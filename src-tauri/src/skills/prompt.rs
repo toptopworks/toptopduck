@@ -30,15 +30,19 @@ use crate::util::sha256_hex;
 /// `pub(crate)` leak).
 const SKILL_MD: &str = "SKILL.md";
 
-/// The byte cap for an activated skill body (issue #1019): unlike the 1 MiB
-/// `read_skill_file` cap (ADR-0111 Decision 6 -- an agent-initiated read
-/// that can be REFUSED), the activation channel injects UNCONDITIONALLY
-/// into the turn, so the cap sits at the largest body a turn survives
-/// whole. Over the cap the body truncates -- never refuses (ADR-0110: a
-/// degraded skill never silently disappears) -- on a char boundary, with an
-/// explicit self-heal marker the model can relay. Body caliber only: the
-/// hash below still covers the WHOLE file, so the drift anchor stays exact.
-const SKILL_BODY_MAX_BYTES: usize = 100 * 1024;
+/// The byte cap for an injected skill body (issue #1019; extended to the
+/// delegation channel by issue #1025): unlike the 1 MiB `read_skill_file`
+/// cap (ADR-0111 Decision 6 -- an agent-initiated read that can be
+/// REFUSED), both injection channels inject UNCONDITIONALLY into context
+/// (the activation channel at invocation, the delegation channel into the
+/// sub-agent's preamble), so the cap sits at the largest body a context
+/// survives whole -- one shared constant so the two channels cannot
+/// disagree on the defense. Over the cap the body truncates -- never
+/// refuses (ADR-0110: a degraded skill never silently disappears) -- on a
+/// char boundary, with an explicit self-heal marker the model can relay.
+/// Body caliber only: the activation-side hash below still covers the
+/// WHOLE file, so the drift anchor stays exact.
+pub(crate) const SKILL_BODY_MAX_BYTES: usize = 100 * 1024;
 
 /// One named skill resolved for prompt injection or invocation (issue #364,
 /// ADR-0086; calibrated by ADR-0119). Carries the spec `name` (stable
@@ -121,13 +125,33 @@ fn empty_fragment(name: &str) -> SkillPromptFragment {
     }
 }
 
-/// Cap an activated body at [`SKILL_BODY_MAX_BYTES`] (issue #1019): step
-/// back to a char boundary, then append the honest-degrade marker on its
-/// own line. Single seam, both faces -- the capped body rides the tool
-/// result and the turn preamble through the same fragment, and
-/// `from_fragment` pins it into the invocation record so historical
-/// replays render the truncated state.
-fn cap_body(name: &str, body: String) -> String {
+/// The injection channel a capped body rides (issue #1025): the truncation
+/// core below is shared, only the honest-degrade tail is face-specific --
+/// the activation channel anchors a whole-file hash and gates
+/// `read_skill_file` on the invoked set (a truncated skill is in it by
+/// definition -- its invocation record has landed, though a mid-turn
+/// invocation joins the turn-start snapshot the next turn), while the
+/// delegation channel has neither: the bound skill is typically NOT in
+/// the main turn's invoked set, so a read-back referral would be a dead
+/// end and the user-relay remedy is the only honest one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum InjectionFace {
+    /// The activation channel (`resolve_one`): tool result + turn preamble.
+    Activation,
+    /// The delegation channel (`DelegationSpec::from_entry`): the
+    /// sub-agent's preamble.
+    Delegation,
+}
+
+/// Cap an injected body at [`SKILL_BODY_MAX_BYTES`] (issue #1019; extended
+/// to the delegation channel by issue #1025): step back to a char boundary,
+/// then append the honest-degrade marker on its own line. Single seam per
+/// channel, every face -- the capped activation body rides the tool result
+/// and the turn preamble through the same fragment (`from_fragment` pins it
+/// into the invocation record so historical replays render the truncated
+/// state), while the capped delegation body rides the sub-agent's preamble
+/// through `DelegationSpec::skill_injections`.
+pub(crate) fn cap_body(name: &str, body: String, face: InjectionFace) -> String {
     if body.len() <= SKILL_BODY_MAX_BYTES {
         return body;
     }
@@ -138,18 +162,28 @@ fn cap_body(name: &str, body: String) -> String {
     while !body.is_char_boundary(end) {
         end -= 1;
     }
+    let (warn_note, remedy) = match face {
+        InjectionFace::Activation => (
+            "the hash still covers the whole file",
+            "Ask the user to shrink or split `SKILL.md`, or read the whole \
+             file via `read_skill_file` (it serves up to 1 MiB).",
+        ),
+        InjectionFace::Delegation => (
+            "the sub-agent has no reliable read-back path",
+            "Ask the user to shrink or split `SKILL.md` to load it whole.",
+        ),
+    };
     log::warn!(
         target: "skills",
         "skill `{name}` body is {actual} bytes, over the {SKILL_BODY_MAX_BYTES}-byte \
-         injection cap -- truncating (the hash still covers the whole file; \
-         shrink or split `SKILL.md` to serve the body whole)",
+         injection cap -- truncating ({warn_note}; shrink or split `SKILL.md` \
+         to serve the body whole)",
     );
     let mut capped = body[..end].trim_end().to_string();
     capped.push_str(&format!(
         "\n\n[Truncated: this skill's body is {actual} bytes, over the \
          {SKILL_BODY_MAX_BYTES}-byte injection cap. Only the leading part was \
-         loaded. Ask the user to shrink or split `SKILL.md`, or read the \
-         whole file via `read_skill_file` (it serves up to 1 MiB).]\n"
+         loaded. {remedy}]\n"
     ));
     capped
 }
@@ -199,8 +233,10 @@ pub(crate) fn resolve_one(root: &Path, name: &str) -> SkillPromptFragment {
     // the user's prompt fragment stays live until they repair or unmount.
     // ONE YAML parse feeds the description: a malformed YAML logs a single
     // degrade line and contributes no metadata, but the body is still
-    // injected.
-    let raw = String::from_utf8_lossy(&bytes);
+    // injected. The decode rides the shared non-UTF-8 observability warn
+    // (`decode_skill_md_lossy`, issue #1025) so the resolve face and the
+    // registry's assemble face cannot drift apart.
+    let raw = super::decode_skill_md_lossy(&bytes, name);
     let (description, body) = match split_frontmatter(&raw) {
         Ok((yaml, body)) => match serde_yaml::from_str::<serde_yaml::Value>(&yaml) {
             Ok(serde_yaml::Value::Mapping(mapping)) => {
@@ -246,7 +282,7 @@ pub(crate) fn resolve_one(root: &Path, name: &str) -> SkillPromptFragment {
     SkillPromptFragment {
         name: name.to_string(),
         description,
-        body: cap_body(name, body),
+        body: cap_body(name, body, InjectionFace::Activation),
         content_hash,
     }
 }
@@ -518,7 +554,8 @@ mod tests {
         // The marker also reports the actual size and both self-heal paths:
         // the user-relay remedy and the model's own full-read channel
         // (ADR-0111 Decision 3 gates `read_skill_file` on the activated
-        // set -- a truncated skill is by definition in it, same turn).
+        // set -- a truncated skill is by definition in it once its
+        // invocation record lands in the turn-start snapshot).
         assert!(
             f.body.contains(&format!("is {} bytes", body.len())),
             "the marker reports the actual size"
@@ -530,6 +567,14 @@ mod tests {
         assert!(
             f.body.contains("read_skill_file"),
             "the marker names the model's own full-read channel"
+        );
+        assert!(
+            f.body.contains("Only the leading part was loaded"),
+            "the marker states the partial load"
+        );
+        assert!(
+            f.body.contains("(it serves up to 1 MiB)"),
+            "the marker keeps the read-back channel's size"
         );
         // ...and the run of x's was cut at the cap.
         assert!(
@@ -553,6 +598,34 @@ mod tests {
         let preamble = crate::provider::prompt::render_invocation_preamble(&[record]);
         assert!(preamble.contains("[Truncated"));
         assert!(!preamble.contains(&"x".repeat(SKILL_BODY_MAX_BYTES + 1)));
+    }
+
+    /// A SKILL.md holding non-UTF-8 bytes still serves its body lossy
+    /// (U+FFFD stand-ins) while the hash anchors the ORIGINAL bytes -- the
+    /// divergence the resolve-time warn makes observable (issue #1025).
+    /// Pins the lossy posture so the warn's arrival cannot regress the
+    /// load itself.
+    #[test]
+    fn non_utf8_body_serves_lossy_with_whole_file_hash() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let dir = root.join("mixed-encoding");
+        std::fs::create_dir_all(&dir).unwrap();
+        // A lone 0xFF byte is invalid in every UTF-8 stride.
+        let raw: &[u8] = b"---\nname: mixed-encoding\ndescription: Test skill mixed-encoding.\n---\nBody with \xFF bytes.\n";
+        std::fs::write(dir.join(SKILL_MD), raw).unwrap();
+        let fragments = resolve_prompt_fragments(root, &["mixed-encoding".to_string()]);
+        assert_eq!(fragments.len(), 1);
+        let f = &fragments[0];
+        assert!(
+            f.body.contains('\u{FFFD}'),
+            "the invalid byte renders as the replacement char"
+        );
+        assert!(
+            f.body.contains("Body with "),
+            "the valid prefix rides verbatim"
+        );
+        assert_eq!(f.content_hash, sha256_hex(raw));
     }
 
     /// A cut point landing inside a whitespace run hands the marker a clean

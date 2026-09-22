@@ -581,7 +581,11 @@ fn assemble_skill_parts(
     acquired: Acquired,
     link_target: Option<String>,
 ) -> Result<SkillEntry, SkillError> {
-    let raw = String::from_utf8_lossy(bytes);
+    // The decode rides the shared non-UTF-8 observability warn (issue
+    // #1025): this face feeds BOTH the listing body and the delegation
+    // channel's injections, so the divergence surfaces once per scan --
+    // the parity signal for the resolve face's warn.
+    let raw = super::decode_skill_md_lossy(bytes, dir_name);
     skill_from_str(&raw, dir_name, acquired, link_target, sha256_hex(bytes))
 }
 
@@ -765,6 +769,31 @@ mod tests {
         )
         .expect("write SKILL.md");
         dir
+    }
+
+    /// A SKILL.md whose body holds non-UTF-8 bytes loads lossy (U+FFFD
+    /// stand-ins) with the hash anchoring the ORIGINAL bytes -- the
+    /// divergence the assemble-time warn makes observable (issue #1025).
+    /// Pins the lossy posture so the warn's arrival cannot regress the
+    /// load itself (the listing body feeds the delegation channel's
+    /// injections and the edit face, so it must stay marker-free).
+    #[test]
+    fn non_utf8_body_loads_lossy_with_whole_file_hash() {
+        let tmp = tempfile::tempdir().expect("skills root");
+        let dir = tmp.path().join("mixed-encoding");
+        fs::create_dir_all(&dir).expect("create skill dir");
+        let raw: &[u8] =
+            b"---\nname: mixed-encoding\ndescription: Test skill.\n---\nBody with \xFF bytes.\n";
+        fs::write(dir.join(SKILL_MD), raw).expect("write SKILL.md");
+        let listing = list_skills(tmp.path());
+        assert_eq!(listing.skills.len(), 1);
+        let skill = &listing.skills[0];
+        assert_eq!(skill.name, "mixed-encoding");
+        assert!(
+            skill.body.contains('\u{FFFD}'),
+            "the invalid byte renders as the replacement char"
+        );
+        assert_eq!(skill.content_hash, sha256_hex(raw));
     }
 
     fn update_payload(name: &str) -> SkillUpdate {
