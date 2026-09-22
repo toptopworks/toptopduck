@@ -353,6 +353,7 @@ impl Harness {
             &self.delegations,
             &mut crate::skills::invocation::test_ctx(&mut invocations),
             &read,
+            &crate::skills::create::SkillCreateGate::inert(),
             approval,
             sink,
             cancel,

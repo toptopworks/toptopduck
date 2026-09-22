@@ -263,18 +263,9 @@ pub fn create_skill(
     description: &str,
     body: &str,
 ) -> Result<SkillEntry, SkillError> {
-    validate_skill_name(name)?;
-    if is_reserved_skill_name(name) {
-        return Err(SkillError::ReservedSkillName(name.to_string()));
-    }
-    validate_description(description)?;
-    validate_body(body)?;
-    fs::create_dir_all(root).map_err(|e| fs_err("create skills root", root, e))?;
-    let dir = root.join(name);
-    if dir.exists() {
-        return Err(SkillError::NameTaken(name.to_string()));
-    }
-    fs::create_dir(&dir).map_err(|e| fs_err("create skill directory", &dir, e))?;
+    // Render + delegate: the whole-string entry re-validates the parsed
+    // fields (serde_yaml round-trips values faithfully), so both entries
+    // share ONE validation / NameTaken / failed-mint-cleanup contract.
     let mut fm = serde_yaml::Mapping::new();
     fm.insert(Value::String("name".into()), Value::String(name.into()));
     fm.insert(
@@ -282,7 +273,47 @@ pub fn create_skill(
         Value::String(description.into()),
     );
     let content = frontmatter::render_skill_md(&fm, body)?;
-    if let Err(e) = write_skill_md(&dir, &content) {
+    create_skill_from_markdown(root, &content)
+}
+
+/// Parse + per-field validate a whole `SKILL.md` string (ADR-0122 Decision
+/// 1): returns the frontmatter's `name` / `description`. The shared
+/// typed-reject face for the whole-string create entry and the model-facing
+/// resolver -- validation lives in one place.
+pub(crate) fn parse_skill_markdown(markdown: &str) -> Result<(String, String), SkillError> {
+    let parsed = frontmatter::parse_skill_md(markdown).map_err(SkillError::InvalidSkill)?;
+    let name = frontmatter::get_string(&parsed.frontmatter, "name")
+        .ok_or_else(|| SkillError::InvalidSkill("frontmatter is missing a `name` string".into()))?;
+    let description =
+        frontmatter::get_string(&parsed.frontmatter, "description").ok_or_else(|| {
+            SkillError::InvalidSkill("frontmatter is missing a `description` string".into())
+        })?;
+    validate_skill_name(&name)?;
+    if is_reserved_skill_name(&name) {
+        return Err(SkillError::ReservedSkillName(name));
+    }
+    validate_description(&description)?;
+    validate_body(&parsed.body)?;
+    Ok((name, description))
+}
+
+/// Mint one local skill from a whole `SKILL.md` string (ADR-0122 Decision
+/// 1): the server-side parse extracts `name` / `description` for per-field
+/// validation (the typed-reject face the model self-corrects from), and the
+/// bytes written are the INPUT VERBATIM -- unknown frontmatter keys survive
+/// (the ecosystem interop interface; consumption reads only the known keys,
+/// unknown keys ride as spec-ignore). The validation, reserved-set refusal,
+/// NameTaken check, and failed-mint cleanup contract are shared with the
+/// three-field entry by construction (that entry renders + delegates here).
+pub fn create_skill_from_markdown(root: &Path, markdown: &str) -> Result<SkillEntry, SkillError> {
+    let (name, _description) = parse_skill_markdown(markdown)?;
+    fs::create_dir_all(root).map_err(|e| fs_err("create skills root", root, e))?;
+    let dir = root.join(&name);
+    if dir.exists() {
+        return Err(SkillError::NameTaken(name));
+    }
+    fs::create_dir(&dir).map_err(|e| fs_err("create skill directory", &dir, e))?;
+    if let Err(e) = write_skill_md(&dir, markdown) {
         // Do not leave an empty directory behind a failed mint (it would
         // surface as NameTaken on the user's retry).
         let _ = fs::remove_dir_all(&dir);
@@ -295,7 +326,7 @@ pub fn create_skill(
     // deadlock a retry on NameTaken. A semantic read-back failure
     // (render/parse drift) stays `Err`, and the mint is removed below so
     // the retry succeeds anyway.
-    let result = read_back_or_derive(load_skill_parts(&dir), &content, name);
+    let result = read_back_or_derive(load_skill_parts(&dir), markdown, &name);
     // Same cleanup contract as the write branch above: a failed mint leaves
     // no directory behind (it would surface as NameTaken on the user's
     // retry).
@@ -1515,6 +1546,102 @@ mod tests {
         assert!(!link.exists(), "the link must be gone");
         assert!(source_dir.exists(), "the external source must survive");
         assert!(source_dir.join(SKILL_MD).exists());
+    }
+
+    // --- whole-string create entry (ADR-0122 Decision 1) ---------------------
+
+    /// The whole-string entry writes the input VERBATIM: unknown frontmatter
+    /// keys survive to disk byte-for-byte (the ecosystem interop interface),
+    /// and the entry derives from the parsed `name` / `description`.
+    #[test]
+    fn create_skill_from_markdown_writes_the_input_verbatim() {
+        let root = tempfile::tempdir().expect("root");
+        let markdown = "---\nname: sql-coach\ndescription: Coach SQL writing.\nlicense: \
+             MIT\ncompatibility: '>=1.0'\nmetadata-version: 3\n---\nCoach the body.\n";
+        let entry = create_skill_from_markdown(root.path(), markdown).expect("create");
+        assert_eq!(entry.name, "sql-coach");
+        assert_eq!(entry.description, "Coach SQL writing.");
+        // The bytes on disk are the input verbatim -- unknown keys included.
+        let on_disk = fs::read_to_string(root.path().join("sql-coach/SKILL.md")).unwrap();
+        assert_eq!(on_disk, markdown);
+    }
+
+    /// The whole-string entry reuses the three-field entry's typed-reject
+    /// face: every malformed shape is refused with its own variant, and no
+    /// half-built directory survives a refusal.
+    #[test]
+    fn create_skill_from_markdown_rejects_each_malformed_shape() {
+        let root = tempfile::tempdir().expect("root");
+        // Malformed YAML frontmatter.
+        assert!(matches!(
+            create_skill_from_markdown(root.path(), "---\nname: [unclosed\n---\nbody\n"),
+            Err(SkillError::InvalidSkill(_))
+        ));
+        // No frontmatter block at all.
+        assert!(matches!(
+            create_skill_from_markdown(root.path(), "Just a body.\n"),
+            Err(SkillError::InvalidSkill(_))
+        ));
+        // Frontmatter missing the `name` string.
+        assert!(matches!(
+            create_skill_from_markdown(root.path(), "---\ndescription: d.\n---\nbody\n"),
+            Err(SkillError::InvalidSkill(_))
+        ));
+        // Frontmatter missing the `description` string.
+        assert!(matches!(
+            create_skill_from_markdown(root.path(), "---\nname: sql-coach\n---\nbody\n"),
+            Err(SkillError::InvalidSkill(_))
+        ));
+        // A spec-violating name is its own variant.
+        assert!(matches!(
+            create_skill_from_markdown(
+                root.path(),
+                "---\nname: SQL Coach\n\
+             description: d.\n---\nbody\n"
+            ),
+            Err(SkillError::InvalidName(_))
+        ));
+        // The reserved builtin set refuses before any disk work.
+        assert_eq!(
+            create_skill_from_markdown(
+                root.path(),
+                "---\nname: pandoc\n\
+             description: d.\n---\nbody\n"
+            )
+            .unwrap_err(),
+            SkillError::ReservedSkillName("pandoc".to_string())
+        );
+        // A blank body is refused.
+        assert!(matches!(
+            create_skill_from_markdown(
+                root.path(),
+                "---\nname: sql-coach\n\
+             description: d.\n---\n\n"
+            ),
+            Err(SkillError::InvalidSkill(_))
+        ));
+        // Nothing landed on disk across all refusals.
+        assert!(!root.path().join("sql-coach").exists());
+        assert!(!root.path().join("pandoc").exists());
+    }
+
+    /// A taken name is refused without disturbing the incumbent, and no
+    /// half-built retry directory survives to block the next attempt.
+    #[test]
+    fn create_skill_from_markdown_refuses_a_taken_name_cleanly() {
+        let root = tempfile::tempdir().expect("root");
+        create_skill(root.path(), "sql-coach", "First.", "First body.\n").expect("first");
+        assert_eq!(
+            create_skill_from_markdown(
+                root.path(),
+                "---\nname: sql-coach\ndescription: Second.\n---\nSecond body.\n"
+            )
+            .unwrap_err(),
+            SkillError::NameTaken("sql-coach".to_string())
+        );
+        // The incumbent is untouched.
+        let raw = fs::read_to_string(root.path().join("sql-coach/SKILL.md")).unwrap();
+        assert!(raw.contains("First body."));
     }
 
     // --- builtin guards (issue #677; readonly posture ADR-0121) -------------

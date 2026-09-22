@@ -906,6 +906,11 @@ struct AssembledTurnInputs<'a> {
     /// The registry root borrow (ADR-0111, issue #714): the turn's read
     /// surface resolves skill names against it live, mid-turn.
     skills_root: &'a Path,
+    /// The live-config handle (ADR-0122 Decision 1): the `create_skill`
+    /// mint's composite needs the config write. Always `Some` from the
+    /// command boundary; the turn-input view keeps the `None` escape for
+    /// config-less test sessions.
+    live_config: Option<&'a LiveProviderConfig>,
     cli_tools: Vec<crate::cli_tools::config::CliToolConfig>,
     /// The turn's delegation snapshot (issue #933, ADR-0117): the enabled
     /// agent definitions with their bound skill bodies resolved. One scan
@@ -954,6 +959,7 @@ fn assemble_turn_inputs<'a>(
         user_invocations,
         disabled_skills,
         skills_root,
+        live_config: Some(live),
         cli_tools,
         delegations,
         keychain: live.keychain(),
@@ -971,6 +977,7 @@ impl AssembledTurnInputs<'_> {
             user_invocations: &self.user_invocations,
             disabled_skills: &self.disabled_skills,
             skills_root: self.skills_root,
+            live_config: self.live_config,
             cli_tools: &self.cli_tools,
             delegations: &self.delegations,
         }

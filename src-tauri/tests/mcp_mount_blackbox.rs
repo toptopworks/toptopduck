@@ -63,6 +63,7 @@ fn a_configured_mcp_server_mounts_the_trio_on_the_provider_tool_surface() {
             keychain: &KeychainStore::new(),
             skills: &[],
             skills_root: std::path::Path::new(""),
+            live_config: None,
             user_invocations: &[],
             disabled_skills: &[],
             cli_tools: &[],
@@ -108,6 +109,7 @@ fn an_empty_effective_set_mounts_no_meta_tools() {
             user_invocations: &[],
             disabled_skills: &[],
             skills_root: std::path::Path::new(""),
+            live_config: None,
             cli_tools: &[],
             delegations: &[],
         },
@@ -123,6 +125,61 @@ fn an_empty_effective_set_mounts_no_meta_tools() {
     assert!(
         !names.iter().any(|n| n.starts_with("mcp_")),
         "no meta tool rides the surface when nothing was attempted, got {names:?}"
+    );
+    assert!(
+        !names.contains(&"create_skill"),
+        "a config-less turn never advertises the creation channel, got {names:?}"
+    );
+}
+
+/// ADR-0122 Decision 1: the built-in surface's `create_skill` mount rides
+/// the live-config handle the turn inputs carry (the mint needs the config
+/// write) -- unconditional on the discovery snapshot otherwise. The
+/// mount point lives inside `ask_with_phase`'s built-in branch beside the
+/// trio's, so the FakeProvider's captured tool-turn request is the honest
+/// read (same seam as the tests above).
+#[test]
+fn a_live_config_mounts_create_skill_on_the_provider_tool_surface() {
+    let provider =
+        FakeProvider::new().scripted_tool_turn("查询", ToolTurnReply::Text("done".into()));
+    let captured = provider.captured_tool_turns();
+    let mut session = Session::with_provider(Box::new(provider)).expect("session");
+
+    let config_dir = tempfile::tempdir().expect("config dir");
+    let live = toptopduck_lib::LiveProviderConfig::new(
+        KeychainStore::new(),
+        config_dir.path().join("config.json"),
+    );
+    let approval = ApprovalState::new();
+    let sink = NullSink;
+    let outcome = session.ask_with_phase(
+        "查询",
+        &approval,
+        &sink,
+        |_| {},
+        &TurnInputs {
+            mcp_servers: &[],
+            keychain: &KeychainStore::new(),
+            skills: &[],
+            skills_root: std::path::Path::new(""),
+            live_config: Some(&live),
+            user_invocations: &[],
+            disabled_skills: &[],
+            cli_tools: &[],
+            delegations: &[],
+        },
+    );
+    assert!(
+        matches!(outcome, TurnOutcome::Textual { .. }),
+        "got {outcome:?}"
+    );
+
+    let guard = captured.lock().expect("capture lock");
+    assert!(!guard.is_empty(), "provider saw no tool turns");
+    let names: Vec<&str> = guard[0].tools.iter().map(|t| t.name.as_str()).collect();
+    assert!(
+        names.contains(&"create_skill"),
+        "a live-config turn mounts the creation channel, got {names:?}"
     );
 }
 
@@ -174,6 +231,7 @@ fn a_connect_phase_token_fire_bounds_the_built_in_turn_with_a_hung_server() {
             keychain: &KeychainStore::new(),
             skills: &[],
             skills_root: std::path::Path::new(""),
+            live_config: None,
             user_invocations: &[],
             disabled_skills: &[],
             cli_tools: &[],

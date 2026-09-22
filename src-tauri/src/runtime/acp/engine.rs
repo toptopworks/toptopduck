@@ -1426,13 +1426,17 @@ fn decide_permission(
     // Gateway-bridged tool names map back to the built-in lane (issue #800).
     // The lane is server-scoped, not a tool enumeration: any name carrying
     // the prefix classifies Allow on the CLI's permission handshake
-    // (`is_builtin` checks the server, never the tool). On today's bridge
-    // surface that is the four DuckDB tools (the primary case, the
-    // ADR-0080 Decision 1 zero-approval mirror) plus the CLI registrations /
-    // meta / skill tools the gateway also advertises under the same server
-    // name — those still meet the gateway's own gate at call time. The
-    // gateway enforces its gate at call time; the CLI's own tools keep the
-    // external lane below.
+    // (`is_builtin` checks the server, never the tool) -- except the gated
+    // builtin meta-tools (ADR-0122 Decision 3): an untrusted `create_skill`
+    // classifies NeedsApproval, and this handshake has no park, so it joins
+    // the external tools' fail-fast family (a persistent write refused
+    // rather than passed; the full-text card stays a built-in-runtime
+    // surface). On today's bridge surface the Allow family is the four
+    // DuckDB tools (the primary case, the ADR-0080 Decision 1 zero-approval
+    // mirror) plus the CLI registrations / meta / skill tools the gateway
+    // also advertises under the same server name — those still meet the
+    // gateway's own gate at call time. The gateway enforces its gate at
+    // call time; the CLI's own tools keep the external lane below.
     let key = match tool_name
         .strip_prefix(GATEWAY_TOOL_PREFIX)
         .map(ToolKey::builtin)
@@ -1933,6 +1937,49 @@ mod tests {
             body.server, "builtin",
             "the policy identity is the builtin lane"
         );
+    }
+
+    /// ADR-0122 Decision 3 on the ACP lane: `create_skill` is a gated
+    /// builtin, and this handshake has no park -- an untrusted call joins
+    /// the external tools' fail-fast family instead of the prefix's Allow
+    /// pass. The refusal is the agent's to self-correct from; the gateway's
+    /// full-text informed-consent card stays a built-in-runtime surface.
+    #[test]
+    fn decide_permission_gated_builtin_fail_fasts_under_per_call() {
+        use crate::approval::ApprovalState;
+        let adapter = crate::runtime::acp::adapter::gemini_cli();
+        let approval = ApprovalState::new(); // PerCall, empty trust
+        let params = RequestPermissionParams {
+            session_id: "s".into(),
+            tool_call: wire::PermissionToolCall {
+                tool_call_id: "tc_1".into(),
+                title: Some("mcp__toptopduck-gateway__create_skill".into()),
+                kind: Some(wire::ToolKind::Other),
+            },
+            options: vec![
+                wire::PermissionOption {
+                    id: "allow_once".into(),
+                    label: "Allow".into(),
+                    kind: Some(PermissionOptionKind::AllowOnce),
+                },
+                wire::PermissionOption {
+                    id: "reject".into(),
+                    label: "Reject".into(),
+                    kind: Some(PermissionOptionKind::RejectOnce),
+                },
+            ],
+        };
+        let sink = RecordingAcpSink::new();
+        let outcome = decide_permission(&adapter, &params, &approval, &sink, &CancelToken::new());
+        match outcome {
+            RequestPermissionOutcome::Selected { option_id } => {
+                assert_eq!(
+                    option_id, "reject",
+                    "an untrusted gated builtin fail-fasts on the handshake"
+                );
+            }
+            other => panic!("expected Selected reject, got {other:?}"),
+        }
     }
 
     /// Only the gateway server's prefix maps to the built-in lane: a tool on

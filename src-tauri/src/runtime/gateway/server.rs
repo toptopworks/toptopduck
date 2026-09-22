@@ -100,6 +100,12 @@ pub struct GatewayCtx<'a> {
     /// registry root) the built-in loop's dispatch server gets, so both
     /// runtime surfaces read with one semantics by construction.
     pub read: crate::skills::read::SkillReadGate<'a>,
+    /// The creation channel (ADR-0122 Decision 1): serves the
+    /// `create_skill` meta-tool's gated interception below -- the registry
+    /// root + live-config handle the approved mint needs, the same pairing
+    /// the built-in loop's dispatch core gets (#987's one-contract
+    /// posture).
+    pub create: crate::skills::create::SkillCreateGate<'a>,
     /// The materializer `tools::dispatch` delegates `materialize` to (the same
     /// trait the built-in loop drives, so numbering + caps inherit verbatim).
     pub materializer: &'a mut dyn Materializer,
@@ -646,6 +652,16 @@ fn handle_method(
                     &crate::skills::read::read_skill_file_definition(),
                 ));
             }
+            // The skill-creation meta-tool (ADR-0122 Decision 1): mounted
+            // iff the live-config handle rides the gate (the mint needs the
+            // config write). Unconditional beyond that -- the bridge mirrors
+            // the built-in table's condition verbatim (one tool plane, two
+            // callers).
+            if ctx.create.live.is_some() {
+                tools.push(tool_to_mcp(
+                    &crate::skills::create::create_skill_definition(),
+                ));
+            }
             Response::Result(json!({ "tools": tools }))
         }
         "tools/call" => handle_tools_call(msg, ctx, outcome),
@@ -753,6 +769,102 @@ fn handle_tools_call(msg: &Value, ctx: &mut GatewayCtx, outcome: &mut GatewayOut
                 local_meta_result(call, &summary, payload, outcome)
             }
             crate::skills::read::SkillReadOutcome::Refused(message) => resolution_failure(message),
+        };
+    }
+    // The skill-creation meta-tool (ADR-0122 Decisions 1 + 3): unlike the
+    // two read-shaped skill meta-tools above, the mint PERSISTS across
+    // sessions and its body is a future prompt-injection source, so it
+    // GATES -- the resolver validates + pre-checks ahead of the card (a
+    // refusal is the model's, never the approver's), and only an approved
+    // call executes the live-config composite (mint + stale-entry clear).
+    // The discovery snapshot is untouched (ADR-0119's session-immutable
+    // posture): the new skill is invocable by name this session, seeded
+    // into the next.
+    if call.name == crate::skills::create::CREATE_SKILL {
+        return match crate::skills::create::resolve_skill_creation(call, ctx.create.root) {
+            crate::skills::create::SkillCreateOutcome::Refused(message) => {
+                resolution_failure(message)
+            }
+            crate::skills::create::SkillCreateOutcome::Gated { summary, markdown } => {
+                let Some(live) = ctx.create.live else {
+                    return resolution_failure(
+                        crate::skills::create::UNAVAILABLE_FAILURE.to_string(),
+                    );
+                };
+                // Freeze across the gate + mint (ADR-0115): the approval
+                // pending and the filesystem write are waits on an external
+                // principal -- never billed to the turn's generation cap.
+                // The shared dispatch freeze below never runs for this
+                // intercept (it sits ahead of that site).
+                let _create_freeze = ctx.cancel.progress_clock().map(|c| c.freeze());
+                let gate_req = ApprovalRequest {
+                    key: crate::approval::ToolKey::builtin(crate::skills::create::CREATE_SKILL),
+                    operation_kind: OperationKind::Write,
+                    summary: summary.clone(),
+                    file_attachments: vec![crate::skills::create::skill_markdown_attachment(
+                        &markdown,
+                    )],
+                    // An external runtime's bridge-originated call carries
+                    // no sub-agent originator (delegation is built-in-only,
+                    // ADR-0117's v1 calibration).
+                    origin_agent: None,
+                };
+                match ctx.approval.gate(gate_req, ctx.sink, ctx.cancel) {
+                    Err(GateCancelled) => Response::Error(-32000, "turn cancelled".into()),
+                    Ok(GateOutcome::Denied) => {
+                        outcome.trace.push(TraceEntry::denied(
+                            call.id.clone(),
+                            call.name.clone(),
+                            OperationKind::Write,
+                            summary,
+                        ));
+                        Response::Result(json!({
+                            "content": [{"type": "text", "text": DENIED_BY_GATEWAY_CONTENT}],
+                            "isError": true,
+                        }))
+                    }
+                    Ok(GateOutcome::Allow) => {
+                        // The gate-pending window can race a same-name mint
+                        // -- the typed error rides the result so the model
+                        // self-corrects.
+                        match crate::skills::create::execute_skill_creation(
+                            live,
+                            ctx.create.root,
+                            &markdown,
+                        ) {
+                            Ok(entry) => {
+                                let text = crate::skills::create::created_skill_result(&entry);
+                                outcome.trace.push(TraceEntry::succeeded(
+                                    call.id.clone(),
+                                    call.name.clone(),
+                                    OperationKind::Write,
+                                    summary,
+                                    String::new(),
+                                ));
+                                Response::Result(json!({
+                                    "content": [{"type": "text", "text": text}],
+                                    "isError": false,
+                                }))
+                            }
+                            Err(e) => {
+                                let message = format!("create_skill: {e}");
+                                let excerpt = truncate_trace_excerpt(&message, TRACE_EXCERPT_MAX);
+                                outcome.trace.push(TraceEntry::failed(
+                                    call.id.clone(),
+                                    call.name.clone(),
+                                    OperationKind::Write,
+                                    summary,
+                                    excerpt,
+                                ));
+                                Response::Result(json!({
+                                    "content": [{"type": "text", "text": message}],
+                                    "isError": true,
+                                }))
+                            }
+                        }
+                    }
+                }
+            }
         };
     }
     // The gate consumes the RESOLVED identity (ADR-0105 Decision 4), so an
@@ -1108,6 +1220,9 @@ mod tests {
             // Inert by default; the read-surface tests overwrite this field
             // with a seeded gate (the ctx is built `mut` for that purpose).
             read: crate::skills::read::SkillReadGate::inert(),
+            // Inert by default; the create-surface tests overwrite this
+            // field with a seeded gate (same purpose).
+            create: crate::skills::create::SkillCreateGate::inert(),
             materializer,
             approval,
             sink,
@@ -3117,6 +3232,270 @@ mod tests {
         }
     }
 
+    /// The create surface's mount condition (ADR-0122 Decision 1): a
+    /// live-config handle mounts the tool (the mint needs the config
+    /// write); a config-less gate never advertises it.
+    #[test]
+    fn tools_list_mounts_create_skill_only_with_a_live_config() {
+        let mut ctx = fresh_ctx();
+        match handle_method(
+            "tools/list",
+            &json!({"jsonrpc": "2.0", "id": 1, "method": "tools/list"}),
+            &mut ctx,
+            &mut GatewayOutcome::default(),
+        ) {
+            Response::Result(v) => {
+                let names: Vec<&str> = v["tools"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|t| t["name"].as_str().unwrap())
+                    .collect();
+                assert!(
+                    !names.contains(&"create_skill"),
+                    "an inert (config-less) gate never advertises the channel"
+                );
+            }
+            Response::Error(code, m) => {
+                panic!("tools/list must return Result, got error {code}: {m}")
+            }
+            Response::None => panic!("tools/list must return Result, got None"),
+        }
+
+        let tmp: &'static tempfile::TempDir = Box::leak(Box::new(tempfile::tempdir().unwrap()));
+        let live: &'static crate::LiveProviderConfig =
+            Box::leak(Box::new(crate::LiveProviderConfig::new(
+                crate::provider::keychain::KeychainStore,
+                tmp.path().join("config.json"),
+            )));
+        ctx.create = crate::skills::create::SkillCreateGate {
+            root: tmp.path(),
+            live: Some(live),
+        };
+        match handle_method(
+            "tools/list",
+            &json!({"jsonrpc": "2.0", "id": 1, "method": "tools/list"}),
+            &mut ctx,
+            &mut GatewayOutcome::default(),
+        ) {
+            Response::Result(v) => {
+                let names: Vec<&str> = v["tools"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|t| t["name"].as_str().unwrap())
+                    .collect();
+                assert!(
+                    names.contains(&"create_skill"),
+                    "a live-config gate mounts the creation channel"
+                );
+            }
+            Response::Error(code, m) => {
+                panic!("tools/list must return Result, got error {code}: {m}")
+            }
+            Response::None => panic!("tools/list must return Result, got None"),
+        }
+    }
+
+    /// The bridge face's `create_skill` arm (ADR-0122 Decisions 1+3): a
+    /// malformed document refuses as the bare error with no trace row; a
+    /// trusted (always-allowed) call mints through the live composite --
+    /// the bytes verbatim, one Write-badged trace row, and no card
+    /// surfaced for the trusted call.
+    #[test]
+    fn handle_tools_call_create_skill_refuses_and_serves_a_trusted_mint() {
+        let approval: &'static ApprovalState = Box::leak(Box::new(ApprovalState::new()));
+        approval.seed_trust(&crate::approval::ToolKey::builtin(
+            crate::skills::create::CREATE_SKILL,
+        ));
+        let sink: &'static RecSink = Box::leak(Box::new(RecSink {
+            requests: std::sync::Mutex::new(Vec::new()),
+        }));
+        let fake: &'static mut FakeMaterializer =
+            Box::leak(Box::new(FakeMaterializer::new(vec![])));
+        let mut ctx = gate_ctx_with_materializer(fake, Vec::new(), approval, sink);
+        let tmp: &'static tempfile::TempDir = Box::leak(Box::new(tempfile::tempdir().unwrap()));
+        let live: &'static crate::LiveProviderConfig =
+            Box::leak(Box::new(crate::LiveProviderConfig::new(
+                crate::provider::keychain::KeychainStore,
+                tmp.path().join("config.json"),
+            )));
+        ctx.create = crate::skills::create::SkillCreateGate {
+            root: tmp.path(),
+            live: Some(live),
+        };
+        let mut outcome = GatewayOutcome::default();
+
+        // (a) A malformed document: the bare typed error, no trace row.
+        let bad = json!({
+            "jsonrpc": "2.0",
+            "id": 21,
+            "method": "tools/call",
+            "params": {"name": "create_skill", "arguments": {
+                "skillMarkdown": "no frontmatter at all"
+            }}
+        });
+        match handle_tools_call(&bad, &mut ctx, &mut outcome) {
+            Response::Result(v) => {
+                assert_eq!(
+                    v["isError"], true,
+                    "a malformed document is the call's error"
+                );
+                let text = v["content"][0]["text"].as_str().unwrap_or_default();
+                assert!(text.starts_with("create_skill"), "{text}");
+            }
+            Response::Error(code, m) => {
+                panic!("create_skill must return Result, got error {code}: {m}")
+            }
+            Response::None => panic!("create_skill must return Result, got None"),
+        }
+        assert!(outcome.trace.is_empty(), "a refusal records no trace row");
+
+        // (b) A trusted mint: verbatim bytes + one Write-badged trace row.
+        let markdown = "---\nname: sql-coach\ndescription: Coach SQL.\nlicense: MIT\n\
+             ---\nCoach the body.\n";
+        let good = json!({
+            "jsonrpc": "2.0",
+            "id": 22,
+            "method": "tools/call",
+            "params": {"name": "create_skill", "arguments": {
+                "skillMarkdown": markdown
+            }}
+        });
+        match handle_tools_call(&good, &mut ctx, &mut outcome) {
+            Response::Result(v) => {
+                assert_eq!(v["isError"], false, "the trusted mint succeeds");
+                let text = v["content"][0]["text"].as_str().unwrap_or_default();
+                assert!(text.contains("sql-coach"), "{text}");
+            }
+            Response::Error(code, m) => {
+                panic!("create_skill must return Result, got error {code}: {m}")
+            }
+            Response::None => panic!("create_skill must return Result, got None"),
+        }
+        assert_eq!(outcome.trace.len(), 1, "one mint -> one trace row");
+        let row = &outcome.trace[0];
+        assert_eq!(row.name, "create_skill");
+        assert!(row.success);
+        assert_eq!(row.operation_kind, crate::approval::OperationKind::Write);
+        let on_disk = std::fs::read_to_string(tmp.path().join("sql-coach/SKILL.md")).unwrap();
+        assert_eq!(on_disk, markdown, "the bytes land verbatim");
+        assert!(
+            sink.requests.lock().unwrap().is_empty(),
+            "a trusted mint surfaces no card"
+        );
+    }
+
+    /// The bridge face's create arm denial: the tool-level `isError` result
+    /// and one denied trace row -- and the refusal never mints, so nothing
+    /// lands on disk.
+    #[test]
+    fn handle_tools_call_create_skill_denial_is_tool_level_error() {
+        let approval: &'static ApprovalState = Box::leak(Box::new(ApprovalState::new()));
+        let sink: &'static AnsweringSink = Box::leak(Box::new(AnsweringSink::new(
+            approval,
+            ApprovalResponse::Deny,
+        )));
+        let fake: &'static mut FakeMaterializer =
+            Box::leak(Box::new(FakeMaterializer::new(vec![])));
+        let mut ctx = gate_ctx_with_materializer(fake, Vec::new(), approval, sink);
+        let tmp: &'static tempfile::TempDir = Box::leak(Box::new(tempfile::tempdir().unwrap()));
+        let live: &'static crate::LiveProviderConfig =
+            Box::leak(Box::new(crate::LiveProviderConfig::new(
+                crate::provider::keychain::KeychainStore,
+                tmp.path().join("config.json"),
+            )));
+        ctx.create = crate::skills::create::SkillCreateGate {
+            root: tmp.path(),
+            live: Some(live),
+        };
+        let mut outcome = GatewayOutcome::default();
+        let msg = json!({
+            "jsonrpc": "2.0",
+            "id": 23,
+            "method": "tools/call",
+            "params": {"name": "create_skill", "arguments": {
+                "skillMarkdown": "---\nname: sql-coach\ndescription: Coach SQL.\n---\nBody.\n"
+            }}
+        });
+        match handle_tools_call(&msg, &mut ctx, &mut outcome) {
+            Response::Result(v) => {
+                assert_eq!(v["isError"], true, "the denial is the call's error");
+                let text = v["content"][0]["text"].as_str().unwrap_or_default();
+                assert!(
+                    text.contains("denied by the approval gateway"),
+                    "denial surfaces as the tool result: {text}"
+                );
+            }
+            _ => panic!("denial must return a tool result, not an error"),
+        }
+        assert_eq!(outcome.trace.len(), 1, "one denial -> one trace row");
+        let row = &outcome.trace[0];
+        assert!(!row.success);
+        assert_eq!(row.name, "create_skill");
+        assert_eq!(row.operation_kind, crate::approval::OperationKind::Write);
+        assert_eq!(row.result_excerpt, "denied by approval gateway");
+        assert!(
+            !tmp.path().join("sql-coach").exists(),
+            "the denial never mints"
+        );
+    }
+
+    /// The bridge face's post-race failure envelope: a same-name mint
+    /// landing inside the gate-pending window races the approved write --
+    /// the typed NameTaken error rides the `isError` result with a failed
+    /// trace row, so the model self-corrects from the message alone.
+    #[test]
+    fn handle_tools_call_create_skill_post_race_failure_is_the_calls_error() {
+        let approval: &'static ApprovalState = Box::leak(Box::new(ApprovalState::new()));
+        let tmp: &'static tempfile::TempDir = Box::leak(Box::new(tempfile::tempdir().unwrap()));
+        let sink: &'static OccupyingSink = Box::leak(Box::new(OccupyingSink {
+            state: approval,
+            occupy: tmp.path().join("sql-coach"),
+        }));
+        let fake: &'static mut FakeMaterializer =
+            Box::leak(Box::new(FakeMaterializer::new(vec![])));
+        let mut ctx = gate_ctx_with_materializer(fake, Vec::new(), approval, sink);
+        let live: &'static crate::LiveProviderConfig =
+            Box::leak(Box::new(crate::LiveProviderConfig::new(
+                crate::provider::keychain::KeychainStore,
+                tmp.path().join("config.json"),
+            )));
+        ctx.create = crate::skills::create::SkillCreateGate {
+            root: tmp.path(),
+            live: Some(live),
+        };
+        let mut outcome = GatewayOutcome::default();
+        let msg = json!({
+            "jsonrpc": "2.0",
+            "id": 24,
+            "method": "tools/call",
+            "params": {"name": "create_skill", "arguments": {
+                "skillMarkdown": "---\nname: sql-coach\ndescription: Coach SQL.\n---\nBody.\n"
+            }}
+        });
+        match handle_tools_call(&msg, &mut ctx, &mut outcome) {
+            Response::Result(v) => {
+                assert_eq!(v["isError"], true, "the raced write is the call's error");
+                let text = v["content"][0]["text"].as_str().unwrap_or_default();
+                assert!(
+                    text.starts_with("create_skill") && text.contains("already taken"),
+                    "the typed error rides the result: {text}"
+                );
+            }
+            _ => panic!("the raced create must return a tool result, not an error"),
+        }
+        assert_eq!(outcome.trace.len(), 1, "one raced failure -> one trace row");
+        let row = &outcome.trace[0];
+        assert!(!row.success);
+        assert_eq!(row.name, "create_skill");
+        assert!(
+            tmp.path().join("sql-coach").exists()
+                && !tmp.path().join("sql-coach/SKILL.md").exists(),
+            "the incumbent stays and no mint landed into it"
+        );
+    }
+
     /// The read surface's mount condition (issue #714, ADR-0111 Decision 1
     /// calibrated by ADR-0119 Decision 4): an EMPTY invoked set lists no
     /// `read_skill_file` even with skills in the snapshot; a non-empty
@@ -3580,6 +3959,26 @@ mod tests {
             self.cards().push(body.clone());
             let id: uuid::Uuid = body.request_id.parse().expect("request_id is a uuid");
             self.state.respond(id, self.answer).expect("respond");
+        }
+
+        fn emit_resolved(&self, _: &ApprovalRequestBody, _: ApprovalResponse) {}
+    }
+
+    /// The post-race seam: occupies the mint target when the card surfaces,
+    /// then allows -- the approved write meets a taken name exactly as the
+    /// gate-pending same-name race produces.
+    struct OccupyingSink {
+        state: &'static ApprovalState,
+        occupy: std::path::PathBuf,
+    }
+
+    impl ApprovalSink for OccupyingSink {
+        fn emit_request(&self, body: &ApprovalRequestBody) {
+            std::fs::create_dir_all(&self.occupy).expect("occupy the name mid-window");
+            let id: uuid::Uuid = body.request_id.parse().expect("request_id is a uuid");
+            self.state
+                .respond(id, ApprovalResponse::AllowOnce)
+                .expect("respond");
         }
 
         fn emit_resolved(&self, _: &ApprovalRequestBody, _: ApprovalResponse) {}

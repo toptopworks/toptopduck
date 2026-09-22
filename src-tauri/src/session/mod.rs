@@ -764,6 +764,12 @@ pub struct TurnInputs<'a> {
     /// turn's data (the same "data passed in" posture as `skills`), keeping
     /// the session I/O-free for skill content.
     pub skills_root: &'a std::path::Path,
+    /// The live-config handle (ADR-0122 Decision 1): the `create_skill`
+    /// meta-tool's mint needs the config write (the stale-disabled-entry
+    /// clear that lands a rebirth enabled) -- the one deliberate config
+    /// reachability the turn's data carries. `None` marks a config-less
+    /// session (tests): the tool then never advertises on either surface.
+    pub live_config: Option<&'a crate::LiveProviderConfig>,
     /// The effective CLI tool registrations for this turn (the config-level
     /// enabled slice, ADR-0106 single axis -- issue #671, ADR-0108). The
     /// turn direct-lists them into the tool table and dispatches their
@@ -790,6 +796,7 @@ impl<'a> TurnInputs<'a> {
             user_invocations: &[],
             disabled_skills: &[],
             skills_root: std::path::Path::new(""),
+            live_config: None,
             cli_tools: &[],
             delegations: &[],
         }
@@ -1447,6 +1454,18 @@ impl Session {
                             .tools
                             .push(crate::skills::read::read_skill_file_definition());
                     }
+                    // The skill-creation meta-tool (ADR-0122 Decision 1):
+                    // mounted iff the live-config handle rides the turn's
+                    // inputs (the mint needs the config write). Unconditional
+                    // beyond that -- unlike the read-shaped pair above, a
+                    // session pays the standing tool cost whatever its
+                    // snapshot holds: with the form channel on its
+                    // retirement path (#1033) this is the creation channel.
+                    if inputs.live_config.is_some() {
+                        request
+                            .tools
+                            .push(crate::skills::create::create_skill_definition());
+                    }
                     // The named delegation tool family (issue #933, ADR-0117
                     // Decision 1): one tool per enabled agent definition,
                     // direct-listed like the CLI tools. A delegation call
@@ -1475,6 +1494,15 @@ impl Session {
                         invoked: skill_state.start_invoked,
                         disabled: inputs.disabled_skills,
                         root: inputs.skills_root,
+                    };
+                    // The creation channel's bundle (ADR-0122 Decision 1):
+                    // the registry root + the live-config handle (the mint's
+                    // stale-disabled-entry clear needs the config write).
+                    // `None` (a config-less test session) never advertises
+                    // the tool -- the dispatch arms' guard is defensive only.
+                    let create_gate = crate::skills::create::SkillCreateGate {
+                        root: inputs.skills_root,
+                        live: inputs.live_config,
                     };
                     // The mid-turn invocation channel (ADR-0119 Decision 4):
                     // `invoke_skill` appends to the turn's pending records
@@ -1524,6 +1552,7 @@ impl Session {
                                 inputs.delegations,
                                 &mut invocation_channel,
                                 &read_gate,
+                                &create_gate,
                                 approval,
                                 sink,
                                 Arc::clone(&self.cancel),
@@ -1799,6 +1828,13 @@ impl Session {
                 disabled: inputs.disabled_skills,
                 root: inputs.skills_root,
             };
+            // The creation channel's bundle (ADR-0122 Decision 1) -- the
+            // same root + live-config pairing the built-in branch wires,
+            // so the two faces mint with one contract (#987's posture).
+            let create_gate = crate::skills::create::SkillCreateGate {
+                root: inputs.skills_root,
+                live: inputs.live_config,
+            };
             // The bridge face's invocation channel (ADR-0119 Decision 4):
             // the external runtime invokes through the SAME turn-record
             // channel by construction -- the CLI's `invoke_skill` calls land
@@ -1813,6 +1849,7 @@ impl Session {
                 deps,
                 invocations: invocation_channel,
                 read: read_gate,
+                create: create_gate,
                 materializer: &mut *self.materializer,
                 approval,
                 sink,

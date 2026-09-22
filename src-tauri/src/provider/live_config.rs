@@ -781,9 +781,37 @@ impl LiveProviderConfig {
         body: &str,
     ) -> Result<crate::skills::SkillEntry, crate::skills::SkillError> {
         let entry = crate::skills::registry::create_skill(skills_root, name, description, body)?;
-        match self.set_skill_enabled(name, true) {
+        self.land_enabled(entry)
+    }
+
+    /// The whole-string create entry (ADR-0122 Decision 1): the model-face
+    /// channel's composite -- the same registry mint + stale-disabled-entry
+    /// clear the form channel gets, so both creation surfaces land a
+    /// rebirth enabled by one contract.
+    pub fn create_skill_from_markdown(
+        &self,
+        skills_root: &std::path::Path,
+        markdown: &str,
+    ) -> Result<crate::skills::SkillEntry, crate::skills::SkillError> {
+        let entry = crate::skills::registry::create_skill_from_markdown(skills_root, markdown)?;
+        self.land_enabled(entry)
+    }
+
+    /// The post-mint enablement composite both create entries share: the
+    /// mint also clears any STALE same-name disabled entry an earlier
+    /// delete may have left -- without the clear, a dangling disabled name
+    /// would silently shadow the rebirth, violating "newly created skills
+    /// are enabled with zero bookkeeping" (issue #961, ADR-0118 Decision
+    /// 2). The clear degrades with a warn (the mint landed); the returned
+    /// entry's enablement reflects the set as it stands.
+    fn land_enabled(
+        &self,
+        entry: crate::skills::SkillEntry,
+    ) -> Result<crate::skills::SkillEntry, crate::skills::SkillError> {
+        match self.set_skill_enabled(&entry.name, true) {
             Ok(_) => Ok(entry),
             Err(e) => {
+                let name = &entry.name;
                 log::warn!(
                     "created skill `{name}` but failed to clear a stale disabled entry \
                      (flip the switch in the Skills pane): {e}"
@@ -2609,6 +2637,27 @@ mod tests {
             .expect("create");
         assert!(entry.enabled, "the rebirth lands enabled");
         assert!(!live.load().disabled_skills.contains("pdf-tools"));
+    }
+
+    /// The whole-string create entry (ADR-0122 Decision 1) rides the SAME
+    /// composite: a same-name rebirth lands enabled, and the bytes on disk
+    /// are the input verbatim.
+    #[test]
+    fn create_skill_from_markdown_lands_enabled_and_verbatim() {
+        let (_dir, live) = live();
+        let root = tempfile::tempdir().expect("skills root");
+        live.set_skill_enabled("pdf-tools", false).expect("disable");
+        let markdown = "---\nname: pdf-tools\ndescription: Does things.\nlicense: MIT\n\
+             ---\nBody.\n";
+        let entry = live
+            .create_skill_from_markdown(root.path(), markdown)
+            .expect("create");
+        assert_eq!(entry.name, "pdf-tools");
+        assert!(entry.enabled, "the rebirth lands enabled");
+        assert!(!live.load().disabled_skills.contains("pdf-tools"));
+        let on_disk =
+            std::fs::read_to_string(root.path().join("pdf-tools/SKILL.md")).expect("read back");
+        assert_eq!(on_disk, markdown, "the bytes land verbatim");
     }
 
     #[test]

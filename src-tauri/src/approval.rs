@@ -6,7 +6,10 @@
 //!
 //! 1. **Built-in read-only + materialize pass through** (ADR-0080 Decision 1):
 //!    explore / describe / sample are in-DB with no egress; materialize is
-//!    in-DB only. Zero approval friction.
+//!    in-DB only. Zero approval friction. The gated builtin meta-tools
+//!    (ADR-0122 Decision 3) are the exception: `create_skill`'s mint
+//!    persists across sessions and its body is a future prompt-injection
+//!    source, so it gates like an external write.
 //! 2. **External MCP tools default to per-call confirmation** (ADR-0080
 //!    Decision 3): the gateway suspends that turn's call and waits for the
 //!    user's answer via the in-flow approval card (ADR-0083). The wait blocks
@@ -213,8 +216,12 @@ pub enum Classification {
 /// the turn, emitting the card) live in [`ApprovalState::gate`]; this fn is
 /// the testable, side-effect-free core.
 pub fn classify(key: &ToolKey, mode: AuthMode, trust: &HashSet<ToolKey>) -> Classification {
-    // (1) Built-in read-only + materialize: zero approval (ADR-0080 Decision 1).
-    if key.is_builtin() {
+    // (1) Built-in read-only + materialize: zero approval (ADR-0080 Decision
+    // 1) -- except the gated builtin meta-tools (ADR-0122 Decision 3): a
+    // `create_skill` mint persists across sessions and its body is a future
+    // prompt-injection source, so it rides the per-call card + session trust
+    // like an external write, never Decision 1's zero-approval pass.
+    if key.is_builtin() && !is_gated_builtin(key) {
         return Classification::Allow;
     }
     // (4) No-confirmation posture: every external call auto-passes (Decision 4).
@@ -244,6 +251,14 @@ where
     keys.into_iter()
         .filter(|k| classify(k, mode, trust) == Classification::Allow)
         .collect()
+}
+
+/// The built-in tools that gate anyway (ADR-0122 Decision 3): their writes
+/// outlive the session, so they never ride ADR-0080 Decision 1's
+/// zero-approval builtin pass. An explicit enumerated family, not a naming
+/// convention.
+fn is_gated_builtin(key: &ToolKey) -> bool {
+    key == &ToolKey::builtin(crate::skills::create::CREATE_SKILL)
 }
 
 // ---------------------------------------------------------------------------
@@ -989,6 +1004,67 @@ mod tests {
     }
 
     // --- gate lifecycle ----------------------------------------------------
+
+    #[test]
+    fn classify_gates_the_create_skill_builtin_despite_the_builtin_pass() {
+        // ADR-0122 Decision 3: the creation mint persists across sessions
+        // and its body is a future prompt-injection source -- the builtin
+        // zero-approval pass (ADR-0080 Decision 1) does not cover it.
+        let key = ToolKey::builtin(crate::skills::create::CREATE_SKILL);
+        assert_eq!(
+            classify(&key, AuthMode::PerCall, &HashSet::new()),
+            Classification::NeedsApproval,
+            "an untrusted create gates"
+        );
+        // Session trust ("always allow") restores the pass.
+        let trust = HashSet::from([key.clone()]);
+        assert_eq!(
+            classify(&key, AuthMode::PerCall, &trust),
+            Classification::Allow,
+            "an always-allowed create passes"
+        );
+        // The no-confirmation posture keeps its universal auto-pass.
+        assert_eq!(
+            classify(&key, AuthMode::NoConfirmation, &HashSet::new()),
+            Classification::Allow
+        );
+        // Ordinary built-ins keep the zero-approval pass.
+        assert_eq!(
+            classify(
+                &ToolKey::builtin("explore"),
+                AuthMode::PerCall,
+                &HashSet::new()
+            ),
+            Classification::Allow
+        );
+    }
+
+    #[test]
+    fn gate_passes_a_trusted_create_skill_without_emitting() {
+        // The always-allow short-circuit reaches the gated builtin the same
+        // way it reaches a trusted external -- no card for a trusted tool.
+        let state = ApprovalState::new();
+        let key = ToolKey::builtin(crate::skills::create::CREATE_SKILL);
+        state.seed_trust(&key);
+        let cancel = CancelToken::new();
+        let sink = RecordingSink::default();
+        let req = ApprovalRequest {
+            key,
+            operation_kind: OperationKind::Write,
+            summary: "Create skill `x`: d.".into(),
+            file_attachments: Vec::new(),
+            origin_agent: None,
+        };
+        let outcome = state
+            .gate(req, &sink, &cancel)
+            .expect("trusted create allowed");
+        assert_eq!(outcome, GateOutcome::Allow);
+        assert_eq!(
+            sink.request_count(),
+            0,
+            "a trusted create must not surface a card"
+        );
+    }
 
     #[test]
     fn gate_passes_builtin_without_emitting() {
