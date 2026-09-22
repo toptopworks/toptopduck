@@ -151,7 +151,7 @@ function SectionContent({
   onDefaultRuntimeChanged: (cfg: AppConfig) => void;
   onCliToolsChanged: (cfg: AppConfig) => void;
   /** The single close path (busy-gated), handed to the panes that can route
-   *  the user back to the workspace (the skills create guide, issue #1033). */
+   *  the user back to the workspace (the skills pane's New button, issue #1033). */
   onExitToWorkspace: () => void;
   onIpcBusy: IpcBusyReporter;
   initialEditProfileId?: string;

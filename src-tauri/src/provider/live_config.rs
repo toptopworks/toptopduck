@@ -2542,7 +2542,7 @@ mod tests {
         .expect("SKILL.md");
     }
 
-    /// The whole-string create entry (ADR-0122 Decision 1) rides the SAME
+    /// The whole-string create entry (ADR-0122 Decision 1) rides the one
     /// composite: a same-name rebirth lands enabled, and the bytes on disk
     /// are the input verbatim.
     #[test]

@@ -703,5 +703,5 @@
   "settings.skills.pathLabel": "文件路径",
   "settings.skills.statusEnabled": "已启用",
   "settings.skills.statusDisabled": "已停用",
-  "settings.skills.openFile": "打开文件"
+  "settings.skills.openFile": "打开文件 {path}"
 }

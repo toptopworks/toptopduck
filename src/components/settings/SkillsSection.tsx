@@ -137,9 +137,9 @@ export function SkillsSection({
    *  command already persisted and returned the updated full config -- the
    *  same state-only-sync contract the CLI pane's writes use). */
   onAppConfigSync: (cfg: AppConfig) => void;
-  /** Close the settings overlay back to the workspace (the create-guide
-   *  dialog's action, issue #1033): the SettingsView's single close path
-   *  (busy-gated), so the guide's exit honors the same contract as the
+  /** Close the settings overlay back to the workspace (the New button's
+   *  action, issue #1033): the SettingsView's single close path
+   *  (busy-gated), so the New exit honors the same contract as the
    *  rail's "Back to workspace". */
   onExitToWorkspace: () => void;
 }) {
@@ -219,10 +219,10 @@ export function SkillsSection({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // The registry root for the local rows' reveal targets (issue #1033): the
+  // The registry root for the local rows' open anchors (issue #1033): the
   // backend is the path authority (the get_agents_dir posture), fetched once
-  // per mount. A fetch failure leaves the local reveals inert (log-only) --
-  // the pane stays usable.
+  // per mount. A fetch failure leaves the local rows' open links inert
+  // (log-only) -- the pane stays usable.
   const [skillsRoot, setSkillsRoot] = useState<string | null>(null);
 
   useEffect(() => {
@@ -338,14 +338,18 @@ export function SkillsSection({
     [materializeFailures, filter, search],
   );
 
-  /** The row's reveal anchor (issue #1033): a `local` row's own
+  /** The row's open anchor (issue #1033): a `local` row's own
    *  `<root>/<name>` directory; a `linked` row's link target and a `builtin`
    *  row's reserved-subtree copy (`link_target` carries both). Null when a
-   *  local row is asked before the registry root has resolved -- the reveal
-   *  stays inert rather than synthesizing a garbage path. */
+   *  local row is asked before the registry root has resolved, or when a
+   *  linked row's link target is unreadable -- the open stays inert rather
+   *  than synthesizing a garbage path. The root's own separator threads
+   *  through the join, so a Windows root reads native backslashes. */
   function revealTarget(skill: SkillEntry): string | null {
     if (skill.acquired !== "local") return skill.link_target;
-    return skillsRoot === null ? null : `${skillsRoot}/${skill.name}`;
+    if (skillsRoot === null) return null;
+    const sep = skillsRoot.includes("\\") ? "\\" : "/";
+    return `${skillsRoot}${sep}${skill.name}`;
   }
 
   /** Open the row's read-only detail dialog (the row-click affordance):
@@ -373,6 +377,15 @@ export function SkillsSection({
       setDetailError(fmtError(e, intl));
     }
   }
+
+  const detail =
+    detailName === null
+      ? null
+      : (allSkills.find((s) => s.name === detailName) ?? null);
+  // The path bar anchors at the SKILL.md file: the bar opens it in the
+  // OS default editor, one click from the bytes. Null (a local row asked
+  // before the registry root resolved) keeps the button inert.
+  const detailFile = skillFilePath(detail === null ? null : revealTarget(detail));
 
   return (
     <div>
@@ -536,24 +549,15 @@ export function SkillsSection({
 
       {ignoredDirs.length > 0 && <IgnoredDirectoriesSection skipped={ignoredDirs} />}
 
-      {(() => {
-        const detail = detailName === null ? null : allSkills.find((s) => s.name === detailName) ?? null;
-        if (detail === null) return null;
-        // The path bar anchors at the SKILL.md file: the reveal selects it
-        // in the file manager, one click from the bytes. Null (a local row
-        // asked before the registry root resolved) keeps the button inert.
-        const target = revealTarget(detail);
-        const file = target === null ? null : skillFilePath(target);
-        return (
-          <SkillDetailDialog
-            skill={detail}
-            file={file}
-            error={detailError}
-            onClose={() => setDetailName(null)}
-            onOpenFile={() => void openFile(file)}
-          />
-        );
-      })()}
+      {detail && (
+        <SkillDetailDialog
+          skill={detail}
+          file={detailFile}
+          error={detailError}
+          onClose={() => setDetailName(null)}
+          onOpenFile={() => void openFile(detailFile)}
+        />
+      )}
 
       {confirmDelete && (
         <AlertDialog
@@ -726,9 +730,11 @@ function SkillRow({
   );
 }
 
-/** The SKILL.md path from a reveal anchor directory: joined with the
- *  anchor's own separator so a Windows root reads native backslashes. */
-function skillFilePath(target: string): string {
+/** The SKILL.md path from an open anchor directory (null passes through
+ *  so the caller renders an inert link): joined with the anchor's own
+ *  separator so a Windows root reads native backslashes. */
+function skillFilePath(target: string | null): string | null {
+  if (target === null) return null;
   return target.includes("\\") ? `${target}\\SKILL.md` : `${target}/SKILL.md`;
 }
 
@@ -739,8 +745,9 @@ function skillFilePath(target: string): string {
  *  this dialog only SHOWS the skill and points at where it lives. */
 type SkillDetailDialogProps = {
   skill: SkillEntry;
-  /** The absolute SKILL.md path the path bar links; null only before a
-   *  local row's registry root resolved (the link then stays disabled). */
+  /** The absolute SKILL.md path the path bar links; null before a local
+   *  row's registry root resolved, or when a linked row's link target is
+   *  unreadable (the link then stays disabled). */
   file: string | null;
   /** The open-file failure's dialog-level face (null = no error shown). */
   error: string | null;
@@ -838,10 +845,13 @@ function SkillDetailDialog({
               type="button"
               onClick={onOpenFile}
               disabled={!file}
-              aria-label={intl.formatMessage({
-                id: "settings.skills.openFile",
-                defaultMessage: "Open file",
-              })}
+              aria-label={intl.formatMessage(
+                {
+                  id: "settings.skills.openFile",
+                  defaultMessage: "Open file {path}",
+                },
+                { path: file ?? "" },
+              )}
               className="text-muted-foreground hover:text-foreground w-fit max-w-full text-left font-mono text-xs underline-offset-2 hover:underline disabled:pointer-events-none disabled:opacity-50"
             >
               <span className="break-all">{file}</span>

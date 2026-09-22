@@ -703,5 +703,5 @@
   "settings.skills.pathLabel": "File path",
   "settings.skills.statusEnabled": "Enabled",
   "settings.skills.statusDisabled": "Disabled",
-  "settings.skills.openFile": "Open file"
+  "settings.skills.openFile": "Open file {path}"
 }

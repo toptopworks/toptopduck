@@ -384,8 +384,8 @@ pub(crate) fn load_skill(dir: &Path) -> Result<SkillEntry, SkillError> {
 /// Load + validate one RESERVED-SUBTREE directory into its wire entry: the
 /// builtin posture by location (ADR-0121 -- whatever spec-valid directory
 /// lives under `.system/` is a builtin row), with the subtree directory as
-/// the reveal anchor (the "open location" affordance that supports the fork
-/// channel).
+/// the open anchor (the detail dialog's path bar points there -- the fork
+/// channel's starting point).
 fn load_builtin_skill(dir: &Path) -> Result<SkillEntry, SkillError> {
     let (bytes, dir_name, _, _) = load_skill_parts(dir)?;
     let reveal = Some(dir.to_string_lossy().into_owned());
@@ -416,7 +416,7 @@ fn load_skill_parts(dir: &Path) -> Result<SkillParts, SkillError> {
         SkillError::InvalidSkill(format!("cannot read `{}`: {e}", md_path.display()))
     })?;
     // Derive acquired off the directory's own metadata (never following the
-    // link), and resolve the target for the "open source location" anchor.
+    // link), and resolve the target for the detail dialog's open anchor.
     let fs_acquired = fs_posture(dir);
     let link_target = if matches!(fs_acquired, Acquired::Linked) {
         link_target_of(dir)
@@ -541,9 +541,10 @@ fn read_back_or_derive(
     }
 }
 
-/// Resolve a link's target to an absolute path for the frontend's reveal
-/// (relative targets resolve against the link's parent). Best effort: an
-/// unreadable link degrades to None, never a listing failure.
+/// Resolve a link's target to an absolute path for the frontend's
+/// open-file anchor (relative targets resolve against the link's
+/// parent). Best effort: an unreadable link degrades to None, never a
+/// listing failure.
 fn link_target_of(dir: &Path) -> Option<String> {
     let target = fs::read_link(dir).ok()?;
     let absolute = if target.is_absolute() {
@@ -792,7 +793,7 @@ mod tests {
 
     /// The reserved-subtree merge (ADR-0121 Decision 3): a `.system/<name>`
     /// directory lists as a BUILTIN row (acquired by location), with the
-    /// subtree directory as the reveal anchor and no covers badge.
+    /// subtree directory as the open anchor and no covers badge.
     #[test]
     fn list_merges_the_reserved_subtree_as_builtin_rows() {
         let tmp = tempfile::tempdir().unwrap();
@@ -809,7 +810,7 @@ mod tests {
         assert_eq!(
             builtin.link_target.as_deref(),
             Some(dir.to_string_lossy().as_ref()),
-            "the builtin row's reveal anchor is its subtree directory"
+            "the builtin row's open anchor is its subtree directory"
         );
         assert_eq!(builtin.body, "Shipped body.\n");
     }
@@ -1037,6 +1038,8 @@ mod tests {
         assert_eq!(entry.content_hash.len(), 64);
     }
 
+    /// The payload a write path just produced: exactly what `write_skill_md`
+    /// writes (the temp-file write is verbatim).
     fn written_skill_payload() -> String {
         "---
 name: cleaner

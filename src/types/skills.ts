@@ -4,9 +4,9 @@
 // equals the directory name). `acquired` is loader-derived (linked = symlink /
 // junction onto an external source, local = real directory); the file carries
 // the prompt fragment (the body after the frontmatter). The settings page is
-// row-level governance (list / enablement / delete / reveal); creation rides
-// the model-face create_skill meta-tool and edits happen in the external
-// editor the row's reveal opens (issue #1033).
+// row-level governance (list / enablement / delete); creation rides the
+// model-face create_skill meta-tool and edits happen in the external editor
+// the detail dialog's path bar opens (issue #1033).
 
 // Loader-derived link/real-directory posture. Crosses IPC as the bare
 // snake_case variant (mirrors the Rust `#[serde(rename_all = "snake_case")]`).
@@ -29,9 +29,9 @@ export interface SkillEntry {
   compatibility: string | null;
   // The Markdown body after the frontmatter -- the prompt fragment.
   body: string;
-  // The resolved link target for `linked` skills (the "open source location"
-  // anchor); the reserved-subtree directory (the reveal / fork anchor) for
-  // `builtin` rows; null for `local`.
+  // The resolved link target for `linked` skills (the detail dialog's open
+  // anchor); the reserved-subtree directory for `builtin` rows; null for
+  // `local`.
   link_target: string | null;
   // The enablement axis read (issue #961, ADR-0118 Decision 2): enabled =
   // in the new-session seed's reach; disabled = dormant (grayed row, the

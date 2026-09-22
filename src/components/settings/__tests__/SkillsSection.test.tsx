@@ -321,7 +321,7 @@ describe("SkillsSection (issue #362)", () => {
     await screen.findByText("pdf-tools");
 
     fireEvent.click(screen.getByText("pdf-tools"));
-    const open = await screen.findByRole("button", { name: "Open file" });
+    const open = await screen.findByRole("button", { name: /^Open file/ });
     expect(open).toBeDisabled();
     fireEvent.click(open);
     expect(openPath).not.toHaveBeenCalled();
@@ -374,9 +374,34 @@ describe("SkillsSection (issue #362)", () => {
     expect(screen.getByText("Source")).toBeInTheDocument();
     expect(screen.getByText("Status")).toBeInTheDocument();
     expect(screen.getByText("Enabled")).toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: "Open file" }));
+    // Label in Name (WCAG 2.5.3): the accessible name carries the action AND
+    // the visible path, so a speech-input user voicing what they see hits
+    // the button.
+    const open = screen.getByRole("button", { name: /^Open file/ });
+    expect(open).toHaveAccessibleName("Open file /roots/skills/pdf-tools/SKILL.md");
+    fireEvent.click(open);
     await waitFor(() => {
       expect(openPath).toHaveBeenCalledWith("/roots/skills/pdf-tools/SKILL.md");
+    });
+  });
+
+  it("joins a Windows root with its own separator", async () => {
+    // The anchor's separator threads through both joins (revealTarget's
+    // middle segment and skillFilePath's tail), so a Windows root reads
+    // native backslashes in the path bar -- never mixed separators.
+    vi.mocked(listSkills).mockResolvedValue({ skills: [localSkill], ignored: [], root_error: null });
+    vi.mocked(getSkillsDir).mockResolvedValue("C:\\roots\\skills");
+    const { openPath } = await import("@tauri-apps/plugin-opener");
+    renderPane();
+    await screen.findByText("pdf-tools");
+
+    fireEvent.click(screen.getByText("pdf-tools"));
+    expect(
+      await screen.findByText("C:\\roots\\skills\\pdf-tools\\SKILL.md"),
+    ).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: /^Open file/ }));
+    await waitFor(() => {
+      expect(openPath).toHaveBeenCalledWith("C:\\roots\\skills\\pdf-tools\\SKILL.md");
     });
   });
 
@@ -400,7 +425,7 @@ describe("SkillsSection (issue #362)", () => {
     await screen.findByText("pdf-tools");
 
     fireEvent.click(screen.getByText("pdf-tools"));
-    fireEvent.click(await screen.findByRole("button", { name: "Open file" }));
+    fireEvent.click(await screen.findByRole("button", { name: /^Open file/ }));
 
     // The failure lands on the dialog's own error line (issue #1033): the
     // dialog stays open -- the open is context, not a navigation away --

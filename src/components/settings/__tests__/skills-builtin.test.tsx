@@ -100,7 +100,7 @@ describe("SkillsSection builtin rows (issue #677, ADR-0121)", () => {
     expect(
       screen.getByText(`${builtinSkill.link_target}/SKILL.md`),
     ).toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: "Open file" }));
+    fireEvent.click(screen.getByRole("button", { name: /^Open file/ }));
     await waitFor(() => {
       expect(openPath).toHaveBeenCalledWith(
         `${builtinSkill.link_target}/SKILL.md`,

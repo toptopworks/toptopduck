@@ -68,14 +68,14 @@ pub fn discover_skill_sources(
 /// discovery status crosses the wire), so a source that changed between
 /// discovery and commit surfaces a typed reject rather than overwriting. The
 /// registry root is minted lazily on first import (parallel to
-/// [`super::registry::create_skill`]).
+/// [`super::registry::create_skill_from_markdown`]).
 ///
 /// Link mode creates a symlink (Unix) / directory junction (Windows) onto the
 /// external source -> `acquired: linked` (read-only). A link failure folds a
 /// copy-mode hint into the error detail. Copy mode recursively copies the
 /// source directory -> `acquired: local` (editable); a mid-copy failure
-/// removes the partial copy so a retry does not strand a name (parallel to
-/// `create_skill`'s rollback).
+/// removes the partial copy so a retry does not strand a name (parallel
+/// to the failed-mint cleanup in `create_skill_from_markdown`).
 pub fn import_skill(
     root: &Path,
     source_dir: &Path,
@@ -113,8 +113,8 @@ pub fn import_skill(
         }
     }
     // Read back through the link / copy so the entry carries the correct
-    // `acquired` variant + the link target the drawer's "open source location"
-    // reveals. The reserved-set refusal above keeps the name out of the
+    // `acquired` variant + the link target the detail dialog's path bar
+    // opens from. The reserved-set refusal above keeps the name out of the
     // builtin namespace, so the read-back cannot be a builtin skill.
     load_skill(&target)
 }

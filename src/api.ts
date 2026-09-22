@@ -671,8 +671,8 @@ export async function setSkillEnabled(
 }
 
 // The skills registry root as an absolute path (<app_data_dir>/skills), for
-// the settings pane's row-level reveal affordance (issue #1033): a `local`
-// row reveals `<root>/<name>`. Always non-null -- the root is resolved at
+// the detail dialog's SKILL.md path bar (issue #1033): a `local` row's bar
+// shows `<root>/<name>/SKILL.md`. Always non-null -- the root is resolved at
 // setup (the get_agents_dir posture).
 export async function getSkillsDir(): Promise<string> {
   return invoke<string>("get_skills_dir");

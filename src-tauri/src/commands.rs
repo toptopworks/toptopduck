@@ -3383,8 +3383,8 @@ fn record_last_model_posture(
 // app-config entry); a directory is a skill iff it holds a spec-valid
 // `SKILL.md`. Creation rides the model-face `create_skill` meta-tool
 // (ADR-0122 Decision 1) and edits happen in the external editor the
-// row-level reveal opens (issue #1033) -- no form-shaped write commands
-// remain. Rejects are the typed [`SkillError`] (adjacently tagged like
+// detail dialog's SKILL.md path bar opens (issue #1033) -- no
+// form-shaped write commands remain. Rejects are the typed [`SkillError`] (adjacently tagged like
 // every other typed IPC error) so the frontend renders each refusal
 // through the locale catalog (ADR-0052).
 
@@ -3436,12 +3436,12 @@ pub fn delete_skill(
     live.delete_skill(&root.0, &name)
 }
 
-/// The skills registry root as an absolute path string, for the settings
-/// pane's row-level reveal affordance (issue #1033): a `local` row reveals
-/// `<root>/<name>` in the OS file manager. The backend is the path
-/// authority (the sessions_dir resolve posture) -- the frontend never
-/// re-derives app-data layout. Always non-null -- the root is resolved at
-/// setup, mirroring `get_agents_dir`.
+/// The skills registry root as an absolute path string, for the detail
+/// dialog's SKILL.md path bar (issue #1033): a `local` row's bar shows
+/// `<root>/<name>/SKILL.md` and opens the file in the OS default editor.
+/// The backend is the path authority (the sessions_dir resolve posture) --
+/// the frontend never re-derives app-data layout. Always non-null -- the
+/// root is resolved at setup, mirroring `get_agents_dir`.
 #[tauri::command]
 pub fn get_skills_dir(root: State<'_, SkillsRoot>) -> Result<String, String> {
     Ok(root.0.to_string_lossy().into_owned())
