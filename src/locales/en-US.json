@@ -698,9 +698,10 @@
   "error.skill.reservedName": "The name \"{name}\" is reserved for a system skill",
   "error.skill.builtinReadOnly": "System skill \"{name}\" is read-only; copy its folder to the skills root to make an editable version",
   "error.skill.undeletable": "System skill \"{name}\" cannot be deleted; disable it instead",
-  "settings.skills.openFolderLabel": "Open skill folder {name}",
-  "settings.skills.createGuideTitle": "Create skills in chat",
-  "settings.skills.createGuideBody": "Skills are created through a conversation with your agent. Go back to the workspace and ask it to create a skill for you -- the built-in skill-creator skill knows the format.",
-  "settings.skills.createGuideAction": "Back to workspace",
-  "settings.skills.openFolder": "Open folder"
+  "settings.skills.sourceLabel": "Source",
+  "settings.skills.statusLabel": "Status",
+  "settings.skills.pathLabel": "File path",
+  "settings.skills.statusEnabled": "Enabled",
+  "settings.skills.statusDisabled": "Disabled",
+  "settings.skills.openFile": "Open file"
 }

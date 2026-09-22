@@ -1,8 +1,16 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { FormattedMessage, useIntl } from "react-intl";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { revealItemInDir } from "@tauri-apps/plugin-opener";
-import { Download, FolderOpen, Plus, Puzzle, RefreshCw, Trash2 } from "lucide-react";
+import { openPath } from "@tauri-apps/plugin-opener";
+import {
+  Download,
+  Plus,
+  Puzzle,
+  RefreshCw,
+  SquareArrowOutUpRight,
+  Trash2,
+  X,
+} from "lucide-react";
 
 import type {
   SkillAcquired,
@@ -31,12 +39,10 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from "../ui/alert-dialog";
-import { Button } from "../ui/button";
 import {
   Dialog,
   DialogContent,
   DialogDescription,
-  DialogFooter,
   DialogHeader,
   DialogTitle,
 } from "../ui/dialog";
@@ -51,6 +57,7 @@ import {
   SelectValue,
 } from "../ui/select";
 import {
+  DialogHeaderButton,
   HeaderActionButton,
   NameBadge,
   RowActionButton,
@@ -63,10 +70,12 @@ import { matchesSearch, searchableText } from "./settings-filters";
 // registry is a directory scan (no app-config entry), so this pane reads
 // list_skills + drives enablement / delete through TanStack mutations that
 // invalidate the one skills query. There is NO create / edit form: creation
-// rides the model-face create_skill meta-tool (the New button's guide dialog
-// points there) and edits happen in the external editor each row's reveal
-// opens -- `local` reveals its own directory, `linked` its link target,
-// `builtin` the reserved-subtree copy. The Import header button opens the
+// rides the model-face create_skill meta-tool -- the New button exits the
+// settings overlay straight to the workspace where that conversation lives --
+// and edits happen in the external editor the detail dialog's SKILL.md link
+// opens -- `local` anchors at its own directory, `linked` at
+// its link target, `builtin` at the reserved-subtree copy. The Import header
+// button opens the
 // two-stage drill-down import dialog (issue #367), which links / copies
 // skills from external agent libraries and invalidates the same skills query
 // on success.
@@ -96,6 +105,28 @@ function matchesAcquired(filter: AcquiredFilter, acquired: SkillAcquired): boole
 
 function matchesFilter(skill: SkillEntry, filter: AcquiredFilter): boolean {
   return matchesAcquired(filter, skill.acquired);
+}
+
+/** The acquired axis's locale label: the row badge and the detail dialog's
+ *  scope value share the one vocabulary -- no second word for the same
+ *  axis. */
+function AcquiredLabel({ acquired }: { acquired: SkillAcquired }) {
+  return acquired === "linked" ? (
+    <FormattedMessage
+      id="settings.skills.acquiredLinked"
+      defaultMessage="linked"
+    />
+  ) : acquired === "builtin" ? (
+    <FormattedMessage
+      id="settings.skills.acquiredBuiltin"
+      defaultMessage="system"
+    />
+  ) : (
+    <FormattedMessage
+      id="settings.skills.acquiredLocal"
+      defaultMessage="local"
+    />
+  );
 }
 
 export function SkillsSection({
@@ -211,7 +242,11 @@ export function SkillsSection({
   const [search, setSearch] = useState("");
   const [filter, setFilter] = useState<AcquiredFilter>("all");
   const [detailName, setDetailName] = useState<string | null>(null);
-  const [createGuideOpen, setCreateGuideOpen] = useState(false);
+  // The detail dialog's own error line (the open-file failure face): the
+  // section-level line is unreachable while the dialog is up (Radix marks
+  // the outside tree aria-hidden), so this failure reports where the user
+  // is. Cleared on the next open and the next attempt.
+  const [detailError, setDetailError] = useState<string | null>(null);
   const [confirmDelete, setConfirmDelete] = useState<string | null>(null);
   const [importOpen, setImportOpen] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -303,7 +338,7 @@ export function SkillsSection({
     [materializeFailures, filter, search],
   );
 
-  /** The row's reveal target (issue #1033): a `local` row's own
+  /** The row's reveal anchor (issue #1033): a `local` row's own
    *  `<root>/<name>` directory; a `linked` row's link target and a `builtin`
    *  row's reserved-subtree copy (`link_target` carries both). Null when a
    *  local row is asked before the registry root has resolved -- the reveal
@@ -314,25 +349,28 @@ export function SkillsSection({
   }
 
   /** Open the row's read-only detail dialog (the row-click affordance):
-   *  name + description + the path bar. Opening clears a stale pane error
-   *  so the dialog never replays an unrelated reject under the overlay. */
+   *  name + description + the SKILL.md path bar. Opening clears a stale
+   *  pane error so the dialog never replays an unrelated reject under the
+   *  overlay. */
   function openDetail(skill: SkillEntry) {
     setError(null);
+    setDetailError(null);
     setDetailName(skill.name);
   }
 
-  /** Reveal one skill's directory in the OS file manager (issue #1033): the
-   *  external-edit channel. A failure lands on the section-level error line
-   *  -- the detail dialog closes before any reveal it triggers, so the
-   *  section-level line is always the visible face. */
-  async function revealSkill(skill: SkillEntry) {
-    setDetailName(null);
-    const target = revealTarget(skill);
-    if (!target) return;
+  /** Open the SKILL.md file in the OS default editor (issue #1033): the
+   *  detail dialog's external-edit channel. The dialog stays open -- the
+   *  open is fire-and-forget context, not a navigation away -- so a failure
+   *  reports on the dialog's own error line (the section-level one is
+   *  aria-hidden behind it). A null path (the registry root unresolved)
+   *  stays inert. */
+  async function openFile(path: string | null) {
+    setDetailError(null);
+    if (path === null) return;
     try {
-      await revealItemInDir(target);
+      await openPath(path);
     } catch (e) {
-      setError(fmtError(e, intl));
+      setDetailError(fmtError(e, intl));
     }
   }
 
@@ -354,10 +392,10 @@ export function SkillsSection({
                 defaultMessage: "New",
               })}
               icon={Plus}
-              onClick={() => {
-                setError(null);
-                setCreateGuideOpen(true);
-              }}
+              // No interposing dialog: the New click exits the settings
+              // overlay straight to the workspace's chat, where the
+              // create_skill meta-tool conversation happens (issue #1033).
+              onClick={onExitToWorkspace}
             />
             <HeaderActionButton
               label={intl.formatMessage({
@@ -476,8 +514,6 @@ export function SkillsSection({
               onToggleEnabled={(enabled) =>
                 toggleEnabledMutation.mutate({ name: skill.name, enabled })}
               onOpen={() => openDetail(skill)}
-              onReveal={() => void revealSkill(skill)}
-              revealTarget={revealTarget(skill)}
               // A builtin skill is undeletable (issue #677): its delete
               // button renders disabled -- the shutdown axis is the
               // enablement axis: disable the skill, or for a CLI companion
@@ -502,25 +538,22 @@ export function SkillsSection({
 
       {(() => {
         const detail = detailName === null ? null : allSkills.find((s) => s.name === detailName) ?? null;
-        return detail ? (
+        if (detail === null) return null;
+        // The path bar anchors at the SKILL.md file: the reveal selects it
+        // in the file manager, one click from the bytes. Null (a local row
+        // asked before the registry root resolved) keeps the button inert.
+        const target = revealTarget(detail);
+        const file = target === null ? null : skillFilePath(target);
+        return (
           <SkillDetailDialog
             skill={detail}
-            target={revealTarget(detail)}
+            file={file}
+            error={detailError}
             onClose={() => setDetailName(null)}
-            onReveal={() => void revealSkill(detail)}
+            onOpenFile={() => void openFile(file)}
           />
-        ) : null;
+        );
       })()}
-
-      {createGuideOpen && (
-        <CreateGuideDialog
-          onCancel={() => setCreateGuideOpen(false)}
-          onExit={() => {
-            setCreateGuideOpen(false);
-            onExitToWorkspace();
-          }}
-        />
-      )}
 
       {confirmDelete && (
         <AlertDialog
@@ -583,14 +616,9 @@ type SkillRowProps = {
   busy?: boolean;
   /** Flip the row's enablement axis (issue #961). */
   onToggleEnabled: (enabled: boolean) => void;
-  /** Open the row's read-only detail dialog (name + description + path). */
+  /** Open the row's read-only detail dialog (name + description + the
+   *  SKILL.md path bar). */
   onOpen: () => void;
-  /** Reveal the skill's directory in the OS file manager (issue #1033):
-   *  the external-edit channel. */
-  onReveal: () => void;
-  /** The absolute path the reveal opens, shown as the button's hover
-   *  tooltip (null only before a local row's registry root resolved). */
-  revealTarget: string | null;
   /** Undefined on builtin rows (issue #677): the delete button then renders
    *  disabled, keeping every row's action column aligned. */
   onDelete?: () => void;
@@ -601,8 +629,6 @@ function SkillRow({
   busy = false,
   onToggleEnabled,
   onOpen,
-  onReveal,
-  revealTarget,
   onDelete,
 }: SkillRowProps) {
   const intl = useIntl();
@@ -635,22 +661,7 @@ function SkillRow({
         <div className="flex items-center gap-2">
           <span className="truncate text-sm font-medium">{skill.name}</span>
           <NameBadge>
-            {skill.acquired === "linked" ? (
-              <FormattedMessage
-                id="settings.skills.acquiredLinked"
-                defaultMessage="linked"
-              />
-            ) : skill.acquired === "builtin" ? (
-              <FormattedMessage
-                id="settings.skills.acquiredBuiltin"
-                defaultMessage="system"
-              />
-            ) : (
-              <FormattedMessage
-                id="settings.skills.acquiredLocal"
-                defaultMessage="local"
-              />
-            )}
+            <AcquiredLabel acquired={skill.acquired} />
           </NameBadge>
           {skill.covers_builtin && (
             <NameBadge>
@@ -679,29 +690,10 @@ function SkillRow({
             { name: skill.name },
           )}
         />
-        {/* The reveal (issue #1033): the external-edit channel -- open the
-            skill's directory in the OS file manager and edit SKILL.md (or
-            the bundled assets) there; the next scan / new-session seed
-            re-discovers the change. */}
-        <RowActionButton
-          label={intl.formatMessage(
-            {
-              id: "settings.skills.openFolderLabel",
-              defaultMessage: "Open skill folder {name}",
-            },
-            { name: skill.name },
-          )}
-          icon={FolderOpen}
-          onClick={onReveal}
-          // The build item's "shows the skill directory path" clause: the
-          // hover carries the absolute path the click reveals (the #1015
-          // real-touchpoint posture), absent only on a local row asked
-          // before the registry root resolved.
-          tooltip={revealTarget ?? undefined}
-        />
-        {/* The row-end cluster renders the same two buttons in every state
-            (the reveal + the delete -- disabled on builtin, issue #677), so
-            the switch column never shifts across rows. */}
+        {/* The row-end delete renders in every state (disabled on builtin,
+            issue #677) so the switch column never shifts across rows. The
+            external-edit channel lives in the detail dialog's SKILL.md path
+            bar (issue #1033) -- the row itself stays management-only. */}
         <RowActionButton
           destructive
           disabled={!onDelete}
@@ -734,106 +726,137 @@ function SkillRow({
   );
 }
 
+/** The SKILL.md path from a reveal anchor directory: joined with the
+ *  anchor's own separator so a Windows root reads native backslashes. */
+function skillFilePath(target: string): string {
+  return target.includes("\\") ? `${target}\\SKILL.md` : `${target}/SKILL.md`;
+}
+
 /** The row's read-only detail dialog (issue #1033's row-click face): the
- *  name + description + the path bar. There is no form here -- creation
- *  rides the conversation channel and edits happen in the external editor
- *  the Open folder button reveals, so this dialog only SHOWS the skill and
- *  points at where it lives. */
+ *  name header, the description / scope / status metadata, and the SKILL.md
+ *  path bar. There is no form here -- creation rides the conversation
+ *  channel and edits happen in the external editor the path link opens, so
+ *  this dialog only SHOWS the skill and points at where it lives. */
 type SkillDetailDialogProps = {
   skill: SkillEntry;
-  /** The absolute directory the Open folder button reveals; null only
-   *  before a local row's registry root resolved (the button then stays
-   *  disabled). */
-  target: string | null;
+  /** The absolute SKILL.md path the path bar links; null only before a
+   *  local row's registry root resolved (the link then stays disabled). */
+  file: string | null;
+  /** The open-file failure's dialog-level face (null = no error shown). */
+  error: string | null;
   onClose: () => void;
-  onReveal: () => void;
+  /** Open the SKILL.md file in the OS default editor. */
+  onOpenFile: () => void;
 };
 
-function SkillDetailDialog({ skill, target, onClose, onReveal }: SkillDetailDialogProps) {
+function SkillDetailDialog({
+  skill,
+  file,
+  error,
+  onClose,
+  onOpenFile,
+}: SkillDetailDialogProps) {
   const intl = useIntl();
   return (
     <Dialog open onOpenChange={(open) => { if (!open) onClose(); }}>
-      {/* No built-in X: the explicit Close button is the sole visual
-          dismissal (the reference form) -- ESC still closes via Radix. */}
-      <DialogContent className="sm:max-w-md" showCloseButton={false}>
+      {/* The default header X is the sole dismissal chrome; ESC and the
+          overlay click still close via Radix. */}
+      <DialogContent className="sm:max-w-lg" showCloseButton={false}>
         <DialogHeader>
-          <DialogTitle>{skill.name}</DialogTitle>
-          <DialogDescription>{skill.description}</DialogDescription>
-        </DialogHeader>
-        <DialogFooter className="sm:justify-between gap-2">
-          {/* The path bar: where the skill lives, and the reveal beside it
-              -- the external-edit channel's anchor. */}
-          <div className="flex min-w-0 items-center gap-2">
-            <span className="text-muted-foreground truncate font-mono text-xs">
-              {target}
-            </span>
-            <Button
-              type="button"
-              variant="outline"
-              size="icon"
-              onClick={onReveal}
-              disabled={!target}
-              aria-label={intl.formatMessage({
-                id: "settings.skills.openFolder",
-                defaultMessage: "Open folder",
+          {/* The close chrome matches the sibling import dialog: the
+              DialogHeaderButton ghost in the header row, not the floating
+              corner X (the #964 dialog-action posture). */}
+          <div className="flex items-center justify-between gap-2">
+            <DialogTitle>{skill.name}</DialogTitle>
+            <DialogHeaderButton
+              label={intl.formatMessage({
+                id: "common.close",
+                defaultMessage: "Close",
               })}
-            >
-              <FolderOpen className="size-4" aria-hidden />
-            </Button>
+              icon={X}
+              onClick={onClose}
+            />
           </div>
-          <Button type="button" variant="ghost" onClick={onClose}>
-            <FormattedMessage id="common.close" defaultMessage="Close" />
-          </Button>
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
-  );
-}
-
-/** The create-guide dialog (issue #1033): the New button's landing. With the
- *  create drawer retired there is no in-app authoring form -- creation rides
- *  the model-face create_skill meta-tool, so the guide explains the
- *  conversation channel and offers the exit to the workspace where it lives.
- *  Pre-filling a teaching-skill mention in the composer is left to a later
- *  pass (the issue's implementation-period note). */
-type CreateGuideDialogProps = {
-  onCancel: () => void;
-  onExit: () => void;
-};
-
-function CreateGuideDialog({ onCancel, onExit }: CreateGuideDialogProps) {
-  return (
-    <Dialog open onOpenChange={(open) => { if (!open) onCancel(); }}>
-      <DialogContent className="sm:max-w-md" showCloseButton>
-        <DialogHeader>
-          <DialogTitle>
-            <FormattedMessage
-              id="settings.skills.createGuideTitle"
-              defaultMessage="Create skills in chat"
-            />
-          </DialogTitle>
-          <DialogDescription>
-            <FormattedMessage
-              id="settings.skills.createGuideBody"
-              defaultMessage={
-                "Skills are created through a conversation with your agent. Go back to the " +
-                "workspace and ask it to create a skill for you -- the built-in skill-creator " +
-                "skill knows the format."
-              }
-            />
-          </DialogDescription>
         </DialogHeader>
-        <DialogFooter>
-          <Button type="button" variant="ghost" onClick={onCancel}>
-            <FormattedMessage id="common.cancel" defaultMessage="Cancel" />
-          </Button>
-          <Button type="button" onClick={onExit}>
-            <FormattedMessage
-              id="settings.skills.createGuideAction"
-              defaultMessage="Back to workspace"
-            />
-          </Button>
-        </DialogFooter>
+        <div className="grid gap-5">
+          <div className="grid gap-1.5">
+            <p className="text-foreground text-sm">
+              <FormattedMessage
+                id="common.description"
+                defaultMessage="Description"
+              />
+            </p>
+            <DialogDescription className="text-sm leading-relaxed">
+              {skill.description}
+            </DialogDescription>
+          </div>
+          <div className="grid grid-cols-2 gap-4">
+            <div className="grid gap-1.5">
+              <p className="text-foreground text-sm">
+                <FormattedMessage
+                  id="settings.skills.sourceLabel"
+                  defaultMessage="Source"
+                />
+              </p>
+              <p className="text-muted-foreground text-sm">
+                <AcquiredLabel acquired={skill.acquired} />
+              </p>
+            </div>
+            <div className="grid gap-1.5">
+              <p className="text-foreground text-sm">
+                <FormattedMessage
+                  id="settings.skills.statusLabel"
+                  defaultMessage="Status"
+                />
+              </p>
+              <p className="text-muted-foreground text-sm">
+                {skill.enabled ? (
+                  <FormattedMessage
+                    id="settings.skills.statusEnabled"
+                    defaultMessage="Enabled"
+                  />
+                ) : (
+                  <FormattedMessage
+                    id="settings.skills.statusDisabled"
+                    defaultMessage="Disabled"
+                  />
+                )}
+              </p>
+            </div>
+          </div>
+          <div className="grid gap-1.5">
+            <p className="text-foreground text-sm">
+              <FormattedMessage
+                id="settings.skills.pathLabel"
+                defaultMessage="File path"
+              />
+            </p>
+            {/* The path is the open-file link (the direct-edit channel):
+                hover underlines it, click opens SKILL.md in the OS default
+                editor; the glyph rides inline as the affordance. */}
+            <button
+              type="button"
+              onClick={onOpenFile}
+              disabled={!file}
+              aria-label={intl.formatMessage({
+                id: "settings.skills.openFile",
+                defaultMessage: "Open file",
+              })}
+              className="text-muted-foreground hover:text-foreground w-fit max-w-full text-left font-mono text-xs underline-offset-2 hover:underline disabled:pointer-events-none disabled:opacity-50"
+            >
+              <span className="break-all">{file}</span>
+              <SquareArrowOutUpRight
+                className="ml-1.5 inline-block size-3.5 align-text-bottom"
+                aria-hidden
+              />
+            </button>
+            {error && (
+              <p className="text-destructive text-xs" role="alert">
+                {error}
+              </p>
+            )}
+          </div>
+        </div>
       </DialogContent>
     </Dialog>
   );

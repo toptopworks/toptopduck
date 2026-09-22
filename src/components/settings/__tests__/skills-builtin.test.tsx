@@ -11,8 +11,8 @@ import { scanResult, skillEntry } from "../../../test-fixtures";
 
 // The builtin-skill surface of the settings pane (issue #677; readonly
 // posture since ADR-0121): the built-in badge + the inert delete entry, the
-// builtin row's reveal anchor (the reserved-subtree directory, issue #1033),
-// and the covers-built-in badge on a shadowing local row.
+// builtin row's SKILL.md anchor in the detail dialog (the reserved subtree,
+// issue #1033), and the covers-built-in badge on a shadowing local row.
 vi.mock("../../../api", () => ({
   listSkills: vi.fn(),
   getSkillsDir: vi.fn(),
@@ -22,7 +22,7 @@ vi.mock("../../../api", () => ({
   rescanBuiltinCliTools: vi.fn(),
 }));
 vi.mock("@tauri-apps/plugin-opener", () => ({
-  revealItemInDir: vi.fn(),
+  openPath: vi.fn(),
 }));
 
 const builtinSkill = skillEntry("pandoc", {
@@ -87,19 +87,24 @@ describe("SkillsSection builtin rows (issue #677, ADR-0121)", () => {
   });
 
   it("opens a read-only detail dialog over a builtin row", async () => {
-    const { revealItemInDir } = await import("@tauri-apps/plugin-opener");
+    const { openPath } = await import("@tauri-apps/plugin-opener");
     renderSection();
     fireEvent.click(await screen.findByText("pandoc"));
-    // The detail dialog is a read-only face: name + description + the path
-    // bar (no form fields, no Save) -- the reserved-subtree anchor is the
-    // path the Open folder button reveals (ADR-0121 Decision 4).
+    // The detail dialog is a read-only face: name + description + scope /
+    // status + the SKILL.md path bar (no form fields, no Save) -- the
+    // reserved-subtree anchor surfaces as the file path the link opens in
+    // the OS default editor (ADR-0121 Decision 4).
     expect(await screen.findByRole("heading", { name: "pandoc" })).toBeInTheDocument();
     expect(screen.queryByLabelText("Name")).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Save" })).not.toBeInTheDocument();
-    expect(screen.getByText(builtinSkill.link_target as string)).toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: "Open folder" }));
+    expect(
+      screen.getByText(`${builtinSkill.link_target}/SKILL.md`),
+    ).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Open file" }));
     await waitFor(() => {
-      expect(revealItemInDir).toHaveBeenCalledWith(builtinSkill.link_target);
+      expect(openPath).toHaveBeenCalledWith(
+        `${builtinSkill.link_target}/SKILL.md`,
+      );
     });
   });
 
@@ -121,21 +126,6 @@ describe("SkillsSection builtin rows (issue #677, ADR-0121)", () => {
         "System skills cannot be deleted; disable the skill instead",
       ),
     ).toBeInTheDocument();
-  });
-
-  it("reveals a builtin row's reserved-subtree folder (the fork channel's anchor)", async () => {
-    const { revealItemInDir } = await import("@tauri-apps/plugin-opener");
-    renderSection();
-    await screen.findByTestId("skill-row");
-    // The open-location anchor (ADR-0121 Decision 4), now a row action
-    // (issue #1033): the reveal targets the reserved-subtree folder -- the
-    // fork channel's starting point.
-    fireEvent.click(
-      screen.getByRole("button", { name: "Open skill folder pandoc" }),
-    );
-    await waitFor(() => {
-      expect(revealItemInDir).toHaveBeenCalledWith(builtinSkill.link_target);
-    });
   });
 
   it("shows the covers badge on a local row shadowing a builtin", async () => {

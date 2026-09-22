@@ -20,9 +20,10 @@ import { baseAppConfig, scanResult, skillEntry } from "../../../test-fixtures";
 import type { BuiltinScanResult } from "../../../types/cli-tool";
 
 // The pane drives everything through IPC + the opener plugin; mock both so the
-// test never touches Tauri. revealItemInDir is every row's external-edit
-// channel (issue #1033); getSkillsDir supplies the local rows' reveal targets.
-// listSkillSources feeds the import dialog's discovery read (issue #367).
+// test never touches Tauri. openPath is the detail dialog's external-edit
+// channel (issue #1033); getSkillsDir supplies the local rows' SKILL.md
+// anchors. listSkillSources feeds the import dialog's discovery read
+// (issue #367).
 vi.mock("../../../api", () => ({
   listSkills: vi.fn(),
   getSkillsDir: vi.fn(),
@@ -33,7 +34,7 @@ vi.mock("../../../api", () => ({
   rescanBuiltinCliTools: vi.fn(),
 }));
 vi.mock("@tauri-apps/plugin-opener", () => ({
-  revealItemInDir: vi.fn(),
+  openPath: vi.fn(),
 }));
 
 const localSkill = skillEntry("pdf-tools", {
@@ -309,73 +310,21 @@ describe("SkillsSection (issue #362)", () => {
     });
   });
 
-  it("reveals a linked row source folder from the row itself", async () => {
-    vi.mocked(listSkills).mockResolvedValue({ skills: [linkedSkill], ignored: [], root_error: null });
-    const { revealItemInDir } = await import("@tauri-apps/plugin-opener");
-    renderPane();
-    await screen.findByText("external-skill");
-
-    // The reveal is a row action now (issue #1033): no drawer opens
-    // first, and the text block stays plain text.
-    fireEvent.click(
-      screen.getByRole("button", { name: "Open skill folder external-skill" }),
-    );
-    await waitFor(() => {
-      expect(revealItemInDir).toHaveBeenCalledWith(linkedSkill.link_target);
-    });
-    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
-  });
-
-  it("reveals a local row's own directory from the registry root", async () => {
-    vi.mocked(listSkills).mockResolvedValue({ skills: [localSkill], ignored: [], root_error: null });
-    const { revealItemInDir } = await import("@tauri-apps/plugin-opener");
-    renderPane();
-    await screen.findByText("pdf-tools");
-
-    // A local skill has no link_target -- the reveal joins the backend's
-    // registry root with the row's name (issue #1033), the path authority
-    // staying on the Rust side.
-    fireEvent.click(
-      screen.getByRole("button", { name: "Open skill folder pdf-tools" }),
-    );
-    await waitFor(() => {
-      expect(revealItemInDir).toHaveBeenCalledWith("/roots/skills/pdf-tools");
-    });
-  });
-
-  it("shows the reveal path on the folder button's hover", async () => {
-    vi.mocked(listSkills).mockResolvedValue({ skills: [localSkill], ignored: [], root_error: null });
-    renderPane();
-    await screen.findByText("pdf-tools");
-
-    // The build item's "shows the skill directory path" clause: the hover
-    // carries the absolute path the click reveals (the #1015 posture).
-    // Radix Tooltip opens on pointermove with delayDuration 0 under the
-    // test's TooltipProvider.
-    fireEvent.pointerMove(
-      screen.getByRole("button", { name: "Open skill folder pdf-tools" }),
-    );
-    expect(
-      await screen.findByText("/roots/skills/pdf-tools"),
-    ).toBeInTheDocument();
-  });
-
-  it("keeps a local row's reveal inert until the registry root resolves", async () => {
+  it("keeps the detail dialog's file action inert until the registry root resolves", async () => {
     vi.mocked(listSkills).mockResolvedValue({ skills: [localSkill], ignored: [], root_error: null });
     // The root fetch never settles: a local row asked in that window must
-    // not synthesize a garbage "null/<name>" path.
+    // not synthesize a garbage "null/SKILL.md" path -- the path bar stays
+    // empty and the open link disabled.
     vi.mocked(getSkillsDir).mockReturnValue(new Promise(() => {}));
-    const { revealItemInDir } = await import("@tauri-apps/plugin-opener");
+    const { openPath } = await import("@tauri-apps/plugin-opener");
     renderPane();
     await screen.findByText("pdf-tools");
 
-    fireEvent.click(
-      screen.getByRole("button", { name: "Open skill folder pdf-tools" }),
-    );
-    await waitFor(() => {
-      expect(screen.getByRole("button", { name: "Open skill folder pdf-tools" })).toBeInTheDocument();
-    });
-    expect(revealItemInDir).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByText("pdf-tools"));
+    const open = await screen.findByRole("button", { name: "Open file" });
+    expect(open).toBeDisabled();
+    fireEvent.click(open);
+    expect(openPath).not.toHaveBeenCalled();
   });
 
   it("opens the detail dialog from the row's text block", async () => {
@@ -409,19 +358,25 @@ describe("SkillsSection (issue #362)", () => {
     ).toBeInTheDocument();
   });
 
-  it("shows the path and reveals from the detail dialog's Open folder", async () => {
+  it("opens the SKILL.md file from the detail dialog's path link", async () => {
     vi.mocked(listSkills).mockResolvedValue({ skills: [localSkill], ignored: [], root_error: null });
-    const { revealItemInDir } = await import("@tauri-apps/plugin-opener");
+    const { openPath } = await import("@tauri-apps/plugin-opener");
     renderPane();
     await screen.findByText("pdf-tools");
 
     fireEvent.click(screen.getByText("pdf-tools"));
-    // The path bar carries the absolute directory (the displayed-path
-    // clause) and the icon button beside it is the reveal.
-    expect(await screen.findByText("/roots/skills/pdf-tools")).toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: "Open folder" }));
+    // The path bar carries the absolute SKILL.md path (the displayed-path
+    // clause); clicking it is the direct-edit channel -- the file opens in
+    // the OS default editor.
+    expect(await screen.findByText("/roots/skills/pdf-tools/SKILL.md")).toBeInTheDocument();
+    // The metadata face: source rides the acquired vocabulary, status the
+    // enablement axis.
+    expect(screen.getByText("Source")).toBeInTheDocument();
+    expect(screen.getByText("Status")).toBeInTheDocument();
+    expect(screen.getByText("Enabled")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Open file" }));
     await waitFor(() => {
-      expect(revealItemInDir).toHaveBeenCalledWith("/roots/skills/pdf-tools");
+      expect(openPath).toHaveBeenCalledWith("/roots/skills/pdf-tools/SKILL.md");
     });
   });
 
@@ -437,25 +392,26 @@ describe("SkillsSection (issue #362)", () => {
     });
   });
 
-  it("surfaces a reveal failure as a formatted error", async () => {
+  it("surfaces an open failure as a formatted error", async () => {
     vi.mocked(listSkills).mockResolvedValue({ skills: [localSkill], ignored: [], root_error: null });
-    const { revealItemInDir } = await import("@tauri-apps/plugin-opener");
-    vi.mocked(revealItemInDir).mockRejectedValueOnce(new Error("opener unavailable"));
+    const { openPath } = await import("@tauri-apps/plugin-opener");
+    vi.mocked(openPath).mockRejectedValueOnce(new Error("opener unavailable"));
     renderPane();
     await screen.findByText("pdf-tools");
 
-    fireEvent.click(
-      screen.getByRole("button", { name: "Open skill folder pdf-tools" }),
-    );
+    fireEvent.click(screen.getByText("pdf-tools"));
+    fireEvent.click(await screen.findByRole("button", { name: "Open file" }));
 
-    // The failure lands on the section-level error line (issue #1033): with
-    // the drawer gone there is no modal face -- the visible alert is the
-    // whole report.
+    // The failure lands on the dialog's own error line (issue #1033): the
+    // dialog stays open -- the open is context, not a navigation away --
+    // and Radix marks the section-level tree aria-hidden behind it, so the
+    // dialog itself carries the report.
     expect(await screen.findByRole("alert")).toBeInTheDocument();
     expect(screen.getByRole("alert")).toHaveTextContent("opener unavailable");
+    expect(screen.getByRole("dialog")).toBeInTheDocument();
   });
 
-  it("routes the New button to the create guide and exits to the workspace", async () => {
+  it("exits straight to the workspace from the New button", async () => {
     vi.mocked(listSkills).mockResolvedValue({ skills: [], ignored: [], root_error: null });
     const onExitToWorkspace = vi.fn();
     renderWithProviders(
@@ -466,15 +422,10 @@ describe("SkillsSection (issue #362)", () => {
     );
     await screen.findByText("No skills yet. Create one in a chat, or import it.");
 
-    // No form opens (issue #1033): creation rides the conversation channel,
-    // so the guide explains where authoring lives and offers the exit.
+    // No dialog interposes (issue #1033): the New click lands on the
+    // SettingsView's single close path directly -- the workspace's chat is
+    // where the create_skill meta-tool conversation happens.
     fireEvent.click(screen.getByRole("button", { name: /New/i }));
-    expect(
-      await screen.findByRole("heading", { name: "Create skills in chat" }),
-    ).toBeInTheDocument();
-    expect(screen.queryByLabelText("Name")).not.toBeInTheDocument();
-
-    fireEvent.click(screen.getByRole("button", { name: "Back to workspace" }));
     expect(onExitToWorkspace).toHaveBeenCalledTimes(1);
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
   });
