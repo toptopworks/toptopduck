@@ -701,5 +701,6 @@
   "settings.skills.openFolderLabel": "打开技能文件夹 {name}",
   "settings.skills.createGuideTitle": "在对话中创建技能",
   "settings.skills.createGuideBody": "技能通过与智能体的对话创建。回到工作区，让它为你创建技能——内置的 skill-creator 技能了解格式。",
-  "settings.skills.createGuideAction": "回到工作区"
+  "settings.skills.createGuideAction": "回到工作区",
+  "settings.skills.openFolder": "打开文件夹"
 }

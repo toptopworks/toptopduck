@@ -701,5 +701,6 @@
   "settings.skills.openFolderLabel": "Open skill folder {name}",
   "settings.skills.createGuideTitle": "Create skills in chat",
   "settings.skills.createGuideBody": "Skills are created through a conversation with your agent. Go back to the workspace and ask it to create a skill for you -- the built-in skill-creator skill knows the format.",
-  "settings.skills.createGuideAction": "Back to workspace"
+  "settings.skills.createGuideAction": "Back to workspace",
+  "settings.skills.openFolder": "Open folder"
 }

@@ -86,15 +86,21 @@ describe("SkillsSection builtin rows (issue #677, ADR-0121)", () => {
     ).toHaveAttribute("aria-disabled", "true");
   });
 
-  it("keeps the row plain text with no open-edit affordance", async () => {
+  it("opens a read-only detail dialog over a builtin row", async () => {
+    const { revealItemInDir } = await import("@tauri-apps/plugin-opener");
     renderSection();
-    const row = await screen.findByTestId("skill-row");
-    // The edit drawer is retired (issue #1033): the row's text block is not
-    // a button and no dialog exists to open.
-    const text = screen.getByText("pandoc");
-    expect(text.closest("[role='button']")).toBeNull();
-    expect(row.tagName).not.toBe("BUTTON");
-    expect(screen.queryByRole("dialog")).toBeNull();
+    fireEvent.click(await screen.findByText("pandoc"));
+    // The detail dialog is a read-only face: name + description + the path
+    // bar (no form fields, no Save) -- the reserved-subtree anchor is the
+    // path the Open folder button reveals (ADR-0121 Decision 4).
+    expect(await screen.findByRole("heading", { name: "pandoc" })).toBeInTheDocument();
+    expect(screen.queryByLabelText("Name")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Save" })).not.toBeInTheDocument();
+    expect(screen.getByText(builtinSkill.link_target as string)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Open folder" }));
+    await waitFor(() => {
+      expect(revealItemInDir).toHaveBeenCalledWith(builtinSkill.link_target);
+    });
   });
 
   it("explains the disabled delete through the shutdown tooltip (#1015)", async () => {

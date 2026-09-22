@@ -80,8 +80,9 @@ const FILTER_OPTIONS: ReadonlyArray<AcquiredFilter> = [
   "builtin",
 ];
 
-// The row is list chrome (hover highlight + layout); every action lives in
-// the row-end cluster (reveal / delete), never on the text block.
+// The row is list chrome (hover highlight + layout); the text block is the
+// detail affordance (click / Enter opens the read-only dialog) and every
+// write action lives in the row-end cluster -- never on the text block.
 const ROW_CLASS = "hover:bg-accent flex items-center gap-3 px-4 py-3";
 
 /** One filter-axis half shared by the rows and the failure lane: "all"
@@ -209,6 +210,7 @@ export function SkillsSection({
 
   const [search, setSearch] = useState("");
   const [filter, setFilter] = useState<AcquiredFilter>("all");
+  const [detailName, setDetailName] = useState<string | null>(null);
   const [createGuideOpen, setCreateGuideOpen] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState<string | null>(null);
   const [importOpen, setImportOpen] = useState(false);
@@ -311,10 +313,20 @@ export function SkillsSection({
     return skillsRoot === null ? null : `${skillsRoot}/${skill.name}`;
   }
 
+  /** Open the row's read-only detail dialog (the row-click affordance):
+   *  name + description + the path bar. Opening clears a stale pane error
+   *  so the dialog never replays an unrelated reject under the overlay. */
+  function openDetail(skill: SkillEntry) {
+    setError(null);
+    setDetailName(skill.name);
+  }
+
   /** Reveal one skill's directory in the OS file manager (issue #1033): the
    *  external-edit channel. A failure lands on the section-level error line
-   *  -- with the drawer gone there is no modal to own it. */
+   *  -- the detail dialog closes before any reveal it triggers, so the
+   *  section-level line is always the visible face. */
   async function revealSkill(skill: SkillEntry) {
+    setDetailName(null);
     const target = revealTarget(skill);
     if (!target) return;
     try {
@@ -463,6 +475,7 @@ export function SkillsSection({
               }
               onToggleEnabled={(enabled) =>
                 toggleEnabledMutation.mutate({ name: skill.name, enabled })}
+              onOpen={() => openDetail(skill)}
               onReveal={() => void revealSkill(skill)}
               revealTarget={revealTarget(skill)}
               // A builtin skill is undeletable (issue #677): its delete
@@ -486,6 +499,18 @@ export function SkillsSection({
       )}
 
       {ignoredDirs.length > 0 && <IgnoredDirectoriesSection skipped={ignoredDirs} />}
+
+      {(() => {
+        const detail = detailName === null ? null : allSkills.find((s) => s.name === detailName) ?? null;
+        return detail ? (
+          <SkillDetailDialog
+            skill={detail}
+            target={revealTarget(detail)}
+            onClose={() => setDetailName(null)}
+            onReveal={() => void revealSkill(detail)}
+          />
+        ) : null;
+      })()}
 
       {createGuideOpen && (
         <CreateGuideDialog
@@ -558,6 +583,8 @@ type SkillRowProps = {
   busy?: boolean;
   /** Flip the row's enablement axis (issue #961). */
   onToggleEnabled: (enabled: boolean) => void;
+  /** Open the row's read-only detail dialog (name + description + path). */
+  onOpen: () => void;
   /** Reveal the skill's directory in the OS file manager (issue #1033):
    *  the external-edit channel. */
   onReveal: () => void;
@@ -573,6 +600,7 @@ function SkillRow({
   skill,
   busy = false,
   onToggleEnabled,
+  onOpen,
   onReveal,
   revealTarget,
   onDelete,
@@ -589,9 +617,21 @@ function SkillRow({
       data-disabled={skill.enabled ? undefined : "true"}
     >
       <Puzzle className="text-muted-foreground size-4 shrink-0" aria-hidden />
-      {/* Plain text: with the edit drawer retired there is no open-edit
-          affordance -- the row's actions all live in the action cluster. */}
-      <div className="min-w-0 flex-1">
+      {/* The detail target is the text block alone (the retired edit
+          drawer's old posture, now opening a read-only face): the row's
+          clickable area stops before the action cluster. */}
+      <div
+        role="button"
+        tabIndex={0}
+        onClick={onOpen}
+        onKeyDown={(e) => {
+          if (e.key === "Enter" || e.key === " ") {
+            e.preventDefault();
+            onOpen();
+          }
+        }}
+        className="min-w-0 flex-1 cursor-pointer outline-none focus-visible:outline-ring focus-visible:outline-2 focus-visible:outline-offset-2"
+      >
         <div className="flex items-center gap-2">
           <span className="truncate text-sm font-medium">{skill.name}</span>
           <NameBadge>
@@ -691,6 +731,62 @@ function SkillRow({
         />
       </div>
     </div>
+  );
+}
+
+/** The row's read-only detail dialog (issue #1033's row-click face): the
+ *  name + description + the path bar. There is no form here -- creation
+ *  rides the conversation channel and edits happen in the external editor
+ *  the Open folder button reveals, so this dialog only SHOWS the skill and
+ *  points at where it lives. */
+type SkillDetailDialogProps = {
+  skill: SkillEntry;
+  /** The absolute directory the Open folder button reveals; null only
+   *  before a local row's registry root resolved (the button then stays
+   *  disabled). */
+  target: string | null;
+  onClose: () => void;
+  onReveal: () => void;
+};
+
+function SkillDetailDialog({ skill, target, onClose, onReveal }: SkillDetailDialogProps) {
+  const intl = useIntl();
+  return (
+    <Dialog open onOpenChange={(open) => { if (!open) onClose(); }}>
+      {/* No built-in X: the explicit Close button is the sole visual
+          dismissal (the reference form) -- ESC still closes via Radix. */}
+      <DialogContent className="sm:max-w-md" showCloseButton={false}>
+        <DialogHeader>
+          <DialogTitle>{skill.name}</DialogTitle>
+          <DialogDescription>{skill.description}</DialogDescription>
+        </DialogHeader>
+        <DialogFooter className="sm:justify-between gap-2">
+          {/* The path bar: where the skill lives, and the reveal beside it
+              -- the external-edit channel's anchor. */}
+          <div className="flex min-w-0 items-center gap-2">
+            <span className="text-muted-foreground truncate font-mono text-xs">
+              {target}
+            </span>
+            <Button
+              type="button"
+              variant="outline"
+              size="icon"
+              onClick={onReveal}
+              disabled={!target}
+              aria-label={intl.formatMessage({
+                id: "settings.skills.openFolder",
+                defaultMessage: "Open folder",
+              })}
+            >
+              <FolderOpen className="size-4" aria-hidden />
+            </Button>
+          </div>
+          <Button type="button" variant="ghost" onClick={onClose}>
+            <FormattedMessage id="common.close" defaultMessage="Close" />
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
   );
 }
 

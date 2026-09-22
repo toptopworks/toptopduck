@@ -378,6 +378,65 @@ describe("SkillsSection (issue #362)", () => {
     expect(revealItemInDir).not.toHaveBeenCalled();
   });
 
+  it("opens the detail dialog from the row's text block", async () => {
+    vi.mocked(listSkills).mockResolvedValue({ skills: [localSkill], ignored: [], root_error: null });
+    renderPane();
+    await screen.findByText("pdf-tools");
+
+    // The row's text block is the detail affordance (issue #1033 follow-up
+    // direction): click opens a READ-ONLY dialog -- name + description +
+    // the path bar, no form fields, no Save.
+    fireEvent.click(screen.getByText("pdf-tools"));
+    expect(
+      await screen.findByRole("heading", { name: "pdf-tools" }),
+    ).toBeInTheDocument();
+    // The description rides twice -- the row's line and the dialog's.
+    expect(screen.getAllByText("Work with PDF files.")).toHaveLength(2);
+    expect(screen.queryByLabelText("Name")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Save" })).not.toBeInTheDocument();
+  });
+
+  it("opens the detail dialog from the keyboard on the text block", async () => {
+    vi.mocked(listSkills).mockResolvedValue({ skills: [localSkill], ignored: [], root_error: null });
+    renderPane();
+    await screen.findByText("pdf-tools");
+
+    const text = screen.getByText("pdf-tools").closest("[role='button']");
+    expect(text).not.toBeNull();
+    fireEvent.keyDown(text as HTMLElement, { key: "Enter" });
+    expect(
+      await screen.findByRole("heading", { name: "pdf-tools" }),
+    ).toBeInTheDocument();
+  });
+
+  it("shows the path and reveals from the detail dialog's Open folder", async () => {
+    vi.mocked(listSkills).mockResolvedValue({ skills: [localSkill], ignored: [], root_error: null });
+    const { revealItemInDir } = await import("@tauri-apps/plugin-opener");
+    renderPane();
+    await screen.findByText("pdf-tools");
+
+    fireEvent.click(screen.getByText("pdf-tools"));
+    // The path bar carries the absolute directory (the displayed-path
+    // clause) and the icon button beside it is the reveal.
+    expect(await screen.findByText("/roots/skills/pdf-tools")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Open folder" }));
+    await waitFor(() => {
+      expect(revealItemInDir).toHaveBeenCalledWith("/roots/skills/pdf-tools");
+    });
+  });
+
+  it("closes the detail dialog", async () => {
+    vi.mocked(listSkills).mockResolvedValue({ skills: [localSkill], ignored: [], root_error: null });
+    renderPane();
+    await screen.findByText("pdf-tools");
+
+    fireEvent.click(screen.getByText("pdf-tools"));
+    fireEvent.click(await screen.findByRole("button", { name: "Close" }));
+    await waitFor(() => {
+      expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    });
+  });
+
   it("surfaces a reveal failure as a formatted error", async () => {
     vi.mocked(listSkills).mockResolvedValue({ skills: [localSkill], ignored: [], root_error: null });
     const { revealItemInDir } = await import("@tauri-apps/plugin-opener");
