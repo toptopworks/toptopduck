@@ -417,6 +417,136 @@ describe("SkillsSection (issue #362)", () => {
     });
   });
 
+  it("closes the detail dialog on Escape (issue #1039)", async () => {
+    vi.mocked(listSkills).mockResolvedValue({ skills: [localSkill], ignored: [], root_error: null });
+    renderPane();
+    await screen.findByText("pdf-tools");
+
+    fireEvent.click(screen.getByText("pdf-tools"));
+    expect(await screen.findByRole("dialog")).toBeInTheDocument();
+    // ESC is the dialog's dismissal chrome (Radix) routed through
+    // onOpenChange -> onClose, the same callback the header Close button
+    // rides; the keydown fires on the document so the portalized
+    // dismissable layer receives it (the SettingsView dialog precedent).
+    fireEvent.keyDown(document.body, { key: "Escape" });
+    await waitFor(() => {
+      expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    });
+  });
+
+  it("drops the open detail when the listing loses the row and never reopens it (issue #1039)", async () => {
+    // The drop arrives as a background refetch while the dialog is open (a
+    // late mount-rescan invalidate), staged via the deferred rescan because
+    // while the dialog is open the outside tree is aria-hidden to role
+    // queries -- a Refresh click cannot deliver the drop until the dialog
+    // unmounts (the Refresh click below runs after that).
+    let resolveRescan!: (result: BuiltinScanResult) => void;
+    vi.mocked(rescanBuiltinCliTools).mockImplementationOnce(
+      () =>
+        new Promise<BuiltinScanResult>((resolve) => {
+          resolveRescan = resolve;
+        }),
+    );
+    vi.mocked(listSkills)
+      .mockResolvedValueOnce({ skills: [localSkill], ignored: [], root_error: null })
+      .mockResolvedValue({ skills: [], ignored: [], root_error: null });
+    renderPane();
+    await screen.findByText("pdf-tools");
+    fireEvent.click(screen.getByText("pdf-tools"));
+    expect(await screen.findByRole("heading", { name: "pdf-tools" })).toBeInTheDocument();
+
+    // The late rescan invalidates the listing; the refetch drops the open
+    // row and the dialog unmounts (the derived detail is gone) ...
+    resolveRescan(scanResult());
+    await waitFor(() => {
+      expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    });
+
+    // ... and when a same-named skill re-enters the registry (an import of
+    // the same folder), the stale detail must NOT spontaneously reopen.
+    vi.mocked(listSkills).mockResolvedValue({ skills: [localSkill], ignored: [], root_error: null });
+    fireEvent.click(screen.getByRole("button", { name: "Refresh" }));
+    expect(await screen.findByText("pdf-tools")).toBeInTheDocument();
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+  });
+
+  it("surfaces a root-resolution failure on the local row's path bar (issue #1039)", async () => {
+    vi.mocked(listSkills).mockResolvedValue({ skills: [localSkill], ignored: [], root_error: null });
+    vi.mocked(getSkillsDir).mockRejectedValue(new Error("root unavailable"));
+    renderPane();
+    await screen.findByText("pdf-tools");
+
+    fireEvent.click(screen.getByText("pdf-tools"));
+    // The failed fetch lands on the dialog's path face (issue #1039): the
+    // local row's open link would otherwise stay permanently inert with no
+    // signal -- the dialog's own alert line reports the failure.
+    expect(await screen.findByRole("alert")).toHaveTextContent("root unavailable");
+    expect(screen.getByRole("dialog")).toBeInTheDocument();
+  });
+
+  it("re-fetches the registry root when a local row's detail opens after a failure (issue #1039)", async () => {
+    vi.mocked(listSkills).mockResolvedValue({ skills: [localSkill], ignored: [], root_error: null });
+    // Mount fetch fails, the first open's re-fetch fails too, and the second
+    // open's re-fetch resolves.
+    vi.mocked(getSkillsDir)
+      .mockRejectedValueOnce(new Error("root unavailable"))
+      .mockRejectedValueOnce(new Error("root unavailable"))
+      .mockResolvedValue("/roots/skills");
+    renderPane();
+    await screen.findByText("pdf-tools");
+
+    // The first open re-fetches and still fails: the dialog reports the
+    // failure on its path face.
+    fireEvent.click(screen.getByText("pdf-tools"));
+    expect(await screen.findByRole("alert")).toHaveTextContent("root unavailable");
+    fireEvent.click(screen.getByRole("button", { name: "Close" }));
+    await waitFor(() => {
+      expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    });
+
+    // Re-opening the row is the retry entry: the root fetch fires again and
+    // the path bar resolves to the SKILL.md anchor.
+    fireEvent.click(screen.getByText("pdf-tools"));
+    expect(
+      await screen.findByText("/roots/skills/pdf-tools/SKILL.md"),
+    ).toBeInTheDocument();
+  });
+
+  it("ignores a stale root rejection landing after a newer fetch resolved (issue #1039)", async () => {
+    vi.mocked(listSkills).mockResolvedValue({ skills: [localSkill], ignored: [], root_error: null });
+    // The mount fetch stays pending; the open click's re-fetch resolves
+    // first, and the stale mount rejection lands last (the PR #1041
+    // review's ordering): the resolved path must survive it.
+    let rejectMount!: (e: Error) => void;
+    vi.mocked(getSkillsDir)
+      .mockImplementationOnce(
+        () =>
+          new Promise<string>((_, reject) => {
+            rejectMount = reject;
+          }),
+      )
+      .mockResolvedValue("/roots/skills");
+    renderPane();
+    await screen.findByText("pdf-tools");
+
+    // Opening while the mount fetch is pending fires the re-fetch (the
+    // loading-phase arm), which resolves the path bar.
+    fireEvent.click(screen.getByText("pdf-tools"));
+    expect(
+      await screen.findByText("/roots/skills/pdf-tools/SKILL.md"),
+    ).toBeInTheDocument();
+
+    // The stale rejection landing afterwards must not flip the resolved
+    // root back to failed -- the path stays and no error line appears.
+    rejectMount(new Error("stale transport failure"));
+    await waitFor(() => {
+      expect(
+        screen.getByText("/roots/skills/pdf-tools/SKILL.md"),
+      ).toBeInTheDocument();
+    });
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  });
+
   it("surfaces an open failure as a formatted error", async () => {
     vi.mocked(listSkills).mockResolvedValue({ skills: [localSkill], ignored: [], root_error: null });
     const { openPath } = await import("@tauri-apps/plugin-opener");

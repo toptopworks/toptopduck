@@ -316,4 +316,16 @@ describe("ImportSkillsDialog (issue #367)", () => {
       ),
     ).toBeInTheDocument();
   });
+
+  it("closes on Escape (issue #1039)", async () => {
+    const onClose = vi.fn();
+    renderWithProviders(<ImportSkillsDialog onClose={onClose} />);
+    expect(await screen.findByText("Import skills")).toBeInTheDocument();
+    // The ESC dismissal arm rides Radix's dismissable layer into
+    // onOpenChange -> onClose -- the same callback the header Close button
+    // carries; the keydown fires on the document so the portalized layer
+    // receives it (the sibling detail dialog's precedent).
+    fireEvent.keyDown(document.body, { key: "Escape" });
+    await waitFor(() => expect(onClose).toHaveBeenCalledTimes(1));
+  });
 });
