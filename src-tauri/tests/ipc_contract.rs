@@ -412,7 +412,7 @@ fn store_command_error_serializes_adjacently_tagged() {
 #[test]
 fn skill_error_serializes_adjacently_tagged() {
     // SkillError (skills registry commands, issue #362) crosses IPC as the
-    // reject of create_skill / update_skill / delete_skill. Every variant
+    // reject of the delete / enablement / import commands. Every variant
     // carries the English detail under data; the kind set is disjoint from
     // every other typed error enum so the frontend dispatch stays unambiguous.
     use toptopduck_lib::SkillError;

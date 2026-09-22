@@ -517,11 +517,14 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path().join("skills");
         // Pre-populate the registry with a skill named "taken".
-        super::super::registry::create_skill(
+        super::super::registry::create_skill_from_markdown(
             &root,
-            "taken",
-            "Already here.",
-            "Pre-existing body.\n",
+            "---
+name: taken
+description: Already here.
+---
+Pre-existing body.
+",
         )
         .unwrap();
         // An external source that collides.

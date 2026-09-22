@@ -2,22 +2,19 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { FormattedMessage, useIntl } from "react-intl";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
-import { Download, Plus, Puzzle, RefreshCw, Trash2 } from "lucide-react";
+import { Download, FolderOpen, Plus, Puzzle, RefreshCw, Trash2 } from "lucide-react";
 
 import type {
   SkillAcquired,
-  SkillCreate,
   SkillEntry,
-  SkillUpdate,
   SkippedSkill,
 } from "../../types/skills";
 import type { AppConfig } from "../../types/app-config";
 import {
-  createSkill,
   deleteSkill,
+  getSkillsDir,
   listSkills,
   rescanBuiltinCliTools,
-  updateSkill,
   setSkillEnabled,
 } from "../../api";
 import { ImportSkillsDialog } from "./ImportSkillsDialog";
@@ -53,7 +50,6 @@ import {
   SelectTrigger,
   SelectValue,
 } from "../ui/select";
-import { Textarea } from "../ui/textarea";
 import {
   HeaderActionButton,
   NameBadge,
@@ -63,46 +59,19 @@ import {
 } from "./settings-chrome";
 import { matchesSearch, searchableText } from "./settings-filters";
 
-// Skills settings pane (issue #362, ADR-0086). The registry is a directory
-// scan (no app-config entry), so this pane reads list_skills + drives
-// create / update / delete through TanStack mutations that invalidate the one
-// skills query. `local` skills open a full-edit drawer; `linked` skills open a
-// read-only drawer with an "open source location" reveal. The Import header
-// button opens the two-stage drill-down import dialog (issue #367), which
-// links / copies skills from external agent libraries and invalidates the same
-// skills query on success.
+// Skills settings pane (issue #362, ADR-0086; issue #1033, ADR-0122). The
+// registry is a directory scan (no app-config entry), so this pane reads
+// list_skills + drives enablement / delete through TanStack mutations that
+// invalidate the one skills query. There is NO create / edit form: creation
+// rides the model-face create_skill meta-tool (the New button's guide dialog
+// points there) and edits happen in the external editor each row's reveal
+// opens -- `local` reveals its own directory, `linked` its link target,
+// `builtin` the reserved-subtree copy. The Import header button opens the
+// two-stage drill-down import dialog (issue #367), which links / copies
+// skills from external agent libraries and invalidates the same skills query
+// on success.
 
 type AcquiredFilter = "all" | SkillAcquired;
-
-type DrawerState =
-  | { mode: "closed" }
-  | { mode: "create" }
-  | { mode: "edit"; name: string };
-
-/** The editable draft carried by the drawer. `currentName` is the CURRENT
- *  directory name when editing (the addressing key for update_skill); it is
- *  empty in create mode. */
-type DrawerDraft = {
-  currentName: string;
-  name: string;
-  description: string;
-  // No edit surface in the drawer: carried as-is and passed back on save so
-  // an existing frontmatter key survives an unrelated edit (null = absent).
-  license: string | null;
-  compatibility: string | null;
-  body: string;
-  acquired: SkillAcquired;
-  linkTarget: string | null;
-};
-
-// The Agent Skills spec ceilings + name rule, mirrored client-side from the
-// backend's validate_skill_name / validate_description (skills/model.rs) so
-// the drawer can gate Save BEFORE an IPC round-trip instead of surfacing the
-// typed reject after one. The backend remains the authority; these only move
-// the feedback earlier.
-const SKILL_NAME_MAX = 64;
-const SKILL_DESCRIPTION_MAX = 1024;
-const SKILL_NAME_PATTERN = /^[a-z0-9]+(-[a-z0-9]+)*$/;
 
 const FILTER_OPTIONS: ReadonlyArray<AcquiredFilter> = [
   "all",
@@ -111,8 +80,8 @@ const FILTER_OPTIONS: ReadonlyArray<AcquiredFilter> = [
   "builtin",
 ];
 
-// The row is list chrome (hover highlight + layout); the open-edit
-// affordance is scoped to the row's text block -- never the action cluster.
+// The row is list chrome (hover highlight + layout); every action lives in
+// the row-end cluster (reveal / delete), never on the text block.
 const ROW_CLASS = "hover:bg-accent flex items-center gap-3 px-4 py-3";
 
 /** One filter-axis half shared by the rows and the failure lane: "all"
@@ -130,11 +99,17 @@ function matchesFilter(skill: SkillEntry, filter: AcquiredFilter): boolean {
 
 export function SkillsSection({
   onAppConfigSync,
+  onExitToWorkspace,
 }: {
   /** Sync the shell's app-config wholesale after a write command (the
    *  command already persisted and returned the updated full config -- the
    *  same state-only-sync contract the CLI pane's writes use). */
   onAppConfigSync: (cfg: AppConfig) => void;
+  /** Close the settings overlay back to the workspace (the create-guide
+   *  dialog's action, issue #1033): the SettingsView's single close path
+   *  (busy-gated), so the guide's exit honors the same contract as the
+   *  rail's "Back to workspace". */
+  onExitToWorkspace: () => void;
 }) {
   const intl = useIntl();
   const queryClient = useQueryClient();
@@ -212,40 +187,32 @@ export function SkillsSection({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // The registry root for the local rows' reveal targets (issue #1033): the
+  // backend is the path authority (the get_agents_dir posture), fetched once
+  // per mount. A fetch failure leaves the local reveals inert (log-only) --
+  // the pane stays usable.
+  const [skillsRoot, setSkillsRoot] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    getSkillsDir()
+      .then((dir) => {
+        if (!cancelled) setSkillsRoot(dir);
+      })
+      .catch((e) => {
+        log.warn("SkillsSection", "get_skills_dir failed", e);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
   const [search, setSearch] = useState("");
   const [filter, setFilter] = useState<AcquiredFilter>("all");
-  const [drawer, setDrawer] = useState<DrawerState>({ mode: "closed" });
+  const [createGuideOpen, setCreateGuideOpen] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState<string | null>(null);
   const [importOpen, setImportOpen] = useState(false);
   const [error, setError] = useState<string | null>(null);
-
-  const createMutation = useMutation({
-    mutationFn: (draft: SkillCreate) =>
-      createSkill(draft.name, draft.description, draft.body),
-    onSuccess: () => {
-      invalidate();
-      // Drop a stale reject so a reopened drawer never seeds off an
-      // outdated error.
-      setError(null);
-      // One-form create: the body was authored in the drawer itself, so a
-      // successful mint closes it -- there is no follow-up edit step.
-      setDrawer({ mode: "closed" });
-    },
-    onError: (e) => setError(fmtError(e, intl)),
-  });
-
-  const updateMutation = useMutation({
-    mutationFn: ({ name, update }: { name: string; update: SkillUpdate }) =>
-      updateSkill(name, update),
-    onSuccess: () => {
-      invalidate();
-      // Drop a stale reject so a reopened drawer never seeds off an
-      // outdated error.
-      setError(null);
-      setDrawer({ mode: "closed" });
-    },
-    onError: (e) => setError(fmtError(e, intl)),
-  });
 
   const deleteMutation = useMutation({
     mutationFn: (name: string) => deleteSkill(name),
@@ -267,8 +234,7 @@ export function SkillsSection({
   // The enablement-axis row Switch (issue #961): the command returns the
   // updated FULL config (synced wholesale, the set-contract) and the
   // listing refetches so each row's `enabled` follows. A success also drops
-  // a stale reject (the create/update precedent) -- the banner must not
-  // outlive the failure it reported.
+  // a stale reject -- the banner must not outlive the failure it reported.
   const toggleEnabledMutation = useMutation({
     mutationFn: ({ name, enabled }: { name: string; enabled: boolean }) =>
       setSkillEnabled(name, enabled),
@@ -335,15 +301,21 @@ export function SkillsSection({
     [materializeFailures, filter, search],
   );
 
-  function openEdit(skill: SkillEntry) {
-    // The drawer owns the error face while open: a leftover pane error
-    // (e.g. an earlier failed save) would otherwise replay inside an
-    // unrelated edit drawer.
-    setError(null);
-    setDrawer({ mode: "edit", name: skill.name });
+  /** The row's reveal target (issue #1033): a `local` row's own
+   *  `<root>/<name>` directory; a `linked` row's link target and a `builtin`
+   *  row's reserved-subtree copy (`link_target` carries both). Null when a
+   *  local row is asked before the registry root has resolved -- the reveal
+   *  stays inert rather than synthesizing a garbage path. */
+  function revealTarget(skill: SkillEntry): string | null {
+    if (skill.acquired !== "local") return skill.link_target;
+    return skillsRoot === null ? null : `${skillsRoot}/${skill.name}`;
   }
 
-  async function openSource(target: string | null) {
+  /** Reveal one skill's directory in the OS file manager (issue #1033): the
+   *  external-edit channel. A failure lands on the section-level error line
+   *  -- with the drawer gone there is no modal to own it. */
+  async function revealSkill(skill: SkillEntry) {
+    const target = revealTarget(skill);
     if (!target) return;
     try {
       await revealItemInDir(target);
@@ -351,38 +323,6 @@ export function SkillsSection({
       setError(fmtError(e, intl));
     }
   }
-
-  const drawerDraft = useMemo<DrawerDraft | null>(() => {
-    if (drawer.mode === "create") {
-      return {
-        currentName: "",
-        name: "",
-        description: "",
-        license: null,
-        compatibility: null,
-        body: "",
-        acquired: "local",
-        linkTarget: null,
-      };
-    }
-    if (drawer.mode === "edit") {
-      const skill = allSkills.find((s) => s.name === drawer.name);
-      if (!skill) return null;
-      return {
-        currentName: skill.name,
-        name: skill.name,
-        description: skill.description,
-        license: skill.license,
-        compatibility: skill.compatibility,
-        body: skill.body,
-        acquired: skill.acquired,
-        linkTarget: skill.link_target,
-      };
-    }
-    return null;
-  }, [drawer, allSkills]);
-
-  const saving = createMutation.isPending || updateMutation.isPending;
 
   return (
     <div>
@@ -404,7 +344,7 @@ export function SkillsSection({
               icon={Plus}
               onClick={() => {
                 setError(null);
-                setDrawer({ mode: "create" });
+                setCreateGuideOpen(true);
               }}
             />
             <HeaderActionButton
@@ -501,7 +441,7 @@ export function SkillsSection({
             {allSkills.length === 0 ? (
               <FormattedMessage
                 id="settings.skills.empty"
-                defaultMessage="No skills yet. Click New to create one."
+                defaultMessage="No skills yet. Create one in a chat, or import it."
               />
             ) : (
               <FormattedMessage
@@ -523,7 +463,8 @@ export function SkillsSection({
               }
               onToggleEnabled={(enabled) =>
                 toggleEnabledMutation.mutate({ name: skill.name, enabled })}
-              onOpen={() => openEdit(skill)}
+              onReveal={() => void revealSkill(skill)}
+              revealTarget={revealTarget(skill)}
               // A builtin skill is undeletable (issue #677): its delete
               // button renders disabled -- the shutdown axis is the
               // enablement axis: disable the skill, or for a CLI companion
@@ -538,25 +479,21 @@ export function SkillsSection({
         )}
       </SettingsCard>
 
-      {/* While the drawer is open it OWNS the error face: the modal covers
-          this line, and rendering the same text twice would read as a
-          duplicated alert. The drawer renders `error` itself. */}
-      {displayError && !drawerDraft && (
-        <p className="settings-error mt-3 text-destructive text-sm">{displayError}</p>
+      {displayError && (
+        <p className="settings-error mt-3 text-destructive text-sm" role="alert">
+          {displayError}
+        </p>
       )}
 
       {ignoredDirs.length > 0 && <IgnoredDirectoriesSection skipped={ignoredDirs} />}
 
-      {drawerDraft && (
-        <SkillDrawer
-          key={drawerDraft.currentName}
-          draft={drawerDraft}
-          saving={saving}
-          error={error}
-          onCancel={() => setDrawer({ mode: "closed" })}
-          onCreate={(draft) => createMutation.mutate(draft)}
-          onSave={(update) => updateMutation.mutate({ name: drawerDraft.currentName, update })}
-          onOpenSource={(target) => void openSource(target)}
+      {createGuideOpen && (
+        <CreateGuideDialog
+          onCancel={() => setCreateGuideOpen(false)}
+          onExit={() => {
+            setCreateGuideOpen(false);
+            onExitToWorkspace();
+          }}
         />
       )}
 
@@ -621,7 +558,12 @@ type SkillRowProps = {
   busy?: boolean;
   /** Flip the row's enablement axis (issue #961). */
   onToggleEnabled: (enabled: boolean) => void;
-  onOpen: () => void;
+  /** Reveal the skill's directory in the OS file manager (issue #1033):
+   *  the external-edit channel. */
+  onReveal: () => void;
+  /** The absolute path the reveal opens, shown as the button's hover
+   *  tooltip (null only before a local row's registry root resolved). */
+  revealTarget: string | null;
   /** Undefined on builtin rows (issue #677): the delete button then renders
    *  disabled, keeping every row's action column aligned. */
   onDelete?: () => void;
@@ -631,7 +573,8 @@ function SkillRow({
   skill,
   busy = false,
   onToggleEnabled,
-  onOpen,
+  onReveal,
+  revealTarget,
   onDelete,
 }: SkillRowProps) {
   const intl = useIntl();
@@ -646,21 +589,9 @@ function SkillRow({
       data-disabled={skill.enabled ? undefined : "true"}
     >
       <Puzzle className="text-muted-foreground size-4 shrink-0" aria-hidden />
-      {/* The open-edit target is the text block alone: the row's clickable
-          area stops before the action cluster instead of spanning the whole
-          row. */}
-      <div
-        role="button"
-        tabIndex={0}
-        onClick={onOpen}
-        onKeyDown={(e) => {
-          if (e.key === "Enter" || e.key === " ") {
-            e.preventDefault();
-            onOpen();
-          }
-        }}
-        className="min-w-0 flex-1 cursor-pointer outline-none focus-visible:outline-ring focus-visible:outline-2 focus-visible:outline-offset-2"
-      >
+      {/* Plain text: with the edit drawer retired there is no open-edit
+          affordance -- the row's actions all live in the action cluster. */}
+      <div className="min-w-0 flex-1">
         <div className="flex items-center gap-2">
           <span className="truncate text-sm font-medium">{skill.name}</span>
           <NameBadge>
@@ -708,10 +639,29 @@ function SkillRow({
             { name: skill.name },
           )}
         />
-        {/* The row-end slot is exactly ONE button wide in every state (the
-            delete -- disabled on builtin, issue #677) -- so the switch
-            column never shifts across rows. Clicks are the action cluster's
-            business (see the container above), never the row's. */}
+        {/* The reveal (issue #1033): the external-edit channel -- open the
+            skill's directory in the OS file manager and edit SKILL.md (or
+            the bundled assets) there; the next scan / new-session seed
+            re-discovers the change. */}
+        <RowActionButton
+          label={intl.formatMessage(
+            {
+              id: "settings.skills.openFolderLabel",
+              defaultMessage: "Open skill folder {name}",
+            },
+            { name: skill.name },
+          )}
+          icon={FolderOpen}
+          onClick={onReveal}
+          // The build item's "shows the skill directory path" clause: the
+          // hover carries the absolute path the click reveals (the #1015
+          // real-touchpoint posture), absent only on a local row asked
+          // before the registry root resolved.
+          tooltip={revealTarget ?? undefined}
+        />
+        {/* The row-end cluster renders the same two buttons in every state
+            (the reveal + the delete -- disabled on builtin, issue #677), so
+            the switch column never shifts across rows. */}
         <RowActionButton
           destructive
           disabled={!onDelete}
@@ -744,283 +694,49 @@ function SkillRow({
   );
 }
 
-type SkillDrawerProps = {
-  draft: DrawerDraft;
-  saving: boolean;
-  /** The pane's live error (the create / update reject, or a failed source
-   *  reveal). Rendered INSIDE the dialog: the modal covers the section-level
-   *  error line, so this is the only visible error face while the drawer is
-   *  open. */
-  error: string | null;
+/** The create-guide dialog (issue #1033): the New button's landing. With the
+ *  create drawer retired there is no in-app authoring form -- creation rides
+ *  the model-face create_skill meta-tool, so the guide explains the
+ *  conversation channel and offers the exit to the workspace where it lives.
+ *  Pre-filling a teaching-skill mention in the composer is left to a later
+ *  pass (the issue's implementation-period note). */
+type CreateGuideDialogProps = {
   onCancel: () => void;
-  onCreate: (draft: SkillCreate) => void;
-  onSave: (update: SkillUpdate) => void;
-  onOpenSource: (target: string | null) => void;
+  onExit: () => void;
 };
 
-function SkillDrawer({
-  draft,
-  saving,
-  error,
-  onCancel,
-  onCreate,
-  onSave,
-  onOpenSource,
-}: SkillDrawerProps) {
-  const isCreate = draft.currentName === "";
-  const isLinked = draft.acquired === "linked";
-  const isBuiltin = draft.acquired === "builtin";
-  // Read-only postures: a linked skill (the app never writes through an
-  // external link) and a builtin skill (ADR-0121: the reserved-subtree
-  // files are an app cache that re-aligns on the next scan -- the editable
-  // variant is a filesystem copy of the folder, never an in-app edit).
-  const readOnly = isLinked || isBuiltin;
-  // The read-only hint sentence, shared by the sr-only dialog description
-  // and the visible paragraph under the form -- rendered twice by design so
-  // the a11y description and the visual hint agree.
-  const readOnlyHint = isLinked ? (
-    <FormattedMessage
-      id="settings.skills.readOnlyHint"
-      defaultMessage="This skill is linked to another folder and can't be edited here."
-    />
-  ) : (
-    <FormattedMessage
-      id="settings.skills.builtinReadOnlyHint"
-      defaultMessage="This skill ships with the app and is read-only; copy its folder to the skills root to keep your own version."
-    />
-  );
-  // Local draft state so the user can type before committing. Reset when the
-  // draft identity changes (switching skills / opening create).
-  const [name, setName] = useState(draft.name);
-  const [description, setDescription] = useState(draft.description);
-  const [body, setBody] = useState(draft.body);
-  // Touched flags gate the invalid hints: a freshly opened drawer stays
-  // quiet (every field starts "invalid-able"), and blur flags a field only
-  // when its value drifted from the draft seed -- the dialog auto-focuses
-  // the name input, so pristine click-away blurs are routine and must not
-  // yell.
-  const [nameTouched, setNameTouched] = useState(false);
-  const [descriptionTouched, setDescriptionTouched] = useState(false);
-  const [bodyTouched, setBodyTouched] = useState(false);
-  // No effect syncs draft -> local state: the parent keys this drawer by the
-  // skill name, so switching skills (or opening create) REMOUNTS it and the
-  // useState initializers above re-seed from the new draft. Typing edits only
-  // local state -- the key stays stable, no remount, no clobber (React 19
-  // "reset state with a key" pattern, cf. react-hooks/set-state-in-effect).
-
-  // Client-side mirror of the backend's spec validation (skills/model.rs):
-  // gate Save here so the user gets immediate feedback instead of an IPC
-  // round-trip reject. The backend stays the authority -- this only moves
-  // the feedback earlier.
-  const trimmedName = name.trim();
-  const nameInvalid =
-    trimmedName === "" ||
-    trimmedName.length > SKILL_NAME_MAX ||
-    !SKILL_NAME_PATTERN.test(trimmedName);
-  const descriptionInvalid = description.trim() === "";
-  const bodyInvalid = body.trim() === "";
-  const formInvalid = nameInvalid || descriptionInvalid || bodyInvalid;
-
-  function handleSave() {
-    if (isCreate) {
-      onCreate({ name: name.trim(), description: description.trim(), body });
-      return;
-    }
-    onSave({
-      name: name.trim(),
-      description: description.trim(),
-      // The passthrough pair: no edit surface, so the draft's original values
-      // ride back untouched (an unrelated edit must not drop a frontmatter
-      // license/compatibility key -- null is the wire's "remove" signal).
-      license: draft.license,
-      compatibility: draft.compatibility,
-      body,
-    });
-  }
-
+function CreateGuideDialog({ onCancel, onExit }: CreateGuideDialogProps) {
   return (
-    <Dialog
-      open
-      onOpenChange={(open) => {
-        // Gate dismissal while saving (the ImportSkillsDialog pattern): a
-        // mid-flight IPC keeps the drawer up so the busy state stays visible
-        // and the draft cannot be abandoned halfway through a write.
-        if (!open && !saving) onCancel();
-      }}
-    >
-      <DialogContent
-        className="sm:max-w-lg"
-        showCloseButton
-        onEscapeKeyDown={(e) => {
-          if (saving) e.preventDefault();
-        }}
-        onPointerDownOutside={(e) => {
-          if (saving) e.preventDefault();
-        }}
-      >
+    <Dialog open onOpenChange={(open) => { if (!open) onCancel(); }}>
+      <DialogContent className="sm:max-w-md" showCloseButton>
         <DialogHeader>
           <DialogTitle>
-            {isCreate ? (
-              <FormattedMessage
-                id="settings.skills.drawerCreateTitle"
-                defaultMessage="New skill"
-              />
-            ) : (
-              <FormattedMessage
-                id="settings.skills.drawerEditTitle"
-                defaultMessage="Edit skill {name}"
-                values={{ name: draft.currentName }}
-              />
-            )}
-          </DialogTitle>
-        </DialogHeader>
-        <DialogDescription className="sr-only">
-          {readOnly ? (
-            readOnlyHint
-          ) : (
             <FormattedMessage
-              id="settings.skills.drawerDescription"
-              defaultMessage="Change the skill's details."
+              id="settings.skills.createGuideTitle"
+              defaultMessage="Create skills in chat"
             />
-          )}
-        </DialogDescription>
-
-        <div className="grid max-h-[70vh] gap-4 overflow-y-auto">
-          <div className="grid gap-1.5">
-            <Label htmlFor="skill-name">
-              <FormattedMessage
-                id="settings.skills.fieldName"
-                defaultMessage="Name"
-              />
-            </Label>
-            <Input
-              id="skill-name"
-              value={name}
-              onChange={(e) => setName(e.target.value)}
-              onBlur={() => {
-                if (name !== draft.name) setNameTouched(true);
-              }}
-              disabled={readOnly}
-              placeholder="pdf-tools"
-              maxLength={SKILL_NAME_MAX}
+          </DialogTitle>
+          <DialogDescription>
+            <FormattedMessage
+              id="settings.skills.createGuideBody"
+              defaultMessage={
+                "Skills are created through a conversation with your agent. Go back to the " +
+                "workspace and ask it to create a skill for you -- the built-in skill-creator " +
+                "skill knows the format."
+              }
             />
-            {nameTouched && nameInvalid ? (
-              <p className="text-destructive text-xs">
-                <FormattedMessage
-                  id="settings.skills.fieldNameInvalid"
-                  defaultMessage="Use only lowercase letters, numbers, and hyphens (example: pdf-tools), up to 64 characters."
-                />
-              </p>
-            ) : null}
-          </div>
-
-          <div className="grid gap-1.5">
-            <Label htmlFor="skill-description">
-              <FormattedMessage
-                id="common.description"
-                defaultMessage="Description"
-              />
-            </Label>
-            <Textarea
-              id="skill-description"
-              value={description}
-              onChange={(e) => setDescription(e.target.value)}
-              onBlur={() => {
-                if (description !== draft.description) setDescriptionTouched(true);
-              }}
-              disabled={readOnly}
-              maxLength={SKILL_DESCRIPTION_MAX}
-              rows={3}
-            />
-            {descriptionTouched && descriptionInvalid && (
-              <p className="text-destructive text-xs">
-                <FormattedMessage
-                  id="settings.skills.fieldDescriptionRequired"
-                  defaultMessage="Description is required."
-                />
-              </p>
-            )}
-          </div>
-
-          <div className="grid gap-1.5">
-            <Label htmlFor="skill-body">
-              <FormattedMessage
-                id="settings.skills.fieldBody"
-                defaultMessage="Instructions"
-              />
-            </Label>
-            <Textarea
-              id="skill-body"
-              value={body}
-              onChange={(e) => setBody(e.target.value)}
-              onBlur={() => {
-                if (body !== draft.body) setBodyTouched(true);
-              }}
-              disabled={readOnly}
-              rows={10}
-              className="font-mono text-sm"
-            />
-            {bodyTouched && bodyInvalid && (
-              <p className="text-destructive text-xs">
-                <FormattedMessage
-                  id="settings.skills.fieldBodyRequired"
-                  defaultMessage="Instructions can't be empty."
-                />
-              </p>
-            )}
-          </div>
-        </div>
-
-        {readOnly && (
-          <p className="text-muted-foreground text-xs">{readOnlyHint}</p>
-        )}
-
-        {/* The in-drawer error face: while the modal is open it covers the
-            section-level error line, so a create / update reject (or a
-            failed source reveal) surfaces HERE -- right under the form the
-            user just submitted, not behind the overlay. */}
-        {error && (
-          <p className="text-destructive text-sm" role="alert">
-            {error}
-          </p>
-        )}
-
+          </DialogDescription>
+        </DialogHeader>
         <DialogFooter>
-          {readOnly && (
-            <Button
-              type="button"
-              variant="outline"
-              onClick={() => onOpenSource(draft.linkTarget)}
-              disabled={!draft.linkTarget}
-            >
-              {isLinked ? (
-                <FormattedMessage
-                  id="settings.skills.openSource"
-                  defaultMessage="Open original folder"
-                />
-              ) : (
-                <FormattedMessage
-                  id="settings.skills.openBuiltinFolder"
-                  defaultMessage="Open folder"
-                />
-              )}
-            </Button>
-          )}
-          <Button type="button" variant="ghost" onClick={onCancel} disabled={saving}>
+          <Button type="button" variant="ghost" onClick={onCancel}>
             <FormattedMessage id="common.cancel" defaultMessage="Cancel" />
           </Button>
-          {!readOnly && (
-            <Button type="button" onClick={handleSave} disabled={saving || formInvalid}>
-              {saving ? (
-                <FormattedMessage
-                  id="common.saving"
-                  defaultMessage="Saving…"
-                />
-              ) : (
-                <FormattedMessage id="common.save" defaultMessage="Save" />
-              )}
-            </Button>
-          )}
+          <Button type="button" onClick={onExit}>
+            <FormattedMessage
+              id="settings.skills.createGuideAction"
+              defaultMessage="Back to workspace"
+            />
+          </Button>
         </DialogFooter>
       </DialogContent>
     </Dialog>

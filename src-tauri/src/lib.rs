@@ -80,8 +80,8 @@ pub use session_store::{
 };
 pub use skills::{
     Acquired, DiscoveredSkill, DiscoveredSkillStatus, ImportItem, ImportMode, ImportOutcome,
-    SkillEntry, SkillError, SkillListing, SkillSource, SkillSourceCandidate, SkillUpdate,
-    SkillsRoot, SkippedSkill,
+    SkillEntry, SkillError, SkillListing, SkillSource, SkillSourceCandidate, SkillsRoot,
+    SkippedSkill,
 };
 
 use std::path::PathBuf;
@@ -511,10 +511,9 @@ pub fn run() {
             commands::get_last_model_posture,
             commands::clear_last_model_posture,
             commands::list_skills,
-            commands::create_skill,
-            commands::update_skill,
             commands::delete_skill,
             commands::set_skill_enabled,
+            commands::get_skills_dir,
             commands::list_agents,
             commands::get_agents_dir,
             commands::create_agent,

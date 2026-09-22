@@ -21,10 +21,8 @@ import type {
   ImportItem,
   ImportMode,
   ImportOutcome,
-  SkillEntry,
   SkillListing,
   SkillSource,
-  SkillUpdate,
 } from "./types/skills";
 import type {
   ResumeProgress,
@@ -672,24 +670,12 @@ export async function setSkillEnabled(
   return invoke<AppConfig>("set_skill_enabled", { name, enabled });
 }
 
-// Mint a new local skill: <root>/<name>/SKILL.md with the given description
-// and body. The name must be kebab-case (<= 64) and free, and the body
-// non-blank. Returns the entry for the written skill (read back, or derived
-// from the written payload on a transient read-back failure).
-export async function createSkill(
-  name: string,
-  description: string,
-  body: string,
-): Promise<SkillEntry> {
-  return invoke<SkillEntry>("create_skill", { name, description, body });
-}
-
-// Rewrite one local skill's SKILL.md (frontmatter + body) atomically. `name`
-// addresses the current directory; `update.name` is the identity to write -- a
-// different value renames the directory. Refuses a linked skill (read-only),
-// an unknown skill, and a taken rename target.
-export async function updateSkill(name: string, update: SkillUpdate): Promise<SkillEntry> {
-  return invoke<SkillEntry>("update_skill", { name, update });
+// The skills registry root as an absolute path (<app_data_dir>/skills), for
+// the settings pane's row-level reveal affordance (issue #1033): a `local`
+// row reveals `<root>/<name>`. Always non-null -- the root is resolved at
+// setup (the get_agents_dir posture).
+export async function getSkillsDir(): Promise<string> {
+  return invoke<string>("get_skills_dir");
 }
 
 // Delete a skill. A local skill's directory is removed with all its contents;

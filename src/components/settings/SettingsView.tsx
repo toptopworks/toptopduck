@@ -139,6 +139,7 @@ function SectionContent({
   onSessionsDirChanged,
   onDefaultRuntimeChanged,
   onCliToolsChanged,
+  onExitToWorkspace,
   onIpcBusy,
   initialEditProfileId,
   profilesControlsRef,
@@ -149,6 +150,9 @@ function SectionContent({
   onSessionsDirChanged: (cfg: AppConfig) => void;
   onDefaultRuntimeChanged: (cfg: AppConfig) => void;
   onCliToolsChanged: (cfg: AppConfig) => void;
+  /** The single close path (busy-gated), handed to the panes that can route
+   *  the user back to the workspace (the skills create guide, issue #1033). */
+  onExitToWorkspace: () => void;
   onIpcBusy: IpcBusyReporter;
   initialEditProfileId?: string;
   profilesControlsRef: React.MutableRefObject<ProfilesControls | null>;
@@ -164,7 +168,12 @@ function SectionContent({
         />
       );
     case "skills":
-      return <SkillsSection onAppConfigSync={onCliToolsChanged} />;
+      return (
+        <SkillsSection
+          onAppConfigSync={onCliToolsChanged}
+          onExitToWorkspace={onExitToWorkspace}
+        />
+      );
     case "agents":
       return <AgentsSection onAppConfigSync={onCliToolsChanged} />;
     case "runtime":
@@ -511,6 +520,7 @@ export function SettingsView({
             onSessionsDirChanged={handleSessionsDirChanged}
             onDefaultRuntimeChanged={handleDefaultRuntimeChanged}
             onCliToolsChanged={handleCliToolsChanged}
+            onExitToWorkspace={() => void requestClose()}
             onIpcBusy={handlePaneIpcBusy}
             initialEditProfileId={initialEditProfileId}
             profilesControlsRef={profilesControlsRef}

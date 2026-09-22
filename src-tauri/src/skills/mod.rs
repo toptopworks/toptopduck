@@ -56,8 +56,8 @@ pub mod registry;
 pub use import::{discover_skill_sources, import_skill, import_skills};
 pub use model::{
     Acquired, DiscoveredSkill, DiscoveredSkillStatus, ImportItem, ImportMode, ImportOutcome,
-    SkillEntry, SkillError, SkillListing, SkillSource, SkillSourceCandidate, SkillUpdate,
-    SkillsRoot, SkippedSkill,
+    SkillEntry, SkillError, SkillListing, SkillSource, SkillSourceCandidate, SkillsRoot,
+    SkippedSkill,
 };
 pub use prompt::{resolve_prompt_fragments, SkillPromptFragment};
 

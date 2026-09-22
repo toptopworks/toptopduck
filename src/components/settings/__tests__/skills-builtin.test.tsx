@@ -1,22 +1,21 @@
 import { describe, expect, it, vi, beforeEach } from "vitest";
-import { fireEvent, render, screen } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { IntlProvider } from "react-intl";
 
 import { SkillsSection } from "../SkillsSection";
 import { chooseOption, openSelect } from "./helpers";
 import { TooltipProvider } from "../../ui/tooltip";
-import { listSkills, rescanBuiltinCliTools } from "../../../api";
+import { getSkillsDir, listSkills, rescanBuiltinCliTools } from "../../../api";
 import { scanResult, skillEntry } from "../../../test-fixtures";
 
 // The builtin-skill surface of the settings pane (issue #677; readonly
 // posture since ADR-0121): the built-in badge + the inert delete entry, the
-// read-only drawer over a builtin row (with the open-location anchor), and
-// the covers-built-in badge on a shadowing local row.
+// builtin row's reveal anchor (the reserved-subtree directory, issue #1033),
+// and the covers-built-in badge on a shadowing local row.
 vi.mock("../../../api", () => ({
   listSkills: vi.fn(),
-  createSkill: vi.fn(),
-  updateSkill: vi.fn(),
+  getSkillsDir: vi.fn(),
   deleteSkill: vi.fn(),
   listSkillSources: vi.fn(),
   importSkills: vi.fn(),
@@ -53,7 +52,7 @@ function renderSection() {
     <QueryClientProvider client={queryClient}>
       <IntlProvider locale="en" messages={{}} onError={() => {}}>
         <TooltipProvider>
-          <SkillsSection onAppConfigSync={onSync} />
+          <SkillsSection onAppConfigSync={onSync} onExitToWorkspace={() => {}} />
         </TooltipProvider>
       </IntlProvider>
     </QueryClientProvider>,
@@ -69,6 +68,7 @@ describe("SkillsSection builtin rows (issue #677, ADR-0121)", () => {
       ignored: [],
       root_error: null,
     });
+    vi.mocked(getSkillsDir).mockResolvedValue("/roots/skills");
     // The pane's mount rescan (issue #1016) resolves quietly by default:
     // no failure lane, no config churn beyond the wholesale sync.
     vi.mocked(rescanBuiltinCliTools).mockResolvedValue(scanResult());
@@ -86,15 +86,15 @@ describe("SkillsSection builtin rows (issue #677, ADR-0121)", () => {
     ).toHaveAttribute("aria-disabled", "true");
   });
 
-  it("keeps a click on the builtin row's disabled delete from opening the edit drawer", async () => {
+  it("keeps the row plain text with no open-edit affordance", async () => {
     renderSection();
-    await screen.findByTestId("skill-row");
-    // The delete (disabled or not) sits outside the row's open-edit target
-    // -- clicking it must never open the drawer.
-    fireEvent.click(
-      screen.getByRole("button", { name: "Delete skill pandoc" }),
-    );
-    expect(screen.queryByLabelText("Name")).toBeNull();
+    const row = await screen.findByTestId("skill-row");
+    // The edit drawer is retired (issue #1033): the row's text block is not
+    // a button and no dialog exists to open.
+    const text = screen.getByText("pandoc");
+    expect(text.closest("[role='button']")).toBeNull();
+    expect(row.tagName).not.toBe("BUTTON");
+    expect(screen.queryByRole("dialog")).toBeNull();
   });
 
   it("explains the disabled delete through the shutdown tooltip (#1015)", async () => {
@@ -117,30 +117,19 @@ describe("SkillsSection builtin rows (issue #677, ADR-0121)", () => {
     ).toBeInTheDocument();
   });
 
-  it("opens a read-only drawer over a builtin row with the open-location anchor", async () => {
+  it("reveals a builtin row's reserved-subtree folder (the fork channel's anchor)", async () => {
+    const { revealItemInDir } = await import("@tauri-apps/plugin-opener");
     renderSection();
-    fireEvent.click(await screen.findByText("pandoc"));
-    const nameInput = await screen.findByLabelText("Name");
-    // The readonly posture (ADR-0121): every field is disabled and there is
-    // no Save -- the reserved-subtree files re-align on the next scan, so
-    // an in-app edit cannot stick.
-    expect(nameInput).toBeDisabled();
-    expect(screen.getByLabelText("Description")).toBeDisabled();
-    expect(screen.getByLabelText("Instructions")).toBeDisabled();
-    expect(screen.queryByRole("button", { name: "Save" })).toBeNull();
-    // The readonly hint rides twice by design: the sr-only dialog
-    // description (screen-reader parity) and the visible paragraph under
-    // the form.
-    expect(
-      screen.getAllByText(
-        "This skill ships with the app and is read-only; copy its folder to the skills root to keep your own version.",
-      ),
-    ).toHaveLength(2);
-    // The open-location anchor (ADR-0121 Decision 4): the reveal targets
-    // the reserved-subtree folder -- the fork channel's starting point.
-    expect(
-      screen.getByRole("button", { name: "Open folder" }),
-    ).toBeInTheDocument();
+    await screen.findByTestId("skill-row");
+    // The open-location anchor (ADR-0121 Decision 4), now a row action
+    // (issue #1033): the reveal targets the reserved-subtree folder -- the
+    // fork channel's starting point.
+    fireEvent.click(
+      screen.getByRole("button", { name: "Open skill folder pandoc" }),
+    );
+    await waitFor(() => {
+      expect(revealItemInDir).toHaveBeenCalledWith(builtinSkill.link_target);
+    });
   });
 
   it("shows the covers badge on a local row shadowing a builtin", async () => {
@@ -186,6 +175,7 @@ describe("SkillsSection materialization-failure lane (issue #1016)", () => {
       ignored: [],
       root_error: null,
     });
+    vi.mocked(getSkillsDir).mockResolvedValue("/roots/skills");
     vi.mocked(rescanBuiltinCliTools).mockResolvedValue(
       scanResult({ skill_materialize_failures: ["vega-chart"] }),
     );
@@ -249,6 +239,7 @@ describe("SkillsSection materialization-failure lane (issue #1016)", () => {
       ignored: [],
       root_error: null,
     });
+    vi.mocked(getSkillsDir).mockResolvedValue("/roots/skills");
     vi.mocked(rescanBuiltinCliTools).mockResolvedValue(
       scanResult({ skill_materialize_failures: ["pandoc", "vega-chart"] }),
     );
@@ -270,6 +261,7 @@ describe("SkillsSection materialization-failure lane (issue #1016)", () => {
       ignored: [],
       root_error: null,
     });
+    vi.mocked(getSkillsDir).mockResolvedValue("/roots/skills");
     renderSection();
     await screen.findByTestId("skill-materialize-failure-row-vega-chart");
     fireEvent.change(screen.getByPlaceholderText("Search skills…"), {
@@ -290,7 +282,7 @@ describe("SkillsSection materialization-failure lane (issue #1016)", () => {
     unmount();
     vi.mocked(rescanBuiltinCliTools).mockResolvedValue(scanResult());
     renderSection();
-    await screen.findByText("No skills yet. Click New to create one.");
+    await screen.findByText("No skills yet. Create one in a chat, or import it.");
     expect(screen.queryByTestId(/skill-materialize-failure-row/)).toBeNull();
     // The second window really ran (not just an unrendered lane): the
     // remount issued its own mount rescan.
@@ -325,7 +317,7 @@ describe("SkillsSection materialization-failure lane (issue #1016)", () => {
     );
     renderSection();
     // The first listing (pre-rescan) shows nothing.
-    await screen.findByText("No skills yet. Click New to create one.");
+    await screen.findByText("No skills yet. Create one in a chat, or import it.");
     // The lane is structurally absent before any scan answer lands (the
     // null snapshot holds until the rescan resolves).
     expect(screen.queryByTestId(/skill-materialize-failure-row/)).toBeNull();
@@ -343,7 +335,7 @@ describe("SkillsSection materialization-failure lane (issue #1016)", () => {
     renderSection();
     // The CLI pane's silent-mount contract: a failed mount rescan leaves
     // no visible UI state (one log.warn), and the empty listing renders.
-    await screen.findByText("No skills yet. Click New to create one.");
+    await screen.findByText("No skills yet. Create one in a chat, or import it.");
     expect(screen.queryByTestId(/skill-materialize-failure-row/)).toBeNull();
   });
 });

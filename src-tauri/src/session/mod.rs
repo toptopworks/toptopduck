@@ -1459,8 +1459,7 @@ impl Session {
                     // inputs (the mint needs the config write). Unconditional
                     // beyond that -- unlike the read-shaped pair above, a
                     // session pays the standing tool cost whatever its
-                    // snapshot holds: with the form channel on its
-                    // retirement path (#1033) this is the creation channel.
+                    // snapshot holds: this is the creation channel.
                     if inputs.live_config.is_some() {
                         request
                             .tools
