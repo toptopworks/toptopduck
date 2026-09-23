@@ -34,6 +34,7 @@ import { Suspense, lazy } from "react";
 import { FormattedMessage } from "react-intl";
 import { Alert, AlertDescription } from "../ui/alert";
 import { ErrorBoundary } from "../common/ErrorBoundary";
+import type { TopLevelSpec } from "vega-lite";
 import type { VizFailureReason } from "./viz";
 
 const LazyVegaChart = lazy(() =>
@@ -67,7 +68,9 @@ export function VizChartSlot({
       )}
     >
       <Suspense fallback={<div className="viz-chart" aria-hidden="true" />}>
-        <LazyVegaChart spec={spec} onError={onError} />
+        {/* The slot stays schema-light (object) to match the decode payload;
+         * the always-vega-lite fact is asserted here, at the single door. */}
+        <LazyVegaChart spec={spec as TopLevelSpec} onError={onError} />
       </Suspense>
     </ErrorBoundary>
   );

@@ -423,6 +423,7 @@ describe("RoundProse markdown rendering (issue #746)", () => {
       expect(vi.mocked(embed).mock.calls[0]?.[1]).toEqual({
         mark: "bar",
         data: { values: [{ a: 1 }] },
+        width: "container",
       });
       expect(container.querySelector(".viz-chart")).toBeInTheDocument();
       expect(screen.getByText("报告如下")).toBeInTheDocument();

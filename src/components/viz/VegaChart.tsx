@@ -1,7 +1,8 @@
 import { useEffect, useRef } from "react";
 import { useIntl } from "react-intl";
-import embed, { type VisualizationSpec } from "vega-embed";
+import embed from "vega-embed";
 import type { Result } from "vega-embed";
+import type { TopLevelSpec } from "vega-lite";
 
 import { log } from "../../lib/log";
 import {
@@ -16,11 +17,18 @@ import type { VizFailureReason } from "./viz";
 //  1. CSS-var theme bridge (ADR-0050 Q12): the Vega config is derived at runtime
 //     from the same shadcn tokens the shell uses, rebuilt on each theme-change
 //     event so the chart flips with the .dark class.
-//  2. resize-on-unhide (ADR-0051 hidden-pane): a ResizeObserver calls
-//     view.resize() when the container goes from 0 -> nonzero size (pane unhide)
-//     so a chart rendered while hidden measures correctly once shown.
+//  2. resize tracking (ADR-0051 hidden-pane + container-width): a
+//     ResizeObserver follows the host's size -- a container-width view gets
+//     its width signal re-fed (vega-lite re-evaluates it on window:resize
+//     only, which a flex fold/unfold never fires), while a fixed-width view
+//     takes the plain view.resize() reflow so a chart rendered while hidden
+//     measures correctly once shown.
 //  3. finalize-on-unmount: every embed result is finalized so no Vega view /
 //     canvas leaks across result or theme switches.
+//  4. interactive defaults (vega-lite 6): vega-lite 6 dropped v5's default
+//     auto-tooltip and default-size charts at a fixed ~20px ordinal step, so
+//     the embed config restores the tooltip and widthless specs stretch to
+//     the container.
 //
 // The decode + whitelist gate (viz.ts) and the degradation disclosure
 // (ADR-0033) live in the callers (the result card's ResultView and the prose
@@ -36,6 +44,11 @@ import type { VizFailureReason } from "./viz";
 function vegaConfig(theme: VegaThemeConfig): object {
   return {
     background: theme.background,
+    // vega-lite 6 no longer emits tooltip data for specs without an explicit
+    // tooltip channel (v5's auto-tooltip default), which leaves every engine-
+    // produced chart inert under hover. Restore it config-wide -- the embed's
+    // default tooltip handler is already attached and only lacked data.
+    mark: { tooltip: true },
     // Single-series default mark color = teal primary (ADR-0050).
     arc: { fill: theme.primary },
     area: { fill: theme.primary },
@@ -62,8 +75,54 @@ function vegaConfig(theme: VegaThemeConfig): object {
   };
 }
 
+/** Prepare one spec for embedding: the spec to pass (widthless plain specs
+ * stretch to the container instead of vega-lite's fixed per-band step) plus
+ * whether the embedded view is container-width, so the resize observer and
+ * the embed call read the same decision from one place. Everything that owns
+ * its width passes through untouched: an explicit width other than
+ * "container", facets (row/column channels or a top-level facet), and
+ * composite concat/repeat layouts -- vega-lite warns and DROPS the
+ * "container" keyword on everything but single and layered views, and the
+ * warning rides the logger, never embed's rejection, so a misapplied
+ * injection would degrade silently. */
+function prepareEmbed(spec: TopLevelSpec): {
+  spec: TopLevelSpec;
+  containerWidth: boolean;
+} {
+  if ("width" in spec) {
+    // An explicit "container" keyword still needs the observer's re-feed;
+    // any other explicit width is a fixed one.
+    return {
+      spec,
+      containerWidth: (spec as { width?: number | string }).width === "container",
+    };
+  }
+  const encoding = (spec as { encoding?: Record<string, unknown> }).encoding;
+  const keepsDefaultWidth =
+    Boolean(encoding && ("row" in encoding || "column" in encoding)) ||
+    "facet" in spec ||
+    "vconcat" in spec ||
+    "hconcat" in spec ||
+    "concat" in spec ||
+    "repeat" in spec;
+  if (keepsDefaultWidth) return { spec, containerWidth: false };
+  // The spread over the TopLevelSpec union needs one syntax-level assertion
+  // to keep the result in the union; the "container" keyword itself is a
+  // legal vega-lite width on every arm that reaches here.
+  return {
+    spec: { ...spec, width: "container" } as TopLevelSpec,
+    containerWidth: true,
+  };
+}
+
 interface VegaChartProps {
-  spec: VisualizationSpec;
+  /** Always a vega-lite spec in practice: both entry chains (the viz.ts
+   * decode gate, the VizChartSlot) only ever hand over vega-lite JSON, but
+   * the wire types stay bare `object` up that chain, so the fact is asserted
+   * once at the lazy door. vega-embed's VisualizationSpec union also admits
+   * vega's own VgSpec arm, which prepareEmbed's container-width injection
+   * would miscompile -- narrowing here keeps that arm out of the contract. */
+  spec: TopLevelSpec;
   /** Fired when Vega-Embed rejects (render failure). The caller swaps in the
    * degradation disclosure (ADR-0033). Carries a typed `{ kind: "render" }`
    * reason so the disclosure renders via the same catalog path as a decode
@@ -77,6 +136,11 @@ export function VegaChart({ spec, onError }: VegaChartProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   // The most recent embed result; finalized on re-embed / unmount / theme swap.
   const viewRef = useRef<Result | null>(null);
+  // Whether the embedded spec is a container-width one (prepareEmbed decided
+  // it). The resize observer branches on this: a container view's width
+  // signal only re-evaluates on window:resize, so flex-driven host changes
+  // must be re-fed by hand; a fixed-width view only needs the plain resize.
+  const isContainerWidthRef = useRef(false);
   // Keep the latest spec + onError reachable from the long-lived theme listener
   // without re-subscribing on every identity change. Written in an effect (not
   // during render) so the ref-update does not trip the react-hooks rule.
@@ -94,8 +158,10 @@ export function VegaChart({ spec, onError }: VegaChartProps) {
     const node = containerRef.current;
     if (!node) return;
     let cancelled = false;
+    const prepared = prepareEmbed(spec);
+    isContainerWidthRef.current = prepared.containerWidth;
     const theme = buildVegaTheme();
-    embed(node, spec, { actions: false, config: vegaConfig(theme) })
+    embed(node, prepared.spec, { actions: false, config: vegaConfig(theme) })
       .then((result) => {
         if (cancelled) {
           result.finalize();
@@ -133,8 +199,10 @@ export function VegaChart({ spec, onError }: VegaChartProps) {
     const unsubscribe = onThemeChange(() => {
       const node = containerRef.current;
       if (!node) return;
+      const prepared = prepareEmbed(specRef.current);
+      isContainerWidthRef.current = prepared.containerWidth;
       const theme = buildVegaTheme();
-      embed(node, specRef.current, { actions: false, config: vegaConfig(theme) })
+      embed(node, prepared.spec, { actions: false, config: vegaConfig(theme) })
         .then((result) => {
           if (unmounted) {
             result.finalize();
@@ -155,17 +223,29 @@ export function VegaChart({ spec, onError }: VegaChartProps) {
     };
   }, []);
 
-  // Resize-on-unhide (ADR-0051): when the pane comes back from display:none,
-  // the container reports a nonzero size again and the observer fires --
-  // view.resize() recomputes the layout so the chart measures correctly.
-  // Observed for the component's life; harmless on visible panes (resize is
-  // cheap and idempotent).
+  // Resize tracking (ADR-0051 + container-width): when the host changes size
+  // (pane unhide, workspace fold/unfold, window resize), a container-width
+  // view needs its width signal re-fed -- vega-lite compiles that signal to
+  // re-evaluate only on window:resize, which a flex fold/unfold never fires.
+  // Setting it to the measured host width (the same containerSize() value the
+  // compiled update reads) and running the view recomputes the layout. A
+  // fixed-width view keeps the plain resize (see the branch below).
   useEffect(() => {
     const node = containerRef.current;
     if (!node) return;
     if (typeof ResizeObserver === "undefined") return; // jsdom
-    const ro = new ResizeObserver(() => {
-      void viewRef.current?.view.resize();
+    const ro = new ResizeObserver((entries) => {
+      const view = viewRef.current?.view;
+      if (!view) return;
+      if (isContainerWidthRef.current) {
+        const width = entries[0]?.contentRect.width ?? node.clientWidth;
+        if (width > 0) view.signal("width", width);
+        void view.runAsync();
+      } else {
+        // A fixed-width view keeps the plain resize: runAsync() re-renders
+        // but skips the layout recompute the unhide path relied on.
+        void view.resize();
+      }
     });
     ro.observe(node);
     return () => ro.disconnect();
