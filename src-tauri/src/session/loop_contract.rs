@@ -129,11 +129,20 @@ pub struct TraceEntry {
     /// Short argument summary (the SQL or reference_name), NOT the full args.
     pub summary: String,
     pub success: bool,
+    /// The call's outcome text stopped at the output cap (issue #1047):
+    /// stamped by the delegation landing from the report builder's own cap
+    /// flag (a success-arm fact), so it marks the one success whose
+    /// bounded excerpt carries the cap's truncation notice -- the
+    /// projections keep it where every other success
+    /// empties (ADR-0078).
+    pub output_truncated: bool,
     /// Bounded excerpt of the tool result content (or the denial / error
-    /// message), captured for BOTH success and failure at dispatch time. Only
-    /// the FAILED-call excerpt survives the persisted mapping (a success is
-    /// emptied -- see [`RecipeTraceEntry::result_excerpt`]); the in-memory
-    /// form keeps the success payload for the loop's own next-turn context.
+    /// message), captured for BOTH success and failure at dispatch time. The
+    /// FAILED-call excerpt survives the persisted mapping; a success excerpt
+    /// is emptied -- the capped-report notice excepted, [`output_truncated`],
+    /// issue #1047 -- see [`RecipeTraceEntry::result_excerpt`]; the
+    /// in-memory form keeps the success payload for the loop's own
+    /// next-turn context.
     pub result_excerpt: String,
     /// The delegation entry's nested sub-trace (ADR-0117 Decision 6, issue
     /// #934): the sub-agent's round-grouped trajectory -- its thinking, its
@@ -166,7 +175,8 @@ pub(crate) const DENIED_BY_GATEWAY_CONTENT: &str = "tool call denied by the appr
 
 impl TraceEntry {
     /// A completed call's entry: `result_excerpt` carries the bounded success
-    /// payload (the loop's own next-turn context; the projections empty it).
+    /// payload (the loop's own next-turn context; the projections empty it --
+    /// the cap-stamped delegation entry excepted, issue #1047).
     pub fn succeeded(
         tool_use_id: impl Into<String>,
         name: impl Into<String>,
@@ -180,6 +190,7 @@ impl TraceEntry {
             operation_kind,
             summary: summary.into(),
             success: true,
+            output_truncated: false,
             result_excerpt: result_excerpt.into(),
             sub_trace: None,
         }
@@ -203,6 +214,7 @@ impl TraceEntry {
             operation_kind,
             summary: summary.into(),
             success: false,
+            output_truncated: false,
             result_excerpt: if message.is_empty() {
                 FAILURE_ANCHOR_FALLBACK.to_string()
             } else {
@@ -234,7 +246,11 @@ impl TraceEntry {
 
 /// Project an in-memory [`TraceEntry`] to its reduced form (ADR-0078): the
 /// per-provider `tool_use_id` is gone and a successful call's data-bearing
-/// excerpt is emptied; a failed call keeps its bounded message. ONE mapping
+/// excerpt is emptied; a failed call keeps its bounded message. The one
+/// success exception (issue #1047): an entry whose outcome the output cap
+/// cut short ([`TraceEntry::output_truncated`]) keeps its marker-bearing
+/// excerpt -- the truncation notice is a status fact every trace surface
+/// must render, not the payload the emptying exists to drop. ONE mapping
 /// feeds the persisted [`RecipeTraceEntry`], the display [`TraceEntryView`],
 /// and the live `turn-progress` event -- a live row, the recorded trace, and
 /// the resumed trace all render the same. The failure-message guard (issue
@@ -251,7 +267,7 @@ fn reduced_trace(entry: &TraceEntry) -> TraceEntryView {
         operation_kind: entry.operation_kind,
         summary: entry.summary.clone(),
         success: entry.success,
-        result_excerpt: if entry.success {
+        result_excerpt: if entry.success && !entry.output_truncated {
             String::new()
         } else {
             entry.result_excerpt.clone()
@@ -293,7 +309,8 @@ impl RecipeTraceRound {
 impl RecipeTraceEntry {
     /// Map a live in-memory [`TraceEntry`] to its persisted recipe form
     /// (ADR-0078, issue #319): the reduced projection (drop the in-memory
-    /// `tool_use_id`, empty a success call's excerpt, keep a failure's message)
+    /// `tool_use_id`, empty a success call's excerpt -- the cap-stamped
+    /// delegation entry excepted, issue #1047 -- and keep a failure's message)
     /// is the persisted shape verbatim -- the surviving strings stay bounded at
     /// capture time (`summarize_field` / `TRACE_EXCERPT_MAX`), so no
     /// re-truncation. Named (not `From`) to make the lossy + conditional
@@ -549,6 +566,7 @@ mod tests {
             operation_kind: OperationKind::Write,
             summary: "SELECT 1".into(),
             success,
+            output_truncated: false,
             result_excerpt: excerpt.into(),
             sub_trace: None,
         };
@@ -574,6 +592,7 @@ mod tests {
             operation_kind: OperationKind::Read,
             summary: "SELECT 1".into(),
             success,
+            output_truncated: false,
             result_excerpt: excerpt.into(),
             sub_trace: None,
         };
@@ -585,6 +604,62 @@ mod tests {
         assert_eq!(
             failed.result_excerpt, "no such table",
             "the failure message rides verbatim"
+        );
+    }
+
+    /// The capped-report exception (issue #1047): a delegation entry whose
+    /// successful outcome the cap cut short keeps its marker-bearing excerpt
+    /// through BOTH reduced projections -- the truncation notice is a status
+    /// fact every trace surface must render, not the data-bearing payload
+    /// the success-emptying exists to drop. An unflagged success still
+    /// empties (the two mapping tests above pin that arm).
+    #[test]
+    fn a_capped_success_keeps_its_excerpt_through_both_reduced_projections() {
+        // The marker's wording pinned literally (the wording-pin convention
+        // for unit tests; the wiring pins reference the const): the
+        // projection keeps the excerpt verbatim, marker and all.
+        let excerpt = "report head…\n\n[output truncated at the token cap]".to_string();
+        let mut entry = TraceEntry::succeeded(
+            "tu_1",
+            "analyst",
+            OperationKind::Execute,
+            "count the rows",
+            excerpt.clone(),
+        );
+        entry.output_truncated = true;
+        assert_eq!(
+            TraceEntryView::from(&entry).result_excerpt,
+            excerpt,
+            "the display mapping keeps the capped report's notice"
+        );
+        assert_eq!(
+            RecipeTraceEntry::from_live_trace(&entry).result_excerpt,
+            excerpt,
+            "the persisted mapping keeps the capped report's notice"
+        );
+    }
+
+    /// The persisted half of the same exception (issue #1047): the recipe
+    /// form carries no flag, so a capped success's non-empty excerpt IS the
+    /// notice -- the resume projection copies it verbatim. This pins that
+    /// convention where a future rehydration through the in-memory form
+    /// (flag defaulting false) would otherwise silently empty it.
+    #[test]
+    fn a_persisted_capped_row_keeps_its_excerpt_through_the_resume_projection() {
+        let excerpt = "report head…\n\n[output truncated at the token cap]".to_string();
+        let mut entry = TraceEntry::succeeded(
+            "tu_1",
+            "analyst",
+            OperationKind::Execute,
+            "count the rows",
+            excerpt.clone(),
+        );
+        entry.output_truncated = true;
+        let persisted = RecipeTraceEntry::from_live_trace(&entry);
+        assert_eq!(
+            TraceEntryView::from(&persisted).result_excerpt,
+            excerpt,
+            "the resumed mapping keeps the persisted notice verbatim"
         );
     }
 
@@ -601,6 +676,7 @@ mod tests {
             operation_kind: OperationKind::Read,
             summary: "SELECT 1".into(),
             success: false,
+            output_truncated: false,
             result_excerpt: String::new(),
             sub_trace: None,
         };
@@ -654,6 +730,7 @@ mod tests {
             operation_kind: OperationKind::Execute,
             summary: "clean the sheet".into(),
             success: true,
+            output_truncated: false,
             result_excerpt: "done".into(),
             sub_trace: Some(vec![sub_round]),
         };

@@ -2,6 +2,7 @@ import type { ReactNode } from "react";
 import { useIntl, type IntlShape } from "react-intl";
 import { Check, TriangleAlert } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
+import { cn } from "@/lib/utils";
 import { TraceList } from "./TraceList";
 import { TraceSummaryFold } from "./TraceSummaryFold";
 import type { OperationKind } from "../../types/approval";
@@ -121,8 +122,18 @@ export function TraceRow({
             </>
           )}
         />
-        {!entry.success && entry.result_excerpt !== "" && (
-          <span className="trace-excerpt block whitespace-pre-wrap break-words text-xs text-destructive">
+        {/* The excerpt is the cross-turn retrospection anchor (ADR-0078).
+         * The one SUCCESS that carries one is a capped delegation report's
+         * truncation notice (issue #1047) -- the projections keep exactly
+         * that success excerpt -- rendered muted under the check glyph: the
+         * call completed, the answer was just cut. */}
+        {entry.result_excerpt !== "" && (
+          <span
+            className={cn(
+              "trace-excerpt block whitespace-pre-wrap break-words text-xs",
+              entry.success ? "text-muted-foreground" : "text-destructive",
+            )}
+          >
             {entry.result_excerpt}
           </span>
         )}

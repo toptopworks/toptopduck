@@ -45,7 +45,7 @@ use std::sync::{Arc, Mutex};
 use rig_agent::agent::{AgentHook, HookContext, ModelTurnAction, ModelTurnFinished};
 use rig_core::completion::{CompletionError, FinishReason};
 
-use crate::session::loop_contract::Termination;
+use crate::session::loop_contract::{truncate_trace_excerpt, Termination};
 
 /// Marker appended to a terminal reply whose turn stopped at the output
 /// cap (issue #1003).
@@ -116,21 +116,56 @@ impl AgentHook for FinishReasonWatcher {
     }
 }
 
+/// The output-cap predicate every face of the signal keys on (issues
+/// #1003/#1047): a stream terminal that stopped at `FinishReason::Length`
+/// -- the endpoint's own assertion that the output was cut. ContentFilter
+/// also reads as truncated output on rig's own predicate; the signal
+/// states the cap's fact, so it stays Length-only.
+pub(crate) fn is_output_capped(finish_reason: Option<&FinishReason>) -> bool {
+    matches!(finish_reason, Some(FinishReason::Length))
+}
+
 /// The reply body shared by the two reply mappings -- the main turn's
 /// terminal reply and a sub-agent's final report (issue #1044): a turn
-/// that stopped at the output cap (`FinishReason::Length`) gets the
+/// that stopped at the output cap ([`is_output_capped`]) gets the
 /// truncation marker appended -- the answer was cut, not finished --
 /// while every other reason (or none) keeps the verbatim text.
 pub(crate) fn marked_reply(text: String, finish_reason: Option<&FinishReason>) -> String {
-    match finish_reason {
-        Some(FinishReason::Length) => format!("{text}{TRUNCATED_REPLY_MARKER}"),
-        _ => text,
+    if is_output_capped(finish_reason) {
+        format!("{text}{TRUNCATED_REPLY_MARKER}")
+    } else {
+        text
     }
 }
 
 /// The terminal reply's termination, over [`marked_reply`].
 pub(crate) fn terminal_reply(text: String, finish_reason: Option<&FinishReason>) -> Termination {
     Termination::Text(marked_reply(text, finish_reason))
+}
+
+/// The delegation report's trace excerpt (issue #1047): the marker rides
+/// the reply's tail, so the head-preserving excerpt cut drops it exactly
+/// when the report ran long -- the over-cap shape whose signal the trace
+/// surfaces must keep. Reserve tail room for the marker before the cut so
+/// the bounded excerpt still ends with it; an unmarked report truncates
+/// through the plain excerpt path, unchanged. Markedness at this stage
+/// keys on the marker suffix in the text itself -- the entry's flag keys
+/// the projections' half.
+pub(crate) fn marked_reply_excerpt(report: &str, max: usize) -> String {
+    debug_assert!(
+        max > TRUNCATED_REPLY_MARKER.chars().count(),
+        "the excerpt cap must exceed the marker or the bounded result cannot carry it"
+    );
+    match report.strip_suffix(TRUNCATED_REPLY_MARKER) {
+        Some(body) => format!(
+            "{}{TRUNCATED_REPLY_MARKER}",
+            truncate_trace_excerpt(
+                body,
+                max.saturating_sub(TRUNCATED_REPLY_MARKER.chars().count()),
+            )
+        ),
+        None => truncate_trace_excerpt(report, max),
+    }
 }
 
 /// Re-attribute the tool-input parse-error family as an output truncation
@@ -174,6 +209,8 @@ fn is_truncated_tool_input(detail: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use crate::session::loop_contract::TRACE_EXCERPT_MAX;
 
     /// The accumulator's bare wording, the `ResponseError` payload on the
     /// live face.
@@ -222,6 +259,66 @@ mod tests {
             terminal_reply("done".to_string(), Some(&FinishReason::ContentFilter)),
             Termination::Text("done".to_string())
         );
+    }
+
+    /// The over-cap shape #1047 exists for: a marked report longer than
+    /// the excerpt cap keeps its tail marker through the cut -- the plain
+    /// head-preserving truncator would drop the signal exactly when the
+    /// report ran long -- and the bounded result stays within the cap.
+    #[test]
+    fn an_over_cap_marked_report_keeps_the_marker_in_its_excerpt() {
+        let report = format!("{}{TRUNCATED_REPLY_MARKER}", "a".repeat(600));
+        let excerpt = marked_reply_excerpt(&report, TRACE_EXCERPT_MAX);
+        assert!(
+            excerpt.ends_with(TRUNCATED_REPLY_MARKER),
+            "the marker rides the excerpt's tail: {excerpt}"
+        );
+        assert!(
+            excerpt.chars().count() <= TRACE_EXCERPT_MAX,
+            "the bounded excerpt stays within the cap"
+        );
+        assert!(
+            excerpt.starts_with(&"a".repeat(100)),
+            "the report's head survives the cut"
+        );
+    }
+
+    /// The under-cap half: a marked report that fits the cap passes
+    /// through verbatim -- marker included, no re-arrangement.
+    #[test]
+    fn an_under_cap_marked_report_passes_through_verbatim() {
+        let report = format!("short answer{TRUNCATED_REPLY_MARKER}");
+        assert_eq!(marked_reply_excerpt(&report, TRACE_EXCERPT_MAX), report);
+    }
+
+    /// The unmarked path is the plain excerpt, unchanged (#1047's
+    /// no-widening constraint): a report without the marker truncates
+    /// exactly as `truncate_trace_excerpt` would.
+    #[test]
+    fn an_unmarked_report_truncates_through_the_plain_excerpt_path() {
+        let plain = "b".repeat(600);
+        assert_eq!(
+            marked_reply_excerpt(&plain, TRACE_EXCERPT_MAX),
+            truncate_trace_excerpt(&plain, TRACE_EXCERPT_MAX)
+        );
+    }
+
+    /// The reserve's boundary (issue #1047): a body sized exactly to the
+    /// reserved room passes through whole -- the report fits the cap with
+    /// its marker and no ellipsis, so the reserve never costs a cut that
+    /// was not needed.
+    #[test]
+    fn a_report_sized_exactly_to_the_reserved_room_passes_whole() {
+        let body_len = TRACE_EXCERPT_MAX - TRUNCATED_REPLY_MARKER.chars().count();
+        let report = format!("{}{TRUNCATED_REPLY_MARKER}", "c".repeat(body_len));
+        let excerpt = marked_reply_excerpt(&report, TRACE_EXCERPT_MAX);
+        assert_eq!(excerpt, report, "the exactly-full report is verbatim");
+        assert_eq!(
+            excerpt.chars().count(),
+            TRACE_EXCERPT_MAX,
+            "the verbatim pass lands exactly on the cap"
+        );
+        assert!(!excerpt.contains('…'), "no ellipsis on an uncut report");
     }
 
     #[test]

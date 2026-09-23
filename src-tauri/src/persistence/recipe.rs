@@ -222,7 +222,9 @@ pub struct RecipeTraceEntry {
     /// Both construction sites guard the inverse invariant (issue #316): a
     /// failed entry never persists an empty excerpt (`debug_assert!` in the
     /// migration's synthetic trace helper + the live trace mapping).
-    /// Empty for a successful call: its dispatch content is a data-bearing
+    /// Empty for a successful call (the capped delegation report's
+    /// truncation notice excepted, issue #1047 -- a status fact, kept): its
+    /// dispatch content is a data-bearing
     /// descriptor / shape JSON the .duck should not carry (ADR-0036 contents
     /// boundary -- though the excerpt is already bounded at capture, the
     /// success payload is rebuilt on resume anyway), so persisting it would

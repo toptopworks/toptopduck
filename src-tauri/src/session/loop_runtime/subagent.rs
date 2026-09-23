@@ -151,7 +151,7 @@ pub(crate) fn delegation_dynamic_tool(
                     Some(task) if !task.trim().is_empty() => task.to_string(),
                     _ => {
                         let refusal = "delegation refused: no task prompt was provided".to_string();
-                        land_delegation_entry(&ctx, &name, "", &refusal, false, Vec::new());
+                        land_delegation_entry(&ctx, &name, "", &refusal, false, false, Vec::new());
                         return Ok(rig_agent::tool::ToolOutput::text(refusal));
                     }
                 };
@@ -169,7 +169,7 @@ pub(crate) fn delegation_dynamic_tool(
                          {DELEGATION_BATCH_CAP} delegations (the cap); defer the task to a \
                          later batch or narrow the delegation"
                     );
-                    land_delegation_entry(&ctx, &name, &task, &refusal, false, Vec::new());
+                    land_delegation_entry(&ctx, &name, &task, &refusal, false, false, Vec::new());
                     return Ok(rig_agent::tool::ToolOutput::text(refusal));
                 }
                 emit_phase(
@@ -187,6 +187,7 @@ pub(crate) fn delegation_dynamic_tool(
                     &task,
                     &report.text,
                     report.success,
+                    report.capped,
                     report.rounds,
                 );
                 emit_phase(
@@ -206,6 +207,11 @@ pub(crate) fn delegation_dynamic_tool(
 /// that hangs under the delegation entry.
 struct SubagentReport {
     text: String,
+    /// The terminal report stopped at the output cap (issue #1047): the
+    /// finish reason's own fact, read once where the marker is stamped --
+    /// the landing keys the entry's `output_truncated` from this rather
+    /// than re-deriving it from the text.
+    capped: bool,
     success: bool,
     /// Every round the run's local fold accumulated, including entries the
     /// finish-time residual drain landed after a cancellation abandoned the
@@ -271,6 +277,7 @@ impl Drop for SubagentRun {
             &self.task,
             &report.text,
             report.success,
+            report.capped,
             report.rounds,
         );
     }
@@ -313,6 +320,7 @@ fn finish_run(run: &mut SubagentRun, exit: RunExit) -> SubagentReport {
             // read as a finished one.
             Some(text) => SubagentReport {
                 text: truncation::marked_reply(text, finish_reason.as_ref()),
+                capped: truncation::is_output_capped(finish_reason.as_ref()),
                 success: true,
                 rounds,
             },
@@ -321,6 +329,7 @@ fn finish_run(run: &mut SubagentRun, exit: RunExit) -> SubagentReport {
                     "sub-agent failed: ended without a final report",
                     &promoted,
                 ),
+                capped: false,
                 success: false,
                 rounds,
             },
@@ -330,11 +339,13 @@ fn finish_run(run: &mut SubagentRun, exit: RunExit) -> SubagentReport {
                 &subagent_failure_text(&err, run.ctx.cap_stamped),
                 &promoted,
             ),
+            capped: false,
             success: false,
             rounds,
         },
         RunExit::Abandoned => SubagentReport {
             text: failure_text_with_orphans("sub-agent aborted: cancelled", &promoted),
+            capped: false,
             success: false,
             rounds,
         },
@@ -521,13 +532,16 @@ fn subagent_failure_text(err: &StreamingError, cap_stamped: bool) -> String {
 /// residual drain, if a cancellation abandoned the stream) pairs it
 /// exactly once. A failed report keeps a bounded excerpt; a succeeded one
 /// records the report's head (the final answer the sub-agent handed back
-/// -- the one excerpt a reader of the trace actually wants).
+/// -- the one excerpt a reader of the trace actually wants), with a capped
+/// report's tail marker reserved through the cut (issue #1047) and the
+/// entry's flag keying the projections' one success-excerpt exception.
 fn land_delegation_entry(
     ctx: &SubagentCtx,
     name: &str,
     task: &str,
     report: &str,
     success: bool,
+    capped: bool,
     rounds: Vec<LoopRound>,
 ) -> TraceEntry {
     let mut entry = if success {
@@ -536,7 +550,7 @@ fn land_delegation_entry(
             name.to_string(),
             OperationKind::Execute,
             delegation_summary(task),
-            truncate_trace_excerpt(report, TRACE_EXCERPT_MAX),
+            truncation::marked_reply_excerpt(report, TRACE_EXCERPT_MAX),
         )
     } else {
         TraceEntry::failed(
@@ -544,9 +558,14 @@ fn land_delegation_entry(
             name.to_string(),
             OperationKind::Execute,
             delegation_summary(task),
-            truncate_trace_excerpt(report, TRACE_EXCERPT_MAX),
+            truncation::marked_reply_excerpt(report, TRACE_EXCERPT_MAX),
         )
     };
+    // The cap-cut stamp (issue #1047): keys the projections' exception --
+    // the capped report's marker-bearing notice survives where every
+    // other success excerpt empties (ADR-0078). The conjunction keeps the
+    // stamp a success-arm fact: a failure never carries it.
+    entry.output_truncated = success && capped;
     // The nested sub-trace (ADR-0117 Decision 6, issue #934): the sub-agent's
     // rounds hang under the delegation entry. Absent when the run produced
     // none -- a refused (blank prompt / batch cap) or never-started

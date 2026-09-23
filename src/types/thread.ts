@@ -136,7 +136,8 @@ export interface TraceRound {
 // Field-for-field the persisted recipe form, so a live turn, its recorded
 // TurnRecord.trace, and its resumed reincarnation all render identically:
 // a successful call's result payload is dropped (the .duck carries none of
-// it, ADR-0036) while a failed call carries its bounded error / denial
+// it, ADR-0036; the capped delegation report's truncation notice excepted,
+// issue #1047) while a failed call carries its bounded error / denial
 // message -- the cross-turn failure retrospection anchor.
 export interface TraceEntry {
   // Tool name -- a built-in (explore / materialize / describe / sample) or an
@@ -149,7 +150,9 @@ export interface TraceEntry {
   // Whether the call succeeded. An approval denial records success: false
   // with the denial message as the excerpt.
   success: boolean;
-  // Bounded excerpt of a FAILED call's result; empty for a successful call.
+  // Bounded excerpt of a FAILED call's result; empty for a successful call
+  // -- the capped delegation report's truncation notice excepted
+  // (issue #1047).
   result_excerpt: string;
   // The delegation entry's nested sub-trace (ADR-0117 Decision 6, issue
   // #934): the sub-agent's rounds under the same slim projection the main

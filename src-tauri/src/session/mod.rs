@@ -3135,6 +3135,7 @@ mod tests {
             operation_kind: OperationKind::Read,
             summary: format!("{name} summary"),
             success,
+            output_truncated: false,
             result_excerpt: format!("{name} excerpt"),
             sub_trace: None,
         }

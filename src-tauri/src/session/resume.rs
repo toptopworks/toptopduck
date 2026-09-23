@@ -580,7 +580,8 @@ impl<'a> Resumer<'a> {
 impl From<&RecipeTraceEntry> for TraceEntryView {
     /// The resumed-trace mapping (ADR-0078, issue #297): the persisted recipe
     /// entry IS the display shape (the live->persisted mapping already dropped
-    /// the tool_use_id + the success excerpt), so the rebuild copies fields
+    /// the tool_use_id + the success excerpt -- the cap-stamped notice
+    /// excepted, issue #1047), so the rebuild copies fields
     /// verbatim. A resumed turn and the live turn that recorded it render the
     /// same expanded trace.
     fn from(entry: &RecipeTraceEntry) -> Self {
