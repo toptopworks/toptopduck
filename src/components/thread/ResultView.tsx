@@ -387,11 +387,9 @@ export function ResultView({
         stacked item). A null viz (plain table turn) renders neither.
       */}
       {showChart && decoded?.ok && (
-        // This load state is a separate layer from the render-failure degrade
-        // path below -- a Vega rejection still routes through onError and
-        // swaps in the disclosure. `relative` anchors the enlarge affordance
-        // to the chart's corner (#1050); the swap-in disclosure below carries
-        // no affordance, so a failed chart has nothing to enlarge.
+        // `relative` anchors the enlarge affordance to the chart's corner
+        // (#1050); the swap-in disclosure below carries no affordance, so a
+        // failed chart has nothing to enlarge.
         <div className="relative">
           <VizChartSlot spec={decoded.spec} onError={setRenderError} />
           <VizEnlargeDialog spec={decoded.spec} />

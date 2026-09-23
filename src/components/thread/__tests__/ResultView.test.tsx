@@ -955,7 +955,7 @@ describe("ResultView viz (ADR-0016/0033, issue #26)", () => {
       limit: 100,
     });
     vi.mocked(embed).mockResolvedValue(embedOk());
-    renderI18n(
+    const { container } = renderI18n(
       <ResultView
         sessionId="sess-1"
         referenceName="result_1"
@@ -965,6 +965,12 @@ describe("ResultView viz (ADR-0016/0033, issue #26)", () => {
       />,
     );
     await waitFor(() => expect(embed).toHaveBeenCalledTimes(1));
+    // The hover reveal keys on the adjacent-sibling selector: the trigger
+    // must sit right after the .viz-chart host inside the mount wrapper, or
+    // mouse reveal dies silently (computed opacity is invisible to jsdom).
+    expect(
+      screen.getByRole("button", { name: "放大查看图表" }).previousElementSibling,
+    ).toBe(container.querySelector(".viz-chart"));
     fireEvent.click(screen.getByRole("button", { name: "放大查看图表" }));
     await waitFor(() => expect(embed).toHaveBeenCalledTimes(2));
     expect(

@@ -1,10 +1,10 @@
 // The chart degrade disclosure (ADR-0033, ADR-0052): the warning Alert that
 // replaces a failed chart on the surfaces where nothing rides under it -- the
-// vega-lite fence and the enlarge overlay's dialog body. Extracted at the
-// third verbatim copy (#1050 review): one place for the wording decision and
-// the role/variant pairing, so the surfaces cannot drift apart on the same
-// four reasons. The result card keeps its own variant (a table rides under
-// its chart, so its wording names that fallback instead).
+// vega-lite fence and the enlarge overlay's dialog body. Extracted (#1050)
+// so the surfaces cannot drift apart on the same four reasons: one place for
+// the wording decision and the role/variant pairing. The result card keeps
+// its own variant (a table rides under its chart, so its wording names that
+// fallback instead).
 
 import { FormattedMessage, useIntl } from "react-intl";
 import { Alert, AlertDescription } from "../ui/alert";

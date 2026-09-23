@@ -10,8 +10,9 @@
 // click stays reserved for the workspace cross-link tail (ADR-0120), and a
 // button carries the role and aria-label a canvas never could. The button
 // floats over the chart's corner (absolute) but stays hidden until the chart
-// host itself is hovered or the button is focused -- always-visible covered
-// chart content (legends, axis labels) at the corner. The mount point owns
+// host itself is hovered or the button is focused -- an always-visible
+// button would sit over corner chart content (legends, axis labels). The
+// mount point owns
 // the positioning context (`relative`), so the two chart surfaces keep their
 // own rhythm untouched.
 
@@ -60,6 +61,13 @@ function EnlargedChartBody({ spec }: { spec: object }) {
  *  to ~72rem, the spec's own height uncompressed, taller charts scroll. */
 export function VizEnlargeDialog({ spec }: { spec: object }) {
   const intl = useIntl();
+  // One source for both surfaces that name the control: the aria-label and
+  // the tooltip content are the same label by construction, not by two
+  // literals agreeing.
+  const triggerLabel = intl.formatMessage({
+    id: "viz.enlarge.trigger",
+    defaultMessage: "Enlarge chart",
+  });
   const [open, setOpen] = useState(false);
   const bodyRef = useRef<HTMLDivElement>(null);
   // Controlled tooltip with a just-closed guard: the dialog close path
@@ -108,21 +116,13 @@ export function VizEnlargeDialog({ spec }: { spec: object }) {
               variant="ghost"
               size="icon"
               className="absolute top-1 right-1 z-10 size-7 opacity-0 transition-opacity duration-150 [.viz-chart:hover_+&]:opacity-100 hover:opacity-100 focus-visible:opacity-100"
-              aria-label={intl.formatMessage({
-                id: "viz.enlarge.trigger",
-                defaultMessage: "Enlarge chart",
-              })}
+              aria-label={triggerLabel}
             >
               <Maximize2 className="size-4" aria-hidden="true" />
             </Button>
           </DialogTrigger>
         </TooltipTrigger>
-        <TooltipContent>
-          {intl.formatMessage({
-            id: "viz.enlarge.trigger",
-            defaultMessage: "Enlarge chart",
-          })}
-        </TooltipContent>
+        <TooltipContent>{triggerLabel}</TooltipContent>
       </Tooltip>
       {/* Only the sm: half is load-bearing: the base default
        * (calc(100%-2rem) of the fixed-position viewport) already degrades to
@@ -130,11 +130,17 @@ export function VizEnlargeDialog({ spec }: { spec: object }) {
        * cap to the full readable size past the lg default. */}
       <DialogContent
         className="sm:max-w-[min(72rem,calc(100vw-2rem))]"
+        // A pure visual surface: the sr-only title is the whole a11y name,
+        // with no description to point at (the explicit opt-out, per the
+        // repo convention for description-less DialogContents).
+        aria-describedby={undefined}
         onOpenAutoFocus={(event) => {
           // The chart surface has no focusable child, so the default initial
           // focus lands on the built-in close button and lights its focus
           // ring; steer it to the scroll container instead (tabindex -1 keeps
-          // it out of the tab order, and focus stays inside the dialog).
+          // it out of the tab order, and focus stays inside the dialog). The
+          // justClosed guard's one-shot math leans on this focus landing --
+          // the div renders unconditionally, so the ref is always mounted.
           event.preventDefault();
           bodyRef.current?.focus();
         }}

@@ -139,8 +139,14 @@ describe("VizFence (ADR-0120)", () => {
   it("mounts the enlarge affordance on the rendered chart (#1050)", async () => {
     vi.mocked(embed).mockResolvedValue(embedOk());
     const body = { mark: "bar", data: { values: [{ a: 1 }] } };
-    renderI18n(<VizFence spec={JSON.stringify(body)} />);
+    const { container } = renderI18n(<VizFence spec={JSON.stringify(body)} />);
     await waitFor(() => expect(embed).toHaveBeenCalledTimes(1));
+    // The hover reveal keys on the adjacent-sibling selector: the trigger
+    // must sit right after the .viz-chart host inside the mount wrapper, or
+    // mouse reveal dies silently (computed opacity is invisible to jsdom).
+    expect(
+      screen.getByRole("button", { name: "放大查看图表" }).previousElementSibling,
+    ).toBe(container.querySelector(".viz-chart"));
     // Opening the overlay re-embeds the same decoded spec -- one decode, two
     // embeds, the shared chart slot and no new render path.
     fireEvent.click(screen.getByRole("button", { name: "放大查看图表" }));

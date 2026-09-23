@@ -25,8 +25,9 @@ describe("VizEnlargeDialog (#1050)", () => {
     renderI18n(<VizEnlargeDialog spec={SPEC} />);
     // The trigger is an explicit button, not a chart-body click: a canvas
     // carries no role or name, the button carries both. Visibility is pure
-    // styling (opacity through the mount point's group hover/focus) and stays
-    // in the tab order and the a11y tree either way.
+    // styling (opacity through the adjacent-sibling variant on the chart
+    // host plus the button's own hover/focus-visible) and stays in the tab
+    // order and the a11y tree either way.
     expect(
       screen.getByRole("button", { name: "放大查看图表" }),
     ).toBeInTheDocument();
@@ -50,6 +51,21 @@ describe("VizEnlargeDialog (#1050)", () => {
       ...SPEC,
       width: "container",
     });
+  });
+
+  it("steers initial focus to the scroll container, not the close button", async () => {
+    vi.mocked(embed).mockResolvedValue(embedOk());
+    renderI18n(<VizEnlargeDialog spec={SPEC} />);
+    fireEvent.click(screen.getByRole("button", { name: "放大查看图表" }));
+    const dialog = screen.getByRole("dialog", { name: "图表放大查看" });
+    const scroller = dialog.querySelector("div[tabindex=\"-1\"]");
+    // The steering is this module's own logic: without it the default focus
+    // lights the close button's ring, and a lost ref would drop focus
+    // outside the dialog entirely. (The keyboard open arm itself is not
+    // pinnable here: DialogTrigger rides the native button Enter->click
+    // default, which fireEvent does not synthesize in jsdom.)
+    await waitFor(() => expect(scroller).toHaveFocus());
+    expect(screen.getByRole("button", { name: "Close" })).not.toHaveFocus();
   });
 
   it("degrades with the honest disclosure when the re-embed rejects", async () => {
