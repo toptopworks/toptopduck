@@ -301,9 +301,9 @@ fn finish_run(run: &mut SubagentRun, exit: RunExit) -> SubagentReport {
     // Promotions still ride the shared list: a sub-agent's `result_N` lands
     // on the working set regardless of the sub-agent's fate.
     let promoted = promoted_since(&run.ctx.state, run.promotions_before);
-    // Read before the exit match: the Done arm owns the record (the
-    // failure arms never consult it), and taking the owned value first
-    // keeps the fold's mutable borrow out of the match arms.
+    // Read once, above the exit match: the Done arm owns the record
+    // (the failure arms never consult it), and every arm sees the
+    // same already-taken view.
     let finish_reason = run.finish_record.last();
     match exit {
         RunExit::Done => match run.fold.final_output.take() {

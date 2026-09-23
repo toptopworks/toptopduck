@@ -2743,6 +2743,16 @@ fn a_mixed_batch_keeps_every_main_row_identity() {
         "the delegation row carries the report: {}",
         round1.calls[1].result_excerpt
     );
+    // A clean report (its last turn stopped normally) carries no marker:
+    // the marker keys on the observed Length stop alone, never on the
+    // run merely having finished.
+    assert!(
+        !round1.calls[1]
+            .result_excerpt
+            .contains(super::truncation::TRUNCATED_REPLY_MARKER),
+        "a clean report carries no truncation marker: {}",
+        round1.calls[1].result_excerpt
+    );
     let round2 = &outcome.trace[1];
     assert_eq!(round2.calls.len(), 1);
     assert_eq!(round2.calls[0].name, "materialize");

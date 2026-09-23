@@ -1,6 +1,8 @@
 //! Output-cap truncation surfacing (issues #1003/#1044): the length
 //! signal's two presentations on both driver faces -- the main loop's and
-//! a delegated sub-agent's -- each downstream of the #1001 cap formula.
+//! a delegated sub-agent's. Both trace back to the #1001 cap formula,
+//! but only the re-attribution keys on the stamp's presence; the marker
+//! rides any `FinishReason::Length` stop, stamped or not.
 //!
 //! The signal lives in rig's stream-terminal `finish_reason`. The
 //! run-level `FinalResponse` the driver's fold consumes carries no
