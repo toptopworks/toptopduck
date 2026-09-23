@@ -474,7 +474,7 @@ impl LoopRuntime {
                     // face keeps `None` and its verbatim detail).
                     StreamingError::Completion(err) => {
                         truncation::reattribute_tool_input_truncation(
-                            termination_for_completion(&err),
+                            &err,
                             self.output_cap.is_some(),
                         )
                     }

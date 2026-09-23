@@ -505,13 +505,12 @@ fn subagent_failure_text(err: &StreamingError, cap_stamped: bool) -> String {
                 format!("sub-agent failed: conversation memory failed: {err}")
             }
         },
-        StreamingError::Completion(err) => match truncation::reattribute_tool_input_truncation(
-            super::termination_for_completion(err),
-            cap_stamped,
-        ) {
-            Termination::Transient(detail) => format!("sub-agent failed: {detail}"),
-            _ => format!("sub-agent failed: {err}"),
-        },
+        StreamingError::Completion(err) => {
+            match truncation::reattribute_tool_input_truncation(err, cap_stamped) {
+                Termination::Transient(detail) => format!("sub-agent failed: {detail}"),
+                _ => format!("sub-agent failed: {err}"),
+            }
+        }
     }
 }
 
