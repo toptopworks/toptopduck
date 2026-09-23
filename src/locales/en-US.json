@@ -599,6 +599,8 @@
   "thread.trace.subtraceTitle": "Sub-agent trace · {name}",
   "thread.trace.toggle": "Trace · {count} {count, plural, one {call} other {calls}}",
   "viz.chartLabel": "Chart",
+  "viz.enlarge.dialogTitle": "Enlarged chart view",
+  "viz.enlarge.trigger": "Enlarge chart",
   "viz.error.invalidJson": "the spec is not valid JSON",
   "viz.error.notObject": "the spec is not a Vega-Lite object",
   "viz.error.render": "render error",

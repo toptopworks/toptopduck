@@ -599,6 +599,8 @@
   "thread.trace.subtraceTitle": "子智能体轨迹 · {name}",
   "thread.trace.toggle": "轨迹 · {count} 次调用",
   "viz.chartLabel": "图表",
+  "viz.enlarge.dialogTitle": "图表放大查看",
+  "viz.enlarge.trigger": "放大查看图表",
   "viz.error.invalidJson": "规格不是合法的 JSON",
   "viz.error.notObject": "规格不是 Vega-Lite 对象",
   "viz.error.render": "渲染出错",

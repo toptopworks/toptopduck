@@ -942,4 +942,67 @@ describe("ResultView viz (ADR-0016/0033, issue #26)", () => {
     expect(alert).toHaveTextContent(/导出文件写入失败/);
     expect(alert).toHaveTextContent(/create C:\/out\/x\.csv: denied/);
   });
+
+  it("mounts the enlarge affordance on a rendered chart (#1050)", async () => {
+    // The result card rides the same enlarge view the fence does: a rendered
+    // chart carries the corner affordance, and opening the overlay re-embeds
+    // the same decoded spec through the shared chart slot.
+    vi.mocked(readRows).mockResolvedValue({
+      columns: [{ name: "n", canonical_type: "BIGINT" }],
+      rows: [["5"]],
+      total: 1,
+      offset: 0,
+      limit: 100,
+    });
+    vi.mocked(embed).mockResolvedValue(embedOk());
+    const { container } = renderI18n(
+      <ResultView
+        sessionId="sess-1"
+        referenceName="result_1"
+        question="q:result_1"
+        assumption={null}
+        viz={{ kind: "bar", spec: JSON.stringify({ mark: "bar", data: { values: [{ a: 1 }] } }) }}
+      />,
+    );
+    await waitFor(() => expect(embed).toHaveBeenCalledTimes(1));
+    // The hover reveal keys on the adjacent-sibling selector: the trigger
+    // must sit right after the .viz-chart host inside the mount wrapper, or
+    // mouse reveal dies silently (computed opacity is invisible to jsdom).
+    expect(
+      screen.getByRole("button", { name: "放大查看图表" }).previousElementSibling,
+    ).toBe(container.querySelector(".viz-chart"));
+    fireEvent.click(screen.getByRole("button", { name: "放大查看图表" }));
+    await waitFor(() => expect(embed).toHaveBeenCalledTimes(2));
+    expect(
+      screen.getByRole("dialog", { name: "图表放大查看" }),
+    ).toBeInTheDocument();
+  });
+
+  it("keeps the enlarge affordance off the degraded chart (#1050)", async () => {
+    // The render-failure arm on the result card: the swap-in disclosure
+    // replaces the chart slot entirely, so a failed chart has no affordance.
+    vi.mocked(readRows).mockResolvedValue({
+      columns: [{ name: "n", canonical_type: "BIGINT" }],
+      rows: [["5"]],
+      total: 1,
+      offset: 0,
+      limit: 100,
+    });
+    vi.mocked(embed).mockRejectedValue(new Error("vega boom"));
+    renderI18n(
+      <ResultView
+        sessionId="sess-1"
+        referenceName="result_1"
+        question="q:result_1"
+        assumption={null}
+        viz={{ kind: "bar", spec: JSON.stringify({ mark: "bar", data: { values: [{ a: 1 }] } }) }}
+      />,
+    );
+    await waitFor(() =>
+      expect(screen.getByText(/图表无法渲染/)).toBeInTheDocument(),
+    );
+    expect(
+      screen.queryByRole("button", { name: "放大查看图表" }),
+    ).not.toBeInTheDocument();
+  });
 });

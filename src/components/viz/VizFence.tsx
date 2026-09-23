@@ -19,11 +19,11 @@
 // would only mis-degrade a chart that would have drawn fine.
 
 import { useEffect, useMemo, useState } from "react";
-import { FormattedMessage, useIntl } from "react-intl";
+import { useIntl } from "react-intl";
 import { Loader2 } from "lucide-react";
-import { Alert, AlertDescription } from "../ui/alert";
 import { VizChartSlot } from "./LazyVegaChart";
-import { formatVizFailure } from "./viz-failure";
+import { VizDegradeDisclosure } from "./VizDegradeDisclosure";
+import { VizEnlargeDialog } from "./VizEnlargeDialog";
 import { decodeVizSpec, type VizFailureReason } from "./viz";
 
 /** The live placeholder (ADR-0120 Decision 4): names what is coming without
@@ -49,7 +49,6 @@ export function VizFencePending() {
  * honest disclosure. `spec` is the fence's raw body text (bare Vega-Lite JSON,
  * no wire `kind`). */
 export function VizFence({ spec }: { spec: string }) {
-  const intl = useIntl();
   // The shared decode gate (viz.ts): parse + whitelist mark. A fence that
   // fails degrades like a result-card spec does, only the disclosure wording
   // differs (no table rides under a fence chart).
@@ -69,26 +68,20 @@ export function VizFence({ spec }: { spec: string }) {
         // The chart slot: the shared door (lazy + Suspense boundary + the
         // standard fallback). The wrapper zeroes the fallback/chart class's
         // own 0.5rem margins (a result-pane concern) so the prose root's
-        // space-y owns this block's rhythm like every other block.
-        <div className="[&_.viz-chart]:m-0">
+        // space-y owns this block's rhythm like every other block; `relative`
+        // anchors the enlarge affordance to the chart's corner (#1050).
+        <div className="relative [&_.viz-chart]:m-0">
           <VizChartSlot spec={decoded.spec} onError={setRenderError} />
+          {/* The overlay re-embeds the same decoded spec at full readable
+              size; a degrade swaps this whole block for the disclosure below,
+              so the affordance dies with the chart it would enlarge. */}
+          <VizEnlargeDialog spec={decoded.spec} />
         </div>
       )}
       {degradedReason !== null && (
-        // ADR-0033: a fence chart that failed to decode/render gets an honest
-        // disclosure instead of silence. Warning Alert (ADR-0050),
-        // role="status"; {reason} is the typed failure rendered through the
-        // shared catalog path so it lands in the active locale (ADR-0052).
-        // Bare on purpose: the prose root's space-y owns the rhythm.
-        <Alert variant="warning" role="status">
-          <AlertDescription>
-            <FormattedMessage
-              id="disclosure.viz.fenceDegraded"
-              defaultMessage="The chart could not render. {reason}"
-              values={{ reason: formatVizFailure(degradedReason, intl) }}
-            />
-          </AlertDescription>
-        </Alert>
+        // ADR-0033: a fence chart that failed to decode/render gets the
+        // shared honest disclosure instead of silence.
+        <VizDegradeDisclosure reason={degradedReason} />
       )}
     </>
   );
