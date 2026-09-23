@@ -36,8 +36,11 @@
 
 /* Viz (ADR-0016/0033): the chart container bounds a Vega-Embed render so a wide
    spec scrolls instead of bursting the panel. The degraded-viz disclosure moved
-   to a warning Alert variant in issue #108 (ADR-0050). */
-.viz-chart { margin: 0.5rem 0; max-width: 100%; overflow: auto; }
+   to a warning Alert variant in issue #108 (ADR-0050). Vega-Embed 7 marks the
+   host `.vega-embed` inline-block, which shrink-to-fits to zero against a
+   container-sized chart (the chart measures the host) — width:100% gives the
+   container-width default a real measurement basis. */
+.viz-chart { margin: 0.5rem 0; width: 100%; max-width: 100%; overflow: auto; }
 
 /* Working-set tab grid (legacy .layout). ADR-0067 Decision 1: a 280px/1fr
    two-column master-detail grid is layout semantics, not a utility long-string,

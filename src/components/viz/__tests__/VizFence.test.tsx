@@ -27,14 +27,40 @@ describe("VizFence (ADR-0120)", () => {
     expect(screen.queryByText(/图表无法渲染/)).not.toBeInTheDocument();
   });
 
-  it("hands the embed the parsed fence body, verbatim", async () => {
+  it("hands the embed the parsed fence body with the container-width default", async () => {
     // The fence is bare JSON (no wire `kind`); the chart draws exactly what
-    // the agent wrote.
+    // the agent wrote, plus the app-level presentation default: a widthless
+    // spec stretches to the container instead of vega-lite's fixed step size.
     vi.mocked(embed).mockResolvedValue(embedOk());
     const body = { mark: "bar", data: { values: [{ a: 1 }] } };
     renderI18n(<VizFence spec={JSON.stringify(body)} />);
     await waitFor(() => expect(embed).toHaveBeenCalledTimes(1));
+    expect(vi.mocked(embed).mock.calls[0]?.[1]).toEqual({
+      ...body,
+      width: "container",
+    });
+  });
+
+  it("respects an explicit spec width (no container override)", async () => {
+    vi.mocked(embed).mockResolvedValue(embedOk());
+    const body = { mark: "bar", width: 240, data: { values: [{ a: 1 }] } };
+    renderI18n(<VizFence spec={JSON.stringify(body)} />);
+    await waitFor(() => expect(embed).toHaveBeenCalledTimes(1));
     expect(vi.mocked(embed).mock.calls[0]?.[1]).toEqual(body);
+  });
+
+  it("keeps row/column-faceted specs at their default width", async () => {
+    // vega-lite rejects the "container" keyword on faceted plots (row/column
+    // channels or a top-level facet), so the default never applies to them.
+    vi.mocked(embed).mockResolvedValue(embedOk());
+    const row = { mark: "bar", encoding: { row: { field: "g" } }, data: { values: [{ a: 1 }] } };
+    renderI18n(<VizFence spec={JSON.stringify(row)} />);
+    await waitFor(() => expect(embed).toHaveBeenCalledTimes(1));
+    expect(vi.mocked(embed).mock.calls[0]?.[1]).toEqual(row);
+    const facet = { facet: { field: "g" }, spec: { mark: "bar" }, data: { values: [{ a: 1 }] } };
+    renderI18n(<VizFence spec={JSON.stringify(facet)} />);
+    await waitFor(() => expect(embed).toHaveBeenCalledTimes(2));
+    expect(vi.mocked(embed).mock.calls[1]?.[1]).toEqual(facet);
   });
 
   it("renders the heatmap rect mark (Decision 3)", async () => {
