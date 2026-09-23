@@ -920,6 +920,54 @@ fn a_length_capped_subagent_report_carries_the_truncation_marker() {
     );
 }
 
+/// The over-cap half of the same signal (issue #1047): a Length-capped
+/// sub-agent report LONGER than the excerpt cap still lands its tail
+/// marker on the delegation entry -- the landing reserves tail room for
+/// the marker through the cut -- and the entry's cap stamp keeps the
+/// notice through the reduced projection, where a plain success excerpt
+/// would empty.
+#[test]
+fn an_over_cap_capped_subagent_report_keeps_the_marker_through_the_landing() {
+    let mut h = Harness::new();
+    h.seed_result_1();
+    h.delegations = vec![analyst_spec()];
+    let long_report = "the sub answer cut mid-sentence ".repeat(20);
+    let model = MockCompletionModel::from_stream_turns([
+        batch_turn(
+            "delegate",
+            None,
+            &[("tu_d1", "analyst", json!({"prompt": "write a long report"}))],
+        ),
+        length_capped_text_turn(&long_report),
+        text_turn("main recovered the truncated report"),
+    ]);
+    let outcome = h.run(
+        &delegation_request(&h, "delegate"),
+        mock_runtime(model),
+        Arc::new(CancelToken::new()),
+    );
+    let row = &outcome.trace[0].calls[0];
+    assert!(row.success, "a capped report is still a completed run");
+    assert!(
+        row.output_truncated,
+        "the landing stamps the cap cut on the entry"
+    );
+    assert!(
+        row.result_excerpt
+            .ends_with(super::truncation::TRUNCATED_REPLY_MARKER),
+        "the marker rides the bounded excerpt's tail: {}",
+        row.result_excerpt
+    );
+    // The projection half: the flag keys the one success-excerpt exception
+    // in the reduced mapping, so every trace surface (the live event, the
+    // recorded view, the persisted recipe) renders the notice.
+    let view = crate::model::TraceEntryView::from(row);
+    assert_eq!(
+        view.result_excerpt, row.result_excerpt,
+        "the capped notice survives the reduced projection"
+    );
+}
+
 /// The delegation EOF-fault fixture (issue #1044): the main loop
 /// delegates, the sub-agent's first generation hits the accumulator's
 /// EOF-family fault, and the main loop recovers -- only the cap stamp

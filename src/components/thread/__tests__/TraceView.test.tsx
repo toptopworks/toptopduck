@@ -152,6 +152,56 @@ describe("LiveRow caption tokens (issue #826)", () => {
   });
 });
 
+describe("LiveRow excerpt gate (issue #1047)", () => {
+  it("renders a capped delegation's truncation notice under a success row, muted", () => {
+    // The one success whose excerpt survives the projection is a capped
+    // delegation report's marker-bearing notice (#1047): it renders under
+    // the check glyph muted -- the call completed, the answer was just cut
+    // -- while the failure excerpt keeps the destructive anchor styling.
+    const capped = renderWithProviders(
+      <LiveRow
+        row={rowWith({
+          approval: null,
+          running: false,
+          success: true,
+          resultExcerpt: "report head…\n\n[output truncated at the token cap]",
+        })}
+        onRespond={vi.fn()}
+      />,
+    );
+    const notice = capped.container.querySelector(".trace-excerpt");
+    expect(notice).not.toBeNull();
+    expect(notice).toHaveTextContent("[output truncated at the token cap]");
+    expect(notice).toHaveClass("text-muted-foreground");
+    const failed = renderWithProviders(
+      <LiveRow
+        row={rowWith({
+          approval: null,
+          running: false,
+          success: false,
+          resultExcerpt: "boom",
+        })}
+        onRespond={vi.fn()}
+      />,
+    );
+    expect(failed.container.querySelector(".trace-excerpt")).toHaveClass(
+      "text-destructive",
+    );
+    const clean = renderWithProviders(
+      <LiveRow
+        row={rowWith({
+          approval: null,
+          running: false,
+          success: true,
+          resultExcerpt: "",
+        })}
+        onRespond={vi.fn()}
+      />,
+    );
+    expect(clean.container.querySelector(".trace-excerpt")).toBeNull();
+  });
+});
+
 describe("LiveRow approval action row wrap (issue #862)", () => {
   it("wraps the action row so the trailing hint stays reachable in a narrow column", () => {
     // The Button base class carries whitespace-nowrap (button-variants.ts),

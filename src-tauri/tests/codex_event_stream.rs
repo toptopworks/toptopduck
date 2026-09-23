@@ -285,6 +285,7 @@ fn mcp_tool_call_rounds_settle_in_place_after_the_merge() {
         operation_kind: OperationKind::Execute,
         summary: format!("{name} gateway summary"),
         success: true,
+        output_truncated: false,
         result_excerpt: String::new(),
         sub_trace: None,
     };
