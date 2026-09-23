@@ -35,9 +35,10 @@
 //! reading while the verbatim detail after it keeps the evidence (the
 //! marker needs no hedge: `FinishReason::Length` is the endpoint's own
 //! assertion). The match gates on the error variant before any string is
-//! scanned (#1045): the wording can only ride the two string-carrying
-//! variants, so text embedded in an unrelated variant's Display never
-//! re-attributes however closely it matches.
+//! scanned (#1045): in production the wording originates only in the two
+//! string-carrying variants, and the gate additionally refuses to scan
+//! any other variant's Display, however closely the embedded text
+//! matches.
 
 use std::sync::{Arc, Mutex};
 
@@ -136,12 +137,13 @@ pub(crate) fn terminal_reply(text: String, finish_reason: Option<&FinishReason>)
 /// (issue #1003, narrowed per #1045): the EOF-family detail is
 /// truncation-shaped (the input ended mid-parse), and on a run whose
 /// request carried the cap stamp the honest attribution is the cap, not a
-/// JSON fault. The variant gate leads the string match: the accumulator's
-/// wording can only ride the two string-carrying variants --
-/// `ResponseError` (rig's accumulator on the live face, Display-prefixed
-/// by the `to_string` fallback) and `ProviderError` (the bridged face's
-/// verbatim relay) -- so detail embedded in any other variant's Display
-/// never re-attributes however closely it matches. Every other
+/// JSON fault. The variant gate leads the string match: in production
+/// the accumulator's wording originates only in the two string-carrying
+/// variants -- `ResponseError` (rig's accumulator on the live face,
+/// Display-prefixed by the `to_string` fallback) and `ProviderError`
+/// (the bridged face's verbatim relay) -- and the gate additionally
+/// refuses to scan any other variant's Display, however closely the
+/// embedded detail matches. Every other
 /// termination -- other details, other variants -- passes through
 /// untouched, preserving the #669 verbatim contract for genuine upstream
 /// errors.
