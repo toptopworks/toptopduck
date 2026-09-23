@@ -2,7 +2,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { waitFor } from "@testing-library/react";
 import { renderI18n, withIntl } from "../../common/__tests__/helpers";
 import { VegaChart } from "../VegaChart";
-import embed, { type VisualizationSpec } from "vega-embed";
+import embed from "vega-embed";
+import type { TopLevelSpec } from "vega-lite";
 
 // Vega-Embed needs a real canvas; jsdom has none, so the render is mocked. Each
 // test scripts a successful embed (finalize on unmount/spec change) or a rejected
@@ -15,7 +16,7 @@ describe("VegaChart (ADR-0016/0033/0050)", () => {
   // a render failure via onError so ResultView can degrade honestly. The
   // ResultView viz tests above drive the same mock through ResultView; these
   // cover VegaChart's own viewRef cleanup + onError path directly.
-  const barSpec = { mark: "bar" } as unknown as VisualizationSpec;
+  const barSpec = { mark: "bar" } as unknown as TopLevelSpec;
 
   beforeEach(() => {
     vi.clearAllMocks();
@@ -51,7 +52,7 @@ describe("VegaChart (ADR-0016/0033/0050)", () => {
     await waitFor(() => expect(embed).toHaveBeenCalledTimes(1));
     // A new spec identity re-runs the embed effect; the prior view is finalized
     // (cancelled branch if A is still pending, or overwrite-finalize if resolved).
-    const lineSpec = { mark: "line" } as unknown as VisualizationSpec;
+    const lineSpec = { mark: "line" } as unknown as TopLevelSpec;
     rerender(withIntl(<VegaChart spec={lineSpec} onError={() => {}} />));
     await waitFor(() => expect(embed).toHaveBeenCalledTimes(2));
     await waitFor(() => expect(finalizeA).toHaveBeenCalled());
@@ -120,11 +121,49 @@ describe("VegaChart (ADR-0016/0033/0050)", () => {
       vi.mocked(embed).mockResolvedValue(embedResultWith(view));
       const fire = stubResizeObserver();
       renderI18n(
-        <VegaChart spec={{ mark: "bar", width: 240 } as unknown as VisualizationSpec} onError={() => {}} />,
+        <VegaChart spec={{ mark: "bar", width: 240 } as unknown as TopLevelSpec} onError={() => {}} />,
       );
       await waitFor(() => expect(embed).toHaveBeenCalledTimes(1));
       fire(283);
       await waitFor(() => expect(view.resize).toHaveBeenCalled());
+      expect(view.signal).not.toHaveBeenCalled();
+    });
+
+    it("re-feeds an explicitly container-width spec (the keyword is honored)", async () => {
+      // An engine-written `width: "container"` compiles to the same
+      // window:resize-only signal as the injected default, so the observer
+      // must own it here too instead of filing it under fixed width.
+      const view = {
+        signal: vi.fn(),
+        runAsync: vi.fn().mockResolvedValue(undefined),
+        resize: vi.fn().mockResolvedValue(undefined),
+      };
+      vi.mocked(embed).mockResolvedValue(embedResultWith(view));
+      const fire = stubResizeObserver();
+      renderI18n(
+        <VegaChart spec={{ mark: "bar", width: "container" } as unknown as TopLevelSpec} onError={() => {}} />,
+      );
+      await waitFor(() => expect(embed).toHaveBeenCalledTimes(1));
+      fire(283);
+      await waitFor(() => expect(view.signal).toHaveBeenCalledWith("width", 283));
+      expect(view.resize).not.toHaveBeenCalled();
+    });
+
+    it("keeps the current width signal when the host reports zero width", async () => {
+      // ADR-0051 hide: the observer delivers width 0 while the pane is
+      // display:none -- the guard holds the last real width instead of
+      // feeding a zero in.
+      const view = {
+        signal: vi.fn(),
+        runAsync: vi.fn().mockResolvedValue(undefined),
+        resize: vi.fn().mockResolvedValue(undefined),
+      };
+      vi.mocked(embed).mockResolvedValue(embedResultWith(view));
+      const fire = stubResizeObserver();
+      renderI18n(<VegaChart spec={barSpec} onError={() => {}} />);
+      await waitFor(() => expect(embed).toHaveBeenCalledTimes(1));
+      fire(0);
+      expect(view.signal).not.toHaveBeenCalledWith("width", 0);
       expect(view.signal).not.toHaveBeenCalled();
     });
   });

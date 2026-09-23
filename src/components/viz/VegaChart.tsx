@@ -1,7 +1,8 @@
 import { useEffect, useRef } from "react";
 import { useIntl } from "react-intl";
-import embed, { type VisualizationSpec } from "vega-embed";
+import embed from "vega-embed";
 import type { Result } from "vega-embed";
+import type { TopLevelSpec } from "vega-lite";
 
 import { log } from "../../lib/log";
 import {
@@ -16,9 +17,12 @@ import type { VizFailureReason } from "./viz";
 //  1. CSS-var theme bridge (ADR-0050 Q12): the Vega config is derived at runtime
 //     from the same shadcn tokens the shell uses, rebuilt on each theme-change
 //     event so the chart flips with the .dark class.
-//  2. resize-on-unhide (ADR-0051 hidden-pane): a ResizeObserver calls
-//     view.resize() when the container goes from 0 -> nonzero size (pane unhide)
-//     so a chart rendered while hidden measures correctly once shown.
+//  2. resize tracking (ADR-0051 hidden-pane + container-width): a
+//     ResizeObserver follows the host's size -- a container-width view gets
+//     its width signal re-fed (vega-lite re-evaluates it on window:resize
+//     only, which a flex fold/unfold never fires), while a fixed-width view
+//     takes the plain view.resize() reflow so a chart rendered while hidden
+//     measures correctly once shown.
 //  3. finalize-on-unmount: every embed result is finalized so no Vega view /
 //     canvas leaks across result or theme switches.
 //  4. interactive defaults (vega-lite 6): vega-lite 6 dropped v5's default
@@ -71,36 +75,54 @@ function vegaConfig(theme: VegaThemeConfig): object {
   };
 }
 
-/** Prepare one spec for embedding: the spec to pass (widthless ones stretch
- * to the container instead of vega-lite's fixed per-band step) plus whether
- * the embedded view is container-width, so the resize observer and the embed
- * call read the same decision from one place. Faceted specs (row/column
- * channels or a top-level facet) keep their default width -- vega-lite
- * rejects the "container" keyword there. */
-function prepareEmbed(spec: VisualizationSpec): {
-  spec: VisualizationSpec;
+/** Prepare one spec for embedding: the spec to pass (widthless plain specs
+ * stretch to the container instead of vega-lite's fixed per-band step) plus
+ * whether the embedded view is container-width, so the resize observer and
+ * the embed call read the same decision from one place. Everything that owns
+ * its width passes through untouched: an explicit width other than
+ * "container", facets (row/column channels or a top-level facet), and
+ * composite concat/repeat layouts -- vega-lite warns and DROPS the
+ * "container" keyword on everything but single and layered views, and the
+ * warning rides the logger, never embed's rejection, so a misapplied
+ * injection would degrade silently. */
+function prepareEmbed(spec: TopLevelSpec): {
+  spec: TopLevelSpec;
   containerWidth: boolean;
 } {
-  const faceted =
-    ((): boolean => {
-      if ("width" in spec) return true;
-      const encoding = (spec as { encoding?: Record<string, unknown> }).encoding;
-      return Boolean(
-        encoding && ("row" in encoding || "column" in encoding),
-      ) || "facet" in spec;
-    })();
-  if (faceted) return { spec, containerWidth: false };
-  // vega-embed 7 types VisualizationSpec as vega's Spec (width: number |
-  // SignalRef), but the actual compiler here is vega-lite, whose top-level
-  // width also accepts the "container" keyword.
+  if ("width" in spec) {
+    // An explicit "container" keyword still needs the observer's re-feed;
+    // any other explicit width is a fixed one.
+    return {
+      spec,
+      containerWidth: (spec as { width?: number | string }).width === "container",
+    };
+  }
+  const encoding = (spec as { encoding?: Record<string, unknown> }).encoding;
+  const keepsDefaultWidth =
+    Boolean(encoding && ("row" in encoding || "column" in encoding)) ||
+    "facet" in spec ||
+    "vconcat" in spec ||
+    "hconcat" in spec ||
+    "concat" in spec ||
+    "repeat" in spec;
+  if (keepsDefaultWidth) return { spec, containerWidth: false };
+  // The spread over the TopLevelSpec union needs one syntax-level assertion
+  // to keep the result in the union; the "container" keyword itself is a
+  // legal vega-lite width on every arm that reaches here.
   return {
-    spec: { ...spec, width: "container" } as VisualizationSpec,
+    spec: { ...spec, width: "container" } as TopLevelSpec,
     containerWidth: true,
   };
 }
 
 interface VegaChartProps {
-  spec: VisualizationSpec;
+  /** Always a vega-lite spec in practice: both entry chains (the viz.ts
+   * decode gate, the VizChartSlot) only ever hand over vega-lite JSON, but
+   * the wire types stay bare `object` up that chain, so the fact is asserted
+   * once at the lazy door. vega-embed's VisualizationSpec union also admits
+   * vega's own VgSpec arm, which prepareEmbed's container-width injection
+   * would miscompile -- narrowing here keeps that arm out of the contract. */
+  spec: TopLevelSpec;
   /** Fired when Vega-Embed rejects (render failure). The caller swaps in the
    * degradation disclosure (ADR-0033). Carries a typed `{ kind: "render" }`
    * reason so the disclosure renders via the same catalog path as a decode

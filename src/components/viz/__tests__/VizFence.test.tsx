@@ -50,8 +50,9 @@ describe("VizFence (ADR-0120)", () => {
   });
 
   it("keeps row/column-faceted specs at their default width", async () => {
-    // vega-lite rejects the "container" keyword on faceted plots (row/column
-    // channels or a top-level facet), so the default never applies to them.
+    // vega-lite warns and drops the "container" keyword on faceted plots
+    // (row/column channels or a top-level facet) -- the warning rides the
+    // logger and never reaches onError -- so the default never applies.
     vi.mocked(embed).mockResolvedValue(embedOk());
     const row = { mark: "bar", encoding: { row: { field: "g" } }, data: { values: [{ a: 1 }] } };
     renderI18n(<VizFence spec={JSON.stringify(row)} />);
@@ -61,6 +62,28 @@ describe("VizFence (ADR-0120)", () => {
     renderI18n(<VizFence spec={JSON.stringify(facet)} />);
     await waitFor(() => expect(embed).toHaveBeenCalledTimes(2));
     expect(vi.mocked(embed).mock.calls[1]?.[1]).toEqual(facet);
+  });
+
+  it("keeps composite concat/repeat specs at their default width", async () => {
+    // Same warn-and-drop arm as facets: composite layouts have no top-level
+    // mark/encoding the faceted check could key on, so they are exempted by
+    // their layout keys instead of being misclassified as stretchable.
+    vi.mocked(embed).mockResolvedValue(embedOk());
+    const vconcat = {
+      vconcat: [{ mark: "bar" }, { mark: "point" }],
+      data: { values: [{ a: 1 }] },
+    };
+    renderI18n(<VizFence spec={JSON.stringify(vconcat)} />);
+    await waitFor(() => expect(embed).toHaveBeenCalledTimes(1));
+    expect(vi.mocked(embed).mock.calls[0]?.[1]).toEqual(vconcat);
+    const repeat = {
+      repeat: { field: "g" },
+      spec: { mark: "bar" },
+      data: { values: [{ a: 1 }] },
+    };
+    renderI18n(<VizFence spec={JSON.stringify(repeat)} />);
+    await waitFor(() => expect(embed).toHaveBeenCalledTimes(2));
+    expect(vi.mocked(embed).mock.calls[1]?.[1]).toEqual(repeat);
   });
 
   it("renders the heatmap rect mark (Decision 3)", async () => {
@@ -105,6 +128,12 @@ describe("VizFence (ADR-0120)", () => {
       new CustomEvent(THEME_CHANGE_EVENT, { detail: { effective: "dark" } }),
     );
     await waitFor(() => expect(embed).toHaveBeenCalledTimes(2));
+    // The theme re-embed rides the same container-width default, not the
+    // raw decoded spec.
+    expect(vi.mocked(embed).mock.calls[1]?.[1]).toEqual({
+      mark: "bar",
+      width: "container",
+    });
   });
 });
 
