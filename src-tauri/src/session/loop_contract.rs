@@ -132,15 +132,15 @@ pub struct TraceEntry {
     /// The call's outcome text stopped at the output cap (issue #1047):
     /// stamped by the delegation landing from the report builder's own cap
     /// flag (a success-arm fact), so it marks the one success whose
-    /// bounded excerpt is a truncation notice rather than data-bearing
-    /// payload -- the projections keep it where every other success
+    /// bounded excerpt carries the cap's truncation notice -- the
+    /// projections keep it where every other success
     /// empties (ADR-0078).
     pub output_truncated: bool,
     /// Bounded excerpt of the tool result content (or the denial / error
-    /// message), captured for BOTH success and failure at dispatch time. Only
-    /// the FAILED-call excerpt survives the persisted mapping (a success is
-    /// emptied -- the capped-report notice excepted, [`output_truncated`],
-    /// issue #1047 -- see [`RecipeTraceEntry::result_excerpt`]); the
+    /// message), captured for BOTH success and failure at dispatch time. The
+    /// FAILED-call excerpt survives the persisted mapping; a success excerpt
+    /// is emptied -- the capped-report notice excepted, [`output_truncated`],
+    /// issue #1047 -- see [`RecipeTraceEntry::result_excerpt`]; the
     /// in-memory form keeps the success payload for the loop's own
     /// next-turn context.
     pub result_excerpt: String,
@@ -175,7 +175,8 @@ pub(crate) const DENIED_BY_GATEWAY_CONTENT: &str = "tool call denied by the appr
 
 impl TraceEntry {
     /// A completed call's entry: `result_excerpt` carries the bounded success
-    /// payload (the loop's own next-turn context; the projections empty it).
+    /// payload (the loop's own next-turn context; the projections empty it --
+    /// the cap-stamped delegation entry excepted, issue #1047).
     pub fn succeeded(
         tool_use_id: impl Into<String>,
         name: impl Into<String>,
@@ -308,7 +309,8 @@ impl RecipeTraceRound {
 impl RecipeTraceEntry {
     /// Map a live in-memory [`TraceEntry`] to its persisted recipe form
     /// (ADR-0078, issue #319): the reduced projection (drop the in-memory
-    /// `tool_use_id`, empty a success call's excerpt, keep a failure's message)
+    /// `tool_use_id`, empty a success call's excerpt -- the cap-stamped
+    /// delegation entry excepted, issue #1047 -- and keep a failure's message)
     /// is the persisted shape verbatim -- the surviving strings stay bounded at
     /// capture time (`summarize_field` / `TRACE_EXCERPT_MAX`), so no
     /// re-truncation. Named (not `From`) to make the lossy + conditional
@@ -634,6 +636,30 @@ mod tests {
             RecipeTraceEntry::from_live_trace(&entry).result_excerpt,
             excerpt,
             "the persisted mapping keeps the capped report's notice"
+        );
+    }
+
+    /// The persisted half of the same exception (issue #1047): the recipe
+    /// form carries no flag, so a capped success's non-empty excerpt IS the
+    /// notice -- the resume projection copies it verbatim. This pins that
+    /// convention where a future rehydration through the in-memory form
+    /// (flag defaulting false) would otherwise silently empty it.
+    #[test]
+    fn a_persisted_capped_row_keeps_its_excerpt_through_the_resume_projection() {
+        let excerpt = "report head…\n\n[output truncated at the token cap]".to_string();
+        let mut entry = TraceEntry::succeeded(
+            "tu_1",
+            "analyst",
+            OperationKind::Execute,
+            "count the rows",
+            excerpt.clone(),
+        );
+        entry.output_truncated = true;
+        let persisted = RecipeTraceEntry::from_live_trace(&entry);
+        assert_eq!(
+            TraceEntryView::from(&persisted).result_excerpt,
+            excerpt,
+            "the resumed mapping keeps the persisted notice verbatim"
         );
     }
 

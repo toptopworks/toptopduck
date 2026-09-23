@@ -563,8 +563,9 @@ fn land_delegation_entry(
     };
     // The cap-cut stamp (issue #1047): keys the projections' exception --
     // the capped report's marker-bearing notice survives where every
-    // other success excerpt empties (ADR-0078).
-    entry.output_truncated = capped;
+    // other success excerpt empties (ADR-0078). The conjunction keeps the
+    // stamp a success-arm fact: a failure never carries it.
+    entry.output_truncated = success && capped;
     // The nested sub-trace (ADR-0117 Decision 6, issue #934): the sub-agent's
     // rounds hang under the delegation entry. Absent when the run produced
     // none -- a refused (blank prompt / batch cap) or never-started

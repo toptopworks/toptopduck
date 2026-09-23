@@ -491,7 +491,8 @@ pub struct TraceEntryView {
     /// denial) routes back to the agent (ADR-0077); the trace records it.
     pub success: bool,
     /// Bounded excerpt of a FAILED call's result (error / denial message);
-    /// empty for a successful call.
+    /// empty for a successful call -- the capped delegation report's
+    /// truncation notice excepted (issue #1047).
     pub result_excerpt: String,
     /// The delegation entry's nested sub-trace (ADR-0117 Decision 6, issue
     /// #934): the sub-agent's rounds under the same slim projection the

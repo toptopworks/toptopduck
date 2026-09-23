@@ -173,6 +173,10 @@ describe("LiveRow excerpt gate (issue #1047)", () => {
     expect(notice).not.toBeNull();
     expect(notice).toHaveTextContent("[output truncated at the token cap]");
     expect(notice).toHaveClass("text-muted-foreground");
+    // The two stylings are mutually exclusive (cn dedupes the family), and
+    // the negative assertion keeps it that way through any regression to
+    // plain concatenation.
+    expect(notice).not.toHaveClass("text-destructive");
     const failed = renderWithProviders(
       <LiveRow
         row={rowWith({
@@ -184,9 +188,9 @@ describe("LiveRow excerpt gate (issue #1047)", () => {
         onRespond={vi.fn()}
       />,
     );
-    expect(failed.container.querySelector(".trace-excerpt")).toHaveClass(
-      "text-destructive",
-    );
+    const failedExcerpt = failed.container.querySelector(".trace-excerpt");
+    expect(failedExcerpt).toHaveClass("text-destructive");
+    expect(failedExcerpt).not.toHaveClass("text-muted-foreground");
     const clean = renderWithProviders(
       <LiveRow
         row={rowWith({

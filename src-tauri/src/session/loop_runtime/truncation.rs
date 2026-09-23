@@ -148,8 +148,14 @@ pub(crate) fn terminal_reply(text: String, finish_reason: Option<&FinishReason>)
 /// when the report ran long -- the over-cap shape whose signal the trace
 /// surfaces must keep. Reserve tail room for the marker before the cut so
 /// the bounded excerpt still ends with it; an unmarked report truncates
-/// through the plain excerpt path, unchanged.
+/// through the plain excerpt path, unchanged. Markedness at this stage
+/// keys on the marker suffix in the text itself -- the entry's flag keys
+/// the projections' half.
 pub(crate) fn marked_reply_excerpt(report: &str, max: usize) -> String {
+    debug_assert!(
+        max > TRUNCATED_REPLY_MARKER.chars().count(),
+        "the excerpt cap must exceed the marker or the bounded result cannot carry it"
+    );
     match report.strip_suffix(TRUNCATED_REPLY_MARKER) {
         Some(body) => format!(
             "{}{TRUNCATED_REPLY_MARKER}",
@@ -295,6 +301,24 @@ mod tests {
             marked_reply_excerpt(&plain, TRACE_EXCERPT_MAX),
             truncate_trace_excerpt(&plain, TRACE_EXCERPT_MAX)
         );
+    }
+
+    /// The reserve's boundary (issue #1047): a body sized exactly to the
+    /// reserved room passes through whole -- the report fits the cap with
+    /// its marker and no ellipsis, so the reserve never costs a cut that
+    /// was not needed.
+    #[test]
+    fn a_report_sized_exactly_to_the_reserved_room_passes_whole() {
+        let body_len = TRACE_EXCERPT_MAX - TRUNCATED_REPLY_MARKER.chars().count();
+        let report = format!("{}{TRUNCATED_REPLY_MARKER}", "c".repeat(body_len));
+        let excerpt = marked_reply_excerpt(&report, TRACE_EXCERPT_MAX);
+        assert_eq!(excerpt, report, "the exactly-full report is verbatim");
+        assert_eq!(
+            excerpt.chars().count(),
+            TRACE_EXCERPT_MAX,
+            "the verbatim pass lands exactly on the cap"
+        );
+        assert!(!excerpt.contains('…'), "no ellipsis on an uncut report");
     }
 
     #[test]
