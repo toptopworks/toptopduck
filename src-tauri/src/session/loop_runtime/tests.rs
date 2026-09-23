@@ -18,8 +18,9 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use rig_agent::agent::model::ModelHandle;
-use rig_core::completion::Message;
+use rig_core::completion::{FinishReason, Message, Usage};
 use rig_core::message::UserContent;
+use rig_core::streaming::StreamFinal;
 use rig_core::test_utils::{MockCompletionModel, MockStreamEvent};
 
 use serde_json::{json, Value as JsonValue};
@@ -68,6 +69,17 @@ fn text_turn(text: &str) -> Vec<MockStreamEvent> {
     vec![
         MockStreamEvent::text(text),
         MockStreamEvent::final_response_with_default_usage(),
+    ]
+}
+
+/// Script one terminal text turn that stopped at the output-token cap
+/// (issue #1003): the stream terminal carries `FinishReason::Length`.
+fn length_capped_text_turn(text: &str) -> Vec<MockStreamEvent> {
+    vec![
+        MockStreamEvent::text(text),
+        MockStreamEvent::FinalResponse(
+            StreamFinal::new("mock", Usage::new()).with_finish_reason(FinishReason::Length),
+        ),
     ]
 }
 
@@ -733,6 +745,32 @@ fn the_seam_stamp_reaches_the_subagent_contexts_cap() {
     // request -- the assembled 512 appears in neither.
     assert_eq!(requests[0].max_tokens, Some(2048));
     assert_eq!(requests[1].max_tokens, Some(2048));
+}
+
+/// A terminal reply that stopped at the output cap carries the explicit
+/// truncation marker (issue #1003): the Length reason rides rig's stream
+/// terminal, the hook seam records it, and the reply mapping appends the
+/// marker to the otherwise-verbatim reply. Every other finish shape keeps
+/// the plain text (the suites asserting plain `Termination::Text` replies
+/// pin that arm).
+#[test]
+fn length_capped_terminal_reply_carries_the_truncation_marker() {
+    let mut h = Harness::new();
+    let model = MockCompletionModel::from_stream_turns([length_capped_text_turn(
+        "Here is the first half of the answ",
+    )]);
+    let outcome = h.run(
+        &h.request("write something long"),
+        mock_runtime(model),
+        Arc::new(CancelToken::new()),
+    );
+    assert_eq!(
+        outcome.termination,
+        Termination::Text(format!(
+            "Here is the first half of the answ{}",
+            super::truncation::TRUNCATED_REPLY_MARKER
+        ))
+    );
 }
 
 /// Dispatch call ids mint uuid-backed: uniqueness is intrinsic to the

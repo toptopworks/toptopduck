@@ -4,7 +4,8 @@
 //! splitting, thinking-loss 400s) made it unservable; ADR-0116 records the
 //! full decision. Borrow the kernel, not
 //! the framework: rig's completion / streaming / tool surfaces drive; rig's
-//! hooks carry exactly one (the cancel watcher), memory is absent
+//! hooks carry two (the cancel watcher's checkpoints and the passive
+//! finish-reason observer), memory is absent
 //! (`without_memory` semantics -- the app owns the window), `ToolContext`
 //! stays blank, and model selection is the single model this runtime was
 //! built with.
@@ -32,6 +33,7 @@ mod fold;
 mod live;
 mod model;
 mod subagent;
+mod truncation;
 
 #[cfg(test)]
 mod tests;
@@ -264,6 +266,7 @@ impl LoopRuntime {
                             return DriveOutcome {
                                 fold,
                                 exit: DriveExit::Done,
+                                finish_reason: None,
                             };
                         }
                     };
@@ -424,12 +427,17 @@ impl LoopRuntime {
             // A driver panic swaps in a fresh fold below: the finish-time
             // pairing assert is exempted for the replacement (#321).
             let fold_replaced = joined.is_err();
-            let DriveOutcome { mut fold, exit } = joined.unwrap_or_else(|payload| {
+            let DriveOutcome {
+                mut fold,
+                exit,
+                finish_reason,
+            } = joined.unwrap_or_else(|payload| {
                 *state.aborted.lock().expect("aborted lock poisoned") =
                     Some(panic_to_transient("loop runtime driver", &*payload));
                 DriveOutcome {
                     fold: EventFold::new(),
                     exit: DriveExit::Done,
+                    finish_reason: None,
                 }
             });
             // Release the watcher thread: the drive is over, its notify
@@ -458,10 +466,23 @@ impl LoopRuntime {
                     StreamingError::Prompt(err) => {
                         termination_for_prompt(&err, self.step_cap, clock.as_ref())
                     }
-                    StreamingError::Completion(err) => termination_for_completion(&err),
+                    // The tool-input truncation shape (issue #1003): rig's
+                    // accumulator pre-empts the completion event that carried
+                    // the Length bit, so the parse error is the only trace of
+                    // the cap cut -- re-attributed on cap-stamped runs (the
+                    // live face and the test seam; the bridged production
+                    // face keeps `None` and its verbatim detail).
+                    StreamingError::Completion(err) => {
+                        truncation::reattribute_tool_input_truncation(
+                            termination_for_completion(&err),
+                            self.output_cap.is_some(),
+                        )
+                    }
                 },
                 DriveExit::Done => match fold.final_output.take() {
-                    Some(text) => Termination::Text(text),
+                    // The terminal reply's Length stop surfaces as an
+                    // explicit marker (issue #1003), not a silent success.
+                    Some(text) => truncation::terminal_reply(text, finish_reason.as_ref()),
                     None => {
                         Termination::Transient("loop runtime ended without a reply".to_string())
                     }
@@ -605,10 +626,13 @@ enum DriveExit {
     Abandoned,
 }
 
-/// The driver's product: the event fold plus its exit cause.
+/// The driver's product: the event fold plus its exit cause, plus the
+/// last model turn's finish reason (the hook seam's record, issue #1003)
+/// -- `None` when no turn completed or the reason went unreported.
 struct DriveOutcome {
     fold: EventFold,
     exit: DriveExit,
+    finish_reason: Option<rig_core::completion::FinishReason>,
 }
 
 /// Drive the rig loop: build the agent (preamble + gateway tools + the one
@@ -655,6 +679,7 @@ async fn drive_turn(inputs: DriveInputs) -> DriveOutcome {
         None => {
             return DriveOutcome {
                 fold: EventFold::new(),
+                finish_reason: None,
                 exit: DriveExit::Error(StreamingError::Completion(
                     rig_core::completion::CompletionError::ProviderError(
                         "empty turn request: no prompt message".to_string(),
@@ -735,6 +760,7 @@ async fn drive_turn(inputs: DriveInputs) -> DriveOutcome {
         .max_tokens(request.max_tokens as u64)
         .dynamic_tools(tools)
         .build();
+    let (finish_watcher, finish_record) = truncation::FinishReasonWatcher::new();
     let mut stream = StreamingPromptRequest::from_agent(&agent, prompt)
         .history(history)
         .max_turns(step_cap as usize)
@@ -753,6 +779,10 @@ async fn drive_turn(inputs: DriveInputs) -> DriveOutcome {
         // unreachable).
         .without_memory()
         .add_hook(CancelWatcher::new(token, clock.clone(), Arc::clone(&state)))
+        // The finish-reason observer (issue #1003): the Length signal never
+        // crosses onto the fold's `MultiTurnStreamItem` face, so the hook
+        // seam is where the driver learns how the (last) turn stopped.
+        .add_hook(finish_watcher)
         .into_future()
         .await;
     let mut fold = EventFold::new();
@@ -787,7 +817,11 @@ async fn drive_turn(inputs: DriveInputs) -> DriveOutcome {
     // The stream is over: land whatever the last turn left waiting (a
     // thinking-only terminal reply's trailing round).
     fold.finish();
-    DriveOutcome { fold, exit }
+    DriveOutcome {
+        fold,
+        exit,
+        finish_reason: finish_record.last(),
+    }
 }
 
 /// Assemble the final [`LoopOutcome`]: drain the completed queue a cancellation may have
