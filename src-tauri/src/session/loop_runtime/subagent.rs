@@ -76,12 +76,14 @@ use crate::cancel::CancelToken;
 use crate::model::TurnPhase;
 use crate::provider::tool_calling::ToolDefinition;
 use crate::session::loop_contract::{
-    retain_landed_rounds, truncate_trace_excerpt, LoopRound, TraceEntry, TRACE_EXCERPT_MAX,
+    retain_landed_rounds, truncate_trace_excerpt, LoopRound, Termination, TraceEntry,
+    TRACE_EXCERPT_MAX,
 };
 use crate::session::progress::ProgressClock;
 
 use super::adapter::{emit_phase, next_call_id, DispatchRequest, PhaseSink, SharedTurnState};
 use super::cancel::CancelWatcher;
+use super::truncation;
 use super::EventFold;
 
 /// Everything a delegation callback needs to run its sub-agent, shared by
@@ -103,6 +105,12 @@ pub(crate) struct SubagentCtx {
     pub(crate) protocol: Option<crate::model::Protocol>,
     pub(crate) thought_level: Option<String>,
     pub(crate) max_tokens: u64,
+    /// The #1001 cap stamp's PRESENCE (issue #1044): the sub-agent
+    /// inherits the stamped cap VALUE through `max_tokens`, but the
+    /// truncation re-attribution keys on the stamp's presence -- the
+    /// bridged face's assembled default is not a #1001 cap, and its
+    /// EOF-family faults keep the verbatim detail (#669).
+    pub(crate) cap_stamped: bool,
     /// The subtracted face (ADR-0117 Decision 4, calibrated by ADR-0119
     /// Decision 4), precomputed once per turn: the turn's tool table minus
     /// every delegation tool minus `invoke_skill` (subagents stay excluded
@@ -239,6 +247,9 @@ struct SubagentRun {
     channel: Arc<super::adapter::CompletionChannel>,
     promotions_before: usize,
     fold: EventFold,
+    /// The driver's reader half of the finish-reason pair (issue #1044):
+    /// read once the stream ends, to mark a Length-stopped final report.
+    finish_record: truncation::FinishReasonRecord,
     armed: bool,
 }
 
@@ -290,10 +301,18 @@ fn finish_run(run: &mut SubagentRun, exit: RunExit) -> SubagentReport {
     // Promotions still ride the shared list: a sub-agent's `result_N` lands
     // on the working set regardless of the sub-agent's fate.
     let promoted = promoted_since(&run.ctx.state, run.promotions_before);
+    // Read once, above the exit match: the Done arm owns the record
+    // (the failure arms never consult it), and every arm sees the
+    // same already-taken view.
+    let finish_reason = run.finish_record.last();
     match exit {
         RunExit::Done => match run.fold.final_output.take() {
+            // The final report's Length stop surfaces as the same explicit
+            // marker the main reply mapping appends (issue #1044): the
+            // report feeds back as tool text, so a cap-cut report must not
+            // read as a finished one.
             Some(text) => SubagentReport {
-                text,
+                text: truncation::marked_reply(text, finish_reason.as_ref()),
                 success: true,
                 rounds,
             },
@@ -307,7 +326,10 @@ fn finish_run(run: &mut SubagentRun, exit: RunExit) -> SubagentReport {
             },
         },
         RunExit::Failed(err) => SubagentReport {
-            text: failure_text_with_orphans(&subagent_failure_text(&err), &promoted),
+            text: failure_text_with_orphans(
+                &subagent_failure_text(&err, run.ctx.cap_stamped),
+                &promoted,
+            ),
             success: false,
             rounds,
         },
@@ -382,6 +404,7 @@ async fn run_subagent(spec: &DelegationSpec, task: &str, ctx: &Arc<SubagentCtx>)
         .max_tokens(ctx.max_tokens)
         .dynamic_tools(tools)
         .build();
+    let (finish_watcher, finish_record) = truncation::FinishReasonWatcher::new();
     let prompt =
         super::model::to_rig_history(&[crate::provider::tool_calling::ToolTurnMessage::user(task)])
             .pop()
@@ -399,6 +422,11 @@ async fn run_subagent(spec: &DelegationSpec, task: &str, ctx: &Arc<SubagentCtx>)
             ctx.clock.clone(),
             Arc::clone(&ctx.state),
         ))
+        // The finish-reason observer (issue #1044): the sub-agent's final
+        // report feeds back to the main model as tool text, so how its
+        // last turn stopped is read off the same hook seam the main loop's
+        // watcher rides.
+        .add_hook(finish_watcher)
         .into_future()
         .await;
     let noop_sink: PhaseSink = Arc::new(Mutex::new(|_phase: TurnPhase| {}));
@@ -415,6 +443,7 @@ async fn run_subagent(spec: &DelegationSpec, task: &str, ctx: &Arc<SubagentCtx>)
         channel: Arc::clone(&channel),
         promotions_before,
         fold: EventFold::new(),
+        finish_record,
         armed: true,
     };
     let exit = loop {
@@ -450,7 +479,13 @@ fn promoted_since(state: &SharedTurnState, before: usize) -> Vec<String> {
 /// loop's termination mapping but as tool-result text -- the main turn
 /// keeps running). A cancel (the forwarded token) words itself as an
 /// abort: the main loop's next checkpoint owns the Cancelled landing.
-fn subagent_failure_text(err: &StreamingError) -> String {
+/// The completion arm rides the main loop's own termination mapping plus
+/// the #1003 re-attribution (issue #1044): on a cap-stamped turn the
+/// accumulator's EOF-family fault reads as the output truncation it is,
+/// and the transient detail lands in the same wording the main turn
+/// would -- while the not-wired / invalid-config classes carry no
+/// transient text and keep the verbatim Display.
+fn subagent_failure_text(err: &StreamingError, cap_stamped: bool) -> String {
     match err {
         StreamingError::Prompt(prompt) => match prompt.as_ref() {
             rig_agent::completion::PromptError::MaxTurnsError { .. } => format!(
@@ -470,7 +505,13 @@ fn subagent_failure_text(err: &StreamingError) -> String {
                 format!("sub-agent failed: conversation memory failed: {err}")
             }
         },
-        StreamingError::Completion(err) => format!("sub-agent failed: {err}"),
+        StreamingError::Completion(err) => match truncation::reattribute_tool_input_truncation(
+            super::termination_for_completion(err),
+            cap_stamped,
+        ) {
+            Termination::Transient(detail) => format!("sub-agent failed: {detail}"),
+            _ => format!("sub-agent failed: {err}"),
+        },
     }
 }
 
@@ -546,6 +587,7 @@ pub(crate) fn subagent_ctx(
     protocol: Option<crate::model::Protocol>,
     thought_level: Option<String>,
     max_tokens: u64,
+    cap_stamped: bool,
     tools: &[ToolDefinition],
     delegation_names: &std::collections::BTreeSet<&str>,
 ) -> Arc<SubagentCtx> {
@@ -559,6 +601,7 @@ pub(crate) fn subagent_ctx(
         protocol,
         thought_level,
         max_tokens,
+        cap_stamped,
         sub_face: subagent_tool_face(tools, delegation_names),
     })
 }

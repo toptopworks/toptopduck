@@ -824,6 +824,140 @@ fn length_capped_terminal_reply_carries_the_truncation_marker() {
     );
 }
 
+/// The sub-agent's Length-capped terminal reply surfaces through the
+/// truncation marker (issue #1044): the sub-agent's final report feeds
+/// back to the main model as the delegation tool's text result, so a
+/// cap-cut report must not read as a finished one -- the same marker the
+/// main reply mapping appends rides the report, and the main turn keeps
+/// running either way (ADR-0117 Decision 5's tool-level vocabulary).
+#[test]
+fn a_length_capped_subagent_report_carries_the_truncation_marker() {
+    let mut h = Harness::new();
+    h.seed_result_1();
+    h.delegations = vec![analyst_spec()];
+    let model = MockCompletionModel::from_stream_turns([
+        batch_turn(
+            "delegate",
+            None,
+            &[("tu_d1", "analyst", json!({"prompt": "write a long report"}))],
+        ),
+        length_capped_text_turn("the sub answer cut mid-sentence"),
+        text_turn("main recovered the truncated report"),
+    ]);
+    let outcome = h.run(
+        &delegation_request(&h, "delegate"),
+        mock_runtime(model),
+        Arc::new(CancelToken::new()),
+    );
+    assert_eq!(
+        outcome.termination,
+        Termination::Text("main recovered the truncated report".into()),
+        "the capped sub-agent report is a tool-level fact, not a turn fault"
+    );
+    let row = &outcome.trace[0].calls[0];
+    assert_eq!(row.name, "analyst");
+    assert!(row.success, "a capped report is still a completed run");
+    assert!(
+        row.result_excerpt
+            .contains(super::truncation::TRUNCATED_REPLY_MARKER),
+        "the capped report carries the marker: {}",
+        row.result_excerpt
+    );
+}
+
+/// The delegation EOF-fault fixture (issue #1044): the main loop
+/// delegates, the sub-agent's first generation hits the accumulator's
+/// EOF-family fault, and the main loop recovers -- only the cap stamp
+/// and the recovery wording differ between the two arms of the pin
+/// below.
+fn delegation_eof_fault_provider(recovery: &str) -> BlockingProvider {
+    BlockingProvider::new(vec![
+        Ok(ToolTurnOutcome {
+            thinking: Vec::new(),
+            reply: ToolTurnReply::ToolCalls {
+                text: None,
+                calls: vec![crate::provider::tool_calling::ToolUse {
+                    id: "tu_d1".into(),
+                    name: "analyst".into(),
+                    input: json!({"prompt": "try to explore"}),
+                }],
+            },
+        }),
+        Err(ProviderError::Unavailable(
+            ACCUMULATOR_EOF_DETAIL.to_string(),
+        )),
+        Ok(ToolTurnOutcome {
+            thinking: Vec::new(),
+            reply: ToolTurnReply::Text(recovery.into()),
+        }),
+    ])
+}
+
+/// The sub-agent's tool-input truncation shape (issue #1044): on a
+/// cap-stamped turn the accumulator's EOF-family fault re-attributes as
+/// an output truncation in the delegation row too -- the stamp's PRESENCE
+/// rides the sub-agent context (the cap value always did, through
+/// `max_tokens`), so the sub-agent's inherited cap gets the same honest
+/// attribution the main turn's #1003 wiring gives its own run.
+#[test]
+fn a_stamped_subagent_run_reattributes_the_accumulator_eof_fault() {
+    let mut h = Harness::new();
+    h.seed_result_1();
+    h.delegations = vec![analyst_spec()];
+    let outcome = h.run(
+        &delegation_request(&h, "delegate then survive"),
+        bridged_runtime(Arc::new(delegation_eof_fault_provider(
+            "recovered after the truncation fault",
+        )))
+        .with_output_cap(2048),
+        Arc::new(CancelToken::new()),
+    );
+    assert_eq!(
+        outcome.termination,
+        Termination::Text("recovered after the truncation fault".into()),
+        "the re-attributed fault stays tool-level"
+    );
+    let row = &outcome.trace[0].calls[0];
+    assert!(!row.success);
+    assert!(
+        row.result_excerpt
+            .contains("output truncated at the token cap"),
+        "the stamped sub-agent run re-attributes the EOF fault: {}",
+        row.result_excerpt
+    );
+    assert!(
+        row.result_excerpt.contains("sub-agent failed"),
+        "the failure vocabulary stays: {}",
+        row.result_excerpt
+    );
+
+    // Stamp-less (the bridged production shape): the same fault keeps its
+    // verbatim passthrough -- #669's contract holds on the delegation
+    // row's error face exactly as it does on the main turn's.
+    let mut h = Harness::new();
+    h.seed_result_1();
+    h.delegations = vec![analyst_spec()];
+    let outcome = h.run(
+        &delegation_request(&h, "delegate then survive"),
+        bridged_runtime(Arc::new(delegation_eof_fault_provider(
+            "recovered after the verbatim fault",
+        ))),
+        Arc::new(CancelToken::new()),
+    );
+    assert_eq!(
+        outcome.termination,
+        Termination::Text("recovered after the verbatim fault".into())
+    );
+    let row = &outcome.trace[0].calls[0];
+    assert!(!row.success);
+    assert!(
+        row.result_excerpt
+            .contains(&format!("sub-agent failed: {ACCUMULATOR_EOF_DETAIL}")),
+        "without the stamp the detail passes through verbatim: {}",
+        row.result_excerpt
+    );
+}
+
 /// Dispatch call ids mint uuid-backed: uniqueness is intrinsic to the
 /// mint, never an artifact of counter scope (#922 retired the per-turn
 /// `gateway-0` collisions a scoped counter minted). This pin holds the
@@ -2607,6 +2741,16 @@ fn a_mixed_batch_keeps_every_main_row_identity() {
     assert!(
         round1.calls[1].result_excerpt.contains("sub reported"),
         "the delegation row carries the report: {}",
+        round1.calls[1].result_excerpt
+    );
+    // A clean report (its last turn stopped normally) carries no marker:
+    // the marker keys on the observed Length stop alone, never on the
+    // run merely having finished.
+    assert!(
+        !round1.calls[1]
+            .result_excerpt
+            .contains(super::truncation::TRUNCATED_REPLY_MARKER),
+        "a clean report carries no truncation marker: {}",
         round1.calls[1].result_excerpt
     );
     let round2 = &outcome.trace[1];

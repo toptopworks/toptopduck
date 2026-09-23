@@ -739,6 +739,7 @@ async fn drive_turn(inputs: DriveInputs) -> DriveOutcome {
             protocol,
             request.thought_level.clone(),
             request.max_tokens as u64,
+            output_cap.is_some(),
             &request.tools,
             &delegation_names,
         );
