@@ -19,7 +19,7 @@ import {
 } from "../../../api";
 import type { AppConfig } from "../../../types/app-config";
 import type { AdapterEntry } from "../../../types/runtime";
-import type { SettingsSection } from "../sections";
+import type { SettingsSection, WorkspaceExitIntent } from "../sections";
 import { chooseOption, openSelect, renderSettings } from "./helpers";
 import { baseAppConfig, scanResult } from "../../../test-fixtures";
 
@@ -187,7 +187,7 @@ describe("SettingsView (ADR-0075 per-control persistence + rail chrome)", () => 
     onSessionsDirChanged?: (cfg: AppConfig) => void;
     onDefaultRuntimeChanged?: (cfg: AppConfig) => void;
     onCliToolsChanged?: (cfg: AppConfig) => void;
-    onClose?: () => void;
+    onClose?: (intent?: WorkspaceExitIntent) => void;
     initialSection?: SettingsSection;
   } = {}) {
     const result = renderSettings(
@@ -611,21 +611,27 @@ describe("SettingsView (ADR-0075 per-control persistence + rail chrome)", () => 
     // from the gear, which shares its accessible name).
     fireEvent.click(container.querySelector(".settings-back") as HTMLElement);
     await waitFor(() => expect(onClose).toHaveBeenCalledTimes(1));
+    // A plain exit carries no intent -- only the skills pane's New does
+    // (issue #1040), and the shell must not stage from a plain exit.
+    expect(onClose).toHaveBeenCalledWith(undefined);
   });
 
   // --- Skills pane: the New exit (issue #1033) ------------------------------
 
-  it("New on the skills pane closes the overlay through the single close path", async () => {
+  it("New on the skills pane closes the overlay through the single close path, carrying the create intent", async () => {
     // The render-through pin (issue #1039): the prop-level call is pinned in
     // SkillsSection.test, but the SettingsView wiring itself -- render the
     // skills pane, click New, the busy-gated requestClose reaches onClose --
-    // had no guard, so a wiring regression dodged every suite.
+    // had no guard, so a wiring regression dodged every suite. Issue #1040
+    // adds the intent payload: the shell stages skill-creator only from this
+    // exit, so the intent must survive the busy-gated path.
     vi.mocked(listSkills).mockResolvedValue({ skills: [], ignored: [], root_error: null });
     vi.mocked(getSkillsDir).mockResolvedValue("/roots/skills");
     vi.mocked(rescanBuiltinCliTools).mockResolvedValue(scanResult());
     const { onClose } = renderView({ initialSection: "skills" });
     fireEvent.click(await screen.findByRole("button", { name: "New" }));
     await waitFor(() => expect(onClose).toHaveBeenCalledTimes(1));
+    expect(onClose).toHaveBeenCalledWith("new-skill");
   });
 
   // --- Profiles pane: auto-persist + structural ops (ADR-0075) -------------

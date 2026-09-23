@@ -81,7 +81,7 @@ function renderPane() {
   return renderWithProviders(
     <SkillsSection
       onAppConfigSync={() => {}}
-      onExitToWorkspace={() => {}}
+      onNewSkill={() => {}}
     />,
   );
 }
@@ -121,7 +121,7 @@ describe("SkillsSection (issue #362)", () => {
     renderWithProviders(
       <SkillsSection
         onAppConfigSync={onAppConfigSync}
-        onExitToWorkspace={() => {}}
+        onNewSkill={() => {}}
       />,
     );
     // The user write lands while the mount rescan is still in flight.
@@ -166,7 +166,7 @@ describe("SkillsSection (issue #362)", () => {
     renderWithProviders(
       <SkillsSection
         onAppConfigSync={onAppConfigSync}
-        onExitToWorkspace={() => {}}
+        onNewSkill={() => {}}
       />,
     );
     const row = await screen.findByTestId("skill-row");
@@ -274,24 +274,27 @@ describe("SkillsSection (issue #362)", () => {
     expect(screen.queryByText("pdf-tools")).not.toBeInTheDocument();
   });
 
-  it("filters local and linked rows through the acquired filter", async () => {
-    // The Radix Select's local/linked arms (the AgentsSection filter
-    // posture, driven through the shared pointer helpers): each arm hides
-    // the other source's rows while the row under test stays visible. The
-    // builtin arm is pinned separately in skills-builtin.
-    vi.mocked(listSkills).mockResolvedValue({ skills: [localSkill, linkedSkill], ignored: [], root_error: null });
+  it("filters enabled and disabled rows through the status filter", async () => {
+    // The shared enabled-axis trio (the Agents/MCP filter posture, driven
+    // through the shared pointer helpers): each arm hides the other
+    // state's rows while the row under test stays visible.
+    vi.mocked(listSkills).mockResolvedValue({
+      skills: [localSkill, { ...linkedSkill, enabled: false }],
+      ignored: [],
+      root_error: null,
+    });
     renderPane();
     expect(await screen.findByText("pdf-tools")).toBeInTheDocument();
     expect(screen.getByText("external-skill")).toBeInTheDocument();
 
-    const filter = screen.getByLabelText("Filter by skill type");
+    const filter = screen.getByLabelText("Filter by status");
     openSelect(filter);
-    chooseOption("Local");
+    chooseOption("Enabled");
     expect(screen.getByText("pdf-tools")).toBeInTheDocument();
     expect(screen.queryByText("external-skill")).toBeNull();
 
     openSelect(filter);
-    chooseOption("Linked");
+    chooseOption("Disabled");
     expect(screen.queryByText("pdf-tools")).toBeNull();
     expect(screen.getByText("external-skill")).toBeInTheDocument();
   });
@@ -566,22 +569,23 @@ describe("SkillsSection (issue #362)", () => {
     expect(screen.getByRole("dialog")).toBeInTheDocument();
   });
 
-  it("exits straight to the workspace from the New button", async () => {
+  it("routes the New click to the create intent (#1040)", async () => {
     vi.mocked(listSkills).mockResolvedValue({ skills: [], ignored: [], root_error: null });
-    const onExitToWorkspace = vi.fn();
+    const onNewSkill = vi.fn();
     renderWithProviders(
       <SkillsSection
         onAppConfigSync={() => {}}
-        onExitToWorkspace={onExitToWorkspace}
+        onNewSkill={onNewSkill}
       />,
     );
     await screen.findByText("No skills yet. Create one in a chat, or import it.");
 
     // No dialog interposes (issue #1033): the New click lands on the
     // SettingsView's single close path directly -- the workspace's chat is
-    // where the create_skill meta-tool conversation happens.
+    // where the create_skill meta-tool conversation happens. #1040 names the
+    // prop for the intent it carries: the shell stages skill-creator on it.
     fireEvent.click(screen.getByRole("button", { name: /New/i }));
-    expect(onExitToWorkspace).toHaveBeenCalledTimes(1);
+    expect(onNewSkill).toHaveBeenCalledTimes(1);
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
   });
 

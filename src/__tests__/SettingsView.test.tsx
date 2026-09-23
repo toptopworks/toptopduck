@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import type { AppConfig } from "../types/app-config";
 
 // Black-box App seam tests for the in-app settings overlay (ADR-0065, issue
@@ -65,11 +65,16 @@ vi.mock("../api", async (importOriginal) => {
     })),
     getAppConfig: vi.fn(async () => null),
     setAppConfig: vi.fn(async (cfg: AppConfig) => cfg),
+    // The skills pane's listing (issue #1040): the New click does not read
+    // the registry; mocking the listing keeps the pane's face clean (the
+    // root fetch and the mount rescan still hit the real bridge and fail
+    // silently under jsdom, per their warn contracts).
+    listSkills: vi.fn(async () => ({ skills: [], ignored: [], root_error: null })),
   };
 });
 
 import App from "../App";
-import { createSession, getAppConfig, setAppConfig } from "../api";
+import { askQuestion, createSession, getAppConfig, setAppConfig } from "../api";
 import { baseAppConfig } from "../test-fixtures";
 
 describe("App settings overlay (ADR-0065, issue #151 ACs)", () => {
@@ -171,6 +176,9 @@ describe("App settings overlay (ADR-0065, issue #151 ACs)", () => {
     expect(document.querySelector(".shell")?.classList.contains("settings-mode")).toBe(false);
     expect(document.querySelector(".session-sidebar")).toBeInTheDocument();
     expect(document.querySelector(".topbar")).toBeInTheDocument();
+    // A plain exit carries no intent, so the shell stages nothing (#1040):
+    // the chip list mounts only when a staging exists.
+    expect(screen.queryByRole("list", { name: "技能" })).toBeNull();
   });
 
   it("collapsed settings-nav is inert to prevent ghost focus (issue #287)", async () => {
@@ -265,5 +273,74 @@ describe("App settings overlay (ADR-0065, issue #151 ACs)", () => {
     await waitFor(() => expect(setAppConfig).toHaveBeenCalledTimes(1));
     // Per-field save does NOT close the overlay.
     expect(document.querySelector(".settings-overlay")).toBeInTheDocument();
+  });
+
+  it("New on the skills pane exits and stages skill-creator on the composer (#1040)", async () => {
+    // AC1: the New click must leave a visible create signal on the workspace
+    // composer -- the staged skill-creator chip (ADR-0119 staging), removable
+    // and riding the next ask -- so the user does not have to discover the
+    // entry. Cold start: the staging lands in the shell's cold-start list.
+    vi.mocked(getAppConfig).mockResolvedValue(baseAppConfig());
+    render(<App />);
+    await waitFor(() => expect(getAppConfig).toHaveBeenCalled());
+    fireEvent.click(screen.getByRole("button", { name: "设置" }));
+    await waitFor(() =>
+      expect(document.querySelector(".settings-overlay")).toBeInTheDocument(),
+    );
+    // Navigate to the skills pane, then New (zh: 新建) -- the busy-gated exit.
+    fireEvent.click(screen.getByRole("button", { name: "技能" }));
+    fireEvent.click(await screen.findByRole("button", { name: "新建" }));
+    await waitFor(() =>
+      expect(document.querySelector(".settings-overlay")).not.toBeInTheDocument(),
+    );
+    // The staged mention renders as the composer's skill chip.
+    const chips = screen.getByRole("list", { name: "技能" });
+    expect(within(chips).getByText("skill-creator")).toBeInTheDocument();
+    // Removable (AC2): the chip's own withdraw button is present.
+    expect(
+      within(chips).getByRole("button", { name: "移除技能 skill-creator" }),
+    ).toBeInTheDocument();
+    // The user left settings to create: focus seats on the composer's
+    // textarea, caret right after the staged chip, ready to type.
+    await waitFor(() =>
+      expect(document.getElementById("question-bar-input")).toHaveFocus(),
+    );
+  });
+
+  it("New on the skills pane from an active session stages the chip on the session composer (#1040)", async () => {
+    // The intent path's other domain: with a session live, the staged
+    // skill-creator lands on the session's composer (the per-sid staging
+    // channel, App.tsx handleSkillPick) and the focus seats on its
+    // textarea -- the test above pins the cold-start half only.
+    vi.mocked(getAppConfig).mockResolvedValue(baseAppConfig());
+    // Settle the minted turn so the textarea is not in its busy (disabled)
+    // state -- focus() on a disabled control is a DOM no-op.
+    vi.mocked(askQuestion).mockResolvedValue({
+      kind: "Textual",
+      data: { text_kind: "Agent", body: "done", assumption: null },
+    });
+    render(<App />);
+    fireEvent.change(screen.getByLabelText("提问"), { target: { value: "q" } });
+    fireEvent.click(screen.getByRole("button", { name: "提问" }));
+    await waitFor(() =>
+      expect(document.querySelector(".session-rail")).toBeInTheDocument(),
+    );
+    // The turn has settled: the bar's textarea is enabled again.
+    await waitFor(() => expect(screen.getByLabelText("提问")).toBeEnabled());
+    fireEvent.click(screen.getByRole("button", { name: "设置" }));
+    await waitFor(() =>
+      expect(document.querySelector(".settings-overlay")).toBeInTheDocument(),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "技能" }));
+    fireEvent.click(await screen.findByRole("button", { name: "新建" }));
+    await waitFor(() =>
+      expect(document.querySelector(".settings-overlay")).not.toBeInTheDocument(),
+    );
+    // The staged mention renders on the session composer.
+    const chips = screen.getByRole("list", { name: "技能" });
+    expect(within(chips).getByText("skill-creator")).toBeInTheDocument();
+    await waitFor(() =>
+      expect(document.getElementById("question-bar-input")).toHaveFocus(),
+    );
   });
 });

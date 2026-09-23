@@ -43,6 +43,7 @@ import {
   type IpcBusyReporter,
   type IpcChannel,
   type SettingsSection,
+  type WorkspaceExitIntent,
 } from "./sections";
 
 // In-app overlay settings view (ADR-0065 shell + ADR-0075 chrome/persistence,
@@ -139,7 +140,7 @@ function SectionContent({
   onSessionsDirChanged,
   onDefaultRuntimeChanged,
   onCliToolsChanged,
-  onExitToWorkspace,
+  onNewSkill,
   onIpcBusy,
   initialEditProfileId,
   profilesControlsRef,
@@ -150,9 +151,10 @@ function SectionContent({
   onSessionsDirChanged: (cfg: AppConfig) => void;
   onDefaultRuntimeChanged: (cfg: AppConfig) => void;
   onCliToolsChanged: (cfg: AppConfig) => void;
-  /** The single close path (busy-gated), handed to the panes that can route
-   *  the user back to the workspace (the skills pane's New button, issue #1033). */
-  onExitToWorkspace: () => void;
+  /** The skills pane's New button (issues #1033/#1040): the create exit
+   *  rides the single close path (busy-gated) and carries the "new-skill"
+   *  intent to the shell's onClose. */
+  onNewSkill: () => void;
   onIpcBusy: IpcBusyReporter;
   initialEditProfileId?: string;
   profilesControlsRef: React.MutableRefObject<ProfilesControls | null>;
@@ -171,7 +173,7 @@ function SectionContent({
       return (
         <SkillsSection
           onAppConfigSync={onCliToolsChanged}
-          onExitToWorkspace={onExitToWorkspace}
+          onNewSkill={onNewSkill}
         />
       );
     case "agents":
@@ -245,8 +247,11 @@ export function SettingsView({
   // write lock + returned the updated config; a second full write from a
   // snapshot that read nothing could clobber concurrent config writes.
   onCliToolsChanged: (cfg: AppConfig) => void;
-  // Called to exit back to the workspace (rail-top back, the gear, or ESC).
-  onClose: () => void;
+  /** Close the overlay (rail-top back, the gear, ESC, or the Skills pane's
+   *  New exit; the discard-confirm's Discard action also calls it bare,
+   *  bypassing requestClose). The optional intent (see WorkspaceExitIntent)
+   *  tells the shell why the user left for the workspace. */
+  onClose: (intent?: WorkspaceExitIntent) => void;
   // The live settings section is controlled by the shell (issue #288): the
   // shell's back/forward history restores it, so SettingsView no longer owns it.
   section: SettingsSection;
@@ -376,7 +381,9 @@ export function SettingsView({
   // Single close path (ADR-0075): block while any IPC is in flight, flush a
   // still-focused profile field (staying open when the flush fails so the
   // inline error remains visible), confirm a dirty add-mode form, else close.
-  async function requestClose() {
+  // The optional intent (issue #1040) rides only a completed close, so a
+  // blocked New never stages on the composer behind the overlay.
+  async function requestClose(intent?: WorkspaceExitIntent) {
     const ctl = profilesControlsRef.current;
     const paneIpc = paneIpcBusyRef.current;
     if (commitsInFlightRef.current > 0 || Object.values(paneIpc).some(Boolean) || ctl?.busy) return;
@@ -385,7 +392,7 @@ export function SettingsView({
       setConfirmDiscardOpen(true);
       return;
     }
-    onClose();
+    onClose(intent);
   }
 
   // Focus management (ADR-0065): on enter, remember the trigger + focus the
@@ -520,7 +527,7 @@ export function SettingsView({
             onSessionsDirChanged={handleSessionsDirChanged}
             onDefaultRuntimeChanged={handleDefaultRuntimeChanged}
             onCliToolsChanged={handleCliToolsChanged}
-            onExitToWorkspace={() => void requestClose()}
+            onNewSkill={() => void requestClose("new-skill")}
             onIpcBusy={handlePaneIpcBusy}
             initialEditProfileId={initialEditProfileId}
             profilesControlsRef={profilesControlsRef}

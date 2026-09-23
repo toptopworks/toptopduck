@@ -121,7 +121,8 @@ describe("ImportSkillsDialog (issue #367)", () => {
     fireEvent.click(screen.getByRole("button", { name: /expand/i }));
 
     expect(await screen.findByText("alpha")).toBeInTheDocument();
-    expect(screen.getByText("First skill.")).toBeInTheDocument();
+    // Name-only rows: the description stays out of the row face.
+    expect(screen.queryByText("First skill.")).not.toBeInTheDocument();
     // already_exists + invalid surface their badges.
     expect(screen.getByText("exists")).toBeInTheDocument();
     expect(screen.getByText("invalid")).toBeInTheDocument();

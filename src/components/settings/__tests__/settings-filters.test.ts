@@ -7,8 +7,8 @@ import {
 } from "../settings-filters";
 
 // The shared settings-list filter predicates (issue #976): EnabledFilter /
-// FILTER_OPTIONS / matchesFilter used verbatim by the MCP and agents panes,
-// and the matchesSearch core shared by those plus the skills pane. These
+// FILTER_OPTIONS / matchesFilter used verbatim by the MCP, agents, and
+// skills panes, and the matchesSearch core shared by the same three. These
 // tests pin the behavioral contract the three panes converged FROM, so the
 // convergence cannot drift it.
 

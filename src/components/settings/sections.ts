@@ -42,6 +42,13 @@ export const SETTINGS_SECTIONS: ReadonlyArray<SettingsSection> = [
  *  Save, issue #571) and mirrored up through a single reporter. */
 export type IpcChannel = "key" | "test" | "sessionsDir" | "probe" | "defaultRuntime";
 
+/** Why the user is leaving the overlay for the workspace (issue #1040):
+ *  "new-skill" is the Skills pane's New button -- the shell answers it by
+ *  staging the skill-creator teaching skill on the workspace composer. A
+ *  close call without one is a plain exit (the rail back button / ESC) and
+ *  stages nothing. */
+export type WorkspaceExitIntent = "new-skill";
+
 /** Reports one channel's busy transition. Panes declare a narrower channel
  *  set than IpcChannel (e.g. Profiles: "key" | "test") so the contract stays
  *  local to what the pane actually fires. */

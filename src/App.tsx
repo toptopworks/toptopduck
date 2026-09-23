@@ -20,7 +20,7 @@ import {
   IDLE_SESSION_FIELDS,
 } from "./session/useComposerState";
 import type { ComposerSessionFields } from "./session/useComposerState";
-import { QuestionBar } from "./components/thread/QuestionBar";
+import { COMPOSER_INPUT_ID, QuestionBar } from "./components/thread/QuestionBar";
 import { ComposerAuthModeChip } from "./components/thread/ComposerAuthModeChip";
 import { ComposerContextPanel } from "./components/thread/ComposerContextPanel";
 import { ComposerSkillChips } from "./components/thread/ComposerSkillChips";
@@ -42,7 +42,7 @@ import { ResumeProgress } from "./shell/ResumeProgress";
 import { ErrorBanner } from "./components/common/ErrorBanner";
 import { DegradeCard, ErrorBoundary } from "./components/common/ErrorBoundary";
 import { SettingsView } from "./components/settings/SettingsView";
-import type { SettingsSection } from "./components/settings/sections";
+import type { SettingsSection, WorkspaceExitIntent } from "./components/settings/sections";
 import { Alert } from "./components/ui/alert";
 import { TooltipProvider } from "./components/ui/tooltip";
 import { log } from "./lib/log";
@@ -673,6 +673,36 @@ export default function App() {
     [],
   );
 
+  // The settings overlay's close handler (issue #1040): a "new-skill"
+  // intent (the Skills pane's New) stages the teaching skill and seats
+  // focus on the composer's textarea, caret right after the chip -- the
+  // staging mechanics live on WorkspaceExitIntent. A plain exit (no
+  // intent) closes only and stages nothing.
+  const handleSettingsClose = useCallback(
+    (intent?: WorkspaceExitIntent) => {
+      if (intent === "new-skill") {
+        handleSkillPick("skill-creator");
+        // Runs after the overlay's synchronous focus restore to its
+        // trigger, and after React has committed the chip onto the bar.
+        window.setTimeout(() => {
+          document.getElementById(COMPOSER_INPUT_ID)?.focus();
+        }, 0);
+      }
+      setSettingsView({ open: false });
+      setLiveSettingsSection("general");
+      // A Settings Save may have changed a keychain slot; bump the epoch
+      // so the picker overlay + the shell-level submit-time gate refetch
+      // (ADR-0019 honest gate, issue #238).
+      setProfileKeyEpoch((n) => n + 1);
+      // The Local CLI tab's Rescan may have changed adapter detection;
+      // invalidate the shared cache so the next popover open shows fresh
+      // data (ADR-0051 explicit invalidate; staleTime:Infinity means no
+      // auto-refetch).
+      void queryClient.invalidateQueries({ queryKey: adapterKeys.all() });
+    },
+    [handleSkillPick, queryClient],
+  );
+
   // Withdrawing a staged invocation (ADR-0112 Decision 3): the chip's
   // removal button (#961) and the composer's Backspace at the draft start
   // are the two user surfaces. Cold start and session picks withdraw the
@@ -1191,7 +1221,7 @@ export default function App() {
                   >
                     {isColdStart && (
                       <label
-                        htmlFor="question-bar-input"
+                        htmlFor={COMPOSER_INPUT_ID}
                         className="cold-start-greeting m-0 text-center text-[1.4rem] font-semibold text-foreground"
                       >
                         <FormattedMessage
@@ -1323,22 +1353,7 @@ export default function App() {
                     onSessionsDirChanged={handleSessionsDirChanged}
                     onDefaultRuntimeChanged={handleDefaultRuntimeChanged}
                     onCliToolsChanged={handleCliToolsChanged}
-                    onClose={() => {
-                      setSettingsView({ open: false });
-                      setLiveSettingsSection("general");
-                      // A Settings Save may have changed a keychain slot; bump
-                      // the epoch so the picker overlay + the shell-level
-                      // submit-time gate refetch (ADR-0019 honest gate,
-                      // issue #238).
-                      setProfileKeyEpoch((n) => n + 1);
-                      // The Local CLI tab's Rescan may have changed adapter
-                      // detection; invalidate the shared cache so the next
-                      // popover open shows fresh data (ADR-0051 explicit
-                      // invalidate; staleTime:Infinity means no auto-refetch).
-                      void queryClient.invalidateQueries({
-                        queryKey: adapterKeys.all(),
-                      });
-                    }}
+                    onClose={handleSettingsClose}
                   />
                 )}
 
