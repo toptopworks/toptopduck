@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { embedOk, renderI18n } from "../../common/__tests__/helpers";
-import { screen, waitFor } from "@testing-library/react";
+import { fireEvent, screen, waitFor } from "@testing-library/react";
 import embed from "vega-embed";
 import { THEME_CHANGE_EVENT } from "../../../theme/useTheme";
 import { VizFence, VizFencePending } from "../VizFence";
@@ -134,6 +134,40 @@ describe("VizFence (ADR-0120)", () => {
       mark: "bar",
       width: "container",
     });
+  });
+
+  it("mounts the enlarge affordance on the rendered chart (#1050)", async () => {
+    vi.mocked(embed).mockResolvedValue(embedOk());
+    const body = { mark: "bar", data: { values: [{ a: 1 }] } };
+    renderI18n(<VizFence spec={JSON.stringify(body)} />);
+    await waitFor(() => expect(embed).toHaveBeenCalledTimes(1));
+    // Opening the overlay re-embeds the same decoded spec -- one decode, two
+    // embeds, the shared chart slot and no new render path.
+    fireEvent.click(screen.getByRole("button", { name: "放大查看图表" }));
+    await waitFor(() => expect(embed).toHaveBeenCalledTimes(2));
+    expect(vi.mocked(embed).mock.calls[1]?.[1]).toEqual({
+      ...body,
+      width: "container",
+    });
+  });
+
+  it("keeps the enlarge affordance off the degraded disclosure (#1050)", async () => {
+    // Decode-failure arm: the disclosure replaces the chart entirely.
+    renderI18n(<VizFence spec="{ not json" />);
+    expect(screen.getByText(/图表无法渲染/)).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "放大查看图表" }),
+    ).not.toBeInTheDocument();
+    // Render-failure arm: the swap-in disclosure likewise carries no
+    // affordance -- a failed chart has nothing to enlarge.
+    vi.mocked(embed).mockRejectedValue(new Error("vega boom"));
+    renderI18n(<VizFence spec={JSON.stringify({ mark: "bar" })} />);
+    await waitFor(() =>
+      expect(screen.getByText(/图表无法渲染/)).toBeInTheDocument(),
+    );
+    expect(
+      screen.queryByRole("button", { name: "放大查看图表" }),
+    ).not.toBeInTheDocument();
   });
 });
 

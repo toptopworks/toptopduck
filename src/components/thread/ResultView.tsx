@@ -4,6 +4,7 @@ import { readRows } from "../../api";
 import { toAppError } from "../../lib/error-presentation";
 import { decodeViz, type VizFailureReason } from "../viz/viz";
 import { VizChartSlot } from "../viz/LazyVegaChart";
+import { VizEnlargeDialog } from "../viz/VizEnlargeDialog";
 import { formatVizFailure } from "../viz/viz-failure";
 import { cn } from "@/lib/utils";
 import { ErrorBanner } from "../common/ErrorBanner";
@@ -388,8 +389,13 @@ export function ResultView({
       {showChart && decoded?.ok && (
         // This load state is a separate layer from the render-failure degrade
         // path below -- a Vega rejection still routes through onError and
-        // swaps in the disclosure.
-        <VizChartSlot spec={decoded.spec} onError={setRenderError} />
+        // swaps in the disclosure. `relative` anchors the enlarge affordance
+        // to the chart's corner (#1050); the swap-in disclosure below carries
+        // no affordance, so a failed chart has nothing to enlarge.
+        <div className="relative">
+          <VizChartSlot spec={decoded.spec} onError={setRenderError} />
+          <VizEnlargeDialog spec={decoded.spec} />
+        </div>
       )}
       {degradedReason && (
         // ADR-0033: an emitted viz that failed to decode/render REPLACES the
