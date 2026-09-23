@@ -18,8 +18,9 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use rig_agent::agent::model::ModelHandle;
-use rig_core::completion::Message;
+use rig_core::completion::{FinishReason, Message, Usage};
 use rig_core::message::UserContent;
+use rig_core::streaming::StreamFinal;
 use rig_core::test_utils::{MockCompletionModel, MockStreamEvent};
 
 use serde_json::{json, Value as JsonValue};
@@ -70,6 +71,24 @@ fn text_turn(text: &str) -> Vec<MockStreamEvent> {
         MockStreamEvent::final_response_with_default_usage(),
     ]
 }
+
+/// Script one terminal text turn that stopped at the output-token cap
+/// (issue #1003): the stream terminal carries `FinishReason::Length`.
+fn length_capped_text_turn(text: &str) -> Vec<MockStreamEvent> {
+    vec![
+        MockStreamEvent::text(text),
+        MockStreamEvent::FinalResponse(
+            StreamFinal::new("mock", Usage::new()).with_finish_reason(FinishReason::Length),
+        ),
+    ]
+}
+
+/// The #1001 incident's accumulator EOF detail exactly as production
+/// composes it -- rig's accumulator wording Display-prefixed with its
+/// variant's "ResponseError: " rendering -- the wiring pin's fault
+/// payload. Mirrors the unit fixture in `truncation` (kept local rather
+/// than exporting a test const).
+const ACCUMULATOR_EOF_DETAIL: &str = "ResponseError: tool call `python` arrived with malformed JSON input: EOF while parsing a string at line 1 column 5232";
 
 /// A no-op approval sink: these suites never exercise approval flows, so
 /// the sink only satisfies the gate's constructor (the recording sink it
@@ -733,6 +752,76 @@ fn the_seam_stamp_reaches_the_subagent_contexts_cap() {
     // request -- the assembled 512 appears in neither.
     assert_eq!(requests[0].max_tokens, Some(2048));
     assert_eq!(requests[1].max_tokens, Some(2048));
+}
+
+/// A cap-stamped run surfaces the tool-input truncation shape at the
+/// wiring (issue #1003): the accumulator's EOF-family fault -- the #1001
+/// incident's detail as the Display-composed string production feeds the
+/// matcher -- is re-attributed as an output truncation, while the
+/// stamp-less (bridged production) shape keeps the verbatim detail. The
+/// unit quartet in `truncation` pins the mapping function itself; this
+/// pin holds the Completion-arm call (dropping the wiring would leave
+/// both faces verbatim with nothing red).
+#[test]
+fn a_stamped_run_reattributes_the_accumulator_eof_fault_at_the_wiring() {
+    let mut h = Harness::new();
+    let provider = Arc::new(BlockingProvider::new(vec![Err(
+        ProviderError::Unavailable(ACCUMULATOR_EOF_DETAIL.to_string()),
+    )]));
+    let outcome = h.run(
+        &h.request("fault"),
+        bridged_runtime(provider).with_output_cap(2048),
+        Arc::new(CancelToken::new()),
+    );
+    assert_eq!(
+        outcome.termination,
+        Termination::Transient(format!(
+            "output truncated at the token cap: {ACCUMULATOR_EOF_DETAIL}"
+        )),
+        "the stamped run re-attributes the EOF-family fault as truncation"
+    );
+
+    // Stamp-less (the bridged production face): the same fault stays
+    // verbatim.
+    let provider = Arc::new(BlockingProvider::new(vec![Err(
+        ProviderError::Unavailable(ACCUMULATOR_EOF_DETAIL.to_string()),
+    )]));
+    let outcome = h.run(
+        &h.request("fault"),
+        bridged_runtime(provider),
+        Arc::new(CancelToken::new()),
+    );
+    assert_eq!(
+        outcome.termination,
+        Termination::Transient(ACCUMULATOR_EOF_DETAIL.to_string()),
+        "without the cap stamp the detail passes through verbatim"
+    );
+}
+
+/// A terminal reply that stopped at the output cap carries the explicit
+/// truncation marker (issue #1003): the Length reason rides rig's stream
+/// terminal, the hook seam records it, and the reply mapping appends the
+/// marker to the otherwise-verbatim reply. Every other finish shape keeps
+/// the plain text (the suites asserting plain `Termination::Text` replies
+/// pin that arm).
+#[test]
+fn length_capped_terminal_reply_carries_the_truncation_marker() {
+    let mut h = Harness::new();
+    let model = MockCompletionModel::from_stream_turns([length_capped_text_turn(
+        "Here is the first half of the answ",
+    )]);
+    let outcome = h.run(
+        &h.request("write something long"),
+        mock_runtime(model),
+        Arc::new(CancelToken::new()),
+    );
+    assert_eq!(
+        outcome.termination,
+        Termination::Text(format!(
+            "Here is the first half of the answ{}",
+            super::truncation::TRUNCATED_REPLY_MARKER
+        ))
+    );
 }
 
 /// Dispatch call ids mint uuid-backed: uniqueness is intrinsic to the
