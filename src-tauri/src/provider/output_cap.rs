@@ -117,9 +117,10 @@ fn clamp_entry(entry: Option<u32>) -> u32 {
 /// serving the turn).
 pub(crate) fn output_token_cap(model_name: &str) -> u32 {
     let entry = catalog_output(model_name);
-    // The under-cap observation (issue #1003): a cataloged family whose
-    // ceiling sits below the fallback is the rare shape worth one line --
-    // this path was zero-signal before.
+    // The under-cap observation (issue #1003): every catalog hit is
+    // sub-CAP by the audit's invariant, so the hit itself is the notable
+    // event (most models miss and take the fallback) -- this path was
+    // zero-signal before.
     if let Some(cap) = entry.filter(|&cap| cap < OUTPUT_TOKEN_CAP) {
         log::debug!(
             "output token cap {cap} for `{model_name}` sits below the {OUTPUT_TOKEN_CAP} fallback"

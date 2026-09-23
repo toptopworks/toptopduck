@@ -83,6 +83,13 @@ fn length_capped_text_turn(text: &str) -> Vec<MockStreamEvent> {
     ]
 }
 
+/// The #1001 incident's accumulator EOF detail exactly as production
+/// composes it -- rig's accumulator wording Display-prefixed with its
+/// variant's "ResponseError: " rendering -- the wiring pin's fault
+/// payload. Mirrors the unit fixture in `truncation` (kept local rather
+/// than exporting a test const).
+const ACCUMULATOR_EOF_DETAIL: &str = "ResponseError: tool call `python` arrived with malformed JSON input: EOF while parsing a string at line 1 column 5232";
+
 /// A no-op approval sink: these suites never exercise approval flows, so
 /// the sink only satisfies the gate's constructor (the recording sink it
 /// retires kept a request-id ledger nothing ever read, #922).
@@ -745,6 +752,50 @@ fn the_seam_stamp_reaches_the_subagent_contexts_cap() {
     // request -- the assembled 512 appears in neither.
     assert_eq!(requests[0].max_tokens, Some(2048));
     assert_eq!(requests[1].max_tokens, Some(2048));
+}
+
+/// A cap-stamped run surfaces the tool-input truncation shape at the
+/// wiring (issue #1003): the accumulator's EOF-family fault -- the #1001
+/// incident's detail as the Display-composed string production feeds the
+/// matcher -- is re-attributed as an output truncation, while the
+/// stamp-less (bridged production) shape keeps the verbatim detail. The
+/// unit quartet in `truncation` pins the mapping function itself; this
+/// pin holds the Completion-arm call (dropping the wiring would leave
+/// both faces verbatim with nothing red).
+#[test]
+fn a_stamped_run_reattributes_the_accumulator_eof_fault_at_the_wiring() {
+    let mut h = Harness::new();
+    let provider = Arc::new(BlockingProvider::new(vec![Err(
+        ProviderError::Unavailable(ACCUMULATOR_EOF_DETAIL.to_string()),
+    )]));
+    let outcome = h.run(
+        &h.request("fault"),
+        bridged_runtime(provider).with_output_cap(2048),
+        Arc::new(CancelToken::new()),
+    );
+    assert_eq!(
+        outcome.termination,
+        Termination::Transient(format!(
+            "output truncated at the token cap: {ACCUMULATOR_EOF_DETAIL}"
+        )),
+        "the stamped run re-attributes the EOF-family fault as truncation"
+    );
+
+    // Stamp-less (the bridged production face): the same fault stays
+    // verbatim.
+    let provider = Arc::new(BlockingProvider::new(vec![Err(
+        ProviderError::Unavailable(ACCUMULATOR_EOF_DETAIL.to_string()),
+    )]));
+    let outcome = h.run(
+        &h.request("fault"),
+        bridged_runtime(provider),
+        Arc::new(CancelToken::new()),
+    );
+    assert_eq!(
+        outcome.termination,
+        Termination::Transient(ACCUMULATOR_EOF_DETAIL.to_string()),
+        "without the cap stamp the detail passes through verbatim"
+    );
 }
 
 /// A terminal reply that stopped at the output cap carries the explicit

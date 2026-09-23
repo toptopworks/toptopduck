@@ -628,7 +628,8 @@ enum DriveExit {
 
 /// The driver's product: the event fold plus its exit cause, plus the
 /// last model turn's finish reason (the hook seam's record, issue #1003)
-/// -- `None` when no turn completed or the reason went unreported.
+/// -- `None` when no turn completed, the reason went unreported, or a
+/// driver panic replaced the outcome (the record dies with its thread).
 struct DriveOutcome {
     fold: EventFold,
     exit: DriveExit,
@@ -779,9 +780,10 @@ async fn drive_turn(inputs: DriveInputs) -> DriveOutcome {
         // unreachable).
         .without_memory()
         .add_hook(CancelWatcher::new(token, clock.clone(), Arc::clone(&state)))
-        // The finish-reason observer (issue #1003): the Length signal never
-        // crosses onto the fold's `MultiTurnStreamItem` face, so the hook
-        // seam is where the driver learns how the (last) turn stopped.
+        // The finish-reason observer (issue #1003): the run-level response
+        // carries no top-level reason, so the driver learns how the (last)
+        // turn stopped off the hook seam -- the same registration the
+        // cancel watcher rides.
         .add_hook(finish_watcher)
         .into_future()
         .await;

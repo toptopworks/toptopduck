@@ -1,11 +1,14 @@
 //! Output-cap truncation surfacing (issue #1003): the length signal's two
 //! presentations, both downstream of the #1001 cap formula.
 //!
-//! The signal lives in rig's stream-terminal `finish_reason`, but it never
-//! crosses onto the `MultiTurnStreamItem` face the driver's fold consumes
-//! (`FinalResponse`'s `PromptResponse` carries no reason) -- the public
-//! observation point is the per-turn hook event, which hands over the
-//! assembled turn's normalized `FinishReason`. [`FinishReasonWatcher`]
+//! The signal lives in rig's stream-terminal `finish_reason`. The
+//! run-level `FinalResponse` the driver's fold consumes carries no
+//! top-level reason (each call's reason does ride the stream as the
+//! per-call usage record, so reading it off the stream items would be
+//! fidelity-equivalent); the hook seam is the chosen observation point --
+//! the registration seam the cancel watcher already rides, no changes to
+//! the fold's consumption loop, and the assembled turn's normalized
+//! `FinishReason` handed over directly. [`FinishReasonWatcher`]
 //! records the last turn's reason off that seam; [`terminal_reply`] turns a
 //! Length-stopped final answer from a silent `Termination::Text` into one
 //! carrying an explicit truncation marker (the partial answer stays
@@ -69,7 +72,9 @@ impl FinishReasonWatcher {
 }
 
 impl FinishReasonRecord {
-    /// The last turn's reason (`None` until the first turn completes).
+    /// The last turn's reason: `None` before the first turn completes,
+    /// and `None` again when the last completed turn reported no reason
+    /// (the honest last-turn semantics -- an earlier reason is not kept).
     pub(crate) fn last(&self) -> Option<FinishReason> {
         self.last
             .lock()
@@ -131,10 +136,12 @@ fn is_truncated_tool_input(detail: &str) -> bool {
 mod tests {
     use super::*;
 
-    /// The #1001 incident's verbatim upstream detail (rig's accumulator on
-    /// a cap-truncated tool call) -- the fixture the whole module hangs
-    /// off.
-    const INCIDENT_DETAIL: &str = "tool call `python` arrived with malformed JSON input: EOF while parsing a string at line 1 column 5232";
+    /// The #1001 incident's detail exactly as the production arm feeds
+    /// the matcher: rig's accumulator wording on a cap-truncated tool
+    /// call, Display-composed with its variant's "ResponseError: " prefix
+    /// by the `to_string` fallback in `termination_for_completion` --
+    /// the fixture the whole module hangs off.
+    const INCIDENT_DETAIL: &str = "ResponseError: tool call `python` arrived with malformed JSON input: EOF while parsing a string at line 1 column 5232";
 
     #[test]
     fn length_stop_appends_the_marker_other_reasons_stay_verbatim() {
@@ -184,8 +191,9 @@ mod tests {
     #[test]
     fn non_eof_faults_and_other_terminations_pass_through_verbatim() {
         // The same accumulator wording with a non-EOF parser fault is a
-        // model's own malformed JSON, not a cap cut (#669 verbatim).
-        let own_fault = "tool call `python` arrived with malformed JSON input: expected `,` or `}` at line 1 column 12";
+        // model's own malformed JSON, not a cap cut (#669 verbatim); the
+        // Display prefix rides the same `to_string` fallback.
+        let own_fault = "ResponseError: tool call `python` arrived with malformed JSON input: expected `,` or `}` at line 1 column 12";
         assert_eq!(
             reattribute_tool_input_truncation(Termination::Transient(own_fault.to_string()), true),
             Termination::Transient(own_fault.to_string())
@@ -215,5 +223,10 @@ mod tests {
         // Last-wins: the terminal turn's reason is the one that stays.
         watcher.record(Some(&FinishReason::Stop));
         assert_eq!(record.last(), Some(FinishReason::Stop));
+
+        // A completed turn that reports no reason overwrites: the last
+        // turn's None is the honest answer, not an earlier reason.
+        watcher.record(None);
+        assert_eq!(record.last(), None);
     }
 }
