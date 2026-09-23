@@ -21,7 +21,8 @@ export const FILTER_OPTIONS: ReadonlyArray<EnabledFilter> = [
 
 /** Whether `entry` passes the enabled-axis filter. `entry` is structural --
  *  any row carrying an `enabled` boolean (an MCP server config, an agent
- *  definition) fits without adapters. */
+ *  definition, a skills row, or the skills pane's failure lane passing a
+ *  synthesized stand-in) fits without adapters. */
 export function matchesFilter(
   entry: { enabled: boolean },
   filter: EnabledFilter,

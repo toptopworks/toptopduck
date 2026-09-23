@@ -247,9 +247,10 @@ export function SettingsView({
   // write lock + returned the updated config; a second full write from a
   // snapshot that read nothing could clobber concurrent config writes.
   onCliToolsChanged: (cfg: AppConfig) => void;
-  // Called to exit back to the workspace (rail-top back, the gear, or ESC).
-  /** Close the overlay. The optional intent (see WorkspaceExitIntent) tells
-   *  the shell why the user left for the workspace. */
+  /** Close the overlay (rail-top back, the gear, ESC, or the Skills pane's
+   *  New exit; the discard-confirm's Discard action also calls it bare,
+   *  bypassing requestClose). The optional intent (see WorkspaceExitIntent)
+   *  tells the shell why the user left for the workspace. */
   onClose: (intent?: WorkspaceExitIntent) => void;
   // The live settings section is controlled by the shell (issue #288): the
   // shell's back/forward history restores it, so SettingsView no longer owns it.
