@@ -1,5 +1,6 @@
-//! Output-cap truncation surfacing (issue #1003): the length signal's two
-//! presentations, both downstream of the #1001 cap formula.
+//! Output-cap truncation surfacing (issues #1003/#1044): the length
+//! signal's two presentations on both driver faces -- the main loop's and
+//! a delegated sub-agent's -- each downstream of the #1001 cap formula.
 //!
 //! The signal lives in rig's stream-terminal `finish_reason`. The
 //! run-level `FinalResponse` the driver's fold consumes carries no
@@ -94,15 +95,21 @@ impl AgentHook for FinishReasonWatcher {
     }
 }
 
-/// The terminal reply's termination: a turn that stopped at the output cap
-/// (`FinishReason::Length`) gets the truncation marker appended -- the
-/// answer was cut, not finished -- while every other reason (or none)
-/// keeps the verbatim text.
-pub(crate) fn terminal_reply(text: String, finish_reason: Option<&FinishReason>) -> Termination {
+/// The reply body shared by the two reply mappings -- the main turn's
+/// terminal reply and a sub-agent's final report (issue #1044): a turn
+/// that stopped at the output cap (`FinishReason::Length`) gets the
+/// truncation marker appended -- the answer was cut, not finished --
+/// while every other reason (or none) keeps the verbatim text.
+pub(crate) fn marked_reply(text: String, finish_reason: Option<&FinishReason>) -> String {
     match finish_reason {
-        Some(FinishReason::Length) => Termination::Text(format!("{text}{TRUNCATED_REPLY_MARKER}")),
-        _ => Termination::Text(text),
+        Some(FinishReason::Length) => format!("{text}{TRUNCATED_REPLY_MARKER}"),
+        _ => text,
     }
+}
+
+/// The terminal reply's termination, over [`marked_reply`].
+pub(crate) fn terminal_reply(text: String, finish_reason: Option<&FinishReason>) -> Termination {
+    Termination::Text(marked_reply(text, finish_reason))
 }
 
 /// Re-attribute the tool-input parse-error family as an output truncation
