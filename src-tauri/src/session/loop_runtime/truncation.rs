@@ -28,18 +28,37 @@
 //! output-truncation failure. Genuine upstream error text keeps its
 //! verbatim passthrough (#669): only the EOF family inside the
 //! accumulator's own tool-input wording is rewritten, and only on runs
-//! whose request carried the #1001 cap stamp.
+//! whose request carried the #1001 cap stamp. The rewrite is hedged
+//! (#1045): the stamp says the request carried a cap, not that THIS stop
+//! was caused by one -- a live model halting its own output mid-JSON
+//! matches the same predicate -- so the prefix claims the high-probability
+//! reading while the verbatim detail after it keeps the evidence (the
+//! marker needs no hedge: `FinishReason::Length` is the endpoint's own
+//! assertion). The match gates on the error variant before any string is
+//! scanned (#1045): in production the wording originates only in the two
+//! string-carrying variants, and the gate additionally refuses to scan
+//! any other variant's Display, however closely the embedded text
+//! matches.
 
 use std::sync::{Arc, Mutex};
 
 use rig_agent::agent::{AgentHook, HookContext, ModelTurnAction, ModelTurnFinished};
-use rig_core::completion::FinishReason;
+use rig_core::completion::{CompletionError, FinishReason};
 
 use crate::session::loop_contract::Termination;
 
 /// Marker appended to a terminal reply whose turn stopped at the output
 /// cap (issue #1003).
 pub(crate) const TRUNCATED_REPLY_MARKER: &str = "\n\n[output truncated at the token cap]";
+
+/// The re-attribution's prefix (issues #1003/#1045): hedged, unlike the
+/// marker -- the marker rides the endpoint's own `FinishReason::Length`
+/// assertion, while the re-attribution infers the cap from a parse shape
+/// plus the request's stamp, and a live model halting its own output
+/// mid-JSON matches the same predicate. The high-probability wording
+/// states the honest claim; the verbatim detail after it keeps the
+/// evidence.
+pub(crate) const LIKELY_TRUNCATION_PREFIX: &str = "output likely truncated at the token cap: ";
 
 /// The per-turn finish-reason observer: records the last turn's
 /// `finish_reason` off the hook seam so the driver can read it once the
@@ -115,21 +134,32 @@ pub(crate) fn terminal_reply(text: String, finish_reason: Option<&FinishReason>)
 }
 
 /// Re-attribute the tool-input parse-error family as an output truncation
-/// (issue #1003): the EOF-family detail is truncation-shaped (the input
-/// ended mid-parse), and on a run whose request carried the cap stamp the
-/// honest attribution is the cap, not a JSON fault. Every other
+/// (issue #1003, narrowed per #1045): the EOF-family detail is
+/// truncation-shaped (the input ended mid-parse), and on a run whose
+/// request carried the cap stamp the honest attribution is the cap, not a
+/// JSON fault. The variant gate leads the string match: in production
+/// the accumulator's wording originates only in the two string-carrying
+/// variants -- `ResponseError` (rig's accumulator on the live face,
+/// Display-prefixed by the `to_string` fallback) and `ProviderError`
+/// (the bridged face's verbatim relay) -- and the gate additionally
+/// refuses to scan any other variant's Display, however closely the
+/// embedded detail matches. Every other
 /// termination -- other details, other variants -- passes through
 /// untouched, preserving the #669 verbatim contract for genuine upstream
 /// errors.
 pub(crate) fn reattribute_tool_input_truncation(
-    termination: Termination,
+    err: &CompletionError,
     cap_stamped: bool,
 ) -> Termination {
-    match termination {
-        Termination::Transient(detail) if cap_stamped && is_truncated_tool_input(&detail) => {
-            Termination::Transient(format!("output truncated at the token cap: {detail}"))
+    let termination = super::termination_for_completion(err);
+    match (termination, err) {
+        (
+            Termination::Transient(detail),
+            CompletionError::ResponseError(_) | CompletionError::ProviderError(_),
+        ) if cap_stamped && is_truncated_tool_input(&detail) => {
+            Termination::Transient(format!("{LIKELY_TRUNCATION_PREFIX}{detail}"))
         }
-        other => other,
+        (termination, _) => termination,
     }
 }
 
@@ -145,12 +175,31 @@ fn is_truncated_tool_input(detail: &str) -> bool {
 mod tests {
     use super::*;
 
-    /// The #1001 incident's detail exactly as the production arm feeds
-    /// the matcher: rig's accumulator wording on a cap-truncated tool
-    /// call, Display-composed with its variant's "ResponseError: " prefix
-    /// by the `to_string` fallback in `termination_for_completion` --
-    /// the fixture the whole module hangs off.
+    /// The accumulator's bare wording, the `ResponseError` payload on the
+    /// live face.
+    const ACCUMULATOR_DETAIL: &str = "tool call `python` arrived with malformed JSON input: EOF while parsing a string at line 1 column 5232";
+
+    /// The #1001 incident's detail exactly as the live face feeds the
+    /// matcher: the accumulator wording Display-composed with its
+    /// variant's "ResponseError: " prefix by the `to_string` fallback in
+    /// `termination_for_completion` -- the fixture the module hangs off.
+    /// The bridged face relays this same composed string verbatim through
+    /// `ProviderError` (the wiring pins' injection route).
     const INCIDENT_DETAIL: &str = "ResponseError: tool call `python` arrived with malformed JSON input: EOF while parsing a string at line 1 column 5232";
+
+    /// A boxed error whose Display is an arbitrary relayed string: the
+    /// variant-gate pin's vehicle -- `RequestError` can carry any text
+    /// without the text ever being the accumulator's own wording.
+    #[derive(Debug)]
+    struct RelayedDetail(String);
+
+    impl std::fmt::Display for RelayedDetail {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str(&self.0)
+        }
+    }
+
+    impl std::error::Error for RelayedDetail {}
 
     #[test]
     fn length_stop_appends_the_marker_other_reasons_stay_verbatim() {
@@ -177,23 +226,35 @@ mod tests {
 
     #[test]
     fn eof_family_reattributes_only_on_a_cap_stamped_run() {
+        // The live face's shape: the accumulator wording rides
+        // `ResponseError`, Display-prefixed by the `to_string` fallback.
+        let live = CompletionError::ResponseError(ACCUMULATOR_DETAIL.to_string());
         assert_eq!(
-            reattribute_tool_input_truncation(
-                Termination::Transient(INCIDENT_DETAIL.to_string()),
-                true
-            ),
+            reattribute_tool_input_truncation(&live, true),
             Termination::Transient(format!(
-                "output truncated at the token cap: {INCIDENT_DETAIL}"
+                "output likely truncated at the token cap: {INCIDENT_DETAIL}"
             ))
         );
         // No cap stamp (the bridged production face keeps `None`) -- the
         // detail passes through verbatim.
         assert_eq!(
-            reattribute_tool_input_truncation(
-                Termination::Transient(INCIDENT_DETAIL.to_string()),
-                false
-            ),
+            reattribute_tool_input_truncation(&live, false),
             Termination::Transient(INCIDENT_DETAIL.to_string())
+        );
+    }
+
+    /// The bridged face's shape: the bridge relays the app's detail
+    /// verbatim through `ProviderError` (no Display prefix of its own), so
+    /// the same composed incident text matches there -- the wiring pins'
+    /// injection route (tests.rs), pinned at the unit level here.
+    #[test]
+    fn the_bridged_relay_reattributes_the_same_wording() {
+        let relayed = CompletionError::ProviderError(INCIDENT_DETAIL.to_string());
+        assert_eq!(
+            reattribute_tool_input_truncation(&relayed, true),
+            Termination::Transient(format!(
+                "output likely truncated at the token cap: {INCIDENT_DETAIL}"
+            ))
         );
     }
 
@@ -202,22 +263,39 @@ mod tests {
         // The same accumulator wording with a non-EOF parser fault is a
         // model's own malformed JSON, not a cap cut (#669 verbatim); the
         // Display prefix rides the same `to_string` fallback.
-        let own_fault = "ResponseError: tool call `python` arrived with malformed JSON input: expected `,` or `}` at line 1 column 12";
+        let own_fault = "tool call `python` arrived with malformed JSON input: expected `,` or `}` at line 1 column 12";
+        let live = CompletionError::ResponseError(own_fault.to_string());
         assert_eq!(
-            reattribute_tool_input_truncation(Termination::Transient(own_fault.to_string()), true),
-            Termination::Transient(own_fault.to_string())
+            reattribute_tool_input_truncation(&live, true),
+            Termination::Transient(format!("ResponseError: {own_fault}"))
         );
-        // Other transient details and other variants never rewrite.
+        // Other transient details and other termination classes never rewrite.
+        let transport = CompletionError::ProviderError("connection reset".to_string());
         assert_eq!(
-            reattribute_tool_input_truncation(
-                Termination::Transient("connection reset".to_string()),
-                true
-            ),
+            reattribute_tool_input_truncation(&transport, true),
             Termination::Transient("connection reset".to_string())
         );
+        let not_wired = CompletionError::ProviderResponse(rig_core::ProviderResponseError::new(
+            http::StatusCode::UNAUTHORIZED,
+            "no LLM provider wired",
+        ));
         assert_eq!(
-            reattribute_tool_input_truncation(Termination::NotWired, true),
+            reattribute_tool_input_truncation(&not_wired, true),
             Termination::NotWired
+        );
+    }
+
+    /// The variant gate's own pin (#1045): the incident wording relayed
+    /// through a variant that cannot originate it stays verbatim however
+    /// closely the text matches -- the string predicate never scans
+    /// Display-merged text from unrelated variants.
+    #[test]
+    fn wording_relayed_through_an_unrelated_variant_stays_verbatim() {
+        let relayed =
+            CompletionError::RequestError(Box::new(RelayedDetail(INCIDENT_DETAIL.to_string())));
+        assert_eq!(
+            reattribute_tool_input_truncation(&relayed, true),
+            Termination::Transient(format!("RequestError: {INCIDENT_DETAIL}"))
         );
     }
 

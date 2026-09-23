@@ -83,6 +83,25 @@ fn length_capped_text_turn(text: &str) -> Vec<MockStreamEvent> {
     ]
 }
 
+/// Script one batch turn whose stream terminal carries a Length stop
+/// (issue #1045): the mid-run shape of a cap cut -- the tool-call turn
+/// hit the cap (in production its arguments' JSON cuts mid-parse into
+/// the #1003 accumulator shape; the mock face ends the turn cleanly) --
+/// composed over the shared batch builder by replacing its default
+/// terminal record.
+fn length_capped_batch_turn(
+    thinking: &str,
+    prose: Option<&str>,
+    calls: &[(&str, &str, JsonValue)],
+) -> Vec<MockStreamEvent> {
+    let mut events = batch_turn(thinking, prose, calls);
+    events.pop();
+    events.push(MockStreamEvent::FinalResponse(
+        StreamFinal::new("mock", Usage::new()).with_finish_reason(FinishReason::Length),
+    ));
+    events
+}
+
 /// The #1001 incident's accumulator EOF detail exactly as production
 /// composes it -- rig's accumulator wording Display-prefixed with its
 /// variant's "ResponseError: " rendering -- the wiring pin's fault
@@ -776,7 +795,8 @@ fn a_stamped_run_reattributes_the_accumulator_eof_fault_at_the_wiring() {
     assert_eq!(
         outcome.termination,
         Termination::Transient(format!(
-            "output truncated at the token cap: {ACCUMULATOR_EOF_DETAIL}"
+            "{}{ACCUMULATOR_EOF_DETAIL}",
+            super::truncation::LIKELY_TRUNCATION_PREFIX
         )),
         "the stamped run re-attributes the EOF-family fault as truncation"
     );
@@ -821,6 +841,41 @@ fn length_capped_terminal_reply_carries_the_truncation_marker() {
             "Here is the first half of the answ{}",
             super::truncation::TRUNCATED_REPLY_MARKER
         ))
+    );
+}
+
+/// Last-wins on the end-to-end face (issue #1045): a run whose MID turn
+/// stopped at the cap (a Length-stamped batch) and whose terminal turn
+/// stopped plainly reports the plain fact -- the marker rides the FINAL
+/// turn's reason alone, and an earlier turn's Length stop never leaks
+/// into the reply. The watcher pair's semantics are unit-pinned; this
+/// pin holds them through the wiring.
+#[test]
+fn an_earlier_length_stop_does_not_mark_the_final_plain_reply() {
+    let mut h = Harness::new();
+    h.seed_result_1();
+    let model = MockCompletionModel::from_stream_turns([
+        length_capped_batch_turn(
+            "",
+            None,
+            &[(
+                "tu_1",
+                "explore",
+                json!({"sql": "SELECT count(*) FROM result_1"}),
+            )],
+        ),
+        text_turn("the final answer, finished cleanly"),
+    ]);
+    let outcome = h.run(
+        &h.request("explore then answer"),
+        mock_runtime(model),
+        Arc::new(CancelToken::new()),
+    );
+    assert_eq!(
+        outcome.termination,
+        Termination::Text("the final answer, finished cleanly".into()),
+        "the marker reflects the FINAL turn's reason: an earlier Length \
+         stop must not leak into a plainly-finished reply"
     );
 }
 
@@ -921,7 +976,7 @@ fn a_stamped_subagent_run_reattributes_the_accumulator_eof_fault() {
     assert!(!row.success);
     assert!(
         row.result_excerpt
-            .contains("output truncated at the token cap"),
+            .contains(super::truncation::LIKELY_TRUNCATION_PREFIX.trim_end()),
         "the stamped sub-agent run re-attributes the EOF fault: {}",
         row.result_excerpt
     );

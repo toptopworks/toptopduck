@@ -23,6 +23,9 @@
 //! mode repeats the old bug's shape (a lower-than-necessary ceiling),
 //! never a rejected request.
 
+use std::collections::HashSet;
+use std::sync::{LazyLock, Mutex};
+
 /// The global output-token cap (issue #1001): the assembled request's
 /// model-blind default, the no-catalog fallback, and the clamp ceiling --
 /// one constant for all three roles (the opencode form; separate
@@ -110,23 +113,47 @@ fn clamp_entry(entry: Option<u32>) -> u32 {
     entry.unwrap_or(OUTPUT_TOKEN_CAP).min(OUTPUT_TOKEN_CAP)
 }
 
+/// Models already observed under-cap in this process (issue #1045): the
+/// catalog is static, so "model X sits below the fallback" is one fact
+/// per model -- the live factory calls the formula every turn, and the
+/// per-turn repeat said nothing the first line hadn't.
+static UNDER_CAP_SEEN: LazyLock<Mutex<HashSet<String>>> =
+    LazyLock::new(|| Mutex::new(HashSet::new()));
+
 /// The dispatch seam's cap formula (issue #1001):
 /// `min(catalog[model] ?? OUTPUT_TOKEN_CAP, OUTPUT_TOKEN_CAP)`. Called once
 /// per turn at the live factory, keyed on the same facts that built the
 /// model handle (zero drift between the cap and the model actually
 /// serving the turn).
 pub(crate) fn output_token_cap(model_name: &str) -> u32 {
-    let entry = catalog_output(model_name);
-    // The under-cap observation (issue #1003): every catalog hit is
-    // sub-CAP by the audit's invariant, so the hit itself is the notable
-    // event (most models miss and take the fallback) -- this path was
-    // zero-signal before.
-    if let Some(cap) = entry.filter(|&cap| cap < OUTPUT_TOKEN_CAP) {
+    let cap = clamp_entry(catalog_output(model_name));
+    // The under-cap observation (issue #1003, level/dedup/condition ruled
+    // in #1045): the clamp maps a miss and any at/over-cap entry onto the
+    // cap itself, so reading the ANSWER is behavior-equivalent to
+    // re-filtering the entry (a sub-cap hit is the only shape that lands
+    // below). Debug stays the level -- a developer diagnostic for catalog
+    // staleness, the same class as the probe's duplicate-drop line; the
+    // release-visible truncation signals are the #1003 marker and the
+    // #1044 re-attribution, not this log. Once per model per process; no
+    // observation seam -- the condition's strictness is the audit's own
+    // `is_sub_cap` predicate, and a seam for a debug side-channel would be
+    // testing infra for noise.
+    if cap < OUTPUT_TOKEN_CAP && first_sight_of_under_cap(model_name) {
         log::debug!(
             "output token cap {cap} for `{model_name}` sits below the {OUTPUT_TOKEN_CAP} fallback"
         );
     }
-    clamp_entry(entry)
+    cap
+}
+
+/// First-sight test for the under-cap observation's once-per-model dedup,
+/// keyed on the lowercased name -- the lookup's own normalization, so
+/// casing variants of one model log as one.
+fn first_sight_of_under_cap(model_name: &str) -> bool {
+    UNDER_CAP_SEEN
+        .lock()
+        .expect("under-cap ledger lock poisoned")
+        .insert(model_name.to_lowercase())
 }
 
 #[cfg(test)]
