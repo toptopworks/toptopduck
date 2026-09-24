@@ -11,7 +11,6 @@ import { useSessionState } from "./useSessionState";
 import type { ComposerSessionFields } from "./useComposerState";
 import type { ApprovalEntry, UseApprovalEvents } from "./useApprovalEvents";
 import type { ApprovalResponse } from "../types/approval";
-import { ActiveSourceDeleteDialog } from "../components/dataset/ActiveSourceDeleteDialog";
 import { ErrorBanner } from "../components/common/ErrorBanner";
 import { ErrorBoundary } from "../components/common/ErrorBoundary";
 import { GuidedLoadDialog } from "../components/dataset/GuidedLoadDialog";
@@ -437,10 +436,6 @@ export function SessionPane({ sessionId, isActive, pendingIngestPaths, onIngestC
       log.warn("SessionPane", "session query failed", ...s.queryErrors);
     }
   }, [s.queryErrors]);
-  // Hoisted so the ActiveSourceDeleteDialog filter callback reads it without a
-  // non-null assertion: TS narrows a const across the JSX guard + closure, but
-  // not a member access like s.pendingActiveDelete.
-  const pendingActiveDelete = s.pendingActiveDelete;
 
   return (
     <div
@@ -738,18 +733,17 @@ export function SessionPane({ sessionId, isActive, pendingIngestPaths, onIngestC
               hidden={tab !== "workingSet"}
               className="min-h-0 flex-1 overflow-y-auto text-sm"
             >
+              {/* ADR-0123: the tab consumes the useWorkingSet seam itself;
+                  the pane passes only session addressing, the execution-window
+                  busy gate (the seam's mutations round-trip through the
+                  pane-level union), the empty card's ingest entry (issue #792:
+                  it rides the same pipeline as the composer's + entry), and
+                  the session-level mutation reporting surfaces. */}
               <WorkspaceWorkingSet
                 sessionId={sessionId}
-                datasets={s.datasets}
-                activeName={s.activeName}
-                loading={s.loading}
-                onRename={s.handleRename}
-                onReplace={s.handleReplace}
-                onDelete={s.handleDelete}
-                onPrivacyChange={s.handlePrivacyChange}
-                // The empty card's inline add entry rides the same pipeline
-                // as the composer's + entry (issue #792).
+                busy={s.loading}
                 onAddFiles={s.handleIngestMany}
+                surfaces={s.mutationSurfaces}
               />
             </div>
           </div>
@@ -771,16 +765,6 @@ export function SessionPane({ sessionId, isActive, pendingIngestPaths, onIngestC
           onSubmit={s.handleGuidedSubmit}
           onCancel={s.handleGuidedCancel}
           onFetchWindow={s.fetchGuidanceWindow}
-        />
-      )}
-      {pendingActiveDelete && (
-        <ActiveSourceDeleteDialog
-          target={pendingActiveDelete}
-          candidates={s.datasets.filter(
-            (d) => d.reference_name !== pendingActiveDelete.reference_name,
-          )}
-          onConfirm={(cw) => s.handleConfirmActiveDelete(cw)}
-          onCancel={s.handleCancelActiveDelete}
         />
       )}
     </div>

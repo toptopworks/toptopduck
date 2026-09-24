@@ -97,16 +97,17 @@ function paneSessionState(): never {
     fetchGuidanceWindow: vi.fn(),
     handleGuidedSubmit: vi.fn(),
     handleGuidedCancel: vi.fn(),
-    pendingActiveDelete: null,
-    handleConfirmActiveDelete: vi.fn(),
-    handleCancelActiveDelete: vi.fn(),
     handleSelectResult: vi.fn(),
     handleJumpToLatest: vi.fn(),
     handleRetryQueries: vi.fn(),
-    handleRename: vi.fn(),
-    handleReplace: vi.fn(),
-    handleDelete: vi.fn(),
-    handlePrivacyChange: vi.fn(),
+    // ADR-0123: the working-set seam's reporting sinks, handed through the
+    // pane to the tab. The `as never` cast bypasses type checking, so a
+    // shape change here must be mirrored by hand.
+    mutationSurfaces: {
+      setError: vi.fn(),
+      setMutationLoading: vi.fn(),
+      pollPersistError: vi.fn(async () => {}),
+    },
     queryErrors: [],
     workspaceContent: { kind: "hero" },
   } as never;
