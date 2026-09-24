@@ -30,7 +30,7 @@
 //! - [`builtin`]: the builtin skills (ADR-0121) -- the embedded asset tree,
 //!   the manifest, the reserved-subtree alignment window, and the shadowing
 //!   resolver: a CLI companion rides its companion CLI registration, a
-//!   knowledge-only skill rides the app version (ADR-0120 Decision 7).
+//!   knowledge-only skill is anchored unconditionally (ADR-0120 Decision 7).
 //! - [`invocation`]: the `invoke_skill` gateway meta-tool (ADR-0119
 //!   Decision 4) -- the mid-turn agent invocation channel + the turn's
 //!   accumulating invocation records.
@@ -92,7 +92,7 @@ fn decode_skill_md_lossy(bytes: &[u8], name: &str) -> String {
 /// the companion axis (ADR-0120 Decision 7: a CLI companion needs its
 /// companion CLI entry detected + enabled -- the #677 two-axis conjunction,
 /// an undetected CLI registration keeps its skill out of the seed; a
-/// knowledge-only skill rides the app version and takes no CLI conjunct).
+/// knowledge-only skill takes no CLI conjunct).
 /// Under shadowing (ADR-0121 Decision 5) the row resolves to the local
 /// fork, which seeds through the user arm like any local skill. The seed is
 /// computed at session creation and MATERIALIZES as the session's discovery

@@ -1,7 +1,8 @@
-//! Builtin skills (ADR-0121): the app-authored skills that ride the app
-//! version. Most are CLI companions, one per builtin CLI registration entry
-//! (same name, 1:1); knowledge-only skills (`vega-chart`, `skill-creator`)
-//! ship without a CLI counterpart and anchor on the app version alone.
+//! Builtin skills (ADR-0121): the app-authored skills that ship with the
+//! app binary. Most are CLI companions, one per builtin CLI registration
+//! entry (same name, 1:1); knowledge-only skills (`vega-chart`,
+//! `skill-creator`) ship without a CLI counterpart and are anchored
+//! unconditionally.
 //!
 //! The definition body is a compile-time-embedded FILE TREE
 //! (`src/skills/assets/builtin/<name>/`, `include_dir!`): `SKILL.md` plus any
@@ -17,10 +18,10 @@
 //! on-disk tree skips with zero writes; any mismatch (missing, external
 //! edit, retired file) deletes the subtree and rewrites it -- the files
 //! are app deployment assets, not user content, so there is no edit
-//! detection, no edit preservation, and no restore action. A same-named LOCAL skill at the
-//! registry root shadows the builtin (Decision 5): the merge-side deference
-//! lives in the registry scan ([`super::registry`]), never here --
-//! materialization always runs.
+//! detection, no edit preservation, and no restore action. A same-named
+//! LOCAL skill at the registry root shadows the builtin (Decision 5):
+//! the merge-side deference lives in the registry scan
+//! ([`super::registry`]), never here -- materialization always runs.
 //!
 //! A skill body enters the system prompt, so the shipped set is a trust
 //! boundary: a third-party `SKILL.md` is never auto-absorbed (the manual
@@ -55,7 +56,7 @@ pub(crate) struct BuiltinSkillManifest {
     /// The builtin CLI entry this skill rides, if any (ADR-0120 Decision 7).
     /// `Some` -- the CLI companions: alignment and auto-include gate on the
     /// entry. `None` -- a knowledge-only skill (`vega-chart` or
-    /// `skill-creator`): the app version is the anchor, so alignment
+    /// `skill-creator`): the anchor is unconditional, so alignment
     /// takes no CLI condition and auto-include drops the CLI conjunct.
     pub companion_cli: Option<&'static str>,
 }
@@ -152,8 +153,7 @@ fn companion_entry<'a>(
 /// The alignment anchor: whether a CLI registry anchors this entry (ADR-0120
 /// Decision 7, kept by ADR-0121). A companioned skill anchors on its
 /// `Builtin`-sourced entry being registered (a dormant or user-sourced entry
-/// anchors nothing); a knowledge-only skill is anchored by the app version
-/// itself.
+/// anchors nothing); a knowledge-only skill is anchored unconditionally.
 fn cli_anchor(
     entry: &BuiltinSkillManifest,
     cli: &[crate::cli_tools::config::CliToolConfig],
@@ -466,7 +466,7 @@ fn collect_disk(
 
 /// The builtin skill names a NEW session auto-includes: a companioned skill
 /// needs its companion CLI entry `Builtin`-sourced AND enabled; a
-/// knowledge-only skill (ADR-0120 Decision 7) rides the app version and
+/// knowledge-only skill (ADR-0120 Decision 7) takes no CLI condition and
 /// skips the CLI conjunct. Presence resolves through the shadowing order
 /// ([`resolve_skill_dir`]), so under a local fork the seeded name resolves
 /// to the local copy (ADR-0121 Decision 5). Computed fresh at session
@@ -986,6 +986,36 @@ mod tests {
         assert!(
             !stale.exists(),
             "a stale file outside the embedded set is removed"
+        );
+    }
+
+    /// The upgrade path over the retired alignment marker (#1056): a
+    /// top-level `.fingerprint` written by an older build is ordinary
+    /// fingerprint input now, so the extra file mismatches, the rewrite
+    /// drops it, and the rebuilt tree matches byte for byte (mutation
+    /// pin: restoring the marker exclusion in `collect_disk` lets the
+    /// stale marker survive and this fails).
+    #[test]
+    fn a_stale_top_level_fingerprint_self_heals_through_the_rewrite() {
+        let root = tempfile::tempdir().expect("root");
+        let cli = registry_with(vec![builtin_pandoc(true)]);
+        align(root.path(), &cli);
+        let marker = root.path().join(".system/pandoc/.fingerprint");
+        std::fs::write(&marker, b"stale marker from an older build\n").expect("stale marker");
+        let outcome = align(root.path(), &cli);
+        assert!(outcome.materialize_failures.is_empty());
+        assert!(
+            !marker.exists(),
+            "the stale top-level marker rides the mismatch rewrite out"
+        );
+        let (_, bytes) = embedded_files("pandoc")
+            .into_iter()
+            .find(|(p, _)| p == "SKILL.md")
+            .unwrap();
+        assert_eq!(
+            std::fs::read(root.path().join(".system/pandoc/SKILL.md")).unwrap(),
+            bytes,
+            "the rebuilt tree matches the embedded one"
         );
     }
 
