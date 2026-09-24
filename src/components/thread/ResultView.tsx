@@ -198,7 +198,11 @@ export function ResultView({
   );
 
   useEffect(() => {
-    // External system -> state: a legitimate one-shot fetch on reference change.
+    // External system -> state: a legitimate one-shot fetch on reference
+    // change. Issue #1060 keep-alive: tab re-entry no longer remounts this
+    // view, so this effect is the ONLY refresh trigger -- a future
+    // same-reference mutation surface must invalidate explicitly (a keyed
+    // query or a refetch call), not rely on the retired roundtrip remount.
     // eslint-disable-next-line react-hooks/set-state-in-effect
     void loadPage(0);
   }, [loadPage]);

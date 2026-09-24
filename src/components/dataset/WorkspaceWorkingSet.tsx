@@ -61,8 +61,13 @@ export function WorkspaceWorkingSet({
 
   // The empty set renders ONE card (issue #792): the two-column shell with its
   // near-empty pair does not mount at all. Hooks stay above the early return
-  // (the useState is unconditional), and remounting per tab entry re-seeds the
-  // initial pick -- the guard below is the only branch.
+  // (the useState is unconditional) -- the guard below is the only branch.
+  // The initializer seeds the FIRST pick only (issue #1060: both tab panels
+  // stay mounted, so re-entering the tab no longer remounts this component
+  // to re-seed it; true remounts are session-level). The viewedDescriptor
+  // arm of the seed is dead on every path: the component mounts on the
+  // pane's first render, when viewedResult is still null, and session-level
+  // remounts restart from null too -- the pick always seeds from activeName.
   if (datasets.length === 0) {
     return (
       <section className={PANEL_CARD_BASE}>

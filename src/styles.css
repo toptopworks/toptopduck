@@ -623,21 +623,22 @@
 /* Clip the workspace AND every descendant scroll container while folded.
    The shrinking column reflows the rich content (tables / charts / wrapping
    text), which summons transient scrollbars on every overflow:auto
-   descendant (.workspace-body first of all) -- opacity does not hide
-   scrollbars, so they flicker during the fade. Specificity (0,4,0) beats the
-   utility overflow classes without !important. The class applies the instant
-   the fold begins, so the clip precedes the first reflow frame. */
+   descendant (.workspace-body's two tabpanel children first of all) --
+   opacity does not hide scrollbars, so they flicker during the fade.
+   Specificity (0,4,0) beats the utility overflow classes without
+   !important. The class applies the instant the fold begins, so the clip
+   precedes the first reflow frame. */
 .shell .session-pane.workspace-collapsed .session-workspace,
 .shell .session-pane.workspace-collapsed .session-workspace * {
   overflow: hidden;
 }
 /* Expand direction: the workspace BODY waits for the grid slide (280ms) to
    settle before fading in -- at intermediate widths the content wraps taller
-   than its final layout and its scrollbar would flicker in with the fade.
-   The workspace card surface itself keeps the normal 200ms fade so the panel
-   still glides with the column (the sidebar fold parity); only the inner
-   body is staged. The collapsed rule overrides the delay so the fold fades
-   out immediately. */
+   than its final layout and the panels' scrollbars would flicker in with
+   the fade. The workspace card surface itself keeps the normal 200ms fade
+   so the panel still glides with the column (the sidebar fold parity); only
+   the inner body is staged. The collapsed rule overrides the delay so the
+   fold fades out immediately. */
 .workspace-body {
   transition: opacity 150ms ease 280ms;
 }

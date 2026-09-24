@@ -300,16 +300,19 @@ export function SessionPane({ sessionId, isActive, pendingIngestPaths, onIngestC
   const [tab, setTab] = useState<WorkspaceTab>("result");
 
   // Issue #760: the WAI-ARIA APG tabs contract for the workspace tab row.
-  // useId-scoped stable ids wire each tab's aria-controls to the ONE shared
-  // workspace-body panel and the panel's aria-labelledby back to whichever
-  // tab is active -- the panel hosts whichever branch the active tab
-  // selects, so a shared id (unlike the settings RuntimeSection's
-  // always-mounted per-tab panels) is the honest shape for the conditional
-  // render.
+  // useId-scoped stable ids wire each tab's aria-controls to its own panel.
+  // Issue #1060: both panels stay mounted and the inactive one carries the
+  // `hidden` attribute, so the working set's detail pick and the result view
+  // state survive tab roundtrips -- #760's shared panel was the honest shape
+  // only while the branches were conditionally rendered. (RuntimeSection's
+  // always-mounted shape, but hiding via the attribute rather than its
+  // `hidden` class: the preflight's [hidden] rule keeps a future display
+  // utility from ever beating the hide.)
   const tabBaseId = useId();
   const resultTabId = `${tabBaseId}-result-tab`;
   const workingSetTabId = `${tabBaseId}-working-set-tab`;
-  const workspacePanelId = `${tabBaseId}-panel`;
+  const resultPanelId = `${tabBaseId}-result-panel`;
+  const workingSetPanelId = `${tabBaseId}-working-set-panel`;
 
   // APG keyboard activation (the same contract the settings RuntimeSection
   // tablist implements): ArrowLeft/Right wrap around and activate on move
@@ -608,7 +611,7 @@ export function SessionPane({ sessionId, isActive, pendingIngestPaths, onIngestC
               role="tab"
               id={resultTabId}
               aria-selected={tab === "result"}
-              aria-controls={workspacePanelId}
+              aria-controls={resultPanelId}
               tabIndex={tab === "result" ? 0 : -1}
               className={cn(
                 "px-3 py-1.5 cursor-pointer text-sm border-b-2 border-b-transparent text-muted-foreground",
@@ -623,7 +626,7 @@ export function SessionPane({ sessionId, isActive, pendingIngestPaths, onIngestC
               role="tab"
               id={workingSetTabId}
               aria-selected={tab === "workingSet"}
-              aria-controls={workspacePanelId}
+              aria-controls={workingSetPanelId}
               tabIndex={tab === "workingSet" ? 0 : -1}
               className={cn(
                 "px-3 py-1.5 cursor-pointer text-sm border-b-2 border-b-transparent text-muted-foreground",
@@ -659,14 +662,18 @@ export function SessionPane({ sessionId, isActive, pendingIngestPaths, onIngestC
           </div>
 
           {/* ADR-0067 (issue #173): the .workspace-body visual rule (padding)
-            retired from styles.css; the flex-1 + overflow-y-auto layout could
-            move too, but the hook stays for selector / test stability. */}
-          <div
-            className="workspace-body flex-1 overflow-y-auto p-4 text-sm"
-            id={workspacePanelId}
-            role="tabpanel"
-            aria-labelledby={tab === "result" ? resultTabId : workingSetTabId}
-          >
+            retired from styles.css; the hook stays for selector / test
+            stability AND as the staged fold/expand fade anchor (the
+            transition + collapsed rules in styles.css). Issue #1060: the
+            banners stay OUTSIDE both panels -- they belong to the session,
+            not either tab -- and the keep-alive panels below stay always
+            mounted (contract at the tab-id comment above). overflow-y-auto
+            rides the panels so each tab keeps its own scroll offset instead
+            of clamping against the other tab's height on a shared container.
+            The panels carry text-sm themselves -- they are the workspace's
+            type roots (issue #864); the container keeps its own for the
+            banner strip above them. */}
+          <div className="workspace-body flex min-h-0 flex-1 flex-col p-4 text-sm">
             {s.error && <ErrorBanner error={s.error} />}
             {s.haltedRemaining !== null && (
               // Issue #748: a terminally halted batch (user cancelled the
@@ -709,7 +716,13 @@ export function SessionPane({ sessionId, isActive, pendingIngestPaths, onIngestC
               </Alert>
             )}
 
-            {tab === "result" ? (
+            <div
+              id={resultPanelId}
+              role="tabpanel"
+              aria-labelledby={resultTabId}
+              hidden={tab !== "result"}
+              className="min-h-0 flex-1 overflow-y-auto text-sm"
+            >
               <WorkspaceResult
                 key={`result-${regionRetryEpoch}`}
                 content={s.workspaceContent}
@@ -720,7 +733,14 @@ export function SessionPane({ sessionId, isActive, pendingIngestPaths, onIngestC
                 onRerun={handleAskAgain}
                 busy={s.loading}
               />
-            ) : (
+            </div>
+            <div
+              id={workingSetPanelId}
+              role="tabpanel"
+              aria-labelledby={workingSetTabId}
+              hidden={tab !== "workingSet"}
+              className="min-h-0 flex-1 overflow-y-auto text-sm"
+            >
               <WorkspaceWorkingSet
                 datasets={s.datasets}
                 activeName={s.activeName}
@@ -734,7 +754,7 @@ export function SessionPane({ sessionId, isActive, pendingIngestPaths, onIngestC
                 // as the composer's + entry (issue #792).
                 onAddFiles={s.handleIngestMany}
               />
-            )}
+            </div>
           </div>
         </section>
 
