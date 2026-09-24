@@ -1,17 +1,56 @@
-import { FormattedMessage } from "react-intl";
-import type { DatasetDescriptor, DatasetPrivacy } from "../../types/dataset";
+import { FormattedMessage, useIntl } from "react-intl";
+import type { ColumnSchema, DatasetDescriptor, DatasetPrivacy } from "../../types/dataset";
 import { PrivacyControls } from "./PrivacyControls";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "../ui/table";
+import { Badge } from "../ui/badge";
+import { staleChipVerb } from "../thread/turn-visual";
+import { fmtError } from "../../lib/error-presentation/format";
+
+// What the container hands the preview renderer: the column list plus one
+// page of rows. Narrow on purpose -- total / offset / limit are the paged
+// reader's bookkeeping, while the detail pane renders one fixed window.
+export interface DatasetSamplePage {
+  columns: ColumnSchema[];
+  rows: string[][];
+}
 
 interface DatasetDetailProps {
   dataset: DatasetDescriptor;
+  // The live preview state, owned by the working-set container (issue
+  // #1061): the fetched page (null = nothing yet), its in-flight flag, and
+  // the raw read error (formatted one-line inside). Error wins over a stale
+  // cached page -- an honest error never hides behind old rows.
+  sample: DatasetSamplePage | null;
+  sampleLoading: boolean;
+  sampleError: unknown;
   // Forwarded to PrivacyControls: disables the toggles while an async op is in
   // flight, and applies a new privacy config to this dataset (ADR-0011, #9).
   loading?: boolean;
   onPrivacyChange?: (referenceName: string, privacy: DatasetPrivacy) => void;
 }
 
-export function DatasetDetail({ dataset, loading = false, onPrivacyChange }: DatasetDetailProps) {
+export function DatasetDetail({
+  dataset,
+  sample,
+  sampleLoading,
+  sampleError,
+  loading = false,
+  onPrivacyChange,
+}: DatasetDetailProps) {
+  const intl = useIntl();
+  // The preview's one visible state (issue #1061): a read error, the
+  // in-flight line, the fetched table, or NOTHING -- a 0-row read renders no
+  // sample section at all (no skeleton, no empty shell; the meta line's row
+  // count already says it). Everything else in the pane keeps working
+  // whichever state the preview lands in: a failed local read never takes
+  // the management surface down.
+  const previewState = sampleError
+    ? ("error" as const)
+    : sampleLoading
+      ? ("loading" as const)
+      : sample && sample.rows.length > 0
+        ? ("table" as const)
+        : null;
   return (
     // ADR-0067 (issue #184): the caller-scoped visual rules that lived under
     // .dataset-detail h2 / .dataset-detail small / .meta / .source / .schema td
@@ -37,6 +76,16 @@ export function DatasetDetail({ dataset, loading = false, onPrivacyChange }: Dat
             values={{ name: dataset.reference_name }}
           />
         </small>
+        {dataset.stale && (
+          // A stale dataset stays previewable (its data still reads, ADR-0013)
+          // and carries a plain muted Badge (ADR-0050 stale semantic) whose
+          // wording shares the thread stale chip's verb helper -- Replaced /
+          // Deleted never diverge between the two surfaces. A LABEL, not the
+          // thread's clickable chip: no button semantics, no jump promise.
+          <Badge variant="secondary" className="stale-badge ml-2">
+            {staleChipVerb(intl, dataset.stale.reason)}
+          </Badge>
+        )}
       </h2>
       {/* #793: the meta line keeps Rows only -- the fingerprint is near-zero
           value at a glance (it exists to prove "the file really did change"
@@ -79,35 +128,58 @@ export function DatasetDetail({ dataset, loading = false, onPrivacyChange }: Dat
         </TableBody>
       </Table>
 
-      <h3 className="text-base font-semibold">
-        <FormattedMessage
-          id="workingSet.detail.sampleHeading"
-          defaultMessage="First 3 rows frozen at load time"
-        />
-      </h3>
-      {dataset.sample.length === 0 ? (
-        <p className="text-muted-foreground">
-          <FormattedMessage id="result.emptyRows" defaultMessage="(no data rows)" />
-        </p>
-      ) : (
-        <Table className="sample">
-          <TableHeader>
-            <TableRow>
-              {dataset.columns.map((c) => (
-                <TableHead key={c.name}>{c.name}</TableHead>
-              ))}
-            </TableRow>
-          </TableHeader>
-          <TableBody>
-            {dataset.sample.map((row, i) => (
-              <TableRow key={i}>
-                {row.map((cell, j) => (
-                  <TableCell key={j}>{cell}</TableCell>
-                ))}
-              </TableRow>
-            ))}
-          </TableBody>
-        </Table>
+      {previewState !== null && (
+        <>
+          <h3 className="text-base font-semibold">
+            {/* Plain heading by design (issue #1061 review): the count the
+                table actually shows varies with the dataset's total, and the
+                meta line already carries the authoritative row count -- a
+                hardcoded window in the label would lie for smaller datasets. */}
+            <FormattedMessage
+              id="workingSet.detail.sampleHeading"
+              defaultMessage="Data sample"
+            />
+          </h3>
+          {previewState === "error" && (
+            <p className="text-destructive">{fmtError(sampleError, intl)}</p>
+          )}
+          {previewState === "loading" && (
+            <p className="text-muted-foreground">
+              <FormattedMessage
+                id="workingSet.detail.sampleLoading"
+                defaultMessage="Loading rows…"
+              />
+            </p>
+          )}
+          {previewState === "table" && sample && (
+            // The disclosure threshold (issue #1061): max-height + internal
+            // scroll. The cap keeps the schema table and the management area
+            // in view in every layout, including the <=600px single-column
+            // fallback (issue #791); the cut-off row at the edge signals the
+            // rest. Overflow on both axes: wide tables scroll horizontally
+            // inside the same cap.
+            <div className="sample-body max-h-64 overflow-auto">
+              <Table className="sample">
+                <TableHeader>
+                  <TableRow>
+                    {sample.columns.map((c) => (
+                      <TableHead key={c.name}>{c.name}</TableHead>
+                    ))}
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {sample.rows.map((row, i) => (
+                    <TableRow key={i}>
+                      {row.map((cell, j) => (
+                        <TableCell key={j}>{cell}</TableCell>
+                      ))}
+                    </TableRow>
+                  ))}
+                </TableBody>
+              </Table>
+            </div>
+          )}
+        </>
       )}
 
       {onPrivacyChange && (

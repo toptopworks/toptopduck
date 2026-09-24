@@ -1,18 +1,33 @@
-import { describe, expect, it } from "vitest";
-import { fireEvent, screen } from "@testing-library/react";
-import { WorkspaceWorkingSet } from "../WorkspaceWorkingSet";
-import type { DatasetDescriptor } from "../../../types/dataset";
-import { mockDataset } from "./helpers";
-import { renderI18n, withIntl } from "../../common/__tests__/helpers";
+import { describe, expect, it, vi, beforeEach } from "vitest";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import type { ReactElement } from "react";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { WorkspaceWorkingSet, SAMPLE_ROW_LIMIT } from "../WorkspaceWorkingSet";
+import { readRows } from "../../../api";
+import { sessionKeys } from "../../../session/queryKeys";
+import type { DatasetDescriptor, RowPage } from "../../../types/dataset";
+import { mockDataset, mockSamplePage, staleDataset } from "./helpers";
+import { withIntl } from "../../common/__tests__/helpers";
 
 // The working-set tab's master/detail composition, extracted from SessionPane
 // so the tab's shell decisions (issue #792: one empty card vs the two-column
 // pair; the detail's delete fallback) are testable without the pane's IPC
 // mock layer. The detail pane is anchored through DatasetDetail's row-count
 // line (行数：N) -- the row list renders "N 行", so the two never collide.
+// Issue #1061: the container also owns the live sample preview query, so the
+// readRows IPC is mocked and every render rides a QueryClientProvider.
 
-// row_count 9 + its own sample make the orders detail distinguishable from
-// people's (both fixtures spread the shared mockDataset otherwise).
+vi.mock("../../../api", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../../../api")>();
+  return {
+    ...actual,
+    readRows: vi.fn(),
+  };
+});
+
+// row_count 9 makes the orders detail distinguishable from people's (both
+// fixtures spread the shared mockDataset otherwise; the sample field is a
+// wire-shape requirement with no rendering consumer, issue #1061).
 const orders: DatasetDescriptor = {
   ...mockDataset,
   reference_name: "orders",
@@ -20,6 +35,8 @@ const orders: DatasetDescriptor = {
   row_count: 9,
   sample: [["1", "ord-1"]],
 };
+
+const SESSION = "sess-1";
 
 const NOOPS = {
   onRename: () => {},
@@ -29,10 +46,49 @@ const NOOPS = {
   onAddFiles: () => {},
 } as const;
 
+// The query's default answer: an empty page. Existing shell tests assert the
+// composition (行数 line, band, empty card) which a hidden preview never
+// disturbs; the preview-focused tests below override per behavior.
+const EMPTY_PAGE: RowPage = {
+  columns: [{ name: "ref", canonical_type: "VARCHAR" }],
+  rows: [],
+  total: 0,
+  offset: 0,
+  limit: SAMPLE_ROW_LIMIT,
+};
+
+// A fresh client per render (test cache never bleeds), but the SAME client
+// across a test's rerenders so the fetched page stays cached -- swapping in
+// a fresh client mid-test would empty the cache and re-fetch on every prop
+// update. retry:false: the mock's rejection IS the test's subject, not a
+// transient to retry.
+function renderSet(ui: ReactElement) {
+  const queryClient = new QueryClient({
+    defaultOptions: { queries: { retry: false } },
+  });
+  const wrap = (element: ReactElement) => (
+    <QueryClientProvider client={queryClient}>{withIntl(element)}</QueryClientProvider>
+  );
+  const view = render(wrap(ui));
+  return {
+    ...view,
+    rerender: (element: ReactElement) => view.rerender(wrap(element)),
+    // Exposed for the invalidation-cascade pin: the mutation layer's refresh
+    // (useSessionState.refreshServerState) invalidates the workingSet prefix.
+    queryClient,
+  };
+}
+
+beforeEach(() => {
+  vi.mocked(readRows).mockClear();
+  vi.mocked(readRows).mockResolvedValue(EMPTY_PAGE);
+});
+
 describe("WorkspaceWorkingSet", () => {
   it("renders a single empty-state card when the set is empty (issue #792)", () => {
-    const { container } = renderI18n(
+    const { container } = renderSet(
       <WorkspaceWorkingSet
+        sessionId={SESSION}
         datasets={[]}
         activeName={null}
         loading={false}
@@ -47,13 +103,16 @@ describe("WorkspaceWorkingSet", () => {
     expect(screen.getByRole("button", { name: "添加数据文件" })).toBeInTheDocument();
     // The old near-empty right pane's placeholder is gone with the shell.
     expect(screen.queryByText(/选择一个数据集/)).not.toBeInTheDocument();
+    // Nothing to preview -> no read fires.
+    expect(readRows).not.toHaveBeenCalled();
   });
 
   it("seeds the detail pick from the active dataset on mount (issue #1065)", () => {
     // The initial pick seeds from activeName alone -- the initializer
     // comment in WorkspaceWorkingSet carries the rationale (issue #1060).
-    renderI18n(
+    renderSet(
       <WorkspaceWorkingSet
+        sessionId={SESSION}
         datasets={[mockDataset, orders]}
         activeName="people"
         loading={false}
@@ -64,8 +123,9 @@ describe("WorkspaceWorkingSet", () => {
   });
 
   it("shows the picked dataset's detail over the active one, with the band following the pick", () => {
-    renderI18n(
+    renderSet(
       <WorkspaceWorkingSet
+        sessionId={SESSION}
         datasets={[mockDataset, orders]}
         activeName="people"
         loading={false}
@@ -90,8 +150,9 @@ describe("WorkspaceWorkingSet", () => {
   });
 
   it("falls back to the active dataset's detail after the pick is deleted (issue #792)", () => {
-    const { rerender } = renderI18n(
+    const { rerender } = renderSet(
       <WorkspaceWorkingSet
+        sessionId={SESSION}
         datasets={[mockDataset, orders]}
         activeName="people"
         loading={false}
@@ -103,14 +164,13 @@ describe("WorkspaceWorkingSet", () => {
     // The picked dataset is removed (a confirmed row delete); the detail must
     // follow the ACTIVE dataset, not drop to a placeholder mid-management.
     rerender(
-      withIntl(
-        <WorkspaceWorkingSet
-          datasets={[mockDataset]}
-          activeName="people"
-          loading={false}
-          {...NOOPS}
-        />,
-      ),
+      <WorkspaceWorkingSet
+        sessionId={SESSION}
+        datasets={[mockDataset]}
+        activeName="people"
+        loading={false}
+        {...NOOPS}
+      />,
     );
     expect(screen.getByText(/行数：5/)).toBeInTheDocument();
     expect(screen.queryByText(/选择一个数据集/)).not.toBeInTheDocument();
@@ -121,8 +181,9 @@ describe("WorkspaceWorkingSet", () => {
   });
 
   it("falls back to the first list item when the active is absent too (issue #792)", () => {
-    const { rerender } = renderI18n(
+    const { rerender } = renderSet(
       <WorkspaceWorkingSet
+        sessionId={SESSION}
         datasets={[mockDataset, orders]}
         activeName={null}
         loading={false}
@@ -132,14 +193,13 @@ describe("WorkspaceWorkingSet", () => {
     fireEvent.click(screen.getByRole("button", { name: /^people/ }));
     expect(screen.getByText(/行数：5/)).toBeInTheDocument();
     rerender(
-      withIntl(
-        <WorkspaceWorkingSet
-          datasets={[orders]}
-          activeName={null}
-          loading={false}
-          {...NOOPS}
-        />,
-      ),
+      <WorkspaceWorkingSet
+        sessionId={SESSION}
+        datasets={[orders]}
+        activeName={null}
+        loading={false}
+        {...NOOPS}
+      />,
     );
     expect(screen.getByText(/行数：9/)).toBeInTheDocument();
     // The band rides the resolved pick on this fallback branch too: with
@@ -150,8 +210,9 @@ describe("WorkspaceWorkingSet", () => {
   });
 
   it("re-renders into the empty-state card when the last dataset is deleted (issue #792)", () => {
-    const { rerender, container } = renderI18n(
+    const { rerender, container } = renderSet(
       <WorkspaceWorkingSet
+        sessionId={SESSION}
         datasets={[mockDataset]}
         activeName="people"
         loading={false}
@@ -160,14 +221,13 @@ describe("WorkspaceWorkingSet", () => {
     );
     expect(screen.getByText(/行数：5/)).toBeInTheDocument();
     rerender(
-      withIntl(
-        <WorkspaceWorkingSet
-          datasets={[]}
-          activeName={null}
-          loading={false}
-          {...NOOPS}
-        />,
-      ),
+      <WorkspaceWorkingSet
+        sessionId={SESSION}
+        datasets={[]}
+        activeName={null}
+        loading={false}
+        {...NOOPS}
+      />,
     );
     expect(screen.getByText(/工作集为空/)).toBeInTheDocument();
     expect(container.querySelector(".layout")).toBeNull();
@@ -177,8 +237,9 @@ describe("WorkspaceWorkingSet", () => {
     // The workspace body's 14px baseline (issue #864) inherits into the bare
     // h2 unless it carries the headline token explicitly -- dropping the
     // utility would flatten the list section's hierarchy to body size.
-    renderI18n(
+    renderSet(
       <WorkspaceWorkingSet
+        sessionId={SESSION}
         datasets={[mockDataset]}
         activeName="people"
         loading={false}
@@ -188,5 +249,160 @@ describe("WorkspaceWorkingSet", () => {
     const h2 = screen.getByRole("heading", { level: 2, name: /工作集 · 1/ });
     expect(h2.className.split(/\s+/)).toContain("text-base");
     expect(h2.className.split(/\s+/)).toContain("font-semibold");
+  });
+
+  it("previews the shown dataset's first rows through readRows (issue #1061)", async () => {
+    // The read rides the paged channel with the pane's session addressing and
+    // the fixed first window; the page's own column list drives the headers.
+    vi.mocked(readRows).mockResolvedValue({
+      ...mockSamplePage,
+      total: 5,
+      offset: 0,
+      limit: SAMPLE_ROW_LIMIT,
+    });
+    renderSet(
+      <WorkspaceWorkingSet
+        sessionId={SESSION}
+        datasets={[mockDataset]}
+        activeName="people"
+        loading={false}
+        {...NOOPS}
+      />,
+    );
+    expect(await screen.findByText("Zoe")).toBeInTheDocument();
+    expect(readRows).toHaveBeenCalledWith(SESSION, "people", 0, SAMPLE_ROW_LIMIT);
+    expect(screen.getByRole("columnheader", { name: "name" })).toBeInTheDocument();
+  });
+
+  it("previews the picked dataset when the selection switches", async () => {
+    // Each reference's page carries a tag row only that dataset returns, so
+    // the swap from the people preview to the orders preview is observable.
+    vi.mocked(readRows).mockImplementation(async (_sessionId, referenceName) => ({
+      columns: [{ name: "tag", canonical_type: "VARCHAR" }],
+      rows: [[`rows-${referenceName}`]],
+      total: 1,
+      offset: 0,
+      limit: SAMPLE_ROW_LIMIT,
+    }));
+    renderSet(
+      <WorkspaceWorkingSet
+        sessionId={SESSION}
+        datasets={[mockDataset, orders]}
+        activeName="people"
+        loading={false}
+        {...NOOPS}
+      />,
+    );
+    expect(await screen.findByText("rows-people")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: /^orders/ }));
+    expect(await screen.findByText("rows-orders")).toBeInTheDocument();
+  });
+
+  it("hides the preview section when the read returns zero rows (issue #1061)", async () => {
+    renderSet(
+      <WorkspaceWorkingSet
+        sessionId={SESSION}
+        datasets={[mockDataset]}
+        activeName="people"
+        loading={false}
+        {...NOOPS}
+      />,
+    );
+    await waitFor(() => expect(readRows).toHaveBeenCalled());
+    expect(screen.getByText(/行数：5/)).toBeInTheDocument();
+    // No sample section at all -- no heading, no empty shell. The wait pins
+    // the SETTLED state: between the fetch firing and resolving, the section
+    // legitimately shows its loading line.
+    await waitFor(() => expect(screen.queryByText(/数据样本/)).toBeNull());
+  });
+
+  it("shows a failed preview read inline and keeps the detail working (issue #1061)", async () => {
+    vi.mocked(readRows).mockRejectedValue(new Error("boom"));
+    renderSet(
+      <WorkspaceWorkingSet
+        sessionId={SESSION}
+        datasets={[mockDataset]}
+        activeName="people"
+        loading={false}
+        {...NOOPS}
+      />,
+    );
+    expect(await screen.findByText(/boom/)).toBeInTheDocument();
+    // The management surface stays up: the meta line and the list remain.
+    expect(screen.getByText(/行数：5/)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /^people/ })).toBeInTheDocument();
+  });
+
+  it("renders the stale badge on a stale dataset's detail title (issue #1061)", async () => {
+    renderSet(
+      <WorkspaceWorkingSet
+        sessionId={SESSION}
+        datasets={[staleDataset("Deleted")]}
+        activeName="people"
+        loading={false}
+        {...NOOPS}
+      />,
+    );
+    // Stale data still reads (ADR-0013) -- the preview fetch fires AND the
+    // honest badge rides the title.
+    expect(await screen.findByText("上游已删除")).toBeInTheDocument();
+    expect(readRows).toHaveBeenCalledWith(SESSION, "people", 0, SAMPLE_ROW_LIMIT);
+  });
+
+  it("pins the preview window at 20 rows", () => {
+    // Every other assertion references the exported constant, which pins
+    // consistency but not the number itself -- a silent resize would
+    // redden nothing. Pin the value.
+    expect(SAMPLE_ROW_LIMIT).toBe(20);
+  });
+
+  it("shows the loading line while the container's preview read is in flight (issue #1061)", async () => {
+    // The renderer's loading arm is pinned by its direct-prop test; this
+    // guards the CONTAINER's sampleLoading forwarding, which no other test
+    // observes (dropping that wiring to a constant keeps everything green).
+    let resolveRead: (page: RowPage) => void = () => {};
+    vi.mocked(readRows).mockImplementation(
+      () => new Promise<RowPage>((resolve) => (resolveRead = resolve)),
+    );
+    renderSet(
+      <WorkspaceWorkingSet
+        sessionId={SESSION}
+        datasets={[mockDataset]}
+        activeName="people"
+        loading={false}
+        {...NOOPS}
+      />,
+    );
+    expect(screen.getByText(/正在加载行数据/)).toBeInTheDocument();
+    resolveRead(EMPTY_PAGE);
+    await waitFor(() => expect(screen.queryByText(/正在加载行数据/)).toBeNull());
+  });
+
+  it("refetches the preview when the working-set prefix is invalidated (issue #1061)", async () => {
+    // The cascade half: rename / replace / delete / privacy mutations
+    // invalidate the workingSet prefix (useSessionState.refreshServerState),
+    // and the previewRows key must nest under it -- a replaced source's rows
+    // would otherwise linger forever (staleTime is Infinity, so nothing else
+    // ever refetches).
+    vi.mocked(readRows).mockImplementation(async (_sessionId, referenceName) => ({
+      columns: [{ name: "tag", canonical_type: "VARCHAR" }],
+      rows: [[`rows-${referenceName}`]],
+      total: 1,
+      offset: 0,
+      limit: SAMPLE_ROW_LIMIT,
+    }));
+    const { queryClient } = renderSet(
+      <WorkspaceWorkingSet
+        sessionId={SESSION}
+        datasets={[mockDataset]}
+        activeName="people"
+        loading={false}
+        {...NOOPS}
+      />,
+    );
+    expect(await screen.findByText("rows-people")).toBeInTheDocument();
+    vi.mocked(readRows).mockClear();
+    await queryClient.invalidateQueries({ queryKey: sessionKeys.workingSet(SESSION) });
+    expect(readRows).toHaveBeenCalledWith(SESSION, "people", 0, SAMPLE_ROW_LIMIT);
   });
 });
