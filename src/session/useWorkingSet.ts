@@ -4,6 +4,7 @@ import { useQuery, useQueryClient, type QueryClient } from "@tanstack/react-quer
 import {
   activeDataset,
   listWorkingSet,
+  previewDeleteImpact,
   readRows,
   removeActiveSource,
   removeSource,
@@ -19,6 +20,7 @@ import type { AppError, SessionFlowKind } from "../types/error";
 import type {
   DatasetDescriptor,
   DatasetPrivacy,
+  DeleteImpactEntry,
   RowPage,
   StaleAnchor,
 } from "../types/dataset";
@@ -360,5 +362,41 @@ export function useWorkingSet(
     handleConfirmActiveDelete,
     handleCancelActiveDelete,
     handlePrivacyChange,
+  };
+}
+
+/** The delete-confirm dialogs' cascade-impact preview (issue #1063): the live
+ *  results a source removal would mark stale, read through the read-only IPC
+ *  command (`preview_delete_impact`). Both dialogs mount conditionally (Radix
+ *  confirm dialogs), so the mount itself gates the query -- a null target (no
+ *  dialog open) simply idles; the `?? ""` placeholders never execute, since a
+ *  disabled query's queryFn never runs.
+ *
+ *  Lives in the seam module per ADR-0123 Decision 1: a working-set-domain
+ *  query (keyed under the workingSet prefix so the seam's invalidation
+ *  cascade refreshes it) belongs with the seam's other queries, not beside
+ *  its consumers.
+ *
+ *  Failure is not fatal by contract: the dialogs degrade to today's copy and
+ *  the delete stays executable (the preview is a read-only convenience, never
+ *  a single point of dependency for the removal). */
+export function useDeleteImpact(
+  sessionId: string | null,
+  referenceName: string | null,
+): {
+  entries: DeleteImpactEntry[];
+  isLoading: boolean;
+  error: unknown;
+} {
+  const enabled = sessionId !== null && referenceName !== null;
+  const query = useQuery({
+    queryKey: sessionKeys.deleteImpact(sessionId ?? "", referenceName ?? ""),
+    queryFn: () => previewDeleteImpact(sessionId ?? "", referenceName ?? ""),
+    enabled,
+  });
+  return {
+    entries: query.data ?? [],
+    isLoading: query.isLoading,
+    error: query.error,
   };
 }

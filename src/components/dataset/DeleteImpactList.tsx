@@ -1,6 +1,6 @@
 import { FormattedMessage, useIntl } from "react-intl";
 import { fmtError } from "../../lib/error-presentation/format";
-import { useDeleteImpact } from "../../session/useDeleteImpact";
+import { useDeleteImpact } from "../../session/useWorkingSet";
 
 // The delete-confirm dialogs' cascade-impact list (issue #1063): what the
 // removal would mark stale, read through `useDeleteImpact`. Four states ride
@@ -45,7 +45,7 @@ export function DeleteImpactList({
   }
   return (
     <div className="mt-1">
-      <p className="text-xs font-medium text-muted-foreground">
+      <p className="text-xs text-muted-foreground">
         <FormattedMessage
           id="workingSet.delete.impactTitle"
           defaultMessage="Affected results"
@@ -53,7 +53,7 @@ export function DeleteImpactList({
       </p>
       {/* The full list, capped: a long cascade scrolls inside the dialog
           instead of stretching it past the viewport (issue #1063). */}
-      <ul className="mt-1 max-h-40 space-y-0.5 overflow-y-auto text-xs">
+      <ul className="mt-1 max-h-40 space-y-1 overflow-y-auto text-xs">
         {entries.map((entry) => (
           <li key={entry.reference_name}>{entry.display_name}</li>
         ))}
