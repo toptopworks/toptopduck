@@ -391,9 +391,6 @@ export function SessionPane({ sessionId, isActive, pendingIngestPaths, onIngestC
   );
 
   const viewedReference = s.viewedResult?.referenceName ?? null;
-  const viewedDescriptor = viewedReference
-    ? s.datasets.find((d) => d.reference_name === viewedReference) ?? null
-    : null;
   // Non-stale dataset labels for the rail's conditional active chip (ADR-0047):
   // a turn's question lights up a chip only when it explicitly names a dataset.
   // Stale datasets are excluded -- they cannot be the target of a new question.
@@ -745,7 +742,6 @@ export function SessionPane({ sessionId, isActive, pendingIngestPaths, onIngestC
                 datasets={s.datasets}
                 activeName={s.activeName}
                 loading={s.loading}
-                viewedDescriptor={viewedDescriptor}
                 onRename={s.handleRename}
                 onReplace={s.handleReplace}
                 onDelete={s.handleDelete}
