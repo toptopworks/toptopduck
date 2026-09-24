@@ -2,7 +2,7 @@
 
 ## Decision
 
-1. **工作集域收敛为单一 hook 接缝 `useWorkingSet(sessionId, selectedName)`。** 查询（workingSet / active / previewRows）、四类变更（rename / replace / delete / privacy）、删源确认状态机（pendingActiveDelete）、详情选中解析（pick ?? active ?? 首项）与样本预览门控同属一个 module（`src/session/useWorkingSet.ts`）。级联语义的权威叙述（三键扇出、previewRows 嵌套前缀继承、staleTime Infinity 下替换源旧行不残留、门控键 = 解析后的 pick）随 module 头注释落位，不再散落在 query 键工厂注释与组件门控多处。
+1. **工作集域收敛为单一 hook 接缝 `useWorkingSet(sessionId, selectedName, surfaces)`。** 查询（workingSet / active / previewRows）、四类变更（rename / replace / delete / privacy）、删源确认状态机（pendingActiveDelete）、详情选中解析（pick ?? active ?? 首项）与样本预览门控同属一个 module（`src/session/useWorkingSet.ts`）。级联语义的权威叙述（三键扇出、previewRows 嵌套前缀继承、staleTime Infinity 下替换源旧行不残留、门控键 = 解析后的 pick）随 module 头注释落位，不再散落在 query 键工厂注释与组件门控多处。
 
 2. **selected 参数化，useState 留在消费组件。** 接缝不拥有选中状态：消费组件持有 pick 的 useState 并以参数传入，接缝只拥有解析与回退。跨目录 import（组件目录引 session 接缝）沿用 query 键工厂的既有先例。
 
@@ -12,7 +12,7 @@
 
 ## Context
 
-工作集的查询、变更与失效知识此前分散四层：五个变更回调从 useSessionState 的三十余字段返回面穿 SessionPane 转发进工作集组件；失效级联的唯一叙述是 query 键工厂的 doc 注释，执行散在 useSessionState 的 refreshServerState、SessionPane 的 resetSessionCache 与组件门控多处；删源一个用户动作横跨四模块（状态机在 useSessionState、对话框挂载与 hoisting 在 SessionPane、触发在列表、回退恢复规则在 workspace 纯函数）。近三张工作集票的修复面都横穿这条 relay。
+工作集的查询、变更与失效知识此前分散四层：四类变更回调与删源状态机的确认/中止操作从 useSessionState 的三十余字段返回面穿 SessionPane 转发进工作集组件；失效级联的唯一叙述是 query 键工厂的 doc 注释，执行散在 useSessionState 的 refreshServerState、SessionPane 的 resetSessionCache 与组件门控多处；删源一个用户动作横跨四模块（状态机在 useSessionState、对话框挂载与 hoisting 在 SessionPane、触发在列表、回退恢复规则在 workspace 纯函数）。近三张工作集票的修复面都横穿这条 relay。
 
 ## Why
 
