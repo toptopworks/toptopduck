@@ -1,9 +1,29 @@
 import { describe, expect, it, vi } from "vitest";
-import { fireEvent, screen } from "@testing-library/react";
+import { fireEvent, screen, waitFor } from "@testing-library/react";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import type { ReactElement } from "react";
 import { ActiveSourceDeleteDialog } from "../ActiveSourceDeleteDialog";
 import type { DatasetDescriptor } from "../../../types/dataset";
 import { mockDataset } from "./helpers";
 import { renderI18n } from "../../common/__tests__/helpers";
+
+// Runs offline: the dialog's impact list (issue #1063) is the only api
+// consumer in this component tree (partial mock, useWorkingSet.test pattern).
+vi.mock("../../../api", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../../../api")>();
+  return { ...actual, previewDeleteImpact: vi.fn() };
+});
+
+import { previewDeleteImpact } from "../../../api";
+
+// The impact list (issue #1063) is a useQuery consumer -- every render gets
+// a QueryClient ancestor (retry:false keeps a rejected preview single-shot).
+function renderDialog(ui: ReactElement) {
+  const client = new QueryClient({
+    defaultOptions: { queries: { retry: false } },
+  });
+  return renderI18n(<QueryClientProvider client={client}>{ui}</QueryClientProvider>);
+}
 
 describe("ActiveSourceDeleteDialog (issue #39)", () => {
   const target: DatasetDescriptor = {
@@ -21,8 +41,9 @@ describe("ActiveSourceDeleteDialog (issue #39)", () => {
     // AC5: every remaining source is a candidate. AC2: the first is pre-selected
     // so a single Confirm carries (ref, continueWith) to the backend.
     const onConfirm = vi.fn();
-    renderI18n(
+    renderDialog(
       <ActiveSourceDeleteDialog
+        sessionId="s1"
         target={target}
         candidates={candidates}
         onConfirm={onConfirm}
@@ -43,8 +64,9 @@ describe("ActiveSourceDeleteDialog (issue #39)", () => {
     // The focus moves to whichever source the user chooses, not always the
     // first -- picking items then confirming carries items as the continuation.
     const onConfirm = vi.fn();
-    renderI18n(
+    renderDialog(
       <ActiveSourceDeleteDialog
+        sessionId="s1"
         target={target}
         candidates={candidates}
         onConfirm={onConfirm}
@@ -59,8 +81,9 @@ describe("ActiveSourceDeleteDialog (issue #39)", () => {
   it("cancel does not fire onConfirm (AC3)", () => {
     const onConfirm = vi.fn();
     const onCancel = vi.fn();
-    renderI18n(
+    renderDialog(
       <ActiveSourceDeleteDialog
+        sessionId="s1"
         target={target}
         candidates={candidates}
         onConfirm={onConfirm}
@@ -81,8 +104,9 @@ describe("ActiveSourceDeleteDialog (issue #39)", () => {
     // action, and neither callback fires.
     const onConfirm = vi.fn();
     const onCancel = vi.fn();
-    renderI18n(
+    renderDialog(
       <ActiveSourceDeleteDialog
+        sessionId="s1"
         target={target}
         candidates={candidates}
         onConfirm={onConfirm}
@@ -102,8 +126,9 @@ describe("ActiveSourceDeleteDialog (issue #39)", () => {
     // action. Pins the overlay-dismiss path the prior ESC test did not cover.
     const onConfirm = vi.fn();
     const onCancel = vi.fn();
-    renderI18n(
+    renderDialog(
       <ActiveSourceDeleteDialog
+        sessionId="s1"
         target={target}
         candidates={candidates}
         onConfirm={onConfirm}
@@ -130,8 +155,9 @@ describe("ActiveSourceDeleteDialog (issue #39)", () => {
     // async remove decides unmount. A failure leaves the dialog open for retry --
     // verified by onConfirm firing AND the alertdialog still being in the DOM.
     const onConfirm = vi.fn();
-    renderI18n(
+    renderDialog(
       <ActiveSourceDeleteDialog
+        sessionId="s1"
         target={target}
         candidates={candidates}
         onConfirm={onConfirm}
@@ -142,5 +168,28 @@ describe("ActiveSourceDeleteDialog (issue #39)", () => {
     expect(onConfirm).toHaveBeenCalledWith("people");
     // preventDefault deferred the auto-close: the dialog is still mounted.
     expect(screen.getByRole("alertdialog")).toBeInTheDocument();
+  });
+
+  it("previews the cascade impact inside the dialog (issue #1063)", async () => {
+    // The impact list rides the read-only preview command: the affected
+    // results render ahead of the continuation pick, and the confirm stays
+    // executable with the list shown (the preview never blocks the delete).
+    vi.mocked(previewDeleteImpact).mockResolvedValue([
+      { reference_name: "result_1", display_name: "销量汇总" },
+    ]);
+    renderDialog(
+      <ActiveSourceDeleteDialog
+        sessionId="s1"
+        target={target}
+        candidates={candidates}
+        onConfirm={vi.fn()}
+        onCancel={() => {}}
+      />,
+    );
+    await waitFor(() =>
+      expect(screen.getByText("受影响的结果")).toBeInTheDocument(),
+    );
+    expect(screen.getByText("销量汇总")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "继续" })).toBeEnabled();
   });
 });

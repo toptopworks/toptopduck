@@ -7,6 +7,7 @@ import type { BuiltinScanResult, CliToolConfig } from "./types/cli-tool";
 import type {
   DatasetDescriptor,
   DatasetPrivacy,
+  DeleteImpactEntry,
   LoadOutcome,
   RowPage,
   SheetGuidance,
@@ -205,6 +206,18 @@ export async function removeActiveSource(
   continueWith: string,
 ): Promise<void> {
   await invoke<void>("remove_active_source", { sessionId, referenceName, continueWith });
+}
+
+// Preview the delete impact of one source (issue #1063): the live results a
+// removal would mark stale, resolved to display labels in ascending result
+// order. Read-only and lenient (an unknown reference yields an empty list),
+// so the confirm dialogs render it while the delete itself never depends on
+// it.
+export async function previewDeleteImpact(
+  sessionId: string,
+  referenceName: string,
+): Promise<DeleteImpactEntry[]> {
+  return invoke<DeleteImpactEntry[]>("preview_delete_impact", { sessionId, referenceName });
 }
 
 // Set a dataset's privacy controls (ADR-0011, issue #9 slice 5).

@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { FormattedMessage } from "react-intl";
 import type { DatasetDescriptor } from "../../types/dataset";
+import { DeleteImpactList } from "./DeleteImpactList";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -39,11 +40,13 @@ import {
 // the parent's async remove decides unmount on success (a failure leaves it
 // open for retry), so no onOpenChange double-routing is needed.
 export function ActiveSourceDeleteDialog({
+  sessionId,
   target,
   candidates,
   onConfirm,
   onCancel,
 }: {
+  sessionId: string;
   target: DatasetDescriptor;
   candidates: DatasetDescriptor[];
   onConfirm: (continueWith: string) => void;
@@ -69,6 +72,10 @@ export function ActiveSourceDeleteDialog({
             />
           </AlertDialogDescription>
         </AlertDialogHeader>
+        {/* The pre-delete impact preview (issue #1063): what this removal
+            would mark stale, ahead of the irreversible action. A failed or
+            empty preview never blocks the delete. */}
+        <DeleteImpactList sessionId={sessionId} referenceName={target.reference_name} />
         <ul className="dialog-list">
           {candidates.map((d) => (
             <li key={d.reference_name}>
