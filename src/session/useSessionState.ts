@@ -158,6 +158,15 @@ export interface UseSessionState {
    *  banner's Retry). Healthy queries keep their cached data untouched -- a
    *  retry is a recovery action, not a global refresh. */
   handleRetryQueries: () => void;
+  /** ADR-0123: the session-level mutation surfaces the working-set seam
+   *  reports into (the same sinks useIngestFlow takes as deps). The error
+   *  banner / busy union / persist poll stay pane-level so a working-set
+   *  mutation stays visible from both tabs (issue #1060). */
+  mutationSurfaces: {
+    setError: (error: AppError | null) => void;
+    setMutationLoading: (loading: boolean) => void;
+    pollPersistError: () => Promise<void>;
+  };
 }
 
 export function useSessionState(
@@ -535,6 +544,15 @@ export function useSessionState(
 
   const clearError = useCallback(() => setError(null), []);
 
+  // ADR-0123: the bundle the working-set tab's seam consumes as its
+  // reporting sinks. Memoized so the consuming component's props stay
+  // identity-stable (the three methods inside are dispatch- or
+  // useCallback-stable).
+  const mutationSurfaces = useMemo(
+    () => ({ setError, setMutationLoading, pollPersistError }),
+    [setError, setMutationLoading, pollPersistError],
+  );
+
   return {
     datasets,
     activeName,
@@ -572,5 +590,6 @@ export function useSessionState(
     handleToggleWorkspace: toggleWorkspace,
     clearError,
     handleRetryQueries,
+    mutationSurfaces,
   };
 }
