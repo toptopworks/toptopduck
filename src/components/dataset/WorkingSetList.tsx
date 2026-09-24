@@ -1,4 +1,4 @@
-import { useRef, useState, type MouseEvent, type ReactNode } from "react";
+import { useState, type MouseEvent, type ReactNode } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 import { useIntl, FormattedMessage } from "react-intl";
 import { Pencil, RefreshCw, X } from "lucide-react";
@@ -19,6 +19,13 @@ import {
   AlertDialogTitle,
 } from "../ui/alert-dialog";
 import { Tooltip, TooltipContent, TooltipTrigger } from "../ui/tooltip";
+import {
+  sameTipKey,
+  useRowHints,
+  type RowTipControls,
+  type RowTipKind,
+  type TipKey,
+} from "./rowHints";
 import { cn } from "../../lib/utils";
 import type { DatasetDescriptor } from "../../types/dataset";
 
@@ -70,8 +77,9 @@ const SELECT_BUTTON_BASE = `${BUTTON_CHROME} p-[0.4rem_0.5rem] flex-1 min-w-0 fl
 // focus to the opening button, and a focus-WITHIN pill would glow forever
 // after that restore even with the pointer parked elsewhere -- focus-visible
 // follows the keyboard heuristic, which a script restore after a keyboard
-// dialog flow still matches (that window is what focusRestoreRef
-// suppresses), so the mouse flow closes clean. Tab order and aria-labels are
+// dialog flow still matches (that window is what the row-hint focus-restore
+// gate suppresses, see rowHints.ts), so the mouse flow closes clean. Tab
+// order and aria-labels are
 // untouched; `invisible` stays rejected (it drops the buttons from the a11y
 // tree). Show/hide snaps (no transition): a per-row 150ms fade cross-fades
 // the outgoing row's icons with the incoming row's on every row-to-row
@@ -89,36 +97,14 @@ const ROW_ACTIONS_OVERLAY = `absolute inset-y-0 right-1 z-10 flex items-center g
 // the pill container owns visibility, so the dim only marks the one hovered
 // row's mid-load state.
 const ICON_BUTTON_BASE = `${BUTTON_CHROME} h-7 w-7 flex items-center justify-center text-muted-foreground transition-colors hover:text-foreground focus-visible:text-foreground focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring disabled:cursor-progress disabled:opacity-50`;
-// The row-tooltip slot identity (which tooltip on which row owns the mutex).
-type RowTipKind = "rename" | "replace" | "delete" | "stale";
-interface TipKey {
-  row: string;
-  kind: RowTipKind;
-}
-const sameTipKey = (a: TipKey, b: TipKey) => a.row === b.row && a.kind === b.kind;
-
-// The row-tooltip mutex plumbing, passed down from WorkingSetList to each row
-// (see the openTip state there): the single-source open key, its setter, and
-// the two dialog-close guards the action hints consult.
-interface RowTipControls {
-  openKey: TipKey | null;
-  setTip: (key: TipKey, next: boolean) => void;
-  dialogClosedAtRef: { current: number };
-  focusRestoreRef: { current: boolean };
-}
 
 // One row-action icon button + its controlled hint tooltip (the shared shape
-// of rename / replace / delete): pointer-enter opens the hint immediately
-// (guarded against the dialog-close re-dispatch window), pointer-leave and
-// blur close it, keyboard focus-visible opens it, and activating clears the
-// slot before handing to the caller (the dialog opens on a clean state).
-// The dialog-close programmatic focus restore must not re-open the hint on
-// EITHER open path: our own handler checks focusRestoreRef, and Radix's
-// internal any-focus open (focus events are non-cancelable, so it cannot be
-// refused at the handler) is gated at the Tooltip's onOpenChange below.
-// disableHoverableContent: terse non-copyable labels -- Radix's invisible
-// hover bridge would hold the tooltip open after the pointer has left the
-// icon and shadow the row above.
+// of rename / replace / delete): the pointer / focus / Radix entries below
+// are the guarded open paths of the row-hint protocol (rowHints.ts sequences
+// 2-3), pointer-leave / blur / activation close the hint, and activation
+// hands to the caller on a clean slot. disableHoverableContent: terse
+// non-copyable labels -- Radix's invisible hover bridge would hold the
+// tooltip open after the pointer has left the icon and shadow the row above.
 function RowActionButton({
   hintKey,
   open,
@@ -140,17 +126,11 @@ function RowActionButton({
   disabled: boolean;
   onActivate: (e: MouseEvent<HTMLButtonElement>) => void;
 }) {
-  const { setTip, dialogClosedAtRef, focusRestoreRef } = tip;
+  const { setTip, pointerEnter, focusOpen, hintOpenChange } = tip;
   return (
     <Tooltip
       open={open}
-      onOpenChange={(next) => {
-        // Radix's internal focus path fires on the dialog-close programmatic
-        // restore too (non-cancelable focus, no focus-visible gate inside
-        // the trigger): drop open requests while that restore is in flight.
-        if (next && focusRestoreRef.current) return;
-        setTip(hintKey, next);
-      }}
+      onOpenChange={(next) => hintOpenChange(hintKey, next)}
       disableHoverableContent
     >
       <TooltipTrigger asChild>
@@ -159,18 +139,9 @@ function RowActionButton({
           className={cn(ICON_BUTTON_BASE, actionClass)}
           aria-label={ariaLabel}
           disabled={disabled}
-          onPointerEnter={(e) => {
-            if (e.pointerType === "mouse" && Date.now() - dialogClosedAtRef.current > 300)
-              setTip(hintKey, true);
-          }}
+          onPointerEnter={(e) => pointerEnter(hintKey, e.pointerType)}
           onPointerLeave={() => setTip(hintKey, false)}
-          onFocus={(e) => {
-            // Our own open keys off the keyboard heuristic and skips the
-            // dialog-close programmatic restore; Radix's side is gated at
-            // the onOpenChange above.
-            if (e.target.matches(":focus-visible") && !focusRestoreRef.current)
-              setTip(hintKey, true);
-          }}
+          onFocus={(e) => focusOpen(hintKey, e.target)}
           onBlur={() => setTip(hintKey, false)}
           onClick={(e) => {
             setTip(hintKey, false);
@@ -192,8 +163,8 @@ function RowActionButton({
 
 // One working-set row: the select button (label + row count), the floating
 // action pill (rename / replace / delete via RowActionButton), and the stale
-// chip. See the constants above for the band / pill / icon contracts and the
-// openTip state on WorkingSetList for the row-tooltip mutex the hints share.
+// chip. See the constants above for the band / pill / icon contracts and
+// rowHints.ts for the row-tooltip mutex the hints share.
 function DatasetRow({
   d,
   isActive,
@@ -539,94 +510,20 @@ export function WorkingSetList({
   // mount/unmount on these targets, so each open starts from fresh draft state.
   const [renameTarget, setRenameTarget] = useState<DatasetDescriptor | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<DatasetDescriptor | null>(null);
-  // SINGLE-SOURCE tooltip mutex for a row: every tooltip on the row (the
-  // three action hints, stale) is controlled off this one value, so a second
-  // tooltip opening necessarily closes the first. Two mechanisms share the
-  // job. Radix-internal opens (the pointermove path every trigger carries;
-  // the stale chip is the only row tooltip without our own handlers)
-  // broadcast a document tooltip.open event that every MOUNTED TooltipContent
-  // answers by closing itself -- peers are gone before the opener's
-  // onOpenChange reaches this state. Our direct opens (the hints' pointer
-  // handlers) set this state without broadcasting (the dispatch sits inside
-  // Radix's own state setter, so a prop-driven open never emits it), and the
-  // single-source key is what excludes those. The pointermove path is also
-  // transit-gated by the provider (isPointerInTransit, set while the pointer
-  // crosses a HOVERABLE tooltip's exit grace area -- the stale chip's, the
-  // one row tooltip without disableHoverableContent), so a sweep can
-  // silently swallow a Radix-side open; the direct handlers are what
-  // actually open the hints. Each Tooltip bridges Radix's internal
-  // open/close intent (delayed-open timers, grace-area keeps) through
-  // onOpenChange into this state; the action hints keep their direct
-  // pointer-enter/-leave/focus/-blur handlers on top of it.
-  const [openTip, setOpenTip] = useState<TipKey | null>(null);
-  // Closing a dialog lifts Radix's modal pointer-events lock on <body>, and
-  // Chromium answers that by re-dispatching a pointer enter at the pointer's
-  // current position -- which re-opens the hint that was showing before the
-  // click. Hints ignore pointer enters within 300ms of a dialog close; real
-  // pointer travel always arrives later than that.
-  const dialogClosedAtRef = useRef(0);
-  // True while closeDialog's programmatic focus restore is in flight: that
-  // restore is not user navigation, so it must not re-open a hint (the
-  // keyboard heuristic makes the restored focus :focus-visible).
-  const focusRestoreRef = useRef(false);
-  const setTip = (key: TipKey, next: boolean) =>
-    setOpenTip((current) => {
-      // Closes are keyed: a stale-timer close for another tooltip must not
-      // clear the one that is open now. Opens just take the slot -- Radix's
-      // own opens arrive on an empty slot anyway (their tooltip.open
-      // broadcast has already closed the mounted peers, see the openTip
-      // comment above), and our direct opens (the action hints' pointer
-      // handlers) are ordered pointer-leave-then-enter by the event
-      // sequence, so a moving pointer releases the old hint before the next
-      // one asks.
-      if (!next) return current !== null && sameTipKey(current, key) ? null : current;
-      return key;
-    });
-  // The row button that opened the dialog. Radix's close-time focus restore
-  // targets the DialogTrigger context ref, but the openers here are the list's
-  // per-row buttons (not DialogTrigger), so the restore is wired by hand:
-  // captured on open, re-focused on close (issue #759 focus-management AC).
-  const openTriggerRef = useRef<HTMLButtonElement | null>(null);
-  // Fallback restore target for the action-close paths (see closeDialog): the
-  // list container is focusable programmatically only (tabIndex -1), so a
-  // disabled opener does not strand keyboard focus on <body>.
-  const listRef = useRef<HTMLUListElement | null>(null);
-  const closeDialog = (clear: () => void) => {
-    dialogClosedAtRef.current = Date.now();
-    clear();
-    // Deferred past the focus trap: while the scope is still mounted the trap
-    // re-focuses the dialog content on any focus-out, and Radix's own
-    // unmount-time restore (also a setTimeout(0)) targets a DialogTrigger ref
-    // the list's per-row buttons never fill. Restoring on the same tick order
-    // lands the close back on the opener. On Save / Delete-confirm the
-    // mutation's loading gate has already disabled the opener (onRename /
-    // onDelete fire before the close and runSimpleMutation sets loading
-    // synchronously, batched into this same commit), and focus() on a
-    // disabled button is ignored -- fall back to the list so keyboard users
-    // keep a place in the working-set region.
-    setTimeout(() => {
-      focusRestoreRef.current = true;
-      const trigger = openTriggerRef.current;
-      if (trigger && trigger.isConnected && !trigger.disabled) {
-        trigger.focus();
-      } else {
-        listRef.current?.focus();
-      }
-      // The focus handler consumed the flag synchronously if the restore
-      // landed; clear it regardless so a later real Tab isn't suppressed.
-      setTimeout(() => {
-        focusRestoreRef.current = false;
-      }, 0);
-    }, 0);
-  };
+  // The row-tooltip protocol -- mutex, suppression window, focus-restore
+  // gate, and the dialog-close handoff -- lives in useRowHints (rowHints.ts
+  // carries the narrative): this list captures the opening trigger, mounts
+  // and clears the dialog targets through the handoff, and attaches the
+  // hook's listRef as the fallback focus target.
+  const { tip, listRef, captureTrigger, closeDialog } = useRowHints();
   const closeRename = () => closeDialog(() => setRenameTarget(null));
   const closeDelete = () => closeDialog(() => setDeleteTarget(null));
   const openRename = (d: DatasetDescriptor, trigger: HTMLButtonElement) => {
-    openTriggerRef.current = trigger;
+    captureTrigger(trigger);
     setRenameTarget(d);
   };
   const openDelete = (d: DatasetDescriptor, trigger: HTMLButtonElement) => {
-    openTriggerRef.current = trigger;
+    captureTrigger(trigger);
     setDeleteTarget(d);
   };
 
@@ -651,15 +548,6 @@ export function WorkingSetList({
     if (typeof selected === "string") {
       onReplace?.(d.reference_name, selected);
     }
-  };
-
-  // The row-tooltip mutex + its guards, bundled for the row components (see
-  // RowTipControls).
-  const tip: RowTipControls = {
-    openKey: openTip,
-    setTip,
-    dialogClosedAtRef,
-    focusRestoreRef,
   };
 
   return (
