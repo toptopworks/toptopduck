@@ -4,7 +4,9 @@
 
 use std::collections::{HashMap, HashSet};
 
-use crate::model::{DatasetDescriptor, DatasetPrivacy, RenameError, StaleAnchor};
+use crate::model::{
+    DatasetDescriptor, DatasetPrivacy, DeleteImpactEntry, RenameError, StaleAnchor,
+};
 
 /// Hard ceiling on the number of registered `result_N` (ADR-0013 M=100). When
 /// a freshly materialized result pushes the count over the cap, the oldest
@@ -496,7 +498,15 @@ impl WorkingSet {
     /// so the caller can log the cascade's reach. `removed_ref` itself is the
     /// source being deleted/replaced; its dependents (not the source) are what
     /// get marked.
-    pub fn cascade_stale(&mut self, removed_ref: &str, anchor: StaleAnchor) -> Vec<String> {
+    /// The transitive closure of live results a source removal would mark
+    /// stale (issue #1063): the same traversal [`Self::cascade_stale`]
+    /// performs, read-only -- nothing is marked, so the delete-confirm
+    /// dialogs can preview the impact without ever mutating the set. Only
+    /// registered, currently-active results enter the closure: an
+    /// already-stale result keeps its first anchor (ADR-0041) and is neither
+    /// collected nor re-expanded, and a name since removed is skipped
+    /// (`dependents_of` may lag a removal).
+    fn stale_closure_preview(&self, removed_ref: &str) -> Vec<String> {
         let mut frontier: Vec<String> = self.dependents_of(removed_ref);
         let mut newly_stale: Vec<String> = Vec::new();
         let mut seen: HashSet<String> = HashSet::new();
@@ -504,9 +514,6 @@ impl WorkingSet {
             if !seen.insert(dep.clone()) {
                 continue;
             }
-            // Only mark + expand a registered, currently-active result. An
-            // already-stale result keeps its first anchor (ADR-0041); a name
-            // since removed is skipped (dependents_of may lag a removal).
             let is_live_result = self
                 .get(&dep)
                 .map(|d| self.results.contains(&dep) && d.stale.is_none())
@@ -514,10 +521,45 @@ impl WorkingSet {
             if !is_live_result {
                 continue;
             }
-            self.mark_stale(&dep, anchor.clone());
             newly_stale.push(dep.clone());
-            // Ripple: results depending on the just-staled result also fall.
+            // Ripple: results depending on this result would fall with it.
             frontier.extend(self.dependents_of(&dep));
+        }
+        newly_stale
+    }
+
+    /// The delete-impact preview the confirm dialogs render (issue #1063):
+    /// [`Self::stale_closure_preview`] resolved to display labels, in
+    /// ascending numeric `result_N` order. Lenient by contract -- an unknown
+    /// reference yields an empty list (the preview never blocks the delete;
+    /// the removal path reports `NotFound` itself).
+    pub fn stale_impact_preview(&self, removed_ref: &str) -> Vec<DeleteImpactEntry> {
+        let mut entries: Vec<DeleteImpactEntry> = self
+            .stale_closure_preview(removed_ref)
+            .into_iter()
+            .filter_map(|name| {
+                self.get(&name).map(|d| DeleteImpactEntry {
+                    reference_name: name,
+                    display_name: d.display_name.clone(),
+                })
+            })
+            .collect();
+        entries.sort_by_key(|e| {
+            e.reference_name
+                .strip_prefix("result_")
+                .and_then(|s| s.parse::<u64>().ok())
+                .unwrap_or(u64::MAX)
+        });
+        entries
+    }
+
+    pub fn cascade_stale(&mut self, removed_ref: &str, anchor: StaleAnchor) -> Vec<String> {
+        // One traversal, two consumers: the preview above computes the reach,
+        // this marks it (issue #1063) -- the dialogs' impact list and the
+        // actual cascade can never drift apart.
+        let newly_stale = self.stale_closure_preview(removed_ref);
+        for name in &newly_stale {
+            self.mark_stale(name, anchor.clone());
         }
         newly_stale
     }
@@ -1145,5 +1187,134 @@ mod tests {
             ws.dependents_of("people").is_empty(),
             "provenance edge cleared -- a GC'd result is no longer a dependent"
         );
+    }
+
+    // --- Delete-impact preview (issue #1063) -----------------------------------
+    //
+    // The delete-confirm dialogs' impact list reads `stale_closure_preview`:
+    // the same traversal `cascade_stale` performs, read-only. These tests pin
+    // the contract the UI relies on -- preview reach == cascade reach,
+    // already-stale results stay out (they keep their first anchor, ADR-0041),
+    // and a preview never mutates.
+
+    /// people <- result_1 <- result_2 (chained ripple), orders <- result_3
+    /// (independent branch).
+    fn ws_with_chained_provenance() -> WorkingSet {
+        let mut ws = WorkingSet::default();
+        ws.register(descriptor("people"));
+        ws.register(descriptor("orders"));
+        ws.register_result(result_descriptor("result_1"));
+        ws.register_result(result_descriptor("result_2"));
+        ws.register_result(result_descriptor("result_3"));
+        let mut deps = HashSet::new();
+        deps.insert("people".to_string());
+        ws.record_provenance("result_1", deps);
+        let mut deps = HashSet::new();
+        deps.insert("result_1".to_string());
+        ws.record_provenance("result_2", deps);
+        let mut deps = HashSet::new();
+        deps.insert("orders".to_string());
+        ws.record_provenance("result_3", deps);
+        ws
+    }
+
+    #[test]
+    fn stale_closure_preview_matches_the_cascade_reach() {
+        // Removing "people" must fall result_1 AND result_2 (the ripple) and
+        // never result_3 -- and the preview must reach exactly what the
+        // cascade marks, since the two share one traversal.
+        let ws = ws_with_chained_provenance();
+        let mut preview = ws.stale_closure_preview("people");
+        preview.sort();
+
+        let mut ws = ws_with_chained_provenance();
+        let mut cascade = ws.cascade_stale("people", anchor());
+        cascade.sort();
+        assert_eq!(
+            preview,
+            vec!["result_1".to_string(), "result_2".to_string()]
+        );
+        assert_eq!(preview, cascade, "preview and cascade must share one reach");
+    }
+
+    #[test]
+    fn stale_closure_preview_excludes_already_stale_results() {
+        // An already-stale result keeps its first anchor (ADR-0041): it
+        // neither enters the closure nor re-expands it -- result_2 hangs off
+        // the stale result_1, so removing "people" marks nothing new through
+        // that branch. A live result depending on the removed source directly
+        // still enters.
+        let mut ws = ws_with_chained_provenance();
+        ws.mark_stale("result_1", anchor());
+        let mut deps = HashSet::new();
+        deps.insert("people".to_string());
+        ws.record_provenance("result_3", deps);
+        assert_eq!(ws.stale_closure_preview("people"), vec!["result_3"]);
+    }
+
+    #[test]
+    fn stale_closure_preview_does_not_mutate_the_working_set() {
+        // The preview marks nothing -- the cascade that runs afterwards still
+        // reaches the full closure, which is what makes the shared traversal
+        // safe for the confirm dialog to call before any delete.
+        let mut ws = ws_with_chained_provenance();
+        let preview = ws.stale_closure_preview("people");
+        assert_eq!(preview.len(), 2);
+        assert!(ws.stale_results().is_empty(), "a preview marks nothing");
+        let mut cascade = ws.cascade_stale("people", anchor());
+        cascade.sort();
+        assert_eq!(
+            cascade,
+            vec!["result_1".to_string(), "result_2".to_string()]
+        );
+    }
+
+    #[test]
+    fn stale_closure_preview_is_empty_without_dependents() {
+        // No result depends on "ghost" (unknown or edge-less names alike) --
+        // the empty closure is the UI's "no results are affected" signal.
+        let ws = ws_with_chained_provenance();
+        assert!(ws.stale_closure_preview("ghost").is_empty());
+    }
+
+    #[test]
+    fn stale_impact_preview_lists_display_names_in_ascending_result_order() {
+        // The dialogs render the entries verbatim: numeric result order (2
+        // before 10 -- string order would put result_10 first) with each
+        // display label resolved from the descriptor.
+        let mut ws = WorkingSet::default();
+        ws.register(descriptor("people"));
+        for name in ["result_2", "result_10"] {
+            let mut d = result_descriptor(name);
+            d.display_name = format!("表 {name}");
+            ws.register_result(d);
+        }
+        let mut deps = HashSet::new();
+        deps.insert("people".to_string());
+        ws.record_provenance("result_2", deps.clone());
+        ws.record_provenance("result_10", deps);
+
+        assert_eq!(
+            ws.stale_impact_preview("people"),
+            vec![
+                DeleteImpactEntry {
+                    reference_name: "result_2".into(),
+                    display_name: "表 result_2".into(),
+                },
+                DeleteImpactEntry {
+                    reference_name: "result_10".into(),
+                    display_name: "表 result_10".into(),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn stale_impact_preview_is_empty_for_an_unknown_reference() {
+        // Lenient by contract: the preview is a read-only convenience for the
+        // confirm dialog and never blocks the delete -- the removal path
+        // reports NotFound itself.
+        let ws = ws_with_chained_provenance();
+        assert!(ws.stale_impact_preview("ghost").is_empty());
     }
 }

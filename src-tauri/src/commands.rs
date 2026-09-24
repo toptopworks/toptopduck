@@ -35,7 +35,7 @@ use crate::cancel::CancelToken;
 use crate::mcp::config::{McpServerConfig, McpServerId, McpTransport};
 use crate::mcp::McpClient;
 use crate::model::{
-    DatasetDescriptor, DatasetPrivacy, LoadOutcome, ProfileId, ProfileKeyStatus,
+    DatasetDescriptor, DatasetPrivacy, DeleteImpactEntry, LoadOutcome, ProfileId, ProfileKeyStatus,
     ProfileTestOutcome, Protocol, ProviderConfig, ProviderConfigView, RemoveSourceError, RowPage,
     SheetGuidance, ThreadEntry, TurnOutcome, TurnProgress,
 };
@@ -740,6 +740,25 @@ pub fn remove_active_source(
     let mut s = handle.session_lock()?;
     s.remove_active_source(&reference_name, &continue_with)
         .map_err(SessionError::RemoveSource)
+}
+
+/// Preview the delete impact of one source (issue #1063): the live results a
+/// removal would mark stale, resolved to display labels in ascending
+/// `result_N` order. Read-only and lenient -- an unknown reference yields an
+/// empty list -- so the delete-confirm dialogs render it as the cascade-
+/// impact list while a failed or empty preview never blocks the delete
+/// itself (the removal path reports `NotFound`). Usable while resuming,
+/// like the other read-only working-set commands.
+#[tauri::command]
+pub fn preview_delete_impact(
+    store: State<'_, Arc<SessionStore>>,
+    session_id: String,
+    reference_name: String,
+) -> Result<Vec<DeleteImpactEntry>, SessionError> {
+    let id = SessionId::parse(&session_id)?;
+    let handle = store.get(&id)?;
+    let s = handle.session_lock()?;
+    Ok(s.delete_impact_preview(&reference_name))
 }
 
 /// Ask one question (PRD #1) against the named session: run one agent turn

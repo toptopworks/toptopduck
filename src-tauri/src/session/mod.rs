@@ -33,10 +33,10 @@ use crate::cancel::CancelToken;
 use crate::ingest::schema::quote_ident;
 use crate::mcp::config::McpServerConfig;
 use crate::model::{
-    CancelledReason, ColumnSchema, DatasetDescriptor, DatasetPrivacy, ExportIoStep,
-    ExportRowsError, RenameError, RowPage, RowReadError, SkillLifecycleEvent, SkillProvenance,
-    SourceLifecycleEvent, TextKind, ThreadEntry, TraceRound, TurnFailure, TurnOutcome, TurnPhase,
-    TurnProvenance, TurnRecord, TurnRuntime,
+    CancelledReason, ColumnSchema, DatasetDescriptor, DatasetPrivacy, DeleteImpactEntry,
+    ExportIoStep, ExportRowsError, RenameError, RowPage, RowReadError, SkillLifecycleEvent,
+    SkillProvenance, SourceLifecycleEvent, TextKind, ThreadEntry, TraceRound, TurnFailure,
+    TurnOutcome, TurnPhase, TurnProvenance, TurnRecord, TurnRuntime,
 };
 use crate::persistence::recipe::{
     LastRuntime, Recipe, RecipeTraceRound, RecipeTurn, RuntimeKind,
@@ -1147,6 +1147,14 @@ impl Session {
 
     pub fn list(&self) -> Vec<DatasetDescriptor> {
         self.working_set.list().to_vec()
+    }
+
+    /// The delete-impact preview (issue #1063): the live results a source
+    /// removal would mark stale, resolved to display labels in ascending
+    /// `result_N` order. Read-only convenience for the delete-confirm
+    /// dialogs; see [`WorkingSet::stale_impact_preview`].
+    pub fn delete_impact_preview(&self, reference_name: &str) -> Vec<DeleteImpactEntry> {
+        self.working_set.stale_impact_preview(reference_name)
     }
 
     pub fn active(&self) -> Option<DatasetDescriptor> {
