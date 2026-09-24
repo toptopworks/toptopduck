@@ -28,11 +28,13 @@ import type {
 // four mutations (rename / replace / delete / privacy), the active-source
 // delete state machine, the detail-pick resolution, and the post-mutation
 // invalidation cascade. Consumers: the working-set container renders this
-// hook directly (the pane passes only session addressing + the cross-domain
-// busy gate); useSessionState renders the read slice below for the pane's
-// own surfaces (rail badges, Targets chip, error aggregation, hero empties);
-// useIngestFlow consumes the exported invalidation entry (ingest stays an
-// orchestration consumer, never an owner -- ADR-0123 Decision 3).
+// hook directly (the pane passes it session addressing, the cross-domain
+// busy gate, the empty card's ingest entry, and the mutation reporting
+// surfaces -- nothing else); useSessionState renders the read slice below
+// for the pane's own surfaces (rail badges, Targets chip, error
+// aggregation, hero empties); useIngestFlow consumes the exported
+// invalidation entry (ingest stays an orchestration consumer, never an
+// owner -- ADR-0123 Decision 3).
 //
 // Invalidation cascade (the authoritative narrative; previously dispersed
 // across queryKeys doc comments and the callers' refresh helpers): every

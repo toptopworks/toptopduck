@@ -12,12 +12,12 @@ export const sessionKeys = {
   workingSet: (sessionId: string) => ["session", sessionId, "workingSet"] as const,
   /** The detail pane's live sample preview (issue #1061): one fixed first
    *  window of the picked dataset, read through the paged channel. Nested
-   *  under the workingSet prefix so the rename / replace / delete / privacy
-   *  invalidations refresh it alongside the descriptor -- a replaced source's
-   *  rows would otherwise linger here forever (staleTime is Infinity,
-   *  ADR-0051). Keyed by reference name only: the window is a fixed
-   *  first-rows cap (the limit constant lives with the query owner in
-   *  WorkspaceWorkingSet), so there is no offset axis to distinguish. */
+   *  under the workingSet prefix so the working-set mutations' invalidation
+   *  refreshes it alongside the descriptor (staleTime is Infinity, ADR-0051)
+   *  -- the cascade's authoritative narrative lives in the useWorkingSet
+   *  module header (ADR-0123). Keyed by reference name only: the window is a
+   *  fixed first-rows cap (the limit constant lives with the query owner in
+   *  useWorkingSet), so there is no offset axis to distinguish. */
   previewRows: (sessionId: string, referenceName: string) =>
     ["session", sessionId, "workingSet", "previewRows", referenceName] as const,
   active: (sessionId: string) => ["session", sessionId, "active"] as const,

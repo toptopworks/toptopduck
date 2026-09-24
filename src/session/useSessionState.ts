@@ -5,7 +5,11 @@ import { conversation, takePersistError } from "../api";
 import { toAppError } from "../lib/error-presentation";
 import { sessionKeys } from "./queryKeys";
 import { useIngestFlow } from "./useIngestFlow";
-import { invalidateSessionData, useWorkingSetData } from "./useWorkingSet";
+import {
+  invalidateSessionData,
+  useWorkingSetData,
+  type UseWorkingSetSurfaces,
+} from "./useWorkingSet";
 import { useTurnFlow, type LiveTurn } from "./useTurnFlow";
 import { useViewedResult } from "./useViewedResult";
 import { useWorkspaceCollapse } from "./useWorkspaceCollapse";
@@ -144,11 +148,7 @@ export interface UseSessionState {
    *  reports into (the same sinks useIngestFlow takes as deps). The error
    *  banner / busy union / persist poll stay pane-level so a working-set
    *  mutation stays visible from both tabs (issue #1060). */
-  mutationSurfaces: {
-    setError: (error: AppError | null) => void;
-    setMutationLoading: (loading: boolean) => void;
-    pollPersistError: () => Promise<void>;
-  };
+  mutationSurfaces: UseWorkingSetSurfaces;
 }
 
 export function useSessionState(
