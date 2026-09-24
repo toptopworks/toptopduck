@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { IntlProvider } from "react-intl";
 import { TooltipProvider } from "../../ui/tooltip";
 import { WorkingSetList } from "../WorkingSetList";
@@ -302,6 +302,32 @@ describe("WorkingSetList", () => {
     expect(onRename).not.toHaveBeenCalled();
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
     expect(trigger).toHaveFocus();
+  });
+
+  it("drops pointer enters inside the dialog-close suppression window (rowHints sequence 2)", async () => {
+    // Closing a dialog makes Chromium re-dispatch a pointer enter at the
+    // pointer's position; the suppression window drops those echoes, and
+    // real pointer travel always arrives later. The wiring check pins the
+    // component's routing: the row's pointer enters go through the gated
+    // entry, not a raw open.
+    renderI18n(
+      <WorkingSetList
+        datasets={[mockDataset]}
+        activeName={null}
+        selectedName={null}
+        onSelect={() => {}}
+        onRename={() => {}}
+      />,
+    );
+    const trigger = screen.getByRole("button", { name: /重命名/ });
+    trigger.focus();
+    fireEvent.click(trigger);
+    fireEvent.keyDown(screen.getByRole("dialog"), { key: "Escape" });
+    // The escape routes through closeDialog (stamping the window) and the
+    // re-dispatched enter is still inside it -- the hint stays closed.
+    fireEvent.pointerEnter(trigger, { pointerType: "mouse" });
+    await new Promise((r) => setTimeout(r, 0));
+    expect(screen.queryByRole("tooltip")).not.toBeInTheDocument();
   });
 
   it("falls back to focusing the list when Save's loading gate disables the trigger (issue #759)", async () => {
@@ -1011,60 +1037,12 @@ describe("WorkingSetList", () => {
     expect(await screen.findByRole("tooltip")).toHaveTextContent("重命名");
   });
 
-  // The mutex's guard arm ("an open action hint owns the slot against a
-  // direct non-hint open", issue #865) retired with its only client: the
-  // name span's direct pointer-enter open. The name's affordance is the
-  // OS-native title now, so no direct non-hint open reaches setTip anymore
-  // -- Radix-internal opens arrive on an empty slot (their tooltip.open
-  // broadcast closes mounted peers first), and the hints' direct opens are
-  // leave-then-enter ordered. The guard and this test's mutant went
-  // together.
-
-  it("releases a stale hint key when its row unmounts -- the next open takes the slot", async () => {
-    // The ghost-key shape the retired guard used to wedge: a row unmounting
-    // mid-hover never fires pointerleave, so its hint key stays in the mutex
-    // slot. Opens take the slot now (the retired guard rejected this
-    // different-key open forever, with nothing left to clear it), so the
-    // next row's hint shows. Re-adding a rejection branch flips this test
-    // back to the stale delete hint (the mutant this test pins).
-    const orders: DatasetDescriptor = {
-      ...mockDataset,
-      reference_name: "orders",
-      display_name: "orders",
-    };
-    const { rerender } = renderI18n(
-      <WorkingSetList
-        datasets={[mockDataset, orders]}
-        activeName={null}
-        selectedName={null}
-        onSelect={() => {}}
-        onRename={() => {}}
-        onDelete={() => {}}
-      />,
-    );
-    const peopleRow = screen.getByRole("button", { name: /^people/ }).closest("li")!;
-    fireEvent.pointerEnter(within(peopleRow).getByRole("button", { name: /删除/ }), {
-      pointerType: "mouse",
-    });
-    expect(await screen.findByRole("tooltip")).toHaveTextContent("删除");
-    // people (the delete-hint row) disappears mid-hover -- no pointerleave.
-    rerender(
-      withIntl(
-        <WorkingSetList
-          datasets={[orders]}
-          activeName={null}
-          selectedName={null}
-          onSelect={() => {}}
-          onRename={() => {}}
-          onDelete={() => {}}
-        />,
-      ),
-    );
-    fireEvent.pointerEnter(screen.getByRole("button", { name: /重命名/ }), {
-      pointerType: "mouse",
-    });
-    expect(await screen.findByRole("tooltip")).toHaveTextContent("重命名");
-  });
+  // The mutex's transfer rules (opens take the slot, closes are keyed) are
+  // pinned at the pure layer in rowHints.test. The retired #865 guard arm
+  // ("an open action hint owns the slot against a direct non-hint open")
+  // and the ghost-key shape a rejection branch would wedge are absorbed by
+  // the opens-take-the-slot rule there (issue #1073 moved the protocol's
+  // authority into that module).
 
   it("renders the stale chip inline after the row actions, retiring the wrapped second line (issue #790, #793)", () => {
     const stale: DatasetDescriptor = {
