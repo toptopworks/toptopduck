@@ -189,8 +189,8 @@ pub fn list_skills(root: &Path) -> SkillListing {
                 let Some(dir_name) = path.file_name().and_then(|n| n.to_str()) else {
                     continue;
                 };
-                // Hidden children of the reserved subtree stay internal (the
-                // alignment marker and any future bookkeeping).
+                // Hidden children of the reserved subtree stay internal
+                // (bookkeeping, never skill content).
                 if dir_name.starts_with('.') {
                     continue;
                 }

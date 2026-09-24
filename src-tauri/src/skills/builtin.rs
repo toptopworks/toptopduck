@@ -11,13 +11,13 @@
 //!
 //! Materialization is a READ-ONLY CACHE in the registry's reserved subtree
 //! `<skills-root>/.system/` (ADR-0121 Decision 3): the alignment window
-//! (still riding the CLI scan, issue #677) writes the whole embedded tree per
-//! anchored skill and records a fingerprint marker (sorted paths + content
-//! hashes + a version salt) inside the subtree. A matching fingerprint skips
-//! with zero writes; any mismatch (missing, external edit, retired file,
-//! app-version bump) deletes the subtree and rewrites it -- the files are app
-//! deployment assets, not user content, so there is no edit detection, no
-//! edit preservation, and no restore action. A same-named LOCAL skill at the
+//! (still riding the CLI scan, issue #677) writes the whole embedded tree
+//! per anchored skill. The tree fingerprint (sorted paths + content
+//! hashes) is computed on both sides and never persisted: a matching
+//! on-disk tree skips with zero writes; any mismatch (missing, external
+//! edit, retired file) deletes the subtree and rewrites it -- the files
+//! are app deployment assets, not user content, so there is no edit
+//! detection, no edit preservation, and no restore action. A same-named LOCAL skill at the
 //! registry root shadows the builtin (Decision 5): the merge-side deference
 //! lives in the registry scan ([`super::registry`]), never here --
 //! materialization always runs.
@@ -39,18 +39,6 @@ use super::model::SkillError;
 /// names, while the filesystem stays free (the fork channel: copy
 /// `.system/<name>/` to the registry root for an editable variant).
 pub(crate) const SYSTEM_SUBTREE: &str = ".system";
-
-/// The alignment marker's file name inside each skill's subtree: holds the
-/// embedded-tree fingerprint the last alignment wrote. Bookkeeping, not skill
-/// content -- excluded from the fingerprint input and from the attachment
-/// read surface.
-pub(crate) const FINGERPRINT_FILE: &str = ".fingerprint";
-
-/// The tree fingerprint's version salt (ADR-0121 Decision 3): folded into
-/// every fingerprint, so an app-version bump can never compare equal to a
-/// marker an older build wrote -- each release re-aligns the subtree once,
-/// cleanly, even when the embedded bytes did not change.
-const VERSION_SALT: &str = env!("CARGO_PKG_VERSION");
 
 /// The embedded builtin-skill asset tree (ADR-0121 Decision 1): one
 /// directory per skill, `SKILL.md` + any attachment assets. The build script
@@ -194,8 +182,8 @@ fn auto_include_gate(
 
 /// The align outcome: the names of the builtin skills whose reserved-subtree
 /// write the window could not complete (issue #1016 semantics, now riding
-/// the whole-tree write). A failure keeps the degraded posture -- warn, no
-/// marker, nothing persisted -- but surfaces by name so the scan payload can
+/// the whole-tree write). A failure keeps the degraded posture -- warn,
+/// nothing persisted -- but surfaces by name so the scan payload can
 /// render the missing row's warning in the Skills panel; the next scan
 /// retries. The retirement sweep's own failures (a blocked delete) are
 /// warn-only -- the leftover is app-owned cache, the next window retries,
@@ -305,17 +293,16 @@ fn align_one(root: &Path, entry: &BuiltinSkillManifest) -> Result<(), SkillError
         )));
     }
     // Quiet path: the on-disk tree already fingerprint-matches the embedded
-    // one -- zero writes (the fingerprint covers every file plus the version
-    // salt, so an external edit, a stale file, or an app bump all read as a
-    // mismatch below).
+    // one -- zero writes (the fingerprint covers every file, so an external
+    // edit or a stale file reads as a mismatch below).
     if let Ok(found) = disk_files(&dir) {
         if tree_fingerprint(&found) == expected {
             return Ok(());
         }
     }
     // Mismatch: the subtree is an app cache, so it is deleted wholesale and
-    // rewritten from the embedded tree, marker last (a crash mid-rewrite
-    // leaves a fingerprint-less subtree that the next window rebuilds).
+    // rewritten from the embedded tree (a crash mid-rewrite leaves a partial
+    // tree that mismatches, and the next window rebuilds it).
     if dir.exists() {
         std::fs::remove_dir_all(&dir).map_err(|e| {
             SkillError::FsFailure(format!(
@@ -342,12 +329,6 @@ fn align_one(root: &Path, entry: &BuiltinSkillManifest) -> Result<(), SkillError
             ))
         })?;
     }
-    std::fs::write(dir.join(FINGERPRINT_FILE), &expected).map_err(|e| {
-        SkillError::FsFailure(format!(
-            "write builtin fingerprint `{}` failed: {e}",
-            dir.join(FINGERPRINT_FILE).display()
-        ))
-    })?;
     log::info!(
         target: "skills",
         "builtin skill `{}` aligned to the embedded tree", entry.name
@@ -355,12 +336,12 @@ fn align_one(root: &Path, entry: &BuiltinSkillManifest) -> Result<(), SkillError
     Ok(())
 }
 
-/// Compute a tree fingerprint (ADR-0121 Decision 3): the version salt folded
-/// with every file's '/'-relative path + content hash, iterated in sorted
-/// path order. Deterministic by construction, so equal trees hash equal and
-/// the marker comparison is exact.
+/// Compute a tree fingerprint (ADR-0121 Decision 3): every file's
+/// '/'-relative path + content hash, iterated in sorted path order.
+/// Deterministic by construction, so equal trees hash equal and the
+/// comparison is exact.
 fn tree_fingerprint(files: &[(String, Vec<u8>)]) -> String {
-    let mut acc = String::from(VERSION_SALT);
+    let mut acc = String::new();
     for (path, bytes) in files {
         acc.push_str(path);
         acc.push('\0');
@@ -414,11 +395,10 @@ fn collect_embedded(dir: &Dir, prefix: &str, out: &mut Vec<(String, Vec<u8>)>) {
 }
 
 /// Collect the on-disk subtree as ('/'-path, bytes) pairs for the
-/// fingerprint comparison, EXCLUDING the marker file itself (it is written
-/// after the tree and re-derived every alignment). A missing subtree reads
-/// empty (a mismatch against any non-empty embedded tree -> write). A read
-/// error skips the quiet path -- the rewrite attempt that follows is what
-/// surfaces it as a per-skill failure (the #1016 degrade posture).
+/// fingerprint comparison. A missing subtree reads empty (a mismatch
+/// against any non-empty embedded tree -> write). A read error skips the
+/// quiet path -- the rewrite attempt that follows is what surfaces it as a
+/// per-skill failure (the #1016 degrade posture).
 fn disk_files(dir: &Path) -> Result<Vec<(String, Vec<u8>)>, SkillError> {
     let mut out = Vec::new();
     collect_disk(dir, "", &mut out)?;
@@ -452,10 +432,6 @@ fn collect_disk(
         let name = entry.file_name().to_string_lossy().into_owned();
         let path = entry.path();
         let rel = join_rel(prefix, &name);
-        // The alignment marker is bookkeeping, never fingerprint input.
-        if prefix.is_empty() && name == FINGERPRINT_FILE {
-            continue;
-        }
         let Ok(ft) = entry.file_type() else {
             continue;
         };
@@ -945,7 +921,10 @@ mod tests {
                 "embedded `{path}` materialized verbatim"
             );
         }
-        assert!(root.path().join(".system/pandoc/.fingerprint").exists());
+        assert!(
+            !root.path().join(".system/pandoc/.fingerprint").exists(),
+            "no marker rides the materialized tree"
+        );
         // ...the knowledge-only skill aligns with no CLI condition...
         assert!(root.path().join(".system/vega-chart/SKILL.md").exists());
         // ...and the un-anchored companions materialize nothing.
@@ -954,21 +933,21 @@ mod tests {
     }
 
     /// The quiet path (ADR-0121 Decision 3): a matching fingerprint writes
-    /// nothing -- pinned by the marker's mtime, which a rewrite would
+    /// nothing -- pinned by `SKILL.md`'s mtime, which a rewrite would
     /// necessarily move.
     #[test]
     fn align_skips_with_zero_writes_when_the_fingerprint_agrees() {
         let root = tempfile::tempdir().expect("root");
         let cli = registry_with(vec![builtin_pandoc(true)]);
         align(root.path(), &cli);
-        let marker = root.path().join(".system/pandoc/.fingerprint");
-        let before = std::fs::metadata(&marker)
-            .expect("marker")
+        let skill_md = root.path().join(".system/pandoc/SKILL.md");
+        let before = std::fs::metadata(&skill_md)
+            .expect("SKILL.md")
             .modified()
             .unwrap();
         align(root.path(), &cli);
-        let after = std::fs::metadata(&marker)
-            .expect("marker")
+        let after = std::fs::metadata(&skill_md)
+            .expect("SKILL.md")
             .modified()
             .unwrap();
         assert_eq!(before, after, "an agreeing fingerprint rewrites nothing");

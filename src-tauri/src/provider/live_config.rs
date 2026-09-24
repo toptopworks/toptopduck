@@ -1946,7 +1946,7 @@ mod tests {
         // The wiring pin (issue #677): a first detection registers the CLI
         // entry AND aligns the companion skill's reserved subtree in the
         // same window -- the file lands under `.system/`, byte-identical
-        // to the embedded asset, with the alignment marker beside it.
+        // to the embedded asset.
         let (_dir, live) = live();
         let skills = tempfile::tempdir().expect("skills root");
         let path_dir = controlled_path(&["pandoc"]);
@@ -1958,7 +1958,6 @@ mod tests {
         let embedded = std::fs::read(md).expect("read");
         let asset = include_bytes!("../skills/assets/builtin/pandoc/SKILL.md");
         assert_eq!(embedded, asset, "byte-identical to the embedded asset");
-        assert!(skills.path().join(".system/pandoc/.fingerprint").exists());
         // The un-anchored companions stay out of the subtree; the
         // knowledge-only skill rides the app version and lands too.
         assert!(!skills.path().join(".system/python").exists());
