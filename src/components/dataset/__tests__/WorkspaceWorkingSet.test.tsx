@@ -2,11 +2,10 @@ import { describe, expect, it, vi, beforeEach } from "vitest";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import type { ReactElement } from "react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { WorkspaceWorkingSet } from "../WorkspaceWorkingSet";
-import { SAMPLE_ROW_LIMIT } from "../DatasetDetail";
+import { WorkspaceWorkingSet, SAMPLE_ROW_LIMIT } from "../WorkspaceWorkingSet";
 import { readRows } from "../../../api";
 import type { DatasetDescriptor, RowPage } from "../../../types/dataset";
-import { mockDataset } from "./helpers";
+import { mockDataset, mockSamplePage, staleDataset } from "./helpers";
 import { withIntl } from "../../common/__tests__/helpers";
 
 // The working-set tab's master/detail composition, extracted from SessionPane
@@ -247,14 +246,7 @@ describe("WorkspaceWorkingSet", () => {
     // The read rides the paged channel with the pane's session addressing and
     // the fixed first window; the page's own column list drives the headers.
     vi.mocked(readRows).mockResolvedValue({
-      columns: [
-        { name: "id", canonical_type: "BIGINT" },
-        { name: "name", canonical_type: "VARCHAR" },
-      ],
-      rows: [
-        ["1", "Zoe"],
-        ["2", "Yan"],
-      ],
+      ...mockSamplePage,
       total: 5,
       offset: 0,
       limit: SAMPLE_ROW_LIMIT,
@@ -333,14 +325,10 @@ describe("WorkspaceWorkingSet", () => {
   });
 
   it("renders the stale badge on a stale dataset's detail title (issue #1061)", async () => {
-    const stalePeople: DatasetDescriptor = {
-      ...mockDataset,
-      stale: { reference_name: "people", display_name: "people", reason: "Deleted" },
-    };
     renderSet(
       <WorkspaceWorkingSet
         sessionId={SESSION}
-        datasets={[stalePeople]}
+        datasets={[staleDataset("Deleted")]}
         activeName="people"
         loading={false}
         {...NOOPS}

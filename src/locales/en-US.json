@@ -617,7 +617,7 @@
   "workingSet.detail.meta": "Rows: {rows}",
   "workingSet.detail.fingerprint": "Fingerprint: {fingerprint}",
   "workingSet.detail.referenceName": "(reference name: {name})",
-  "workingSet.detail.sampleHeading": "Data sample (first {count} rows)",
+  "workingSet.detail.sampleHeading": "Data sample",
   "workingSet.detail.sampleLoading": "Loading rows…",
   "workingSet.detail.sourceFile": "Source file: {path}",
   "workingSet.empty": "Working set is empty — drop or pick a data file to start.",

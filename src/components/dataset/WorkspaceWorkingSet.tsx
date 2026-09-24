@@ -5,7 +5,7 @@ import { readRows } from "../../api";
 import { sessionKeys } from "../../session/queryKeys";
 import { WorkingSetList } from "./WorkingSetList";
 import { WorkingSetEmptyState } from "./WorkingSetEmptyState";
-import { DatasetDetail, SAMPLE_ROW_LIMIT } from "./DatasetDetail";
+import { DatasetDetail } from "./DatasetDetail";
 import { resolveWorkingSetDetail } from "../../session/workspace";
 import type { DatasetDescriptor, DatasetPrivacy } from "../../types/dataset";
 
@@ -26,6 +26,12 @@ import type { DatasetDescriptor, DatasetPrivacy } from "../../types/dataset";
 // above the page floor (dark mode brightness step; light mode hairline +
 // shadow-sm, the system's light depth method).
 const PANEL_CARD_BASE = "panel bg-card border rounded-lg shadow-sm p-4";
+// The live sample window (issue #1061): the detail pane previews the FIRST
+// N rows of the shown dataset through the paged read (ADR-0024) -- the
+// query's limit; the preview table renders exactly the page it returns.
+// Lives with the query owner so the container->renderer dependency stays
+// one-way. Exported for the tests to pin.
+export const SAMPLE_ROW_LIMIT = 20;
 export function WorkspaceWorkingSet({
   sessionId,
   datasets,
@@ -66,20 +72,22 @@ export function WorkspaceWorkingSet({
   // conditional return): the preview query's gate needs the same resolved
   // pick the detail pane renders, so there is exactly one resolution.
   const shown = resolveWorkingSetDetail(datasets, selected, activeName);
+  const referenceName = shown?.reference_name ?? null;
 
   // The live sample preview (issue #1061): one fixed first window of the
   // shown dataset through the paged read (ADR-0024). The gate keys on the
   // PICK, never on tab visibility or unmount -- issue #1060 keeps both tab
   // panels mounted across switches, so an unmount-based gate would never
-  // fire; enabled:false with no pick simply idles the query. The key nests
-  // under the working-set prefix so the rename / replace / delete / privacy
-  // invalidations refresh the rows alongside the descriptor (a replaced
-  // source's rows would otherwise linger -- staleTime is Infinity app-wide,
-  // ADR-0051).
+  // fire; enabled:false with no pick simply idles the query (the `?? ""`
+  // placeholders never execute: a disabled query's queryFn never runs). The
+  // key nests under the working-set prefix so the rename / replace / delete /
+  // privacy invalidations refresh the rows alongside the descriptor (a
+  // replaced source's rows would otherwise linger -- staleTime is Infinity
+  // app-wide, ADR-0051).
   const preview = useQuery({
-    queryKey: sessionKeys.previewRows(sessionId, shown?.reference_name ?? ""),
-    queryFn: () => readRows(sessionId, shown!.reference_name, 0, SAMPLE_ROW_LIMIT),
-    enabled: shown !== null,
+    queryKey: sessionKeys.previewRows(sessionId, referenceName ?? ""),
+    queryFn: () => readRows(sessionId, referenceName ?? "", 0, SAMPLE_ROW_LIMIT),
+    enabled: referenceName !== null,
   });
 
   // The empty set renders ONE card (issue #792): the two-column shell with its
@@ -122,7 +130,7 @@ export function WorkspaceWorkingSet({
           // The band rides the RESOLVED pick, not the raw state: after a
           // delete the pane falls back (active, then first) and the band
           // follows the pane, never a name that is no longer in the list.
-          selectedName={shown?.reference_name ?? null}
+          selectedName={referenceName}
           onSelect={setSelected}
           onRename={onRename}
           onReplace={onReplace}

@@ -617,7 +617,7 @@
   "workingSet.detail.meta": "行数：{rows}",
   "workingSet.detail.fingerprint": "指纹：{fingerprint}",
   "workingSet.detail.referenceName": "（引用名：{name}）",
-  "workingSet.detail.sampleHeading": "数据样本（前 {count} 行）",
+  "workingSet.detail.sampleHeading": "数据样本",
   "workingSet.detail.sampleLoading": "正在加载行数据…",
   "workingSet.detail.sourceFile": "来源文件：{path}",
   "workingSet.empty": "工作集为空 — 拖入或拾取一个数据文件开始。",

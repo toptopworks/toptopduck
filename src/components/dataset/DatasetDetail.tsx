@@ -6,12 +6,6 @@ import { Badge } from "../ui/badge";
 import { staleChipVerb } from "../thread/turn-visual";
 import { fmtError } from "../../lib/error-presentation/format";
 
-// The live sample window (issue #1061): the detail pane previews the FIRST
-// N rows of the shown dataset through the paged read (ADR-0024). A named
-// constant so the query's limit and the heading's count can never drift.
-// Exported: the working-set container imports it for the readRows call.
-export const SAMPLE_ROW_LIMIT = 20;
-
 // What the container hands the preview renderer: the column list plus one
 // page of rows. Narrow on purpose -- total / offset / limit are the paged
 // reader's bookkeeping, while the detail pane renders one fixed window.
@@ -137,10 +131,13 @@ export function DatasetDetail({
       {previewState !== null && (
         <>
           <h3 className="text-base font-semibold">
+            {/* Plain heading by design (issue #1061 review): the count the
+                table actually shows varies with the dataset's total, and the
+                meta line already carries the authoritative row count -- a
+                hardcoded window in the label would lie for smaller datasets. */}
             <FormattedMessage
               id="workingSet.detail.sampleHeading"
-              defaultMessage="Data sample (first {count} rows)"
-              values={{ count: SAMPLE_ROW_LIMIT }}
+              defaultMessage="Data sample"
             />
           </h3>
           {previewState === "error" && (

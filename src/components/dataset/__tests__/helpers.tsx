@@ -3,6 +3,7 @@ import type {
   DatasetPrivacy,
   GuidanceReason,
   GuidanceSheet,
+  StaleReason,
 } from "../../../types/dataset";
 
 // Shared dataset-domain test fixtures (ADR-0011 defaults). The zh-CN
@@ -41,3 +42,30 @@ export const mockDataset: DatasetDescriptor = {
 
 // The ADR-0011 default: samples on, no type-only columns.
 export const defaultPrivacy: DatasetPrivacy = { send_samples: true, type_only_columns: [] };
+
+// The live preview page fixture (issue #1061): its row values ride nowhere in
+// mockDataset.sample, so a hit proves the preview renders the PROP page, not
+// the retired frozen arm.
+export const mockSamplePage = {
+  columns: [
+    { name: "id", canonical_type: "BIGINT" },
+    { name: "name", canonical_type: "VARCHAR" },
+  ],
+  rows: [
+    ["1", "Zoe"],
+    ["2", "Yan"],
+  ],
+};
+
+// A stale-state descriptor fixture (issue #40, ADR-0013): the anchor rides
+// the descriptor; the reason selects the shared causal verb wording.
+export function staleDataset(reason: StaleReason): DatasetDescriptor {
+  return {
+    ...mockDataset,
+    stale: {
+      reference_name: mockDataset.reference_name,
+      display_name: mockDataset.display_name,
+      reason,
+    },
+  };
+}

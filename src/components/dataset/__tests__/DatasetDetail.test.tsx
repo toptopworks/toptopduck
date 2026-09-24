@@ -2,32 +2,19 @@ import { describe, expect, it } from "vitest";
 import { screen } from "@testing-library/react";
 import { DatasetDetail } from "../DatasetDetail";
 import type { DatasetDescriptor } from "../../../types/dataset";
-import { mockDataset } from "./helpers";
+import { mockDataset, mockSamplePage, staleDataset } from "./helpers";
 import { renderI18n } from "../../common/__tests__/helpers";
 
 // The detail pane's live preview reads through props (issue #1061): the
 // working-set container owns the readRows query, the detail stays a pure
 // renderer. The descriptor's frozen load-time sample no longer renders
-// anywhere -- the live page replaces it.
-const SAMPLE = {
-  columns: [
-    { name: "id", canonical_type: "BIGINT" },
-    { name: "name", canonical_type: "VARCHAR" },
-  ],
-  // "Zoe" rides nowhere in the shared mockDataset.sample, so a hit proves
-  // the preview renders the PROP page, not the frozen arm.
-  rows: [
-    ["1", "Zoe"],
-    ["2", "Yan"],
-  ],
-};
-
-const NO_PREVIEW = { sample: SAMPLE, sampleLoading: false, sampleError: null } as const;
-
-const staleDataset = (reason: "Deleted" | "Replaced"): DatasetDescriptor => ({
-  ...mockDataset,
-  stale: { reference_name: "people", display_name: "people", reason },
-});
+// anywhere -- the live page replaces it. The page and stale fixtures share
+// the domain helpers.
+const NO_PREVIEW = {
+  sample: mockSamplePage,
+  sampleLoading: false,
+  sampleError: null,
+} as const;
 
 describe("DatasetDetail", () => {
   it("renders canonical column types and the live sample page", () => {
@@ -121,7 +108,7 @@ describe("DatasetDetail", () => {
       <DatasetDetail
         dataset={mockDataset}
         {...NO_PREVIEW}
-        sample={{ columns: SAMPLE.columns, rows: [] }}
+        sample={{ columns: mockSamplePage.columns, rows: [] }}
       />,
     );
     expect(screen.queryByText(/数据样本/)).toBeNull();
@@ -172,7 +159,11 @@ describe("DatasetDetail", () => {
     // chip -- Replaced/Deleted never diverge between the two surfaces. It is
     // a label, not the thread chip: no button semantics, no jump promise.
     renderI18n(<DatasetDetail dataset={staleDataset("Deleted")} {...NO_PREVIEW} />);
-    expect(screen.getByText("上游已删除")).toBeInTheDocument();
+    const badge = screen.getByText("上游已删除");
+    expect(badge).toBeInTheDocument();
+    // The class hook matches the working-set list's stale badge convention
+    // (#1062 pins the same class there) -- one selector for both surfaces.
+    expect(badge.className.split(/\s+/)).toContain("stale-badge");
   });
 
   it("renders the Replaced stale verb for a replaced source", () => {
