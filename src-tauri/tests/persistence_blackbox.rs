@@ -3728,11 +3728,27 @@ fn cancelled_in_flight_turn_writes_recipe_once_at_terminal_not_mid_flight() {
 
     let bytes_before = fs::read(&duck).expect("read before turn");
 
-    // Fire cancel from a separate thread after a short delay -- the ask
-    // thread blocks inside generate() until the flag flips.
+    // Fire cancel from a separate thread once the provider has ENTERED
+    // generation (the mid-flight snapshot is captured) -- the ask thread
+    // blocks inside generate() until the flag flips. A fixed delay would
+    // race the ask-side setup on a loaded runner: the completion-call
+    // cancel checkpoint can stop the turn before generate() is ever
+    // called, leaving no snapshot (#921's wall-clock lesson, applied to
+    // the trigger side). The deadline only guards against hanging -- if
+    // the provider is never entered, the mid-flight expect below still
+    // fails loudly.
     let cancel_for_thread = Arc::clone(&cancel);
+    let mid_flight_for_thread = Arc::clone(&mid_flight);
     let handle = std::thread::spawn(move || {
-        std::thread::sleep(std::time::Duration::from_millis(50));
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(500);
+        while mid_flight_for_thread
+            .lock()
+            .expect("mid_flight poisoned")
+            .is_none()
+            && std::time::Instant::now() < deadline
+        {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
         cancel_for_thread.request();
     });
     let outcome = session.ask("blocking-question");
