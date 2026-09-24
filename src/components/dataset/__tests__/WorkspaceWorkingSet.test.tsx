@@ -4,6 +4,7 @@ import type { ReactElement } from "react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { WorkspaceWorkingSet, SAMPLE_ROW_LIMIT } from "../WorkspaceWorkingSet";
 import { readRows } from "../../../api";
+import { sessionKeys } from "../../../session/queryKeys";
 import type { DatasetDescriptor, RowPage } from "../../../types/dataset";
 import { mockDataset, mockSamplePage, staleDataset } from "./helpers";
 import { withIntl } from "../../common/__tests__/helpers";
@@ -24,8 +25,9 @@ vi.mock("../../../api", async (importOriginal) => {
   };
 });
 
-// row_count 9 + its own sample make the orders detail distinguishable from
-// people's (both fixtures spread the shared mockDataset otherwise).
+// row_count 9 makes the orders detail distinguishable from people's (both
+// fixtures spread the shared mockDataset otherwise; the sample field is a
+// wire-shape requirement with no rendering consumer, issue #1061).
 const orders: DatasetDescriptor = {
   ...mockDataset,
   reference_name: "orders",
@@ -56,9 +58,10 @@ const EMPTY_PAGE: RowPage = {
 };
 
 // A fresh client per render (test cache never bleeds), but the SAME client
-// across a test's rerenders so the pick state survives the prop update --
-// a new provider would remount the tab and reset the pick. retry:false: the
-// mock's rejection IS the test's subject, not a transient to retry.
+// across a test's rerenders so the fetched page stays cached -- swapping in
+// a fresh client mid-test would empty the cache and re-fetch on every prop
+// update. retry:false: the mock's rejection IS the test's subject, not a
+// transient to retry.
 function renderSet(ui: ReactElement) {
   const queryClient = new QueryClient({
     defaultOptions: { queries: { retry: false } },
@@ -67,7 +70,13 @@ function renderSet(ui: ReactElement) {
     <QueryClientProvider client={queryClient}>{withIntl(element)}</QueryClientProvider>
   );
   const view = render(wrap(ui));
-  return { ...view, rerender: (element: ReactElement) => view.rerender(wrap(element)) };
+  return {
+    ...view,
+    rerender: (element: ReactElement) => view.rerender(wrap(element)),
+    // Exposed for the invalidation-cascade pin: the mutation layer's refresh
+    // (useSessionState.refreshServerState) invalidates the workingSet prefix.
+    queryClient,
+  };
 }
 
 beforeEach(() => {
@@ -337,6 +346,63 @@ describe("WorkspaceWorkingSet", () => {
     // Stale data still reads (ADR-0013) -- the preview fetch fires AND the
     // honest badge rides the title.
     expect(await screen.findByText("上游已删除")).toBeInTheDocument();
+    expect(readRows).toHaveBeenCalledWith(SESSION, "people", 0, SAMPLE_ROW_LIMIT);
+  });
+
+  it("pins the preview window at 20 rows", () => {
+    // Every other assertion references the exported constant, which pins
+    // consistency but not the number itself -- a silent resize would
+    // redden nothing. Pin the value.
+    expect(SAMPLE_ROW_LIMIT).toBe(20);
+  });
+
+  it("shows the loading line while the container's preview read is in flight (issue #1061)", async () => {
+    // The renderer's loading arm is pinned by its direct-prop test; this
+    // guards the CONTAINER's sampleLoading forwarding, which no other test
+    // observes (dropping that wiring to a constant keeps everything green).
+    let resolveRead: (page: RowPage) => void = () => {};
+    vi.mocked(readRows).mockImplementation(
+      () => new Promise<RowPage>((resolve) => (resolveRead = resolve)),
+    );
+    renderSet(
+      <WorkspaceWorkingSet
+        sessionId={SESSION}
+        datasets={[mockDataset]}
+        activeName="people"
+        loading={false}
+        {...NOOPS}
+      />,
+    );
+    expect(screen.getByText(/正在加载行数据/)).toBeInTheDocument();
+    resolveRead(EMPTY_PAGE);
+    await waitFor(() => expect(screen.queryByText(/正在加载行数据/)).toBeNull());
+  });
+
+  it("refetches the preview when the working-set prefix is invalidated (issue #1061)", async () => {
+    // The cascade half: rename / replace / delete / privacy mutations
+    // invalidate the workingSet prefix (useSessionState.refreshServerState),
+    // and the previewRows key must nest under it -- a replaced source's rows
+    // would otherwise linger forever (staleTime is Infinity, so nothing else
+    // ever refetches).
+    vi.mocked(readRows).mockImplementation(async (_sessionId, referenceName) => ({
+      columns: [{ name: "tag", canonical_type: "VARCHAR" }],
+      rows: [[`rows-${referenceName}`]],
+      total: 1,
+      offset: 0,
+      limit: SAMPLE_ROW_LIMIT,
+    }));
+    const { queryClient } = renderSet(
+      <WorkspaceWorkingSet
+        sessionId={SESSION}
+        datasets={[mockDataset]}
+        activeName="people"
+        loading={false}
+        {...NOOPS}
+      />,
+    );
+    expect(await screen.findByText("rows-people")).toBeInTheDocument();
+    vi.mocked(readRows).mockClear();
+    await queryClient.invalidateQueries({ queryKey: sessionKeys.workingSet(SESSION) });
     expect(readRows).toHaveBeenCalledWith(SESSION, "people", 0, SAMPLE_ROW_LIMIT);
   });
 });

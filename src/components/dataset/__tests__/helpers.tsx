@@ -5,6 +5,7 @@ import type {
   GuidanceSheet,
   StaleReason,
 } from "../../../types/dataset";
+import type { DatasetSamplePage } from "../DatasetDetail";
 
 // Shared dataset-domain test fixtures (ADR-0011 defaults). The zh-CN
 // IntlProvider wrapper used by the dataset component tests lives in the common
@@ -46,7 +47,7 @@ export const defaultPrivacy: DatasetPrivacy = { send_samples: true, type_only_co
 // The live preview page fixture (issue #1061): its row values ride nowhere in
 // mockDataset.sample, so a hit proves the preview renders the PROP page, not
 // the retired frozen arm.
-export const mockSamplePage = {
+export const mockSamplePage: DatasetSamplePage = {
   columns: [
     { name: "id", canonical_type: "BIGINT" },
     { name: "name", canonical_type: "VARCHAR" },

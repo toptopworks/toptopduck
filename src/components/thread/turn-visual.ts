@@ -252,14 +252,15 @@ export function findStaleSourceIdx(
   return null;
 }
 
-// Concise verb for the stale causal chip (ADR-0041 honest split, ADR-0052 i18n):
+// Concise verb for the stale causal surfaces (ADR-0041 honest split, ADR-0052 i18n):
 // a Replaced source -> "Source updated" (the SQL still physically runs on the
 // new backing; v1 just does not recompute); a Deleted source -> "Upstream
 // deleted" (the reference name is gone, truly unavailable). The wording split
 // signals whether the user could re-ask to recover the result. Distinct from
 // the working-set list's stale row: its badge is the short "Stale" chip with
 // the full causal sentence on its Radix tooltip (workingSet.staleRow.hint,
-// issue #793 / #865) -- this chip is a compact, clickable label.
+// issue #793 / #865) -- this chip is a compact, clickable label. The
+// working-set detail title (issue #1061) reuses the verb on an inert badge.
 export function staleChipVerb(intl: IntlShape, reason: StaleReason): string {
   switch (reason) {
     case "Replaced":

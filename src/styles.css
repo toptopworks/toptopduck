@@ -48,7 +48,7 @@
    (SessionPane WorkspaceWorkingSet) as utility. Single consumer. The detail
    track is minmax(0, 1fr) and the panels carry min-width: 0 -- a bare 1fr
    track resolves its automatic minimum to the content's min-content, so a
-   wide dataset (a 40-column frozen sample) re-widens the column into
+   wide dataset (a 40-column preview table) re-widens the column into
    workspace-body overflow instead of scrolling inside the Table primitive's
    overflow-x-auto container (ADR-0057). Same pin the narrow fallback below
    carries. */

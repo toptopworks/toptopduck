@@ -10,7 +10,7 @@ import { renderI18n } from "../../common/__tests__/helpers";
 // renderer. The descriptor's frozen load-time sample no longer renders
 // anywhere -- the live page replaces it. The page and stale fixtures share
 // the domain helpers.
-const NO_PREVIEW = {
+const LOADED_PREVIEW = {
   sample: mockSamplePage,
   sampleLoading: false,
   sampleError: null,
@@ -18,7 +18,7 @@ const NO_PREVIEW = {
 
 describe("DatasetDetail", () => {
   it("renders canonical column types and the live sample page", () => {
-    renderI18n(<DatasetDetail dataset={mockDataset} {...NO_PREVIEW} />);
+    renderI18n(<DatasetDetail dataset={mockDataset} {...LOADED_PREVIEW} />);
     expect(screen.getByText("BIGINT")).toBeInTheDocument();
     expect(screen.getByText("VARCHAR")).toBeInTheDocument();
     // The type column header is brand-neutral (issue #739).
@@ -41,7 +41,7 @@ describe("DatasetDetail", () => {
     // directly under the source-file line so that check needs no hover (the
     // former tooltip form is gone: no title attribute, no tooltip in the
     // tree).
-    renderI18n(<DatasetDetail dataset={mockDataset} {...NO_PREVIEW} />);
+    renderI18n(<DatasetDetail dataset={mockDataset} {...LOADED_PREVIEW} />);
     const meta = screen.getByText(/行数：5/);
     expect(meta).not.toHaveTextContent(/指纹/);
     expect(meta).not.toHaveAttribute("title");
@@ -59,7 +59,7 @@ describe("DatasetDetail", () => {
     // proves its changes renders; a dangling fingerprint alone would prove
     // nothing.
     renderI18n(
-      <DatasetDetail dataset={{ ...mockDataset, source_path: "" }} {...NO_PREVIEW} />,
+      <DatasetDetail dataset={{ ...mockDataset, source_path: "" }} {...LOADED_PREVIEW} />,
     );
     expect(screen.queryByText(/来源文件/)).toBeNull();
     expect(screen.queryByText(/指纹/)).toBeNull();
@@ -71,7 +71,7 @@ describe("DatasetDetail", () => {
     // that drops font-mono would silently render in the body font -- pin the
     // tagName + className here so the regression fails loudly (mirrors the
     // bg-muted pinning pattern in the ResultView cell-null test).
-    renderI18n(<DatasetDetail dataset={mockDataset} {...NO_PREVIEW} />);
+    renderI18n(<DatasetDetail dataset={mockDataset} {...LOADED_PREVIEW} />);
     const typeCell = screen.getByText("BIGINT");
     expect(typeCell.tagName).toBe("CODE");
     expect(typeCell.className.split(/\s+/)).toContain("font-mono");
@@ -87,7 +87,7 @@ describe("DatasetDetail", () => {
     // that drops the utility would render at the body size with zero
     // hierarchy. Pin all headings the section renders: the title, the schema
     // heading, and the sample heading.
-    renderI18n(<DatasetDetail dataset={mockDataset} {...NO_PREVIEW} />);
+    renderI18n(<DatasetDetail dataset={mockDataset} {...LOADED_PREVIEW} />);
     const headings = [
       screen.getByRole("heading", { level: 2 }),
       ...screen.getAllByRole("heading", { level: 3 }),
@@ -107,7 +107,7 @@ describe("DatasetDetail", () => {
     renderI18n(
       <DatasetDetail
         dataset={mockDataset}
-        {...NO_PREVIEW}
+        {...LOADED_PREVIEW}
         sample={{ columns: mockSamplePage.columns, rows: [] }}
       />,
     );
@@ -117,7 +117,7 @@ describe("DatasetDetail", () => {
 
   it("shows a muted loading line while the preview fetch is in flight", () => {
     renderI18n(
-      <DatasetDetail dataset={mockDataset} {...NO_PREVIEW} sample={null} sampleLoading />,
+      <DatasetDetail dataset={mockDataset} {...LOADED_PREVIEW} sample={null} sampleLoading />,
     );
     expect(screen.getByText(/正在加载行数据/)).toBeInTheDocument();
     expect(screen.queryByText("Zoe")).toBeNull();
@@ -129,7 +129,7 @@ describe("DatasetDetail", () => {
     renderI18n(
       <DatasetDetail
         dataset={mockDataset}
-        {...NO_PREVIEW}
+        {...LOADED_PREVIEW}
         sample={null}
         sampleError={new Error("boom")}
       />,
@@ -146,7 +146,7 @@ describe("DatasetDetail", () => {
     // area above/below never leave the viewport, including the <=600px
     // single-column fallback (issue #791). Pin the classes -- a dropped cap
     // or scroll would silently stretch the panel again.
-    const { container } = renderI18n(<DatasetDetail dataset={mockDataset} {...NO_PREVIEW} />);
+    const { container } = renderI18n(<DatasetDetail dataset={mockDataset} {...LOADED_PREVIEW} />);
     const scrollWrap = container.querySelector(".sample-body");
     expect(scrollWrap).not.toBeNull();
     expect(scrollWrap!.className.split(/\s+/)).toContain("max-h-64");
@@ -158,21 +158,22 @@ describe("DatasetDetail", () => {
     // whose wording comes from the SAME verb helper as the thread's stale
     // chip -- Replaced/Deleted never diverge between the two surfaces. It is
     // a label, not the thread chip: no button semantics, no jump promise.
-    renderI18n(<DatasetDetail dataset={staleDataset("Deleted")} {...NO_PREVIEW} />);
+    renderI18n(<DatasetDetail dataset={staleDataset("Deleted")} {...LOADED_PREVIEW} />);
     const badge = screen.getByText("上游已删除");
     expect(badge).toBeInTheDocument();
     // The class hook matches the working-set list's stale badge convention
-    // (#1062 pins the same class there) -- one selector for both surfaces.
+    // (WorkingSetList.test pins the same class on the row badge) -- one
+    // selector for both surfaces.
     expect(badge.className.split(/\s+/)).toContain("stale-badge");
   });
 
   it("renders the Replaced stale verb for a replaced source", () => {
-    renderI18n(<DatasetDetail dataset={staleDataset("Replaced")} {...NO_PREVIEW} />);
+    renderI18n(<DatasetDetail dataset={staleDataset("Replaced")} {...LOADED_PREVIEW} />);
     expect(screen.getByText("源已更新")).toBeInTheDocument();
   });
 
   it("renders no stale badge on an active dataset", () => {
-    renderI18n(<DatasetDetail dataset={mockDataset} {...NO_PREVIEW} />);
+    renderI18n(<DatasetDetail dataset={mockDataset} {...LOADED_PREVIEW} />);
     expect(screen.queryByText("上游已删除")).toBeNull();
     expect(screen.queryByText("源已更新")).toBeNull();
   });
@@ -186,14 +187,14 @@ describe("DatasetDetail", () => {
         { name: "tags", canonical_type: "LIST(VARCHAR)" },
       ],
     };
-    renderI18n(<DatasetDetail dataset={nested} {...NO_PREVIEW} />);
+    renderI18n(<DatasetDetail dataset={nested} {...LOADED_PREVIEW} />);
     expect(screen.getByText("STRUCT(city VARCHAR, zip VARCHAR)")).toBeInTheDocument();
     expect(screen.getByText("LIST(VARCHAR)")).toBeInTheDocument();
   });
 
   it("renders privacy controls + disclosure when onPrivacyChange is supplied (issue #9)", () => {
     renderI18n(
-      <DatasetDetail dataset={mockDataset} {...NO_PREVIEW} onPrivacyChange={() => {}} />,
+      <DatasetDetail dataset={mockDataset} {...LOADED_PREVIEW} onPrivacyChange={() => {}} />,
     );
     // The sample toggle and the per-column "type only" header are present.
     expect(screen.getByText(/隐私控制/)).toBeInTheDocument();
