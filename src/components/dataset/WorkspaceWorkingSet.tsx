@@ -27,7 +27,6 @@ export function WorkspaceWorkingSet({
   datasets,
   activeName,
   loading,
-  viewedDescriptor,
   onRename,
   onReplace,
   onDelete,
@@ -37,7 +36,6 @@ export function WorkspaceWorkingSet({
   datasets: DatasetDescriptor[];
   activeName: string | null;
   loading: boolean;
-  viewedDescriptor: DatasetDescriptor | null;
   onRename: (referenceName: string, newDisplay: string) => void;
   onReplace: (referenceName: string, path: string) => void;
   onDelete: (referenceName: string) => void;
@@ -55,19 +53,17 @@ export function WorkspaceWorkingSet({
   // action, not a workspace view selection (ADR-0051 active/viewed split).
   // Drives both the detail pane and the list's selection band, so the
   // highlight follows the pick (and the deleted-pick fallbacks below).
-  const [selected, setSelected] = useState<string | null>(
-    viewedDescriptor?.reference_name ?? activeName ?? null,
-  );
+  const [selected, setSelected] = useState<string | null>(activeName ?? null);
 
   // The empty set renders ONE card (issue #792): the two-column shell with its
   // near-empty pair does not mount at all. Hooks stay above the early return
   // (the useState is unconditional) -- the guard below is the only branch.
   // The initializer seeds the FIRST pick only (issue #1060: both tab panels
   // stay mounted, so re-entering the tab no longer remounts this component
-  // to re-seed it; true remounts are session-level). The viewedDescriptor
-  // arm of the seed is dead on every path: the component mounts on the
-  // pane's first render, when viewedResult is still null, and session-level
-  // remounts restart from null too -- the pick always seeds from activeName.
+  // to re-seed it; true remounts are session-level). The pick always seeds
+  // from activeName: the component mounts on the pane's first render, before
+  // any viewed result exists (issue #1065 retired the unreachable
+  // viewed-result seed arm).
   if (datasets.length === 0) {
     return (
       <section className={PANEL_CARD_BASE}>

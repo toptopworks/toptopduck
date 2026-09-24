@@ -36,7 +36,6 @@ describe("WorkspaceWorkingSet", () => {
         datasets={[]}
         activeName={null}
         loading={false}
-        viewedDescriptor={null}
         {...NOOPS}
       />,
     );
@@ -50,22 +49,18 @@ describe("WorkspaceWorkingSet", () => {
     expect(screen.queryByText(/选择一个数据集/)).not.toBeInTheDocument();
   });
 
-  it("seeds the detail from the viewed descriptor on mount (issue #792)", () => {
-    // The tab's initial pick seeds from the VIEWED descriptor before the
-    // active dataset: viewing a non-active result in the result tab and then
-    // entering this tab must open the viewed dataset's detail. Every other
-    // test here mounts with viewedDescriptor={null}, so removing the seed
-    // from the useState initializer survives them all.
+  it("seeds the detail pick from the active dataset on mount (issue #1065)", () => {
+    // The initial pick seeds from activeName alone -- the initializer
+    // comment in WorkspaceWorkingSet carries the rationale (issue #1060).
     renderI18n(
       <WorkspaceWorkingSet
         datasets={[mockDataset, orders]}
         activeName="people"
         loading={false}
-        viewedDescriptor={orders}
         {...NOOPS}
       />,
     );
-    expect(screen.getByText(/行数：9/)).toBeInTheDocument();
+    expect(screen.getByText(/行数：5/)).toBeInTheDocument();
   });
 
   it("shows the picked dataset's detail over the active one, with the band following the pick", () => {
@@ -74,7 +69,6 @@ describe("WorkspaceWorkingSet", () => {
         datasets={[mockDataset, orders]}
         activeName="people"
         loading={false}
-        viewedDescriptor={null}
         {...NOOPS}
       />,
     );
@@ -101,7 +95,6 @@ describe("WorkspaceWorkingSet", () => {
         datasets={[mockDataset, orders]}
         activeName="people"
         loading={false}
-        viewedDescriptor={null}
         {...NOOPS}
       />,
     );
@@ -115,7 +108,6 @@ describe("WorkspaceWorkingSet", () => {
           datasets={[mockDataset]}
           activeName="people"
           loading={false}
-          viewedDescriptor={null}
           {...NOOPS}
         />,
       ),
@@ -134,7 +126,6 @@ describe("WorkspaceWorkingSet", () => {
         datasets={[mockDataset, orders]}
         activeName={null}
         loading={false}
-        viewedDescriptor={null}
         {...NOOPS}
       />,
     );
@@ -146,7 +137,6 @@ describe("WorkspaceWorkingSet", () => {
           datasets={[orders]}
           activeName={null}
           loading={false}
-          viewedDescriptor={null}
           {...NOOPS}
         />,
       ),
@@ -165,7 +155,6 @@ describe("WorkspaceWorkingSet", () => {
         datasets={[mockDataset]}
         activeName="people"
         loading={false}
-        viewedDescriptor={null}
         {...NOOPS}
       />,
     );
@@ -176,7 +165,6 @@ describe("WorkspaceWorkingSet", () => {
           datasets={[]}
           activeName={null}
           loading={false}
-          viewedDescriptor={null}
           {...NOOPS}
         />,
       ),
@@ -194,7 +182,6 @@ describe("WorkspaceWorkingSet", () => {
         datasets={[mockDataset]}
         activeName="people"
         loading={false}
-        viewedDescriptor={null}
         {...NOOPS}
       />,
     );
