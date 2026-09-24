@@ -485,17 +485,6 @@ fn walk_tree(
         } else if ft.is_dir() {
             complete &= walk_tree(anchor, &path, visited, out);
         } else if ft.is_file() {
-            // The builtin alignment marker (ADR-0121) is bookkeeping, never
-            // skill content. It sits at the subtree top, so only a TOP-LEVEL
-            // file of that name is excluded -- mirroring the fingerprint
-            // input's own top-level-only exclusion -- while a deeper file of
-            // the same name is an ordinary attachment.
-            if path.parent() == Some(anchor)
-                && path.file_name().and_then(|n| n.to_str())
-                    == Some(crate::skills::builtin::FINGERPRINT_FILE)
-            {
-                continue;
-            }
             push_relative(anchor, &path, out);
         }
     }
@@ -670,12 +659,12 @@ mod tests {
         }
     }
 
-    /// The alignment marker is bookkeeping, hidden from the readable
-    /// listing ONLY at the tree top (mirroring the fingerprint input's own
-    /// top-level-only exclusion); a deeper `.fingerprint` is an ordinary
-    /// attachment (ADR-0121).
+    /// A `.fingerprint`-named file has no special treatment anywhere in the
+    /// tree -- the retired alignment marker (#1056) leaves no read-surface
+    /// residue, so a top-level namesake is an ordinary attachment exactly
+    /// like a deeper one.
     #[test]
-    fn the_listing_hides_the_top_level_marker_and_keeps_deeper_namesakes() {
+    fn a_fingerprint_named_file_is_an_ordinary_attachment_at_any_depth() {
         let fx = Fixture::new();
         fx.put_system_skill("sql-coach");
         fx.put_system_file("sql-coach", ".fingerprint", b"marker\n");
@@ -684,8 +673,8 @@ mod tests {
         let (listing, incomplete) = readable_listing(&anchor);
         assert!(!incomplete);
         assert!(
-            !listing.contains(&".fingerprint".to_string()),
-            "the marker stays hidden: {listing:?}"
+            listing.contains(&".fingerprint".to_string()),
+            "a top-level namesake is listed: {listing:?}"
         );
         assert!(
             listing.contains(&"references/.fingerprint".to_string()),

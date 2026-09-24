@@ -1,7 +1,8 @@
-//! Builtin skills (ADR-0121): the app-authored skills that ride the app
-//! version. Most are CLI companions, one per builtin CLI registration entry
-//! (same name, 1:1); knowledge-only skills (`vega-chart`, `skill-creator`)
-//! ship without a CLI counterpart and anchor on the app version alone.
+//! Builtin skills (ADR-0121): the app-authored skills that ship with the
+//! app binary. Most are CLI companions, one per builtin CLI registration
+//! entry (same name, 1:1); knowledge-only skills (`vega-chart`,
+//! `skill-creator`) ship without a CLI counterpart and are anchored
+//! unconditionally.
 //!
 //! The definition body is a compile-time-embedded FILE TREE
 //! (`src/skills/assets/builtin/<name>/`, `include_dir!`): `SKILL.md` plus any
@@ -11,16 +12,16 @@
 //!
 //! Materialization is a READ-ONLY CACHE in the registry's reserved subtree
 //! `<skills-root>/.system/` (ADR-0121 Decision 3): the alignment window
-//! (still riding the CLI scan, issue #677) writes the whole embedded tree per
-//! anchored skill and records a fingerprint marker (sorted paths + content
-//! hashes + a version salt) inside the subtree. A matching fingerprint skips
-//! with zero writes; any mismatch (missing, external edit, retired file,
-//! app-version bump) deletes the subtree and rewrites it -- the files are app
-//! deployment assets, not user content, so there is no edit detection, no
-//! edit preservation, and no restore action. A same-named LOCAL skill at the
-//! registry root shadows the builtin (Decision 5): the merge-side deference
-//! lives in the registry scan ([`super::registry`]), never here --
-//! materialization always runs.
+//! (still riding the CLI scan, issue #677) writes the whole embedded tree
+//! per anchored skill. The tree fingerprint (sorted paths + content
+//! hashes) is computed on both sides and never persisted: a matching
+//! on-disk tree skips with zero writes; any mismatch (missing, external
+//! edit, retired file) deletes the subtree and rewrites it -- the files
+//! are app deployment assets, not user content, so there is no edit
+//! detection, no edit preservation, and no restore action. A same-named
+//! LOCAL skill at the registry root shadows the builtin (Decision 5):
+//! the merge-side deference lives in the registry scan
+//! ([`super::registry`]), never here -- materialization always runs.
 //!
 //! A skill body enters the system prompt, so the shipped set is a trust
 //! boundary: a third-party `SKILL.md` is never auto-absorbed (the manual
@@ -40,18 +41,6 @@ use super::model::SkillError;
 /// `.system/<name>/` to the registry root for an editable variant).
 pub(crate) const SYSTEM_SUBTREE: &str = ".system";
 
-/// The alignment marker's file name inside each skill's subtree: holds the
-/// embedded-tree fingerprint the last alignment wrote. Bookkeeping, not skill
-/// content -- excluded from the fingerprint input and from the attachment
-/// read surface.
-pub(crate) const FINGERPRINT_FILE: &str = ".fingerprint";
-
-/// The tree fingerprint's version salt (ADR-0121 Decision 3): folded into
-/// every fingerprint, so an app-version bump can never compare equal to a
-/// marker an older build wrote -- each release re-aligns the subtree once,
-/// cleanly, even when the embedded bytes did not change.
-const VERSION_SALT: &str = env!("CARGO_PKG_VERSION");
-
 /// The embedded builtin-skill asset tree (ADR-0121 Decision 1): one
 /// directory per skill, `SKILL.md` + any attachment assets. The build script
 /// declares the recursive rerun-if-changed so an edited or newly added asset
@@ -67,7 +56,7 @@ pub(crate) struct BuiltinSkillManifest {
     /// The builtin CLI entry this skill rides, if any (ADR-0120 Decision 7).
     /// `Some` -- the CLI companions: alignment and auto-include gate on the
     /// entry. `None` -- a knowledge-only skill (`vega-chart` or
-    /// `skill-creator`): the app version is the anchor, so alignment
+    /// `skill-creator`): the anchor is unconditional, so alignment
     /// takes no CLI condition and auto-include drops the CLI conjunct.
     pub companion_cli: Option<&'static str>,
 }
@@ -164,8 +153,7 @@ fn companion_entry<'a>(
 /// The alignment anchor: whether a CLI registry anchors this entry (ADR-0120
 /// Decision 7, kept by ADR-0121). A companioned skill anchors on its
 /// `Builtin`-sourced entry being registered (a dormant or user-sourced entry
-/// anchors nothing); a knowledge-only skill is anchored by the app version
-/// itself.
+/// anchors nothing); a knowledge-only skill is anchored unconditionally.
 fn cli_anchor(
     entry: &BuiltinSkillManifest,
     cli: &[crate::cli_tools::config::CliToolConfig],
@@ -194,8 +182,8 @@ fn auto_include_gate(
 
 /// The align outcome: the names of the builtin skills whose reserved-subtree
 /// write the window could not complete (issue #1016 semantics, now riding
-/// the whole-tree write). A failure keeps the degraded posture -- warn, no
-/// marker, nothing persisted -- but surfaces by name so the scan payload can
+/// the whole-tree write). A failure keeps the degraded posture -- warn,
+/// nothing persisted -- but surfaces by name so the scan payload can
 /// render the missing row's warning in the Skills panel; the next scan
 /// retries. The retirement sweep's own failures (a blocked delete) are
 /// warn-only -- the leftover is app-owned cache, the next window retries,
@@ -305,17 +293,16 @@ fn align_one(root: &Path, entry: &BuiltinSkillManifest) -> Result<(), SkillError
         )));
     }
     // Quiet path: the on-disk tree already fingerprint-matches the embedded
-    // one -- zero writes (the fingerprint covers every file plus the version
-    // salt, so an external edit, a stale file, or an app bump all read as a
-    // mismatch below).
+    // one -- zero writes (the fingerprint covers every file, so an external
+    // edit or a stale file reads as a mismatch below).
     if let Ok(found) = disk_files(&dir) {
         if tree_fingerprint(&found) == expected {
             return Ok(());
         }
     }
     // Mismatch: the subtree is an app cache, so it is deleted wholesale and
-    // rewritten from the embedded tree, marker last (a crash mid-rewrite
-    // leaves a fingerprint-less subtree that the next window rebuilds).
+    // rewritten from the embedded tree (a crash mid-rewrite leaves a partial
+    // tree that mismatches, and the next window rebuilds it).
     if dir.exists() {
         std::fs::remove_dir_all(&dir).map_err(|e| {
             SkillError::FsFailure(format!(
@@ -342,12 +329,6 @@ fn align_one(root: &Path, entry: &BuiltinSkillManifest) -> Result<(), SkillError
             ))
         })?;
     }
-    std::fs::write(dir.join(FINGERPRINT_FILE), &expected).map_err(|e| {
-        SkillError::FsFailure(format!(
-            "write builtin fingerprint `{}` failed: {e}",
-            dir.join(FINGERPRINT_FILE).display()
-        ))
-    })?;
     log::info!(
         target: "skills",
         "builtin skill `{}` aligned to the embedded tree", entry.name
@@ -355,12 +336,12 @@ fn align_one(root: &Path, entry: &BuiltinSkillManifest) -> Result<(), SkillError
     Ok(())
 }
 
-/// Compute a tree fingerprint (ADR-0121 Decision 3): the version salt folded
-/// with every file's '/'-relative path + content hash, iterated in sorted
-/// path order. Deterministic by construction, so equal trees hash equal and
-/// the marker comparison is exact.
+/// Compute a tree fingerprint (ADR-0121 Decision 3): every file's
+/// '/'-relative path + content hash, iterated in sorted path order.
+/// Deterministic by construction, so equal trees hash equal and the
+/// comparison is exact.
 fn tree_fingerprint(files: &[(String, Vec<u8>)]) -> String {
-    let mut acc = String::from(VERSION_SALT);
+    let mut acc = String::new();
     for (path, bytes) in files {
         acc.push_str(path);
         acc.push('\0');
@@ -414,11 +395,10 @@ fn collect_embedded(dir: &Dir, prefix: &str, out: &mut Vec<(String, Vec<u8>)>) {
 }
 
 /// Collect the on-disk subtree as ('/'-path, bytes) pairs for the
-/// fingerprint comparison, EXCLUDING the marker file itself (it is written
-/// after the tree and re-derived every alignment). A missing subtree reads
-/// empty (a mismatch against any non-empty embedded tree -> write). A read
-/// error skips the quiet path -- the rewrite attempt that follows is what
-/// surfaces it as a per-skill failure (the #1016 degrade posture).
+/// fingerprint comparison. A missing subtree reads empty (a mismatch
+/// against any non-empty embedded tree -> write). A read error skips the
+/// quiet path -- the rewrite attempt that follows is what surfaces it as a
+/// per-skill failure (the #1016 degrade posture).
 fn disk_files(dir: &Path) -> Result<Vec<(String, Vec<u8>)>, SkillError> {
     let mut out = Vec::new();
     collect_disk(dir, "", &mut out)?;
@@ -452,10 +432,6 @@ fn collect_disk(
         let name = entry.file_name().to_string_lossy().into_owned();
         let path = entry.path();
         let rel = join_rel(prefix, &name);
-        // The alignment marker is bookkeeping, never fingerprint input.
-        if prefix.is_empty() && name == FINGERPRINT_FILE {
-            continue;
-        }
         let Ok(ft) = entry.file_type() else {
             continue;
         };
@@ -490,7 +466,7 @@ fn collect_disk(
 
 /// The builtin skill names a NEW session auto-includes: a companioned skill
 /// needs its companion CLI entry `Builtin`-sourced AND enabled; a
-/// knowledge-only skill (ADR-0120 Decision 7) rides the app version and
+/// knowledge-only skill (ADR-0120 Decision 7) takes no CLI condition and
 /// skips the CLI conjunct. Presence resolves through the shadowing order
 /// ([`resolve_skill_dir`]), so under a local fork the seeded name resolves
 /// to the local copy (ADR-0121 Decision 5). Computed fresh at session
@@ -945,7 +921,10 @@ mod tests {
                 "embedded `{path}` materialized verbatim"
             );
         }
-        assert!(root.path().join(".system/pandoc/.fingerprint").exists());
+        assert!(
+            !root.path().join(".system/pandoc/.fingerprint").exists(),
+            "no marker rides the materialized tree"
+        );
         // ...the knowledge-only skill aligns with no CLI condition...
         assert!(root.path().join(".system/vega-chart/SKILL.md").exists());
         // ...and the un-anchored companions materialize nothing.
@@ -954,21 +933,21 @@ mod tests {
     }
 
     /// The quiet path (ADR-0121 Decision 3): a matching fingerprint writes
-    /// nothing -- pinned by the marker's mtime, which a rewrite would
+    /// nothing -- pinned by `SKILL.md`'s mtime, which a rewrite would
     /// necessarily move.
     #[test]
     fn align_skips_with_zero_writes_when_the_fingerprint_agrees() {
         let root = tempfile::tempdir().expect("root");
         let cli = registry_with(vec![builtin_pandoc(true)]);
         align(root.path(), &cli);
-        let marker = root.path().join(".system/pandoc/.fingerprint");
-        let before = std::fs::metadata(&marker)
-            .expect("marker")
+        let skill_md = root.path().join(".system/pandoc/SKILL.md");
+        let before = std::fs::metadata(&skill_md)
+            .expect("SKILL.md")
             .modified()
             .unwrap();
         align(root.path(), &cli);
-        let after = std::fs::metadata(&marker)
-            .expect("marker")
+        let after = std::fs::metadata(&skill_md)
+            .expect("SKILL.md")
             .modified()
             .unwrap();
         assert_eq!(before, after, "an agreeing fingerprint rewrites nothing");
@@ -1007,6 +986,36 @@ mod tests {
         assert!(
             !stale.exists(),
             "a stale file outside the embedded set is removed"
+        );
+    }
+
+    /// The upgrade path over the retired alignment marker (#1056): a
+    /// top-level `.fingerprint` written by an older build is ordinary
+    /// fingerprint input now, so the extra file mismatches, the rewrite
+    /// drops it, and the rebuilt tree matches byte for byte (mutation
+    /// pin: restoring the marker exclusion in `collect_disk` lets the
+    /// stale marker survive and this fails).
+    #[test]
+    fn a_stale_top_level_fingerprint_self_heals_through_the_rewrite() {
+        let root = tempfile::tempdir().expect("root");
+        let cli = registry_with(vec![builtin_pandoc(true)]);
+        align(root.path(), &cli);
+        let marker = root.path().join(".system/pandoc/.fingerprint");
+        std::fs::write(&marker, b"stale marker from an older build\n").expect("stale marker");
+        let outcome = align(root.path(), &cli);
+        assert!(outcome.materialize_failures.is_empty());
+        assert!(
+            !marker.exists(),
+            "the stale top-level marker rides the mismatch rewrite out"
+        );
+        let (_, bytes) = embedded_files("pandoc")
+            .into_iter()
+            .find(|(p, _)| p == "SKILL.md")
+            .unwrap();
+        assert_eq!(
+            std::fs::read(root.path().join(".system/pandoc/SKILL.md")).unwrap(),
+            bytes,
+            "the rebuilt tree matches the embedded one"
         );
     }
 
