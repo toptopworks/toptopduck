@@ -32,9 +32,10 @@ import type {
 // busy gate, the empty card's ingest entry, and the mutation reporting
 // surfaces -- nothing else); useSessionState renders the read slice below
 // for the pane's own surfaces (rail badges, Targets chip, error
-// aggregation, hero empties); useIngestFlow consumes the exported
-// invalidation entry (ingest stays an orchestration consumer, never an
-// owner -- ADR-0123 Decision 3).
+// aggregation, hero empties); useIngestFlow reaches the cascade through
+// useSessionState's refreshServerState wrapper around the exported entry
+// (ingest stays an orchestration consumer, never an owner -- ADR-0123
+// Decision 3).
 //
 // Invalidation cascade (the authoritative narrative; previously dispersed
 // across queryKeys doc comments and the callers' refresh helpers): every
@@ -123,10 +124,11 @@ export function useWorkingSetData(sessionId: string): WorkingSetData {
 }
 
 /** The three-key fan-out every working-set mutation runs, and the single
- *  external entry the ingest domain consumes (ADR-0123 Decision 3 -- one
- *  undifferentiated cascade: the four mutations have no divergence
- *  evidence, so kind labels stay on the error wrappers, never here). Error
- *  tagging stays with each consumer's error surface. */
+ *  external entry behind the ingest domain's refreshServerState dep
+ *  (ADR-0123 Decision 3 -- one undifferentiated cascade: the four
+ *  mutations have no divergence evidence, so kind labels stay on the error
+ *  wrappers, never here). Error tagging stays with each consumer's error
+ *  surface. */
 export function invalidateSessionData(
   queryClient: QueryClient,
   sessionId: string,
@@ -197,9 +199,9 @@ export function useWorkingSet(
 
   const { datasets, activeName } = useWorkingSetData(sessionId);
 
-  // Resolved BEFORE any early branch (hooks cannot sit past a conditional
-  // return): the preview query's gate needs the same resolved pick the
-  // detail pane renders, so there is exactly one resolution.
+  // Resolved once, above everything: the preview query's gate needs the
+  // same resolved pick the detail pane renders, so there is exactly one
+  // resolution.
   const shown = resolveWorkingSetDetail(datasets, selectedName, activeName);
   const referenceName = shown?.reference_name ?? null;
 

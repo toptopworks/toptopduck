@@ -394,13 +394,10 @@ export function useSessionState(
   const clearError = useCallback(() => setError(null), []);
 
   // ADR-0123: the bundle the working-set tab's seam consumes as its
-  // reporting sinks. Memoized so the consuming component's props stay
-  // identity-stable (the three methods inside are dispatch- or
-  // useCallback-stable).
-  const mutationSurfaces = useMemo(
-    () => ({ setError, setMutationLoading, pollPersistError }),
-    [setError, setMutationLoading, pollPersistError],
-  );
+  // reporting sinks. A plain object: nothing compares the bundle's
+  // identity (the seam destructures the methods and the tab is not
+  // memoized), and the methods inside are dispatch- or useCallback-stable.
+  const mutationSurfaces = { setError, setMutationLoading, pollPersistError };
 
   return {
     datasets,

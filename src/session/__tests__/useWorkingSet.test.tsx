@@ -45,7 +45,7 @@ import {
 } from "../useWorkingSet";
 import { sessionKeys } from "../queryKeys";
 import { src } from "./fixtures";
-import type { RowPage } from "../../types/dataset";
+import type { DatasetDescriptor, RowPage } from "../../types/dataset";
 
 const SID = "sess-1";
 const PEOPLE = src("people");
@@ -74,16 +74,21 @@ function makeSurfaces(): UseWorkingSetSurfaces {
 // mock's rejection IS the test's subject, not a transient to retry. The
 // invalidate spy documents the fan-out shape; the preview assertions stay
 // behavioral (a refetch actually fires -- the #1061 cascade precedent).
-function setup(datasets = [PEOPLE, ORDERS], selectedName: string | null = null) {
+function setup(
+  datasets = [PEOPLE, ORDERS],
+  selectedName: string | null = null,
+  active?: DatasetDescriptor | null,
+) {
   const surfaces = makeSurfaces();
   const queryClient = new QueryClient({
     defaultOptions: { queries: { retry: false } },
   });
   const invalidateSpy = vi.spyOn(queryClient, "invalidateQueries");
   vi.mocked(listWorkingSet).mockResolvedValue(datasets);
-  // The active defaults to the first dataset (the common posture); tests
-  // that need a different active override via activeDataset themselves.
-  vi.mocked(activeDataset).mockResolvedValue(datasets[0] ?? null);
+  // The active defaults to the first dataset (the common posture); the
+  // third parameter overrides it BEFORE the first render fires the query
+  // (mocking activeDataset after setup() would race the initial fetch).
+  vi.mocked(activeDataset).mockResolvedValue(active ?? datasets[0] ?? null);
   vi.mocked(readRows).mockResolvedValue(EMPTY_PAGE);
   const wrapper = ({ children }: { children: ReactNode }) => (
     <QueryClientProvider client={queryClient}>
@@ -111,7 +116,8 @@ describe("useWorkingSet", () => {
     it("resolves the detail target as pick, then active, then first", async () => {
       const { result, rerender } = setup();
       await waitFor(() => expect(result.current.datasets).toHaveLength(2));
-      // No pick: the active (first fixture) shows.
+      // No pick: the active shows. (Same as the first fixture here -- the
+      // arms are told apart by the test below.)
       expect(result.current.shown?.reference_name).toBe("people");
       // An explicit pick wins.
       rerender("orders");
@@ -120,6 +126,20 @@ describe("useWorkingSet", () => {
       // dead name (the deleted-pick fallback).
       rerender("ghost");
       expect(result.current.shown?.reference_name).toBe("people");
+    });
+
+    it("falls back to the active, not the first item, when the two differ", async () => {
+      // The default fixture's active IS the first item, which makes the
+      // active and first fallback arms indistinguishable; this is the
+      // pair's only composition-level pin (issue #792's old component
+      // test covered it before the seam migration).
+      const { result, rerender } = setup([PEOPLE, ORDERS], null, ORDERS);
+      await waitFor(() => expect(result.current.datasets).toHaveLength(2));
+      // No pick: the active shows, and it is not the first item.
+      expect(result.current.shown?.reference_name).toBe("orders");
+      // A dead pick falls back to the active too, still not the first item.
+      rerender("ghost");
+      expect(result.current.shown?.reference_name).toBe("orders");
     });
 
     it("idles the preview when the set is empty and reads the resolved pick's first window", async () => {
@@ -177,6 +197,12 @@ describe("useWorkingSet", () => {
       await waitFor(() => expect(surfaces.setError).toHaveBeenCalled());
       const last = vi.mocked(surfaces.setError).mock.calls.at(-1)?.[0];
       expect(last?.kind).toBe("rename");
+      // The refresh-failure wording, not a fresh "{verb} failed": the
+      // refreshFailed tag rides the composed message (toAppError's opts),
+      // not a separate AppError field, so the message is the assertion.
+      expect(last?.message).toMatch(
+        /saved, but refreshing the working set failed/i,
+      );
     });
   });
 

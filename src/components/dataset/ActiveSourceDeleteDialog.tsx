@@ -95,7 +95,7 @@ export function ActiveSourceDeleteDialog({
                 // AlertDialogAction auto-closes on click (Radix
                 // composeEventHandlers). preventDefault defers close so the
                 // parent's async remove decides unmount -- a failure leaves
-                // the dialog open for retry (useSessionState contract).
+                // the dialog open for retry (useWorkingSet contract).
                 e.preventDefault();
                 onConfirm(selected);
               }

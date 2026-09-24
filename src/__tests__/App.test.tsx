@@ -124,6 +124,7 @@ import {
   ingestFileGuided,
   listWorkingSet,
   readRows,
+  removeSource,
   renameDataset,
   setDatasetPrivacy,
 } from "../api";
@@ -1197,6 +1198,43 @@ describe("App workspace tab keyboard contract (issue #760)", () => {
     // The working-set panel is hidden now; the banner must not ride inside it.
     expect(banner).toBeVisible();
     fireEvent.click(workingSetTab);
+    expect(banner).toBeVisible();
+  });
+
+  it("a delete failure's verb-labelled banner stays visible from both tabs (issue #1060)", async () => {
+    // The rename sample above pins the both-tabs shape; this one restores
+    // the delete verb's end-to-end anchor: a typed RemoveSource refusal
+    // (issue #121) renders under the 删源失败 prefix through the seam's
+    // sink into the same pane-level strip, never mislabelled as another
+    // operation's failure or a turn outcome (issue #125).
+    vi.mocked(removeSource).mockRejectedValueOnce({
+      kind: "RemoveSource",
+      data: { kind: "NotFound", data: "people" },
+    });
+    renderPane();
+    const { resultTab, workingSetTab } = await openWorkspaceTabs();
+    fireEvent.click(workingSetTab);
+    await waitFor(() =>
+      expect(
+        screen.getByRole("button", { name: /^people/ }),
+      ).toBeInTheDocument(),
+    );
+    fireEvent.click(screen.getByRole("button", { name: /删除/ }));
+    // Confirm at the in-app AlertDialog (#759): its Action's accessible
+    // name is the bare 删除 (the row trigger carries "删除 people").
+    fireEvent.click(screen.getByRole("button", { name: "删除" }));
+    const banner = await screen.findByText(
+      /删源失败：找不到引用名为「people」的数据集/,
+    );
+    expect(banner).toBeVisible();
+    // No other operation's prefix, and no rail Failed card (issue #125).
+    expect(screen.queryByText(failedPrefix("load"))).not.toBeInTheDocument();
+    expect(screen.queryByText(failedPrefix("rename"))).not.toBeInTheDocument();
+    expect(
+      document.querySelector(".turn-outcome.failed"),
+    ).not.toBeInTheDocument();
+    // The strip is pane-level: hiding the working-set panel never hides it.
+    fireEvent.click(resultTab);
     expect(banner).toBeVisible();
   });
 
