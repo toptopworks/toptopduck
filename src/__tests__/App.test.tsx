@@ -983,6 +983,7 @@ describe("App workspace tab keyboard contract (issue #760)", () => {
   const EXPAND_WORKSPACE = catalogFor("zh-CN")["workspace.expand"];
   const RESULT_TAB = catalogFor("zh-CN")["session.tab.result"];
   const WORKING_SET_TAB = catalogFor("zh-CN")["session.tab.workingSet"];
+  const HERO_HAS_DATA = catalogFor("zh-CN")["session.hero.hasData"];
 
   beforeEach(() => {
     vi.clearAllMocks();
@@ -1081,18 +1082,90 @@ describe("App workspace tab keyboard contract (issue #760)", () => {
     expect(screen.getByRole("tab", { name: WORKING_SET_TAB })).toHaveFocus();
   });
 
-  it("the tab-panel association tracks the active tab", async () => {
+  it("each tab owns its own always-mounted panel (issue #1060 keep-alive)", async () => {
     renderPane();
     const { resultTab, workingSetTab } = await openWorkspaceTabs();
-    // Both tabs point at the one shared workspace-body panel; the panel's
-    // label tracks whichever tab is active.
+    // Distinct panels, each permanently labelled by its own tab -- the
+    // keep-alive shape (issue #1060) replaced #760's shared panel, whose
+    // label used to track the active tab.
     const resultPanel = panelOf(resultTab);
-    expect(resultPanel).toBe(panelOf(workingSetTab));
+    const workingSetPanel = panelOf(workingSetTab);
+    expect(resultPanel).not.toBe(workingSetPanel);
     expect(resultPanel).toHaveAttribute("role", "tabpanel");
+    expect(workingSetPanel).toHaveAttribute("role", "tabpanel");
     expect(resultPanel.getAttribute("aria-labelledby")).toBe(resultTab.id);
+    expect(workingSetPanel.getAttribute("aria-labelledby")).toBe(workingSetTab.id);
 
     fireEvent.click(workingSetTab);
-    expect(resultPanel.getAttribute("aria-labelledby")).toBe(workingSetTab.id);
+    // The labels are static per panel; switching moves only the hidden
+    // toggle between them (the next test owns that toggle).
+    expect(resultPanel.getAttribute("aria-labelledby")).toBe(resultTab.id);
+    expect(workingSetPanel.getAttribute("aria-labelledby")).toBe(workingSetTab.id);
+  });
+
+  it("keeps both panels mounted, hiding the inactive one (issue #1060)", async () => {
+    renderPane();
+    const { resultTab, workingSetTab } = await openWorkspaceTabs();
+    const resultPanel = panelOf(resultTab);
+    const workingSetPanel = panelOf(workingSetTab);
+    // Wait for the working set to land: the hero flips to its hasData copy.
+    const hero = await within(resultPanel).findByText(HERO_HAS_DATA);
+    // Results active: its panel is exposed, the working set's is hidden.
+    expect(resultPanel).not.toHaveAttribute("hidden");
+    expect(workingSetPanel).toHaveAttribute("hidden");
+
+    fireEvent.click(workingSetTab);
+    expect(workingSetPanel).not.toHaveAttribute("hidden");
+    expect(resultPanel).toHaveAttribute("hidden");
+    // `hidden` drops the panel out of the accessibility tree: jest-dom's
+    // visibility walk sees it even through text queries (which ignore
+    // visibility). Focusability of hidden content is a browser-level fact
+    // (jsdom focuses anything); the attribute is what the APG contract and
+    // browsers both key on.
+    expect(hero).not.toBeVisible();
+    // Keep-alive: the hidden panel keeps its DOM subtree -- the hero <p> is
+    // the SAME node after a roundtrip, so the result view's state (viz view,
+    // per-panel scroll offset) rides it across tab switches. jsdom does no
+    // layout, so the scroll offset itself is only pinned structurally (the
+    // per-panel overflow-y-auto containers never unmount).
+    fireEvent.click(resultTab);
+    expect(within(panelOf(resultTab)).getByText(HERO_HAS_DATA)).toBe(hero);
+  });
+
+  it("the working-set detail pick survives a tab roundtrip (issue #1060)", async () => {
+    // A second source so the pick has somewhere to go; row_count 9
+    // distinguishes its detail line (行数：9) from people's (行数：1) -- the
+    // anchor convention the WorkspaceWorkingSet tests use. Set before
+    // renderPane: the listWorkingSet mock reads state lazily.
+    const orders: DatasetDescriptor = {
+      ...guidedDataset,
+      reference_name: "orders",
+      display_name: "orders",
+      row_count: 9,
+      sample: [["1", "ord-1"]],
+    };
+    state.workingSet = [guidedDataset, orders];
+    renderPane();
+    const { resultTab, workingSetTab } = await openWorkspaceTabs();
+    const workingSetPanel = panelOf(workingSetTab);
+    // The initial pick seeds from the active dataset (people, 行数：1);
+    // findBy* -- the working set query resolves a beat after the tabs.
+    expect(
+      await within(workingSetPanel).findByText(/行数：1/),
+    ).toBeInTheDocument();
+    // The pick is made in the visible panel (a hidden panel's rows are out
+    // of the accessibility tree, as they should be).
+    fireEvent.click(workingSetTab);
+    fireEvent.click(
+      within(workingSetPanel).getByRole("button", { name: /^orders/ }),
+    );
+    expect(within(workingSetPanel).getByText(/行数：9/)).toBeInTheDocument();
+
+    fireEvent.click(resultTab);
+    fireEvent.click(workingSetTab);
+    // The pick is NOT re-seeded to the active dataset on re-entry -- that
+    // reset was the per-tab-entry remount's re-seeding (issue #1060).
+    expect(within(workingSetPanel).getByText(/行数：9/)).toBeInTheDocument();
   });
 
   it("mouse clicks still switch tabs", async () => {
