@@ -1,21 +1,11 @@
 import { useCallback, useMemo, useState } from "react";
 import { useIntl } from "react-intl";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import {
-  activeDataset,
-  conversation,
-  listWorkingSet,
-  removeActiveSource,
-  removeSource,
-  renameDataset,
-  replaceSource,
-  setDatasetPrivacy,
-  takePersistError,
-} from "../api";
+import { conversation, takePersistError } from "../api";
 import { toAppError } from "../lib/error-presentation";
-import { loadErrorDisplay } from "../lib/loadErrorDisplay";
 import { sessionKeys } from "./queryKeys";
 import { useIngestFlow } from "./useIngestFlow";
+import { invalidateSessionData, useWorkingSetData } from "./useWorkingSet";
 import { useTurnFlow, type LiveTurn } from "./useTurnFlow";
 import { useViewedResult } from "./useViewedResult";
 import { useWorkspaceCollapse } from "./useWorkspaceCollapse";
@@ -26,35 +16,37 @@ import {
   type WorkspaceContent,
 } from "./workspace";
 import type { AppError, SessionFlowKind } from "../types/error";
-import type {
-  DatasetDescriptor,
-  DatasetPrivacy,
-  GuidanceRequest,
-  SheetGuidance,
-  StaleAnchor,
-} from "../types/dataset";
+import type { DatasetDescriptor, GuidanceRequest, SheetGuidance, StaleAnchor } from "../types/dataset";
 import type { SaveError, TurnPhase } from "../types/session";
 import type { ThreadEntry } from "../types/thread";
 
 // Per-session state + actions (ADR-0051). The shell (<App>) creates the
 // session id and renders <SessionPane key={sid} sessionId={sid} />; this hook
-// owns everything inside: server state (workingSet / active / thread via
-// TanStack Query) and client UI state (viewedResult / loading / dialogs).
-// The hook IS the ADR-0051 "per-tab component autonomy" --
-// a future multi-session shell renders one SessionPane per open id and the
-// keyed caches stay isolated by the `['session', sid, ...]` prefix.
+// owns everything inside: server state (thread via TanStack Query; the
+// working-set descriptors via the useWorkingSet read slice) and client UI
+// state (viewedResult / loading / dialogs). The hook IS the ADR-0051
+// "per-tab component autonomy" -- a future multi-session shell renders one
+// SessionPane per open id and the keyed caches stay isolated by the
+// `['session', sid, ...]` prefix.
+//
+// ADR-0123: the working-set DOMAIN (its mutations, delete machine, pick
+// resolution, and preview) lives in the useWorkingSet seam, consumed by the
+// working-set tab directly. This hook stays the turn-flow orchestration --
+// it re-exposes the read slice's descriptors for the pane's own surfaces
+// (rail badges, Targets chip, error aggregation, hero empties) and hands the
+// ingest flow + the tab the mutation surfaces (error banner / busy union /
+// persist poll) that keep cross-domain reporting pane-level.
 
 // AppError / AppErrorKind / SessionFlowKind live in ../types/error (issue
 // #194). The verb prefix logic ("{verb} failed:" / "{verb} saved, but
 // refreshing ...") is module-internal to error-presentation (ADR-0069): every
-// reject + the two post-mutation refresh rejects below reach it through the
+// reject + the post-mutation refresh reject below reach it through the
 // single kind-driven toAppError entry (refresh rejects pass { refreshFailed:
 // true }).
 
-// Module-level empty constants so `query.data ?? EMPTY` keeps a stable reference
-// across renders while the query is still loading (avoids cascading re-renders
-// in the useMemo/useCallback that consume `datasets` / `thread`).
-const EMPTY_DATASETS: DatasetDescriptor[] = [];
+// Module-level empty constant so `query.data ?? EMPTY` keeps a stable
+// reference across renders while the query is still loading (avoids cascading
+// re-renders in the useMemo/useCallback that consume `thread`).
 const EMPTY_THREAD: ThreadEntry[] = [];
 
 export interface UseSessionState {
@@ -65,7 +57,7 @@ export interface UseSessionState {
   // Derived from the working set (runtime truth, ADR-0051). Shared with the
   // rail's stale badges so the map is built once per session, not twice.
   staleByReference: ReadonlyMap<string, StaleAnchor>;
-  /** Issue #763: the three session queries' errors in a fixed order (working
+  /** Issue #763: the session queries' errors in a fixed order (working
    *  set -> active -> thread); empty while all are healthy. The `data ??`
    *  fallbacks keep the derivations rendering through a failure, so this
    *  aggregate is the pane's only error signal -- it drives the session-level
@@ -113,7 +105,6 @@ export interface UseSessionState {
    *  (cancel-halt / Error-halt), rendered as a workspace notice; null
    *  otherwise and cleared at the start of the next ingest. */
   haltedRemaining: number | null;
-  pendingActiveDelete: DatasetDescriptor | null;
   // Actions.
   // Mirrors UseTurnFlow (async -> Promise<void>, honest + awaitable); the
   // QuestionBar consumer accepts it via void-return covariance.
@@ -135,15 +126,6 @@ export interface UseSessionState {
    *  [offset, offset + limit) of the parked workbook's sheet, served from
    *  the backend retention (zero re-parse per page). */
   fetchGuidanceWindow: (sheetName: string, offset: number, limit: number) => Promise<string[][]>;
-  handleRename: (referenceName: string, newDisplay: string) => void;
-  handleReplace: (referenceName: string, path: string) => void;
-  handleDelete: (referenceName: string) => void;
-  handleConfirmActiveDelete: (continueWith: string) => void;
-  handleCancelActiveDelete: () => void;
-  handlePrivacyChange: (
-    referenceName: string,
-    privacy: DatasetPrivacy,
-  ) => void;
   handleSelectResult: (referenceName: string) => void;
   /** Issue #757: the history indicator's "back to latest" exit -- moves
    *  viewedResult to the latest Materialized turn's primary (hero fallback
@@ -194,53 +176,40 @@ export function useSessionState(
   const intl = useIntl();
 
   // --- Server state (TanStack Query, ADR-0051) -----------------------------
-  const workingSetQuery = useQuery({
-    queryKey: sessionKeys.workingSet(sessionId),
-    queryFn: () => listWorkingSet(sessionId),
-  });
-  const activeQuery = useQuery({
-    queryKey: sessionKeys.active(sessionId),
-    queryFn: () => activeDataset(sessionId),
-  });
+  // The working-set descriptors come from the useWorkingSet read slice
+  // (ADR-0123: the sole wiring site for the workingSet / active queries --
+  // the seam's tab and this pane read share the same cache entries); the
+  // thread stays here with the turn domain.
+  const {
+    datasets,
+    activeName,
+    staleByReference,
+    queryErrors: workingSetErrors,
+    retryFailed: retryWorkingSetQueries,
+  } = useWorkingSetData(sessionId);
+
   const threadQuery = useQuery({
     queryKey: sessionKeys.thread(sessionId),
     queryFn: () => conversation(sessionId),
   });
-
-  const datasets = workingSetQuery.data ?? EMPTY_DATASETS;
-  const active = activeQuery.data ?? null;
-  const activeName = active?.reference_name ?? null;
   const thread = threadQuery.data ?? EMPTY_THREAD;
 
   // Issue #763: the queries' error states, coalesced in the same fixed order
-  // the fallbacks above drain them. The coalescing renders a failed fetch
-  // exactly like a fresh session (empty datasets / no active / empty thread),
-  // so this aggregate is what makes the failure observable; the destructured
-  // error/refetch pairs feed the memo + retry below (refetch is a stable
-  // observer method, so the callback's identity only moves when an error
-  // appears or clears).
-  const { error: workingSetError, refetch: refetchWorkingSet } = workingSetQuery;
-  const { error: activeError, refetch: refetchActive } = activeQuery;
+  // the fallbacks above drain them (working set -> active from the slice,
+  // thread here). The coalescing renders a failed fetch exactly like a fresh
+  // session (empty datasets / no active / empty thread), so this aggregate is
+  // what makes the failure observable; the destructured error/refetch pair
+  // feeds the retry below (refetch is a stable observer method, so the
+  // callback's identity only moves when an error appears or clears).
   const { error: threadError, refetch: refetchThread } = threadQuery;
   const queryErrors = useMemo(() => {
-    const errs: Error[] = [];
-    if (workingSetError !== null) errs.push(workingSetError);
-    if (activeError !== null) errs.push(activeError);
-    if (threadError !== null) errs.push(threadError);
-    return errs;
-  }, [workingSetError, activeError, threadError]);
+    if (threadError === null) return workingSetErrors;
+    return [...workingSetErrors, threadError];
+  }, [workingSetErrors, threadError]);
   const handleRetryQueries = useCallback(() => {
-    if (workingSetError !== null) void refetchWorkingSet();
-    if (activeError !== null) void refetchActive();
+    retryWorkingSetQueries();
     if (threadError !== null) void refetchThread();
-  }, [
-    workingSetError,
-    refetchWorkingSet,
-    activeError,
-    refetchActive,
-    threadError,
-    refetchThread,
-  ]);
+  }, [retryWorkingSetQueries, threadError, refetchThread]);
 
   // --- Client UI state -----------------------------------------------------
   // viewedResult domain lives in useViewedResult (issue #229) -- see its header
@@ -269,26 +238,18 @@ export function useSessionState(
   // the Ask/Stop button flip for the mutation's whole in-flight window):
   // turnLoading -- an ask/cancel is in flight (useTurnFlow); drives the bar's
   //   Stop button + disabled input (ADR-0021 single in-flight).
-  // mutationLoading -- a dataset/ingest mutation (rename / privacy / replace /
-  //   delete / ingest) is in flight; it contributes to the working-set
-  //   buttons' disabled gate -- the derived `loading` union drives it
-  //   (ADR-0040 execution window: either domain in flight disables). `loading`
-  //   derives from both so every pane consumer keeps the union semantics.
+  // mutationLoading -- an ingest mutation is in flight (the working-set
+  //   mutations report into the same sink through their seam, ADR-0123); it
+  //   contributes to the buttons' disabled gate -- the derived `loading`
+  //   union drives it (ADR-0040 execution window: either domain in flight
+  //   disables).
   const [turnLoading, setTurnLoading] = useState(false);
   const [mutationLoading, setMutationLoading] = useState(false);
   const loading = turnLoading || mutationLoading;
   const [error, setError] = useState<AppError | null>(null);
-  const [pendingActiveDelete, setPendingActiveDelete] =
-    useState<DatasetDescriptor | null>(null);
   const [persistError, setPersistError] = useState<SaveError | null>(null);
 
-  // --- Derived: stale map (working-set runtime truth, ADR-0051) + workspace ---
-  const staleByReference = useMemo(() => {
-    const m = new Map<string, StaleAnchor>();
-    for (const d of datasets) if (d.stale) m.set(d.reference_name, d.stale);
-    return m;
-  }, [datasets]);
-
+  // --- Derived: workspace content ------------------------------------------
   const workspaceContent = useMemo(
     () => deriveWorkspaceContent(thread, viewedResult, staleByReference),
     [thread, viewedResult, staleByReference],
@@ -303,30 +264,27 @@ export function useSessionState(
     }
   }, [sessionId]);
 
-  /** Invalidate the working-set + active + thread queries (post-mutation
-   * refresh). A failure here surfaces as a distinct "saved but refresh failed"
-   * error tagged with the operation kind, never a silent no-op. */
+  /** Invalidate the session descriptors through the working-set seam's
+   *  cascade (ADR-0123: the fan-out's sole owner). A failure here surfaces
+   *  as a distinct "saved but refresh failed" error tagged with the
+   *  operation kind, never a silent no-op. */
   const refreshServerState = useCallback(
     async (kind: SessionFlowKind): Promise<void> => {
       try {
-        await Promise.all([
-          queryClient.invalidateQueries({ queryKey: sessionKeys.workingSet(sessionId) }),
-          queryClient.invalidateQueries({ queryKey: sessionKeys.active(sessionId) }),
-          queryClient.invalidateQueries({ queryKey: sessionKeys.thread(sessionId) }),
-        ]);
+        await invalidateSessionData(queryClient, sessionId);
       } catch (refreshErr) {
         setError(toAppError(refreshErr, intl, kind, { refreshFailed: true }));
       }
     },
-    [queryClient, sessionId, intl],
+    [queryClient, sessionId, intl, setError],
   );
 
   // --- Actions -------------------------------------------------------------
 
   // Turn orchestration (handleAsk + handleCancel + phase) lives in useTurnFlow
   // (issue #230) -- the turn domain's "thread stays un-invalidated" rule is
-  // distinct from the generic refreshServerState used by the ingest / dataset
-  // mutations below. Driven through injected deps; this hook never reaches for
+  // distinct from the generic refreshServerState used by the ingest mutations.
+  // Driven through injected deps; this hook never reaches for
   // the raw queryClient / viewed setters for turn work.
   // A settled Materialized turn moves viewedResult (the useViewedResult seam)
   // AND spends the workspace's auto-expand one-shot (ADR-0083, issue #298):
@@ -389,12 +347,12 @@ export function useSessionState(
   // Ingest orchestration (handleIngest + handleIngestMany + handleGuidedSubmit
   // + handleGuidedCancel + guidance dialog state) lives in useIngestFlow
   // (issue #231) -- the ingest domain goes through the GENERIC refreshServerState
-  // on a Loaded outcome (no optimistic thread append, so thread refresh is
-  // harmless), the inverse of useTurnFlow above which must leave thread
-  // un-invalidated. Driven through injected deps; this hook never reaches for
-  // the raw guidance setter or the viewed setter for ingest work. Pending-ingest
-  // consumption (#500) lives one level up in SessionPane, which sequences the
-  // files BEFORE the pending question.
+  // (the working-set seam's cascade) on a Loaded outcome (no optimistic thread
+  // append, so thread refresh is harmless), the inverse of useTurnFlow above
+  // which must leave thread un-invalidated. Driven through injected deps; this
+  // hook never reaches for the raw guidance setter or the viewed setter for
+  // ingest work. Pending-ingest consumption (#500) lives one level up in
+  // SessionPane, which sequences the files BEFORE the pending question.
   const {
     guidance,
     guidanceError,
@@ -415,115 +373,6 @@ export function useSessionState(
       viewed: { clearForNewSource },
     },
   );
-
-  // Rename / privacy / delete share the simple mutation shape: call the API,
-  // then refresh. Tagged per-kind so a refusal carries the right prefix.
-  const runSimpleMutation = useCallback(
-    async (kind: SessionFlowKind, fn: () => Promise<unknown>) => {
-      setMutationLoading(true);
-      setError(null);
-      try {
-        await fn();
-      } catch (e) {
-        setError(toAppError(e, intl, kind));
-        setMutationLoading(false);
-        void pollPersistError();
-        return;
-      }
-      await refreshServerState(kind);
-      setMutationLoading(false);
-      void pollPersistError();
-    },
-    [refreshServerState, pollPersistError, intl],
-  );
-
-  const handleRename = useCallback(
-    (referenceName: string, newDisplay: string) => {
-      void runSimpleMutation("rename", () => renameDataset(sessionId, referenceName, newDisplay));
-    },
-    [runSimpleMutation, sessionId],
-  );
-
-  const handlePrivacyChange = useCallback(
-    (referenceName: string, privacy: DatasetPrivacy) => {
-      void runSimpleMutation("privacy", () =>
-        setDatasetPrivacy(sessionId, referenceName, privacy),
-      );
-    },
-    [runSimpleMutation, sessionId],
-  );
-
-  const handleReplace = useCallback(
-    async (referenceName: string, path: string) => {
-      setMutationLoading(true);
-      setError(null);
-      try {
-        const result = await replaceSource(sessionId, referenceName, path);
-        if (result.kind === "Loaded") {
-          await refreshServerState("replace");
-        } else if (result.kind === "NeedsGuidance") {
-          // Structured replace never yields NeedsGuidance; defensive guard.
-          setError({
-            message: intl.formatMessage({
-              id: "error.flow.replaceNeedsGuidanceUnsupported",
-              defaultMessage:
-                "Replace source does not support files needing rectify guidance; use a structured file instead",
-            }),
-            kind: "replace",
-            detail: null,
-          });
-        } else {
-          setError({ ...loadErrorDisplay(result.data, intl), kind: "replace" });
-        }
-      } catch (e) {
-        setError(toAppError(e, intl, "replace"));
-      } finally {
-        setMutationLoading(false);
-        void pollPersistError();
-      }
-    },
-    [sessionId, refreshServerState, pollPersistError, intl],
-  );
-
-  const handleRemoveSource = useCallback(
-    (referenceName: string) => {
-      void runSimpleMutation("delete", () => removeSource(sessionId, referenceName));
-    },
-    [runSimpleMutation, sessionId],
-  );
-
-  // Deleting the ACTIVE source while others remain routes through the confirm
-  // dialog (issue #39 / ADR-0035 -- no silent focus jump). Any non-active
-  // source, or the last active source, goes straight through removeSource.
-  const handleDelete = useCallback(
-    (referenceName: string) => {
-      if (referenceName === activeName && datasets.length > 1) {
-        const target = datasets.find((d) => d.reference_name === referenceName);
-        if (target) {
-          setPendingActiveDelete(target);
-          return;
-        }
-      }
-      handleRemoveSource(referenceName);
-    },
-    [activeName, datasets, handleRemoveSource],
-  );
-
-  const handleConfirmActiveDelete = useCallback(
-    (continueWith: string) => {
-      const target = pendingActiveDelete;
-      if (!target) return;
-      // Reuses runSimpleMutation (setMutationLoading/setError/refresh/poll). The dialog
-      // is closed inside fn so a removal failure leaves it open for retry.
-      void runSimpleMutation("delete", async () => {
-        await removeActiveSource(sessionId, target.reference_name, continueWith);
-        setPendingActiveDelete(null);
-      });
-    },
-    [pendingActiveDelete, sessionId, runSimpleMutation],
-  );
-
-  const handleCancelActiveDelete = useCallback(() => setPendingActiveDelete(null), []);
 
   // Rail result selection (preview card / result link, ADR-0083 issue #298):
   // moves viewedResult (the move rule lives in useViewedResult) AND opens the
@@ -571,7 +420,6 @@ export function useSessionState(
     guidance,
     guidanceError,
     haltedRemaining,
-    pendingActiveDelete,
     handleAsk: handleAskWithAutoName,
     handleCancel,
     handleIngest,
@@ -579,12 +427,6 @@ export function useSessionState(
     handleGuidedSubmit,
     handleGuidedCancel,
     fetchGuidanceWindow,
-    handleReplace,
-    handleDelete,
-    handleConfirmActiveDelete,
-    handleCancelActiveDelete,
-    handleRename,
-    handlePrivacyChange,
     handleSelectResult,
     handleJumpToLatest: jumpToLatest,
     handleToggleWorkspace: toggleWorkspace,
