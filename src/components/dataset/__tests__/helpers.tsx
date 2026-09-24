@@ -6,10 +6,16 @@ import type {
   StaleReason,
 } from "../../../types/dataset";
 import type { DatasetSamplePage } from "../DatasetDetail";
+import { src } from "../../../session/__tests__/fixtures";
 
 // Shared dataset-domain test fixtures (ADR-0011 defaults). The zh-CN
 // IntlProvider wrapper used by the dataset component tests lives in the common
 // test helpers (../../common/__tests__/helpers) and is imported per test file.
+// The base descriptor shape derives from the ONE shared builder (the session
+// fixtures' src(), whose cross-directory consumers it already documents) --
+// only the UI-test-relevant surface (two named columns, a 5-row count, richer
+// sample) rides as overrides, so the two hand-rolled minimal-but-real shapes
+// cannot drift apart (ADR-0123 test convergence).
 
 // Compact two-state constructors for readable guidance fixtures (#751): the
 // NeedsGuidance / AutoTidied union literals inline verbosely, and a
@@ -24,9 +30,7 @@ export function autoTidied(headerRow: number): GuidanceSheet["state"] {
 }
 
 export const mockDataset: DatasetDescriptor = {
-  reference_name: "people",
-  display_name: "people",
-  source_path: "/x/people.csv",
+  ...src("people"),
   row_count: 5,
   fingerprint: "abc123def4560000000000000000000000000000000000000000000000000999",
   columns: [
@@ -37,8 +41,6 @@ export const mockDataset: DatasetDescriptor = {
     ["1", "Alice"],
     ["2", "Bob"],
   ],
-  rectify: { kind: "NotApplicable" },
-  privacy: { send_samples: true, type_only_columns: [] },
 };
 
 // The ADR-0011 default: samples on, no type-only columns.

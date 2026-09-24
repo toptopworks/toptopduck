@@ -3,7 +3,13 @@ import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import type { ReactElement } from "react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { WorkspaceWorkingSet } from "../WorkspaceWorkingSet";
-import { listWorkingSet, activeDataset, readRows, removeActiveSource } from "../../../api";
+import {
+  listWorkingSet,
+  activeDataset,
+  readRows,
+  removeActiveSource,
+  removeSource,
+} from "../../../api";
 import { SAMPLE_ROW_LIMIT, type UseWorkingSetSurfaces } from "../../../session/useWorkingSet";
 import { sessionKeys } from "../../../session/queryKeys";
 import type { DatasetDescriptor, RowPage } from "../../../types/dataset";
@@ -28,6 +34,7 @@ vi.mock("../../../api", async (importOriginal) => {
     activeDataset: vi.fn(),
     readRows: vi.fn(),
     removeActiveSource: vi.fn(),
+    removeSource: vi.fn(),
   };
 });
 
@@ -265,15 +272,49 @@ describe("WorkspaceWorkingSet", () => {
     expect(screen.getByRole("alertdialog")).toHaveTextContent(/确定从工作集删除「people」/);
     // ...whose bare-name 删除 Action forwards into the seam's machine...
     fireEvent.click(screen.getByRole("button", { name: "删除" }));
-    // ...mounting the continuation dialog (alertdialog #2) with the
-    // remaining source as its only candidate.
+    // ...mounting the continuation dialog (alertdialog #2) with the full
+    // remaining set as candidates, the first one pre-selected (AC5).
     const dialog = await screen.findByRole("alertdialog");
     expect(dialog).toHaveTextContent(/删除焦点源「people」/);
-    expect(dialog).toHaveTextContent("orders");
-    // Cancel is a no-op: the machine closes, nothing crosses IPC.
+    expect(screen.getByRole("radio", { name: "orders" })).toBeChecked();
+    // Confirm carries the target + the chosen continuation (AC2) and closes
+    // the machine.
+    fireEvent.click(screen.getByRole("button", { name: "继续" }));
+    await waitFor(() =>
+      expect(removeActiveSource).toHaveBeenCalledWith(SESSION, "people", "orders"),
+    );
+    await waitFor(() => expect(screen.queryByRole("alertdialog")).toBeNull());
+  });
+
+  it("cancel in the continuation dialog is a no-op", async () => {
+    // AC3: cancel leaves the working set untouched -- nothing crossed IPC
+    // while the dialog was open, so there is nothing to undo.
+    renderSet();
+    expect(await screen.findByText(/行数：5/)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "删除 people" }));
+    fireEvent.click(screen.getByRole("button", { name: "删除" }));
+    await screen.findByRole("alertdialog");
     fireEvent.click(screen.getByRole("button", { name: "中止" }));
     await waitFor(() => expect(screen.queryByRole("alertdialog")).toBeNull());
     expect(removeActiveSource).not.toHaveBeenCalled();
+  });
+
+  it("removes a non-active source directly and refreshes the set", async () => {
+    // The migrated App-level pin (ADR-0123 test convergence): a non-active
+    // delete goes straight through removeSource, and the seam's cascade
+    // refreshes the descriptor query so the row leaves the list.
+    vi.mocked(removeSource).mockImplementation(async () => {
+      vi.mocked(listWorkingSet).mockResolvedValue([mockDataset]);
+    });
+    renderSet();
+    expect(await screen.findByRole("button", { name: /^orders/ })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "删除 orders" }));
+    fireEvent.click(screen.getByRole("button", { name: "删除" }));
+    await waitFor(() => expect(removeSource).toHaveBeenCalledWith(SESSION, "orders"));
+    // The cascade's workingSet invalidation refetches the (updated) list.
+    await waitFor(() =>
+      expect(screen.queryByRole("button", { name: /^orders/ })).not.toBeInTheDocument(),
+    );
   });
 
   it("reports a failed confirmed removal into the pane-level surfaces and keeps the machine open (ADR-0123)", async () => {
