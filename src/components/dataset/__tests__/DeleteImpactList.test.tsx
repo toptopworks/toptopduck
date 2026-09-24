@@ -47,12 +47,21 @@ describe("DeleteImpactList (issue #1063)", () => {
     expect(screen.getByText("Orders by month")).toBeInTheDocument();
   });
 
-  it("shows one muted line when the removal affects no results", async () => {
+  it("renders nothing when the removal affects no results", async () => {
     vi.mocked(previewDeleteImpact).mockResolvedValue([]);
-    renderImpact(<DeleteImpactList sessionId="s1" referenceName="people" />);
+    const { container } = renderImpact(
+      <DeleteImpactList sessionId="s1" referenceName="people" />,
+    );
 
-    await waitFor(() => expect(screen.getByText("不影响任何结果。")).toBeInTheDocument());
-    expect(screen.queryByText("受影响的结果")).not.toBeInTheDocument();
+    // The empty closure keeps the whole section out of the dialog: silence
+    // reads faster than a line the user must parse to learn the delete is
+    // safe. The loading line withdraws once the empty preview lands.
+    await waitFor(() =>
+      expect(
+        screen.queryByText("正在检查受影响的结果…"),
+      ).not.toBeInTheDocument(),
+    );
+    expect(container.textContent).toBe("");
   });
 
   it("degrades to one error line when the preview fails -- the delete stays executable", async () => {

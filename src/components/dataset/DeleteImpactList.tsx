@@ -3,13 +3,14 @@ import { fmtError } from "../../lib/error-presentation/format";
 import { useDeleteImpact } from "../../session/useWorkingSet";
 
 // The delete-confirm dialogs' cascade-impact list (issue #1063): what the
-// removal would mark stale, read through `useDeleteImpact`. Four states ride
-// the query -- loading (one muted line), failure (one `fmtError` line; the
+// removal would mark stale, read through `useDeleteImpact`. Three states
+// render -- loading (one muted line), failure (one `fmtError` line; the
 // dialog's own copy stays untouched and the delete stays executable -- the
-// preview is read-only and never a dependency of the removal), empty ("no
-// results are affected"), else the full list with an internal scroll cap.
-// The entries arrive in ascending numeric `result_N` order (the backend
-// contract, `WorkingSet::stale_impact_preview`).
+// preview is read-only and never a dependency of the removal), else the full
+// list with an internal scroll cap. An empty closure renders nothing at all:
+// silence reads faster than a line the user must parse to learn the delete
+// is safe. The entries arrive in ascending numeric `result_N` order (the
+// backend contract, `WorkingSet::stale_impact_preview`).
 export function DeleteImpactList({
   sessionId,
   referenceName,
@@ -34,14 +35,7 @@ export function DeleteImpactList({
     return <p className="text-xs text-destructive">{fmtError(error, intl)}</p>;
   }
   if (entries.length === 0) {
-    return (
-      <p className="text-xs text-muted-foreground">
-        <FormattedMessage
-          id="workingSet.delete.impactEmpty"
-          defaultMessage="No results are affected."
-        />
-      </p>
-    );
+    return null;
   }
   return (
     <div className="mt-1">
