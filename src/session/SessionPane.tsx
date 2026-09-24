@@ -301,11 +301,13 @@ export function SessionPane({ sessionId, isActive, pendingIngestPaths, onIngestC
 
   // Issue #760: the WAI-ARIA APG tabs contract for the workspace tab row.
   // useId-scoped stable ids wire each tab's aria-controls to its own panel.
-  // Issue #1060: both panels stay mounted (the settings RuntimeSection's
-  // shape) and the inactive one carries `hidden`, so the working set's
-  // detail pick and the result view state survive tab roundtrips -- #760's
-  // shared panel was the honest shape only while the branches were
-  // conditionally rendered.
+  // Issue #1060: both panels stay mounted and the inactive one carries the
+  // `hidden` attribute, so the working set's detail pick and the result view
+  // state survive tab roundtrips -- #760's shared panel was the honest shape
+  // only while the branches were conditionally rendered. (RuntimeSection's
+  // always-mounted shape, but hiding via the attribute rather than its
+  // `hidden` class: the preflight's [hidden] rule keeps a future display
+  // utility from ever beating the hide.)
   const tabBaseId = useId();
   const resultTabId = `${tabBaseId}-result-tab`;
   const workingSetTabId = `${tabBaseId}-working-set-tab`;
@@ -661,16 +663,16 @@ export function SessionPane({ sessionId, isActive, pendingIngestPaths, onIngestC
 
           {/* ADR-0067 (issue #173): the .workspace-body visual rule (padding)
             retired from styles.css; the hook stays for selector / test
-            stability. Issue #1060: the banners stay OUTSIDE both panels --
-            they belong to the session, not either tab -- and each panel is
-            always mounted (keep-alive: the working set's detail pick and the
-            result's chart/scroll state survive tab roundtrips); the inactive
-            one carries `hidden` (APG tabs: out of layout, focus, and the
-            accessibility tree). overflow-y-auto rides the panels so each tab
-            keeps its own scroll offset instead of clamping against the other
-            tab's height on a shared container. The panels carry text-sm
-            themselves -- they are the workspace's type roots (issue #864);
-            the container keeps its own for the banner strip above them. */}
+            stability AND as the staged fold/expand fade anchor (the
+            transition + collapsed rules in styles.css). Issue #1060: the
+            banners stay OUTSIDE both panels -- they belong to the session,
+            not either tab -- and the keep-alive panels below stay always
+            mounted (contract at the tab-id comment above). overflow-y-auto
+            rides the panels so each tab keeps its own scroll offset instead
+            of clamping against the other tab's height on a shared container.
+            The panels carry text-sm themselves -- they are the workspace's
+            type roots (issue #864); the container keeps its own for the
+            banner strip above them. */}
           <div className="workspace-body flex min-h-0 flex-1 flex-col p-4 text-sm">
             {s.error && <ErrorBanner error={s.error} />}
             {s.haltedRemaining !== null && (

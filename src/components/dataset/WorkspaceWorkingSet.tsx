@@ -64,7 +64,10 @@ export function WorkspaceWorkingSet({
   // (the useState is unconditional) -- the guard below is the only branch.
   // The initializer seeds the FIRST pick only (issue #1060: both tab panels
   // stay mounted, so re-entering the tab no longer remounts this component
-  // to re-seed it; true remounts are session-level).
+  // to re-seed it; true remounts are session-level). The viewedDescriptor
+  // arm of the seed is dead on every path: the component mounts on the
+  // pane's first render, when viewedResult is still null, and session-level
+  // remounts restart from null too -- the pick always seeds from activeName.
   if (datasets.length === 0) {
     return (
       <section className={PANEL_CARD_BASE}>

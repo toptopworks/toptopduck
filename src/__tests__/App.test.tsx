@@ -1011,7 +1011,8 @@ describe("App workspace tab keyboard contract (issue #760)", () => {
     return { resultTab, workingSetTab };
   }
 
-  /** The workspace-body panel the tabs' aria-controls points at. */
+  /** The per-tab tabpanel the tab's aria-controls points at (a child of
+   *  .workspace-body, issue #1060 keep-alive). */
   function panelOf(tab: HTMLElement): HTMLElement {
     return document.getElementById(tab.getAttribute("aria-controls")!)!;
   }
@@ -1120,14 +1121,16 @@ describe("App workspace tab keyboard contract (issue #760)", () => {
     // `hidden` drops the panel out of the accessibility tree: jest-dom's
     // visibility walk sees it even through text queries (which ignore
     // visibility). Focusability of hidden content is a browser-level fact
-    // (jsdom focuses anything); the attribute is what the APG contract and
-    // browsers both key on.
+    // (jsdom focuses anything); the attribute is what the UA stylesheet and
+    // jest-dom's visibility walk both key on (APG mandates the removal from
+    // the tree, not the attribute form).
     expect(hero).not.toBeVisible();
     // Keep-alive: the hidden panel keeps its DOM subtree -- the hero <p> is
     // the SAME node after a roundtrip, so the result view's state (viz view,
     // per-panel scroll offset) rides it across tab switches. jsdom does no
-    // layout, so the scroll offset itself is only pinned structurally (the
-    // per-panel overflow-y-auto containers never unmount).
+    // layout, so the scroll classes themselves carry no pin: panel survival
+    // is implied by this node-identity assertion (a remounted panel cannot
+    // return the same child).
     fireEvent.click(resultTab);
     expect(within(panelOf(resultTab)).getByText(HERO_HAS_DATA)).toBe(hero);
   });
@@ -1168,6 +1171,37 @@ describe("App workspace tab keyboard contract (issue #760)", () => {
     expect(within(workingSetPanel).getByText(/行数：9/)).toBeInTheDocument();
   });
 
+  it("the session error banner stays visible from both tabs (issue #1060)", async () => {
+    // The banners live ABOVE both panels -- they belong to the session, not
+    // either tab -- so hiding a panel must never hide them. A rename
+    // rejection surfaces through s.error (runSimpleMutation -> setError)
+    // as the pane's workspace ErrorBanner, rendered outside the tabpanels.
+    vi.mocked(renameDataset).mockRejectedValueOnce({
+      kind: "RenameDataset",
+      data: { kind: "DisplayTaken", data: "员工表" },
+    });
+    renderPane();
+    const { resultTab, workingSetTab } = await openWorkspaceTabs();
+    fireEvent.click(workingSetTab);
+    // The rename trigger lives on the working-set row -- the same door
+    // production uses (and only reachable in the visible panel).
+    await waitFor(() =>
+      expect(
+        screen.getByRole("button", { name: /^people/ }),
+      ).toBeInTheDocument(),
+    );
+    submitRename(/重命名/, "员工表");
+    const banner = await screen.findByText(
+      /显示名「员工表」已被其他数据集使用/,
+    );
+    expect(banner).toBeVisible();
+    fireEvent.click(resultTab);
+    // The working-set panel is hidden now; the banner must not ride inside it.
+    expect(banner).toBeVisible();
+    fireEvent.click(workingSetTab);
+    expect(banner).toBeVisible();
+  });
+
   it("mouse clicks still switch tabs", async () => {
     renderPane();
     const { resultTab, workingSetTab } = await openWorkspaceTabs();
@@ -1179,7 +1213,7 @@ describe("App workspace tab keyboard contract (issue #760)", () => {
     ).toBeInTheDocument();
   });
 
-  it("pins the workspace-body base type to 14px (issue #864)", async () => {
+  it("pins the workspace tabpanel base type to 14px (issue #864)", async () => {
     // The panel is the workspace's type root: every text node that does not
     // carry an explicit size inherits from here. Without the text-sm baseline
     // the bare inheritors render at the 16px document default (one step above
