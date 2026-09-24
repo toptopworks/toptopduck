@@ -87,9 +87,12 @@ describe("useRowHints", () => {
   });
 
   // A stub target answering the keyboard heuristic, so the focus-restore
-  // gate (the unit under test) is isolated from the selector engine.
-  const focusVisibleTarget = (): Element =>
-    ({ matches: (selector: string) => selector === ":focus-visible" }) as unknown as Element;
+  // gate (the unit under test) is isolated from the selector engine; the
+  // visible flag drives the heuristic's negative arm.
+  const focusVisibleTarget = (visible = true): Element =>
+    ({
+      matches: (selector: string) => selector === ":focus-visible" && visible,
+    }) as unknown as Element;
 
   const mountTrigger = (): HTMLButtonElement => {
     const trigger = document.createElement("button");
@@ -102,6 +105,14 @@ describe("useRowHints", () => {
     act(() => result.current.tip.setTip(key("rename"), true));
     expect(result.current.tip.openKey).toEqual(key("rename"));
     act(() => result.current.tip.setTip(key("rename"), false));
+    expect(result.current.tip.openKey).toBeNull();
+  });
+
+  it("focusOpen ignores focus that does not match the keyboard heuristic", () => {
+    // Pointer-style focus (a mouse click moves focus without :focus-visible)
+    // must not open a hint -- only keyboard navigation lights one.
+    const { result } = renderHook(() => useRowHints());
+    act(() => result.current.tip.focusOpen(key("rename"), focusVisibleTarget(false)));
     expect(result.current.tip.openKey).toBeNull();
   });
 
@@ -182,6 +193,29 @@ describe("useRowHints", () => {
     result.current.listRef.current = list;
     act(() => result.current.captureTrigger(trigger));
     act(() => result.current.closeDialog(vi.fn()));
+    act(() => {
+      vi.advanceTimersByTime(0);
+    });
+    expect(list).toHaveFocus();
+    expect(trigger).not.toHaveFocus();
+  });
+
+  it("falls back to the list container when the captured trigger is disconnected at restore time", () => {
+    // The row unmounting while its dialog is open (a refetch changing the
+    // working set) fires nothing on the button: focus() on a detached
+    // element lands nowhere, so the restore falls back to the list and
+    // keyboard focus keeps a place in the working-set region.
+    const trigger = mountTrigger();
+    const list = document.createElement("ul");
+    // The real list is focusable programmatically only (tabIndex -1) -- the
+    // property the fallback restore keys on.
+    list.tabIndex = -1;
+    document.body.appendChild(list);
+    const { result } = renderHook(() => useRowHints());
+    result.current.listRef.current = list;
+    act(() => result.current.captureTrigger(trigger));
+    act(() => result.current.closeDialog(vi.fn()));
+    trigger.remove(); // the row disappeared mid-dialog -- no focus events fire
     act(() => {
       vi.advanceTimersByTime(0);
     });

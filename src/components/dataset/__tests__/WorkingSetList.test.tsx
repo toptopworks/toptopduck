@@ -304,6 +304,32 @@ describe("WorkingSetList", () => {
     expect(trigger).toHaveFocus();
   });
 
+  it("drops pointer enters inside the dialog-close suppression window (rowHints sequence 2)", async () => {
+    // Closing a dialog makes Chromium re-dispatch a pointer enter at the
+    // pointer's position; the suppression window drops those echoes, and
+    // real pointer travel always arrives later. The wiring check pins the
+    // component's routing: the row's pointer enters go through the gated
+    // entry, not a raw open.
+    renderI18n(
+      <WorkingSetList
+        datasets={[mockDataset]}
+        activeName={null}
+        selectedName={null}
+        onSelect={() => {}}
+        onRename={() => {}}
+      />,
+    );
+    const trigger = screen.getByRole("button", { name: /重命名/ });
+    trigger.focus();
+    fireEvent.click(trigger);
+    fireEvent.keyDown(screen.getByRole("dialog"), { key: "Escape" });
+    // The escape routes through closeDialog (stamping the window) and the
+    // re-dispatched enter is still inside it -- the hint stays closed.
+    fireEvent.pointerEnter(trigger, { pointerType: "mouse" });
+    await new Promise((r) => setTimeout(r, 0));
+    expect(screen.queryByRole("tooltip")).not.toBeInTheDocument();
+  });
+
   it("falls back to focusing the list when Save's loading gate disables the trigger (issue #759)", async () => {
     // The submit fires onRename before closing, and the parent's mutation runs
     // setMutationLoading(true) synchronously -- batched with the close into one commit,

@@ -79,11 +79,10 @@ const SELECT_BUTTON_BASE = `${BUTTON_CHROME} p-[0.4rem_0.5rem] flex-1 min-w-0 fl
 // follows the keyboard heuristic, which a script restore after a keyboard
 // dialog flow still matches (that window is what the row-hint focus-restore
 // gate suppresses, see rowHints.ts), so the mouse flow closes clean. Tab
-// order and aria-labels are
-// untouched; `invisible` stays rejected (it drops the buttons from the a11y
-// tree). Show/hide snaps (no transition): a per-row 150ms fade cross-fades
-// the outgoing row's icons with the incoming row's on every row-to-row
-// sweep, which reads as the strip flashing.
+// order and aria-labels are untouched; `invisible` stays rejected (it drops
+// the buttons from the a11y tree). Show/hide snaps (no transition): a
+// per-row 150ms fade cross-fades the outgoing row's icons with the incoming
+// row's on every row-to-row sweep, which reads as the strip flashing.
 const ROW_ACTIONS_OVERLAY = `absolute inset-y-0 right-1 z-10 flex items-center gap-0 rounded-md bg-accent opacity-0 pointer-events-none group-hover:opacity-100 group-hover:pointer-events-auto has-[:focus-visible]:opacity-100 has-[:focus-visible]:pointer-events-auto`;
 // The per-row icon actions (issue #790): a 28px square hit area (h-7 w-7)
 // wrapping a 14px glyph -- the #774 header-chrome spec. Visibility is owned
@@ -513,8 +512,8 @@ export function WorkingSetList({
   // The row-tooltip protocol -- mutex, suppression window, focus-restore
   // gate, and the dialog-close handoff -- lives in useRowHints (rowHints.ts
   // carries the narrative): this list captures the opening trigger, mounts
-  // and clears the dialog targets through the handoff, and attaches the
-  // hook's listRef as the fallback focus target.
+  // the dialog targets and clears them through the handoff, and attaches
+  // the hook's listRef as the fallback focus target.
   const { tip, listRef, captureTrigger, closeDialog } = useRowHints();
   const closeRename = () => closeDialog(() => setRenameTarget(null));
   const closeDelete = () => closeDialog(() => setDeleteTarget(null));

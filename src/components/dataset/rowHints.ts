@@ -8,7 +8,7 @@ import { useRef, useState, type RefObject } from "react";
 // transfer rules (reduceTip / sameTipKey / the suppression-window predicate)
 // and the useRowHints hook that wires them to state, refs and the
 // dialog-close handoff live here, and consumers hold the controls object,
-// never the underlying refs. The protocol's five transfer sequences:
+// never the guard refs. The protocol's five transfer sequences:
 //
 // 1. Mutex. A second tooltip opening necessarily closes the first. The
 //    hints themselves are controlled Radix Tooltips per #865, which
@@ -53,9 +53,11 @@ import { useRef, useState, type RefObject } from "react";
 // 5. Deferred close handoff. closeDialog clears the dialog target first,
 //    then restores focus one setTimeout(0) out -- deferred past the focus
 //    trap, which re-focuses the dialog content on any focus-out while the
-//    scope is mounted, and past Radix's own unmount-time restore (also a
-//    setTimeout(0), targeting the DialogTrigger ref the row buttons never
-//    fill). On Save / Delete-confirm the mutation's loading gate has already
+//    scope is mounted, and alongside Radix's own unmount-time restore (also
+//    a setTimeout(0), targeting the DialogTrigger ref the row buttons never
+//    fill): ours registers first, so restoring on the same tick order lands
+//    the close back on the opener while Radix's restore finds its ref empty.
+//    On Save / Delete-confirm the mutation's loading gate has already
 //    disabled the opener (the mutation fires before the close and the
 //    loading flip is batched into the same commit), and focus() on a
 //    disabled button is ignored -- the restore falls back to the list
