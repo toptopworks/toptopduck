@@ -1,8 +1,11 @@
 import { useState } from "react";
 import { FormattedMessage } from "react-intl";
+import { useQuery } from "@tanstack/react-query";
+import { readRows } from "../../api";
+import { sessionKeys } from "../../session/queryKeys";
 import { WorkingSetList } from "./WorkingSetList";
 import { WorkingSetEmptyState } from "./WorkingSetEmptyState";
-import { DatasetDetail } from "./DatasetDetail";
+import { DatasetDetail, SAMPLE_ROW_LIMIT } from "./DatasetDetail";
 import { resolveWorkingSetDetail } from "../../session/workspace";
 import type { DatasetDescriptor, DatasetPrivacy } from "../../types/dataset";
 
@@ -24,6 +27,7 @@ import type { DatasetDescriptor, DatasetPrivacy } from "../../types/dataset";
 // shadow-sm, the system's light depth method).
 const PANEL_CARD_BASE = "panel bg-card border rounded-lg shadow-sm p-4";
 export function WorkspaceWorkingSet({
+  sessionId,
   datasets,
   activeName,
   loading,
@@ -33,6 +37,9 @@ export function WorkspaceWorkingSet({
   onPrivacyChange,
   onAddFiles,
 }: {
+  // ADR-0056 session addressing: the live sample preview (issue #1061) reads
+  // this session's rows through the paged channel.
+  sessionId: string;
   datasets: DatasetDescriptor[];
   activeName: string | null;
   loading: boolean;
@@ -55,14 +62,34 @@ export function WorkspaceWorkingSet({
   // highlight follows the pick (and the deleted-pick fallbacks below).
   const [selected, setSelected] = useState<string | null>(activeName ?? null);
 
+  // Resolved BEFORE the empty-set early return (hooks cannot sit past a
+  // conditional return): the preview query's gate needs the same resolved
+  // pick the detail pane renders, so there is exactly one resolution.
+  const shown = resolveWorkingSetDetail(datasets, selected, activeName);
+
+  // The live sample preview (issue #1061): one fixed first window of the
+  // shown dataset through the paged read (ADR-0024). The gate keys on the
+  // PICK, never on tab visibility or unmount -- issue #1060 keeps both tab
+  // panels mounted across switches, so an unmount-based gate would never
+  // fire; enabled:false with no pick simply idles the query. The key nests
+  // under the working-set prefix so the rename / replace / delete / privacy
+  // invalidations refresh the rows alongside the descriptor (a replaced
+  // source's rows would otherwise linger -- staleTime is Infinity app-wide,
+  // ADR-0051).
+  const preview = useQuery({
+    queryKey: sessionKeys.previewRows(sessionId, shown?.reference_name ?? ""),
+    queryFn: () => readRows(sessionId, shown!.reference_name, 0, SAMPLE_ROW_LIMIT),
+    enabled: shown !== null,
+  });
+
   // The empty set renders ONE card (issue #792): the two-column shell with its
   // near-empty pair does not mount at all. Hooks stay above the early return
-  // (the useState is unconditional) -- the guard below is the only branch.
-  // The initializer seeds the FIRST pick only (issue #1060: both tab panels
-  // stay mounted, so re-entering the tab no longer remounts this component
-  // to re-seed it; true remounts are session-level). The pick always seeds
-  // from activeName: the component mounts on the pane's first render, before
-  // any viewed result exists (issue #1065 retired the unreachable
+  // (the useState / useQuery are unconditional) -- the guard below is the only
+  // branch. The initializer seeds the FIRST pick only (issue #1060: both tab
+  // panels stay mounted, so re-entering the tab no longer remounts this
+  // component to re-seed it; true remounts are session-level). The pick always
+  // seeds from activeName: the component mounts on the pane's first render,
+  // before any viewed result exists (issue #1065 retired the unreachable
   // viewed-result seed arm).
   if (datasets.length === 0) {
     return (
@@ -71,10 +98,6 @@ export function WorkspaceWorkingSet({
       </section>
     );
   }
-
-  // Derived, not held (issue #792): a deleted pick falls back to the active
-  // dataset, then the first item, so the detail never blanks mid-management.
-  const shown = resolveWorkingSetDetail(datasets, selected, activeName);
 
   return (
     // ADR-0067 (issue #184): the WorkspaceWorkingSet div carries the .layout
@@ -111,6 +134,12 @@ export function WorkspaceWorkingSet({
         {shown !== null ? (
           <DatasetDetail
             dataset={shown}
+            // The preview state rides props (issue #1061): the container owns
+            // the query, the detail stays a pure renderer. An error wins over
+            // a stale cached page; a 0-row page renders no section at all.
+            sample={preview.data ?? null}
+            sampleLoading={preview.isLoading}
+            sampleError={preview.error}
             loading={loading}
             onPrivacyChange={onPrivacyChange}
           />

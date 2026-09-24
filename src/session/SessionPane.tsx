@@ -739,6 +739,7 @@ export function SessionPane({ sessionId, isActive, pendingIngestPaths, onIngestC
               className="min-h-0 flex-1 overflow-y-auto text-sm"
             >
               <WorkspaceWorkingSet
+                sessionId={sessionId}
                 datasets={s.datasets}
                 activeName={s.activeName}
                 loading={s.loading}
