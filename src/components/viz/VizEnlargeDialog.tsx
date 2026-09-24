@@ -33,12 +33,12 @@ import {
   TooltipContent,
   TooltipTrigger,
 } from "../ui/tooltip";
-import type { VizFailureReason } from "./viz";
+import type { DecodedVizSpec, VizFailureReason } from "./viz";
 
 /** The dialog body: one chart re-embed, or its own honest disclosure. Lives
  *  inside DialogContent so closing unmounts it: a reopen starts with fresh
  *  failure state, the same reset a new fence body gets. */
-function EnlargedChartBody({ spec }: { spec: object }) {
+function EnlargedChartBody({ spec }: { spec: DecodedVizSpec }) {
   const [renderError, setRenderError] = useState<VizFailureReason | null>(null);
   return (
     <>
@@ -59,7 +59,7 @@ function EnlargedChartBody({ spec }: { spec: object }) {
  *  object, so decode runs once and both embeds draw one spec. The overlay is
  *  viewport-anchored (never the conversation column): full readable width up
  *  to ~72rem, the spec's own height uncompressed, taller charts scroll. */
-export function VizEnlargeDialog({ spec }: { spec: object }) {
+export function VizEnlargeDialog({ spec }: { spec: DecodedVizSpec }) {
   const intl = useIntl();
   // One source for both surfaces that name the control: the aria-label and
   // the tooltip content are the same label by construction, not by two

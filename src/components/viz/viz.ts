@@ -51,12 +51,21 @@ export type VizFailureReason =
  * checks honest about which kinds the decode doors can actually emit). */
 export type VizDecodeReason = Exclude<VizFailureReason, { kind: "render" }>;
 
+/** The shape the decode gate guarantees for a passed spec: JSON.parse's
+ * product when it is an object and not an array (issue #1055). Naming the
+ * fact single-sources every contract site that carries a decode-passed spec
+ * and lets viz.ts read spec fields without a narrowing cast. It deliberately
+ * stays schema-light -- the always-vega-lite fact is asserted at one door
+ * (LazyVegaChart), not encoded here. */
+export type DecodedVizSpec = Record<string, unknown>;
+
 /** The outcome of decoding one provider viz spec. The `ok` variant carries the
- * parsed Vega-Lite object ready to render; the failure variant carries the
- * typed reason the chart could not be shown (so the ResultView can disclose it
- * honestly, ADR-0033 -- silent degradation is a silent lie). */
+ * parsed Vega-Lite spec (`DecodedVizSpec`) ready to render; the failure
+ * variant carries the typed reason the chart could not be shown (so the
+ * ResultView can disclose it honestly, ADR-0033 -- silent degradation is a
+ * silent lie). */
 export type DecodeResult =
-  | { ok: true; spec: object }
+  | { ok: true; spec: DecodedVizSpec }
   | { ok: false; reason: VizDecodeReason };
 
 /** Parse + whitelist-check a Vega-Lite spec string (ADR-0016/0033, ADR-0120).
@@ -69,7 +78,7 @@ export function decodeVizSpec(spec: string): DecodeResult {
   } catch {
     return { ok: false, reason: { kind: "invalidJson" } };
   }
-  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+  if (!isRecord(parsed)) {
     return { ok: false, reason: { kind: "notObject" } };
   }
   const mark = readMark(parsed);
@@ -88,17 +97,25 @@ export function decodeViz(viz: VizSpec): DecodeResult {
   return decodeVizSpec(viz.spec);
 }
 
+/** Narrow `unknown` to a plain record (a non-null, non-array object) -- the
+ * shape `DecodedVizSpec` names. One predicate serves decodeVizSpec's gate and
+ * readMark's mark-object probe, so both carry the typed value with no
+ * narrowing cast. */
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
 /** Read a Vega-Lite spec's top-level mark type, whether `mark` is a string
  * ("bar") or a mark object ({"type":"bar"}). `null` when there is no top-level
  * mark (a layered spec, or one relying on a default) -- decodeVizSpec lets
  * such a spec through so Vega-Embed can judge it, with a render failure
  * degrading via the caller's disclosure (the result card's table swap, or the
  * fence's bare disclosure). */
-function readMark(spec: object): string | null {
-  const mark = (spec as Record<string, unknown>).mark;
+function readMark(spec: DecodedVizSpec): string | null {
+  const mark = spec.mark;
   if (typeof mark === "string") return mark;
-  if (typeof mark === "object" && mark !== null && !Array.isArray(mark)) {
-    const type = (mark as Record<string, unknown>).type;
+  if (isRecord(mark)) {
+    const type = mark.type;
     if (typeof type === "string") return type;
   }
   return null;
