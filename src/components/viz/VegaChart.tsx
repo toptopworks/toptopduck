@@ -171,12 +171,17 @@ export function VegaChart({ spec, onError }: VegaChartProps) {
         viewRef.current = result;
       })
       .catch((err: unknown) => {
-        if (cancelled) return;
         // Log the full error for diagnostics (ADR-0029): the disclosure only
         // carries a typed { kind: "render" } reason (ADR-0052 i18n closeout), so
         // the engine detail that distinguishes a bad spec from a canvas/WebGL
-        // failure lives here in the log, not in the user-facing banner.
+        // failure lives here in the log, not in the user-facing banner. The log
+        // sits before the cancelled guard (#1054): a slow-failing embed that
+        // rejects after unmount (close-equals-unmount on the enlarge overlay,
+        // #1050) -- or after a spec change superseded it -- still leaves its
+        // only diagnostic trace; only the onError state update stays gated so
+        // React never sees a gone component.
         log.warn("viz", "vega-embed render failed", err);
+        if (cancelled) return;
         onErrorRef.current({ kind: "render" });
       });
     return () => {
@@ -212,8 +217,11 @@ export function VegaChart({ spec, onError }: VegaChartProps) {
           viewRef.current = result;
         })
         .catch((err: unknown) => {
-          if (unmounted) return;
+          // Same ordering as the spec effect's catch (#1054): the diagnostic
+          // lands even when the rejection arrives after unmount; only the
+          // state update stays behind the guard.
           log.warn("viz", "vega-embed theme re-embed failed", err);
+          if (unmounted) return;
           onErrorRef.current({ kind: "render" });
         });
     });

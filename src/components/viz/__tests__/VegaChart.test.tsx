@@ -4,11 +4,25 @@ import { renderI18n, withIntl } from "../../common/__tests__/helpers";
 import { VegaChart } from "../VegaChart";
 import embed from "vega-embed";
 import type { TopLevelSpec } from "vega-lite";
+import { log } from "../../../lib/log";
+import { THEME_CHANGE_EVENT } from "../../../theme/useTheme";
 
 // Vega-Embed needs a real canvas; jsdom has none, so the render is mocked. Each
 // test scripts a successful embed (finalize on unmount/spec change) or a rejected
 // one (onError path) -- ADR-0033.
 vi.mock("vega-embed", () => ({ default: vi.fn() }));
+
+// The unmount-in-flight rejection tests (#1054) assert the shared log sink;
+// mocking it also keeps the plugin-log IPC from firing under jsdom (issue #98).
+vi.mock("../../../lib/log", () => ({
+  log: {
+    trace: vi.fn(),
+    debug: vi.fn(),
+    info: vi.fn(),
+    warn: vi.fn(),
+    error: vi.fn(),
+  },
+}));
 
 describe("VegaChart (ADR-0016/0033/0050)", () => {
   // VegaChart owns the embed lifecycle: it renders one decoded spec, finalizes
@@ -41,6 +55,13 @@ describe("VegaChart (ADR-0016/0033/0050)", () => {
     const onError = vi.fn();
     renderI18n(<VegaChart spec={barSpec} onError={onError} />);
     await waitFor(() => expect(onError).toHaveBeenCalledWith({ kind: "render" }));
+    // One failure, one log line -- the diagnostic must not double-fire (#1054).
+    // Counted by message: the mocked sink also carries vega-theme's unrelated
+    // CSS-token fallback warns (one per embed's token reads).
+    const renderFailWarns = vi.mocked(log.warn).mock.calls.filter(
+      ([, message]) => message === "vega-embed render failed",
+    );
+    expect(renderFailWarns).toHaveLength(1);
   });
 
   it("finalizes the prior view when the spec changes (no leak across results)", async () => {
@@ -68,6 +89,60 @@ describe("VegaChart (ADR-0016/0033/0050)", () => {
       config: { mark?: { tooltip?: boolean } };
     };
     expect(opts.config.mark?.tooltip).toBe(true);
+  });
+
+  describe("unmount-in-flight rejection logging (#1054)", () => {
+    // A slow-failing embed (heavy spec, canvas blowup) that rejects after the
+    // component unmounts -- the enlarge overlay made close-equals-unmount a
+    // regular path (#1050). The rejection must leave its diagnostic trace in
+    // the log; only the onError state update stays gated so React never sees
+    // a setter on a gone component.
+    function deferredEmbed() {
+      let reject!: (reason?: unknown) => void;
+      const promise = new Promise<Awaited<ReturnType<typeof embed>>>(
+        (_, rej) => (reject = rej),
+      );
+      return { promise, reject };
+    }
+
+    it("logs a spec-effect rejection landing after unmount, without onError", async () => {
+      const d = deferredEmbed();
+      vi.mocked(embed).mockReturnValueOnce(d.promise);
+      const onError = vi.fn();
+      const { unmount } = renderI18n(<VegaChart spec={barSpec} onError={onError} />);
+      await waitFor(() => expect(embed).toHaveBeenCalledTimes(1));
+      unmount();
+      d.reject(new Error("slow spec boom"));
+      await waitFor(() =>
+        expect(log.warn).toHaveBeenCalledWith("viz", "vega-embed render failed", expect.any(Error)),
+      );
+      expect(onError).not.toHaveBeenCalled();
+    });
+
+    it("logs a theme re-embed rejection landing after unmount, without onError", async () => {
+      vi.mocked(embed).mockResolvedValueOnce(
+        { finalize: vi.fn() } as unknown as Awaited<ReturnType<typeof embed>>,
+      );
+      const d = deferredEmbed();
+      vi.mocked(embed).mockReturnValueOnce(d.promise);
+      const onError = vi.fn();
+      const { unmount } = renderI18n(<VegaChart spec={barSpec} onError={onError} />);
+      await waitFor(() => expect(embed).toHaveBeenCalledTimes(1));
+      window.dispatchEvent(
+        new CustomEvent(THEME_CHANGE_EVENT, { detail: { effective: "dark" } }),
+      );
+      await waitFor(() => expect(embed).toHaveBeenCalledTimes(2));
+      unmount();
+      d.reject(new Error("theme re-embed boom"));
+      await waitFor(() =>
+        expect(log.warn).toHaveBeenCalledWith(
+          "viz",
+          "vega-embed theme re-embed failed",
+          expect.any(Error),
+        ),
+      );
+      expect(onError).not.toHaveBeenCalled();
+    });
   });
 
   describe("host resize (container-width tracking, #1051)", () => {
