@@ -1,8 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { screen } from "@testing-library/react";
+import { render, screen } from "@testing-library/react";
 import { DatasetDetail } from "../DatasetDetail";
 import type { DatasetDescriptor } from "../../../types/dataset";
 import { mockDataset, mockSamplePage, staleDataset } from "./helpers";
+import { IntlProvider } from "react-intl";
 import { renderI18n } from "../../common/__tests__/helpers";
 
 // The detail pane's live preview reads through props (issue #1061): the
@@ -32,6 +33,19 @@ describe("DatasetDetail", () => {
     expect(screen.getByText(/行数：5/)).toBeInTheDocument();
     // Privacy controls are absent when onPrivacyChange is not supplied.
     expect(screen.queryByText(/隐私控制/)).toBeNull();
+  });
+
+  it("renders the meta line via the en defaultMessage (issue #1062)", () => {
+    // workingSet.detail.meta (#793) had no en anchor either -- the zh 行数：
+    // hits masked the defaultMessage. The empty English provider (the
+    // WorkingSetList rowCount precedent) routes the key to the canonical
+    // copy; no TooltipProvider needed: the detail pane renders no tooltips.
+    render(
+      <IntlProvider locale="en" messages={{}} onError={() => {}}>
+        <DatasetDetail dataset={mockDataset} {...LOADED_PREVIEW} />
+      </IntlProvider>,
+    );
+    expect(screen.getByText("Rows: 5")).toBeInTheDocument();
   });
 
   it("keeps the meta line to the row count and renders the fingerprint under the source file (issue #793)", () => {

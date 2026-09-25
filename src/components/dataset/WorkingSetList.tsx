@@ -196,6 +196,19 @@ function DatasetRow({
   const intl = useIntl();
   const key = (kind: RowTipKind): TipKey => ({ row: d.reference_name, kind });
   const isTipOpen = (kind: RowTipKind) => openKey !== null && sameTipKey(openKey, key(kind));
+  // The stale causal sentence, formatted once for both consumers (#1062):
+  // the tooltip's copy and the chip's aria-label stay one source, so the
+  // keyboard/AT path and the visual hover path can never drift apart.
+  const staleCause = d.stale
+    ? intl.formatMessage(
+        {
+          id: "workingSet.staleRow.hint",
+          defaultMessage:
+            "Invalidated because {name} was {reason, select, Deleted {deleted} Replaced {updated} other {changed}}",
+        },
+        { name: d.stale.display_name, reason: d.stale.reason },
+      )
+    : undefined;
   return (
     <li
       className={cn(
@@ -306,10 +319,23 @@ function DatasetRow({
         // #793: a short chip with the full causal sentence on the tooltip --
         // the sentence used to wrap inside the badge and break the chip shape
         // in narrow columns. No action outlet here: the rerun path lives with
-        // the result panel's stale banner (#758).
+        // the result panel's stale banner (#758). #1062 makes the sentence
+        // keyboard-reachable too: tabIndex + the staleCause aria-label put it in
+        // the tab order and the a11y tree, and Radix's own focus path opens
+        // the tooltip through the controlled slot (the chip keeps no
+        // handlers of its own; its opens need no restore gate -- the
+        // dialog-close restore never lands on the chip, the rowHints setTip
+        // note). The focus ring follows the action buttons' outline tokens
+        // so tabbing reads the same across the row, and the badge-variants
+        // base already carries shrink-0, so the call site stays lean.
         <Tooltip open={isTipOpen("stale")} onOpenChange={(next) => setTip(key("stale"), next)}>
           <TooltipTrigger asChild>
-            <Badge variant="secondary" className="stale-badge shrink-0">
+            <Badge
+              variant="secondary"
+              className="stale-badge focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring"
+              tabIndex={0}
+              aria-label={staleCause}
+            >
               <FormattedMessage id="workingSet.staleRow" defaultMessage="Stale" />
             </Badge>
           </TooltipTrigger>
@@ -317,14 +343,7 @@ function DatasetRow({
             data-hit-transparent
             className="pointer-events-none data-[state=closed]:animate-none!"
           >
-            {intl.formatMessage(
-              {
-                id: "workingSet.staleRow.hint",
-                defaultMessage:
-                  "Invalidated because {name} was {reason, select, Deleted {deleted} Replaced {updated} other {changed}}",
-              },
-              { name: d.stale.display_name, reason: d.stale.reason },
-            )}
+            {staleCause}
           </TooltipContent>
         </Tooltip>
       )}
