@@ -2,30 +2,19 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { FormattedMessage, useIntl } from "react-intl";
 import { useQueryClient } from "@tanstack/react-query";
 import { openPath } from "@tauri-apps/plugin-opener";
-import {
-  Download,
-  Plus,
-  Puzzle,
-  RefreshCw,
-  SquareArrowOutUpRight,
-  Trash2,
-  X,
-} from "lucide-react";
+import { Download, Plus, RefreshCw } from "lucide-react";
 
-import type {
-  SkillAcquired,
-  SkillEntry,
-  SkippedSkill,
-} from "../../types/skills";
+import type { SkillEntry } from "../../types/skills";
 import type { AppConfig } from "../../types/app-config";
-import {
-  getSkillsDir,
-  rescanBuiltinCliTools,
-} from "../../api";
+import { rescanBuiltinCliTools } from "../../api";
+import { IgnoredDirectoriesSection } from "./IgnoredDirectoriesSection";
 import { ImportSkillsDialog } from "./ImportSkillsDialog";
+import { SkillDetailDialog } from "./SkillDetailDialog";
+import { SkillMaterializeFailureRow, SkillRow } from "./SkillRow";
 import { fmtError } from "../../lib/error-presentation";
 import { log } from "../../lib/log";
 import { invalidateSkills, useSkillsRegistry } from "../../skills/registry";
+import { useSkillsRoot } from "./useSkillsRoot";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -36,15 +25,7 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from "../ui/alert-dialog";
-import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogHeader,
-  DialogTitle,
-} from "../ui/dialog";
 import { Input } from "../ui/input";
-import { Switch } from "../ui/switch";
 import { Label } from "../ui/label";
 import {
   Select,
@@ -54,10 +35,7 @@ import {
   SelectValue,
 } from "../ui/select";
 import {
-  DialogHeaderButton,
   HeaderActionButton,
-  NameBadge,
-  RowActionButton,
   PaneHeader,
   SettingsCard,
 } from "./settings-chrome";
@@ -77,45 +55,11 @@ import {
 // form: creation rides the model-face create_skill meta-tool -- the New
 // button exits the settings overlay straight to the workspace where that
 // conversation lives -- and edits happen in the external editor the detail
-// dialog's SKILL.md link opens -- `local` anchors at its own directory,
-// `linked` at its link target, `builtin` at the reserved-subtree copy. The
-// Import header button opens the two-stage drill-down import dialog (issue
-// #367), which links / copies skills from external agent libraries through
-// the registry's import mutation.
-
-// The row is list chrome (hover highlight + layout); the text block is the
-// detail affordance (click / Enter opens the read-only dialog) and every
-// write action lives in the row-end cluster -- never on the text block.
-const ROW_CLASS = "hover:bg-accent flex items-center gap-3 px-4 py-3";
-
-/** The registry root's resolution state: `failed` carries the formatted
- *  error the detail dialog's path face reports (issue #1039). */
-type SkillsRoot =
-  | { phase: "loading" }
-  | { phase: "resolved"; root: string }
-  | { phase: "failed"; error: string };
-
-/** The acquired axis's locale label: the row badge and the detail dialog's
- *  scope value share the one vocabulary -- no second word for the same
- *  axis. */
-function AcquiredLabel({ acquired }: { acquired: SkillAcquired }) {
-  return acquired === "linked" ? (
-    <FormattedMessage
-      id="settings.skills.acquiredLinked"
-      defaultMessage="linked"
-    />
-  ) : acquired === "builtin" ? (
-    <FormattedMessage
-      id="settings.skills.acquiredBuiltin"
-      defaultMessage="system"
-    />
-  ) : (
-    <FormattedMessage
-      id="settings.skills.acquiredLocal"
-      defaultMessage="local"
-    />
-  );
-}
+// dialog's SKILL.md link opens. The Import header button opens the
+// two-stage drill-down import dialog (issue #367), which links / copies
+// skills from external agent libraries through the registry's import
+// mutation. The row family, the detail dialog, and the skipped fold live in
+// sibling files, and the registry root rides useSkillsRoot (issue #1083).
 
 export function SkillsSection({
   onAppConfigSync,
@@ -154,6 +98,12 @@ export function SkillsSection({
   function applyUserWrite(next: AppConfig) {
     writeGenRef.current += 1;
     onAppConfigSync(next);
+  }
+
+  /** Report a mutation failure on the pane's error banner: the one shared
+   *  face of the enablement / delete rejects (formatted once, here). */
+  function reportMutationError(e: unknown) {
+    setError(fmtError(e, intl));
   }
 
   // The pane's whole registry surface rides the one seam (issue #1077): the
@@ -209,52 +159,11 @@ export function SkillsSection({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // The registry root for the local rows' open anchors (issue #1033): the
-  // backend is the path authority (the get_agents_dir posture). Fetched on
-  // mount and re-fetched by a local row's detail-open while unresolved
-  // (issue #1039) -- the open click is the retry entry -- so a failed fetch
-  // reports on that row's detail dialog (the path face) instead of leaving
-  // the open link permanently inert. A re-fetch keeps the previous phase
-  // until its response lands, and the fetch callbacks alone write the
-  // state: a response landing after unmount is a silent React no-op, so
-  // unlike the rescan above there is no cancelled guard to thread through
-  // the shared fetcher (its callbacks carry no cross-pane cache write or
-  // config sync).
-  const [skillsRoot, setSkillsRoot] = useState<SkillsRoot>({
-    phase: "loading",
-  });
-
-  // Each fetch bumps a generation so a late response from an older fetch
-  // cannot overwrite a newer one (the PR #1041 review): with the mount
-  // fetch and an open-click re-fetch both in flight, a stale rejection
-  // landing after a newer resolve would flip the phase back to failed
-  // mid-dialog. The writeGenRef posture above, at fetch scope -- the warn
-  // still fires unconditionally so a stale failure stays diagnosable.
-  const fetchGenRef = useRef(0);
-
-  function fetchSkillsRoot() {
-    fetchGenRef.current += 1;
-    const gen = fetchGenRef.current;
-    getSkillsDir()
-      .then((dir) => {
-        if (fetchGenRef.current === gen) {
-          setSkillsRoot({ phase: "resolved", root: dir });
-        }
-      })
-      .catch((e) => {
-        log.warn("SkillsSection", "get_skills_dir failed", e);
-        if (fetchGenRef.current === gen) {
-          setSkillsRoot({ phase: "failed", error: fmtError(e, intl) });
-        }
-      });
-  }
-
-  useEffect(() => {
-    fetchSkillsRoot();
-    // fetchSkillsRoot closes over the pane-lifetime intl (stable for the
-    // provider's life); the mount-once contract matches the rescan effect.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  // The registry root rides the skills-root seam (issue #1083); this
+  // container keeps the retry orchestration (the open-click entry in
+  // openDetail below) and the failed phase's wording (the detail
+  // dialog's path face).
+  const { root, detailFilePath, retry } = useSkillsRoot();
 
   const [search, setSearch] = useState("");
   const [filter, setFilter] = useState<EnabledFilter>("all");
@@ -338,20 +247,6 @@ export function SkillsSection({
     [materializeFailures, allSkills, filter, search],
   );
 
-  /** The row's open anchor (issue #1033): a `local` row's own
-   *  `<root>/<name>` directory; a `linked` row's link target and a `builtin`
-   *  row's reserved-subtree copy (`link_target` carries both). Null when a
-   *  local row is asked before the registry root has resolved, or when a
-   *  linked row's link target is unreadable -- the open stays inert rather
-   *  than synthesizing a garbage path. The root's own separator threads
-   *  through the join, so a Windows root reads native backslashes. */
-  function revealTarget(skill: SkillEntry): string | null {
-    if (skill.acquired !== "local") return skill.link_target;
-    if (skillsRoot.phase !== "resolved") return null;
-    const sep = skillsRoot.root.includes("\\") ? "\\" : "/";
-    return `${skillsRoot.root}${sep}${skill.name}`;
-  }
-
   /** Open the row's read-only detail dialog (the row-click affordance):
    *  name + description + the SKILL.md path bar. Opening clears a stale
    *  pane error so the dialog never replays an unrelated reject under the
@@ -362,8 +257,8 @@ export function SkillsSection({
     // A local row's path bar needs the registry root: while unresolved --
     // still loading or failed -- ask again now (issue #1039), making the
     // open click the retry entry after a failed fetch.
-    if (skill.acquired === "local" && skillsRoot.phase !== "resolved") {
-      fetchSkillsRoot();
+    if (skill.acquired === "local" && root.phase !== "resolved") {
+      retry();
     }
     setDetailName(skill.name);
   }
@@ -406,7 +301,7 @@ export function SkillsSection({
   // The path bar anchors at the SKILL.md file: the bar opens it in the
   // OS default editor, one click from the bytes. Null (a local row asked
   // before the registry root resolved) keeps the button inert.
-  const detailFile = skillFilePath(detail === null ? null : revealTarget(detail));
+  const detailFile = detail === null ? null : detailFilePath(detail);
   // The local-row face when the root fetch failed (issue #1039): the failed
   // resolution reports under the dialog's path link instead of leaving it
   // inert with no signal. Null on every other row and phase.
@@ -414,14 +309,14 @@ export function SkillsSection({
     detail !== null &&
     detail.acquired === "local" &&
     detailFile === null &&
-    skillsRoot.phase === "failed"
+    root.phase === "failed"
       ? intl.formatMessage(
           {
             id: "settings.skills.pathUnavailable",
             defaultMessage:
               "Couldn't determine the skills folder path: {detail}",
           },
-          { detail: skillsRoot.error },
+          { detail: root.error },
         )
       : null;
 
@@ -564,7 +459,7 @@ export function SkillsSection({
                     // A success also drops a stale reject -- the banner must
                     // not outlive the failure it reported.
                     onSuccess: () => setError(null),
-                    onError: (e) => setError(fmtError(e, intl)),
+                    onError: reportMutationError,
                   },
                 )}
               onOpen={() => openDetail(skill)}
@@ -638,7 +533,7 @@ export function SkillsSection({
                   deleteSkillMutation.mutate(confirmDelete, {
                     onSuccess: () => setConfirmDelete(null),
                     onError: (e) => {
-                      setError(fmtError(e, intl));
+                      reportMutationError(e);
                       setConfirmDelete(null);
                     },
                   })}
@@ -658,364 +553,6 @@ export function SkillsSection({
           onClose={() => setImportOpen(false)}
         />
       )}
-    </div>
-  );
-}
-
-type SkillRowProps = {
-  skill: SkillEntry;
-  /** The enablement switch is mid-flight on this row: gate this row's
-   *  switch (the per-row gate, the AgentsSection #932 precedent). */
-  busy?: boolean;
-  /** Flip the row's enablement axis (issue #961). */
-  onToggleEnabled: (enabled: boolean) => void;
-  /** Open the row's read-only detail dialog (name + description + the
-   *  SKILL.md path bar). */
-  onOpen: () => void;
-  /** Undefined on builtin rows (issue #677): the delete button then renders
-   *  disabled, keeping every row's action column aligned. */
-  onDelete?: () => void;
-};
-
-function SkillRow({
-  skill,
-  busy = false,
-  onToggleEnabled,
-  onOpen,
-  onDelete,
-}: SkillRowProps) {
-  const intl = useIntl();
-  return (
-    <div
-      data-testid="skill-row"
-      // Dormant-on-disable gray-out (issue #961): the whole row reads
-      // faded, switch and actions dimmed with it (management stays
-      // operable -- disabling hides from discovery, not from management)
-      // and carries data-disabled as the test/styling hook.
-      className={`${ROW_CLASS} ${skill.enabled ? "" : "opacity-60"}`}
-      data-disabled={skill.enabled ? undefined : "true"}
-    >
-      <Puzzle className="text-muted-foreground size-4 shrink-0" aria-hidden />
-      {/* The detail target is the text block alone (the retired edit
-          drawer's old posture, now opening a read-only face): the row's
-          clickable area stops before the action cluster. */}
-      <div
-        role="button"
-        tabIndex={0}
-        onClick={onOpen}
-        onKeyDown={(e) => {
-          if (e.key === "Enter" || e.key === " ") {
-            e.preventDefault();
-            onOpen();
-          }
-        }}
-        className="min-w-0 flex-1 cursor-pointer outline-none focus-visible:outline-ring focus-visible:outline-2 focus-visible:outline-offset-2"
-      >
-        <div className="flex items-center gap-2">
-          <span className="truncate text-sm font-medium">{skill.name}</span>
-          <NameBadge>
-            <AcquiredLabel acquired={skill.acquired} />
-          </NameBadge>
-          {skill.covers_builtin && (
-            <NameBadge>
-              <FormattedMessage
-                id="settings.skills.coversBuiltin"
-                defaultMessage="covers built-in"
-              />
-            </NameBadge>
-          )}
-        </div>
-        <p className="text-muted-foreground truncate text-xs">
-          {skill.description}
-        </p>
-      </div>
-      <div className="flex shrink-0 items-center gap-0.5">
-        <Switch
-          className="mr-1.5"
-          checked={skill.enabled}
-          disabled={busy}
-          onCheckedChange={onToggleEnabled}
-          aria-label={intl.formatMessage(
-            {
-              id: "settings.skills.enabledLabel",
-              defaultMessage: "Enable skill {name}",
-            },
-            { name: skill.name },
-          )}
-        />
-        {/* The row-end delete renders in every state (disabled on builtin,
-            issue #677) so the switch column never shifts across rows. The
-            external-edit channel lives in the detail dialog's SKILL.md path
-            bar (issue #1033) -- the row itself stays management-only. */}
-        <RowActionButton
-          destructive
-          disabled={!onDelete}
-          label={intl.formatMessage(
-            {
-              id: "settings.skills.deleteLabel",
-              defaultMessage: "Delete skill {name}",
-            },
-            { name: skill.name },
-          )}
-          icon={Trash2}
-          onClick={onDelete}
-          // The shutdown guidance at the real touchpoint (#1015): the
-          // disabled delete explains itself instead of dead-ending --
-          // the reachable off-action is the enablement-axis switch on
-          // this row (ADR-0118), true for every builtin (knowledge-only
-          // skills like vega-chart have no companion CLI to point at).
-          tooltip={
-            skill.acquired === "builtin"
-              ? intl.formatMessage({
-                  id: "settings.skills.deleteDisabledHint",
-                  defaultMessage:
-                    "System skills cannot be deleted; disable the skill instead",
-                })
-              : undefined
-          }
-        />
-      </div>
-    </div>
-  );
-}
-
-/** The SKILL.md path from an open anchor directory (null passes through
- *  so the caller renders an inert link): joined with the anchor's own
- *  separator so a Windows root reads native backslashes. */
-function skillFilePath(target: string | null): string | null {
-  if (target === null) return null;
-  return target.includes("\\") ? `${target}\\SKILL.md` : `${target}/SKILL.md`;
-}
-
-/** The row's read-only detail dialog (issue #1033's row-click face): the
- *  name header, the description / scope / status metadata, and the SKILL.md
- *  path bar. There is no form here -- creation rides the conversation
- *  channel and edits happen in the external editor the path link opens, so
- *  this dialog only SHOWS the skill and points at where it lives. */
-type SkillDetailDialogProps = {
-  skill: SkillEntry;
-  /** The absolute SKILL.md path the path bar links; null before a local
-   *  row's registry root resolved, or when a linked row's link target is
-   *  unreadable (the link then stays disabled). */
-  file: string | null;
-  /** The local-row face when the registry root failed to resolve (issue
-   *  #1039); null on every other row and phase. */
-  pathUnavailable: string | null;
-  /** The open-file failure's dialog-level face (null = no error shown). */
-  error: string | null;
-  onClose: () => void;
-  /** Open the SKILL.md file in the OS default editor. */
-  onOpenFile: () => void;
-};
-
-function SkillDetailDialog({
-  skill,
-  file,
-  pathUnavailable,
-  error,
-  onClose,
-  onOpenFile,
-}: SkillDetailDialogProps) {
-  const intl = useIntl();
-  return (
-    <Dialog open onOpenChange={(open) => { if (!open) onClose(); }}>
-      {/* The default header X is the sole dismissal chrome; ESC and the
-          overlay click still close via Radix. */}
-      <DialogContent className="sm:max-w-lg" showCloseButton={false}>
-        <DialogHeader>
-          {/* The close chrome matches the sibling import dialog: the
-              DialogHeaderButton ghost in the header row, not the floating
-              corner X (the #964 dialog-action posture). */}
-          <div className="flex items-center justify-between gap-2">
-            <DialogTitle>{skill.name}</DialogTitle>
-            <DialogHeaderButton
-              label={intl.formatMessage({
-                id: "common.close",
-                defaultMessage: "Close",
-              })}
-              icon={X}
-              onClick={onClose}
-            />
-          </div>
-        </DialogHeader>
-        <div className="grid gap-5">
-          <div className="grid gap-1.5">
-            <p className="text-foreground text-sm">
-              <FormattedMessage
-                id="common.description"
-                defaultMessage="Description"
-              />
-            </p>
-            <DialogDescription className="text-sm leading-relaxed">
-              {skill.description}
-            </DialogDescription>
-          </div>
-          <div className="grid grid-cols-2 gap-4">
-            <div className="grid gap-1.5">
-              <p className="text-foreground text-sm">
-                <FormattedMessage
-                  id="settings.skills.sourceLabel"
-                  defaultMessage="Source"
-                />
-              </p>
-              <p className="text-muted-foreground text-sm">
-                <AcquiredLabel acquired={skill.acquired} />
-              </p>
-            </div>
-            <div className="grid gap-1.5">
-              <p className="text-foreground text-sm">
-                <FormattedMessage
-                  id="settings.skills.statusLabel"
-                  defaultMessage="Status"
-                />
-              </p>
-              <p className="text-muted-foreground text-sm">
-                {skill.enabled ? (
-                  <FormattedMessage
-                    id="settings.skills.statusEnabled"
-                    defaultMessage="Enabled"
-                  />
-                ) : (
-                  <FormattedMessage
-                    id="settings.skills.statusDisabled"
-                    defaultMessage="Disabled"
-                  />
-                )}
-              </p>
-            </div>
-          </div>
-          <div className="grid gap-1.5">
-            <p className="text-foreground text-sm">
-              <FormattedMessage
-                id="settings.skills.pathLabel"
-                defaultMessage="File path"
-              />
-            </p>
-            {/* The path is the open-file link (the direct-edit channel):
-                hover underlines it, click opens SKILL.md in the OS default
-                editor; the glyph rides inline as the affordance. */}
-            <button
-              type="button"
-              onClick={onOpenFile}
-              disabled={!file}
-              aria-label={intl.formatMessage(
-                {
-                  id: "settings.skills.openFile",
-                  defaultMessage: "Open file {path}",
-                },
-                { path: file ?? "" },
-              )}
-              className="text-muted-foreground hover:text-foreground w-fit max-w-full text-left font-mono text-xs underline-offset-2 hover:underline disabled:pointer-events-none disabled:opacity-50"
-            >
-              <span className="break-all">{file}</span>
-              <SquareArrowOutUpRight
-                className="ml-1.5 inline-block size-3.5 align-text-bottom"
-                aria-hidden
-              />
-            </button>
-            {/* One error line for the path area's two failure faces,
-                mutually exclusive: the failed root fetch (issue #1039)
-                shows only while the link above is inert, the open failure
-                only after a click on a resolved link. */}
-            {(pathUnavailable ?? error) && (
-              <p className="text-destructive text-xs" role="alert">
-                {pathUnavailable ?? error}
-              </p>
-            )}
-          </div>
-        </div>
-      </DialogContent>
-    </Dialog>
-  );
-}
-
-type IgnoredDirectoriesSectionProps = {
-  skipped: SkippedSkill[];
-};
-
-// Collapsible diagnostic fold for spec-invalid skill directories the scan
-// skipped (issue #373). Rendered ONLY when the list is non-empty (a clean
-// registry never shows it). Each row shows the directory name + the English
-// technical reason verbatim -- the locale catalog owns the title / intro
-// wording, NOT the per-row reason (ADR-0052 layer 4). The section does not
-// participate in the search / filter / edit flows: it is read-only context.
-// Native <details> / <summary> keeps it KISS (no extra state, keyboard +
-// screen-reader accessible out of the box); the section is folded shut by
-// default so the primary skills list stays the visual focus.
-function IgnoredDirectoriesSection({ skipped }: IgnoredDirectoriesSectionProps) {
-  return (
-    <details
-      data-testid="skills-ignored-details"
-      className="border-border mt-3 rounded-lg border"
-    >
-      <summary className="hover:bg-accent flex cursor-pointer items-center gap-2 px-4 py-3 text-sm font-medium select-none">
-        <span>
-          <FormattedMessage
-            id="settings.skills.ignoredTitle"
-            defaultMessage="Ignored directories"
-          />
-        </span>
-        <NameBadge>
-          {skipped.length}
-        </NameBadge>
-      </summary>
-      <div className="border-border border-t px-4 py-3">
-        <p className="text-muted-foreground mb-2 text-xs">
-          <FormattedMessage
-            id="settings.skills.ignoredDescription"
-            defaultMessage="These skill folders couldn't be loaded. Fix the folder or its SKILL.md file, then rescan."
-          />
-        </p>
-        <ul className="grid gap-1.5">
-          {skipped.map((entry) => (
-            <li
-              key={entry.dir}
-              data-testid="ignored-skill-row"
-              className="grid gap-0.5 text-xs"
-            >
-              <span className="font-mono font-medium">{entry.dir}</span>
-              <span className="text-muted-foreground break-words">
-                {entry.reason}
-              </span>
-            </li>
-          ))}
-        </ul>
-      </div>
-    </details>
-  );
-}
-
-/** One materialization-failure row (issue #1016): the CLI pane's
- * conflict-row shape (issue #675) carried over as the skills pane's
- * warning lane -- the #937 agents-pane precedent for surfacing
- * materialization failures. The skill never landed on disk, so the
- * listing has no row for it -- this one stands in with the failure
- * category and the self-heal hint. No open/edit affordance: there is
- * nothing on disk to edit. */
-function SkillMaterializeFailureRow({ name }: { name: string }) {
-  return (
-    <div
-      data-testid={`skill-materialize-failure-row-${name}`}
-      className={ROW_CLASS}
-    >
-      <div className="min-w-0 flex-1">
-        <div className="text-sm font-medium truncate">{name}</div>
-        <p className="text-destructive mt-1 text-xs">
-          <FormattedMessage
-            id="settings.skills.materializeFailureHint"
-            defaultMessage="Couldn't write this built-in skill to disk. Check that the skills folder is writable and has disk space; the next scan retries."
-          />
-        </p>
-      </div>
-      {/* The DESIGN.md badge token (the CLI conflict row's shape):
-       * typography.badge on rounded.md, the destructive coloring marking
-       * the failed write. */}
-      <span className="bg-muted text-destructive shrink-0 rounded-md px-2 py-0.5 text-xs font-medium leading-none">
-        <FormattedMessage
-          id="settings.skills.materializeFailureBadge"
-          defaultMessage="Write failed"
-        />
-      </span>
     </div>
   );
 }
