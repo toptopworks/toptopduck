@@ -4,9 +4,12 @@
 // and so refetch/ invalidate targets a precise slice. Session-AGNOSTIC queries
 // (provider config / app config) use a different prefix and are NOT here.
 
-/** The per-session row tuple (ADR-0051 row pages). The offset is part of the
- * key so each page caches independently and `placeholderData: keepPreviousData`
- * can show the prior page while the next loads. */
+/** The per-session row tuple (ADR-0051 row pages), read through the
+ * useRowPage seam (issue #1079) -- a SNAPSHOT read that never joins an
+ * invalidation cascade (narrative: the useRowPage module header). The
+ * offset is part of the key so each page caches independently and
+ * `placeholderData: keepPreviousData` can show the prior page while the
+ * next loads. */
 export const sessionKeys = {
   all: (sessionId: string) => ["session", sessionId] as const,
   workingSet: (sessionId: string) => ["session", sessionId, "workingSet"] as const,
