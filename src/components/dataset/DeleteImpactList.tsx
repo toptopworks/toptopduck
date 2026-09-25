@@ -4,24 +4,28 @@ import { useDeleteImpact } from "../../session/useWorkingSet";
 
 // The delete-confirm dialogs' cascade-impact list (issue #1063): what the
 // removal would mark stale, read through `useDeleteImpact`. Three states
-// render -- loading (one muted line), failure (one `fmtError` line; the
-// dialog's own copy stays untouched and the delete stays executable -- the
-// preview is read-only and never a dependency of the removal), else the full
-// list with an internal scroll cap. An empty closure renders nothing at all:
-// silence reads faster than a line the user must parse to learn the delete
-// is safe. The entries arrive in ascending numeric `result_N` order (the
-// backend contract, `WorkingSet::stale_impact_preview`).
+// render -- in flight (one muted line, first load and refetch alike: with
+// staleTime Infinity the prefix-invalidation reopen path must not show an
+// unindicated stale list), failure (one `fmtError` line; the dialog's own
+// copy stays untouched and the delete stays executable -- the preview is
+// read-only and never a dependency of the removal), else the full list with
+// an internal scroll cap. An empty closure renders nothing at all: silence
+// reads faster than a line the user must parse to learn the delete is safe.
+// The entries arrive in ascending numeric `result_N` order (the backend
+// contract, `WorkingSet::stale_impact_preview`). The dialogs mount this list
+// conditionally with a non-null target and own the never-blocks-the-delete
+// contract (issue #1063's lenient-degrade ruling).
 export function DeleteImpactList({
   sessionId,
   referenceName,
 }: {
-  sessionId: string | null;
-  referenceName: string | null;
+  sessionId: string;
+  referenceName: string;
 }) {
   const intl = useIntl();
-  const { entries, isLoading, error } = useDeleteImpact(sessionId, referenceName);
+  const { entries, isFetching, error } = useDeleteImpact(sessionId, referenceName);
 
-  if (isLoading) {
+  if (isFetching) {
     return (
       <p className="text-xs text-muted-foreground">
         <FormattedMessage

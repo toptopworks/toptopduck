@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { IntlProvider } from "react-intl";
@@ -43,6 +43,15 @@ function renderList(ui: ReactElement) {
 describe("WorkingSetList", () => {
   // Spies must not leak between tests.
   afterEach(() => vi.restoreAllMocks());
+
+  // Most tests here open no delete dialog, and the ones that do mostly
+  // don't seed the impact preview; restore strips the mock's
+  // implementation, so re-seed before each test -- an empty resolved list
+  // keeps un-seeded dialogs out of the query library's undefined-data
+  // error branch (owned by DeleteImpactList.test).
+  beforeEach(() => {
+    vi.mocked(previewDeleteImpact).mockResolvedValue([]);
+  });
 
   it("lists the datasets as selectable rows", () => {
     renderList(

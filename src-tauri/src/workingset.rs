@@ -487,17 +487,6 @@ impl WorkingSet {
             .collect()
     }
 
-    /// Transitively mark every result_N downstream of `removed_ref` as stale,
-    /// each carrying `anchor` (the invalidating source event identity -- Deleted
-    /// per #40 or Replaced per #41, for traceability ADR-0040). The walk is the
-    /// provenance-graph transitive closure over direct dependents: a source
-    /// delete/replace ripples through chained results (result_2 FROM result_1
-    /// FROM source). A result already stale keeps its FIRST anchor (the earliest
-    /// invalidating event), matching ADR-0041's "终局死轮" (a dead turn is never
-    /// revived, so the first death is the truth). Returns the newly-staled names
-    /// so the caller can log the cascade's reach. `removed_ref` itself is the
-    /// source being deleted/replaced; its dependents (not the source) are what
-    /// get marked.
     /// The transitive closure of live results a source removal would mark
     /// stale (issue #1063): the same traversal [`Self::cascade_stale`]
     /// performs, read-only -- nothing is marked, so the delete-confirm
@@ -553,6 +542,17 @@ impl WorkingSet {
         entries
     }
 
+    /// Transitively mark every result_N downstream of `removed_ref` as stale,
+    /// each carrying `anchor` (the invalidating source event identity -- Deleted
+    /// per #40 or Replaced per #41, for traceability ADR-0040). The walk is the
+    /// provenance-graph transitive closure over direct dependents: a source
+    /// delete/replace ripples through chained results (result_2 FROM result_1
+    /// FROM source). A result already stale keeps its FIRST anchor (the earliest
+    /// invalidating event), matching ADR-0041's "终局死轮" (a dead turn is never
+    /// revived, so the first death is the truth). Returns the newly-staled names
+    /// so the caller can log the cascade's reach. `removed_ref` itself is the
+    /// source being deleted/replaced; its dependents (not the source) are what
+    /// get marked.
     pub fn cascade_stale(&mut self, removed_ref: &str, anchor: StaleAnchor) -> Vec<String> {
         // One traversal, two consumers: the preview above computes the reach,
         // this marks it (issue #1063) -- the dialogs' impact list and the

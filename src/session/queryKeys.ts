@@ -25,7 +25,8 @@ export const sessionKeys = {
    *  labels. Nested under the workingSet prefix like `previewRows` so the
    *  working-set mutations' invalidation refreshes it (staleTime is
    *  Infinity, ADR-0051). Keyed by reference name; the dialog's conditional
-   *  mount gates the query, so no open dialog simply never fetches. */
+   *  mount gates the query, so with no dialog open it simply never
+   *  fetches. */
   deleteImpact: (sessionId: string, referenceName: string) =>
     ["session", sessionId, "workingSet", "deleteImpact", referenceName] as const,
   active: (sessionId: string) => ["session", sessionId, "active"] as const,

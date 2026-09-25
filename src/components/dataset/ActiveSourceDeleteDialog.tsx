@@ -72,9 +72,8 @@ export function ActiveSourceDeleteDialog({
             />
           </AlertDialogDescription>
         </AlertDialogHeader>
-        {/* The pre-delete impact preview (issue #1063): what this removal
-            would mark stale, ahead of the irreversible action. A failed or
-            empty preview never blocks the delete. */}
+        {/* The pre-delete impact preview (issue #1063); DeleteImpactList
+            owns the rendering contract. */}
         <DeleteImpactList sessionId={sessionId} referenceName={target.reference_name} />
         <ul className="dialog-list">
           {candidates.map((d) => (

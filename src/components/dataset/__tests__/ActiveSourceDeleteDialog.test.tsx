@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { fireEvent, screen, waitFor } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import type { ReactElement } from "react";
@@ -26,6 +26,16 @@ function renderDialog(ui: ReactElement) {
 }
 
 describe("ActiveSourceDeleteDialog (issue #39)", () => {
+  // Every test here opens the dialog, which mounts the impact preview;
+  // seed the default so un-seeded renders read an empty closure instead of
+  // the query library's undefined-data error line (the error branch is
+  // owned by DeleteImpactList.test). clearAllMocks wipes the call record
+  // the shared module-mock spy accumulates across tests.
+  beforeEach(() => {
+    vi.mocked(previewDeleteImpact).mockResolvedValue([]);
+  });
+  afterEach(() => vi.clearAllMocks());
+
   const target: DatasetDescriptor = {
     ...mockDataset,
     reference_name: "orders",

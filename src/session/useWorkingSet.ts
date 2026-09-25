@@ -26,10 +26,10 @@ import type {
 } from "../types/dataset";
 
 // The working-set seam (ADR-0123): the single owner of the working-set
-// domain -- its descriptor queries (workingSet / active / previewRows), its
-// four mutations (rename / replace / delete / privacy), the active-source
-// delete state machine, the detail-pick resolution, and the post-mutation
-// invalidation cascade. Consumers: the working-set container renders this
+// domain -- its descriptor queries (workingSet / active / previewRows /
+// deleteImpact), its four mutations (rename / replace / delete / privacy),
+// the active-source delete state machine, the detail-pick resolution, and
+// the post-mutation invalidation cascade. Consumers: the working-set container renders this
 // hook directly (the pane passes it session addressing, the cross-domain
 // busy gate, the empty card's ingest entry, and the mutation reporting
 // surfaces -- nothing else); useSessionState renders the read slice below
@@ -48,7 +48,8 @@ import type {
 // under the workingSet prefix, so the workingSet invalidation refreshes the
 // sample page alongside the descriptor -- with the app-wide staleTime
 // Infinity (ADR-0051) a replaced source's cached rows would otherwise
-// linger forever.
+// linger forever. The deleteImpact key nests the same way, so a reopened
+// confirm dialog can never show a stale cascade list.
 //
 // Detail-pick resolution + preview gating: the pick (selectedName) arrives
 // as a parameter -- the useState lives in the consuming component (ADR-0123
@@ -365,12 +366,16 @@ export function useWorkingSet(
   };
 }
 
+// Same stable-reference rationale as EMPTY_DATASETS: the fallback must not
+// mint a fresh array per render.
+const EMPTY_IMPACT: DeleteImpactEntry[] = [];
+
 /** The delete-confirm dialogs' cascade-impact preview (issue #1063): the live
  *  results a source removal would mark stale, read through the read-only IPC
- *  command (`preview_delete_impact`). Both dialogs mount conditionally (Radix
- *  confirm dialogs), so the mount itself gates the query -- a null target (no
- *  dialog open) simply idles; the `?? ""` placeholders never execute, since a
- *  disabled query's queryFn never runs.
+ *  command (`preview_delete_impact`). The dialogs mount conditionally (Radix
+ *  confirm dialogs) and always pass a non-null target, so the mount itself
+ *  gates the query: with no dialog open the hook never mounts and nothing
+ *  fetches.
  *
  *  Lives in the seam module per ADR-0123 Decision 1: a working-set-domain
  *  query (keyed under the workingSet prefix so the seam's invalidation
@@ -379,24 +384,24 @@ export function useWorkingSet(
  *
  *  Failure is not fatal by contract: the dialogs degrade to today's copy and
  *  the delete stays executable (the preview is a read-only convenience, never
- *  a single point of dependency for the removal). */
+ *  a single point of dependency for the removal). The error type is unknown
+ *  by structure -- Tauri IPC rejects with the raw serialized error, which
+ *  fmtError narrows -- unlike the Error-typed sampleError above. */
 export function useDeleteImpact(
-  sessionId: string | null,
-  referenceName: string | null,
+  sessionId: string,
+  referenceName: string,
 ): {
   entries: DeleteImpactEntry[];
-  isLoading: boolean;
+  isFetching: boolean;
   error: unknown;
 } {
-  const enabled = sessionId !== null && referenceName !== null;
-  const query = useQuery({
-    queryKey: sessionKeys.deleteImpact(sessionId ?? "", referenceName ?? ""),
-    queryFn: () => previewDeleteImpact(sessionId ?? "", referenceName ?? ""),
-    enabled,
+  const query = useQuery<DeleteImpactEntry[], unknown>({
+    queryKey: sessionKeys.deleteImpact(sessionId, referenceName),
+    queryFn: () => previewDeleteImpact(sessionId, referenceName),
   });
   return {
-    entries: query.data ?? [],
-    isLoading: query.isLoading,
+    entries: query.data ?? EMPTY_IMPACT,
+    isFetching: query.isFetching,
     error: query.error,
   };
 }

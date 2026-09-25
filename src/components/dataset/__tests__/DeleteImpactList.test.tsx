@@ -97,12 +97,4 @@ describe("DeleteImpactList (issue #1063)", () => {
     await waitFor(() => expect(screen.getByText("销量汇总")).toBeInTheDocument());
     expect(screen.queryByText("正在检查受影响的结果…")).not.toBeInTheDocument();
   });
-
-  it("never fetches while its gates are closed (no dialog open)", () => {
-    // Disabled query: no IPC, and the entries fallback renders the empty
-    // line -- a state unreachable in production, where the list only mounts
-    // with a dialog target in hand.
-    renderImpact(<DeleteImpactList sessionId="s1" referenceName={null} />);
-    expect(previewDeleteImpact).not.toHaveBeenCalled();
-  });
 });
