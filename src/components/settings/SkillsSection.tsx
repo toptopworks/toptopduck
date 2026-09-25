@@ -6,10 +6,7 @@ import { Download, Plus, RefreshCw } from "lucide-react";
 
 import type { SkillEntry } from "../../types/skills";
 import type { AppConfig } from "../../types/app-config";
-import {
-  getSkillsDir,
-  rescanBuiltinCliTools,
-} from "../../api";
+import { rescanBuiltinCliTools } from "../../api";
 import { IgnoredDirectoriesSection } from "./IgnoredDirectoriesSection";
 import { ImportSkillsDialog } from "./ImportSkillsDialog";
 import { SkillDetailDialog } from "./SkillDetailDialog";
@@ -17,6 +14,7 @@ import { SkillMaterializeFailureRow, SkillRow } from "./SkillRow";
 import { fmtError } from "../../lib/error-presentation";
 import { log } from "../../lib/log";
 import { invalidateSkills, useSkillsRegistry } from "../../skills/registry";
+import { useSkillsRoot } from "./useSkillsRoot";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -62,13 +60,14 @@ import {
 // Import header button opens the two-stage drill-down import dialog (issue
 // #367), which links / copies skills from external agent libraries through
 // the registry's import mutation.
-
-/** The registry root's resolution state: `failed` carries the formatted
- *  error the detail dialog's path face reports (issue #1039). */
-type SkillsRoot =
-  | { phase: "loading" }
-  | { phase: "resolved"; root: string }
-  | { phase: "failed"; error: string };
+//
+// The pane's embedded species live in sibling files (issue #1083): the row
+// family and its shared acquired label (SkillRow.tsx), the read-only
+// detail dialog (SkillDetailDialog.tsx), and the skipped-fold diagnostic
+// (IgnoredDirectoriesSection.tsx). The registry root's resolution, its
+// fetch-generation guard, and the SKILL.md path join ride useSkillsRoot
+// (useSkillsRoot.ts) -- this container keeps the retry orchestration (the
+// open-click entry) and the failed-phase wording on the detail path face.
 
 export function SkillsSection({
   onAppConfigSync,
@@ -107,6 +106,12 @@ export function SkillsSection({
   function applyUserWrite(next: AppConfig) {
     writeGenRef.current += 1;
     onAppConfigSync(next);
+  }
+
+  /** Report a mutation failure on the pane's error banner: the one shared
+   *  face of the enablement / delete rejects (formatted once, here). */
+  function reportMutationError(e: unknown) {
+    setError(fmtError(e, intl));
   }
 
   // The pane's whole registry surface rides the one seam (issue #1077): the
@@ -162,52 +167,12 @@ export function SkillsSection({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // The registry root for the local rows' open anchors (issue #1033): the
-  // backend is the path authority (the get_agents_dir posture). Fetched on
-  // mount and re-fetched by a local row's detail-open while unresolved
-  // (issue #1039) -- the open click is the retry entry -- so a failed fetch
-  // reports on that row's detail dialog (the path face) instead of leaving
-  // the open link permanently inert. A re-fetch keeps the previous phase
-  // until its response lands, and the fetch callbacks alone write the
-  // state: a response landing after unmount is a silent React no-op, so
-  // unlike the rescan above there is no cancelled guard to thread through
-  // the shared fetcher (its callbacks carry no cross-pane cache write or
-  // config sync).
-  const [skillsRoot, setSkillsRoot] = useState<SkillsRoot>({
-    phase: "loading",
-  });
-
-  // Each fetch bumps a generation so a late response from an older fetch
-  // cannot overwrite a newer one (the PR #1041 review): with the mount
-  // fetch and an open-click re-fetch both in flight, a stale rejection
-  // landing after a newer resolve would flip the phase back to failed
-  // mid-dialog. The writeGenRef posture above, at fetch scope -- the warn
-  // still fires unconditionally so a stale failure stays diagnosable.
-  const fetchGenRef = useRef(0);
-
-  function fetchSkillsRoot() {
-    fetchGenRef.current += 1;
-    const gen = fetchGenRef.current;
-    getSkillsDir()
-      .then((dir) => {
-        if (fetchGenRef.current === gen) {
-          setSkillsRoot({ phase: "resolved", root: dir });
-        }
-      })
-      .catch((e) => {
-        log.warn("SkillsSection", "get_skills_dir failed", e);
-        if (fetchGenRef.current === gen) {
-          setSkillsRoot({ phase: "failed", error: fmtError(e, intl) });
-        }
-      });
-  }
-
-  useEffect(() => {
-    fetchSkillsRoot();
-    // fetchSkillsRoot closes over the pane-lifetime intl (stable for the
-    // provider's life); the mount-once contract matches the rescan effect.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  // The registry root rides the skills-root seam (issue #1083): the mount
+  // fetch, the fetch-generation guard, and the SKILL.md path join live in
+  // the hook. This container keeps the retry orchestration (the open-click
+  // entry in openDetail below) and the failed phase's wording (the detail
+  // dialog's path face).
+  const { root, detailFilePath, retry } = useSkillsRoot();
 
   const [search, setSearch] = useState("");
   const [filter, setFilter] = useState<EnabledFilter>("all");
@@ -291,20 +256,6 @@ export function SkillsSection({
     [materializeFailures, allSkills, filter, search],
   );
 
-  /** The row's open anchor (issue #1033): a `local` row's own
-   *  `<root>/<name>` directory; a `linked` row's link target and a `builtin`
-   *  row's reserved-subtree copy (`link_target` carries both). Null when a
-   *  local row is asked before the registry root has resolved, or when a
-   *  linked row's link target is unreadable -- the open stays inert rather
-   *  than synthesizing a garbage path. The root's own separator threads
-   *  through the join, so a Windows root reads native backslashes. */
-  function revealTarget(skill: SkillEntry): string | null {
-    if (skill.acquired !== "local") return skill.link_target;
-    if (skillsRoot.phase !== "resolved") return null;
-    const sep = skillsRoot.root.includes("\\") ? "\\" : "/";
-    return `${skillsRoot.root}${sep}${skill.name}`;
-  }
-
   /** Open the row's read-only detail dialog (the row-click affordance):
    *  name + description + the SKILL.md path bar. Opening clears a stale
    *  pane error so the dialog never replays an unrelated reject under the
@@ -315,8 +266,8 @@ export function SkillsSection({
     // A local row's path bar needs the registry root: while unresolved --
     // still loading or failed -- ask again now (issue #1039), making the
     // open click the retry entry after a failed fetch.
-    if (skill.acquired === "local" && skillsRoot.phase !== "resolved") {
-      fetchSkillsRoot();
+    if (skill.acquired === "local" && root.phase !== "resolved") {
+      retry();
     }
     setDetailName(skill.name);
   }
@@ -359,7 +310,7 @@ export function SkillsSection({
   // The path bar anchors at the SKILL.md file: the bar opens it in the
   // OS default editor, one click from the bytes. Null (a local row asked
   // before the registry root resolved) keeps the button inert.
-  const detailFile = skillFilePath(detail === null ? null : revealTarget(detail));
+  const detailFile = detail === null ? null : detailFilePath(detail);
   // The local-row face when the root fetch failed (issue #1039): the failed
   // resolution reports under the dialog's path link instead of leaving it
   // inert with no signal. Null on every other row and phase.
@@ -367,14 +318,14 @@ export function SkillsSection({
     detail !== null &&
     detail.acquired === "local" &&
     detailFile === null &&
-    skillsRoot.phase === "failed"
+    root.phase === "failed"
       ? intl.formatMessage(
           {
             id: "settings.skills.pathUnavailable",
             defaultMessage:
               "Couldn't determine the skills folder path: {detail}",
           },
-          { detail: skillsRoot.error },
+          { detail: root.error },
         )
       : null;
 
@@ -517,7 +468,7 @@ export function SkillsSection({
                     // A success also drops a stale reject -- the banner must
                     // not outlive the failure it reported.
                     onSuccess: () => setError(null),
-                    onError: (e) => setError(fmtError(e, intl)),
+                    onError: reportMutationError,
                   },
                 )}
               onOpen={() => openDetail(skill)}
@@ -591,7 +542,7 @@ export function SkillsSection({
                   deleteSkillMutation.mutate(confirmDelete, {
                     onSuccess: () => setConfirmDelete(null),
                     onError: (e) => {
-                      setError(fmtError(e, intl));
+                      reportMutationError(e);
                       setConfirmDelete(null);
                     },
                   })}
@@ -613,12 +564,4 @@ export function SkillsSection({
       )}
     </div>
   );
-}
-
-/** The SKILL.md path from an open anchor directory (null passes through
- *  so the caller renders an inert link): joined with the anchor's own
- *  separator so a Windows root reads native backslashes. */
-function skillFilePath(target: string | null): string | null {
-  if (target === null) return null;
-  return target.includes("\\") ? `${target}\\SKILL.md` : `${target}/SKILL.md`;
 }
