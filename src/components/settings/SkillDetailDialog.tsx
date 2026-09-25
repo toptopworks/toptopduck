@@ -12,13 +12,12 @@ import {
 import { DialogHeaderButton } from "./settings-chrome";
 import { AcquiredLabel } from "./SkillRow";
 
-/** The row's read-only detail dialog (issue #1033's row-click face, carved
- *  out of the skills pane container in issue #1083): the name header, the
- *  description / scope / status metadata, and the SKILL.md path bar. There
- *  is no form here -- creation rides the conversation channel and edits
- *  happen in the external editor the path link opens, so this dialog only
- *  SHOWS the skill and points at where it lives. */
-export type SkillDetailDialogProps = {
+/** The row's read-only detail dialog (issue #1033's row-click face): the
+ *  name header, the description / scope / status metadata, and the SKILL.md
+ *  path bar. There is no form here -- creation rides the conversation
+ *  channel and edits happen in the external editor the path link opens, so
+ *  this dialog only SHOWS the skill and points at where it lives. */
+type SkillDetailDialogProps = {
   skill: SkillEntry;
   /** The absolute SKILL.md path the path bar links; null before a local
    *  row's registry root resolved, or when a linked row's link target is

@@ -59,15 +59,9 @@ import {
 // `linked` at its link target, `builtin` at the reserved-subtree copy. The
 // Import header button opens the two-stage drill-down import dialog (issue
 // #367), which links / copies skills from external agent libraries through
-// the registry's import mutation.
-//
-// The pane's embedded species live in sibling files (issue #1083): the row
-// family and its shared acquired label (SkillRow.tsx), the read-only
-// detail dialog (SkillDetailDialog.tsx), and the skipped-fold diagnostic
-// (IgnoredDirectoriesSection.tsx). The registry root's resolution, its
-// fetch-generation guard, and the SKILL.md path join ride useSkillsRoot
-// (useSkillsRoot.ts) -- this container keeps the retry orchestration (the
-// open-click entry) and the failed-phase wording on the detail path face.
+// the registry's import mutation. The row family, the detail dialog, and
+// the skipped fold live in sibling files, and the registry root rides
+// useSkillsRoot (issue #1083).
 
 export function SkillsSection({
   onAppConfigSync,

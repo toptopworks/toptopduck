@@ -26,7 +26,7 @@ import type { SkillEntry } from "../../types/skills";
 
 /** The registry root's resolution state: `failed` carries the formatted
  *  error the detail dialog's path face reports (issue #1039). */
-export type SkillsRoot =
+type SkillsRoot =
   | { phase: "loading" }
   | { phase: "resolved"; root: string }
   | { phase: "failed"; error: string };

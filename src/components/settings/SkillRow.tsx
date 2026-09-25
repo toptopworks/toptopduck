@@ -5,10 +5,10 @@ import type { SkillAcquired, SkillEntry } from "../../types/skills";
 import { Switch } from "../ui/switch";
 import { NameBadge, RowActionButton } from "./settings-chrome";
 
-// The row-render family carved out of the skills pane container (issue
-// #1083): the normal row, the acquired-axis label it shares with the detail
-// dialog, and the materialization-failure stand-in row. Pure presentation --
-// every write rides the container's callbacks.
+// The skills pane's row-render family (issue #1083): the normal row, the
+// acquired-axis label it shares with the detail dialog, and the
+// materialization-failure stand-in row. Pure presentation -- every write
+// rides the container's callbacks.
 
 // The row is list chrome (hover highlight + layout); the text block is the
 // detail affordance (click / Enter opens the read-only dialog) and every

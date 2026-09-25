@@ -3,13 +3,13 @@ import { FormattedMessage } from "react-intl";
 import type { SkippedSkill } from "../../types/skills";
 import { NameBadge } from "./settings-chrome";
 
-export type IgnoredDirectoriesSectionProps = {
+type IgnoredDirectoriesSectionProps = {
   skipped: SkippedSkill[];
 };
 
 // Collapsible diagnostic fold for spec-invalid skill directories the scan
-// skipped (issue #373), carved out of the skills pane container in issue
-// #1083. Rendered ONLY when the list is non-empty (a clean registry never
+// skipped (issue #373). Rendered ONLY when the list is non-empty (a clean
+// registry never
 // shows it). Each row shows the directory name + the English technical
 // reason verbatim -- the locale catalog owns the title / intro wording,
 // NOT the per-row reason (ADR-0052 layer 4). The section does not
