@@ -918,6 +918,13 @@ describe("WorkingSetList", () => {
     );
     const chip = screen.getByText("已失效").closest(".stale-badge")!;
     expect(chip).toHaveAttribute("tabindex", "0");
+    // The ring is the visible half of keyboard reach: the three outline
+    // tokens mirror the row's action buttons, so tabbing reads the same.
+    // Pinned at class level -- jsdom renders no actual outline.
+    const chipClasses = chip.className.split(/\s+/);
+    expect(chipClasses).toContain("focus-visible:outline-2");
+    expect(chipClasses).toContain("focus-visible:outline-offset-2");
+    expect(chipClasses).toContain("focus-visible:outline-ring");
     expect(chip).not.toHaveAttribute("title");
     expect(chip).toHaveAttribute("aria-label", "因「员工表」已删除而失效");
     fireEvent.focus(chip);
