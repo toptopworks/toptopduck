@@ -6,7 +6,7 @@
 
 2. **selected 参数化，useState 留在消费组件。** 接缝不拥有选中状态：消费组件持有 pick 的 useState 并以参数传入，接缝只拥有解析与回退。跨目录 import（组件目录引 session 接缝）沿用 query 键工厂的既有先例。
 
-3. **失效级联私有、不按 kind 分化，对外仅单一入口。** 三键扇出（workingSet + active + thread）是 module 内一个无参分化的函数——四类变更没有分化证据，kind 只在错误包装层作动词前缀。ingest（useIngestFlow）保持独立编排，作为该级联的失效消费者：refreshServerState 的扇出核收编进 module，错误标注留在消费侧各自的 error 面。
+3. **失效级联私有、不按 kind 分化，对外仅单一入口。** 三键扇出（workingSet + active + thread）是 module 内一个无参分化的函数——四类变更没有分化证据，kind 只在错误包装层作动词前缀。ingest（useIngestFlow）保持独立编排，作为该级联的失效消费者：refreshServerState 的扇出核收编进 module，错误标注留在消费侧各自的 error 面。校准：轮末刷新是对外的第二入口——轮次结束已乐观写入 thread 缓存（ADR-0051），再失效 thread 会以陈旧/空数据冲掉乐观追加，故该入口只刷工作集键；两入口的键清单在 module 内单点派生（全级联 = 工作集键 + thread），级联集增键仍单点生效。轮末入口是读写语境之别，不是按变更 kind 的分化。
 
 4. **删源确认对话框随状态机落工作集侧。** ActiveSourceDeleteDialog 的挂载与 pendingActiveDelete 状态机同侧（工作集容器内），SessionPane 的 hoisting 退役；pane 对工作集面退为渲染壳，仅余会话寻址、跨域 busy 门、空态 ingest 入口与变更上报面（mutation surfaces，注入 sink——useIngestFlow deps 的同形先例）四项 props。四类变更的错误横幅、busy 并集与持久化轮询经上报面写回 pane 级状态：横幅条带在两个 tab 面板之外渲染，变更失败无论当前所在 tab 恒可见。
 

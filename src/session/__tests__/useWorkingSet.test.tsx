@@ -41,6 +41,7 @@ import {
 } from "../../api";
 import {
   invalidateSessionData,
+  invalidateTurnEndData,
   SAMPLE_ROW_LIMIT,
   useDeleteImpact,
   useWorkingSet,
@@ -422,6 +423,24 @@ describe("invalidateSessionData", () => {
       JSON.stringify(sessionKeys.workingSet(SID)),
       JSON.stringify(sessionKeys.active(SID)),
       JSON.stringify(sessionKeys.thread(SID)),
+    ]);
+  });
+});
+
+describe("invalidateTurnEndData", () => {
+  it("runs the two-key turn-end fan-out (thread omitted, issue #1080)", async () => {
+    const queryClient = new QueryClient();
+    const spy = vi.spyOn(queryClient, "invalidateQueries");
+
+    await invalidateTurnEndData(queryClient, SID);
+
+    // workingSet + active only: a settled turn already wrote its thread
+    // cache optimistically (setQueryData in useTurnFlow), so refreshing
+    // thread here would wipe the optimistic append (ADR-0051). The
+    // omission narrative lives with the seam, never at the caller.
+    expect(spy.mock.calls.map(([filters]) => JSON.stringify(filters?.queryKey))).toEqual([
+      JSON.stringify(sessionKeys.workingSet(SID)),
+      JSON.stringify(sessionKeys.active(SID)),
     ]);
   });
 });
