@@ -104,6 +104,10 @@ describe("SkillsSection (issue #362)", () => {
     // sync is skipped; the cache-scoped listing invalidate still runs.
     const staleConfig = baseAppConfig();
     const next = baseAppConfig({ disabled_skills: ["pdf-tools"] });
+    const disabledSkill = { ...localSkill, enabled: false };
+    const newSkill = skillEntry("vega-chart", {
+      description: "Chart skills.",
+    });
     let resolveMount: (result: BuiltinScanResult) => void = () => {};
     vi.mocked(rescanBuiltinCliTools).mockImplementationOnce(
       () =>
@@ -112,11 +116,28 @@ describe("SkillsSection (issue #362)", () => {
         }),
     );
     vi.mocked(setSkillEnabled).mockResolvedValue(next);
-    vi.mocked(listSkills).mockResolvedValue({
-      skills: [localSkill],
-      ignored: [],
-      root_error: null,
-    });
+    // Staged listing: the mount fetch and the toggle's refetch carry the
+    // pre-rescan roster (the toggle's refetch showing the flipped axis);
+    // every fetch after the rescan's invalidate carries the materialized
+    // row -- the behavioral replacement for the retired 3-call count pin
+    // (the seam-layer invalidation semantics are pinned in registry.test,
+    // issue #1077).
+    vi.mocked(listSkills)
+      .mockResolvedValueOnce({
+        skills: [localSkill],
+        ignored: [],
+        root_error: null,
+      })
+      .mockResolvedValueOnce({
+        skills: [disabledSkill],
+        ignored: [],
+        root_error: null,
+      })
+      .mockResolvedValue({
+        skills: [disabledSkill, newSkill],
+        ignored: [],
+        root_error: null,
+      });
     const onAppConfigSync = vi.fn();
     renderWithProviders(
       <SkillsSection
@@ -132,13 +153,22 @@ describe("SkillsSection (issue #362)", () => {
         expect.objectContaining({ disabled_skills: ["pdf-tools"] }),
       ),
     );
+    // The toggle's refetch has landed (the row grays) before the rescan
+    // resolves, so the rescan's invalidate cannot dedupe into it.
+    await waitFor(() =>
+      expect(screen.getByTestId("skill-row")).toHaveAttribute(
+        "data-disabled",
+        "true",
+      ),
+    );
     resolveMount(scanResult({ config: staleConfig }));
-    // Only the user write's config ever syncs; the listing still
-    // refetches (mount fetch + the toggle's invalidate + the rescan's
-    // cache-scoped invalidate landing last).
-    await waitFor(() => expect(listSkills).toHaveBeenCalledTimes(3));
+    // Only the user write's config ever syncs... and the cache-scoped
+    // invalidate still fires after the guarded sync was skipped: the
+    // post-rescan refetch lands the materialized row (a mutant moving the
+    // invalidate inside the write-generation guard fails this finding).
     expect(onAppConfigSync).toHaveBeenCalledTimes(1);
     expect(onAppConfigSync).not.toHaveBeenCalledWith(staleConfig);
+    expect(await screen.findByText("vega-chart")).toBeInTheDocument();
   });
 
   it("flips a row's enablement through setSkillEnabled and syncs the config", async () => {
@@ -183,15 +213,11 @@ describe("SkillsSection (issue #362)", () => {
     // The switch sits outside the row's open-edit target (the text block):
     // toggling it must not open the drawer.
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
-    // The refetch half: the listing is queried again and the row grays.
-    // Two calls despite the mount rescan's invalidate (issue #1016): under
-    // jsdom both mocks resolve on the same microtask flush, so the
-    // invalidate dedupes into the still-in-flight mount fetch (TanStack's
-    // in-flight dedupe) and only the toggle's refetch lands as a second
-    // call -- the post-rescan refetch is pinned separately in
+    // The refetch half: the mutation's invalidation lands and the row grays
+    // (the invalidation semantics are pinned at the registry seam's layer,
+    // issue #1077; the post-rescan refetch is pinned in
     // skills-builtin.test.tsx, where the rescan resolves late enough to
-    // observe it.
-    await waitFor(() => expect(listSkills).toHaveBeenCalledTimes(2));
+    // observe it).
     await waitFor(() =>
       expect(screen.getByTestId("skill-row")).toHaveAttribute(
         "data-disabled",

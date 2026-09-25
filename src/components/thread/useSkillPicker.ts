@@ -1,8 +1,6 @@
 import { useMemo, useState, type KeyboardEvent } from "react";
-import { useQuery } from "@tanstack/react-query";
 
-import { listSkills } from "../../api";
-import { skillKeys } from "../../session/queryKeys";
+import { useSkillsRegistry } from "../../skills/registry";
 import type { SkillEntry } from "../../types/skills";
 import {
   clampHighlight,
@@ -19,8 +17,9 @@ import {
 // the SkillPickerPanel from the returned snapshot. Owns the trigger state
 // (which char opened the panel, where it sits in the draft), the query text,
 // the highlight index, and the one read the panel needs -- the registry
-// listing (the shared skillKeys.all() cache), filtered to the ENABLEMENT
-// axis (ADR-0119 Decision 5). The pure algebra lives in skillPickerLogic.ts.
+// seam's enabledRoster projection (the shared listing cache, filtered to
+// the ENABLEMENT axis, ADR-0119 Decision 5). The pure algebra lives in
+// skillPickerLogic.ts.
 
 export interface UseSkillPickerOpts {
   /** Receives each selected skill name. A selection stages this turn's user
@@ -63,27 +62,19 @@ export function useSkillPicker({ onPick, setValue, enabled = true }: UseSkillPic
   const [query, setQuery] = useState("");
   const [highlight, setHighlight] = useState(0);
 
-  // Registry rows for the panel. The key is the shared skillKeys.all() cache
-  // the settings SkillsSection and the thread rail already ride, so opening
-  // the picker adds no extra IPC round-trip once any of them has loaded. The
-  // error channel is exposed alongside the data: a rejected listing must
-  // surface as an error row, not collapse into the "No skills" empty face
-  // (the settings SkillsSection surfaces its query errors -- the picker must
-  // not be the one surface that hides it).
-  const { data: listing, error: listingError } = useQuery({
-    queryKey: skillKeys.all(),
-    queryFn: listSkills,
+  // Registry rows for the panel, through the one registry seam: the listing
+  // cache is shared with the settings SkillsSection and the thread rail, so
+  // opening the picker adds no extra IPC round-trip once any of them has
+  // loaded. The error channel is exposed alongside the data: a rejected
+  // listing must surface as an error row, not collapse into the "No skills"
+  // empty face (the settings SkillsSection surfaces its query errors -- the
+  // picker must not be the one surface that hides it). The roster arrives
+  // already filtered to the enablement axis (ADR-0119 Decision 5): a
+  // disabled skill cannot be invoked, so listing it as a pick was a dead
+  // end -- the row promised a staging the submit would silently drop.
+  const { enabledRoster: registry, error: listingError } = useSkillsRegistry({
     enabled,
   });
-  // Filtered to the enablement axis (ADR-0119 Decision 5, reversing the
-  // issue #961 sub-decision): a disabled skill cannot be invoked, so listing
-  // it as a pick was a dead end -- the row promised a staging the submit
-  // would silently drop. Permanent removal goes through the enablement axis
-  // in settings; the picker surfaces exactly what the submit will invoke.
-  const registry = useMemo(
-    () => (listing?.skills ?? []).filter((skill) => skill.enabled),
-    [listing],
-  );
 
   const rows = useMemo(
     () => (trigger !== null ? filterSkills(registry, query) : []),

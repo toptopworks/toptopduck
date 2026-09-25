@@ -86,8 +86,8 @@ export const adapterKeys = {
   posture: (adapterId: string) => ["adapters", "posture", adapterId] as const,
 } as const;
 
-/** Session-AGNOSTIC skills registry (issue #362, ADR-0086) -- the settings
- *  SkillsSection list read + the create / update / delete invalidation target.
+/** Session-AGNOSTIC skills registry (issue #362, ADR-0086) -- the keys the
+ *  registry seam (src/skills/registry.ts, issue #1077) reads and invalidates.
  *  NOT under the session prefix: the registry is process-global (one root
  *  shared by every session). A close's removeQueries does not touch it. */
 export const skillKeys = {
@@ -96,10 +96,9 @@ export const skillKeys = {
    *  source-list read. Keyed by the custom-paths tuple so adding a custom path
    *  re-fetches; the standard sources (Claude Code / Codex CLI) are resolved
    *  server-side off the home dir, so the key only needs the user-controlled
-   *  tail. Lives under the "skills" prefix so a successful import (which
-   *  invalidates `skillKeys.all()`) also evicts the stale discovery read -- a
-   *  previously `already_exists` skill becomes importable-shaped once its name
-   *  leaves the registry, and the dialog re-reads on next open. */
+   *  tail. Lives under the "skills" prefix so the registry seam's one
+   *  invalidation cascades here too -- the contract's authoritative narrative
+   *  lives in the registry module header. */
   sources: (customPaths: readonly string[]) =>
     ["skills", "sources", customPaths] as const,
 } as const;
