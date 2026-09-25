@@ -1,7 +1,8 @@
-import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
+import { useEffect, useId, useMemo, useState } from "react";
 import { FormattedMessage, useIntl } from "react-intl";
-import { readRows } from "../../api";
 import { toAppError } from "../../lib/error-presentation";
+import { useRowPage } from "../../session/useRowPage";
+import type { RowPage } from "../../types/dataset";
 import { decodeViz, type VizFailureReason } from "../viz/viz";
 import { VizChartSlot } from "../viz/LazyVegaChart";
 import { VizEnlargeDialog } from "../viz/VizEnlargeDialog";
@@ -38,6 +39,13 @@ const PAGE_BTN =
 // font so a numeric column reads as one aligned column. Shared by <th> and
 // <td> (ADR-0067 (2): Tailwind scale utility, no new token).
 const NUMERIC_CELL = "num text-right tabular-nums";
+
+// Module-level empties so the pre-settle render path (no page yet) keeps a
+// stable reference -- the numericFlags useMemo depends on `columns`, and an
+// inline `?? []` would invalidate it every render (exhaustive-deps enforces
+// this exact shape).
+const EMPTY_COLUMNS: ColumnSchema[] = [];
+const EMPTY_ROWS: string[][] = [];
 
 // Issue #768 banner-stack rhythm: warning-class notices (the stale
 // disclosure, the viz degradation, the read-error banner) take the sm step
@@ -138,74 +146,61 @@ export function ResultView({
   rerunBusy = false,
   pageSize = DEFAULT_PAGE_SIZE,
 }: ResultViewProps) {
-  const [columns, setColumns] = useState<ColumnSchema[]>([]);
-  const [rows, setRows] = useState<string[][]>([]);
-  const [total, setTotal] = useState(0);
+  // The paging window is this view's UI state (the seam takes offset as a
+  // parameter, issue #1079): a result switch resets it to page 0 -- adjusted
+  // during render so the seam never fetches the prior result's offset
+  // against the new reference (React discards the mid-render output before
+  // committing, so no observer ever mounts on the stale window). The
+  // take-it-away actions' failures (issue #769) ride their own slot: every
+  // window move clears it, so a stale action failure never follows the user
+  // into the next window.
+  const [windowRef, setWindowRef] = useState(referenceName);
   const [offset, setOffset] = useState(0);
-  // Issue #773: the initial value is "loading" -- the mount effect below
-  // unconditionally kicks off loadPage(0), so before the first frame settles
-  // the component IS loading. A false initial value rendered the empty-table
-  // branch ("(no data rows)") for one frame before the fetch flipped it.
-  const [loading, setLoading] = useState(true);
-  // Issue #773: has the first loadPage finished (success OR error)? Gates the
-  // pagination count's content so the pre-settle initial state (total 0,
-  // rows []) never renders "Rows 0–0 (of 0)" -- a fake value flashing in the
-  // count bar.
-  // Never resets: later fetches (pagination, result switches) keep the last
-  // real values on screen while in flight instead of clearing.
-  const [settled, setSettled] = useState(false);
-  // Issue #194: readRows reject typed as AppError, kind "read" (a readRows
-  // reject is the read phase of a turn; toAppError applies no verb prefix on the
-  // read kind, and ErrorBanner renders only message + detail, not kind).
-  const [error, setError] = useState<AppError | null>(null);
+  const [actionError, setActionError] = useState<AppError | null>(null);
+  if (windowRef !== referenceName) {
+    setWindowRef(referenceName);
+    setOffset(0);
+    setActionError(null);
+  }
+
+  // Issue #1079: the paged read rides the useRowPage snapshot seam -- one
+  // cached query per (reference, offset) window.
+  const { page, inFlight, error: readError, refetch } = useRowPage(sessionId, referenceName, offset, pageSize);
+
+  // An errored window has no placeholder (keepPreviousData holds only while
+  // the new key is pending), so the last landed page is tracked separately
+  // and shown through the error: without it a rejected turn renders a false
+  // empty table with both pager buttons dead (the retired machine kept the
+  // last page on screen through its catch).
+  const [lastGoodPage, setLastGoodPage] = useState<RowPage | null>(null);
+  if (page !== null && page !== lastGoodPage) {
+    setLastGoodPage(page);
+  }
+  const shownPage = page ?? lastGoodPage;
+
+  const columns = shownPage?.columns ?? EMPTY_COLUMNS;
+  const rows = shownPage?.rows ?? EMPTY_ROWS;
+  const total = shownPage?.total ?? 0;
+  // The DISPLAYED window's offset (the snapshot's own, so the count and the
+  // prev/next bounds stay pinned to the rows on screen). The component's
+  // `offset` is the FETCH target and moves the instant a page turn starts --
+  // deriving the count from it would mix the new offset with the previous
+  // page's placeholder rows and flash a window that was never fetched.
+  const shownOffset = shownPage?.offset ?? 0;
 
   // Stable id linking the table to its heading so the heading text is the
   // table's accessible name.
   const headingId = useId();
-  // Monotonic request id: each loadPage bumps it and ignores any response whose
-  // id is no longer current, so a late-arriving page (or its error) can never
-  // overwrite the page the user navigated to next.
-  const seqRef = useRef(0);
   const intl = useIntl();
-  const loadPage = useCallback(
-    async (off: number) => {
-      const seq = (seqRef.current += 1);
-      setLoading(true);
-      setError(null);
-      try {
-        const page = await readRows(sessionId, referenceName, off, pageSize);
-        if (seq !== seqRef.current) return; // superseded -- discard the stale page
-        setColumns(page.columns);
-        setRows(page.rows);
-        setTotal(page.total);
-        setOffset(off);
-      } catch (e) {
-        if (seq !== seqRef.current) return;
-        setError(toAppError(e, intl, "read"));
-      } finally {
-        if (seq === seqRef.current) {
-          setLoading(false);
-          // Issue #773: settling is success OR failure -- an errored first
-          // load keeps today's behavior (the count renders alongside the
-          // error banner), so only the pre-settle window is suppressed. A
-          // superseded request (seq mismatch) does not settle; its successor
-          // does when it lands.
-          setSettled(true);
-        }
-      }
-    },
-    [intl, sessionId, referenceName, pageSize],
-  );
 
-  useEffect(() => {
-    // External system -> state: a legitimate one-shot fetch on reference
-    // change. Issue #1060 keep-alive: tab re-entry no longer remounts this
-    // view, so this effect is the ONLY refresh trigger -- a future
-    // same-reference mutation surface must invalidate explicitly (a keyed
-    // query or a refetch call), not rely on the retired roundtrip remount.
-    // eslint-disable-next-line react-hooks/set-state-in-effect
-    void loadPage(0);
-  }, [loadPage]);
+  // Issue #194: a readRows reject typed as AppError, kind "read" (a readRows
+  // reject is the read phase of a turn; toAppError applies no verb prefix on
+  // the read kind, and ErrorBanner renders only message + detail, not kind).
+  // The seam passes the reject through raw; the formatting happens here.
+  // The actions' error wins when both exist: a snapshot read's reject is
+  // sticky under its key -- without the priority the newest failure would
+  // be silently swallowed.
+  const error = actionError ?? (readError !== null ? toAppError(readError, intl, "read") : null);
 
   // --- Viz (ADR-0016/0033) ------------------------------------------------
   // decodeViz is a pure pre-check (parse + whitelist mark). A spec that passes
@@ -233,9 +228,18 @@ export function ResultView({
     [columns],
   );
 
-  const hasNext = offset + rows.length < total;
-  const hasPrev = offset > 0;
+  const hasNext = shownOffset + rows.length < total;
+  const hasPrev = shownOffset > 0;
   const shown = rows.length;
+
+  // Issue #773: has the first load settled (success OR error)? Gates the
+  // pagination count's content so the pre-settle state (no page, no error)
+  // never renders "Rows 0–0 (of 0)" -- a fake value flashing in the count
+  // bar. Re-gates only where no honest value exists: a page turn or result
+  // switch keeps the last real page on screen (keepPreviousData while
+  // pending, the last-good fallback after an error), but a switch away from
+  // an errored first load has neither, so the count waits for the new read.
+  const settled = shownPage !== null || readError !== null;
 
   const showRowDisclosure = total > ROW_DISCLOSURE_THRESHOLD;
   const showColumnDisclosure = columns.length > COLUMN_DISCLOSURE_THRESHOLD;
@@ -295,7 +299,12 @@ export function ResultView({
           sessionId={sessionId}
           referenceName={referenceName}
           onError={(e) => {
-            setError(toAppError(e, intl, "read"));
+            // The error write owns only the error slot: ResultActions holds
+            // the click-time closure across the pull's awaits, and its stale
+            // guard does not cover paging within the same result, so
+            // restating the window here would yank the view back to the
+            // pull's start offset.
+            setActionError(toAppError(e, intl, "read"));
           }}
         />
       </div>
@@ -448,7 +457,7 @@ export function ResultView({
           </TableRow>
         </TableHeader>
         <TableBody>
-          {shown === 0 && !loading && (
+          {shown === 0 && !inFlight && (
             <TableRow>
               <TableCell className="text-muted-foreground">
                 <FormattedMessage id="result.emptyRows" defaultMessage="(no data rows)" />
@@ -494,22 +503,23 @@ export function ResultView({
       */}
       <div className="page-info sticky bottom-0 bg-background border-t border-border py-2 m-0 flex gap-2 items-center">
         {/* Issue #773: the count's content mounts only after the first load
-          settles. Before that, the initial state (total 0, rows []) would
+          settles. Before that, the pre-settle state (no page yet) would
           render "Rows 0–0 (of 0)" -- a fake value flashing in the count bar.
           The region itself stays mounted from the first frame, so the first
           real count lands as a text mutation -- the reliably announced class
           (content present when a live region is created is commonly not
           announced). In flight the content keeps the last real values (the
-          buttons disable on loading, so the stale count is never actionable),
-          and a 0-row result renders its honest true "0–0 (of 0)". */}
+          buttons disable while in flight, so the stale count is never
+          actionable), and a 0-row result renders its honest true "0–0 (of
+          0)". */}
         <span aria-live="polite">
           {settled ? (
             <FormattedMessage
               id="result.pagination.range"
               defaultMessage="Rows {start}–{end} (of {total})"
               values={{
-                start: total === 0 ? 0 : offset + 1,
-                end: offset + shown,
+                start: total === 0 ? 0 : shownOffset + 1,
+                end: shownOffset + shown,
                 total,
               }}
             />
@@ -517,16 +527,29 @@ export function ResultView({
         </span>
         <button
           type="button"
-          disabled={!hasPrev || loading}
-          onClick={() => loadPage(Math.max(0, offset - pageSize))}
+          disabled={!hasPrev || inFlight}
+          onClick={() => {
+            setOffset(Math.max(0, offset - pageSize));
+            setActionError(null);
+          }}
           className={PAGE_BTN}
         >
           <FormattedMessage id="result.pagination.prev" defaultMessage="Previous" />
         </button>
         <button
           type="button"
-          disabled={!hasNext || loading}
-          onClick={() => loadPage(offset + pageSize)}
+          disabled={!hasNext || inFlight}
+          onClick={() => {
+            // An errored window's Next is the in-place retry: the offset
+            // already points at the failed window, so re-targeting it would
+            // bail out on the same value -- refetch through the seam.
+            if (readError !== null && page === null) {
+              refetch();
+            } else {
+              setOffset(offset + pageSize);
+            }
+            setActionError(null);
+          }}
           className={PAGE_BTN}
         >
           <FormattedMessage id="result.pagination.next" defaultMessage="Next" />
