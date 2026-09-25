@@ -1,6 +1,11 @@
 import { useCallback, useMemo, useState } from "react";
 import { useIntl } from "react-intl";
-import { useQuery, useQueryClient, type QueryClient } from "@tanstack/react-query";
+import {
+  useQuery,
+  useQueryClient,
+  type QueryClient,
+  type QueryKey,
+} from "@tanstack/react-query";
 import {
   activeDataset,
   listWorkingSet,
@@ -35,16 +40,19 @@ import type {
 // surfaces -- nothing else); useSessionState renders the read slice below
 // for the pane's own surfaces (rail badges, Targets chip, error
 // aggregation, hero empties); useIngestFlow reaches the cascade through
-// useSessionState's refreshServerState wrapper around the exported entry
-// (ingest stays an orchestration consumer, never an owner -- ADR-0123
-// Decision 3).
+// useSessionState's refreshServerState wrapper around the exported
+// full-cascade entry (ingest stays an orchestration consumer, never an
+// owner -- ADR-0123 Decision 3); useTurnFlow reaches the turn-end entry
+// (invalidateTurnEndData) directly.
 //
 // Invalidation cascade (the authoritative narrative; previously dispersed
 // across queryKeys doc comments and the callers' refresh helpers): every
 // mutation fans out to the three session descriptors -- workingSet, active,
 // thread. thread shares the fan-out even though this seam never observes it:
 // source lifecycle events append to the thread, so a mutation without the
-// thread refresh would leave the rail stale. The previewRows key NESTS
+// thread refresh would leave the rail stale. The turn-end entry is the one
+// sanctioned divergence; its thread omission is narrated at the entry
+// itself, not here (issue #1080). The previewRows key NESTS
 // under the workingSet prefix, so the workingSet invalidation refreshes the
 // sample page alongside the descriptor -- with the app-wide staleTime
 // Infinity (ADR-0051) a replaced source's cached rows would otherwise
@@ -126,6 +134,37 @@ export function useWorkingSetData(sessionId: string): WorkingSetData {
   return { datasets, activeName, staleByReference, queryErrors, retryFailed };
 }
 
+/** The working-set-facing half of the cascade -- the keys BOTH external
+ *  entries fan out to (issue #1080). Single point of maintenance: a fourth
+ *  cascade key joins this list once and every entry picks it up; keys only
+ *  the full cascade touches (currently thread alone) append there. */
+const workingSetFacingKeys = (sessionId: string) => [
+  sessionKeys.workingSet(sessionId),
+  sessionKeys.active(sessionId),
+];
+
+const invalidateKeys = (
+  queryClient: QueryClient,
+  keys: ReadonlyArray<QueryKey>,
+): Promise<void> =>
+  Promise.all(
+    keys.map((queryKey) => queryClient.invalidateQueries({ queryKey })),
+  ).then(() => undefined);
+
+/** The turn-end refresh entry (issue #1080): a settled turn's working-set
+ *  half. Omits thread BY DESIGN -- the turn already wrote the thread cache
+ *  optimistically (setQueryData in useTurnFlow), and invalidating it would
+ *  wipe the optimistic append against a stale/empty refetch (ADR-0051).
+ *  The canonical narrative for that omission lives here; lifecycle
+ *  comments elsewhere describe their own contexts, never this key set.
+ *  Error handling stays with the caller. */
+export function invalidateTurnEndData(
+  queryClient: QueryClient,
+  sessionId: string,
+): Promise<void> {
+  return invalidateKeys(queryClient, workingSetFacingKeys(sessionId));
+}
+
 /** The three-key fan-out every working-set mutation runs, and the single
  *  external entry behind the ingest domain's refreshServerState dep
  *  (ADR-0123 Decision 3 -- one undifferentiated cascade: the four
@@ -136,11 +175,10 @@ export function invalidateSessionData(
   queryClient: QueryClient,
   sessionId: string,
 ): Promise<void> {
-  return Promise.all([
-    queryClient.invalidateQueries({ queryKey: sessionKeys.workingSet(sessionId) }),
-    queryClient.invalidateQueries({ queryKey: sessionKeys.active(sessionId) }),
-    queryClient.invalidateQueries({ queryKey: sessionKeys.thread(sessionId) }),
-  ]).then(() => undefined);
+  return invalidateKeys(queryClient, [
+    ...workingSetFacingKeys(sessionId),
+    sessionKeys.thread(sessionId),
+  ]);
 }
 
 /** The live sample preview's fixed first window (issue #1061): the query's

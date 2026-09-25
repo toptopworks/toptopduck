@@ -41,6 +41,7 @@ import {
 } from "../../api";
 import {
   invalidateSessionData,
+  invalidateTurnEndData,
   SAMPLE_ROW_LIMIT,
   useDeleteImpact,
   useWorkingSet,
@@ -422,6 +423,22 @@ describe("invalidateSessionData", () => {
       JSON.stringify(sessionKeys.workingSet(SID)),
       JSON.stringify(sessionKeys.active(SID)),
       JSON.stringify(sessionKeys.thread(SID)),
+    ]);
+  });
+});
+
+describe("invalidateTurnEndData", () => {
+  it("runs the two-key turn-end fan-out (thread omitted, issue #1080)", async () => {
+    const queryClient = new QueryClient();
+    const spy = vi.spyOn(queryClient, "invalidateQueries");
+
+    await invalidateTurnEndData(queryClient, SID);
+
+    // workingSet + active only -- thread omitted by design; the why lives
+    // with invalidateTurnEndData's JSDoc (issue #1080).
+    expect(spy.mock.calls.map(([filters]) => JSON.stringify(filters?.queryKey))).toEqual([
+      JSON.stringify(sessionKeys.workingSet(SID)),
+      JSON.stringify(sessionKeys.active(SID)),
     ]);
   });
 });

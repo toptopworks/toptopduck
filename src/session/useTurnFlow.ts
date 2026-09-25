@@ -5,6 +5,7 @@ import { askQuestion, cancelQuery, getSessionRuntime, onTurnProgress } from "../
 import { toAppError } from "../lib/error-presentation";
 import { log } from "../lib/log";
 import { sessionKeys } from "./queryKeys";
+import { invalidateTurnEndData } from "./useWorkingSet";
 import type { ApprovalEntry } from "./useApprovalEvents";
 import type { UseViewedResult } from "./useViewedResult";
 import type { AppError } from "../types/error";
@@ -20,14 +21,13 @@ import type { ThreadEntry, ThinkingTrace, TraceEntry, TraceRound, TurnRuntime } 
 // never reaches for the raw queryClient / viewed setters from here.
 //
 // Boundary is TURN ORCHESTRATION, not the generic post-mutation refresh.
-// handleAsk's Materialized branch invalidates workingSet + active DIRECTLY via
-// the injected queryClient and deliberately skips the thread -- invalidating
-// thread would wipe the optimistic append against a stale/empty refetch
-// (ADR-0051). That "thread stays un-invalidated" rule is turn-unique: ingest /
-// dataset mutations go through the parent's refreshServerState (which DOES
-// refresh thread, harmless for them); turn cannot. The deps therefore do NOT
-// include refreshServerState -- the interface honestly reflects "turn does not
-// use the generic refresh".
+// handleAsk's Materialized branch refreshes through the seam's turn-end
+// entry (invalidateTurnEndData); the entry's key set and its thread omission
+// live with the seam, never restated here (issue #1080). What is turn-unique
+// is the entry CHOICE: ingest / dataset mutations go through the parent's
+// refreshServerState (the full cascade); the turn cannot, so the deps do
+// NOT include refreshServerState -- the interface honestly reflects "turn
+// does not use the generic refresh".
 
 // Module-level empty constants keep the optional deps' defaults referentially
 // stable across renders (the useMemo over live state must not recompute on an
@@ -669,8 +669,9 @@ export function useTurnFlow(sessionId: string, deps: UseTurnFlowDeps): UseTurnFl
   // (ADR-0051) -- question + outcome + the live trace rows the events
   // delivered (issue #297: the optimistic record matches the backend's
   // recorded TurnRecord.trace entry-for-entry); a Materialized outcome
-  // additionally moves viewedResult (auto-selects) and invalidates workingSet
-  // + active (a new result_N registered server-side).
+  // additionally moves viewedResult (auto-selects) and refreshes through
+  // the seam's turn-end entry (a new result_N registered server-side;
+  // the key set belongs to the seam, issue #1080).
   const handleAsk = useCallback(
     async (question: string, invocations?: string[]) => {
       // Belt-and-suspenders (issue #758): the one-turn rule enforced at the
@@ -847,20 +848,16 @@ export function useTurnFlow(sessionId: string, deps: UseTurnFlowDeps): UseTurnFl
           if (referenceName !== undefined) {
             markProduced(referenceName);
           }
-          // Only workingSet + active change here (a new result_N registered
-          // server-side + active may have moved); thread stays un-invalidated
-          // (ADR-0051) -- see the hook header for the why. The try/catch guard
-          // surfaces a refresh failure as a tagged error instead of skipping
-          // the busy-gate clear below (would lock QuestionBar forever); mirrors
+          // The seam's turn-end entry owns the key set (and the thread
+          // omission's narrative, issue #1080). The try/catch guard surfaces
+          // a refresh failure as a tagged error instead of skipping the
+          // busy-gate clear below (would lock QuestionBar forever); mirrors
           // refreshServerState's "saved but refresh failed" contract.
           try {
-            await Promise.all([
-              queryClient.invalidateQueries({ queryKey: sessionKeys.workingSet(sessionId) }),
-              queryClient.invalidateQueries({ queryKey: sessionKeys.active(sessionId) }),
-            ]);
+            await invalidateTurnEndData(queryClient, sessionId);
           } catch (invalidateErr) {
-            // invalidateErr because this try wraps invalidateQueries (workingSet +
-            // active); the refreshFailed option stays -- it selects toAppError's
+            // invalidateErr because this try wraps the seam's turn-end refresh;
+            // the refreshFailed option stays -- it selects toAppError's
             // user-facing "saved but refreshing..." prefix (ADR-0069), not the impl.
             setError(toAppError(invalidateErr, intl, "ask", { refreshFailed: true }));
           }

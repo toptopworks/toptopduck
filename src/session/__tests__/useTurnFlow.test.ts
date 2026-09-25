@@ -58,6 +58,17 @@ vi.mock("../../api", async (importOriginal) => {
 });
 
 import { askQuestion, cancelQuery, getSessionRuntime } from "../../api";
+import { invalidateTurnEndData } from "../useWorkingSet";
+
+// The turn-end refresh routes through the seam's entry (issue #1080): wrap
+// the real implementation in a mock fn so the key-set tests below keep
+// exercising the true fan-out (the queryClient spy still sees the real
+// invalidateQueries calls) while the coupling itself stays assertable, and
+// failure-injection can still target this seam edge.
+vi.mock("../useWorkingSet", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../useWorkingSet")>();
+  return { ...actual, invalidateTurnEndData: vi.fn(actual.invalidateTurnEndData) };
+});
 
 const SID = "sess-1";
 const STRANGER = "sess-other";
@@ -87,7 +98,7 @@ function setup() {
   const setTurnLoading = vi.fn();
   const setError = vi.fn();
   const pollPersistError = vi.fn(async () => {});
-  const intl = { formatMessage: () => "err" } as unknown as IntlShape;
+  const intl = { formatMessage: vi.fn(() => "err") } as unknown as IntlShape;
   const deps = {
     queryClient,
     intl,
@@ -1131,6 +1142,18 @@ describe("useTurnFlow", () => {
       expect(invalidatedKeys).toContainEqual(sessionKeys.active(SID));
     });
 
+    it("routes the Materialized refresh through the seam's turn-end entry (#1080)", async () => {
+      const { deps } = setup();
+      const { result } = renderHook(() => useTurnFlow(SID, deps));
+      vi.mocked(askQuestion).mockResolvedValue(materializedOutcome("result_1"));
+
+      await act(async () => {
+        await result.current.handleAsk("build it");
+      });
+
+      expect(invalidateTurnEndData).toHaveBeenCalledWith(deps.queryClient, SID);
+    });
+
     it("does NOT invalidate the thread on a Materialized outcome (optimistic append)", async () => {
       const { invalidateSpy, deps } = setup();
       const { result } = renderHook(() => useTurnFlow(SID, deps));
@@ -1181,6 +1204,14 @@ describe("useTurnFlow", () => {
       // still runs -- QuestionBar is not left locked forever. setError(null)
       // ran at the ask start (clear), then the refresh reject set the error.
       expect(setError).toHaveBeenLastCalledWith(expect.objectContaining({ kind: "ask" }));
+      // The refreshFailed option selects the "saved, but refreshing" banner
+      // (ADR-0069). The stub intl returns "err" for every descriptor, so the
+      // observable seam here is the descriptor id, not the composed message
+      // (the wording itself is pinned in toAppError.test.ts).
+      expect(vi.mocked(deps.intl.formatMessage)).toHaveBeenLastCalledWith(
+        expect.objectContaining({ id: "error.flow.savedRefreshFailed" }),
+        expect.anything(),
+      );
       expect(setTurnLoading).toHaveBeenLastCalledWith(false);
       // Thread cache holds the optimistic append (a refresh failure does not
       // wipe it; thread is never invalidated, ADR-0051).
