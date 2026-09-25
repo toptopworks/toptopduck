@@ -1,6 +1,6 @@
 import { useMemo, useState } from "react";
 import { FormattedMessage, useIntl } from "react-intl";
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useQuery } from "@tanstack/react-query";
 import { open } from "@tauri-apps/plugin-dialog";
 import { Plus, RefreshCw, X } from "lucide-react";
 
@@ -10,9 +10,10 @@ import type {
   ImportMode,
   SkillSource,
 } from "../../types/skills";
-import { importSkills, listSkillSources } from "../../api";
+import { listSkillSources } from "../../api";
 import { fmtError } from "../../lib/error-presentation";
 import { skillKeys } from "../../session/queryKeys";
+import { useSkillsRegistry } from "../../skills/registry";
 import { cn } from "../../lib/utils";
 import { Badge } from "../ui/badge";
 import { Button } from "../ui/button";
@@ -39,9 +40,13 @@ import {
 // resident skills as checkboxes. The dialog classifies each skill importable /
 // already_exists / invalid against the registry snapshot the backend read at
 // discovery time -- the backend re-validates + re-checks the registry at
-// commit too, so no status is cached beyond the preview. The bottom dropdown
-// picks link (symlink / junction -> linked) vs copy (recursive -> local) for
-// the whole batch; the Import action is gray at zero selections.
+// commit too, so no status is cached beyond the preview. The import batch
+// rides the registry seam's mutation, whose invalidation carries the cascade
+// contract (this dialog's own discovery read is evicted with the listing).
+// The staging state machine -- selection, expansion, mode -- stays here. The
+// bottom dropdown picks link (symlink / junction -> linked) vs copy
+// (recursive -> local) for the whole batch; the Import action is gray at
+// zero selections.
 
 type Props = {
   onClose: () => void;
@@ -49,7 +54,6 @@ type Props = {
 
 export function ImportSkillsDialog({ onClose }: Props) {
   const intl = useIntl();
-  const queryClient = useQueryClient();
 
   const [customPaths, setCustomPaths] = useState<string[]>([]);
   const [expanded, setExpanded] = useState<Set<string>>(() => new Set());
@@ -57,56 +61,12 @@ export function ImportSkillsDialog({ onClose }: Props) {
   const [mode, setMode] = useState<ImportMode>("link");
   const [error, setError] = useState<string | null>(null);
 
+  const { importSkillsMutation } = useSkillsRegistry();
+
   const sourcesKey = skillKeys.sources(customPaths);
   const { data: sources, error: sourcesError, refetch, isFetching } = useQuery({
     queryKey: sourcesKey,
     queryFn: () => listSkillSources(customPaths),
-  });
-
-  function invalidateAfterImport() {
-    void queryClient.invalidateQueries({ queryKey: skillKeys.all() });
-    void queryClient.invalidateQueries({ queryKey: sourcesKey });
-  }
-
-  const importMutation = useMutation({
-    mutationFn: (items: ImportItem[]) => importSkills(items, mode),
-    onSuccess: (outcomes, items) => {
-      invalidateAfterImport();
-      // Prune successfully imported items from `selected` so a retry does not
-      // re-send them (the backend would reject with NameTaken). The outcomes
-      // parallel the input items in order.
-      const importedDirs = items
-        .filter((_, i) => outcomes[i]?.kind === "imported")
-        .map((item) => item.source_dir);
-      if (importedDirs.length > 0) {
-        setSelected((prev) => {
-          const next = new Set(prev);
-          importedDirs.forEach((d) => next.delete(d));
-          return next;
-        });
-      }
-      const failed = outcomes.filter((o) => o.kind === "failed");
-      if (failed.length === 0) {
-        onClose();
-        return;
-      }
-      // Partial failure: surface the first typed reject + the total failure
-      // count so the user knows how many imports did not land. The rest
-      // imported fine; a full success closes the dialog.
-      const firstError = fmtError(failed[0].data, intl);
-      setError(
-        failed.length > 1
-          ? intl.formatMessage(
-              {
-                id: "settings.skills.importPartialFailure",
-                defaultMessage: "{error} (+{count} more)",
-              },
-              { error: firstError, count: failed.length - 1 },
-            )
-          : firstError,
-      );
-    },
-    onError: (e) => setError(fmtError(e, intl)),
   });
 
   // The selectable set is the union of `importable` skills across all sources,
@@ -183,8 +143,51 @@ export function ImportSkillsDialog({ onClose }: Props) {
 
   function handleImport() {
     setError(null);
-    const items = [...selected].map((source_dir) => ({ source_dir }));
-    importMutation.mutate(items);
+    const items: ImportItem[] = [...selected].map((source_dir) => ({
+      source_dir,
+    }));
+    importSkillsMutation.mutate(
+      { items, mode },
+      {
+        // The per-call half (the registry owns the cache work): prune
+        // successfully imported items from `selected` so a retry does not
+        // re-send them (the backend would reject with NameTaken). The
+        // outcomes parallel the input items in order.
+        onSuccess: (outcomes, vars) => {
+          const importedDirs = vars.items
+            .filter((_, i) => outcomes[i]?.kind === "imported")
+            .map((item) => item.source_dir);
+          if (importedDirs.length > 0) {
+            setSelected((prev) => {
+              const next = new Set(prev);
+              importedDirs.forEach((d) => next.delete(d));
+              return next;
+            });
+          }
+          const failed = outcomes.filter((o) => o.kind === "failed");
+          if (failed.length === 0) {
+            onClose();
+            return;
+          }
+          // Partial failure: surface the first typed reject + the total
+          // failure count so the user knows how many imports did not land.
+          // The rest imported fine; a full success closes the dialog.
+          const firstError = fmtError(failed[0].data, intl);
+          setError(
+            failed.length > 1
+              ? intl.formatMessage(
+                  {
+                    id: "settings.skills.importPartialFailure",
+                    defaultMessage: "{error} (+{count} more)",
+                  },
+                  { error: firstError, count: failed.length - 1 },
+                )
+              : firstError,
+          );
+        },
+        onError: (e) => setError(fmtError(e, intl)),
+      },
+    );
   }
 
   const sourceList = sources ?? [];
@@ -200,10 +203,10 @@ export function ImportSkillsDialog({ onClose }: Props) {
         className="sm:max-w-2xl"
         showCloseButton={false}
         onEscapeKeyDown={(e) => {
-          if (importMutation.isPending) e.preventDefault();
+          if (importSkillsMutation.isPending) e.preventDefault();
         }}
         onPointerDownOutside={(e) => {
-          if (importMutation.isPending) e.preventDefault();
+          if (importSkillsMutation.isPending) e.preventDefault();
         }}
       >
         <DialogHeader>
@@ -230,7 +233,7 @@ export function ImportSkillsDialog({ onClose }: Props) {
                   defaultMessage: "Close",
                 })}
                 icon={X}
-                disabled={importMutation.isPending}
+                disabled={importSkillsMutation.isPending}
                 onClick={onClose}
               />
             </div>
@@ -347,7 +350,7 @@ export function ImportSkillsDialog({ onClose }: Props) {
             variant="ghost"
             className="sm:ml-auto"
             onClick={onClose}
-            disabled={importMutation.isPending}
+            disabled={importSkillsMutation.isPending}
           >
             <FormattedMessage
               id="common.cancel"
@@ -358,9 +361,9 @@ export function ImportSkillsDialog({ onClose }: Props) {
             type="button"
             data-testid="import-action"
             onClick={handleImport}
-            disabled={selectedCount === 0 || importMutation.isPending}
+            disabled={selectedCount === 0 || importSkillsMutation.isPending}
           >
-            {importMutation.isPending ? (
+            {importSkillsMutation.isPending ? (
               <FormattedMessage
                 id="common.importing"
                 defaultMessage="Importing…"

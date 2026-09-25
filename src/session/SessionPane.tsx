@@ -1,9 +1,9 @@
-import { useCallback, useEffect, useId, useMemo, useRef, useState, type KeyboardEvent } from "react";
+import { useCallback, useEffect, useId, useRef, useState, type KeyboardEvent } from "react";
 import { useIntl, FormattedMessage } from "react-intl";
-import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { useQueryClient } from "@tanstack/react-query";
 import { fmtError, errorDetail } from "../lib/error-presentation";
 import { log } from "../lib/log";
-import { getApprovalAttachments, listSkills } from "../api";
+import { getApprovalAttachments } from "../api";
 import { WorkspaceToggle } from "../shell/WorkspaceToggle";
 import { SessionHeaderMenu } from "./SessionHeaderMenu";
 import { useRailFollow } from "./useRailFollow";
@@ -22,10 +22,10 @@ import { Badge } from "../components/ui/badge";
 import { Button } from "../components/ui/button";
 import { WorkspaceWorkingSet } from "../components/dataset/WorkspaceWorkingSet";
 import { cn } from "@/lib/utils";
-import type { SkillEntry } from "../types/skills";
 import type { ThreadEntry } from "../types/thread";
 import type { WorkspaceContent } from "./workspace";
-import { sessionKeys, skillKeys } from "./queryKeys";
+import { sessionKeys } from "./queryKeys";
+import { useSkillsRegistry } from "../skills/registry";
 
 // The per-session pane (ADR-0051/0092). One `<SessionPane key={sid} sessionId={sid} />`
 // owns ALL of a session's server state (via useSessionState -> TanStack Query)
@@ -396,31 +396,23 @@ export function SessionPane({ sessionId, isActive, pendingIngestPaths, onIngestC
   const datasetLabels = s.datasets.filter((d) => !d.stale);
   // Skill registry keyed by spec name (ADR-0086, issue #366): the thread rail's
   // Skill lifecycle markers look up their name here to flag a name the
-  // registry no longer carries (resume drift). The
-  // query reuses the shared skillKeys.all() cache -- the
-  // registry is process-global (not per-session), so every pane shares one
-  // IPC round-trip. A failed / loading read leaves data undefined, so
-  // skillIndex stays undefined and the markers render the verb + name from
-  // the event alone (no drift warning) -- the timeline stays
-  // readable while the registry resolves.
-  const skillListing = useQuery({ queryKey: skillKeys.all(), queryFn: listSkills });
-  const skillIndex = useMemo(() => {
-    const skills = skillListing.data?.skills;
-    if (skills === undefined) return undefined;
-    const m = new Map<string, SkillEntry>();
-    for (const skill of skills) m.set(skill.name, skill);
-    return m;
-  }, [skillListing.data?.skills]);
+  // registry no longer carries (resume drift). The read rides the one
+  // registry seam -- the registry is process-global (not per-session), so
+  // every pane shares one IPC round-trip. A failed / loading read leaves the
+  // projection undefined, so the markers render the verb + name from the
+  // event alone (no drift warning) -- the timeline stays readable while the
+  // registry resolves.
+  const { skillIndex, error: skillRegistryError } = useSkillsRegistry();
   // Observable honest-degrade: listSkills never rejects in practice, but a
   // transport failure would otherwise leave the rail silently enriched-less
   // with no signal. The settings SkillsSection surfaces its query
   // errors in the UI; the rail trades UI surfacing for readability, so the
   // log is the only trace (ADR-0029).
   useEffect(() => {
-    if (skillListing.error !== null) {
-      log.warn("SessionPane", "skill registry query failed", skillListing.error);
+    if (skillRegistryError !== null) {
+      log.warn("SessionPane", "skill registry query failed", skillRegistryError);
     }
-  }, [skillListing.error]);
+  }, [skillRegistryError]);
   // Issue #763: a session query's fetch/refetch failure carries a visible
   // banner (rendered below the header); this log is the durable trace, the
   // same observable honest-degrade posture as the skill-registry warn above

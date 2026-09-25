@@ -6,15 +6,20 @@ import type { ReactElement, ReactNode } from "react";
 
 import { ImportSkillsDialog } from "../ImportSkillsDialog";
 import { TooltipProvider } from "../../ui/tooltip";
-import { importSkills, listSkillSources } from "../../../api";
+import { importSkills, listSkillSources, listSkills } from "../../../api";
 import * as dialogPlugin from "@tauri-apps/plugin-dialog";
 import type { ImportOutcome, SkillSource } from "../../../types/skills";
 import { skillEntry } from "../../../test-fixtures";
 
 // The dialog drives everything through IPC + the directory picker; mock both
-// so the test never touches Tauri.
+// so the test never touches Tauri. The import mutation rides the registry
+// seam, so the factory covers the seam's whole API surface (the listing the
+// seam's query pair reads included).
 vi.mock("../../../api", () => ({
+  listSkills: vi.fn(),
   listSkillSources: vi.fn(),
+  setSkillEnabled: vi.fn(),
+  deleteSkill: vi.fn(),
   importSkills: vi.fn(),
 }));
 vi.mock("@tauri-apps/plugin-dialog", () => ({
@@ -94,6 +99,13 @@ function renderWithProviders(ui: ReactElement) {
 describe("ImportSkillsDialog (issue #367)", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    // The registry seam's listing read resolves empty (the dialog never
+    // renders it); the discovery + import channels are the test's surface.
+    vi.mocked(listSkills).mockResolvedValue({
+      skills: [],
+      ignored: [],
+      root_error: null,
+    });
     vi.mocked(listSkillSources).mockResolvedValue([]);
     vi.mocked(importSkills).mockResolvedValue([]);
     vi.mocked(dialogPlugin.open).mockResolvedValue(null);

@@ -1,6 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { FormattedMessage, useIntl } from "react-intl";
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { openPath } from "@tauri-apps/plugin-opener";
 import {
   Download,
@@ -19,16 +18,13 @@ import type {
 } from "../../types/skills";
 import type { AppConfig } from "../../types/app-config";
 import {
-  deleteSkill,
   getSkillsDir,
-  listSkills,
   rescanBuiltinCliTools,
-  setSkillEnabled,
 } from "../../api";
 import { ImportSkillsDialog } from "./ImportSkillsDialog";
 import { fmtError } from "../../lib/error-presentation";
 import { log } from "../../lib/log";
-import { skillKeys } from "../../session/queryKeys";
+import { invalidateSkills, useSkillsRegistry } from "../../skills/registry";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -73,18 +69,18 @@ import {
 } from "./settings-filters";
 
 // Skills settings pane (issue #362, ADR-0086; issue #1033, ADR-0122). The
-// registry is a directory scan (no app-config entry), so this pane reads
-// list_skills + drives enablement / delete through TanStack mutations that
-// invalidate the one skills query. There is NO create / edit form: creation
-// rides the model-face create_skill meta-tool -- the New button exits the
-// settings overlay straight to the workspace where that conversation lives --
-// and edits happen in the external editor the detail dialog's SKILL.md link
-// opens -- `local` anchors at its own directory, `linked` at
-// its link target, `builtin` at the reserved-subtree copy. The Import header
-// button opens the
-// two-stage drill-down import dialog (issue #367), which links / copies
-// skills from external agent libraries and invalidates the same skills query
-// on success.
+// registry is a directory scan (no app-config entry), so this pane rides the
+// one registry seam for its reads and writes: the listing query pair, the
+// enablement / delete mutations, and the mount rescan's invalidation all
+// come from src/skills/registry.ts (issue #1077). There is NO create / edit
+// form: creation rides the model-face create_skill meta-tool -- the New
+// button exits the settings overlay straight to the workspace where that
+// conversation lives -- and edits happen in the external editor the detail
+// dialog's SKILL.md link opens -- `local` anchors at its own directory,
+// `linked` at its link target, `builtin` at the reserved-subtree copy. The
+// Import header button opens the two-stage drill-down import dialog (issue
+// #367), which links / copies skills from external agent libraries through
+// the registry's import mutation.
 
 // The row is list chrome (hover highlight + layout); the text block is the
 // detail affordance (click / Enter opens the read-only dialog) and every
@@ -133,12 +129,6 @@ export function SkillsSection({
   onNewSkill: () => void;
 }) {
   const intl = useIntl();
-  const queryClient = useQueryClient();
-
-  const { data: listing, error: queryError, refetch, isFetching } = useQuery({
-    queryKey: skillKeys.all(),
-    queryFn: listSkills,
-  });
 
   // The materialization-failure lane (issue #1016): the names of the
   // builtin skills the scan window could not write, refreshed by the same
@@ -162,12 +152,19 @@ export function SkillsSection({
     onAppConfigSync(next);
   }
 
-  /** One cache-scope invalidate of the skills keys (the listing plus
-   *  every observer on the family -- the picker and rail ride the same
-   *  keys): fire-and-forget, used by the mount rescan and the writes. */
-  const invalidate = () => {
-    void queryClient.invalidateQueries({ queryKey: skillKeys.all() });
-  };
+  // The pane's whole registry surface rides the one seam (issue #1077): the
+  // listing read, the enablement / delete mutations, and (below) the mount
+  // rescan's invalidation. The wholesale config sync is injected so a
+  // successful enablement write lands through the write-generation-guarded
+  // path (applyUserWrite above).
+  const {
+    listing,
+    error: queryError,
+    refetch,
+    isFetching,
+    setSkillEnabledMutation,
+    deleteSkillMutation,
+  } = useSkillsRegistry({ onAppConfigSync: applyUserWrite });
 
   /** Opening the pane refreshes the materialization snapshot (issue
    *  #1016): the same one read-modify-write IPC the CLI pane rides on
@@ -192,7 +189,7 @@ export function SkillsSection({
         // unmount-safe, so it runs even when the pane closed mid-flight
         // (the picker / rail observers outlive this pane and need the
         // refreshed cache).
-        invalidate();
+        invalidateSkills();
       })
       .catch((e) => {
         // Silent in the UI on mount; the failure lane stays absent.
@@ -201,10 +198,10 @@ export function SkillsSection({
     return () => {
       cancelled = true;
     };
-    // `invalidate` closes over the pane-lifetime `queryClient` (stable
-    // for the provider's life) and `onAppConfigSync` is a stable
-    // pass-through from the settings view (the same mount-once contract
-    // as the other settings panes).
+    // invalidateSkills is the registry's module-level entry (client-scoped,
+    // not pane-scoped) and `onAppConfigSync` is a stable pass-through from
+    // the settings view (the same mount-once contract as the other settings
+    // panes).
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -267,37 +264,18 @@ export function SkillsSection({
   const [importOpen, setImportOpen] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const deleteMutation = useMutation({
-    mutationFn: (name: string) => deleteSkill(name),
-    onSuccess: () => {
-      invalidate();
-      setConfirmDelete(null);
-    },
-    onError: (e) => {
-      setError(fmtError(e, intl));
-      setConfirmDelete(null);
-    },
-  });
-
   // The explicit builtin-skill restore (issue #677) retired with ADR-0121:
   // builtin skills are a read-only app cache that re-aligns on every scan,
   // so there is no edited state to restore -- the editable variant is a
   // filesystem copy of the reserved-subtree folder (the fork channel).
 
-  // The enablement-axis row Switch (issue #961): the command returns the
-  // updated FULL config (synced wholesale, the set-contract) and the
-  // listing refetches so each row's `enabled` follows. A success also drops
-  // a stale reject -- the banner must not outlive the failure it reported.
-  const toggleEnabledMutation = useMutation({
-    mutationFn: ({ name, enabled }: { name: string; enabled: boolean }) =>
-      setSkillEnabled(name, enabled),
-    onSuccess: (cfg) => {
-      setError(null);
-      applyUserWrite(cfg);
-      invalidate();
-    },
-    onError: (e) => setError(fmtError(e, intl)),
-  });
+  // The enablement / delete mutations ride the registry seam (issue #1077):
+  // the seam owns the IPC + the invalidation + the injected config sync,
+  // while the per-call callbacks below carry this pane's UI state -- the
+  // confirm-dialog close, the banner's stale-reject drop. The
+  // enablement-axis row Switch (issue #961) keeps its contract: the command
+  // returns the updated FULL config (synced wholesale, the set-contract) and
+  // the listing refetches so each row's `enabled` follows.
 
   const allSkills = useMemo<SkillEntry[]>(
     () => listing?.skills ?? [],
@@ -572,11 +550,19 @@ export function SkillsSection({
               // Per-row gate (the AgentsSection #932 precedent): only the
               // row whose toggle is in flight locks its switch.
               busy={
-                toggleEnabledMutation.isPending &&
-                toggleEnabledMutation.variables?.name === skill.name
+                setSkillEnabledMutation.isPending &&
+                setSkillEnabledMutation.variables?.name === skill.name
               }
               onToggleEnabled={(enabled) =>
-                toggleEnabledMutation.mutate({ name: skill.name, enabled })}
+                setSkillEnabledMutation.mutate(
+                  { name: skill.name, enabled },
+                  {
+                    // A success also drops a stale reject -- the banner must
+                    // not outlive the failure it reported.
+                    onSuccess: () => setError(null),
+                    onError: (e) => setError(fmtError(e, intl)),
+                  },
+                )}
               onOpen={() => openDetail(skill)}
               // A builtin skill is undeletable (issue #677): its delete
               // button renders disabled -- the shutdown axis is the
@@ -644,7 +630,14 @@ export function SkillsSection({
               </AlertDialogCancel>
               <AlertDialogAction
                 className="bg-destructive text-white hover:bg-destructive/90"
-                onClick={() => deleteMutation.mutate(confirmDelete)}
+                onClick={() =>
+                  deleteSkillMutation.mutate(confirmDelete, {
+                    onSuccess: () => setConfirmDelete(null),
+                    onError: (e) => {
+                      setError(fmtError(e, intl));
+                      setConfirmDelete(null);
+                    },
+                  })}
               >
                 <FormattedMessage
                   id="common.delete"
