@@ -6,7 +6,7 @@ import type { ReactElement } from "react";
 import { TooltipProvider } from "../../ui/tooltip";
 import { WorkingSetList } from "../WorkingSetList";
 import type { DatasetDescriptor, StaleReason } from "../../../types/dataset";
-import { mockDataset } from "./helpers";
+import { mockDataset, staleDataset } from "./helpers";
 import { withIntl } from "../../common/__tests__/helpers";
 
 // WorkingSetList's replace action opens the Tauri file dialog; stub it so the
@@ -832,6 +832,36 @@ describe("WorkingSetList", () => {
     expect(screen.getByRole("button", { name: /5 rows/ })).toBeInTheDocument();
   });
 
+  it("renders the stale chip copy via the en defaultMessage (issue #1062)", async () => {
+    // The zh-CN catalog collapses workingSet.staleRow / .hint to 已失效 /
+    // 因…, so the en defaultMessage fallback had no anchor: a stray edit to
+    // either defaultMessage stayed green behind the zh hits. The empty
+    // English provider (the rowCount plural precedent above) routes both
+    // keys to the canonical copy -- chip label and causal sentence alike
+    // (the aria-label shares the hint's formatted output).
+    render(
+      <IntlProvider locale="en" messages={{}} onError={() => {}}>
+        <TooltipProvider>
+          <WorkingSetList
+            sessionId="s1"
+            datasets={[staleDataset("Deleted")]}
+            activeName={null}
+            selectedName={null}
+            onSelect={() => {}}
+            onRename={() => {}}
+          />
+        </TooltipProvider>
+      </IntlProvider>,
+    );
+    expect(screen.getByText("Stale")).toBeInTheDocument();
+    const chip = screen.getByText("Stale").closest(".stale-badge")!;
+    expect(chip).toHaveAttribute("aria-label", "Invalidated because people was deleted");
+    fireEvent.focus(chip);
+    expect(await screen.findByRole("tooltip")).toHaveTextContent(
+      "Invalidated because people was deleted",
+    );
+  });
+
   it("renders the stale tooltip verb for a Replaced anchor (issue #41 AC4, #865)", async () => {
     // Pins the Replaced arm of the workingSet.staleRow.hint ICU select (the
     // Deleted arm is covered above) so a regression that drops the arm renders
@@ -860,6 +890,101 @@ describe("WorkingSetList", () => {
     const chip = screen.getByText("已失效").closest(".stale-badge")!;
     fireEvent.pointerMove(chip);
     expect(await screen.findByRole("tooltip")).toHaveTextContent("因「员工表」已更新而失效");
+  });
+
+  it("focuses the stale chip in the Tab order and opens its tooltip on keyboard focus (issue #1062)", async () => {
+    // #1062: hover was the only path to the causal sentence -- a span chip
+    // neither tabs nor announces. The chip now carries tabIndex and the
+    // causal sentence as aria-label (same formatted output as the tooltip
+    // copy), and Radix's own focus path bridges into the controlled open
+    // slot: the chip keeps no handlers of its own, and its opens need no
+    // restore gate -- the dialog-close restore never lands on the chip (the
+    // rowHints setTip note).
+    // The neighboring stale fixtures carry a zh display name so the causal
+    // sentence reads fully in zh.
+    const stale: DatasetDescriptor = {
+      ...staleDataset("Deleted"),
+      stale: { reference_name: "people", display_name: "员工表", reason: "Deleted" },
+    };
+    renderList(
+      <WorkingSetList
+        sessionId="s1"
+        datasets={[stale]}
+        activeName={null}
+        selectedName={null}
+        onSelect={() => {}}
+        onRename={() => {}}
+      />,
+    );
+    const chip = screen.getByText("已失效").closest(".stale-badge")!;
+    expect(chip).toHaveAttribute("tabindex", "0");
+    expect(chip).not.toHaveAttribute("title");
+    expect(chip).toHaveAttribute("aria-label", "因「员工表」已删除而失效");
+    fireEvent.focus(chip);
+    expect(await screen.findByRole("tooltip")).toHaveTextContent("因「员工表」已删除而失效");
+    fireEvent.blur(chip);
+    await waitFor(() => expect(screen.queryByRole("tooltip")).toBeNull());
+  });
+
+  it("yields a held hint to the chip's focus open -- opens take the slot (rowHints sequence 1, issue #1062)", async () => {
+    // Keyboard tab order runs action buttons -> chip; the chip's Radix
+    // focus open takes the mutex slot from a pointer-opened hint without an
+    // explicit close (reduceTip: opens take the slot), so the two tooltips
+    // never coexist on one row.
+    const stale: DatasetDescriptor = {
+      ...staleDataset("Deleted"),
+      stale: { reference_name: "people", display_name: "员工表", reason: "Deleted" },
+    };
+    renderList(
+      <WorkingSetList
+        sessionId="s1"
+        datasets={[stale]}
+        activeName={null}
+        selectedName={null}
+        onSelect={() => {}}
+        onRename={() => {}}
+      />,
+    );
+    const rename = screen.getByRole("button", { name: /重命名/ });
+    fireEvent.pointerEnter(rename, { pointerType: "mouse" });
+    expect(await screen.findByRole("tooltip")).toHaveTextContent("重命名");
+    fireEvent.focus(screen.getByText("已失效").closest(".stale-badge")!);
+    expect(await screen.findByRole("tooltip")).toHaveTextContent("因「员工表」已删除而失效");
+    expect(screen.getAllByRole("tooltip")).toHaveLength(1);
+  });
+
+  it("opens a row hint on keyboard focus of an action button (rowHints sequence 3, issue #1062)", async () => {
+    // The hints' focus-open path (onFocus -> focusOpen, :focus-visible
+    // gated) landed with #1073 but had no component-level pin. jsdom cannot
+    // emulate the keyboard-modality heuristic, so the selector engine is
+    // stubbed for :focus-visible only: the pure layer stubs the whole
+    // target (rowHints.test's focusVisibleTarget); here the real DOM button
+    // drives the wiring, so only the selector's answer is faked.
+    renderList(
+      <WorkingSetList
+        sessionId="s1"
+        datasets={[mockDataset]}
+        activeName={null}
+        selectedName={null}
+        onSelect={() => {}}
+        onRename={() => {}}
+      />,
+    );
+    const rename = screen.getByRole("button", { name: /重命名/ });
+    const nativeMatches = HTMLElement.prototype.matches;
+    const matches = vi
+      .spyOn(HTMLElement.prototype, "matches")
+      .mockImplementation(function (this: HTMLElement, selector: string) {
+        if (selector === ":focus-visible") return this.dataset.keyboardFocus === "true";
+        return nativeMatches.call(this, selector);
+      });
+    try {
+      rename.dataset.keyboardFocus = "true";
+      fireEvent.focus(rename);
+      expect(await screen.findByRole("tooltip")).toHaveTextContent("重命名");
+    } finally {
+      matches.mockRestore();
+    }
   });
 
   it("exhausts every StaleReason variant in the workingSet.staleRow.hint select (ADR-0041)", () => {
