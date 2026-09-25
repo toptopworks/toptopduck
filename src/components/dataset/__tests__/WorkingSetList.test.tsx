@@ -1,25 +1,62 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { IntlProvider } from "react-intl";
+import type { ReactElement } from "react";
 import { TooltipProvider } from "../../ui/tooltip";
 import { WorkingSetList } from "../WorkingSetList";
 import type { DatasetDescriptor, StaleReason } from "../../../types/dataset";
 import { mockDataset } from "./helpers";
-import { renderI18n, withIntl } from "../../common/__tests__/helpers";
+import { withIntl } from "../../common/__tests__/helpers";
 
 // WorkingSetList's replace action opens the Tauri file dialog; stub it so the
 // tests can drive the picker without the native bridge.
 vi.mock("@tauri-apps/plugin-dialog", () => ({ open: vi.fn() }));
 
+// Runs offline: the delete dialog's impact list (issue #1063) is the only api
+// consumer in this component tree (partial mock, useWorkingSet.test pattern).
+vi.mock("../../../api", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../../../api")>();
+  return { ...actual, previewDeleteImpact: vi.fn() };
+});
+
 import { open } from "@tauri-apps/plugin-dialog";
+import { previewDeleteImpact } from "../../../api";
+
+// The delete dialog mounts DeleteImpactList (issue #1063), a useQuery
+// consumer -- every render gets a QueryClient ancestor (retry:false keeps a
+// rejected preview single-shot). withIntl rides inside, so initial renders
+// and rerenders share one wrapper with the full Intl + Tooltip context.
+function withQuery(ui: ReactElement) {
+  const client = new QueryClient({
+    defaultOptions: { queries: { retry: false } },
+  });
+  return (
+    <QueryClientProvider client={client}>{withIntl(ui)}</QueryClientProvider>
+  );
+}
+
+function renderList(ui: ReactElement) {
+  return render(withQuery(ui));
+}
 
 describe("WorkingSetList", () => {
   // Spies must not leak between tests.
   afterEach(() => vi.restoreAllMocks());
 
+  // Most tests here open no delete dialog, and the ones that do mostly
+  // don't seed the impact preview; restore strips the mock's
+  // implementation, so re-seed before each test -- an empty resolved list
+  // keeps un-seeded dialogs out of the query library's undefined-data
+  // error branch (owned by DeleteImpactList.test).
+  beforeEach(() => {
+    vi.mocked(previewDeleteImpact).mockResolvedValue([]);
+  });
+
   it("lists the datasets as selectable rows", () => {
-    renderI18n(
+    renderList(
       <WorkingSetList
+        sessionId="s1"
         datasets={[mockDataset]}
         activeName="people"
         selectedName={null}
@@ -49,8 +86,9 @@ describe("WorkingSetList", () => {
       reference_name: "orders",
       display_name: "orders",
     };
-    const { rerender } = renderI18n(
+    const { rerender } = renderList(
       <WorkingSetList
+        sessionId="s1"
         datasets={[mockDataset, orders]}
         activeName="people"
         selectedName="orders"
@@ -74,8 +112,9 @@ describe("WorkingSetList", () => {
     // The band follows the pick across rerenders (rows keep their keys, so
     // the li references stay live).
     rerender(
-      withIntl(
+      withQuery(
         <WorkingSetList
+          sessionId="s1"
           datasets={[mockDataset, orders]}
           activeName="people"
           selectedName="people"
@@ -90,8 +129,9 @@ describe("WorkingSetList", () => {
     // No selection -> no band anywhere, even with an active dataset: the
     // active state never carries the band.
     rerender(
-      withIntl(
+      withQuery(
         <WorkingSetList
+          sessionId="s1"
           datasets={[mockDataset, orders]}
           activeName="people"
           selectedName={null}
@@ -114,8 +154,9 @@ describe("WorkingSetList", () => {
     // annotation's parent chain, and the preflight small rule (80%) would
     // resolve an unsized small at 11.2px -- below the caption token, the
     // ladder's floor. text-xs pins 12px independent of that chain.
-    renderI18n(
+    renderList(
       <WorkingSetList
+        sessionId="s1"
         datasets={[mockDataset]}
         activeName="people"
         selectedName={null}
@@ -135,8 +176,9 @@ describe("WorkingSetList", () => {
   // the reference name survives).
 
   it("opens the rename dialog with the current display name prefilled (issue #759)", () => {
-    renderI18n(
+    renderList(
       <WorkingSetList
+        sessionId="s1"
         datasets={[mockDataset]}
         activeName={null}
         selectedName={null}
@@ -153,8 +195,9 @@ describe("WorkingSetList", () => {
 
   it("submits a valid rename through the dialog and closes it (ADR-0037, issue #759)", () => {
     const onRename = vi.fn();
-    renderI18n(
+    renderList(
       <WorkingSetList
+        sessionId="s1"
         datasets={[mockDataset]}
         activeName={null}
         selectedName={null}
@@ -180,8 +223,9 @@ describe("WorkingSetList", () => {
     // must carry the stable reference name, never the (old or new) label.
     const onRename = vi.fn();
     const diverged: DatasetDescriptor = { ...mockDataset, display_name: "员工表" };
-    renderI18n(
+    renderList(
       <WorkingSetList
+        sessionId="s1"
         datasets={[diverged]}
         activeName={null}
         selectedName={null}
@@ -197,8 +241,9 @@ describe("WorkingSetList", () => {
 
   it("keeps Save disabled for a blank or whitespace-only draft (issue #759)", () => {
     const onRename = vi.fn();
-    renderI18n(
+    renderList(
       <WorkingSetList
+        sessionId="s1"
         datasets={[mockDataset]}
         activeName={null}
         selectedName={null}
@@ -222,8 +267,9 @@ describe("WorkingSetList", () => {
     // current name disables it again. This is the old prompt's no-change ignore
     // expressed as an un-submittable form.
     const onRename = vi.fn();
-    renderI18n(
+    renderList(
       <WorkingSetList
+        sessionId="s1"
         datasets={[mockDataset]}
         activeName={null}
         selectedName={null}
@@ -244,8 +290,9 @@ describe("WorkingSetList", () => {
 
   it("trims surrounding whitespace before renaming (issue #759)", () => {
     const onRename = vi.fn();
-    renderI18n(
+    renderList(
       <WorkingSetList
+        sessionId="s1"
         datasets={[mockDataset]}
         activeName={null}
         selectedName={null}
@@ -262,8 +309,9 @@ describe("WorkingSetList", () => {
 
   it("cancels the rename dialog without firing onRename (issue #759)", () => {
     const onRename = vi.fn();
-    renderI18n(
+    renderList(
       <WorkingSetList
+        sessionId="s1"
         datasets={[mockDataset]}
         activeName={null}
         selectedName={null}
@@ -283,8 +331,9 @@ describe("WorkingSetList", () => {
     // restore only targets a DialogTrigger ref), so the keyboard flow lands
     // back on the row's rename button.
     const onRename = vi.fn();
-    renderI18n(
+    renderList(
       <WorkingSetList
+        sessionId="s1"
         datasets={[mockDataset]}
         activeName={null}
         selectedName={null}
@@ -310,8 +359,9 @@ describe("WorkingSetList", () => {
     // real pointer travel always arrives later. The wiring check pins the
     // component's routing: the row's pointer enters go through the gated
     // entry, not a raw open.
-    renderI18n(
+    renderList(
       <WorkingSetList
+        sessionId="s1"
         datasets={[mockDataset]}
         activeName={null}
         selectedName={null}
@@ -337,8 +387,9 @@ describe("WorkingSetList", () => {
     // disabled button is ignored. The restore must fall back to the list
     // container instead of dropping keyboard focus to <body>.
     const onRename = vi.fn();
-    const utils = renderI18n(
+    const utils = renderList(
       <WorkingSetList
+        sessionId="s1"
         datasets={[mockDataset]}
         activeName={null}
         selectedName={null}
@@ -349,8 +400,9 @@ describe("WorkingSetList", () => {
     // Mirror the parent: the loading flip rides the same commit as the close.
     onRename.mockImplementation(() => {
       utils.rerender(
-        withIntl(
+        withQuery(
           <WorkingSetList
+            sessionId="s1"
             datasets={[mockDataset]}
             activeName={null}
             selectedName={null}
@@ -373,8 +425,9 @@ describe("WorkingSetList", () => {
     // A rename in flight locks the button: rapid double-clicks must not fire a
     // second IPC before the first settles (the backend would run its label-
     // collision check against stale state and reject a valid rename).
-    renderI18n(
+    renderList(
       <WorkingSetList
+        sessionId="s1"
         datasets={[mockDataset]}
         activeName={null}
         selectedName={null}
@@ -392,8 +445,9 @@ describe("WorkingSetList", () => {
     // reference name -- the name the backend takes over.
     const onReplace = vi.fn();
     vi.mocked(open).mockResolvedValue("/x/new.csv");
-    renderI18n(
+    renderList(
       <WorkingSetList
+        sessionId="s1"
         datasets={[mockDataset]}
         activeName={null}
         selectedName={null}
@@ -409,8 +463,9 @@ describe("WorkingSetList", () => {
   it("ignores a cancelled replace picker (issue #11)", async () => {
     const onReplace = vi.fn();
     vi.mocked(open).mockResolvedValue(null); // cancelled
-    renderI18n(
+    renderList(
       <WorkingSetList
+        sessionId="s1"
         datasets={[mockDataset]}
         activeName={null}
         selectedName={null}
@@ -425,8 +480,9 @@ describe("WorkingSetList", () => {
   });
 
   it("disables the replace button while loading (issue #11)", () => {
-    renderI18n(
+    renderList(
       <WorkingSetList
+        sessionId="s1"
         datasets={[mockDataset]}
         activeName={null}
         selectedName={null}
@@ -445,8 +501,9 @@ describe("WorkingSetList", () => {
   // explicit 取消 / 删除.
 
   it("opens a delete AlertDialog naming the dataset (issue #38, #759)", () => {
-    renderI18n(
+    renderList(
       <WorkingSetList
+        sessionId="s1"
         datasets={[mockDataset]}
         activeName={null}
         selectedName={null}
@@ -465,8 +522,9 @@ describe("WorkingSetList", () => {
 
   it("confirms the delete and forwards the stable reference name (issue #38, #759)", () => {
     const onDelete = vi.fn();
-    renderI18n(
+    renderList(
       <WorkingSetList
+        sessionId="s1"
         datasets={[mockDataset]}
         activeName={null}
         selectedName={null}
@@ -490,8 +548,9 @@ describe("WorkingSetList", () => {
     // reference name (a swap regression would remove the wrong source).
     const onDelete = vi.fn();
     const diverged: DatasetDescriptor = { ...mockDataset, display_name: "员工表" };
-    renderI18n(
+    renderList(
       <WorkingSetList
+        sessionId="s1"
         datasets={[diverged]}
         activeName={null}
         selectedName={null}
@@ -513,8 +572,9 @@ describe("WorkingSetList", () => {
     // nothing. Two deletes in a row is the core working-set teardown flow.
     const onDelete = vi.fn();
     const orders: DatasetDescriptor = { ...mockDataset, reference_name: "orders", display_name: "orders" };
-    renderI18n(
+    renderList(
       <WorkingSetList
+        sessionId="s1"
         datasets={[mockDataset, orders]}
         activeName={null}
         selectedName={null}
@@ -536,8 +596,9 @@ describe("WorkingSetList", () => {
     // A cancel at the confirm gate never reaches the backend -- no IPC, no
     // removal; the keyboard flow lands back on the row's delete trigger.
     const onDelete = vi.fn();
-    renderI18n(
+    renderList(
       <WorkingSetList
+        sessionId="s1"
         datasets={[mockDataset]}
         activeName={null}
         selectedName={null}
@@ -563,8 +624,9 @@ describe("WorkingSetList", () => {
     // parent flips loading in the same commit, so the deferred restore meets a
     // disabled trigger -- the fallback keeps focus in the working-set region.
     const onDelete = vi.fn();
-    const utils = renderI18n(
+    const utils = renderList(
       <WorkingSetList
+        sessionId="s1"
         datasets={[mockDataset]}
         activeName={null}
         selectedName={null}
@@ -575,8 +637,9 @@ describe("WorkingSetList", () => {
     );
     onDelete.mockImplementation(() => {
       utils.rerender(
-        withIntl(
+        withQuery(
           <WorkingSetList
+            sessionId="s1"
             datasets={[mockDataset]}
             activeName={null}
             selectedName={null}
@@ -600,8 +663,9 @@ describe("WorkingSetList", () => {
     // intentionally blocks ESC dismiss -- ESC on the content is inert, so
     // onDelete never fires (no accidental dismiss of an irreversible removal).
     const onDelete = vi.fn();
-    renderI18n(
+    renderList(
       <WorkingSetList
+        sessionId="s1"
         datasets={[mockDataset]}
         activeName={null}
         selectedName={null}
@@ -621,8 +685,9 @@ describe("WorkingSetList", () => {
     // overlay (outside the content) leaves the dialog open and fires onDelete
     // never -- the user must take an explicit 取消 / 删除.
     const onDelete = vi.fn();
-    renderI18n(
+    renderList(
       <WorkingSetList
+        sessionId="s1"
         datasets={[mockDataset]}
         activeName={null}
         selectedName={null}
@@ -643,12 +708,40 @@ describe("WorkingSetList", () => {
     expect(onDelete).not.toHaveBeenCalled();
   });
 
+  it("previews the cascade impact inside the delete dialog (issue #1063)", async () => {
+    // The dialog's impact list rides the read-only preview command: the
+    // affected results render ahead of the irreversible action, and the
+    // confirm stays executable with the list shown (the preview never
+    // blocks the delete).
+    vi.mocked(previewDeleteImpact).mockResolvedValue([
+      { reference_name: "result_1", display_name: "销量汇总" },
+    ]);
+    renderList(
+      <WorkingSetList
+        sessionId="s1"
+        datasets={[mockDataset]}
+        activeName={null}
+        selectedName={null}
+        onSelect={() => {}}
+        onRename={() => {}}
+        onDelete={() => {}}
+      />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: /删除/ }));
+    await waitFor(() =>
+      expect(screen.getByText("受影响的结果")).toBeInTheDocument(),
+    );
+    expect(screen.getByText("销量汇总")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "删除" })).toBeEnabled();
+  });
+
   it("disables the delete button while loading (execution window, ADR-0040)", () => {
     // loading is true while any async op (incl. an in-flight turn) runs -- the
     // execution window disables source management so a mid-turn delete cannot
     // interleave with the query.
-    renderI18n(
+    renderList(
       <WorkingSetList
+        sessionId="s1"
         datasets={[mockDataset]}
         activeName={null}
         selectedName={null}
@@ -679,8 +772,9 @@ describe("WorkingSetList", () => {
         reason: "Deleted" as const,
       },
     };
-    renderI18n(
+    renderList(
       <WorkingSetList
+        sessionId="s1"
         datasets={[stale]}
         activeName={null}
         selectedName={null}
@@ -706,6 +800,7 @@ describe("WorkingSetList", () => {
       <IntlProvider locale="en" messages={{}} onError={() => {}}>
         <TooltipProvider>
           <WorkingSetList
+            sessionId="s1"
             datasets={[{ ...mockDataset, row_count: 1 }]}
             activeName={null}
             selectedName={null}
@@ -724,6 +819,7 @@ describe("WorkingSetList", () => {
       <IntlProvider locale="en" messages={{}} onError={() => {}}>
         <TooltipProvider>
           <WorkingSetList
+            sessionId="s1"
             datasets={[{ ...mockDataset, row_count: 5 }]}
             activeName={null}
             selectedName={null}
@@ -751,8 +847,9 @@ describe("WorkingSetList", () => {
         reason: "Replaced" as const,
       },
     };
-    renderI18n(
+    renderList(
       <WorkingSetList
+        sessionId="s1"
         datasets={[stale]}
         activeName={null}
         selectedName={null}
@@ -786,8 +883,9 @@ describe("WorkingSetList", () => {
   // #790/#251 weak-show).
 
   it("lays each dataset out as one flex row with the three icon actions in an overlay pill (issue #790)", () => {
-    renderI18n(
+    renderList(
       <WorkingSetList
+        sessionId="s1"
         datasets={[mockDataset]}
         activeName="people"
         selectedName={null}
@@ -813,8 +911,9 @@ describe("WorkingSetList", () => {
   });
 
   it("renders lucide glyphs on 28px hit areas, retiring the text-character buttons (issue #790, #774 spec)", () => {
-    renderI18n(
+    renderList(
       <WorkingSetList
+        sessionId="s1"
         datasets={[mockDataset]}
         activeName={null}
         selectedName={null}
@@ -857,8 +956,9 @@ describe("WorkingSetList", () => {
     // programmatic focus restore from glowing the pill forever; `invisible`
     // stays rejected (it would drop the buttons from the a11y tree), and the
     // tab order / aria-labels are untouched.
-    renderI18n(
+    renderList(
       <WorkingSetList
+        sessionId="s1"
         datasets={[mockDataset]}
         activeName={null}
         selectedName={null}
@@ -903,8 +1003,9 @@ describe("WorkingSetList", () => {
     // into it. The switch is intentionally NOT transitioned -- per-row 150ms
     // fades cross-fade two bands on every row-to-row crossing, which reads
     // as the strip flashing on a downward sweep.
-    renderI18n(
+    renderList(
       <WorkingSetList
+        sessionId="s1"
         datasets={[mockDataset]}
         activeName={null}
         selectedName={null}
@@ -930,8 +1031,9 @@ describe("WorkingSetList", () => {
     // background tint would be invisible on the pill's own accent). The
     // strip keeps the default arrow (the highlight carries the affordance);
     // the select button's hand is pinned at the tail of this test.
-    renderI18n(
+    renderList(
       <WorkingSetList
+        sessionId="s1"
         datasets={[mockDataset]}
         activeName={null}
         selectedName={null}
@@ -970,8 +1072,9 @@ describe("WorkingSetList", () => {
       ...mockDataset,
       display_name: "a-very-long-dataset-display-label",
     };
-    renderI18n(
+    renderList(
       <WorkingSetList
+        sessionId="s1"
         datasets={[long]}
         activeName={null}
         selectedName={null}
@@ -1005,8 +1108,9 @@ describe("WorkingSetList", () => {
   });
 
   it("keeps the native titles off the row controls; the action hints ride Radix tooltips (issue #865)", async () => {
-    renderI18n(
+    renderList(
       <WorkingSetList
+        sessionId="s1"
         datasets={[mockDataset]}
         activeName={null}
         selectedName={null}
@@ -1053,8 +1157,9 @@ describe("WorkingSetList", () => {
         reason: "Deleted" as const,
       },
     };
-    renderI18n(
+    renderList(
       <WorkingSetList
+        sessionId="s1"
         datasets={[stale]}
         activeName={null}
         selectedName={null}
@@ -1102,8 +1207,9 @@ describe("WorkingSetList", () => {
     // the key exists, and the en defaultMessage covers the partial revert
     // where only the source hunk comes back and the catalog keys stay
     // deleted.
-    renderI18n(
+    renderList(
       <WorkingSetList
+        sessionId="s1"
         datasets={[mockDataset]}
         activeName="people"
         selectedName={null}

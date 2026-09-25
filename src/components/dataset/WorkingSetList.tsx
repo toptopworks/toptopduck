@@ -5,6 +5,7 @@ import { Pencil, RefreshCw, X } from "lucide-react";
 import { Badge } from "../ui/badge";
 import { Button } from "../ui/button";
 import { buttonVariants } from "../ui/button-variants";
+import { DeleteImpactList } from "./DeleteImpactList";
 import { Input } from "../ui/input";
 import { Label } from "../ui/label";
 import { Dialog, DialogContent, DialogFooter, DialogTitle } from "../ui/dialog";
@@ -415,10 +416,12 @@ function WorkingSetRenameDialog({
 // exist) surfaces via the existing error channel. The destructive variant
 // marks the irreversible action (DESIGN.md).
 function WorkingSetDeleteDialog({
+  sessionId,
   target,
   onCancel,
   onConfirm,
 }: {
+  sessionId: string;
   target: DatasetDescriptor;
   onCancel: () => void;
   onConfirm: () => void;
@@ -441,6 +444,9 @@ function WorkingSetDeleteDialog({
             />
           </AlertDialogDescription>
         </AlertDialogHeader>
+        {/* The pre-delete impact preview (issue #1063); DeleteImpactList
+            owns the rendering contract. */}
+        <DeleteImpactList sessionId={sessionId} referenceName={target.reference_name} />
         <AlertDialogFooter>
           <AlertDialogCancel onClick={onCancel}>
             <FormattedMessage id="common.cancel" defaultMessage="Cancel" />
@@ -458,6 +464,7 @@ function WorkingSetDeleteDialog({
 }
 
 export function WorkingSetList({
+  sessionId,
   datasets,
   activeName,
   selectedName,
@@ -467,6 +474,9 @@ export function WorkingSetList({
   onDelete,
   loading = false,
 }: {
+  // Session addressing for the delete dialog's impact preview (issue #1063);
+  // the rows themselves render from the `datasets` snapshot prop.
+  sessionId: string;
   datasets: DatasetDescriptor[];
   // The ACTIVE dataset (server truth, ADR-0051): bolds the row's label. The
   // authoritative naming is the tab header's Targets chip; bold is the row's
@@ -589,6 +599,7 @@ export function WorkingSetList({
       )}
       {deleteTarget && (
         <WorkingSetDeleteDialog
+          sessionId={sessionId}
           target={deleteTarget}
           onCancel={closeDelete}
           onConfirm={() => {

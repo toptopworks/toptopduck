@@ -166,3 +166,11 @@ export interface RowPage {
   offset: number;
   limit: number;
 }
+
+// One entry of the delete-impact preview (issue #1063): a live result that a
+// source removal would mark stale. The delete-confirm dialogs render the
+// display label verbatim. Mirrors the Rust `DeleteImpactEntry`.
+export interface DeleteImpactEntry {
+  reference_name: string;
+  display_name: string;
+}

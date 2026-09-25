@@ -24,12 +24,14 @@ vi.mock("../../api", async (importOriginal) => {
     removeSource: vi.fn(),
     removeActiveSource: vi.fn(),
     setDatasetPrivacy: vi.fn(),
+    previewDeleteImpact: vi.fn(),
   };
 });
 
 import {
   activeDataset,
   listWorkingSet,
+  previewDeleteImpact,
   readRows,
   removeActiveSource,
   removeSource,
@@ -40,6 +42,7 @@ import {
 import {
   invalidateSessionData,
   SAMPLE_ROW_LIMIT,
+  useDeleteImpact,
   useWorkingSet,
   type UseWorkingSetSurfaces,
 } from "../useWorkingSet";
@@ -181,6 +184,45 @@ describe("useWorkingSet", () => {
       // app-wide makes invalidation the ONLY refetch trigger.
       await waitFor(() =>
         expect(readRows).toHaveBeenCalledWith(SID, "people", 0, SAMPLE_ROW_LIMIT),
+      );
+    });
+
+    it("refreshes the nested delete-impact preview with the workingSet prefix", async () => {
+      // The impact key must inherit the workingSet prefix so the mutation
+      // cascade refreshes it alongside the descriptors -- with staleTime
+      // Infinity app-wide, invalidation is the only refetch trigger, and a
+      // reopened confirm dialog must never show a stale cascade list.
+      vi.mocked(listWorkingSet).mockResolvedValue([PEOPLE, ORDERS]);
+      vi.mocked(activeDataset).mockResolvedValue(PEOPLE);
+      vi.mocked(readRows).mockResolvedValue(EMPTY_PAGE);
+      vi.mocked(renameDataset).mockResolvedValue(PEOPLE);
+      vi.mocked(previewDeleteImpact).mockResolvedValue([]);
+      const surfaces = makeSurfaces();
+      const queryClient = new QueryClient({
+        defaultOptions: { queries: { retry: false } },
+      });
+      const wrapper = ({ children }: { children: ReactNode }) => (
+        <QueryClientProvider client={queryClient}>
+          <IntlProvider locale="en" messages={{}} onError={() => {}}>
+            {children}
+          </IntlProvider>
+        </QueryClientProvider>
+      );
+      // Both hooks ride one client: the seam's fan-out must reach the
+      // impact query mounted beside it.
+      const ws = renderHook(() => useWorkingSet(SID, null, surfaces), { wrapper });
+      renderHook(() => useDeleteImpact(SID, "people"), { wrapper });
+      await waitFor(() =>
+        expect(vi.mocked(previewDeleteImpact)).toHaveBeenCalledTimes(1),
+      );
+      vi.mocked(previewDeleteImpact).mockClear();
+
+      await act(async () => {
+        ws.result.current.handleRename("people", "renamed");
+      });
+
+      await waitFor(() =>
+        expect(vi.mocked(previewDeleteImpact)).toHaveBeenCalledTimes(1),
       );
     });
 

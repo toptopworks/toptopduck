@@ -346,6 +346,21 @@ fn remove_source_error_serializes_adjacently_tagged() {
 }
 
 #[test]
+fn delete_impact_entry_serializes_flat() {
+    // DeleteImpactEntry (issue #1063) crosses IPC as a plain struct -- no
+    // tagging: the delete-confirm dialogs' impact list reads these entries
+    // verbatim, so both field names are load-bearing on the TS side.
+    use toptopduck_lib::DeleteImpactEntry;
+    assert_wire(
+        &DeleteImpactEntry {
+            reference_name: "result_1".into(),
+            display_name: "员工表".into(),
+        },
+        r#"{"reference_name":"result_1","display_name":"员工表"}"#,
+    );
+}
+
+#[test]
 fn rename_error_serializes_adjacently_tagged() {
     // RenameError (dataset display-label rename, ADR-0037) crosses IPC wrapped
     // in SessionError::RenameDataset (issue #121). NotFound / DisplayTaken are

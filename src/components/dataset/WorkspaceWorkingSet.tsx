@@ -99,6 +99,7 @@ export function WorkspaceWorkingSet({
               />
             </h2>
             <WorkingSetList
+              sessionId={sessionId}
               datasets={ws.datasets}
               activeName={ws.activeName}
               // The band rides the RESOLVED pick, not the raw state: after a
@@ -137,6 +138,7 @@ export function WorkspaceWorkingSet({
           everything whichever tab is visible. */}
       {pendingActiveDelete && (
         <ActiveSourceDeleteDialog
+          sessionId={sessionId}
           target={pendingActiveDelete}
           candidates={ws.datasets.filter(
             (d) => d.reference_name !== pendingActiveDelete.reference_name,

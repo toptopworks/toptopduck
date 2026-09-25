@@ -113,6 +113,17 @@ impl Default for DatasetPrivacy {
     }
 }
 
+/// One entry of the delete-impact preview (issue #1063): a live result that a
+/// source removal would mark stale. Carries the display label so the delete-
+/// confirm dialogs render human names without a second lookup.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeleteImpactEntry {
+    /// Reference name of the result that would go stale (`result_N`).
+    pub reference_name: String,
+    /// Display label, as shown in the confirm dialog's impact list.
+    pub display_name: String,
+}
+
 /// The descriptor of a loaded source Dataset: the artifact registered in the
 /// working set and surfaced to the UI (and, later, the LLM payload).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

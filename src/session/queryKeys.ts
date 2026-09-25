@@ -20,6 +20,15 @@ export const sessionKeys = {
    *  useWorkingSet), so there is no offset axis to distinguish. */
   previewRows: (sessionId: string, referenceName: string) =>
     ["session", sessionId, "workingSet", "previewRows", referenceName] as const,
+  /** The delete-confirm dialogs' cascade-impact preview (issue #1063): the
+   *  live results a source removal would mark stale, resolved to display
+   *  labels. Nested under the workingSet prefix like `previewRows` so the
+   *  working-set mutations' invalidation refreshes it (staleTime is
+   *  Infinity, ADR-0051). Keyed by reference name; the dialog's conditional
+   *  mount gates the query, so with no dialog open it simply never
+   *  fetches. */
+  deleteImpact: (sessionId: string, referenceName: string) =>
+    ["session", sessionId, "workingSet", "deleteImpact", referenceName] as const,
   active: (sessionId: string) => ["session", sessionId, "active"] as const,
   thread: (sessionId: string) => ["session", sessionId, "thread"] as const,
   rows: (
