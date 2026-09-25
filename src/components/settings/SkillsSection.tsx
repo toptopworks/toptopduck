@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { FormattedMessage, useIntl } from "react-intl";
+import { useQueryClient } from "@tanstack/react-query";
 import { openPath } from "@tauri-apps/plugin-opener";
 import {
   Download,
@@ -129,6 +130,9 @@ export function SkillsSection({
   onNewSkill: () => void;
 }) {
   const intl = useIntl();
+  // The client the rescan's late invalidate threads through the registry's
+  // entry (stable for the provider's life, so the closure outlives the pane).
+  const queryClient = useQueryClient();
 
   // The materialization-failure lane (issue #1016): the names of the
   // builtin skills the scan window could not write, refreshed by the same
@@ -189,7 +193,7 @@ export function SkillsSection({
         // unmount-safe, so it runs even when the pane closed mid-flight
         // (the picker / rail observers outlive this pane and need the
         // refreshed cache).
-        invalidateSkills();
+        invalidateSkills(queryClient);
       })
       .catch((e) => {
         // Silent in the UI on mount; the failure lane stays absent.
@@ -198,10 +202,10 @@ export function SkillsSection({
     return () => {
       cancelled = true;
     };
-    // invalidateSkills is the registry's module-level entry (client-scoped,
-    // not pane-scoped) and `onAppConfigSync` is a stable pass-through from
-    // the settings view (the same mount-once contract as the other settings
-    // panes).
+    // invalidateSkills threads the pane-lifetime client (its closure, like
+    // the old invalidate closure, outlives this pane) and
+    // `onAppConfigSync` is a stable pass-through from the settings view
+    // (the same mount-once contract as the other settings panes).
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 

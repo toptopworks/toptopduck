@@ -3,7 +3,6 @@ import { act, renderHook, waitFor } from "@testing-library/react";
 import {
   QueryClient,
   QueryClientProvider,
-  useQuery,
 } from "@tanstack/react-query";
 import type { ReactNode } from "react";
 
@@ -16,7 +15,6 @@ import {
 import {
   deleteSkill,
   importSkills,
-  listSkillSources,
   listSkills,
   setSkillEnabled,
 } from "../../api";
@@ -31,7 +29,6 @@ import type { SkillListing } from "../../types/skills";
 
 vi.mock("../../api", () => ({
   listSkills: vi.fn(),
-  listSkillSources: vi.fn(),
   setSkillEnabled: vi.fn(),
   deleteSkill: vi.fn(),
   importSkills: vi.fn(),
@@ -56,25 +53,6 @@ function makeHarness() {
   return { wrapper, queryClient };
 }
 
-/** Fetch one sources-family read then drop its observer, leaving an INACTIVE
- *  cache entry: the only witness the invalidation cascade reaches it is its
- *  invalidated state (an active observer would just refetch past it). */
-async function seedInactiveSources(
-  wrapper: (props: { children: ReactNode }) => ReactNode,
-  customPaths: readonly string[],
-) {
-  const sources = renderHook(
-    () =>
-      useQuery({
-        queryKey: skillKeys.sources(customPaths),
-        queryFn: () => listSkillSources([...customPaths]),
-      }),
-    { wrapper },
-  );
-  await waitFor(() => expect(sources.result.current.isSuccess).toBe(true));
-  sources.unmount();
-}
-
 describe("skills registry pure projections", () => {
   it("reads an unanswered listing as an empty roster and keeps only enabled skills", () => {
     expect(enabledRoster(undefined)).toEqual([]);
@@ -94,7 +72,6 @@ describe("useSkillsRegistry", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     vi.mocked(listSkills).mockResolvedValue(listingOf([onSkill, offSkill]));
-    vi.mocked(listSkillSources).mockResolvedValue([]);
     vi.mocked(setSkillEnabled).mockResolvedValue(baseAppConfig());
     vi.mocked(deleteSkill).mockResolvedValue(undefined);
     vi.mocked(importSkills).mockResolvedValue([]);
@@ -108,6 +85,11 @@ describe("useSkillsRegistry", () => {
     // one cache entry, never their own keys.
     expect(queryClient.getQueryState(skillKeys.all())).not.toBeNull();
     expect(listSkills).toHaveBeenCalledTimes(1);
+    // The projection outputs, asserted non-empty here: every consumer suite
+    // mocks an empty listing, so this is the seam's own window on the
+    // roster / index wiring.
+    expect(result.current.enabledRoster).toEqual([onSkill]);
+    expect(result.current.skillIndex?.get("vega-chart")).toBe(offSkill);
   });
 
   it("gates the listing IPC behind enabled: false", async () => {
@@ -142,6 +124,30 @@ describe("useSkillsRegistry", () => {
     await waitFor(() => expect(listSkills).toHaveBeenCalledTimes(2));
   });
 
+  it("keeps a rejected write from syncing the config or invalidating", async () => {
+    const onAppConfigSync = vi.fn();
+    vi.mocked(setSkillEnabled).mockRejectedValue(new Error("ipc down"));
+    const { wrapper } = makeHarness();
+    const { result } = renderHook(
+      () => useSkillsRegistry({ onAppConfigSync }),
+      { wrapper },
+    );
+    await waitFor(() => expect(result.current.listing).toBeDefined());
+    act(() => {
+      result.current.setSkillEnabledMutation.mutate({
+        name: "pdf-tools",
+        enabled: false,
+      });
+    });
+    await waitFor(() =>
+      expect(result.current.setSkillEnabledMutation.isError).toBe(true),
+    );
+    // The contract's failure half: a rejected write syncs no config and
+    // invalidates nothing (the listing fetch stays at its one mount call).
+    expect(onAppConfigSync).not.toHaveBeenCalled();
+    expect(listSkills).toHaveBeenCalledTimes(1);
+  });
+
   it("invalidates the listing after a delete", async () => {
     const { wrapper } = makeHarness();
     const { result } = renderHook(() => useSkillsRegistry(), { wrapper });
@@ -155,7 +161,9 @@ describe("useSkillsRegistry", () => {
 
   it("cascades an import's invalidation to the sources discovery reads", async () => {
     const { wrapper, queryClient } = makeHarness();
-    await seedInactiveSources(wrapper, []);
+    // Seed an INACTIVE sources entry (no observer attached): the only
+    // witness the cascade reaches it is its invalidated state.
+    queryClient.setQueryData(skillKeys.sources([]), []);
     const { result } = renderHook(() => useSkillsRegistry(), { wrapper });
     await waitFor(() => expect(result.current.listing).toBeDefined());
     act(() => {
@@ -166,19 +174,19 @@ describe("useSkillsRegistry", () => {
     });
     await waitFor(() => expect(listSkills).toHaveBeenCalledTimes(2));
     // The cascade contract's test pin: one invalidate, the sources family
-    // evicted with it.
+    // invalidated with it.
     expect(
       queryClient.getQueryState(skillKeys.sources([]))?.isInvalidated,
     ).toBe(true);
   });
 
-  it("evicts the listing and the sources family from the module entry alone", async () => {
+  it("invalidates the listing and the sources family from the exported entry alone", async () => {
     const { wrapper, queryClient } = makeHarness();
-    await seedInactiveSources(wrapper, ["/custom/lib"]);
+    queryClient.setQueryData(skillKeys.sources(["/custom/lib"]), []);
     const { result } = renderHook(() => useSkillsRegistry(), { wrapper });
     await waitFor(() => expect(result.current.listing).toBeDefined());
     act(() => {
-      invalidateSkills();
+      invalidateSkills(queryClient);
     });
     await waitFor(() => expect(listSkills).toHaveBeenCalledTimes(2));
     expect(

@@ -276,6 +276,86 @@ describe("ImportSkillsDialog (issue #367)", () => {
     expect(onClose).not.toHaveBeenCalled();
   });
 
+  it("prunes imported items so a retry re-sends only the failed one", async () => {
+    // The per-call onSuccess's prune half (the registry seam owns the
+    // cache work): a partial batch must not re-send the items that landed
+    // (the backend would reject them with NameTaken), so the retry carries
+    // only the failed item's source_dir.
+    vi.mocked(listSkillSources).mockResolvedValue([
+      {
+        id: "claude-code",
+        label: "Claude Code",
+        path: "/home/u/.claude/skills",
+        skills: [
+          {
+            name: "alpha",
+            description: "First skill.",
+            source_dir: "/home/u/.claude/skills/alpha",
+            status: "importable" as const,
+            reason: null,
+          },
+          {
+            name: "beta",
+            description: "Second skill.",
+            source_dir: "/home/u/.claude/skills/beta",
+            status: "importable" as const,
+            reason: null,
+          },
+        ],
+      },
+    ]);
+    const imported: ImportOutcome = {
+      kind: "imported",
+      data: skillEntry("alpha", {
+        description: "First skill.",
+        acquired: "linked",
+        body: "Body.\n",
+        link_target: "/home/u/.claude/skills/alpha",
+        content_hash: "abc",
+      }),
+    };
+    vi.mocked(importSkills)
+      .mockResolvedValueOnce([
+        imported,
+        { kind: "failed", data: { kind: "NameTaken", data: "beta" } },
+      ])
+      .mockResolvedValue([]);
+    const onClose = vi.fn();
+    renderWithProviders(<ImportSkillsDialog onClose={onClose} />);
+    await screen.findByText("Claude Code");
+    fireEvent.click(screen.getByRole("button", { name: /expand/i }));
+    fireEvent.click(await screen.findByText("alpha"));
+    fireEvent.click(screen.getByText("beta"));
+    expect(screen.getByTestId("import-action").textContent).toContain(
+      "Import 2",
+    );
+
+    fireEvent.click(screen.getByTestId("import-action"));
+    // The failed item's error lane surfaces and the dialog stays open...
+    await waitFor(() =>
+      expect(
+        screen.getByText("A skill named \"beta\" already exists"),
+      ).toBeInTheDocument(),
+    );
+    expect(onClose).not.toHaveBeenCalled();
+    // ...while the imported item left the selection: the action label
+    // drops to the surviving count.
+    await waitFor(() =>
+      expect(screen.getByTestId("import-action").textContent).toContain(
+        "Import 1",
+      ),
+    );
+
+    // The retry re-sends only the failed item (alpha was pruned).
+    fireEvent.click(screen.getByTestId("import-action"));
+    await waitFor(() =>
+      expect(importSkills).toHaveBeenLastCalledWith(
+        [{ source_dir: "/home/u/.claude/skills/beta" }],
+        "link",
+      ),
+    );
+  });
+
   it("adds a custom path via the directory picker and re-discovers", async () => {
     // First call: no custom paths -> empty. Second call (after picking): the
     // custom source appears.

@@ -1,4 +1,4 @@
-import { useEffect, useMemo } from "react";
+import { useMemo } from "react";
 import {
   useMutation,
   useQuery,
@@ -12,6 +12,7 @@ import {
   listSkills,
   setSkillEnabled,
 } from "../api";
+import { log } from "../lib/log";
 import { skillKeys } from "../session/queryKeys";
 import type { AppConfig } from "../types/app-config";
 import type {
@@ -25,41 +26,34 @@ import type {
 // process-global registry direction). ONE seam owns every read and write of
 // the registry's TanStack cache: the listing query pair
 // (skillKeys.all() + listSkills) lives here, the three mutations
-// (enablement / delete / import) ride here, and the module-level
-// invalidateSkills() is the single invalidation entry the mount rescan and
-// the mutations share. The consumers -- the settings pane, the import
-// dialog, the composer picker, the thread rail -- read the projections and
-// fire the mutations; none of them pairs its own query or rolls its own
-// invalidate.
+// (enablement / delete / import) ride here, and invalidateSkills() is the
+// single invalidation entry the mount rescan and the mutations share. The
+// consumers -- the settings pane, the import dialog, the composer picker,
+// the thread rail -- read the projections and fire the mutations; none of
+// them pairs its own listing read or rolls its own invalidate (the import
+// dialog's sources discovery read is the one read keyed outside the seam --
+// the cascade contract below carries it).
 //
 // Invalidation cascade contract: invalidateSkills() issues ONE prefix
 // invalidate against skillKeys.all(), and TanStack's prefix matching is what
 // carries it across the family -- the import dialog's source-discovery reads
 // are keyed ["skills", "sources", <customPaths>] under the same "skills"
-// prefix, so this single call also evicts them. The eviction matters because
-// discovery classifies each skill against the registry snapshot the backend
+// prefix, so this single call also invalidates them. The staleness matters
+// because discovery classifies each skill against the registry snapshot the
+// backend
 // read: a previously `already_exists` skill only becomes importable-shaped
 // once its name leaves the registry, and the stale discovery read re-fetches
 // on the dialog's next open. This module header is the contract's
 // authoritative narrative (moved here from the key factory's comment).
 
-// The client the module-level invalidateSkills() targets. The hook registers
-// its useQueryClient() value in an effect: the client is provider-stable
-// (one QueryClient per App, ADR-0051), so the assignment is an idempotent
-// pointer refresh. The registration runs before every real caller -- it
-// precedes the consumers' own mount effects in the same flush, and the
-// mutations / the settings pane's rescan-then all fire later still. It is
-// deliberately NOT cleared on unmount: an in-flight mutation's or the
-// rescan's late invalidate must stay cache-scoped after the calling pane
-// went away (the picker / rail observers outlive it).
-let registeredClient: QueryClient | null = null;
-
 /** The one invalidation entry for the whole registry cache (see the cascade
- *  contract above). Fire-and-forget and cache-scoped, so it stays safe after
- *  the calling pane unmounted (the picker / rail observers outlive it). */
-export function invalidateSkills(): void {
-  if (registeredClient === null) return;
-  void registeredClient.invalidateQueries({ queryKey: skillKeys.all() });
+ *  contract above). Takes the client so callers outside the hook (the
+ *  settings pane's mount rescan) can fire it; the caller's closure holds the
+ *  provider-lifetime client (ADR-0051), so a late invalidate stays
+ *  cache-scoped and safe after the calling pane unmounted (the picker / rail
+ *  observers outlive it). */
+export function invalidateSkills(queryClient: QueryClient): void {
+  void queryClient.invalidateQueries({ queryKey: skillKeys.all() });
 }
 
 /** The enablement-axis roster (ADR-0119 Decision 5): the listing's enabled
@@ -78,7 +72,7 @@ export function enabledRoster(
  *  markers render the verb + name from the event alone. */
 export function skillIndex(
   listing: SkillListing | undefined,
-): Map<string, SkillEntry> | undefined {
+): ReadonlyMap<string, SkillEntry> | undefined {
   const skills = listing?.skills;
   if (skills === undefined) return undefined;
   const index = new Map<string, SkillEntry>();
@@ -102,9 +96,6 @@ export function useSkillsRegistry({
   onAppConfigSync,
 }: UseSkillsRegistryOpts = {}) {
   const queryClient = useQueryClient();
-  useEffect(() => {
-    registeredClient = queryClient;
-  }, [queryClient]);
 
   const { data: listing, error, refetch, isFetching } = useQuery({
     queryKey: skillKeys.all(),
@@ -121,7 +112,13 @@ export function useSkillsRegistry({
       setSkillEnabled(name, enabled),
     onSuccess: (cfg) => {
       onAppConfigSync?.(cfg);
-      invalidateSkills();
+      invalidateSkills(queryClient);
+    },
+    // The seam-level fallback trace: consumers own the UI presentation
+    // through per-call callbacks, and a call site that forgets one must
+    // still leave a durable signal (ADR-0029).
+    onError: (e) => {
+      log.warn("SkillsRegistry", "skill enablement write failed", e);
     },
   });
 
@@ -130,18 +127,25 @@ export function useSkillsRegistry({
   const deleteSkillMutation = useMutation({
     mutationFn: (name: string) => deleteSkill(name),
     onSuccess: () => {
-      invalidateSkills();
+      invalidateSkills(queryClient);
+    },
+    onError: (e) => {
+      log.warn("SkillsRegistry", "skill delete failed", e);
     },
   });
 
   // The import batch (one mode for the whole batch): the registry's
   // invalidation is the cascade contract's live trigger -- a successful
-  // import must evict the sources discovery reads alongside the listing.
+  // import must invalidate the sources discovery reads alongside the
+  // listing.
   const importSkillsMutation = useMutation({
     mutationFn: ({ items, mode }: { items: ImportItem[]; mode: ImportMode }) =>
       importSkills(items, mode),
     onSuccess: () => {
-      invalidateSkills();
+      invalidateSkills(queryClient);
+    },
+    onError: (e) => {
+      log.warn("SkillsRegistry", "skill import failed", e);
     },
   });
 

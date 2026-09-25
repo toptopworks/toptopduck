@@ -42,7 +42,8 @@ import {
 // discovery time -- the backend re-validates + re-checks the registry at
 // commit too, so no status is cached beyond the preview. The import batch
 // rides the registry seam's mutation, whose invalidation carries the cascade
-// contract (this dialog's own discovery read is evicted with the listing).
+// contract (this dialog's own discovery read is invalidated with the
+// listing).
 // The staging state machine -- selection, expansion, mode -- stays here. The
 // bottom dropdown picks link (symlink / junction -> linked) vs copy
 // (recursive -> local) for the whole batch; the Import action is gray at
