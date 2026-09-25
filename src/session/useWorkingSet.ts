@@ -40,9 +40,10 @@ import type {
 // surfaces -- nothing else); useSessionState renders the read slice below
 // for the pane's own surfaces (rail badges, Targets chip, error
 // aggregation, hero empties); useIngestFlow reaches the cascade through
-// useSessionState's refreshServerState wrapper around the exported entry
-// (ingest stays an orchestration consumer, never an owner -- ADR-0123
-// Decision 3).
+// useSessionState's refreshServerState wrapper around the exported
+// full-cascade entry (ingest stays an orchestration consumer, never an
+// owner -- ADR-0123 Decision 3); useTurnFlow reaches the turn-end entry
+// (invalidateTurnEndData) directly.
 //
 // Invalidation cascade (the authoritative narrative; previously dispersed
 // across queryKeys doc comments and the callers' refresh helpers): every
@@ -50,10 +51,8 @@ import type {
 // thread. thread shares the fan-out even though this seam never observes it:
 // source lifecycle events append to the thread, so a mutation without the
 // thread refresh would leave the rail stale. The turn-end entry is the one
-// sanctioned divergence: a settled turn already wrote its thread cache
-// optimistically (useTurnFlow's setQueryData), so it refreshes only the
-// working-set descriptors -- the omission narrative lives HERE, never at the
-// caller (issue #1080). The previewRows key NESTS
+// sanctioned divergence; its thread omission is narrated at the entry
+// itself, not here (issue #1080). The previewRows key NESTS
 // under the workingSet prefix, so the workingSet invalidation refreshes the
 // sample page alongside the descriptor -- with the app-wide staleTime
 // Infinity (ADR-0051) a replaced source's cached rows would otherwise
@@ -156,8 +155,9 @@ const invalidateKeys = (
  *  half. Omits thread BY DESIGN -- the turn already wrote the thread cache
  *  optimistically (setQueryData in useTurnFlow), and invalidating it would
  *  wipe the optimistic append against a stale/empty refetch (ADR-0051).
- *  This is the single point where that omission is narrated; consumers
- *  never restate it. Error handling stays with the caller. */
+ *  The canonical narrative for that omission lives here; lifecycle
+ *  comments elsewhere describe their own contexts, never this key set.
+ *  Error handling stays with the caller. */
 export function invalidateTurnEndData(
   queryClient: QueryClient,
   sessionId: string,

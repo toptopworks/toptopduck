@@ -669,8 +669,9 @@ export function useTurnFlow(sessionId: string, deps: UseTurnFlowDeps): UseTurnFl
   // (ADR-0051) -- question + outcome + the live trace rows the events
   // delivered (issue #297: the optimistic record matches the backend's
   // recorded TurnRecord.trace entry-for-entry); a Materialized outcome
-  // additionally moves viewedResult (auto-selects) and invalidates workingSet
-  // + active (a new result_N registered server-side).
+  // additionally moves viewedResult (auto-selects) and refreshes through
+  // the seam's turn-end entry (a new result_N registered server-side;
+  // the key set belongs to the seam, issue #1080).
   const handleAsk = useCallback(
     async (question: string, invocations?: string[]) => {
       // Belt-and-suspenders (issue #758): the one-turn rule enforced at the

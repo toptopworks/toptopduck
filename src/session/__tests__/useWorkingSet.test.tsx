@@ -434,10 +434,8 @@ describe("invalidateTurnEndData", () => {
 
     await invalidateTurnEndData(queryClient, SID);
 
-    // workingSet + active only: a settled turn already wrote its thread
-    // cache optimistically (setQueryData in useTurnFlow), so refreshing
-    // thread here would wipe the optimistic append (ADR-0051). The
-    // omission narrative lives with the seam, never at the caller.
+    // workingSet + active only -- thread omitted by design; the why lives
+    // with invalidateTurnEndData's JSDoc (issue #1080).
     expect(spy.mock.calls.map(([filters]) => JSON.stringify(filters?.queryKey))).toEqual([
       JSON.stringify(sessionKeys.workingSet(SID)),
       JSON.stringify(sessionKeys.active(SID)),
