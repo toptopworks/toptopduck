@@ -2,6 +2,7 @@ import { useEffect, useId, useMemo, useState } from "react";
 import { FormattedMessage, useIntl } from "react-intl";
 import { toAppError } from "../../lib/error-presentation";
 import { useRowPage } from "../../session/useRowPage";
+import type { RowPage } from "../../types/dataset";
 import { decodeViz, type VizFailureReason } from "../viz/viz";
 import { VizChartSlot } from "../viz/LazyVegaChart";
 import { VizEnlargeDialog } from "../viz/VizEnlargeDialog";
@@ -150,33 +151,42 @@ export function ResultView({
   // during render so the seam never fetches the prior result's offset
   // against the new reference (React discards the mid-render output before
   // committing, so no observer ever mounts on the stale window). The
-  // take-it-away actions' failures (issue #769) ride the same state: every
-  // window move clears them, mirroring the loadPage reset that cleared the
-  // shared error at every fetch start.
-  const [pageWindow, setPageWindow] = useState({
-    referenceName,
-    offset: 0,
-    // Seeds the field's widened type (null is its only other value).
-    actionError: null as AppError | null,
-  });
-  if (pageWindow.referenceName !== referenceName) {
-    setPageWindow({ referenceName, offset: 0, actionError: null });
+  // take-it-away actions' failures (issue #769) ride their own slot: every
+  // window move clears it, so a stale action failure never follows the user
+  // into the next window.
+  const [windowRef, setWindowRef] = useState(referenceName);
+  const [offset, setOffset] = useState(0);
+  const [actionError, setActionError] = useState<AppError | null>(null);
+  if (windowRef !== referenceName) {
+    setWindowRef(referenceName);
+    setOffset(0);
+    setActionError(null);
   }
-  const { offset, actionError } = pageWindow;
 
   // Issue #1079: the paged read rides the useRowPage snapshot seam -- one
   // cached query per (reference, offset) window.
-  const { page, inFlight, error: readError } = useRowPage(sessionId, referenceName, offset, pageSize);
+  const { page, inFlight, error: readError, refetch } = useRowPage(sessionId, referenceName, offset, pageSize);
 
-  const columns = page?.columns ?? EMPTY_COLUMNS;
-  const rows = page?.rows ?? EMPTY_ROWS;
-  const total = page?.total ?? 0;
+  // An errored window has no placeholder (keepPreviousData holds only while
+  // the new key is pending), so the last landed page is tracked separately
+  // and shown through the error: without it a rejected turn renders a false
+  // empty table with both pager buttons dead (the retired machine kept the
+  // last page on screen through its catch).
+  const [lastGoodPage, setLastGoodPage] = useState<RowPage | null>(null);
+  if (page !== null && page !== lastGoodPage) {
+    setLastGoodPage(page);
+  }
+  const shownPage = page ?? lastGoodPage;
+
+  const columns = shownPage?.columns ?? EMPTY_COLUMNS;
+  const rows = shownPage?.rows ?? EMPTY_ROWS;
+  const total = shownPage?.total ?? 0;
   // The DISPLAYED window's offset (the snapshot's own, so the count and the
   // prev/next bounds stay pinned to the rows on screen). The component's
   // `offset` is the FETCH target and moves the instant a page turn starts --
   // deriving the count from it would mix the new offset with the previous
   // page's placeholder rows and flash a window that was never fetched.
-  const shownOffset = page?.offset ?? 0;
+  const shownOffset = shownPage?.offset ?? 0;
 
   // Stable id linking the table to its heading so the heading text is the
   // table's accessible name.
@@ -187,10 +197,9 @@ export function ResultView({
   // reject is the read phase of a turn; toAppError applies no verb prefix on
   // the read kind, and ErrorBanner renders only message + detail, not kind).
   // The seam passes the reject through raw; the formatting happens here.
-  // The actions' error wins when both exist: the manual machine's error was
-  // last-writer-wins (an action failure replaced the read banner), and a
-  // snapshot read's reject is sticky under its key -- without the priority
-  // the newest failure would be silently swallowed.
+  // The actions' error wins when both exist: a snapshot read's reject is
+  // sticky under its key -- without the priority the newest failure would
+  // be silently swallowed.
   const error = actionError ?? (readError !== null ? toAppError(readError, intl, "read") : null);
 
   // --- Viz (ADR-0016/0033) ------------------------------------------------
@@ -226,10 +235,11 @@ export function ResultView({
   // Issue #773: has the first load settled (success OR error)? Gates the
   // pagination count's content so the pre-settle state (no page, no error)
   // never renders "Rows 0–0 (of 0)" -- a fake value flashing in the count
-  // bar. Never re-gates: a page turn or result switch keeps the last real
-  // page on screen via keepPreviousData (page !== null), so the count keeps
-  // the old values while in flight instead of clearing.
-  const settled = page !== null || readError !== null;
+  // bar. Re-gates only where no honest value exists: a page turn or result
+  // switch keeps the last real page on screen (keepPreviousData while
+  // pending, the last-good fallback after an error), but a switch away from
+  // an errored first load has neither, so the count waits for the new read.
+  const settled = shownPage !== null || readError !== null;
 
   const showRowDisclosure = total > ROW_DISCLOSURE_THRESHOLD;
   const showColumnDisclosure = columns.length > COLUMN_DISCLOSURE_THRESHOLD;
@@ -289,7 +299,12 @@ export function ResultView({
           sessionId={sessionId}
           referenceName={referenceName}
           onError={(e) => {
-            setPageWindow({ referenceName, offset, actionError: toAppError(e, intl, "read") });
+            // The error write owns only the error slot: ResultActions holds
+            // the click-time closure across the pull's awaits, and its stale
+            // guard does not cover paging within the same result, so
+            // restating the window here would yank the view back to the
+            // pull's start offset.
+            setActionError(toAppError(e, intl, "read"));
           }}
         />
       </div>
@@ -513,8 +528,10 @@ export function ResultView({
         <button
           type="button"
           disabled={!hasPrev || inFlight}
-          onClick={() =>
-            setPageWindow({ referenceName, offset: Math.max(0, offset - pageSize), actionError: null })}
+          onClick={() => {
+            setOffset(Math.max(0, offset - pageSize));
+            setActionError(null);
+          }}
           className={PAGE_BTN}
         >
           <FormattedMessage id="result.pagination.prev" defaultMessage="Previous" />
@@ -522,7 +539,17 @@ export function ResultView({
         <button
           type="button"
           disabled={!hasNext || inFlight}
-          onClick={() => setPageWindow({ referenceName, offset: offset + pageSize, actionError: null })}
+          onClick={() => {
+            // An errored window's Next is the in-place retry: the offset
+            // already points at the failed window, so re-targeting it would
+            // bail out on the same value -- refetch through the seam.
+            if (readError !== null && page === null) {
+              refetch();
+            } else {
+              setOffset(offset + pageSize);
+            }
+            setActionError(null);
+          }}
           className={PAGE_BTN}
         >
           <FormattedMessage id="result.pagination.next" defaultMessage="Next" />

@@ -75,9 +75,10 @@ describe("useRowPage", () => {
 
   it("does not refetch on remount (staleTime/gcTime Infinity -- a snapshot never goes stale)", async () => {
     // The snapshot contract's teeth: with the bare client's staleTime 0 a
-    // remount would refetch; with gcTime's 5-minute default an unmounted
-    // entry would be evicted. The seam pins both to Infinity -- the cache
-    // lives until the session close drops the `session` prefix.
+    // remount would refetch -- that is the half this pin discriminates.
+    // gcTime's 5-minute default never evicts inside a test's lifetime, so
+    // the eviction half is not observable here; both options are pinned to
+    // Infinity at the seam, and the session's slice sweep drops the cache.
     vi.mocked(readRows).mockResolvedValue(page(0));
     const sharedClient = new QueryClient();
     const first = setup(sharedClient);

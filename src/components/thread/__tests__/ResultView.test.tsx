@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { fireEvent, screen, waitFor, within } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { renderI18n as renderI18nBase, embedOk } from "../../common/__tests__/helpers";
+import { renderI18n as renderI18nBase, withIntl, embedOk } from "../../common/__tests__/helpers";
 import { COLUMN_DISCLOSURE_THRESHOLD, ResultView, ROW_DISCLOSURE_THRESHOLD } from "../ResultView";
 import { catalogFor } from "../../../i18n";
 import { readRows, exportRowsCsv } from "../../../api";
@@ -283,6 +283,96 @@ describe("ResultView", () => {
   // (issue #1079): late responses are isolated by the offset/reference axes of
   // the query key, pinned at the useRowPage module layer instead of here.
 
+  it("keeps the last good page and a working pager when a page turn's read rejects", async () => {
+    // keepPreviousData holds the prior page only while the new key is
+    // pending -- a rejected turn drops the placeholder, and without the
+    // last-good fallback the view would render a false empty table, an
+    // all-zeros count, and both pager buttons dead. The fallback keeps the
+    // previous page on screen through the error, and Next on the errored
+    // window is the in-place retry (the offset already points there).
+    vi.mocked(readRows)
+      .mockResolvedValueOnce({
+        columns: [{ name: "n", canonical_type: "BIGINT" }],
+        rows: [["1"], ["2"]],
+        total: 5,
+        offset: 0,
+        limit: 2,
+      })
+      .mockRejectedValueOnce({ kind: "RowRead", data: { kind: "UnknownReference" } })
+      .mockResolvedValueOnce({
+        columns: [{ name: "n", canonical_type: "BIGINT" }],
+        rows: [["3"], ["4"]],
+        total: 5,
+        offset: 2,
+        limit: 2,
+      });
+    renderI18n(<ResultView sessionId="sess-1" referenceName="result_1" question="q:result_1" assumption={null} viz={null} pageSize={2} />);
+    await waitFor(() => expect(screen.getByText(/第 1–2 行（共 5 行）/)).toBeInTheDocument());
+    fireEvent.click(screen.getByRole("button", { name: /下一页/ }));
+    // The read banner lands with the previous page still on screen: real
+    // rows, real count, no false empty-state row.
+    await screen.findByRole("alert");
+    expect(screen.getByText("1")).toBeInTheDocument();
+    expect(screen.queryByText(/（无数据行）/)).not.toBeInTheDocument();
+    expect(screen.getByText(/第 1–2 行（共 5 行）/)).toBeInTheDocument();
+    // The pager stays usable: Next retries the failed window, Prev (window
+    // 0) stays out of bounds.
+    const next = screen.getByRole("button", { name: /下一页/ });
+    expect(next).toBeEnabled();
+    expect(screen.getByRole("button", { name: /上一页/ })).toBeDisabled();
+    fireEvent.click(next);
+    // The retry re-fetches the failed offset (not the next window), and its
+    // landing restores the normal flow.
+    await waitFor(() => expect(readRows).toHaveBeenLastCalledWith("sess-1", "result_1", 2, 2));
+    expect(readRows).toHaveBeenCalledTimes(3);
+    await waitFor(() => expect(screen.getByText(/第 3–4 行（共 5 行）/)).toBeInTheDocument());
+  });
+
+  it("resets the paging window on a result switch (fetches the new reference at offset 0)", async () => {
+    // The render-phase reset is the switch path's request-side logic (the
+    // response-side isolation lives at the module layer): without it the
+    // new reference is fetched at the prior result's stale offset. The
+    // rerender shares the harness client so the switch runs against the
+    // live cache, as in production (SessionPane does not key the mount).
+    vi.mocked(readRows).mockImplementation(async (_sid, ref, off) => {
+      if (ref === "result_3") {
+        throw { kind: "RowRead", data: { kind: "UnknownReference" } };
+      }
+      return {
+        columns: [{ name: "n", canonical_type: "BIGINT" }],
+        rows: [[String(off + 1)], [String(off + 2)]],
+        total: 5,
+        offset: off,
+        limit: 2,
+      };
+    });
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    // The rerender must repeat the render's exact tree (withIntl wrapping
+    // the provider body): a bare element would swap the tree shape and
+    // remount the view, whose fresh state reset would mask the reset logic
+    // under test.
+    const body = (ref: string) => (
+      <QueryClientProvider client={queryClient}>
+        <ResultView sessionId="sess-1" referenceName={ref} question={`q:${ref}`} assumption={null} viz={null} pageSize={2} />
+      </QueryClientProvider>
+    );
+    const { rerender } = renderI18nBase(body("result_1"));
+    await waitFor(() => expect(screen.getByText("1")).toBeInTheDocument());
+    fireEvent.click(screen.getByRole("button", { name: /下一页/ }));
+    await waitFor(() => expect(screen.getByText("3")).toBeInTheDocument());
+    // Switch: the new reference fetches from offset 0, never the stale
+    // offset 2.
+    rerender(withIntl(body("result_2")));
+    await waitFor(() => expect(readRows).toHaveBeenLastCalledWith("sess-1", "result_2", 0, 2));
+    await waitFor(() => expect(screen.getByText(/第 1–2 行（共 5 行）/)).toBeInTheDocument());
+    // Switch onto a rejecting result: the banner lands with the previous
+    // result's page kept on screen (the last-good fallback spans switches,
+    // like the retired machine's untouched state).
+    rerender(withIntl(body("result_3")));
+    await screen.findByRole("alert");
+    expect(screen.getByText(/第 1–2 行（共 5 行）/)).toBeInTheDocument();
+  });
+
   describe("first-load flash (issue #773)", () => {
     // Issue #773: two first-frame artifacts. (1) The loading state starts
     // "not loading" while the mount effect unconditionally fetches, so the very
@@ -372,8 +462,8 @@ describe("ResultView", () => {
       renderI18n(<ResultView sessionId="sess-1" referenceName="result_1" question="q:result_1" assumption={null} viz={null} />);
       await waitFor(() => expect(screen.getByRole("alert")).toBeInTheDocument());
       expect(screen.getByText(/第 0–0 行（共 0 行）/)).toBeInTheDocument();
-      // The error path also recovers loading: with rows empty and loading
-      // false, the empty-state row renders (shown === 0 && !loading).
+      // The error path also recovers the busy flag: with rows empty and not
+      // in flight, the empty-state row renders (shown === 0 && !inFlight).
       expect(screen.getByText(/（无数据行）/)).toBeInTheDocument();
     });
 
@@ -885,6 +975,92 @@ describe("ResultView viz (ADR-0016/0033, issue #26)", () => {
     const alert = await screen.findByRole("alert");
     expect(alert).toHaveTextContent(/导出文件写入失败/);
     expect(alert).toHaveTextContent(/create C:\/out\/x\.csv: denied/);
+  });
+
+  it("a late action failure does not yank the paging window", async () => {
+    // The error write owns only the error slot: ResultActions holds the
+    // click-time onError closure across the pull's awaits, and its stale
+    // guard compares references only -- so paging within the same result
+    // during a long pull lets the failure through late. Restating the
+    // window at that moment would drag the view back to the pull's start
+    // offset; only the banner may land.
+    const page = (off: number) => ({
+      columns: [{ name: "n", canonical_type: "BIGINT" }] as { name: string; canonical_type: string }[],
+      rows: [[String(off + 1)], [String(off + 2)]],
+      total: 5,
+      offset: off,
+      limit: 2,
+    });
+    let rejectExport: (e: unknown) => void = () => {};
+    vi.mocked(readRows).mockImplementation(async (_sid, _ref, off) => page(off));
+    vi.mocked(exportRowsCsv).mockImplementation(
+      () =>
+        new Promise((_resolve, reject) => {
+          rejectExport = reject;
+        }),
+    );
+    vi.mocked(saveDialog).mockResolvedValue("C:/out/x.csv");
+    renderI18n(
+      <ResultView sessionId="sess-1" referenceName="result_1" question="q:result_1" assumption={null} viz={null} pageSize={2} />,
+    );
+    await waitFor(() => expect(screen.getByText("1")).toBeInTheDocument());
+    fireEvent.click(screen.getByRole("button", { name: "导出 CSV" }));
+    // The pull is in flight; the user pages forward and the page lands.
+    fireEvent.click(screen.getByRole("button", { name: /下一页/ }));
+    await waitFor(() => expect(screen.getByText(/第 3–4 行（共 5 行）/)).toBeInTheDocument());
+    // The export fails late: the banner lands, the window stays on page 2.
+    rejectExport({ kind: "Export", data: { kind: "Io", data: { step: "Create", path: "C:/out/x.csv", detail: "denied" } } });
+    await screen.findByRole("alert");
+    expect(screen.getByText(/第 3–4 行（共 5 行）/)).toBeInTheDocument();
+  });
+
+  it("the action error wins when the read rejects too", async () => {
+    // The priority rule (actionError over the sticky readError) is new law
+    // from the seam switch: with both live, the newest failure -- the
+    // action's -- must own the banner, or it is silently swallowed by the
+    // read reject parked under the window's key.
+    vi.mocked(readRows).mockRejectedValue({ kind: "RowRead", data: { kind: "UnknownReference" } });
+    vi.mocked(saveDialog).mockResolvedValue("C:/out/x.csv");
+    vi.mocked(exportRowsCsv).mockRejectedValue({
+      kind: "Export",
+      data: { kind: "Io", data: { step: "Create", path: "C:/out/x.csv", detail: "denied" } },
+    });
+    renderI18n(
+      <ResultView sessionId="sess-1" referenceName="result_1" question="q:result_1" assumption={null} viz={null} />,
+    );
+    // The read banner is up first; the export failure must replace it.
+    await screen.findByRole("alert");
+    fireEvent.click(screen.getByRole("button", { name: "导出 CSV" }));
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent(/导出文件写入失败/);
+  });
+
+  it("a window move clears the action error", async () => {
+    // Every window move clears the action slot, so a stale action failure
+    // never follows the user into the next window.
+    const page = (off: number) => ({
+      columns: [{ name: "n", canonical_type: "BIGINT" }] as { name: string; canonical_type: string }[],
+      rows: off === 0 ? [["1"], ["2"]] : [["3"], ["4"]],
+      total: 5,
+      offset: off,
+      limit: 2,
+    });
+    vi.mocked(readRows).mockImplementation(async (_sid, _ref, off) => page(off));
+    vi.mocked(saveDialog).mockResolvedValue("C:/out/x.csv");
+    vi.mocked(exportRowsCsv).mockRejectedValue({
+      kind: "Export",
+      data: { kind: "Io", data: { step: "Create", path: "C:/out/x.csv", detail: "denied" } },
+    });
+    renderI18n(
+      <ResultView sessionId="sess-1" referenceName="result_1" question="q:result_1" assumption={null} viz={null} pageSize={2} />,
+    );
+    await waitFor(() => expect(screen.getByText("1")).toBeInTheDocument());
+    fireEvent.click(screen.getByRole("button", { name: "导出 CSV" }));
+    await screen.findByRole("alert");
+    // The page turn clears the banner.
+    fireEvent.click(screen.getByRole("button", { name: /下一页/ }));
+    await waitFor(() => expect(screen.getByText("3")).toBeInTheDocument());
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
   });
 
   it("mounts the enlarge affordance on a rendered chart (#1050)", async () => {

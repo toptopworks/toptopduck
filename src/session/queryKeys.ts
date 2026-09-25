@@ -9,7 +9,9 @@
  * invalidation cascade (narrative: the useRowPage module header). The
  * offset is part of the key so each page caches independently and
  * `placeholderData: keepPreviousData` can show the prior page while the
- * next loads. */
+ * next loads; the limit is keyed too -- the page size is caller-variable,
+ * and a differently-sized fetch must never be served from the same
+ * window's cache. */
 export const sessionKeys = {
   all: (sessionId: string) => ["session", sessionId] as const,
   workingSet: (sessionId: string) => ["session", sessionId, "workingSet"] as const,
@@ -38,7 +40,8 @@ export const sessionKeys = {
     sessionId: string,
     referenceName: string,
     offset: number,
-  ) => ["session", sessionId, "rows", referenceName, offset] as const,
+    limit: number,
+  ) => ["session", sessionId, "rows", referenceName, offset, limit] as const,
   /** Per-session authorization posture (ADR-0080, issue #352) -- the composer
    *  auth-mode chip's read. Lives under the session prefix so a close's
    *  removeQueries drops it with the rest; a resume lands the reset value via
