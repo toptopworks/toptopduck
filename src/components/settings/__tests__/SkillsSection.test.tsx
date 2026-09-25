@@ -133,10 +133,9 @@ describe("SkillsSection (issue #362)", () => {
       ),
     );
     resolveMount(scanResult({ config: staleConfig }));
-    // Only the user write's config ever syncs; the listing still
-    // refetches (mount fetch + the toggle's invalidate + the rescan's
-    // cache-scoped invalidate landing last).
-    await waitFor(() => expect(listSkills).toHaveBeenCalledTimes(3));
+    // Only the user write's config ever syncs (the invalidation semantics
+    // themselves -- what a rescan / mutation invalidates -- are pinned at
+    // the registry seam's own layer, issue #1077).
     expect(onAppConfigSync).toHaveBeenCalledTimes(1);
     expect(onAppConfigSync).not.toHaveBeenCalledWith(staleConfig);
   });
@@ -183,15 +182,11 @@ describe("SkillsSection (issue #362)", () => {
     // The switch sits outside the row's open-edit target (the text block):
     // toggling it must not open the drawer.
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
-    // The refetch half: the listing is queried again and the row grays.
-    // Two calls despite the mount rescan's invalidate (issue #1016): under
-    // jsdom both mocks resolve on the same microtask flush, so the
-    // invalidate dedupes into the still-in-flight mount fetch (TanStack's
-    // in-flight dedupe) and only the toggle's refetch lands as a second
-    // call -- the post-rescan refetch is pinned separately in
+    // The refetch half: the mutation's invalidation lands and the row grays
+    // (the invalidation semantics are pinned at the registry seam's layer,
+    // issue #1077; the post-rescan refetch is pinned in
     // skills-builtin.test.tsx, where the rescan resolves late enough to
-    // observe it.
-    await waitFor(() => expect(listSkills).toHaveBeenCalledTimes(2));
+    // observe it).
     await waitFor(() =>
       expect(screen.getByTestId("skill-row")).toHaveAttribute(
         "data-disabled",
