@@ -44,7 +44,7 @@ export function SkillDetailDialog({
   const intl = useIntl();
   return (
     <Dialog open onOpenChange={(open) => { if (!open) onClose(); }}>
-      {/* The default header X is the sole dismissal chrome; ESC and the
+      {/* The header button is the sole dismissal chrome; ESC and the
           overlay click still close via Radix. */}
       <DialogContent className="sm:max-w-lg" showCloseButton={false}>
         <DialogHeader>

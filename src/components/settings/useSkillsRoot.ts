@@ -99,9 +99,9 @@ export function useSkillsRoot(): {
 
   useEffect(() => {
     fetchSkillsRoot();
-    // fetchSkillsRoot closes over the provider-lifetime intl (stable for
-    // the provider's life); the mount-once contract matches the pane's
-    // rescan effect.
+    // fetchSkillsRoot closes over the mount-render's intl (stable while
+    // the locale is, per ADR-0052's live re-render); the mount-once
+    // contract matches the pane's rescan effect.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 

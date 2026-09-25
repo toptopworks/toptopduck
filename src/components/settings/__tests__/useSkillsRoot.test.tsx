@@ -4,6 +4,7 @@ import { IntlProvider } from "react-intl";
 
 import { useSkillsRoot } from "../useSkillsRoot";
 import { getSkillsDir } from "../../../api";
+import { log } from "../../../lib/log";
 import { skillEntry } from "../../../test-fixtures";
 
 // The skills-root seam's only IPC dependency is the path query; fmtError is
@@ -15,11 +16,16 @@ vi.mock("../../../api", () => ({
 vi.mock("../../../lib/error-presentation", () => ({
   fmtError: vi.fn(() => "formatted-error"),
 }));
+// log is mocked to the warn-only shape the seam exercises: the guard drops
+// a stale rejection's state write but the warn stays diagnosable.
+vi.mock("../../../lib/log", () => ({
+  log: { warn: vi.fn() },
+}));
 
 const localSkill = skillEntry("pdf-tools");
 
-// Empty-catalog English IntlProvider: the hook formats the failed phase's
-// error through the pane's own provider posture (ADR-0052).
+// Empty-catalog English IntlProvider: satisfies the hook's useIntl context;
+// formatting itself is mocked out above.
 function renderRoot() {
   return renderHook(() => useSkillsRoot(), {
     wrapper: ({ children }) => (
@@ -35,9 +41,13 @@ describe("useSkillsRoot (issue #1083)", () => {
     vi.clearAllMocks();
   });
 
-  it("fetches the registry root on mount", () => {
+  it("fetches the registry root on mount", async () => {
     vi.mocked(getSkillsDir).mockResolvedValue("/roots/skills");
     renderRoot();
+    // Flush the resolve's microtask and the re-render it schedules before
+    // counting: a dep-array regression reruns the effect on that render,
+    // so the count must still be one AFTER the flush, not just before it.
+    await act(async () => {});
     // The mount effect issues the one fetch without any caller action.
     expect(getSkillsDir).toHaveBeenCalledTimes(1);
   });
@@ -67,6 +77,43 @@ describe("useSkillsRoot (issue #1083)", () => {
     // The async act flushes the microtask the rejection's catch rides.
     await act(async () => {
       rejectFirst(new Error("stale"));
+    });
+    expect(result.current.root).toEqual({
+      phase: "resolved",
+      root: "/roots/retried",
+    });
+    // The guard drops the stale rejection's state write, not the warn:
+    // a stale failure stays diagnosable (the contract above the catch).
+    expect(log.warn).toHaveBeenCalledWith(
+      "SkillsRoot",
+      "get_skills_dir failed",
+      expect.any(Error),
+    );
+  });
+
+  it("keeps a newer resolve when an older fetch resolves late", async () => {
+    let resolveFirst!: (dir: string) => void;
+    vi.mocked(getSkillsDir)
+      .mockImplementationOnce(
+        () =>
+          new Promise((res) => {
+            resolveFirst = res;
+          }),
+      )
+      .mockImplementationOnce(() => Promise.resolve("/roots/retried"));
+    const { result } = renderRoot();
+    act(() => result.current.retry());
+    await waitFor(() =>
+      expect(result.current.root).toEqual({
+        phase: "resolved",
+        root: "/roots/retried",
+      }),
+    );
+    // The stale first RESOLVE lands after the newer resolve (a slow mount
+    // fetch answering after the open-click re-fetch) and must not revert
+    // the root to the older directory -- the .then arm of the guard.
+    await act(async () => {
+      resolveFirst("/roots/stale");
     });
     expect(result.current.root).toEqual({
       phase: "resolved",

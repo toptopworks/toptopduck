@@ -55,13 +55,11 @@ import {
 // form: creation rides the model-face create_skill meta-tool -- the New
 // button exits the settings overlay straight to the workspace where that
 // conversation lives -- and edits happen in the external editor the detail
-// dialog's SKILL.md link opens -- `local` anchors at its own directory,
-// `linked` at its link target, `builtin` at the reserved-subtree copy. The
-// Import header button opens the two-stage drill-down import dialog (issue
-// #367), which links / copies skills from external agent libraries through
-// the registry's import mutation. The row family, the detail dialog, and
-// the skipped fold live in sibling files, and the registry root rides
-// useSkillsRoot (issue #1083).
+// dialog's SKILL.md link opens. The Import header button opens the
+// two-stage drill-down import dialog (issue #367), which links / copies
+// skills from external agent libraries through the registry's import
+// mutation. The row family, the detail dialog, and the skipped fold live in
+// sibling files, and the registry root rides useSkillsRoot (issue #1083).
 
 export function SkillsSection({
   onAppConfigSync,
@@ -161,10 +159,9 @@ export function SkillsSection({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // The registry root rides the skills-root seam (issue #1083): the mount
-  // fetch, the fetch-generation guard, and the SKILL.md path join live in
-  // the hook. This container keeps the retry orchestration (the open-click
-  // entry in openDetail below) and the failed phase's wording (the detail
+  // The registry root rides the skills-root seam (issue #1083); this
+  // container keeps the retry orchestration (the open-click entry in
+  // openDetail below) and the failed phase's wording (the detail
   // dialog's path face).
   const { root, detailFilePath, retry } = useSkillsRoot();
 
