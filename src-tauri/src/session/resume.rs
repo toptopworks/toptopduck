@@ -561,6 +561,10 @@ impl<'a> Resumer<'a> {
                             // body into the window ahead of its turn's
                             // question (the pinned bytes survive unchanged).
                             invocations: turn.invocations.clone(),
+                            // ADR-0124 (issue #1087): the artifact manifest
+                            // round-trips verbatim (settle-frozen; a turn
+                            // recorded before the field resumes empty).
+                            artifacts: turn.artifacts.clone(),
                         },
                         // ADR-0078 (issue #319): the persisted audit round-trips
                         // verbatim from the recipe turn -- trace + provenance
@@ -1745,6 +1749,44 @@ mod tests {
             }
             other => panic!("expected Materialized, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn rebuild_timeline_restores_the_artifact_manifest() {
+        // PR #1089 review Important 5 (issue #1087): the manifest is the
+        // whole point of materialization -- it must survive the rebuild
+        // verbatim, or a reopen silently loses every delivered artifact.
+        let mut turn = RecipeTurn::without_audit(
+            "q",
+            RecipeOutcome::Textual {
+                text_kind: TextKind::Agent,
+                body: "报告在 report.pdf".into(),
+                assumption: None,
+            },
+        );
+        turn.artifacts = vec![crate::model::TurnArtifact {
+            path: "/sessions/abc/artifacts/report.pdf".into(),
+            file_name: "report.pdf".into(),
+            primary: true,
+        }];
+        let recipe = recipe_with(vec![RecipeEntry::Turn(turn)], None);
+        let mut ws = WorkingSet::default();
+        let cancel = Arc::new(CancelToken::new());
+        let mut fake = FakeMaterializer::new(Vec::new());
+        let resumer = Resumer::new(&cancel, &mut fake, &recipe);
+        let timeline = resumer.rebuild_timeline(&mut ws, None).unwrap();
+        let TimelineEntry::Turn { record, .. } = &timeline[0] else {
+            panic!("expected Turn, got {:?}", timeline[0])
+        };
+        assert_eq!(
+            record.artifacts,
+            vec![crate::model::TurnArtifact {
+                path: "/sessions/abc/artifacts/report.pdf".into(),
+                file_name: "report.pdf".into(),
+                primary: true,
+            }],
+            "the manifest round-trips verbatim across close/reopen"
+        );
     }
 
     #[test]

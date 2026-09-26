@@ -390,6 +390,7 @@ impl Harness {
             cli,
             &self.delegations,
             &mut crate::skills::invocation::test_ctx(&mut invocations),
+            &mut Vec::new(),
             &read,
             &crate::skills::create::SkillCreateGate::inert(),
             approval,

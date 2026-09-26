@@ -123,7 +123,7 @@ path = "src/bin/acp_bridge.rs"
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-tauri = { version = "2", features = [] }
+tauri = { version = "2", features = ["protocol-asset"] }
 tauri-plugin-dialog = "2"
 # Platform detection (ADR-0074, issue #262): plugin-os over `navigator.userAgent`
 # (webview UA drift) and `cfg!(target_os)` (command + async + wiring), consistent
@@ -139,6 +139,11 @@ duckdb = { version = "1", features = ["bundled", "parquet"] }
 sha2 = "0.10"
 anyhow = "1"
 tempfile = "3"
+# `regex` backs the turn-artifact reply-text scan's three pattern families
+# (ADR-0124): markdown link targets, quoted/backtick-wrapped paths, and
+# whitelist-constrained bare paths. Already in the tree transitively; used
+# directly here so the scan does not hand-roll a tokenizer.
+regex = "1"
 # `calamine` reads .xlsx cell cached values (formulas resolved to their cached
 # result, never recomputed -- ADR-0015) fully offline. duckdb-rs's vendored
 # DuckDB amalgamation cannot statically link the `excel` loadable extension

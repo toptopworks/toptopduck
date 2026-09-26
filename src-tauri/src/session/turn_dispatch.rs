@@ -203,6 +203,7 @@ pub(crate) fn dispatch_gated_call(
     mcp: &mut McpAggregator,
     cli: &[crate::cli_tools::config::CliToolConfig],
     invocations: &mut crate::skills::invocation::SkillInvocationCtx<'_>,
+    presented: &mut Vec<String>,
     read: &crate::skills::read::SkillReadGate<'_>,
     create: &crate::skills::create::SkillCreateGate<'_>,
     gate: &GateCtx<'_>,
@@ -225,6 +226,7 @@ pub(crate) fn dispatch_gated_call(
             mcp,
             cli,
             invocations,
+            presented,
             read,
             create,
             gate,
@@ -246,6 +248,7 @@ fn dispatch_gated_call_inner(
     mcp: &mut McpAggregator,
     cli: &[crate::cli_tools::config::CliToolConfig],
     invocations: &mut crate::skills::invocation::SkillInvocationCtx<'_>,
+    presented: &mut Vec<String>,
     read: &crate::skills::read::SkillReadGate<'_>,
     create: &crate::skills::create::SkillCreateGate<'_>,
     gate: &GateCtx<'_>,
@@ -293,6 +296,28 @@ fn dispatch_gated_call_inner(
                     (result, Some(entry), None)
                 }
                 crate::skills::invocation::SkillInvocationOutcome::Refused(message) => {
+                    (meta_failure(call, &message), None, None)
+                }
+            },
+        );
+    }
+    // The artifact-delivery meta-tool (ADR-0124 Decision 1, issue #1087):
+    // intercepted beside the skill meta-tools, equally ahead of any
+    // classification / gate -- delivery is a declaration, approval-free by
+    // design (no machine axis is enabled). The resolver appends the
+    // declared paths to the turn's channel; validation, resolution, and
+    // materialization are SETTLE concerns, one place for both channels.
+    // Loop-runtime face only: the gateway's bridge arm never lists the
+    // tool, so an external CLI's spoofed call falls to the unknown-tool
+    // refusal (ADR-0124 -- injection into external CLIs was rejected).
+    if call.name == crate::session::artifacts::PRESENT_FILES {
+        return Ok(
+            match crate::session::artifacts::resolve_present_files(call, presented) {
+                crate::session::artifacts::PresentFilesOutcome::Local { summary, payload } => {
+                    let (result, entry) = local_meta_call(call, &summary, payload, on_phase);
+                    (result, Some(entry), None)
+                }
+                crate::session::artifacts::PresentFilesOutcome::Refused(message) => {
                     (meta_failure(call, &message), None, None)
                 }
             },
@@ -1334,6 +1359,7 @@ mod tests {
             &mut McpAggregator::empty(),
             &[],
             &mut crate::skills::invocation::test_ctx(&mut invocations),
+            &mut Vec::new(),
             &crate::skills::read::SkillReadGate::inert(),
             &crate::skills::create::SkillCreateGate::inert(),
             &gate,
@@ -1385,6 +1411,7 @@ mod tests {
             &mut McpAggregator::empty(),
             &[],
             &mut crate::skills::invocation::test_ctx(&mut invocations),
+            &mut Vec::new(),
             &crate::skills::read::SkillReadGate::inert(),
             &crate::skills::create::SkillCreateGate::inert(),
             &gate,
@@ -1474,6 +1501,7 @@ mod tests {
             &mut McpAggregator::empty(),
             &[],
             &mut crate::skills::invocation::test_ctx(&mut invocations),
+            &mut Vec::new(),
             &crate::skills::read::SkillReadGate::inert(),
             &create,
             &gate,
@@ -1518,6 +1546,7 @@ mod tests {
             &mut McpAggregator::empty(),
             &[],
             &mut crate::skills::invocation::test_ctx(&mut invocations),
+            &mut Vec::new(),
             &crate::skills::read::SkillReadGate::inert(),
             &create,
             &gate,
@@ -1615,6 +1644,7 @@ mod tests {
             &mut McpAggregator::empty(),
             &[],
             &mut crate::skills::invocation::test_ctx(&mut invocations),
+            &mut Vec::new(),
             &crate::skills::read::SkillReadGate::inert(),
             &create,
             &gate,
@@ -1713,6 +1743,7 @@ mod tests {
             &mut McpAggregator::empty(),
             &[],
             &mut crate::skills::invocation::test_ctx(&mut invocations),
+            &mut Vec::new(),
             &crate::skills::read::SkillReadGate::inert(),
             &create,
             &gate,
@@ -1796,6 +1827,7 @@ mod tests {
             &mut McpAggregator::empty(),
             &[],
             &mut crate::skills::invocation::test_ctx(&mut invocations),
+            &mut Vec::new(),
             &crate::skills::read::SkillReadGate::inert(),
             &crate::skills::create::SkillCreateGate::inert(),
             &gate,
@@ -1884,6 +1916,7 @@ mod tests {
             &mut McpAggregator::empty(),
             std::slice::from_ref(&registration),
             &mut crate::skills::invocation::test_ctx(&mut invocations),
+            &mut Vec::new(),
             &crate::skills::read::SkillReadGate::inert(),
             &crate::skills::create::SkillCreateGate::inert(),
             &gate,
@@ -2002,6 +2035,7 @@ mod tests {
             &mut McpAggregator::empty(),
             std::slice::from_ref(&registration),
             &mut crate::skills::invocation::test_ctx(&mut invocations),
+            &mut Vec::new(),
             &crate::skills::read::SkillReadGate::inert(),
             &crate::skills::create::SkillCreateGate::inert(),
             &gate,
@@ -2087,6 +2121,7 @@ mod tests {
             &mut mcp,
             &[],
             &mut crate::skills::invocation::test_ctx(&mut invocations),
+            &mut Vec::new(),
             &crate::skills::read::SkillReadGate::inert(),
             &crate::skills::create::SkillCreateGate::inert(),
             &gate,
@@ -2176,6 +2211,7 @@ mod tests {
             &mut mcp,
             &[],
             &mut crate::skills::invocation::test_ctx(&mut invocations),
+            &mut Vec::new(),
             &crate::skills::read::SkillReadGate::inert(),
             &crate::skills::create::SkillCreateGate::inert(),
             &gate,
@@ -2307,6 +2343,7 @@ mod tests {
             &mut McpAggregator::empty(),
             &[],
             &mut crate::skills::invocation::test_ctx(&mut invocations),
+            &mut Vec::new(),
             &crate::skills::read::SkillReadGate::inert(),
             &crate::skills::create::SkillCreateGate::inert(),
             &gate,
@@ -2556,6 +2593,7 @@ mod tests {
             &mut mcp,
             &[],
             &mut crate::skills::invocation::test_ctx(&mut invocations),
+            &mut Vec::new(),
             &crate::skills::read::SkillReadGate::inert(),
             &crate::skills::create::SkillCreateGate::inert(),
             &gate,
@@ -2624,6 +2662,7 @@ mod tests {
             &mut mcp,
             &[],
             &mut crate::skills::invocation::test_ctx(&mut invocations),
+            &mut Vec::new(),
             &crate::skills::read::SkillReadGate::inert(),
             &crate::skills::create::SkillCreateGate::inert(),
             &gate,

@@ -1093,11 +1093,18 @@ fn window_assembler_windows_history_and_samples_via_fake_provider() {
     let buf = captured.lock().expect("capture lock");
     let payload = request_for(&buf, "probe");
 
-    // The built-in tool table (ADR-0076) is advertised every turn.
+    // The built-in tool table (ADR-0076) is advertised every turn,
+    // closing with the artifact-delivery meta-tool (ADR-0124).
     let tool_names: Vec<&str> = payload.tools.iter().map(|t| t.name.as_str()).collect();
     assert_eq!(
         tool_names,
-        vec!["explore", "materialize", "describe", "sample"]
+        vec![
+            "explore",
+            "materialize",
+            "describe",
+            "sample",
+            "present_files"
+        ]
     );
 
     // 21 prior turns + the asking question: each prior turn ships a user

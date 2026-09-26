@@ -3162,6 +3162,43 @@ mod tests {
         );
     }
 
+    /// ADR-0124 (issue #1087): `present_files` is the BUILT-IN runtime's
+    /// injection (mounted in `ask_with_phase`'s table); the bridge face
+    /// never lists it -- an external CLI has no injection point and no
+    /// system-prompt clause, so its only channel is the reply-text scan.
+    /// Structural pin: `tools/list` never carries the name however the
+    /// conditionals mount, and a spoofed `tools/call` has no landing on
+    /// the bridge face: the bare name classifies under the unknown-server
+    /// external arm (the gate's pending card surfaces, as this module's
+    /// routing doc notes), and only post-Allow routing reaches
+    /// `tools::dispatch`, which answers with the unknown-tool error.
+    #[test]
+    fn tools_list_never_lists_present_files() {
+        for ctx in [fresh_ctx(), skill_ctx(vec!["sql-coach".to_string()])] {
+            let mut ctx = ctx;
+            match handle_method(
+                "tools/list",
+                &json!({"jsonrpc": "2.0", "id": 1, "method": "tools/list"}),
+                &mut ctx,
+                &mut GatewayOutcome::default(),
+            ) {
+                Response::Result(v) => {
+                    let names: Vec<&str> = v["tools"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .map(|t| t["name"].as_str().unwrap())
+                        .collect();
+                    assert!(
+                        !names.contains(&"present_files"),
+                        "the bridge face never advertises present_files"
+                    );
+                }
+                _ => panic!("tools/list must return Result"),
+            }
+        }
+    }
+
     /// The mount-conditional surface (ADR-0119 Decision 4, ADR-0105
     /// Decision 6): an EMPTY discovery snapshot lists no `invoke_skill`; a
     /// non-empty snapshot mounts it once, beside the trio's conditional

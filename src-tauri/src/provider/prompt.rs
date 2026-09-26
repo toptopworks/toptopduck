@@ -281,6 +281,9 @@ OUT-OF-SCOPE（DuckDB 原生不支持）：预测与 forecasting / 时序建模�
 - sample(reference_name, limit?, offset?)：返回某已注册数据集的有界样例行。
 工具调用失败（SQL 报错、审批拒绝、引用失效等）会把错误回给你，请据错自纠（改正 SQL、换字段、换工具），不要盲目重试同一个失败调用。分析完成后，用普通文本作终局答复结束本轮。
 
+【产物交付】
+凡任务产出了用户可直接查看的交付文件（如报告 PDF/DOCX/XLSX/PPTX、网页 HTML、文档 MD），必须在终局答复前调用 present_files 工具登记这些文件：参数为有序的文件路径列表，顺序即观看优先级，首个为 primary 交付物。该调用是对用户的强制交付动作——产生了可查看结果的任务必须以该调用收尾，不要只在文字里提到文件名。
+
 【数据引用】
 下方“数据上下文”列出当前可用的数据集。每条给出引用名与一个 sql_ref（FROM 子句片段）。工具的 sql 参数中引用数据集时必须原样使用该 sql_ref。若用户未指明目标且给出 active，默认指向 active；但用户可用自然语言重定向（如“在原始数据上”“用上一步的结果”），请按语义判断，不要被 active 机械锁定。
 
@@ -715,6 +718,16 @@ mod tests {
             !TOOL_CALLING_PROMPT.contains("SQL 执行代理"),
             "old tool-calling identity retired"
         );
+    }
+
+    #[test]
+    fn tool_prompt_carries_the_mandatory_delivery_clause() {
+        // ADR-0124 Decision 1 (issue #1087): the built-in runtime's system
+        // prompt names present_files and its MUST semantics -- a viewable
+        // deliverable ends the task with the call, order = viewing priority.
+        assert!(TOOL_CALLING_PROMPT.contains("【产物交付】"));
+        assert!(TOOL_CALLING_PROMPT.contains("present_files"));
+        assert!(TOOL_CALLING_PROMPT.contains("强制交付"));
     }
 
     #[test]

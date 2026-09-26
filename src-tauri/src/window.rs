@@ -488,6 +488,7 @@ mod tests {
             asked_at: None,
             settled_at: None,
             invocations: Vec::new(),
+            artifacts: Vec::new(),
         }
     }
 
@@ -676,6 +677,7 @@ mod tests {
             asked_at: None,
             settled_at: None,
             invocations: Vec::new(),
+            artifacts: Vec::new(),
         }];
         let payload = assemble("probe", &[], &ws, &history);
         let full = format!("{:?}", payload.history);
@@ -770,6 +772,7 @@ mod tests {
             asked_at: None,
             settled_at: None,
             invocations: Vec::new(),
+            artifacts: Vec::new(),
         }];
         let payload = assemble("probe", &[], &ws, &history);
         let find = |name: &str| {
@@ -916,6 +919,7 @@ mod tests {
             asked_at: None,
             settled_at: None,
             invocations: Vec::new(),
+            artifacts: Vec::new(),
         }
     }
 
@@ -933,6 +937,7 @@ mod tests {
             asked_at: None,
             settled_at: None,
             invocations: Vec::new(),
+            artifacts: Vec::new(),
         }
     }
 

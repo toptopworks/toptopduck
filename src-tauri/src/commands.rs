@@ -826,6 +826,10 @@ pub async fn ask(
     // AppHandle + the id string is cheap; the closure is FnMut (called once
     // per wait boundary + per tool call, across every loop step).
     let app_for_cb = app.clone();
+    // ADR-0124 (issue #1087): the same AppHandle clone grants the asset
+    // protocol scope after the turn settles, so a freshly materialized
+    // artifact is iframe-servable before the card can render.
+    let app_for_scope = app.clone();
     let sid = id.clone();
     // Clone the skills-root path off the managed State so it can move into the
     // spawn_blocking closure (the State borrow does not cross the await). The
@@ -897,6 +901,11 @@ pub async fn ask(
         if let Some(discovered) = s.last_discovered_runtime() {
             handle.set_cached_discovered(discovered);
         }
+        // ADR-0124 (issue #1087): a turn that materialized artifacts into
+        // the per-session `artifacts/` directory widens the asset protocol
+        // scope to it right here, before any card can render -- the
+        // artifacts dir may not have existed when the session opened.
+        grant_artifact_asset_scope(&app_for_scope, s.duck_path());
         Ok::<TurnOutcome, SessionError>(outcome)
     })
     .await
@@ -1027,13 +1036,88 @@ pub fn cancel(store: State<'_, Arc<SessionStore>>, session_id: String) -> Result
 /// out before assembly), so source events never enter the LLM payload.
 #[tauri::command]
 pub fn conversation(
+    app: tauri::AppHandle,
     store: State<'_, Arc<SessionStore>>,
     session_id: String,
 ) -> Result<Vec<ThreadEntry>, SessionError> {
     let id = SessionId::parse(&session_id)?;
     let handle = store.get(&id)?;
     let s = handle.session_lock()?;
-    Ok(s.conversation())
+    let duck_path = s.duck_path().map(PathBuf::from);
+    let entries = s.conversation();
+    // ADR-0124 (issue #1087): a reopened session's materialized artifacts
+    // must be iframe-servable before a card can render -- grant the asset
+    // protocol scope for the per-session artifacts directory on every
+    // thread read (session open / remount; idempotent by pattern).
+    grant_artifact_asset_scope(&app, duck_path.as_deref());
+    Ok(entries)
+}
+
+/// Upper bound on the md text `read_artifact_text` returns (ADR-0124
+/// Decision 4): an inline-rendered markdown artifact is a bounded report,
+/// not an arbitrary file read; beyond the cap the command refuses rather
+/// than materializing an unbounded payload into the webview.
+const ARTIFACT_TEXT_MAX_BYTES: u64 = 2 * 1024 * 1024;
+
+/// Widen the asset protocol's runtime scope to the session's artifacts
+/// directory (ADR-0124 Decision 4: HTML artifacts render through
+/// `asset://` in a sandboxed iframe, so the scope anchors the per-session
+/// materialization directory -- NOT the whole sessions root and never the
+/// user's directories). Idempotent: the scope is a pattern set, re-granting
+/// adds nothing. Failures log and degrade (a card falls back to the
+/// external-open path, the iframe render fails honest).
+fn grant_artifact_asset_scope(app: &tauri::AppHandle, duck_path: Option<&Path>) {
+    let Some(dir) = crate::session::artifacts::artifacts_dir(duck_path) else {
+        return;
+    };
+    if let Err(e) = app.asset_protocol_scope().allow_directory(&dir, false) {
+        log::warn!(
+            target: "toptopduck::commands",
+            "failed to grant asset scope for {}: {e}",
+            dir.display()
+        );
+    }
+}
+
+/// Whether an artifact manifest entry's file still exists (ADR-0124
+/// Decision 2: existence is a runtime fact checked at render time -- a
+/// deleted / moved file degrades the card to not-openable; the manifest is
+/// never rewritten). Plain `bool`: a missing file is an answer, not an
+/// error.
+#[tauri::command]
+pub fn artifact_exists(path: String) -> bool {
+    Path::new(&path).is_file()
+}
+
+/// Read one markdown artifact's text for inline rendering (ADR-0124
+/// Decision 4: md renders through IPC + the prose renderer, never the
+/// asset protocol). Paths are manifest entries -- backend-computed at
+/// settle, including user-directory in-place hits (ADR-0124 Decision 2,
+/// which is why this must accept paths outside the sessions root). The
+/// trust boundary is the extension pin (md only) + the payload cap at
+/// [`ARTIFACT_TEXT_MAX_BYTES`]: a compromised webview could probe any
+/// path, but it can already call `opener:allow-open-path` with `**`, so
+/// this adds no new exposure class.
+#[tauri::command]
+pub fn read_artifact_text(path: String) -> Result<String, String> {
+    let path = Path::new(&path);
+    let is_md = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| e.eq_ignore_ascii_case("md"));
+    if !is_md {
+        return Err("artifact text reads are limited to markdown files".to_string());
+    }
+    let meta = std::fs::metadata(path).map_err(|e| format!("cannot read artifact: {e}"))?;
+    if !meta.is_file() {
+        return Err("artifact is not a file".to_string());
+    }
+    if meta.len() > ARTIFACT_TEXT_MAX_BYTES {
+        return Err(format!(
+            "artifact exceeds the {ARTIFACT_TEXT_MAX_BYTES}-byte render cap"
+        ));
+    }
+    std::fs::read_to_string(path).map_err(|e| format!("cannot read artifact: {e}"))
 }
 
 /// Read one page of a dataset's rows from the named session (ADR-0024 windowed
@@ -3673,6 +3757,54 @@ mod tests {
     use super::*;
     use crate::session_store::UNKNOWN_SESSION;
     use crate::CancelToken;
+
+    // ADR-0124 (issue #1087): the artifact presentation commands -- exists
+    // degrades honestly, the md read is extension-pinned and size-capped.
+    #[test]
+    fn artifact_exists_reports_file_presence() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let pdf = dir.path().join("report.pdf");
+        std::fs::write(&pdf, "x").expect("write");
+        assert!(artifact_exists(pdf.to_string_lossy().into_owned()));
+        // Deleted / moved -> false, never an error (the card degrades).
+        assert!(!artifact_exists(
+            dir.path().join("gone.pdf").to_string_lossy().into_owned()
+        ));
+    }
+
+    #[test]
+    fn read_artifact_text_serves_md_and_refuses_other_extensions() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let md = dir.path().join("notes.md");
+        std::fs::write(&md, "# notes").expect("write");
+        assert_eq!(
+            read_artifact_text(md.to_string_lossy().into_owned()).expect("md reads"),
+            "# notes"
+        );
+        let html = dir.path().join("page.html");
+        std::fs::write(&html, "<html/>").expect("write");
+        assert!(
+            read_artifact_text(html.to_string_lossy().into_owned()).is_err(),
+            "non-md artifacts never read as text"
+        );
+        assert!(
+            read_artifact_text(dir.path().join("missing.md").to_string_lossy().into_owned())
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn read_artifact_text_refuses_past_the_size_cap() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let md = dir.path().join("big.md");
+        // One byte over the cap: len() > cap refuses.
+        let oversized = vec![b'#'; ARTIFACT_TEXT_MAX_BYTES as usize + 1];
+        std::fs::write(&md, &oversized).expect("write");
+        assert!(
+            read_artifact_text(md.to_string_lossy().into_owned()).is_err(),
+            "an oversized artifact refuses rather than materializing"
+        );
+    }
 
     /// A minimal CliToolConfig for the turn-assembly projection tests: only
     /// `name` and `enabled` matter to the assembly seam.
