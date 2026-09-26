@@ -18,6 +18,8 @@ ADR-0103 把 thread 改为 chat 化投影：rail 渲染轮次全量内容——p
 - viewedResult ≠ null 且载荷可自 thread 解析 → 显该结果的图 + 表（ADR-0062 R4 布局不变）；
 - 否则 → hero 空态（ADR-0061 / 0083 语义不变）。
 
+校准：产物文件分支（ADR-0124）把两态扩为三态——viewed 泛化为 dataset | file，选中产物文件时结果面显产物视图；hero 仍是唯一非数据呈现态。
+
 工作区对 B/C/D 轮无反应：非物化轮次既不移动 viewedResult、也不改变工作区内容。viewedResult 的移动事件均为既有（点选时间线 Materialized 卡、产出即选中，0047/0051/0062 所定），本 ADR 不增不减。
 
 轮次内容的读面统一归 rail；澄清 / 纠偏流不变（ADR-0048：读 rail、答下一条 QuestionBar、无新原语）。

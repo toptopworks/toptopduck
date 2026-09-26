@@ -33,6 +33,10 @@ _Avoid_: 临时表(temp table)、缓存(cache)、视图(view)——实现概念
 由外部工具（MCP 工具或 CLI 工具）产出、经文件中介导入并持久化进会话数据目录的文件——在 Working Set 中作为源 Dataset 存在，与上传源文件同级（路径 + 内容指纹）。其来源是 agent 轮内外部工具调用（非用户上传），但一旦持久化，resume 加载、stale 检测、换源级联行为与上传源完全一致（ADR-0087）。agent 经 `read_csv_auto` / `read_json` 等 DuckDB 原生文件读取在 explore/materialize 中引用它。
 _Avoid_: 临时文件(temp file)、缓存(cache)、中间结果(intermediate result)——派生源是源数据非派生数据
 
+**产物 (Artifact)**:
+轮次交付给用户的文件（报告 pdf/docx/xlsx/pptx、HTML 页、md），与**中间结果**（SQL 表格）并列的轮次内容类型。发现走双通道：内置运行时注入的 `present_files` 工具与全部运行时（含外部 CLI）通用的回复文本扫描（扩展名白名单约束的三族正则），settle 时去重合并为**产物清单**入档轮次记录——绝对路径存储（temp 工作目录命中 settle 时物化拷贝至会话 `artifacts/` 目录、清单存物化后路径；用户目录原位命中不拷）、settle 冻结、每轮上限 8 件；文件存在性是运行时事实，呈现期校验——文件被删则产物卡降级为不可打开，不回写清单（见 ADR-0124）。结果页呈现与中间结果**单舞台互斥**（无 tab、最后选中上位）；HTML 经 iframe 隔离壳内嵌渲染、md 内嵌渲染、pdf/docx/xlsx/pptx 卡片+外部打开。不是工作集成员（不可被 SQL 引用）、不是派生源（无文件中介导入）——是展示层交付物，不参与分析链。
+_Avoid_: 工件——中文工程腔；artifact 的会话部件义（会话级挂件非文件——本词条首用即锁文件产物义）；附件——那是用户输入侧；交付物——词条定名「产物」
+
 **会话 (Session)**:
 一个**持久化、可命名、可 resume** 的分析单元，拥有一条 recipe（见下）存在本地磁盘；重启后按 recipe 重建其工作集。打开时其工作集在内存中物化，多个打开的 Session 在内存中相互隔离（见 ADR-0027）。会话是持久化单位；临时的只是工作集，不再是“关闭即重置”。
 _Avoid_: 项目(project)、对话(conversation)、工作区(workspace)

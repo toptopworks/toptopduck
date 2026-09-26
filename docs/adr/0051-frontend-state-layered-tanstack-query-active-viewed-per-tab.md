@@ -13,6 +13,7 @@
    - **active**（CONTEXT.md 领域概念：LLM 隐式"作用于"的 Dataset）→ 走 Query（`activeDataset` IPC，服务端真相）。
    - **Viewed Result**（用户在 workspace 大舞台**正在查看**哪个 result pane，纯 UI 选择）→ 走 React 原生，**不进 cache**。
    - 二者语义不同：active 是分析语义（LLM 默认作用对象，ADR-0010 对用户基本不可见），Viewed Result 是 view 选择（用户点了哪个）。产出新结果时 Viewed Result 默认跟随（沿用"产出即选中"体感），但**重选历史结果只动 Viewed Result，绝不碰后端 active**。
+   - 校准：viewed 泛化为 dataset | file（ADR-0124，产物文件为第二可选中类）；active 语义不动——仍只指 Dataset，产物文件不是分析作用对象。
 
 3. **Viewed Result 持瘦引用 + 产出时乐观追加 thread**：
    - `viewedResult: { referenceName: string } | null`（仅一个字符串）。
