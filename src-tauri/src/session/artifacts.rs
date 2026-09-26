@@ -728,6 +728,27 @@ mod tests {
         assert_eq!(manifest[7].file_name, "declared_8.pdf");
     }
 
+    /// Channel priority (#1091 review): the presented channel merges
+    /// ahead of the scan channel, so the derived primary (the first
+    /// entry) keeps the declaration's viewing priority over a scan hit.
+    /// Pinned platform-independently -- the case-folded sibling that
+    /// also kills a merge-order swap is cfg(windows), and CI runs Linux.
+    #[test]
+    fn settle_manifest_keeps_presented_order_ahead_of_scan_hits() {
+        let work = tempfile::tempdir().expect("workdir");
+        let cwd = work.path();
+        std::fs::write(cwd.join("a.pdf"), "x").expect("write");
+        let manifest = settle_manifest(
+            &["b.pdf".to_string()],
+            "the table is ready, see a.pdf for the full view",
+            cwd,
+            None,
+        );
+        assert_eq!(manifest.len(), 2);
+        assert_eq!(manifest[0].file_name, "b.pdf", "the declaration leads");
+        assert_eq!(manifest[1].file_name, "a.pdf", "the scan hit follows");
+    }
+
     /// The cap runs BEFORE materialization (#1090): ten real files against
     /// a bound session leave exactly [`ARTIFACT_CAP`] copies on disk -- a
     /// reorder that materializes first would orphan two copies no manifest
@@ -782,10 +803,11 @@ mod tests {
         );
     }
 
-    /// The `durable` honest face (#1090): a materialized temp hit and a
-    /// user-directory original are durable; an unbound session's temp path
-    /// and a failed materialization are not -- openable until the session
-    /// closes, gone after.
+    /// The `durable` honest face (#1090): a materialized temp hit, a
+    /// user-directory original, and a declared-but-missing entry are
+    /// durable; an unbound session's temp path and a failed
+    /// materialization are not -- openable until the session closes,
+    /// gone after.
     #[test]
     fn settle_manifest_marks_the_saved_honest_face() {
         let work = tempfile::tempdir().expect("workdir");
@@ -820,6 +842,22 @@ mod tests {
             "a user-directory original is durable in place"
         );
 
+        // A declared-but-missing entry against a bound session: nothing
+        // to copy, and durable stays true -- the flag answers "survives
+        // the session close", deadness is the render-time existence
+        // fact's job (#1090).
+        let ghost = settle_manifest(
+            &["ghost.pdf".to_string()],
+            "",
+            cwd,
+            Some(&session.path().join(ARTIFACTS_DIR_NAME)),
+        );
+        assert_eq!(ghost.len(), 1);
+        assert!(
+            ghost[0].durable,
+            "a missing declaration is not this flag's job"
+        );
+
         // A materialization that cannot even create the artifacts dir (its
         // parent is a file) degrades to the temp path, unsaved.
         let blocked = tempfile::tempdir().expect("blocked session dir");
@@ -838,6 +876,34 @@ mod tests {
         );
         assert!(
             Path::new(&failed[0].path).starts_with(cwd),
+            "the entry keeps the temp path"
+        );
+    }
+
+    /// A copy that fails mid-materialization (the source is unreadable)
+    /// degrades to the temp path with durable false -- openable until
+    /// the session closes, gone after (#1091 review). Unix-only: the
+    /// permission denial is the portable trigger, and CI runs Linux.
+    #[cfg(unix)]
+    #[test]
+    fn settle_manifest_copy_failure_leaves_the_temp_path_unsaved() {
+        use std::os::unix::fs::PermissionsExt;
+        let work = tempfile::tempdir().expect("workdir");
+        let cwd = work.path();
+        let secret = cwd.join("secret.pdf");
+        std::fs::write(&secret, "pdf").expect("write");
+        std::fs::set_permissions(&secret, std::fs::Permissions::from_mode(0o000)).expect("chmod");
+        let session = tempfile::tempdir().expect("session dir");
+        let manifest = settle_manifest(
+            &["secret.pdf".to_string()],
+            "",
+            cwd,
+            Some(&session.path().join(ARTIFACTS_DIR_NAME)),
+        );
+        assert_eq!(manifest.len(), 1);
+        assert!(!manifest[0].durable, "a failed copy is unsaved");
+        assert!(
+            Path::new(&manifest[0].path).starts_with(cwd),
             "the entry keeps the temp path"
         );
     }

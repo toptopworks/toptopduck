@@ -467,7 +467,7 @@ pub struct RecipeTurn {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub invocations: Vec<crate::model::SkillInvocation>,
     /// The turn's delivered-artifact manifest (ADR-0124, issue #1087):
-    /// absolute paths + file names + the primary flag, merged from the
+    /// absolute paths + file names + the durable flag, merged from the
     /// dual channels at settle and frozen here. Empty for turns that
     /// delivered nothing; absent-on-disk for turns recorded before the
     /// field (serde default -- strictly additive, no format_version bump,
