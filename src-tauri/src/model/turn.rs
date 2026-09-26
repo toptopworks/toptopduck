@@ -422,6 +422,32 @@ pub struct TurnRecord {
     /// Same honest-degrade rule as [`Self::asked_at`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub settled_at: Option<u64>,
+    /// The turn's delivered artifacts (ADR-0124, issue #1087): the merged
+    /// dual-channel manifest -- the `present_files` tool's declared paths
+    /// plus reply-text scan hits -- computed once at settle, frozen on the
+    /// record. Entries carry absolute (post-materialization) paths; the
+    /// first entry is the primary. Empty for turns that delivered nothing
+    /// and for turns recorded before the field existed (serde default).
+    /// Display-only: never enters the LLM window (like [`Self::trace`]).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub artifacts: Vec<TurnArtifact>,
+}
+
+/// One delivered artifact on a turn's manifest (ADR-0124, issue #1087):
+/// an absolute path (materialized into the per-session `artifacts/`
+/// directory when the source lived in the session temp working dir;
+/// user-directory hits stay in place), its file name, and whether it is
+/// the manifest's primary (the first entry -- the viewing priority the
+/// `present_files` order defines). File existence is a runtime fact
+/// checked at render time; the manifest is never rewritten.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TurnArtifact {
+    /// Absolute filesystem path, post-materialization.
+    pub path: String,
+    /// The entry's file name (display + external-open label).
+    pub file_name: String,
+    /// Whether this is the manifest's primary entry (the first hit).
+    pub primary: bool,
 }
 
 /// One round of a turn's execution trace (ADR-0103, calibrating ADR-0078):

@@ -267,6 +267,9 @@ impl RecipePersister {
                         },
                     );
                     turn.invocations = record.invocations.clone();
+                    // ADR-0124 (issue #1087): the artifact manifest rides
+                    // the persisted turn verbatim (settle-frozen).
+                    turn.artifacts = record.artifacts.clone();
                     Some(RecipeEntry::Turn(turn))
                 }
                 TimelineEntry::Source(ev) => Some(RecipeEntry::Source(ev.clone())),
@@ -607,6 +610,7 @@ mod tests {
                 asked_at: None,
                 settled_at: None,
                 invocations: Vec::new(),
+                artifacts: Vec::new(),
             },
             audit: TurnAudit::test_new(
                 Vec::new(),
@@ -835,6 +839,7 @@ mod tests {
                 asked_at: None,
                 settled_at: None,
                 invocations: Vec::new(),
+                artifacts: Vec::new(),
             },
             audit: TurnAudit::test_new(trace.clone(), provenance.clone()),
         }];
@@ -882,6 +887,7 @@ mod tests {
                 asked_at: None,
                 settled_at: None,
                 invocations: Vec::new(),
+                artifacts: Vec::new(),
             },
             audit: TurnAudit::test_new(Vec::new(), Default::default()),
         }];
@@ -927,6 +933,7 @@ mod tests {
                 asked_at: None,
                 settled_at: None,
                 invocations: Vec::new(),
+                artifacts: Vec::new(),
             },
             audit: TurnAudit::test_new(Vec::new(), Default::default()),
         }];

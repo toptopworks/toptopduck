@@ -100,6 +100,13 @@ use crate::model::{
 /// serde's missing-newtype-content path, so every existing file loads
 /// unchanged, and a resumed watchdog kill still presents the timeout.
 ///
+/// Still v7 (#1087): [`RecipeTurn`] gains the artifact manifest
+/// (`artifacts`, ADR-0124 -- the turn's settle-frozen dual-channel
+/// deliverable list) with no version bump: the field rides
+/// `serde(default)` + `skip_serializing_if`, so an existing v7 shape (no
+/// `artifacts` key) deserializes as the empty manifest -- the same
+/// no-op-widening posture as #847's `body` and #883's `Cancelled` reason.
+///
 /// v7 (ADR-0119, issue #983) retires persistent skill activation for
 /// turn-scoped invocation: [`RecipeTurn`] gains `invocations` (the turn's
 /// invocation records -- name + body + actor + `content_hash`, turn input
@@ -451,6 +458,14 @@ pub struct RecipeTurn {
     /// (serde default).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub invocations: Vec<crate::model::SkillInvocation>,
+    /// The turn's delivered-artifact manifest (ADR-0124, issue #1087):
+    /// absolute paths + file names + the primary flag, merged from the
+    /// dual channels at settle and frozen here. Empty for turns that
+    /// delivered nothing; absent-on-disk for turns recorded before the
+    /// field (serde default -- strictly additive, no format_version bump,
+    /// the same precedent as `last_runtime`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub artifacts: Vec<crate::model::TurnArtifact>,
 }
 
 impl RecipeTurn {
@@ -469,6 +484,8 @@ impl RecipeTurn {
             asked_at: None,
             settled_at: None,
             invocations: Vec::new(),
+
+            artifacts: Vec::new(),
         }
     }
 
@@ -494,6 +511,8 @@ impl RecipeTurn {
             asked_at: timestamps.asked_at,
             settled_at: timestamps.settled_at,
             invocations: Vec::new(),
+
+            artifacts: Vec::new(),
         }
     }
 }
@@ -1602,6 +1621,39 @@ mod tests {
     }
 
     #[test]
+    fn recipe_turn_artifacts_round_trip_and_absent_key_degrades_to_empty() {
+        // ADR-0124 (issue #1087): the artifact manifest rides the turn and
+        // round-trips verbatim; a persisted turn WITHOUT the key (recorded
+        // before the field) deserializes to the empty manifest -- the
+        // strictly-additive serde-default degrade, no format_version bump.
+        let turn = RecipeTurn::without_audit(
+            "报告",
+            RecipeOutcome::Textual {
+                text_kind: TextKind::Agent,
+                body: "见 report.pdf".into(),
+                assumption: None,
+            },
+        );
+        let mut with_artifacts = turn.clone();
+        with_artifacts.artifacts = vec![crate::model::TurnArtifact {
+            path: "/sessions/abc/artifacts/report.pdf".into(),
+            file_name: "report.pdf".into(),
+            primary: true,
+        }];
+        let json = serde_json::to_string(&with_artifacts).expect("serialize");
+        assert!(json.contains("\"artifacts\""), "artifacts key present");
+        let back: RecipeTurn = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(back, with_artifacts);
+        // The degrade: strip the key entirely (the pre-field shape).
+        let stripped = json.replace(",\"artifacts\":[{\"path\":\"/sessions/abc/artifacts/report.pdf\",\"file_name\":\"report.pdf\",\"primary\":true}]", "");
+        let old: RecipeTurn = serde_json::from_str(&stripped).expect("old shape loads");
+        assert!(old.artifacts.is_empty(), "absent key degrades to empty");
+        // And the field omits the key when empty (skip_serializing_if).
+        let empty_json = serde_json::to_string(&turn).expect("serialize");
+        assert!(!empty_json.contains("artifacts"), "empty omits the key");
+    }
+
+    #[test]
     fn recipe_turn_round_trips_a_synthetic_trace_through_json() {
         // A Materialized turn's synthesized single-call trace survives a
         // serialize -> deserialize cycle, so the .duck written on save reads
@@ -1628,6 +1680,7 @@ mod tests {
             asked_at: None,
             settled_at: None,
             invocations: Vec::new(),
+            artifacts: Vec::new(),
         };
         let json = serde_json::to_string(&turn).expect("serialize");
         assert!(json.contains("\"trace\""), "trace key present");

@@ -561,6 +561,10 @@ impl<'a> Resumer<'a> {
                             // body into the window ahead of its turn's
                             // question (the pinned bytes survive unchanged).
                             invocations: turn.invocations.clone(),
+                            // ADR-0124 (issue #1087): the artifact manifest
+                            // round-trips verbatim (settle-frozen; a turn
+                            // recorded before the field resumes empty).
+                            artifacts: turn.artifacts.clone(),
                         },
                         // ADR-0078 (issue #319): the persisted audit round-trips
                         // verbatim from the recipe turn -- trace + provenance

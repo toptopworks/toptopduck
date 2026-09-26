@@ -227,6 +227,26 @@ export interface TurnRecord {
   // When the turn settled, Unix epoch ms (ADR-0103). Same honest-degrade
   // rule as asked_at.
   settled_at?: number;
+  // The turn's delivered artifacts (ADR-0124, #1087): the settle-frozen
+  // dual-channel manifest — present_files declarations + reply-text scan
+  // hits, merged and deduped. Entries carry absolute paths (materialized
+  // into the per-session artifacts/ dir when the source lived in the
+  // session temp working dir); the first entry is the primary. Absent for
+  // turns that delivered nothing and turns recorded before the field.
+  // Rendering rides #1088; existence is checked at render time, the
+  // manifest is never rewritten.
+  artifacts?: TurnArtifact[];
+}
+
+// One delivered artifact on a turn's manifest (ADR-0124, #1087). Mirrors
+// the Rust model::TurnArtifact.
+export interface TurnArtifact {
+  // Absolute filesystem path, post-materialization.
+  path: string;
+  // The entry's file name (display + external-open label).
+  file_name: string;
+  // Whether this is the manifest's primary entry (the first hit).
+  primary: boolean;
 }
 
 // One skill invocation attached to a turn (ADR-0119, #983): the body expanded

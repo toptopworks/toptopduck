@@ -121,6 +121,12 @@ pub struct SkillLifecycleEvent {
 /// `entry` uniformly. The conversation() command returns `Vec<ThreadEntry>`; the
 /// window assembler receives only the turns (filtered by the session before
 /// assembly), so source and skill events never reach the provider payload.
+// A deliberately un-boxed Turn arm (the same stance as TimelineEntry): the
+// record grew with the artifact manifest (ADR-0124) past the variant-size
+// lint, but the thread holds one entry per turn and serialization moves it
+// once per conversation read -- boxing would churn every match site for no
+// measurable win.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "entry", content = "data")]
 pub enum ThreadEntry {

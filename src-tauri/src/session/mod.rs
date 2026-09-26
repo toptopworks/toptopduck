@@ -2,6 +2,7 @@
 //! result_N) plus READ_ONLY-attached source snapshots (ADR-0004/0005/0012). The
 //! per-session temp dir holds the snapshot files and is cleared on drop (ADR-0012).
 
+pub mod artifacts;
 pub mod derived_source;
 pub(crate) mod engine;
 pub mod ingest;
@@ -1342,6 +1343,12 @@ impl Session {
         // the user's ask, not the first provider reply. Stamped onto the
         // TurnRecord + recipe turn at `record_turn`.
         let asked_at = now_epoch_ms();
+        // ADR-0124 (issue #1087): the turn's accumulating `present_files`
+        // declarations -- the tool channel's counterpart to
+        // `pending_invocations`, consumed by value at `record_turn` where
+        // it merges with the reply-text scan. The external arm leaves it
+        // empty (external CLIs never see the tool).
+        let mut presented_files: Vec<String> = Vec::new();
         // The external-runtime branch (issue #299 slice 9c, ADR-0085) replaces
         // the built-in agent loop when an adapter is set; otherwise the built-in
         // loop runs (ADR-0081). Both return a `(outcome, trace)` pair; the
@@ -1481,6 +1488,16 @@ impl Session {
                     for spec in inputs.delegations {
                         request.tools.push(spec.tool_definition());
                     }
+                    // The artifact-delivery meta-tool (ADR-0124 Decision 1,
+                    // issue #1087): mounted unconditionally on the built-in
+                    // runtime's table -- the tool face the system prompt's
+                    // mandatory delivery clause backs. The declarations
+                    // land on `presented_files` and merge with the reply
+                    // scan at settle (`record_turn`). Bridge face never
+                    // lists it (external CLIs are scan-channel-only).
+                    request
+                        .tools
+                        .push(crate::session::artifacts::present_files_definition());
                     let mut deps = TurnDeps {
                         engine: &self.admin_engine,
                         source_files: &mut self.source_files,
@@ -1558,6 +1575,7 @@ impl Session {
                                 inputs.cli_tools,
                                 inputs.delegations,
                                 &mut invocation_channel,
+                                &mut presented_files,
                                 &read_gate,
                                 &create_gate,
                                 approval,
@@ -1619,6 +1637,7 @@ impl Session {
             skill_state.into_pending(),
             attribution,
             asked_at,
+            presented_files,
         )
     }
 
@@ -1921,7 +1940,10 @@ impl Session {
     /// timeline (ADR-0040) but never enter the LLM window. `trace` is the agent
     /// loop's recorded call trajectory for this turn; it snapshots into the
     /// turn's persisted audit so [`Self::build_recipe`]'s whole-file rebuild
-    /// reads it per turn.
+    /// reads it per turn. `presented` is the turn's `present_files`
+    /// declaration channel (ADR-0124): merged with the reply scan into the
+    /// record's frozen artifact manifest here, at settle.
+    #[allow(clippy::too_many_arguments)]
     fn record_turn(
         &mut self,
         question: &str,
@@ -1930,6 +1952,7 @@ impl Session {
         invocations: Vec<crate::model::SkillInvocation>,
         runtime: TurnRuntime,
         asked_at: Option<u64>,
+        presented: Vec<String>,
     ) -> TurnOutcome {
         // Identical repeats collapse (review Important 3, issue #983): the
         // user channel dedupes at staging, so this catches the agent's
@@ -1993,6 +2016,21 @@ impl Session {
         // payloads never cross IPC). Mapped before the audit consumes the
         // in-memory entries below.
         let trace_view: Vec<TraceRound> = rounds.iter().map(TraceRound::from).collect();
+        // ADR-0124 (issue #1087): the turn's artifact manifest, computed
+        // ONCE here at settle (non-streaming -- the full reply text and the
+        // tool channel are both final): the `present_files` declarations
+        // merged with the reply-text scan, resolved against the session
+        // working dir (the external agent cwd / built-in tool output area),
+        // deduped, capped, and -- for temp-dir hits -- materialized into
+        // the per-session `artifacts/` directory so the manifest survives a
+        // close/reopen. Frozen on the record; existence is a render-time
+        // fact.
+        let artifacts = artifacts::settle_manifest(
+            &presented,
+            artifacts::reply_body(&outcome),
+            &self.temp_path,
+            artifacts::artifacts_dir(self.persister.duck_path()).as_deref(),
+        );
         self.timeline.push(TimelineEntry::Turn {
             record: TurnRecord {
                 question: question.to_string(),
@@ -2017,6 +2055,7 @@ impl Session {
                     runtime: Some(runtime.clone()),
                 },
                 invocations: invocations.clone(),
+                artifacts,
             },
             // ADR-0078 (issue #319) + ADR-0101: the loop's real multi-call
             // trace (mapped to the recipe form) + the runtime attribution +
@@ -3024,7 +3063,11 @@ mod tests {
         no_progress_kill_summary, turn_outcome_from_loop, Session, BUILT_IN_RUNTIME_FACE,
         TOOL_OUTPUT_DIR_NAME,
     };
-    use crate::model::{CancelledReason, DatasetDescriptor, TurnFailure, TurnOutcome, TurnRuntime};
+    use std::path::Path;
+
+    use crate::model::{
+        CancelledReason, DatasetDescriptor, ThreadEntry, TurnFailure, TurnOutcome, TurnRuntime,
+    };
     use crate::provider::fake::FakeProvider;
     use crate::provider::tool_calling::{ToolTurnReply, ToolUse};
     use crate::provider::ProviderError;
@@ -4486,6 +4529,7 @@ mod tests {
             asked_at: None,
             settled_at: None,
             invocations: Vec::new(),
+            artifacts: Vec::new(),
         };
 
         // Inject the timeline entry -- simulates a resumed session whose
@@ -4546,6 +4590,7 @@ mod tests {
                 adapter_id: Some("gemini-cli".into()),
             },
             None,
+            Vec::new(),
         );
         // ADR-0102 (issue #589): the same attribution snapshot stamps the
         // recipe-header `last_runtime` -- here the external turn's adapter.
@@ -4561,6 +4606,7 @@ mod tests {
             Vec::new(),
             TurnRuntime::BuiltIn,
             None,
+            Vec::new(),
         );
 
         let external = match &session.timeline[0] {
@@ -4766,6 +4812,129 @@ mod tests {
     /// not an error result fed back for the model to answer on top) -- and
     /// the engine stays at zero instances either way,
     /// which is the materialization assertion this AC pins.
+    #[test]
+    fn present_files_turn_records_manifest_and_trace_row() {
+        // ADR-0124 (issue #1087) end-to-end: the built-in turn's
+        // `present_files` call lands on the turn's artifact manifest (the
+        // tool channel's declaration, deduped against the reply scan's hit
+        // of the same file) and records an honest trace row. No approval
+        // seeding: delivery is a declaration, intercepted ahead of the gate.
+        let provider = FakeProvider::new().scripted_tool_turn_seq(
+            "生成报告",
+            vec![
+                Ok(ToolTurnReply::tool_calls(vec![ToolUse {
+                    id: "tu_pf".into(),
+                    name: "present_files".into(),
+                    input: json!({"files": ["report.html"]}),
+                }])),
+                Ok(ToolTurnReply::Text("报告已生成：report.html".into())),
+            ],
+        );
+        let mut session = Session::with_provider(Box::new(provider)).expect("session");
+        let approval = crate::approval::ApprovalState::new();
+        let keychain = super::KeychainStore::new();
+        let inputs = super::TurnInputs::empty(&keychain);
+        let outcome = session.ask_with_phase(
+            "生成报告",
+            &approval,
+            &super::NullApprovalSink,
+            |_| {},
+            &inputs,
+        );
+        assert!(matches!(outcome, TurnOutcome::Textual { .. }));
+        let entry = session
+            .conversation()
+            .into_iter()
+            .find_map(|e| match e {
+                ThreadEntry::Turn(r) if r.question == "生成报告" => Some(r),
+                _ => None,
+            })
+            .expect("the turn recorded");
+        // The declared file does not exist, so the entry keeps the resolved
+        // temp path (an explicit declaration survives the heuristic
+        // existence filter); the reply text's scan hit of the SAME file
+        // dedupes against it -- one entry, primary.
+        assert_eq!(entry.artifacts.len(), 1, "tool + scan dedupe to one entry");
+        assert!(entry.artifacts[0].primary);
+        assert_eq!(entry.artifacts[0].file_name, "report.html");
+        assert!(
+            Path::new(&entry.artifacts[0].path).is_absolute(),
+            "the manifest stores absolute paths"
+        );
+        // The call records an honest trace row (AC: the call enters the
+        // execution trace).
+        assert_eq!(entry.trace[0].calls.len(), 1);
+        assert_eq!(entry.trace[0].calls[0].name, "present_files");
+        assert!(entry.trace[0].calls[0].success);
+    }
+
+    /// ADR-0124 Decision 2 (issue #1087): a temp-working-dir hit
+    /// materializes into the bound session's `artifacts/` directory at
+    /// settle, so the manifest survives the session's close (the temp dir
+    /// dies with the session).
+    #[test]
+    fn present_files_turn_materializes_temp_hits_into_the_session_artifacts_dir() {
+        let duck_dir = tempfile::tempdir().expect("duck dir");
+        let provider = FakeProvider::new().scripted_tool_turn_seq(
+            "生成网页",
+            vec![
+                Ok(ToolTurnReply::tool_calls(vec![ToolUse {
+                    id: "tu_pf".into(),
+                    name: "present_files".into(),
+                    input: json!({"files": ["page.html"]}),
+                }])),
+                Ok(ToolTurnReply::Text("done".into())),
+            ],
+        );
+        let mut session = Session::with_provider(Box::new(provider)).expect("session");
+        session
+            .bind_duck(duck_dir.path().join("session.duck"), "s".into())
+            .expect("bind");
+        let report = session.temp_path.join("page.html");
+        std::fs::write(&report, "<html/>").expect("write temp report");
+        let approval = crate::approval::ApprovalState::new();
+        let keychain = super::KeychainStore::new();
+        let inputs = super::TurnInputs::empty(&keychain);
+        session.ask_with_phase(
+            "生成网页",
+            &approval,
+            &super::NullApprovalSink,
+            |_| {},
+            &inputs,
+        );
+        let entry = session
+            .conversation()
+            .into_iter()
+            .find_map(|e| match e {
+                ThreadEntry::Turn(r) if r.question == "生成网页" => Some(r),
+                _ => None,
+            })
+            .expect("the turn recorded");
+        assert_eq!(entry.artifacts.len(), 1);
+        let materialized = Path::new(&entry.artifacts[0].path);
+        assert_eq!(
+            materialized.parent().expect("parent"),
+            duck_dir.path().join("artifacts"),
+            "the manifest stores the materialized per-session path"
+        );
+        assert!(materialized.is_file(), "the copy exists");
+        // And the recipe persisted the same manifest (the `.duck` is the
+        // reopen path -- the whole point of materialization).
+        let recipe = session.build_recipe();
+        let persisted = recipe
+            .history
+            .iter()
+            .find_map(|e| match e {
+                crate::persistence::recipe::RecipeEntry::Turn(t) if t.question == "生成网页" => {
+                    Some(t.artifacts.clone())
+                }
+                _ => None,
+            })
+            .expect("the persisted turn");
+        assert_eq!(persisted.len(), 1);
+        assert_eq!(persisted[0].path, entry.artifacts[0].path);
+    }
+
     #[test]
     fn external_tool_only_turn_does_not_materialize_the_engine() {
         let provider = FakeProvider::new().scripted_tool_turn_seq(
@@ -5071,6 +5240,7 @@ mod tests {
             Vec::new(),
             TurnRuntime::BuiltIn,
             None,
+            Vec::new(),
         );
 
         assert_eq!(
@@ -5094,6 +5264,7 @@ mod tests {
             Vec::new(),
             TurnRuntime::BuiltIn,
             None,
+            Vec::new(),
         );
         assert_eq!(session.session_name(), Some("first question"));
 
@@ -5108,6 +5279,7 @@ mod tests {
             Vec::new(),
             TurnRuntime::BuiltIn,
             None,
+            Vec::new(),
         );
         assert_eq!(
             session.session_name(),
@@ -5131,6 +5303,7 @@ mod tests {
             Vec::new(),
             TurnRuntime::BuiltIn,
             None,
+            Vec::new(),
         );
         let name = session.session_name().expect("name set");
         let chars: Vec<char> = name.chars().collect();
@@ -5165,6 +5338,7 @@ mod tests {
             Vec::new(),
             TurnRuntime::BuiltIn,
             None,
+            Vec::new(),
         );
         assert_eq!(
             session.session_name(),
@@ -5186,6 +5360,7 @@ mod tests {
             Vec::new(),
             TurnRuntime::BuiltIn,
             None,
+            Vec::new(),
         );
         assert_eq!(
             session.session_name(),
@@ -5220,6 +5395,7 @@ mod tests {
             Vec::new(),
             TurnRuntime::BuiltIn,
             None,
+            Vec::new(),
         );
         assert_eq!(
             session.session_name(),
@@ -5245,6 +5421,7 @@ mod tests {
             Vec::new(),
             TurnRuntime::BuiltIn,
             None,
+            Vec::new(),
         );
         assert_eq!(
             session_a.session_name(),
@@ -5260,6 +5437,7 @@ mod tests {
             Vec::new(),
             TurnRuntime::BuiltIn,
             None,
+            Vec::new(),
         );
         assert_eq!(
             session_b.session_name(),
@@ -5307,6 +5485,7 @@ mod tests {
             Vec::new(),
             TurnRuntime::BuiltIn,
             None,
+            Vec::new(),
         );
         assert!(
             !session.is_timeline_empty(),

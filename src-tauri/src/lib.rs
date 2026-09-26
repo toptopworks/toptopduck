@@ -458,6 +458,8 @@ pub fn run() {
             commands::ask,
             commands::cancel,
             commands::conversation,
+            commands::artifact_exists,
+            commands::read_artifact_text,
             commands::read_rows,
             commands::read_rows_tsv,
             commands::export_rows_csv,
