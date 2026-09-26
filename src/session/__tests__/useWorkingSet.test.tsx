@@ -41,7 +41,6 @@ import {
 } from "../../api";
 import {
   invalidateSessionData,
-  invalidateTurnEndData,
   SAMPLE_ROW_LIMIT,
   useDeleteImpact,
   useWorkingSet,
@@ -427,18 +426,21 @@ describe("invalidateSessionData", () => {
   });
 });
 
-describe("invalidateTurnEndData", () => {
-  it("runs the two-key turn-end fan-out (thread omitted, issue #1080)", async () => {
+describe("invalidateSessionData (the one cascade, since #1088)", () => {
+  it("runs the three-key fan-out every consumer shares (incl. turn end)", async () => {
     const queryClient = new QueryClient();
     const spy = vi.spyOn(queryClient, "invalidateQueries");
 
-    await invalidateTurnEndData(queryClient, SID);
+    await invalidateSessionData(queryClient, SID);
 
-    // workingSet + active only -- thread omitted by design; the why lives
-    // with invalidateTurnEndData's JSDoc (issue #1080).
+    // The #1080-era turn-end divergence (working-set only, thread omitted)
+    // retired with ADR-0124: the recorded row's settle-computed artifact
+    // manifest needs the thread refetch, so the turn end rejoined the one
+    // cascade (issue #1088; narrative in the module header).
     expect(spy.mock.calls.map(([filters]) => JSON.stringify(filters?.queryKey))).toEqual([
       JSON.stringify(sessionKeys.workingSet(SID)),
       JSON.stringify(sessionKeys.active(SID)),
+      JSON.stringify(sessionKeys.thread(SID)),
     ]);
   });
 });

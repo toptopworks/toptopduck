@@ -1,5 +1,5 @@
 import type { DatasetDescriptor } from "../../types/dataset";
-import type { ThreadEntry } from "../../types/thread";
+import type { ThreadEntry, TurnRecord } from "../../types/thread";
 
 // Shared thread fixtures for session tests plus cross-directory consumers
 // (e.g. src/__tests__/App.test.tsx). Each helper mints a minimal-but-real
@@ -38,6 +38,38 @@ export function materialized(referenceName: string): ThreadEntry {
       },
       trace: [], provenance: { skills: [] },
     },
+  };
+}
+
+/** A textual turn carrying a delivered-files manifest (ADR-0124, issue
+ * #1088): artifacts land on the TurnRecord (settle-frozen), whatever the
+ * outcome kind. Paths default to an artifacts-dir shape (in scope). */
+export function artifactTurn(
+  paths: string[],
+  outcome: TurnRecord["outcome"] = { kind: "Textual", data: { text_kind: "Agent", body: "done", assumption: null } },
+): ThreadEntry {
+  return {
+    entry: "Turn",
+    data: {
+      question: "q",
+      outcome,
+      trace: [], provenance: { skills: [] },
+      artifacts: paths.map((path) => {
+        const name = path.split(/[\\/]/).pop() ?? path;
+        return { path, file_name: name, durable: true };
+      }),
+    },
+  };
+}
+
+/** The recorded row a settled ask leaves behind (issue #1088 mock parity):
+ * record_turn commits before `ask` resolves, so the turn-end thread refetch
+ * sees this row -- ask-flow tests seed it into their thread state like the
+ * backend would, or the refetch wipes the optimistic append. */
+export function recordedTurn(question: string, outcome: TurnRecord["outcome"]): ThreadEntry {
+  return {
+    entry: "Turn",
+    data: { question, outcome, trace: [], provenance: { skills: [] } },
   };
 }
 

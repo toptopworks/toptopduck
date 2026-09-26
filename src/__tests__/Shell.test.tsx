@@ -161,6 +161,7 @@ import {
 import type { AppConfig } from "../types/app-config";
 import type { McpServerConfig } from "../types/mcp";
 import { baseAppConfig as sharedBaseAppConfig, skillEntry } from "../test-fixtures";
+import { recordedTurn } from "../session/__tests__/fixtures";
 import type { SessionRuntimeChoice } from "../types/runtime";
 import { log } from "../lib/log";
 
@@ -300,7 +301,7 @@ describe("App three-column shell (issue #79 ACs)", () => {
 
   it("derives result content after a Materialized ask (R2 result state)", async () => {
     state.workingSet = [src("people")];
-    vi.mocked(askQuestion).mockResolvedValue({
+    const outcome = {
       kind: "Materialized",
       data: {
         promotions: [{ dataset: { ...src("result_1"), row_count: 1 }, sql: "SELECT 1" }],
@@ -308,7 +309,9 @@ describe("App three-column shell (issue #79 ACs)", () => {
         body: null,
         assumption: null,
       },
-    });
+    } satisfies TurnOutcome;
+    vi.mocked(askQuestion).mockResolvedValue(outcome);
+    state.thread = [recordedTurn("总共几行", outcome)];
     render(<App />);
     await openSession();
     fireEvent.change(screen.getByLabelText("提问"), { target: { value: "总共几行" } });
@@ -345,14 +348,15 @@ describe("App three-column shell (issue #79 ACs)", () => {
     expect(vi.mocked(askQuestion).mock.calls.length).toBe(asksBeforeClick);
   });
 
-  it("appends the new turn optimistically without a thread refetch (ADR-0051)", async () => {
-    // The thread cache is the single truth; on a successful ask the new turn is
-    // appended via setQueryData and the thread query is NEVER invalidated, so a
-    // stale/empty refetch cannot wipe the turn the user just produced. The new
-    // turn's question renders in the rail from the optimistic append, not from
-    // a refetch -- conversation is called exactly once (the initial load).
+  it("appends optimistically, then the turn-end refresh converges onto the recorded row (ADR-0051, #1088)", async () => {
+    // The thread cache is the single truth: on a successful ask the new turn
+    // is appended via setQueryData first (the rail shows it immediately),
+    // then the turn-end refresh refetches the thread ONCE -- the recorded row
+    // carries settle-computed fields the append cannot know (ADR-0124's
+    // artifact manifest), and record_turn commits before the ask resolves,
+    // so the refetch lands a richer row, never a wipe.
     state.workingSet = [src("people")];
-    vi.mocked(askQuestion).mockResolvedValue({
+    const outcome = {
       kind: "Materialized",
       data: {
         promotions: [{ dataset: { ...src("result_1"), row_count: 1 }, sql: "SELECT 1" }],
@@ -360,15 +364,18 @@ describe("App three-column shell (issue #79 ACs)", () => {
         body: null,
         assumption: null,
       },
-    });
+    } satisfies TurnOutcome;
+    vi.mocked(askQuestion).mockResolvedValue(outcome);
+    // The recorded row the backend would have committed (mock parity).
+    state.thread = [recordedTurn("总共几行", outcome)];
     render(<App />);
     await openSession();
     // The thread query (useSessionState) fires conversation() in a post-open
     // effect; wait for it to fire before asserting the count, so a slow CI
     // runner that mounts the textbox before scheduling the effect does not
-    // read 0 calls. The assert below still pins "exactly once, no refetch".
+    // read 0 calls.
     await waitFor(() => expect(conversation).toHaveBeenCalled());
-    expect(conversation).toHaveBeenCalledTimes(1); // initial load only
+    expect(conversation).toHaveBeenCalledTimes(1); // the initial load
     fireEvent.change(screen.getByLabelText("提问"), { target: { value: "总共几行" } });
     fireEvent.click(screen.getByRole("button", { name: "提问" }));
     // The new turn's question lands in the rail from the optimistic append.
@@ -377,8 +384,12 @@ describe("App three-column shell (issue #79 ACs)", () => {
     await waitFor(() =>
       expect(within(document.querySelector(".session-rail")!).getByText("总共几行")).toBeInTheDocument(),
     );
-    // No refetch: conversation was not called again (thread never invalidated).
-    expect(conversation).toHaveBeenCalledTimes(1);
+    // The turn-end refresh: exactly one refetch, and it converges the append
+    // onto the recorded row -- the question stays on the rail after it.
+    await waitFor(() => expect(conversation).toHaveBeenCalledTimes(2));
+    await waitFor(() =>
+      expect(within(document.querySelector(".session-rail")!).getByText("总共几行")).toBeInTheDocument(),
+    );
   });
 
   it("keeps the workspace inert to a textual last turn; a rail click moves viewedResult (ADR-0114)", async () => {
@@ -1591,7 +1602,7 @@ describe("App shell window collapse + drag-drop bisection (issue #84)", () => {
     expect(within(wrapper!).getByText("尚无对话。在下方提问或加载数据开始。")).toBeInTheDocument();
     // Materialized turn (the suite's ADR-0083 idiom): auto-expands the
     // workspace, which does not matter here -- the wrapper is unconditional.
-    vi.mocked(askQuestion).mockResolvedValueOnce({
+    const outcome833 = {
       kind: "Materialized",
       data: {
         promotions: [{ dataset: { ...src("result_1"), row_count: 1 }, sql: "SELECT 1" }],
@@ -1599,7 +1610,9 @@ describe("App shell window collapse + drag-drop bisection (issue #84)", () => {
         body: null,
         assumption: null,
       },
-    });
+    } satisfies TurnOutcome;
+    vi.mocked(askQuestion).mockResolvedValueOnce(outcome833);
+    state.thread = [recordedTurn("第一问", outcome833)];
     fireEvent.change(screen.getByLabelText("提问"), { target: { value: "第一问" } });
     fireEvent.click(screen.getByRole("button", { name: "提问" }));
     // 2 asks total: the creation turn (rejected) + this one.
@@ -1810,25 +1823,27 @@ describe("App shell window collapse + drag-drop bisection (issue #84)", () => {
     // Queue the test's own turns AFTER openSession so the creation turn consumes
     // the helper's one-time rejection, not these Materialized outcomes (which
     // would otherwise auto-expand the workspace during openSession).
-    vi.mocked(askQuestion)
-      .mockResolvedValueOnce({
-        kind: "Materialized",
-        data: {
-          promotions: [{ dataset: { ...src("result_1"), row_count: 1 }, sql: "SELECT 1" }],
-          viz: null,
-          body: null,
-          assumption: null,
-        },
-      })
-      .mockResolvedValueOnce({
-        kind: "Materialized",
-        data: {
-          promotions: [{ dataset: { ...src("result_2"), row_count: 1 }, sql: "SELECT 2" }],
-          viz: null,
-          body: null,
-          assumption: null,
-        },
-      });
+    const outcome1 = {
+      kind: "Materialized",
+      data: {
+        promotions: [{ dataset: { ...src("result_1"), row_count: 1 }, sql: "SELECT 1" }],
+        viz: null,
+        body: null,
+        assumption: null,
+      },
+    } satisfies TurnOutcome;
+    const outcome2 = {
+      kind: "Materialized",
+      data: {
+        promotions: [{ dataset: { ...src("result_2"), row_count: 1 }, sql: "SELECT 2" }],
+        viz: null,
+        body: null,
+        assumption: null,
+      },
+    } satisfies TurnOutcome;
+    vi.mocked(askQuestion).mockResolvedValueOnce(outcome1).mockResolvedValueOnce(outcome2);
+    // The recorded rows the turn-end refreshes return (mock parity, #1088).
+    state.thread = [recordedTurn("第一问", outcome1), recordedTurn("第二问", outcome2)];
     expect(document.querySelector(".session-pane")?.classList.contains("workspace-collapsed")).toBe(true);
     // First promotion -> the panel opens with the produced dataset.
     fireEvent.change(screen.getByLabelText("提问"), { target: { value: "第一问" } });
@@ -1863,7 +1878,7 @@ describe("App shell window collapse + drag-drop bisection (issue #84)", () => {
     await openSession();
     // Queue the turn AFTER openSession so the creation turn consumes the
     // one-time rejection of the helper, not this Materialized outcome.
-    vi.mocked(askQuestion).mockResolvedValueOnce({
+    const outcome771 = {
       kind: "Materialized",
       data: {
         promotions: [{ dataset: { ...src("result_2"), row_count: 1 }, sql: "SELECT 2" }],
@@ -1871,7 +1886,11 @@ describe("App shell window collapse + drag-drop bisection (issue #84)", () => {
         body: null,
         assumption: null,
       },
-    });
+    } satisfies TurnOutcome;
+    vi.mocked(askQuestion).mockResolvedValueOnce(outcome771);
+    // The recorded row the turn-end refresh returns (mock parity, #1088) --
+    // appended AFTER the R5 landing assertions above ran against the resumed
+    // thread, so the refetch sees both rows like the backend would.
     // Resume cold-start: folded, with the R5 landing visible on the rail
     // (result_1 is the viewed result) -- the landing moved no fold.
     expect(document.querySelector(".session-pane")?.classList.contains("workspace-collapsed")).toBe(true);
@@ -1879,8 +1898,11 @@ describe("App shell window collapse + drag-drop bisection (issue #84)", () => {
       "aria-current",
       "true",
     );
-    // The first NEW promotion after resume: the view follows result_2 but
-    // the panel stays folded (this session already showed results).
+    // The recorded row the turn-end refresh returns (mock parity, #1088),
+    // appended AFTER the R5 landing assertions above -- the first NEW
+    // promotion after resume: the view follows result_2 but the panel
+    // stays folded (this session already showed results).
+    state.thread = [...state.thread, recordedTurn("新问", outcome771)];
     fireEvent.change(screen.getByLabelText("提问"), { target: { value: "新问" } });
     fireEvent.click(screen.getByRole("button", { name: "提问" }));
     await waitFor(() =>

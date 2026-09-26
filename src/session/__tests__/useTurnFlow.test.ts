@@ -58,16 +58,17 @@ vi.mock("../../api", async (importOriginal) => {
 });
 
 import { askQuestion, cancelQuery, getSessionRuntime } from "../../api";
-import { invalidateTurnEndData } from "../useWorkingSet";
+import { invalidateSessionData } from "../useWorkingSet";
 
-// The turn-end refresh routes through the seam's entry (issue #1080): wrap
-// the real implementation in a mock fn so the key-set tests below keep
-// exercising the true fan-out (the queryClient spy still sees the real
-// invalidateQueries calls) while the coupling itself stays assertable, and
-// failure-injection can still target this seam edge.
+// The turn-end refresh routes through the seam's cascade entry (issue #1088
+// retired the #1080 working-set-only divergence): wrap the real
+// implementation in a mock fn so the coupling stays assertable while the
+// key-set tests below keep exercising the true fan-out (the queryClient spy
+// still sees the real invalidateQueries calls), and failure-injection can
+// still target this seam edge.
 vi.mock("../useWorkingSet", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../useWorkingSet")>();
-  return { ...actual, invalidateTurnEndData: vi.fn(actual.invalidateTurnEndData) };
+  return { ...actual, invalidateSessionData: vi.fn(actual.invalidateSessionData) };
 });
 
 const SID = "sess-1";
@@ -1142,7 +1143,7 @@ describe("useTurnFlow", () => {
       expect(invalidatedKeys).toContainEqual(sessionKeys.active(SID));
     });
 
-    it("routes the Materialized refresh through the seam's turn-end entry (#1080)", async () => {
+    it("routes the turn-end refresh through the seam's cascade entry (#1088)", async () => {
       const { deps } = setup();
       const { result } = renderHook(() => useTurnFlow(SID, deps));
       vi.mocked(askQuestion).mockResolvedValue(materializedOutcome("result_1"));
@@ -1151,13 +1152,19 @@ describe("useTurnFlow", () => {
         await result.current.handleAsk("build it");
       });
 
-      expect(invalidateTurnEndData).toHaveBeenCalledWith(deps.queryClient, SID);
+      expect(invalidateSessionData).toHaveBeenCalledWith(deps.queryClient, SID);
     });
 
-    it("does NOT invalidate the thread on a Materialized outcome (optimistic append)", async () => {
+    it("refreshes the thread on EVERY settled outcome (the recorded row converges the append)", async () => {
+      // ADR-0124 (issue #1088): the recorded row carries settle-computed
+      // fields the optimistic append cannot know (the artifact manifest, the
+      // terminal body, invocation hashes), and record_turn commits before
+      // the ask resolves -- the refetch lands a richer row, never a wipe.
+      // A textual outcome matters most here: it is the artifact-carrying
+      // shape with no working-set change of its own.
       const { invalidateSpy, deps } = setup();
       const { result } = renderHook(() => useTurnFlow(SID, deps));
-      vi.mocked(askQuestion).mockResolvedValue(materializedOutcome("result_1"));
+      vi.mocked(askQuestion).mockResolvedValue(textualOutcome("answer"));
 
       await act(async () => {
         await result.current.handleAsk("build it");
@@ -1166,16 +1173,17 @@ describe("useTurnFlow", () => {
       const invalidatedKeys = invalidateSpy.mock.calls.map(
         (call) => (call[0] as { queryKey: unknown }).queryKey,
       );
-      // The core ADR-0051 invariant: invalidating thread would wipe the
-      // optimistic append against a stale/empty refetch.
-      expect(invalidatedKeys).not.toContainEqual(sessionKeys.thread(SID));
+      expect(invalidatedKeys).toContainEqual(sessionKeys.thread(SID));
+      expect(invalidatedKeys).toContainEqual(sessionKeys.workingSet(SID));
+      expect(invalidatedKeys).toContainEqual(sessionKeys.active(SID));
     });
 
-    it("invalidates ONLY the model config on a non-Materialized outcome (Textual)", async () => {
-      // ADR-0051 rule (no workingSet/active/thread invalidation) still holds;
-      // ADR-0095 adds ONE exception: the model-config read refreshes on every
-      // outcome kind, because an external-runtime turn's discovered catalog
-      // lands on the backend handle cache regardless of how the turn ended.
+    it("invalidates the model config on a non-Materialized outcome too (Textual, ADR-0095)", async () => {
+      // Issue #1088: the turn-end cascade now runs on every settled outcome
+      // (the recorded row's settle-computed fields), so a textual turn
+      // refreshes workingSet/active/thread AND the model config -- an
+      // external-runtime turn's discovered catalog lands on the backend
+      // handle cache regardless of how the turn ended.
       const { invalidateSpy, deps } = setup();
       const { result } = renderHook(() => useTurnFlow(SID, deps));
       vi.mocked(askQuestion).mockResolvedValue(textualOutcome("answer"));
@@ -1184,7 +1192,6 @@ describe("useTurnFlow", () => {
         await result.current.handleAsk("q");
       });
 
-      expect(invalidateSpy).toHaveBeenCalledTimes(1);
       expect(invalidateSpy).toHaveBeenCalledWith({
         queryKey: sessionKeys.modelConfig(SID),
       });

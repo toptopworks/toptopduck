@@ -1,13 +1,17 @@
 import { describe, expect, it } from "vitest";
 import {
+  artifactRenderKind,
   deriveWorkspaceContent,
+  findArtifact,
   findLatestMaterializedPrimary,
   findMaterializedPayload,
+  isWithinArtifactsDir,
+  latestArtifactCandidate,
   resolveWorkingSetDetail,
 } from "../workspace";
-import { materialized, src, textual } from "./fixtures";
+import { artifactTurn, materialized, src, textual } from "./fixtures";
 import type { DatasetDescriptor } from "../../types/dataset";
-import type { ThreadEntry } from "../../types/thread";
+import type { ThreadEntry, TurnRecord } from "../../types/thread";
 
 // Unit tests for the pure workspace-derivation helpers (ADR-0051 / ADR-0062
 // R2, calibrated by ADR-0114). These are the architectural invariants the
@@ -117,7 +121,7 @@ describe("deriveWorkspaceContent (ADR-0062 R2 two-state, ADR-0114)", () => {
     // ADR-0114: non-materialized turns do not disturb the current view; the
     // result stays until a new Materialized or another selection moves it.
     const thread = [materialized("result_1"), textual("which name?")];
-    const content = deriveWorkspaceContent(thread, { referenceName: "result_1" }, new Map());
+    const content = deriveWorkspaceContent(thread, { kind: "dataset", referenceName: "result_1" }, new Map());
     expect(content.kind).toBe("result");
     if (content.kind === "result") {
       expect(content.referenceName).toBe("result_1");
@@ -126,7 +130,7 @@ describe("deriveWorkspaceContent (ADR-0062 R2 two-state, ADR-0114)", () => {
 
   it("shows the viewed result chart + table for a history selection", () => {
     const thread = [materialized("result_1"), materialized("result_2")];
-    const content = deriveWorkspaceContent(thread, { referenceName: "result_1" }, new Map());
+    const content = deriveWorkspaceContent(thread, { kind: "dataset", referenceName: "result_1" }, new Map());
     expect(content.kind).toBe("result");
     if (content.kind === "result") {
       expect(content.referenceName).toBe("result_1");
@@ -140,7 +144,7 @@ describe("deriveWorkspaceContent (ADR-0062 R2 two-state, ADR-0114)", () => {
     // never re-scans the thread itself (one scan, ADR-0051).
     const content = deriveWorkspaceContent(
       [materialized("result_1")],
-      { referenceName: "result_1" },
+      { kind: "dataset", referenceName: "result_1" },
       new Map(),
     );
     expect(content.kind).toBe("result");
@@ -152,7 +156,7 @@ describe("deriveWorkspaceContent (ADR-0062 R2 two-state, ADR-0114)", () => {
     const staleByReference = new Map([
       ["result_1", { reference_name: "orders", display_name: "orders", reason: "Deleted" as const }],
     ]);
-    const content = deriveWorkspaceContent(thread, { referenceName: "result_1" }, staleByReference);
+    const content = deriveWorkspaceContent(thread, { kind: "dataset", referenceName: "result_1" }, staleByReference);
     expect(content.kind).toBe("result");
     if (content.kind === "result") {
       expect(content.staleAnchor?.reason).toBe("Deleted");
@@ -162,14 +166,14 @@ describe("deriveWorkspaceContent (ADR-0062 R2 two-state, ADR-0114)", () => {
 
   it("falls back to hero when viewedResult points at a turn not in the thread", () => {
     // viewedResult set but the producing turn was GC'd / not yet appended.
-    expect(deriveWorkspaceContent([], { referenceName: "result_1" }, new Map()).kind).toBe("hero");
+    expect(deriveWorkspaceContent([], { kind: "dataset", referenceName: "result_1" }, new Map()).kind).toBe("hero");
   });
 
   describe("viewingHistory (issue #757 derived fact)", () => {
     it("is false when the viewed result is the latest Materialized primary", () => {
       const content = deriveWorkspaceContent(
         [materialized("result_1"), materialized("result_2")],
-        { referenceName: "result_2" },
+        { kind: "dataset", referenceName: "result_2" },
         new Map(),
       );
       expect(content.kind).toBe("result");
@@ -179,7 +183,7 @@ describe("deriveWorkspaceContent (ADR-0062 R2 two-state, ADR-0114)", () => {
     it("is true when the viewed result is an older result", () => {
       const content = deriveWorkspaceContent(
         [materialized("result_1"), materialized("result_2")],
-        { referenceName: "result_1" },
+        { kind: "dataset", referenceName: "result_1" },
         new Map(),
       );
       expect(content.kind).toBe("result");
@@ -191,7 +195,7 @@ describe("deriveWorkspaceContent (ADR-0062 R2 two-state, ADR-0114)", () => {
       // B/C/D turn leaves the view on the latest result (ADR-0114).
       const content = deriveWorkspaceContent(
         [materialized("result_1"), textual("which name?")],
-        { referenceName: "result_1" },
+        { kind: "dataset", referenceName: "result_1" },
         new Map(),
       );
       expect(content.kind).toBe("result");
@@ -204,7 +208,7 @@ describe("deriveWorkspaceContent (ADR-0062 R2 two-state, ADR-0114)", () => {
       // target (pinned here at the derivation level, not just the helper).
       const content = deriveWorkspaceContent(
         [materialized("result_1"), noPrimaryTurn],
-        { referenceName: "result_1" },
+        { kind: "dataset", referenceName: "result_1" },
         new Map(),
       );
       expect(content.kind).toBe("result");
@@ -234,10 +238,10 @@ describe("deriveWorkspaceContent (ADR-0062 R2 two-state, ADR-0114)", () => {
           trace: [], provenance: { skills: [] },
         },
       };
-      const antecedent = deriveWorkspaceContent([multiPromotion], { referenceName: "scratch_1" }, new Map());
+      const antecedent = deriveWorkspaceContent([multiPromotion], { kind: "dataset", referenceName: "scratch_1" }, new Map());
       expect(antecedent.kind).toBe("result");
       if (antecedent.kind === "result") expect(antecedent.viewingHistory).toBe(true);
-      const tail = deriveWorkspaceContent([multiPromotion], { referenceName: "result_1" }, new Map());
+      const tail = deriveWorkspaceContent([multiPromotion], { kind: "dataset", referenceName: "result_1" }, new Map());
       expect(tail.kind).toBe("result");
       if (tail.kind === "result") expect(tail.viewingHistory).toBe(false);
     });
@@ -286,5 +290,121 @@ describe("resolveWorkingSetDetail (issue #792)", () => {
 
   it("returns null only for an empty working set", () => {
     expect(resolveWorkingSetDetail([], null, null)).toBeNull();
+  });
+});
+
+describe("artifact derivation (ADR-0124, issue #1088)", () => {
+  const HTML = "C:/sessions/s1/artifacts/page.html";
+  const PDF = "C:/sessions/s1/artifacts/report.pdf";
+  const MD = "C:/sessions/s1/artifacts/notes.md";
+
+  describe("artifactRenderKind (Decision 4 matrix)", () => {
+    it("html/htm -> html, md -> markdown, the rest -> card", () => {
+      expect(artifactRenderKind(HTML)).toBe("html");
+      expect(artifactRenderKind("x/report.HTM")).toBe("html");
+      expect(artifactRenderKind(MD)).toBe("markdown");
+      expect(artifactRenderKind(PDF)).toBe("card");
+      expect(artifactRenderKind("x/table.xlsx")).toBe("card");
+      // Extension-less (unreachable via the whitelist) degrades to the card.
+      expect(artifactRenderKind("x/README")).toBe("card");
+    });
+  });
+
+  describe("isWithinArtifactsDir (the HTML scope gate)", () => {
+    it("accepts paths under the duck path's artifacts dir, both separators", () => {
+      expect(isWithinArtifactsDir(HTML, "C:/sessions/s1/session.duck")).toBe(true);
+      expect(
+        isWithinArtifactsDir("C:\\sessions\\s1\\artifacts\\a.html", "C:\\sessions\\s1\\session.duck"),
+      ).toBe(true);
+      expect(
+        isWithinArtifactsDir("/home/u/.duck/s1/artifacts/a.html", "/home/u/.duck/s1/session.duck"),
+      ).toBe(true);
+    });
+
+    it("rejects user-directory originals, temp paths, and prefix lookalikes", () => {
+      const duck = "C:/sessions/s1/session.duck";
+      expect(isWithinArtifactsDir("C:/Users/me/report.html", duck)).toBe(false);
+      // artifactsFoo is not the artifacts dir -- the trailing separator pins
+      // the boundary.
+      expect(isWithinArtifactsDir("C:/sessions/s1/artifactsFoo/x.html", duck)).toBe(false);
+      expect(isWithinArtifactsDir("/tmp/work/page.html", duck)).toBe(false);
+    });
+  });
+
+  describe("findArtifact (the file view's thread resolve)", () => {
+    it("resolves the entry by absolute path, newest turn wins", () => {
+      const old = artifactTurn(["/a/first.pdf"]);
+      const fresh = artifactTurn(["/a/first.pdf", "/a/second.pdf"]);
+      expect(findArtifact([old, fresh], "/a/first.pdf")).toBe(
+        (fresh.data as TurnRecord).artifacts?.[0],
+      );
+    });
+
+    it("returns null for a path no turn carries", () => {
+      expect(findArtifact([artifactTurn(["/a/x.pdf"])], "/a/foreign.pdf")).toBeNull();
+      expect(findArtifact([textual("no files")], "/a/x.pdf")).toBeNull();
+    });
+  });
+
+  describe("latestArtifactCandidate (the auto-open input)", () => {
+    it("picks the latest manifest-bearing turn; primary is the first entry", () => {
+      const older = artifactTurn(["/a/old.pdf"]);
+      const latest = artifactTurn(["/a/page.html", "/a/report.pdf"]);
+      const candidate = latestArtifactCandidate([older, latest]);
+      expect(candidate?.primaryPath).toBe("/a/page.html");
+      expect(candidate?.signature).toBe("/a/page.html\n/a/report.pdf");
+      expect(candidate?.turnMaterialized).toBe(false);
+    });
+
+    it("flags a both-present turn (no stage steal) and skips artifact-less tails", () => {
+      const both = artifactTurn(["/a/x.pdf"], (materialized("result_1").data as TurnRecord).outcome);
+      expect(latestArtifactCandidate([both])?.turnMaterialized).toBe(true);
+      // A trailing artifact-less turn is skipped, not a re-arm: the candidate
+      // stays the older delivery (its signature already consumed -- the
+      // one-shot does not re-fire on it).
+      expect(
+        latestArtifactCandidate([artifactTurn(["/a/x.pdf"]), textual("done")])?.primaryPath,
+      ).toBe("/a/x.pdf");
+    });
+
+    it("returns null on an empty / manifest-less thread", () => {
+      expect(latestArtifactCandidate([])).toBeNull();
+      expect(latestArtifactCandidate([materialized("result_1")])).toBeNull();
+    });
+  });
+
+  describe("deriveWorkspaceContent file branch (single stage)", () => {
+    it("a file view resolves its manifest entry and render kind", () => {
+      const thread = [artifactTurn([HTML, PDF])];
+      const content = deriveWorkspaceContent(thread, { kind: "file", path: HTML }, new Map());
+      expect(content).toEqual({
+        kind: "file",
+        path: HTML,
+        fileName: "page.html",
+        render: "html",
+      });
+    });
+
+    it("a dataset view and a file view are the same selection domain -- last wins", () => {
+      const thread = [artifactTurn([HTML]), materialized("result_1")];
+      const filePick = deriveWorkspaceContent(thread, { kind: "file", path: HTML }, new Map());
+      expect(filePick?.kind).toBe("file");
+      // Re-selecting the dataset moves the SAME slot back -- no tabs, no stack.
+      const datasetPick = deriveWorkspaceContent(
+        thread,
+        { kind: "dataset", referenceName: "result_1" },
+        new Map(),
+      );
+      expect(datasetPick?.kind).toBe("result");
+    });
+
+    it("a file view naming a path no turn carries degrades to hero", () => {
+      const content = deriveWorkspaceContent(
+        [artifactTurn([HTML])],
+        { kind: "file", path: "/a/foreign.pdf" },
+        new Map(),
+      );
+      expect(content).toEqual({ kind: "hero" });
+    });
   });
 });

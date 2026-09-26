@@ -978,3 +978,19 @@ export async function setSessionPosture(
     posture,
   });
 }
+
+// Whether a manifest entry's file still exists (ADR-0124 Decision 2, issue
+// #1087): existence is a render-time fact -- a deleted / moved file degrades
+// the artifact surfaces to not-openable, and the manifest is never rewritten.
+// Plain boolean: a missing file is an answer, not an error.
+export async function artifactExists(path: string): Promise<boolean> {
+  return invoke<boolean>("artifact_exists", { path });
+}
+
+// One markdown artifact's text for inline rendering (ADR-0124 Decision 4,
+// issue #1087): extension-pinned server-side (md only) and size-capped (a
+// bounded inline report, not an arbitrary file read) -- a refusal crosses as
+// a rejection the render degrades on.
+export async function readArtifactText(path: string): Promise<string> {
+  return invoke<string>("read_artifact_text", { path });
+}

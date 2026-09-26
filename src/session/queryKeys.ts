@@ -116,3 +116,13 @@ export const skillKeys = {
 export const agentKeys = {
   all: () => ["agents"] as const,
 } as const;
+
+/** Artifact render-time facts (ADR-0124 Decision 2/4, issue #1088), keyed by
+ *  ABSOLUTE PATH -- a filesystem fact, not a session slice, so two views of
+ *  the same delivered file share one cache entry. NOT under the session
+ *  prefix: the facts outlive any single pane mount, and a close's
+ *  removeQueries dropping them is harmless (the next check re-runs). */
+export const artifactKeys = {
+  exists: (path: string) => ["artifact", "exists", path] as const,
+  text: (path: string) => ["artifact", "text", path] as const,
+} as const;

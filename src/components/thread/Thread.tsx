@@ -33,10 +33,20 @@ interface ThreadProps {
   /** The result reference currently shown in the result pane, so its thread
    * entry can be marked active. */
   selectedResult: string | null;
-  /** Click a result turn to show its rows in the result pane. Carries only the
-   * reference name -- assumption/viz are derived from the thread by the caller
+  /** Click a result turn to show its rows in the result pane. Carries only
+   * the reference name -- assumption/viz are derived from the thread by the caller
    * (single source of truth, ADR-0051), not carried as a fat snapshot. */
   onSelectResult: (referenceName: string) => void;
+  /** The artifact file currently on the workspace stage (ADR-0124 Decision
+   *  3, issue #1088), keyed by its absolute path -- the artifact card row
+   *  carrying it renders active (the dual-view linkage's file half). null
+   *  while a dataset (or hero) holds the stage. Optional for tests that do
+   *  not exercise artifacts; defaults to null (no active row). */
+  selectedFile?: string | null;
+  /** Click an artifact card row to select that file onto the workspace
+   *  stage (the onSelectResult twin, keyed by the manifest entry's path).
+   *  Optional: absent handlers keep the card read-only (honest degrade). */
+  onSelectFile?: (path: string) => void;
   /** Stale result_N anchors keyed by reference name (issue #40/#41,
    * ADR-0013): a Materialized turn whose result is now stale renders as a ghost
    * (CircleOff + reduced opacity) plus a clickable causal chip that jumps to
@@ -118,6 +128,8 @@ export function Thread({
   entries,
   selectedResult,
   onSelectResult,
+  selectedFile = null,
+  onSelectFile,
   staleByReference = new Map(),
   datasetLabels = [],
   skillIndex,
@@ -364,6 +376,8 @@ export function Thread({
                   record={entry.data}
                   selectedResult={selectedResult}
                   onSelectResult={onSelectResult}
+                  selectedFile={selectedFile}
+                  onSelectFile={onSelectFile}
                   staleAnchor={staleAnchor}
                   hasJumpTarget={jumpTargetIdx !== null}
                   onStaleChipJump={
