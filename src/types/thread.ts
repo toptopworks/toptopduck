@@ -231,22 +231,25 @@ export interface TurnRecord {
   // dual-channel manifest — present_files declarations + reply-text scan
   // hits, merged and deduped. Entries carry absolute paths (materialized
   // into the per-session artifacts/ dir when the source lived in the
-  // session temp working dir); the first entry is the primary. Absent for
-  // turns that delivered nothing and turns recorded before the field.
-  // Rendering rides #1088; existence is checked at render time, the
-  // manifest is never rewritten.
+  // session temp working dir); the first entry is the primary (declared
+  // order for a present_files-shaped manifest, first-seen order for a
+  // scan-only one). Absent for turns that delivered nothing and turns
+  // recorded before the field. Rendering rides #1088; existence is
+  // checked at render time, the manifest is never rewritten.
   artifacts?: TurnArtifact[];
 }
 
 // One delivered artifact on a turn's manifest (ADR-0124, #1087). Mirrors
-// the Rust model::TurnArtifact.
+// the Rust model::TurnArtifact. The primary is derived as the first entry
+// of the manifest, never a stored flag.
 export interface TurnArtifact {
   // Absolute filesystem path, post-materialization.
   path: string;
   // The entry's file name (display + external-open label).
   file_name: string;
-  // Whether this is the manifest's primary entry (the first hit).
-  primary: boolean;
+  // Whether the path is durable (a materialized copy or a user-directory
+  // original); false = a temp path openable until the session closes.
+  durable: boolean;
 }
 
 // One skill invocation attached to a turn (ADR-0119, #983): the body expanded

@@ -107,6 +107,14 @@ use crate::model::{
 /// `artifacts` key) deserializes as the empty manifest -- the same
 /// no-op-widening posture as #847's `body` and #883's `Cancelled` reason.
 ///
+/// Still v7 (#1090): the manifest entry drops the stored `primary` flag
+/// (the primary is derived as the first entry; a pre-#1090 file's
+/// `primary` key is an ignored unknown field) and gains `durable`
+/// (`serde(default = "default_durable")`, same no-op-widening posture).
+/// Files written after #1090 no longer carry `primary`, which a
+/// pre-#1090 reader rejects at deserialize -- the unreleased-app posture
+/// the v1 `Failed` widening used, so no migration.
+///
 /// v7 (ADR-0119, issue #983) retires persistent skill activation for
 /// turn-scoped invocation: [`RecipeTurn`] gains `invocations` (the turn's
 /// invocation records -- name + body + actor + `content_hash`, turn input
@@ -459,7 +467,7 @@ pub struct RecipeTurn {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub invocations: Vec<crate::model::SkillInvocation>,
     /// The turn's delivered-artifact manifest (ADR-0124, issue #1087):
-    /// absolute paths + file names + the primary flag, merged from the
+    /// absolute paths + file names + the durable flag, merged from the
     /// dual channels at settle and frozen here. Empty for turns that
     /// delivered nothing; absent-on-disk for turns recorded before the
     /// field (serde default -- strictly additive, no format_version bump,
@@ -1638,14 +1646,21 @@ mod tests {
         with_artifacts.artifacts = vec![crate::model::TurnArtifact {
             path: "/sessions/abc/artifacts/report.pdf".into(),
             file_name: "report.pdf".into(),
-            primary: true,
+            durable: true,
         }];
         let json = serde_json::to_string(&with_artifacts).expect("serialize");
         assert!(json.contains("\"artifacts\""), "artifacts key present");
         let back: RecipeTurn = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(back, with_artifacts);
-        // The degrade: strip the key entirely (the pre-field shape).
-        let stripped = json.replace(",\"artifacts\":[{\"path\":\"/sessions/abc/artifacts/report.pdf\",\"file_name\":\"report.pdf\",\"primary\":true}]", "");
+        // The degrade: strip the key entirely (the pre-field shape) --
+        // structurally, off the parsed value, not a serialized-literal
+        // replace (#1090).
+        let mut value: serde_json::Value = serde_json::from_str(&json).expect("json");
+        value
+            .as_object_mut()
+            .expect("a turn serializes to an object")
+            .remove("artifacts");
+        let stripped = value.to_string();
         let old: RecipeTurn = serde_json::from_str(&stripped).expect("old shape loads");
         assert!(old.artifacts.is_empty(), "absent key degrades to empty");
         // And the field omits the key when empty (skip_serializing_if).

@@ -1767,7 +1767,7 @@ mod tests {
         turn.artifacts = vec![crate::model::TurnArtifact {
             path: "/sessions/abc/artifacts/report.pdf".into(),
             file_name: "report.pdf".into(),
-            primary: true,
+            durable: true,
         }];
         let recipe = recipe_with(vec![RecipeEntry::Turn(turn)], None);
         let mut ws = WorkingSet::default();
@@ -1783,7 +1783,7 @@ mod tests {
             vec![crate::model::TurnArtifact {
                 path: "/sessions/abc/artifacts/report.pdf".into(),
                 file_name: "report.pdf".into(),
-                primary: true,
+                durable: true,
             }],
             "the manifest round-trips verbatim across close/reopen"
         );
