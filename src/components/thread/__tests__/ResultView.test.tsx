@@ -866,6 +866,43 @@ describe("ResultView viz (ADR-0016/0033, issue #26)", () => {
     expect(screen.getByRole("button", { name: /下一页/ })).toBeInTheDocument();
   });
 
+  it("resets the render failure on a result switch (a same-spec new result gets a fresh try)", async () => {
+    // The gate's reset axis is [referenceName, decoded] (#1085): switching
+    // to a new result that carries the SAME viz object (same decode, same
+    // chart) still clears a landed render failure -- the new result gets
+    // its own try, not the previous one's verdict. Observable as a second
+    // embed attempt against the sticky-rejecting mock. The rerender repeats
+    // the render's exact tree (cf. the paging-reset test): a bare element
+    // would remount the view and reset on mount, masking the axis.
+    const viz = { kind: "bar" as const, spec: JSON.stringify({ mark: "bar" }) };
+    vi.mocked(embed).mockRejectedValue(new Error("vega render boom"));
+    const queryClient = new QueryClient({
+      defaultOptions: { queries: { retry: false } },
+    });
+    const body = (ref: string) => (
+      <QueryClientProvider client={queryClient}>
+        <ResultView
+          sessionId="sess-1"
+          referenceName={ref}
+          question={`q:${ref}`}
+          assumption={null}
+          viz={viz}
+        />
+      </QueryClientProvider>
+    );
+    const { rerender } = renderI18nBase(body("result_1"));
+    await waitFor(() => expect(embed).toHaveBeenCalledTimes(1));
+    await waitFor(() =>
+      expect(screen.getByText(/图表无法渲染，已显示表格/)).toBeInTheDocument(),
+    );
+    rerender(withIntl(body("result_2")));
+    // The fresh try re-embeds; the sticky rejection degrades again.
+    await waitFor(() => expect(embed).toHaveBeenCalledTimes(2));
+    await waitFor(() =>
+      expect(screen.getByText(/图表无法渲染，已显示表格/)).toBeInTheDocument(),
+    );
+  });
+
   it("renders a plain table with no disclosure when viz is null", async () => {
     // ADR-0033: a null viz is the default table turn -- NOT a degradation, so no
     // disclosure shows and Vega-Embed is never called.

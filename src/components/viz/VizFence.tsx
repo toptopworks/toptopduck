@@ -18,13 +18,14 @@
 // guardrail lives in the skill's production guidance -- by render time a cap
 // would only mis-degrade a chart that would have drawn fine.
 
-import { useEffect, useMemo, useState } from "react";
+import { useMemo } from "react";
 import { useIntl } from "react-intl";
 import { Loader2 } from "lucide-react";
 import { VizChartSlot } from "./LazyVegaChart";
 import { VizDegradeDisclosure } from "./VizDegradeDisclosure";
 import { VizEnlargeDialog } from "./VizEnlargeDialog";
-import { decodeVizSpec, type VizFailureReason } from "./viz";
+import { useVizChartGate } from "./useVizChartGate";
+import { decodeVizSpec } from "./viz";
 
 /** The live placeholder (ADR-0120 Decision 4): names what is coming without
  * showing the source or attempting a render. Deliberately parse-free -- it
@@ -53,13 +54,9 @@ export function VizFence({ spec }: { spec: string }) {
   // fails degrades like a result-card spec does, only the disclosure wording
   // differs (no table rides under a fence chart).
   const decoded = useMemo(() => decodeVizSpec(spec), [spec]);
-  const [renderError, setRenderError] = useState<VizFailureReason | null>(null);
-
-  // A new fence body resets the render-failure state so it gets a fresh try.
-  useEffect(() => {
-    // eslint-disable-next-line react-hooks/set-state-in-effect
-    setRenderError(null);
-  }, [spec]);
+  // The render-failure gate rides the shared hook (#1085), keyed on the
+  // fence's raw spec text -- a new fence body gets a fresh try.
+  const { renderError, onError } = useVizChartGate(spec);
 
   const degradedReason = decoded.ok ? renderError : decoded.reason;
   return (
@@ -71,7 +68,7 @@ export function VizFence({ spec }: { spec: string }) {
         // space-y owns this block's rhythm like every other block; `relative`
         // anchors the enlarge affordance to the chart's corner (#1050).
         <div className="relative [&_.viz-chart]:m-0">
-          <VizChartSlot spec={decoded.spec} onError={setRenderError} />
+          <VizChartSlot spec={decoded.spec} onError={onError} />
           {/* The overlay re-embeds the same decoded spec at full readable
               size; a degrade swaps this whole block for the disclosure below,
               so the affordance dies with the chart it would enlarge. */}

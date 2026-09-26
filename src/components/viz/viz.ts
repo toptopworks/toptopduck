@@ -110,7 +110,10 @@ function isRecord(value: unknown): value is Record<string, unknown> {
  * mark (a layered spec, or one relying on a default) -- decodeVizSpec lets
  * such a spec through so Vega-Embed can judge it, with a render failure
  * degrading via the caller's disclosure (the result card's table swap, or the
- * fence's bare disclosure). */
+ * fence's bare disclosure).
+ *
+ * cf. keepsDefaultWidth in VegaChart -- an orthogonal gate whose exemption
+ * set rules `layer` the opposite way on purpose; never merge the two. */
 function readMark(spec: DecodedVizSpec): string | null {
   const mark = spec.mark;
   if (typeof mark === "string") return mark;

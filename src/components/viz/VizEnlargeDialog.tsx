@@ -28,22 +28,25 @@ import {
 } from "../ui/dialog";
 import { VizChartSlot } from "./LazyVegaChart";
 import { VizDegradeDisclosure } from "./VizDegradeDisclosure";
+import { useVizChartGate } from "./useVizChartGate";
 import {
   Tooltip,
   TooltipContent,
   TooltipTrigger,
 } from "../ui/tooltip";
-import type { DecodedVizSpec, VizFailureReason } from "./viz";
+import type { DecodedVizSpec } from "./viz";
 
-/** The dialog body: one chart re-embed, or its own honest disclosure. Lives
- *  inside DialogContent so closing unmounts it: a reopen starts with fresh
- *  failure state, the same reset a new fence body gets. */
+/** The dialog body: one chart re-embed, or its own honest disclosure. The
+ *  render-failure gate rides the shared hook (#1085), keyed on the decoded
+ *  spec's identity -- closing unmounts this body (fresh state on reopen),
+ *  and a new spec arriving while open resets in place, the same identity
+ *  reset the other two chart surfaces get. */
 function EnlargedChartBody({ spec }: { spec: DecodedVizSpec }) {
-  const [renderError, setRenderError] = useState<VizFailureReason | null>(null);
+  const { renderError, showChart, onError } = useVizChartGate(spec);
   return (
     <>
-      {renderError === null && (
-        <VizChartSlot spec={spec} onError={setRenderError} />
+      {showChart && (
+        <VizChartSlot spec={spec} onError={onError} />
       )}
       {renderError !== null && (
         // ADR-0033: a re-embed that fails in the overlay degrades to the
