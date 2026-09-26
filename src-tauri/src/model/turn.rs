@@ -426,9 +426,11 @@ pub struct TurnRecord {
     /// dual-channel manifest -- the `present_files` tool's declared paths
     /// plus reply-text scan hits -- computed once at settle, frozen on the
     /// record. Entries carry absolute (post-materialization) paths; the
-    /// first entry is the primary. Empty for turns that delivered nothing
-    /// and for turns recorded before the field existed (serde default).
-    /// Display-only: never enters the LLM window (like [`Self::trace`]).
+    /// first entry is the primary (declared order for a
+    /// `present_files`-shaped manifest, first-seen order for a scan-only
+    /// one). Empty for turns that delivered nothing and for turns recorded
+    /// before the field existed (serde default). Display-only: never
+    /// enters the LLM window (like [`Self::trace`]).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub artifacts: Vec<TurnArtifact>,
 }
@@ -436,18 +438,33 @@ pub struct TurnRecord {
 /// One delivered artifact on a turn's manifest (ADR-0124, issue #1087):
 /// an absolute path (materialized into the per-session `artifacts/`
 /// directory when the source lived in the session temp working dir;
-/// user-directory hits stay in place), its file name, and whether it is
-/// the manifest's primary (the first entry -- the viewing priority the
-/// `present_files` order defines). File existence is a runtime fact
-/// checked at render time; the manifest is never rewritten.
+/// user-directory hits stay in place), its file name, and whether that
+/// path is durable. The manifest's primary is DERIVED as the first entry
+/// (no stored flag, #1090): `present_files` declarations keep their
+/// declared order, a scan-only manifest's order is first-seen. File
+/// existence is a runtime fact checked at render time; the manifest is
+/// never rewritten.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TurnArtifact {
     /// Absolute filesystem path, post-materialization.
     pub path: String,
     /// The entry's file name (display + external-open label).
     pub file_name: String,
-    /// Whether this is the manifest's primary entry (the first hit).
-    pub primary: bool,
+    /// Whether the path is durable: a materialized copy under the
+    /// per-session `artifacts/` directory, or a user-directory original.
+    /// `false` marks a temp-path entry the materialization could not move
+    /// -- openable until the session closes, gone after. Records persisted
+    /// before the field default to `true`: the only mislabeled pre-field
+    /// shape is a temp path a failed copy left in the recipe, and that
+    /// entry is dead on reopen regardless (existence is a render-time
+    /// fact), so the default never invents a live-but-unsaved entry.
+    #[serde(default = "default_durable")]
+    pub durable: bool,
+}
+
+/// The serde default for [`TurnArtifact::durable`] -- see its doc.
+fn default_durable() -> bool {
+    true
 }
 
 /// One round of a turn's execution trace (ADR-0103, calibrating ADR-0078):

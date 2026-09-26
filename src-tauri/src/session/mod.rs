@@ -4816,9 +4816,10 @@ mod tests {
     fn present_files_turn_records_manifest_and_trace_row() {
         // ADR-0124 (issue #1087) end-to-end: the built-in turn's
         // `present_files` call lands on the turn's artifact manifest (the
-        // tool channel's declaration, deduped against the reply scan's hit
-        // of the same file) and records an honest trace row. No approval
-        // seeding: delivery is a declaration, intercepted ahead of the gate.
+        // tool channel's declaration; the reply scan's hit of the same
+        // MISSING file is existence-filtered, not deduped) and records an
+        // honest trace row. No approval seeding: delivery is a declaration,
+        // intercepted ahead of the gate.
         let provider = FakeProvider::new().scripted_tool_turn_seq(
             "生成报告",
             vec![
@@ -4831,16 +4832,7 @@ mod tests {
             ],
         );
         let mut session = Session::with_provider(Box::new(provider)).expect("session");
-        let approval = crate::approval::ApprovalState::new();
-        let keychain = super::KeychainStore::new();
-        let inputs = super::TurnInputs::empty(&keychain);
-        let outcome = session.ask_with_phase(
-            "生成报告",
-            &approval,
-            &super::NullApprovalSink,
-            |_| {},
-            &inputs,
-        );
+        let outcome = session.ask("生成报告");
         assert!(matches!(outcome, TurnOutcome::Textual { .. }));
         let entry = session
             .conversation()
@@ -4852,10 +4844,13 @@ mod tests {
             .expect("the turn recorded");
         // The declared file does not exist, so the entry keeps the resolved
         // temp path (an explicit declaration survives the heuristic
-        // existence filter); the reply text's scan hit of the SAME file
-        // dedupes against it -- one entry, primary.
-        assert_eq!(entry.artifacts.len(), 1, "tool + scan dedupe to one entry");
-        assert!(entry.artifacts[0].primary);
+        // existence filter); the reply text's scan hit of the SAME missing
+        // file dies at that filter -- one entry, from the declaration.
+        assert_eq!(
+            entry.artifacts.len(),
+            1,
+            "one entry from the declaration; the scan hit is existence-filtered"
+        );
         assert_eq!(entry.artifacts[0].file_name, "report.html");
         assert!(
             Path::new(&entry.artifacts[0].path).is_absolute(),
@@ -4892,16 +4887,7 @@ mod tests {
             .expect("bind");
         let report = session.temp_path.join("page.html");
         std::fs::write(&report, "<html/>").expect("write temp report");
-        let approval = crate::approval::ApprovalState::new();
-        let keychain = super::KeychainStore::new();
-        let inputs = super::TurnInputs::empty(&keychain);
-        session.ask_with_phase(
-            "生成网页",
-            &approval,
-            &super::NullApprovalSink,
-            |_| {},
-            &inputs,
-        );
+        session.ask("生成网页");
         let entry = session
             .conversation()
             .into_iter()

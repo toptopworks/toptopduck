@@ -39,7 +39,7 @@ pub(crate) const PRESENT_FILES: &str = "present_files";
 /// created lazily at the first settle-time materialization. Session
 /// deletion removes the whole per-session directory, so `artifacts/` rides
 /// the existing cleanup semantics.
-pub(crate) const ARTIFACTS_DIR_NAME: &str = "artifacts";
+const ARTIFACTS_DIR_NAME: &str = "artifacts";
 
 /// The per-session persistent artifacts directory (ADR-0124 Decision 2):
 /// `artifacts/` under the session directory (the bound `.duck`'s parent).
@@ -54,7 +54,7 @@ pub(crate) fn artifacts_dir(duck_path: Option<&Path>) -> Option<PathBuf> {
 
 /// The per-turn manifest cap (ADR-0124 Decision 1): a turn's merged
 /// artifact manifest holds at most this many entries.
-pub(crate) const ARTIFACT_CAP: usize = 8;
+const ARTIFACT_CAP: usize = 8;
 
 /// The deliverable extension whitelist (the scan channel's constraint,
 /// ADR-0124 Decision 1): the formats a reply-text hit must carry to count
@@ -159,28 +159,35 @@ pub(crate) enum PresentFilesOutcome {
 
 /// Resolve one `present_files` call against the turn's accumulating
 /// channel (ADR-0124 Decision 1): a non-empty `files` array of non-empty
-/// strings appends verbatim -- validation, resolution, and materialization
-/// are settle concerns, one place for both channels.
+/// strings appends verbatim. Schema-strict (the `invoke_skill` stance,
+/// #1090): any non-string or blank member refuses the WHOLE call -- a
+/// partial accept would report a filtered count the model never asked
+/// for. Validation, resolution, and materialization are settle concerns,
+/// one place for both channels.
 pub(crate) fn resolve_present_files(
     call: &ToolUse,
     channel: &mut Vec<String>,
 ) -> PresentFilesOutcome {
-    let files = call
-        .input
-        .get("files")
-        .and_then(Value::as_array)
-        .map(|arr| {
-            arr.iter()
-                .filter_map(Value::as_str)
-                .filter(|s| !s.trim().is_empty())
-                .map(str::to_string)
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default();
+    let refuse = || {
+        PresentFilesOutcome::Refused(format!(
+            "{PRESENT_FILES} requires a non-empty `files` array of non-empty file path strings"
+        ))
+    };
+    let Some(values) = call.input.get("files").and_then(Value::as_array) else {
+        return refuse();
+    };
+    let mut files = Vec::with_capacity(values.len());
+    for value in values {
+        let Some(path) = value.as_str() else {
+            return refuse();
+        };
+        if path.trim().is_empty() {
+            return refuse();
+        }
+        files.push(path.to_string());
+    }
     if files.is_empty() {
-        return PresentFilesOutcome::Refused(format!(
-            "{PRESENT_FILES} requires a non-empty `files` array of file paths"
-        ));
+        return refuse();
     }
     let summary = format!("{} file(s) presented", files.len());
     let payload = json!({ "recorded": files.len(), "files": files });
@@ -190,8 +197,9 @@ pub(crate) fn resolve_present_files(
 
 /// The turn's reply text for the scan channel: the Materialized terminal
 /// body or the Textual body -- the prose the user reads, where deliverable
-/// paths are mentioned. Failed / cancelled turns carry no reply to scan
-/// (the turn delivered nothing).
+/// paths are mentioned. Failed / cancelled turns carry no reply prose to
+/// scan; their tool-channel declarations, if any, still land on the
+/// manifest (the scan is only one of the two channels).
 pub(crate) fn reply_body(outcome: &crate::model::TurnOutcome) -> &str {
     match outcome {
         crate::model::TurnOutcome::Materialized {
@@ -365,9 +373,8 @@ pub(crate) fn settle_manifest(
     resolved.truncate(ARTIFACT_CAP);
     resolved
         .into_iter()
-        .enumerate()
-        .map(|(index, path)| {
-            let path = materialize(path, cwd, artifacts_dir);
+        .map(|path| {
+            let (path, durable) = materialize(path, cwd, artifacts_dir);
             let file_name = path
                 .file_name()
                 .map(|n| n.to_string_lossy().into_owned())
@@ -375,7 +382,7 @@ pub(crate) fn settle_manifest(
             TurnArtifact {
                 path: path.to_string_lossy().into_owned(),
                 file_name,
-                primary: index == 0,
+                durable,
             }
         })
         .collect()
@@ -389,7 +396,11 @@ pub(crate) fn settle_manifest(
 /// unchanged -- the app does not copy user files. Best-effort + logged: a
 /// copy failure leaves the temp path in place (the card degrades after
 /// close, honestly). A same-name collision takes a `_2`, `_3`, ... suffix
-/// so two distinct same-named files never overwrite each other.
+/// so two distinct same-named files never overwrite each other. The
+/// returned flag is the entry's [`TurnArtifact::durable`] honest face:
+/// `true` for a materialized copy or a user-directory original, `false`
+/// for a temp path the copy could not move (openable until the session
+/// closes).
 /// Whether `path` names something strictly inside `dir` (the session
 /// working directory -- the materialization trigger). `Path::starts_with`
 /// compares components byte-exactly, so on Windows -- where the FS is
@@ -424,12 +435,20 @@ fn component_eq(a: &std::path::Component, b: &std::path::Component) -> bool {
     a == b
 }
 
-fn materialize(path: PathBuf, cwd: &Path, artifacts_dir: Option<&Path>) -> PathBuf {
+fn materialize(path: PathBuf, cwd: &Path, artifacts_dir: Option<&Path>) -> (PathBuf, bool) {
     let Some(dir) = artifacts_dir else {
-        return path;
+        return (path, false);
     };
-    if !is_within(&path, cwd) || !path.is_file() {
-        return path;
+    // A hit outside the session working dir is a user-directory original:
+    // durable in place -- the app does not copy user files.
+    if !is_within(&path, cwd) {
+        return (path, true);
+    }
+    // A declared-but-missing entry: nothing to copy. Durable stays `true`
+    // -- the flag answers "survives the session close", and deadness is
+    // the render-time existence fact's job, not this flag's.
+    if !path.is_file() {
+        return (path, true);
     }
     if let Err(e) = std::fs::create_dir_all(dir) {
         log::warn!(
@@ -437,35 +456,42 @@ fn materialize(path: PathBuf, cwd: &Path, artifacts_dir: Option<&Path>) -> PathB
             "artifact materialization skipped: cannot create {}: {e}",
             dir.display()
         );
-        return path;
+        return (path, false);
     }
     let file_name = match path.file_name().and_then(|n| n.to_str()) {
         Some(name) => name.to_string(),
-        None => return path,
+        None => return (path, false),
     };
     let mut target = dir.join(&file_name);
+    // Collision-loop invariants hoisted (#1090): stem/ext are constant per
+    // attempt, and an empty extension formats without the separator dot
+    // (`LICENSE_2`, never `LICENSE_2.`).
+    let stem = Path::new(&file_name)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("artifact");
+    let ext = Path::new(&file_name)
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or_default();
     let mut counter = 2u32;
     while target.exists() {
-        let stem = Path::new(&file_name)
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .unwrap_or("artifact");
-        let ext = Path::new(&file_name)
-            .extension()
-            .and_then(|e| e.to_str())
-            .unwrap_or_default();
-        target = dir.join(format!("{stem}_{counter}.{ext}"));
+        target = dir.join(if ext.is_empty() {
+            format!("{stem}_{counter}")
+        } else {
+            format!("{stem}_{counter}.{ext}")
+        });
         counter += 1;
     }
     match std::fs::copy(&path, &target) {
-        Ok(_) => target,
+        Ok(_) => (target, true),
         Err(e) => {
             log::warn!(
                 target: "toptopduck::session",
                 "artifact materialization failed for {}: {e}",
                 path.display()
             );
-            path
+            (path, false)
         }
     }
 }
@@ -521,7 +547,7 @@ mod tests {
     #[test]
     fn scan_pairs_quotes_strictly_and_keeps_prose_bare_hits() {
         let hits = scan_reply_text(
-            "I've saved \"Q3 report.pdf\", and it's also in \"see a.pdf and b.pdf\".",
+            "I've durable \"Q3 report.pdf\", and it's also in \"see a.pdf and b.pdf\".",
         );
         assert_eq!(
             hits,
@@ -556,6 +582,29 @@ mod tests {
             other => panic!("expected Local, got {other:?}"),
         }
         assert_eq!(channel, vec!["report.html", "C:/data/table.xlsx"]);
+    }
+
+    /// Schema-strict stance (#1090): a mixed-type array is refused WHOLE
+    /// (the `invoke_skill` precedent) -- silently dropping the non-string
+    /// members would report a filtered count the model never asked for.
+    #[test]
+    fn resolve_present_files_refuses_mixed_type_arrays_whole() {
+        let mut channel = Vec::new();
+        let call = ToolUse {
+            id: "tu_3".into(),
+            name: PRESENT_FILES.into(),
+            input: json!({"files": ["/a.pdf", 5]}),
+        };
+        match resolve_present_files(&call, &mut channel) {
+            PresentFilesOutcome::Refused(message) => {
+                assert!(
+                    message.contains("present_files"),
+                    "names the tool: {message}"
+                );
+            }
+            other => panic!("expected Refused, got {other:?}"),
+        }
+        assert!(channel.is_empty(), "a refused call lands nothing");
     }
 
     #[test]
@@ -612,7 +661,6 @@ mod tests {
             "the same file from both channels is ONE entry"
         );
         assert_eq!(manifest.len(), 2, "the distinct second file survives");
-        assert!(manifest[0].primary, "the first presented entry is primary");
         assert_eq!(manifest[0].file_name, "dup.pdf");
     }
 
@@ -677,12 +725,121 @@ mod tests {
         }
         let manifest = settle_manifest(&presented, "", cwd, None);
         assert_eq!(manifest.len(), ARTIFACT_CAP);
-        assert!(manifest[0].primary, "the first entry is primary");
-        assert!(
-            manifest[1..].iter().all(|a| !a.primary),
-            "exactly one primary"
-        );
         assert_eq!(manifest[7].file_name, "declared_8.pdf");
+    }
+
+    /// The cap runs BEFORE materialization (#1090): ten real files against
+    /// a bound session leave exactly [`ARTIFACT_CAP`] copies on disk -- a
+    /// reorder that materializes first would orphan two copies no manifest
+    /// entry points at. Pins the order, not just the count.
+    #[test]
+    fn settle_manifest_caps_before_materializing_no_orphan_copies() {
+        let work = tempfile::tempdir().expect("workdir");
+        let session = tempfile::tempdir().expect("session dir");
+        let cwd = work.path();
+        let artifacts_dir = session.path().join(ARTIFACTS_DIR_NAME);
+        let mut presented = Vec::new();
+        for i in 1..=10 {
+            let name = format!("declared_{i}.pdf");
+            std::fs::write(cwd.join(&name), "x").expect("write");
+            presented.push(name);
+        }
+        let manifest = settle_manifest(&presented, "", cwd, Some(&artifacts_dir));
+        assert_eq!(manifest.len(), ARTIFACT_CAP);
+        let on_disk = std::fs::read_dir(&artifacts_dir)
+            .expect("artifacts dir")
+            .count();
+        assert_eq!(
+            on_disk, ARTIFACT_CAP,
+            "no orphan copies: what is on disk is what the manifest kept"
+        );
+    }
+
+    /// The three empty arms of [`reply_body`] (#1090): a failed turn, a
+    /// cancelled turn, and a bodiless Materialized outcome all scan "".
+    #[test]
+    fn reply_body_is_empty_for_failed_cancelled_and_bodiless_materialized() {
+        use crate::model::{CancelledReason, TurnFailure, TurnOutcome};
+        assert_eq!(
+            reply_body(&TurnOutcome::Failed(TurnFailure::NotWired)),
+            "",
+            "a failed turn has no reply prose to scan"
+        );
+        assert_eq!(
+            reply_body(&TurnOutcome::Cancelled(Some(CancelledReason::NoProgress))),
+            "",
+            "a cancelled turn has no reply prose to scan"
+        );
+        assert_eq!(
+            reply_body(&TurnOutcome::Materialized {
+                promotions: Vec::new(),
+                viz: None,
+                body: None,
+                assumption: None,
+            }),
+            "",
+            "a bodiless Materialized turn has no reply prose to scan"
+        );
+    }
+
+    /// The `durable` honest face (#1090): a materialized temp hit and a
+    /// user-directory original are durable; an unbound session's temp path
+    /// and a failed materialization are not -- openable until the session
+    /// closes, gone after.
+    #[test]
+    fn settle_manifest_marks_the_saved_honest_face() {
+        let work = tempfile::tempdir().expect("workdir");
+        let cwd = work.path();
+        std::fs::write(cwd.join("page.html"), "x").expect("write");
+        let user_dir = tempfile::tempdir().expect("user dir");
+        let user_pdf = user_dir.path().join("external.pdf");
+        std::fs::write(&user_pdf, "pdf").expect("write");
+
+        // Unbound session: nothing persists, the temp path is not durable.
+        let unbound = settle_manifest(&["page.html".to_string()], "", cwd, None);
+        assert_eq!(unbound.len(), 1);
+        assert!(!unbound[0].durable, "an unbound session saves nothing");
+
+        // Bound session: the temp hit materializes (durable), the
+        // user-directory original stays in place (durable -- the user's file
+        // is durable by nature).
+        let session = tempfile::tempdir().expect("session dir");
+        let bound = settle_manifest(
+            &[
+                "page.html".to_string(),
+                user_pdf.to_string_lossy().into_owned(),
+            ],
+            "",
+            cwd,
+            Some(&session.path().join(ARTIFACTS_DIR_NAME)),
+        );
+        assert_eq!(bound.len(), 2);
+        assert!(bound[0].durable, "the materialized copy is durable");
+        assert!(
+            bound[1].durable,
+            "a user-directory original is durable in place"
+        );
+
+        // A materialization that cannot even create the artifacts dir (its
+        // parent is a file) degrades to the temp path, unsaved.
+        let blocked = tempfile::tempdir().expect("blocked session dir");
+        let blocker = blocked.path().join("blocker");
+        std::fs::write(&blocker, "x").expect("write");
+        let failed = settle_manifest(
+            &["page.html".to_string()],
+            "",
+            cwd,
+            Some(&blocker.join(ARTIFACTS_DIR_NAME)),
+        );
+        assert_eq!(failed.len(), 1);
+        assert!(
+            !failed[0].durable,
+            "a failed materialization leaves the temp path unsaved"
+        );
+        assert!(
+            Path::new(&failed[0].path).starts_with(cwd),
+            "the entry keeps the temp path"
+        );
     }
 
     /// Relative candidates resolve against the cwd basis (the external
@@ -785,6 +942,30 @@ mod tests {
         let second = std::fs::read_to_string(&manifest[1].path).expect("copy 2");
         assert_eq!(first, "one");
         assert_eq!(second, "two");
+    }
+
+    /// A collision on an extension-less name (`LICENSE`) disambiguates
+    /// without minting a trailing dot (`LICENSE_2.`, #1090).
+    #[test]
+    fn settle_manifest_collision_on_extensionless_names_has_no_trailing_dot() {
+        let work = tempfile::tempdir().expect("workdir");
+        let session = tempfile::tempdir().expect("session dir");
+        let cwd = work.path();
+        let artifacts_dir = session.path().join(ARTIFACTS_DIR_NAME);
+        std::fs::create_dir_all(cwd.join("a")).expect("dirs");
+        std::fs::create_dir_all(cwd.join("b")).expect("dirs");
+        std::fs::write(cwd.join("a").join("LICENSE"), "one").expect("write");
+        std::fs::write(cwd.join("b").join("LICENSE"), "two").expect("write");
+
+        let manifest = settle_manifest(
+            &["a/LICENSE".to_string(), "b/LICENSE".to_string()],
+            "",
+            cwd,
+            Some(&artifacts_dir),
+        );
+        assert_eq!(manifest.len(), 2);
+        assert_eq!(manifest[1].file_name, "LICENSE_2");
+        assert!(Path::new(&manifest[1].path).is_file(), "the copy exists");
     }
 
     /// An unbound session (no artifacts dir) keeps temp paths -- the

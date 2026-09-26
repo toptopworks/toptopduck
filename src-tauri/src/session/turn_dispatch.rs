@@ -1857,6 +1857,70 @@ mod tests {
         }
     }
 
+    /// ADR-0124 (#1087; pin #1090): a malformed `present_files` call
+    /// refused at dispatch wires through as the call's OWN error result --
+    /// no trace entry, no phase pair, nothing on the presented channel.
+    #[test]
+    fn present_files_refusal_at_dispatch_is_error_result_without_trace_or_channel() {
+        let engine = Engine::new();
+        let mut ws = WorkingSet::default();
+        let mut sources = HashMap::new();
+        let mut refs = HashMap::new();
+        let mut d = TurnDeps::test_deps(
+            &engine.admin_engine,
+            &mut ws,
+            &mut sources,
+            engine.temp.path(),
+            &mut refs,
+        );
+        let cancel = CancelToken::new();
+        let approval = ApprovalState::new();
+        let sink = RecordingSink::default();
+        let gate = GateCtx {
+            approval: &approval,
+            sink: &sink,
+            cancel: &cancel,
+        };
+        let call = ToolUse {
+            id: "tu_pf".into(),
+            name: "present_files".into(),
+            input: json!({"files": ["/a.pdf", 5]}),
+        };
+        let phases = std::sync::Mutex::new(Vec::new());
+        let mut on_phase = |p: TurnPhase| phases.lock().unwrap().push(p);
+        let mut invocations: Vec<crate::model::SkillInvocation> = Vec::new();
+        let mut presented: Vec<String> = Vec::new();
+        let (result, entry, promotion) = dispatch_gated_call(
+            &call,
+            &mut d,
+            &mut RealMaterializer,
+            &mut McpAggregator::empty(),
+            &[],
+            &mut crate::skills::invocation::test_ctx(&mut invocations),
+            &mut presented,
+            &crate::skills::read::SkillReadGate::inert(),
+            &crate::skills::create::SkillCreateGate::inert(),
+            &gate,
+            &mut on_phase,
+            None,
+        )
+        .expect("a refusal is a tool result, not an abort");
+
+        assert!(result.is_error, "the malformed call is the call's error");
+        assert!(
+            result.content.starts_with("present_files"),
+            "the refusal names the tool: {}",
+            result.content
+        );
+        assert!(entry.is_none(), "a refusal records no trace row");
+        assert!(promotion.is_none());
+        assert!(presented.is_empty(), "nothing lands on the channel");
+        assert!(
+            phases.into_inner().unwrap().is_empty(),
+            "a refusal emits no phase pair"
+        );
+    }
+
     /// The registered-CLI dispatch arm (issue #673): a seeded trust key (the
     /// single plane's payoff: one trust axis, two callers) skips the card;
     /// the executor's structured spawn failure feeds back as a tool-level

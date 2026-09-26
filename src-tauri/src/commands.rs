@@ -1053,10 +1053,11 @@ pub fn conversation(
     Ok(entries)
 }
 
-/// Upper bound on the md text `read_artifact_text` returns (ADR-0124
-/// Decision 4): an inline-rendered markdown artifact is a bounded report,
-/// not an arbitrary file read; beyond the cap the command refuses rather
-/// than materializing an unbounded payload into the webview.
+/// Upper bound on the md text `read_artifact_text` returns: the md-via-IPC
+/// ruling is ADR-0124 Decision 4; the byte value itself is an implementation
+/// parameter (a bounded inline report, not an arbitrary file read). Beyond
+/// the cap the command refuses rather than materializing an unbounded
+/// payload into the webview.
 const ARTIFACT_TEXT_MAX_BYTES: u64 = 2 * 1024 * 1024;
 
 /// Widen the asset protocol's runtime scope to the session's artifacts
@@ -1064,8 +1065,9 @@ const ARTIFACT_TEXT_MAX_BYTES: u64 = 2 * 1024 * 1024;
 /// `asset://` in a sandboxed iframe, so the scope anchors the per-session
 /// materialization directory -- NOT the whole sessions root and never the
 /// user's directories). Idempotent: the scope is a pattern set, re-granting
-/// adds nothing. Failures log and degrade (a card falls back to the
-/// external-open path, the iframe render fails honest).
+/// adds nothing. Failures log and degrade: the iframe render then fails
+/// honest (whether the card offers an external-open fallback is #1088's
+/// render-time concern, not a grant-time fact).
 fn grant_artifact_asset_scope(app: &tauri::AppHandle, duck_path: Option<&Path>) {
     let Some(dir) = crate::session::artifacts::artifacts_dir(duck_path) else {
         return;
@@ -3803,6 +3805,29 @@ mod tests {
         assert!(
             read_artifact_text(md.to_string_lossy().into_owned()).is_err(),
             "an oversized artifact refuses rather than materializing"
+        );
+    }
+
+    /// The cap's boundary is inclusive (#1090): a report of exactly the
+    /// cap reads whole (the check is `>`, not `>=`); and an md whose bytes
+    /// are not UTF-8 refuses rather than serving a lossy read.
+    #[test]
+    fn read_artifact_text_accepts_exactly_the_cap_and_refuses_non_utf8() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let at_cap = dir.path().join("at_cap.md");
+        std::fs::write(&at_cap, vec![b'#'; ARTIFACT_TEXT_MAX_BYTES as usize]).expect("write");
+        assert_eq!(
+            read_artifact_text(at_cap.to_string_lossy().into_owned())
+                .expect("an at-cap artifact reads")
+                .len(),
+            ARTIFACT_TEXT_MAX_BYTES as usize,
+            "exactly at the cap is in bounds"
+        );
+        let binary = dir.path().join("binary.md");
+        std::fs::write(&binary, [0xFF, 0xFE, 0x00]).expect("write");
+        assert!(
+            read_artifact_text(binary.to_string_lossy().into_owned()).is_err(),
+            "non-UTF-8 bytes refuse rather than lossy-read"
         );
     }
 
