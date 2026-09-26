@@ -98,6 +98,8 @@ function prepareEmbed(spec: TopLevelSpec): {
     };
   }
   const encoding = (spec as { encoding?: Record<string, unknown> }).encoding;
+  // cf. readMark in viz.ts -- an orthogonal gate whose exemption set rules
+  // `layer` the opposite way on purpose; never merge the two.
   const keepsDefaultWidth =
     Boolean(encoding && ("row" in encoding || "column" in encoding)) ||
     "facet" in spec ||

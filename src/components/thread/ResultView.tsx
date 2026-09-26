@@ -1,9 +1,10 @@
-import { useEffect, useId, useMemo, useState } from "react";
+import { useId, useMemo, useState } from "react";
 import { FormattedMessage, useIntl } from "react-intl";
 import { toAppError } from "../../lib/error-presentation";
 import { useRowPage } from "../../session/useRowPage";
 import type { RowPage } from "../../types/dataset";
-import { decodeViz, type VizFailureReason } from "../viz/viz";
+import { decodeViz } from "../viz/viz";
+import { useVizChartGate } from "../viz/useVizChartGate";
 import { VizChartSlot } from "../viz/LazyVegaChart";
 import { VizEnlargeDialog } from "../viz/VizEnlargeDialog";
 import { formatVizFailure } from "../viz/viz-failure";
@@ -208,13 +209,16 @@ export function ResultView({
   // render failure reported by VegaChart degrades the same way. memoized so the
   // chart-slot decision stays stable across re-renders.
   const decoded = useMemo(() => (viz ? decodeViz(viz) : null), [viz]);
-  const [renderError, setRenderError] = useState<VizFailureReason | null>(null);
 
-  // A new result/viz resets the render-failure state so it gets a fresh try.
-  useEffect(() => {
-    // eslint-disable-next-line react-hooks/set-state-in-effect
-    setRenderError(null);
-  }, [referenceName, viz]);
+  // The render-failure gate rides the shared hook (#1085), keyed on the
+  // [referenceName, decoded] pair -- memoized so the identity is stable
+  // between renders (the hook compares by identity), preserving the old
+  // reset contract: a result switch OR a new spec starts the chart fresh.
+  const vizGateKey = useMemo(
+    () => [referenceName, decoded],
+    [referenceName, decoded],
+  );
+  const { renderError, onError } = useVizChartGate(vizGateKey);
 
   // The chart renders only when a spec decoded AND no render error has landed.
   const showChart = decoded !== null && decoded.ok && renderError === null;
@@ -404,7 +408,7 @@ export function ResultView({
         // (#1050); the swap-in disclosure below carries no affordance, so a
         // failed chart has nothing to enlarge.
         <div className="relative">
-          <VizChartSlot spec={decoded.spec} onError={setRenderError} />
+          <VizChartSlot spec={decoded.spec} onError={onError} />
           <VizEnlargeDialog spec={decoded.spec} />
         </div>
       )}

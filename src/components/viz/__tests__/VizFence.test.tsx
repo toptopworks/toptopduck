@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { embedOk, renderI18n } from "../../common/__tests__/helpers";
+import { embedOk, renderI18n, withIntl } from "../../common/__tests__/helpers";
 import { fireEvent, screen, waitFor } from "@testing-library/react";
 import embed from "vega-embed";
 import { THEME_CHANGE_EVENT } from "../../../theme/useTheme";
@@ -115,6 +115,28 @@ describe("VizFence (ADR-0120)", () => {
     renderI18n(<VizFence spec={JSON.stringify({ mark: "bar" })} />);
     await waitFor(() => expect(screen.getByText(/图表无法渲染/)).toBeInTheDocument());
     expect(embed).toHaveBeenCalledTimes(1);
+  });
+
+  it("resets the render failure on a new fence body (a fresh body gets its own try)", async () => {
+    // The gate's reset axis is the fence's raw spec text (#1085): a settled
+    // body revision swaps the text in place (RoundProse re-parses the prose),
+    // and the fence must try the new body, not wear the old verdict. The
+    // sticky rejection closes the loop twice (reset, re-embed, degrade
+    // again); the rerender repeats the render's exact tree -- a bare element
+    // would remount and reset on mount, masking the axis.
+    vi.mocked(embed).mockRejectedValue(new Error("vega render boom"));
+    const body = (mark: string) => JSON.stringify({ mark });
+    const { rerender } = renderI18n(<VizFence spec={body("bar")} />);
+    await waitFor(() => expect(embed).toHaveBeenCalledTimes(1));
+    await waitFor(() =>
+      expect(screen.getByText(/图表无法渲染/)).toBeInTheDocument(),
+    );
+    rerender(withIntl(<VizFence spec={body("point")} />));
+    // The fresh body re-embeds; the sticky rejection degrades again.
+    await waitFor(() => expect(embed).toHaveBeenCalledTimes(2));
+    await waitFor(() =>
+      expect(screen.getByText(/图表无法渲染/)).toBeInTheDocument(),
+    );
   });
 
   it("re-embeds with the fresh palette on a theme flip (ADR-0050 bridge)", async () => {
