@@ -74,17 +74,41 @@ static MD_LINK: LazyLock<Regex> =
 
 /// Family 2: quoted / backtick-wrapped spans. Unlike the bare-token family
 /// this carries paths WITH spaces (`"my report.pdf"`); the whitelist check
-/// on the extracted span rejects ordinary quoted prose.
-static QUOTED: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r#"["'`]([^"'`\r\n]{1,400})["'`]"#).expect("quoted regex"));
+/// on the extracted span rejects ordinary quoted prose. Delimiters pair
+/// strictly -- each alternative opens and closes with the same mark,
+/// straight or curly (PR #1089 review: independent pairing let an
+/// apostrophe eat a following opening quote), and a single-quoted span may
+/// not contain a double quote, so contractions flanking a quoted path
+/// never swallow it.
+static QUOTED: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        r#""([^"\r\n]{1,400})"|'([^'"\r\n]{1,400})'|`([^`\r\n]{1,400})`|“([^“”\r\n]{1,400})”|‘([^‘’\r\n]{1,400})’"#,
+    )
+    .expect("quoted regex")
+});
 
-/// Family 3: bare tokens ending in a whitelisted extension. The character
-/// class excludes quotes and pairing punctuation so a token does not run
-/// past a quote boundary; the trailing `\b` rejects longer extensions
-/// (`report.pdfx` -- f/x are both word chars, no boundary there).
+/// The captured span of one [`QUOTED`] match -- the alternation's five
+/// capture groups, exactly one of which is present.
+fn quoted_capture<'t>(caps: &regex::Captures<'t>) -> &'t str {
+    (1..=5)
+        .find_map(|i| caps.get(i))
+        .map(|m| m.as_str())
+        .expect("quoted capture")
+}
+
+/// Family 3: bare tokens ending in a whitelisted extension. The FIRST
+/// character is its own ASCII path-start class so adjacent prose never
+/// becomes part of the token (a CJK word directly before `report.md`
+/// would otherwise be swallowed into the candidate, which then dies at
+/// the settle existence filter; PR #1089 review), and the rest of the
+/// class also excludes curly quotes and CJK punctuation. Longer
+/// extensions (`report.pdfx`) are rejected after the match via
+/// [`ends_at_token_boundary`]: the regex crate has no lookahead, and its
+/// Unicode-aware `\b` would reject the CJK word chars that legitimately
+/// follow a mention.
 static BARE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(&format!(
-        r#"(?i)[^\s'`"<>\x5b\x5d(){{}}]+\.({})\b"#,
+        r#"(?i)[A-Za-z0-9_~./\\-][^\s'`"“”‘’<>\x5b\x5d(){{}}（）【】，。、；：]*\.({})"#,
         DELIVERABLE_EXTENSIONS.join("|")
     ))
     .expect("bare-path regex")
@@ -217,17 +241,31 @@ pub(crate) fn scan_reply_text(text: &str) -> Vec<String> {
     // The wrapping families' full match spans, so a bare-token hit INSIDE
     // one (`"my report.pdf"` also yields the partial `report.pdf` from the
     // bare family) is subsumed by the wrapping hit and dropped -- the
-    // partial resolves to a different, wrong path.
+    // partial resolves to a different, wrong path. A QUOTED span subsumes
+    // only when the capture plausibly IS the path (at most one bare hit
+    // inside, no CJK prose -- PR #1089 review): quoted prose mentioning
+    // two files, or CJK prose mentioning one, would otherwise swallow the
+    // genuine bare hits and the phrase itself dies at the settle existence
+    // filter, losing the delivery. Markdown link targets always subsume --
+    // a target is a single token, so the inner bare hit is only its echo.
     let mut wrapped: Vec<std::ops::Range<usize>> = Vec::new();
     for caps in MD_LINK.captures_iter(text) {
         wrapped.push(caps.get(0).expect("md-link match").range());
         push(caps.get(1).expect("md-link capture").as_str());
     }
     for caps in QUOTED.captures_iter(text) {
-        wrapped.push(caps.get(0).expect("quoted match").range());
-        push(caps.get(1).expect("quoted capture").as_str());
+        let span = caps.get(0).expect("quoted match").range();
+        let capture = quoted_capture(&caps);
+        let plausibly_path = BARE.find_iter(capture).count() <= 1 && !capture.chars().any(is_cjk);
+        if plausibly_path {
+            wrapped.push(span);
+        }
+        push(capture);
     }
     for mat in BARE.find_iter(text) {
+        if !ends_at_token_boundary(text, mat.end()) {
+            continue; // a longer extension (`report.pdfx`) -- not this token
+        }
         if wrapped
             .iter()
             .any(|r| mat.start() >= r.start && mat.end() <= r.end)
@@ -237,6 +275,25 @@ pub(crate) fn scan_reply_text(text: &str) -> Vec<String> {
         push(mat.as_str());
     }
     candidates
+}
+
+/// Whether the character at `end` in `text` continues an ASCII token (a
+/// longer extension, `report.pdfx`) -- the code-level replacement for a
+/// trailing `\b`, which the regex crate would make Unicode-aware and
+/// thereby reject the CJK word chars that legitimately follow a mention
+/// (`report.md` followed by the word for "file" is a hit, not a miss).
+fn ends_at_token_boundary(text: &str, end: usize) -> bool {
+    !text[end..]
+        .chars()
+        .next()
+        .is_some_and(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
+/// Whether a char is in the CJK unified ideographs block -- this app's
+/// primary prose script; its presence in a quoted span marks prose, not a
+/// path (see the subsumption rule in [`scan_reply_text`]).
+fn is_cjk(c: char) -> bool {
+    ('\u{4e00}'..='\u{9fff}').contains(&c)
 }
 
 /// Resolve one raw candidate against the turn's working-directory basis
@@ -333,11 +390,45 @@ pub(crate) fn settle_manifest(
 /// copy failure leaves the temp path in place (the card degrades after
 /// close, honestly). A same-name collision takes a `_2`, `_3`, ... suffix
 /// so two distinct same-named files never overwrite each other.
+/// Whether `path` names something strictly inside `dir` (the session
+/// working directory -- the materialization trigger). `Path::starts_with`
+/// compares components byte-exactly, so on Windows -- where the FS is
+/// case-insensitive and a model may echo an absolute temp path with
+/// drifted casing -- the comparison folds case through the same lens as
+/// [`dedup_key`], keeping the dedup and materialization decisions on one
+/// case semantics (PR #1089 review).
+fn is_within(path: &Path, dir: &Path) -> bool {
+    let mut dir_comps = dir.components();
+    for comp in path.components() {
+        match dir_comps.next() {
+            Some(d) if component_eq(&comp, &d) => continue,
+            // `dir` exhausted: this component is a child below it.
+            None => return true,
+            Some(_) => return false,
+        }
+    }
+    false // `path` ended with `dir` components unconsumed (or equals it).
+}
+
+/// Component equality, case-folded on Windows (see [`is_within`]);
+/// component comparison already normalizes `/` vs `\`.
+#[cfg(windows)]
+fn component_eq(a: &std::path::Component, b: &std::path::Component) -> bool {
+    a.as_os_str()
+        .to_string_lossy()
+        .eq_ignore_ascii_case(&b.as_os_str().to_string_lossy())
+}
+
+#[cfg(not(windows))]
+fn component_eq(a: &std::path::Component, b: &std::path::Component) -> bool {
+    a == b
+}
+
 fn materialize(path: PathBuf, cwd: &Path, artifacts_dir: Option<&Path>) -> PathBuf {
     let Some(dir) = artifacts_dir else {
         return path;
     };
-    if !path.starts_with(cwd) || !path.is_file() {
+    if !is_within(&path, cwd) || !path.is_file() {
         return path;
     }
     if let Err(e) = std::fs::create_dir_all(dir) {
@@ -419,6 +510,34 @@ mod tests {
     fn scan_bare_token_rejects_longer_extensions() {
         let hits = scan_reply_text("见 readout.pdfx 与 manual.pdf5 以及 real.md");
         assert_eq!(hits, vec!["real.md"]);
+    }
+
+    /// PR #1089 review Important 2: delimiters pair strictly (an
+    /// apostrophe never eats a following opening quote, even with a
+    /// second contraction flanking the path), and quoted prose
+    /// mentioning files does not subsume the bare hits inside it -- the
+    /// prose span itself dies at the settle existence filter, but the
+    /// genuine paths survive.
+    #[test]
+    fn scan_pairs_quotes_strictly_and_keeps_prose_bare_hits() {
+        let hits = scan_reply_text(
+            "I've saved \"Q3 report.pdf\", and it's also in \"see a.pdf and b.pdf\".",
+        );
+        assert_eq!(
+            hits,
+            vec!["Q3 report.pdf", "see a.pdf and b.pdf", "a.pdf", "b.pdf",]
+        );
+    }
+
+    /// PR #1089 review Important 3: the primary-language reply shapes.
+    /// A CJK word directly before the path no longer becomes part of the
+    /// token, a CJK word right after the extension is a legitimate
+    /// follower (not a longer extension), and curly quotes wrap CJK
+    /// file names the ASCII quote class never opened.
+    #[test]
+    fn scan_matches_cjk_adjacent_and_curly_quoted_paths() {
+        let hits = scan_reply_text("已生成report.md文件，另见“最终报告.pdf”。");
+        assert_eq!(hits, vec!["最终报告.pdf", "report.md"]);
     }
 
     #[test]
@@ -513,6 +632,37 @@ mod tests {
             manifest[0].path.ends_with("Dup.pdf"),
             "the presented spelling wins"
         );
+    }
+
+    /// Windows case-insensitivity on the materialization trigger (PR
+    /// #1089 review Important 4): an echoed absolute temp path with
+    /// drifted casing is still a temp-dir member and materializes -- the
+    /// same fold lens the dedup key uses. (Unix keeps byte-exact
+    /// membership; pinned on Windows only.)
+    #[cfg(windows)]
+    #[test]
+    fn settle_manifest_materializes_case_drifted_temp_paths_on_windows() {
+        let work = tempfile::tempdir().expect("workdir");
+        let session = tempfile::tempdir().expect("session dir");
+        std::fs::write(work.path().join("page.html"), "x").expect("write");
+        let drifted = work
+            .path()
+            .join("page.html")
+            .to_string_lossy()
+            .to_ascii_uppercase();
+        let manifest = settle_manifest(
+            &[drifted],
+            "",
+            work.path(),
+            Some(&session.path().join(ARTIFACTS_DIR_NAME)),
+        );
+        assert_eq!(manifest.len(), 1);
+        assert!(
+            Path::new(&manifest[0].path).starts_with(session.path()),
+            "the drifted-casing temp hit still materializes: {}",
+            manifest[0].path
+        );
+        assert!(Path::new(&manifest[0].path).is_file(), "the copy exists");
     }
 
     /// The manifest caps at [`ARTIFACT_CAP`] entries; the cap keeps the

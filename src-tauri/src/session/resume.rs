@@ -1752,6 +1752,44 @@ mod tests {
     }
 
     #[test]
+    fn rebuild_timeline_restores_the_artifact_manifest() {
+        // PR #1089 review Important 5 (issue #1087): the manifest is the
+        // whole point of materialization -- it must survive the rebuild
+        // verbatim, or a reopen silently loses every delivered artifact.
+        let mut turn = RecipeTurn::without_audit(
+            "q",
+            RecipeOutcome::Textual {
+                text_kind: TextKind::Agent,
+                body: "报告在 report.pdf".into(),
+                assumption: None,
+            },
+        );
+        turn.artifacts = vec![crate::model::TurnArtifact {
+            path: "/sessions/abc/artifacts/report.pdf".into(),
+            file_name: "report.pdf".into(),
+            primary: true,
+        }];
+        let recipe = recipe_with(vec![RecipeEntry::Turn(turn)], None);
+        let mut ws = WorkingSet::default();
+        let cancel = Arc::new(CancelToken::new());
+        let mut fake = FakeMaterializer::new(Vec::new());
+        let resumer = Resumer::new(&cancel, &mut fake, &recipe);
+        let timeline = resumer.rebuild_timeline(&mut ws, None).unwrap();
+        let TimelineEntry::Turn { record, .. } = &timeline[0] else {
+            panic!("expected Turn, got {:?}", timeline[0])
+        };
+        assert_eq!(
+            record.artifacts,
+            vec![crate::model::TurnArtifact {
+                path: "/sessions/abc/artifacts/report.pdf".into(),
+                file_name: "report.pdf".into(),
+                primary: true,
+            }],
+            "the manifest round-trips verbatim across close/reopen"
+        );
+    }
+
+    #[test]
     fn rebuild_timeline_projects_runtime_attribution_to_the_wire() {
         // ADR-0101: the resume projection maps the persisted pair (runtime
         // kind + adapter id) onto the wire `TurnRuntime` the thread's segment

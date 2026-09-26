@@ -3167,8 +3167,11 @@ mod tests {
     /// never lists it -- an external CLI has no injection point and no
     /// system-prompt clause, so its only channel is the reply-text scan.
     /// Structural pin: `tools/list` never carries the name however the
-    /// conditionals mount, and a spoofed `tools/call` falls to the
-    /// unknown-tool refusal.
+    /// conditionals mount, and a spoofed `tools/call` has no landing on
+    /// the bridge face: the bare name classifies under the unknown-server
+    /// external arm (the gate's pending card surfaces, as this module's
+    /// routing doc notes), and only post-Allow routing reaches
+    /// `tools::dispatch`, which answers with the unknown-tool error.
     #[test]
     fn tools_list_never_lists_present_files() {
         for ctx in [fresh_ctx(), skill_ctx(vec!["sql-coach".to_string()])] {
