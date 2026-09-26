@@ -66,6 +66,16 @@ describe("ArtifactView", () => {
       expect(screen.getByTestId("artifact-card")).toBeInTheDocument();
       expect(screen.queryByTestId("artifact-frame")).not.toBeInTheDocument();
     });
+
+    it("degrades a missing in-scope HTML file to the not-openable card", async () => {
+      // The iframe gate shares the exists cache entry: a deleted file must
+      // render the card, not a WebView denial inside the opaque origin.
+      vi.mocked(artifactExists).mockResolvedValue(false);
+      renderView("C:/sessions/s1/artifacts/gone.html", "html");
+      expect(await screen.findByTestId("artifact-card")).toBeInTheDocument();
+      expect(screen.getByText(/已不在磁盘上|no longer on disk/)).toBeInTheDocument();
+      expect(screen.queryByTestId("artifact-frame")).not.toBeInTheDocument();
+    });
   });
 
   describe("markdown branch (IPC text + prose renderer)", () => {

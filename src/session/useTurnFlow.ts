@@ -124,10 +124,10 @@ export interface LiveTurn {
   /** The client's submit stamp (the live bubble's `asked_at`, ADR-0103 live
    *  isomorphism, issue #610): read at handleAsk, carried so the bubble
    *  mounts its timestamp before any progress event lands. The same value
-   *  rides the optimistic TurnRecord until the backend's own stamps land: a
-   *  reopened mount reads them, or another domain's invalidation (ingest,
-   *  skill changes) replaces the append with the recorded row -- the turn
-   *  flow itself never invalidates the thread (ADR-0051). */
+   *  rides the optimistic TurnRecord until the backend's own stamps land:
+   *  the turn-end refresh, a reopened mount, or another domain's invalidation
+   *  (ingest, skill changes) all converge the append onto the recorded row
+   *  (ADR-0051 / issue #1088). */
   askedAt: number;
   /** The skill names staged at submit (ADR-0119: the turn's user
    *  invocations, client-known before the IPC returns). The live bubble's

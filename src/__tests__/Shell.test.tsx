@@ -12,6 +12,15 @@ import type { ThreadEntry, TurnOutcome } from "../types/thread";
 // bridge) so the shell renders offline.
 
 vi.mock("@tauri-apps/plugin-dialog", () => ({ open: vi.fn(), save: vi.fn() }));
+
+// ArtifactView's HTML branch rides convertFileSrc (the asset protocol); the
+// real transform reads window.__TAURI_INTERNALS__ (absent in jsdom), so a
+// pure stand-in keeps the iframe's src observable (issue #1088). Partial:
+// api.ts's invoke keeps the real binding via importOriginal spreads.
+vi.mock("@tauri-apps/api/core", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@tauri-apps/api/core")>();
+  return { ...actual, convertFileSrc: (p: string) => "asset://mock/" + p };
+});
 const dropEvent = vi.hoisted(() => ({
   handler: null as
   | null
@@ -102,6 +111,10 @@ vi.mock("../api", async (importOriginal) => {
     onApprovalResolved: vi.fn(async () => () => {}),
     respondToolApproval: vi.fn(async () => {}),
     readRows: vi.fn(),
+    // The artifact surfaces' render-time facts (issue #1088): existence
+    // defaults to true (openable rows/cards), the text read to empty.
+    artifactExists: vi.fn(async () => true),
+    readArtifactText: vi.fn(async () => ""),
     // listProviderProfiles feeds the per-profile has_key overlay consumed by
     // the shell-level bar: the composer picker's badge + the ADR-0092
     // submit-time honest gate (useProfileKeys). Default: the "default" profile
@@ -161,7 +174,7 @@ import {
 import type { AppConfig } from "../types/app-config";
 import type { McpServerConfig } from "../types/mcp";
 import { baseAppConfig as sharedBaseAppConfig, skillEntry } from "../test-fixtures";
-import { recordedTurn } from "../session/__tests__/fixtures";
+import { artifactTurn, recordedTurn } from "../session/__tests__/fixtures";
 import type { SessionRuntimeChoice } from "../types/runtime";
 import { log } from "../lib/log";
 
@@ -1554,6 +1567,117 @@ function mcpServer(id: string): McpServerConfig {
     enabled: true,
   };
 }
+
+describe("App artifact presentation (issue #1088, ADR-0124 Decision 3/4)", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    state.workingSet = [];
+    state.thread = [];
+    vi.mocked(listSessions).mockResolvedValue([]);
+    vi.mocked(activeDataset).mockResolvedValue(null);
+    vi.mocked(listWorkingSet).mockResolvedValue([]);
+    // mockImplementation so state.thread mutations within a test flow
+    // through to the rendered Thread (the live-flow test seeds the recorded
+    // row after the mount's initial load).
+    vi.mocked(conversation).mockImplementation(async () => state.thread);
+    // Re-establish the createSession default: clearAllMocks clears calls,
+    // not implementations, and an earlier suite's persistent clobber (a
+    // different duck_path) would route the HTML scope check off the
+    // artifacts dir and degrade the iframe to the card.
+    vi.mocked(createSession).mockResolvedValue({
+      session_id: "sess-1",
+      duck_path: "/sessions/sess-1/session.duck",
+    });
+    vi.stubGlobal("navigator", { language: "zh-CN" });
+  });
+
+  it("renders the rail card on a resumed manifest; a row click selects the file onto the stage", async () => {
+    // The composition chain the issue is about, driven end to end: the
+    // recorded turn already carries the settle-computed manifest (ADR-0124
+    // Decision 2), TurnCard's render gate mounts the ArtifactCard, the
+    // exists-checked row is clickable, handleSelectFile moves viewedResult
+    // onto the file view AND expands the workspace, and the in-scope HTML
+    // renders the sandboxed iframe stage.
+    state.workingSet = [src("people")];
+    state.thread = [artifactTurn(["/sessions/sess-1/artifacts/page.html"])];
+    render(<App />);
+    await openSession();
+    const row = await screen.findByRole("button", { name: /page\.html/ });
+    expect(screen.getByText(/交付文件/)).toBeInTheDocument();
+    // Resume posture (#771 mirror): no Materialized turn means nothing
+    // auto-opens -- the one-shot spends silently on the init scan and the
+    // workspace stays folded until the user picks a row.
+    expect(document.querySelector(".session-pane")?.classList.contains("workspace-collapsed")).toBe(true);
+    fireEvent.click(row);
+    await waitFor(() =>
+      expect(document.querySelector(".session-pane")?.classList.contains("workspace-collapsed")).toBe(false),
+    );
+    const frame = document.querySelector("[data-testid=\"artifact-frame\"]");
+    expect(frame?.getAttribute("src")).toContain("page.html");
+    expect(frame?.getAttribute("sandbox")).toBe("allow-scripts");
+    // The dual-view mirror: the clicked row carries the active marker.
+    expect(row).toHaveAttribute("aria-current", "true");
+  });
+
+  it("auto-opens the primary when the turn-end refetch lands a manifest (live flow)", async () => {
+    state.workingSet = [src("people")];
+    const outcome = {
+      kind: "Textual",
+      data: { text_kind: "Agent", body: "report written", assumption: null },
+    } satisfies TurnOutcome;
+    // Persisting impl: the creation turn (openSession's one-time rejection)
+    // consumes its queue slot first, this turn resolves textual.
+    vi.mocked(askQuestion).mockResolvedValue(outcome);
+    // The refetch must land AFTER the optimistic append's commit: the real
+    // IPC round-trip separates the two thread writes into two renders, but
+    // an instantly-resolving mock batches them into one -- the auto-open's
+    // init scan would first see the manifest and spend silently. Gate the
+    // second conversation call (the turn-end refetch) on a manual release.
+    let releaseRefetch: (() => void) | null = null;
+    let conversationCalls = 0;
+    vi.mocked(conversation).mockImplementation(async () => {
+      conversationCalls += 1;
+      if (conversationCalls > 1) {
+        await new Promise<void>((resolve) => {
+          releaseRefetch = resolve;
+        });
+      }
+      return state.thread;
+    });
+    render(<App />);
+    await openSession();
+    // The mount's initial conversation load saw the empty thread; the
+    // optimistic append carries no manifest (settle-computed fields are
+    // backend-only), so the workspace is still folded here.
+    expect(document.querySelector(".session-pane")?.classList.contains("workspace-collapsed")).toBe(true);
+    // The recorded row the turn-end refetch returns (mock parity): the
+    // same outcome plus the manifest.
+    state.thread = [artifactTurn(["/sessions/sess-1/artifacts/report.pdf"], outcome)];
+    fireEvent.change(screen.getByLabelText("提问"), { target: { value: "写个报告" } });
+    fireEvent.click(screen.getByRole("button", { name: "提问" }));
+    // The optimistic append commits first -- the rail shows the question
+    // from the append, before any refetched data exists.
+    const rail = document.querySelector<HTMLElement>(".session-rail")!;
+    await waitFor(() => expect(within(rail).getByText("写个报告")).toBeInTheDocument());
+    // Release the refetch: the turn-end refresh refetches the thread, the
+    // manifest lands, and
+    expect(releaseRefetch).not.toBeNull();
+    releaseRefetch!();
+    // The manifest lands; the auto-open one-shot fires (no Materialized -> the artifact owns
+    // the stage): the workspace expands and the primary renders as the
+    // file card (pdf -> the card branch, not the iframe).
+    await waitFor(() =>
+      expect(document.querySelector(".session-pane")?.classList.contains("workspace-collapsed")).toBe(false),
+    );
+    const card = await waitFor(() => {
+      const node = document.querySelector("[data-testid=\"artifact-card\"]");
+      expect(node).not.toBeNull();
+      return node as HTMLElement;
+    });
+    expect(card).toHaveTextContent("report.pdf");
+    expect(document.querySelector("[data-testid=\"artifact-frame\"]")).toBeNull();
+  });
+});
 
 describe("App shell window collapse + drag-drop bisection (issue #84)", () => {
   beforeEach(() => {

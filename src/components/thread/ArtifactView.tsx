@@ -23,8 +23,9 @@ import { FileDown, FileWarning } from "lucide-react";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { openPath } from "@tauri-apps/plugin-opener";
 import { cn } from "@/lib/utils";
-import { artifactExists, readArtifactText } from "../../api";
+import { readArtifactText } from "../../api";
 import { artifactKeys } from "../../session/queryKeys";
+import { useArtifactExists } from "../../session/useArtifactExists";
 import { isWithinArtifactsDir, type ArtifactRenderKind } from "../../session/workspace";
 import { RoundProse } from "./RoundProse";
 
@@ -44,19 +45,31 @@ export function ArtifactView({
 }) {
   if (render === "html") {
     // The scope check is a render fact, not a query: the duck path and the
-    // manifest paths are both settle/stable strings.
-    return isWithinArtifactsDir(artifact.path, duckPath) ? (
-      <HtmlArtifactShell path={artifact.path} fileName={artifact.file_name} />
-    ) : (
-      // A user-directory original or an unbound temp path: the asset
-      // protocol would deny it, so the card IS the render (Decision 4).
-      <ArtifactFallbackCard artifact={artifact} />
-    );
+    // manifest paths are both settle/stable strings. A user-directory
+    // original or an unbound temp path would be denied by the asset
+    // protocol, so the card IS the render (Decision 4).
+    if (!isWithinArtifactsDir(artifact.path, duckPath)) {
+      return <ArtifactFallbackCard artifact={artifact} />;
+    }
+    return <HtmlArtifactGate path={artifact.path} fileName={artifact.file_name} />;
   }
   if (render === "markdown") {
     return <MarkdownArtifact path={artifact.path} fallback={artifact} />;
   }
   return <ArtifactFallbackCard artifact={artifact} />;
+}
+
+/** The existence gate before the iframe (Decision 2's honest degrade, the
+ * one branch that used to skip it): a missing in-scope file must render
+ * the not-openable card, not point the frame at a denial the opaque origin
+ * would show as the WebView's own error page. Shares the rail row's exists
+ * cache entry (same artifactKeys key), so the row's check pays for this. */
+function HtmlArtifactGate({ path, fileName }: { path: string; fileName: string }) {
+  const exists = useArtifactExists(path);
+  if (!exists) {
+    return <ArtifactFallbackCard artifact={{ path, file_name: fileName }} />;
+  }
+  return <HtmlArtifactShell path={path} fileName={fileName} />;
 }
 
 /** The isolated HTML shell (Decision 4's trust boundary). sandbox is pinned
@@ -89,8 +102,10 @@ function MarkdownArtifact({
   const text = useQuery({
     queryKey: artifactKeys.text(path),
     queryFn: () => readArtifactText(path),
-    // One read per path: the manifest is settle-frozen, so the bytes behind
-    // it change only by external edits -- a refocus refetch re-checks those.
+    // One read per path (the manifest is settle-frozen): never stale and
+    // focus refetch is off app-wide, so the text re-reads only when the
+    // cache entry ages out (gcTime after the last observer unmounts) and a
+    // later mount re-observes it.
     staleTime: Infinity,
     retry: false,
   });
@@ -109,14 +124,7 @@ function ArtifactFallbackCard({
   artifact: { path: string; file_name: string };
 }) {
   const [openFailed, setOpenFailed] = useState(false);
-  // Undefined (in flight) reads as openable: existence is the common case,
-  // and flipping a live card to "missing" mid-check would flash.
-  const exists = useQuery({
-    queryKey: artifactKeys.exists(artifact.path),
-    queryFn: () => artifactExists(artifact.path),
-    staleTime: 0,
-    retry: false,
-  }).data !== false;
+  const exists = useArtifactExists(artifact.path);
   const handleOpen = () => {
     setOpenFailed(false);
     // openPath hands the path to the OS opener; a failure surfaces as a

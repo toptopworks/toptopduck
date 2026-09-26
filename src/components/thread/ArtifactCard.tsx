@@ -14,12 +14,10 @@
 // not-openable state (dimmed, no click) and NOTHING rewrites the manifest --
 // a settled turn keeps its full list forever, deletions only degrade.
 
-import { useQuery } from "@tanstack/react-query";
 import { FormattedMessage, useIntl } from "react-intl";
 import { FileText, FileX2 } from "lucide-react";
 import { cn } from "@/lib/utils";
-import { artifactExists } from "../../api";
-import { artifactKeys } from "../../session/queryKeys";
+import { useArtifactExists } from "../../session/useArtifactExists";
 import type { TurnArtifact } from "../../types/thread";
 
 export function ArtifactCard({
@@ -79,15 +77,7 @@ function ArtifactRow({
   onSelectFile?: (path: string) => void;
 }) {
   const intl = useIntl();
-  // Undefined (in flight) reads as openable: existence is the common case,
-  // and flipping a live row to "missing" mid-check would flash.
-  const exists =
-    useQuery({
-      queryKey: artifactKeys.exists(artifact.path),
-      queryFn: () => artifactExists(artifact.path),
-      staleTime: 0,
-      retry: false,
-    }).data !== false;
+  const exists = useArtifactExists(artifact.path);
   if (!exists) {
     return (
       // The not-openable degrade: a span, not a dead button -- nothing to

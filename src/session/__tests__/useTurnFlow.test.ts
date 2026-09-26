@@ -1220,8 +1220,8 @@ describe("useTurnFlow", () => {
         expect.anything(),
       );
       expect(setTurnLoading).toHaveBeenLastCalledWith(false);
-      // Thread cache holds the optimistic append (a refresh failure does not
-      // wipe it; thread is never invalidated, ADR-0051).
+      // Thread cache holds the optimistic append (a refresh failure skips
+      // the refetch, so the append stands).
       const thread = queryClient.getQueryData<unknown[]>(sessionKeys.thread(SID));
       expect(thread).toHaveLength(1);
       expect(thread?.[0]).toMatchObject({ entry: "Turn" });
