@@ -14,6 +14,7 @@ import type { ApprovalResponse } from "../types/approval";
 import { ErrorBanner } from "../components/common/ErrorBanner";
 import { ErrorBoundary } from "../components/common/ErrorBoundary";
 import { GuidedLoadDialog } from "../components/dataset/GuidedLoadDialog";
+import { ArtifactView } from "../components/thread/ArtifactView";
 import { ResultView } from "../components/thread/ResultView";
 import { TechnicalDetailsFold } from "../components/common/TechnicalDetailsFold";
 import { Thread } from "../components/thread/Thread";
@@ -389,7 +390,12 @@ export function SessionPane({ sessionId, isActive, pendingIngestPaths, onIngestC
     [handleAsk],
   );
 
-  const viewedReference = s.viewedResult?.referenceName ?? null;
+  // ADR-0124 Decision 3: the single stage's two faces -- the dataset name
+  // for the result-link / preview-card active mirror, the file path for the
+  // artifact-card row mirror. Exactly one is non-null at a time.
+  const viewedReference =
+    s.viewedResult?.kind === "dataset" ? s.viewedResult.referenceName : null;
+  const viewedFile = s.viewedResult?.kind === "file" ? s.viewedResult.path : null;
   // Non-stale dataset labels for the rail's conditional active chip (ADR-0047):
   // a turn's question lights up a chip only when it explicitly names a dataset.
   // Stale datasets are excluded -- they cannot be the target of a new question.
@@ -542,6 +548,8 @@ export function SessionPane({ sessionId, isActive, pendingIngestPaths, onIngestC
                   entries={s.thread}
                   selectedResult={viewedReference}
                   onSelectResult={s.handleSelectResult}
+                  selectedFile={viewedFile}
+                  onSelectFile={s.handleSelectFile}
                   staleByReference={s.staleByReference}
                   datasetLabels={datasetLabels}
                   skillIndex={skillIndex}
@@ -711,6 +719,7 @@ export function SessionPane({ sessionId, isActive, pendingIngestPaths, onIngestC
                 key={`result-${regionRetryEpoch}`}
                 content={s.workspaceContent}
                 sessionId={sessionId}
+                duckPath={duckPath}
                 hasData={s.datasets.length > 0}
                 onResetRegion={resetSessionCache}
                 onJumpToLatest={s.handleJumpToLatest}
@@ -769,6 +778,7 @@ export function SessionPane({ sessionId, isActive, pendingIngestPaths, onIngestC
 function WorkspaceResult({
   content,
   sessionId,
+  duckPath,
   hasData,
   onResetRegion,
   onJumpToLatest,
@@ -777,6 +787,9 @@ function WorkspaceResult({
 }: {
   content: WorkspaceContent;
   sessionId: string;
+  /** The session's bound .duck path -- anchors the HTML branch's
+   *  artifacts-dir scope check (ADR-0124 Decision 4). */
+  duckPath: string;
   hasData: boolean;
   /** ADR-0058 L2 result-partition retry: remove the session slice so a
    *  remounted ResultView re-fetches fresh rows instead of re-throwing against
@@ -863,6 +876,18 @@ function WorkspaceResult({
             />
           </ErrorBoundary>
         </>
+      );
+    case "file":
+      // ADR-0124 Decision 3/4 (issue #1088): the artifact stage -- one file
+      // at a time, rendered per the matrix (iframe shell / prose / card).
+      // No history banner: the manifest is settle-frozen, a file view never
+      // goes "stale" the way a past result does.
+      return (
+        <ArtifactView
+          artifact={{ path: content.path, file_name: content.fileName }}
+          render={content.render}
+          duckPath={duckPath}
+        />
       );
     default: {
       const unhandled: never = content;

@@ -20,6 +20,11 @@ export interface UseViewedResult {
   /** Rail click on a Materialized result (ADR-0047 + ADR-0114): moves ONLY
    *  viewedResult, never the backend active pointer. No pin state. */
   selectResult: (referenceName: string) => void;
+  /** Rail click on a delivered artifact (ADR-0124 Decision 3): moves ONLY
+   *  viewedResult to the file view -- the same move semantics as
+   *  selectResult (single stage, last selection wins), keyed by the
+   *  manifest entry's absolute path. */
+  selectFile: (path: string) => void;
   /** Turn Materialized auto-selects: the view follows the produced result
    *  (ADR-0062 R2 "new-turn produce -> selected"). */
   markProduced: (referenceName: string) => void;
@@ -49,8 +54,11 @@ export function useViewedResult(thread: ThreadEntry[]): UseViewedResult {
     const latest = findLatestMaterializedPrimary(thread);
     // External system -> state: the injected thread (resume query data) seeds
     // the initial view once; a legitimate one-shot init, not derived churn.
+    // ADR-0124: the resume landing stays dataset-shaped -- a reopened
+    // artifact-only session lands on hero, the ADR-0114 empty posture (the
+    // artifact auto-open's init scan spends silently, like #771).
     // eslint-disable-next-line react-hooks/set-state-in-effect
-    if (latest !== null) setViewedResult({ referenceName: latest });
+    if (latest !== null) setViewedResult({ kind: "dataset", referenceName: latest });
   }, [thread]);
 
   // ADR-0047 + ADR-0114 (rail click): moves ONLY viewedResult (never the
@@ -58,18 +66,26 @@ export function useViewedResult(thread: ThreadEntry[]): UseViewedResult {
   // non-materialized turns, so a history view holds on its own until a new
   // Materialized or another selection moves it.
   const selectResult = useCallback((referenceName: string) => {
-    setViewedResult({ referenceName });
+    setViewedResult({ kind: "dataset", referenceName });
+  }, []);
+
+  // ADR-0124 Decision 3: the artifact twin of selectResult. A file view and
+  // a dataset view are the same domain (one stage, last selection wins), so
+  // they share the setter -- kinded apart only at the derivation.
+  const selectFile = useCallback((path: string) => {
+    setViewedResult({ kind: "file", path });
   }, []);
 
   // Turn Materialized auto-selects (ADR-0062 R2 "new-turn produce ->
   // selected"): the just-produced result becomes the viewed result, so a prior
   // history view never outlives a new turn.
   const markProduced = useCallback((referenceName: string) => {
-    setViewedResult({ referenceName });
+    setViewedResult({ kind: "dataset", referenceName });
   }, []);
 
   // A freshly added source has no result yet -> hero (ADR-0062 R2 "source
-  // loaded, not yet asked" hero extension).
+  // loaded, not yet asked" hero extension). Clears a file view the same way
+  // -- the single-stage selection resets with the source.
   const clearForNewSource = useCallback(() => {
     setViewedResult(null);
   }, []);
@@ -88,12 +104,13 @@ export function useViewedResult(thread: ThreadEntry[]): UseViewedResult {
   // showing) but keeps the move total.
   const jumpToLatest = useCallback(() => {
     const latest = findLatestMaterializedPrimary(thread);
-    setViewedResult(latest !== null ? { referenceName: latest } : null);
+    setViewedResult(latest !== null ? { kind: "dataset", referenceName: latest } : null);
   }, [thread]);
 
   return {
     viewedResult,
     selectResult,
+    selectFile,
     markProduced,
     clearForNewSource,
     suppressInit,

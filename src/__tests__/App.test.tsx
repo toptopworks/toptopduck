@@ -12,7 +12,7 @@ import { IntlProvider } from "react-intl";
 import { StrictMode } from "react";
 import type { ReactNode } from "react";
 import type { DatasetDescriptor } from "../types/dataset";
-import type { TurnOutcome } from "../types/thread";
+import type { ThreadEntry, TurnOutcome } from "../types/thread";
 import type { ComposerSessionFields } from "../session/useComposerState";
 
 // The composer "+" context panel (the retired FileDropzone's successor, issue
@@ -61,7 +61,13 @@ vi.mock("../components/ui/select", () => ({
 
 // Mutable working set the api mock reflects after a guided load (the dialog
 // flow's end state). vi.hoisted keeps it alive across the hoisted vi.mock.
-const state = vi.hoisted(() => ({ workingSet: [] as DatasetDescriptor[] }));
+const state = vi.hoisted(() => ({
+  workingSet: [] as DatasetDescriptor[],
+  // The recorded thread the conversation mock reflects (issue #1088: the
+  // turn-end refresh refetches the thread, so ask-flow tests must seed the
+  // recorded row the backend would have committed before `ask` resolves).
+  thread: [] as ThreadEntry[],
+}));
 // importOriginal keeps the real fmtError (a pure helper) while the Tauri invoke
 // wrappers are stubbed.
 vi.mock("../api", async (importOriginal) => {
@@ -87,7 +93,7 @@ vi.mock("../api", async (importOriginal) => {
     removeActiveSource: vi.fn(),
     setDatasetPrivacy: vi.fn(),
     askQuestion: vi.fn(),
-    conversation: vi.fn(async () => []),
+    conversation: vi.fn(async () => state.thread),
     // ADR-0059: the turn-progress listener mounts with every SessionPane.
     // Stub it (no-op unlisten) so jsdom doesn't hit the real Tauri listen.
     onTurnProgress: vi.fn(async () => () => {}),
@@ -128,7 +134,12 @@ import {
   renameDataset,
   setDatasetPrivacy,
 } from "../api";
-import { cancelled, failed, materialized } from "../session/__tests__/fixtures";
+import {
+  cancelled,
+  failed,
+  materialized,
+  recordedTurn,
+} from "../session/__tests__/fixtures";
 import { log } from "../lib/log";
 
 // ADR-0093 (#512): the session-header management callback props are no-ops in
@@ -311,6 +322,7 @@ describe("App guided-load flow", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     state.workingSet = [];
+    state.thread = [];
     vi.mocked(open).mockResolvedValue("/x/m.xlsx");
     vi.mocked(listWorkingSet).mockImplementation(async () => state.workingSet);
     vi.mocked(ingestFile).mockResolvedValue({
@@ -390,6 +402,7 @@ describe("App rename flow", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     state.workingSet = [];
+    state.thread = [];
     vi.mocked(listWorkingSet).mockImplementation(async () => state.workingSet);
   });
 
@@ -514,6 +527,7 @@ describe("App privacy flow", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     state.workingSet = [];
+    state.thread = [];
     vi.mocked(listWorkingSet).mockImplementation(async () => state.workingSet);
   });
 
@@ -649,7 +663,9 @@ describe("App ask flow", () => {
     // schedule frames, but the inactive gate must keep every one from
     // writing -- display:none collapses the extent to 0, and a write would
     // land scrollTop 0, corrupting even a paused pane's preserved position.
-    vi.mocked(askQuestion).mockResolvedValue(materializedOutcome("result_1"));
+    const outcome829 = materializedOutcome("result_1");
+    vi.mocked(askQuestion).mockResolvedValue(outcome829);
+    state.thread = [recordedTurn("hidden pane question", outcome829)];
     renderPane("zh-CN", "Test session", false);
     const rail = document.querySelector<HTMLElement>(".session-rail")!;
     let writes = 0;
@@ -674,7 +690,9 @@ describe("App ask flow", () => {
   });
 
   it("submits a question and shows the materialized result (issue #22)", async () => {
-    vi.mocked(askQuestion).mockResolvedValue(materializedOutcome("result_1"));
+    const outcome22 = materializedOutcome("result_1");
+    vi.mocked(askQuestion).mockResolvedValue(outcome22);
+    state.thread = [recordedTurn("总共几行", outcome22)];
     renderPane();
     await submitQuestion("总共几行");
     await waitFor(() =>
@@ -708,17 +726,20 @@ describe("App ask flow", () => {
     renderPane();
     // Mount refresh has settled; queue what the turn produces (asked after mount
     // so the mount's own conversation() call doesn't consume the once-mock).
-    // No conversation once-mock: the turn flow appends optimistically and
-    // never invalidates the thread (ADR-0051), so a queued thread mock would
-    // go UNCONSUMED here and leak into the next test's mount query.
-    vi.mocked(askQuestion).mockResolvedValueOnce({
+    // The recorded row rides state.thread (issue #1088): the turn-end
+    // refresh refetches the thread, and the backend would have committed
+    // this row before the ask resolved -- without it the refetch wipes the
+    // optimistic append.
+    const outcome23 = {
       kind: "Textual",
       data: {
         text_kind: "Clarify",
         body: "按产品名还是客户名汇总？",
         assumption: null,
       },
-    });
+    } satisfies TurnOutcome;
+    vi.mocked(askQuestion).mockResolvedValueOnce(outcome23);
+    state.thread = [recordedTurn("哪个名字", outcome23)];
     await submitQuestion("哪个名字");
 
     // The clarify body is visible in the thread AND now also in the workspace
@@ -782,11 +803,14 @@ describe("App workspace history indicator (issue #757)", () => {
     // A resumed session's thread: two Materialized turns (the session
     // fixtures mint them). R5 lands the view on the latest primary
     // (result_2); the workspace starts folded (ADR-0083), so each flow
-    // opens it via the header toggle or a rail selection.
-    vi.mocked(conversation).mockResolvedValue([
-      materialized("result_1"),
-      materialized("result_2"),
-    ]);
+    // opens it via the header toggle or a rail selection. Seeded on
+    // state.thread (not a frozen mockResolvedValue) so an ask-flow test's
+    // turn-end refetch can return the recorded row too (issue #1088). The
+    // explicit mockImplementation re-establishes the dynamic default: a
+    // sibling test's mockResolvedValue clobber survives clearAllMocks
+    // (which clears calls, not implementations).
+    state.thread = [materialized("result_1"), materialized("result_2")];
+    vi.mocked(conversation).mockImplementation(async () => state.thread);
   });
 
   it("shows no indicator when the viewed result is the latest one", async () => {
@@ -839,7 +863,10 @@ describe("App workspace history indicator (issue #757)", () => {
       expect(screen.getByText(HISTORY_MESSAGE)).toBeInTheDocument(),
     );
 
-    vi.mocked(askQuestion).mockResolvedValueOnce(materializedOutcome("result_3"));
+    const outcome757 = materializedOutcome("result_3");
+    vi.mocked(askQuestion).mockResolvedValueOnce(outcome757);
+    // The recorded row the turn-end refetch returns (mock parity, #1088).
+    state.thread = [...state.thread, recordedTurn("新一问", outcome757)];
     await submitQuestion("新一问");
     await waitFor(() =>
       expect(screen.getByRole("heading", { name: /新一问/ })).toBeInTheDocument(),
@@ -1264,6 +1291,7 @@ describe("App working-set empty state (issue #792)", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     state.workingSet = [];
+    state.thread = [];
     vi.mocked(listWorkingSet).mockImplementation(async () => state.workingSet);
   });
 
@@ -1474,6 +1502,7 @@ describe("SessionPane pending-payload consumption (#500)", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     state.workingSet = [];
+    state.thread = [];
     vi.mocked(listWorkingSet).mockResolvedValue([]);
     vi.mocked(activeDataset).mockResolvedValue(null);
     // The question fires through handleAsk; reject the turn so it settles

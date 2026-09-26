@@ -5,7 +5,7 @@ import { askQuestion, cancelQuery, getSessionRuntime, onTurnProgress } from "../
 import { toAppError } from "../lib/error-presentation";
 import { log } from "../lib/log";
 import { sessionKeys } from "./queryKeys";
-import { invalidateTurnEndData } from "./useWorkingSet";
+import { invalidateSessionData } from "./useWorkingSet";
 import type { ApprovalEntry } from "./useApprovalEvents";
 import type { UseViewedResult } from "./useViewedResult";
 import type { AppError } from "../types/error";
@@ -21,13 +21,13 @@ import type { ThreadEntry, ThinkingTrace, TraceEntry, TraceRound, TurnRuntime } 
 // never reaches for the raw queryClient / viewed setters from here.
 //
 // Boundary is TURN ORCHESTRATION, not the generic post-mutation refresh.
-// handleAsk's Materialized branch refreshes through the seam's turn-end
-// entry (invalidateTurnEndData); the entry's key set and its thread omission
-// live with the seam, never restated here (issue #1080). What is turn-unique
-// is the entry CHOICE: ingest / dataset mutations go through the parent's
-// refreshServerState (the full cascade); the turn cannot, so the deps do
-// NOT include refreshServerState -- the interface honestly reflects "turn
-// does not use the generic refresh".
+// handleAsk's turn-end refresh goes through the seam's single cascade entry
+// (invalidateSessionData) AFTER the optimistic thread append -- the refetch
+// converges the append onto the recorded row (richer: the settle-computed
+// artifact manifest, body, invocation hashes; issue #1088). The turn calls
+// the entry DIRECTLY rather than through the parent's refreshServerState
+// dep: the refresh must fire inside handleAsk's finally-guarded tail (the
+// busy-gate clear), not after the parent's await returns.
 
 // Module-level empty constants keep the optional deps' defaults referentially
 // stable across renders (the useMemo over live state must not recompute on an
@@ -124,10 +124,10 @@ export interface LiveTurn {
   /** The client's submit stamp (the live bubble's `asked_at`, ADR-0103 live
    *  isomorphism, issue #610): read at handleAsk, carried so the bubble
    *  mounts its timestamp before any progress event lands. The same value
-   *  rides the optimistic TurnRecord until the backend's own stamps land: a
-   *  reopened mount reads them, or another domain's invalidation (ingest,
-   *  skill changes) replaces the append with the recorded row -- the turn
-   *  flow itself never invalidates the thread (ADR-0051). */
+   *  rides the optimistic TurnRecord until the backend's own stamps land:
+   *  the turn-end refresh, a reopened mount, or another domain's invalidation
+   *  (ingest, skill changes) all converge the append onto the recorded row
+   *  (ADR-0051 / issue #1088). */
   askedAt: number;
   /** The skill names staged at submit (ADR-0119: the turn's user
    *  invocations, client-known before the IPC returns). The live bubble's
@@ -669,9 +669,10 @@ export function useTurnFlow(sessionId: string, deps: UseTurnFlowDeps): UseTurnFl
   // (ADR-0051) -- question + outcome + the live trace rows the events
   // delivered (issue #297: the optimistic record matches the backend's
   // recorded TurnRecord.trace entry-for-entry); a Materialized outcome
-  // additionally moves viewedResult (auto-selects) and refreshes through
-  // the seam's turn-end entry (a new result_N registered server-side;
-  // the key set belongs to the seam, issue #1080).
+  // additionally moves viewedResult (auto-selects), and EVERY settled
+  // outcome runs the turn-end refresh -- the seam's full cascade,
+  // thread included (issue #1088: the refetch converges the append onto
+  // the recorded row).
   const handleAsk = useCallback(
     async (question: string, invocations?: string[]) => {
       // Belt-and-suspenders (issue #758): the one-turn rule enforced at the
@@ -686,9 +687,9 @@ export function useTurnFlow(sessionId: string, deps: UseTurnFlowDeps): UseTurnFl
       setError(null);
       // ADR-0103 (issue #608): the ask timestamp, read at submit so the
       // optimistic record carries the user's ask time (the backend stamps its
-      // own reading at record time; it lands on a reopened mount, or when
-      // another domain invalidates the thread -- the turn flow itself never
-      // does, ADR-0051).
+      // own reading at record time; it lands with the turn-end refresh, a
+      // reopened mount, or any other domain's invalidation -- all converge
+      // the append onto the recorded row, ADR-0051 / issue #1088).
       const askedAt = Date.now();
       // The staged invocations (ADR-0119 Decision 1): the turn's user
       // invocation names, pinned at submit -- the live bubble's badge renders
@@ -791,12 +792,12 @@ export function useTurnFlow(sessionId: string, deps: UseTurnFlowDeps): UseTurnFl
         // rows (completed calls only); the runtime attribution is the ask-time
         // choice stamp (issue #725). Only the content_hashes and the backend's
         // own timestamps differ from the recorded row. The thread is
-        // staleTime-Infinity and the turn flow itself never invalidates it
-        // (ADR-0051 -- its own invalidation would wipe this append), so this
-        // optimistic form is final until the backend's row lands: a reopened
-        // mount reads it, or another domain's invalidation (ingest, skill
-        // changes) replaces the append with the recorded row -- expected
-        // convergence, never a wipe.
+        // staleTime-Infinity, and only the turn-end refresh below touches it
+        // (after this append lands), so between the append and that refresh
+        // this optimistic form is what the rail reads. The turn-end refresh
+        // (issue #1088) and any other domain's invalidation (ingest, skill
+        // changes) replace the append with the recorded row -- expected
+        // convergence onto a richer row, never a wipe.
         const newEntry: ThreadEntry = {
           entry: "Turn",
           // Issue #381: the optimistic entry's provenance carries no
@@ -817,9 +818,10 @@ export function useTurnFlow(sessionId: string, deps: UseTurnFlowDeps): UseTurnFl
             // optimistic record stamps User-actor invocation records now.
             // The body / content_hash are the backend's materialization
             // (unknown client-side) and stay empty until the recorded row
-            // lands on a reopen or another domain's invalidation -- the same
-            // optimistic degrade as provenance.skills above. The badge reads
-            // names only, so the visible surface is exact.
+            // lands with the turn-end refresh below, a reopen, or another
+            // domain's invalidation -- the same optimistic degrade as
+            // provenance.skills above. The badge reads names only, so the
+            // visible surface is exact.
             ...((stagedInvocations.length > 0
               ? {
                   invocations: stagedInvocations.map((name) => ({
@@ -848,22 +850,26 @@ export function useTurnFlow(sessionId: string, deps: UseTurnFlowDeps): UseTurnFl
           if (referenceName !== undefined) {
             markProduced(referenceName);
           }
-          // The seam's turn-end entry owns the key set (and the thread
-          // omission's narrative, issue #1080). The try/catch guard surfaces
-          // a refresh failure as a tagged error instead of skipping the
-          // busy-gate clear below (would lock QuestionBar forever); mirrors
-          // refreshServerState's "saved but refresh failed" contract.
-          try {
-            await invalidateTurnEndData(queryClient, sessionId);
-          } catch (invalidateErr) {
-            // invalidateErr because this try wraps the seam's turn-end refresh;
-            // the refreshFailed option stays -- it selects toAppError's
-            // user-facing "saved but refreshing..." prefix (ADR-0069), not the impl.
-            setError(toAppError(invalidateErr, intl, "ask", { refreshFailed: true }));
-          }
         }
-        // Textual / Failed / Cancelled: no working-set change; the optimistic
-        // append is the thread state, nothing to invalidate.
+        // Turn-end refresh (ADR-0124, issue #1088): EVERY settled outcome runs
+        // the full cascade, thread included. The optimistic append above cannot
+        // know the settle-computed fields the backend records -- the artifact
+        // manifest (ADR-0124 Decision 2), the terminal body, the invocation
+        // content hashes -- and record_turn commits before `ask` resolves, so
+        // the refetch lands the authoritative row over the append (richer, never
+        // a wipe; the ADR-0051-era "extra refetch" rationale retired with the
+        // artifact channel, calibrated on ADR-0123 Decision 3). The try/catch
+        // guard surfaces a refresh failure as a tagged error instead of skipping
+        // the busy-gate clear below (would lock QuestionBar forever); mirrors
+        // refreshServerState's "saved but refresh failed" contract.
+        try {
+          await invalidateSessionData(queryClient, sessionId);
+        } catch (invalidateErr) {
+          // invalidateErr because this try wraps the turn-end refresh;
+          // the refreshFailed option stays -- it selects toAppError's
+          // user-facing "saved but refreshing..." prefix (ADR-0069), not the impl.
+          setError(toAppError(invalidateErr, intl, "ask", { refreshFailed: true }));
+        }
         // ADR-0095: refresh the model config on EVERY outcome kind -- an
         // external-runtime turn's LoopOutcome.discovered_runtime lands on the
         // handle cache regardless of how the turn terminated, and the selector

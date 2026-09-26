@@ -11,6 +11,7 @@ import {
   type UseWorkingSetSurfaces,
 } from "./useWorkingSet";
 import { useTurnFlow, type LiveTurn } from "./useTurnFlow";
+import { useArtifactAutoOpen } from "./useArtifactAutoOpen";
 import { useViewedResult } from "./useViewedResult";
 import { useWorkspaceCollapse } from "./useWorkspaceCollapse";
 import type { ApprovalEntry } from "./useApprovalEvents";
@@ -131,6 +132,10 @@ export interface UseSessionState {
    *  the backend retention (zero re-parse per page). */
   fetchGuidanceWindow: (sheetName: string, offset: number, limit: number) => Promise<string[][]>;
   handleSelectResult: (referenceName: string) => void;
+  /** ADR-0124 Decision 3 (issue #1088): rail artifact-card row click --
+   *  moves viewedResult onto the file view and opens the workspace (the
+   *  handleSelectResult twin, keyed by the manifest entry's path). */
+  handleSelectFile: (path: string) => void;
   /** Issue #757: the history indicator's "back to latest" exit -- moves
    *  viewedResult to the latest Materialized turn's primary (hero fallback
    *  when the thread materialized none). The exit only renders while a result
@@ -217,6 +222,7 @@ export function useSessionState(
   const {
     viewedResult,
     selectResult,
+    selectFile,
     markProduced,
     clearForNewSource,
     suppressInit,
@@ -233,6 +239,12 @@ export function useSessionState(
     toggleWorkspace,
     notePromotion,
   } = useWorkspaceCollapse(thread);
+  // ADR-0124 Decision 3 (issue #1088): the artifact auto-open one-shot.
+  // Composed here (like markProducedWithExpand below) so each hook keeps
+  // owning exactly one state domain: this fusion watches the thread for a
+  // freshly delivered manifest and moves the view + fold through the two
+  // semantic methods above.
+  useArtifactAutoOpen(thread, selectFile, expandWorkspace);
   // Two loading domains (kept apart so the shell bar keys off the turn domain
   // only -- a dataset mutation's loading flag leaking into the shell bar made
   // the Ask/Stop button flip for the mutation's whole in-flight window):
@@ -391,6 +403,19 @@ export function useSessionState(
     [selectResult, expandWorkspace],
   );
 
+  // The artifact twin (ADR-0124 Decision 3): a rail artifact-card row moves
+  // the view onto the file AND surfaces its panel half -- the same
+  // move-and-open composition, keyed by the manifest entry's path. The same
+  // invariant holds: callers source the path from the thread's manifest, so
+  // the selection always resolves.
+  const handleSelectFile = useCallback(
+    (path: string) => {
+      selectFile(path);
+      expandWorkspace();
+    },
+    [selectFile, expandWorkspace],
+  );
+
   const clearError = useCallback(() => setError(null), []);
 
   // ADR-0123: the bundle the working-set tab's seam consumes as its
@@ -425,6 +450,7 @@ export function useSessionState(
     handleGuidedCancel,
     fetchGuidanceWindow,
     handleSelectResult,
+    handleSelectFile,
     handleJumpToLatest: jumpToLatest,
     handleToggleWorkspace: toggleWorkspace,
     clearError,

@@ -12,15 +12,20 @@
 //    is read from the descriptor by the caller, never from the thread snapshot.
 
 import type { DatasetDescriptor, StaleAnchor } from "../types/dataset";
-import type { ThreadEntry, VizSpec } from "../types/thread";
+import type { ThreadEntry, TurnArtifact, VizSpec } from "../types/thread";
 
-/** The user's workspace view selection (ADR-0051): a thin reference to the
- * Materialized result pane the user is looking at. NEVER the active dataset
- * (which is server truth) -- clicking a past result moves ONLY this, never
- * touching the backend active pointer. */
-export interface ViewedResult {
-  referenceName: string;
-}
+/** The user's workspace view selection (ADR-0051, generalized by ADR-0124
+ * Decision 3): a thin reference to what the result pane is showing -- either
+ * a Materialized result (dataset) or a delivered artifact (file). The two
+ * are mutually exclusive on the single stage; the last selection wins. A
+ * dataset view is NEVER the active dataset (which is server truth) --
+ * clicking a past result moves ONLY this, never the backend active pointer.
+ * A file view names the manifest entry by its absolute path (settle-frozen,
+ * never rewritten), so the display facts (file name) re-derive from the
+ * thread like the dataset payload does. */
+export type ViewedResult =
+  | { kind: "dataset"; referenceName: string }
+  | { kind: "file"; path: string };
 
 /** The payload a viewed Materialized result renders with (ADR-0051: derived
  * from the thread, not held as a fat snapshot). null when no turn in the thread
@@ -88,13 +93,106 @@ export function findLatestMaterializedPrimary(thread: ThreadEntry[]): string | n
   return null;
 }
 
+/** How a viewed artifact renders (ADR-0124 Decision 4's matrix, keyed by the
+ * file's extension): HTML rides the sandboxed asset-protocol iframe, md rides
+ * the IPC text read + the prose renderer, everything else (and every degrade)
+ * is the file card with the external-open action. */
+export type ArtifactRenderKind = "html" | "markdown" | "card";
+
+/** The render kind for one artifact path (ADR-0124 Decision 4). Extension-
+ * keyed off the path itself (the file_name is a display mirror); the
+ * deliverable whitelist (pdf/docx/xlsx/pptx/html/htm/md) makes the
+ * extension-less fallthrough unreachable in practice -- it degrades to the
+ * card, the honest shape for an unknown format. */
+export function artifactRenderKind(path: string): ArtifactRenderKind {
+  const dot = path.lastIndexOf(".");
+  const ext = dot === -1 ? "" : path.slice(dot + 1).toLowerCase();
+  if (ext === "html" || ext === "htm") return "html";
+  if (ext === "md") return "markdown";
+  return "card";
+}
+
+/** Look up a manifest entry by its absolute path (the viewed file's thin
+ * reference, ADR-0124 Decision 3). Tail-first like the dataset scans: the
+ * same path re-delivered by a later turn resolves to that turn's entry --
+ * the newest delivery owns the display facts. null when no turn in the
+ * thread carries the path (the manifest is settle-frozen and the thread is
+ * append-only, so this is a foreign view, not a GC race). */
+export function findArtifact(
+  thread: ThreadEntry[],
+  path: string,
+): TurnArtifact | null {
+  for (let i = thread.length - 1; i >= 0; i--) {
+    const entry = thread[i];
+    if (entry.entry !== "Turn") continue;
+    const hit = entry.data.artifacts?.find((a) => a.path === path);
+    if (hit) return hit;
+  }
+  return null;
+}
+
+/** Whether an artifact path sits inside the per-session artifacts directory
+ * (ADR-0124 Decision 4): `artifacts/` under the bound .duck's parent -- the
+ * one directory the asset protocol's runtime scope grants. Only in-scope
+ * HTML is iframe-servable; a user-directory original (or an unbound temp
+ * path) degrades to the card + external open instead of a denied iframe.
+ * Case-insensitive: Windows (the app's host) folds path case, and a
+ * case-differing collision on a case-sensitive host is pathological.
+ * ponytail: hand-rolled dirname/sep (no path polyfill in the webview); if
+ * mixed-separator duck paths ever appear, normalize at the IPC edge. */
+export function isWithinArtifactsDir(path: string, duckPath: string): boolean {
+  const sep = duckPath.includes("\\") ? "\\" : "/";
+  const last = Math.max(duckPath.lastIndexOf("/"), duckPath.lastIndexOf("\\"));
+  const prefix = `${last === -1 ? "" : duckPath.slice(0, last)}${sep}artifacts${sep}`;
+  return path.toLowerCase().startsWith(prefix.toLowerCase());
+}
+
+/** The auto-open candidate (ADR-0124 Decision 3): the LATEST turn carrying a
+ * non-empty manifest, scanned tail-first. Non-artifact turns are skipped
+ * like the dataset scans -- a trailing turn that delivered nothing never
+ * re-arms an older turn's auto-open. */
+export interface ArtifactAutoOpenCandidate {
+  /** The one-shot consumption key: the manifest's paths in order. The same
+   * candidate arriving again (a rerender, a duplicate refetch) never
+   * re-consumes; a fresh delivery (a different manifest) does. */
+  signature: string;
+  /** The manifest's primary -- the first entry (#1090: derived order, never
+   * a stored flag). */
+  primaryPath: string;
+  /** The candidate turn ALSO materialized a result: the existing promotion
+   * semantics own the stage (the view follows the produced dataset), so the
+   * artifact auto-open must not steal it. */
+  turnMaterialized: boolean;
+}
+
+export function latestArtifactCandidate(
+  thread: ThreadEntry[],
+): ArtifactAutoOpenCandidate | null {
+  for (let i = thread.length - 1; i >= 0; i--) {
+    const entry = thread[i];
+    if (entry.entry !== "Turn") continue;
+    const artifacts = entry.data.artifacts;
+    if (artifacts === undefined || artifacts.length === 0) continue;
+    return {
+      signature: artifacts.map((a) => a.path).join("\n"),
+      primaryPath: artifacts[0].path,
+      turnMaterialized: entry.data.outcome.kind === "Materialized",
+    };
+  }
+  return null;
+}
+
 /** What the workspace "result" area shows (ADR-0062 R2 two-state, calibrated
- * by ADR-0114):
+ * by ADR-0114; extended to three states by ADR-0124 Decision 3 -- hero stays
+ * the single non-data state):
  *  - `result`: the user selected a Materialized result (now or in the past)
  *    and its payload resolves from the thread -- show its chart + table.
+ *  - `file`: the user selected a delivered artifact and its manifest entry
+ *    resolves from the thread -- show it per the render matrix (Decision 4).
  *  - `hero`: otherwise -- the empty-state drop zone.
- * Non-materialized turns (B/C/D) never reach the workspace; their read
- * surface is the rail (ADR-0103), so the workspace is inert to them. */
+ * Non-materialized turns (B/C/D) still never reach the workspace on their
+ * own; their read surface is the rail (ADR-0103) -- an artifact they
+ * delivered reaches it only through the view selection. */
 export type WorkspaceContent =
   | {
     kind: "result";
@@ -112,6 +210,15 @@ export type WorkspaceContent =
      *  historical, and a non-tail promotion of the latest turn does. */
     viewingHistory: boolean;
   }
+  | {
+    kind: "file";
+    /** The manifest entry's absolute path -- the view's identity. */
+    path: string;
+    /** The entry's display name (ADR-0124 Decision 2). */
+    fileName: string;
+    /** The render matrix branch for this path (Decision 4). */
+    render: ArtifactRenderKind;
+  }
   | { kind: "hero" };
 
 /** Derive what the workspace shows right now (ADR-0062 R2, ADR-0114). Pure in
@@ -124,24 +231,39 @@ export function deriveWorkspaceContent(
   staleByReference: ReadonlyMap<string, StaleAnchor>,
 ): WorkspaceContent {
   if (viewedResult) {
-    const payload = findMaterializedPayload(thread, viewedResult.referenceName);
-    if (payload) {
-      return {
-        kind: "result",
-        referenceName: viewedResult.referenceName,
-        assumption: payload.assumption,
-        viz: payload.viz,
-        question: payload.question,
-        staleAnchor: staleByReference.get(viewedResult.referenceName) ?? null,
-        // The result branch implies the thread materialized SOMETHING, so the
-        // latest primary resolves; the comparison still holds when it
-        // wouldn't (any non-null name !== null).
-        viewingHistory: viewedResult.referenceName !== findLatestMaterializedPrimary(thread),
-      };
+    if (viewedResult.kind === "file") {
+      const artifact = findArtifact(thread, viewedResult.path);
+      if (artifact) {
+        return {
+          kind: "file",
+          path: artifact.path,
+          fileName: artifact.file_name,
+          render: artifactRenderKind(artifact.path),
+        };
+      }
+      // The view names a path no turn in the thread carries (a foreign /
+      // hand-set view). Fall through to hero rather than render a file whose
+      // manifest entry we cannot resolve.
+    } else {
+      const payload = findMaterializedPayload(thread, viewedResult.referenceName);
+      if (payload) {
+        return {
+          kind: "result",
+          referenceName: viewedResult.referenceName,
+          assumption: payload.assumption,
+          viz: payload.viz,
+          question: payload.question,
+          staleAnchor: staleByReference.get(viewedResult.referenceName) ?? null,
+          // The result branch implies the thread materialized SOMETHING, so the
+          // latest primary resolves; the comparison still holds when it
+          // wouldn't (any non-null name !== null).
+          viewingHistory: viewedResult.referenceName !== findLatestMaterializedPrimary(thread),
+        };
+      }
+      // viewedResult points at a turn not currently in the thread (optimistic
+      // append race, or the result was GC'd). Fall through to hero rather than
+      // render a result whose rows/viz we cannot resolve.
     }
-    // viewedResult points at a turn not currently in the thread (optimistic
-    // append race, or the result was GC'd). Fall through to hero rather than
-    // render a result whose rows/viz we cannot resolve.
   }
   return { kind: "hero" };
 }

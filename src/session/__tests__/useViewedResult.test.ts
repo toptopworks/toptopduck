@@ -10,6 +10,15 @@ import type { ThreadEntry } from "../../types/thread";
 // selection only moves viewedResult) -- in isolation from react-query /
 // intl (the hook takes the thread as a plain argument).
 
+// The dataset face of the (dataset | file) union (ADR-0124): a local
+// narrowing read so the assertions below say "which dataset" without
+// repeating the discriminated-union ternary six times.
+function datasetRefOf(
+  vr: { kind: "dataset"; referenceName: string } | { kind: "file"; path: string } | null,
+): string | null {
+  return vr?.kind === "dataset" ? vr.referenceName : null;
+}
+
 describe("useViewedResult", () => {
   describe("R5 resume init (ADR-0062 R5)", () => {
     it("starts on hero (viewedResult null) when the thread is empty", () => {
@@ -26,7 +35,7 @@ describe("useViewedResult", () => {
       rerender({ thread: [materialized("result_1"), materialized("result_2")] });
       // R5 scans tail-first; result_2 is the last Materialized -> the resume
       // landing is "where the user left off".
-      expect(result.current.viewedResult?.referenceName).toBe("result_2");
+      expect(datasetRefOf(result.current.viewedResult)).toBe("result_2");
     });
 
     it("stays on hero when the thread has no Materialized turn", () => {
@@ -44,7 +53,7 @@ describe("useViewedResult", () => {
       // R5 fired on initial content (viewedResult=result_1); a later thread
       // update must not re-fire R5 and yank viewedResult to result_2.
       rerender({ thread: [materialized("result_1"), materialized("result_2")] });
-      expect(result.current.viewedResult?.referenceName).toBe("result_1");
+      expect(datasetRefOf(result.current.viewedResult)).toBe("result_1");
     });
   });
 
@@ -55,9 +64,40 @@ describe("useViewedResult", () => {
       const thread = [materialized("result_1"), materialized("result_2")];
       const { result } = renderHook(() => useViewedResult(thread));
       act(() => result.current.selectResult("result_1"));
-      expect(result.current.viewedResult?.referenceName).toBe("result_1");
+      expect(datasetRefOf(result.current.viewedResult)).toBe("result_1");
       act(() => result.current.selectResult("result_2"));
-      expect(result.current.viewedResult?.referenceName).toBe("result_2");
+      expect(datasetRefOf(result.current.viewedResult)).toBe("result_2");
+    });
+  });
+
+  describe("selectFile (ADR-0124 Decision 3: the file face of the same stage)", () => {
+    it("moves viewedResult onto the clicked manifest path", () => {
+      const { result } = renderHook(() => useViewedResult([]));
+      act(() => result.current.selectFile("/tmp/artifacts/report.pdf"));
+      expect(result.current.viewedResult).toEqual({
+        kind: "file",
+        path: "/tmp/artifacts/report.pdf",
+      });
+    });
+
+    it("a later file selection displaces a dataset view (single stage, last wins)", () => {
+      const { result } = renderHook(() => useViewedResult([materialized("result_1")]));
+      act(() => result.current.selectResult("result_1"));
+      act(() => result.current.selectFile("/tmp/artifacts/page.html"));
+      expect(result.current.viewedResult?.kind).toBe("file");
+      // And back: the twin move works in the other direction too.
+      act(() => result.current.selectResult("result_1"));
+      expect(result.current.viewedResult).toEqual({
+        kind: "dataset",
+        referenceName: "result_1",
+      });
+    });
+
+    it("clearForNewSource clears a file view like a dataset one", () => {
+      const { result } = renderHook(() => useViewedResult([]));
+      act(() => result.current.selectFile("/tmp/artifacts/report.pdf"));
+      act(() => result.current.clearForNewSource());
+      expect(result.current.viewedResult).toBeNull();
     });
   });
 
@@ -65,7 +105,7 @@ describe("useViewedResult", () => {
     it("markProduced selects the just-produced result", () => {
       const { result } = renderHook(() => useViewedResult([materialized("result_1")]));
       act(() => result.current.markProduced("result_3"));
-      expect(result.current.viewedResult?.referenceName).toBe("result_3");
+      expect(datasetRefOf(result.current.viewedResult)).toBe("result_3");
     });
 
     it("clearForNewSource resets viewedResult to null", () => {
@@ -85,7 +125,7 @@ describe("useViewedResult", () => {
       const { result } = renderHook(() => useViewedResult(thread));
       act(() => result.current.selectResult("result_1"));
       act(() => result.current.jumpToLatest());
-      expect(result.current.viewedResult?.referenceName).toBe("result_2");
+      expect(datasetRefOf(result.current.viewedResult)).toBe("result_2");
     });
 
     it("skips trailing non-materialized turns", () => {
@@ -93,7 +133,7 @@ describe("useViewedResult", () => {
       const { result } = renderHook(() => useViewedResult(thread));
       act(() => result.current.selectResult("result_1"));
       act(() => result.current.jumpToLatest());
-      expect(result.current.viewedResult?.referenceName).toBe("result_2");
+      expect(datasetRefOf(result.current.viewedResult)).toBe("result_2");
     });
 
     it("falls back to hero when the thread materialized no primary", () => {

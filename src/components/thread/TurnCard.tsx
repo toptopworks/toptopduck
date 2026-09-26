@@ -16,6 +16,7 @@ import { cn } from "@/lib/utils";
 import { Button } from "../ui/button";
 import { DelegationTraceDialog } from "./DelegationTraceDialog";
 import { TraceRowList } from "./TraceRow";
+import { ArtifactCard } from "./ArtifactCard";
 import { ResultPreviewCard } from "./ResultPreviewCard";
 import { CopyButton } from "./CopyButton";
 import { FoldToggle } from "./FoldToggle";
@@ -44,6 +45,12 @@ interface TurnCardProps {
   record: TurnRecord;
   selectedResult: string | null;
   onSelectResult: (referenceName: string) => void;
+  /** ADR-0124 (issue #1088): the artifact file on the workspace stage
+   *  (the artifact card's active mirror), or null. */
+  selectedFile?: string | null;
+  /** ADR-0124 (issue #1088): selects a manifest entry's file onto the
+   *  stage. Optional: absent handlers render the card read-only. */
+  onSelectFile?: (path: string) => void;
   staleAnchor: StaleAnchor | undefined;
   /** Whether a matching source event follows this turn, i.e. the stale chip can
    * actually perform its jump (ADR-0047). False on the resume / stale-map
@@ -101,6 +108,8 @@ export function TurnCard({
   record,
   selectedResult,
   onSelectResult,
+  selectedFile = null,
+  onSelectFile,
   staleAnchor,
   hasJumpTarget,
   onStaleChipJump,
@@ -191,6 +200,19 @@ export function TurnCard({
           busy={busy}
           defaultOpenDetail={defaultOpenDetail}
         />
+        {/* ADR-0124 (issue #1088): the turn's delivered-files card, the
+            ResultPreviewCard's sibling at the same end-of-stream rhythm. It
+            renders for EVERY outcome kind -- the manifest is turn-level and
+            settle-frozen, not a Materialized byproduct -- so it hangs on the
+            stream, never inside TurnBody's per-outcome branches. */}
+        {record.artifacts !== undefined && record.artifacts.length > 0 && (
+          <ArtifactCard
+            artifacts={record.artifacts}
+            activePath={selectedFile}
+            stale={isStale}
+            onSelectFile={onSelectFile}
+          />
+        )}
         {/* Closing meta row (ADR-0103): the outcome glyph ends the exchange --
             state, always visible -- for Materialized/Textual (issue #720 moves
             the Failed/Cancelled glyph to the failure card head). The settle
