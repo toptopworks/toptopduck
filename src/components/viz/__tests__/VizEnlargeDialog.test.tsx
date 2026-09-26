@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { fireEvent, screen, waitFor } from "@testing-library/react";
 import embed from "vega-embed";
-import { embedOk, renderI18n } from "../../common/__tests__/helpers";
+import { embedOk, renderI18n, withIntl } from "../../common/__tests__/helpers";
 import { VizEnlargeDialog } from "../VizEnlargeDialog";
 
 // The chart enlarge view (#1050, ADR-0120 tail): every
@@ -93,6 +93,30 @@ describe("VizEnlargeDialog (#1050)", () => {
       expect(screen.queryByText(/图表无法渲染/)).not.toBeInTheDocument(),
     );
     fireEvent.click(screen.getByRole("button", { name: "放大查看图表" }));
+    await waitFor(() => expect(embed).toHaveBeenCalledTimes(2));
+    expect(screen.queryByText(/图表无法渲染/)).not.toBeInTheDocument();
+  });
+
+  it("resets a landed failure in place when the spec changes while open", async () => {
+    // A re-run under the same reference name swaps decoded.spec's identity
+    // (#1085); with the overlay open, the gate clears the landed failure in
+    // place -- the new body gets its own try without a close/reopen. The
+    // close/reopen axis is the unmount reset's own test above; this pins the
+    // identity-reset axis a bare-useState fallback would lose. The rerender
+    // repeats the render's exact tree so the dialog stays mounted and open.
+    vi.mocked(embed)
+      .mockRejectedValueOnce(new Error("vega boom"))
+      .mockResolvedValueOnce(embedOk());
+    const { rerender } = renderI18n(
+      <VizEnlargeDialog spec={{ mark: "bar" }} />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "放大查看图表" }));
+    await waitFor(() =>
+      expect(screen.getByText(/图表无法渲染/)).toBeInTheDocument(),
+    );
+    rerender(
+      withIntl(<VizEnlargeDialog spec={{ mark: "point" }} />),
+    );
     await waitFor(() => expect(embed).toHaveBeenCalledTimes(2));
     expect(screen.queryByText(/图表无法渲染/)).not.toBeInTheDocument();
   });
