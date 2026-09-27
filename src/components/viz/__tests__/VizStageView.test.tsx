@@ -17,10 +17,9 @@ describe("VizStageView (issue #1093: the fence chart on the stage)", () => {
     vi.mocked(embed).mockResolvedValue(embedOk());
     renderI18n(<VizStageView spec={JSON.stringify({ mark: "bar" })} />);
     await waitFor(() => expect(embed).toHaveBeenCalledTimes(1));
-    // The viz view is the chart plus the export pair -- the stage's export
-    // surface (the in-stream fence carries no export).
-    expect(screen.getByRole("button", { name: "下载 PNG 图表" })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "下载 SVG 图表" })).toBeInTheDocument();
+    // The viz view is the chart plus its export anchor -- the stage's
+    // export surface (the in-stream fence carries no export).
+    expect(screen.getByRole("button", { name: "下载图表" })).toBeInTheDocument();
   });
 
   it("discloses a staged body that fails to decode (no empty pane)", () => {

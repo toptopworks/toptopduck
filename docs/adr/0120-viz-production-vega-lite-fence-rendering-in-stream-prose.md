@@ -45,6 +45,7 @@ ADR-0016 定义了 viz 意图与白名单，ADR-0033 补触发与退化披露，
 - **校准（L2 放大退役）**：视口锚定的放大浮层退役；结果页 viz 视图为其继任查看面，浮层的 max-height 滚动语义移交工作区面板。
 - **校准（导出解冻）**：图导出落结果页 viz 视图与结果卡图——PNG / SVG 双按钮，经 Vega view 序列化（toSVG / toCanvas）走 WebView2 默认下载通道，命名取 spec `title` 净化值、catalog 词兜底；md 产物内 fence 图导出留尾。
 - **校准（导出落盘通道改判）**：图导出的落盘通道由 WebView2 默认下载改为原生另存为对话框加后端写命令——默认通道静默落入系统下载文件夹且应用内零反馈，真机点按读作按钮失效；序列化（toSVG / toCanvas）与命名规则不变。
+- **校准（导出锚点形态）**：PNG / SVG 双裸图标按钮收敛为单锚点加下拉菜单（vega-embed 原生动作栏之形、本仓 popover tokens 之皮），锚点视觉对齐 topbar 图标按钮家族；hover 显形含锚点自持，键盘显形仅认可见焦点。
 - 结果卡 `viz` 槽位（ADR-0016/0033 原设计）继续闲置；若未来结果卡图表诉求真实，emit_chart 路线按本 ADR Considered 记录重评。
 - **校准 ADR-0016**：白名单增 heatmap；图表生产表面增流内 fence 一路，结果卡槽位与降级/主题路径不变。
 - **被 ADR-0121 校准**：Decision 7 的「技能单文件、双语（en-US / zh-CN 随响应 locale），不启用 references 多文件物化」读作「技能为文件树、英文单语、支持 scripts/references 多文件」；Considered 的「references/ 多文件渐进披露」否决项就此翻案（复杂技能压力就此真实）；Why 4 所引「用户可编辑 / hash 漂移跟踪」治理随 ADR-0109 校准失效；伴随关系可选化与自动包含判定不变。

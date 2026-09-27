@@ -1100,7 +1100,7 @@ describe("ResultView viz (ADR-0016/0033, issue #26)", () => {
     expect(screen.queryByRole("alert")).not.toBeInTheDocument();
   });
 
-  it("mounts the export pair on a rendered chart (issue #1093)", async () => {
+  it("mounts the export anchor on a rendered chart (issue #1093)", async () => {
     // The result card's chart rides the export-bearing frame: one embed, and
     // the PNG/SVG pair walk THAT embedded view (a click never re-embeds).
     vi.mocked(readRows).mockResolvedValue({
@@ -1122,14 +1122,11 @@ describe("ResultView viz (ADR-0016/0033, issue #26)", () => {
     );
     await waitFor(() => expect(embed).toHaveBeenCalledTimes(1));
     expect(
-      screen.getByRole("button", { name: "下载 PNG 图表" }),
-    ).toBeInTheDocument();
-    expect(
-      screen.getByRole("button", { name: "下载 SVG 图表" }),
+      screen.getByRole("button", { name: "下载图表" }),
     ).toBeInTheDocument();
   });
 
-  it("keeps the export pair off the degraded chart (issue #1093)", async () => {
+  it("keeps the export anchor off the degraded chart (issue #1093)", async () => {
     // The render-failure arm on the result card: the swap-in disclosure
     // replaces the chart slot entirely, so a failed chart has nothing to
     // export.
@@ -1154,10 +1151,7 @@ describe("ResultView viz (ADR-0016/0033, issue #26)", () => {
       expect(screen.getByText(/图表无法渲染/)).toBeInTheDocument(),
     );
     expect(
-      screen.queryByRole("button", { name: "下载 PNG 图表" }),
-    ).not.toBeInTheDocument();
-    expect(
-      screen.queryByRole("button", { name: "下载 SVG 图表" }),
+      screen.queryByRole("button", { name: "下载图表" }),
     ).not.toBeInTheDocument();
   });
 });

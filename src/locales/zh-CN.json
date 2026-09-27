@@ -608,6 +608,7 @@
   "viz.error.unsupportedMark": "图表类型「{mark}」不在支持的范围内（仅支持柱/线/面积/散点/饼图/热力图）",
   "viz.fence.pending": "图表生成中…",
   "viz.fence.stageLink": "在结果页查看图表",
+  "viz.export.menu": "下载图表",
   "viz.export.fallbackName": "图表",
   "viz.export.png": "下载 PNG 图表",
   "viz.export.svg": "下载 SVG 图表",

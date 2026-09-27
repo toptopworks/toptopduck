@@ -608,6 +608,7 @@
   "viz.error.unsupportedMark": "the chart type \"{mark}\" is not supported (only bar/line/area/scatter/pie/heatmap)",
   "viz.fence.pending": "Generating chart…",
   "viz.fence.stageLink": "View chart in the results pane",
+  "viz.export.menu": "Download chart",
   "viz.export.fallbackName": "chart",
   "viz.export.png": "Download chart as PNG",
   "viz.export.svg": "Download chart as SVG",
