@@ -436,7 +436,7 @@ export function SkillsSection({
               />
             ) : (
               <FormattedMessage
-                id="settings.skills.noMatches"
+                id="common.skillsNoMatches"
                 defaultMessage="No skills match your search."
               />
             )}

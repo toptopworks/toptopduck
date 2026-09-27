@@ -21,8 +21,8 @@ const ROW_CLASS = "hover:bg-accent flex items-center gap-3 px-4 py-3";
 export function AcquiredLabel({ acquired }: { acquired: SkillAcquired }) {
   return acquired === "linked" ? (
     <FormattedMessage
-      id="settings.skills.acquiredLinked"
-      defaultMessage="linked"
+      id="common.linked"
+      defaultMessage="Linked"
     />
   ) : acquired === "builtin" ? (
     <FormattedMessage

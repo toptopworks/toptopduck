@@ -111,7 +111,7 @@ export function RuntimeSection({
       {/* Tab switcher (issue #489): two tab buttons. State is NOT persisted --
           a nav switch unmounts RuntimeSection and useState resets on remount.
           Each label is a static <FormattedMessage> literal at the call site so
-          @formatjs/cli extract resolves every settings.runtime.tab.* id
+          @formatjs/cli extract resolves both tab ids
           (ADR-0052: a variable id would fail the i18n:check CI gate). */}
       <div
         className="mb-6 inline-flex items-center gap-1 rounded-lg bg-muted p-0.5"
@@ -125,7 +125,7 @@ export function RuntimeSection({
           onClick={() => setTab("api-access")}
           label={(
             <FormattedMessage
-              id="settings.runtime.tab.apiAccess"
+              id="common.apiAccess"
               defaultMessage="API Access"
             />
           )}

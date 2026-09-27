@@ -183,7 +183,7 @@ export function SkillPickerPanel({
       {noMatches && (
         <div className={NOTE_CLASS}>
           <FormattedMessage
-            id="settings.skills.noMatches"
+            id="common.skillsNoMatches"
             defaultMessage="No skills match your search."
           />
         </div>

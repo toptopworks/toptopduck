@@ -256,7 +256,7 @@ describe("SkillsSection (issue #362)", () => {
     expect(screen.getByText("Work with PDF files.")).toBeInTheDocument();
     expect(screen.getByText("external-skill")).toBeInTheDocument();
     expect(screen.getAllByText("local").length).toBeGreaterThan(0);
-    expect(screen.getAllByText("linked").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("Linked").length).toBeGreaterThan(0);
   });
 
   it("filters by search text across name and description", async () => {
