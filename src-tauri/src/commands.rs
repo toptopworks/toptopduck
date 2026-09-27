@@ -3843,6 +3843,35 @@ mod tests {
         );
     }
 
+    /// The export write lane (#1093): bytes land verbatim at the user-picked
+    /// path, and an impossible destination errors naming the lane (the
+    /// frontend surfaces the failure; this end only refuses).
+    #[test]
+    fn write_export_file_lands_bytes_verbatim() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let out = dir.path().join("chart.svg");
+        let payload = vec![b'<', b's', b'v', b'g', b'>'];
+        write_export_file(out.to_string_lossy().into_owned(), payload.clone())
+            .expect("the picked path writes");
+        assert_eq!(
+            std::fs::read(&out).expect("read back"),
+            payload,
+            "the export payload lands byte-for-byte"
+        );
+    }
+
+    #[test]
+    fn write_export_file_errors_on_missing_parent() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let missing = dir.path().join("no-such-dir").join("chart.png");
+        let err = write_export_file(missing.to_string_lossy().into_owned(), vec![1, 2, 3])
+            .expect_err("a missing parent refuses");
+        assert!(
+            err.contains("cannot write export"),
+            "the error names the lane: {err}"
+        );
+    }
+
     /// A minimal CliToolConfig for the turn-assembly projection tests: only
     /// `name` and `enabled` matter to the assembly seam.
     fn cli_tool(name: &str, enabled: bool) -> crate::cli_tools::config::CliToolConfig {

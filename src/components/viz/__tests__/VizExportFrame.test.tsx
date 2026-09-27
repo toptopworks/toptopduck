@@ -140,4 +140,27 @@ describe("VizExportFrame (issue #1093: the result card / stage export anchor)", 
     await new Promise((r) => setTimeout(r, 0));
     expect(writeExportFile).not.toHaveBeenCalled();
   });
+
+  it("surfaces a write failure after a confirmed pick, and clears on retry", async () => {
+    // A confirmed destination that never appears must not read as a dead
+    // click: the destructive notice names the failure, and the next attempt
+    // clears it (one sentence, no detail -- the log sink carries the why).
+    const view = { resize: vi.fn(), toSVG: vi.fn().mockResolvedValue("<svg/>") };
+    vi.mocked(embed).mockResolvedValue({
+      finalize: vi.fn(),
+      view,
+    } as unknown as Awaited<ReturnType<typeof embed>>);
+    vi.mocked(saveDialog).mockResolvedValue("C:/out/chart.svg");
+    vi.mocked(writeExportFile).mockRejectedValueOnce(new Error("disk full"));
+    renderI18n(<VizExportFrame spec={{ mark: "bar" }} onError={vi.fn()} />);
+    await waitFor(() => expect(embed).toHaveBeenCalledTimes(1));
+    await openExportMenu();
+    activateItem(screen.getByRole("menuitem", { name: "下载 SVG 图表" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("图表导出失败");
+    // The retry succeeds (the Once-rejection is spent) and the notice goes.
+    await openExportMenu();
+    activateItem(screen.getByRole("menuitem", { name: "下载 SVG 图表" }));
+    await waitFor(() => expect(screen.queryByRole("alert")).not.toBeInTheDocument());
+    expect(writeExportFile).toHaveBeenCalledTimes(2);
+  });
 });

@@ -612,6 +612,7 @@
   "viz.export.fallbackName": "图表",
   "viz.export.png": "下载 PNG 图表",
   "viz.export.svg": "下载 SVG 图表",
+  "viz.export.failed": "图表导出失败",
   "window.maximize": "最大化",
   "window.minimize": "最小化",
   "window.restore": "还原",

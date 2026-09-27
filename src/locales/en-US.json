@@ -612,6 +612,7 @@
   "viz.export.fallbackName": "chart",
   "viz.export.png": "Download chart as PNG",
   "viz.export.svg": "Download chart as SVG",
+  "viz.export.failed": "Chart export failed",
   "window.maximize": "Maximize",
   "window.minimize": "Minimize",
   "window.restore": "Restore",

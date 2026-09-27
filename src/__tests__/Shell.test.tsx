@@ -12,6 +12,9 @@ import type { ThreadEntry, TurnOutcome } from "../types/thread";
 // bridge) so the shell renders offline.
 
 vi.mock("@tauri-apps/plugin-dialog", () => ({ open: vi.fn(), save: vi.fn() }));
+// The viz suites' posture: jsdom has no canvas, so every chart render in
+// this file draws through the mocked embed.
+vi.mock("vega-embed", () => ({ default: vi.fn() }));
 
 // ArtifactView's HTML branch rides convertFileSrc (the asset protocol); the
 // real transform reads window.__TAURI_INTERNALS__ (absent in jsdom), so a
@@ -148,6 +151,7 @@ vi.mock("../api", async (importOriginal) => {
 
 import App from "../App";
 import { open } from "@tauri-apps/plugin-dialog";
+import embed from "vega-embed";
 import {
   activeDataset,
   askQuestion,
@@ -174,7 +178,8 @@ import {
 import type { AppConfig } from "../types/app-config";
 import type { McpServerConfig } from "../types/mcp";
 import { baseAppConfig as sharedBaseAppConfig, skillEntry } from "../test-fixtures";
-import { artifactTurn, recordedTurn } from "../session/__tests__/fixtures";
+import { artifactTurn, recordedTurn, textual } from "../session/__tests__/fixtures";
+import { embedOk } from "../components/common/__tests__/helpers";
 import type { SessionRuntimeChoice } from "../types/runtime";
 import { log } from "../lib/log";
 
@@ -1676,6 +1681,49 @@ describe("App artifact presentation (issue #1088, ADR-0124 Decision 3/4)", () =>
     });
     expect(card).toHaveTextContent("report.pdf");
     expect(document.querySelector("[data-testid=\"artifact-frame\"]")).toBeNull();
+  });
+});
+
+describe("App viz stage presentation (issue #1093, ADR-0120 calibration)", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    state.workingSet = [];
+    state.thread = [];
+    vi.mocked(listSessions).mockResolvedValue([]);
+    vi.mocked(activeDataset).mockResolvedValue(null);
+    vi.mocked(listWorkingSet).mockResolvedValue([]);
+    vi.mocked(conversation).mockImplementation(async () => state.thread);
+    vi.mocked(createSession).mockResolvedValue({
+      session_id: "sess-1",
+      duck_path: "/sessions/sess-1/session.duck",
+    });
+    vi.mocked(embed).mockResolvedValue(embedOk());
+    vi.stubGlobal("navigator", { language: "zh-CN" });
+  });
+
+  it("stages a settled fence body onto the workspace on click (the stream->stage link)", async () => {
+    // The composition chain pinned end to end (the #1088 file-face twin):
+    // the settled fence renders clickable through the context link,
+    // handleSelectViz moves viewedResult onto the viz view AND expands the
+    // workspace, the stage renders the export-bearing frame, and the
+    // clicked fence lights the aria-current mirror.
+    const body = "```vega-lite\n{\"mark\": \"bar\"}\n```";
+    state.workingSet = [src("people")];
+    state.thread = [textual(body)];
+    render(<App />);
+    await openSession();
+    const fence = await screen.findByRole("button", { name: "在结果页查看图表" });
+    // Resume posture mirror (#771): no Materialized turn auto-opens, so the
+    // workspace stays folded until the fence is clicked.
+    expect(document.querySelector(".session-pane")?.classList.contains("workspace-collapsed")).toBe(true);
+    fireEvent.click(fence);
+    await waitFor(() =>
+      expect(document.querySelector(".session-pane")?.classList.contains("workspace-collapsed")).toBe(false),
+    );
+    // The stage's third face: the export anchor on the viz view.
+    expect(screen.getByRole("button", { name: "下载图表" })).toBeInTheDocument();
+    // The in-stream selection mirror on the clicked fence.
+    expect(fence).toHaveAttribute("aria-current", "true");
   });
 });
 

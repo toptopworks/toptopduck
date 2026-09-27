@@ -28,6 +28,7 @@ import type { Result } from "vega-embed";
 import { writeExportFile } from "../../api";
 import { log } from "../../lib/log";
 import { cn } from "@/lib/utils";
+import { Alert, AlertDescription } from "../ui/alert";
 import { Button } from "../ui/button";
 import {
   DropdownMenu,
@@ -42,8 +43,10 @@ import { vizExportName, type DecodedVizSpec, type VizFailureReason } from "./viz
 // dialog hands back an explicit destination, then the Rust write command
 // lands the bytes there -- the click's first effect is a dialog the user
 // cannot miss. A cancelled picker is a quiet no-op (the exportRowsCsv
-// precedent); a write failure routes to the caller's log-sink catch like a
-// serialization failure.
+// precedent); a write or serialization failure after a CONFIRMED pick
+// surfaces on the in-frame notice (the ResultActions onError twin -- a
+// confirmed destination that never appears must not read as a dead click),
+// with the diagnostic detail in the log sink (ADR-0029).
 async function saveChartFile(blob: Blob, stem: string, ext: "png" | "svg") {
   const target = await saveDialog({
     defaultPath: `${stem}.${ext}`,
@@ -74,6 +77,9 @@ export function VizExportFrame({
   // open, focus (and the pointer) ride the portal content, so neither
   // :hover on the host nor focus-within on the wrapper holds.
   const [menuOpen, setMenuOpen] = useState(false);
+  // The export failure flag: set by the exporters' catches, cleared by the
+  // next attempt -- one fixed sentence, no detail (the log carries the why).
+  const [exportFailed, setExportFailed] = useState(false);
 
   // The one naming rule: the spec title sanitized, else the catalog word.
   const stem = vizExportName(
@@ -86,6 +92,7 @@ export function VizExportFrame({
   // the plugin log sink is the diagnostic lane (ADR-0029), mirroring the
   // embed rejection path.
   const exportSvg = async () => {
+    setExportFailed(false);
     const view = viewRef.current;
     if (!view) return;
     try {
@@ -93,9 +100,11 @@ export function VizExportFrame({
       await saveChartFile(new Blob([svg], { type: "image/svg+xml" }), stem, "svg");
     } catch (err) {
       log.warn("viz", "chart SVG export failed", err);
+      setExportFailed(true);
     }
   };
   const exportPng = async () => {
+    setExportFailed(false);
     const view = viewRef.current;
     if (!view) return;
     try {
@@ -106,6 +115,7 @@ export function VizExportFrame({
       if (blob) await saveChartFile(blob, stem, "png");
     } catch (err) {
       log.warn("viz", "chart PNG export failed", err);
+      setExportFailed(true);
     }
   };
 
@@ -120,6 +130,10 @@ export function VizExportFrame({
   const menuLabel = intl.formatMessage({
     id: "viz.export.menu",
     defaultMessage: "Download chart",
+  });
+  const failedLabel = intl.formatMessage({
+    id: "viz.export.failed",
+    defaultMessage: "Chart export failed",
   });
 
   return (
@@ -179,6 +193,15 @@ export function VizExportFrame({
           </DropdownMenuContent>
         </DropdownMenu>
       </div>
+      {exportFailed && (
+        // The honest failure face (issue #1093): the destructive Alert's
+        // assertive default role fits a user-initiated action that did not
+        // land; the wording stays category-level like the degrade
+        // disclosures -- the engine detail lives in the log (ADR-0029).
+        <Alert variant="destructive" className="my-2">
+          <AlertDescription>{failedLabel}</AlertDescription>
+        </Alert>
+      )}
     </div>
   );
 }
