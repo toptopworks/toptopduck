@@ -551,7 +551,7 @@ function AgentRow({
                 defaultMessage="Built-in"
               />
             ) : agent.source === "linked" ? (
-              <FormattedMessage id="settings.agents.sourceLinked" defaultMessage="Linked" />
+              <FormattedMessage id="common.linked" defaultMessage="Linked" />
             ) : (
               <FormattedMessage id="common.custom" defaultMessage="Custom" />
             )}
@@ -592,7 +592,7 @@ function AgentRow({
         <RowActionButton
           label={intl.formatMessage(
             {
-              id: "settings.agents.editLabel",
+              id: "settings.agents.edit",
               defaultMessage: "Edit agent {name}",
             },
             { name: agent.name },
@@ -698,7 +698,7 @@ function AgentForm({
         size="form"
         title={editing ? (
           <FormattedMessage
-            id="settings.agents.editLabel"
+            id="settings.agents.edit"
             defaultMessage="Edit agent {name}"
             values={{ name: editing.name }}
           />

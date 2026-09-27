@@ -574,7 +574,7 @@ export function ProfilesSection({
   });
 
   const unnamed = intl.formatMessage({
-    id: "settings.profiles.unnamed",
+    id: "common.profileUnnamed",
     defaultMessage: "Unnamed profile",
   });
   const derivedPreset = draft ? derivePresetId(draft) : PRESET_CUSTOM;

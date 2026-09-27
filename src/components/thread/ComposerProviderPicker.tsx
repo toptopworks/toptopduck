@@ -677,7 +677,7 @@ export function ComposerProviderPicker({
 
   const activeProfile = findActiveProfile(provider);
   const unnamed = intl.formatMessage({
-    id: "settings.profiles.unnamed",
+    id: "common.profileUnnamed",
     defaultMessage: "Unnamed profile",
   });
   const builtInModel = activeProfile?.model ?? "";
@@ -759,7 +759,7 @@ export function ComposerProviderPicker({
     defaultMessage: "no key",
   });
   const keychainUnavailableMark = intl.formatMessage({
-    id: "settings.profiles.keychainUnavailable",
+    id: "composer.providerPicker.keychainUnavailable",
     defaultMessage: "Keychain unavailable",
   });
   // The external-runtime tooltip names the selected adapter (the closed chip

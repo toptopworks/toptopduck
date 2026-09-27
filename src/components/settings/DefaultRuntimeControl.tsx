@@ -180,7 +180,7 @@ export function DefaultRuntimeControl({
                   <SelectGroup>
                     <SelectLabel>
                       <FormattedMessage
-                        id="settings.runtime.tab.apiAccess"
+                        id="common.apiAccess"
                         defaultMessage="API Access"
                       />
                     </SelectLabel>

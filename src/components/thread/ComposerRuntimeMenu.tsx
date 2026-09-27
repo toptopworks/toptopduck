@@ -74,7 +74,7 @@ export function ComposerRuntimeMenu({
   const intl = useIntl();
 
   const unnamed = intl.formatMessage({
-    id: "settings.profiles.unnamed",
+    id: "common.profileUnnamed",
     defaultMessage: "Unnamed profile",
   });
   const noProfiles = provider.profiles.length === 0;
@@ -102,7 +102,7 @@ export function ComposerRuntimeMenu({
     defaultMessage: "no key",
   });
   const keychainUnavailableMark = intl.formatMessage({
-    id: "settings.profiles.keychainUnavailable",
+    id: "composer.providerPicker.keychainUnavailable",
     defaultMessage: "Keychain unavailable",
   });
 
@@ -133,7 +133,7 @@ export function ComposerRuntimeMenu({
           onClick={() => void onSelectRuntime({ kind: "built_in" })}
         >
           <FormattedMessage
-            id="settings.runtime.tab.apiAccess"
+            id="common.apiAccess"
             defaultMessage="API Access"
           />
         </RuntimeGroupRow>
