@@ -4,11 +4,11 @@
 
 1. **错误呈现收口为 `src/lib/error-presentation/` 深模块**——把散落在 `src/api.ts`（9 个 `is*Error` 类型守卫 + 7 个子格式化器 + 4 个 detail 提取器 + `fmtError`/`errorDetail` + `describeReject` + `formatTurnFailure`/`turnFailureDetail`）与 `src/session/useSessionState.ts`（`errorVerb`/`flowFailedMessage`/`refreshFailedMessage`/`appErrorFrom`）的「IPC 拒绝 → `AppError`」转换整体搬入。`api.ts` 退回纯 `invoke` 边界（仅留 ~35 个 IPC 函数）。
 
-2. **分层接口：上层组装 + 底层裸呈现**——上层 `toAppError(e: unknown, intl, kind: AppErrorKind, opts?: { refreshFailed?: boolean }): AppError` 组装 `AppError` 并决定前缀策略；底层 `fmtError`/`errorDetail`/`formatTurnFailure`/`turnFailureDetail` 保持公开（persist banner 与 TextualOutcomeCard 直接消费）。9 守卫 + 7 子格式化器 + verb 前缀逻辑下沉为模块私有。
+2. **分层接口：上层组装 + 底层裸呈现**——上层 `toAppError(e: unknown, intl, kind: AppErrorKind, opts?: { refreshFailed?: boolean }): AppError` 组装 `AppError` 并决定前缀策略；底层 `fmtError`/`errorDetail`/`formatTurnFailure`/`turnFailureDetail` 保持公开（persist banner 与 TextualOutcomeCard 直接消费）。9 守卫 + 7 子格式化器 + verb 前缀逻辑下沉为模块私有。校准：`flowFailedMessage` 例外公开——测试侧的失败前缀期望经生产组合器构造，不再于测试内维护第二份 verb → id 映射；`errorVerb` 与 `refreshFailedMessage` 仍为模块私有。
 
 3. **前缀策略由 `kind` 驱动，取代调用点选函数**——`toAppError` 内部 `switch(kind)`：`SessionFlowKind` 六值（load/rename/replace/delete/privacy/ask）加 `"{verb} failed: {message}"` 前缀；`shell`/`read` 裸输出；`opts.refreshFailed` 产出 `"{verb} saved, but refreshing the working set failed: {message}"`。exhaustiveness `default: never` 保留「verb 只对 `SessionFlowKind` 加」编译期不变量（types/error.ts 已立的 `SessionFlowKind ⊂ AppErrorKind`）。
 
-4. **模块物理分片**——`guards.ts`（9 守卫，纯窄化无 intl）/ `format.ts`（`fmtError` 内核 + 7 子格式化器 + 4 detail 提取器 + `errorDetail`）/ `turn-failure.ts`（`formatTurnFailure` + `turnFailureDetail`）/ `app-error.ts`（`toAppError` + verb 前缀逻辑）/ `index.ts`（facade，仅 re-export 6 个公开函数 + 必要类型；第 6 个是全量拉取护栏分类器 `classifyFullPullRejection`）。每文件 150–300 行。
+4. **模块物理分片**——`guards.ts`（9 守卫，纯窄化无 intl）/ `format.ts`（`fmtError` 内核 + 7 子格式化器 + 4 detail 提取器 + `errorDetail`）/ `turn-failure.ts`（`formatTurnFailure` + `turnFailureDetail`）/ `app-error.ts`（`toAppError` + verb 前缀逻辑）/ `index.ts`（facade，仅 re-export 6 个公开函数 + 必要类型；第 6 个是全量拉取护栏分类器 `classifyFullPullRejection`）。每文件 150–300 行。校准：re-export 公开函数 6 → 7，新增 `flowFailedMessage`（见 Decision 2 校准）。
 
 5. **`AppError`/`AppErrorKind`/`SessionFlowKind` 留 `types/error.ts`**——值对象（`ErrorBanner` 渲染 + 多 hook 持有），非呈现逻辑；types/ 保持纯数据，lib/ 保持纯逻辑。
 

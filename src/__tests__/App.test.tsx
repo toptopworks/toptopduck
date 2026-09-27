@@ -8,9 +8,8 @@ import {
   within,
 } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { IntlProvider } from "react-intl";
 import { StrictMode } from "react";
-import type { ReactNode } from "react";
+import type { ReactElement, ReactNode } from "react";
 import type { DatasetDescriptor } from "../types/dataset";
 import type { ThreadEntry, TurnOutcome } from "../types/thread";
 import type { ComposerSessionFields } from "../session/useComposerState";
@@ -118,10 +117,10 @@ vi.mock("../api", async (importOriginal) => {
 
 import { open } from "@tauri-apps/plugin-dialog";
 import { SessionPane } from "../session/SessionPane";
-import { TooltipProvider } from "../components/ui/tooltip";
+import { catalogIntl, withIntlAt } from "../components/common/__tests__/helpers";
 import type { UseApprovalEvents } from "../session/useApprovalEvents";
 import type { SessionFlowKind } from "../types/error";
-import { catalogFor, type CatalogKey, type EffectiveLocale } from "../i18n";
+import { catalogFor, type EffectiveLocale } from "../i18n";
 import {
   activeDataset,
   askQuestion,
@@ -141,6 +140,7 @@ import {
   recordedTurn,
 } from "../session/__tests__/fixtures";
 import { log } from "../lib/log";
+import { flowFailedMessage } from "../lib/error-presentation";
 
 // ADR-0093 (#512): the session-header management callback props are no-ops in
 // every SessionPane render in this file (these tests exercise session-INTERNAL
@@ -168,20 +168,13 @@ function renderPane(
   const queryClient = new QueryClient({
     defaultOptions: { queries: { retry: false } },
   });
-  // TooltipProvider mirrors the App ancestor: the rail's turn cards carry the
-  // TruncatingTooltip question recovery (ADR-0050), which crashes without the
-  // provider context once a turn renders (an optimistic append or a thread
-  // mock).
-  const wrap = (children: ReactNode) => (
-    <QueryClientProvider client={queryClient}>
-      <IntlProvider
-        locale={locale}
-        messages={catalogFor(locale)}
-        defaultLocale="en-US"
-      >
-        <TooltipProvider>{children}</TooltipProvider>
-      </IntlProvider>
-    </QueryClientProvider>
+  // withIntlAt (the shared i18n test seam) carries the IntlProvider over the
+  // real catalog plus the TooltipProvider mirroring the App ancestor: the
+  // rail's turn cards carry the TruncatingTooltip question recovery
+  // (ADR-0050), which crashes without the provider context once a turn
+  // renders (an optimistic append or a thread mock).
+  const wrap = (children: ReactElement) => (
+    <QueryClientProvider client={queryClient}>{withIntlAt(locale, children)}</QueryClientProvider>
   );
   // An inert approval channel: these session-internal flows never exercise
   // approvals (the api mock has no approval listeners), so the pane reads an
@@ -242,46 +235,18 @@ async function clickRailResultLink(name: string): Promise<void> {
   fireEvent.click(await within(rail).findByRole("button", { name: `结果：${name}` }));
 }
 
-// The catalog key for an operation verb (issue #139). The negative prefix
-// assertions below build the expected "{verb} failed"/"{verb}失败" text from
-// the catalog so they track the verb wording instead of duplicating a hard-
-// coded string, and the same helper serves the en-US locale test.
-function verbKey(kind: SessionFlowKind): CatalogKey {
-  switch (kind) {
-    case "load":
-      return "common.load";
-    case "rename":
-      return "common.rename";
-    case "replace":
-      return "error.verb.replace";
-    case "delete":
-      return "error.verb.delete";
-    case "privacy":
-      return "error.verb.privacy";
-    case "ask":
-      return "common.ask";
-    default: {
-      // Exhaustiveness guard: mirrors errorVerb in lib/error-presentation/
-      // app-error so a new SessionFlowKind member forces a test update here
-      // too. The `default: never` throw enforces this regardless of tsconfig
-      // flags.
-      const unhandled: never = kind;
-      throw new Error(
-        `unhandled SessionFlowKind: ${JSON.stringify(unhandled)}`,
-      );
-    }
-  }
-}
-
-// The "{verb}失败" prefix substring for the zh-CN test locale, built from the
-// catalog so the assertion tracks the verb wording instead of duplicating a
-// hard-coded string (issue #139 locale-aware closeout). Used only in the
-// negative -- asserting an operation's failure banner does NOT carry another
-// operation's prefix (a rename rejection is never mislabelled a load failure).
-// The en-US locale is covered positively by the English-prefix assertion in
-// the locale-consistency test below, so this helper stays zh-CN-scoped.
+// The "{verb}失败：" prefix substring for the zh-CN test locale, composed by
+// running the PRODUCTION banner composer with an empty message (issue #139
+// locale-aware closeout): the regex tracks the verb wording and the failure
+// template through the real code path, with no second verb -> id map here
+// (issue #1100 retired the mirrored map). Mostly the negative -- asserting
+// an operation's failure banner does NOT carry another operation's prefix
+// (a rename rejection is never mislabelled a load failure). Positive uses
+// (the privacy banner, the en-US locale-consistency arm) catch routing only:
+// composer-built expectations flip with an errorVerb swap, so the verb -> id
+// table is pinned in toAppError.test.
 function failedPrefix(kind: SessionFlowKind): RegExp {
-  return new RegExp(`${catalogFor("zh-CN")[verbKey(kind)]}失败`);
+  return new RegExp(flowFailedMessage(catalogIntl("zh-CN"), kind, ""));
 }
 
 const guidedDataset: DatasetDescriptor = {
@@ -1443,13 +1408,7 @@ describe("SessionPane pending-payload consumption (#500)", () => {
     );
     const tree = (
       <QueryClientProvider client={queryClient}>
-        <IntlProvider
-          locale="zh-CN"
-          messages={catalogFor("zh-CN")}
-          defaultLocale="en-US"
-        >
-          <TooltipProvider>{pane}</TooltipProvider>
-        </IntlProvider>
+        {withIntlAt("zh-CN", pane)}
       </QueryClientProvider>
     );
     const view = render(
@@ -1477,13 +1436,7 @@ describe("SessionPane pending-payload consumption (#500)", () => {
       );
       const nextTree = (
         <QueryClientProvider client={queryClient}>
-          <IntlProvider
-            locale="zh-CN"
-            messages={catalogFor("zh-CN")}
-            defaultLocale="en-US"
-          >
-            <TooltipProvider>{nextPane}</TooltipProvider>
-          </IntlProvider>
+          {withIntlAt("zh-CN", nextPane)}
         </QueryClientProvider>
       );
       view.rerender(

@@ -1,8 +1,11 @@
 // The upper-layer AppError assembler (ADR-0069). toAppError is the single
 // kind-driven entry point: it computes the bare locale message + detail (via
 // the format core) and applies the prefix strategy chosen by `kind`. The verb
-// prefix logic (errorVerb / flowFailedMessage / refreshFailedMessage) is
-// module-internal -- every call site reaches it through toAppError.
+// mapping (errorVerb) and the refreshFailed banner stay module-internal --
+// every call site reaches them through toAppError. flowFailedMessage is the
+// one export besides toAppError: App.test composes its expected "{verb}
+// failed:" prefix through the production composer instead of mirroring the
+// verb -> id map (issue #1100).
 
 import type { IntlShape } from "react-intl";
 import type { AppError, AppErrorKind, SessionFlowKind } from "../../types/error";
@@ -65,8 +68,10 @@ function errorVerb(intl: IntlShape, kind: SessionFlowKind): string {
 // Compose the "{verb} failed: {message}" banner for an operation reject
 // (issue #139). Both the verb and the failure template render through the
 // active locale, so the catalog message underneath is no longer wrapped in a
-// hard-coded Chinese prefix.
-function flowFailedMessage(intl: IntlShape, kind: SessionFlowKind, message: string): string {
+// hard-coded Chinese prefix. Exported (issue #1100) so App.test builds its
+// expected failure-prefix regex through this composer with an empty message
+// instead of hand-mirroring the verb -> id map.
+export function flowFailedMessage(intl: IntlShape, kind: SessionFlowKind, message: string): string {
   return intl.formatMessage(
     {
       id: "error.flow.failed",

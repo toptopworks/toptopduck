@@ -1,7 +1,7 @@
 import { act, renderHook, waitFor } from "@testing-library/react";
 import { QueryClient } from "@tanstack/react-query";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import type { IntlShape } from "react-intl";
+import { flatIntl } from "../../components/common/__tests__/helpers";
 import { sessionKeys } from "../queryKeys";
 import {
   buildLiveRounds,
@@ -99,7 +99,7 @@ function setup() {
   const setTurnLoading = vi.fn();
   const setError = vi.fn();
   const pollPersistError = vi.fn(async () => {});
-  const intl = { formatMessage: vi.fn(() => "err") } as unknown as IntlShape;
+  const intl = flatIntl();
   const deps = {
     queryClient,
     intl,

@@ -1,6 +1,6 @@
 import { act, renderHook } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import type { IntlShape } from "react-intl";
+import { flatIntl } from "../../components/common/__tests__/helpers";
 import { useIngestFlow } from "../useIngestFlow";
 import { src } from "./fixtures";
 import type {
@@ -78,10 +78,10 @@ function setup() {
   const setMutationLoading = vi.fn();
   const setError = vi.fn();
   const pollPersistError = vi.fn(async () => {});
-  // formatMessage is a spy so the NeedsGuidance-recur test can assert the
-  // canonical id; it returns a fixed "err" so loadErrorDisplay's message is
-  // deterministic for the Error-branch assertion.
-  const intl = { formatMessage: vi.fn(() => "err") } as unknown as IntlShape;
+  // flatIntl from the shared i18n test seam: the NeedsGuidance-recur test
+  // asserts the canonical id via the spy, and the fixed "err" keeps
+  // loadErrorDisplay's message deterministic for the Error-branch assertion.
+  const intl = flatIntl();
   const deps = { intl, setMutationLoading, setError, refreshServerState, pollPersistError, viewed };
   return {
     deps,
