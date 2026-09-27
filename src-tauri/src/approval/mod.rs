@@ -34,10 +34,13 @@
 //! holds. The handle is the natural boundary -- it already carries the cancel
 //! token / closing flag / resume flag as interior-mutable per-session state.
 //!
-//! ACP `session/request_permission` (ADR-0081) is serviced by
-//! [`auto_allowed`]: the bridge (#299) maps each permission option to a
-//! [`ToolKey`] and the gateway returns the subset the policy auto-permits.
-//! An empty return = fail-fast (no interactive confirmation over ACP).
+//! ACP `session/request_permission` (ADR-0081) is decided by a single
+//! [`classify`] call against an `auth_mode()` + `trust_list()` snapshot: an
+//! option the policy permits is selected, everything else is a reject the
+//! agent self-corrects from (ADR-0077). No interactive suspension rides ACP
+//! -- the card events the engine emits are best-effort notices of a raised +
+//! auto-decided permission; interactive confirmation is the app's own
+//! in-flow card.
 
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -48,6 +51,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::cancel::CancelToken;
 use crate::SessionId;
+
+pub mod policy;
+
+pub use policy::{classify, Classification};
 
 // ---------------------------------------------------------------------------
 // Identifiers + posture
@@ -191,74 +198,6 @@ pub enum OperationKind {
     Write,
     Execute,
     Network,
-}
-
-// ---------------------------------------------------------------------------
-// Classification (pure)
-// ---------------------------------------------------------------------------
-
-/// The gateway's classification of a tool call (ADR-0080). The
-/// [`ApprovalState`] gate maps this to a concrete action (pass / suspend).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Classification {
-    /// Pass through: built-in (Decision 1), OR trusted via "always allow"
-    /// (Decision 3), OR the session is in [`AuthMode::NoConfirmation`]
-    /// (Decision 4).
-    Allow,
-    /// External tool under [`AuthMode::PerCall`] that is not in the trust
-    /// set: suspend this turn's call and surface the in-flow approval card
-    /// (ADR-0083).
-    NeedsApproval,
-}
-
-/// Pure policy check (ADR-0080). Given the tool, the session posture, and the
-/// trust set, return the classification. Stateful side effects (suspending
-/// the turn, emitting the card) live in [`ApprovalState::gate`]; this fn is
-/// the testable, side-effect-free core.
-pub fn classify(key: &ToolKey, mode: AuthMode, trust: &HashSet<ToolKey>) -> Classification {
-    // (1) Built-in read-only + materialize: zero approval (ADR-0080 Decision
-    // 1) -- except the gated builtin meta-tools (ADR-0122 Decision 3): a
-    // `create_skill` mint persists across sessions and its body is a future
-    // prompt-injection source, so it rides the per-call card + session trust
-    // like an external write, never Decision 1's zero-approval pass.
-    if key.is_builtin() && !is_gated_builtin(key) {
-        return Classification::Allow;
-    }
-    // (4) No-confirmation posture: every external call auto-passes (Decision 4).
-    if mode == AuthMode::NoConfirmation {
-        return Classification::Allow;
-    }
-    // (3) "Always allow" (per-tool session trust) overrides per-call (Decision 3).
-    if trust.contains(key) {
-        return Classification::Allow;
-    }
-    // (3) Default: external tool under PerCall, not trusted -> suspend + ask.
-    Classification::NeedsApproval
-}
-
-/// Auto-select the tool keys the gateway permits without interactive
-/// confirmation (ADR-0081 ACP `session/request_permission`, issue #294).
-///
-/// The ACP bridge (#299) maps each permission option to a [`ToolKey`] and
-/// calls this against the live policy. The returned subset is what the bridge
-/// answers with; an empty return = no selectable option = fail-fast (ACP
-/// carries no interactive confirmation channel -- that path is the MCP-side
-/// approval card, not the ACP permission handshake).
-pub fn auto_allowed<'a, I>(keys: I, mode: AuthMode, trust: &HashSet<ToolKey>) -> Vec<&'a ToolKey>
-where
-    I: IntoIterator<Item = &'a ToolKey>,
-{
-    keys.into_iter()
-        .filter(|k| classify(k, mode, trust) == Classification::Allow)
-        .collect()
-}
-
-/// The built-in tools that gate anyway (ADR-0122 Decision 3): their writes
-/// outlive the session, so they never ride ADR-0080 Decision 1's
-/// zero-approval builtin pass. An explicit enumerated family, not a naming
-/// convention.
-fn is_gated_builtin(key: &ToolKey) -> bool {
-    key == &ToolKey::builtin(crate::skills::create::CREATE_SKILL)
 }
 
 // ---------------------------------------------------------------------------
@@ -908,180 +847,7 @@ mod tests {
         );
     }
 
-    // --- pure classify -----------------------------------------------------
-
-    #[test]
-    fn builtin_tools_always_pass() {
-        let mode = AuthMode::PerCall;
-        let trust = HashSet::new();
-        for name in ["explore", "materialize", "describe", "sample"] {
-            let key = ToolKey::builtin(name);
-            assert_eq!(
-                classify(&key, mode, &trust),
-                Classification::Allow,
-                "built-in {name} must pass with zero approval (ADR-0080 Decision 1)"
-            );
-        }
-    }
-
-    #[test]
-    fn external_per_call_untrusted_needs_approval() {
-        let key = ToolKey::external("acme", "fetch");
-        assert_eq!(
-            classify(&key, AuthMode::PerCall, &HashSet::new()),
-            Classification::NeedsApproval
-        );
-    }
-
-    #[test]
-    fn external_per_call_trusted_passes() {
-        let key = ToolKey::external("acme", "fetch");
-        let mut trust = HashSet::new();
-        trust.insert(key.clone());
-        assert_eq!(
-            classify(&key, AuthMode::PerCall, &trust),
-            Classification::Allow,
-            "always-allow trust overrides per-call (ADR-0080 Decision 3)"
-        );
-    }
-
-    #[test]
-    fn no_confirmation_mode_passes_all_external() {
-        let key = ToolKey::external("acme", "fetch");
-        assert_eq!(
-            classify(&key, AuthMode::NoConfirmation, &HashSet::new()),
-            Classification::Allow,
-            "no-confirmation posture auto-passes every external call (ADR-0080 Decision 4)"
-        );
-    }
-
-    #[test]
-    fn trust_is_scoped_to_server_tool() {
-        // Same tool name, different server -> different trust (ADR-0076/0080).
-        let trusted = ToolKey::external("acme", "fetch");
-        let mut trust = HashSet::new();
-        trust.insert(trusted);
-        let other = ToolKey::external("other", "fetch");
-        assert_eq!(
-            classify(&other, AuthMode::PerCall, &trust),
-            Classification::NeedsApproval,
-            "trust is per server::tool, not per tool name"
-        );
-    }
-
-    // --- ACP auto-select ---------------------------------------------------
-
-    #[test]
-    fn acp_auto_select_no_confirmation_allows_all() {
-        let keys = vec![
-            ToolKey::external("acme", "fetch"),
-            ToolKey::external("other", "write"),
-        ];
-        let allowed = auto_allowed(&keys, AuthMode::NoConfirmation, &HashSet::new());
-        assert_eq!(allowed.len(), 2, "no-confirmation selects every option");
-    }
-
-    #[test]
-    fn acp_auto_select_per_call_only_allows_trusted() {
-        let trusted = ToolKey::external("acme", "fetch");
-        let mut trust = HashSet::new();
-        trust.insert(trusted.clone());
-        let keys = vec![
-            trusted,
-            ToolKey::external("acme", "write"),
-            ToolKey::external("other", "fetch"),
-        ];
-        let allowed = auto_allowed(&keys, AuthMode::PerCall, &trust);
-        assert_eq!(allowed.len(), 1, "only the trusted tool is selectable");
-    }
-
-    #[test]
-    fn acp_auto_select_empty_is_fail_fast() {
-        // PerCall + nothing trusted -> empty -> the bridge fail-fast (ADR-0081).
-        let keys = vec![ToolKey::external("acme", "fetch")];
-        let allowed = auto_allowed(&keys, AuthMode::PerCall, &HashSet::new());
-        assert!(allowed.is_empty(), "empty selection = fail-fast");
-    }
-
     // --- gate lifecycle ----------------------------------------------------
-
-    #[test]
-    fn classify_gates_the_create_skill_builtin_despite_the_builtin_pass() {
-        // ADR-0122 Decision 3: the creation mint persists across sessions
-        // and its body is a future prompt-injection source -- the builtin
-        // zero-approval pass (ADR-0080 Decision 1) does not cover it.
-        let key = ToolKey::builtin(crate::skills::create::CREATE_SKILL);
-        assert_eq!(
-            classify(&key, AuthMode::PerCall, &HashSet::new()),
-            Classification::NeedsApproval,
-            "an untrusted create gates"
-        );
-        // Session trust ("always allow") restores the pass.
-        let trust = HashSet::from([key.clone()]);
-        assert_eq!(
-            classify(&key, AuthMode::PerCall, &trust),
-            Classification::Allow,
-            "an always-allowed create passes"
-        );
-        // The no-confirmation posture keeps its universal auto-pass.
-        assert_eq!(
-            classify(&key, AuthMode::NoConfirmation, &HashSet::new()),
-            Classification::Allow
-        );
-        // Ordinary built-ins keep the zero-approval pass.
-        assert_eq!(
-            classify(
-                &ToolKey::builtin("explore"),
-                AuthMode::PerCall,
-                &HashSet::new()
-            ),
-            Classification::Allow
-        );
-    }
-
-    #[test]
-    fn gate_passes_a_trusted_create_skill_without_emitting() {
-        // The always-allow short-circuit reaches the gated builtin the same
-        // way it reaches a trusted external -- no card for a trusted tool.
-        let state = ApprovalState::new();
-        let key = ToolKey::builtin(crate::skills::create::CREATE_SKILL);
-        state.seed_trust(&key);
-        let cancel = CancelToken::new();
-        let sink = RecordingSink::default();
-        let req = ApprovalRequest {
-            key,
-            operation_kind: OperationKind::Write,
-            summary: "Create skill `x`: d.".into(),
-            file_attachments: Vec::new(),
-            origin_agent: None,
-        };
-        let outcome = state
-            .gate(req, &sink, &cancel)
-            .expect("trusted create allowed");
-        assert_eq!(outcome, GateOutcome::Allow);
-        assert_eq!(
-            sink.request_count(),
-            0,
-            "a trusted create must not surface a card"
-        );
-    }
-
-    #[test]
-    fn gate_passes_builtin_without_emitting() {
-        let state = ApprovalState::new();
-        let cancel = CancelToken::new();
-        let sink = RecordingSink::default();
-        let req = ApprovalRequest {
-            key: ToolKey::builtin("explore"),
-            operation_kind: OperationKind::Read,
-            summary: "SELECT 1".into(),
-            file_attachments: Vec::new(),
-            origin_agent: None,
-        };
-        let outcome = state.gate(req, &sink, &cancel).expect("builtin allowed");
-        assert_eq!(outcome, GateOutcome::Allow);
-        assert_eq!(sink.request_count(), 0, "built-in must not surface a card");
-    }
 
     #[test]
     fn gate_passes_trusted_external_without_emitting() {
@@ -1099,24 +865,6 @@ mod tests {
             origin_agent: None,
         };
         let outcome = state.gate(req, &sink, &cancel).expect("trusted allowed");
-        assert_eq!(outcome, GateOutcome::Allow);
-        assert_eq!(sink.request_count(), 0);
-    }
-
-    #[test]
-    fn gate_passes_external_under_no_confirmation_without_emitting() {
-        let state = ApprovalState::new();
-        state.set_auth_mode(AuthMode::NoConfirmation);
-        let cancel = CancelToken::new();
-        let sink = RecordingSink::default();
-        let req = ApprovalRequest {
-            key: ToolKey::external("acme", "fetch"),
-            operation_kind: OperationKind::Network,
-            summary: "GET /x".into(),
-            file_attachments: Vec::new(),
-            origin_agent: None,
-        };
-        let outcome = state.gate(req, &sink, &cancel).expect("no-confirm allowed");
         assert_eq!(outcome, GateOutcome::Allow);
         assert_eq!(sink.request_count(), 0);
     }
