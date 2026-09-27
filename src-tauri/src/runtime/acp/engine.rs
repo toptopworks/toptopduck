@@ -2102,7 +2102,7 @@ mod tests {
 
     /// decide_permission truncates the summary before broadcasting so an
     /// unbounded ACP title cannot flood every pane (review M1 — the gate-side
-    /// equivalent is `gate_truncates_summary_before_broadcast` in approval.rs).
+    /// equivalent is `gate_truncates_summary_before_broadcast` in approval).
     #[test]
     fn decide_permission_truncates_summary_before_broadcast() {
         use crate::approval::ApprovalState;

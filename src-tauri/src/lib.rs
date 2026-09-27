@@ -44,7 +44,7 @@ pub use app_config::{
     APP_CONFIG_FORMAT_VERSION,
 };
 pub use approval::{
-    auto_allowed, classify, ApprovalRequest, ApprovalRequestBody, ApprovalRequestPayload,
+    classify, ApprovalRequest, ApprovalRequestBody, ApprovalRequestPayload,
     ApprovalResolvedPayload, ApprovalResponse, ApprovalSink, ApprovalState, AuthMode,
     Classification, GateCancelled, GateOutcome, OperationKind, RespondError, ToolKey,
 };
