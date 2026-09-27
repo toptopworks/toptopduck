@@ -4,10 +4,11 @@ import type { ReactElement } from "react";
 import type embedType from "vega-embed";
 import { vi } from "vitest";
 import { TooltipProvider } from "../../ui/tooltip";
-import { catalogFor, type EffectiveLocale } from "../../../i18n";
+import { catalogFor, FALLBACK_LOCALE, type EffectiveLocale } from "../../../i18n";
 
-// The i18n test seam (ADR-0052): the single shared interface for react-intl
-// in tests (issue #216 split, #1100 convergence). Two postures, picked by
+// The i18n test seam (ADR-0052): the shared interface for react-intl in
+// tests (issue #216 split, #1100 convergence); pre-seam inline provider
+// wraps migrate here on next touch. Two postures, picked by
 // what a suite asserts:
 // - Asserting rendered wording -> the REAL catalog, so the pin tracks catalog
 //   edits. Component trees wrap via withIntl / renderI18n (zh-CN) or
@@ -56,7 +57,7 @@ export function renderI18n(ui: ReactElement) {
  * inside. Suites needing a QueryClient compose it around this wrap. */
 export function withIntlAt(locale: EffectiveLocale, ui: ReactElement) {
   return (
-    <IntlProvider locale={locale} messages={catalogFor(locale)} defaultLocale="en-US">
+    <IntlProvider locale={locale} messages={catalogFor(locale)} defaultLocale={FALLBACK_LOCALE}>
       <TooltipProvider>{ui}</TooltipProvider>
     </IntlProvider>
   );

@@ -1334,14 +1334,13 @@ describe("Thread", () => {
 
     it("renders the Runtime failure reason via its catalog id with the diagnostic riding the fold (issue #852)", () => {
       // #852 split TurnFailure::Runtime out of Execute: the reason points at
-      // the external runtime, not the SQL. The id-level pin lives here, not in
-      // the unit suite -- a createIntl message map mirrors the defaultMessage
-      // strings, so a mistyped id silently falls back and the unit stays green
-      // (issue #857); resolving through the real zh-CN catalog is what turns a
-      // wrong id red. The hardcoded zh literal below is deliberate, contra the
-      // retry-label catalog-tracking convention (issue #139): the pin's
-      // subject is the id-to-wording binding, so the expectation must not
-      // track the catalog.
+      // the external runtime, not the SQL. The kind -> message-id binding is
+      // pinned in the unit suite since the mirror retirement (#1100:
+      // turn-failure.test's compile-checked catalog keys); what lives here is
+      // the render-side pin -- the id-to-zh-wording binding. The hardcoded zh
+      // literal below is deliberate, contra the retry-label catalog-tracking
+      // convention (issue #139): the pin's subject is the id-to-wording
+      // binding, so the expectation must not track the catalog.
       const { container } = renderChat(
         chatRecord({
           outcome: {

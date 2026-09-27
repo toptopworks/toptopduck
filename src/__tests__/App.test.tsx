@@ -239,11 +239,12 @@ async function clickRailResultLink(name: string): Promise<void> {
 // running the PRODUCTION banner composer with an empty message (issue #139
 // locale-aware closeout): the regex tracks the verb wording and the failure
 // template through the real code path, with no second verb -> id map here
-// (issue #1100 retired the mirrored map). Used only in the negative --
-// asserting an operation's failure banner does NOT carry another operation's
-// prefix (a rename rejection is never mislabelled a load failure). The en-US
-// locale is covered positively by the English-prefix assertion in the
-// locale-consistency test below, so this helper stays zh-CN-scoped.
+// (issue #1100 retired the mirrored map). Mostly the negative -- asserting
+// an operation's failure banner does NOT carry another operation's prefix
+// (a rename rejection is never mislabelled a load failure). Positive uses
+// (the privacy banner, the en-US locale-consistency arm) catch routing only:
+// composer-built expectations flip with an errorVerb swap, so the verb -> id
+// table is pinned in toAppError.test.
 function failedPrefix(kind: SessionFlowKind): RegExp {
   return new RegExp(flowFailedMessage(catalogIntl("zh-CN"), kind, ""));
 }
