@@ -1,9 +1,8 @@
 import { act, renderHook, waitFor } from "@testing-library/react";
 import { StrictMode, type ComponentType, type ReactNode } from "react";
-import { createIntl } from "react-intl";
+import { catalogIntl } from "../../components/common/__tests__/helpers";
 import { QueryClient } from "@tanstack/react-query";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { catalogFor } from "../../i18n";
 
 // Issue #195: useShellSessions owns the runtime OPEN set + every mutating
 // action. These tests pin the contracts hardest to assert through the App
@@ -107,7 +106,7 @@ import { useShellSessions } from "../useShellSessions";
 import type { PendingComposerPosture } from "../useShellSessions";
 import { AUTH_MODE_DEFAULT } from "../../types/approval";
 
-const intl = createIntl({ locale: "en-US", messages: catalogFor("en-US") });
+const intl = catalogIntl("en-US");
 
 // The backend-default composer posture. Passing it to the cold-start mint
 // paths exercises the no-op posture branch (no runtime / auth-mode IPC):

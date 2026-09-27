@@ -1,12 +1,9 @@
 import type { ReactElement } from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
-import { IntlProvider } from "react-intl";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import embed from "vega-embed";
-import { TooltipProvider } from "../../ui/tooltip";
-import { embedOk } from "../../common/__tests__/helpers";
-import { catalogFor } from "../../../i18n";
+import { embedOk, withIntl } from "../../common/__tests__/helpers";
 import { log } from "../../../lib/log";
 import { RoundProse } from "../RoundProse";
 import { CODE_BLOCK_REVEAL_CLASS } from "../turn-visual";
@@ -29,16 +26,11 @@ vi.mock("../../../lib/log", () => ({
 vi.mock("vega-embed", () => ({ default: vi.fn() }));
 
 // The prose rides the thread's chrome (ADR-0052 react-intl + Radix Tooltip
-// for the code block's CopyButton) -- wrap it the way the thread does.
-// isLive mirrors the live round block's wiring (ADR-0120 Decision 4).
+// for the code block's CopyButton) -- wrapped via the shared i18n test seam
+// the way the thread does. isLive mirrors the live round block's wiring
+// (ADR-0120 Decision 4).
 function renderProse(text: string, isLive = false) {
-  return render(
-    <IntlProvider locale="zh-CN" messages={catalogFor("zh-CN")}>
-      <TooltipProvider>
-        <RoundProse text={text} isLive={isLive} />
-      </TooltipProvider>
-    </IntlProvider>,
-  );
+  return render(withIntl(<RoundProse text={text} isLive={isLive} />));
 }
 
 function proseOf(ui: ReturnType<typeof renderProse>): HTMLElement {
@@ -396,11 +388,7 @@ describe("RoundProse markdown rendering (issue #746)", () => {
       // The next streamed delta extends the fence body; the custom component
       // must reconcile in place, not remount (a remount drops the ack state).
       view.rerender(
-        <IntlProvider locale="zh-CN" messages={catalogFor("zh-CN")}>
-          <TooltipProvider>
-            <RoundProse text={"```python\nprint(1)\nprint(2)\n```"} />
-          </TooltipProvider>
-        </IntlProvider>,
+        withIntl(<RoundProse text={"```python\nprint(1)\nprint(2)\n```"} />),
       );
       expect(screen.getByRole("button", { name: "已复制" })).toBeInTheDocument();
       expect(view.container.querySelector("pre")?.textContent).toContain("print(2)");
@@ -486,11 +474,7 @@ describe("RoundProse markdown rendering (issue #746)", () => {
       const view = renderProse("```vega-lite\n{\"mark\": \"ba", true);
       expect(screen.getAllByText("图表生成中…")).toHaveLength(1);
       view.rerender(
-        <IntlProvider locale="zh-CN" messages={catalogFor("zh-CN")}>
-          <TooltipProvider>
-            <RoundProse text={"```vega-lite\n{\"mark\": \"bar\"}"} isLive />
-          </TooltipProvider>
-        </IntlProvider>,
+        withIntl(<RoundProse text={"```vega-lite\n{\"mark\": \"bar\"}"} isLive />),
       );
       expect(screen.getAllByText("图表生成中…")).toHaveLength(1);
       expect(view.container.textContent).not.toContain("mark");
@@ -503,13 +487,7 @@ describe("RoundProse markdown rendering (issue #746)", () => {
       const text = "```vega-lite\n{\"mark\": \"bar\"}\n```";
       const view = renderProse(text, true);
       expect(screen.getByText("图表生成中…")).toBeInTheDocument();
-      view.rerender(
-        <IntlProvider locale="zh-CN" messages={catalogFor("zh-CN")}>
-          <TooltipProvider>
-            <RoundProse text={text} />
-          </TooltipProvider>
-        </IntlProvider>,
-      );
+      view.rerender(withIntl(<RoundProse text={text} />));
       await waitFor(() => expect(embed).toHaveBeenCalledTimes(1));
       expect(screen.queryByText("图表生成中…")).not.toBeInTheDocument();
       expect(view.container.querySelector(".viz-chart")).toBeInTheDocument();
@@ -524,11 +502,7 @@ describe("RoundProse viz stage link (issue #1093)", () => {
   const FENCE = "```vega-lite\n" + BODY + "\n```";
 
   function renderLinked(ui: ReactElement) {
-    return render(
-      <IntlProvider locale="zh-CN" messages={catalogFor("zh-CN")}>
-        <TooltipProvider>{ui}</TooltipProvider>
-      </IntlProvider>,
-    );
+    return render(withIntl(ui));
   }
 
   beforeEach(() => {

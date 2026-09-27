@@ -1,7 +1,6 @@
 import { act, renderHook, waitFor } from "@testing-library/react";
-import { createIntl } from "react-intl";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { catalogFor } from "../../i18n";
+import { catalogIntl } from "../../components/common/__tests__/helpers";
 import type { SessionMetadata } from "../../types/session";
 
 // Issue #195: usePersistedSessions owns the list_sessions advisory state
@@ -31,7 +30,7 @@ import { listSessions } from "../../api";
 import { log } from "../../lib/log";
 import { usePersistedSessions } from "../usePersistedSessions";
 
-const intl = createIntl({ locale: "en-US", messages: catalogFor("en-US") });
+const intl = catalogIntl("en-US");
 
 const SESSION_A: SessionMetadata = {
   duck_path: "/x/a.duck",

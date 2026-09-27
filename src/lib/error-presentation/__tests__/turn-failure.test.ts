@@ -1,53 +1,45 @@
-import { createIntl } from "react-intl";
 import { describe, expect, it } from "vitest";
 
+import { catalogFor } from "../../../i18n";
+import { catalogIntl } from "../../../components/common/__tests__/helpers";
 import { formatTurnFailure, turnFailureDetail } from "../turn-failure";
 import type { TurnFailure } from "../../../types/thread";
 
-// An IntlShape carrying the TurnFailure message ids (mirroring en-US.json) so
-// formatTurnFailure resolves kind -> catalog wording. The canonical wording
-// lives in the locale files; the map below mirrors the defaultMessage strings,
-// so a mistyped id silently falls back and this suite stays green -- what is
-// pinned here is the defaultMessage-level kind -> wording mapping and the
-// detail-fold routing, not the id binding itself. The id-level pin lives in
-// the Thread component tests, which resolve through the real locale catalog
-// (issue #857).
-const intl = createIntl({
-  locale: "en",
-  messages: {
-    "error.turn.execution": "Execution failed",
-    "error.turn.runtime": "Failed to connect to the external runtime",
-    "error.turn.resource": "A resource limit was reached",
-    "error.turn.notWired": "No LLM provider is configured",
-    "error.turn.invalidConfig": "The provider configuration is invalid",
-    "error.turn.stale": "References a stale result \"{name}\"",
-  },
-});
+// Real-catalog en-US intl from the shared i18n test seam (issue #1100):
+// formatTurnFailure resolves kind -> catalog wording through the actual
+// catalog, and the assertions follow the catalog keys -- the id-level kind ->
+// message-id binding is pinned HERE with compile-checked literal keys,
+// replacing the retired hand-copied mirror, whose wording could silently
+// drift (it stayed green through the #1096/#1098 rewrites). StaleReference
+// keeps a literal expected string: its {name} substitution is the pin. The
+// detail (engine diagnosis, the runtime diagnostic, or the configuration
+// policy reason) never enters the primary message -- it rides the fold below.
+const intl = catalogIntl("en-US");
+const en = catalogFor("en-US");
 
 describe("formatTurnFailure", () => {
   // In production each TurnFailure kind renders through its own catalog id
-  // (issue #125), not a backend string; this suite pins kind -> wording at
-  // defaultMessage level only -- the id binding is pinned in Thread.test.tsx.
-  // The detail (engine diagnosis, the runtime diagnostic, or the
-  // configuration policy reason) never enters the primary message -- it rides
-  // the fold below.
+  // (issue #125), not a backend string; this suite pins the kind -> id
+  // binding through the real catalog. The detail (engine diagnosis, the
+  // runtime diagnostic, or the configuration policy reason) never enters the
+  // primary message -- it rides the fold below.
   // Issue #852: turn-level Execute renders the neutral `error.turn.execution`
   // (a turn may be a pure conversation, so "query" prejudges the context);
   // external-runtime failures render `error.turn.runtime`. The query-worded
   // `error.turn.execute` is RowReadError::Execute's id (format.ts), pinned
   // there.
-  it("maps each TurnFailure kind to its catalog wording (defaultMessage level)", () => {
+  it("maps each TurnFailure kind to its catalog id", () => {
     const cases: Array<[TurnFailure, string]> = [
-      [{ kind: "Execute", data: { detail: "bad column" } }, "Execution failed"],
+      [{ kind: "Execute", data: { detail: "bad column" } }, en["error.turn.execution"]],
       [
         { kind: "Runtime", data: { detail: "external runtime `cli-a` not found on PATH" } },
-        "Failed to connect to the external runtime",
+        en["error.turn.runtime"],
       ],
-      [{ kind: "Resource", data: { detail: "timeout" } }, "A resource limit was reached"],
-      [{ kind: "NotWired" }, "No LLM provider is configured"],
+      [{ kind: "Resource", data: { detail: "timeout" } }, en["error.turn.resource"]],
+      [{ kind: "NotWired" }, en["error.turn.notWired"]],
       [
         { kind: "InvalidConfig", data: { detail: "scheme `file` is not http/https" } },
-        "The provider configuration is invalid",
+        en["error.turn.invalidConfig"],
       ],
       [
         { kind: "StaleReference", data: { reference_name: "result_1" } },

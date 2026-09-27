@@ -1,6 +1,7 @@
-import { createIntl } from "react-intl";
 import { describe, expect, it } from "vitest";
 
+import { catalogFor } from "../i18n";
+import { catalogIntl } from "../components/common/__tests__/helpers";
 import { errorDetail, fmtError } from "../lib/error-presentation";
 import type {
   ResumeError,
@@ -9,52 +10,16 @@ import type {
   StoreCommandError,
 } from "../types/session";
 
-// An IntlShape carrying the typed-error message ids (mirroring the locale
-// files) so fmtError resolves kind -> catalog wording. This pins the kind ->
-// message-id mapping and the fallback behavior, not the wording itself.
-const intl = createIntl({
-  locale: "en",
-  messages: {
-    "error.dataset.displayTaken": "Display label \"{label}\" is already used by another dataset; pick a different one",
-    "error.dataset.invalidContinueWith":
-      "\"{name}\" is not among the remaining datasets; refresh the data list and pick again",
-    "error.dataset.invalidLabel": "Display label must not be empty or whitespace-only",
-    "error.dataset.notActive":
-      "\"{name}\" is not the dataset currently in use; refresh the data list and retry",
-    "error.dataset.notFound": "No dataset found with reference name \"{name}\"",
-    "error.dataset.removeActive":
-      "\"{name}\" is the dataset currently in use. Pick one of the remaining datasets to continue (or cancel)",
-    "error.duck.alreadyOpen": "This file is already open in the app",
-    "error.duck.loadIo": "Couldn't read this file",
-    "error.duck.loadParse": "This file seems to be corrupted or incomplete",
-    "error.duck.migration": "Couldn't upgrade this file to the current format",
-    "error.duck.versionMismatch":
-      "This file was created by a newer version of the app (file version {found}; this app supports up to {supported}). Please update the app and open it again.",
-    "error.resume.aborted": "Resume aborted",
-    "error.resume.activeMissing": "The dataset \"{name}\" used by this session isn't loaded",
-    "error.resume.cancelled": "Resume cancelled",
-    "error.resume.replay": "Failed to restore \"{name}\"",
-    "error.resume.sourceMissing": "Couldn't find the dataset \"{name}\"",
-    "error.save.io": "Couldn't save the data file (writing to disk failed)",
-    "error.save.rename": "Couldn't save the data file (replacing the old file failed)",
-    "error.save.serialize": "Couldn't save the data file (packing the data failed)",
-    "error.session.engine": "Internal error",
-    "error.session.inFlight":
-      "A query is already running on this session; cancel it or wait for it to finish",
-    "error.session.invalidId": "Invalid session ID",
-    "error.session.notFound": "Session not found or closed",
-    "error.session.renameEmpty": "Session name must not be empty",
-    "error.session.resuming": "Session is resuming, please try again shortly",
-    "error.store.configWriteFailure": "Failed to save settings",
-    "error.store.destinationExists": "A folder with this name already exists; choose a different name",
-    "error.store.ioFailure": "A file operation failed",
-    "error.store.keychainFailure": "Failed to access the OS keychain",
-    "error.store.noActiveProfile": "No provider profile is active; create or activate one first",
-    "error.store.openConflict": "This session is currently open; close it first",
-    "error.store.unknownAdapter": "Unknown CLI adapter",
-    "error.turn.execute": "Failed to execute the query",
-  },
-});
+// Real-catalog en-US intl from the shared i18n test seam (issue #1100):
+// fmtError resolves kind -> catalog wording through the actual catalog, and
+// assertions follow the catalog keys -- what is pinned is the kind ->
+// message-id mapping (a mistyped key fails to compile) plus the fallback
+// behavior, not a hand-copied wording mirror (the retired mirror stayed
+// silently green through the #1096/#1098 copy rewrites). Cases whose catalog
+// template interpolates ({name}, {label}, versions) keep literal expected
+// strings: what they pin is the substitution.
+const intl = catalogIntl("en-US");
+const en = catalogFor("en-US");
 
 // Wrap a ResumeError as the open_duck reject shape: SessionError::Resume
 // (issue #120). open_duck rejects with its ResumeError wrapped in
@@ -66,14 +31,11 @@ function resume(err: ResumeError): SessionError {
 describe("fmtError — SessionError", () => {
   it("renders each SessionError kind via the locale catalog, not a backend string", () => {
     const cases: Array<[SessionError, string]> = [
-      [{ kind: "InvalidId" }, "Invalid session ID"],
-      [{ kind: "NotFound" }, "Session not found or closed"],
-      [{ kind: "Resuming" }, "Session is resuming, please try again shortly"],
-      [
-        { kind: "InFlight" },
-        "A query is already running on this session; cancel it or wait for it to finish",
-      ],
-      [{ kind: "Engine", data: "session lock poisoned" }, "Internal error"],
+      [{ kind: "InvalidId" }, en["error.session.invalidId"]],
+      [{ kind: "NotFound" }, en["error.session.notFound"]],
+      [{ kind: "Resuming" }, en["error.session.resuming"]],
+      [{ kind: "InFlight" }, en["error.session.inFlight"]],
+      [{ kind: "Engine", data: "session lock poisoned" }, en["error.session.engine"]],
     ];
     for (const [err, expected] of cases) {
       expect(fmtError(err, intl)).toBe(expected);
@@ -81,7 +43,9 @@ describe("fmtError — SessionError", () => {
   });
 
   it("does not leak the Engine detail into the rendered message (ADR-0029)", () => {
-    expect(fmtError({ kind: "Engine", data: "sk-ant-secret" }, intl)).toBe("Internal error");
+    expect(fmtError({ kind: "Engine", data: "sk-ant-secret" }, intl)).toBe(
+      en["error.session.engine"],
+    );
   });
 });
 
@@ -90,9 +54,9 @@ describe("fmtError — SessionError::Resume (open_duck reject)", () => {
     // open_duck wraps its ResumeError in SessionError::Resume; fmtError
     // recurses Resume.data.kind -> locale. Every kind is pinned to its id.
     const cases: Array<[ResumeError, string]> = [
-      [{ kind: "Cancelled" }, "Resume cancelled"],
-      [{ kind: "Aborted" }, "Resume aborted"],
-      [{ kind: "AlreadyOpen", data: "/x/a.duck" }, "This file is already open in the app"],
+      [{ kind: "Cancelled" }, en["error.resume.cancelled"]],
+      [{ kind: "Aborted" }, en["error.resume.aborted"]],
+      [{ kind: "AlreadyOpen", data: "/x/a.duck" }, en["error.duck.alreadyOpen"]],
       [
         { kind: "SourceMissing", data: { reference_name: "people", path: "/x", detail: "d" } },
         "Couldn't find the dataset \"people\"",
@@ -125,16 +89,16 @@ describe("fmtError — SessionError::Resume (open_duck reject)", () => {
     );
     expect(
       fmtError(resume({ kind: "Load", data: { kind: "Io", data: "io-fail" } }), intl),
-    ).toBe("Couldn't read this file");
+    ).toBe(en["error.duck.loadIo"]);
     expect(
       fmtError(resume({ kind: "Load", data: { kind: "Parse", data: "parse-fail" } }), intl),
-    ).toBe("This file seems to be corrupted or incomplete");
+    ).toBe(en["error.duck.loadParse"]);
     expect(
       fmtError(
         resume({ kind: "Load", data: { kind: "Migration", data: { kind: "Field", data: "bad" } } }),
         intl,
       ),
-    ).toBe("Couldn't upgrade this file to the current format");
+    ).toBe(en["error.duck.migration"]);
   });
 
   it("does not leak the SourceMissing detail into the rendered message (ADR-0029)", () => {
@@ -191,7 +155,7 @@ describe("fmtError — SessionError source-management kinds (issue #121)", () =>
         { kind: "RenameDataset", data: { kind: "DisplayTaken", data: "员工表" } },
         "Display label \"员工表\" is already used by another dataset; pick a different one",
       ],
-      [{ kind: "RenameDataset", data: { kind: "InvalidLabel" } }, "Display label must not be empty or whitespace-only"],
+      [{ kind: "RenameDataset", data: { kind: "InvalidLabel" } }, en["error.dataset.invalidLabel"]],
     ];
     for (const [err, expected] of cases) {
       expect(fmtError(err, intl)).toBe(expected);
@@ -200,20 +164,20 @@ describe("fmtError — SessionError source-management kinds (issue #121)", () =>
 
   it("renders RenameSession and Turn kinds via the locale catalog", () => {
     expect(fmtError({ kind: "RenameSession", data: { kind: "EmptyName" } }, intl)).toBe(
-      "Session name must not be empty",
+      en["error.session.renameEmpty"],
     );
     expect(
       fmtError({ kind: "Turn", data: { kind: "UnknownDataset", data: "result_1" } }, intl),
     ).toBe("No dataset found with reference name \"result_1\"");
     // Execute renders a generic message; the engine detail rides the fold.
     expect(fmtError({ kind: "Turn", data: { kind: "Execute", data: "bad column" } }, intl)).toBe(
-      "Failed to execute the query",
+      en["error.turn.execute"],
     );
   });
 
   it("does not leak the Turn::Execute detail into the rendered message (ADR-0029)", () => {
     expect(fmtError({ kind: "Turn", data: { kind: "Execute", data: "sk-ant-secret" } }, intl)).toBe(
-      "Failed to execute the query",
+      en["error.turn.execute"],
     );
   });
 });
@@ -224,10 +188,10 @@ describe("fmtError — SaveError", () => {
     // through the catalog. AlreadyOpen shares the merged error.duck.alreadyOpen
     // id with ResumeError::AlreadyOpen.
     const cases: Array<[SaveError, string]> = [
-      [{ kind: "Serialize", data: "ser-fail" }, "Couldn't save the data file (packing the data failed)"],
-      [{ kind: "Io", data: "io-fail" }, "Couldn't save the data file (writing to disk failed)"],
-      [{ kind: "Rename", data: "rename-fail" }, "Couldn't save the data file (replacing the old file failed)"],
-      [{ kind: "AlreadyOpen", data: "/x/a.duck" }, "This file is already open in the app"],
+      [{ kind: "Serialize", data: "ser-fail" }, en["error.save.serialize"]],
+      [{ kind: "Io", data: "io-fail" }, en["error.save.io"]],
+      [{ kind: "Rename", data: "rename-fail" }, en["error.save.rename"]],
+      [{ kind: "AlreadyOpen", data: "/x/a.duck" }, en["error.duck.alreadyOpen"]],
     ];
     for (const [err, expected] of cases) {
       expect(fmtError(err, intl)).toBe(expected);
@@ -236,13 +200,11 @@ describe("fmtError — SaveError", () => {
 
   it("does not leak the Serialize/Io/Rename detail into the rendered message (ADR-0029)", () => {
     expect(fmtError({ kind: "Serialize", data: "sk-ant-secret" }, intl)).toBe(
-      "Couldn't save the data file (packing the data failed)",
+      en["error.save.serialize"],
     );
-    expect(fmtError({ kind: "Io", data: "sk-ant-secret" }, intl)).toBe(
-      "Couldn't save the data file (writing to disk failed)",
-    );
+    expect(fmtError({ kind: "Io", data: "sk-ant-secret" }, intl)).toBe(en["error.save.io"]);
     expect(fmtError({ kind: "Rename", data: "sk-ant-secret" }, intl)).toBe(
-      "Couldn't save the data file (replacing the old file failed)",
+      en["error.save.rename"],
     );
   });
 });
@@ -253,23 +215,23 @@ describe("fmtError — StoreCommandError", () => {
     // + app config) reject with a typed StoreCommandError. BlankName reuses the
     // renameEmpty id so the blank-name refusal matches rename_session's.
     const cases: Array<[StoreCommandError, string]> = [
-      [{ kind: "OpenConflict" }, "This session is currently open; close it first"],
+      [{ kind: "OpenConflict" }, en["error.store.openConflict"]],
       [
         { kind: "BlankName", data: { kind: "EmptyName" } },
-        "Session name must not be empty",
+        en["error.session.renameEmpty"],
       ],
       [
         { kind: "DestinationExists", data: "/dest/existing" },
-        "A folder with this name already exists; choose a different name",
+        en["error.store.destinationExists"],
       ],
-      [{ kind: "IoFailure", data: "io-fail" }, "A file operation failed"],
-      [{ kind: "KeychainFailure", data: "kc-fail" }, "Failed to access the OS keychain"],
-      [{ kind: "ConfigWriteFailure", data: "cfg-fail" }, "Failed to save settings"],
+      [{ kind: "IoFailure", data: "io-fail" }, en["error.store.ioFailure"]],
+      [{ kind: "KeychainFailure", data: "kc-fail" }, en["error.store.keychainFailure"]],
+      [{ kind: "ConfigWriteFailure", data: "cfg-fail" }, en["error.store.configWriteFailure"]],
       [
         { kind: "NoActiveProfile" },
-        "No provider profile is active; create or activate one first",
+        en["error.store.noActiveProfile"],
       ],
-      [{ kind: "UnknownAdapter", data: "no-such-cli" }, "Unknown CLI adapter"],
+      [{ kind: "UnknownAdapter", data: "no-such-cli" }, en["error.store.unknownAdapter"]],
     ];
     for (const [err, expected] of cases) {
       expect(fmtError(err, intl)).toBe(expected);
@@ -278,13 +240,13 @@ describe("fmtError — StoreCommandError", () => {
 
   it("does not leak the failure detail into the rendered message (ADR-0029)", () => {
     expect(fmtError({ kind: "IoFailure", data: "sk-ant-secret" }, intl)).toBe(
-      "A file operation failed",
+      en["error.store.ioFailure"],
     );
     expect(fmtError({ kind: "KeychainFailure", data: "sk-ant-secret" }, intl)).toBe(
-      "Failed to access the OS keychain",
+      en["error.store.keychainFailure"],
     );
     expect(fmtError({ kind: "ConfigWriteFailure", data: "sk-ant-secret" }, intl)).toBe(
-      "Failed to save settings",
+      en["error.store.configWriteFailure"],
     );
   });
 });

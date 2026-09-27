@@ -1,6 +1,5 @@
-import { createIntl } from "react-intl";
 import { describe, expect, it } from "vitest";
-import { catalogFor } from "../i18n";
+import { catalogIntl } from "../components/common/__tests__/helpers";
 import { errorDetail, fmtError, toAppError } from "../lib/error-presentation";
 import type { AppErrorKind, SessionFlowKind } from "../types/error";
 
@@ -9,11 +8,11 @@ import type { AppErrorKind, SessionFlowKind } from "../types/error";
 // fallback, the verb-prefix locale consistency (issue #139), the refreshFailed
 // prefix, the shell/read bare output, and the exhaustiveness throw guard.
 
-// Build intl from the REAL en-US catalog so the verb + templates track the
-// active locale (issue #139): the assertion strings are the catalog values, so
-// a regression to a hard-coded verb map wrapped around a catalog message would
-// fail here under en-US.
-const intl = createIntl({ locale: "en-US", messages: catalogFor("en-US") });
+// Real-catalog en-US intl from the shared i18n test seam so the verb +
+// templates track the active locale (issue #139): the assertion strings are
+// the catalog values, so a regression to a hard-coded verb map wrapped around
+// a catalog message would fail here under en-US.
+const intl = catalogIntl("en-US");
 
 // A SessionError::Engine reject (issue #119): fmtError resolves the
 // Engine locale message ("Internal error"); errorDetail surfaces Engine.data.

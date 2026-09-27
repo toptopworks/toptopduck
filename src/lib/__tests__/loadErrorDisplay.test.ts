@@ -1,25 +1,17 @@
-import { createIntl } from "react-intl";
 import { describe, expect, it } from "vitest";
 
+import { catalogFor } from "../../i18n";
+import { catalogIntl } from "../../components/common/__tests__/helpers";
 import { loadErrorDisplay } from "../loadErrorDisplay";
 import type { LoadError } from "../../types/dataset";
 
-// An IntlShape carrying the ingest LoadError message ids (mirroring the locale
-// files) so loadErrorDisplay resolves kind -> catalog wording.
-const intl = createIntl({
-  locale: "en",
-  messages: {
-    "error.dataset.notFound": "No dataset found with reference name \"{name}\"",
-    "error.load.legacyExcel":
-      ".xls is not supported (only .xlsx); re-save as .xlsx in Excel and retry",
-    "error.load.unsupportedFormat":
-      "Unsupported format: {requested} (supported: .csv / .parquet / .json / .xlsx)",
-    "error.load.unrecognizedFormat": "Unrecognized format",
-    "error.load.parse": "Failed to parse the file",
-    "error.load.io": "Failed to read the file",
-    "error.load.other": "Failed to load",
-  },
-});
+// Real-catalog en-US intl from the shared i18n test seam (issue #1100):
+// loadErrorDisplay resolves kind -> catalog wording through the actual
+// catalog; assertions follow the catalog keys (compile-checked literals). The
+// interpolated arms (UnsupportedFormat's {requested}, UnknownDataset's
+// {name}) keep literal expected strings -- what they pin is the substitution.
+const intl = catalogIntl("en-US");
+const en = catalogFor("en-US");
 
 // Covers every LoadError kind the switch narrows. Issue #131 split the primary
 // message from the backend detail: the message is a fixed catalog string (no
@@ -31,7 +23,7 @@ describe("loadErrorDisplay", () => {
   it("returns the .xls rejection hint with no detail for LegacyExcel", () => {
     const err: LoadError = { kind: "LegacyExcel" };
     expect(loadErrorDisplay(err, intl)).toEqual({
-      message: ".xls is not supported (only .xlsx); re-save as .xlsx in Excel and retry",
+      message: en["error.load.legacyExcel"],
       detail: null,
     });
   });
@@ -47,7 +39,7 @@ describe("loadErrorDisplay", () => {
   it("falls back to the generic hint with no detail when the requested format is empty", () => {
     const err: LoadError = { kind: "UnsupportedFormat", data: { requested: "" } };
     expect(loadErrorDisplay(err, intl)).toEqual({
-      message: "Unrecognized format",
+      message: en["error.load.unrecognizedFormat"],
       detail: null,
     });
   });
@@ -63,7 +55,7 @@ describe("loadErrorDisplay", () => {
   it("keeps the backend detail OUT of the Parse primary message, in the fold", () => {
     const err: LoadError = { kind: "Parse", data: { detail: "bad cell" } };
     expect(loadErrorDisplay(err, intl)).toEqual({
-      message: "Failed to parse the file",
+      message: en["error.load.parse"],
       detail: "bad cell",
     });
   });
@@ -71,7 +63,7 @@ describe("loadErrorDisplay", () => {
   it("keeps the backend detail OUT of the Io primary message, in the fold", () => {
     const err: LoadError = { kind: "Io", data: { detail: "io-fail" } };
     expect(loadErrorDisplay(err, intl)).toEqual({
-      message: "Failed to read the file",
+      message: en["error.load.io"],
       detail: "io-fail",
     });
   });
@@ -79,7 +71,7 @@ describe("loadErrorDisplay", () => {
   it("keeps the backend detail OUT of the Other primary message, in the fold", () => {
     const err: LoadError = { kind: "Other", data: { detail: "boom" } };
     expect(loadErrorDisplay(err, intl)).toEqual({
-      message: "Failed to load",
+      message: en["error.load.other"],
       detail: "boom",
     });
   });
