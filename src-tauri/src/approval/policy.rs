@@ -1,13 +1,13 @@
 //! Pure approval policy (ADR-0080): the decision cascade's home.
 //!
-//! Stateless and IO-free — given a tool key, the session posture, and the
+//! Stateless and IO-free -- given a tool key, the session posture, and the
 //! trust set, [`classify`] returns the verdict. Two production adapters
 //! consume it: [`super::ApprovalState::gate`] (per-call enforcement for the
 //! builtin runtime, which suspends the turn on `NeedsApproval`) and the ACP
 //! permission handshake (`runtime/acp/engine.rs`, which answers each
-//! `session/request_permission` option with a single-key check against an
+//! `session/request_permission` request with a single-key check against an
 //! `auth_mode()` + `trust_list()` snapshot). The vocabulary types
-//! ([`super::ToolKey`] / [`super::AuthMode`]) stay in the parent module —
+//! ([`super::ToolKey`] / [`super::AuthMode`]) stay in the parent module --
 //! they serve the whole gateway, not the policy alone.
 
 use std::collections::HashSet;
