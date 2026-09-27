@@ -317,7 +317,7 @@ function formatSkillError(e: SkillError, intl: IntlShape): string {
       return intl.formatMessage(
         {
           id: "error.skill.reservedName",
-          defaultMessage: "The name \"{name}\" is reserved for a built-in skill",
+          defaultMessage: "The name \"{name}\" is reserved for a system skill",
         },
         { name: e.data },
       );
@@ -326,7 +326,7 @@ function formatSkillError(e: SkillError, intl: IntlShape): string {
         {
           id: "error.skill.builtinReadOnly",
           defaultMessage:
-            "Built-in skill \"{name}\" is read-only; copy its folder to the skills root to make an editable version",
+            "System skill \"{name}\" is read-only; copy its folder to the skills root to make an editable version",
         },
         { name: e.data },
       );
@@ -334,7 +334,7 @@ function formatSkillError(e: SkillError, intl: IntlShape): string {
       return intl.formatMessage(
         {
           id: "error.skill.undeletable",
-          defaultMessage: "Built-in skill \"{name}\" cannot be deleted; disable it instead",
+          defaultMessage: "System skill \"{name}\" cannot be deleted; disable it instead",
         },
         { name: e.data },
       );

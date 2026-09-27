@@ -100,7 +100,7 @@ describe("ActiveSourceDeleteDialog (issue #39)", () => {
         onCancel={onCancel}
       />,
     );
-    fireEvent.click(screen.getByRole("button", { name: "中止" }));
+    fireEvent.click(screen.getByRole("button", { name: "取消" }));
     expect(onCancel).toHaveBeenCalledOnce();
     expect(onConfirm).not.toHaveBeenCalled();
   });
@@ -110,7 +110,7 @@ describe("ActiveSourceDeleteDialog (issue #39)", () => {
     // an unguarded AlertDialog still closes on ESC (issue #766: once closed,
     // pendingActiveDelete stayed mounted and the dialog could not be reopened).
     // The explicit onEscapeKeyDown preventDefault on the content keeps the
-    // destructive confirm open: the user must take an explicit 中止 / 继续
+    // destructive confirm open: the user must take an explicit 取消 / 继续
     // action, and neither callback fires.
     const onConfirm = vi.fn();
     const onCancel = vi.fn();
@@ -132,7 +132,7 @@ describe("ActiveSourceDeleteDialog (issue #39)", () => {
   it("overlay-click does not close the dialog or fire callbacks (AlertDialog, issue #111)", async () => {
     // Radix AlertDialog prevents onPointerDownOutside / onInteractOutside, so a
     // pointer-down on the overlay (outside the content) leaves the dialog open
-    // and fires neither callback -- the user must take an explicit 中止 / 继续
+    // and fires neither callback -- the user must take an explicit 取消 / 继续
     // action. Pins the overlay-dismiss path the prior ESC test did not cover.
     const onConfirm = vi.fn();
     const onCancel = vi.fn();

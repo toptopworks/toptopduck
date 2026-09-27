@@ -294,7 +294,7 @@ describe("WorkspaceWorkingSet", () => {
     fireEvent.click(screen.getByRole("button", { name: "删除 people" }));
     fireEvent.click(screen.getByRole("button", { name: "删除" }));
     await screen.findByRole("alertdialog");
-    fireEvent.click(screen.getByRole("button", { name: "中止" }));
+    fireEvent.click(screen.getByRole("button", { name: "取消" }));
     await waitFor(() => expect(screen.queryByRole("alertdialog")).toBeNull());
     expect(removeActiveSource).not.toHaveBeenCalled();
   });

@@ -1,5 +1,4 @@
 {
-  "activeSourceDelete.cancel": "Cancel",
   "activeSourceDelete.description": "This is the dataset your conversation is using. After removing it, pick one of the remaining datasets to continue (or cancel — the working set stays unchanged).",
   "activeSourceDelete.title": "Remove the current dataset {name}",
   "coldStart.greeting": "What would you like to analyze?",
@@ -111,7 +110,7 @@
   "error.load.parse": "Failed to parse the file",
   "error.load.unrecognizedFormat": "Unrecognized format",
   "error.load.unsupportedFormat": "Unsupported format: {requested} (supported: .csv / .parquet / .json / .xlsx)",
-  "error.persist.banner": "Auto-save failed: {reason} (your latest changes haven't been saved to the file; retry the save before closing the app.)",
+  "error.persist.banner": "Auto-save failed: {reason} — your latest changes haven't been saved to the file; retry the save before closing the app.",
   "error.resume.aborted": "Resume aborted",
   "error.resume.activeMissing": "The dataset \"{name}\" used by this session isn't loaded",
   "error.resume.cancelled": "Resume cancelled",
@@ -528,8 +527,6 @@
   "settings.skills.scanFailed": "Couldn't load your skills: {detail}",
   "settings.skills.searchPlaceholder": "Search skills…",
   "settings.skills.sourceLabel": "Source",
-  "settings.skills.statusDisabled": "Disabled",
-  "settings.skills.statusEnabled": "Enabled",
   "settings.skills.statusLabel": "Status",
   "settings.theme.dark": "Dark",
   "settings.theme.description": "Follow the system appearance, or force a light or dark palette.",

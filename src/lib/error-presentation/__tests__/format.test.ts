@@ -18,7 +18,7 @@ describe("fmtError skill lane", () => {
   it("points the undeletable skill error at the enablement axis", () => {
     const e: SkillError = { kind: "BuiltinUndeletable", data: "vega-chart" };
     expect(fmtError(e, intl)).toBe(
-      "Built-in skill \"vega-chart\" cannot be deleted; disable it instead",
+      "System skill \"vega-chart\" cannot be deleted; disable it instead",
     );
   });
 });
