@@ -9,34 +9,39 @@
 // ResultActions family form (ghost icon + tooltip + sr-only accessible
 // name). Exports walk the embedded Vega view -- the SAME render the user
 // sees, never a second embed: SVG serializes via view.toSVG() into a Blob,
-// PNG rasterizes via view.toCanvas() -> canvas.toBlob. Both download through
-// the WebView2 default channel -- an anchor click on a blob: URL -- no save
-// dialog, no fs scope (the issue's spike: wry registers no download
-// handler, so the WebView2 default applies). The file name is the spec's
-// `title` through the one naming rule (vizExportName); a title-less spec
-// falls back to the catalog word.
+// PNG rasterizes via view.toCanvas() -> canvas.toBlob. Both land through the
+// native save dialog + the Rust write command (re-adjudicated 2026-09-27):
+// the first lane -- an anchor click on a blob: URL riding the WebView2
+// default download channel -- completed silently into the OS Downloads
+// folder with zero in-app feedback, reading as a dead button. The file name
+// is the spec's `title` through the one naming rule (vizExportName); a
+// title-less spec falls back to the catalog word.
 
 import { useRef } from "react";
 import { useIntl } from "react-intl";
+import { save as saveDialog } from "@tauri-apps/plugin-dialog";
 import { FileCode, FileImage } from "lucide-react";
 import type { Result } from "vega-embed";
+import { writeExportFile } from "../../api";
 import { log } from "../../lib/log";
 import { Button } from "../ui/button";
 import { Tooltip, TooltipContent, TooltipTrigger } from "../ui/tooltip";
 import { VizChartSlot } from "./LazyVegaChart";
 import { vizExportName, type DecodedVizSpec, type VizFailureReason } from "./viz";
 
-// The WebView2 default download lane: a programmatic anchor click on a
-// blob: URL. The anchor never renders (a detached click carries the
-// download attribute fine in Chromium, the app's only host) and the URL
-// lives until the document unloads -- one blob per explicit user click,
-// nothing worth a revoke timer.
-function downloadBlob(blob: Blob, fileName: string) {
-  const url = URL.createObjectURL(blob);
-  const anchor = document.createElement("a");
-  anchor.href = url;
-  anchor.download = fileName;
-  anchor.click();
+// The export lane (issue #1093, re-adjudicated 2026-09-27): the native save
+// dialog hands back an explicit destination, then the Rust write command
+// lands the bytes there -- the click's first effect is a dialog the user
+// cannot miss. A cancelled picker is a quiet no-op (the exportRowsCsv
+// precedent); a write failure routes to the caller's log-sink catch like a
+// serialization failure.
+async function saveChartFile(blob: Blob, stem: string, ext: "png" | "svg") {
+  const target = await saveDialog({
+    defaultPath: `${stem}.${ext}`,
+    filters: [{ name: ext.toUpperCase(), extensions: [ext] }],
+  });
+  if (target === null) return;
+  await writeExportFile(target, new Uint8Array(await blob.arrayBuffer()));
 }
 
 export function VizExportFrame({
@@ -72,7 +77,7 @@ export function VizExportFrame({
     if (!view) return;
     try {
       const svg = await view.toSVG();
-      downloadBlob(new Blob([svg], { type: "image/svg+xml" }), `${stem}.svg`);
+      await saveChartFile(new Blob([svg], { type: "image/svg+xml" }), stem, "svg");
     } catch (err) {
       log.warn("viz", "chart SVG export failed", err);
     }
@@ -85,7 +90,7 @@ export function VizExportFrame({
       const blob = await new Promise<Blob | null>((resolve) =>
         canvas.toBlob(resolve, "image/png"),
       );
-      if (blob) downloadBlob(blob, `${stem}.png`);
+      if (blob) await saveChartFile(blob, stem, "png");
     } catch (err) {
       log.warn("viz", "chart PNG export failed", err);
     }

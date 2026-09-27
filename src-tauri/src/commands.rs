@@ -1122,6 +1122,18 @@ pub fn read_artifact_text(path: String) -> Result<String, String> {
     std::fs::read_to_string(path).map_err(|e| format!("cannot read artifact: {e}"))
 }
 
+/// Write one export payload (the chart PNG / SVG, issue #1093) to a
+/// user-chosen path. The native save dialog runs before this call, so
+/// `path` is always an explicit user pick -- the write lane the WebView2
+/// default download channel could not be (it completed silently into the
+/// OS Downloads folder with no in-app feedback, reading as a dead button).
+/// A plain `String` error rides `read_artifact_text`'s precedent: the
+/// failure lane is the plugin log sink, not a user-facing category.
+#[tauri::command]
+pub fn write_export_file(path: String, bytes: Vec<u8>) -> Result<(), String> {
+    std::fs::write(&path, &bytes).map_err(|e| format!("cannot write export {path}: {e}"))
+}
+
 /// Read one page of a dataset's rows from the named session (ADR-0024 windowed
 /// display). Runs off the async/UI thread (AC8) like `ask`: a large OFFSET is
 /// an O(offset) scan, so holding the session lock on the IPC path would block
