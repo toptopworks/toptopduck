@@ -113,7 +113,7 @@ export function CliToolForm({
       return intl.formatMessage({
         id: "settings.cli.form.nameHint",
         defaultMessage:
-          "Name must be kebab-case (lowercase letters, digits, single hyphens).",
+          "The name can only use lowercase letters, digits, and hyphens (like my-tool).",
       });
     }
     if (!tool.description.trim() || !tool.executable.trim()) {
@@ -487,7 +487,7 @@ export function CliToolForm({
             >
               <Plus className="size-4" aria-hidden />
               <FormattedMessage
-                id="settings.cli.form.addEnv"
+                id="settings.form.envAdd"
                 defaultMessage="Add variable"
               />
             </Button>
@@ -496,7 +496,7 @@ export function CliToolForm({
           {envRows.length === 0 ? (
             <p className="text-muted-foreground text-xs">
               <FormattedMessage
-                id="settings.cli.form.envEmpty"
+                id="settings.form.envEmpty"
                 defaultMessage="No environment variables. Click Add variable to create one."
               />
             </p>

@@ -17,12 +17,12 @@ export function formatVizFailure(reason: VizFailureReason, intl: IntlShape): str
     case "invalidJson":
       return intl.formatMessage({
         id: "viz.error.invalidJson",
-        defaultMessage: "the spec is not valid JSON",
+        defaultMessage: "the chart definition is not valid JSON",
       });
     case "notObject":
       return intl.formatMessage({
         id: "viz.error.notObject",
-        defaultMessage: "the spec is not a Vega-Lite object",
+        defaultMessage: "the chart definition has an unsupported format",
       });
     case "unsupportedMark":
       return intl.formatMessage(
@@ -36,7 +36,7 @@ export function formatVizFailure(reason: VizFailureReason, intl: IntlShape): str
     case "render":
       return intl.formatMessage({
         id: "viz.error.render",
-        defaultMessage: "render error",
+        defaultMessage: "an error occurred while drawing",
       });
     default: {
       const unhandled: never = reason;

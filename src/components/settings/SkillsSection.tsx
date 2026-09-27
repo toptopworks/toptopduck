@@ -323,7 +323,7 @@ export function SkillsSection({
   return (
     <div>
       <PaneHeader
-        title={<FormattedMessage id="settings.nav.skills" defaultMessage="Skills" />}
+        title={<FormattedMessage id="common.skills" defaultMessage="Skills" />}
         description={(
           <FormattedMessage
             id="settings.skills.description"
@@ -334,7 +334,7 @@ export function SkillsSection({
           <div className="flex items-center gap-1.5">
             <HeaderActionButton
               label={intl.formatMessage({
-                id: "settings.skills.new",
+                id: "settings.new",
                 defaultMessage: "New",
               })}
               icon={Plus}
@@ -380,7 +380,7 @@ export function SkillsSection({
         />
         <Label htmlFor="skills-enabled-filter" className="sr-only">
           <FormattedMessage
-            id="settings.skills.filterLabel"
+            id="settings.filter.label"
             defaultMessage="Filter by status"
           />
         </Label>
@@ -388,7 +388,7 @@ export function SkillsSection({
           <SelectTrigger
             id="skills-enabled-filter"
             aria-label={intl.formatMessage({
-              id: "settings.skills.filterLabel",
+              id: "settings.filter.label",
               defaultMessage: "Filter by status",
             })}
           >
@@ -399,17 +399,17 @@ export function SkillsSection({
               <SelectItem key={opt} value={opt}>
                 {opt === "all" ? (
                   <FormattedMessage
-                    id="settings.skills.filterAll"
+                    id="settings.filter.all"
                     defaultMessage="All"
                   />
                 ) : opt === "enabled" ? (
                   <FormattedMessage
-                    id="settings.skills.filterEnabled"
+                    id="settings.filter.enabled"
                     defaultMessage="Enabled"
                   />
                 ) : (
                   <FormattedMessage
-                    id="settings.skills.filterDisabled"
+                    id="settings.filter.disabled"
                     defaultMessage="Disabled"
                   />
                 )}
@@ -523,7 +523,7 @@ export function SkillsSection({
             <AlertDialogFooter>
               <AlertDialogCancel onClick={() => setConfirmDelete(null)}>
                 <FormattedMessage
-                  id="settings.skills.confirmDeleteCancel"
+                  id="common.cancel"
                   defaultMessage="Cancel"
                 />
               </AlertDialogCancel>

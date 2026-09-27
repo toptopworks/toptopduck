@@ -90,7 +90,7 @@ export function ComposerRuntimeMenu({
     defaultMessage: "API profile",
   });
   const cliSelectAria = intl.formatMessage({
-    id: "composer.runtimePicker.cliSelectAria",
+    id: "common.localCli",
     defaultMessage: "Local CLI",
   });
   const noCliDetected = intl.formatMessage({
@@ -204,7 +204,7 @@ export function ComposerRuntimeMenu({
           onClick={onSelectLocalCliGroup}
         >
           <FormattedMessage
-            id="settings.runtime.tab.localCli"
+            id="common.localCli"
             defaultMessage="Local CLI"
           />
         </RuntimeGroupRow>

@@ -1276,7 +1276,7 @@ describe("ComposerProviderPicker posture set-IPC fault lines (issue #529)", () =
     );
     fireEvent.click(screen.getByRole("menuitemradio", { name: "fake-sonnet" }));
     expect(
-      await screen.findByText(/Selection not saved: Failed to write/),
+      await screen.findByText(/Selection not saved: Couldn't save the data file/),
     ).toBeTruthy();
   });
 

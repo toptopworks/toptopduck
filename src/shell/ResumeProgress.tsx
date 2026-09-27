@@ -32,7 +32,7 @@ export function ResumeProgress({
         );
       case "replay":
         return intl.formatMessage(
-          { id: "resume.replay", defaultMessage: "Replaying {index}/{total}: {name}" },
+          { id: "resume.replay", defaultMessage: "Restoring {index}/{total}: {name}" },
           { index: status.index, total: status.total, name: status.name },
         );
       default: {

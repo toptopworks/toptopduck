@@ -38,26 +38,26 @@ function formatDuckLoadError(e: DuckLoadError, intl: IntlShape): string {
     case "Io":
       return intl.formatMessage({
         id: "error.duck.loadIo",
-        defaultMessage: "Failed to read the .duck file",
+        defaultMessage: "Couldn't read this file",
       });
     case "Parse":
       return intl.formatMessage({
         id: "error.duck.loadParse",
-        defaultMessage: "Failed to parse the .duck file",
+        defaultMessage: "This file seems to be corrupted or incomplete",
       });
     case "VersionMismatch":
       return intl.formatMessage(
         {
           id: "error.duck.versionMismatch",
           defaultMessage:
-            "This .duck was made by a newer app (format_version={found}); the current app supports only {supported}. Please upgrade the app, then reopen it.",
+            "This file was created by a newer version of the app (file version {found}; this app supports up to {supported}). Please update the app and open it again.",
         },
         { found: e.data.found, supported: e.data.supported },
       );
     case "Migration":
       return intl.formatMessage({
         id: "error.duck.migration",
-        defaultMessage: "Failed to migrate the .duck file to the current format",
+        defaultMessage: "Couldn't upgrade this file to the current format",
       });
     default: {
       const unhandled: never = e;
@@ -77,19 +77,19 @@ function formatResumeError(e: ResumeError, intl: IntlShape): string {
       return formatDuckLoadError(e.data, intl);
     case "SourceMissing":
       return intl.formatMessage(
-        { id: "error.resume.sourceMissing", defaultMessage: "Source \"{name}\" not found" },
+        { id: "error.resume.sourceMissing", defaultMessage: "Couldn't find the dataset \"{name}\"" },
         { name: e.data.reference_name },
       );
     case "Replay":
       return intl.formatMessage(
-        { id: "error.resume.replay", defaultMessage: "Failed to replay \"{name}\"" },
+        { id: "error.resume.replay", defaultMessage: "Failed to restore \"{name}\"" },
         { name: e.data.reference_name },
       );
     case "ActiveMissing":
       return intl.formatMessage(
         {
           id: "error.resume.activeMissing",
-          defaultMessage: "The session focus points to an unregistered source \"{name}\"",
+          defaultMessage: "The dataset \"{name}\" used by this session isn't loaded",
         },
         { name: e.data },
       );
@@ -106,7 +106,7 @@ function formatResumeError(e: ResumeError, intl: IntlShape): string {
     case "AlreadyOpen":
       return intl.formatMessage({
         id: "error.duck.alreadyOpen",
-        defaultMessage: "This .duck is already open in this process",
+        defaultMessage: "This file is already open in the app",
       });
     default: {
       const unhandled: never = e;
@@ -122,22 +122,22 @@ function formatSaveError(e: SaveError, intl: IntlShape): string {
     case "Serialize":
       return intl.formatMessage({
         id: "error.save.serialize",
-        defaultMessage: "Failed to serialize the .duck file",
+        defaultMessage: "Couldn't save the data file (packing the data failed)",
       });
     case "Io":
       return intl.formatMessage({
         id: "error.save.io",
-        defaultMessage: "Failed to write the .duck temp file",
+        defaultMessage: "Couldn't save the data file (writing to disk failed)",
       });
     case "Rename":
       return intl.formatMessage({
         id: "error.save.rename",
-        defaultMessage: "Failed to replace the .duck file",
+        defaultMessage: "Couldn't save the data file (replacing the old file failed)",
       });
     case "AlreadyOpen":
       return intl.formatMessage({
         id: "error.duck.alreadyOpen",
-        defaultMessage: "This .duck is already open in this process",
+        defaultMessage: "This file is already open in the app",
       });
     default: {
       const unhandled: never = e;
@@ -217,7 +217,7 @@ function formatAgentError(e: AgentError, intl: IntlShape): string {
     case "InvalidAgentName":
       return intl.formatMessage({
         id: "error.agent.invalidName",
-        defaultMessage: "Agent name must be kebab-case (lowercase a-z / 0-9 + hyphens) and at most 64 chars",
+        defaultMessage: "Agent names can only use lowercase letters, digits, and hyphens (like my-agent), up to 64 characters",
       });
     case "InvalidAgent":
       return intl.formatMessage({
@@ -290,7 +290,7 @@ function formatSkillError(e: SkillError, intl: IntlShape): string {
     case "InvalidName":
       return intl.formatMessage({
         id: "error.skill.invalidName",
-        defaultMessage: "Skill name must be kebab-case (lowercase a-z / 0-9 + hyphens) and at most 64 chars",
+        defaultMessage: "Skill names can only use lowercase letters, digits, and hyphens (like my-skill), up to 64 characters",
       });
     case "InvalidSkill":
       return intl.formatMessage({
@@ -317,7 +317,7 @@ function formatSkillError(e: SkillError, intl: IntlShape): string {
       return intl.formatMessage(
         {
           id: "error.skill.reservedName",
-          defaultMessage: "The name \"{name}\" is reserved for a built-in skill",
+          defaultMessage: "The name \"{name}\" is reserved for a system skill",
         },
         { name: e.data },
       );
@@ -326,7 +326,7 @@ function formatSkillError(e: SkillError, intl: IntlShape): string {
         {
           id: "error.skill.builtinReadOnly",
           defaultMessage:
-            "Built-in skill \"{name}\" is read-only; copy its folder to the skills root to make an editable version",
+            "System skill \"{name}\" is read-only; copy its folder to the skills root to make an editable version",
         },
         { name: e.data },
       );
@@ -334,7 +334,7 @@ function formatSkillError(e: SkillError, intl: IntlShape): string {
       return intl.formatMessage(
         {
           id: "error.skill.undeletable",
-          defaultMessage: "Built-in skill \"{name}\" cannot be deleted; disable it instead",
+          defaultMessage: "System skill \"{name}\" cannot be deleted; disable it instead",
         },
         { name: e.data },
       );
@@ -375,7 +375,7 @@ function formatRemoveSourceError(e: RemoveSourceError, intl: IntlShape): string 
         {
           id: "error.dataset.removeActive",
           defaultMessage:
-            "\"{name}\" is the current focus table; pick a continuation from the remaining sources first (or cancel)",
+            "\"{name}\" is the dataset currently in use. Pick one of the remaining datasets to continue (or cancel)",
         },
         { name: e.data.display_name },
       );
@@ -384,7 +384,7 @@ function formatRemoveSourceError(e: RemoveSourceError, intl: IntlShape): string 
         {
           id: "error.dataset.notActive",
           defaultMessage:
-            "\"{name}\" is not the current focus source; use plain delete or refresh the working set and retry",
+            "\"{name}\" is not the dataset currently in use; refresh the data list and retry",
         },
         { name: e.data },
       );
@@ -393,7 +393,7 @@ function formatRemoveSourceError(e: RemoveSourceError, intl: IntlShape): string 
         {
           id: "error.dataset.invalidContinueWith",
           defaultMessage:
-            "\"{name}\" is not among the remaining sources; cannot use it as the continuation (refresh the working set and re-pick)",
+            "\"{name}\" is not among the remaining datasets; refresh the data list and pick again",
         },
         { name: e.data },
       );
@@ -465,7 +465,7 @@ function formatRowReadError(e: RowReadError, intl: IntlShape): string {
       // wording for any other lane the refusal might reach.
       return intl.formatMessage({
         id: "error.rowRead.tooLarge",
-        defaultMessage: "This result is too large to pull in one go without confirmation",
+        defaultMessage: "This result is large; confirm before loading it all",
       });
     case "Cancelled":
       return intl.formatMessage({
@@ -516,7 +516,7 @@ export function fmtError(e: unknown, intl: IntlShape): string {
       case "InvalidId":
         return intl.formatMessage({
           id: "error.session.invalidId",
-          defaultMessage: "Invalid session id",
+          defaultMessage: "Invalid session ID",
         });
       case "NotFound":
         return intl.formatMessage({

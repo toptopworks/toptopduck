@@ -156,7 +156,7 @@ export function DegradeCard({ error, onRetry, name, onReload }: DegradeCardProps
       </p>
       <div className="flex gap-2">
         <Button onClick={onRetry}>
-          {intl.formatMessage({ id: "errorBoundary.retry", defaultMessage: "Retry" })}
+          {intl.formatMessage({ id: "common.retry", defaultMessage: "Retry" })}
         </Button>
         {onReload && (
           <Button variant="outline" onClick={onReload}>

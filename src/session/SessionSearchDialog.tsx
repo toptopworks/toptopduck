@@ -144,7 +144,7 @@ export function SessionSearchDialog({
         }}
       >
         <DialogTitle className="sr-only">
-          <FormattedMessage id="sidebar.search.title" defaultMessage="Search sessions" />
+          <FormattedMessage id="sidebar.search.ariaLabel" defaultMessage="Search sessions" />
         </DialogTitle>
         <DialogDescription className="sr-only">
           <FormattedMessage

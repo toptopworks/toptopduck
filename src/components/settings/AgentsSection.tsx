@@ -70,7 +70,7 @@ import {
 // it -- the form keeps the name for section context, without the list-only
 // action buttons.
 const NAV_TITLE = (
-  <FormattedMessage id="settings.agents.title" defaultMessage="Subagents" />
+  <FormattedMessage id="settings.nav.agents" defaultMessage="Subagents" />
 );
 
 // Agents settings pane (issue #932, ADR-0117). The registry is a directory
@@ -301,7 +301,7 @@ export function AgentsSection({
         />
         <Label htmlFor="agents-enabled-filter" className="sr-only">
           <FormattedMessage
-            id="settings.agents.filterLabel"
+            id="settings.filter.label"
             defaultMessage="Filter by status"
           />
         </Label>
@@ -309,7 +309,7 @@ export function AgentsSection({
           <SelectTrigger
             id="agents-enabled-filter"
             aria-label={intl.formatMessage({
-              id: "settings.agents.filterLabel",
+              id: "settings.filter.label",
               defaultMessage: "Filter by status",
             })}
           >
@@ -319,11 +319,11 @@ export function AgentsSection({
             {FILTER_OPTIONS.map((opt) => (
               <SelectItem key={opt} value={opt}>
                 {opt === "all" ? (
-                  <FormattedMessage id="settings.agents.filterAll" defaultMessage="All" />
+                  <FormattedMessage id="settings.filter.all" defaultMessage="All" />
                 ) : opt === "enabled" ? (
-                  <FormattedMessage id="settings.agents.filterEnabled" defaultMessage="Enabled" />
+                  <FormattedMessage id="settings.filter.enabled" defaultMessage="Enabled" />
                 ) : (
-                  <FormattedMessage id="settings.agents.filterDisabled" defaultMessage="Disabled" />
+                  <FormattedMessage id="settings.filter.disabled" defaultMessage="Disabled" />
                 )}
               </SelectItem>
             ))}
@@ -472,7 +472,7 @@ export function AgentsSection({
             <AlertDialogFooter>
               <AlertDialogCancel onClick={() => setConfirmDelete(null)}>
                 <FormattedMessage
-                  id="settings.agents.confirmDeleteCancel"
+                  id="common.cancel"
                   defaultMessage="Cancel"
                 />
               </AlertDialogCancel>
@@ -481,7 +481,7 @@ export function AgentsSection({
                 onClick={() => deleteMutation.mutate(confirmDelete)}
               >
                 <FormattedMessage
-                  id="settings.agents.confirmDeleteConfirm"
+                  id="common.delete"
                   defaultMessage="Delete"
                 />
               </AlertDialogAction>
@@ -547,13 +547,13 @@ function AgentRow({
           <NameBadge>
             {agent.source === "builtin" ? (
               <FormattedMessage
-                id="settings.agents.sourceBuiltin"
+                id="common.builtin"
                 defaultMessage="Built-in"
               />
             ) : agent.source === "linked" ? (
               <FormattedMessage id="settings.agents.sourceLinked" defaultMessage="Linked" />
             ) : (
-              <FormattedMessage id="settings.agents.sourceUser" defaultMessage="Custom" />
+              <FormattedMessage id="common.custom" defaultMessage="Custom" />
             )}
           </NameBadge>
           {!agent.enabled && (
@@ -698,12 +698,12 @@ function AgentForm({
         size="form"
         title={editing ? (
           <FormattedMessage
-            id="settings.agents.editTitle"
+            id="settings.agents.editLabel"
             defaultMessage="Edit agent {name}"
             values={{ name: editing.name }}
           />
         ) : (
-          <FormattedMessage id="settings.agents.createTitle" defaultMessage="New agent" />
+          <FormattedMessage id="settings.agents.add" defaultMessage="New agent" />
         )}
       />
 
@@ -712,7 +712,7 @@ function AgentForm({
           dense
           title={(
             <Label htmlFor="agent-name" className="text-muted-foreground">
-              <FormattedMessage id="settings.agents.nameLabel" defaultMessage="Name" />
+              <FormattedMessage id="common.name" defaultMessage="Name" />
             </Label>
           )}
         >
@@ -745,7 +745,7 @@ function AgentForm({
           title={(
             <Label htmlFor="agent-description" className="text-muted-foreground">
               <FormattedMessage
-                id="settings.agents.descriptionLabel"
+                id="common.description"
                 defaultMessage="Description"
               />
             </Label>
@@ -857,7 +857,7 @@ function AgentForm({
             {saving ? (
               <FormattedMessage id="common.saving" defaultMessage="Saving…" />
             ) : (
-              <FormattedMessage id="settings.agents.save" defaultMessage="Save" />
+              <FormattedMessage id="common.save" defaultMessage="Save" />
             )}
           </Button>
         </div>

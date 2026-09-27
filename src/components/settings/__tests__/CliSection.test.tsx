@@ -117,7 +117,7 @@ describe("CliSection", () => {
       />,
     );
     expect(
-      screen.getByText("No CLI tools registered yet. Click New to register one."),
+      screen.getByText("No CLI tools yet. Click New to add one."),
     ).toBeInTheDocument();
     expect(onCliToolsChanged).not.toHaveBeenCalled();
   });
@@ -235,7 +235,7 @@ describe("CliSection", () => {
     expect(screen.queryByRole("button", { name: "New" })).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: "Back to CLI list" }));
     expect(
-      screen.getByText("No CLI tools registered yet. Click New to register one."),
+      screen.getByText("No CLI tools yet. Click New to add one."),
     ).toBeInTheDocument();
   });
 

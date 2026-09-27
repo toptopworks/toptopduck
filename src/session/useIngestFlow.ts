@@ -397,7 +397,7 @@ export function useIngestFlow(
             message: intl.formatMessage({
               id: "error.flow.guidedStillNeedsGuidance",
               defaultMessage:
-                "The worksheet still cannot be rectified; adjust the header selection and retry",
+                "The worksheet's header rows still can't be detected reliably; adjust the header selection and retry",
             }),
             kind: "load",
             detail: null,

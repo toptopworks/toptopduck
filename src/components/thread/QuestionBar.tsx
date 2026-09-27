@@ -274,7 +274,7 @@ export function QuestionBar({ onSubmit, onCancel, loading, phase = null, draft, 
             >
               <Square className="size-3.5 fill-current" aria-hidden />
               <span className="sr-only">
-                {intl.formatMessage({ id: "questionBar.cancel", defaultMessage: "Stop" })}
+                {intl.formatMessage({ id: "common.stop", defaultMessage: "Stop" })}
               </span>
             </Button>
           ) : (
@@ -289,7 +289,7 @@ export function QuestionBar({ onSubmit, onCancel, loading, phase = null, draft, 
             >
               <ArrowUp className="size-4" aria-hidden />
               <span className="sr-only">
-                {intl.formatMessage({ id: "questionBar.submit", defaultMessage: "Ask" })}
+                {intl.formatMessage({ id: "common.ask", defaultMessage: "Ask" })}
               </span>
             </Button>
           )}

@@ -231,7 +231,7 @@ export function McpImportDialog({ open, onClose, existingNames, onImported }: Mc
       setError(
         failures.length > 1
           ? intl.formatMessage(
-              { id: "settings.mcp.import.partialFailure", defaultMessage: "{error} (+{count} more)" },
+              { id: "settings.import.partialFailure", defaultMessage: "{error} (+{count} more)" },
               { error: firstError, count: failures.length - 1 },
             )
           : firstError,
@@ -292,7 +292,7 @@ export function McpImportDialog({ open, onClose, existingNames, onImported }: Mc
             <div className="flex items-center gap-1">
               <DialogHeaderButton
                 label={intl.formatMessage({
-                  id: "settings.mcp.import.refresh",
+                  id: "settings.import.refresh",
                   defaultMessage: "Refresh sources",
                 })}
                 icon={RefreshCw}
@@ -467,7 +467,7 @@ function SourceRow({
           <div className="text-muted-foreground mb-1.5 flex items-center justify-between text-xs">
             <span>
               <FormattedMessage
-                id="settings.mcp.import.selectedCount"
+                id="settings.import.selectedCount"
                 defaultMessage="Selected {selected} / {total}"
                 values={{ selected: selectedInSource, total: source.servers.length }}
               />
@@ -478,7 +478,7 @@ function SourceRow({
               className="hover:text-foreground"
             >
               <FormattedMessage
-                id="settings.mcp.import.selectAll"
+                id="settings.import.selectAll"
                 defaultMessage="Select all"
               />
             </button>

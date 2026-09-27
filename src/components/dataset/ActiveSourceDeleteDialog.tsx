@@ -30,7 +30,7 @@ import {
 // overlay/outside pointer dismiss itself but NOT ESC -- an unguarded
 // AlertDialog still closes on ESC (issue #766) -- so the content carries an
 // explicit onEscapeKeyDown preventDefault (same guard as the working-set
-// delete confirm): the user must take an explicit 中止 / 继续 action, and the
+// delete confirm): the user must take an explicit 取消 / 继续 action, and the
 // hand-written window ESC listener stays gone. The candidate list keeps
 // native radios (the issue scope is the AlertDialog shell, not a
 // form-control sweep; native radios keep toBeChecked reliable in the tests).
@@ -61,14 +61,14 @@ export function ActiveSourceDeleteDialog({
           <AlertDialogTitle>
             <FormattedMessage
               id="activeSourceDelete.title"
-              defaultMessage="Remove focus source {name}"
+              defaultMessage="Remove the current dataset {name}"
               values={{ name: target.display_name }}
             />
           </AlertDialogTitle>
           <AlertDialogDescription>
             <FormattedMessage
               id="activeSourceDelete.description"
-              defaultMessage="This source is the current focus table. After removing it, pick one of the remaining sources to continue (or cancel — the working set stays unchanged)."
+              defaultMessage="This is the dataset your conversation is using. After removing it, pick one of the remaining datasets to continue (or cancel — the working set stays unchanged)."
             />
           </AlertDialogDescription>
         </AlertDialogHeader>
@@ -93,7 +93,7 @@ export function ActiveSourceDeleteDialog({
         </ul>
         <AlertDialogFooter>
           <AlertDialogCancel onClick={onCancel}>
-            <FormattedMessage id="activeSourceDelete.cancel" defaultMessage="Cancel" />
+            <FormattedMessage id="common.cancel" defaultMessage="Cancel" />
           </AlertDialogCancel>
           <AlertDialogAction
             onClick={(e) => {
@@ -108,7 +108,7 @@ export function ActiveSourceDeleteDialog({
             }}
             disabled={!selected}
           >
-            <FormattedMessage id="activeSourceDelete.confirm" defaultMessage="Continue" />
+            <FormattedMessage id="common.continue" defaultMessage="Continue" />
           </AlertDialogAction>
         </AlertDialogFooter>
       </AlertDialogContent>

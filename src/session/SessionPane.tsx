@@ -499,7 +499,7 @@ export function SessionPane({ sessionId, isActive, pendingIngestPaths, onIngestC
             </p>
             <Button variant="outline" size="sm" onClick={s.handleRetryQueries}>
               <FormattedMessage
-                id="session.queries.retry"
+                id="common.retry"
                 defaultMessage="Retry"
               />
             </Button>
@@ -705,7 +705,7 @@ export function SessionPane({ sessionId, isActive, pendingIngestPaths, onIngestC
                   <p className="m-0">
                     <FormattedMessage
                       id="error.persist.banner"
-                      defaultMessage="Auto-save failed: {reason} (the latest in-memory changes were not written to disk; retry the save before closing the app.)"
+                      defaultMessage="Auto-save failed: {reason} — your latest changes haven't been saved to the file; retry the save before closing the app."
                       values={{ reason: fmtError(s.persistError, intl) }}
                     />
                   </p>
@@ -832,7 +832,7 @@ function WorkspaceResult({
             ) : (
               <FormattedMessage
                 id="session.hero.empty"
-                defaultMessage="Drop or select a data file to start analyzing."
+                defaultMessage="Drop a data file onto the window to start analyzing, or add one with the + button."
               />
             )}
           </p>

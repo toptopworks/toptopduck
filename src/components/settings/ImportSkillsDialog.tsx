@@ -178,7 +178,7 @@ export function ImportSkillsDialog({ onClose }: Props) {
             failed.length > 1
               ? intl.formatMessage(
                   {
-                    id: "settings.skills.importPartialFailure",
+                    id: "settings.import.partialFailure",
                     defaultMessage: "{error} (+{count} more)",
                   },
                   { error: firstError, count: failed.length - 1 },
@@ -221,7 +221,7 @@ export function ImportSkillsDialog({ onClose }: Props) {
             <div className="flex items-center gap-1">
               <DialogHeaderButton
                 label={intl.formatMessage({
-                  id: "settings.skills.importRefresh",
+                  id: "settings.import.refresh",
                   defaultMessage: "Refresh sources",
                 })}
                 icon={RefreshCw}
@@ -424,7 +424,7 @@ function SourceRow({
       <div className="text-muted-foreground mb-1.5 flex items-center justify-between text-xs">
         <span>
           <FormattedMessage
-            id="settings.skills.importSelectedCount"
+            id="settings.import.selectedCount"
             defaultMessage="Selected {selected} / {total}"
             values={{
               selected: selectedInSource,
@@ -439,7 +439,7 @@ function SourceRow({
           className="hover:text-foreground disabled:opacity-50"
         >
           <FormattedMessage
-            id="settings.skills.importSelectAll"
+            id="settings.import.selectAll"
             defaultMessage="Select all"
           />
         </button>

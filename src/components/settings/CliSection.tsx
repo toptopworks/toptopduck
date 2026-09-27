@@ -242,7 +242,7 @@ export function CliSection({
           <div className="flex items-center gap-1.5">
             <HeaderActionButton
               label={intl.formatMessage({
-                id: "settings.cli.new",
+                id: "settings.new",
                 defaultMessage: "New",
               })}
               icon={Plus}
@@ -288,7 +288,7 @@ export function CliSection({
           <div className="text-muted-foreground px-4 py-8 text-center text-sm">
             <FormattedMessage
               id="settings.cli.empty"
-              defaultMessage="No CLI tools registered yet. Click New to register one."
+              defaultMessage="No CLI tools yet. Click New to add one."
             />
           </div>
         ) : (
@@ -390,7 +390,7 @@ export function CliSection({
             <AlertDialogFooter>
               <AlertDialogCancel disabled={confirmBusy}>
                 <FormattedMessage
-                  id="settings.cli.confirmDeleteCancel"
+                  id="common.cancel"
                   defaultMessage="Cancel"
                 />
               </AlertDialogCancel>
@@ -410,7 +410,7 @@ export function CliSection({
                 {confirmBusy ? (
                   confirmTarget.kind === "delete" ? (
                     <FormattedMessage
-                      id="settings.cli.deleting"
+                      id="settings.deleting"
                       defaultMessage="Deleting…"
                     />
                   ) : (
@@ -563,7 +563,7 @@ function CliToolRow({
           {tool.source === "builtin" && (
             <NameBadge>
               <FormattedMessage
-                id="settings.cli.builtinBadge"
+                id="common.builtin"
                 defaultMessage="Built-in"
               />
             </NameBadge>

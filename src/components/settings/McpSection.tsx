@@ -404,7 +404,7 @@ export function McpSection({
           <div className="flex items-center gap-1.5">
             <HeaderActionButton
               label={intl.formatMessage({
-                id: "settings.mcp.new",
+                id: "settings.new",
                 defaultMessage: "New",
               })}
               icon={Plus}
@@ -440,7 +440,7 @@ export function McpSection({
         />
         <Label htmlFor="mcp-status-filter" className="sr-only">
           <FormattedMessage
-            id="settings.mcp.filterLabel"
+            id="settings.filter.label"
             defaultMessage="Filter by status"
           />
         </Label>
@@ -448,7 +448,7 @@ export function McpSection({
           <SelectTrigger
             id="mcp-status-filter"
             aria-label={intl.formatMessage({
-              id: "settings.mcp.filterLabel",
+              id: "settings.filter.label",
               defaultMessage: "Filter by status",
             })}
           >
@@ -458,11 +458,11 @@ export function McpSection({
             {FILTER_OPTIONS.map((opt) => (
               <SelectItem key={opt} value={opt}>
                 {opt === "all" ? (
-                  <FormattedMessage id="settings.mcp.filterAll" defaultMessage="All" />
+                  <FormattedMessage id="settings.filter.all" defaultMessage="All" />
                 ) : opt === "enabled" ? (
-                  <FormattedMessage id="settings.mcp.filterEnabled" defaultMessage="Enabled" />
+                  <FormattedMessage id="settings.filter.enabled" defaultMessage="Enabled" />
                 ) : (
-                  <FormattedMessage id="settings.mcp.filterDisabled" defaultMessage="Disabled" />
+                  <FormattedMessage id="settings.filter.disabled" defaultMessage="Disabled" />
                 )}
               </SelectItem>
             ))}
@@ -555,7 +555,7 @@ export function McpSection({
             <AlertDialogFooter>
               <AlertDialogCancel disabled={deleting}>
                 <FormattedMessage
-                  id="settings.mcp.confirmDeleteCancel"
+                  id="common.cancel"
                   defaultMessage="Cancel"
                 />
               </AlertDialogCancel>
@@ -571,7 +571,7 @@ export function McpSection({
               >
                 {deleting ? (
                   <FormattedMessage
-                    id="settings.mcp.deleting"
+                    id="settings.deleting"
                     defaultMessage="Deleting…"
                   />
                 ) : (

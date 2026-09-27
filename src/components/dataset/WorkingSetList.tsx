@@ -265,7 +265,7 @@ function DatasetRow({
             hintKey={key("rename")}
             open={isTipOpen("rename")}
             tip={tip}
-            title={intl.formatMessage({ id: "workingSet.rename.hint", defaultMessage: "Rename" })}
+            title={intl.formatMessage({ id: "common.rename", defaultMessage: "Rename" })}
             ariaLabel={intl.formatMessage(
               { id: "workingSet.rename.ariaLabel", defaultMessage: "Rename {name}" },
               { name: d.display_name },
@@ -300,7 +300,7 @@ function DatasetRow({
               open={isTipOpen("delete")}
               tip={tip}
               title={intl.formatMessage({
-                id: "workingSet.delete.hint",
+                id: "common.delete",
                 defaultMessage: "Delete",
               })}
               ariaLabel={intl.formatMessage(
@@ -393,7 +393,7 @@ function WorkingSetRenameDialog({
           className="grid gap-4"
         >
           <DialogTitle>
-            <FormattedMessage id="workingSet.rename.title" defaultMessage="Rename" />
+            <FormattedMessage id="common.rename" defaultMessage="Rename" />
           </DialogTitle>
           <div className="grid gap-2">
             <Label htmlFor="working-set-rename-input">
@@ -459,7 +459,7 @@ function WorkingSetDeleteDialog({
           <AlertDialogDescription>
             <FormattedMessage
               id="workingSet.delete.description"
-              defaultMessage="The source file is removed and its reference name is dropped from the shared namespace — any SQL reading from it will fail. This cannot be undone; the file must be re-uploaded to restore the source."
+              defaultMessage="The dataset is removed and its name is released — any SQL reading from it will fail. This cannot be undone; the file must be re-uploaded to restore it."
             />
           </AlertDialogDescription>
         </AlertDialogHeader>

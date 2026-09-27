@@ -97,12 +97,12 @@ export function SkillDetailDialog({
               <p className="text-muted-foreground text-sm">
                 {skill.enabled ? (
                   <FormattedMessage
-                    id="settings.skills.statusEnabled"
+                    id="settings.filter.enabled"
                     defaultMessage="Enabled"
                   />
                 ) : (
                   <FormattedMessage
-                    id="settings.skills.statusDisabled"
+                    id="settings.filter.disabled"
                     defaultMessage="Disabled"
                   />
                 )}

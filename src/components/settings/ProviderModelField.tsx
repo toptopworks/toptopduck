@@ -153,7 +153,7 @@ export function ProviderModelField({
       dense
       title={(
         <Label htmlFor={modelId} className="text-muted-foreground">
-          <FormattedMessage id="settings.profiles.model" defaultMessage="Model" />
+          <FormattedMessage id="common.model" defaultMessage="Model" />
         </Label>
       )}
     >
@@ -301,7 +301,7 @@ function PreflightResult({ outcome }: { outcome: ProfileTestOutcome }) {
         <DetailFold detail={outcome.data.detail}>
           <FormattedMessage
             id="settings.profiles.test.keychainUnavailable"
-            defaultMessage="Keychain unavailable — the OS keychain could not be read. Check the OS keychain, then test again."
+            defaultMessage="Keychain unavailable — the system keychain could not be read. Check the OS keychain, then test again."
           />
         </DetailFold>
       );

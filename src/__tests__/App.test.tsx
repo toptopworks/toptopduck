@@ -249,9 +249,9 @@ async function clickRailResultLink(name: string): Promise<void> {
 function verbKey(kind: SessionFlowKind): CatalogKey {
   switch (kind) {
     case "load":
-      return "error.verb.load";
+      return "common.load";
     case "rename":
-      return "error.verb.rename";
+      return "common.rename";
     case "replace":
       return "error.verb.replace";
     case "delete":
@@ -259,7 +259,7 @@ function verbKey(kind: SessionFlowKind): CatalogKey {
     case "privacy":
       return "error.verb.privacy";
     case "ask":
-      return "error.verb.ask";
+      return "common.ask";
     default: {
       // Exhaustiveness guard: mirrors errorVerb in lib/error-presentation/
       // app-error so a new SessionFlowKind member forces a test update here
@@ -1709,7 +1709,7 @@ describe("SessionPane session-query error banner (#763)", () => {
   // (derivations keep rendering, the composer stays live) with a retry that
   // refetches only the errored queries.
   const BANNER_TITLE = catalogFor("zh-CN")["session.queries.errorTitle"];
-  const RETRY_LABEL = catalogFor("zh-CN")["session.queries.retry"];
+  const RETRY_LABEL = catalogFor("zh-CN")["common.retry"];
   const RAIL_EMPTY = catalogFor("zh-CN")["session.rail.empty"];
 
   beforeEach(() => {

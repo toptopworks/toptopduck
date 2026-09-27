@@ -295,7 +295,7 @@ describe("ComposerPostureTrigger honest fault surfaces (issue #529)", () => {
       persistSuspended: true,
     });
     expect(screen.getByText(/Could not apply the selection/)).toBeTruthy();
-    expect(screen.getByText(/Selection not saved: Failed to write/)).toBeTruthy();
+    expect(screen.getByText(/Selection not saved: Couldn't save the data file/)).toBeTruthy();
     expect(screen.getByText(/autosave is paused/)).toBeTruthy();
   });
 });

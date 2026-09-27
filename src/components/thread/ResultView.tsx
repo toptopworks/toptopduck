@@ -326,7 +326,7 @@ export function ResultView({
             <p className="m-0">
               <FormattedMessage
                 id="disclosure.result.stale"
-                defaultMessage="This result is stale (source {name} was {reason, select, Replaced {updated} other {deleted}}) — ask again to recompute against the new source."
+                defaultMessage='This result is stale (the dataset "{name}" was {reason, select, Replaced {updated} other {deleted}}) — ask again to recompute against the new dataset.'
                 values={{ name: staleAnchor.display_name, reason: staleAnchor.reason }}
               />
             </p>
