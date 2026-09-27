@@ -407,4 +407,18 @@ describe("artifact derivation (ADR-0124, issue #1088)", () => {
       expect(content).toEqual({ kind: "hero" });
     });
   });
+
+  describe("deriveWorkspaceContent viz branch (issue #1093: the fence chart on the stage)", () => {
+    it("a viz view resolves straight to the stage -- the spec body is self-contained", () => {
+      // The fence body is the whole truth (ADR-0120): no thread resolution is
+      // involved, so even an empty thread (or one whose turns moved on) shows
+      // the staged chart until another selection displaces it.
+      const content = deriveWorkspaceContent(
+        [],
+        { kind: "viz", spec: "{\"mark\":\"bar\"}" },
+        new Map(),
+      );
+      expect(content).toEqual({ kind: "viz", spec: "{\"mark\":\"bar\"}" });
+    });
+  });
 });

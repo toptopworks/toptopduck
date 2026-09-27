@@ -1,11 +1,19 @@
-import { describe, expect, it } from "vitest";
-import { fireEvent, render, screen } from "@testing-library/react";
+import { describe, expect, it, vi } from "vitest";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import embed from "vega-embed";
 import { IntlProvider } from "react-intl";
 import type { ReactElement } from "react";
 
 import { DelegationTraceDialog } from "../DelegationTraceDialog";
 import { TraceRowList } from "../TraceRow";
 import type { TraceEntry, TraceRound } from "../../../types/thread";
+
+// A fence chart may ride the sub-agent's prose; jsdom cannot run vega-embed,
+// so its render is mocked (a resolved embed = the chart surface draws) --
+// the pin below is then meaningful, not vacuous.
+vi.mock("vega-embed", () => ({
+  default: vi.fn().mockResolvedValue({ finalize: vi.fn(), view: { resize: vi.fn() } }),
+}));
 
 // The delegation row's thin summary + modal viewer (issue #934; the modal
 // form was decided on the issue in triage): a delegation trace row stays one
@@ -124,4 +132,22 @@ describe("TraceRowList delegation affordance (issue #934)", () => {
     // Opening the modal must not also toggle the row's summary fold.
     expect(container.querySelector(".summary-fold-block")).toBeNull();
   });
+});
+
+it("keeps a vega-lite fence in the sub-trace static (issue #1093 pin)", async () => {
+  // The delegation dialog mounts RoundProse bare -- never through Thread's
+  // stage link -- so its fences are static content: the chart itself draws,
+  // but no click affordance may exist.
+  const fenceRound: TraceRound = {
+    ...SUB_ROUND,
+    text: "```vega-lite\n{\"mark\": \"bar\"}\n```",
+  };
+  renderWithProviders(
+    <DelegationTraceDialog entry={{ ...DELEGATION, sub_rounds: [fenceRound] }} />,
+  );
+  fireEvent.click(screen.getByRole("button", { name: /sub-trace/i }));
+  await waitFor(() => expect(vi.mocked(embed)).toHaveBeenCalledTimes(1));
+  expect(
+    screen.queryByRole("button", { name: "View chart in the results pane" }),
+  ).not.toBeInTheDocument();
 });

@@ -19,13 +19,14 @@
 // would only mis-degrade a chart that would have drawn fine.
 
 import { useMemo } from "react";
+import type { KeyboardEvent } from "react";
 import { useIntl } from "react-intl";
 import { Loader2 } from "lucide-react";
 import { VizChartSlot } from "./LazyVegaChart";
 import { VizDegradeDisclosure } from "./VizDegradeDisclosure";
-import { VizEnlargeDialog } from "./VizEnlargeDialog";
 import { useVizChartGate } from "./useVizChartGate";
 import { decodeVizSpec } from "./viz";
+import { cn } from "@/lib/utils";
 
 /** The live placeholder (ADR-0120 Decision 4): names what is coming without
  * showing the source or attempting a render. Deliberately parse-free -- it
@@ -49,7 +50,23 @@ export function VizFencePending() {
 /** The settled fence renderer: one decoded spec through the chart, or an
  * honest disclosure. `spec` is the fence's raw body text (bare Vega-Lite JSON,
  * no wire `kind`). */
-export function VizFence({ spec }: { spec: string }) {
+export function VizFence({
+  spec,
+  onSelectViz,
+  selected = false,
+}: {
+  spec: string;
+  /** Issue #1093: promotes this fence's body onto the workspace stage. The
+   *  handler receives the RAW body text -- the stage view's identity is the
+   *  fence's own spec. Absent (the default): the chart renders inert/static,
+   *  the posture the delegation dialog and the md artifact renderer get. */
+  onSelectViz?: (spec: string) => void;
+  /** Issue #1093: this body is the staged spec -- the selection mirror
+   *  (aria-current + the teal ring). Identity is the body TEXT, so twin
+   *  fences sharing a body light together. */
+  selected?: boolean;
+}) {
+  const intl = useIntl();
   // The shared decode gate (viz.ts): parse + whitelist mark. A fence that
   // fails degrades like a result-card spec does, only the disclosure wording
   // differs (no table rides under a fence chart).
@@ -59,20 +76,49 @@ export function VizFence({ spec }: { spec: string }) {
   const { renderError, onError } = useVizChartGate(spec);
 
   const degradedReason = decoded.ok ? renderError : decoded.reason;
+  // The stage link (issue #1093): when the caller wires a handler, the chart
+  // body itself becomes the click affordance. The host is a div with
+  // role="button" -- a real <button> is phrasing content, so wrapping the
+  // block-level chart subtree violates the content model -- carrying the
+  // keyboard path (Enter/Space) and the selected mirror on the same element.
+  const stageLabel = onSelectViz === undefined
+    ? null
+    : intl.formatMessage({
+        id: "viz.fence.stageLink",
+        defaultMessage: "View chart in the results pane",
+      });
+  const handleStageKey = (event: KeyboardEvent<HTMLDivElement>) => {
+    if (event.key === "Enter" || event.key === " ") {
+      event.preventDefault();
+      onSelectViz?.(spec);
+    }
+  };
   return (
     <>
       {decoded.ok && renderError === null && (
         // The chart slot: the shared door (lazy + Suspense boundary + the
         // standard fallback). The wrapper zeroes the fallback/chart class's
         // own 0.5rem margins (a result-pane concern) so the prose root's
-        // space-y owns this block's rhythm like every other block; `relative`
-        // anchors the enlarge affordance to the chart's corner (#1050).
-        <div className="relative [&_.viz-chart]:m-0">
+        // space-y owns this block's rhythm like every other block.
+        <div
+          {...(stageLabel === null
+            ? {}
+            : {
+                "role": "button",
+                "tabIndex": 0,
+                "aria-label": stageLabel,
+                "aria-current": selected ? ("true" as const) : undefined,
+                "onClick": () => onSelectViz?.(spec),
+                "onKeyDown": handleStageKey,
+              })}
+          className={cn(
+            "[&_.viz-chart]:m-0",
+            stageLabel !== null &&
+            "cursor-pointer rounded-md outline-none transition-shadow focus-visible:ring-[3px] focus-visible:ring-ring/50",
+            selected && "ring-1 ring-primary",
+          )}
+        >
           <VizChartSlot spec={decoded.spec} onError={onError} />
-          {/* The overlay re-embeds the same decoded spec at full readable
-              size; a degrade swaps this whole block for the disclosure below,
-              so the affordance dies with the chart it would enlarge. */}
-          <VizEnlargeDialog spec={decoded.spec} />
         </div>
       )}
       {degradedReason !== null && (

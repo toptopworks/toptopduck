@@ -1100,10 +1100,9 @@ describe("ResultView viz (ADR-0016/0033, issue #26)", () => {
     expect(screen.queryByRole("alert")).not.toBeInTheDocument();
   });
 
-  it("mounts the enlarge affordance on a rendered chart (#1050)", async () => {
-    // The result card rides the same enlarge view the fence does: a rendered
-    // chart carries the corner affordance, and opening the overlay re-embeds
-    // the same decoded spec through the shared chart slot.
+  it("mounts the export pair on a rendered chart (issue #1093)", async () => {
+    // The result card's chart rides the export-bearing frame: one embed, and
+    // the PNG/SVG pair walk THAT embedded view (a click never re-embeds).
     vi.mocked(readRows).mockResolvedValue({
       columns: [{ name: "n", canonical_type: "BIGINT" }],
       rows: [["5"]],
@@ -1112,7 +1111,7 @@ describe("ResultView viz (ADR-0016/0033, issue #26)", () => {
       limit: 100,
     });
     vi.mocked(embed).mockResolvedValue(embedOk());
-    const { container } = renderI18n(
+    renderI18n(
       <ResultView
         sessionId="sess-1"
         referenceName="result_1"
@@ -1122,22 +1121,18 @@ describe("ResultView viz (ADR-0016/0033, issue #26)", () => {
       />,
     );
     await waitFor(() => expect(embed).toHaveBeenCalledTimes(1));
-    // The hover reveal keys on the adjacent-sibling selector: the trigger
-    // must sit right after the .viz-chart host inside the mount wrapper, or
-    // mouse reveal dies silently (computed opacity is invisible to jsdom).
     expect(
-      screen.getByRole("button", { name: "放大查看图表" }).previousElementSibling,
-    ).toBe(container.querySelector(".viz-chart"));
-    fireEvent.click(screen.getByRole("button", { name: "放大查看图表" }));
-    await waitFor(() => expect(embed).toHaveBeenCalledTimes(2));
+      screen.getByRole("button", { name: "下载 PNG 图表" }),
+    ).toBeInTheDocument();
     expect(
-      screen.getByRole("dialog", { name: "图表放大查看" }),
+      screen.getByRole("button", { name: "下载 SVG 图表" }),
     ).toBeInTheDocument();
   });
 
-  it("keeps the enlarge affordance off the degraded chart (#1050)", async () => {
+  it("keeps the export pair off the degraded chart (issue #1093)", async () => {
     // The render-failure arm on the result card: the swap-in disclosure
-    // replaces the chart slot entirely, so a failed chart has no affordance.
+    // replaces the chart slot entirely, so a failed chart has nothing to
+    // export.
     vi.mocked(readRows).mockResolvedValue({
       columns: [{ name: "n", canonical_type: "BIGINT" }],
       rows: [["5"]],
@@ -1159,7 +1154,10 @@ describe("ResultView viz (ADR-0016/0033, issue #26)", () => {
       expect(screen.getByText(/图表无法渲染/)).toBeInTheDocument(),
     );
     expect(
-      screen.queryByRole("button", { name: "放大查看图表" }),
+      screen.queryByRole("button", { name: "下载 PNG 图表" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "下载 SVG 图表" }),
     ).not.toBeInTheDocument();
   });
 });

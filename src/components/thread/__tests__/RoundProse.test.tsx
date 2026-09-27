@@ -1,3 +1,4 @@
+import type { ReactElement } from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { IntlProvider } from "react-intl";
@@ -513,5 +514,62 @@ describe("RoundProse markdown rendering (issue #746)", () => {
       expect(screen.queryByText("图表生成中…")).not.toBeInTheDocument();
       expect(view.container.querySelector(".viz-chart")).toBeInTheDocument();
     });
+  });
+});
+
+describe("RoundProse viz stage link (issue #1093)", () => {
+  // The fence body IS the stage identity: the handler receives the raw text
+  // and the mirror keys on it, so a same-body twin lights with the original.
+  const BODY = "{\"mark\": \"bar\"}";
+  const FENCE = "```vega-lite\n" + BODY + "\n```";
+
+  function renderLinked(ui: ReactElement) {
+    return render(
+      <IntlProvider locale="zh-CN" messages={catalogFor("zh-CN")}>
+        <TooltipProvider>{ui}</TooltipProvider>
+      </IntlProvider>,
+    );
+  }
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("wires the settled fence's chart-body click to the stage handler", async () => {
+    vi.mocked(embed).mockResolvedValue(embedOk());
+    const onSelectViz = vi.fn();
+    renderLinked(<RoundProse text={FENCE} onSelectViz={onSelectViz} />);
+    await waitFor(() => expect(embed).toHaveBeenCalledTimes(1));
+    fireEvent.click(screen.getByRole("button", { name: "在结果页查看图表" }));
+    expect(onSelectViz).toHaveBeenCalledTimes(1);
+    expect(onSelectViz).toHaveBeenCalledWith(BODY);
+  });
+
+  it("lights every fence sharing the staged body (same-spec identity)", async () => {
+    vi.mocked(embed).mockResolvedValue(embedOk());
+    renderLinked(
+      <RoundProse
+        text={FENCE + "\n\n" + FENCE}
+        onSelectViz={vi.fn()}
+        selectedVizSpec={BODY}
+      />,
+    );
+    await waitFor(() => expect(embed).toHaveBeenCalledTimes(2));
+    const mirrors = screen.getAllByRole("button", { name: "在结果页查看图表" });
+    expect(mirrors).toHaveLength(2);
+    for (const mirror of mirrors) {
+      expect(mirror).toHaveAttribute("aria-current", "true");
+    }
+  });
+
+  it("keeps the live placeholder static even when a handler is wired", () => {
+    // The live side never parses (ADR-0120 Decision 4), so there is no chart
+    // body to click -- the link exists for the settled side only.
+    vi.mocked(embed).mockResolvedValue(embedOk());
+    renderLinked(<RoundProse text={FENCE} isLive onSelectViz={vi.fn()} />);
+    expect(embed).not.toHaveBeenCalled();
+    expect(
+      screen.queryByRole("button", { name: "在结果页查看图表" }),
+    ).not.toBeInTheDocument();
   });
 });

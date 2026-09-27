@@ -5,12 +5,19 @@ import { TooltipProvider } from "../../ui/tooltip";
 import type { ReactElement } from "react";
 import { catalogFor } from "../../../i18n";
 import { cancelled, failed, sourceAdded } from "../../../session/__tests__/fixtures";
+import { embedOk } from "../../common/__tests__/helpers";
+import embed from "vega-embed";
 import { Thread } from "../Thread";
 import type { LiveRound, LiveRoundRow, LiveTurn } from "../../../session/useTurnFlow";
 import type { DatasetDescriptor } from "../../../types/dataset";
 import type { SkillEntry } from "../../../types/skills";
 import { skillEntry } from "../../../test-fixtures";
 import type { ThreadEntry, TurnRecord } from "../../../types/thread";
+
+// A fence chart may ride a turn prose body; jsdom cannot run vega-embed, so
+// the chart render is mocked -- the stage-link pin below is meaningful
+// (chart draws), not vacuous.
+vi.mock("vega-embed", () => ({ default: vi.fn() }));
 
 // A materialized-record fixture (reference_name overridden per test) -- the
 // only outcome that needs a full dataset payload. File-local per the suite
@@ -2882,5 +2889,26 @@ describe("Thread", () => {
       );
       expect(container.querySelector("details.error-details")).toBeNull();
     });
+  });
+
+  it("wires the in-stream fence to the stage handler and mirrors the staged body (issue #1093)", async () => {
+    vi.mocked(embed).mockResolvedValue(embedOk());
+    const BODY = JSON.stringify({ mark: "bar" });
+    const FENCE = "```vega-lite\n" + BODY + "\n```";
+    const onSelectViz = vi.fn();
+    renderThread(
+      <Thread
+        entries={[turnEntry(materializedRecord("result_1", null, FENCE))]}
+        selectedResult={null}
+        onSelectResult={() => {}}
+        onSelectViz={onSelectViz}
+        selectedVizSpec={BODY}
+      />,
+    );
+    await waitFor(() => expect(embed).toHaveBeenCalledTimes(1));
+    const host = screen.getByRole("button", { name: "在结果页查看图表" });
+    expect(host).toHaveAttribute("aria-current", "true");
+    fireEvent.click(host);
+    expect(onSelectViz).toHaveBeenCalledWith(BODY);
   });
 });

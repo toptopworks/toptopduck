@@ -34,6 +34,7 @@ import { Suspense, lazy } from "react";
 import { FormattedMessage } from "react-intl";
 import { Alert, AlertDescription } from "../ui/alert";
 import { ErrorBoundary } from "../common/ErrorBoundary";
+import type { Result } from "vega-embed";
 import type { TopLevelSpec } from "vega-lite";
 import type { DecodedVizSpec, VizFailureReason } from "./viz";
 
@@ -49,9 +50,13 @@ const LazyVegaChart = lazy(() =>
 export function VizChartSlot({
   spec,
   onError,
+  onView,
 }: {
   spec: DecodedVizSpec;
   onError: (reason: VizFailureReason) => void;
+  /** Issue #1093: the embedded view handle, handed through to the one
+   *  export-bearing frame; the plain door leaves it undefined. */
+  onView?: (view: Result["view"] | null) => void;
 }) {
   return (
     <ErrorBoundary
@@ -71,7 +76,11 @@ export function VizChartSlot({
         {/* The slot stays schema-light (DecodedVizSpec) to match the decode
          * payload; the always-vega-lite fact is asserted here, at the single
          * door. */}
-        <LazyVegaChart spec={spec as unknown as TopLevelSpec} onError={onError} />
+        <LazyVegaChart
+          spec={spec as unknown as TopLevelSpec}
+          onError={onError}
+          onView={onView}
+        />
       </Suspense>
     </ErrorBoundary>
   );

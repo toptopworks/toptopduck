@@ -47,6 +47,14 @@ interface ThreadProps {
    *  stage (the onSelectResult twin, keyed by the manifest entry's path).
    *  Optional: absent handlers keep the card read-only (honest degrade). */
   onSelectFile?: (path: string) => void;
+  /** Issue #1093: click an in-stream fence chart to promote its body onto
+   *  the workspace stage (the stream -> stage link). Optional: absent
+   *  handlers keep every fence static (the delegation dialog and the md
+   *  artifact renderer mount RoundProse bare, never through Thread). */
+  onSelectViz?: (spec: string) => void;
+  /** Issue #1093: the staged spec text -- the in-stream mirror lights every
+   *  fence whose body equals it (null = no chart is staged). */
+  selectedVizSpec?: string | null;
   /** Stale result_N anchors keyed by reference name (issue #40/#41,
    * ADR-0013): a Materialized turn whose result is now stale renders as a ghost
    * (CircleOff + reduced opacity) plus a clickable causal chip that jumps to
@@ -130,6 +138,8 @@ export function Thread({
   onSelectResult,
   selectedFile = null,
   onSelectFile,
+  onSelectViz,
+  selectedVizSpec,
   staleByReference = new Map(),
   datasetLabels = [],
   skillIndex,
@@ -378,6 +388,8 @@ export function Thread({
                   onSelectResult={onSelectResult}
                   selectedFile={selectedFile}
                   onSelectFile={onSelectFile}
+                  onSelectViz={onSelectViz}
+                  selectedVizSpec={selectedVizSpec}
                   staleAnchor={staleAnchor}
                   hasJumpTarget={jumpTargetIdx !== null}
                   onStaleChipJump={

@@ -5,8 +5,7 @@ import { useRowPage } from "../../session/useRowPage";
 import type { RowPage } from "../../types/dataset";
 import { decodeViz } from "../viz/viz";
 import { useVizChartGate } from "../viz/useVizChartGate";
-import { VizChartSlot } from "../viz/LazyVegaChart";
-import { VizEnlargeDialog } from "../viz/VizEnlargeDialog";
+import { VizExportFrame } from "../viz/VizExportFrame";
 import { formatVizFailure } from "../viz/viz-failure";
 import { cn } from "@/lib/utils";
 import { ErrorBanner } from "../common/ErrorBanner";
@@ -404,13 +403,10 @@ export function ResultView({
         stacked item). A null viz (plain table turn) renders neither.
       */}
       {showChart && decoded?.ok && (
-        // `relative` anchors the enlarge affordance to the chart's corner
-        // (#1050); the swap-in disclosure below carries no affordance, so a
-        // failed chart has nothing to enlarge.
-        <div className="relative">
-          <VizChartSlot spec={decoded.spec} onError={onError} />
-          <VizEnlargeDialog spec={decoded.spec} />
-        </div>
+        // The export-bearing frame (issue #1093): the chart plus its PNG/SVG
+        // pair; the swap-in disclosure below carries no affordance, so a
+        // failed chart has nothing to export.
+        <VizExportFrame spec={decoded.spec} onError={onError} />
       )}
       {degradedReason && (
         // ADR-0033: an emitted viz that failed to decode/render REPLACES the
