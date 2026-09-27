@@ -51,6 +51,14 @@ interface TurnCardProps {
   /** ADR-0124 (issue #1088): selects a manifest entry's file onto the
    *  stage. Optional: absent handlers render the card read-only. */
   onSelectFile?: (path: string) => void;
+  /** Issue #1093: promotes an in-stream fence chart's body onto the
+   *  workspace stage. Optional (the read-only precedent above): the
+   *  delegation dialog and the md artifact renderer never receive it, so
+   *  their fences stay static. */
+  onSelectViz?: (spec: string) => void;
+  /** Issue #1093: the staged spec text -- the in-stream selection mirror
+   *  (aria-current + ring) lights every fence whose body matches it. */
+  selectedVizSpec?: string | null;
   staleAnchor: StaleAnchor | undefined;
   /** Whether a matching source event follows this turn, i.e. the stale chip can
    * actually perform its jump (ADR-0047). False on the resume / stale-map
@@ -110,6 +118,8 @@ export function TurnCard({
   onSelectResult,
   selectedFile = null,
   onSelectFile,
+  onSelectViz,
+  selectedVizSpec,
   staleAnchor,
   hasJumpTarget,
   onStaleChipJump,
@@ -187,12 +197,20 @@ export function TurnCard({
         {record.trace.map((round, i) => (
           // The trace is append-only within a turn and never reordered, so the
           // index is a stable key (the same YAGNI call the thread makes).
-          <TraceRoundBlock key={i} round={round} thinkingInitiallyExpanded={thinkingInitiallyExpanded} />
+          <TraceRoundBlock
+            key={i}
+            round={round}
+            thinkingInitiallyExpanded={thinkingInitiallyExpanded}
+            onSelectViz={onSelectViz}
+            selectedVizSpec={selectedVizSpec}
+          />
         ))}
         <TurnBody
           record={record}
           selectedResult={selectedResult}
           onSelectResult={onSelectResult}
+          onSelectViz={onSelectViz}
+          selectedVizSpec={selectedVizSpec}
           staleAnchor={staleAnchor}
           hasJumpTarget={hasJumpTarget}
           onStaleChipJump={onStaleChipJump}
@@ -285,9 +303,13 @@ function OutcomeGlyph({ visual }: { visual: ReturnType<typeof outcomeVisual> }) 
 function TraceRoundBlock({
   round,
   thinkingInitiallyExpanded,
+  onSelectViz,
+  selectedVizSpec,
 }: {
   round: TraceRound;
   thinkingInitiallyExpanded: ReadonlySet<ThinkingTrace> | undefined;
+  onSelectViz?: (spec: string) => void;
+  selectedVizSpec?: string | null;
 }) {
   const [stepsExpanded, setStepsExpanded] = useState(false);
   // Destructured const so the aliased guard narrows the binding itself (a
@@ -309,7 +331,9 @@ function TraceRoundBlock({
           initialExpanded={thinkingInitiallyExpanded?.has(thinking) ?? false}
         />
       )}
-      {text !== undefined && <RoundProse text={text} />}
+      {text !== undefined && (
+        <RoundProse text={text} onSelectViz={onSelectViz} selectedVizSpec={selectedVizSpec} />
+      )}
       {hasCalls && (
         // The round's step fold: the call count reads "Trace · N calls" so a
         // rail scan shows which rounds made multiple calls without expanding.
@@ -367,6 +391,8 @@ interface TurnBodyProps {
   record: TurnRecord;
   selectedResult: string | null;
   onSelectResult: (referenceName: string) => void;
+  onSelectViz?: (spec: string) => void;
+  selectedVizSpec?: string | null;
   staleAnchor: StaleAnchor | undefined;
   hasJumpTarget: boolean;
   onStaleChipJump: (() => void) | undefined;
@@ -391,6 +417,8 @@ function TurnBody({
   record,
   selectedResult,
   onSelectResult,
+  onSelectViz,
+  selectedVizSpec,
   staleAnchor,
   hasJumpTarget,
   onStaleChipJump,
@@ -505,7 +533,9 @@ function TurnBody({
               and displayed as raw markdown. The prose sits between the result
               link row and the preview card, mirroring the Textual branch's
               caption-row -> prose -> note rhythm. */}
-          {body && <RoundProse text={body} />}
+          {body && (
+            <RoundProse text={body} onSelectViz={onSelectViz} selectedVizSpec={selectedVizSpec} />
+          )}
           <AssumptionNote assumption={assumption} />
           {/* ADR-0083 (issue #298): the primary result's inline preview card --
               the windowed sample (first rows, ADR-0026) for a rail-scan glance
@@ -572,7 +602,7 @@ function TurnBody({
             // instead of riding the conversation tier.
             <p className="textual-kind m-0 text-xs text-muted-foreground">{badge}</p>
           )}
-          <RoundProse text={body} />
+          <RoundProse text={body} onSelectViz={onSelectViz} selectedVizSpec={selectedVizSpec} />
           <AssumptionNote assumption={assumption} />
         </div>
       );

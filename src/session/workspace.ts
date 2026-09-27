@@ -15,17 +15,23 @@ import type { DatasetDescriptor, StaleAnchor } from "../types/dataset";
 import type { ThreadEntry, TurnArtifact, VizSpec } from "../types/thread";
 
 /** The user's workspace view selection (ADR-0051, generalized by ADR-0124
- * Decision 3): a thin reference to what the result pane is showing -- either
- * a Materialized result (dataset) or a delivered artifact (file). The two
- * are mutually exclusive on the single stage; the last selection wins. A
- * dataset view is NEVER the active dataset (which is server truth) --
- * clicking a past result moves ONLY this, never the backend active pointer.
- * A file view names the manifest entry by its absolute path (settle-frozen,
- * never rewritten), so the display facts (file name) re-derive from the
- * thread like the dataset payload does. */
+ * Decision 3; the viz face is issue #1093): a thin reference to what the
+ * result pane is showing -- a Materialized result (dataset), a delivered
+ * artifact (file), or an in-stream fence chart (viz). The three are mutually
+ * exclusive on the single stage; the last selection wins. A dataset view is
+ * NEVER the active dataset (which is server truth) -- clicking a past result
+ * moves ONLY this, never the backend active pointer. A file view names the
+ * manifest entry by its absolute path (settle-frozen, never rewritten), so
+ * the display facts (file name) re-derive from the thread like the dataset
+ * payload does. A viz view carries the fence's raw body text: the spec is
+ * self-contained (ADR-0120), so the reference needs no resolution -- and
+ * because the text rides the turn prose (thread truth), the view is pure
+ * runtime state that never persists; a reopened session lands on
+ * dataset/hero per R5, never a viz. */
 export type ViewedResult =
   | { kind: "dataset"; referenceName: string }
-  | { kind: "file"; path: string };
+  | { kind: "file"; path: string }
+  | { kind: "viz"; spec: string };
 
 /** The payload a viewed Materialized result renders with (ADR-0051: derived
  * from the thread, not held as a fat snapshot). null when no turn in the thread
@@ -219,6 +225,12 @@ export type WorkspaceContent =
     /** The render matrix branch for this path (Decision 4). */
     render: ArtifactRenderKind;
   }
+  | {
+    kind: "viz";
+    /** The fence's raw body text (issue #1093) -- the view's identity and
+     *  the chart's whole input (decoded by the stage view like a fence). */
+    spec: string;
+  }
   | { kind: "hero" };
 
 /** Derive what the workspace shows right now (ADR-0062 R2, ADR-0114). Pure in
@@ -231,6 +243,13 @@ export function deriveWorkspaceContent(
   staleByReference: ReadonlyMap<string, StaleAnchor>,
 ): WorkspaceContent {
   if (viewedResult) {
+    if (viewedResult.kind === "viz") {
+      // Issue #1093: the fence chart's own stage branch. The spec body is
+      // self-contained (ADR-0120), so the view resolves unconditionally --
+      // there is no thread lookup that could miss, and no payload facts
+      // (assumption / question / stale anchor) exist for a fence chart.
+      return { kind: "viz", spec: viewedResult.spec };
+    }
     if (viewedResult.kind === "file") {
       const artifact = findArtifact(thread, viewedResult.path);
       if (artifact) {

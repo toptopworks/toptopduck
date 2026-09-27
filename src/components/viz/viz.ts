@@ -123,3 +123,29 @@ function readMark(spec: DecodedVizSpec): string | null {
   }
   return null;
 }
+
+/** Filesystem-hostile characters for an export file stem (issue #1093):
+*  Windows-reserved punctuation plus control chars. Each hit becomes one
+*  space, so a title like "a/b: c" stays readable instead of collapsing. */
+// no-control-regex is the point here: the sanitizer's job is to kill the
+// control characters an LLM title may carry, so the range is deliberate.
+// eslint-disable-next-line no-control-regex
+const EXPORT_NAME_HOSTILE = /[<>:"/\\|?*\u0000-\u001f]/g;
+
+// A stem past this length is truncated: titles are LLM output and unbounded,
+// while file names live inside path budgets (the WebView2 download lane).
+const EXPORT_NAME_MAX = 80;
+
+/** The export file stem (issue #1093): the spec's `title`, sanitized to a
+*  filesystem-safe stem; a missing or blank title falls back to the catalog
+*  word the caller supplies. One rule for every chart that exports. */
+export function vizExportName(spec: DecodedVizSpec, fallback: string): string {
+  const raw = typeof spec.title === "string" ? spec.title : "";
+  const cleaned = raw
+    .replace(EXPORT_NAME_HOSTILE, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, EXPORT_NAME_MAX)
+    .trim();
+  return cleaned !== "" ? cleaned : fallback;
+}

@@ -29,7 +29,7 @@
 // language -- and a language-less fence -- stays a plain code block
 // (Decision 6: no guessing).
 
-import { memo, useState, type MouseEvent, type ReactNode } from "react";
+import { memo, useContext, useMemo, useState, type MouseEvent, type ReactNode } from "react";
 import Markdown from "react-markdown";
 import type { Components, ExtraProps, Options } from "react-markdown";
 import remarkBreaks from "remark-breaks";
@@ -38,6 +38,7 @@ import { openUrl } from "@tauri-apps/plugin-opener";
 import { useIntl } from "react-intl";
 import { log } from "../../lib/log";
 import { VizFence, VizFencePending } from "../viz/VizFence";
+import { VizStageLinkContext, type VizStageLink } from "../viz/viz-stage-link";
 import { CopyButton } from "./CopyButton";
 import { CODE_BLOCK_REVEAL_CLASS } from "./turn-visual";
 
@@ -170,8 +171,21 @@ function ProseLink({ href, children }: { href?: string; children?: ReactNode }) 
 // language stays the plain code block. The two doors differ in the vega-lite
 // arm only -- the code-block fallback is the same call on both sides.
 function SettledPre({ node }: { node?: HastElement }) {
+  // The stage link rides context, not a prop: the components map is a
+  // module-level constant (the streaming contract above), so the door cannot
+  // close over per-render values. Identity = the raw body text, so twin
+  // fences sharing a body light together (issue #1093).
+  const link = useContext(VizStageLinkContext);
+  // The mdast-to-hast conversion appends one trailing newline to the code
+  // text (the CodeBlock copy payload drops it the same way); the stage
+  // identity and the decode input are the clean body.
+  const body = hastTextContent(node).replace(/\n$/, "");
   return codeLanguage(node) === VEGA_LITE_FENCE ? (
-    <VizFence spec={hastTextContent(node)} />
+    <VizFence
+      spec={body}
+      onSelectViz={link?.onSelectViz}
+      selected={link !== null && link.selectedVizSpec === body}
+    />
   ) : (
     <CodeBlock node={node} />
   );
@@ -275,6 +289,8 @@ const LIVE_MARKDOWN_COMPONENTS: Components = {
 export const RoundProse = memo(function RoundProse({
   text,
   isLive = false,
+  onSelectViz,
+  selectedVizSpec,
 }: {
   text: string;
   /** True while the round streams (the live exchange, issue #610): a
@@ -282,24 +298,44 @@ export const RoundProse = memo(function RoundProse({
    * Decision 4). Settled consumers -- the round block, the textual outcome,
    * the delegation trace -- leave it false so a fence renders as a chart. */
   isLive?: boolean;
+  /** Issue #1093: promotes a settled fence's body onto the workspace stage.
+   *  Optional (the ArtifactCard read-only precedent): only the TurnCard
+   *  stream wires it -- the delegation dialog and the md artifact renderer
+   *  mount RoundProse bare, so their fences stay static. */
+  onSelectViz?: (spec: string) => void;
+  /** Issue #1093: the staged spec text, for the in-stream selection mirror.
+   *  null (or an absent handler) = no fence is lit. */
+  selectedVizSpec?: string | null;
 }) {
+  // Stable link value: an absent handler is null (static surface); a wired
+  // one mints the link once per handler/selection change, so the provider's
+  // consumers re-render only when the mirror actually moves.
+  const link = useMemo<VizStageLink | null>(
+    () =>
+      onSelectViz === undefined
+        ? null
+        : { onSelectViz, selectedVizSpec: selectedVizSpec ?? null },
+    [onSelectViz, selectedVizSpec],
+  );
   return (
-    // round-text is a cross-module stability hook: this suite's own pins plus
-    // TurnCard/Thread's composition selectors (`.turn-outcome.textual
-    // .round-text`) query through it.
-    // max-w-full: on the #847 materialized face the root hangs off the
-    // stream (flex-col items-start) as a non-stretched flex item, so its
-    // min-content (a wide markdown table) stretches the whole item past
-    // the card and the rail's overflow-x crops it -- the #826 trace-round
-    // cap's prose twin (issue #860); the other consumers sit inside
-    // already-capped containers (.trace-round, .turn-outcome.textual).
-    <div className="round-text m-0 mt-0.5 max-w-full space-y-4 text-sm leading-[1.75] text-foreground break-words">
-      <Markdown
-        remarkPlugins={REMARK_PLUGINS}
-        components={isLive ? LIVE_MARKDOWN_COMPONENTS : SETTLED_MARKDOWN_COMPONENTS}
-      >
-        {text}
-      </Markdown>
-    </div>
+    <VizStageLinkContext.Provider value={link}>
+      {/* round-text is a cross-module stability hook: this suite's own pins
+          plus TurnCard/Thread's composition selectors
+          (`.turn-outcome.textual .round-text`) query through it.
+          max-w-full: on the #847 materialized face the root hangs off the
+          stream (flex-col items-start) as a non-stretched flex item, so its
+          min-content (a wide markdown table) stretches the whole item past
+          the card and the rail's overflow-x crops it -- the #826 trace-round
+          cap's prose twin (issue #860); the other consumers sit inside
+          already-capped containers (.trace-round, .turn-outcome.textual). */}
+      <div className="round-text m-0 mt-0.5 max-w-full space-y-4 text-sm leading-[1.75] text-foreground break-words">
+        <Markdown
+          remarkPlugins={REMARK_PLUGINS}
+          components={isLive ? LIVE_MARKDOWN_COMPONENTS : SETTLED_MARKDOWN_COMPONENTS}
+        >
+          {text}
+        </Markdown>
+      </div>
+    </VizStageLinkContext.Provider>
   );
 });

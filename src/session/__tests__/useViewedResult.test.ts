@@ -10,11 +10,15 @@ import type { ThreadEntry } from "../../types/thread";
 // selection only moves viewedResult) -- in isolation from react-query /
 // intl (the hook takes the thread as a plain argument).
 
-// The dataset face of the (dataset | file) union (ADR-0124): a local
-// narrowing read so the assertions below say "which dataset" without
+// The dataset face of the (dataset | file | viz) union (ADR-0124, #1093): a
+// local narrowing read so the assertions below say "which dataset" without
 // repeating the discriminated-union ternary six times.
 function datasetRefOf(
-  vr: { kind: "dataset"; referenceName: string } | { kind: "file"; path: string } | null,
+  vr:
+    | { kind: "dataset"; referenceName: string }
+    | { kind: "file"; path: string }
+    | { kind: "viz"; spec: string }
+    | null,
 ): string | null {
   return vr?.kind === "dataset" ? vr.referenceName : null;
 }
@@ -96,6 +100,47 @@ describe("useViewedResult", () => {
     it("clearForNewSource clears a file view like a dataset one", () => {
       const { result } = renderHook(() => useViewedResult([]));
       act(() => result.current.selectFile("/tmp/artifacts/report.pdf"));
+      act(() => result.current.clearForNewSource());
+      expect(result.current.viewedResult).toBeNull();
+    });
+  });
+
+  describe("selectViz (issue #1093: the fence chart's face of the same stage)", () => {
+    it("moves viewedResult onto the clicked fence's spec text", () => {
+      const { result } = renderHook(() => useViewedResult([]));
+      act(() => result.current.selectViz("{\"mark\":\"bar\"}"));
+      expect(result.current.viewedResult).toEqual({
+        kind: "viz",
+        spec: "{\"mark\":\"bar\"}",
+      });
+    });
+
+    it("a later dataset / viz selection displaces it either way (single stage, last wins)", () => {
+      const { result } = renderHook(() => useViewedResult([materialized("result_1")]));
+      act(() => result.current.selectResult("result_1"));
+      act(() => result.current.selectViz("{\"mark\":\"bar\"}"));
+      expect(result.current.viewedResult?.kind).toBe("viz");
+      // The rail click's twin move: a dataset selection takes the stage back.
+      act(() => result.current.selectResult("result_1"));
+      expect(result.current.viewedResult).toEqual({
+        kind: "dataset",
+        referenceName: "result_1",
+      });
+    });
+
+    it("markProduced displaces a viz view like any other view (zero new rules)", () => {
+      const { result } = renderHook(() => useViewedResult([]));
+      act(() => result.current.selectViz("{\"mark\":\"bar\"}"));
+      act(() => result.current.markProduced("result_2"));
+      expect(result.current.viewedResult).toEqual({
+        kind: "dataset",
+        referenceName: "result_2",
+      });
+    });
+
+    it("clearForNewSource clears a viz view like every other face", () => {
+      const { result } = renderHook(() => useViewedResult([]));
+      act(() => result.current.selectViz("{\"mark\":\"bar\"}"));
       act(() => result.current.clearForNewSource());
       expect(result.current.viewedResult).toBeNull();
     });

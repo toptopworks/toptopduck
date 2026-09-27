@@ -25,6 +25,7 @@ import { WorkspaceWorkingSet } from "../components/dataset/WorkspaceWorkingSet";
 import { cn } from "@/lib/utils";
 import type { ThreadEntry } from "../types/thread";
 import type { WorkspaceContent } from "./workspace";
+import { VizStageView } from "../components/viz/VizStageView";
 import { sessionKeys } from "./queryKeys";
 import { useSkillsRegistry } from "../skills/registry";
 
@@ -396,6 +397,9 @@ export function SessionPane({ sessionId, isActive, pendingIngestPaths, onIngestC
   const viewedReference =
     s.viewedResult?.kind === "dataset" ? s.viewedResult.referenceName : null;
   const viewedFile = s.viewedResult?.kind === "file" ? s.viewedResult.path : null;
+  // Issue #1093: the stage's third face -- the staged fence body, the
+  // in-stream mirror's key. Exactly one of the three is non-null at a time.
+  const viewedVizSpec = s.viewedResult?.kind === "viz" ? s.viewedResult.spec : null;
   // Non-stale dataset labels for the rail's conditional active chip (ADR-0047):
   // a turn's question lights up a chip only when it explicitly names a dataset.
   // Stale datasets are excluded -- they cannot be the target of a new question.
@@ -550,6 +554,8 @@ export function SessionPane({ sessionId, isActive, pendingIngestPaths, onIngestC
                   onSelectResult={s.handleSelectResult}
                   selectedFile={viewedFile}
                   onSelectFile={s.handleSelectFile}
+                  onSelectViz={s.handleSelectViz}
+                  selectedVizSpec={viewedVizSpec}
                   staleByReference={s.staleByReference}
                   datasetLabels={datasetLabels}
                   skillIndex={skillIndex}
@@ -889,6 +895,12 @@ function WorkspaceResult({
           duckPath={duckPath}
         />
       );
+    case "viz":
+      // Issue #1093: the fence chart's own stage branch. The chart is the
+      // whole view (no stale/question/assumption facts exist for a fence --
+      // none are fabricated); the pane's scroll owns the height, and the
+      // export pair rides the frame.
+      return <VizStageView spec={content.spec} />;
     default: {
       const unhandled: never = content;
       throw new Error(`unhandled workspace content: ${JSON.stringify(unhandled)}`);

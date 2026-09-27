@@ -131,9 +131,14 @@ interface VegaChartProps {
    * failure (ADR-0052 i18n closeout, issue #138). Stable identity keeps the
    * embed effect from re-running; a useState setter is naturally stable. */
   onError: (reason: VizFailureReason) => void;
+  /** Issue #1093: hands the embedded Vega view out (and null once it is
+   *  finalized) so an export affordance can serialize the SAME render the
+   *  user sees -- never a second embed. Stable identity is not required
+   *  (read through a ref, like onError). */
+  onView?: (view: Result["view"] | null) => void;
 }
 
-export function VegaChart({ spec, onError }: VegaChartProps) {
+export function VegaChart({ spec, onError, onView }: VegaChartProps) {
   const intl = useIntl();
   const containerRef = useRef<HTMLDivElement>(null);
   // The most recent embed result; finalized on re-embed / unmount / theme swap.
@@ -148,9 +153,11 @@ export function VegaChart({ spec, onError }: VegaChartProps) {
   // during render) so the ref-update does not trip the react-hooks rule.
   const specRef = useRef(spec);
   const onErrorRef = useRef(onError);
+  const onViewRef = useRef(onView);
   useEffect(() => {
     specRef.current = spec;
     onErrorRef.current = onError;
+    onViewRef.current = onView;
   });
 
   // Embed (or re-embed) the spec, deriving the config from the live tokens.
@@ -167,10 +174,12 @@ export function VegaChart({ spec, onError }: VegaChartProps) {
       .then((result) => {
         if (cancelled) {
           result.finalize();
+          onViewRef.current?.(null);
           return;
         }
         viewRef.current?.finalize();
         viewRef.current = result;
+        onViewRef.current?.(result.view);
       })
       .catch((err: unknown) => {
         // Log the full error for diagnostics (ADR-0029): the disclosure only
@@ -190,6 +199,7 @@ export function VegaChart({ spec, onError }: VegaChartProps) {
       cancelled = true;
       viewRef.current?.finalize();
       viewRef.current = null;
+      onViewRef.current?.(null);
     };
   }, [spec]);
 
@@ -213,10 +223,12 @@ export function VegaChart({ spec, onError }: VegaChartProps) {
         .then((result) => {
           if (unmounted) {
             result.finalize();
+            onViewRef.current?.(null);
             return;
           }
           viewRef.current?.finalize();
           viewRef.current = result;
+          onViewRef.current?.(result.view);
         })
         .catch((err: unknown) => {
           // Same ordering as the spec effect's catch (#1054): the diagnostic

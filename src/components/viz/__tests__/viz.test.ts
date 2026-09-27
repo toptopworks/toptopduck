@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { decodeViz, decodeVizSpec } from "../viz";
+import { decodeViz, decodeVizSpec, vizExportName } from "../viz";
 import type { ChartKind, VizSpec } from "../../../types/thread";
 
 // Build a VizSpec with a given spec JSON string; the kind is decorative for
@@ -138,5 +138,28 @@ describe("decodeVizSpec (the fence entry, ADR-0120)", () => {
     // same JSON resolve the same way.
     const spec = JSON.stringify({ mark: { type: "line" } });
     expect(decodeVizSpec(spec)).toEqual(decodeViz(viz("line", spec)));
+  });
+});
+
+describe("vizExportName (issue #1093: the one export naming rule)", () => {
+  it("uses the spec title verbatim when it is filesystem-safe", () => {
+    expect(vizExportName({ title: "Revenue by quarter" }, "chart")).toBe(
+      "Revenue by quarter",
+    );
+  });
+
+  it("replaces filesystem-hostile characters with spaces (not deletion)", () => {
+    expect(vizExportName({ title: "a/b: c*d" }, "chart")).toBe("a b c d");
+  });
+
+  it("falls back to the catalog word on a missing / blank title", () => {
+    expect(vizExportName({}, "chart")).toBe("chart");
+    expect(vizExportName({ title: "   " }, "chart")).toBe("chart");
+    expect(vizExportName({ title: "///" }, "chart")).toBe("chart");
+  });
+
+  it("caps an unbounded LLM title at the stem budget", () => {
+    const long = "x".repeat(200);
+    expect(vizExportName({ title: long }, "chart")).toHaveLength(80);
   });
 });

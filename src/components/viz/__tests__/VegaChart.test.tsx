@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { waitFor } from "@testing-library/react";
-import { renderI18n, withIntl } from "../../common/__tests__/helpers";
+import { embedOk, renderI18n, withIntl } from "../../common/__tests__/helpers";
 import { VegaChart } from "../VegaChart";
 import embed from "vega-embed";
 import type { TopLevelSpec } from "vega-lite";
@@ -241,5 +241,44 @@ describe("VegaChart (ADR-0016/0033/0050)", () => {
       expect(view.signal).not.toHaveBeenCalledWith("width", 0);
       expect(view.signal).not.toHaveBeenCalled();
     });
+  });
+});
+
+describe("VegaChart onView (issue #1093: the export's view handle)", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("hands the embedded view to onView once the embed resolves", async () => {
+    const result = embedOk();
+    vi.mocked(embed).mockResolvedValue(result);
+    const onView = vi.fn();
+    renderI18n(
+      <VegaChart
+        spec={{ mark: "bar", data: { values: [{ a: 1 }] } } as TopLevelSpec}
+        onError={vi.fn()}
+        onView={onView}
+      />,
+    );
+    await waitFor(() =>
+      expect(onView).toHaveBeenCalledWith(
+        (result as unknown as { view: unknown }).view,
+      ),
+    );
+  });
+
+  it("clears onView on unmount (no export through a dead view)", async () => {
+    vi.mocked(embed).mockResolvedValue(embedOk());
+    const onView = vi.fn();
+    const { unmount } = renderI18n(
+      <VegaChart
+        spec={{ mark: "bar", data: { values: [{ a: 1 }] } } as TopLevelSpec}
+        onError={vi.fn()}
+        onView={onView}
+      />,
+    );
+    await waitFor(() => expect(onView).toHaveBeenCalledTimes(1));
+    unmount();
+    await waitFor(() => expect(onView).toHaveBeenLastCalledWith(null));
   });
 });

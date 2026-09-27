@@ -136,6 +136,10 @@ export interface UseSessionState {
    *  moves viewedResult onto the file view and opens the workspace (the
    *  handleSelectResult twin, keyed by the manifest entry's path). */
   handleSelectFile: (path: string) => void;
+  /** Issue #1093: an in-stream fence chart click -- moves viewedResult onto
+   *  the viz view and opens the workspace (the handleSelectFile twin, keyed
+   *  by the fence's raw spec text). */
+  handleSelectViz: (spec: string) => void;
   /** Issue #757: the history indicator's "back to latest" exit -- moves
    *  viewedResult to the latest Materialized turn's primary (hero fallback
    *  when the thread materialized none). The exit only renders while a result
@@ -223,6 +227,7 @@ export function useSessionState(
     viewedResult,
     selectResult,
     selectFile,
+    selectViz,
     markProduced,
     clearForNewSource,
     suppressInit,
@@ -416,6 +421,19 @@ export function useSessionState(
     [selectFile, expandWorkspace],
   );
 
+  // The viz twin (issue #1093): an in-stream fence click moves the view onto
+  // the chart AND surfaces its panel half -- the same move-and-open
+  // composition. The spec text is self-contained, so the selection always
+  // resolves; the panel exits ride the shared displacements (rail click /
+  // markProduced / artifact auto-open), never a dedicated rule.
+  const handleSelectViz = useCallback(
+    (spec: string) => {
+      selectViz(spec);
+      expandWorkspace();
+    },
+    [selectViz, expandWorkspace],
+  );
+
   const clearError = useCallback(() => setError(null), []);
 
   // ADR-0123: the bundle the working-set tab's seam consumes as its
@@ -451,6 +469,7 @@ export function useSessionState(
     fetchGuidanceWindow,
     handleSelectResult,
     handleSelectFile,
+    handleSelectViz,
     handleJumpToLatest: jumpToLatest,
     handleToggleWorkspace: toggleWorkspace,
     clearError,

@@ -292,6 +292,15 @@ export async function exportRowsCsv(
   return invoke<void>("export_rows_csv", { sessionId, referenceName, path, confirmed });
 }
 
+// Write one export payload (the chart PNG / SVG, issue #1093) to the path the
+// native save dialog returned. Same contract as exportRowsCsv: the picker runs
+// before this call, so a cancel never reaches the backend. Bytes ride IPC as a
+// JSON number array (invoke's default body) -- chart payloads are tens of KB,
+// far under any frame concern.
+export async function writeExportFile(path: string, bytes: Uint8Array): Promise<void> {
+  await invoke<void>("write_export_file", { path, bytes: Array.from(bytes) });
+}
+
 // --- LLM provider key + config (issue #29, ADR-0007/0019/0029) -------------
 //
 // Session-AGNOSTIC (ADR-0056): no sessionId. The API key crosses IPC exactly

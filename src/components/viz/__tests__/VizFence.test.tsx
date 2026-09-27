@@ -157,44 +157,65 @@ describe("VizFence (ADR-0120)", () => {
       width: "container",
     });
   });
+});
 
-  it("mounts the enlarge affordance on the rendered chart (#1050)", async () => {
-    vi.mocked(embed).mockResolvedValue(embedOk());
-    const body = { mark: "bar", data: { values: [{ a: 1 }] } };
-    const { container } = renderI18n(<VizFence spec={JSON.stringify(body)} />);
-    await waitFor(() => expect(embed).toHaveBeenCalledTimes(1));
-    // The hover reveal keys on the adjacent-sibling selector: the trigger
-    // must sit right after the .viz-chart host inside the mount wrapper, or
-    // mouse reveal dies silently (computed opacity is invisible to jsdom).
-    expect(
-      screen.getByRole("button", { name: "放大查看图表" }).previousElementSibling,
-    ).toBe(container.querySelector(".viz-chart"));
-    // Opening the overlay re-embeds the same decoded spec -- one decode, two
-    // embeds, the shared chart slot and no new render path.
-    fireEvent.click(screen.getByRole("button", { name: "放大查看图表" }));
-    await waitFor(() => expect(embed).toHaveBeenCalledTimes(2));
-    expect(vi.mocked(embed).mock.calls[1]?.[1]).toEqual({
-      ...body,
-      width: "container",
-    });
+describe("VizFence stage link (issue #1093: the fence chart on the workspace stage)", () => {
+  const BODY = JSON.stringify({ mark: "bar", data: { values: [{ a: 1 }] } });
+
+  beforeEach(() => {
+    vi.clearAllMocks();
   });
 
-  it("keeps the enlarge affordance off the degraded disclosure (#1050)", async () => {
-    // Decode-failure arm: the disclosure replaces the chart entirely.
-    renderI18n(<VizFence spec="{ not json" />);
-    expect(screen.getByText(/图表无法渲染/)).toBeInTheDocument();
-    expect(
-      screen.queryByRole("button", { name: "放大查看图表" }),
-    ).not.toBeInTheDocument();
-    // Render-failure arm: the swap-in disclosure likewise carries no
-    // affordance -- a failed chart has nothing to enlarge.
-    vi.mocked(embed).mockRejectedValue(new Error("vega boom"));
-    renderI18n(<VizFence spec={JSON.stringify({ mark: "bar" })} />);
-    await waitFor(() =>
-      expect(screen.getByText(/图表无法渲染/)).toBeInTheDocument(),
+  it("promotes the fence body onto the stage on a chart-body click", async () => {
+    vi.mocked(embed).mockResolvedValue(embedOk());
+    const onSelectViz = vi.fn();
+    renderI18n(<VizFence spec={BODY} onSelectViz={onSelectViz} />);
+    await waitFor(() => expect(embed).toHaveBeenCalledTimes(1));
+    // The click carries the RAW body text -- the stage view's identity is the
+    // fence's own spec, not the decoded object.
+    fireEvent.click(screen.getByRole("button", { name: "在结果页查看图表" }));
+    expect(onSelectViz).toHaveBeenCalledTimes(1);
+    expect(onSelectViz).toHaveBeenCalledWith(BODY);
+  });
+
+  it("carries the keyboard path (Enter and Space)", async () => {
+    vi.mocked(embed).mockResolvedValue(embedOk());
+    const onSelectViz = vi.fn();
+    renderI18n(<VizFence spec={BODY} onSelectViz={onSelectViz} />);
+    await waitFor(() => expect(embed).toHaveBeenCalledTimes(1));
+    const host = screen.getByRole("button", { name: "在结果页查看图表" });
+    fireEvent.keyDown(host, { key: "Enter" });
+    expect(onSelectViz).toHaveBeenCalledTimes(1);
+    fireEvent.keyDown(host, { key: " " });
+    expect(onSelectViz).toHaveBeenCalledTimes(2);
+  });
+
+  it("mirrors the staged selection with aria-current", async () => {
+    vi.mocked(embed).mockResolvedValue(embedOk());
+    const { rerender } = renderI18n(
+      withIntl(<VizFence spec={BODY} onSelectViz={vi.fn()} selected />),
     );
+    await waitFor(() => expect(embed).toHaveBeenCalledTimes(1));
     expect(
-      screen.queryByRole("button", { name: "放大查看图表" }),
+      screen.getByRole("button", { name: "在结果页查看图表" }),
+    ).toHaveAttribute("aria-current", "true");
+    rerender(withIntl(<VizFence spec={BODY} onSelectViz={vi.fn()} />));
+    expect(
+      screen.getByRole("button", { name: "在结果页查看图表" }),
+    ).not.toHaveAttribute("aria-current");
+  });
+
+  it("renders the chart inert when no stage handler is wired (the static pin)", async () => {
+    // The optional-prop default (the ArtifactCard precedent): the delegation
+    // dialog and the md artifact renderer mount VizFence bare -- their charts
+    // are static content, so no click affordance may exist.
+    vi.mocked(embed).mockResolvedValue(embedOk());
+    const { container } = renderI18n(<VizFence spec={BODY} />);
+    await waitFor(() => expect(embed).toHaveBeenCalledTimes(1));
+    // The chart itself still draws (static content, not a degrade).
+    expect(container.querySelector(".viz-chart")).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "在结果页查看图表" }),
     ).not.toBeInTheDocument();
   });
 });

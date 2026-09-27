@@ -25,6 +25,11 @@ export interface UseViewedResult {
    *  selectResult (single stage, last selection wins), keyed by the
    *  manifest entry's absolute path. */
   selectFile: (path: string) => void;
+  /** Issue #1093: an in-stream fence chart click -- moves ONLY viewedResult
+   *  to the viz view (the same single-stage move as selectResult /
+   *  selectFile), keyed by the fence's raw spec text. Pure runtime state:
+   *  never persisted, never the R5 resume landing. */
+  selectViz: (spec: string) => void;
   /** Turn Materialized auto-selects: the view follows the produced result
    *  (ADR-0062 R2 "new-turn produce -> selected"). */
   markProduced: (referenceName: string) => void;
@@ -76,6 +81,13 @@ export function useViewedResult(thread: ThreadEntry[]): UseViewedResult {
     setViewedResult({ kind: "file", path });
   }, []);
 
+  // Issue #1093: the fence-chart twin of the two selectors above. The spec
+  // text IS the reference (self-contained per ADR-0120), so the move is one
+  // setter -- the derivation resolves nothing.
+  const selectViz = useCallback((spec: string) => {
+    setViewedResult({ kind: "viz", spec });
+  }, []);
+
   // Turn Materialized auto-selects (ADR-0062 R2 "new-turn produce ->
   // selected"): the just-produced result becomes the viewed result, so a prior
   // history view never outlives a new turn.
@@ -111,6 +123,7 @@ export function useViewedResult(thread: ThreadEntry[]): UseViewedResult {
     viewedResult,
     selectResult,
     selectFile,
+    selectViz,
     markProduced,
     clearForNewSource,
     suppressInit,

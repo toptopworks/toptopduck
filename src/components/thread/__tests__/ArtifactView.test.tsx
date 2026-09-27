@@ -10,6 +10,7 @@ import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { IntlProvider } from "react-intl";
 import { openPath } from "@tauri-apps/plugin-opener";
+import embed from "vega-embed";
 import { catalogFor } from "../../../i18n";
 import { artifactExists, readArtifactText } from "../../../api";
 import { ArtifactView } from "../ArtifactView";
@@ -26,6 +27,12 @@ vi.mock("@tauri-apps/plugin-opener", () => ({
 // stand-in keeps the src assertion observable.
 vi.mock("@tauri-apps/api/core", () => ({
   convertFileSrc: (p: string) => "asset://mock/" + p,
+}));
+// A fence chart may ride an md artifact's prose; jsdom cannot run
+// vega-embed, so its render is mocked -- the static pin below is then
+// meaningful (chart draws, affordance absent), not vacuous.
+vi.mock("vega-embed", () => ({
+  default: vi.fn().mockResolvedValue({ finalize: vi.fn(), view: { resize: vi.fn() } }),
 }));
 
 const DUCK = "C:/sessions/s1/session.duck";
@@ -91,6 +98,20 @@ describe("ArtifactView", () => {
       vi.mocked(artifactExists).mockResolvedValue(true);
       renderView("C:/sessions/s1/artifacts/huge.md", "markdown");
       expect(await screen.findByTestId("artifact-card")).toBeInTheDocument();
+    });
+
+    it("keeps a vega-lite fence in an md artifact static (issue #1093 pin)", async () => {
+      // MarkdownArtifact mounts RoundProse bare -- never through Thread's
+      // stage link -- so a delivered report's fences are static content even
+      // while the chart itself draws.
+      vi.mocked(readArtifactText).mockResolvedValue(
+        "# Report\n\n```vega-lite\n{\"mark\": \"bar\"}\n```",
+      );
+      renderView("C:/sessions/s1/artifacts/report.md", "markdown");
+      await waitFor(() => expect(vi.mocked(embed)).toHaveBeenCalledTimes(1));
+      expect(
+        screen.queryByRole("button", { name: "在结果页查看图表" }),
+      ).not.toBeInTheDocument();
     });
   });
 
