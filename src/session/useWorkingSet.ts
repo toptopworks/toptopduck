@@ -308,7 +308,7 @@ export function useWorkingSet(
             message: intl.formatMessage({
               id: "error.flow.replaceNeedsGuidanceUnsupported",
               defaultMessage:
-                "Replace source does not support files needing rectify guidance; use a structured file instead",
+                "Replace source doesn't support files that need header guidance; use a regular spreadsheet file (e.g. .csv / .xlsx) instead",
             }),
             kind: "replace",
             detail: null,

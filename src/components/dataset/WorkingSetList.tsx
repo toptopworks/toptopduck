@@ -459,7 +459,7 @@ function WorkingSetDeleteDialog({
           <AlertDialogDescription>
             <FormattedMessage
               id="workingSet.delete.description"
-              defaultMessage="The source file is removed and its reference name is dropped from the shared namespace — any SQL reading from it will fail. This cannot be undone; the file must be re-uploaded to restore the source."
+              defaultMessage="The dataset is removed and its name is released — any SQL reading from it will fail. This cannot be undone; the file must be re-uploaded to restore it."
             />
           </AlertDialogDescription>
         </AlertDialogHeader>

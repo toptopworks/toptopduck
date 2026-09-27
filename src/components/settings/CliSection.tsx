@@ -288,7 +288,7 @@ export function CliSection({
           <div className="text-muted-foreground px-4 py-8 text-center text-sm">
             <FormattedMessage
               id="settings.cli.empty"
-              defaultMessage="No CLI tools registered yet. Click New to register one."
+              defaultMessage="No CLI tools yet. Click New to add one."
             />
           </div>
         ) : (

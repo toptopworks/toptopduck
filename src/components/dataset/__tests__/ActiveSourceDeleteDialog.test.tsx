@@ -61,7 +61,7 @@ describe("ActiveSourceDeleteDialog (issue #39)", () => {
       />,
     );
     // The target is named in the dialog title.
-    expect(screen.getByText(/删除焦点源「orders」/)).toBeInTheDocument();
+    expect(screen.getByText(/删除当前数据集「orders」/)).toBeInTheDocument();
     // AC5: full remaining set renders; the first is checked by default.
     expect(screen.getByRole("radio", { name: "people" })).toBeChecked();
     expect(screen.getByRole("radio", { name: "items" })).not.toBeChecked();

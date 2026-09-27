@@ -61,14 +61,14 @@ export function ActiveSourceDeleteDialog({
           <AlertDialogTitle>
             <FormattedMessage
               id="activeSourceDelete.title"
-              defaultMessage="Remove focus source {name}"
+              defaultMessage="Remove the current dataset {name}"
               values={{ name: target.display_name }}
             />
           </AlertDialogTitle>
           <AlertDialogDescription>
             <FormattedMessage
               id="activeSourceDelete.description"
-              defaultMessage="This source is the current focus table. After removing it, pick one of the remaining sources to continue (or cancel — the working set stays unchanged)."
+              defaultMessage="This is the dataset your conversation is using. After removing it, pick one of the remaining datasets to continue (or cancel — the working set stays unchanged)."
             />
           </AlertDialogDescription>
         </AlertDialogHeader>

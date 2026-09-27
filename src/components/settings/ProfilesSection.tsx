@@ -614,7 +614,7 @@ export function ProfilesSection({
           description={(
             <FormattedMessage
               id="settings.profiles.description"
-              defaultMessage="Named connection endpoints. The active profile drives new turns; edits save as you move away from a field."
+              defaultMessage="Named connection profiles for your AI service. New conversations use the active profile; edits save when you leave a field."
             />
           )}
           action={refreshButton}

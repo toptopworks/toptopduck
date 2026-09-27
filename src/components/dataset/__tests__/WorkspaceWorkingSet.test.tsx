@@ -275,7 +275,7 @@ describe("WorkspaceWorkingSet", () => {
     // ...mounting the continuation dialog (alertdialog #2) with the full
     // remaining set as candidates, the first one pre-selected (AC5).
     const dialog = await screen.findByRole("alertdialog");
-    expect(dialog).toHaveTextContent(/删除焦点源「people」/);
+    expect(dialog).toHaveTextContent(/删除当前数据集「people」/);
     expect(screen.getByRole("radio", { name: "orders" })).toBeChecked();
     // Confirm carries the target + the chosen continuation (AC2) and closes
     // the machine.
@@ -327,11 +327,11 @@ describe("WorkspaceWorkingSet", () => {
     fireEvent.click(screen.getByRole("button", { name: "删除 people" }));
     fireEvent.click(screen.getByRole("button", { name: "删除" }));
     const dialog = await screen.findByRole("alertdialog");
-    expect(dialog).toHaveTextContent(/删除焦点源「people」/);
+    expect(dialog).toHaveTextContent(/删除当前数据集「people」/);
     fireEvent.click(screen.getByRole("button", { name: "继续" }));
     await waitFor(() => expect(surfaces.setError).toHaveBeenCalled());
     expect(vi.mocked(surfaces.setError).mock.calls.at(-1)?.[0]?.kind).toBe("delete");
     // The machine stays mounted for retry.
-    expect(screen.getByRole("alertdialog")).toHaveTextContent(/删除焦点源「people」/);
+    expect(screen.getByRole("alertdialog")).toHaveTextContent(/删除当前数据集「people」/);
   });
 });

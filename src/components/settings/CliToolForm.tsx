@@ -113,7 +113,7 @@ export function CliToolForm({
       return intl.formatMessage({
         id: "settings.cli.form.nameHint",
         defaultMessage:
-          "Name must be kebab-case (lowercase letters, digits, single hyphens).",
+          "The name can only use lowercase letters, digits, and hyphens (like my-tool).",
       });
     }
     if (!tool.description.trim() || !tool.executable.trim()) {

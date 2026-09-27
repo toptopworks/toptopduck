@@ -17,31 +17,31 @@ const intl = createIntl({
   messages: {
     "error.dataset.displayTaken": "Display label \"{label}\" is already used by another dataset; pick a different one",
     "error.dataset.invalidContinueWith":
-      "\"{name}\" is not among the remaining sources; cannot use it as the continuation (refresh the working set and re-pick)",
+      "\"{name}\" is not among the remaining datasets; refresh the data list and pick again",
     "error.dataset.invalidLabel": "Display label must not be empty or whitespace-only",
     "error.dataset.notActive":
-      "\"{name}\" is not the current focus source; use plain delete or refresh the working set and retry",
+      "\"{name}\" is not the dataset currently in use; refresh the data list and retry",
     "error.dataset.notFound": "No dataset found with reference name \"{name}\"",
     "error.dataset.removeActive":
-      "\"{name}\" is the current focus table; pick a continuation from the remaining sources first (or cancel)",
-    "error.duck.alreadyOpen": "This .duck is already open in this process",
-    "error.duck.loadIo": "Failed to read the .duck file",
-    "error.duck.loadParse": "Failed to parse the .duck file",
-    "error.duck.migration": "Failed to migrate the .duck file to the current format",
+      "\"{name}\" is the dataset currently in use. Pick one of the remaining datasets to continue (or cancel)",
+    "error.duck.alreadyOpen": "This file is already open in the app",
+    "error.duck.loadIo": "Couldn't read this file",
+    "error.duck.loadParse": "This file seems to be corrupted or incomplete",
+    "error.duck.migration": "Couldn't upgrade this file to the current format",
     "error.duck.versionMismatch":
-      "This .duck was made by a newer app (format_version={found}); the current app supports only {supported}. Please upgrade the app, then reopen it.",
+      "This file was created by a newer version of the app (file version {found}; this app supports up to {supported}). Please update the app and open it again.",
     "error.resume.aborted": "Resume aborted",
-    "error.resume.activeMissing": "The session focus points to an unregistered source \"{name}\"",
+    "error.resume.activeMissing": "The dataset \"{name}\" used by this session isn't loaded",
     "error.resume.cancelled": "Resume cancelled",
-    "error.resume.replay": "Failed to replay \"{name}\"",
-    "error.resume.sourceMissing": "Source \"{name}\" not found",
-    "error.save.io": "Failed to write the .duck temp file",
-    "error.save.rename": "Failed to replace the .duck file",
-    "error.save.serialize": "Failed to serialize the .duck file",
+    "error.resume.replay": "Failed to restore \"{name}\"",
+    "error.resume.sourceMissing": "Couldn't find the dataset \"{name}\"",
+    "error.save.io": "Couldn't save the data file (writing to disk failed)",
+    "error.save.rename": "Couldn't save the data file (replacing the old file failed)",
+    "error.save.serialize": "Couldn't save the data file (packing the data failed)",
     "error.session.engine": "Internal error",
     "error.session.inFlight":
       "A query is already running on this session; cancel it or wait for it to finish",
-    "error.session.invalidId": "Invalid session id",
+    "error.session.invalidId": "Invalid session ID",
     "error.session.notFound": "Session not found or closed",
     "error.session.renameEmpty": "Session name must not be empty",
     "error.session.resuming": "Session is resuming, please try again shortly",
@@ -66,7 +66,7 @@ function resume(err: ResumeError): SessionError {
 describe("fmtError — SessionError", () => {
   it("renders each SessionError kind via the locale catalog, not a backend string", () => {
     const cases: Array<[SessionError, string]> = [
-      [{ kind: "InvalidId" }, "Invalid session id"],
+      [{ kind: "InvalidId" }, "Invalid session ID"],
       [{ kind: "NotFound" }, "Session not found or closed"],
       [{ kind: "Resuming" }, "Session is resuming, please try again shortly"],
       [
@@ -92,18 +92,18 @@ describe("fmtError — SessionError::Resume (open_duck reject)", () => {
     const cases: Array<[ResumeError, string]> = [
       [{ kind: "Cancelled" }, "Resume cancelled"],
       [{ kind: "Aborted" }, "Resume aborted"],
-      [{ kind: "AlreadyOpen", data: "/x/a.duck" }, "This .duck is already open in this process"],
+      [{ kind: "AlreadyOpen", data: "/x/a.duck" }, "This file is already open in the app"],
       [
         { kind: "SourceMissing", data: { reference_name: "people", path: "/x", detail: "d" } },
-        "Source \"people\" not found",
+        "Couldn't find the dataset \"people\"",
       ],
       [
         { kind: "Replay", data: { reference_name: "result_1", detail: "d" } },
-        "Failed to replay \"result_1\"",
+        "Failed to restore \"result_1\"",
       ],
       [
         { kind: "ActiveMissing", data: "ghost" },
-        "The session focus points to an unregistered source \"ghost\"",
+        "The dataset \"ghost\" used by this session isn't loaded",
       ],
     ];
     for (const [err, expected] of cases) {
@@ -121,20 +121,20 @@ describe("fmtError — SessionError::Resume (open_duck reject)", () => {
         intl,
       ),
     ).toBe(
-      "This .duck was made by a newer app (format_version=3); the current app supports only 1. Please upgrade the app, then reopen it.",
+      "This file was created by a newer version of the app (file version 3; this app supports up to 1). Please update the app and open it again.",
     );
     expect(
       fmtError(resume({ kind: "Load", data: { kind: "Io", data: "io-fail" } }), intl),
-    ).toBe("Failed to read the .duck file");
+    ).toBe("Couldn't read this file");
     expect(
       fmtError(resume({ kind: "Load", data: { kind: "Parse", data: "parse-fail" } }), intl),
-    ).toBe("Failed to parse the .duck file");
+    ).toBe("This file seems to be corrupted or incomplete");
     expect(
       fmtError(
         resume({ kind: "Load", data: { kind: "Migration", data: { kind: "Field", data: "bad" } } }),
         intl,
       ),
-    ).toBe("Failed to migrate the .duck file to the current format");
+    ).toBe("Couldn't upgrade this file to the current format");
   });
 
   it("does not leak the SourceMissing detail into the rendered message (ADR-0029)", () => {
@@ -146,7 +146,7 @@ describe("fmtError — SessionError::Resume (open_duck reject)", () => {
         }),
         intl,
       ),
-    ).toBe("Source \"p\" not found");
+    ).toBe("Couldn't find the dataset \"p\"");
   });
 });
 
@@ -165,15 +165,15 @@ describe("fmtError — SessionError source-management kinds (issue #121)", () =>
           kind: "RemoveSource",
           data: { kind: "IsActive", data: { reference_name: "people", display_name: "员工表" } },
         },
-        "\"员工表\" is the current focus table; pick a continuation from the remaining sources first (or cancel)",
+        "\"员工表\" is the dataset currently in use. Pick one of the remaining datasets to continue (or cancel)",
       ],
       [
         { kind: "RemoveSource", data: { kind: "NotActive", data: "people" } },
-        "\"people\" is not the current focus source; use plain delete or refresh the working set and retry",
+        "\"people\" is not the dataset currently in use; refresh the data list and retry",
       ],
       [
         { kind: "RemoveSource", data: { kind: "InvalidContinueWith", data: "ghost" } },
-        "\"ghost\" is not among the remaining sources; cannot use it as the continuation (refresh the working set and re-pick)",
+        "\"ghost\" is not among the remaining datasets; refresh the data list and pick again",
       ],
     ];
     for (const [err, expected] of cases) {
@@ -224,10 +224,10 @@ describe("fmtError — SaveError", () => {
     // through the catalog. AlreadyOpen shares the merged error.duck.alreadyOpen
     // id with ResumeError::AlreadyOpen.
     const cases: Array<[SaveError, string]> = [
-      [{ kind: "Serialize", data: "ser-fail" }, "Failed to serialize the .duck file"],
-      [{ kind: "Io", data: "io-fail" }, "Failed to write the .duck temp file"],
-      [{ kind: "Rename", data: "rename-fail" }, "Failed to replace the .duck file"],
-      [{ kind: "AlreadyOpen", data: "/x/a.duck" }, "This .duck is already open in this process"],
+      [{ kind: "Serialize", data: "ser-fail" }, "Couldn't save the data file (packing the data failed)"],
+      [{ kind: "Io", data: "io-fail" }, "Couldn't save the data file (writing to disk failed)"],
+      [{ kind: "Rename", data: "rename-fail" }, "Couldn't save the data file (replacing the old file failed)"],
+      [{ kind: "AlreadyOpen", data: "/x/a.duck" }, "This file is already open in the app"],
     ];
     for (const [err, expected] of cases) {
       expect(fmtError(err, intl)).toBe(expected);
@@ -236,13 +236,13 @@ describe("fmtError — SaveError", () => {
 
   it("does not leak the Serialize/Io/Rename detail into the rendered message (ADR-0029)", () => {
     expect(fmtError({ kind: "Serialize", data: "sk-ant-secret" }, intl)).toBe(
-      "Failed to serialize the .duck file",
+      "Couldn't save the data file (packing the data failed)",
     );
     expect(fmtError({ kind: "Io", data: "sk-ant-secret" }, intl)).toBe(
-      "Failed to write the .duck temp file",
+      "Couldn't save the data file (writing to disk failed)",
     );
     expect(fmtError({ kind: "Rename", data: "sk-ant-secret" }, intl)).toBe(
-      "Failed to replace the .duck file",
+      "Couldn't save the data file (replacing the old file failed)",
     );
   });
 });
