@@ -380,7 +380,7 @@ function AssumptionNote({ assumption }: { assumption: string | null }) {
   return (
     <span className="assumption mt-0.5 block text-xs italic text-muted-foreground">
       {intl.formatMessage(
-        { id: "thread.assumption", defaultMessage: "Assumption: {text}" },
+        { id: "result.assumption", defaultMessage: "Assumption: {text}" },
         { text: assumption },
       )}
     </span>
@@ -448,7 +448,7 @@ function TurnBody({
           defaultMessage: "Retry this question",
         })}
       >
-        <FormattedMessage id="thread.outcome.retry" defaultMessage="Retry" />
+        <FormattedMessage id="common.retry" defaultMessage="Retry" />
       </Button>
     );
   switch (record.outcome.kind) {
@@ -514,7 +514,7 @@ function TurnBody({
               onClick={() => onSelectResult(primary.dataset.reference_name)}
             >
               <FormattedMessage
-                id="thread.resultLink"
+                id="result.title"
                 defaultMessage="Result: {name}"
                 values={{ name: primary.dataset.reference_name }}
               />

@@ -108,7 +108,7 @@ function SectionLabel({ section }: { section: SettingsSection }) {
     case "general":
       return <FormattedMessage id="settings.nav.general" defaultMessage="General" />;
     case "skills":
-      return <FormattedMessage id="settings.nav.skills" defaultMessage="Skills" />;
+      return <FormattedMessage id="common.skills" defaultMessage="Skills" />;
     case "agents":
       return <FormattedMessage id="settings.nav.agents" defaultMessage="Subagents" />;
     case "runtime":

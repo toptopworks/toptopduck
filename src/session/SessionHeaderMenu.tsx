@@ -84,7 +84,7 @@ export function SessionHeaderMenu({
           <DropdownMenuItem onSelect={() => setDialog("rename")}>
             <Pencil aria-hidden />
             <FormattedMessage
-              id="session.headerMenu.rename"
+              id="common.rename"
               defaultMessage="Rename"
             />
           </DropdownMenuItem>

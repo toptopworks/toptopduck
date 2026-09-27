@@ -911,7 +911,7 @@ function FormView({
         title={(
           <Label htmlFor="mcp-display-name" className="text-muted-foreground">
             <FormattedMessage
-              id="settings.mcp.form.name"
+              id="common.name"
               defaultMessage="Name"
             />
           </Label>
@@ -1115,11 +1115,11 @@ function KvEditor({
           defaultMessage: "Environment variables (optional)",
         }),
         add: intl.formatMessage({
-          id: "settings.mcp.form.envAdd",
+          id: "settings.form.envAdd",
           defaultMessage: "Add variable",
         }),
         empty: intl.formatMessage({
-          id: "settings.mcp.form.envEmpty",
+          id: "settings.form.envEmpty",
           defaultMessage:
             "No environment variables. Click Add variable to create one.",
         }),

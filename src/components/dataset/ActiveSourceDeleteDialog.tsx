@@ -108,7 +108,7 @@ export function ActiveSourceDeleteDialog({
             }}
             disabled={!selected}
           >
-            <FormattedMessage id="activeSourceDelete.confirm" defaultMessage="Continue" />
+            <FormattedMessage id="common.continue" defaultMessage="Continue" />
           </AlertDialogAction>
         </AlertDialogFooter>
       </AlertDialogContent>

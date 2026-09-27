@@ -186,7 +186,7 @@ export function DefaultRuntimeControl({
                     </SelectLabel>
                     <SelectItem value="built_in">
                       <FormattedMessage
-                        id="settings.runtime.defaultRuntime.builtIn"
+                        id="common.builtin"
                         defaultMessage="Built-in"
                       />
                     </SelectItem>
@@ -194,7 +194,7 @@ export function DefaultRuntimeControl({
                   <SelectGroup>
                     <SelectLabel>
                       <FormattedMessage
-                        id="settings.runtime.tab.localCli"
+                        id="common.localCli"
                         defaultMessage="Local CLI"
                       />
                     </SelectLabel>

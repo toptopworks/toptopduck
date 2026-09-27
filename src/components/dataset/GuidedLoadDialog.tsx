@@ -316,7 +316,7 @@ export function GuidedLoadDialog({
         )}
         <DialogFooter className="shrink-0 px-6 py-4">
           <Button variant="outline" onClick={onCancel} disabled={loading}>
-            <FormattedMessage id="guidedLoad.cancel" defaultMessage="Cancel" />
+            <FormattedMessage id="common.cancel" defaultMessage="Cancel" />
           </Button>
           <Button onClick={submit} disabled={loading}>
             {loading && <Loader2 className="size-4 animate-spin" aria-hidden />}
@@ -326,7 +326,7 @@ export function GuidedLoadDialog({
                   defaultMessage: "Loading…",
                 })
               : intl.formatMessage({
-                  id: "guidedLoad.submit",
+                  id: "common.load",
                   defaultMessage: "Load",
                 })}
           </Button>

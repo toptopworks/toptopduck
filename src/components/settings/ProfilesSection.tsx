@@ -902,7 +902,7 @@ export function ProfilesSection({
             <AlertDialogFooter>
               <AlertDialogCancel onClick={() => setConfirmDeleteId(null)}>
                 <FormattedMessage
-                  id="settings.profiles.deleteConfirm.cancel"
+                  id="common.cancel"
                   defaultMessage="Cancel"
                 />
               </AlertDialogCancel>

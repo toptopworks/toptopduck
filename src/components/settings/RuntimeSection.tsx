@@ -137,7 +137,7 @@ export function RuntimeSection({
           onClick={() => setTab("local-cli")}
           label={(
             <FormattedMessage
-              id="settings.runtime.tab.localCli"
+              id="common.localCli"
               defaultMessage="Local CLI"
             />
           )}

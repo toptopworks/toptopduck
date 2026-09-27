@@ -153,7 +153,7 @@ export function ProviderModelField({
       dense
       title={(
         <Label htmlFor={modelId} className="text-muted-foreground">
-          <FormattedMessage id="settings.profiles.model" defaultMessage="Model" />
+          <FormattedMessage id="common.model" defaultMessage="Model" />
         </Label>
       )}
     >

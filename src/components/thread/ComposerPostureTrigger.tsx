@@ -246,7 +246,7 @@ export function ComposerPostureTrigger({
           <DimensionSub
             label={(
               <FormattedMessage
-                id="composer.runtimePicker.modelLabel"
+                id="common.model"
                 defaultMessage="Model"
               />
             )}

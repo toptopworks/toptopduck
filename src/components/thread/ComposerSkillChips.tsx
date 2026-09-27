@@ -28,7 +28,7 @@ export function ComposerSkillChips({ names, onRemove }: ComposerSkillChipsProps)
     <ul
       className="contents"
       aria-label={intl.formatMessage({
-        id: "composer.skillChips.groupAria",
+        id: "common.skills",
         defaultMessage: "Skills",
       })}
     >

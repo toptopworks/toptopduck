@@ -103,7 +103,7 @@ export function SkillPickerPanel({
         // omits it (flat by definition, Decision 1).
         <div className="text-muted-foreground px-2 py-1 text-xs font-medium">
           <FormattedMessage
-            id="composer.skillPicker.groupLabel"
+            id="common.skills"
             defaultMessage="Skills"
           />
         </div>
@@ -183,7 +183,7 @@ export function SkillPickerPanel({
       {noMatches && (
         <div className={NOTE_CLASS}>
           <FormattedMessage
-            id="composer.skillPicker.noMatches"
+            id="settings.skills.noMatches"
             defaultMessage="No skills match your search."
           />
         </div>

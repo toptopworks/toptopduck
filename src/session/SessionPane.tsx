@@ -499,7 +499,7 @@ export function SessionPane({ sessionId, isActive, pendingIngestPaths, onIngestC
             </p>
             <Button variant="outline" size="sm" onClick={s.handleRetryQueries}>
               <FormattedMessage
-                id="session.queries.retry"
+                id="common.retry"
                 defaultMessage="Retry"
               />
             </Button>

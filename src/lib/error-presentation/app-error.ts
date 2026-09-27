@@ -30,9 +30,9 @@ function engineFallback(intl: IntlShape): string {
 function errorVerb(intl: IntlShape, kind: SessionFlowKind): string {
   switch (kind) {
     case "load":
-      return intl.formatMessage({ id: "error.verb.load", defaultMessage: "Load" });
+      return intl.formatMessage({ id: "common.load", defaultMessage: "Load" });
     case "rename":
-      return intl.formatMessage({ id: "error.verb.rename", defaultMessage: "Rename" });
+      return intl.formatMessage({ id: "common.rename", defaultMessage: "Rename" });
     case "replace":
       return intl.formatMessage({
         id: "error.verb.replace",
@@ -49,7 +49,7 @@ function errorVerb(intl: IntlShape, kind: SessionFlowKind): string {
         defaultMessage: "Privacy update",
       });
     case "ask":
-      return intl.formatMessage({ id: "error.verb.ask", defaultMessage: "Ask" });
+      return intl.formatMessage({ id: "common.ask", defaultMessage: "Ask" });
     default: {
       // Exhaustiveness guard (issue #139): a new SessionFlowKind member without
       // a case would fall through and return undefined, rendering a malformed

@@ -661,7 +661,7 @@ export function DeleteSessionDialog({
         </AlertDialogHeader>
         <AlertDialogFooter>
           <AlertDialogCancel onClick={onCancel}>
-            <FormattedMessage id="session.delete.cancel" defaultMessage="Cancel" />
+            <FormattedMessage id="common.cancel" defaultMessage="Cancel" />
           </AlertDialogCancel>
           <AlertDialogAction
             className={buttonVariants({ variant: "destructive" })}
@@ -728,7 +728,7 @@ export function RenameSessionDialog({
           </div>
           <DialogFooter>
             <Button variant="outline" type="button" onClick={onCancel}>
-              <FormattedMessage id="session.rename.cancel" defaultMessage="Cancel" />
+              <FormattedMessage id="common.cancel" defaultMessage="Cancel" />
             </Button>
             <Button type="submit" disabled={!value.trim()}>
               <FormattedMessage id="common.save" defaultMessage="Save" />

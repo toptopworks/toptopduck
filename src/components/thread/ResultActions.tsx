@@ -182,7 +182,7 @@ export function ResultActions({
     defaultMessage: "Copied",
   });
   const stopLabel = intl.formatMessage({
-    id: "result.action.stop",
+    id: "common.stop",
     defaultMessage: "Stop",
   });
   return (
@@ -275,13 +275,13 @@ export function ResultActions({
             <AlertDialogFooter>
               <AlertDialogCancel onClick={() => setPendingLargePull(null)}>
                 <FormattedMessage
-                  id="result.action.confirmLarge.cancel"
+                  id="common.cancel"
                   defaultMessage="Cancel"
                 />
               </AlertDialogCancel>
               <AlertDialogAction onClick={confirmLargePull}>
                 <FormattedMessage
-                  id="result.action.confirmLarge.confirm"
+                  id="common.continue"
                   defaultMessage="Continue"
                 />
               </AlertDialogAction>

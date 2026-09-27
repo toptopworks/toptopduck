@@ -100,7 +100,7 @@ export function ProviderPresetField({
           <SelectSeparator />
           <SelectItem value={PRESET_CUSTOM} disabled={presetId === PRESET_CUSTOM}>
             {intl.formatMessage({
-              id: "settings.profiles.preset.custom",
+              id: "common.custom",
               defaultMessage: "Custom",
             })}
           </SelectItem>
