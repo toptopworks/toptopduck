@@ -64,6 +64,7 @@ import {
 import { McpImportDialog } from "./McpImportDialog";
 import { McpServerForm } from "./McpServerForm";
 import { upsertMirror, withMcpServers } from "./mcp-mirror";
+import { clearRemovedServerSecrets } from "./mcpFinalize";
 
 // The pane's navigation name: the list header and the create/edit form share
 // it -- the form keeps the name for section context, without the list-only
@@ -345,24 +346,24 @@ export function McpSection({
         return next;
       });
       setDeleteTarget(null);
-      // Clear keychain secrets after successful config removal (best
-      // effort). An orphaned keychain entry is inert — keyed by the
-      // removed server's uuid id, nothing reads it.
-      for (const envKey of removedKeys) {
-        try {
-          await clearMcpServerSecret(removedId, envKey);
-        } catch (e) {
-          console.warn("keychain clear failed for", removedId, envKey, e);
-        }
-      }
-      // Header secrets ride distinct accounts (`mcp-<id>-header-<name>`,
-      // issue #901) and need their own clears, same best-effort posture.
-      for (const headerName of removedHeaderKeys) {
-        try {
-          await clearMcpServerHeaderSecret(removedId, headerName);
-        } catch (e) {
-          console.warn("keychain clear failed for", removedId, headerName, e);
-        }
+      // Clear both keychain account families behind the removed server
+      // through the SAME secret lifecycle species the form's save uses
+      // (issue #1115) — no second divergent copy. Best-effort: the config
+      // entry is already gone, but a failure is surfaced on the pane's
+      // error banner (never a silent console.warn); an orphaned keychain
+      // entry is inert — keyed by the removed server's uuid id, nothing
+      // reads it.
+      const warnings = await clearRemovedServerSecrets(
+        removedId,
+        removedKeys,
+        removedHeaderKeys,
+        {
+          ipc: { clearMcpServerSecret, clearMcpServerHeaderSecret },
+          formatError: (e) => fmtError(e, intl),
+        },
+      );
+      if (warnings.length > 0) {
+        setError(warnings.join("; "));
       }
     }
     // runCommit never rejects, so the busy flag always clears (no finally
