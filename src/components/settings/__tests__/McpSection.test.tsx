@@ -379,7 +379,7 @@ describe("McpSection (issue #387)", () => {
     expect(clearMcpServerHeaderSecret).not.toHaveBeenCalled();
   });
 
-  it("proceeds with config removal when keychain clear fails (best effort)", async () => {
+  it("proceeds with config removal and surfaces a keychain clear failure (issue #1115)", async () => {
     const server = makeServer({
       id: "srv-1",
       display_name: "My Server",
@@ -402,8 +402,9 @@ describe("McpSection (issue #387)", () => {
       expect(clearMcpServerSecret).toHaveBeenCalledWith("srv-1", "API_KEY");
     });
 
-    // No error surfaced — the keychain failure is swallowed (best effort).
-    expect(screen.queryByText("keychain locked")).not.toBeInTheDocument();
+    // The cleanup failure is surfaced on the pane's error banner — the same
+    // user-visible posture the save path has (#1115), never swallowed.
+    expect(await screen.findByText("keychain locked")).toBeInTheDocument();
   });
 
   it("clicking Add switches to the form view (issue #388)", () => {

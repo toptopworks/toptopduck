@@ -41,12 +41,35 @@ import {
   SettingsCard,
   SettingsRow,
 } from "./settings-chrome";
+import {
+  collectSecretValues,
+  finalizeMcpServer,
+  headerFaceOf,
+  partitionKvEntries,
+  restorePendingSecrets,
+  withDormantEnv,
+  type KvEntry,
+  type McpFinalizeIpc,
+  type McpSecretFaces,
+} from "./mcpFinalize";
+
+// The real ipc boundary for the secret lifecycle species: the api module's
+// functions, handed to finalizeMcpServer as one object. Component tests mock
+// the api module, so the mocks flow through the species unchanged.
+const mcpIpc: McpFinalizeIpc = {
+  upsertMcpServer,
+  setMcpServerSecret,
+  setMcpServerHeaderSecret,
+  clearMcpServerSecret,
+  clearMcpServerHeaderSecret,
+  probeMcpServer,
+};
 
 // MCP server add / edit form (issue #388). A full-page replacement for the
-// server list with Form / JSON dual-mode, bidirectional sync, and a save flow:
-// upsertMcpServer → setMcpServerSecret / setMcpServerHeaderSecret (per secret
-// env / header key) → auto probe → onSaved callback returns the finalized
-// config + probe result to the list.
+// server list with Form / JSON dual-mode, bidirectional sync, and a save flow
+// owned by the secret lifecycle species (mcpFinalize, issue #1115): upsert →
+// minted id → secret writes → deleted-account clears → auto probe; the
+// onSaved callback returns the finalized config + probe result to the list.
 //
 // Secrets never appear in the JSON view — only the keychain_env_keys /
 // keychain_header_keys key names. Secret values are transient form state; on
@@ -71,16 +94,6 @@ import {
 // A pure JSON save (no row deleted this session) clears nothing: pasting
 // replaces the config shape without any credential-management action —
 // accepted gap.
-
-/** One row of the env-var / headers editor. `isSecret` routes the value to
- *  the OS keychain (via setMcpServerSecret / setMcpServerHeaderSecret on
- *  save) instead of the plain `env` / `transport.headers` map. */
-type KvEntry = {
-  id: number;
-  key: string;
-  value: string;
-  isSecret: boolean;
-};
 
 // Monotonic counter for stable KvEntry keys (H1: index-based keys break
 // focus/cursor when rows are inserted or deleted mid-list).
@@ -120,17 +133,6 @@ function initKvEntries(
     entries.push({ id: entrySeq++, key, value: "", isSecret: true });
   }
   return entries;
-}
-
-/** The header face of a draft (empty on a stdio draft — no transport
- *  headers there, issue #901). */
-function headerFaceOf(server: McpServerDraft): {
-  plain: Record<string, string>;
-  secretKeys: string[];
-} {
-  return server.transport.type === "stdio"
-    ? { plain: {}, secretKeys: [] }
-    : { plain: server.transport.headers, secretKeys: server.keychain_header_keys };
 }
 
 /** The add / remove / update triplet one key-value editor drives. Shared by
@@ -176,39 +178,6 @@ function capturePendingSecrets(entries: KvEntry[]): Record<string, string> {
     }
   }
   return pending;
-}
-
-/** Restore captured secret values onto a freshly rebuilt entry list (the
- *  JSON→Form switch half of the H2 round-trip). */
-function restorePendingSecrets(
-  entries: KvEntry[],
-  pending: Record<string, string>,
-): KvEntry[] {
-  return entries.map((entry) =>
-    entry.isSecret && pending[entry.key]
-      ? { ...entry, value: pending[entry.key] }
-      : entry,
-  );
-}
-
-/** Split one face's rows into its config shape: plain values into a map,
- *  secret names into a key list (the values ride the keychain, never the
- *  config). Shared by buildConfigFromForm's two faces (issue #904 fold). */
-function partitionKvEntries(entries: KvEntry[]): {
-  plain: Record<string, string>;
-  secretKeys: string[];
-} {
-  const plain: Record<string, string> = {};
-  const secretKeys: string[] = [];
-  for (const entry of entries) {
-    if (!entry.key) continue;
-    if (entry.isSecret) {
-      secretKeys.push(entry.key);
-    } else {
-      plain[entry.key] = entry.value;
-    }
-  }
-  return { plain, secretKeys };
 }
 
 export function McpServerForm({
@@ -392,23 +361,6 @@ export function McpServerForm({
     }
   }
 
-  /** Keep a remote draft's dormant env face across a JSON-mode parse
-   *  (issue #901): the web format cannot express it, so an EMPTY parsed
-   *  face means "unchanged" (the ref's face rides through); only an
-   *  internal-format paste that explicitly carries env entries replaces
-   *  it. Stdio drafts pass through untouched (env is their live face). */
-  function withDormantEnv(draft: McpServerDraft): McpServerDraft {
-    if (draft.transport.type === "stdio") return draft;
-    if (Object.keys(draft.env).length > 0 || draft.keychain_env_keys.length > 0) {
-      return draft;
-    }
-    return {
-      ...draft,
-      env: dormantEnvRef.current.env,
-      keychain_env_keys: dormantEnvRef.current.keychainEnvKeys,
-    };
-  }
-
   /** Sync FROM JSON text → flat form state (called when switching JSON → Form). */
   function syncFromJson(parsed: McpServerDraft): void {
     setDisplayName(parsed.display_name);
@@ -536,7 +488,7 @@ export function McpServerForm({
       // parsed face keeps the ref's face -- the same preservation the Form
       // path's buildConfigFromForm applies. An internal-format paste that
       // explicitly carries env entries wins.
-      draft = withDormantEnv(result.config);
+      draft = withDormantEnv(result.config, dormantEnvRef.current);
     } else {
       draft = buildConfigFromForm();
     }
@@ -573,113 +525,37 @@ export function McpServerForm({
       return;
     }
 
-    // Capture secret values from the form's entries (only populated in
-    // Form mode — JSON mode never has secret values). One map per face
-    // (issue #901): env secrets and header secrets go to distinct keychain
-    // accounts.
-    const secretsToSet: Record<string, string> = {};
-    const headerSecretsToSet: Record<string, string> = {};
-    if (mode === "form") {
-      for (const entry of envEntries) {
-        if (entry.isSecret && entry.value) {
-          secretsToSet[entry.key] = entry.value;
-        }
-      }
-      for (const entry of headerEntries) {
-        if (entry.isSecret && entry.value) {
-          headerSecretsToSet[entry.key] = entry.value;
-        }
-      }
-    }
+    // The secret faces the save carries: one value map per face (issue
+    // #901 — env secrets and header secrets go to distinct keychain
+    // accounts; JSON mode never writes keychain values) plus the recorded
+    // row deletions (issue #904 — only Form-mode row removals record
+    // names, so flips, pastes, and a pure JSON save clear nothing).
+    const faces: McpSecretFaces = {
+      envSecrets: mode === "form" ? collectSecretValues(envEntries) : {},
+      headerSecrets: mode === "form" ? collectSecretValues(headerEntries) : {},
+      deletedEnvKeys: deletedSecretKeysRef.current.env,
+      deletedHeaderKeys: deletedSecretKeysRef.current.header,
+    };
 
     setSaving(true);
     setError(null);
     try {
-      // 1. Upsert (writes to disk; returns finalized config with minted id).
-      const finalized = await upsertMcpServer(config);
-
-      // Persist the minted id so a retry (after a secret/probe failure) is
-      // idempotent — without this, a retry sends id="" again and Rust mints
-      // a second server (C1).
-      setServerId(finalized.id);
-
-      // 2. Write each secret to the OS keychain (ADR-0029 one-shot transfer):
-      // env secrets under `mcp-<id>-<env_key>`, header secrets under
-      // `mcp-<id>-header-<name>` (issue #901).
-      for (const key of finalized.keychain_env_keys) {
-        const value = secretsToSet[key];
-        if (value) {
-          await setMcpServerSecret(finalized.id, key, value);
-        }
-      }
-      for (const name of finalized.keychain_header_keys) {
-        const value = headerSecretsToSet[name];
-        if (value) {
-          await setMcpServerHeaderSecret(finalized.id, name, value);
-        }
-      }
-
-      // 3. Clear the keychain accounts behind rows the user deleted this
-      // session (issue #904), filtered against the finalized config so a
-      // re-added name keeps its (possibly re-entered) value. Only Form-mode
-      // row removals recorded names — flips and pastes record nothing, and a
-      // pure JSON save (no recorded deletion) clears nothing.
-      const envClears = [...new Set(deletedSecretKeysRef.current.env)].filter(
-        (key) => !finalized.keychain_env_keys.includes(key),
+      // The five-step save orchestration — upsert → persist minted id →
+      // secret writes → deleted-account clears → probe — lives in the
+      // secret lifecycle species (issue #1115). A fatal step (upsert or a
+      // secret write) rejects into the catch below; clear and probe
+      // failures ride the probe result's error channel so the row surfaces
+      // them while the save still completes (C2).
+      const { finalized, probeResult } = await finalizeMcpServer(
+        config,
+        faces,
+        {
+          ipc: mcpIpc,
+          formatError: (e) => fmtError(e, intl),
+          onUpserted: (f) => setServerId(f.id),
+        },
       );
-      const headerClears = [
-        ...new Set(deletedSecretKeysRef.current.header),
-      ].filter((name) => !finalized.keychain_header_keys.includes(name));
-      // Non-fatal the way the probe below is (C2): the upsert already
-      // committed, and aborting before onSaved would leave the list's
-      // mirror stale -- any later full-config commit (a theme change, an
-      // engine save) would silently revert this save (review I3). Each
-      // failure is collected and appended to the probe result's error
-      // channel so the row surfaces it; connected stays true -- the
-      // server itself is fine, only the cleanup did not land.
-      const clearWarnings: string[] = [];
-      for (const key of envClears) {
-        try {
-          await clearMcpServerSecret(finalized.id, key);
-        } catch (clearErr) {
-          clearWarnings.push(fmtError(clearErr, intl));
-        }
-      }
-      for (const name of headerClears) {
-        try {
-          await clearMcpServerHeaderSecret(finalized.id, name);
-        } catch (clearErr) {
-          clearWarnings.push(fmtError(clearErr, intl));
-        }
-      }
-
-      // 4. Auto-probe so the list shows an immediate status. A probe failure
-      // is non-fatal — the server is already saved; surface it as a
-      // disconnected probe result so the parent still commits the config
-      // and switches to the list view (C2).
-      let probeResult: McpProbeResult;
-      try {
-        probeResult = await probeMcpServer(finalized);
-      } catch (probeErr) {
-        probeResult = {
-          connected: false,
-          tools: [],
-          error: fmtError(probeErr, intl),
-        };
-      }
-      if (clearWarnings.length > 0) {
-        // A deleted credential may still sit in the OS keychain -- the row
-        // tells the user instead of the save silently half-completing.
-        const warning = clearWarnings.join("; ");
-        probeResult = {
-          ...probeResult,
-          error: probeResult.error
-            ? `${probeResult.error}; ${warning}`
-            : warning,
-        };
-      }
-
-      // 5. Hand the finalized config + probe result back to the list.
+      // Hand the finalized config + probe result back to the list.
       onSaved(finalized, probeResult);
     } catch (e) {
       setError(fmtError(e, intl));
