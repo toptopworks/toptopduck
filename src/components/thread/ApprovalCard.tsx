@@ -15,8 +15,9 @@ import type { ApprovalResponse, FileAttachment } from "../../types/approval";
 // pending card (the decision moment -- the gateway suspends the turn until
 // the user answers, ADR-0080/0083), its file-delivery expand-on-demand view
 // (issues #672 / #1009), and the resolved marker that flips the card in
-// place once answered. LiveRow (TraceView) stays the four-arm dispatcher and
-// owns the pending precondition (`approval.response === null`).
+// place once answered. LiveRow (TraceView) stays the three-arm dispatcher;
+// the pending precondition (`response === null`) is pinned in the card's
+// props type.
 //
 // i18n (ADR-0052): every chrome string (button copy, resolved markers)
 // routes through react-intl with a static literal id; the layer-4 content
@@ -33,10 +34,10 @@ export function ApprovalCard({
   onRespond,
   onLoadAttachments,
 }: {
-  /** The pending request's snapshot; `response === null` is the LiveRow
-   *  pending-arm guard's precondition -- the card renders the three
-   *  answers, never a resolved state. */
-  approval: NonNullable<LiveRoundRow["approval"]>;
+  /** The pending request's snapshot -- the card renders the three answers,
+   *  never a resolved state; the `response: null` intersection pins that
+   *  in the type. */
+  approval: NonNullable<LiveRoundRow["approval"]> & { response: null };
   name: LiveRoundRow["name"];
   summary: LiveRoundRow["summary"];
   operationKind: LiveRoundRow["operationKind"];
@@ -271,7 +272,8 @@ export function ApprovalResolvedBadge({ response }: { response: ApprovalResponse
   // size, so the far wider summary and tool name collapse first and the
   // badge truncates only near the narrowest columns (the unshrinkable
   // chrome -- spinner, op-badge, chevron -- sets the row's min-content
-  // floor just past that column's line box). `shrink` overrides the Badge
+  // floor just past that column's line box). Those siblings render from
+  // LiveRow / TraceSummaryFold in TraceView. `shrink` overrides the Badge
   // base class's own shrink-0 (twMerge keeps the later same-group class),
   // which would otherwise pin the badge wide and silently defeat min-w-0.
   return (

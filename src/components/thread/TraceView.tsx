@@ -18,6 +18,14 @@ import type { ApprovalResponse, FileAttachment } from "../../types/approval";
 // each species renders follow ADR-0052 (react-intl, static literal ids) in
 // their own files.
 
+// Type guard for the pending arm: a plain `response === null` check narrows
+// only the leaf property, so the arm routes through this predicate to hand
+// ApprovalCard its `response: null` props contract.
+const isPendingApproval = (
+  approval: NonNullable<LiveRoundRow["approval"]>,
+): approval is NonNullable<LiveRoundRow["approval"]> & { response: null } =>
+  approval.response === null;
+
 // One live trace row: a pending approval renders the three-button card
 // (ADR-0083); a resolved approval merges its badge with the call's state;
 // plain built-in calls render as a running spinner or a completed trace row.
@@ -30,16 +38,10 @@ export function LiveRow({
 }: {
   row: LiveRoundRow;
   onRespond: (requestId: string, response: ApprovalResponse) => void;
-  /** Pulls the FULL pre-truncation file values for a pending request
-   *  (issue #1009): the snapshot the row already holds is the capped
-   *  broadcast copy; this fetches the uncut originals while the turn is
-   *  suspended on the gate. Optional -- absent loaders keep the #672
-   *  capped-snapshot behavior. */
+  /** Passed through to ApprovalCard (issue #1009). */
   onLoadAttachments?: (requestId: string) => Promise<FileAttachment[]>;
 }) {
-  if (row.approval !== null && row.approval.response === null) {
-    // The pending card species: this arm's `response === null` guard is the
-    // precondition ApprovalCard's props declare.
+  if (row.approval !== null && isPendingApproval(row.approval)) {
     return (
       <ApprovalCard
         approval={row.approval}
