@@ -28,11 +28,12 @@ const MAX_READ_ROWS: u64 = 10_000;
 
 /// The full-result confirm threshold (issue #779): a full pull (CSV export or
 /// TSV copy) over this many rows is refused with `RowReadError::TooLarge`
-/// unless the caller passes `confirmed`. Both full paths hold the session
-/// lock for the whole scan (ADR-0021's single-flight gate) -- a
-/// multi-million-row pull queues every other command on that session for its
-/// duration -- and the TSV half materializes the whole payload, so a pull
-/// this large must be a deliberate act, not an accidental click. Sits beside
+/// unless the caller passes `confirmed`. The session lock the caller holds
+/// across both full paths spans the whole scan (ADR-0021's single-flight
+/// gate) -- a multi-million-row pull queues every other command on that
+/// session for its duration -- and the TSV half materializes the whole
+/// payload, so a pull this large must be a deliberate act, not an accidental
+/// click. Sits beside
 /// MAX_READ_ROWS on purpose: both bound how much of a table one call may
 /// pull, one for the display page, one for the full path.
 const MAX_UNCONFIRMED_FULL_ROWS: u64 = 1_000_000;
@@ -158,12 +159,13 @@ where
 ///
 /// Full-path guardrails (issue #779): a result over
 /// `MAX_UNCONFIRMED_FULL_ROWS` refuses with `RowReadError::TooLarge`
-/// unless `confirmed` (the lock a full pull holds is O(all rows) long, so
-/// a pull that large must be deliberate), and a cancel observed mid-scan
-/// stops the export with `RowReadError::Cancelled` -- the session's
-/// [`CancelToken`] fires without the session lock (ADR-0021's
-/// outside-the-lock cancel path), so the export's own lock hold cannot
-/// shield it from the cancel command. The pull's start retires the
+/// unless `confirmed` (the session lock the caller holds across a full pull
+/// is O(all rows) long, so a pull that large must be deliberate), and a
+/// cancel observed mid-scan stops the export with `RowReadError::Cancelled`
+/// -- the session's [`CancelToken`] fires without the session lock
+/// (ADR-0021's outside-the-lock cancel path), so the caller's lock hold
+/// cannot shield the export from the cancel command. The pull's start
+/// retires the
 /// token's generation (see [`start_full_pull`]), so a past stop or
 /// a still-sleeping no-progress watchdog from the last turn never kills
 /// the pull. A cancelled export leaves no artifact: the destination is a
@@ -193,7 +195,7 @@ pub(super) fn export_rows_csv(
 /// [`export_rows_csv`] delegates here with the production constant. The
 /// threshold is a parameter (not the constant) so tests exercise the gate
 /// with small fixtures -- the `read_line_bounded` `max` precedent.
-pub(super) fn export_rows_csv_gated(
+fn export_rows_csv_gated(
     cancel: &CancelToken,
     working_set: &WorkingSet,
     engine: &AdminEngine,
@@ -311,7 +313,7 @@ pub(super) fn read_rows_tsv(
 /// [`read_rows_tsv`] twin of [`export_rows_csv_gated`]: the
 /// threshold is a parameter so tests exercise the gate with small
 /// fixtures (the `read_line_bounded` `max` precedent).
-pub(super) fn read_rows_tsv_gated(
+fn read_rows_tsv_gated(
     cancel: &CancelToken,
     working_set: &WorkingSet,
     engine: &AdminEngine,

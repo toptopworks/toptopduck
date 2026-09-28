@@ -1428,26 +1428,6 @@ impl Session {
         )
     }
 
-    /// The gated seam the confirm-gate tests inject a small threshold
-    /// through (see `rows_io::export_rows_csv_gated`).
-    pub fn export_rows_csv_gated(
-        &self,
-        reference_name: &str,
-        path: &str,
-        confirmed: bool,
-        confirm_above: u64,
-    ) -> Result<(), ExportRowsError> {
-        rows_io::export_rows_csv_gated(
-            &self.cancel,
-            &self.working_set,
-            &self.admin_engine,
-            reference_name,
-            path,
-            confirmed,
-            confirm_above,
-        )
-    }
-
     pub fn read_rows_tsv(
         &self,
         reference_name: &str,
@@ -1459,24 +1439,6 @@ impl Session {
             &self.admin_engine,
             reference_name,
             confirmed,
-        )
-    }
-
-    /// The gated seam the confirm-gate tests inject a small threshold
-    /// through (see `rows_io::read_rows_tsv_gated`).
-    pub fn read_rows_tsv_gated(
-        &self,
-        reference_name: &str,
-        confirmed: bool,
-        confirm_above: u64,
-    ) -> Result<String, RowReadError> {
-        rows_io::read_rows_tsv_gated(
-            &self.cancel,
-            &self.working_set,
-            &self.admin_engine,
-            reference_name,
-            confirmed,
-            confirm_above,
         )
     }
 

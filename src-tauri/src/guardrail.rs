@@ -131,7 +131,7 @@ pub(crate) const MAX_THREADS: u32 = 4;
 /// than OOM the machine. The DEFAULT of the user-adjustable app-config engine
 /// default (see [`MEMORY_LIMIT`]); the engine-enforced memory ceiling is what
 /// bounds the risk of a user-raised cap. Distinct from the 10k DISPLAY window
-/// (`session::MAX_READ_ROWS`): results up to this cap are materialized in full
+/// (`rows_io::MAX_READ_ROWS`): results up to this cap are materialized in full
 /// (full export preserved, ADR-0030); only beyond it does the turn abort with a
 /// resource error -- silent truncation is forbidden (ADR-0030).
 pub(crate) const DEFAULT_MAX_RESULT_ROWS: u64 = 1_000_000;
