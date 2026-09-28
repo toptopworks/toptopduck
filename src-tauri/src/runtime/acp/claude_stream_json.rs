@@ -27,7 +27,7 @@
 //! gateway-routed: the driver emits the live phases AND lands an engine-side
 //! trace row under the bare name -- the row is the in-place-replacement
 //! anchor the settle merge pairs the gateway's authoritative record against
-//! (ADR-0085 single enforcement point; [`crate::session::merge_outcomes`]
+//! (ADR-0085 single enforcement point; [`crate::session::outcome_merge::merge_outcomes`]
 //! replaces a paired echo with the gateway row -- per-name quota with
 //! built-ins included, or the `mcp_invoke` pool (issues #820 + #817)). An
 //! unprefixed `tool_use` (a native tool that
