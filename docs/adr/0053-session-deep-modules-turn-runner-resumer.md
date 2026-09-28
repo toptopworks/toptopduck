@@ -45,3 +45,4 @@
 - **延伸 ADR-0035**：`OpenDuckGuard` / `RESUMING_COUNT` 物理移到 `session/resume.rs`，语义零改动，`is_resuming()` 读门不变。
 - **不延伸 ADR-0007**：provider 抽象仍故意浅，本 ADR 不加深（`UnwiredProvider` 默认实现不变）。
 - **被 ADR-0059 延伸（小）**：`TurnRunner::run()` 增 `on_phase: Box<dyn Fn(TurnPhase) + Send>` 注入参数——延续本 ADR materializer `Box<dyn>` 注入风格，callback 不硬编码副作用、测试传 no-op 保纯净；字面不违本 ADR（仍不读 history、不调 persist）。见 ADR-0059。
+- **校准（TurnRunner 落地形态）**：Decision 1 的 TurnRunner struct 形态经演化由 materializer / loop_runtime / outcome_merge 分立 + TurnDeps 借入承载（Decision 2/4）；轮次编排最终以 `session/turn_runner.rs` 的 impl 块平移收尾——界线不变。
