@@ -11,7 +11,7 @@ import {
   type KvEntry,
   type McpFinalizeIpc,
   type McpSecretFaces,
-} from "../mcpFinalize";
+} from "../mcp-finalize";
 import type { McpServerConfig, McpServerDraft } from "../../../types/mcp";
 
 // Function-level seam of the MCP secret lifecycle species (issue #1115):
@@ -73,8 +73,7 @@ function emptyFaces(): McpSecretFaces {
   return {
     envSecrets: {},
     headerSecrets: {},
-    deletedEnvKeys: [],
-    deletedHeaderKeys: [],
+    deletedKeys: { env: [], header: [] },
   };
 }
 
@@ -211,8 +210,10 @@ describe("finalizeMcpServer (issue #1115)", () => {
       {
         ...emptyFaces(),
         envSecrets: { API_KEY: "sk-secret-123" },
-        deletedEnvKeys: ["OLD_KEY", "STALE_KEY", "OLD_KEY", "API_KEY"],
-        deletedHeaderKeys: ["X-Test-Token", "X-Old-Token"],
+        deletedKeys: {
+          env: ["OLD_KEY", "STALE_KEY", "OLD_KEY", "API_KEY"],
+          header: ["X-Test-Token", "X-Old-Token"],
+        },
       },
       { ipc, formatError: String, onUpserted: vi.fn() },
     );
@@ -273,8 +274,7 @@ describe("finalizeMcpServer (issue #1115)", () => {
       makeConfig(),
       {
         ...emptyFaces(),
-        deletedEnvKeys: ["OLD_KEY"],
-        deletedHeaderKeys: ["X-Test-Token"],
+        deletedKeys: { env: ["OLD_KEY"], header: ["X-Test-Token"] },
       },
       { ipc, formatError: String, onUpserted: vi.fn() },
     );
@@ -295,8 +295,7 @@ describe("clearRemovedServerSecrets (issue #904 list twin)", () => {
 
     const warnings = await clearRemovedServerSecrets(
       "srv-1",
-      ["API_KEY", "WEBHOOK_SECRET"],
-      ["X-Test-Token"],
+      { env: ["API_KEY", "WEBHOOK_SECRET"], header: ["X-Test-Token"] },
       { ipc, formatError: String },
     );
 
@@ -322,12 +321,26 @@ describe("clearRemovedServerSecrets (issue #904 list twin)", () => {
 
     const warnings = await clearRemovedServerSecrets(
       "srv-1",
-      ["API_KEY"],
-      [],
+      { env: ["API_KEY"], header: [] },
       { ipc, formatError: String },
     );
 
     expect(warnings).toEqual([]);
+  });
+
+  it("keeps the two key families as labeled fields — a positional pair must not compile (issue #1117)", () => {
+    // Compile-time pin: pre-#1117 the env/header keys were adjacent bare
+    // string[] parameters — a swapped family pair compiled silently and the
+    // idempotent clears no-opped, stranding real credentials in the OS
+    // keychain. bind() type-checks its arguments without invoking the
+    // function, so this pin is exercised by tsc and inert at runtime.
+    const positional = clearRemovedServerSecrets.bind(
+      null,
+      "srv-1",
+      // @ts-expect-error pre-#1117 positional shape must stay a type error
+      ["API_KEY"],
+    );
+    expect(positional).toBeTypeOf("function");
   });
 });
 

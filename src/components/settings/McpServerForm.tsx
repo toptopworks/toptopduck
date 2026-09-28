@@ -49,9 +49,11 @@ import {
   restorePendingSecrets,
   withDormantEnv,
   type KvEntry,
+  type McpDormantEnv,
   type McpFinalizeIpc,
   type McpSecretFaces,
-} from "./mcpFinalize";
+  type SecretKeyFaces,
+} from "./mcp-finalize";
 
 // The real ipc boundary for the secret lifecycle species: the api module's
 // functions, handed to finalizeMcpServer as one object. Component tests mock
@@ -67,7 +69,7 @@ const mcpIpc: McpFinalizeIpc = {
 
 // MCP server add / edit form (issue #388). A full-page replacement for the
 // server list with Form / JSON dual-mode, bidirectional sync, and a save flow
-// owned by the secret lifecycle species (mcpFinalize, issue #1115): upsert →
+// owned by the secret lifecycle species (mcp-finalize, issue #1115): upsert →
 // minted id → secret writes → deleted-account clears → auto probe; the
 // onSaved callback returns the finalized config + probe result to the list.
 //
@@ -195,7 +197,7 @@ export function McpServerForm({
   // record nothing — the backend upsert's blind diff would misread a flip as
   // deletions; that is why this cleanup lives in the form. A recorded name
   // survives mode switches and clears at the next save of either mode.
-  const deletedSecretKeysRef = useRef<{ env: string[]; header: string[] }>({
+  const deletedSecretKeysRef = useRef<SecretKeyFaces>({
     env: [],
     header: [],
   });
@@ -205,10 +207,7 @@ export function McpServerForm({
   // transport, configToWebJson serializes none of it, but the save path
   // puts the ORIGINAL env values + secret key names back so an edit never
   // drops or migrates them.
-  const dormantEnvRef = useRef<{
-    env: Record<string, string>;
-    keychainEnvKeys: string[];
-  }>(
+  const dormantEnvRef = useRef<McpDormantEnv>(
     initialServer.transport.type === "stdio"
       ? { env: {}, keychainEnvKeys: [] }
       : {
@@ -523,8 +522,7 @@ export function McpServerForm({
     const faces: McpSecretFaces = {
       envSecrets: mode === "form" ? collectSecretValues(envEntries) : {},
       headerSecrets: mode === "form" ? collectSecretValues(headerEntries) : {},
-      deletedEnvKeys: deletedSecretKeysRef.current.env,
-      deletedHeaderKeys: deletedSecretKeysRef.current.header,
+      deletedKeys: deletedSecretKeysRef.current,
     };
 
     setSaving(true);

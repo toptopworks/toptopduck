@@ -64,7 +64,7 @@ import {
 import { McpImportDialog } from "./McpImportDialog";
 import { McpServerForm } from "./McpServerForm";
 import { upsertMirror, withMcpServers } from "./mcp-mirror";
-import { clearRemovedServerSecrets } from "./mcpFinalize";
+import { clearRemovedServerSecrets } from "./mcp-finalize";
 
 // The pane's navigation name: the list header and the create/edit form share
 // it -- the form keeps the name for section context, without the list-only
@@ -333,8 +333,10 @@ export function McpSection({
     if (err === null) {
       // Config removed — clean up local state for the removed server.
       const removedId = deleteTarget.id;
-      const removedKeys = deleteTarget.keychainEnvKeys;
-      const removedHeaderKeys = deleteTarget.keychainHeaderKeys;
+      const removedKeyFaces = {
+        env: deleteTarget.keychainEnvKeys,
+        header: deleteTarget.keychainHeaderKeys,
+      };
       setProbeStates((prev) => {
         const next = { ...prev };
         delete next[removedId];
@@ -355,8 +357,7 @@ export function McpSection({
       // reads it.
       const warnings = await clearRemovedServerSecrets(
         removedId,
-        removedKeys,
-        removedHeaderKeys,
+        removedKeyFaces,
         {
           ipc: { clearMcpServerSecret, clearMcpServerHeaderSecret },
           formatError: (e) => fmtError(e, intl),
