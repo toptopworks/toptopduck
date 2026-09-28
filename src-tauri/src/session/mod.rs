@@ -54,13 +54,13 @@ use crate::runtime::acp::wire::McpServer;
 use crate::runtime::gateway::server::{bind_gateway, serve_connection, GatewayCtx};
 use crate::session::loop_contract::{LoopOutcome, LoopRound};
 use crate::session::materializer::{CachedDerivedRef, Materializer, RealMaterializer, TurnDeps};
+use crate::session::outcome_merge::{merge_outcomes, turn_outcome_from_loop};
 use crate::session::skills::SkillTurnState;
 use crate::session_store::ClosingFlag;
 use crate::skills::SkillPromptFragment;
 use crate::window;
 use crate::workingset::{WorkingSet, DEFAULT_RESULT_COUNT_CAP};
 use crate::SessionId;
-use outcome_merge::{merge_outcomes, turn_outcome_from_loop};
 
 // Re-export the resume global-state probe (ADR-0053 Decision 3) after its
 // move into `session::resume`. Since ADR-0056 the LIVE command-layer resume
@@ -2789,7 +2789,7 @@ fn migrate_derived_sources(working_set: &mut WorkingSet, temp_path: &Path, duck_
 
 #[cfg(test)]
 mod tests {
-    use super::{Session, TOOL_OUTPUT_DIR_NAME};
+    use super::{clamp_settle, Session, TOOL_OUTPUT_DIR_NAME};
     use std::path::Path;
 
     use crate::model::{ThreadEntry, TurnFailure, TurnOutcome, TurnRuntime};
@@ -2798,8 +2798,6 @@ mod tests {
     use crate::provider::ProviderError;
     use serde_json::json;
     use tempfile::NamedTempFile;
-
-    use super::clamp_settle;
 
     // Issue #617: the settle stamp reads the wall clock a second time after
     // the ask stamp, so a backward clock correction (NTP, a manual change)

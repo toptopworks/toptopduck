@@ -1,12 +1,13 @@
 //! The gateway/ACP outcome merge species (ADR-0085 trace merge, issue #299
-//! slice 9c): where the built-in runtime's gateway-side dispatch records
-//! (`GatewayOutcome`) and the external ACP engine's loop stream (`LoopOutcome`)
-//! fold into one turn record. `turn_outcome_from_loop` projects the loop
-//! outcome onto the turn-record outcome (the no-progress kill-log line rides
-//! along); `merge_outcomes` pairs gateway rows with engine echoes (by name or
-//! through the `mcp_invoke` pool) so one call is one audited row.
-//! Deterministic functions only -- no row reads, persistence, or turn
-//! driving (extracted from the session monolith by issue #1106).
+//! slice 9c): where the gateway's authoritative dispatch records
+//! (`GatewayOutcome`) -- the MCP server the external runtime's bridge
+//! connects back to -- and the external ACP engine's loop stream
+//! (`LoopOutcome`) fold into one turn record. `turn_outcome_from_loop`
+//! projects the loop outcome onto the turn-record outcome (the no-progress
+//! kill-log line rides along); `merge_outcomes` pairs gateway rows with
+//! engine echoes (by name or through the `mcp_invoke` pool) so one call is
+//! one audited row. Deterministic functions only -- no row reads,
+//! persistence, or turn driving.
 
 use std::collections::{HashMap, VecDeque};
 
