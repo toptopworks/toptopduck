@@ -65,8 +65,9 @@ pub use resume::{is_resuming, resuming_count};
 
 // Re-export the turn's data inputs after their move into
 // `session::turn_runner` (ADR-0053): the pub turn entry `ask_with_phase`
-// takes it, so the parameter type rides the same public path (the
-// `GatewayOutcome` posture in outcome_merge.rs).
+// takes it, so the parameter type rides the same public path -- the
+// pub-module-plus-re-export dual path `resume` already rides, keeping
+// `session::TurnInputs` stable for its existing consumers.
 pub use turn_runner::TurnInputs;
 
 /// Upper bound on a single read_rows page (ADR-0005/0024 display cap). A larger
@@ -450,7 +451,7 @@ pub struct Session {
     /// materializer injected for a `Resumer` unit test exercises the replay
     /// branch without DuckDB / a filesystem. Stateless (`RealMaterializer`);
     /// the admin connection / source_files / working_set it borrows live on
-    /// this Session and are passed per turn via [`TurnDeps`]. Held on the
+    /// this Session and are passed per turn via [`materializer::TurnDeps`]. Held on the
     /// Session itself (not inside the loop, which is built per turn) so the
     /// resume borrow and the live-turn borrow share one object.
     materializer: Box<dyn Materializer>,
@@ -1168,7 +1169,7 @@ impl Session {
     // Turn orchestration (ask_with_phase / run_external_turn /
     // snapshot_discovered_runtime / TurnInputs) lives in turn_runner.rs
     // (#1108; ADR-0053 Decision 1); this facade keeps the session-state
-    // surface + settle (record_turn, ADR-0053 Decision 2).
+    // surface + settle (record_turn, ADR-0053 Decision 1).
 
     /// Append a turn to the conversation thread and return its outcome. Every
     /// outcome kind is recorded (ADR-0028 always-visible); the caller has

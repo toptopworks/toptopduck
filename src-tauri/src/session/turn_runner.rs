@@ -7,12 +7,12 @@
 //! ADR-0095). Both arms return the same `(TurnOutcome, trace)` shape, and
 //! the settled outcome crosses back to the facade's `record_turn` -- the
 //! conversation timeline + persistence stay on `session/mod.rs` (ADR-0053
-//! Decision 2: they are session concerns, not turn orchestration).
+//! Decision 1: they are session concerns, not turn orchestration).
 //!
 //! `TurnInputs` rides along as the turn's data vocabulary -- everything
 //! "passed in" rather than wired -- re-exported by the parent module so the
-//! pub turn entry and its parameter type share one public path (the
-//! `GatewayOutcome` posture).
+//! pub turn entry and its parameter type share one public path (the dual
+//! path `resume` already rides).
 //!
 //! The shape is an `impl super::Session` block, not the standalone TurnRunner
 //! struct ADR-0053 Decision 1 drew: that struct's roles evolved into the
