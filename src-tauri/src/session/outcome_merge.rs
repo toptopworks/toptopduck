@@ -305,7 +305,7 @@ mod tests {
     use crate::session::loop_contract::{
         LoopOutcome, LoopRound, NoProgressDetail, Termination, TraceEntry,
     };
-    use crate::session::BUILT_IN_RUNTIME_FACE;
+    use crate::session::turn_runner::BUILT_IN_RUNTIME_FACE;
 
     // --- merge_outcomes (issue #299 slice 9c, ADR-0085 trace merge) -------
 

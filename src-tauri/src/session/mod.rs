@@ -1764,15 +1764,6 @@ fn export_io(step: ExportIoStep, path: &str, e: impl std::fmt::Display) -> Expor
 // The gateway/ACP outcome merge family lives in `outcome_merge` (#1106;
 // ADR-0085 trace merge, #299 slice 9c).
 
-/// The built-in runtime's kill-log face (#886): what the projection names
-/// when the silenced turn ran on the built-in loop (the external branches
-/// pass their adapter id). A named const so the wording stays greppable.
-/// Deliberately spelled with a hyphen while its wire counterpart is
-/// `TurnRuntime::BuiltIn`'s snake_case `"built_in"` (model/turn.rs): the
-/// face is log prose, the wire tag is a persisted enum -- correlating a
-/// kill log against persisted turns needs to know both spellings (#890).
-const BUILT_IN_RUNTIME_FACE: &str = "built-in";
-
 /// Current Unix epoch time in milliseconds (ADR-0103, issue #608): the
 /// clock the turn's `asked_at` / `settled_at` timestamps read. Millisecond
 /// precision matches the timestamp grain the chat projection renders. A
@@ -1805,62 +1796,10 @@ fn clamp_settle(now: Option<u64>, asked: Option<u64>) -> Option<u64> {
 /// injector in `lib.rs` (`inject_dev_bridge_bin`, debug-only) so the name
 /// cannot drift between inject and read. The integration-test injector lives
 /// in a separate crate and hardcodes the literal -- a rename caught by those
-/// tests failing loudly, the same drift guard `ENV_PORT` below documents.
+/// tests failing loudly, the same drift guard `ENV_PORT` in `turn_runner`
+/// documents.
 pub(crate) const ACP_BRIDGE_BIN_ENV: &str = "TOPTOPDUCK_ACP_BRIDGE_BIN";
 
-/// Resolve the ACP bridge binary path (issue #299 slice 9c, ADR-0085).
-///
-/// Returns `Err` with a turn-failure detail when [`ACP_BRIDGE_BIN_ENV`] is
-/// unset or empty (a non-Unicode value gets its own detail) so the
-/// orchestrator surfaces a `TurnOutcome::Failed(Runtime)` --
-/// consistent with the `detect_adapter` and `bind_gateway` failure paths in
-/// [`Session::run_external_turn`] -- instead of poisoning the session mutex
-/// with a panic. The var is read at run time (`env!`/`option_env!` are
-/// compile-time, and cargo only sets `CARGO_BIN_EXE_toptopduck-acp-bridge`
-/// while compiling same-package integration tests, which the lib build never
-/// sees). Injectors: dev builds resolve the `current_exe()` sibling in
-/// `.setup()` (debug-only; an explicit export wins); integration tests set it
-/// (serially, mirroring the 9a `ACP_FAKE_SCENARIO` env lock) to
-/// `env!("CARGO_BIN_EXE_toptopduck-acp-bridge")` before driving a turn.
-/// Production Tauri sidecar bundling is a packaging-time decision (ADR-0085
-/// Consequences: the bridge bin production path) -- the `[[bin]]` does not
-/// enter the default Tauri bundle, so a shipped app cannot yet resolve this
-/// path; a follow-up ADR wires the sidecar. Centralizing the lookup here
-/// means the follow-up changes one site.
-fn bridge_bin_path() -> Result<String, String> {
-    match std::env::var(ACP_BRIDGE_BIN_ENV) {
-        Ok(v) if !v.is_empty() => Ok(v),
-        // An explicitly empty export is not a configuration: report the
-        // missing-var guidance instead of handing the external CLI an empty
-        // bridge command (which stalls the turn on the gateway connect
-        // deadline with a generic timeout detail).
-        Ok(_) | Err(std::env::VarError::NotPresent) => Err(format!(
-            "{ACP_BRIDGE_BIN_ENV} is not set, so no ACP bridge binary is \
-             available. Injection sources: tauri dev resolves the sibling \
-             built by beforeDevCommand; integration tests inject it from \
-             CARGO_BIN_EXE_toptopduck-acp-bridge; production sidecar \
-             bundling is the ADR-0085 packaging-time follow-up. For a dev \
-             run bypassing the tauri CLI (e.g. cargo run), build the bridge \
-             first: cargo build --manifest-path src-tauri/Cargo.toml \
-             --bin toptopduck-acp-bridge. A release-profile or cross-target \
-             dev run also needs the sibling built for the matching profile, \
-             or an explicit export"
-        )),
-        Err(std::env::VarError::NotUnicode(_)) => Err(format!(
-            "{ACP_BRIDGE_BIN_ENV} is set but not valid Unicode, so the ACP \
-             bridge binary path is unusable; export the absolute path to a \
-             valid bridge binary"
-        )),
-    }
-}
-
-/// The bridge's port env var name. Mirrors the bridge binary's own const; the
-/// bin is a pure-std target that does not import lib, so the name is duplicated
-/// here -- a rename in either place fails the integration tests loudly rather
-/// than the bridge silently reading a stale name.
-const ENV_PORT: &str = "TOPTOPDUCK_GATEWAY_PORT";
-/// The bridge's token env var name (mirrors the bridge binary).
-const ENV_TOKEN: &str = "TOPTOPDUCK_GATEWAY_TOKEN";
 /// The MCP server name advertised in the bridge descriptor (the CLI sees this
 /// as the MCP server's `name`). Load-bearing beyond trace clarity: the
 /// claude-code adapter's `--allowedTools` value and the ACP engine's gateway
@@ -1897,24 +1836,6 @@ impl Drop for Session {
             let _ = tx.send(());
         }
     }
-}
-
-/// The turn-start invoked snapshot (ADR-0119 Decision 4, issue #983): the
-/// session's monotonic fold plus the turn's user invocations -- a user
-/// invocation is turn INPUT (assembled ahead of the question), so it reads
-/// within its own turn, unlike an agent's mid-turn invoke which joins the
-/// next turn's snapshot. Derived ONCE at the submit boundary and passed into
-/// both runtime faces -- the gateway branch used to refold the pending vec's
-/// user-invocation names (equivalent only by comment, retired #987).
-fn turn_start_invoked(
-    session_fold: &[String],
-    user_invocations: &[crate::model::SkillInvocation],
-) -> Vec<String> {
-    let mut invoked = session_fold.to_vec();
-    for invocation in user_invocations {
-        crate::util::push_unique(&mut invoked, &invocation.name);
-    }
-    invoked
 }
 
 /// Fold the turn's invocation records into the turn's skill provenance
