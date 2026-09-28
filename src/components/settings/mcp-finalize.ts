@@ -52,6 +52,16 @@ export type McpFinalizeIpc = {
   probeMcpServer: (server: McpServerConfig) => Promise<McpProbeResult>;
 };
 
+/** The two keychain account families' key names (issue #901: env secrets
+ *  and header secrets live in distinct families). Labeled fields, never
+ *  adjacent bare arrays — a swapped family pair would compile silently and
+ *  the idempotent clears would no-op, stranding real credentials in the OS
+ *  keychain (issue #1117). */
+export type SecretKeyFaces = {
+  env: string[];
+  header: string[];
+};
+
 /** The secret faces one save carries (issue #901 split env / headers into
  *  distinct keychain account families). */
 export type McpSecretFaces = {
@@ -61,9 +71,10 @@ export type McpSecretFaces = {
   envSecrets: Record<string, string>;
   headerSecrets: Record<string, string>;
   /** Secret names whose accounts a deleted row must clear at save (issue
-   *  #904). Only explicit Form-mode row removals record names. */
-  deletedEnvKeys: string[];
-  deletedHeaderKeys: string[];
+   *  #904). Only explicit Form-mode row removals record names; the form's
+   *  deletion recorder passes its ref straight through (issue #1117 — no
+   *  flatten/re-nest churn). */
+  deletedKeys: SecretKeyFaces;
 };
 
 /** The injected dependencies of the finalize orchestration. */
@@ -138,6 +149,15 @@ export function collectSecretValues(
   return secrets;
 }
 
+/** A remote draft's dormant env face (issue #901): the env values + secret
+ *  key names that ride through a form session while the JSON text cannot
+ *  express them. The single named declaration — withDormantEnv's parameter
+ *  and the form's ref share it (issue #1117). */
+export type McpDormantEnv = {
+  env: Record<string, string>;
+  keychainEnvKeys: string[];
+};
+
 /** Keep a remote draft's dormant env face across a JSON-mode parse (issue
  *  #901): the web format cannot express it, so an EMPTY parsed face means
  *  "unchanged" (the dormant face rides through); only an internal-format
@@ -145,7 +165,7 @@ export function collectSecretValues(
  *  through untouched (env is their live face). */
 export function withDormantEnv(
   draft: McpServerDraft,
-  dormant: { env: Record<string, string>; keychainEnvKeys: string[] },
+  dormant: McpDormantEnv,
 ): McpServerDraft {
   if (draft.transport.type === "stdio") return draft;
   if (Object.keys(draft.env).length > 0 || draft.keychain_env_keys.length > 0) {
@@ -170,8 +190,8 @@ async function clearAccounts(
     "clearMcpServerSecret" | "clearMcpServerHeaderSecret"
   >,
   serverId: string,
-  deleted: { env: string[]; header: string[] },
-  finalized: { env: string[]; header: string[] },
+  deleted: SecretKeyFaces,
+  finalized: SecretKeyFaces,
   formatError: (e: unknown) => string,
 ): Promise<string[]> {
   const envClears = [...new Set(deleted.env)].filter(
@@ -245,7 +265,7 @@ export async function finalizeMcpServer(
   const clearWarnings = await clearAccounts(
     ipc,
     finalized.id,
-    { env: faces.deletedEnvKeys, header: faces.deletedHeaderKeys },
+    faces.deletedKeys,
     {
       env: finalized.keychain_env_keys,
       header: finalized.keychain_header_keys,
@@ -286,8 +306,7 @@ export async function finalizeMcpServer(
  *  swallows them. */
 export async function clearRemovedServerSecrets(
   serverId: string,
-  envKeys: string[],
-  headerKeys: string[],
+  deletedKeys: SecretKeyFaces,
   deps: {
     ipc: Pick<
       McpFinalizeIpc,
@@ -299,7 +318,7 @@ export async function clearRemovedServerSecrets(
   return clearAccounts(
     deps.ipc,
     serverId,
-    { env: envKeys, header: headerKeys },
+    deletedKeys,
     { env: [], header: [] },
     deps.formatError,
   );
