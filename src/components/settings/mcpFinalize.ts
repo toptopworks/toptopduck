@@ -72,7 +72,7 @@ export type FinalizeDeps = {
   /** Localized error rendering (fmtError + intl in the components). */
   formatError: (e: unknown) => string;
   /** Called right after the upsert commits, BEFORE the secret writes — the
-   *  form persists the minted id here so a retry after a secret/probe
+   *  form persists the minted id here so a retry after a secret-write
    *  failure is idempotent (C1: without it, a retry sends id="" again and
    *  the backend mints a second server). */
   onUpserted: (finalized: McpServerConfig) => void;
@@ -180,27 +180,29 @@ async function clearAccounts(
   const headerClears = [...new Set(deleted.header)].filter(
     (name) => !finalized.header.includes(name),
   );
+  // Each warning carries its key name — the raw keychain error names no
+  // account, and the key is safe to show (the config file lists it).
   const warnings: string[] = [];
   for (const key of envClears) {
     try {
       await ipc.clearMcpServerSecret(serverId, key);
     } catch (clearErr) {
-      warnings.push(formatError(clearErr));
+      warnings.push(`${key}: ${formatError(clearErr)}`);
     }
   }
   for (const name of headerClears) {
     try {
       await ipc.clearMcpServerHeaderSecret(serverId, name);
     } catch (clearErr) {
-      warnings.push(formatError(clearErr));
+      warnings.push(`${name}: ${formatError(clearErr)}`);
     }
   }
   return warnings;
 }
 
-/** The save-time five-step orchestration (verbatim from the form's old
- *  inline flow, issue #1115): upsert → persist minted id (onUpserted, C1) →
- *  write env/header secrets → clear deleted accounts → probe. A fatal step
+/** The save-time five-step orchestration (issue #1115): upsert → persist
+ *  minted id (onUpserted, C1) → write env/header secrets → clear deleted
+ *  accounts → probe. A fatal step
  *  (the upsert or a secret write) REJECTS — the caller aborts the save; the
  *  clears and the probe are non-fatal (C2) and their failures ride the
  *  returned probe result's error channel so the row surfaces them while
@@ -219,8 +221,10 @@ export async function finalizeMcpServer(
 
   // 2. Write each secret to the OS keychain (ADR-0029 one-shot transfer):
   //    env secrets under `mcp-<id>-<env_key>`, header secrets under
-  //    `mcp-<id>-header-<name>` (issue #901). A row with no entered value
-  //    writes nothing — its stored value is kept.
+  //    `mcp-<id>-header-<name>` (issue #901). The finalized config's key
+  //    lists are the write authority — a face value whose key the backend
+  //    did not echo back never lands. A row with no entered value writes
+  //    nothing — its stored value is kept.
   for (const key of finalized.keychain_env_keys) {
     const value = faces.envSecrets[key];
     if (value) {

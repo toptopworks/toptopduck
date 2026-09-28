@@ -168,18 +168,6 @@ function kvEntryActions(
   };
 }
 
-/** Capture one face's secret values before a Form→JSON switch so they
- *  survive the round-trip (H2; one call per face since #901 split them). */
-function capturePendingSecrets(entries: KvEntry[]): Record<string, string> {
-  const pending: Record<string, string> = {};
-  for (const entry of entries) {
-    if (entry.isSecret) {
-      pending[entry.key] = entry.value;
-    }
-  }
-  return pending;
-}
-
 export function McpServerForm({
   initialServer,
   isEdit,
@@ -188,7 +176,7 @@ export function McpServerForm({
 }: McpServerFormProps) {
   const intl = useIntl();
 
-  // Server id state — updated after upsert so a retry (after a secret/probe
+  // Server id state — updated after upsert so a retry (after a secret-write
   // failure) sends the minted id instead of "", preventing Rust from creating
   // a duplicate server (C1).
   const [serverId, setServerId] = useState(initialServer.id);
@@ -417,8 +405,10 @@ export function McpServerForm({
       // secret key names with blanked values; the actual values are restored
       // from the pending refs on the JSON → Form switch. One ref per face
       // (issue #901).
-      pendingEnvSecrets.current = capturePendingSecrets(envEntries);
-      pendingHeaderSecrets.current = capturePendingSecrets(headerEntries);
+      // collectSecretValues doubles as the capture (H2 round-trip; empty
+      // values are unobservable — restore skips them by truthiness).
+      pendingEnvSecrets.current = collectSecretValues(envEntries);
+      pendingHeaderSecrets.current = collectSecretValues(headerEntries);
       // Serialize into the common web format (bare server map) so the user
       // sees and edits the same shape they'd copy from online docs.
       const config = buildConfigFromForm();

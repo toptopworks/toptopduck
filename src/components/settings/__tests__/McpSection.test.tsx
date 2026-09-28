@@ -402,9 +402,12 @@ describe("McpSection (issue #387)", () => {
       expect(clearMcpServerSecret).toHaveBeenCalledWith("srv-1", "API_KEY");
     });
 
-    // The cleanup failure is surfaced on the pane's error banner — the same
-    // user-visible posture the save path has (#1115), never swallowed.
-    expect(await screen.findByText("keychain locked")).toBeInTheDocument();
+    // The cleanup failure is surfaced on the pane's error banner, named by
+    // its key — the same user-visible posture the save path has (#1115),
+    // never swallowed.
+    expect(
+      await screen.findByText("API_KEY: keychain locked"),
+    ).toBeInTheDocument();
   });
 
   it("clicking Add switches to the form view (issue #388)", () => {

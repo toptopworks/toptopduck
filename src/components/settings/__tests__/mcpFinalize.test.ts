@@ -15,10 +15,9 @@ import {
 import type { McpServerConfig, McpServerDraft } from "../../../types/mcp";
 
 // Function-level seam of the MCP secret lifecycle species (issue #1115):
-// the orchestration semantics that used to be pinned through ~16 component
-// tests (mount + mock five queries + fireEvent + waitFor) live here as
-// direct fake-ipc assertions. The component tests keep only what the
-// component itself owns (UI routing, form state, refs).
+// the orchestration semantics live here as direct fake-ipc assertions. The
+// component tests keep only what the component itself owns (UI routing,
+// form state, refs).
 
 function makeConfig(overrides: Partial<McpServerConfig> = {}): McpServerConfig {
   return {
@@ -32,15 +31,6 @@ function makeConfig(overrides: Partial<McpServerConfig> = {}): McpServerConfig {
     enabled: true,
     ...overrides,
   };
-}
-
-function makeRemoteConfig(
-  overrides: Partial<McpServerConfig> = {},
-): McpServerConfig {
-  return makeConfig({
-    transport: { type: "http", url: "https://example.com/mcp", headers: {} },
-    ...overrides,
-  });
 }
 
 function makeDraft(overrides: Partial<McpServerDraft> = {}): McpServerDraft {
@@ -197,14 +187,16 @@ describe("finalizeMcpServer (issue #1115)", () => {
     expect(probeResult.error).toContain("probe timeout");
   });
 
-  it("clears deleted accounts (deduped, re-added names spared) and folds clear failures into the probe error (issue #904)", async () => {
+  it("clears deleted accounts (deduped, re-added names spared on both faces) and folds clear failures into the probe error (issue #904)", async () => {
     // API_KEY was deleted (recorded) then re-added — it rides the finalized
-    // config, so the clear-filter must spare its account. OLD_KEY/STALE_KEY
-    // stay deleted (OLD_KEY recorded twice — dedup to one clear);
-    // STALE_KEY's clear fails, non-fatally.
+    // config, so the clear-filter must spare its account; X-Test-Token does
+    // the same on the header face. OLD_KEY/STALE_KEY stay deleted (OLD_KEY
+    // recorded twice — dedup to one clear); STALE_KEY's clear fails,
+    // non-fatally.
     const finalized = makeConfig({
       id: "srv-1",
       keychain_env_keys: ["API_KEY"],
+      keychain_header_keys: ["X-Test-Token"],
     });
     const ipc = makeIpc({
       upsertMcpServer: vi.fn().mockResolvedValue(finalized),
@@ -218,14 +210,16 @@ describe("finalizeMcpServer (issue #1115)", () => {
       makeConfig(),
       {
         ...emptyFaces(),
+        envSecrets: { API_KEY: "sk-secret-123" },
         deletedEnvKeys: ["OLD_KEY", "STALE_KEY", "OLD_KEY", "API_KEY"],
-        deletedHeaderKeys: ["X-Test-Token"],
+        deletedHeaderKeys: ["X-Test-Token", "X-Old-Token"],
       },
       { ipc, formatError: String, onUpserted: vi.fn() },
     );
 
-    // Dedup + clear-filter: two env clears total (OLD_KEY once, STALE_KEY),
-    // API_KEY never touched; the header family clears its own account.
+    // Dedup + clear-filter on the env face: two clears total (OLD_KEY once,
+    // STALE_KEY), API_KEY never touched. On the header face the re-added
+    // X-Test-Token is spared; only X-Old-Token clears.
     expect(ipc.clearMcpServerSecret).toHaveBeenCalledTimes(2);
     expect(ipc.clearMcpServerSecret).toHaveBeenCalledWith("srv-1", "OLD_KEY");
     expect(ipc.clearMcpServerSecret).toHaveBeenCalledWith("srv-1", "STALE_KEY");
@@ -233,7 +227,12 @@ describe("finalizeMcpServer (issue #1115)", () => {
       "srv-1",
       "API_KEY",
     );
+    expect(ipc.clearMcpServerHeaderSecret).toHaveBeenCalledTimes(1);
     expect(ipc.clearMcpServerHeaderSecret).toHaveBeenCalledWith(
+      "srv-1",
+      "X-Old-Token",
+    );
+    expect(ipc.clearMcpServerHeaderSecret).not.toHaveBeenCalledWith(
       "srv-1",
       "X-Test-Token",
     );
@@ -241,7 +240,18 @@ describe("finalizeMcpServer (issue #1115)", () => {
     // Non-fatal posture: connected reflects the server, the failed cleanup
     // rides the error channel.
     expect(probeResult.connected).toBe(true);
-    expect(probeResult.error).toContain("keychain locked");
+    expect(probeResult.error).toContain("STALE_KEY: Error: keychain locked");
+
+    // The secret write precedes the clears, which precede the probe — a
+    // stale credential must not outlive the save's own status check.
+    const envWriteOrder =
+      vi.mocked(ipc.setMcpServerSecret).mock.invocationCallOrder[0];
+    const clearOrder =
+      vi.mocked(ipc.clearMcpServerSecret).mock.invocationCallOrder[0];
+    const probeOrder =
+      vi.mocked(ipc.probeMcpServer).mock.invocationCallOrder[0];
+    expect(envWriteOrder).toBeLessThan(clearOrder);
+    expect(clearOrder).toBeLessThan(probeOrder);
   });
 
   it("appends clear warnings to an existing probe error, joined with '; '", async () => {
@@ -269,9 +279,10 @@ describe("finalizeMcpServer (issue #1115)", () => {
       { ipc, formatError: String, onUpserted: vi.fn() },
     );
 
-    // Both failure channels fold into one message, probe first.
+    // Both failure channels fold into one message, probe first, each clear
+    // failure named by its key.
     expect(probeResult.error).toBe(
-      "Error: probe timeout; Error: clear failed; Error: header clear failed",
+      "Error: probe timeout; OLD_KEY: Error: clear failed; X-Test-Token: Error: header clear failed",
     );
   });
 });
@@ -299,8 +310,11 @@ describe("clearRemovedServerSecrets (issue #904 list twin)", () => {
       "X-Test-Token",
     );
     // Every env clear failed; the header clear succeeded — the failures are
-    // returned so the caller can surface them.
-    expect(warnings).toEqual(["Error: keychain locked", "Error: keychain locked"]);
+    // returned, each named by its key, so the caller can surface them.
+    expect(warnings).toEqual([
+      "API_KEY: Error: keychain locked",
+      "WEBHOOK_SECRET: Error: keychain locked",
+    ]);
   });
 
   it("returns an empty warning list when every clear succeeds", async () => {
@@ -335,7 +349,7 @@ describe("value-level helpers", () => {
     const stdio = makeConfig();
     expect(headerFaceOf(stdio)).toEqual({ plain: {}, secretKeys: [] });
 
-    const remote = makeRemoteConfig({
+    const remote = makeConfig({
       transport: {
         type: "http",
         url: "https://example.com/mcp",
@@ -403,5 +417,13 @@ describe("value-level helpers", () => {
       env: { FRESH: "value" },
     });
     expect(withDormantEnv(explicitDraft, dormant)).toBe(explicitDraft);
+
+    // A paste whose env is entirely secret keys also wins — the key list
+    // itself proves the paste explicitly touched env.
+    const allSecretDraft = makeDraft({
+      transport: { type: "http", url: "https://example.com/mcp", headers: {} },
+      keychain_env_keys: ["ONLY_SECRET"],
+    });
+    expect(withDormantEnv(allSecretDraft, dormant)).toBe(allSecretDraft);
   });
 });
