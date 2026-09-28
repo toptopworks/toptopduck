@@ -14,6 +14,7 @@ pub mod outcome_merge;
 pub(crate) mod progress;
 pub mod recipe_persister;
 pub mod resume;
+mod rows_io;
 pub mod sandbox;
 pub mod skills;
 pub mod snapshot;
@@ -34,10 +35,9 @@ use crate::approval::{ApprovalRequestBody, ApprovalResponse, ApprovalSink, Appro
 use crate::cancel::CancelToken;
 use crate::ingest::schema::quote_ident;
 use crate::model::{
-    ColumnSchema, DatasetDescriptor, DatasetPrivacy, DeleteImpactEntry, ExportIoStep,
-    ExportRowsError, RenameError, RowPage, RowReadError, SkillLifecycleEvent, SkillProvenance,
-    SourceLifecycleEvent, ThreadEntry, TraceRound, TurnOutcome, TurnProvenance, TurnRecord,
-    TurnRuntime,
+    DatasetDescriptor, DatasetPrivacy, DeleteImpactEntry, ExportRowsError, RenameError, RowPage,
+    RowReadError, SkillLifecycleEvent, SkillProvenance, SourceLifecycleEvent, ThreadEntry,
+    TraceRound, TurnOutcome, TurnProvenance, TurnRecord, TurnRuntime,
 };
 use crate::persistence::recipe::{
     LastRuntime, Recipe, RecipeTraceRound, RecipeTurn, RuntimeKind,
@@ -69,27 +69,6 @@ pub use resume::{is_resuming, resuming_count};
 // pub-module-plus-re-export dual path `resume` already rides, keeping
 // `session::TurnInputs` stable for its existing consumers.
 pub use turn_runner::TurnInputs;
-
-/// Upper bound on a single read_rows page (ADR-0005/0024 display cap). A larger
-/// requested limit is clamped so a malformed/hostile caller can't pull the whole
-/// table into memory; the physical table still holds the full result.
-const MAX_READ_ROWS: u64 = 10_000;
-
-/// The full-result confirm threshold (issue #779): a full pull (CSV export or
-/// TSV copy) over this many rows is refused with `RowReadError::TooLarge`
-/// unless the caller passes `confirmed`. Both full paths hold the session
-/// lock for the whole scan (ADR-0021's single-flight gate) -- a
-/// multi-million-row pull queues every other command on that session for its
-/// duration -- and the TSV half materializes the whole payload, so a pull
-/// this large must be a deliberate act, not an accidental click. Sits beside
-/// MAX_READ_ROWS on purpose: both bound how much of a table one call may
-/// pull, one for the display page, one for the full path.
-const MAX_UNCONFIRMED_FULL_ROWS: u64 = 1_000_000;
-
-/// The UTF-8 BOM written ahead of an exported CSV's first record (issue #769):
-/// Excel-family spreadsheets autodetect UTF-8 by its presence -- without it a
-/// CJK column name or value garbles on open.
-const UTF8_BOM: &str = "\u{FEFF}";
 
 /// The subdirectory name under the session temp dir where external MCP tools
 /// write their output files (ADR-0087 Decision 3). Created eagerly at session
@@ -1413,149 +1392,44 @@ impl Session {
     /// masquerades as complete (ADR-0030). Sources read `"<ref>".data`; results
     /// read `"<ref>"`. The FROM fragment, identifiers, and numeric LIMIT/OFFSET
     /// are all tool-generated, so the interpolation is safe.
+    // The result-set read / export / copy species lives in `rows_io` (issue
+    // #1113): free functions over this session's borrowed (cancel, working
+    // set, engine), unit-tested at that seam (ADR-0053 Decision 6). The
+    // delegations below keep the facade's public surface stable for
+    // `commands.rs`.
     pub fn read_rows(
         &self,
         reference_name: &str,
         offset: u64,
         limit: u64,
     ) -> Result<RowPage, RowReadError> {
-        // Clamp the page size to the display cap (ADR-0005/0024) so a malformed
-        // or hostile caller can't pull the whole table into memory.
-        let limit = limit.min(MAX_READ_ROWS);
-        let (columns, body, total) = self.full_rows_sql(reference_name)?;
-        let sql = format!("{body} LIMIT {limit} OFFSET {offset}");
-        let mut out = Vec::new();
-        self.scan_rows(&sql, columns.len(), |cells| {
-            out.push(cells);
-            Ok(())
-        })?;
-        Ok(RowPage {
-            columns,
-            rows: out,
-            total,
+        rows_io::read_rows(
+            &self.working_set,
+            &self.admin_engine,
+            reference_name,
             offset,
             limit,
-        })
+        )
     }
 
-    /// The shared SELECT body of the paged read and the full-result export /
-    /// copy paths (issue #769): the working set's FROM fragment with every
-    /// column CAST to VARCHAR (NULL -> "") for uniform rendering, plus the
-    /// descriptor's full row count (the paged read's honest `total`). Paged
-    /// reads append LIMIT/OFFSET; the full paths run it unclamped and stream
-    /// the rows out instead of paging them. The identifiers and the FROM
-    /// fragment are tool-generated, so the interpolation is safe.
-    fn full_rows_sql(
-        &self,
-        reference_name: &str,
-    ) -> Result<(Vec<ColumnSchema>, String, u64), RowReadError> {
-        let descriptor = self
-            .working_set
-            .get(reference_name)
-            .ok_or_else(|| RowReadError::UnknownDataset(reference_name.to_string()))?;
-        let from = self
-            .working_set
-            .sql_from(reference_name)
-            .ok_or_else(|| RowReadError::UnknownDataset(reference_name.to_string()))?;
-        let columns = descriptor.columns.clone();
-        let selects: Vec<String> = columns
-            .iter()
-            .map(|c| format!("CAST({} AS VARCHAR)", quote_ident(&c.name)))
-            .collect();
-        Ok((
-            columns,
-            format!("SELECT {} FROM {}", selects.join(", "), from),
-            descriptor.row_count,
-        ))
-    }
-
-    /// Read one queried row as display cells: VARCHAR cells verbatim, NULL ->
-    /// "" -- the cell semantics shared by the paged read and the full-result
-    /// export / copy paths (lifted from read_rows, issue #769).
-    fn varchar_cells(row: &duckdb::Row<'_>, len: usize) -> Result<Vec<String>, RowReadError> {
-        let mut cells = Vec::with_capacity(len);
-        for i in 0..len {
-            let v: Option<String> = row
-                .get(i)
-                .map_err(|e| RowReadError::Execute(e.to_string()))?;
-            cells.push(v.unwrap_or_default());
-        }
-        Ok(cells)
-    }
-
-    /// Run a rows query and hand each row's display cells to `on_row`
-    /// (issue #769): the one data-access loop shared by the paged read and
-    /// the full-result export / copy paths -- acquire / prepare / query /
-    /// scan / cell-shaping live here exactly once, so the three paths share
-    /// one contract instead of three copies. `E` converts from
-    /// [`RowReadError`], keeping each caller's own error type.
-    fn scan_rows<E>(
-        &self,
-        sql: &str,
-        ncols: usize,
-        mut on_row: impl FnMut(Vec<String>) -> Result<(), E>,
-    ) -> Result<(), E>
-    where
-        E: From<RowReadError>,
-    {
-        let conn = self
-            .admin_engine
-            .acquire()
-            .map_err(|e| RowReadError::Execute(e.to_string()))?;
-        let mut stmt = conn
-            .prepare(sql)
-            .map_err(|e| RowReadError::Execute(e.to_string()))?;
-        let mut rows = stmt
-            .query([])
-            .map_err(|e| RowReadError::Execute(e.to_string()))?;
-        while let Some(row) = rows
-            .next()
-            .map_err(|e| RowReadError::Execute(e.to_string()))?
-        {
-            let cells = Self::varchar_cells(row, ncols)?;
-            on_row(cells)?;
-        }
-        Ok(())
-    }
-
-    /// Export every row of a dataset to `path` as UTF-8 CSV (issue #769): the
-    /// header row leads, then ALL rows -- the same data source and cell
-    /// semantics as [`Self::read_rows`] but no `MAX_READ_ROWS` clamp and no
-    /// paging; rows stream through the csv writer's buffer instead of landing
-    /// in memory, and the frontend never stitches pages together. The file
-    /// opens with a UTF-8 BOM (see [`UTF8_BOM`]); fields are CSV-escaped by the
-    /// writer. Destination-file failures (create / write / flush) are
-    /// [`ExportRowsError::Io`]; everything else matches `read_rows` 1:1. Stale
-    /// results export too -- the rows are real and the payload carries no
-    /// status markers.
-    ///
-    /// Full-path guardrails (issue #779): a result over
-    /// `MAX_UNCONFIRMED_FULL_ROWS` refuses with `RowReadError::TooLarge`
-    /// unless `confirmed` (the lock a full pull holds is O(all rows) long, so
-    /// a pull that large must be deliberate), and a cancel observed mid-scan
-    /// stops the export with `RowReadError::Cancelled` -- the session's
-    /// [`CancelToken`] fires without the session lock (ADR-0021's
-    /// outside-the-lock cancel path), so the export's own lock hold cannot
-    /// shield it from the cancel command. The pull's start retires the
-    /// token's generation (see [`Self::start_full_pull`]), so a past stop or
-    /// a still-sleeping no-progress watchdog from the last turn never kills
-    /// the pull. A cancelled export leaves no artifact: the destination is a
-    /// temp sibling until success, and the failed-write cleanup below removes
-    /// it -- a pre-existing file at the user-chosen path stays untouched.
     pub fn export_rows_csv(
         &self,
         reference_name: &str,
         path: &str,
         confirmed: bool,
     ) -> Result<(), ExportRowsError> {
-        self.export_rows_csv_gated(reference_name, path, confirmed, MAX_UNCONFIRMED_FULL_ROWS)
+        rows_io::export_rows_csv(
+            &self.cancel,
+            &self.working_set,
+            &self.admin_engine,
+            reference_name,
+            path,
+            confirmed,
+        )
     }
 
-    /// The full-path size gate (issue #779): a result over `confirm_above`
-    /// rows refuses unless `confirmed`, quoting the real row count. Delegates
-    /// to [`Self::export_rows_csv`] for everything else. The threshold is a
-    /// parameter (not the constant) so tests exercise the gate with small
-    /// fixtures -- the `read_line_bounded` `max` precedent.
+    /// The gated seam the confirm-gate tests inject a small threshold
+    /// through (see `rows_io::export_rows_csv_gated`).
     pub fn export_rows_csv_gated(
         &self,
         reference_name: &str,
@@ -1563,146 +1437,47 @@ impl Session {
         confirmed: bool,
         confirm_above: u64,
     ) -> Result<(), ExportRowsError> {
-        let (columns, sql) = self.start_full_pull(reference_name, confirmed, confirm_above)?;
-        // Write to a temp sibling and rename on success (issue #779 review):
-        // File::create truncates, so writing the chosen path directly would
-        // destroy a pre-existing file the moment the export starts -- a
-        // stopped or failed export must leave it exactly as it was. The
-        // streaming half writes the BOM to the temp file and hands it to the
-        // csv writer (which adds its own buffer and flushes through it at the
-        // end). Create / Rename errors report the user-chosen path; the
-        // streaming half's Write / Flush errors report the temp sibling (the
-        // file the OS actually failed on).
-        let temp_path = format!("{path}.part");
-        let file =
-            fs::File::create(&temp_path).map_err(|e| export_io(ExportIoStep::Create, path, e))?;
-        let result = self.export_csv_stream(file, &columns, &sql, &temp_path);
-        match result {
-            Ok(()) => {
-                fs::rename(&temp_path, path).map_err(|e| export_io(ExportIoStep::Rename, path, e))
-            }
-            Err(e) => {
-                // The failed write must not leave the half-written artifact
-                // behind -- a truncated CSV opens as a valid-looking export.
-                // Best-effort removal of the temp sibling; the error itself
-                // still crosses IPC and the user-chosen path is untouched.
-                let _ = fs::remove_file(&temp_path);
-                Err(e)
-            }
-        }
+        rows_io::export_rows_csv_gated(
+            &self.cancel,
+            &self.working_set,
+            &self.admin_engine,
+            reference_name,
+            path,
+            confirmed,
+            confirm_above,
+        )
     }
 
-    /// The post-create half of [`Self::export_rows_csv`] (issue #769): BOM,
-    /// header, and every row streamed through the csv writer's buffer. Split
-    /// out so the caller can remove the truncated destination when this
-    /// fails.
-    fn export_csv_stream(
-        &self,
-        mut file: fs::File,
-        columns: &[ColumnSchema],
-        sql: &str,
-        path: &str,
-    ) -> Result<(), ExportRowsError> {
-        use std::io::Write as _;
-
-        file.write_all(UTF8_BOM.as_bytes())
-            .map_err(|e| export_io(ExportIoStep::Write, path, e))?;
-        let mut wtr = csv::Writer::from_writer(file);
-        wtr.write_record(columns.iter().map(|c| c.name.as_str()))
-            .map_err(|e| export_io(ExportIoStep::Write, path, e))?;
-        self.scan_rows(sql, columns.len(), |cells| {
-            // The cancel checkpoint (issue #779): every row consults the
-            // session token, so a cancel during a multi-minute scan stops the
-            // export within one row instead of at its natural end.
-            if self.cancel.is_requested() {
-                return Err(RowReadError::Cancelled.into());
-            }
-            wtr.write_record(cells)
-                .map_err(|e| export_io(ExportIoStep::Write, path, e))
-        })?;
-        wtr.flush()
-            .map_err(|e| export_io(ExportIoStep::Flush, path, e))?;
-        Ok(())
-    }
-
-    /// Every row of a dataset as TSV text with the header row leading (issue
-    /// #769): the full-result clipboard payload. Same data source and cell
-    /// semantics as [`Self::read_rows`], no clamp and no paging. TSV carries no
-    /// quoting convention that spreadsheet paste honors, so an embedded tab,
-    /// CR, or LF would silently split one cell across columns -- those control
-    /// characters are sanitized to a space (see [`push_tsv_line`]). Stale
-    /// results copy too; the payload carries no status markers.
-    ///
-    /// Memory upper bound, deliberately NOT chunked (issue #779 AC3): the
-    /// clipboard write takes exactly one string, so chunking the scan would
-    /// only move the peak (the chunks plus the joined result), never lower
-    /// it. The bound on that peak is the confirm gate -- a result over
-    /// `MAX_UNCONFIRMED_FULL_ROWS` rows refuses with `RowReadError::TooLarge`
-    /// unless `confirmed`, so a copy that large is an explicit choice, and a
-    /// cancel observed mid-scan stops it with `RowReadError::Cancelled`
-    /// (the [`CancelToken`] fires without the session lock, ADR-0021; the
-    /// pull's start retires the token's generation -- consuming a leftover
-    /// request and standing down a still-sleeping no-progress watchdog from
-    /// the last turn -- see [`Self::start_full_pull`]).
     pub fn read_rows_tsv(
         &self,
         reference_name: &str,
         confirmed: bool,
     ) -> Result<String, RowReadError> {
-        self.read_rows_tsv_gated(reference_name, confirmed, MAX_UNCONFIRMED_FULL_ROWS)
+        rows_io::read_rows_tsv(
+            &self.cancel,
+            &self.working_set,
+            &self.admin_engine,
+            reference_name,
+            confirmed,
+        )
     }
 
-    /// The full-path size gate for the TSV copy (issue #779) -- the
-    /// [`Self::read_rows_tsv`] twin of [`Self::export_rows_csv_gated`]: the
-    /// threshold is a parameter so tests exercise the gate with small
-    /// fixtures (the `read_line_bounded` `max` precedent).
+    /// The gated seam the confirm-gate tests inject a small threshold
+    /// through (see `rows_io::read_rows_tsv_gated`).
     pub fn read_rows_tsv_gated(
         &self,
         reference_name: &str,
         confirmed: bool,
         confirm_above: u64,
     ) -> Result<String, RowReadError> {
-        let (columns, sql) = self.start_full_pull(reference_name, confirmed, confirm_above)?;
-        let mut out = String::new();
-        push_tsv_line(&mut out, columns.iter().map(|c| c.name.as_str()));
-        self.scan_rows(&sql, columns.len(), |cells| {
-            // The cancel checkpoint (issue #779), symmetric with the export
-            // path's: every row consults the session token.
-            if self.cancel.is_requested() {
-                return Err(RowReadError::Cancelled);
-            }
-            push_tsv_line(&mut out, cells.iter());
-            Ok(())
-        })?;
-        Ok(out)
-    }
-
-    /// The shared full-pull preamble (issue #779): resolve the data source,
-    /// run the confirm gate over the descriptor's row count, then retire the
-    /// token's generation -- consuming any leftover cancel request (a stop
-    /// that landed after the last turn or pull cannot silently kill this pull
-    /// on its first row) AND standing down any still-sleeping wall-clock
-    /// watchdog from the last turn, which would otherwise fire into a pull
-    /// the user never stopped and land as a quiet Cancelled (the begin_turn
-    /// word update, minus the in-flight half; a pull is not a turn). A
-    /// request that fires AFTER this point is honored by the row loop's
-    /// checkpoint; one racing it is either wiped or honored, the same
-    /// nondeterminism `begin_turn` documents.
-    fn start_full_pull(
-        &self,
-        reference_name: &str,
-        confirmed: bool,
-        confirm_above: u64,
-    ) -> Result<(Vec<ColumnSchema>, String), RowReadError> {
-        let (columns, sql, row_count) = self.full_rows_sql(reference_name)?;
-        if !confirmed && row_count > confirm_above {
-            return Err(RowReadError::TooLarge {
-                row_count,
-                limit: confirm_above,
-            });
-        }
-        self.cancel.retire_generation();
-        Ok((columns, sql))
+        rows_io::read_rows_tsv_gated(
+            &self.cancel,
+            &self.working_set,
+            &self.admin_engine,
+            reference_name,
+            confirmed,
+            confirm_above,
+        )
     }
 
     /// Run arbitrary SQL on the session connection, materializing the engine
@@ -1725,39 +1500,6 @@ impl Session {
             [],
             |r| r.get(0),
         )?)
-    }
-}
-
-/// Append one TSV line (cells joined on tabs, trailing newline) with each
-/// cell's embedded tab / CR / LF sanitized to a single space (issue #769) --
-/// TSV has no quoting convention that spreadsheet paste honors, so keeping
-/// those control characters would silently break the paste's column structure.
-fn push_tsv_line<S: AsRef<str>>(out: &mut String, cells: impl IntoIterator<Item = S>) {
-    let mut first = true;
-    for cell in cells {
-        if !first {
-            out.push('\t');
-        }
-        first = false;
-        for ch in cell.as_ref().chars() {
-            out.push(if matches!(ch, '\t' | '\r' | '\n') {
-                ' '
-            } else {
-                ch
-            });
-        }
-    }
-    out.push('\n');
-}
-
-/// Build the typed destination-file failure for a CSV export (issue #769):
-/// which step failed, at which path, with the underlying io error as the
-/// detail.
-fn export_io(step: ExportIoStep, path: &str, e: impl std::fmt::Display) -> ExportRowsError {
-    ExportRowsError::Io {
-        step,
-        path: path.to_string(),
-        detail: e.to_string(),
     }
 }
 
