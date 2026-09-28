@@ -22,7 +22,7 @@ use toptopduck_lib::runtime::acp::adapter::codex;
 use toptopduck_lib::runtime::acp::engine::{AcpEngine, AcpTurnInput};
 use toptopduck_lib::runtime::acp::wire::{ContentBlock, McpServer};
 use toptopduck_lib::session::loop_contract::{LoopOutcome, Termination, TraceEntry};
-use toptopduck_lib::session::{merge_outcomes, GatewayOutcome};
+use toptopduck_lib::session::outcome_merge::{merge_outcomes, GatewayOutcome};
 
 /// Resolve the codex fake-CLI binary path.
 fn fake_cli() -> PathBuf {
