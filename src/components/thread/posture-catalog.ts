@@ -17,16 +17,19 @@ import type { CatalogNote, PostureCatalog } from "./ComposerPostureTrigger";
 
 // The unselected posture pair (ADR-0100): never chosen, or explicitly
 // cleared -- the "Default (recommended)" start.
-export const EMPTY_POSTURE: ModelPosture = { model: null, thought_level: null };
+export const EMPTY_POSTURE = {
+  model: null,
+  thought_level: null,
+} as const satisfies ModelPosture;
 
 // The honest default while the model-config read settles (and on the
 // cold-start bar, where there is no session to read): no selection, no
 // discovery cache. The CLI's own defaults rule the next turn.
-export const MODEL_CONFIG_DEFAULT: SessionModelConfig = {
+export const MODEL_CONFIG_DEFAULT = {
   model: null,
   thought_level: null,
   cached_discovered: null,
-};
+} as const satisfies SessionModelConfig;
 
 // The reads the projection consumes: the active runtime's identity + the two
 // catalog sources (the session's own discovery cache, and the global probe
@@ -42,13 +45,16 @@ export type PostureCatalogReads = {
   posture: ModelPosture;
 };
 
-// The held posture dimensions as display parts: null AND the empty string
-// both count as unset (the menu guards' convention, so a hand-edited blank
-// cannot blank the button).
+// A posture dimension counts as set only when non-null AND non-empty: the
+// menu guards' convention, so a hand-edited blank cannot blank the button.
+// Shared by the held-pair display and the live-currents tooltip filter.
+function isSetPosturePart(part: string | null | undefined): part is string {
+  return part != null && part !== "";
+}
+
+// The held posture dimensions as display parts.
 export function heldPostureParts(posture: ModelPosture): string[] {
-  return [posture.model, posture.thought_level].filter(
-    (part): part is string => part != null && part !== "",
-  );
+  return [posture.model, posture.thought_level].filter(isSetPosturePart);
 }
 
 export type PostureCatalogProjection = {
@@ -160,19 +166,23 @@ export function derivePostureCatalog(
           : null
       : null;
 
-  const catalog: PostureCatalog | null = !isExternal
-    ? null
-    : isPerModelCatalogAdapter
-      ? (perModelCatalog ? { kind: "perModel", models: perModelCatalog } : null)
-      : acpCatalog
-        ? {
-            kind: "acp",
-            models: acpCatalog.models,
-            thoughtLevels: acpCatalog.thought_levels,
-            currentModel: acpCatalog.current_model,
-            currentThoughtLevel: acpCatalog.current_thought_level,
-          }
-        : null;
+  // The two catalog sources are already stream-format-namespaced above
+  // (per-model implies an external per-model adapter; acp implies an
+  // external ACP one, and they are mutually exclusive), so the projection
+  // re-dispatches on the resolved values alone -- null on both is the
+  // static-label surface (built-in, or an external runtime with no
+  // directory yet).
+  const catalog: PostureCatalog | null = perModelCatalog
+    ? { kind: "perModel", models: perModelCatalog }
+    : acpCatalog
+      ? {
+          kind: "acp",
+          models: acpCatalog.models,
+          thoughtLevels: acpCatalog.thought_levels,
+          currentModel: acpCatalog.current_model,
+          currentThoughtLevel: acpCatalog.current_thought_level,
+        }
+      : null;
 
   // The live payload joins the turn's currents (issue #586): read as facts
   // only while nothing is held (a selection always outranks the live read)
@@ -185,7 +195,7 @@ export function derivePostureCatalog(
   const liveParts = [
     liveDiscovered?.current_model,
     liveDiscovered?.current_thought_level,
-  ].filter((part): part is string => part != null && part !== "");
+  ].filter(isSetPosturePart);
   const liveValue =
     catalog != null && heldParts.length === 0 && liveParts.length > 0
       ? liveParts.join(" · ")

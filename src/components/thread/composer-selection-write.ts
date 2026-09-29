@@ -42,14 +42,10 @@ import { EMPTY_POSTURE, MODEL_CONFIG_DEFAULT } from "./posture-catalog";
 
 // What a posture write resolved to. "written" carries the persist-now
 // verdict of a successful in-session set (ADR-0095 Decision 6, issue #529);
-// "rejected" carries the raw failure for the inline fault line -- the port
-// never rejects, every failure lands on the outcome instead.
+// "rejected" carries the raw failure for the inline fault line -- a posture
+// write never rejects, every failure lands on the outcome instead.
 export type PostureWriteOutcome =
   | { status: "written"; persistError: SaveError | null; persistSuspended: boolean }
-  | { status: "rejected"; error: unknown };
-
-export type RuntimeWriteOutcome =
-  | { status: "written" }
   | { status: "rejected"; error: unknown };
 
 // The options of one posture write. `clearsBackfill`: a cold-start clear
@@ -70,7 +66,7 @@ export type SelectionWritePort = {
     next: ModelPosture,
     options: PostureWriteOptions,
   ): Promise<PostureWriteOutcome>;
-  writeRuntime(next: SessionRuntimeChoice): Promise<RuntimeWriteOutcome>;
+  writeRuntime(next: SessionRuntimeChoice): Promise<void>;
 };
 
 // --- Session adapter (in-session, ADR-0095) ---------------------------------
@@ -148,8 +144,10 @@ export function createSessionSelectionPort(args: {
         void queryClient.invalidateQueries({
           queryKey: sessionKeys.modelConfig(sessionId),
         });
-        return { status: "written" };
       } catch (e) {
+        // Keep the server runtime: refetch so the picker re-reads the
+        // backend truth instead of showing a switch the write never
+        // granted.
         log.warn(
           "composer-selection-write",
           "set session runtime failed; resyncing from the session",
@@ -158,7 +156,6 @@ export function createSessionSelectionPort(args: {
         void queryClient.invalidateQueries({
           queryKey: sessionKeys.runtime(sessionId),
         });
-        return { status: "rejected", error: e };
       }
     },
   };
@@ -260,7 +257,7 @@ export function useColdStartSelection(args: {
   );
 
   const writeRuntime = useCallback(
-    async (next: SessionRuntimeChoice): Promise<RuntimeWriteOutcome> => {
+    async (next: SessionRuntimeChoice): Promise<void> => {
       // A runtime switch is a namespace reset (ADR-0100 Decision 2): model
       // ids are adapter-namespaced, so a posture picked under one CLI must
       // not leak into another (or into the built-in runtime, whose posture
@@ -270,7 +267,6 @@ export function useColdStartSelection(args: {
       gestureRef.current = {};
       setPendingRuntime(next);
       setPendingModelPosture(null);
-      return { status: "written" };
     },
     [],
   );

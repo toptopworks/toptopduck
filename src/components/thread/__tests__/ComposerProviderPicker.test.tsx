@@ -228,7 +228,7 @@ function staticColdStartChannel(
         persistError: null,
         persistSuspended: false,
       })),
-      writeRuntime: vi.fn(async () => ({ status: "written" as const })),
+      writeRuntime: vi.fn(async () => {}),
     },
   };
 }

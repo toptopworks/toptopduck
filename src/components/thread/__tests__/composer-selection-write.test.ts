@@ -162,9 +162,8 @@ describe("session selection port (ADR-0095 set-IPC orchestration)", () => {
   it("seeds the runtime cache after a successful switch and refetches the posture slot", async () => {
     const queryClient = new QueryClient();
     const invalidate = vi.spyOn(queryClient, "invalidateQueries");
-    const outcome = await sessionPort(queryClient).writeRuntime(EXTERNAL_QWEN);
+    await sessionPort(queryClient).writeRuntime(EXTERNAL_QWEN);
     expect(setSessionRuntime).toHaveBeenCalledWith("sess-1", EXTERNAL_QWEN);
-    expect(outcome).toEqual({ status: "written" });
     expect(queryClient.getQueryData(sessionKeys.runtime("sess-1"))).toBe(
       EXTERNAL_QWEN,
     );
@@ -178,8 +177,7 @@ describe("session selection port (ADR-0095 set-IPC orchestration)", () => {
     const queryClient = new QueryClient();
     const invalidate = vi.spyOn(queryClient, "invalidateQueries");
     vi.mocked(setSessionRuntime).mockRejectedValueOnce(new Error("ipc down"));
-    const outcome = await sessionPort(queryClient).writeRuntime(EXTERNAL_QWEN);
-    expect(outcome).toEqual({ status: "rejected", error: new Error("ipc down") });
+    await sessionPort(queryClient).writeRuntime(EXTERNAL_QWEN);
     expect(invalidate).toHaveBeenCalledWith({
       queryKey: sessionKeys.runtime("sess-1"),
     });
@@ -350,6 +348,37 @@ describe("cold-start selection channel (ADR-0099/0100, issues #572/#574)", () =>
     });
     // No rollback: the pre-clear posture is not resurrected under the new
     // runtime.
+    expect(result.current.pendingModelPosture).toBeNull();
+  });
+
+  it("does not roll back when a same-identity runtime re-pick replaced the ledger token (#592)", async () => {
+    // Re-picking the ALREADY-effective runtime moves no namespace, so the
+    // drift effect never fires (same kind, same data) -- the switch's own
+    // ledger token replacement is the only guard, including the same-task
+    // window before any effect flush could re-mask the token.
+    let rejectClear: ((reason: unknown) => void) | undefined;
+    vi.mocked(clearLastModelPosture).mockImplementationOnce(
+      () =>
+        new Promise((_, reject) => {
+          rejectClear = reject;
+        }),
+    );
+    const { result } = renderColdStart();
+    let clearSettled: Promise<unknown> | undefined;
+    act(() => {
+      clearSettled = result.current.channel.port.writePosture(CLEAR, {
+        clearsBackfill: true,
+        rollbackTo: POSTURE,
+      });
+    });
+    // The user re-picks the runtime already displayed; the clear rejects
+    // inside the same task, before any effect flush.
+    await act(async () => {
+      await result.current.channel.port.writeRuntime(EXTERNAL_QWEN);
+      rejectClear?.(new Error("config write failed"));
+      await clearSettled;
+    });
+    // No rollback: the token stands even though the runtime never moved.
     expect(result.current.pendingModelPosture).toBeNull();
   });
 
