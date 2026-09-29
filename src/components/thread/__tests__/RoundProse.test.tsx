@@ -5,7 +5,7 @@ import { openUrl } from "@tauri-apps/plugin-opener";
 import embed from "vega-embed";
 import { embedOk, withIntl } from "../../common/__tests__/helpers";
 import { log } from "../../../lib/log";
-import { RoundProse } from "../RoundProse";
+import { RoundProse, type RoundProseMode } from "../RoundProse";
 import { CODE_BLOCK_REVEAL_CLASS } from "../turn-visual";
 
 // The link channel is the opener plugin IPC (mocked so clicks are pinned
@@ -25,11 +25,20 @@ vi.mock("../../../lib/log", () => ({
 // render is mocked (the fence still drives the real decode gate).
 vi.mock("vega-embed", () => ({ default: vi.fn() }));
 
+// CopyButton writes through the clipboard API; stub it the way the
+// thread's copy tests do (test-setup un-stubs after each test).
+function stubClipboard(): ReturnType<typeof vi.fn> {
+  const writeText = vi.fn().mockResolvedValue(undefined);
+  vi.stubGlobal("navigator", { ...navigator, clipboard: { writeText } });
+  return writeText;
+}
+
 // The prose rides the thread's chrome (ADR-0052 react-intl + Radix Tooltip
 // for the code block's CopyButton) -- wrapped via the shared i18n test seam
 // the way the thread does. mode mirrors the live round block's wiring
-// (ADR-0120 Decision 4, issue #1128).
-function renderProse(text: string, mode: "streaming" | "static" = "static") {
+// (ADR-0120 Decision 4, issue #1128) and rides the exported alias so a
+// vocabulary drift cannot silently shed the helper's coverage.
+function renderProse(text: string, mode: RoundProseMode = "static") {
   return render(withIntl(<RoundProse text={text} mode={mode} />));
 }
 
@@ -149,6 +158,35 @@ describe("RoundProse markdown rendering (issue #746)", () => {
         // readOnly suppresses React's controlled-input warning on checked.
         expect(box).toHaveAttribute("readonly");
       }
+    });
+
+    it("keeps the hast task-list class alive on the task item's li", () => {
+      // The bare li entry threads the hast className through verbatim;
+      // task-list-item is the hook anything keying on task shape reads.
+      renderProse("- [ ] 待办");
+      const li = screen.getAllByRole("listitem")[0];
+      expect(li?.className).toContain("task-list-item");
+    });
+
+    it("keeps table sections and footnote references free of library chrome (issue #1130)", () => {
+      // thead/tbody/sup are reachable through GFM (tables, footnote
+      // references) and the library's defaults inject their own surface over
+      // them -- the bare entries pin the preflight-native rendering the
+      // component's own th/td entries paint.
+      const { container } = renderProse(
+        "| 列 | 值 |\n| --- | --- |\n| a | 1 |\n\n正文[^1]\n\n[^1]: 注脚",
+      );
+      for (const tag of ["thead", "tbody"]) {
+        const section = container.querySelector(tag);
+        expect(section).not.toBeNull();
+        expect(section).not.toHaveAttribute("data-streamdown");
+        expect(section?.className ?? "").not.toContain("bg-muted");
+        expect(section?.className ?? "").not.toContain("divide-y");
+      }
+      const sup = container.querySelector("sup");
+      expect(sup).not.toBeNull();
+      expect(sup).not.toHaveAttribute("data-streamdown");
+      expect(sup?.className).not.toContain("text-sm");
     });
 
     it("renders a GFM pipe table in a scroll container with hairline borders", () => {
@@ -335,6 +373,22 @@ describe("RoundProse markdown rendering (issue #746)", () => {
       expect(vi.mocked(openUrl)).toHaveBeenCalledWith("HTTPS://example.com/x");
     });
 
+    it("passes a markdown link title through to the anchor (issue #1130)", () => {
+      renderProse("[文档](https://example.com/docs \"示例标题\")");
+      expect(screen.getByRole("link", { name: "文档" })).toHaveAttribute("title", "示例标题");
+    });
+
+    it("degrades a literal streamdown: link to its bare label (issue #1130)", () => {
+      // The prefix guard exists for remend's placeholder href, but the
+      // scheme also passes urlTransform whole when it appears in source
+      // text -- the pin makes the prefix shape itself the contract, not an
+      // accident of the streaming path.
+      const { container } = renderProse("[字面](streamdown:foo)");
+      expect(container.querySelector("a")).toBeNull();
+      expect(screen.getByText("字面")).toBeInTheDocument();
+      expect(container.textContent).not.toContain("streamdown:");
+    });
+
     it("surfaces an opener failure as a live note beside the link and logs it", async () => {
       vi.mocked(openUrl).mockRejectedValueOnce(new Error("no browser"));
       renderProse("[文档](https://example.com/docs)");
@@ -350,14 +404,6 @@ describe("RoundProse markdown rendering (issue #746)", () => {
   });
 
   describe("code blocks", () => {
-    // CopyButton writes through the clipboard API; stub it the way the
-    // thread's copy tests do (test-setup un-stubs after each test).
-    function stubClipboard(): ReturnType<typeof vi.fn> {
-      const writeText = vi.fn().mockResolvedValue(undefined);
-      vi.stubGlobal("navigator", { ...navigator, clipboard: { writeText } });
-      return writeText;
-    }
-
     it("renders the fence as monospace block + language label + hover copy", async () => {
       const writeText = stubClipboard();
       const { container } = renderProse("```python\nprint(1)\n```");
@@ -541,6 +587,18 @@ describe("RoundProse markdown rendering (issue #746)", () => {
       expect(pre?.textContent).toContain("print(1)");
       expect(proseOf(view).textContent).not.toContain("```");
     });
+
+    it("completes a half-open bold marker inside a table cell", () => {
+      const view = renderProse("| 列 |\n| --- |\n| **胞内", "streaming");
+      expect(view.container.querySelector("td strong")).not.toBeNull();
+      expect(proseOf(view).textContent).not.toContain("**");
+    });
+
+    it("completes a half-open bold marker inside a list item", () => {
+      const view = renderProse("- 项 **尾粗", "streaming");
+      expect(view.container.querySelector("li strong")).not.toBeNull();
+      expect(proseOf(view).textContent).not.toContain("**");
+    });
   });
 
   describe("caret (issue #1128)", () => {
@@ -566,6 +624,13 @@ describe("RoundProse markdown rendering (issue #746)", () => {
     it("hides the caret while the last block is an unclosed fence", () => {
       const prose = proseOf(renderProse("```python\nprint(1)", "streaming"));
       expect(caretArmed(prose)).toBe(false);
+    });
+
+    it("keeps the caret armed while the last block is a closed list", () => {
+      // The suppression is the unclosed fence's alone: a list completes
+      // normally, so the round-is-alive signal stays armed on it.
+      const prose = proseOf(renderProse("- 甲\n- 乙", "streaming"));
+      expect(caretArmed(prose)).toBe(true);
     });
 
     it("leaves no caret on the settled side", () => {
