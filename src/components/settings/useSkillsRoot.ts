@@ -19,10 +19,11 @@ import type { SkillEntry } from "../../types/skills";
 //   - a failed phase carries the ALREADY-FORMATTED error (fmtError) so the
 //     detail dialog's path face renders it verbatim.
 //
-// The rescan's write-generation guard (writeGenRef) deliberately stays in
-// the pane container: same shape, different domain -- one protects the
-// config sync from a late mount rescan, this one protects the root state
-// from a late fetch. They are orthogonal and must not merge.
+// The rescan's write-generation guard (now the shared `useWriteGeneration`
+// hook, issue #1123) deliberately stays out of this hook: same shape,
+// different domain -- one protects the config sync from a late mount
+// rescan, this one protects the root state from a late fetch. They are
+// orthogonal and must not merge.
 
 /** The registry root's resolution state: `failed` carries the formatted
  *  error the detail dialog's path face reports (issue #1039). */

@@ -184,7 +184,7 @@ export function AgentsSection({
     onError: (e) => report(e),
   });
 
-  const agents = useMemo(() => listing?.agents ?? [], [listing]);
+  const agents = listing?.agents ?? [];
   const ignoredFiles = useMemo(() => listing?.ignored ?? [], [listing]);
   const warnings = useMemo(() => listing?.warnings ?? [], [listing]);
   const rootError = listing?.root_error ?? null;

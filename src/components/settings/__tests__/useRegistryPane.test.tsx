@@ -20,19 +20,14 @@ const ROWS: Row[] = [
   { key: "g", name: "gamma", enabled: true },
 ];
 
-function renderPane(items: Row[] = ROWS) {
-  return renderHook(
-    ({ rows }: { rows: Row[] }) =>
-      useRegistryPane(rows, (row) => row.name),
-    {
-      initialProps: { rows: items },
-      wrapper: ({ children }) => (
-        <IntlProvider locale="en" messages={{}} onError={() => {}}>
-          {children}
-        </IntlProvider>
-      ),
-    },
-  );
+function renderPane() {
+  return renderHook(() => useRegistryPane(ROWS, (row) => row.name), {
+    wrapper: ({ children }) => (
+      <IntlProvider locale="en" messages={{}} onError={() => {}}>
+        {children}
+      </IntlProvider>
+    ),
+  });
 }
 
 describe("useRegistryPane", () => {
@@ -120,6 +115,32 @@ describe("useRegistryPane", () => {
       expect(result.current.confirmBusy).toBe(false);
       expect(returned).toBe("disk-full");
       expect(result.current.error).toBe("disk-full");
+    });
+
+    it("clears a stale error before the write starts (the parked mid-flight face)", async () => {
+      const { result } = renderPane();
+      await act(async () => {
+        result.current.report(new Error("stale"));
+      });
+      let released!: () => void;
+      const gate = new Promise<void>((resolve) => {
+        released = resolve;
+      });
+      act(() => {
+        void result.current.runConfirm(async () => {
+          await gate;
+          return null;
+        });
+      });
+      // The act has flushed runConfirm's synchronous prologue while the
+      // write sits parked on the gate: the stale error is already gone and
+      // the busy lane is up BEFORE the write could report its own outcome.
+      expect(result.current.error).toBeNull();
+      expect(result.current.confirmBusy).toBe(true);
+      await act(async () => {
+        released();
+      });
+      expect(result.current.confirmBusy).toBe(false);
     });
   });
 

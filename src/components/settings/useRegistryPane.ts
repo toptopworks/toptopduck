@@ -56,8 +56,12 @@ export function useRegistryPane<T extends { enabled: boolean }>(
     [items, search, filter, searchable],
   );
 
-  function report(e: unknown) {
-    setError(fmtError(e, intl));
+  /** The error face's single formatting point (a pre-formatted string
+   *  passes fmtError verbatim); returns the formatted message. */
+  function report(e: unknown): string {
+    const msg = fmtError(e, intl);
+    setError(msg);
+    return msg;
   }
 
   function clearError() {
@@ -76,9 +80,7 @@ export function useRegistryPane<T extends { enabled: boolean }>(
       if (err) setError(err);
       return err;
     } catch (e) {
-      const msg = fmtError(e, intl);
-      setError(msg);
-      return msg;
+      return report(e);
     }
   }
 
