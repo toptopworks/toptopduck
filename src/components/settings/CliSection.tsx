@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useState } from "react";
 import { FormattedMessage, useIntl } from "react-intl";
 import { Pencil, Plus, RefreshCw, RotateCcw, Terminal, Trash2 } from "lucide-react";
 
@@ -11,7 +11,6 @@ import {
   upsertCliTool,
 } from "../../api";
 import { log } from "../../lib/log";
-import { fmtError } from "../../lib/error-presentation";
 import { cn } from "../../lib/utils";
 import {
   AlertDialog,
@@ -33,6 +32,8 @@ import {
 } from "./settings-chrome";
 import { blankCliTool } from "../../types/cli-tool";
 import { CliToolForm } from "./CliToolForm";
+import { useRegistryPane } from "./useRegistryPane";
+import { useWriteGeneration } from "./useWriteGeneration";
 
 // The pane's navigation name: the list header and the create/edit form share
 // it -- the form keeps the name for section context, without the list-only
@@ -70,9 +71,6 @@ export function CliSection({
     isEdit: boolean;
   } | null>(null);
   const [confirmTarget, setConfirmTarget] = useState<ConfirmTarget | null>(null);
-  const [confirmBusy, setConfirmBusy] = useState(false);
-  const [togglingName, setTogglingName] = useState<string | null>(null);
-  const [error, setError] = useState<string | null>(null);
 
   const tools = appConfig.cli_tools.tools;
   const [scan, setScan] = useState<BuiltinScanEntry[] | null>(null);
@@ -87,22 +85,25 @@ export function CliSection({
     ),
   );
 
+  // The pane machine (issue #1123): the error face, the never-rejects write
+  // wrapper, and the two busy lanes. This pane has no search box, so the
+  // filter face rides unused (the searchable injection stays a constant).
+  const {
+    error,
+    clearError,
+    runCommit,
+    togglingKey,
+    toggle,
+    confirmBusy,
+    runConfirm,
+  } = useRegistryPane(tools, () => "");
   // The write-generation guard (issue #683): advances with every APPLIED
   // user write. A rescan response that arrives after a user write landed
   // reads a stale config snapshot (the backend read it before the write),
-  // so applying it would silently roll the user's change back. The guard
-  // is a monotonic counter, not a request queue -- the backend's RMW write
-  // lock already serializes the registry; this only fixes the frontend's
-  // response-application order.
-  const writeGenRef = useRef(0);
-
-  /** Apply a user write's returned config: the sync advances the write
-   *  generation, so any rescan response still in flight (issued before
-   *  this write) skips its config sync instead of rolling it back. */
-  function applyUserWrite(next: AppConfig) {
-    writeGenRef.current += 1;
-    onCliToolsChanged(next);
-  }
+  // so applying it would silently roll the user's change back.
+  const { applyUserWrite, current, syncIfCurrent } = useWriteGeneration(
+    onCliToolsChanged,
+  );
 
   /** Opening the pane refreshes the detection snapshot (issue #675): one
    * read-modify-write IPC returns the full config + snapshot together. A
@@ -111,12 +112,12 @@ export function CliSection({
    * button still surfaces errors through the shared error lane. */
   useEffect(() => {
     let cancelled = false;
-    const gen = writeGenRef.current;
+    const gen = current();
     rescanBuiltinCliTools()
       .then((result) => {
         if (cancelled) return;
         setScan(result.scan);
-        if (writeGenRef.current === gen) onCliToolsChanged(result.config);
+        syncIfCurrent(gen, result.config);
       })
       .catch((e) => {
         // Silent in the UI on mount; the manual rescan surfaces errors.
@@ -137,47 +138,26 @@ export function CliSection({
    * in flight skips the (stale) config sync; the snapshot still applies. */
   async function handleRescan() {
     setScanning(true);
-    setError(null);
-    const gen = writeGenRef.current;
-    try {
+    clearError();
+    const gen = current();
+    await runCommit(async () => {
       const result = await rescanBuiltinCliTools();
       setScan(result.scan);
-      if (writeGenRef.current === gen) onCliToolsChanged(result.config);
-    } catch (e) {
-      setError(fmtError(e, intl));
-    } finally {
-      setScanning(false);
-    }
-  }
-
-  /** The shared error half of every write here: surface a resolve-to-error
-   *  or rejection through setError (the McpSection runCommit contract). */
-  async function runCommit(
-    write: () => Promise<string | null>,
-  ): Promise<string | null> {
-    try {
-      const err = await write();
-      if (err) setError(err);
-      return err;
-    } catch (e) {
-      const msg = fmtError(e, intl);
-      setError(msg);
-      return msg;
-    }
+      syncIfCurrent(gen, result.config);
+      return null;
+    });
+    setScanning(false);
   }
 
   /** The row-level enable toggle (ADR-0106 single axis): one-field upsert
    *  over the same command the form uses. The returned full config syncs
    *  shell state wholesale -- the registry order is the backend's truth. */
   async function handleToggleEnabled(tool: CliToolConfig, enabled: boolean) {
-    setTogglingName(tool.name);
-    setError(null);
-    await runCommit(async () => {
+    await toggle(tool.name, async () => {
       const next = await upsertCliTool({ ...tool, enabled });
       applyUserWrite(next);
       return null;
     });
-    setTogglingName(null);
   }
 
   /** Called by the form after ITS upsert lands: the command already
@@ -193,11 +173,9 @@ export function CliSection({
    * persisted and returned the updated full config -- sync and close. */
   async function handleConfirm() {
     if (!confirmTarget) return;
-    setConfirmBusy(true);
-    setError(null);
     const kind = confirmTarget.kind;
     const name = confirmTarget.name;
-    await runCommit(async () => {
+    await runConfirm(async () => {
       const next =
         kind === "delete"
           ? await removeCliTool(name)
@@ -205,7 +183,6 @@ export function CliSection({
       applyUserWrite(next);
       return null;
     });
-    setConfirmBusy(false);
     setConfirmTarget(null);
   }
 
@@ -296,7 +273,7 @@ export function CliSection({
             <CliToolRow
               key={tool.name}
               tool={tool}
-              toggling={togglingName === tool.name}
+              toggling={togglingKey === tool.name}
               holdsBuiltinName={
                 tool.source === "user" && conflictingNames.has(tool.name)
               }

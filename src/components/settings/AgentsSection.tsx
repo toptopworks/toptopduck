@@ -61,10 +61,9 @@ import {
 import {
   type EnabledFilter,
   FILTER_OPTIONS,
-  matchesFilter,
-  matchesSearch,
   searchableText,
 } from "./settings-filters";
+import { useRegistryPane } from "./useRegistryPane";
 
 // The pane's navigation name: the list header and the create/edit form share
 // it -- the form keeps the name for section context, without the list-only
@@ -104,20 +103,33 @@ export function AgentsSection({
 }) {
   const intl = useIntl();
   const queryClient = useQueryClient();
-  const [search, setSearch] = useState("");
-  const [filter, setFilter] = useState<EnabledFilter>("all");
   const [form, setForm] = useState<FormState>({ mode: "closed" });
   const [confirmDelete, setConfirmDelete] = useState<string | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  // Reveal failures live apart from `error`: that state is the open form's
-  // error prop, and a late reveal rejection must not render inside a draft
-  // (the GeneralSection dirError posture).
+  // Reveal failures live apart from the pane error: that state is the open
+  // form's error prop, and a late reveal rejection must not render inside a
+  // draft (the GeneralSection dirError posture).
   const [dirError, setDirError] = useState<string | null>(null);
 
   const { data: listing, error: queryError, refetch, isFetching } = useQuery({
     queryKey: agentKeys.all(),
     queryFn: listAgents,
   });
+
+  // The pane machine's filter + error faces (issue #1123): the mutations
+  // below report through the hook, and the shared filter predicates project
+  // the listing. This pane keeps its write orchestration on the mutations.
+  const {
+    search,
+    setSearch,
+    filter,
+    setFilter,
+    visible,
+    error,
+    report,
+    clearError,
+  } = useRegistryPane(listing?.agents ?? [], (a) =>
+    searchableText(a.name, a.description),
+  );
 
   function invalidate() {
     void queryClient.invalidateQueries({ queryKey: agentKeys.all() });
@@ -128,10 +140,10 @@ export function AgentsSection({
       createAgent(name, description, preamble),
     onSuccess: () => {
       invalidate();
-      setError(null);
+      clearError();
       setForm({ mode: "closed" });
     },
-    onError: (e) => setError(fmtError(e, intl)),
+    onError: (e) => report(e),
   });
 
   const updateMutation = useMutation({
@@ -139,10 +151,10 @@ export function AgentsSection({
       updateAgent(name, update),
     onSuccess: () => {
       invalidate();
-      setError(null);
+      clearError();
       setForm({ mode: "closed" });
     },
-    onError: (e) => setError(fmtError(e, intl)),
+    onError: (e) => report(e),
   });
 
   const deleteMutation = useMutation({
@@ -153,10 +165,10 @@ export function AgentsSection({
       onAppConfigSync(cfg);
       invalidate();
       setConfirmDelete(null);
-      setError(null);
+      clearError();
     },
     onError: (e) => {
-      setError(fmtError(e, intl));
+      report(e);
       setConfirmDelete(null);
     },
   });
@@ -167,21 +179,12 @@ export function AgentsSection({
     onSuccess: (cfg) => {
       onAppConfigSync(cfg);
       invalidate();
-      setError(null);
+      clearError();
     },
-    onError: (e) => setError(fmtError(e, intl)),
+    onError: (e) => report(e),
   });
 
-  const agents = useMemo(() => listing?.agents ?? [], [listing]);
-  const visible = useMemo(
-    () =>
-      agents.filter(
-        (a) =>
-          matchesSearch(searchableText(a.name, a.description), search) &&
-          matchesFilter(a, filter),
-      ),
-    [agents, search, filter],
-  );
+  const agents = listing?.agents ?? [];
   const ignoredFiles = useMemo(() => listing?.ignored ?? [], [listing]);
   const warnings = useMemo(() => listing?.warnings ?? [], [listing]);
   const rootError = listing?.root_error ?? null;
@@ -207,7 +210,7 @@ export function AgentsSection({
   function openEdit(entry: AgentEntry) {
     // The form owns the error face while open (a leftover list error would
     // replay inside an unrelated edit form).
-    setError(null);
+    clearError();
     setForm({ mode: "edit", entry });
   }
 
@@ -263,7 +266,7 @@ export function AgentsSection({
               })}
               icon={Plus}
               onClick={() => {
-                setError(null);
+                clearError();
                 setForm({ mode: "create" });
               }}
             />
