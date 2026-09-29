@@ -36,8 +36,8 @@ function stubClipboard(): ReturnType<typeof vi.fn> {
 // The prose rides the thread's chrome (ADR-0052 react-intl + Radix Tooltip
 // for the code block's CopyButton) -- wrapped via the shared i18n test seam
 // the way the thread does. mode mirrors the live round block's wiring
-// (ADR-0120 Decision 4, issue #1128) and rides the exported alias so a
-// vocabulary drift cannot silently shed the helper's coverage.
+// (ADR-0120 Decision 4, issue #1128) and rides the exported alias so the
+// vocabulary is spelled from the component's single source.
 function renderProse(text: string, mode: RoundProseMode = "static") {
   return render(withIntl(<RoundProse text={text} mode={mode} />));
 }
@@ -161,15 +161,19 @@ describe("RoundProse markdown rendering (issue #746)", () => {
     });
 
     it("keeps the hast task-list class alive on the task item's li", () => {
-      // The bare li entry threads the hast className through verbatim;
-      // task-list-item is the hook anything keying on task shape reads.
+      // The bare li entry threads the hast className through verbatim
+      // (task-list-item is the hook anything keying on task shape reads)
+      // and keeps the library's own li chrome -- py-1 padding, the
+      // data-streamdown marker -- off the native rendering.
       renderProse("- [ ] 待办");
-      const li = screen.getAllByRole("listitem")[0];
-      expect(li?.className).toContain("task-list-item");
+      const li = screen.getByRole("listitem");
+      expect(li.className).toContain("task-list-item");
+      expect(li).not.toHaveAttribute("data-streamdown");
+      expect(li.className).not.toContain("py-1");
     });
 
-    it("keeps table sections and footnote references free of library chrome (issue #1130)", () => {
-      // thead/tbody/sup are reachable through GFM (tables, footnote
+    it("keeps table rows/sections and footnote references free of library chrome (issue #1130)", () => {
+      // thead/tbody/tr/sup are reachable through GFM (tables, footnote
       // references) and the library's defaults inject their own surface over
       // them -- the bare entries pin the preflight-native rendering the
       // component's own th/td entries paint.
@@ -183,6 +187,10 @@ describe("RoundProse markdown rendering (issue #746)", () => {
         expect(section?.className ?? "").not.toContain("bg-muted");
         expect(section?.className ?? "").not.toContain("divide-y");
       }
+      const tr = container.querySelector("tr");
+      expect(tr).not.toBeNull();
+      expect(tr).not.toHaveAttribute("data-streamdown");
+      expect(tr?.className ?? "").not.toContain("border-border");
       const sup = container.querySelector("sup");
       expect(sup).not.toBeNull();
       expect(sup).not.toHaveAttribute("data-streamdown");
@@ -512,8 +520,7 @@ describe("RoundProse markdown rendering (issue #746)", () => {
     it("keeps every other fence language a plain code block (Decision 6: no guessing)", async () => {
       // A chart-shaped body under the `json` language is not a chart intent:
       // it stays a copyable code block and Vega-Embed never runs.
-      const writeText = vi.fn().mockResolvedValue(undefined);
-      vi.stubGlobal("navigator", { ...navigator, clipboard: { writeText } });
+      const writeText = stubClipboard();
       const { container } = renderProse("```json\n{\"mark\": \"bar\"}\n```");
       const block = container.querySelector("pre");
       expect(block).not.toBeNull();

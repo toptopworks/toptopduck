@@ -70,8 +70,8 @@ import { CODE_BLOCK_REVEAL_CLASS } from "./turn-visual";
 type HastElement = NonNullable<ExtraProps["node"]>;
 
 // The render-mode vocabulary (issue #1128, replacing `isLive`): "streaming"
-// while the round streams, "static" once settled. Exported so every consumer
-// and the test seam speak the same words.
+// while the round streams, "static" once settled. Exported so the mode prop
+// and the test helper spell the vocabulary from one source.
 export type RoundProseMode = "streaming" | "static";
 
 // The one fence language that renders as a chart (ADR-0120 Decision 6). Any
@@ -151,8 +151,10 @@ function CodeBlock({ node }: { node?: HastElement }) {
 // ProviderKeyField's get-key link uses). Every other shape -- mailto:,
 // relative refs -- degrades to plain text with the surviving href beside
 // the label, so the target never vanishes from the visible surface (a
-// [email us](mailto:...) answer stays contentful). Streamdown's urlTransform
-// passes non-web schemes through un-stripped, so the unsafe ones
+// [email us](mailto:...) answer stays contentful). A link title rides the
+// anchor only -- the degrade lanes drop it, an accepted loss: a plain-text
+// span carrying a tooltip would contradict the degradation. Streamdown's
+// urlTransform passes non-web schemes through un-stripped, so the unsafe ones
 // (javascript:, file:, ...) arrive here whole and the http(s) gate below is
 // what keeps them off the anchor element; the library's own
 // `streamdown:incomplete-link` placeholder (remend's provisional href for a
@@ -287,8 +289,9 @@ const BASE_MARKDOWN_COMPONENTS: Components = {
     <code className="rounded-xs bg-muted px-1.5 py-0.5 font-mono text-[13px]">{children}</code>
   ),
   // Bare by design: streamdown replaces some tags with its own styled
-  // surface (li list markers, a span for strong, table-row/-section chrome,
-  // text-sm on sup), so the bare entries pin today's preflight-native
+  // surface (li item padding with inline inner paragraphs, a span for
+  // strong, table-row/-section chrome, text-sm on sup), so the bare
+  // entries pin today's preflight-native
   // rendering, picking the attributes the hast conversion actually produces
   // (className on li is the task-list hook; the checkbox triple is a task
   // item's full shape). The input entry exists for readOnly: the library
