@@ -5,17 +5,13 @@ import { Box } from "lucide-react";
 
 import { fmtError } from "../../lib/error-presentation";
 import { findActiveProfile } from "../../lib/findActiveProfile";
-import { log } from "../../lib/log";
 import {
-  clearLastModelPosture,
   getAdapterCatalogs,
   getLastModelPosture,
   getSessionModelConfig,
   getSessionRuntime,
   listAdapters,
   listProviderProfiles,
-  setSessionPosture,
-  setSessionRuntime,
 } from "../../api";
 import { adapterKeys, sessionKeys } from "../../session/queryKeys";
 import type { ModelPosture } from "../../types/app-config";
@@ -27,11 +23,17 @@ import type {
   SessionRuntimeChoice,
 } from "../../types/runtime";
 import { RUNTIME_CHOICE_DEFAULT } from "../../types/runtime";
+import { ComposerPostureTrigger } from "./ComposerPostureTrigger";
 import {
-  ComposerPostureTrigger,
-  type CatalogNote,
-  type PostureCatalog,
-} from "./ComposerPostureTrigger";
+  createSessionSelectionPort,
+  type ColdStartSelectionChannel,
+} from "./composer-selection-write";
+import {
+  derivePostureCatalog,
+  EMPTY_POSTURE,
+  heldPostureParts,
+  MODEL_CONFIG_DEFAULT,
+} from "./posture-catalog";
 import { ComposerRuntimeMenu } from "./ComposerRuntimeMenu";
 import {
   PRESET_CUSTOM,
@@ -40,19 +42,6 @@ import {
 } from "../settings/provider-presets";
 import { Popover, PopoverContent, PopoverTrigger } from "../ui/popover";
 import { Tooltip, TooltipContent, TooltipTrigger } from "../ui/tooltip";
-
-// The honest default while the model-config read settles (and on the
-// cold-start bar, where there is no session to read): no selection, no
-// discovery cache. The CLI's own defaults rule the next turn.
-const MODEL_CONFIG_DEFAULT: SessionModelConfig = {
-  model: null,
-  thought_level: null,
-  cached_discovered: null,
-};
-
-// The unselected posture pair (ADR-0100): never chosen, or explicitly
-// cleared -- the "Default (recommended)" start.
-const EMPTY_POSTURE: ModelPosture = { model: null, thought_level: null };
 
 // Composer runtime entry (ADR-0099, issues #353/#574; ADR-0071/0081/0085/
 // 0091 lineage). TWO resident controls at the QuestionBar edge, each with one
@@ -123,27 +112,13 @@ export type ComposerProviderPickerProps = {
   // row-level marks do not show a stale "no key" after the user just
   // configured one (ADR-0019 honest gate).
   profileKeyEpoch?: number;
-  // When sessionId is null (cold-start bar, ADR-0092), a runtime selection
-  // writes to the shell-level pending state via this callback instead of the
-  // per-session IPC. The caller resets the pending model posture whenever
-  // this fires (postures are adapter-namespaced, ADR-0100 Decision 2).
-  onPendingRuntimeChange?: (runtime: SessionRuntimeChoice) => void;
-  // The shell-level pending runtime value to DISPLAY while sessionId is null
-  // (issue #572, ADR-0098 Decision 4): the caller seeds it with the resolved
-  // default_runtime and replaces it on each onPendingRuntimeChange. null
-  // means untouched -- the picker's OWN fallback then renders the built-in
-  // default; showing the startup resolution is the caller's pre-seeding,
-  // not a picker-side read.
-  pendingRuntime?: SessionRuntimeChoice | null;
-  // Cold-start posture channel (ADR-0099/0100, issue #574): a cascade-menu
-  // pick on the cold-start bar submits the full pair to the shell-held
-  // pending posture via this callback. null means untouched -- the picker
-  // displays the adapter's backfill entry, and the first submit lets the
-  // backend's create_session startup posture apply (no set IPC). A non-null
-  // pair is EXPLICIT -- null fields are real clears -- and lands on the
-  // minted session via the set IPC.
-  onPendingModelPostureChange?: (posture: ModelPosture) => void;
-  pendingModelPosture?: ModelPosture | null;
+  // The cold-start selection channel (ADR-0092 bar, ADR-0098/0100, issues
+  // #572/#574): the App-owned pending facets (the displayed runtime value
+  // + the pending posture pair) and the selection write port -- the picker
+  // reads the display face and routes every write through the port, the
+  // same interface the session adapter implements in-session. null while a
+  // session is active.
+  coldStart: ColdStartSelectionChannel | null;
 };
 
 export function ComposerProviderPicker({
@@ -152,10 +127,7 @@ export function ComposerProviderPicker({
   onSwitchActive,
   onOpenSettings,
   profileKeyEpoch,
-  onPendingRuntimeChange,
-  pendingRuntime,
-  onPendingModelPostureChange,
-  pendingModelPosture = null,
+  coldStart,
 }: ComposerProviderPickerProps) {
   const intl = useIntl();
   const [open, setOpen] = useState(false);
@@ -205,13 +177,17 @@ export function ComposerProviderPicker({
   // sessionId (cold-start bar, ADR-0092): the query is disabled and the
   // caller-held pendingRuntime drives the picker -- no IPC round-trip.
   const queryClient = useQueryClient();
+  // The cold-start read face: the App-owned channel's displayed pending
+  // facets (inert while a session is active).
+  const effectiveRuntime = coldStart?.effectiveRuntime ?? null;
+  const pendingModelPosture = coldStart?.pendingModelPosture ?? null;
   const { data: runtimeData, error: runtimeError } = useQuery({
     queryKey: sessionKeys.runtime(sessionId ?? ""),
     queryFn: () => getSessionRuntime(sessionId as string),
     enabled: sessionId !== null,
   });
   const runtime: SessionRuntimeChoice =
-    runtimeData ?? pendingRuntime ?? RUNTIME_CHOICE_DEFAULT;
+    runtimeData ?? effectiveRuntime ?? RUNTIME_CHOICE_DEFAULT;
   const isExternal = runtime.kind === "external";
   const activeAdapterId = isExternal ? runtime.data : null;
 
@@ -249,18 +225,6 @@ export function ComposerProviderPicker({
   // of the selector list. Surfaced at the top of the Local CLI group so the
   // user knows their current pick is broken before the next turn fails.
   const activeAdapterStale = isExternal && activeAdapterId !== null && activeAdapter === null;
-  // The active adapter's stream format decides the posture catalog surface
-  // (ADR-0095/0097): ACP adapters get the flat handshake catalog; the
-  // per-model catalog formats (codex_event_stream / claude_stream_json) get
-  // the probe-cache-fed per-model catalog. The dispatch enumerates the
-  // per-model kinds explicitly (not `!== "acp"`): a future fourth format
-  // must be classified here deliberately, never default into a surface.
-  const isPerModelCatalogAdapter =
-    isExternal &&
-    activeAdapter != null &&
-    (activeAdapter.stream_format === "codex_event_stream" ||
-      activeAdapter.stream_format === "claude_stream_json");
-
   // The startup backfill entry (ADR-0100, issue #581): what a NEW session on
   // this adapter starts with. Read only on the cold-start bar (in-session
   // truth is the model-config query above). Enabled flips true whenever the
@@ -276,40 +240,6 @@ export function ComposerProviderPicker({
     queryFn: () => getLastModelPosture(activeAdapterId as string),
     enabled: sessionId === null && activeAdapterId !== null,
   });
-
-  // Discovery-cache provenance (issue #529): the cached catalog records the
-  // adapter that produced it (stamped by the engine at the handshake). After
-  // a runtime switch the cache still holds the OLD adapter's catalog until
-  // the new runtime's first turn replaces it (replace-on-Some) -- flag that
-  // window so the user can judge which residual selection to clear. A cache
-  // with NO provenance (persisted before the field existed) is not a
-  // mismatch -- it renders without the flag. Scoped to discovery-fed (ACP)
-  // adapters: a per-model runtime's selector feeds off the probe cache, so
-  // its turns would never replace the discovery cache -- the "refreshes
-  // after the next turn" promise would be a permanent lie there.
-  const catalogProvenanceStale =
-    isExternal &&
-    !isPerModelCatalogAdapter &&
-    discovered != null &&
-    discovered.adapter_id != null &&
-    discovered.adapter_id !== activeAdapterId;
-
-  // The turn-end live currents (issue #586, ADR-0095 Decision 5): the
-  // session discovery cache records what the last turn ACTUALLY ran -- the
-  // ACP handshake currents, the claude system{init} model (codex turns
-  // report no discovery, so its cache never exists). The provenance gate is
-  // strict: only a cache stamped by the ACTIVE adapter may be asserted as
-  // this runtime's last turn -- another adapter's cache is a stale fact
-  // (the #529 note covers it) and a pre-stamp cache is an unattributable
-  // one. Display-layer only (ADR-0100 constraint): the live currents render
-  // the unselected label; they never write the posture.
-  const liveDiscovered =
-    isExternal &&
-    discovered != null &&
-    discovered.adapter_id != null &&
-    discovered.adapter_id === activeAdapterId
-      ? discovered
-      : null;
 
   // Catalog priority chain (ADR-0096 D6, issue #537, ADR-0097): where the
   // posture catalog comes from, per the active runtime's stream format.
@@ -329,53 +259,6 @@ export function ComposerProviderPicker({
     isExternal && activeAdapterId !== null
       ? (cachedCatalogs[activeAdapterId] ?? null)
       : null;
-
-  const acpCatalog =
-    isExternal && !isPerModelCatalogAdapter
-      ? (discovered ??
-        (probeEntry && probeEntry.probe_kind === "acp"
-          ? probeEntry.outcome.acp.discovered
-          : null))
-      : null;
-  // True when the ACP catalog is fed by the probe cache rather than the
-  // session's own discovery (drives the provenance note: the session cache
-  // replaces it after this runtime's next turn).
-  const acpCatalogFromProbe =
-    acpCatalog != null && discovered == null && probeEntry != null;
-
-  // The one provenance note the posture trigger renders: the two predicates
-  // are complementary over `discovered` (stale requires a session-owned
-  // discovery, probe-fed requires none), so at most one ever fires.
-  const catalogNote: CatalogNote = catalogProvenanceStale
-    ? "stale-runtime"
-    : acpCatalogFromProbe
-      ? "from-probe"
-      : null;
-
-  const perModelCatalog =
-    isPerModelCatalogAdapter && probeEntry
-      ? probeEntry.probe_kind === "codex_event_stream"
-        ? probeEntry.outcome.codex_event_stream.models
-        : probeEntry.probe_kind === "claude_stream_json"
-          ? probeEntry.outcome.claude_stream_json.models
-          : null
-      : null;
-
-  // The catalog handed to the posture trigger: null renders the static
-  // no-arrow label (built-in, or an external runtime with no directory yet).
-  const postureCatalog: PostureCatalog | null = !isExternal
-    ? null
-    : isPerModelCatalogAdapter
-      ? (perModelCatalog ? { kind: "perModel", models: perModelCatalog } : null)
-      : acpCatalog
-        ? {
-            kind: "acp",
-            models: acpCatalog.models,
-            thoughtLevels: acpCatalog.thought_levels,
-            currentModel: acpCatalog.current_model,
-            currentThoughtLevel: acpCatalog.current_thought_level,
-          }
-        : null;
 
   // Guards the posture set IPC (the menu is disabled while a write is in
   // flight). In-session only -- the cold-start channel is a synchronous
@@ -403,6 +286,23 @@ export function ComposerProviderPicker({
       ? { model: modelConfig.model, thought_level: modelConfig.thought_level }
       : (pendingModelPosture ?? backfillData ?? EMPTY_POSTURE);
 
+  // The posture-catalog projection (ADR-0096 D6 priority chain, issues
+  // #529/#586, in posture-catalog.ts): the cascade menu's catalog, its one
+  // provenance note, and the tooltip's live payload -- derived pure from
+  // the query reads assembled above.
+  const {
+    catalog: postureCatalog,
+    note: catalogNote,
+    liveValue,
+  } = derivePostureCatalog({
+    isExternal,
+    activeAdapterId,
+    activeAdapter,
+    discovered,
+    probeEntry,
+    posture,
+  });
+
   // The posture read's settle gate (issue #603 review): the full-pair wire
   // makes this cache the authority for the UNTOUCHED field of every submit,
   // so an unsettled read must never feed one. Two windows: the first fetch
@@ -416,143 +316,57 @@ export function ComposerProviderPicker({
   const postureReadUnsettled =
     isExternal && sessionId !== null && modelConfigFetching;
 
-  // Latest caller-held pending posture, mirrored in an effect for the async
-  // rollback guard below: the IPC reject handler must compare against the
-  // CURRENT pair, not the render snapshot its closure captured (issue #592).
-  const pendingPostureRef = useRef(pendingModelPosture);
-  useEffect(() => {
-    pendingPostureRef.current = pendingModelPosture;
-  }, [pendingModelPosture]);
+  // The write face (composer-selection-write.ts): the session adapter over
+  // the set IPCs, or the App-owned cold-start channel on the bar -- one
+  // interface, so the selectors below carry no session/cold-start write
+  // branch. Stateless orchestration, rebuilt per render (identity is never
+  // compared).
+  const sessionPort =
+    sessionId !== null
+      ? createSessionSelectionPort({
+          sessionId,
+          queryClient,
+          activeAdapterId,
+        })
+      : null;
+  const writePort = sessionPort ?? coldStart?.port ?? null;
 
-  // Monotonic posture-gesture counter (issue #592): every pending write
-  // bumps it, so a reject handler can tell whether ANY later gesture fired
-  // after its own -- a repeat of the SAME clear re-writes an equal pair the
-  // value check alone cannot distinguish from "no later gesture".
-  const postureGestureSeqRef = useRef(0);
-
-  // Cold-start posture writes (ADR-0099/0100, issue #574): a pick submits a
-  // FULL pair to the shell-held pending posture -- the caller builds it from
-  // the DISPLAYED posture (backfill or a prior pick) so an untouched field
-  // carries the displayed value and the first edit starts from what the bar
-  // shows. The clear row additionally wipes the backfill entry via the #581
-  // IPC so the clear survives even when the user never submits (otherwise
-  // the next cold-start visit re-seeds the cleared posture -- the backfill
-  // defeating an explicit clear, ADR-0100 Decision 3). In-session clears do
-  // NOT wipe the entry separately: the set IPC's server-side record already
-  // lands the post-set pair there (the single write point).
-  function pendingPostureWrite(
+  // The selectors' shared write sequence: delegates to the port (the
+  // session adapter seeds the caches and lands the persist verdict, the
+  // cold-start adapter writes the pending state and clears the backfill
+  // entry with its rollback) and projects the outcome onto the fault
+  // slots. Never rejects -- every failure lands on the slots instead.
+  async function submitPosture(
     next: ModelPosture,
     clearsBackfill: boolean,
-  ): void {
-    if (!onPendingModelPostureChange) {
-      log.warn(
-        "ComposerProviderPicker",
-        "cold-start posture selection discarded — no onPendingModelPostureChange handler",
-      );
+  ): Promise<void> {
+    if (writePort == null) return;
+    // Session-only write gates (issue #603 review): an in-flight set or an
+    // unsettled read drops the gesture -- Radix items ignore the trigger's
+    // disabled, so the handlers gate too. The cold-start writes are
+    // synchronous pending updates with nothing to guard.
+    if (sessionId !== null && (postureSwitching || postureReadUnsettled)) {
       return;
     }
-    const prevPosture = posture;
-    const gestureSeq = ++postureGestureSeqRef.current;
-    // A new gesture is a fresh write attempt: clear any fault a previous
-    // rejected one left on the set-fault slot (the applyPosture
-    // symmetry on the in-session side).
-    setPostureSetError(null);
-    onPendingModelPostureChange(next);
-    if (clearsBackfill && activeAdapterId !== null) {
-      const adapterId = activeAdapterId;
-      clearLastModelPosture(adapterId)
-        .then(() => {
-          queryClient.setQueryData(adapterKeys.posture(adapterId), EMPTY_POSTURE);
-        })
-        .catch((e) => {
-          // The entry survived -- roll the optimistic clear back so the bar
-          // keeps showing it. Otherwise the next cold start (the pending
-          // pair resets to null on a runtime switch / restart) re-seeds from
-          // the un-cleared entry and the posture silently "comes back" --
-          // precisely the backfill-defeats-clear outcome this IPC exists to
-          // prevent (ADR-0100 Decision 3).
-          //
-          // Lost-update guard (issue #592): the rollback restores
-          // prevPosture only while the pending pair still equals THIS
-          // clear's submitted pair AND no later posture gesture has fired (the
-          // counter; a same-value repeat would slip past the value check
-          // alone). A later gesture (or the caller's runtime-switch reset
-          // to null) means a newer intent -- restoring the pre-clear
-          // snapshot then would silently clobber it.
-          const current = pendingPostureRef.current;
-          const stillThisClear =
-            gestureSeq === postureGestureSeqRef.current &&
-            current != null &&
-            current.model === next.model &&
-            current.thought_level === next.thought_level;
-          if (stillThisClear) {
-            onPendingModelPostureChange(prevPosture);
-          }
-          // The failed clear surfaces on the shared set-fault line in BOTH
-          // outcomes: rolled back, the bar would otherwise show the restored
-          // entry with no explanation; skipped, the optimistic clear stays
-          // displayed while the backfill entry survived -- the failure would
-          // surface only at the NEXT cold start as the posture "coming back".
-          setPostureSetError(e);
-          log.warn(
-            "ComposerProviderPicker",
-            stillThisClear
-              ? "clear startup posture failed; rolled the pending clear back"
-              : "clear startup posture failed; pending posture moved on, rollback skipped",
-            fmtError(e, intl),
-          );
-        });
-    }
-  }
-
-  // The selectors' shared write sequence in-session. On resolve: seed the
-  // cache with the submitted posture and project the returned persist
-  // verdict onto the two fault slots. On reject: keep the server posture
-  // (refetch off the reject) + show the failure. Never rejects -- every
-  // failure lands on the fault slots instead.
-  async function applyPosture(next: ModelPosture): Promise<void> {
-    if (sessionId === null || postureSwitching || postureReadUnsettled) return;
-    setPostureSwitching(true);
+    if (sessionId !== null) setPostureSwitching(true);
     setPostureSetError(null);
     setPosturePersistFault(null);
     setPosturePersistSuspended(false);
     try {
-      const outcome = await setSessionPosture(sessionId, next);
-      // Functional update: a later selection in the same menu session must
-      // patch the CURRENT cache, not the snapshot this closure captured at
-      // render -- two rapid selections (e.g. a model pick that auto-clears
-      // an unsupported thought level) would otherwise clobber each other.
-      queryClient.setQueryData(
-        sessionKeys.modelConfig(sessionId),
-        (prev: SessionModelConfig | undefined): SessionModelConfig => ({
-          ...(prev ?? modelConfig),
-          ...next,
-        }),
-      );
-      setPosturePersistFault(outcome.persist_error);
-      setPosturePersistSuspended(outcome.persist_suspended);
-      // The set lands the post-set pair in the startup backfill entry
-      // server-side (record_last_model_posture, the single write point).
-      // Invalidate so the NEXT return to cold start refetches the post-set
-      // entry instead of showing the pre-set one (staleTime: Infinity never
-      // auto-refetches, ADR-0051).
-      if (activeAdapterId !== null) {
-        void queryClient.invalidateQueries({
-          queryKey: adapterKeys.posture(activeAdapterId),
-        });
-      }
-    } catch (e) {
-      setPostureSetError(e);
-      log.warn(
-        "ComposerProviderPicker",
-        "set session posture failed; resyncing from the session",
-        fmtError(e, intl),
-      );
-      void queryClient.invalidateQueries({
-        queryKey: sessionKeys.modelConfig(sessionId),
+      const outcome = await writePort.writePosture(next, {
+        clearsBackfill,
+        // The displayed pair at submit time -- the cold-start rollback
+        // target when the backfill-clear IPC rejects (ADR-0100 D3).
+        rollbackTo: posture,
       });
+      if (outcome.status === "written") {
+        setPosturePersistFault(outcome.persistError);
+        setPosturePersistSuspended(outcome.persistSuspended);
+      } else {
+        setPostureSetError(outcome.error);
+      }
     } finally {
-      setPostureSwitching(false);
+      if (sessionId !== null) setPostureSwitching(false);
     }
   }
 
@@ -564,21 +378,19 @@ export function ComposerProviderPicker({
     // cleared in the SAME user gesture -- since issue #603 the same wire
     // submit, so a rejected write leaves the held level against the
     // still-held model untouched.
+    const perModelModels =
+      postureCatalog?.kind === "perModel" ? postureCatalog.models : null;
     const mustClearLevel =
-      perModelCatalog &&
+      perModelModels &&
       posture.thought_level != null &&
-      !supportedEffortsFor(perModelCatalog, model).includes(
+      !supportedEffortsFor(perModelModels, model).includes(
         posture.thought_level,
       );
     const thoughtLevel = mustClearLevel ? null : posture.thought_level;
-    // Both channels submit the same full pair: the cold-start pending
-    // write (no IPCs) and the in-session set IPC.
+    // Both channels submit the same full pair through the one write port:
+    // the cold-start pending write (no set IPCs) and the in-session set.
     const next: ModelPosture = { model, thought_level: thoughtLevel };
-    if (sessionId === null) {
-      pendingPostureWrite(next, model === null);
-      return;
-    }
-    return applyPosture(next);
+    return submitPosture(next, model === null);
   };
 
   const selectThoughtLevel = (thoughtLevel: string | null) => {
@@ -586,11 +398,7 @@ export function ComposerProviderPicker({
     // as its current value -- an untouched field is never derived
     // server-side (the pending write on the cold-start bar included).
     const next: ModelPosture = { model: posture.model, thought_level: thoughtLevel };
-    if (sessionId === null) {
-      pendingPostureWrite(next, thoughtLevel === null);
-      return;
-    }
-    return applyPosture(next);
+    return submitPosture(next, thoughtLevel === null);
   };
 
   // Per-model helper (issue #537, codex + claude-code): the thought-level
@@ -612,54 +420,13 @@ export function ComposerProviderPicker({
   const [switching, setSwitching] = useState(false);
 
   async function selectRuntime(next: SessionRuntimeChoice) {
-    if (switching) return;
-    // Null sessionId (cold-start bar, ADR-0092): write to the caller-held
-    // pending state. No IPC, no switching gate -- the write is synchronous.
-    if (sessionId === null) {
-      if (onPendingRuntimeChange) {
-        // The caller resets the pending posture to null on a runtime switch
-        // (App's handlePendingRuntimeChange; ADR-0100 D2 namespacing) -- a
-        // reset that bypasses pendingPostureWrite and so bumps no gesture
-        // counter. Bump it in the same task so a still-in-flight clear
-        // reject from the previous runtime cannot roll its pre-clear
-        // posture over the reset even if it lands before the ref mirror
-        // flushes.
-        ++postureGestureSeqRef.current;
-        onPendingRuntimeChange(next);
-      } else {
-        log.warn(
-          "ComposerProviderPicker",
-          "selectRuntime called with null sessionId but no onPendingRuntimeChange handler — selection discarded",
-        );
-      }
-      return;
-    }
+    if (writePort == null || switching) return;
+    // Both channels through the one write port: the session set IPC, or the
+    // cold-start pending write (which also resets the pending posture,
+    // ADR-0100 D2 namespacing -- the port's single reset point).
     setSwitching(true);
     try {
-      await setSessionRuntime(sessionId, next);
-      // The write is the truth source: seed the cache directly (no extra IPC
-      // round-trip; a later remount refetches the same value).
-      queryClient.setQueryData(sessionKeys.runtime(sessionId), next);
-      // The switch also re-seeded the posture slot server-side from the
-      // target adapter's backfill entry (ADR-0102 Decision 3, issue #590)
-      // -- invalidate so the model button refetches the seeded pair
-      // instead of lingering on the old adapter's stale one. The seeded
-      // value lives server-side (the backfill map read), so an invalidate +
-      // refetch is the honest path -- no local projection of the entry.
-      void queryClient.invalidateQueries({
-        queryKey: sessionKeys.modelConfig(sessionId),
-      });
-    } catch (e) {
-      // Keep the server posture: refetch so the picker re-reads the backend
-      // truth instead of showing a selection the write never granted.
-      log.warn(
-        "ComposerProviderPicker",
-        "set session runtime failed; resyncing from the session",
-        fmtError(e, intl),
-      );
-      void queryClient.invalidateQueries({
-        queryKey: sessionKeys.runtime(sessionId),
-      });
+      await writePort.writeRuntime(next);
     } finally {
       setSwitching(false);
     }
@@ -703,25 +470,7 @@ export function ComposerProviderPicker({
   // so the unselected label keeps its default copy verbatim. An
   // empty-string field counts as unset, matching the menu guards'
   // convention, so a hand-edited blank cannot blank the button.
-  const heldParts = [posture.model, posture.thought_level].filter(
-    (part): part is string => part != null && part !== "",
-  );
-  const liveParts = [
-    liveDiscovered?.current_model,
-    liveDiscovered?.current_thought_level,
-  ].filter((part): part is string => part != null && part !== "");
-  // The tooltip's live payload: the turn-end currents, read as facts only
-  // while nothing is held (a selection always outranks the live read) and
-  // only alongside a catalog -- the trigger drops the tooltip on its
-  // static-label early return, so a claude session whose per-model catalog
-  // still awaits its first settings probe keeps the live read unsurfaced
-  // instead of half-rendered.
-  const liveValue =
-    postureCatalog != null &&
-    heldParts.length === 0 &&
-    liveParts.length > 0
-      ? liveParts.join(" · ")
-      : null;
+  const heldParts = heldPostureParts(posture);
   const postureLabel = !isExternal
     ? noProfiles
       ? notConfigured

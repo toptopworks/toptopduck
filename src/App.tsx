@@ -28,10 +28,10 @@ import {
   ComposerProviderPicker,
   type ComposerProviderPickerProps,
 } from "./components/thread/ComposerProviderPicker";
-import type { AppConfig, ModelPosture } from "./types/app-config";
+import { useColdStartSelection } from "./components/thread/composer-selection-write";
+import type { AppConfig } from "./types/app-config";
 import type { AuthMode } from "./types/approval";
 import { AUTH_MODE_DEFAULT } from "./types/approval";
-import type { SessionRuntimeChoice } from "./types/runtime";
 import { usePlatform } from "./shell/use-platform";
 import { SidebarToggle } from "./shell/SidebarToggle";
 import { NavButtons } from "./shell/NavButtons";
@@ -412,27 +412,13 @@ export default function App() {
   // cold-start picker opens on the startup resolution instead of a built-in
   // constant. A pick replaces the whole value (never null again until
   // consumed).
-  const [pendingRuntime, setPendingRuntime] =
-    useState<SessionRuntimeChoice | null>(null);
-  // ADR-0099/0100 (issue #574): the cold-start posture cascade's pending
-  // pair, same null-sentinel shape as pendingRuntime -- null = untouched
-  // (the picker displays the adapter's backfill entry and the backend's
-  // create_session startup posture applies); a non-null pair is the user's
-  // explicit posture (null fields = real clears) applied to the minted
-  // session via the two model set IPCs.
-  const [pendingModelPosture, setPendingModelPosture] =
-    useState<ModelPosture | null>(null);
-  // A runtime switch on the cold-start bar resets the pending posture:
-  // model ids are adapter-namespaced (ADR-0100 Decision 2), so a posture
-  // picked under one CLI must not leak into another (or into the built-in
-  // runtime, whose posture is the active profile's model).
-  const handlePendingRuntimeChange = useCallback(
-    (runtime: SessionRuntimeChoice) => {
-      setPendingRuntime(runtime);
-      setPendingModelPosture(null);
-    },
-    [],
-  );
+  // ADR-0098 Decision 4 / ADR-0099/0100 (issues #572/#574): the cold-start
+  // bar's pending selection state -- the runtime facet + the posture pair,
+  // both null-sentineled (null = untouched) -- owned by the selection
+  // write port module, which also holds the ADR-0100 Decision 2 namespace
+  // reset (an explicit runtime switch or a startup-resolution drift resets
+  // the pending posture) and the #592 rollback ledger. App reads the raw
+  // facets at the mint submit and consumes them on success.
   const [pendingAuthMode, setPendingAuthMode] =
     useState<AuthMode>(AUTH_MODE_DEFAULT);
   const [pendingFiles, setPendingFiles] = useState<string[]>([]);
@@ -477,28 +463,17 @@ export default function App() {
     queryClient,
     appConfig?.default_runtime,
   );
-  const effectivePendingRuntime = pendingRuntime ?? startupRuntime;
-  // The effective runtime can move WITHOUT an explicit picker pick:
-  // default_runtime changes in Settings or an adapter-table refetch move the
-  // startup resolution. Postures are adapter-namespaced (ADR-0100 Decision
-  // 2), so a pending pair picked under the previous runtime must not ride
-  // into the new one -- reconcile identity changes here (the explicit-switch
-  // reset in handlePendingRuntimeChange covers the picker path; this one is
-  // the resolution-only path).
-  const prevEffectiveRuntimeRef = useRef(effectivePendingRuntime);
-  useEffect(() => {
-    const prev = prevEffectiveRuntimeRef.current;
-    const next = effectivePendingRuntime;
-    if (
-      prev.kind !== next.kind ||
-      (prev.kind === "external" &&
-        next.kind === "external" &&
-        prev.data !== next.data)
-    ) {
-      setPendingModelPosture(null);
-    }
-    prevEffectiveRuntimeRef.current = next;
-  }, [effectivePendingRuntime]);
+  // The cold-start selection channel (composer-selection-write.ts): owns
+  // the pending runtime + posture pair, the write port the picker routes
+  // through, and the namespace reset for effective-runtime identity
+  // changes (the picker-path switch and this resolution-only drift).
+  const coldStartSelection = useColdStartSelection({
+    startupRuntime,
+    queryClient,
+  });
+  const { pendingRuntime, pendingModelPosture, consume: consumeColdStart } =
+    coldStartSelection;
+  const effectivePendingRuntime = coldStartSelection.channel.effectiveRuntime;
 
   // ADR-0092 Decision 4 honest gate (submit-time). The centered bar is
   // always typeable; a cold-start submit on the built-in runtime requires a
@@ -579,8 +554,7 @@ export default function App() {
           // closure's setter is still the null-keyed one: it writes the
           // cold-start slot even after activeSessionId flips to the mint.
           setComposerDraft("");
-          setPendingRuntime(null);
-          setPendingModelPosture(null);
+          consumeColdStart();
           setPendingAuthMode(AUTH_MODE_DEFAULT);
           setColdInvocations([]);
           setPendingFiles([]);
@@ -608,6 +582,7 @@ export default function App() {
       effectivePendingRuntime,
       pendingRuntime,
       pendingModelPosture,
+      consumeColdStart,
       pendingAuthMode,
       pendingFiles,
       builtInGateOpen,
@@ -902,14 +877,7 @@ export default function App() {
   // appConfig-derived bundle could not ride the spread over the explicitly
   // written mode-conditional values at the render site.
   const providerPicker:
-    | Omit<
-      ComposerProviderPickerProps,
-      | "sessionId"
-      | "onPendingRuntimeChange"
-      | "pendingRuntime"
-      | "onPendingModelPostureChange"
-      | "pendingModelPosture"
-    >
+    | Omit<ComposerProviderPickerProps, "sessionId" | "coldStart">
     | undefined = appConfig
       ? {
           provider: appConfig.provider,
@@ -1270,21 +1238,8 @@ export default function App() {
                           providerPicker ? (
                             <ComposerProviderPicker
                               sessionId={activeSessionId}
-                              onPendingRuntimeChange={
-                                isColdStart
-                                  ? handlePendingRuntimeChange
-                                  : undefined
-                              }
-                              pendingRuntime={
-                                isColdStart
-                                  ? effectivePendingRuntime
-                                  : undefined
-                              }
-                              onPendingModelPostureChange={
-                                isColdStart ? setPendingModelPosture : undefined
-                              }
-                              pendingModelPosture={
-                                isColdStart ? pendingModelPosture : null
+                              coldStart={
+                                isColdStart ? coldStartSelection.channel : null
                               }
                               {...providerPicker}
                             />
