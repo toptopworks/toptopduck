@@ -36,26 +36,17 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from "../ui/alert-dialog";
-import { Input } from "../ui/input";
-import { Label } from "../ui/label";
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "../ui/select";
 import { Switch } from "../ui/switch";
 import {
   HeaderActionButton,
   NameBadge,
+  PaneFilterBar,
   RowActionButton,
   RowFoldChevron,
   PaneHeader,
   SETTINGS_TOOLTIP_CLASS,
   SettingsCard,
 } from "./settings-chrome";
-import { type EnabledFilter, FILTER_OPTIONS } from "./settings-filters";
 import { useRegistryPane } from "./useRegistryPane";
 import { McpImportDialog } from "./McpImportDialog";
 import { McpServerForm } from "./McpServerForm";
@@ -68,6 +59,11 @@ import { clearRemovedServerSecrets } from "./mcp-finalize";
 const NAV_TITLE = (
   <FormattedMessage id="settings.nav.mcp" defaultMessage="MCP Servers" />
 );
+
+// The searchable projection the registry pane filters rows by: hoisted so
+// its identity is stable across renders and the visible memo holds
+// (issue #1126).
+const SEARCHABLE = (s: McpServerConfig) => s.display_name;
 
 // MCP servers settings pane (issue #387 + #388). Two sub-views managed by local
 // state: "list" shows every configured server with a connection status dot,
@@ -144,7 +140,7 @@ export function McpSection({
     togglingKey: togglingId,
     toggle,
     runConfirm,
-  } = useRegistryPane(servers, (s) => s.display_name);
+  } = useRegistryPane(servers, SEARCHABLE);
   const [deleting, setDeleting] = useState(false);
 
   function handleAdd() {
@@ -403,48 +399,17 @@ export function McpSection({
 
       {/* The search + status filter ride the shared list posture (the
           skills / agents pane row). */}
-      <div className="mb-3 flex items-center gap-2">
-        <Input
-          type="search"
-          value={search}
-          onChange={(e) => setSearch(e.target.value)}
-          placeholder={intl.formatMessage({
-            id: "settings.mcp.searchPlaceholder",
-            defaultMessage: "Search servers…",
-          })}
-          className="max-w-xs"
-        />
-        <Label htmlFor="mcp-status-filter" className="sr-only">
-          <FormattedMessage
-            id="settings.filter.label"
-            defaultMessage="Filter by status"
-          />
-        </Label>
-        <Select value={filter} onValueChange={(v) => setFilter(v as EnabledFilter)}>
-          <SelectTrigger
-            id="mcp-status-filter"
-            aria-label={intl.formatMessage({
-              id: "settings.filter.label",
-              defaultMessage: "Filter by status",
-            })}
-          >
-            <SelectValue />
-          </SelectTrigger>
-          <SelectContent>
-            {FILTER_OPTIONS.map((opt) => (
-              <SelectItem key={opt} value={opt}>
-                {opt === "all" ? (
-                  <FormattedMessage id="settings.filter.all" defaultMessage="All" />
-                ) : opt === "enabled" ? (
-                  <FormattedMessage id="settings.filter.enabled" defaultMessage="Enabled" />
-                ) : (
-                  <FormattedMessage id="settings.filter.disabled" defaultMessage="Disabled" />
-                )}
-              </SelectItem>
-            ))}
-          </SelectContent>
-        </Select>
-      </div>
+      <PaneFilterBar
+        idPrefix="mcp"
+        placeholder={intl.formatMessage({
+          id: "settings.mcp.searchPlaceholder",
+          defaultMessage: "Search servers…",
+        })}
+        search={search}
+        onSearchChange={setSearch}
+        filter={filter}
+        onFilterChange={setFilter}
+      />
 
       {servers.length > 0 && (
         <p className="mb-2 text-sm">

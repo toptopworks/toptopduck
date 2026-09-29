@@ -25,26 +25,16 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from "../ui/alert-dialog";
-import { Input } from "../ui/input";
-import { Label } from "../ui/label";
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "../ui/select";
 import {
   HeaderActionButton,
+  PaneFilterBar,
   PaneHeader,
   SettingsCard,
 } from "./settings-chrome";
 import {
-  FILTER_OPTIONS,
   matchesFilter,
   matchesSearch,
   searchableText,
-  type EnabledFilter,
 } from "./settings-filters";
 import { useRegistryPane } from "./useRegistryPane";
 import { useWriteGeneration } from "./useWriteGeneration";
@@ -62,6 +52,11 @@ import { useWriteGeneration } from "./useWriteGeneration";
 // skills from external agent libraries through the registry's import
 // mutation. The row family, the detail dialog, and the skipped fold live in
 // sibling files, and the registry root rides useSkillsRoot (issue #1083).
+
+// The searchable projection the registry pane filters rows by: hoisted so
+// its identity is stable across renders and the visible memo holds
+// (issue #1126).
+const SEARCHABLE = (s: SkillEntry) => searchableText(s.name, s.description);
 
 export function SkillsSection({
   onAppConfigSync,
@@ -195,7 +190,7 @@ export function SkillsSection({
     error,
     report,
     clearError,
-  } = useRegistryPane(allSkills, (s) => searchableText(s.name, s.description));
+  } = useRegistryPane(allSkills, SEARCHABLE);
 
   const ignoredDirs = useMemo(
     () => listing?.ignored ?? [],
@@ -361,57 +356,17 @@ export function SkillsSection({
         )}
       />
 
-      <div className="mb-3 flex items-center gap-2">
-        <Input
-          type="search"
-          value={search}
-          onChange={(e) => setSearch(e.target.value)}
-          placeholder={intl.formatMessage({
-            id: "settings.skills.searchPlaceholder",
-            defaultMessage: "Search skills…",
-          })}
-          className="max-w-xs"
-        />
-        <Label htmlFor="skills-enabled-filter" className="sr-only">
-          <FormattedMessage
-            id="settings.filter.label"
-            defaultMessage="Filter by status"
-          />
-        </Label>
-        <Select value={filter} onValueChange={(v) => setFilter(v as EnabledFilter)}>
-          <SelectTrigger
-            id="skills-enabled-filter"
-            aria-label={intl.formatMessage({
-              id: "settings.filter.label",
-              defaultMessage: "Filter by status",
-            })}
-          >
-            <SelectValue />
-          </SelectTrigger>
-          <SelectContent>
-            {FILTER_OPTIONS.map((opt) => (
-              <SelectItem key={opt} value={opt}>
-                {opt === "all" ? (
-                  <FormattedMessage
-                    id="settings.filter.all"
-                    defaultMessage="All"
-                  />
-                ) : opt === "enabled" ? (
-                  <FormattedMessage
-                    id="settings.filter.enabled"
-                    defaultMessage="Enabled"
-                  />
-                ) : (
-                  <FormattedMessage
-                    id="settings.filter.disabled"
-                    defaultMessage="Disabled"
-                  />
-                )}
-              </SelectItem>
-            ))}
-          </SelectContent>
-        </Select>
-      </div>
+      <PaneFilterBar
+        idPrefix="skills"
+        placeholder={intl.formatMessage({
+          id: "settings.skills.searchPlaceholder",
+          defaultMessage: "Search skills…",
+        })}
+        search={search}
+        onSearchChange={setSearch}
+        filter={filter}
+        onFilterChange={setFilter}
+      />
 
       <SettingsCard>
         {/* The lane rides above the listing; when a lane row matches the

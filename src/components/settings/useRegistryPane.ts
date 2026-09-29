@@ -26,7 +26,11 @@ import {
 // - `toggle` is the four-step dance: busy on for just that row, the error
 //   face cleared BEFORE the write starts, the write through `runCommit`,
 //   busy off -- the busy flag always clears because `runCommit` never
-//   rejects.
+//   rejects. The lane is single-slot: a second row toggled while one write
+//   is in flight overwrites `togglingKey`, and the first write's completion
+//   clears the flag early (the second row's switch re-enables before its
+//   own write lands). The backend's read-modify-write lock is what keeps
+//   the data safe; this flag gates the UI, not correctness.
 // - `runConfirm` gates `confirmBusy` across the same contract and returns
 //   the error string so a pane can gate its own post-write cleanup on
 //   success (the MCP delete's keychain sweep) without the hook owning the

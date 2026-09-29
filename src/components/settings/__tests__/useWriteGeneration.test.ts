@@ -16,6 +16,7 @@ describe("useWriteGeneration", () => {
     });
     expect(result.current.current()).toBe(1);
     expect(onSync).toHaveBeenCalledTimes(1);
+    expect(onSync).toHaveBeenCalledWith(baseAppConfig());
   });
 
   it("skips a stale sync whose generation predates the latest write", () => {

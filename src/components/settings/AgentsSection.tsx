@@ -39,30 +39,20 @@ import {
 import { Button } from "../ui/button";
 import { Input } from "../ui/input";
 import { Label } from "../ui/label";
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "../ui/select";
 import { Switch } from "../ui/switch";
 import { Textarea } from "../ui/textarea";
 import {
   FieldHint,
   HeaderActionButton,
   PaneBackLink,
+  PaneFilterBar,
   RowActionButton,
   NameBadge,
   PaneHeader,
   SettingsCard,
   SettingsRow,
 } from "./settings-chrome";
-import {
-  type EnabledFilter,
-  FILTER_OPTIONS,
-  searchableText,
-} from "./settings-filters";
+import { searchableText } from "./settings-filters";
 import { useRegistryPane } from "./useRegistryPane";
 
 // The pane's navigation name: the list header and the create/edit form share
@@ -71,6 +61,11 @@ import { useRegistryPane } from "./useRegistryPane";
 const NAV_TITLE = (
   <FormattedMessage id="settings.nav.agents" defaultMessage="Subagents" />
 );
+
+// The searchable projection the registry pane filters rows by: hoisted so
+// its identity is stable across renders and the visible memo holds
+// (issue #1126).
+const SEARCHABLE = (a: AgentEntry) => searchableText(a.name, a.description);
 
 // Agents settings pane (issue #932, ADR-0117). The registry is a directory
 // scan (no app-config entity -- the definitions are files), so this pane
@@ -127,9 +122,7 @@ export function AgentsSection({
     error,
     report,
     clearError,
-  } = useRegistryPane(listing?.agents ?? [], (a) =>
-    searchableText(a.name, a.description),
-  );
+  } = useRegistryPane(listing?.agents ?? [], SEARCHABLE);
 
   function invalidate() {
     void queryClient.invalidateQueries({ queryKey: agentKeys.all() });
@@ -189,8 +182,10 @@ export function AgentsSection({
   const warnings = useMemo(() => listing?.warnings ?? [], [listing]);
   const rootError = listing?.root_error ?? null;
 
-  // Derived display error (the SkillsSection priority order): the mutation
-  // error first, then the IPC transport error, then the root scan error.
+  // Derived display error, four levels in priority order: the mutation
+  // error (the user's most recent action), the directory-reveal error (the
+  // header's open-folder lane), the IPC transport error, the root scan
+  // error.
   const displayError = useMemo(() => {
     if (error) return error;
     if (dirError) return dirError;
@@ -291,48 +286,17 @@ export function AgentsSection({
         )}
       />
 
-      <div className="mb-3 flex items-center gap-2">
-        <Input
-          type="search"
-          value={search}
-          onChange={(e) => setSearch(e.target.value)}
-          placeholder={intl.formatMessage({
-            id: "settings.agents.searchPlaceholder",
-            defaultMessage: "Search agents…",
-          })}
-          className="max-w-xs"
-        />
-        <Label htmlFor="agents-enabled-filter" className="sr-only">
-          <FormattedMessage
-            id="settings.filter.label"
-            defaultMessage="Filter by status"
-          />
-        </Label>
-        <Select value={filter} onValueChange={(v) => setFilter(v as EnabledFilter)}>
-          <SelectTrigger
-            id="agents-enabled-filter"
-            aria-label={intl.formatMessage({
-              id: "settings.filter.label",
-              defaultMessage: "Filter by status",
-            })}
-          >
-            <SelectValue />
-          </SelectTrigger>
-          <SelectContent>
-            {FILTER_OPTIONS.map((opt) => (
-              <SelectItem key={opt} value={opt}>
-                {opt === "all" ? (
-                  <FormattedMessage id="settings.filter.all" defaultMessage="All" />
-                ) : opt === "enabled" ? (
-                  <FormattedMessage id="settings.filter.enabled" defaultMessage="Enabled" />
-                ) : (
-                  <FormattedMessage id="settings.filter.disabled" defaultMessage="Disabled" />
-                )}
-              </SelectItem>
-            ))}
-          </SelectContent>
-        </Select>
-      </div>
+      <PaneFilterBar
+        idPrefix="agents"
+        placeholder={intl.formatMessage({
+          id: "settings.agents.searchPlaceholder",
+          defaultMessage: "Search agents…",
+        })}
+        search={search}
+        onSearchChange={setSearch}
+        filter={filter}
+        onFilterChange={setFilter}
+      />
 
       <SettingsCard>
         {visible.length === 0 ? (
