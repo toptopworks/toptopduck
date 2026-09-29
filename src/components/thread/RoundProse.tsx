@@ -6,7 +6,7 @@
 // the answer rides the same pipeline as the prose.
 //
 // Rendered as markdown (issue #746) through streamdown (issue #1128): the
-// library's render core is a react-markdown fork (remark-parse +
+// library re-implements the react-markdown pipeline (remark-parse +
 // remark-rehype + hast-util-to-jsx-runtime), and its streaming layer adds
 // remend -- the pass that completes half-open markers (an unclosed `**`, a
 // dangling `[label](url`, a fence still being written) so the raw syntax
@@ -15,10 +15,10 @@
 // in ProseLink -- streamdown's urlTransform passes non-web schemes through
 // un-stripped (see ProseLink).
 // Embedded HTML never renders and never vanishes either: an empty rehype
-// list drops the library's raw/sanitize defaults, and the renderer's own
-// post transform flips raw hast nodes to text, so the tag characters show
-// verbatim -- the safe posture plus honest content, pinned by the component
-// tests.
+// list drops the library's raw/sanitize/harden defaults, and the fork's
+// remark-stage substitution flips mdast html nodes to text nodes (raw hast
+// nodes never exist), so the tag characters show verbatim -- the safe
+// posture plus honest content, pinned by the component tests.
 //
 // Streaming contract: the plugin lists and the components maps are
 // MODULE-LEVEL constants. Streamdown splits the text into blocks and
@@ -31,11 +31,13 @@
 // in the `pre` door (the vega-lite fence, ADR-0120 Decision 4); each is its
 // own constant, so a mode switch (the settle swap) is the only thing that
 // ever changes identity, and within a mode streamed deltas reconcile in
-// place. The static branch never runs the full-text remend pass (the
-// library gates it on streaming mode); the fork's parser-side completion of
-// half-open markers runs on BOTH sides, so what a stream completed is
-// exactly what settles -- that parity is the construction guarantee
-// (ADR-0103), pinned by the component tests.
+// place. The library's own mode prop stays unset on purpose: its default is
+// "streaming", so the remend pass runs on BOTH sides here and what a stream
+// completed is exactly what settles -- that parity is the construction
+// guarantee (ADR-0103), pinned by the component tests. Forwarding the mode
+// through would switch the static branch to the library's untouched
+// single-pass path and silently break that parity; do not wire it without
+// re-verifying the parity tests.
 //
 // A vega-lite fence renders as a chart on the settled side and as a
 // placeholder on the streaming side (ADR-0120 Decision 4); the choice is the
@@ -46,13 +48,13 @@
 // The caret (a block glyph after the last block) is the round-is-alive
 // signal: `isAnimating` follows the mode, and the library suppresses the
 // glyph while the last block is an unclosed fence. Direction stays
-// untouched: the library only probes (and wraps blocks) when `dir="auto"`
-// is asked for, so the default keeps the inherited direction without the
-// per-block wrapper element.
+// untouched: any per-block direction (auto probing included) wraps every
+// block in a display-contents div, so the default -- no dir asked for --
+// keeps the inherited direction without the wrapper element.
 
 import { memo, useContext, useMemo, useState, type MouseEvent, type ReactNode } from "react";
 import { Streamdown } from "streamdown";
-import type { Components, ExtraProps } from "streamdown";
+import type { Components, ExtraProps, StreamdownProps } from "streamdown";
 import remarkBreaks from "remark-breaks";
 import remarkGfm from "remark-gfm";
 import { openUrl } from "@tauri-apps/plugin-opener";
@@ -67,10 +69,6 @@ import { CODE_BLOCK_REVEAL_CLASS } from "./turn-visual";
 // from its own typings so no hast package import is needed.
 type HastElement = NonNullable<ExtraProps["node"]>;
 
-// The library does not export its options interface; the component's props
-// stand in for the plugin-list typings.
-type StreamdownOptions = NonNullable<Parameters<typeof Streamdown>[0]>;
-
 // The one fence language that renders as a chart (ADR-0120 Decision 6). Any
 // other value -- including a language-less fence -- is not a chart intent.
 const VEGA_LITE_FENCE = "vega-lite";
@@ -79,8 +77,8 @@ const VEGA_LITE_FENCE = "vega-lite";
 // empty rehype list replaces the library's raw/sanitize defaults (the
 // embedded-HTML posture above); gfm is carried explicitly because the list
 // replaces the library's default remark plugins too.
-const REMARK_PLUGINS: NonNullable<StreamdownOptions["remarkPlugins"]> = [remarkGfm, remarkBreaks];
-const REHYPE_PLUGINS: NonNullable<StreamdownOptions["rehypePlugins"]> = [];
+const REMARK_PLUGINS: NonNullable<StreamdownProps["remarkPlugins"]> = [remarkGfm, remarkBreaks];
+const REHYPE_PLUGINS: NonNullable<StreamdownProps["rehypePlugins"]> = [];
 
 // The hast subtree's concatenated text (a fence's code text lives in one
 // text node under pre > code, but walk generically).
@@ -274,15 +272,17 @@ const BASE_MARKDOWN_COMPONENTS: Components = {
   inlineCode: ({ children }) => (
     <code className="rounded-xs bg-muted px-1.5 py-0.5 font-mono text-[13px]">{children}</code>
   ),
-  // Bare by design: streamdown's built-in replacements for these tags carry
-  // its own surface (list markers, table-row chrome, styled checkboxes);
-  // the bare entries pin today's preflight-native rendering, picking the
+  // Bare by design: streamdown replaces some tags with its own styled
+  // surface (li list markers, a span for strong, table-row chrome), so the
+  // bare entries pin today's preflight-native rendering, picking the
   // attributes the hast conversion actually produces (className on li is
   // the task-list hook; the checkbox triple is a task item's full shape).
+  // The input entry exists for readOnly: the library ships no checkbox
+  // styling, but a bare input would trip React's controlled-input warning
+  // on the checked attribute. em and del carry no library replacement and
+  // no attributes, so they need no entries.
   li: ({ children, className }) => <li className={className}>{children}</li>,
   strong: ({ children }) => <strong>{children}</strong>,
-  em: ({ children }) => <em>{children}</em>,
-  del: ({ children }) => <del>{children}</del>,
   tr: ({ children }) => <tr>{children}</tr>,
   input: ({ type, checked, disabled }) => (
     <input type={type} checked={checked} disabled={disabled} readOnly />
@@ -347,11 +347,13 @@ export const RoundProse = memo(function RoundProse({
 }: {
   text: string;
   /** The render mode (issue #1128, replacing `isLive`): "streaming" while
-   * the round streams (the live exchange, issue #610) -- remend repairs
-   * half-open markers and the caret arms. "static" for every settled
-   * consumer -- the round block, the textual outcome, the delegation trace,
-   * the artifact view -- where text renders untouched and a vega-lite fence
-   * decodes (ADR-0120 Decision 4). */
+   * the round streams (the live exchange, issue #610) -- the caret arms.
+   * "static" for every settled consumer -- the round block, the textual
+   * outcome, the delegation trace, the artifact view -- where a vega-lite
+   * fence decodes (ADR-0120 Decision 4). The mode drives only the
+   * components door and the caret here; the library's mode prop stays
+   * unset (see the file header), so remend runs on both sides and the
+   * settle swap keeps the same shape. */
   mode?: "streaming" | "static";
   /** Issue #1093: promotes a settled fence's body onto the workspace stage.
    *  Optional (the ArtifactCard read-only precedent): only the TurnCard

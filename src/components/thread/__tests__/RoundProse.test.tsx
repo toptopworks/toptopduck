@@ -146,6 +146,8 @@ describe("RoundProse markdown rendering (issue #746)", () => {
       expect(boxes[1]?.checked).toBe(true);
       for (const box of boxes) {
         expect(box).toBeDisabled();
+        // readOnly suppresses React's controlled-input warning on checked.
+        expect(box).toHaveAttribute("readonly");
       }
     });
 
@@ -524,8 +526,9 @@ describe("RoundProse markdown rendering (issue #746)", () => {
     it("renders a half-open link as its label without flashing the raw syntax", () => {
       const view = renderProse("参考 [文档](https://example.com", "streaming");
       expect(screen.getByText("文档")).toBeInTheDocument();
-      // Remend completes the link with a provisional href the default
-      // urlTransform strips, so the label survives as text -- never an anchor
+      // Remend completes the link with a provisional `streamdown:` href
+      // (the urlTransform never strips it -- the component's own prefix
+      // guard does), so the label survives as text -- never an anchor
       // pointing at a made-up URL, and never the raw `](` syntax on screen.
       expect(view.container.querySelector("a")).toBeNull();
       expect(proseOf(view).textContent).not.toContain("](");
@@ -572,11 +575,12 @@ describe("RoundProse markdown rendering (issue #746)", () => {
   });
 
   describe("settled/streaming parity (issue #1128)", () => {
-    // The remend gate covers the full-text pass only; the fork's parser
-    // completes half-open markers on BOTH sides (measured, not assumed).
-    // That is the settle-swap guarantee in its strongest form (ADR-0103):
-    // whatever streamed completes identically once settled, so the swap can
-    // never flash a different shape.
+    // The library's mode prop is never forwarded, so its "streaming"
+    // default holds on both sides and the remend pass repairs half-open
+    // markers identically (measured, not assumed). That is the settle-swap
+    // guarantee in its strongest form (ADR-0103): whatever streamed
+    // completes identically once settled, so the swap can never flash a
+    // different shape.
     it("renders the same half-open marker identically on both sides", () => {
       const settled = renderProse("开头 **加粗");
       const streaming = render(withIntl(<RoundProse text="开头 **加粗" mode="streaming" />));
