@@ -100,7 +100,8 @@ describe("LiveTurnExchange user-invocation badges (ADR-0119 Decision 5, review I
   });
 });
 
-// ADR-0120 Decision 4: the live round block threads isLive into RoundProse, so
+// ADR-0120 Decision 4: the live round block threads mode="streaming" into
+// RoundProse, so
 // a vega-lite fence decodes only after the settle swap. While the round
 // streams, a half-written fence body must never show as source and must never
 // flash a degradation banner.

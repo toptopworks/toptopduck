@@ -11,7 +11,9 @@
 // remend -- the pass that completes half-open markers (an unclosed `**`, a
 // dangling `[label](url`, a fence still being written) so the raw syntax
 // never flashes on screen mid-stream. Rendering stays in React elements (no
-// innerHTML); URLs pass the library's default urlTransform allowlist.
+// innerHTML); unsafe URLs are kept off anchor elements by the http(s) gate
+// in ProseLink -- streamdown's urlTransform passes non-web schemes through
+// un-stripped (see ProseLink).
 // Embedded HTML never renders and never vanishes either: an empty rehype
 // list drops the library's raw/sanitize defaults, and the renderer's own
 // post transform flips raw hast nodes to text, so the tag characters show
@@ -25,12 +27,15 @@
 // custom component on each streamed delta, dropping interaction state (a
 // code block's copy ack). The i18n reads therefore live inside the
 // subcomponents so the maps close over nothing. There are two maps --
-// settled and streaming -- differing only in the `pre` door (the vega-lite
-// fence, ADR-0120 Decision 4); each is its own constant, so a mode switch
-// (the settle swap) is the only thing that ever changes identity, and within
-// a mode streamed deltas reconcile in place. The static branch never runs
-// remend (the library gates the pass on streaming mode), so settled text is
-// touched by nothing -- a construction guarantee, not a flag.
+// settled and live (the streaming mode; ADR-0120's term) -- differing only
+// in the `pre` door (the vega-lite fence, ADR-0120 Decision 4); each is its
+// own constant, so a mode switch (the settle swap) is the only thing that
+// ever changes identity, and within a mode streamed deltas reconcile in
+// place. The static branch never runs the full-text remend pass (the
+// library gates it on streaming mode); the fork's parser-side completion of
+// half-open markers runs on BOTH sides, so what a stream completed is
+// exactly what settles -- that parity is the construction guarantee
+// (ADR-0103), pinned by the component tests.
 //
 // A vega-lite fence renders as a chart on the settled side and as a
 // placeholder on the streaming side (ADR-0120 Decision 4); the choice is the
@@ -280,7 +285,7 @@ const BASE_MARKDOWN_COMPONENTS: Components = {
   del: ({ children }) => <del>{children}</del>,
   tr: ({ children }) => <tr>{children}</tr>,
   input: ({ type, checked, disabled }) => (
-    <input type={type} checked={checked} disabled={disabled} />
+    <input type={type} checked={checked} disabled={disabled} readOnly />
   ),
   // The spread arrow keeps the entry's parameter type inferred from the
   // Components map (a direct ProseLink reference fights the map's index

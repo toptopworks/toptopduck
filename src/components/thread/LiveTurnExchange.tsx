@@ -73,8 +73,9 @@ function LiveRoundBlock({
         <ThinkingFold thinking={thinking} onExpandedChange={reportThinkingExpanded} />
       )}
       {text !== undefined && (
-        // isLive: a vega-lite fence shows the placeholder while the round
-        // streams and decodes only after the settle swap (ADR-0120 Decision 4).
+        // mode="streaming": a vega-lite fence shows the placeholder while
+        // the round streams and decodes only after the settle swap
+        // (ADR-0120 Decision 4).
         <RoundProse text={text} mode="streaming" />
       )}
       {rows.length > 0 && (

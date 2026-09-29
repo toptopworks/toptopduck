@@ -586,6 +586,18 @@ describe("RoundProse markdown rendering (issue #746)", () => {
       expect(settled.container.querySelector("strong")).not.toBeNull();
     });
 
+    it("renders complete text with bare tildes identically on both sides", () => {
+      // The spec's discriminating shape (issue #1128): a complete text must
+      // carry the same markup once settled as while streaming.
+      const text = "样本 20~25 与 30~40 各取一点";
+      const settled = renderProse(text);
+      const streaming = render(withIntl(<RoundProse text={text} mode="streaming" />));
+      expect(streaming.container.querySelector("p")?.outerHTML).toBe(
+        settled.container.querySelector("p")?.outerHTML,
+      );
+      expect(settled.container.textContent).toContain("20~25");
+    });
+
     it("renders an unparseable link as its bare label, never internal protocol noise", () => {
       // Both modes leave the library's `streamdown:incomplete-link`
       // placeholder href on the degrade lane; the label-only span keeps the
