@@ -5,33 +5,49 @@
 // (TurnCard, issue #827) so the settle swap renders the identical markup and
 // the answer rides the same pipeline as the prose.
 //
-// Rendered as markdown (issue #746): agent answers carry headings, lists,
-// code fences, tables, and inline emphasis. react-markdown renders to React
-// elements (no innerHTML); URLs pass the library's default urlTransform
-// allowlist. Embedded HTML never renders and never vanishes either: the
-// library's own post transform flips raw hast nodes to text, so the tag
-// characters show verbatim -- the safe posture plus honest content, pinned
-// by the component tests.
+// Rendered as markdown (issue #746) through streamdown (issue #1128): the
+// library's render core is a react-markdown fork (remark-parse +
+// remark-rehype + hast-util-to-jsx-runtime), and its streaming layer adds
+// remend -- the pass that completes half-open markers (an unclosed `**`, a
+// dangling `[label](url`, a fence still being written) so the raw syntax
+// never flashes on screen mid-stream. Rendering stays in React elements (no
+// innerHTML); URLs pass the library's default urlTransform allowlist.
+// Embedded HTML never renders and never vanishes either: an empty rehype
+// list drops the library's raw/sanitize defaults, and the renderer's own
+// post transform flips raw hast nodes to text, so the tag characters show
+// verbatim -- the safe posture plus honest content, pinned by the component
+// tests.
 //
-// Streaming contract: the plugin list and the components maps are MODULE-LEVEL
-// constants. A fresh array/object identity per render would make
-// react-markdown unmount and remount every custom component on each streamed
-// delta, dropping interaction state (a code block's copy ack). The i18n reads
-// therefore live inside the subcomponents so the maps close over nothing.
-// There are two maps -- settled and live -- differing only in the `pre` door
-// (the vega-lite fence, ADR-0120 Decision 4); each is its own constant, so a
-// mode switch (the settle swap) is the only thing that ever changes identity,
-// and within a mode streamed deltas reconcile in place.
+// Streaming contract: the plugin lists and the components maps are
+// MODULE-LEVEL constants. Streamdown splits the text into blocks and
+// memoizes each one, comparing the components/plugin entries by identity --
+// a fresh array/object per render would defeat that memo and remount every
+// custom component on each streamed delta, dropping interaction state (a
+// code block's copy ack). The i18n reads therefore live inside the
+// subcomponents so the maps close over nothing. There are two maps --
+// settled and streaming -- differing only in the `pre` door (the vega-lite
+// fence, ADR-0120 Decision 4); each is its own constant, so a mode switch
+// (the settle swap) is the only thing that ever changes identity, and within
+// a mode streamed deltas reconcile in place. The static branch never runs
+// remend (the library gates the pass on streaming mode), so settled text is
+// touched by nothing -- a construction guarantee, not a flag.
 //
 // A vega-lite fence renders as a chart on the settled side and as a
-// placeholder on the live side (ADR-0120 Decision 4); the live/settled choice
-// is the `isLive` prop, threaded by the live round block. Every other fence
-// language -- and a language-less fence -- stays a plain code block
-// (Decision 6: no guessing).
+// placeholder on the streaming side (ADR-0120 Decision 4); the choice is the
+// `mode` prop, threaded by the live round block. Every other fence language
+// -- and a language-less fence -- stays a plain code block (Decision 6: no
+// guessing).
+//
+// The caret (a block glyph after the last block) is the round-is-alive
+// signal: `isAnimating` follows the mode, and the library suppresses the
+// glyph while the last block is an unclosed fence. Direction stays
+// untouched: the library only probes (and wraps blocks) when `dir="auto"`
+// is asked for, so the default keeps the inherited direction without the
+// per-block wrapper element.
 
 import { memo, useContext, useMemo, useState, type MouseEvent, type ReactNode } from "react";
-import Markdown from "react-markdown";
-import type { Components, ExtraProps, Options } from "react-markdown";
+import { Streamdown } from "streamdown";
+import type { Components, ExtraProps } from "streamdown";
 import remarkBreaks from "remark-breaks";
 import remarkGfm from "remark-gfm";
 import { openUrl } from "@tauri-apps/plugin-opener";
@@ -42,16 +58,24 @@ import { VizStageLinkContext, type VizStageLink } from "../viz/viz-stage-link";
 import { CopyButton } from "./CopyButton";
 import { CODE_BLOCK_REVEAL_CLASS } from "./turn-visual";
 
-// The hast element type react-markdown itself hands to components -- derived
+// The hast element type streamdown itself hands to components -- derived
 // from its own typings so no hast package import is needed.
 type HastElement = NonNullable<ExtraProps["node"]>;
+
+// The library does not export its options interface; the component's props
+// stand in for the plugin-list typings.
+type StreamdownOptions = NonNullable<Parameters<typeof Streamdown>[0]>;
 
 // The one fence language that renders as a chart (ADR-0120 Decision 6). Any
 // other value -- including a language-less fence -- is not a chart intent.
 const VEGA_LITE_FENCE = "vega-lite";
 
-// Module-level constant: see the streaming contract in the file header.
-const REMARK_PLUGINS: NonNullable<Options["remarkPlugins"]> = [remarkGfm, remarkBreaks];
+// Module-level constants: see the streaming contract in the file header. An
+// empty rehype list replaces the library's raw/sanitize defaults (the
+// embedded-HTML posture above); gfm is carried explicitly because the list
+// replaces the library's default remark plugins too.
+const REMARK_PLUGINS: NonNullable<StreamdownOptions["remarkPlugins"]> = [remarkGfm, remarkBreaks];
+const REHYPE_PLUGINS: NonNullable<StreamdownOptions["rehypePlugins"]> = [];
 
 // The hast subtree's concatenated text (a fence's code text lives in one
 // text node under pre > code, but walk generically).
@@ -119,12 +143,16 @@ function CodeBlock({ node }: { node?: HastElement }) {
 // ProviderKeyField's get-key link uses). Every other shape -- mailto:,
 // relative refs -- degrades to plain text with the surviving href beside
 // the label, so the target never vanishes from the visible surface (a
-// [email us](mailto:...) answer stays contentful); what the default
-// urlTransform stripped to empty (javascript:, file:, ...) keeps only its
-// label text. An opener rejection surfaces as a caption-sized live note
-// beside the link (role=status so screen readers announce it): the click
-// already swallowed the default navigation, so silence would read as a
-// dead button.
+// [email us](mailto:...) answer stays contentful). Streamdown's urlTransform
+// passes non-web schemes through un-stripped, so the unsafe ones
+// (javascript:, file:, ...) arrive here whole and the http(s) gate below is
+// what keeps them off the anchor element; the library's own
+// `streamdown:incomplete-link` placeholder (remend's provisional href for a
+// link still being written) is internal noise, never a real target -- it
+// degrades to the bare label. An opener rejection surfaces as a
+// caption-sized live note beside the link (role=status so screen readers
+// announce it): the click already swallowed the default navigation, so
+// silence would read as a dead button.
 function ProseLink({ href, children }: { href?: string; children?: ReactNode }) {
   const intl = useIntl();
   const [failed, setFailed] = useState(false);
@@ -160,7 +188,7 @@ function ProseLink({ href, children }: { href?: string; children?: ReactNode }) 
       </>
     );
   }
-  if (typeof href === "string" && href !== "") {
+  if (typeof href === "string" && href !== "" && !href.startsWith("streamdown:")) {
     return <span>{children} ({href})</span>;
   }
   return <span>{children}</span>;
@@ -191,8 +219,8 @@ function SettledPre({ node }: { node?: HastElement }) {
   );
 }
 
-// The live `pre` door (ADR-0120 Decision 4): a vega-lite fence renders as a
-// placeholder only -- no parse, no failure judgment, and never the
+// The streaming `pre` door (ADR-0120 Decision 4): a vega-lite fence renders
+// as a placeholder only -- no parse, no failure judgment, and never the
 // half-streamed source.
 function LivePre({ node }: { node?: HastElement }) {
   return codeLanguage(node) === VEGA_LITE_FENCE ? (
@@ -232,13 +260,33 @@ const BASE_MARKDOWN_COMPONENTS: Components = {
     </blockquote>
   ),
   // No `pre` entry here on purpose: the fence door is the one thing the
-  // settled and live maps differ on (see the file header), so each derived
-  // map supplies its own. A base `pre` would be dead weight that silently
-  // wins if a future map forgets to override it.
-  code: ({ children }) => (
+  // settled and streaming maps differ on (see the file header), so each
+  // derived map supplies its own. A base `pre` would be dead weight that
+  // silently wins if a future map forgets to override it. The same applies
+  // to fenced code's inner element: streamdown routes INLINE code to the
+  // `inlineCode` entry, so the muted monospace chip lives there and no
+  // `code` entry shadows the library's fenced handling.
+  inlineCode: ({ children }) => (
     <code className="rounded-xs bg-muted px-1.5 py-0.5 font-mono text-[13px]">{children}</code>
   ),
-  a: ProseLink,
+  // Bare by design: streamdown's built-in replacements for these tags carry
+  // its own surface (list markers, table-row chrome, styled checkboxes);
+  // the bare entries pin today's preflight-native rendering, picking the
+  // attributes the hast conversion actually produces (className on li is
+  // the task-list hook; the checkbox triple is a task item's full shape).
+  li: ({ children, className }) => <li className={className}>{children}</li>,
+  strong: ({ children }) => <strong>{children}</strong>,
+  em: ({ children }) => <em>{children}</em>,
+  del: ({ children }) => <del>{children}</del>,
+  tr: ({ children }) => <tr>{children}</tr>,
+  input: ({ type, checked, disabled }) => (
+    <input type={type} checked={checked} disabled={disabled} />
+  ),
+  // The spread arrow keeps the entry's parameter type inferred from the
+  // Components map (a direct ProseLink reference fights the map's index
+  // signature); the extra renderer props (node) dissolve into the
+  // component's own signature.
+  a: (props) => <ProseLink {...props} />,
   // Remote images never load (the CSP allows only self/data/blob/asset), so a
   // default img would render as a broken placeholder -- the alt text carries
   // the content with the untransformed URL beside it, so where the image
@@ -273,8 +321,8 @@ const BASE_MARKDOWN_COMPONENTS: Components = {
 };
 
 // The two doors over the shared map (see the file header): the settled side
-// renders a vega-lite fence as a chart, the live side as a placeholder. Both
-// are module-level constants so neither identity moves across streamed
+// renders a vega-lite fence as a chart, the streaming side as a placeholder.
+// Both are module-level constants so neither identity moves across streamed
 // deltas.
 const SETTLED_MARKDOWN_COMPONENTS: Components = {
   ...BASE_MARKDOWN_COMPONENTS,
@@ -288,16 +336,18 @@ const LIVE_MARKDOWN_COMPONENTS: Components = {
 
 export const RoundProse = memo(function RoundProse({
   text,
-  isLive = false,
+  mode = "static",
   onSelectViz,
   selectedVizSpec,
 }: {
   text: string;
-  /** True while the round streams (the live exchange, issue #610): a
-   * vega-lite fence shows the placeholder instead of decoding (ADR-0120
-   * Decision 4). Settled consumers -- the round block, the textual outcome,
-   * the delegation trace -- leave it false so a fence renders as a chart. */
-  isLive?: boolean;
+  /** The render mode (issue #1128, replacing `isLive`): "streaming" while
+   * the round streams (the live exchange, issue #610) -- remend repairs
+   * half-open markers and the caret arms. "static" for every settled
+   * consumer -- the round block, the textual outcome, the delegation trace,
+   * the artifact view -- where text renders untouched and a vega-lite fence
+   * decodes (ADR-0120 Decision 4). */
+  mode?: "streaming" | "static";
   /** Issue #1093: promotes a settled fence's body onto the workspace stage.
    *  Optional (the ArtifactCard read-only precedent): only the TurnCard
    *  stream wires it -- the delegation dialog and the md artifact renderer
@@ -321,21 +371,25 @@ export const RoundProse = memo(function RoundProse({
     <VizStageLinkContext.Provider value={link}>
       {/* round-text is a cross-module stability hook: this suite's own pins
           plus TurnCard/Thread's composition selectors
-          (`.turn-outcome.textual .round-text`) query through it.
-          max-w-full: on the #847 materialized face the root hangs off the
-          stream (flex-col items-start) as a non-stretched flex item, so its
-          min-content (a wide markdown table) stretches the whole item past
-          the card and the rail's overflow-x crops it -- the #826 trace-round
-          cap's prose twin (issue #860); the other consumers sit inside
-          already-capped containers (.trace-round, .turn-outcome.textual). */}
-      <div className="round-text m-0 mt-0.5 max-w-full space-y-4 text-sm leading-[1.75] text-foreground break-words">
-        <Markdown
-          remarkPlugins={REMARK_PLUGINS}
-          components={isLive ? LIVE_MARKDOWN_COMPONENTS : SETTLED_MARKDOWN_COMPONENTS}
-        >
-          {text}
-        </Markdown>
-      </div>
+          (`.turn-outcome.textual .round-text`) query through it. The classes
+          merge onto the library's own root (its tailwind-merge dedupes the
+          shared space-y-4), so the wrapper div from the react-markdown era
+          is gone. max-w-full: on the #847 materialized face the root hangs
+          off the stream (flex-col items-start) as a non-stretched flex item,
+          so its min-content (a wide markdown table) stretches the whole item
+          past the card and the rail's overflow-x crops it -- the #826
+          trace-round cap's prose twin (issue #860); the other consumers sit
+          inside already-capped containers (.trace-round, .turn-outcome.textual). */}
+      <Streamdown
+        className="round-text m-0 mt-0.5 max-w-full space-y-4 text-sm leading-[1.75] text-foreground break-words"
+        remarkPlugins={REMARK_PLUGINS}
+        rehypePlugins={REHYPE_PLUGINS}
+        components={mode === "streaming" ? LIVE_MARKDOWN_COMPONENTS : SETTLED_MARKDOWN_COMPONENTS}
+        caret="block"
+        isAnimating={mode === "streaming"}
+      >
+        {text}
+      </Streamdown>
     </VizStageLinkContext.Provider>
   );
 });

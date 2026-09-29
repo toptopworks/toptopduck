@@ -27,10 +27,10 @@ vi.mock("vega-embed", () => ({ default: vi.fn() }));
 
 // The prose rides the thread's chrome (ADR-0052 react-intl + Radix Tooltip
 // for the code block's CopyButton) -- wrapped via the shared i18n test seam
-// the way the thread does. isLive mirrors the live round block's wiring
-// (ADR-0120 Decision 4).
-function renderProse(text: string, isLive = false) {
-  return render(withIntl(<RoundProse text={text} isLive={isLive} />));
+// the way the thread does. mode mirrors the live round block's wiring
+// (ADR-0120 Decision 4, issue #1128).
+function renderProse(text: string, mode: "streaming" | "static" = "static") {
+  return render(withIntl(<RoundProse text={text} mode={mode} />));
 }
 
 function proseOf(ui: ReturnType<typeof renderProse>): HTMLElement {
@@ -136,6 +136,19 @@ describe("RoundProse markdown rendering (issue #746)", () => {
       expect(screen.getAllByRole("listitem")).toHaveLength(4);
     });
 
+    it("renders a GFM task list as a native disabled checkbox", () => {
+      // The bare input mapping keeps the checkbox preflight-native; the
+      // disabled attribute is what the hast conversion carries.
+      renderProse("- [ ] 待办\n- [x] 已办");
+      const boxes = screen.getAllByRole("checkbox") as HTMLInputElement[];
+      expect(boxes).toHaveLength(2);
+      expect(boxes[0]?.checked).toBe(false);
+      expect(boxes[1]?.checked).toBe(true);
+      for (const box of boxes) {
+        expect(box).toBeDisabled();
+      }
+    });
+
     it("renders a GFM pipe table in a scroll container with hairline borders", () => {
       const { container } = renderProse("| 列 | 值 |\n| --- | --- |\n| a | 1 |");
       expect(screen.getByRole("table")).toBeInTheDocument();
@@ -208,14 +221,21 @@ describe("RoundProse markdown rendering (issue #746)", () => {
     });
 
     it.each([
-      ["javascript:alert(1)", "小写 javascript:"],
-      ["JAVASCRIPT:alert(1)", "大写 JAVASCRIPT:"],
-      ["data:text/html,<script>alert(1)</script>", "data:"],
-      ["vbscript:MsgBox(1)", "vbscript:"],
-    ])("does not turn a %s link into a clickable anchor (%s)", (url) => {
+      ["javascript:alert(1)", "小写 javascript:", "点我 (javascript:alert(1))"],
+      ["JAVASCRIPT:alert(1)", "大写 JAVASCRIPT:", "点我 (JAVASCRIPT:alert(1))"],
+      [
+        "data:text/html,<script>alert(1)</script>",
+        "data:",
+        "点我 (data:text/html,%3Cscript%3Ealert(1)%3C/script%3E)",
+      ],
+      ["vbscript:MsgBox(1)", "vbscript:", "点我 (vbscript:MsgBox(1))"],
+    ])("does not turn a %s link into a clickable anchor (%s)", (url, _label, degraded) => {
       const { container } = renderProse(`[点我](${url})`);
+      // Streamdown's urlTransform passes unsafe schemes through un-stripped,
+      // so the anchor gate is the ProseLink http(s) check itself -- the link
+      // degrades to text with the target beside the label.
       expect(container.querySelector("a")).toBeNull();
-      expect(screen.getByText("点我")).toBeInTheDocument();
+      expect(screen.getByText(degraded)).toBeInTheDocument();
     });
 
     it("shows HTML embedded inside table cells and list items as raw text too", () => {
@@ -276,12 +296,12 @@ describe("RoundProse markdown rendering (issue #746)", () => {
       expect(vi.mocked(openUrl)).not.toHaveBeenCalled();
     });
 
-    it("degrades file links to plain text without the target", () => {
+    it("degrades file links to plain text that keeps the target", () => {
       const { container } = renderProse("[本地](file:///C:/data/x.csv)");
       expect(container.querySelector("a")).toBeNull();
-      // file: is outside the default urlTransform's allowlist, so the href
-      // is stripped before the component sees it -- only the label remains.
-      expect(screen.getByText("本地")).toBeInTheDocument();
+      // Streamdown's urlTransform passes file: through un-stripped, so the
+      // degrade lane shows the target beside the label (the mailto: shape).
+      expect(screen.getByText("本地 (file:///C:/data/x.csv)")).toBeInTheDocument();
       expect(vi.mocked(openUrl)).not.toHaveBeenCalled();
     });
 
@@ -461,7 +481,7 @@ describe("RoundProse markdown rendering (issue #746)", () => {
       // placeholder names the chart without showing the source and without
       // attempting a parse (which would flash a degradation banner on every
       // partial delta).
-      const { container } = renderProse("```vega-lite\n{\"mark\": \"ba", true);
+      const { container } = renderProse("```vega-lite\n{\"mark\": \"ba", "streaming");
       expect(screen.getByText("图表生成中…")).toBeInTheDocument();
       expect(container.textContent).not.toContain("mark");
       expect(container.querySelector("pre")).toBeNull();
@@ -471,10 +491,10 @@ describe("RoundProse markdown rendering (issue #746)", () => {
     it("keeps the live placeholder as the fence body streams in", async () => {
       // The live map is a module-level constant, so the growing fence
       // reconciles the placeholder in place instead of remounting per delta.
-      const view = renderProse("```vega-lite\n{\"mark\": \"ba", true);
+      const view = renderProse("```vega-lite\n{\"mark\": \"ba", "streaming");
       expect(screen.getAllByText("图表生成中…")).toHaveLength(1);
       view.rerender(
-        withIntl(<RoundProse text={"```vega-lite\n{\"mark\": \"bar\"}"} isLive />),
+        withIntl(<RoundProse text={"```vega-lite\n{\"mark\": \"bar\"}"} mode="streaming" />),
       );
       expect(screen.getAllByText("图表生成中…")).toHaveLength(1);
       expect(view.container.textContent).not.toContain("mark");
@@ -485,12 +505,95 @@ describe("RoundProse markdown rendering (issue #746)", () => {
       // The same text that streamed as a placeholder decodes into the chart
       // once the turn settles.
       const text = "```vega-lite\n{\"mark\": \"bar\"}\n```";
-      const view = renderProse(text, true);
+      const view = renderProse(text, "streaming");
       expect(screen.getByText("图表生成中…")).toBeInTheDocument();
       view.rerender(withIntl(<RoundProse text={text} />));
       await waitFor(() => expect(embed).toHaveBeenCalledTimes(1));
       expect(screen.queryByText("图表生成中…")).not.toBeInTheDocument();
       expect(view.container.querySelector(".viz-chart")).toBeInTheDocument();
+    });
+  });
+
+  describe("streaming repair (issue #1128)", () => {
+    it("completes a half-open bold marker into strong instead of flashing the source", () => {
+      const view = renderProse("前文 **加粗", "streaming");
+      expect(screen.getByText("加粗").tagName).toBe("STRONG");
+      expect(proseOf(view).textContent).not.toContain("*");
+    });
+
+    it("renders a half-open link as its label without flashing the raw syntax", () => {
+      const view = renderProse("参考 [文档](https://example.com", "streaming");
+      expect(screen.getByText("文档")).toBeInTheDocument();
+      // Remend completes the link with a provisional href the default
+      // urlTransform strips, so the label survives as text -- never an anchor
+      // pointing at a made-up URL, and never the raw `](` syntax on screen.
+      expect(view.container.querySelector("a")).toBeNull();
+      expect(proseOf(view).textContent).not.toContain("](");
+    });
+
+    it("renders an unclosed fence as a code block while streaming, never the fence source", () => {
+      const view = renderProse("结果如下\n```python\nprint(1)", "streaming");
+      const pre = view.container.querySelector("pre");
+      expect(pre).not.toBeNull();
+      expect(pre?.textContent).toContain("print(1)");
+      expect(proseOf(view).textContent).not.toContain("```");
+    });
+  });
+
+  describe("caret (issue #1128)", () => {
+    // The caret is the library's `--streamdown-caret` CSS custom property on
+    // the root plus an after-content utility class; jsdom cannot paint pseudo
+    // elements, so the assertions pin the two conditions the CSS reads.
+    const CARET_CLASS = "after:content-[var(--streamdown-caret)]";
+
+    function caretArmed(root: HTMLElement): boolean {
+      return (
+        root.className.includes(CARET_CLASS) &&
+        root.style.getPropertyValue("--streamdown-caret") !== ""
+      );
+    }
+
+    it("arms the caret on the last block while streaming", () => {
+      const prose = proseOf(renderProse("正文", "streaming"));
+      expect(caretArmed(prose)).toBe(true);
+      // The library writes the glyph as a quoted CSS content value.
+      expect(prose.style.getPropertyValue("--streamdown-caret")).toBe("\" ▋\"");
+    });
+
+    it("hides the caret while the last block is an unclosed fence", () => {
+      const prose = proseOf(renderProse("```python\nprint(1)", "streaming"));
+      expect(caretArmed(prose)).toBe(false);
+    });
+
+    it("leaves no caret on the settled side", () => {
+      const prose = proseOf(renderProse("正文"));
+      expect(caretArmed(prose)).toBe(false);
+    });
+  });
+
+  describe("settled/streaming parity (issue #1128)", () => {
+    // The remend gate covers the full-text pass only; the fork's parser
+    // completes half-open markers on BOTH sides (measured, not assumed).
+    // That is the settle-swap guarantee in its strongest form (ADR-0103):
+    // whatever streamed completes identically once settled, so the swap can
+    // never flash a different shape.
+    it("renders the same half-open marker identically on both sides", () => {
+      const settled = renderProse("开头 **加粗");
+      const streaming = render(withIntl(<RoundProse text="开头 **加粗" mode="streaming" />));
+      expect(streaming.container.querySelector("p")?.outerHTML).toBe(
+        settled.container.querySelector("p")?.outerHTML,
+      );
+      expect(settled.container.querySelector("strong")).not.toBeNull();
+    });
+
+    it("renders an unparseable link as its bare label, never internal protocol noise", () => {
+      // Both modes leave the library's `streamdown:incomplete-link`
+      // placeholder href on the degrade lane; the label-only span keeps the
+      // internal protocol string off the visible surface.
+      const view = renderProse("开头 [链接](https://example.com");
+      expect(screen.getByText("链接")).toBeInTheDocument();
+      expect(view.container.querySelector("a")).toBeNull();
+      expect(proseOf(view).textContent).not.toContain("streamdown:");
     });
   });
 });
@@ -540,7 +643,7 @@ describe("RoundProse viz stage link (issue #1093)", () => {
     // The live side never parses (ADR-0120 Decision 4), so there is no chart
     // body to click -- the link exists for the settled side only.
     vi.mocked(embed).mockResolvedValue(embedOk());
-    renderLinked(<RoundProse text={FENCE} isLive onSelectViz={vi.fn()} />);
+    renderLinked(<RoundProse text={FENCE} mode="streaming" onSelectViz={vi.fn()} />);
     expect(embed).not.toHaveBeenCalled();
     expect(
       screen.queryByRole("button", { name: "在结果页查看图表" }),
