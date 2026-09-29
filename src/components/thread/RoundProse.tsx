@@ -39,6 +39,23 @@
 // single-pass path and silently break that parity; do not wire it without
 // re-verifying the parity tests.
 //
+// Error containment stays at the session level by adjudication
+// (issue #1132): streamdown has no internal catch, so a pathological
+// delta's remend or block-parse throw propagates and degrades the
+// whole thread view (the degrade card with its retry), not just the
+// offending round -- accepted. A per-round ErrorBoundary was
+// rejected: the motivating throw lands on a streamed re-render, a
+// query-cache-driven external-store update -- exactly the React 19
+// case where the nearest boundary can be skipped and the outer
+// per-session boundary catches first (the known limitation recorded
+// at the thread boundary in SessionPane; it does not reproduce in
+// isolation), so the narrower boundary would pass an isolated test
+// yet stay inert in the real tree. The session-level posture is also
+// the honest one: the failure is loud (logged plus a visible degrade
+// card), vanishingly rare, and cheap to leave behind -- retry remounts
+// the thread, and the settle swap replaces the live block with the
+// settled round block's own fresh subtree anyway.
+//
 // A vega-lite fence renders as a chart on the settled side and as a
 // placeholder on the streaming side (ADR-0120 Decision 4); the choice is the
 // `mode` prop, threaded by the live round block. Every other fence language
