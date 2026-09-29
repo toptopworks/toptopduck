@@ -2,8 +2,9 @@
 // is the conversational discourse, folding it would hide the narrative.
 // Shared by the settled round block (TurnCard), the live round block
 // (LiveTurnExchange, issue #610), and the Textual outcome's terminal answer
-// (TurnCard, issue #827) so the settle swap renders the identical markup and
-// the answer rides the same pipeline as the prose.
+// (TurnCard, issue #827) so the settle swap renders the identical content
+// markup -- the live-only animate spans of the word cascade below excepted --
+// and the answer rides the same pipeline as the prose.
 //
 // Rendered as markdown (issue #746) through streamdown (issue #1128): the
 // library re-implements the react-markdown pipeline (remark-parse +
@@ -64,7 +65,19 @@
 //
 // The caret (a block glyph after the last block) is the round-is-alive
 // signal: `isAnimating` follows the mode, and the library suppresses the
-// glyph while the last block is an unclosed fence. Direction stays
+// glyph while the last block is an unclosed fence.
+//
+// The word cascade (issue #1137): `animated` rides the boolean default
+// (fadeIn 150ms, word separation, the library's stagger defaults), and the
+// same isAnimating gate that arms the caret builds the animate plugin --
+// live only, so the settle swap renders zero animate spans and the parity
+// holds. The plugin skips pre/svg/math/annotation subtrees (code blocks and
+// the vega fence body never cascade; markdown never produces the MathML
+// annotation); its keyframes live in the library's
+// styles.css (imported at the CSS entry) with a prefers-reduced-motion
+// cutoff in app.css, which the library ships without.
+//
+// Direction stays
 // untouched: any per-block direction (auto probing included) wraps every
 // block in a display-contents div, so the default -- no dir asked for --
 // keeps the inherited direction without the wrapper element.
@@ -437,6 +450,7 @@ export const RoundProse = memo(function RoundProse({
         components={mode === "streaming" ? LIVE_MARKDOWN_COMPONENTS : SETTLED_MARKDOWN_COMPONENTS}
         caret="block"
         isAnimating={mode === "streaming"}
+        animated
       >
         {text}
       </Streamdown>
