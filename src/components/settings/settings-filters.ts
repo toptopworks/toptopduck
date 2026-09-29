@@ -2,10 +2,12 @@
 // skills pane joined the enabled-axis trio when its acquired Select
 // retired): the enabled-axis Select trio consumed verbatim by the MCP,
 // agents, and skills panes, plus the search-box predicate the same three
-// panes share. Functions, types, and one option-list constant only -- the
-// Select's option-label JSX stays in each pane as literal FormattedMessage
-// children, because formatjs extract only matches a direct literal
-// descriptor and would drop ids hoisted here.
+// panes share. Functions, types, and one option-list constant only --
+// nothing user-facing renders from here. Since issue #1126 the Select's
+// option-label JSX lives once in the shared PaneFilterBar
+// (settings-chrome.tsx); its FormattedMessage descriptors stay direct
+// literals in that .tsx component, because formatjs extract only matches a
+// direct literal descriptor and would drop ids hoisted into this module.
 
 import { searchMatcher } from "../../lib/searchMatcher";
 

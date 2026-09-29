@@ -3,12 +3,22 @@ import {
   type ReactNode,
 } from "react";
 import { type LucideIcon, ArrowLeft, ChevronDown, ChevronRight, Info, Loader2 } from "lucide-react";
-import { useIntl } from "react-intl";
+import { FormattedMessage, useIntl } from "react-intl";
 
 import { cn } from "../../lib/utils";
 import { Badge } from "../ui/badge";
 import { Button } from "../ui/button";
+import { Input } from "../ui/input";
+import { Label } from "../ui/label";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "../ui/select";
 import { Tooltip, TooltipContent, TooltipTrigger } from "../ui/tooltip";
+import { type EnabledFilter, FILTER_OPTIONS } from "./settings-filters";
 
 // Settings-page layout chrome (ADR-0075, issue #281). The redesign replaces the
 // old single-fieldset panes with card-grouped ROWS: a card is a bordered,
@@ -626,6 +636,82 @@ export function SourceFold({
       {expanded && (
         <div className="border-border border-t px-3 py-2">{children}</div>
       )}
+    </div>
+  );
+}
+
+/** The registry panes' filter toolbar (issue #1126): the search box and the
+ *  enabled-axis Select on one row -- the render half of the useRegistryPane
+ *  filter face, whose state half the hook owns. The option labels stay as
+ *  literal FormattedMessage children (formatjs extract only matches a
+ *  direct literal descriptor -- the settings-filters.ts header records the
+ *  same constraint for the .ts module). The CLI pane renders no search box,
+ *  so it mounts no toolbar. */
+export function PaneFilterBar({
+  idPrefix,
+  placeholder,
+  search,
+  onSearchChange,
+  filter,
+  onFilterChange,
+}: {
+  /** The enabled-axis Select's DOM id derives from one prefix
+   *  (`${idPrefix}-enabled-filter`), pairing the sr-only Label's htmlFor. */
+  idPrefix: string;
+  /** The pre-formatted search placeholder -- each pane owns its catalog id. */
+  placeholder: string;
+  search: string;
+  onSearchChange: (value: string) => void;
+  filter: EnabledFilter;
+  onFilterChange: (value: EnabledFilter) => void;
+}) {
+  const intl = useIntl();
+  const filterId = `${idPrefix}-enabled-filter`;
+  // One read feeds both slots: the sr-only Label and the SelectTrigger's
+  // aria-label share the catalog string (the StatusDot posture).
+  const filterLabel = intl.formatMessage({
+    id: "settings.filter.label",
+    defaultMessage: "Filter by status",
+  });
+  return (
+    <div className="mb-3 flex items-center gap-2">
+      <Input
+        type="search"
+        value={search}
+        onChange={(e) => onSearchChange(e.target.value)}
+        placeholder={placeholder}
+        className="max-w-xs"
+      />
+      <Label htmlFor={filterId} className="sr-only">
+        {filterLabel}
+      </Label>
+      <Select
+        value={filter}
+        onValueChange={(v) => onFilterChange(v as EnabledFilter)}
+      >
+        <SelectTrigger id={filterId} aria-label={filterLabel}>
+          <SelectValue />
+        </SelectTrigger>
+        <SelectContent>
+          {FILTER_OPTIONS.map((opt) => (
+            <SelectItem key={opt} value={opt}>
+              {opt === "all" ? (
+                <FormattedMessage id="settings.filter.all" defaultMessage="All" />
+              ) : opt === "enabled" ? (
+                <FormattedMessage
+                  id="settings.filter.enabled"
+                  defaultMessage="Enabled"
+                />
+              ) : (
+                <FormattedMessage
+                  id="settings.filter.disabled"
+                  defaultMessage="Disabled"
+                />
+              )}
+            </SelectItem>
+          ))}
+        </SelectContent>
+      </Select>
     </div>
   );
 }

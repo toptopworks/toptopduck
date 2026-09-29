@@ -42,6 +42,11 @@ const NAV_TITLE = (
   <FormattedMessage id="settings.nav.cliTools" defaultMessage="CLI Tools" />
 );
 
+// The searchable injection this pane passes the registry pane: a constant,
+// because the filter face rides unused (no search box renders). Hoisted so
+// the injection's identity is stable across renders (issue #1126).
+const SEARCHABLE = () => "";
+
 // Registered CLI tools settings pane (issue #671, ADR-0108): the second
 // external tool source. Structured like the MCP pane -- "list" shows every
 // registered tool with a per-row enable toggle + Edit/Delete, "form" shows
@@ -96,7 +101,7 @@ export function CliSection({
     toggle,
     confirmBusy,
     runConfirm,
-  } = useRegistryPane(tools, () => "");
+  } = useRegistryPane(tools, SEARCHABLE);
   // The write-generation guard (issue #683): advances with every APPLIED
   // user write. A rescan response that arrives after a user write landed
   // reads a stale config snapshot (the backend read it before the write),
