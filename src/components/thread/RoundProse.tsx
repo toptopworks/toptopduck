@@ -71,8 +71,9 @@
 // (fadeIn 150ms, word separation, the library's stagger defaults), and the
 // same isAnimating gate that arms the caret builds the animate plugin --
 // live only, so the settle swap renders zero animate spans and the parity
-// holds. The plugin skips pre/svg/math subtrees (code blocks and the vega
-// fence body never cascade); its keyframes live in the library's
+// holds. The plugin skips pre/svg/math/annotation subtrees (code blocks and
+// the vega fence body never cascade; markdown never produces the MathML
+// annotation); its keyframes live in the library's
 // styles.css (imported at the CSS entry) with a prefers-reduced-motion
 // cutoff in app.css, which the library ships without.
 //

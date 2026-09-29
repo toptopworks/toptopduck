@@ -669,11 +669,20 @@ describe("RoundProse markdown rendering (issue #746)", () => {
     // the markup must stay byte-identical across the swap; any real
     // structure change (strong drifting to em, a dropped link) still
     // fails the compare.
-    const parityHtml = (el: Element | null): string | undefined => {
-      if (!el) return undefined;
+    const parityHtml = (el: Element | null): string => {
+      if (!el) throw new Error("parity target paragraph missing");
       const clone = el.cloneNode(true) as Element;
       for (const span of clone.querySelectorAll(ANIMATE_SPAN)) {
-        span.replaceWith(...Array.from(span.childNodes));
+        span.replaceWith(...span.childNodes);
+      }
+      // The library also stamps live-only attributes on ancestors
+      // (data-sd-animated on e.g. em, data-sd-animate-marker on li);
+      // strip them so the content-tree compare stays byte-identical even
+      // on paragraphs whose mappings keep incoming attributes.
+      const marked = clone.querySelectorAll("[data-sd-animated], [data-sd-animate-marker]");
+      for (const el of marked) {
+        el.removeAttribute("data-sd-animated");
+        el.removeAttribute("data-sd-animate-marker");
       }
       return clone.outerHTML;
     };
@@ -772,10 +781,13 @@ describe("RoundProse animated prose (issue #1137)", () => {
   // a live-only surface and the settle swap renders identical markup (the
   // ADR-0103 parity construction).
 
-  it("wraps the streaming prose's words in animate spans", () => {
-    const view = renderProse("逐词级联淡入", "streaming");
+  it("wraps each streaming word in its own animate span (word-level, not a block fade)", () => {
+    const view = renderProse("words cascade in", "streaming");
     const spans = proseOf(view).querySelectorAll(ANIMATE_SPAN);
-    expect(spans.length).toBeGreaterThan(0);
+    // Two-plus spans pin the word separation the DESIGN.md chat-exchange
+    // entry promises -- a library sep drift to a block-level fade would
+    // render one span for the whole paragraph and fail this floor.
+    expect(spans.length).toBeGreaterThanOrEqual(2);
   });
 
   it("renders zero animate spans on the settled side (the plugin builds only while animating)", () => {
@@ -786,7 +798,7 @@ describe("RoundProse animated prose (issue #1137)", () => {
   it("leaves the code fence subtree untouched by the word cascade", () => {
     const view = renderProse("先看代码\n\n```python\nprint(1)\n```", "streaming");
     // The plain-language fence keeps its CodeBlock (pre) on the live side;
-    // the cascade must skip it -- code arrives block-sealed, not wordwise.
+    // the cascade must skip it -- the explicit pre skip seals it wholesale.
     const pre = view.container.querySelector("pre");
     expect(pre).not.toBeNull();
     expect(pre?.querySelectorAll(ANIMATE_SPAN)).toHaveLength(0);

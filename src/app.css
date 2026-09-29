@@ -167,7 +167,8 @@
 /* Reduced-motion cutoff for the streamdown word cascade (issue #1137): the
  * library ships no prefers-reduced-motion handling of its own, so both
  * animated surfaces turn off here -- the word spans and the list ::marker
- * fade (which animates color, not opacity, since ::marker honors neither). */
+ * fade (which animates color -- ::marker ignores opacity/transform
+ * animations, color it does honor). */
 @media (prefers-reduced-motion: reduce) {
   [data-sd-animate],
   [data-sd-animate-marker]::marker {
