@@ -48,6 +48,11 @@ function proseOf(ui: ReturnType<typeof renderProse>): HTMLElement {
   return root as HTMLElement;
 }
 
+// The word cascade's DOM hook (issue #1137): every animated word rides a
+// span carrying this attribute -- the cascade pins and the parity unwrap
+// all query through it.
+const ANIMATE_SPAN = "span[data-sd-animate]";
+
 describe("RoundProse markdown rendering (issue #746)", () => {
   beforeEach(() => {
     vi.mocked(openUrl).mockReset();
@@ -572,7 +577,10 @@ describe("RoundProse markdown rendering (issue #746)", () => {
   describe("streaming repair (issue #1128)", () => {
     it("completes a half-open bold marker into strong instead of flashing the source", () => {
       const view = renderProse("前文 **加粗", "streaming");
-      expect(screen.getByText("加粗").tagName).toBe("STRONG");
+      // The word cascade (issue #1137) wraps each word in an animate span,
+      // so the repaired marker is pinned through the wrapping strong, not
+      // through the text's nearest element (now the span).
+      expect(screen.getByText("加粗").closest("strong")).not.toBeNull();
       expect(proseOf(view).textContent).not.toContain("*");
     });
 
@@ -653,10 +661,27 @@ describe("RoundProse markdown rendering (issue #746)", () => {
     // guarantee in its strongest form (ADR-0103): whatever streamed
     // completes identically once settled, so the swap can never flash a
     // different shape.
+    //
+    // The word cascade (issue #1137) adds one live-only wrapper layer --
+    // animate spans around words, animation chrome rather than content
+    // (a finished span's end state is visually the bare text). Parity
+    // therefore compares the content tree: with the wrappers unwrapped,
+    // the markup must stay byte-identical across the swap; any real
+    // structure change (strong drifting to em, a dropped link) still
+    // fails the compare.
+    const parityHtml = (el: Element | null): string | undefined => {
+      if (!el) return undefined;
+      const clone = el.cloneNode(true) as Element;
+      for (const span of clone.querySelectorAll(ANIMATE_SPAN)) {
+        span.replaceWith(...Array.from(span.childNodes));
+      }
+      return clone.outerHTML;
+    };
+
     it("renders the same half-open marker identically on both sides", () => {
       const settled = renderProse("开头 **加粗");
       const streaming = render(withIntl(<RoundProse text="开头 **加粗" mode="streaming" />));
-      expect(streaming.container.querySelector("p")?.outerHTML).toBe(
+      expect(parityHtml(streaming.container.querySelector("p"))).toBe(
         settled.container.querySelector("p")?.outerHTML,
       );
       expect(settled.container.querySelector("strong")).not.toBeNull();
@@ -668,7 +693,7 @@ describe("RoundProse markdown rendering (issue #746)", () => {
       const text = "样本 20~25 与 30~40 各取一点";
       const settled = renderProse(text);
       const streaming = render(withIntl(<RoundProse text={text} mode="streaming" />));
-      expect(streaming.container.querySelector("p")?.outerHTML).toBe(
+      expect(parityHtml(streaming.container.querySelector("p"))).toBe(
         settled.container.querySelector("p")?.outerHTML,
       );
       expect(settled.container.textContent).toContain("20~25");
@@ -736,5 +761,37 @@ describe("RoundProse viz stage link (issue #1093)", () => {
     expect(
       screen.queryByRole("button", { name: "在结果页查看图表" }),
     ).not.toBeInTheDocument();
+  });
+});
+
+describe("RoundProse animated prose (issue #1137)", () => {
+  // The word cascade rides span[data-sd-animate] -- the library's animate
+  // plugin wraps each newly streamed word, and the keyframes live in
+  // streamdown/styles.css. The plugin is gated on the library's isAnimating
+  // context, which the component drives from the mode -- so the cascade is
+  // a live-only surface and the settle swap renders identical markup (the
+  // ADR-0103 parity construction).
+
+  it("wraps the streaming prose's words in animate spans", () => {
+    const view = renderProse("逐词级联淡入", "streaming");
+    const spans = proseOf(view).querySelectorAll(ANIMATE_SPAN);
+    expect(spans.length).toBeGreaterThan(0);
+  });
+
+  it("renders zero animate spans on the settled side (the plugin builds only while animating)", () => {
+    const view = renderProse("逐词级联淡入");
+    expect(proseOf(view).querySelectorAll(ANIMATE_SPAN)).toHaveLength(0);
+  });
+
+  it("leaves the code fence subtree untouched by the word cascade", () => {
+    const view = renderProse("先看代码\n\n```python\nprint(1)\n```", "streaming");
+    // The plain-language fence keeps its CodeBlock (pre) on the live side;
+    // the cascade must skip it -- code arrives block-sealed, not wordwise.
+    const pre = view.container.querySelector("pre");
+    expect(pre).not.toBeNull();
+    expect(pre?.querySelectorAll(ANIMATE_SPAN)).toHaveLength(0);
+    // Discriminating counterpart: the same render's prose carries the
+    // cascade, so the zero above reads as "skipped", not "never ran".
+    expect(proseOf(view).querySelectorAll(ANIMATE_SPAN).length).toBeGreaterThan(0);
   });
 });

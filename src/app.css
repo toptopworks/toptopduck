@@ -15,6 +15,12 @@
  * migration slices.
  */
 @import "tailwindcss";
+/* Streamdown's own stylesheet (issue #1137): the word-cascade keyframes and
+ * the [data-sd-animate] rules the animate plugin's spans depend on. It must
+ * inline ahead of this file's own rules -- the reduced-motion cutoff at the
+ * bottom overrides the cascade at equal specificity, so the cutoff wins
+ * only because it comes later in the same sheet. */
+@import "streamdown/styles.css";
 /* tw-animate-css (ADR-0049, issue #105): the animation utility layer shadcn
  * copy-in components reference (data-[state=open]:animate-in / fade-in / zoom-in
  * etc. for Dialog/AlertDialog enter+exit). Tailwind v4 successor to
@@ -155,5 +161,16 @@
      reset; utilities still override freely (ADR-0067). */
   button {
     font: inherit;
+  }
+}
+
+/* Reduced-motion cutoff for the streamdown word cascade (issue #1137): the
+ * library ships no prefers-reduced-motion handling of its own, so both
+ * animated surfaces turn off here -- the word spans and the list ::marker
+ * fade (which animates color, not opacity, since ::marker honors neither). */
+@media (prefers-reduced-motion: reduce) {
+  [data-sd-animate],
+  [data-sd-animate-marker]::marker {
+    animation: none;
   }
 }
