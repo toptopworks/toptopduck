@@ -55,12 +55,8 @@ import {
   SETTINGS_TOOLTIP_CLASS,
   SettingsCard,
 } from "./settings-chrome";
-import {
-  type EnabledFilter,
-  FILTER_OPTIONS,
-  matchesFilter,
-  matchesSearch,
-} from "./settings-filters";
+import { type EnabledFilter, FILTER_OPTIONS } from "./settings-filters";
+import { useRegistryPane } from "./useRegistryPane";
 import { McpImportDialog } from "./McpImportDialog";
 import { McpServerForm } from "./McpServerForm";
 import { upsertMirror, withMcpServers } from "./mcp-mirror";
@@ -120,52 +116,36 @@ export function McpSection({
   );
   const [expandedRows, setExpandedRows] = useState<Set<string>>(new Set());
   const [deleteTarget, setDeleteTarget] = useState<DeleteTarget | null>(null);
-  const [deleting, setDeleting] = useState(false);
   const [importOpen, setImportOpen] = useState(false);
   // Monotonic counter that increments each time the import dialog opens, used
   // as the dialog's `key` so React creates a fresh instance (resetting all
   // internal step/state) without a setState-in-effect (react-hooks lint).
   const [importEpoch, setImportEpoch] = useState(0);
-  const [error, setError] = useState<string | null>(null);
-  const [searchQuery, setSearchQuery] = useState("");
-  const [filter, setFilter] = useState<EnabledFilter>("all");
-  // The server whose enable toggle write is in flight (gates just that row's
-  // switch so a slow write does not freeze the whole list).
-  const [togglingId, setTogglingId] = useState<string | null>(null);
 
   const servers = appConfig.mcp_servers.servers;
   const existingNames = useMemo(
     () => new Set(servers.map((s) => s.display_name)),
     [servers],
   );
-  const filteredServers = useMemo(
-    () =>
-      servers.filter(
-        (s) =>
-          matchesSearch(s.display_name, searchQuery) &&
-          matchesFilter(s, filter),
-      ),
-    [servers, searchQuery, filter],
-  );
-
-  /** Shared error half of every write here (#659): run one async write unit
-   *  and surface a resolve-to-error or rejection through setError — the catch
-   *  contract lives in one place, mirroring useShellSessions's
-   *  applyPostureWrite. Returns the error string, or null on success;
-   *  handleConfirmDelete gates its cleanup on the non-null value. */
-  async function runCommit(
-    write: () => Promise<string | null>,
-  ): Promise<string | null> {
-    try {
-      const err = await write();
-      if (err) setError(err);
-      return err;
-    } catch (e) {
-      const msg = fmtError(e, intl);
-      setError(msg);
-      return msg;
-    }
-  }
+  // The pane state machine (list filter + error face + write wrapper + the
+  // two busy lanes) rides the shared hook (issue #1123). `deleting` stays
+  // local: the confirm write itself is the hook's lane, but the keychain
+  // sweep after a successful delete extends the dialog's busy gate past it.
+  const {
+    search,
+    setSearch,
+    filter,
+    setFilter,
+    visible: filteredServers,
+    error,
+    report,
+    clearError,
+    runCommit,
+    togglingKey: togglingId,
+    toggle,
+    runConfirm,
+  } = useRegistryPane(servers, (s) => s.display_name);
+  const [deleting, setDeleting] = useState(false);
 
   function handleAdd() {
     setFormTarget({
@@ -199,17 +179,12 @@ export function McpSection({
     server: McpServerConfig,
     enabled: boolean,
   ) {
-    setTogglingId(server.id);
-    setError(null);
-    await runCommit(async () => {
+    await toggle(server.id, async () => {
       const finalized = await upsertMcpServer({ ...server, enabled });
       return onCommit((cfg) =>
         withMcpServers(cfg, upsertMirror(cfg.mcp_servers.servers, finalized)),
       );
     });
-    // runCommit never rejects (failures surface as error strings), so the
-    // busy flag always clears.
-    setTogglingId(null);
   }
 
   /** Called by the form after upsert + secrets + probe complete. Syncs the
@@ -292,7 +267,7 @@ export function McpSection({
 
   async function handleProbe(server: McpServerConfig) {
     setProbeStates((prev) => ({ ...prev, [server.id]: { kind: "testing" } }));
-    setError(null);
+    clearError();
     try {
       const result = await probeMcpServer(server);
       setProbeStates((prev) => ({
@@ -317,12 +292,11 @@ export function McpSection({
   async function handleConfirmDelete() {
     if (!deleteTarget) return;
     setDeleting(true);
-    setError(null);
     // Remove the config entry first (the primary action). If this fails,
     // the server is still intact — secrets are preserved (reversed from
     // the original clear-then-remove order to avoid a partial-failure
     // window where secrets are wiped but the config persists).
-    const err = await runCommit(() =>
+    const err = await runConfirm(() =>
       onCommit((cfg) =>
         withMcpServers(
           cfg,
@@ -364,10 +338,10 @@ export function McpSection({
         },
       );
       if (warnings.length > 0) {
-        setError(warnings.join("; "));
+        report(warnings.join("; "));
       }
     }
-    // runCommit never rejects, so the busy flag always clears (no finally
+    // runConfirm never rejects, so the busy flag always clears (no finally
     // needed).
     setDeleting(false);
   }
@@ -432,8 +406,8 @@ export function McpSection({
       <div className="mb-3 flex items-center gap-2">
         <Input
           type="search"
-          value={searchQuery}
-          onChange={(e) => setSearchQuery(e.target.value)}
+          value={search}
+          onChange={(e) => setSearch(e.target.value)}
           placeholder={intl.formatMessage({
             id: "settings.mcp.searchPlaceholder",
             defaultMessage: "Search servers…",
