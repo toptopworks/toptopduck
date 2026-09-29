@@ -58,15 +58,15 @@ export type PostureCatalogProjection = {
   // The one provenance note the posture trigger renders (#529).
   note: CatalogNote;
   // The turn-end live currents (issue #586, ADR-0095 Decision 5): display
-  // only -- never writes the posture (ADR-0100 constraint).
+  // only -- never writes the posture (ADR-0100 constraint). The
+  // test-observable face of the live-currents gate: `liveValue` folds the
+  // currents into a string, so the function-level tests assert the
+  // admitted cache object's identity through this field.
   liveDiscovered: DiscoveredRuntime | null;
   // The tooltip's live payload, joined and gated: non-null only while
   // nothing is held AND a catalog seats the menu (the trigger drops the
   // tooltip on its static-label early return).
   liveValue: string | null;
-  // True when the active adapter feeds off a per-model catalog -- drives the
-  // model->effort linkage on writes (issue #537).
-  isPerModelCatalogAdapter: boolean;
 };
 
 export function derivePostureCatalog(
@@ -196,6 +196,5 @@ export function derivePostureCatalog(
     note,
     liveDiscovered,
     liveValue,
-    isPerModelCatalogAdapter,
   };
 }

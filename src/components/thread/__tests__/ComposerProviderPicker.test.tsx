@@ -1363,6 +1363,89 @@ describe("ComposerProviderPicker cold-start posture channel (ADR-0100, issue #57
     expect(setSessionPosture).not.toHaveBeenCalled();
   });
 
+  it("routes a runtime switch through the cold-start port (no set IPCs)", async () => {
+    // The cold-start twin of the in-session routing: the switch rides the
+    // channel port (which also resets the pending posture, ADR-0100 D2),
+    // never the runtime set IPC.
+    vi.mocked(listAdapters).mockResolvedValue([
+      adapter("qwen-code"),
+      adapter("codex"),
+    ]);
+    vi.mocked(getAdapterCatalogs).mockResolvedValue(acpProbeEntry(CATALOG));
+    const channel = staticColdStartChannel();
+    renderPicker(pickerJsx({ sessionId: null, coldStart: channel }));
+    await screen.findByRole("button", { name: /Runtime: qwen-code/ });
+    await settlePostureSurface();
+    fireEvent.click(screen.getByRole("button", { name: /Runtime: qwen-code/ }));
+    await screen.findByRole("combobox", { name: CLI_SELECT });
+    await selectOption(
+      screen.getByRole("combobox", { name: CLI_SELECT }),
+      /codex/,
+    );
+    await waitFor(() =>
+      expect(channel.port.writeRuntime).toHaveBeenCalledWith({
+        kind: "external",
+        data: "codex",
+      }),
+    );
+    expect(setSessionRuntime).not.toHaveBeenCalled();
+  });
+
+  it("routes a thought-level pick with the held model through the port (one full-pair submit)", async () => {
+    // #603: the held model rides the submit untouched -- an untouched
+    // field is never derived -- and a level pick alone does not wipe the
+    // backfill entry (only a whole-dimension clear does).
+    vi.mocked(listAdapters).mockResolvedValue([adapter("qwen-code")]);
+    vi.mocked(getAdapterCatalogs).mockResolvedValue(acpProbeEntry(CATALOG));
+    vi.mocked(getLastModelPosture).mockResolvedValue({
+      model: "fake-opus",
+      thought_level: "medium",
+    });
+    const channel = staticColdStartChannel();
+    renderPicker(pickerJsx({ sessionId: null, coldStart: channel }));
+    await screen.findByRole("button", { name: /Runtime: qwen-code/ });
+    await settlePostureSurface();
+    fireEvent.click(screen.getByRole("menuitemradio", { name: "high" }));
+    expect(channel.port.writePosture).toHaveBeenCalledWith(
+      { model: "fake-opus", thought_level: "high" },
+      {
+        clearsBackfill: false,
+        rollbackTo: { model: "fake-opus", thought_level: "medium" },
+      },
+    );
+    expect(setSessionPosture).not.toHaveBeenCalled();
+  });
+
+  it("wipes the backfill entry on a level-dimension clear (clearsBackfill routes per gesture)", async () => {
+    // Clearing the level dimension is a whole-dimension clear gesture:
+    // the pending write carries the held model with a null level, and the
+    // port receives clearsBackfill so the #581 entry is wiped with it.
+    vi.mocked(listAdapters).mockResolvedValue([adapter("qwen-code")]);
+    vi.mocked(getAdapterCatalogs).mockResolvedValue(acpProbeEntry(CATALOG));
+    vi.mocked(getLastModelPosture).mockResolvedValue({
+      model: "fake-opus",
+      thought_level: "medium",
+    });
+    const channel = staticColdStartChannel();
+    renderPicker(pickerJsx({ sessionId: null, coldStart: channel }));
+    await screen.findByRole("button", { name: /Runtime: qwen-code/ });
+    await settlePostureSurface();
+    // The always-open menu holds two clear rows -- the level dimension's
+    // is the second ("Default (recommended)" on both).
+    const clearingRows = screen.getAllByRole("menuitem", {
+      name: "Default (recommended)",
+    });
+    fireEvent.click(clearingRows[1]);
+    expect(channel.port.writePosture).toHaveBeenCalledWith(
+      { model: "fake-opus", thought_level: null },
+      {
+        clearsBackfill: true,
+        rollbackTo: { model: "fake-opus", thought_level: "medium" },
+      },
+    );
+    expect(setSessionPosture).not.toHaveBeenCalled();
+  });
+
   it("renders Default (recommended) when the backfill entry is empty", async () => {
     await renderColdStartPicker();
     expect(

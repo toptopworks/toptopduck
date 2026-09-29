@@ -353,6 +353,42 @@ describe("cold-start selection channel (ADR-0099/0100, issues #572/#574)", () =>
     expect(result.current.pendingModelPosture).toBeNull();
   });
 
+  it("does not roll back when the mint consumed the pending pair in the IPC window (#592)", async () => {
+    // The mint's consume resets both pending facets; a clear rejecting
+    // after that point must not resurrect the consumed pair as an
+    // explicit pending selection -- the ledger token goes with it, or
+    // the next cold start would apply a posture the user cleared.
+    let rejectClear: ((reason: unknown) => void) | undefined;
+    vi.mocked(clearLastModelPosture).mockImplementationOnce(
+      () =>
+        new Promise((_, reject) => {
+          rejectClear = reject;
+        }),
+    );
+    const { result } = renderColdStart();
+    let clearSettled: Promise<unknown> | undefined;
+    act(() => {
+      clearSettled = result.current.channel.port.writePosture(CLEAR, {
+        clearsBackfill: true,
+        rollbackTo: POSTURE,
+      });
+    });
+    // The submit mints the session and consumes the pending pair inside
+    // the IPC window (App calls consume on mint success). The effective
+    // runtime never moved, so the drift reset cannot mask this arm --
+    // the consume's own token replacement is the only guard.
+    act(() => {
+      result.current.consume();
+    });
+    expect(result.current.pendingModelPosture).toBeNull();
+    await act(async () => {
+      rejectClear?.(new Error("config write failed"));
+      await clearSettled;
+    });
+    // No rollback: the consumed pair stays consumed.
+    expect(result.current.pendingModelPosture).toBeNull();
+  });
+
   it("resets the pending posture when the effective runtime drifts without a pick (ADR-0100 D2)", async () => {
     let rejectClear: ((reason: unknown) => void) | undefined;
     vi.mocked(clearLastModelPosture).mockImplementationOnce(

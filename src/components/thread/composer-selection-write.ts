@@ -25,14 +25,14 @@ import { EMPTY_POSTURE, MODEL_CONFIG_DEFAULT } from "./posture-catalog";
 // port's single namespace-reset point: an explicit runtime switch
 // (writeRuntime) and a startup-resolution drift (the effective-runtime
 // reconciliation in useColdStartSelection) both reset the pending posture
-// -- previously maintained in three places (App's switch handler, App's
-// drift effect, and the picker's gesture-seq bump), each knowing about the
-// others. The state owner and the write owner being one module is also
-// what retires the gesture-seq machinery (#592): every pending-writing
-// gesture replaces the ledger token, so a rejected backfill clear may roll
-// its pre-clear pair back ONLY while its own gesture is still the ledger's
-// latest entry -- a later pick, a repeated equal clear, a runtime switch,
-// or a drift reset each replace the token first, and the rollback skips.
+// from this one module. Keeping the pending-state owner and the write
+// owner together is what lets the gesture-identity ledger (#592) guard
+// the rollback: every pending-resetting gesture replaces the ledger
+// token, so a rejected backfill clear may roll its pre-clear pair back
+// ONLY while its own gesture is still the ledger's latest entry -- a
+// later pick, a repeated equal clear, a runtime switch, a drift reset,
+// or a mint consume each replace the token first, and the rollback
+// skips.
 //
 // Structure (ADR-0099 two-level selector untouched): the picker builds a
 // session adapter per render (stateless orchestration) and receives the
@@ -56,7 +56,9 @@ export type RuntimeWriteOutcome =
 // additionally wipes the #581 backfill entry (ADR-0100 Decision 3 --
 // otherwise the next cold start re-seeds the cleared posture); in-session
 // clears never do (the set IPC's server-side record is the single write
-// point). `rollbackTo`: the DISPLAYED pair at submit time -- the rollback
+// point). True only on a whole-dimension clear gesture -- the picker
+// derives it as the picked dimension's new value being null.
+// `rollbackTo`: the DISPLAYED pair at submit time -- the rollback
 // target if the backfill-clear IPC rejects.
 export type PostureWriteOptions = {
   clearsBackfill: boolean;
@@ -82,6 +84,10 @@ export function createSessionSelectionPort(args: {
 }): SelectionWritePort {
   const { sessionId, queryClient, activeAdapterId } = args;
   return {
+    // The options are the cold-start adapter's contract: an in-session
+    // clear never wipes the backfill entry and takes no rollback either
+    // (the set IPC's server-side record is the single write point) -- a
+    // reject resyncs from the backend truth below.
     async writePosture(next) {
       try {
         const outcome = await setSessionPosture(sessionId, next);
@@ -117,6 +123,7 @@ export function createSessionSelectionPort(args: {
         log.warn(
           "composer-selection-write",
           "set session posture failed; resyncing from the session",
+          e,
         );
         void queryClient.invalidateQueries({
           queryKey: sessionKeys.modelConfig(sessionId),
@@ -146,6 +153,7 @@ export function createSessionSelectionPort(args: {
         log.warn(
           "composer-selection-write",
           "set session runtime failed; resyncing from the session",
+          e,
         );
         void queryClient.invalidateQueries({
           queryKey: sessionKeys.runtime(sessionId),
@@ -159,8 +167,7 @@ export function createSessionSelectionPort(args: {
 // --- Cold-start channel (ADR-0092 bar, ADR-0098/0100) ----------------------
 
 // What the picker consumes on the cold-start bar: the displayed pending
-// facets + the write port, one prop in place of the retired four-channel
-// pending wiring.
+// facets + the write port, one prop carrying the whole pending wiring.
 export type ColdStartSelectionChannel = {
   // The runtime the bar displays: the explicit pick or the startup
   // resolution (ADR-0098 Decision 4) -- never the raw null sentinel (the
@@ -193,12 +200,13 @@ export function useColdStartSelection(args: {
   // startup resolution -- never the raw null sentinel.
   const effectiveRuntime = pendingRuntime ?? startupRuntime;
 
-  // The gesture ledger (#592): every pending-writing gesture -- a posture
-  // write, a runtime switch, a drift reset -- replaces the token. A
-  // rejected backfill clear may roll its pre-clear pair back only while
-  // its own gesture is still the latest entry; anything newer (a later
-  // pick, a repeated EQUAL clear a value check cannot distinguish, the
-  // caller's namespace resets) has replaced the token first.
+  // The gesture ledger (#592): every pending-resetting gesture -- a
+  // posture write, a runtime switch, a drift reset, a mint consume --
+  // replaces the token. A rejected backfill clear may roll its pre-clear
+  // pair back only while its own gesture is still the latest entry;
+  // anything newer (a later pick, a repeated EQUAL clear the token's
+  // fresh identity distinguishes from "no later gesture", the caller's
+  // namespace resets) has replaced the token first.
   const gestureRef = useRef<object>({});
 
   const adapterId =
@@ -237,6 +245,7 @@ export function useColdStartSelection(args: {
           stillThisGesture
             ? "clear startup posture failed; rolled the pending clear back"
             : "clear startup posture failed; pending posture moved on, rollback skipped",
+          e,
         );
         // The failed clear surfaces on the picker's shared set-fault line
         // in BOTH outcomes: rolled back, the bar would otherwise show the
@@ -288,6 +297,10 @@ export function useColdStartSelection(args: {
   }, [effectiveRuntime]);
 
   const consume = useCallback(() => {
+    // The mint consumed the pending pair: replace the ledger token too,
+    // so a still-in-flight clear rejecting after this point skips its
+    // rollback instead of resurrecting the consumed pair (#592).
+    gestureRef.current = {};
     setPendingRuntime(null);
     setPendingModelPosture(null);
   }, []);
