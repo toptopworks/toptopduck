@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { FormattedMessage, useIntl } from "react-intl";
 import { useQueryClient } from "@tanstack/react-query";
 import { openPath } from "@tauri-apps/plugin-opener";
@@ -46,6 +46,8 @@ import {
   searchableText,
   type EnabledFilter,
 } from "./settings-filters";
+import { useRegistryPane } from "./useRegistryPane";
+import { useWriteGeneration } from "./useWriteGeneration";
 
 // Skills settings pane (issue #362, ADR-0086; issue #1033, ADR-0122). The
 // registry is a directory scan (no app-config entry), so this pane rides the
@@ -86,25 +88,13 @@ export function SkillsSection({
     string[] | null
   >(null);
 
-  // The write-generation guard (the CliSection #683 contract): advances
+  // The write-generation guard (issue #1123, the #683 contract): advances
   // with every APPLIED user write, so a mount-rescan response arriving
   // after a user write landed skips its config sync instead of rolling
   // the write back.
-  const writeGenRef = useRef(0);
-
-  /** Apply a user write's returned config: the sync advances the write
-   *  generation, so a mount rescan still in flight skips its (stale)
-   *  config sync. */
-  function applyUserWrite(next: AppConfig) {
-    writeGenRef.current += 1;
-    onAppConfigSync(next);
-  }
-
-  /** Report a mutation failure on the pane's error banner: the one shared
-   *  face of the enablement / delete rejects (formatted once, here). */
-  function reportMutationError(e: unknown) {
-    setError(fmtError(e, intl));
-  }
+  const { applyUserWrite, current, syncIfCurrent } = useWriteGeneration(
+    onAppConfigSync,
+  );
 
   // The pane's whole registry surface rides the one seam (issue #1077): the
   // listing read, the enablement / delete mutations, and (below) the mount
@@ -130,12 +120,12 @@ export function SkillsSection({
    *  pane's silent-mount contract). */
   useEffect(() => {
     let cancelled = false;
-    const gen = writeGenRef.current;
+    const gen = current();
     rescanBuiltinCliTools()
       .then((result) => {
         if (!cancelled) {
           setMaterializeFailures(result.skill_materialize_failures);
-          if (writeGenRef.current === gen) onAppConfigSync(result.config);
+          syncIfCurrent(gen, result.config);
         }
         // The scan may have materialized a skill in this window: the
         // listing refetches so the new row appears beside the lane that
@@ -165,8 +155,6 @@ export function SkillsSection({
   // dialog's path face).
   const { root, detailFilePath, retry } = useSkillsRoot();
 
-  const [search, setSearch] = useState("");
-  const [filter, setFilter] = useState<EnabledFilter>("all");
   const [detailName, setDetailName] = useState<string | null>(null);
   // The detail dialog's own error line (the open-file failure face): the
   // section-level line is unreachable while the dialog is up (Radix marks
@@ -175,7 +163,6 @@ export function SkillsSection({
   const [detailError, setDetailError] = useState<string | null>(null);
   const [confirmDelete, setConfirmDelete] = useState<string | null>(null);
   const [importOpen, setImportOpen] = useState(false);
-  const [error, setError] = useState<string | null>(null);
 
   // The explicit builtin-skill restore (issue #677) retired with ADR-0121:
   // builtin skills are a read-only app cache that re-aligns on every scan,
@@ -194,6 +181,22 @@ export function SkillsSection({
     () => listing?.skills ?? [],
     [listing],
   );
+
+  // The pane machine's filter + error faces (issue #1123): the row Switch's
+  // mutations report through the hook, and the shared filter predicates
+  // project the listing (the materialize-failure lane below reuses the raw
+  // search / filter values against its stand-in rows).
+  const {
+    search,
+    setSearch,
+    filter,
+    setFilter,
+    visible,
+    error,
+    report,
+    clearError,
+  } = useRegistryPane(allSkills, (s) => searchableText(s.name, s.description));
+
   const ignoredDirs = useMemo(
     () => listing?.ignored ?? [],
     [listing],
@@ -219,15 +222,6 @@ export function SkillsSection({
     }
     return null;
   }, [error, queryError, rootError, intl]);
-  const visible = useMemo(
-    () =>
-      allSkills.filter(
-        (s) =>
-          matchesSearch(searchableText(s.name, s.description), search) &&
-          matchesFilter(s, filter),
-      ),
-    [allSkills, search, filter],
-  );
 
   // The materialization lane's visible rows (issue #1016): a failed write
   // leaves the row on disk stale or absent, so the stand-in ALWAYS renders
@@ -252,7 +246,7 @@ export function SkillsSection({
    *  pane error so the dialog never replays an unrelated reject under the
    *  overlay. */
   function openDetail(skill: SkillEntry) {
-    setError(null);
+    clearError();
     setDetailError(null);
     // A local row's path bar needs the registry root: while unresolved --
     // still loading or failed -- ask again now (issue #1039), making the
@@ -350,7 +344,7 @@ export function SkillsSection({
               })}
               icon={Download}
               onClick={() => {
-                setError(null);
+                clearError();
                 setImportOpen(true);
               }}
             />
@@ -458,8 +452,8 @@ export function SkillsSection({
                   {
                     // A success also drops a stale reject -- the banner must
                     // not outlive the failure it reported.
-                    onSuccess: () => setError(null),
-                    onError: reportMutationError,
+                    onSuccess: () => clearError(),
+                    onError: report,
                   },
                 )}
               onOpen={() => openDetail(skill)}
@@ -533,7 +527,7 @@ export function SkillsSection({
                   deleteSkillMutation.mutate(confirmDelete, {
                     onSuccess: () => setConfirmDelete(null),
                     onError: (e) => {
-                      reportMutationError(e);
+                      report(e);
                       setConfirmDelete(null);
                     },
                   })}
