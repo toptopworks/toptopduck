@@ -1,10 +1,18 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
-import { useState, type ReactElement } from "react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { useEffect, type ReactElement } from "react";
 import { IntlProvider } from "react-intl";
-import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import {
+  QueryClient,
+  QueryClientProvider,
+  useQueryClient,
+} from "@tanstack/react-query";
 
 import { ComposerProviderPicker } from "../ComposerProviderPicker";
+import {
+  useColdStartSelection,
+  type ColdStartSelectionChannel,
+} from "../composer-selection-write";
 import {
   clearLastModelPosture,
   getAdapterCatalogs,
@@ -18,7 +26,6 @@ import {
   type SetPosturePersistOutcome,
 } from "../../../api";
 import { TooltipProvider } from "../../ui/tooltip";
-import { adapterKeys } from "../../../session/queryKeys";
 import type { ModelPosture } from "../../../types/app-config";
 import type { ProviderConfig, ProfileKeyStatus } from "../../../types/provider";
 import type {
@@ -199,9 +206,31 @@ function pickerJsx(overrides: PickerOverrides = {}) {
       provider={pickerProvider()}
       onSwitchActive={vi.fn()}
       onOpenSettings={vi.fn()}
+      coldStart={null}
       {...overrides}
     />
   );
+}
+
+// A static cold-start channel for display-face tests: fixed pending facets,
+// a recording port (writes assert the picker routed them, not their effects
+// -- those live in composer-selection-write.test.tsx).
+function staticColdStartChannel(
+  posture: ModelPosture | null = null,
+  runtime: SessionRuntimeChoice = { kind: "external", data: "qwen-code" },
+): ColdStartSelectionChannel {
+  return {
+    effectiveRuntime: runtime,
+    pendingModelPosture: posture,
+    port: {
+      writePosture: vi.fn(async () => ({
+        status: "written" as const,
+        persistError: null,
+        persistSuspended: false,
+      })),
+      writeRuntime: vi.fn(async () => ({ status: "written" as const })),
+    },
+  };
 }
 
 async function openPopover() {
@@ -575,7 +604,10 @@ describe("ComposerProviderPicker two-level popover (ADR-0099)", () => {
 
   it("does not call getSessionRuntime when sessionId is null", () => {
     renderPicker(
-      pickerJsx({ sessionId: null, onPendingRuntimeChange: vi.fn() }),
+      pickerJsx({
+        sessionId: null,
+        coldStart: staticColdStartChannel(null, { kind: "built_in" }),
+      }),
     );
     expect(getSessionRuntime).not.toHaveBeenCalled();
     expect(
@@ -583,32 +615,12 @@ describe("ComposerProviderPicker two-level popover (ADR-0099)", () => {
     ).toBeTruthy();
   });
 
-  it("routes a runtime selection to onPendingRuntimeChange when sessionId is null", async () => {
-    vi.mocked(listAdapters).mockResolvedValue([adapter("qwen-code")]);
-    const onPendingRuntimeChange = vi.fn();
-    renderPicker(
-      pickerJsx({ sessionId: null, onPendingRuntimeChange }),
-    );
-    fireEvent.click(screen.getByRole("button", { name: BUILTIN_TRIGGER }));
-    await screen.findByText("Local CLI");
-    await selectOption(
-      screen.getByRole("combobox", { name: CLI_SELECT }),
-      /qwen-code/,
-    );
-    expect(onPendingRuntimeChange).toHaveBeenCalledWith({
-      kind: "external",
-      data: "qwen-code",
-    });
-    expect(setSessionRuntime).not.toHaveBeenCalled();
-  });
-
-  it("renders the pendingRuntime prop in the trigger name when sessionId is null (issue #572)", async () => {
+  it("renders the channel's pendingRuntime in the trigger name when sessionId is null (issue #572)", async () => {
     vi.mocked(listAdapters).mockResolvedValue([adapter("qwen-code")]);
     renderPicker(
       pickerJsx({
         sessionId: null,
-        onPendingRuntimeChange: vi.fn(),
-        pendingRuntime: { kind: "external", data: "qwen-code" },
+        coldStart: staticColdStartChannel(),
       }),
     );
     await screen.findByRole("button", { name: /Runtime: qwen-code/ });
@@ -839,109 +851,6 @@ describe("ComposerProviderPicker posture label live rendering (issue #586)", () 
     expect(clearLastModelPosture).not.toHaveBeenCalled();
   });
 
-  it("shows the turn's actual model alone when the live cache carries no level (claude shape)", async () => {
-    // claude-code's turns report only the system{init} model (no thought
-    // levels); the per-model catalog rides the probe entry as usual.
-    vi.mocked(getSessionRuntime).mockResolvedValue({
-      kind: "external",
-      data: "claude-code",
-    });
-    vi.mocked(listAdapters).mockResolvedValue([
-      { ...adapter("claude-code"), stream_format: "claude_stream_json" },
-    ]);
-    vi.mocked(getAdapterCatalogs).mockResolvedValue({
-      "claude-code": {
-        probe_kind: "claude_stream_json",
-        outcome: {
-          claude_stream_json: {
-            models: [
-              {
-                id: "opus",
-                display_name: "Opus",
-                is_default: true,
-                default_reasoning_effort: "medium",
-                supported_reasoning_efforts: ["low", "medium", "high"],
-              },
-            ],
-          },
-        },
-        probed_at_millis: 0,
-      },
-    });
-    vi.mocked(getSessionModelConfig).mockResolvedValue({
-      model: null,
-      thought_level: null,
-      cached_discovered: {
-        models: [],
-        current_model: "opus",
-        thought_levels: [],
-        current_thought_level: null,
-        adapter_id: "claude-code",
-      },
-    });
-    renderPicker(pickerJsx());
-    await screen.findByRole("button", { name: /Runtime: claude-code/ });
-    const trigger = screen.getByRole("button", {
-      name: "Model: Default (recommended)",
-    });
-    fireEvent.pointerMove(trigger);
-    expect(await screen.findByText("opus (last turn)")).toBeTruthy();
-  });
-
-  it("shows the turn's actual level alone when the live cache carries no model", async () => {
-    // The two current fields are independent Options on the wire (a
-    // handshake may report only a thought level); a lone level has its own
-    // live form, mirroring the held side's lone-level form.
-    await renderExternalPicker(
-      {},
-      {
-        cached_discovered: {
-          models: CATALOG.models,
-          current_model: null,
-          thought_levels: CATALOG.thought_levels,
-          current_thought_level: "medium",
-          adapter_id: "qwen-code",
-        },
-      },
-    );
-    const trigger = screen.getByRole("button", {
-      name: "Model: Default (recommended)",
-    });
-    fireEvent.focus(trigger);
-    expect(await screen.findByText("medium (last turn)")).toBeTruthy();
-  });
-
-  it("holds the live read back when a stamped claude cache has no probe entry to seat the menu", async () => {
-    // claude stamps the session cache on its turns, but its per-model
-    // catalog exists only after a settings probe; without one the trigger
-    // is the static no-arrow label, and the picker emits no live value
-    // rather than one the static form would drop.
-    vi.mocked(getSessionRuntime).mockResolvedValue({
-      kind: "external",
-      data: "claude-code",
-    });
-    vi.mocked(listAdapters).mockResolvedValue([
-      { ...adapter("claude-code"), stream_format: "claude_stream_json" },
-    ]);
-    vi.mocked(getAdapterCatalogs).mockResolvedValue({});
-    vi.mocked(getSessionModelConfig).mockResolvedValue({
-      model: null,
-      thought_level: null,
-      cached_discovered: {
-        models: [],
-        current_model: "opus",
-        thought_levels: [],
-        current_thought_level: null,
-        adapter_id: "claude-code",
-      },
-    });
-    renderPicker(pickerJsx());
-    await screen.findByRole("button", { name: /Runtime: claude-code/ });
-    // Static label: no arrow, no menu -- and structurally no tooltip.
-    expect(screen.getByText("Default (recommended)")).toBeTruthy();
-    expect(screen.queryByRole("button", { name: /Model:/ })).toBeNull();
-  });
-
   it("an explicit selection outranks the live currents and drops the tooltip", async () => {
     await renderExternalPicker(
       {},
@@ -981,45 +890,6 @@ describe("ComposerProviderPicker posture label live rendering (issue #586)", () 
     }
   });
 
-  it("keeps Default (recommended) on a codex session (probe cache carries no live currents)", async () => {
-    vi.mocked(getSessionRuntime).mockResolvedValue({
-      kind: "external",
-      data: "codex",
-    });
-    vi.mocked(listAdapters).mockResolvedValue([codexAdapter("codex")]);
-    vi.mocked(getSessionModelConfig).mockResolvedValue({
-      model: null,
-      thought_level: null,
-      cached_discovered: null,
-    });
-    vi.mocked(getAdapterCatalogs).mockResolvedValue(
-      codexProbeEntry([CODEX_MODELS[0]]),
-    );
-    renderPicker(pickerJsx());
-    await screen.findByRole("button", { name: /Runtime: codex/ });
-    const trigger = screen.getByRole("button", {
-      name: "Model: Default (recommended)",
-    });
-    expect(trigger).toBeTruthy();
-    fireEvent.focus(trigger);
-    expect(screen.queryByText(LIVE_TOOLTIP)).toBeNull();
-  });
-
-  it("does not attribute another adapter's live currents to the active runtime", async () => {
-    // The cache holds live values, but its stamp names a different adapter
-    // (the stale-provenance window after a runtime switch): asserting them
-    // as THIS runtime's last turn would be a lie, so no live tooltip.
-    await renderExternalPicker(
-      {},
-      { cached_discovered: { ...CATALOG, adapter_id: "other-cli" } },
-    );
-    const trigger = screen.getByRole("button", {
-      name: "Model: Default (recommended)",
-    });
-    fireEvent.focus(trigger);
-    expect(screen.queryByText(LIVE_TOOLTIP)).toBeNull();
-  });
-
   it("cold start keeps Default (recommended) even when the probe cache carries currents", async () => {
     // The probe entry's handshake currents are probe facts, not turn
     // facts -- and the cold-start bar has no session discovery cache to
@@ -1030,8 +900,7 @@ describe("ComposerProviderPicker posture label live rendering (issue #586)", () 
     renderPicker(
       pickerJsx({
         sessionId: null,
-        onPendingRuntimeChange: vi.fn(),
-        pendingRuntime: { kind: "external", data: "qwen-code" },
+        coldStart: staticColdStartChannel(),
       }),
     );
     await screen.findByRole("button", { name: /Runtime: qwen-code/ });
@@ -1342,8 +1211,7 @@ describe("ComposerProviderPicker cold-start posture channel (ADR-0100, issue #57
     renderPicker(
       pickerJsx({
         sessionId: null,
-        onPendingRuntimeChange: vi.fn(),
-        pendingRuntime: { kind: "external", data: "qwen-code" },
+        coldStart: staticColdStartChannel(),
         ...overrides,
       }),
     );
@@ -1351,47 +1219,39 @@ describe("ComposerProviderPicker cold-start posture channel (ADR-0100, issue #57
     await settlePostureSurface();
   }
 
-  // The shell-shaped cold-start host: the pending pair lives in the parent
-  // and feeds back through pendingModelPosture, mirroring the QuestionBar
-  // wiring the rollback guard reads (issue #592). An inert vi.fn() callback
-  // never updates the prop, so the guard would always see a stale pair. The
-  // runtime handler mirrors App's handlePendingRuntimeChange -- the switch
-  // resets the pending posture to null (ADR-0100 D2) -- so the guard's
-  // caller-reset branch is reachable from tests.
+  // The shell-shaped cold-start host: the pending pair lives in the REAL
+  // cold-start selection channel (the same hook App mounts), so picker
+  // reads and writes round-trip through the production port (the #592
+  // guard reads the pair the user actually sees).
   function ColdStartHost({
-    onPendingChange,
+    onPostureChange,
   }: {
-    onPendingChange: (posture: ModelPosture) => void;
+    onPostureChange: (posture: ModelPosture | null) => void;
   }) {
-    const [pending, setPending] = useState<ModelPosture | null>(null);
-    const [pendingRuntime, setPendingRuntime] =
-      useState<SessionRuntimeChoice | null>({
-        kind: "external",
-        data: "qwen-code",
-      });
+    const queryClient = useQueryClient();
+    const selection = useColdStartSelection({
+      startupRuntime: { kind: "external", data: "qwen-code" },
+      queryClient,
+    });
+    useEffect(() => {
+      onPostureChange(selection.pendingModelPosture);
+    }, [selection.pendingModelPosture, onPostureChange]);
     return (
       <ComposerProviderPicker
         sessionId={null}
         provider={pickerProvider()}
         onSwitchActive={vi.fn()}
         onOpenSettings={vi.fn()}
-        onPendingRuntimeChange={(runtime) => {
-          setPendingRuntime(runtime);
-          setPending(null);
-        }}
-        pendingRuntime={pendingRuntime}
-        onPendingModelPostureChange={(p) => {
-          setPending(p);
-          onPendingChange(p);
-        }}
-        pendingModelPosture={pending}
+        coldStart={selection.channel}
       />
     );
   }
 
-  async function renderColdStartHost(onPendingChange: (p: ModelPosture) => void) {
+  async function renderColdStartHost(
+    onPostureChange: (p: ModelPosture | null) => void,
+  ) {
     seedColdStartCatalog();
-    renderPicker(<ColdStartHost onPendingChange={onPendingChange} />);
+    renderPicker(<ColdStartHost onPostureChange={onPostureChange} />);
     await screen.findByRole("button", { name: /Runtime: qwen-code/ });
     await settlePostureSurface();
   }
@@ -1422,7 +1282,10 @@ describe("ComposerProviderPicker cold-start posture channel (ADR-0100, issue #57
       thought_level: "medium",
     });
     await renderColdStartPicker({
-      pendingModelPosture: { model: "fake-sonnet", thought_level: null },
+      coldStart: staticColdStartChannel({
+        model: "fake-sonnet",
+        thought_level: null,
+      }),
     });
     // The explicit pending pair wins over the seeded entry.
     expect(
@@ -1431,52 +1294,18 @@ describe("ComposerProviderPicker cold-start posture channel (ADR-0100, issue #57
     expect(screen.queryByText("fake-opus · medium")).toBeNull();
   });
 
-  it("routes a pick to onPendingModelPostureChange seeded from the backfill (no set IPCs)", async () => {
+  it("routes a pick through the cold-start port seeded from the backfill (no set IPCs)", async () => {
     vi.mocked(getLastModelPosture).mockResolvedValue({
       model: "fake-opus",
       thought_level: "medium",
     });
-    const onPendingModelPostureChange = vi.fn();
-    await renderColdStartPicker({ onPendingModelPostureChange });
+    const onPostureChange = vi.fn();
+    await renderColdStartHost(onPostureChange);
     fireEvent.click(screen.getByRole("menuitemradio", { name: "fake-sonnet" }));
-    expect(onPendingModelPostureChange).toHaveBeenCalledWith({
+    expect(onPostureChange).toHaveBeenCalledWith({
       model: "fake-sonnet",
       thought_level: "medium",
     });
-    expect(setSessionPosture).not.toHaveBeenCalled();
-  });
-
-  it("routes a thought-level pick to onPendingModelPostureChange with the held model (no set IPCs)", async () => {
-    vi.mocked(getLastModelPosture).mockResolvedValue({
-      model: "fake-opus",
-      thought_level: "medium",
-    });
-    const onPendingModelPostureChange = vi.fn();
-    await renderColdStartPicker({ onPendingModelPostureChange });
-    fireEvent.click(screen.getByRole("menuitemradio", { name: /^low$/ }));
-    expect(onPendingModelPostureChange).toHaveBeenCalledWith({
-      model: "fake-opus",
-      thought_level: "low",
-    });
-    expect(setSessionPosture).not.toHaveBeenCalled();
-  });
-
-  it("clears the level dimension and wipes the backfill entry via the #581 IPC (level clear)", async () => {
-    vi.mocked(getLastModelPosture).mockResolvedValue({
-      model: "fake-opus",
-      thought_level: "medium",
-    });
-    const onPendingModelPostureChange = vi.fn();
-    await renderColdStartPicker({ onPendingModelPostureChange });
-    const clearingRows = screen.getAllByRole("menuitem", {
-      name: "Default (recommended)",
-    });
-    fireEvent.click(clearingRows[1]);
-    expect(onPendingModelPostureChange).toHaveBeenCalledWith({
-      model: "fake-opus",
-      thought_level: null,
-    });
-    expect(clearLastModelPosture).toHaveBeenCalledWith("qwen-code");
     expect(setSessionPosture).not.toHaveBeenCalled();
   });
 
@@ -1485,13 +1314,13 @@ describe("ComposerProviderPicker cold-start posture channel (ADR-0100, issue #57
       model: "fake-opus",
       thought_level: "medium",
     });
-    const onPendingModelPostureChange = vi.fn();
-    await renderColdStartPicker({ onPendingModelPostureChange });
+    const onPostureChange = vi.fn();
+    await renderColdStartHost(onPostureChange);
     const clearingRows = screen.getAllByRole("menuitem", {
       name: "Default (recommended)",
     });
     fireEvent.click(clearingRows[0]);
-    expect(onPendingModelPostureChange).toHaveBeenCalledWith({
+    expect(onPostureChange).toHaveBeenCalledWith({
       model: null,
       thought_level: "medium",
     });
@@ -1513,15 +1342,11 @@ describe("ComposerProviderPicker cold-start posture channel (ADR-0100, issue #57
       thought_level: "medium",
     });
     vi.mocked(getAdapterCatalogs).mockResolvedValue(codexProbeEntry(CODEX_MODELS));
-    const onPendingModelPostureChange = vi.fn();
-    renderPicker(
-      pickerJsx({
-        sessionId: null,
-        onPendingRuntimeChange: vi.fn(),
-        pendingRuntime: { kind: "external", data: "codex" },
-        onPendingModelPostureChange,
-      }),
+    const channel = staticColdStartChannel(
+      null,
+      { kind: "external", data: "codex" },
     );
+    renderPicker(pickerJsx({ sessionId: null, coldStart: channel }));
     await screen.findByRole("button", { name: /Runtime: codex/ });
     // This render is inline (its own codex seed, not the helpers), so await
     // the catalog-gated row directly -- the same second-hop settle the
@@ -1529,10 +1354,12 @@ describe("ComposerProviderPicker cold-start posture channel (ADR-0100, issue #57
     fireEvent.click(
       await screen.findByRole("menuitemradio", { name: "gpt-5-codex" }),
     );
-    expect(onPendingModelPostureChange).toHaveBeenCalledWith({
-      model: "gpt-5-codex",
-      thought_level: null,
-    });
+    // The routed intent through the recording port: the unsupported level
+    // cleared in the same patch.
+    expect(channel.port.writePosture).toHaveBeenCalledWith(
+      { model: "gpt-5-codex", thought_level: null },
+      { clearsBackfill: false, rollbackTo: { model: "gpt-5", thought_level: "medium" } },
+    );
     expect(setSessionPosture).not.toHaveBeenCalled();
   });
 
@@ -1547,8 +1374,9 @@ describe("ComposerProviderPicker cold-start posture channel (ADR-0100, issue #57
     // The clear is optimistic; a rejected wipe must roll the pending pair back
     // to the displayed posture, otherwise the next cold start re-seeds from
     // the surviving entry and the "cleared" posture silently comes back.
-    // Hosted (not an inert vi.fn()) so the rollback guard reads the pair the
-    // user actually sees (issue #592).
+    // Hosted on the real channel so the rollback guard reads the pair the
+    // user actually sees (issue #592 -- the ledger's skip arms live port-
+    // level in composer-selection-write.test.tsx).
     vi.mocked(getLastModelPosture).mockResolvedValue({
       model: "fake-opus",
       thought_level: "medium",
@@ -1556,18 +1384,20 @@ describe("ComposerProviderPicker cold-start posture channel (ADR-0100, issue #57
     vi.mocked(clearLastModelPosture).mockRejectedValueOnce(
       new Error("config write failed"),
     );
-    const onPendingModelPostureChange = vi.fn();
-    await renderColdStartHost(onPendingModelPostureChange);
+    const onPostureChange = vi.fn();
+    await renderColdStartHost(onPostureChange);
     const clearingRows = screen.getAllByRole("menuitem", {
       name: "Default (recommended)",
     });
     fireEvent.click(clearingRows[0]);
-    expect(onPendingModelPostureChange).toHaveBeenNthCalledWith(1, {
+    // Call 1 is the spy's mount effect with the initial null pair; the
+    // write sequence follows it.
+    expect(onPostureChange).toHaveBeenNthCalledWith(2, {
       model: null,
       thought_level: "medium",
     });
     await waitFor(() =>
-      expect(onPendingModelPostureChange).toHaveBeenNthCalledWith(2, {
+      expect(onPostureChange).toHaveBeenNthCalledWith(3, {
         model: "fake-opus",
         thought_level: "medium",
       }),
@@ -1582,129 +1412,6 @@ describe("ComposerProviderPicker cold-start posture channel (ADR-0100, issue #57
     expect(
       await screen.findByText(/Could not apply the selection/),
     ).toBeTruthy();
-  });
-
-  it("does not roll the pending clear back when a later gesture rewrote the pair (issue #592)", async () => {
-    // The clear IPC fails only AFTER the user picked a model in the IPC
-    // window: the rollback compares the pending pair against this clear's
-    // patch, finds a newer intent, and leaves it alone -- restoring the
-    // pre-clear snapshot would silently drop the pick.
-    vi.mocked(getLastModelPosture).mockResolvedValue({
-      model: "fake-opus",
-      thought_level: "medium",
-    });
-    let rejectClear: ((reason: unknown) => void) | undefined;
-    vi.mocked(clearLastModelPosture).mockImplementationOnce(
-      () =>
-        new Promise((_, reject) => {
-          rejectClear = reject;
-        }),
-    );
-    const onPendingModelPostureChange = vi.fn();
-    await renderColdStartHost(onPendingModelPostureChange);
-    fireEvent.click(
-      screen.getAllByRole("menuitem", { name: "Default (recommended)" })[0],
-    );
-    fireEvent.click(screen.getByRole("menuitemradio", { name: "fake-sonnet" }));
-    // Self-check the IPC fired before rejecting it, so the optional-chain
-    // reject below cannot pass vacuously on a dropped gesture.
-    expect(clearLastModelPosture).toHaveBeenCalledTimes(1);
-    // Settle the rejection inside act so the catch handler runs before the
-    // assertions below.
-    await act(async () => {
-      rejectClear?.(new Error("config write failed"));
-    });
-    // The pick survives the rejected clear: exactly the two gesture calls
-    // (no third, rollback, call) and the label keeps the picked model.
-    expect(onPendingModelPostureChange).toHaveBeenCalledTimes(2);
-    expect(screen.getByText("fake-sonnet · medium")).toBeTruthy();
-    expect(screen.queryByText("fake-opus · medium")).toBeNull();
-  });
-
-  it("does not roll the pending clear back when the same clear gesture repeats in the IPC window (issue #592)", async () => {
-    // Double-clicking the clearing row rewrites an EQUAL pair -- the value
-    // check alone cannot tell it from "no later gesture" -- so the guard
-    // also carries a monotonic gesture counter: the repeat bumps it and the
-    // first reject's rollback is skipped, keeping the twice-expressed clear
-    // intent.
-    vi.mocked(getLastModelPosture).mockResolvedValue({
-      model: "fake-opus",
-      thought_level: "medium",
-    });
-    let rejectFirstClear: ((reason: unknown) => void) | undefined;
-    vi.mocked(clearLastModelPosture).mockImplementationOnce(
-      () =>
-        new Promise((_, reject) => {
-          rejectFirstClear = reject;
-        }),
-    );
-    const onPendingModelPostureChange = vi.fn();
-    await renderColdStartHost(onPendingModelPostureChange);
-    // After the first clear the Model row's clearing label gains its
-    // current-annotation suffix, so match on the prefix both times.
-    const modelClearRow = () =>
-      screen.getAllByRole("menuitem", {
-        name: /^Default \(recommended\)/,
-      })[0];
-    fireEvent.click(modelClearRow());
-    fireEvent.click(modelClearRow());
-    expect(clearLastModelPosture).toHaveBeenCalledTimes(2);
-    await act(async () => {
-      rejectFirstClear?.(new Error("config write failed"));
-    });
-    // No rollback: both gestures' cleared pair stands.
-    expect(onPendingModelPostureChange).toHaveBeenCalledTimes(2);
-    expect(
-      screen.getByRole("button", { name: "Model: medium" }),
-    ).toBeTruthy();
-    expect(screen.queryByText("fake-opus · medium")).toBeNull();
-  });
-
-  it("does not roll the pending clear back when the caller resets the pair on a runtime switch (issue #592)", async () => {
-    // The clear IPC fails only AFTER the user switched runtimes on the bar:
-    // the host mirrors App's handlePendingRuntimeChange, resetting the
-    // pending pair to null (ADR-0100 D2 namespacing) -- a reset that
-    // bypasses the picker's gesture path, so it bumps no gesture counter.
-    // The guard must still skip the rollback (the null check, plus the
-    // counter the runtime write itself bumps): restoring the pre-clear
-    // posture would resurrect it under the NEW runtime.
-    vi.mocked(getLastModelPosture).mockResolvedValue({
-      model: "fake-opus",
-      thought_level: "medium",
-    });
-    let rejectClear: ((reason: unknown) => void) | undefined;
-    vi.mocked(clearLastModelPosture).mockImplementationOnce(
-      () =>
-        new Promise((_, reject) => {
-          rejectClear = reject;
-        }),
-    );
-    const onPendingModelPostureChange = vi.fn();
-    await renderColdStartHost(onPendingModelPostureChange);
-    // The posture menu's clearing row issues the clear...
-    fireEvent.click(
-      screen.getAllByRole("menuitem", {
-        name: /^Default \(recommended\)/,
-      })[0],
-    );
-    // ...then the user switches to the built-in runtime inside the IPC
-    // window (the popover's level-1 API Access row).
-    fireEvent.click(screen.getByRole("button", { name: /Runtime: qwen-code/ }));
-    await screen.findByText("API Access");
-    fireEvent.click(screen.getByRole("button", { name: "API Access" }));
-    // Self-check the clear IPC fired before rejecting it, so the
-    // optional-chain reject below cannot pass vacuously.
-    expect(clearLastModelPosture).toHaveBeenCalledTimes(1);
-    await act(async () => {
-      rejectClear?.(new Error("config write failed"));
-    });
-    // No rollback: exactly the one gesture call (the caller's reset is its
-    // own setState, not a picker write), and the pre-clear posture is not
-    // resurrected under the new runtime. (The set-fault line is pinned by
-    // the rolled-back test above -- the built-in runtime renders the
-    // static no-menu label, so no fault surface exists to query here.)
-    expect(onPendingModelPostureChange).toHaveBeenCalledTimes(1);
-    expect(screen.queryByText("fake-opus · medium")).toBeNull();
   });
 });
 
@@ -1722,157 +1429,18 @@ describe("ComposerProviderPicker backfill cache coherence (ADR-0100 single write
     renderPicker(
       pickerJsx({
         sessionId: null,
-        onPendingRuntimeChange: vi.fn(),
-        pendingRuntime: { kind: "built_in" },
+        coldStart: staticColdStartChannel(null, { kind: "built_in" }),
       }),
     );
     await screen.findByRole("button", { name: BUILTIN_TRIGGER });
     expect(getLastModelPosture).not.toHaveBeenCalled();
   });
-
-  it("invalidates the backfill entry after a successful in-session set so the next cold start refetches", async () => {
-    // staleTime: Infinity never auto-refetches; without the invalidation a
-    // return to cold start would show the pre-set entry.
-    const queryClient = new QueryClient({
-      defaultOptions: { queries: { retry: false } },
-    });
-    vi.mocked(getSessionRuntime).mockResolvedValue({
-      kind: "external",
-      data: "qwen-code",
-    });
-    vi.mocked(listAdapters).mockResolvedValue([adapter("qwen-code")]);
-    vi.mocked(getSessionModelConfig).mockResolvedValue({
-      model: "fake-opus",
-      thought_level: null,
-      cached_discovered: CATALOG,
-    });
-    render(wrap(pickerJsx(), queryClient));
-    await screen.findByRole("button", { name: /Runtime: qwen-code/ });
-    fireEvent.click(screen.getByRole("menuitemradio", { name: "fake-sonnet" }));
-    await waitFor(() =>
-      expect(setSessionPosture).toHaveBeenCalledWith("sess-1", { model: "fake-sonnet", thought_level: null }),
-    );
-    await waitFor(() =>
-      expect(
-        queryClient.getQueryState(adapterKeys.posture("qwen-code"))
-          ?.isInvalidated,
-      ).toBe(true),
-    );
-  });
 });
 
-// ---------------------------------------------------------------------------
-// Catalog provenance staleness (issue #529, restored #584): the deleted
-// popover-rewrite tests' liveness coverage.
-// ---------------------------------------------------------------------------
-
-describe("ComposerProviderPicker catalog provenance staleness (issue #529)", () => {
-  it("flags a session discovery stamped by a different adapter", async () => {
-    await renderExternalPicker(
-      {},
-      { cached_discovered: { ...CATALOG, adapter_id: "other-cli" } },
-    );
-    expect(
-      screen.getByText(/discovered on a different runtime/),
-    ).toBeTruthy();
-  });
-
-  it("does not flag a discovery stamped by the active adapter itself", async () => {
-    // The steady state after a turn on this runtime: the stamp's presence
-    // alone is not staleness -- only a mismatch is.
-    await renderExternalPicker(
-      {},
-      { cached_discovered: { ...CATALOG, adapter_id: "qwen-code" } },
-    );
-    expect(
-      screen.queryByText(/discovered on a different runtime/),
-    ).toBeNull();
-  });
-
-  it("does not flag a pre-stamp discovery with no adapter_id", async () => {
-    await renderExternalPicker({}, { cached_discovered: CATALOG });
-    // Persisted before the field existed: no provenance, no mismatch.
-    expect(
-      screen.queryByText(/discovered on a different runtime/),
-    ).toBeNull();
-  });
-
-  it("never flags a per-model adapter (its turns never replace the discovery cache)", async () => {
-    // The stale note's promise ("refreshes after this runtime's next turn")
-    // would be a permanent lie for a per-model runtime -- the predicate is
-    // scoped to discovery-fed (ACP) adapters only.
-    vi.mocked(getSessionRuntime).mockResolvedValue({
-      kind: "external",
-      data: "codex",
-    });
-    vi.mocked(listAdapters).mockResolvedValue([codexAdapter("codex")]);
-    vi.mocked(getSessionModelConfig).mockResolvedValue({
-      model: "gpt-5",
-      thought_level: null,
-      cached_discovered: { ...CATALOG, adapter_id: "other-cli" },
-    });
-    renderPicker(pickerJsx());
-    await screen.findByRole("button", { name: /Runtime: codex/ });
-    expect(
-      screen.queryByText(/discovered on a different runtime/),
-    ).toBeNull();
-  });
-});
-
-// ---------------------------------------------------------------------------
-// Catalog priority chain (ADR-0096 D6, restored #584)
-// ---------------------------------------------------------------------------
-
-describe("ComposerProviderPicker catalog priority chain (ADR-0096 D6)", () => {
-  it("prefers the session's cached discovery over a probe-cache entry", async () => {
-    vi.mocked(getAdapterCatalogs).mockResolvedValue({
-      "qwen-code": {
-        probe_kind: "acp",
-        outcome: {
-          acp: {
-            discovered: {
-              ...CATALOG,
-              models: ["probe-only-model"],
-              adapter_id: "qwen-code",
-            },
-          },
-        },
-        probed_at_millis: 0,
-      },
-    });
-    await renderExternalPicker({}, { cached_discovered: CATALOG });
-    // The menu lists the session cache's models, never the probe entry's.
-    expect(screen.getByRole("menuitemradio", { name: "fake-opus" })).toBeTruthy();
-    expect(
-      screen.queryByRole("menuitemradio", { name: "probe-only-model" }),
-    ).toBeNull();
-  });
-
-  it("renders the static label when the probe cache holds only another adapter's entry", async () => {
-    // The entry is keyed under qwen-code while the session runs a different
-    // ACP adapter with no session discovery: no catalog anywhere, so the
-    // trigger is a static label (no menu to fake).
-    vi.mocked(getAdapterCatalogs).mockResolvedValue(acpProbeEntry(CATALOG));
-    vi.mocked(getSessionRuntime).mockResolvedValue({
-      kind: "external",
-      data: "other-acp",
-    });
-    vi.mocked(listAdapters).mockResolvedValue([adapter("other-acp")]);
-    vi.mocked(getSessionModelConfig).mockResolvedValue({
-      model: null,
-      thought_level: null,
-      cached_discovered: null,
-    });
-    renderPicker(pickerJsx());
-    await screen.findByRole("button", { name: /Runtime: other-acp/ });
-    expect(screen.getByText("Default (recommended)")).toBeTruthy();
-    expect(screen.queryByRole("button", { name: /Model:/ })).toBeNull();
-  });
-});
-
-// ---------------------------------------------------------------------------
-// Per-profile key overlay refetch (issue #154, restored #584)
-// ---------------------------------------------------------------------------
+// The provenance-staleness and priority-chain projection matrices live
+// function-level in posture-catalog.test.tsx (the picker only assembles
+// the reads); the note's rendering is pinned in
+// ComposerPostureTrigger.test.tsx.
 
 describe("ComposerProviderPicker key overlay refetch (issue #154)", () => {
   it("refetches the key overlay on a profileKeyEpoch bump", async () => {
