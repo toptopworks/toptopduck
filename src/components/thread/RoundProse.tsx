@@ -69,6 +69,11 @@ import { CODE_BLOCK_REVEAL_CLASS } from "./turn-visual";
 // from its own typings so no hast package import is needed.
 type HastElement = NonNullable<ExtraProps["node"]>;
 
+// The render-mode vocabulary (issue #1128, replacing `isLive`): "streaming"
+// while the round streams, "static" once settled. Exported so the mode prop
+// and the test helper spell the vocabulary from one source.
+export type RoundProseMode = "streaming" | "static";
+
 // The one fence language that renders as a chart (ADR-0120 Decision 6). Any
 // other value -- including a language-less fence -- is not a chart intent.
 const VEGA_LITE_FENCE = "vega-lite";
@@ -146,8 +151,10 @@ function CodeBlock({ node }: { node?: HastElement }) {
 // ProviderKeyField's get-key link uses). Every other shape -- mailto:,
 // relative refs -- degrades to plain text with the surviving href beside
 // the label, so the target never vanishes from the visible surface (a
-// [email us](mailto:...) answer stays contentful). Streamdown's urlTransform
-// passes non-web schemes through un-stripped, so the unsafe ones
+// [email us](mailto:...) answer stays contentful). A link title rides the
+// anchor only -- the degrade lanes drop it, an accepted loss: a plain-text
+// span carrying a tooltip would contradict the degradation. Streamdown's
+// urlTransform passes non-web schemes through un-stripped, so the unsafe ones
 // (javascript:, file:, ...) arrive here whole and the http(s) gate below is
 // what keeps them off the anchor element; the library's own
 // `streamdown:incomplete-link` placeholder (remend's provisional href for a
@@ -156,7 +163,15 @@ function CodeBlock({ node }: { node?: HastElement }) {
 // caption-sized live note beside the link (role=status so screen readers
 // announce it): the click already swallowed the default navigation, so
 // silence would read as a dead button.
-function ProseLink({ href, children }: { href?: string; children?: ReactNode }) {
+function ProseLink({
+  href,
+  title,
+  children,
+}: {
+  href?: string;
+  title?: string;
+  children?: ReactNode;
+}) {
   const intl = useIntl();
   const [failed, setFailed] = useState(false);
   if (typeof href === "string" && /^https?:\/\//i.test(href)) {
@@ -175,6 +190,7 @@ function ProseLink({ href, children }: { href?: string; children?: ReactNode }) 
       <>
         <a
           href={href}
+          title={title}
           className="text-primary underline decoration-primary/50 underline-offset-2 hover:decoration-primary"
           onClick={handleClick}
         >
@@ -273,17 +289,27 @@ const BASE_MARKDOWN_COMPONENTS: Components = {
     <code className="rounded-xs bg-muted px-1.5 py-0.5 font-mono text-[13px]">{children}</code>
   ),
   // Bare by design: streamdown replaces some tags with its own styled
-  // surface (li list markers, a span for strong, table-row chrome), so the
-  // bare entries pin today's preflight-native rendering, picking the
-  // attributes the hast conversion actually produces (className on li is
-  // the task-list hook; the checkbox triple is a task item's full shape).
-  // The input entry exists for readOnly: the library ships no checkbox
-  // styling, but a bare input would trip React's controlled-input warning
-  // on the checked attribute. em and del carry no library replacement and
-  // no attributes, so they need no entries.
+  // surface (li item padding with inline inner paragraphs, a span for
+  // strong, table-row/-section chrome, text-sm on sup), so the bare
+  // entries pin today's preflight-native
+  // rendering, picking the attributes the hast conversion actually produces
+  // (className on li is the task-list hook; the checkbox triple is a task
+  // item's full shape). The input entry exists for readOnly: the library
+  // ships no checkbox styling, but a bare input would trip React's
+  // controlled-input warning on the checked attribute. em and del carry no
+  // library replacement and no attributes, so they need no entries. Two
+  // further library keys were evaluated and deliberately left on the
+  // library's entry (issue #1130): `sub` is unreachable through this
+  // pipeline (no markdown construct produces it, and raw HTML never becomes
+  // an element), and `section` is the library's GFM footnote handler --
+  // its payload is footnote content collapsing, not styling, so a bare
+  // entry would change rendering rather than pin it.
   li: ({ children, className }) => <li className={className}>{children}</li>,
   strong: ({ children }) => <strong>{children}</strong>,
   tr: ({ children }) => <tr>{children}</tr>,
+  thead: ({ children }) => <thead>{children}</thead>,
+  tbody: ({ children }) => <tbody>{children}</tbody>,
+  sup: ({ children }) => <sup>{children}</sup>,
   input: ({ type, checked, disabled }) => (
     <input type={type} checked={checked} disabled={disabled} readOnly />
   ),
@@ -354,7 +380,7 @@ export const RoundProse = memo(function RoundProse({
    * components door and the caret here; the library's mode prop stays
    * unset (see the file header), so remend runs on both sides and the
    * settle swap keeps the same shape. */
-  mode?: "streaming" | "static";
+  mode?: RoundProseMode;
   /** Issue #1093: promotes a settled fence's body onto the workspace stage.
    *  Optional (the ArtifactCard read-only precedent): only the TurnCard
    *  stream wires it -- the delegation dialog and the md artifact renderer
