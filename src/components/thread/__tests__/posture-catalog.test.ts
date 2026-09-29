@@ -240,6 +240,20 @@ describe("turn-end live currents gate (issue #586, ADR-0100)", () => {
     ).toBe("fake-opus · medium");
   });
 
+  it("drops empty-string live currents like the held side (hand-edited blanks)", () => {
+    expect(
+      derivePostureCatalog(
+        reads({
+          discovered: {
+            ...STAMPED_CATALOG,
+            current_model: "",
+            current_thought_level: "medium",
+          },
+        }),
+      ).liveValue,
+    ).toBe("medium");
+  });
+
   it("renders the lone live dimension when the cache carries one side only (claude shape)", () => {
     expect(
       derivePostureCatalog(
