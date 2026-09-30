@@ -8,7 +8,9 @@
 //!
 //! Menu shape (ADR-0125 Decision 3): a disabled "recent" header + the 3
 //! most recent sessions + a "more" submenu holding the next 10 (omitted
-//! entirely when empty) + new session / open main window / quit. Session
+//! entirely when empty) + new session / open main window / quit -- two
+//! native separators split that run into three zones: sessions, window
+//! actions, and the exit. Session
 //! data comes from the SAME directory scan the sidebar uses (ADR-0089) --
 //! same source, same fields. The two lists refresh independently (the
 //! sidebar on demand, the tray per visit), so a transient freshness gap
@@ -774,10 +776,10 @@ mod tests {
                 "tray-open-session::s1.duck",
                 "tray-open-session::s2.duck",
                 ID_MORE,
-                "--",
+                SEP,
                 ID_NEW_SESSION,
                 ID_OPEN_MAIN,
-                "--",
+                SEP,
                 ID_QUIT,
             ]
         );
