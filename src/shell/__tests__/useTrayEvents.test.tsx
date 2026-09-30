@@ -1,7 +1,7 @@
 import { act, renderHook, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { useTrayEvents } from "../useTrayEvents";
-import { onTrayOpenSession, trayReady } from "../../api";
+import { onTrayNewSession, onTrayOpenSession, trayReady } from "../../api";
 import type { SessionMetadata } from "../../types/session";
 
 // Issue #1140 (ADR-0125): useTrayEvents routes the two tray events onto the
@@ -221,6 +221,39 @@ describe("useTrayEvents", () => {
     await rerenderTray(rendered, makeDeps({ sessions: [persisted("a.duck", "n")] }), 2);
 
     expect(trayReady).toHaveBeenCalledTimes(1);
+  });
+
+  it("handshake: no fire until the SECOND listener resolves", async () => {
+    // The once-count pins cannot discriminate first-vs-both (both base
+    // mocks resolve immediately), so this pin defers the second
+    // listener's registration: after the first resolves, the handshake
+    // must NOT have fired -- a first-listener-only handshake would
+    // replay into a half-registered page, exactly the loss the
+    // handshake exists to prevent.
+    let releaseNewListener!: () => void;
+    vi.mocked(onTrayNewSession).mockImplementationOnce(
+      (cb: () => void) =>
+        new Promise<() => void>((resolve) => {
+          releaseNewListener = () => {
+            trayListeners.newSession = cb;
+            resolve(() => {
+              trayListeners.newSession = null;
+            });
+          };
+        }),
+    );
+    renderHook((d: Deps) => useTrayEvents(d), { initialProps: makeDeps() });
+    await waitFor(() => {
+      expect(trayListeners.open).not.toBeNull();
+    });
+    // First subscription resolved, second still pending: no handshake.
+    expect(trayReady).not.toHaveBeenCalled();
+    await act(async () => {
+      releaseNewListener();
+    });
+    await waitFor(() => {
+      expect(trayReady).toHaveBeenCalledTimes(1);
+    });
   });
 
   it("unsubscribes on unmount", async () => {

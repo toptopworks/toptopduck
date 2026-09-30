@@ -64,14 +64,25 @@ export function useTrayEvents({
     // Both subscriptions must resolve before the handshake: replaying
     // after the first would deliver a buffered open/new into a page where
     // the other listener is still missing.
-    Promise.all([openPromise, newPromise]).then((resolved) => {
-      for (const unlisten of resolved) track(unlisten);
-      if (disposed || handshookRef.current) return;
-      handshookRef.current = true;
-      trayReady().catch((e) => {
-        log.warn("tray", "tray_ready handshake rejected", e);
+    Promise.all([openPromise, newPromise])
+      .then((resolved) => {
+        for (const unlisten of resolved) track(unlisten);
+        if (disposed || handshookRef.current) return;
+        handshookRef.current = true;
+        trayReady().catch((e) => {
+          // A rejected handshake leaves the backend buffering with no
+          // replay for the rest of the page load; re-arm so the next
+          // re-subscription retries (mark_ready is idempotent).
+          handshookRef.current = false;
+          log.warn("tray", "tray_ready handshake rejected", e);
+        });
+      })
+      .catch((e) => {
+        // A listener registration rejected: no handshake can fire on a
+        // half-registered page. Log for parity with the handshake's own
+        // catch rather than leaving the rejection unhandled.
+        log.warn("tray", "tray listener registration failed", e);
       });
-    });
     return () => {
       disposed = true;
       for (const unlisten of unlisteners) unlisten();

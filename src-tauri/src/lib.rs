@@ -332,8 +332,8 @@ pub fn run() {
             // this window build (so the page-load hook below never
             // observes a missing state) and before tray::init (so menu
             // clicks from the very first moment find it). Desktop-only,
-            // like the tray surface; a mobile build manages nothing and
-            // the tray dispatch degrades to the direct emit.
+            // like the tray surface; a mobile build has no tray dispatch
+            // at all (the module is compiled out).
             #[cfg(desktop)]
             app.manage(tray::TrayReadiness::default());
             // A page (re)load tears the webview's tray listeners down;
