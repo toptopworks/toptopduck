@@ -138,22 +138,20 @@ pub fn run() {
 
     // Window geometry persistence across launches (issue #268). The plugin is
     // the SINGLE source of truth for window geometry: SIZE + POSITION +
-    // MAXIMIZED + VISIBLE. ADR-0038's app-config `WindowGeometry` field + the
+    // MAXIMIZED. ADR-0038's app-config `WindowGeometry` field + the
     // frontend restore/persist effects are retired by #268 -- they raced this
     // plugin's restore on launch, causing the window to jump from the OS-
     // default spot to the restored spot once the frontend IPC resolved.
     //
-    // VISIBLE + `visible: false` in tauri.conf.json let the plugin own the
-    // show() timing: the window stays hidden until `restore_state` (the
-    // plugin's internal on-window-ready hook) applies the persisted geometry,
-    // then `show()`s -- geometry is set before the window is visible. On a
-    // first launch (no persisted state) `restore_state` takes its no-state
-    // branch and leaves `should_show` at its `true` initial value, so `show()`
-    // still fires and the window appears (centered by `center: true` in
-    // tauri.conf.json). VISIBLE both persists the visibility flag and gates
-    // `show()` on restore; a safety-net `show()` in `setup` (below) covers the
-    // narrow case where `restore_state` itself errors and the plugin swallows
-    // the `Err` with `let _ =`.
+    // `visible: false` in tauri.conf.json holds the window back until
+    // `restore_state` (the plugin's on-window-ready hook, synchronous inside
+    // the setup-side build) applies the persisted geometry; the app-owned
+    // show() right after that build then reveals it at the restored spot.
+    // Visibility is NOT a persisted dimension: the VISIBLE flag's write-back
+    // captured the live window at exit, so quitting while hidden-to-tray
+    // (ADR-0125) saved `visible: false` and gated the next boot's show --
+    // a 2s invisible launch until the old safety net rescued it. Boot always
+    // shows the main window, so there is no state to restore.
     //
     // DECORATIONS + FULLSCREEN stay off the flags: this app never toggles
     // them. No denylist (the template's quick-pane denylist is an NSPanel
@@ -165,8 +163,7 @@ pub fn run() {
                 .with_state_flags(
                     tauri_plugin_window_state::StateFlags::SIZE
                         | tauri_plugin_window_state::StateFlags::POSITION
-                        | tauri_plugin_window_state::StateFlags::MAXIMIZED
-                        | tauri_plugin_window_state::StateFlags::VISIBLE,
+                        | tauri_plugin_window_state::StateFlags::MAXIMIZED,
                 )
                 .build(),
         );
@@ -316,7 +313,7 @@ pub fn run() {
             // window additions, and a build failure propagates -- the same
             // boot-failure mode the framework's own config-window creation
             // had. Created early so everything later in setup sees the main
-            // window (the 2s visibility watchdog), as does the
+            // window (the boot show below), as does the
             // single-instance focus path registered before setup.
             let main_window_cfg = app
                 .config()
@@ -348,7 +345,17 @@ pub fn run() {
                     window.state::<tray::TrayReadiness>().page_load_started();
                 }
             });
-            main_window_builder.build()?;
+            let main_window = main_window_builder.build()?;
+            // Boot show: `restore_state` ran synchronously inside build(), so
+            // the persisted geometry is already applied -- reveal at the
+            // restored spot. A show() failure is logged, not swallowed: an
+            // invisible boot must stay diagnosable.
+            if let Err(e) = main_window.show() {
+                log::error!("main window show() failed at boot: {e}");
+            }
+            // A failed focus steal is a cosmetic loss (the window is already
+            // visible), not a lost boot -- best-effort, unlike show above.
+            let _ = main_window.set_focus();
             // ADR-0089 + issue #452: managed sessions directory. Default root
             // is `<Documents>/toptopduck/sessions/` (platform-conventions
             // Documents, not hidden app-data). When app-config carries a
@@ -477,39 +484,6 @@ pub fn run() {
                         }
                     });
                 }
-            }
-
-            // Visibility safety net (issue #268). `visible: false` in
-            // tauri.conf.json + the window-state plugin's VISIBLE flag mean
-            // the plugin's `restore_state` is the ONLY code path that calls
-            // `show()` on the main window. The plugin swallows `restore_state`
-            // errors with `let _ =`, so a failure inside it (a platform
-            // set_position / set_size after a monitor unplug, a malformed
-            // .window-state.json) would leave the window permanently hidden
-            // with no log. This fallback checks visibility 2s after boot -- if
-            // the plugin already showed the window, it is a no-op; if not, it
-            // forces show() + set_focus() and logs the recovery so a future
-            // regression is diagnosable instead of presenting as "app won't
-            // open". Desktop-only: mobile has no main window managed here.
-            #[cfg(desktop)]
-            {
-                let handle = app.handle().clone();
-                std::thread::spawn(move || {
-                    std::thread::sleep(std::time::Duration::from_secs(2));
-                    let Some(window) = handle.get_webview_window("main") else {
-                        return;
-                    };
-                    let already_visible = window.is_visible().unwrap_or(false);
-                    if !already_visible {
-                        log::error!(
-                            "main window still hidden 2s after boot; the \
-                             window-state plugin did not show() it -- forcing \
-                             show() so the app is usable"
-                        );
-                        let _ = window.show();
-                        let _ = window.set_focus();
-                    }
-                });
             }
 
             Ok(())
