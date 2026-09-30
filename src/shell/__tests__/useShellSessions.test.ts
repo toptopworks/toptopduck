@@ -579,6 +579,34 @@ describe("useShellSessions", () => {
     );
   });
 
+  it("openPersisted on an already-open path only activates -- no second runtime instance", async () => {
+    // Sidebar parity for the tray open-session click (ADR-0125 Decision 5):
+    // the already-open idempotency lives HERE, in openPersisted's own
+    // open-or-activate branch (useTrayEvents routes straight through), so a
+    // click on an open session must switch to it without minting or
+    // resuming anything new.
+    vi.mocked(createSession).mockResolvedValueOnce(reply("p1"));
+    vi.mocked(openDuck).mockResolvedValueOnce();
+    vi.mocked(createSession).mockResolvedValueOnce(reply("p2"));
+    vi.mocked(openDuck).mockResolvedValueOnce();
+    const { result } = renderSessions();
+    await act(async () => {
+      await result.current.openPersisted("/x/a.duck", "a");
+      await result.current.openPersisted("/x/b.duck", "b");
+    });
+    expect(result.current.activeSessionId).toBe("p2");
+
+    const mintsBefore = vi.mocked(createSession).mock.calls.length;
+    const resumesBefore = vi.mocked(openDuck).mock.calls.length;
+    await act(async () => {
+      await result.current.openPersisted("/x/a.duck", "a");
+    });
+
+    expect(result.current.activeSessionId).toBe("p1");
+    expect(vi.mocked(createSession).mock.calls.length).toBe(mintsBefore);
+    expect(vi.mocked(openDuck).mock.calls.length).toBe(resumesBefore);
+  });
+
   // --- Issue #204: hook-level coverage gaps --------------------------------
   // These pin the concurrency + branch contracts a regression would silently
   // break (no black-box signal): the busy-gated drop listener, the in-flight

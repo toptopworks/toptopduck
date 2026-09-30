@@ -9,6 +9,7 @@ import { useApprovalEvents } from "./session/useApprovalEvents";
 import { useShellError } from "./shell/useShellError";
 import { usePersistedSessions } from "./shell/usePersistedSessions";
 import { useShellSessions } from "./shell/useShellSessions";
+import { useTrayEvents } from "./shell/useTrayEvents";
 import { useAppConfigState } from "./shell/useAppConfigState";
 import { useStartupRuntime } from "./shell/useStartupRuntime";
 import { useSidebarResize } from "./shell/useSidebarResize";
@@ -289,6 +290,16 @@ export default function App() {
     handleExportSession,
     syncSessionName,
   } = useShellSessions({ intl, queryClient, refreshSessions, setShellError });
+
+  // System tray events (issue #1140, ADR-0125): routes the tray menu's
+  // open-session / new-session clicks onto the shell's existing session
+  // actions (sidebar parity -- the tray introduces no session semantics of
+  // its own; the window reveal is handled on the Rust side).
+  useTrayEvents({
+    sessions,
+    openPersisted,
+    goToEmptyState,
+  });
 
   // Cold start (ADR-0092): no active session -- the centered bar + greeting
   // shell posture, and the composer's pending channels below are live.

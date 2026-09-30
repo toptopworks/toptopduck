@@ -113,6 +113,10 @@ vi.mock("../api", async (importOriginal) => {
     onApprovalRequest: vi.fn(async () => () => {}),
     onApprovalResolved: vi.fn(async () => () => {}),
     respondToolApproval: vi.fn(async () => {}),
+    // The tray channel (issue #1140) mounts on App render; no Shell.test
+    // scenario drives tray events, so inert no-op listeners suffice.
+    onTrayOpenSession: vi.fn(async () => () => {}),
+    onTrayNewSession: vi.fn(async () => () => {}),
     readRows: vi.fn(),
     // The artifact surfaces' render-time facts (issue #1088): existence
     // defaults to true (openable rows/cards), the text read to empty.

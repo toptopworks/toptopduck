@@ -96,6 +96,11 @@ vi.mock("../api", async (importOriginal) => {
     // ADR-0059: the turn-progress listener mounts with every SessionPane.
     // Stub it (no-op unlisten) so jsdom doesn't hit the real Tauri listen.
     onTurnProgress: vi.fn(async () => () => {}),
+    // The tray channel (issue #1140) mounts with App; no App.test flow
+    // drives tray events, so inert no-op listeners keep jsdom off the real
+    // Tauri listen.
+    onTrayOpenSession: vi.fn(async () => () => {}),
+    onTrayNewSession: vi.fn(async () => () => {}),
     // The composer auth-mode chip queries the session's authorization posture
     // on mount (issue #352); no App.test flow exercises the toggle, so a
     // per_call default read + no-op write keep jsdom off the real invoke.

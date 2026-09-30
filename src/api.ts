@@ -1003,3 +1003,36 @@ export async function artifactExists(path: string): Promise<boolean> {
 export async function readArtifactText(path: string): Promise<string> {
   return invoke<string>("read_artifact_text", { path });
 }
+
+// --- System tray (issue #1140, ADR-0125) --------------------------------------
+//
+// Session-AGNOSTIC: no sessionId. The backend emits these when the user acts
+// on the resident tray menu; the window reveal itself is handled on the Rust
+// side at click time (the webview may be mid-load), so the frontend only
+// carries the session-level consequence.
+
+// The `tray://open-session` payload: the `.duck` path alone (the stable
+// session identity, ADR-0089). The display name for the open action is
+// resolved from the persisted-session list -- same source, no duplicate wire
+// field.
+export interface TrayOpenSession {
+  duck_path: string;
+}
+
+// Subscribe to tray menu "open session" clicks (ADR-0125 Decision 5). The
+// sidebar-parity rule (Decision 5): the action is exactly what a sidebar
+// click on the same session does -- an already-open session is only
+// activated (idempotent), a closed one resumes through the same openDuck
+// path.
+export async function onTrayOpenSession(
+  cb: (ev: TrayOpenSession) => void,
+): Promise<UnlistenFn> {
+  return listen<TrayOpenSession>("tray://open-session", (e) => cb(e.payload));
+}
+
+// Subscribe to tray menu "new session" clicks (ADR-0125 Decision 5). No
+// payload: the action is the sidebar "+" (ADR-0092 empty-state navigation) --
+// zero new session semantics originate on the tray side.
+export async function onTrayNewSession(cb: () => void): Promise<UnlistenFn> {
+  return listen("tray://new-session", () => cb());
+}

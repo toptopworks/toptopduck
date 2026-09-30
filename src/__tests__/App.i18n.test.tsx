@@ -90,6 +90,10 @@ vi.mock("../api", async (importOriginal) => {
     onApprovalRequest: vi.fn(async () => () => {}),
     onApprovalResolved: vi.fn(async () => () => {}),
     respondToolApproval: vi.fn(async () => {}),
+    // The tray channel (issue #1140) mounts on App render; same inert
+    // no-op treatment as the approval listeners above.
+    onTrayOpenSession: vi.fn(async () => () => {}),
+    onTrayNewSession: vi.fn(async () => () => {}),
     closeSession: vi.fn(async () => false),
     createSession: vi.fn(async () => "sess-1"),
     listWorkingSet: vi.fn(async () => []),
