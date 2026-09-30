@@ -13,8 +13,9 @@
 //! same source, same fields. The two lists refresh independently (the
 //! sidebar on demand, the tray per visit), so a transient freshness gap
 //! is normal; the scan is shared, so the shape never diverges. The menu
-//! is rebuilt on tray hover/click (throttled) rather than kept live -- a
-//! stale-by-one-visit list is the accepted cost of not running a watcher.
+//! is rebuilt on tray hover and left click (throttled) rather than kept
+//! live -- a stale-by-one-visit list is the accepted cost of not running
+//! a watcher.
 //!
 //! Exit semantics (ADR-0125 Decision 1): the tray Quit item is the ONLY
 //! exit channel, via a plain `app.exit(0)`. `ExitRequested` is not
@@ -413,8 +414,10 @@ struct TrayEventPlan {
 /// menu on the spot -- the first right click showed a flash of menu, and
 /// the throttle then suppressed the rebuild so the second click worked.
 /// Enter gives the rebuild the hover-to-click gap to settle BEFORE the menu
-/// opens; the left click stays as a trigger (it never opens the menu) so
-/// hover-less hosts (Linux SNI) still refresh.
+/// opens; the left click stays as a second trigger (it never opens the
+/// menu). Caveat: the Linux GTK backend dispatches NO icon events
+/// (AppIndicator exposes no click callback), so there the menu carries
+/// only the boot-time fill -- no trigger of ours can fire.
 fn plan_tray_event(event: &TrayIconEvent) -> TrayEventPlan {
     match event {
         TrayIconEvent::Enter { .. } => TrayEventPlan {
