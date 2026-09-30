@@ -8,7 +8,9 @@
 //!
 //! Menu shape (ADR-0125 Decision 3): a disabled "recent" header + the 3
 //! most recent sessions + a "more" submenu holding the next 10 (omitted
-//! entirely when empty) + new session / open main window / quit. Session
+//! entirely when empty) + new session / open main window / quit -- two
+//! native separators split that run into three zones: sessions, window
+//! actions, and the exit. Session
 //! data comes from the SAME directory scan the sidebar uses (ADR-0089) --
 //! same source, same fields. The two lists refresh independently (the
 //! sidebar on demand, the tray per visit), so a transient freshness gap
@@ -207,11 +209,12 @@ struct MenuRow {
     enabled: bool,
 }
 
-/// One planned top-level menu slot: a row, or the "more" submenu in its
-/// display position.
+/// One planned top-level menu slot: a row, a separator, or the "more"
+/// submenu in its display position.
 #[derive(Debug)]
 enum MenuEntry {
     Row(MenuRow),
+    Separator,
     More {
         title: String,
         children: Vec<MenuRow>,
@@ -220,10 +223,13 @@ enum MenuEntry {
 
 /// Plan the whole tray menu as pure data, in display order: the disabled
 /// "recent" header, the recent rows, the optional "more" submenu, then the
-/// three fixed actions. The submenu is omitted entirely when there is
-/// nothing to hold (Decision 3: an empty submenu renders as a dead-end item
-/// on some platforms). Pure so the assembly -- order, omission, disabled
-/// header, fixed entries -- is pinnable without an app handle.
+/// three fixed actions. Separators split the menu into three zones --
+/// sessions, window actions, and the exit -- so the eye can parse the
+/// groups without reading every label. The submenu is omitted entirely when
+/// there is nothing to hold (Decision 3: an empty submenu renders as a
+/// dead-end item on some platforms). Pure so the assembly -- order,
+/// omission, disabled header, separators, fixed entries -- is pinnable
+/// without an app handle.
 fn plan_menu(metas: &[SessionMetadata], texts: &TrayTexts) -> Vec<MenuEntry> {
     fn row(id: String, text: &str, enabled: bool) -> MenuRow {
         MenuRow {
@@ -240,7 +246,7 @@ fn plan_menu(metas: &[SessionMetadata], texts: &TrayTexts) -> Vec<MenuEntry> {
         )
     }
     let (recent, more) = split_recent(metas);
-    let mut entries: Vec<MenuEntry> = Vec::with_capacity(5 + recent.len());
+    let mut entries: Vec<MenuEntry> = Vec::with_capacity(7 + recent.len());
     // Disabled: the header is a label, not an action.
     entries.push(MenuEntry::Row(row(
         ID_RECENT_HEADER.into(),
@@ -254,6 +260,7 @@ fn plan_menu(metas: &[SessionMetadata], texts: &TrayTexts) -> Vec<MenuEntry> {
             children: more.iter().map(|m| session_row(m, texts)).collect(),
         });
     }
+    entries.push(MenuEntry::Separator);
     entries.push(MenuEntry::Row(row(
         ID_NEW_SESSION.into(),
         texts.new_session,
@@ -264,6 +271,7 @@ fn plan_menu(metas: &[SessionMetadata], texts: &TrayTexts) -> Vec<MenuEntry> {
         texts.open_main,
         true,
     )));
+    entries.push(MenuEntry::Separator);
     entries.push(MenuEntry::Row(row(ID_QUIT.into(), texts.quit, true)));
     entries
 }
@@ -289,6 +297,9 @@ fn build_menu(
     for entry in &plan_menu(metas, texts) {
         match entry {
             MenuEntry::Row(r) => items.extend(materialize(std::slice::from_ref(r))?),
+            MenuEntry::Separator => {
+                items.push(Box::new(tauri::menu::PredefinedMenuItem::separator(app)?));
+            }
             MenuEntry::More { title, children } => {
                 let rows = materialize(children)?;
                 let submenu = tauri::menu::Submenu::with_id(app, ID_MORE, title, true)?;
@@ -528,6 +539,9 @@ mod tests {
         metas.iter().map(|m| m.duck_path.as_str()).collect()
     }
 
+    /// Test-only token for a separator slot in the plan kind assertions.
+    const SEP: &str = "--";
+
     // --- texts_for (three-state mirror, ADR-0052) --------------------------
 
     #[test]
@@ -679,7 +693,7 @@ mod tests {
             .iter()
             .filter_map(|e| match e {
                 MenuEntry::Row(r) => Some((r.id.as_str(), r.text.as_str(), r.enabled)),
-                MenuEntry::More { .. } => None,
+                MenuEntry::Separator | MenuEntry::More { .. } => None,
             })
             .collect();
         assert_eq!(
@@ -695,8 +709,8 @@ mod tests {
             ]
         );
         // The fourth session rides the "more" submenu in its display
-        // position (after the recent rows, before the fixed actions), in
-        // scan order.
+        // position (after the recent rows, before the first zone
+        // separator), in scan order.
         match &plan[4] {
             MenuEntry::More { title, children } => {
                 assert_eq!(title, "More");
@@ -715,9 +729,60 @@ mod tests {
         let plan = plan_menu(&metas, &texts_for(LocalePreference::ZhCN, None));
         assert!(plan.iter().all(|e| !matches!(e, MenuEntry::More { .. })));
         // With no sessions at all the header + the three fixed actions
-        // remain -- the empty tray still offers new/open/quit.
+        // plus the two zone separators remain, in layout order -- the
+        // empty tray still offers new/open/quit, with no doubled
+        // separator anywhere.
         let plan = plan_menu(&[], &texts_for(LocalePreference::ZhCN, None));
-        assert_eq!(plan.len(), 4);
+        let kinds: Vec<&str> = plan
+            .iter()
+            .map(|e| match e {
+                MenuEntry::Row(r) => r.id.as_str(),
+                MenuEntry::Separator => SEP,
+                MenuEntry::More { .. } => ID_MORE,
+            })
+            .collect();
+        assert_eq!(
+            kinds,
+            vec![
+                ID_RECENT_HEADER,
+                SEP,
+                ID_NEW_SESSION,
+                ID_OPEN_MAIN,
+                SEP,
+                ID_QUIT,
+            ]
+        );
+    }
+
+    #[test]
+    fn plan_separates_sessions_from_actions_and_quit() {
+        // Two separators, three zones: the session block (header + rows +
+        // more), the window actions, and the exit on its own.
+        let metas: Vec<_> = (0..4).map(|i| meta(&format!("s{i}.duck"), "n")).collect();
+        let plan = plan_menu(&metas, &texts_for(LocalePreference::EnUS, None));
+        let kinds: Vec<&str> = plan
+            .iter()
+            .map(|e| match e {
+                MenuEntry::Row(r) => r.id.as_str(),
+                MenuEntry::Separator => SEP,
+                MenuEntry::More { .. } => ID_MORE,
+            })
+            .collect();
+        assert_eq!(
+            kinds,
+            vec![
+                ID_RECENT_HEADER,
+                "tray-open-session::s0.duck",
+                "tray-open-session::s1.duck",
+                "tray-open-session::s2.duck",
+                ID_MORE,
+                SEP,
+                ID_NEW_SESSION,
+                ID_OPEN_MAIN,
+                SEP,
+                ID_QUIT,
+            ]
+        );
     }
 
     // --- plan_tray_event (rebuild trigger stays off the right click) ------
