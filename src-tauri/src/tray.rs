@@ -1,18 +1,20 @@
 //! System tray residency (ADR-0125, issue #1140). The tray is the app's
 //! resident surface while the main window is hidden: closing the window
-//! always hides (never kills) the process while a turn may be in flight
-//! -- the turn's execution lives in backend threads + external CLIs, and
-//! the approval surface lives in the webview, so destroying the window
-//! would deadlock the turn (ADR-0125 Context).
+//! ALWAYS hides (never kills) the process -- unconditionally, with no
+//! turn-state branching (ADR-0125 Decision 1) -- because a running turn's
+//! execution lives in backend threads + external CLIs and its approval
+//! surface lives in the webview, so destroying the window would strand
+//! the turn (ADR-0125 Context).
 //!
-//! Menu shape (the ChatGPT/WorkBuddy consensus form, ADR-0125 Decision 3):
-//! a disabled "recent" header + the 3 most recent sessions + a "more"
-//! submenu holding the next 10 (omitted entirely when empty) + new
-//! session / open main window / quit. Session data comes from the SAME
-//! directory scan the sidebar uses (ADR-0089), so the tray list and the
-//! sidebar can never disagree about what exists. The menu is rebuilt on
-//! tray click (throttled) rather than kept live -- a stale-by-one-click
-//! list is the accepted cost of not running a watcher.
+//! Menu shape (ADR-0125 Decision 3): a disabled "recent" header + the 3
+//! most recent sessions + a "more" submenu holding the next 10 (omitted
+//! entirely when empty) + new session / open main window / quit. Session
+//! data comes from the SAME directory scan the sidebar uses (ADR-0089) --
+//! same source, same fields. The two lists refresh independently (the
+//! sidebar on demand, the tray per click), so a transient freshness gap
+//! is normal; the scan is shared, so the shape never diverges. The menu
+//! is rebuilt on tray click (throttled) rather than kept live -- a
+//! stale-by-one-click list is the accepted cost of not running a watcher.
 //!
 //! Exit semantics (ADR-0125 Decision 1): the tray Quit item is the ONLY
 //! exit channel, via a plain `app.exit(0)`. `ExitRequested` is not
@@ -49,12 +51,12 @@ const TRAY_ID: &str = "main-tray";
 /// path (the stable session identity, ADR-0089) -- the frontend resolves the
 /// display name from its persisted-session list, keeping the wire shape
 /// minimal and the payload type shared with nothing else.
-pub(crate) const OPEN_SESSION_EVENT: &str = "tray://open-session";
+const OPEN_SESSION_EVENT: &str = "tray://open-session";
 
 /// Emitted when the tray "new session" item is clicked. No payload: the
 /// frontend action is the same as the sidebar "+" (navigate to the empty
 /// state, ADR-0092) -- zero new session semantics on the tray side.
-pub(crate) const NEW_SESSION_EVENT: &str = "tray://new-session";
+const NEW_SESSION_EVENT: &str = "tray://new-session";
 
 const ID_NEW_SESSION: &str = "tray-new-session";
 const ID_OPEN_MAIN: &str = "tray-open-main";
@@ -63,7 +65,8 @@ const ID_RECENT_HEADER: &str = "tray-recent-header";
 const ID_MORE: &str = "tray-more";
 /// Session item ids embed the `.duck` path after this prefix; the click
 /// handler parses it back out. A path collision with the fixed ids is
-/// impossible because the prefix is checked after the exact matches.
+/// impossible by namespace: session ids always start with this prefix,
+/// the fixed ids never do.
 const ID_SESSION_PREFIX: &str = "tray-open-session::";
 
 /// How many sessions the top level of the menu shows (Decision 3: 3 + more).
@@ -77,15 +80,15 @@ const REBUILD_THROTTLE: Duration = Duration::from_secs(5);
 /// The `tray://open-session` payload. `duck_path` alone; see
 /// [`OPEN_SESSION_EVENT`].
 #[derive(Debug, Clone, serde::Serialize)]
-pub(crate) struct OpenSessionPayload {
-    pub(crate) duck_path: String,
+struct OpenSessionPayload {
+    duck_path: String,
 }
 
 /// All user-facing tray strings in one locale. Two languages only -- the app
 /// ships exactly en/zh catalogs, so a tray table for more would be
 /// speculative (YAGNI).
 #[derive(Debug, Clone, Copy)]
-pub(crate) struct TrayTexts {
+struct TrayTexts {
     pub(crate) recent_header: &'static str,
     pub(crate) more: &'static str,
     pub(crate) new_session: &'static str,
@@ -118,7 +121,7 @@ const EN: TrayTexts = TrayTexts {
 /// copy of it); an explicit preference overrides the OS. `os_locale` is a
 /// parameter so the mapping is unit-testable without touching the real OS
 /// locale.
-pub(crate) fn texts_for(pref: LocalePreference, os_locale: Option<&str>) -> TrayTexts {
+fn texts_for(pref: LocalePreference, os_locale: Option<&str>) -> TrayTexts {
     let zh = match pref {
         LocalePreference::ZhCN => true,
         LocalePreference::EnUS => false,
@@ -140,7 +143,7 @@ pub(crate) fn texts_for(pref: LocalePreference, os_locale: Option<&str>) -> Tray
 /// `metas` MUST already be newest-first -- [`scan_sessions_dir`] sorts by
 /// descending mtime, and this function preserves that order verbatim
 /// (display-name-only menu, no re-sorting).
-pub(crate) fn split_recent(metas: &[SessionMetadata]) -> (&[SessionMetadata], &[SessionMetadata]) {
+fn split_recent(metas: &[SessionMetadata]) -> (&[SessionMetadata], &[SessionMetadata]) {
     let recent_len = metas.len().min(RECENT_CAP);
     let more_len = (metas.len() - recent_len).min(MORE_CAP);
     (
@@ -152,7 +155,7 @@ pub(crate) fn split_recent(metas: &[SessionMetadata]) -> (&[SessionMetadata], &[
 /// One menu session item's label. A session with no name AND no sources has
 /// an empty `display_name`; an empty tray row is unreadable, so it falls
 /// back to the localized "unnamed" string.
-pub(crate) fn session_label<'a>(m: &'a SessionMetadata, texts: &'a TrayTexts) -> &'a str {
+fn session_label<'a>(m: &'a SessionMetadata, texts: &'a TrayTexts) -> &'a str {
     if m.display_name.trim().is_empty() {
         texts.unnamed_session
     } else {
@@ -162,7 +165,7 @@ pub(crate) fn session_label<'a>(m: &'a SessionMetadata, texts: &'a TrayTexts) ->
 
 /// What a tray menu click asks for, parsed back out of the menu item id.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum TrayAction {
+enum TrayAction {
     /// Open (or reveal) the persisted session bound to this `.duck` path.
     OpenSession {
         duck_path: String,
@@ -176,7 +179,7 @@ pub(crate) enum TrayAction {
 /// the three fixed actions match exactly; anything else (a submenu/header
 /// id, or a foreign id) is `None` and silently ignored -- an unknown id has
 /// no honest action, and erroring on it would only log noise.
-pub(crate) fn parse_menu_id(id: &str) -> Option<TrayAction> {
+fn parse_menu_id(id: &str) -> Option<TrayAction> {
     if id == ID_NEW_SESSION {
         return Some(TrayAction::NewSession);
     }
@@ -192,77 +195,109 @@ pub(crate) fn parse_menu_id(id: &str) -> Option<TrayAction> {
         })
 }
 
-/// One session menu item per metadata entry, in list order. Shared by the
-/// top-level recent rows and the "more" submenu rows (same item shape, same
-/// id scheme -- where the row lands is the caller's split, not the item's).
-fn session_items(
-    app: &AppHandle,
-    metas: &[SessionMetadata],
-    texts: &TrayTexts,
-) -> tauri::Result<Vec<tauri::menu::MenuItem<tauri::Wry>>> {
-    metas
-        .iter()
-        .map(|m| {
-            tauri::menu::MenuItem::with_id(
-                app,
-                format!("{ID_SESSION_PREFIX}{}", m.duck_path.as_str()),
-                session_label(m, texts),
-                true,
-                None::<&str>,
-            )
-        })
-        .collect()
+/// One session menu item per metadata entry, in list order -- pure data:
+/// the menu item id, the label, and clickability. `build_menu` materializes
+/// rows against an app handle; the plan is what tests pin.
+#[derive(Debug)]
+struct MenuRow {
+    id: String,
+    text: String,
+    enabled: bool,
 }
 
-/// Build the tray's menu from the current session list + texts. The
-/// disabled header, the 3 recent items, the optional "more" submenu, then
-/// the three fixed actions. A failure (menu construction is fallible on
-/// every platform) propagates to the caller, which degrades.
+/// One planned top-level menu slot: a row, or the "more" submenu in its
+/// display position.
+#[derive(Debug)]
+enum MenuEntry {
+    Row(MenuRow),
+    More {
+        title: String,
+        children: Vec<MenuRow>,
+    },
+}
+
+/// Plan the whole tray menu as pure data, in display order: the disabled
+/// "recent" header, the recent rows, the optional "more" submenu, then the
+/// three fixed actions. The submenu is omitted entirely when there is
+/// nothing to hold (Decision 3: an empty submenu renders as a dead-end item
+/// on some platforms). Pure so the assembly -- order, omission, disabled
+/// header, fixed entries -- is pinnable without an app handle.
+fn plan_menu(metas: &[SessionMetadata], texts: &TrayTexts) -> Vec<MenuEntry> {
+    fn row(id: String, text: &str, enabled: bool) -> MenuRow {
+        MenuRow {
+            id,
+            text: text.to_string(),
+            enabled,
+        }
+    }
+    fn session_row(m: &SessionMetadata, texts: &TrayTexts) -> MenuRow {
+        row(
+            format!("{ID_SESSION_PREFIX}{}", m.duck_path.as_str()),
+            session_label(m, texts),
+            true,
+        )
+    }
+    let (recent, more) = split_recent(metas);
+    let mut entries: Vec<MenuEntry> = Vec::with_capacity(5 + recent.len());
+    // Disabled: the header is a label, not an action.
+    entries.push(MenuEntry::Row(row(
+        ID_RECENT_HEADER.into(),
+        texts.recent_header,
+        false,
+    )));
+    entries.extend(recent.iter().map(|m| MenuEntry::Row(session_row(m, texts))));
+    if !more.is_empty() {
+        entries.push(MenuEntry::More {
+            title: texts.more.to_string(),
+            children: more.iter().map(|m| session_row(m, texts)).collect(),
+        });
+    }
+    entries.push(MenuEntry::Row(row(
+        ID_NEW_SESSION.into(),
+        texts.new_session,
+        true,
+    )));
+    entries.push(MenuEntry::Row(row(
+        ID_OPEN_MAIN.into(),
+        texts.open_main,
+        true,
+    )));
+    entries.push(MenuEntry::Row(row(ID_QUIT.into(), texts.quit, true)));
+    entries
+}
+
+/// Build the tray's menu from the current session list + texts by
+/// materializing [`plan_menu`]'s output. A failure (menu construction is
+/// fallible on every platform) propagates to the caller, which degrades.
 fn build_menu(
     app: &AppHandle,
     metas: &[SessionMetadata],
     texts: &TrayTexts,
 ) -> tauri::Result<tauri::menu::Menu<tauri::Wry>> {
-    let (recent, more) = split_recent(metas);
-    let header = tauri::menu::MenuItem::with_id(
-        app,
-        ID_RECENT_HEADER,
-        texts.recent_header,
-        // Disabled: the header is a label, not an action.
-        false,
-        None::<&str>,
-    )?;
-    let recent_items = session_items(app, recent, texts)?;
-    let more_items = session_items(app, more, texts)?;
-    // The "more" submenu is omitted entirely when there is nothing to hold
-    // (Decision 3: an empty submenu renders as a dead-end item on some
-    // platforms).
-    let more_submenu = if more_items.is_empty() {
-        None
-    } else {
-        let submenu = tauri::menu::Submenu::with_id(app, ID_MORE, texts.more, true)?;
-        let refs: Vec<&dyn IsMenuItem<_>> =
-            more_items.iter().map(|i| i as &dyn IsMenuItem<_>).collect();
-        submenu.append_items(&refs)?;
-        Some(submenu)
+    let materialize = |rows: &[MenuRow]| -> tauri::Result<Vec<Box<dyn IsMenuItem<tauri::Wry>>>> {
+        let mut out: Vec<Box<dyn IsMenuItem<tauri::Wry>>> = Vec::with_capacity(rows.len());
+        for r in rows {
+            let item =
+                tauri::menu::MenuItem::with_id(app, &r.id, &r.text, r.enabled, None::<&str>)?;
+            out.push(Box::new(item));
+        }
+        Ok(out)
     };
-    let new_item =
-        tauri::menu::MenuItem::with_id(app, ID_NEW_SESSION, texts.new_session, true, None::<&str>)?;
-    let open_item =
-        tauri::menu::MenuItem::with_id(app, ID_OPEN_MAIN, texts.open_main, true, None::<&str>)?;
-    let quit_item = tauri::menu::MenuItem::with_id(app, ID_QUIT, texts.quit, true, None::<&str>)?;
-    let mut items: Vec<&dyn IsMenuItem<_>> = Vec::with_capacity(3 + recent_items.len() + 1);
-    items.push(&header);
-    for i in &recent_items {
-        items.push(i);
+    let mut items: Vec<Box<dyn IsMenuItem<tauri::Wry>>> = Vec::new();
+    for entry in &plan_menu(metas, texts) {
+        match entry {
+            MenuEntry::Row(r) => items.extend(materialize(std::slice::from_ref(r))?),
+            MenuEntry::More { title, children } => {
+                let rows = materialize(children)?;
+                let submenu = tauri::menu::Submenu::with_id(app, ID_MORE, title, true)?;
+                let refs: Vec<&dyn IsMenuItem<_>> = rows.iter().map(|i| i.as_ref()).collect();
+                submenu.append_items(&refs)?;
+                items.push(Box::new(submenu));
+            }
+        }
     }
-    if let Some(sub) = &more_submenu {
-        items.push(sub);
-    }
-    items.push(&new_item);
-    items.push(&open_item);
-    items.push(&quit_item);
-    tauri::menu::Menu::with_items(app, &items)
+    let refs: Vec<&dyn IsMenuItem<_>> = items.iter().map(|i| i.as_ref()).collect();
+    tauri::menu::Menu::with_items(app, &refs)
 }
 
 /// Reveal the main window from any state (hidden resident, minimized,
@@ -294,14 +329,27 @@ fn current_texts(app: &AppHandle) -> TrayTexts {
     texts_for(pref, sys_locale::get_locale().as_deref())
 }
 
+/// The close-requested decision (ADR-0125 Decisions 1 + 2): a live tray
+/// means the window close HIDES (residency); anything else keeps the
+/// default real close so the "window hidden, no tray, no exit path" state
+/// stays unreachable. Extracted as a named, pinned seam -- the close
+/// handler is imperative wiring around this boolean, which is the part
+/// tests can hold.
+pub(crate) fn close_hides(tray_available: bool) -> bool {
+    tray_available
+}
+
 /// Rebuild the tray menu off the event thread: scan the sessions directory
 /// (spawn_blocking, the same posture as the `list_sessions` command),
 /// re-resolve strings, and swap the menu in. Throttled so tray clicking
-/// cannot hammer the scan; a FAILED rebuild releases the throttle window
-/// (the timestamp is set to reserve the window against concurrent spawns,
-/// then cleared on failure) so the next click retries instead of waiting
-/// out a window a dead scan burned. A failure logs and keeps the previous
-/// menu -- a stale list beats no tray.
+/// cannot hammer the scan; a FAILED scan-join, build, or swap releases the
+/// throttle window (the timestamp reserves it against concurrent spawns,
+/// then clears on failure) so the next click retries instead of waiting
+/// out a window a dead build burned, and logs while keeping the previous
+/// menu -- a stale list beats no tray. The scan itself cannot fail loudly:
+/// it degrades to an empty list (the same face the sidebar's error path
+/// shows), which swaps in honestly and self-heals on the next
+/// post-throttle click.
 fn rebuild_soon(app: AppHandle) {
     static LAST_REBUILD: std::sync::Mutex<Option<Instant>> = std::sync::Mutex::new(None);
     tauri::async_runtime::spawn(async move {
@@ -562,5 +610,78 @@ mod tests {
         assert_eq!(parse_menu_id(ID_MORE), None);
         assert_eq!(parse_menu_id("tray-open-session:"), None);
         assert_eq!(parse_menu_id("anything-else"), None);
+    }
+
+    // --- close decision (ADR-0125 D1 + D2) ---------------------------------
+
+    #[test]
+    fn close_hides_only_with_a_live_tray() {
+        // D1: with the tray live, close hides the window (residency).
+        assert!(close_hides(true));
+        // D2: with the tray unavailable, close falls through to the real
+        // exit -- the stranded "hidden window, no exit path" state stays
+        // unreachable.
+        assert!(!close_hides(false));
+    }
+
+    // --- wire names (the frontend listens on these exact strings) ----------
+
+    #[test]
+    fn wire_names_match_the_frontend_listeners() {
+        // api.ts listens on these literals with no parity test of its own;
+        // this pin makes a one-side rename visible on the Rust side.
+        assert_eq!(OPEN_SESSION_EVENT, "tray://open-session");
+        assert_eq!(NEW_SESSION_EVENT, "tray://new-session");
+    }
+
+    // --- plan_menu (assembly: order, omission, fixed entries) --------------
+
+    #[test]
+    fn plan_pins_the_full_assembly_order() {
+        let metas: Vec<_> = (0..4).map(|i| meta(&format!("s{i}.duck"), "n")).collect();
+        let plan = plan_menu(&metas, &texts_for(LocalePreference::EnUS, None));
+        let rows: Vec<(&str, &str, bool)> = plan
+            .iter()
+            .filter_map(|e| match e {
+                MenuEntry::Row(r) => Some((r.id.as_str(), r.text.as_str(), r.enabled)),
+                MenuEntry::More { .. } => None,
+            })
+            .collect();
+        assert_eq!(
+            rows,
+            vec![
+                (ID_RECENT_HEADER, "Recent sessions", false),
+                ("tray-open-session::s0.duck", "n", true),
+                ("tray-open-session::s1.duck", "n", true),
+                ("tray-open-session::s2.duck", "n", true),
+                (ID_NEW_SESSION, "New session", true),
+                (ID_OPEN_MAIN, "Open main window", true),
+                (ID_QUIT, "Quit", true),
+            ]
+        );
+        // The fourth session rides the "more" submenu in its display
+        // position (after the recent rows, before the fixed actions), in
+        // scan order.
+        match &plan[4] {
+            MenuEntry::More { title, children } => {
+                assert_eq!(title, "More");
+                assert_eq!(
+                    children.iter().map(|c| c.id.as_str()).collect::<Vec<_>>(),
+                    vec!["tray-open-session::s3.duck"]
+                );
+            }
+            other => panic!("expected the more submenu at index 4, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn plan_omits_the_more_submenu_when_empty() {
+        let metas: Vec<_> = (0..3).map(|i| meta(&format!("s{i}.duck"), "n")).collect();
+        let plan = plan_menu(&metas, &texts_for(LocalePreference::ZhCN, None));
+        assert!(plan.iter().all(|e| !matches!(e, MenuEntry::More { .. })));
+        // With no sessions at all the header + the three fixed actions
+        // remain -- the empty tray still offers new/open/quit.
+        let plan = plan_menu(&[], &texts_for(LocalePreference::ZhCN, None));
+        assert_eq!(plan.len(), 4);
     }
 }

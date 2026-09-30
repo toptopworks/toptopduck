@@ -35,6 +35,9 @@ pub mod session;
 pub mod session_store;
 pub mod skills;
 pub mod tools;
+// cfg(desktop) mirrors the tauri `tray-icon` feature's own desktop gate --
+// mobile builds neither compile the tray surface nor register it.
+#[cfg(desktop)]
 pub mod tray;
 pub mod util;
 pub mod window;
@@ -412,32 +415,47 @@ pub fn run() {
             // destroy would strand the turn. Registered AFTER SessionsRoot
             // is managed so the first on-click menu rebuild can already read
             // it. init returns whether the tray is live, and the close
-            // handler below keys off that: an unavailable tray (no icon
-            // resource, or Linux without a StatusNotifierItem host) keeps
-            // close = real exit, so the stranded "window hidden, no tray, no
-            // exit path" state is unreachable by construction (ADR-0125
-            // Decision 2).
-            let tray_available = tray::init(app.handle());
-            if let Some(main_window) = app.get_webview_window("main") {
-                let window_for_close = main_window.clone();
-                main_window.on_window_event(move |event| {
-                    if let tauri::WindowEvent::CloseRequested { api, .. } = event {
-                        if !tray_available {
-                            // Degradation path (ADR-0125 Decision 2): no
-                            // resident surface, so the default real close
-                            // runs and the process exits.
-                            return;
+            // handler below keys off that through tray::close_hides (pinned
+            // in tray's tests): an unavailable tray (no icon resource, or
+            // Linux without a StatusNotifierItem host) keeps close = real
+            // exit, so the stranded "window hidden, no tray, no exit path"
+            // state is unreachable by construction (ADR-0125 Decision 2).
+            // cfg(desktop) mirrors the module gate -- on mobile no handler
+            // registers and close stays the default real exit, which is the
+            // same D2 posture.
+            #[cfg(desktop)]
+            {
+                let tray_available = tray::init(app.handle());
+                if let Some(main_window) = app.get_webview_window("main") {
+                    let window_for_close = main_window.clone();
+                    main_window.on_window_event(move |event| {
+                        if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                            if !tray::close_hides(tray_available) {
+                                // Degradation path (ADR-0125 Decision 2): no
+                                // resident surface, so the default real close
+                                // runs and the process exits.
+                                return;
+                            }
+                            // Hide, don't destroy: the resident form (ADR-0125
+                            // Decision 1). The hide runs first and the
+                            // taskbar skip only after it succeeds, so a
+                            // failed hide cannot strand a visible window
+                            // with no taskbar entry; show_main restores it
+                            // symmetrically.
+                            api.prevent_close();
+                            match window_for_close.hide() {
+                                Ok(()) => {
+                                    #[cfg(target_os = "windows")]
+                                    let _ = window_for_close.set_skip_taskbar(true);
+                                }
+                                Err(e) => log::warn!(
+                                    "tray close-to-hide failed (close cancelled, \
+                                     window stays visible): {e}"
+                                ),
+                            }
                         }
-                        // Hide, don't destroy: the resident form (ADR-0125
-                        // Decision 1). Windows also drops the taskbar entry
-                        // so the hidden window leaves no dead taskbar
-                        // button; show_main restores it symmetrically.
-                        api.prevent_close();
-                        #[cfg(target_os = "windows")]
-                        let _ = window_for_close.set_skip_taskbar(true);
-                        let _ = window_for_close.hide();
-                    }
-                });
+                    });
+                }
             }
 
             // Visibility safety net (issue #268). `visible: false` in

@@ -1,16 +1,19 @@
 import { act, renderHook, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { useTrayEvents } from "../useTrayEvents";
-import type { OpenSession } from "../../session/sidebarModel";
+import { onTrayOpenSession } from "../../api";
 import type { SessionMetadata } from "../../types/session";
 
 // Issue #1140 (ADR-0125): useTrayEvents routes the two tray events onto the
 // shell's existing session actions. Sidebar parity is the whole contract --
-// the tray introduces no session semantics of its own -- so these tests pin
-// the three branches: open (closed session resumes), idempotent (open
-// session only activates), and new (empty-state navigation). The api mock
-// stubs the two subscribe wrappers; the hoisted slots capture the registered
-// callbacks so a test can fire a synthetic tray event payload.
+// the tray introduces no session semantics of its own, and the already-open
+// idempotency lives inside openPersisted (pinned in useShellSessions.test),
+// so these tests pin the routing (open resolves the persisted display name,
+// new navigates to the empty state) and the freshness: production mounts
+// this hook at cold start and moves its inputs LATER, so a stale closure
+// here is a real bug, not a style concern. The api mock stubs the two
+// subscribe wrappers; the hoisted slots capture the registered callbacks so
+// a test can fire a synthetic tray event payload.
 const trayListeners = vi.hoisted(() => ({
   open: null as ((ev: { duck_path: string }) => void) | null,
   newSession: null as (() => void) | null,
@@ -31,17 +34,6 @@ vi.mock("../../api", () => ({
   }),
 }));
 
-function openSession(sid: string, path: string): OpenSession {
-  return {
-    sid,
-    name: "",
-    path,
-    pendingIngestPaths: [],
-    pendingQuestion: null,
-    pendingSkillInvocations: [],
-  };
-}
-
 function persisted(path: string, displayName: string): SessionMetadata {
   return {
     duck_path: path,
@@ -56,9 +48,7 @@ type Deps = Parameters<typeof useTrayEvents>[0];
 
 function makeDeps(overrides: Partial<Deps> = {}): Deps {
   return {
-    openSessions: [],
     sessions: [],
-    activateSession: vi.fn(),
     openPersisted: vi.fn(async () => {}),
     goToEmptyState: vi.fn(),
     ...overrides,
@@ -77,13 +67,30 @@ async function renderTray(deps: Deps) {
   return rendered;
 }
 
+/** Rerender with moved inputs and wait for the re-subscription the deps
+ *  array must produce (the mount effect's async tail re-registers). */
+async function rerenderTray(
+  rendered: Awaited<ReturnType<typeof renderTray>>,
+  deps: Deps,
+  subscriptions: number,
+) {
+  await act(async () => {
+    rendered.rerender(deps);
+  });
+  await waitFor(() => {
+    expect(onTrayOpenSession).toHaveBeenCalledTimes(subscriptions);
+    expect(trayListeners.open).not.toBeNull();
+  });
+}
+
 beforeEach(() => {
   trayListeners.open = null;
   trayListeners.newSession = null;
+  vi.mocked(onTrayOpenSession).mockClear();
 });
 
 describe("useTrayEvents", () => {
-  it("open: a closed session resumes through the sidebar path with the persisted display name", async () => {
+  it("open: a session click routes through the sidebar path with the persisted display name", async () => {
     const deps = makeDeps({ sessions: [persisted("a.duck", "我的分析")] });
     await renderTray(deps);
 
@@ -92,9 +99,10 @@ describe("useTrayEvents", () => {
     });
 
     // The wire payload carries only the path; the name is derived from the
-    // persisted list (same scan the sidebar renders).
+    // persisted list (same scan the sidebar renders). The already-open
+    // idempotency is openPersisted's own branch, pinned in
+    // useShellSessions.test.
     expect(deps.openPersisted).toHaveBeenCalledWith("a.duck", "我的分析");
-    expect(deps.activateSession).not.toHaveBeenCalled();
   });
 
   it("open: a path missing from the persisted list opens with the empty name", async () => {
@@ -108,21 +116,6 @@ describe("useTrayEvents", () => {
     expect(deps.openPersisted).toHaveBeenCalledWith("gone.duck", "");
   });
 
-  it("idempotent: an already-open session only activates, never re-resumes", async () => {
-    const deps = makeDeps({
-      openSessions: [openSession("s1", "a.duck")],
-      sessions: [persisted("a.duck", "我的分析")],
-    });
-    await renderTray(deps);
-
-    act(() => {
-      trayListeners.open!({ duck_path: "a.duck" });
-    });
-
-    expect(deps.activateSession).toHaveBeenCalledWith("s1");
-    expect(deps.openPersisted).not.toHaveBeenCalled();
-  });
-
   it("new: navigates to the empty state (the sidebar + action)", async () => {
     const deps = makeDeps();
     await renderTray(deps);
@@ -132,6 +125,74 @@ describe("useTrayEvents", () => {
     });
 
     expect(deps.goToEmptyState).toHaveBeenCalledTimes(1);
+  });
+
+  it("refresh: a post-mount persisted-list change resolves names from the CURRENT list", async () => {
+    // Cold start mounts with an empty list; the disk scan lands later. The
+    // listener must re-subscribe and read the refreshed list, or every
+    // tray-open after the first sidebar refresh opens with the empty name.
+    // Only `sessions` re-identifies across the rerender (the action props
+    // are useCallback-stable in production) -- moving every dep at once
+    // would re-run the effect regardless and discriminate nothing.
+    const openPersisted = vi.fn(async () => {});
+    const goToEmptyState = vi.fn();
+    const mounted = makeDeps({ openPersisted, goToEmptyState });
+    const rendered = await renderTray(mounted);
+
+    act(() => {
+      trayListeners.open!({ duck_path: "a.duck" });
+    });
+    expect(openPersisted).toHaveBeenCalledWith("a.duck", "");
+
+    const refreshed = makeDeps({
+      openPersisted,
+      goToEmptyState,
+      sessions: [persisted("a.duck", "我的分析")],
+    });
+    await rerenderTray(rendered, refreshed, 2);
+
+    act(() => {
+      trayListeners.open!({ duck_path: "a.duck" });
+    });
+    expect(openPersisted).toHaveBeenLastCalledWith("a.duck", "我的分析");
+    expect(openPersisted).toHaveBeenCalledTimes(2);
+  });
+
+  it("refresh: a post-mount open-set change routes through the CURRENT openPersisted", async () => {
+    // openPersisted re-identifies when the open set moves (its useCallback
+    // tracks openSessions); the persisted list and the navigation action
+    // stay put. If the listener kept the mount-time openPersisted, a tray
+    // click on an already-open session would re-resume through the stale
+    // open-set -- the duplicate runtime instance the idempotency exists
+    // to prevent.
+    const sessions: SessionMetadata[] = [];
+    const goToEmptyState = vi.fn();
+    const mountedOpen = vi.fn(async () => {});
+    const mounted = makeDeps({
+      sessions,
+      goToEmptyState,
+      openPersisted: mountedOpen,
+    });
+    const rendered = await renderTray(mounted);
+
+    act(() => {
+      trayListeners.open!({ duck_path: "a.duck" });
+    });
+    expect(mountedOpen).toHaveBeenCalledTimes(1);
+
+    const movedOpen = vi.fn(async () => {});
+    const moved = makeDeps({
+      sessions,
+      goToEmptyState,
+      openPersisted: movedOpen,
+    });
+    await rerenderTray(rendered, moved, 2);
+
+    act(() => {
+      trayListeners.open!({ duck_path: "a.duck" });
+    });
+    expect(movedOpen).toHaveBeenCalledWith("a.duck", "");
+    expect(mountedOpen).toHaveBeenCalledTimes(1);
   });
 
   it("unsubscribes on unmount", async () => {

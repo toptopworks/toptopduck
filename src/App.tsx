@@ -296,9 +296,7 @@ export default function App() {
   // actions (sidebar parity -- the tray introduces no session semantics of
   // its own; the window reveal is handled on the Rust side).
   useTrayEvents({
-    openSessions,
     sessions,
-    activateSession,
     openPersisted,
     goToEmptyState,
   });
