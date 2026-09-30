@@ -53,9 +53,10 @@ use tauri::menu::IsMenuItem;
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::{AppHandle, Emitter, Manager};
 
-use crate::app_config::LocalePreference;
 use crate::persistence::{scan_sessions_dir, SessionMetadata, SessionsRoot};
+use crate::provider::keychain::ProviderConfigSource;
 use crate::provider::live_config::LiveProviderConfig;
+use crate::provider::prompt::ResponseLocale;
 
 /// The tray's registered id; the rebuild path re-resolves the tray by it.
 const TRAY_ID: &str = "main-tray";
@@ -101,7 +102,7 @@ struct OpenSessionPayload {
 /// All user-facing tray strings in one locale. Two languages only -- the app
 /// ships exactly en/zh catalogs, so a tray table for more would be
 /// speculative (YAGNI).
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct TrayTexts {
     pub(crate) recent_header: &'static str,
     pub(crate) more: &'static str,
@@ -129,27 +130,15 @@ const EN: TrayTexts = TrayTexts {
     unnamed_session: "Unnamed session",
 };
 
-/// Resolve the tray strings for one locale preference. `System` follows the
-/// OS locale through the SAME zh/en bucketing the response-locale directive
-/// uses (`resolve_locale_from_tag`, ADR-0052 -- one mapping, not a tray
-/// copy of it); an explicit preference overrides the OS. `os_locale` is a
-/// parameter so the mapping is unit-testable without touching the real OS
-/// locale.
-fn texts_for(pref: LocalePreference, os_locale: Option<&str>) -> TrayTexts {
-    let zh = match pref {
-        LocalePreference::ZhCN => true,
-        LocalePreference::EnUS => false,
-        LocalePreference::System => os_locale.is_some_and(|tag| {
-            matches!(
-                crate::provider::prompt::resolve_locale_from_tag(tag),
-                crate::provider::prompt::ResponseLocale::ZhCN
-            )
-        }),
-    };
-    if zh {
-        ZH
-    } else {
-        EN
+/// Resolve the tray strings for one resolved locale. The three-state
+/// preference dispatch (explicit override / `System` -> OS tag bucketing)
+/// lives in ONE place -- `ProviderConfigSource::locale` (ADR-0052, issue
+/// #1144) -- so this is a plain table lookup on its output, not a tray copy
+/// of the dispatch.
+fn texts_for(locale: ResponseLocale) -> TrayTexts {
+    match locale {
+        ResponseLocale::ZhCN => ZH,
+        ResponseLocale::EnUS => EN,
     }
 }
 
@@ -341,15 +330,16 @@ pub(crate) fn show_main(app: &AppHandle) {
     }
 }
 
-/// The current locale preference, read through the same config carrier the
-/// rest of the backend uses. A read failure degrades to the default
-/// (`System`) preference -- the tray must never fail to build over strings.
+/// The current tray strings, read through the same config carrier the rest
+/// of the backend uses: the provider source's already-resolved locale (the
+/// ADR-0052 single dispatch point). A missing state degrades to the English
+/// bucket -- the tray must never fail to build over strings.
 fn current_texts(app: &AppHandle) -> TrayTexts {
-    let pref = app
+    let locale = app
         .try_state::<LiveProviderConfig>()
-        .map(|live| live.load().locale)
-        .unwrap_or_default();
-    texts_for(pref, sys_locale::get_locale().as_deref())
+        .map(|live| live.locale())
+        .unwrap_or(ResponseLocale::EnUS);
+    texts_for(locale)
 }
 
 /// The close-requested decision (ADR-0125 Decisions 1 + 2): a live tray
@@ -641,40 +631,37 @@ mod tests {
     /// Test-only token for a separator slot in the plan kind assertions.
     const SEP: &str = "--";
 
-    // --- texts_for (three-state mirror, ADR-0052) --------------------------
+    // --- texts_for (whole-table per locale, issue #1144) --------------------
 
+    /// Whole-table equality against independently spelled expectations, not a
+    /// single-field spot check: a swapped or mistranslated entry inside either
+    /// catalog fails here. Comparing against the `ZH`/`EN` consts themselves
+    /// would catch only a branch swap -- both sides would mutate together on
+    /// an in-table edit. The plan tests already pin the EN strings
+    /// positionally; this adds the ZH table.
     #[test]
-    fn system_follows_the_os_locale() {
+    fn texts_for_pins_the_full_table_per_locale() {
         assert_eq!(
-            texts_for(LocalePreference::System, Some("zh-CN")).quit,
-            ZH.quit
+            texts_for(ResponseLocale::ZhCN),
+            TrayTexts {
+                recent_header: "最近会话",
+                more: "更多",
+                new_session: "新会话",
+                open_main: "打开主窗",
+                quit: "退出",
+                unnamed_session: "未命名会话",
+            }
         );
         assert_eq!(
-            texts_for(LocalePreference::System, Some("zh")).quit,
-            ZH.quit
-        );
-        assert_eq!(
-            texts_for(LocalePreference::System, Some("en-US")).quit,
-            EN.quit
-        );
-        // Case-insensitive tag matching.
-        assert_eq!(
-            texts_for(LocalePreference::System, Some("ZH-Hant")).quit,
-            ZH.quit
-        );
-        // No OS locale at all: the English bucket is the fallback.
-        assert_eq!(texts_for(LocalePreference::System, None).quit, EN.quit);
-    }
-
-    #[test]
-    fn explicit_preference_overrides_the_os_locale() {
-        assert_eq!(
-            texts_for(LocalePreference::ZhCN, Some("en-US")).quit,
-            ZH.quit
-        );
-        assert_eq!(
-            texts_for(LocalePreference::EnUS, Some("zh-CN")).quit,
-            EN.quit
+            texts_for(ResponseLocale::EnUS),
+            TrayTexts {
+                recent_header: "Recent sessions",
+                more: "More",
+                new_session: "New session",
+                open_main: "Open main window",
+                quit: "Quit",
+                unnamed_session: "Unnamed session",
+            }
         );
     }
 
@@ -719,7 +706,7 @@ mod tests {
 
     #[test]
     fn label_falls_back_to_unnamed_for_blank_display_names() {
-        let texts = texts_for(LocalePreference::ZhCN, None);
+        let texts = texts_for(ResponseLocale::ZhCN);
         assert_eq!(
             session_label(&meta("a.duck", ""), &texts),
             texts.unnamed_session
@@ -845,7 +832,7 @@ mod tests {
     #[test]
     fn plan_pins_the_full_assembly_order() {
         let metas: Vec<_> = (0..4).map(|i| meta(&format!("s{i}.duck"), "n")).collect();
-        let plan = plan_menu(&metas, &texts_for(LocalePreference::EnUS, None));
+        let plan = plan_menu(&metas, &texts_for(ResponseLocale::EnUS));
         let rows: Vec<(&str, &str, bool)> = plan
             .iter()
             .filter_map(|e| match e {
@@ -883,13 +870,13 @@ mod tests {
     #[test]
     fn plan_omits_the_more_submenu_when_empty() {
         let metas: Vec<_> = (0..3).map(|i| meta(&format!("s{i}.duck"), "n")).collect();
-        let plan = plan_menu(&metas, &texts_for(LocalePreference::ZhCN, None));
+        let plan = plan_menu(&metas, &texts_for(ResponseLocale::ZhCN));
         assert!(plan.iter().all(|e| !matches!(e, MenuEntry::More { .. })));
         // With no sessions at all the header + the three fixed actions
         // plus the two zone separators remain, in layout order -- the
         // empty tray still offers new/open/quit, with no doubled
         // separator anywhere.
-        let plan = plan_menu(&[], &texts_for(LocalePreference::ZhCN, None));
+        let plan = plan_menu(&[], &texts_for(ResponseLocale::ZhCN));
         let kinds: Vec<&str> = plan
             .iter()
             .map(|e| match e {
@@ -916,7 +903,7 @@ mod tests {
         // Two separators, three zones: the session block (header + rows +
         // more), the window actions, and the exit on its own.
         let metas: Vec<_> = (0..4).map(|i| meta(&format!("s{i}.duck"), "n")).collect();
-        let plan = plan_menu(&metas, &texts_for(LocalePreference::EnUS, None));
+        let plan = plan_menu(&metas, &texts_for(ResponseLocale::EnUS));
         let kinds: Vec<&str> = plan
             .iter()
             .map(|e| match e {
