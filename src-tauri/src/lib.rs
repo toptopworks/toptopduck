@@ -172,7 +172,7 @@ pub fn run() {
         );
     }
 
-    app_builder
+    let app = app_builder
         .plugin(tauri_plugin_dialog::init())
         // Platform detection (ADR-0074, issue #262): plugin-os injects the
         // compile-time OS as a webview global the frontend reads synchronously
@@ -607,8 +607,19 @@ pub fn run() {
             #[cfg(desktop)]
             commands::tray_ready,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application");
+
+    app.run(|_app, _event| {
+        // Dock icon click must reopen the hidden resident window (issue
+        // #1143). The Reopen variant only exists on macOS, so other
+        // platforms compile an empty callback and behave exactly as the
+        // callback-less Builder::run did.
+        #[cfg(target_os = "macos")]
+        if let tauri::RunEvent::Reopen { .. } = _event {
+            tray::show_main(_app);
+        }
+    });
 }
 
 /// The bridge binary's file name expected beside the app exe in dev builds.
