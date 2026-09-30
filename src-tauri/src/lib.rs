@@ -413,7 +413,7 @@ pub fn run() {
             // running turn's execution lives in backend threads + external
             // CLIs and its approval surface lives in the webview -- a real
             // destroy would strand the turn. Registered AFTER SessionsRoot
-            // is managed so the first on-click menu rebuild can already read
+            // is managed so the first menu rebuild can already read
             // it. init returns whether the tray is live, and the close
             // handler below keys off that through tray::close_hides (pinned
             // in tray's tests): an unavailable tray (no icon resource, or

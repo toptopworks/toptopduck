@@ -11,10 +11,11 @@
 //! entirely when empty) + new session / open main window / quit. Session
 //! data comes from the SAME directory scan the sidebar uses (ADR-0089) --
 //! same source, same fields. The two lists refresh independently (the
-//! sidebar on demand, the tray per click), so a transient freshness gap
+//! sidebar on demand, the tray per visit), so a transient freshness gap
 //! is normal; the scan is shared, so the shape never diverges. The menu
-//! is rebuilt on tray click (throttled) rather than kept live -- a
-//! stale-by-one-click list is the accepted cost of not running a watcher.
+//! is rebuilt on tray hover and left click (throttled) rather than kept
+//! live -- a stale-by-one-visit list is the accepted cost of not running
+//! a watcher.
 //!
 //! Exit semantics (ADR-0125 Decision 1): the tray Quit item is the ONLY
 //! exit channel, via a plain `app.exit(0)`. `ExitRequested` is not
@@ -73,8 +74,9 @@ const ID_SESSION_PREFIX: &str = "tray-open-session::";
 const RECENT_CAP: usize = 3;
 /// How many sessions the "more" submenu holds (Decision 3: next 10).
 const MORE_CAP: usize = 10;
-/// Minimum spacing between on-click menu rebuilds (Decision 3: rebuild on
-/// click, throttled -- rapid clicking must not scan the directory per click).
+/// Minimum spacing between menu rebuilds (throttled -- sweeping the tray area
+/// must not scan the directory per visit; the trigger set lives in
+/// [`plan_tray_event`]).
 const REBUILD_THROTTLE: Duration = Duration::from_secs(5);
 
 /// The `tray://open-session` payload. `duck_path` alone; see
@@ -341,15 +343,15 @@ pub(crate) fn close_hides(tray_available: bool) -> bool {
 
 /// Rebuild the tray menu off the event thread: scan the sessions directory
 /// (spawn_blocking, the same posture as the `list_sessions` command),
-/// re-resolve strings, and swap the menu in. Throttled so tray clicking
-/// cannot hammer the scan; a FAILED scan-join, build, or swap releases the
-/// throttle window (the timestamp reserves it against concurrent spawns,
-/// then clears on failure) so the next click retries instead of waiting
-/// out a window a dead build burned, and logs while keeping the previous
-/// menu -- a stale list beats no tray. The scan itself cannot fail loudly:
-/// it degrades to an empty list (the same face the sidebar's error path
-/// shows), which swaps in honestly and self-heals on the next
-/// post-throttle click.
+/// re-resolve strings, and swap the menu in. Throttled so tray hovering and
+/// clicking cannot hammer the scan; a FAILED scan-join, build, or swap
+/// releases the throttle window (the timestamp reserves it against
+/// concurrent spawns, then clears on failure) so the next visit retries
+/// instead of waiting out a window a dead build burned, and logs while
+/// keeping the previous menu -- a stale list beats no tray. The scan itself
+/// cannot fail loudly: it degrades to an empty list (the same face the
+/// sidebar's error path shows), which swaps in honestly and self-heals on
+/// the next post-throttle visit.
 fn rebuild_soon(app: AppHandle) {
     static LAST_REBUILD: std::sync::Mutex<Option<Instant>> = std::sync::Mutex::new(None);
     tauri::async_runtime::spawn(async move {
@@ -397,6 +399,46 @@ fn rebuild_soon(app: AppHandle) {
     });
 }
 
+/// What the tray-icon event wiring does for one event: whether it reveals
+/// the window and whether it triggers a menu rebuild. Extracted as a named,
+/// pinned seam like [`close_hides`] -- the wiring around it is imperative.
+#[derive(Debug)]
+struct TrayEventPlan {
+    reveal: bool,
+    rebuild: bool,
+}
+
+/// Decide the wiring for one tray-icon event. The rebuild trigger rides
+/// hover enter and the LEFT click; a RIGHT-click rebuild races Windows's
+/// menu display: `set_menu` swapping the HMENU while it is open closes the
+/// menu on the spot -- the first right click showed a flash of menu, and
+/// the throttle then suppressed the rebuild so the second click worked.
+/// Enter gives the rebuild the hover-to-click gap to settle BEFORE the menu
+/// opens; the left click stays as a second trigger (it never opens the
+/// menu). Caveat: the Linux GTK backend dispatches NO icon events
+/// (AppIndicator exposes no click callback), so there the menu carries
+/// only the boot-time fill -- no trigger of ours can fire.
+fn plan_tray_event(event: &TrayIconEvent) -> TrayEventPlan {
+    match event {
+        TrayIconEvent::Enter { .. } => TrayEventPlan {
+            reveal: false,
+            rebuild: true,
+        },
+        TrayIconEvent::Click {
+            button: MouseButton::Left,
+            button_state: MouseButtonState::Up,
+            ..
+        } => TrayEventPlan {
+            reveal: true,
+            rebuild: true,
+        },
+        _ => TrayEventPlan {
+            reveal: false,
+            rebuild: false,
+        },
+    }
+}
+
 /// Register the system tray. Returns whether it is live; the caller keys the
 /// close-to-hide semantics off this (ADR-0125 Decision 2 -- an unavailable
 /// tray keeps close = real exit). The initial menu carries no sessions (zero
@@ -440,18 +482,11 @@ pub(crate) fn init(app: &AppHandle) -> bool {
             None => {}
         })
         .on_tray_icon_event(|tray, event| {
-            if let TrayIconEvent::Click {
-                button,
-                button_state: MouseButtonState::Up,
-                ..
-            } = event
-            {
-                if button == MouseButton::Left {
-                    show_main(tray.app_handle());
-                }
-                // Any-button click (left reveals, right opens the menu) is
-                // the menu-freshness trigger; hover/move events do not
-                // rebuild. The rebuild itself is throttled.
+            let plan = plan_tray_event(&event);
+            if plan.reveal {
+                show_main(tray.app_handle());
+            }
+            if plan.rebuild {
                 rebuild_soon(tray.app_handle().clone());
             }
         })
@@ -683,5 +718,67 @@ mod tests {
         // remain -- the empty tray still offers new/open/quit.
         let plan = plan_menu(&[], &texts_for(LocalePreference::ZhCN, None));
         assert_eq!(plan.len(), 4);
+    }
+
+    // --- plan_tray_event (rebuild trigger stays off the right click) ------
+
+    use tauri::tray::TrayIconId;
+    use tauri::{PhysicalPosition, PhysicalSize, Position, Rect, Size};
+
+    /// A minimal Click event: id/position/rect carry no wiring weight.
+    fn click(button: MouseButton, state: MouseButtonState) -> TrayIconEvent {
+        TrayIconEvent::Click {
+            id: TrayIconId(TRAY_ID.into()),
+            position: PhysicalPosition::new(0.0, 0.0),
+            rect: Rect {
+                position: Position::Physical(PhysicalPosition::new(0, 0)),
+                size: Size::Physical(PhysicalSize::new(0, 0)),
+            },
+            button,
+            button_state: state,
+        }
+    }
+
+    fn enter() -> TrayIconEvent {
+        TrayIconEvent::Enter {
+            id: TrayIconId(TRAY_ID.into()),
+            position: PhysicalPosition::new(0.0, 0.0),
+            rect: Rect {
+                position: Position::Physical(PhysicalPosition::new(0, 0)),
+                size: Size::Physical(PhysicalSize::new(0, 0)),
+            },
+        }
+    }
+
+    #[test]
+    fn right_click_up_triggers_neither_action() {
+        // The bug this pins: a right-click-up rebuild swapped the HMENU
+        // while Windows had the menu open, closing it on the spot.
+        let plan = plan_tray_event(&click(MouseButton::Right, MouseButtonState::Up));
+        assert!(!plan.reveal);
+        assert!(!plan.rebuild);
+    }
+
+    #[test]
+    fn left_click_up_reveals_and_rebuilds() {
+        let plan = plan_tray_event(&click(MouseButton::Left, MouseButtonState::Up));
+        assert!(plan.reveal);
+        assert!(plan.rebuild);
+    }
+
+    #[test]
+    fn left_click_down_does_nothing() {
+        let plan = plan_tray_event(&click(MouseButton::Left, MouseButtonState::Down));
+        assert!(!plan.reveal);
+        assert!(!plan.rebuild);
+    }
+
+    #[test]
+    fn enter_rebuilds_without_revealing() {
+        // Hover refreshes the menu without stealing focus from whatever the
+        // user is doing -- Enter must not reveal.
+        let plan = plan_tray_event(&enter());
+        assert!(!plan.reveal);
+        assert!(plan.rebuild);
     }
 }
