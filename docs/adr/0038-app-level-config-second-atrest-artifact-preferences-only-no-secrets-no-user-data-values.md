@@ -46,4 +46,4 @@ ADR-0029 不变量 2 = 「默认零**用户数据**持久落盘」、ADR-0034 �
 - **收口 ADR-0004/0005/0011/0019 的「可调默认」归宿**：这些可调参数的默认值与上次值住 app-config；会话内临时覆盖不落盘（除非另存）。
 - 实现侧：app-config 读写（OS app-data 目录）、schema 只含 IN 项、迁移随 app 版本（与 `.duck` 的 `format_version` 不同域——app-config 是 app 级、随 app 升级自行迁移，不需跨用户移植）。
 - app-config 不可移植（机/用户级偏好），与 `.duck` 的可移植性正交——分享分析给同事只给 `.duck`，不带偏好。
-- **窗口几何移交原生 plugin（issue #268）**：app-config 原含 `window` 字段，与 `tauri_plugin_window_state` 形成**双重持久化**——启动时两条恢复路径时序错位，窗口从系统默认位置跳到恢复位置。`window` 字段退役，几何改由 `tauri_plugin_window_state` 独占（`SIZE | POSITION | MAXIMIZED | VISIBLE` flags + `tauri.conf.json` `visible:false`，plugin 在窗口可见前应用几何后 `show()`）。
+- **窗口几何移交原生 plugin（issue #268）**：app-config 原含 `window` 字段，与 `tauri_plugin_window_state` 形成**双重持久化**——启动时两条恢复路径时序错位，窗口从系统默认位置跳到恢复位置。`window` 字段退役，几何改由 `tauri_plugin_window_state` 独占（`SIZE | POSITION | MAXIMIZED` flags + `tauri.conf.json` `visible:false`，plugin 只在窗口可见前应用几何，`show()` 由应用在窗口 build 后自行执行——可见性不入存档：`VISIBLE` flag 的退出时写回会捕捉活窗口状态，「隐藏到托盘后退出」（ADR-0125）即存 `visible:false`，门控下次启动的显示；启动恒显主窗口，可见性无可恢复状态）。
