@@ -32,6 +32,16 @@
 //! absent (no StatusNotifierItem host), so the fallback is a real path,
 //! not defensive dead code.
 //!
+//! Tray-ready handshake (issue #1142): `app.emit` is a fire-and-forget
+//! broadcast that returns `Ok` with zero listeners, so a session-level
+//! menu click before the webview's tray listeners register would be lost
+//! without a trace (cold start, or a webview reload). Such clicks buffer
+//! in a single slot (the last action wins) and replay when the frontend's
+//! `tray_ready` arrives; a webview page-load Started drops readiness
+//! again so a reload re-arms the buffer. The window reveal never waits
+//! for the handshake -- it runs on the Rust side at click time, and once
+//! ready the steady path emits directly with zero handshake traffic.
+//!
 //! Tray strings mirror the locale preference's three states
 //! (ADR-0052): explicit zh-CN / en-US override, `System` resolved via
 //! sys-locale exactly like the Rust-side response-locale directive (the
@@ -352,6 +362,99 @@ pub(crate) fn close_hides(tray_available: bool) -> bool {
     tray_available
 }
 
+/// A session-level tray action in the shape the readiness handshake
+/// buffers it (issue #1142): only the two actions with a frontend
+/// consequence. OpenMain reveals the window at click time and Quit exits
+/// the process -- neither has a webview half, so neither is buffered.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum PendingSessionAction {
+    OpenSession { duck_path: String },
+    NewSession,
+}
+
+/// Mutable core of [`TrayReadiness`] -- one lock covers both fields so
+/// the record / mark_ready / page-load decisions stay atomic against each
+/// other.
+#[derive(Default)]
+struct ReadinessCore {
+    ready: bool,
+    pending: Option<PendingSessionAction>,
+}
+
+/// The tray-ready handshake state (issue #1142) -- the buffering
+/// contract is the module doc's handshake paragraph. Deltas: the
+/// lost-click symptom is a window that reveals while the session never
+/// opens, and LAST-wins treats a rapid double click as one user
+/// intent, not a queue.
+#[derive(Default)]
+// pub (not the module-default pub(crate)) because the pub `tray_ready`
+// command's signature references the type; Rust's private-interfaces
+// lint forces the wider visibility.
+pub struct TrayReadiness(std::sync::Mutex<ReadinessCore>);
+
+impl TrayReadiness {
+    /// A session action arrived. `true` = it was buffered (the frontend
+    /// is not ready; the caller skips its emit); `false` = the listeners
+    /// are live (the caller emits directly). Borrows the action -- only
+    /// the buffering branch stores it, so the steady-state click (the
+    /// common case) clones nothing here.
+    pub(crate) fn record(&self, action: &PendingSessionAction) -> bool {
+        let mut core = self.0.lock().expect("tray readiness lock poisoned");
+        if core.ready {
+            false
+        } else {
+            core.pending = Some(action.clone());
+            true
+        }
+    }
+
+    /// The frontend finished registering its listeners: mark ready and
+    /// hand back the buffered action, if any. Idempotent -- a repeated
+    /// `tray_ready` replays nothing.
+    pub(crate) fn mark_ready(&self) -> Option<PendingSessionAction> {
+        let mut core = self.0.lock().expect("tray readiness lock poisoned");
+        core.ready = true;
+        core.pending.take()
+    }
+
+    /// The webview started (re)loading: its listeners are gone until the
+    /// next `tray_ready`, so clicks must buffer again. The pending slot
+    /// is retained -- an action that raced the reload still carries the
+    /// user's intent, and the freshly loaded page replays it.
+    pub(crate) fn page_load_started(&self) {
+        self.0.lock().expect("tray readiness lock poisoned").ready = false;
+    }
+}
+
+/// Emit one session-level tray action on its wire event -- the shared
+/// tail of the direct path and the handshake replay.
+pub(crate) fn emit_session_action(app: &AppHandle, action: &PendingSessionAction) {
+    let result = match action {
+        PendingSessionAction::OpenSession { duck_path } => app.emit(
+            OPEN_SESSION_EVENT,
+            OpenSessionPayload {
+                duck_path: duck_path.clone(),
+            },
+        ),
+        PendingSessionAction::NewSession => app.emit(NEW_SESSION_EVENT, ()),
+    };
+    if let Err(e) = result {
+        log::warn!("tray session action emit failed ({action:?}): {e}");
+    }
+}
+
+/// Route one session-level tray action through the handshake (issue
+/// #1142): buffer for replay while the frontend listeners are not up,
+/// emit directly once they are. The state is managed in setup before
+/// [`init`], so the lookup is a structural invariant -- same crate,
+/// same boot -- not a runtime option.
+fn dispatch_session_action(app: &AppHandle, action: PendingSessionAction) {
+    let buffered = app.state::<TrayReadiness>().record(&action);
+    if !buffered {
+        emit_session_action(app, &action);
+    }
+}
+
 /// Rebuild the tray menu off the event thread: scan the sessions directory
 /// (spawn_blocking, the same posture as the `list_sessions` command),
 /// re-resolve strings, and swap the menu in. Throttled so tray hovering and
@@ -478,15 +581,11 @@ pub(crate) fn init(app: &AppHandle) -> bool {
         .on_menu_event(|app, event| match parse_menu_id(event.id().as_ref()) {
             Some(TrayAction::OpenSession { duck_path }) => {
                 show_main(app);
-                if let Err(e) = app.emit(OPEN_SESSION_EVENT, OpenSessionPayload { duck_path }) {
-                    log::warn!("tray open-session emit failed: {e}");
-                }
+                dispatch_session_action(app, PendingSessionAction::OpenSession { duck_path });
             }
             Some(TrayAction::NewSession) => {
                 show_main(app);
-                if let Err(e) = app.emit(NEW_SESSION_EVENT, ()) {
-                    log::warn!("tray new-session emit failed: {e}");
-                }
+                dispatch_session_action(app, PendingSessionAction::NewSession);
             }
             Some(TrayAction::OpenMain) => show_main(app),
             Some(TrayAction::Quit) => app.exit(0),
@@ -671,6 +770,64 @@ mod tests {
         // exit -- the stranded "hidden window, no exit path" state stays
         // unreachable.
         assert!(!close_hides(false));
+    }
+
+    // --- TrayReadiness (the tray-ready handshake, issue #1142) ------------
+
+    fn open(path: &str) -> PendingSessionAction {
+        PendingSessionAction::OpenSession {
+            duck_path: path.into(),
+        }
+    }
+
+    #[test]
+    fn not_ready_clicks_buffer_and_only_the_last_action_replays() {
+        let readiness = TrayReadiness::default();
+        // Three clicks before the frontend registers its listeners: each
+        // reports buffered (the caller skips its emit)...
+        assert!(readiness.record(&open("a.duck")));
+        assert!(readiness.record(&open("b.duck")));
+        assert!(readiness.record(&PendingSessionAction::NewSession));
+        // ...and only the LAST action replays -- a rapid double click is
+        // one user intent, not a queue.
+        assert_eq!(
+            readiness.mark_ready(),
+            Some(PendingSessionAction::NewSession)
+        );
+        // A repeated ready (a stale tray_ready call) replays nothing.
+        assert_eq!(readiness.mark_ready(), None);
+    }
+
+    #[test]
+    fn once_ready_clicks_pass_through_untouched() {
+        let readiness = TrayReadiness::default();
+        readiness.mark_ready();
+        // record returning false = not buffered = the caller emits
+        // directly (the steady path: zero handshake traffic per click).
+        assert!(!readiness.record(&open("a.duck")));
+        assert_eq!(readiness.mark_ready(), None);
+    }
+
+    #[test]
+    fn a_page_load_re_arms_the_buffer() {
+        let readiness = TrayReadiness::default();
+        readiness.mark_ready();
+        // A reload tears the webview's listeners down; Started is the
+        // earliest backend-visible signal, so clicks buffer again until
+        // the next tray_ready.
+        readiness.page_load_started();
+        assert!(readiness.record(&open("c.duck")));
+        assert_eq!(readiness.mark_ready(), Some(open("c.duck")));
+    }
+
+    #[test]
+    fn a_page_load_keeps_an_action_that_raced_the_reload() {
+        let readiness = TrayReadiness::default();
+        assert!(readiness.record(&open("a.duck")));
+        // The webview reloaded before the ready landed; the buffered
+        // intent survives and the freshly loaded page replays it.
+        readiness.page_load_started();
+        assert_eq!(readiness.mark_ready(), Some(open("a.duck")));
     }
 
     // --- wire names (the frontend listens on these exact strings) ----------

@@ -3766,6 +3766,20 @@ fn build_skill_source_candidates(
     candidates
 }
 
+/// The tray-ready handshake (issue #1142): the frontend calls this once
+/// its tray listeners are registered (cold start + each webview reload).
+/// The backend replays the single session action, if any, that was
+/// clicked before that point -- the pre-registration window otherwise
+/// loses it without a trace (`app.emit` returns `Ok` with zero
+/// listeners). Desktop-only, like the tray surface itself.
+#[cfg(desktop)]
+#[tauri::command]
+pub fn tray_ready(app: tauri::AppHandle, readiness: State<'_, crate::tray::TrayReadiness>) {
+    if let Some(action) = readiness.mark_ready() {
+        crate::tray::emit_session_action(&app, &action);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
