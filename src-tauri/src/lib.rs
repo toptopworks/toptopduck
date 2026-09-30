@@ -35,6 +35,7 @@ pub mod session;
 pub mod session_store;
 pub mod skills;
 pub mod tools;
+pub mod tray;
 pub mod util;
 pub mod window;
 pub mod workingset;
@@ -121,13 +122,14 @@ pub fn run() {
     // SessionStore (ADR-0056) and the two race on the app-config atomic write
     // (ADR-0038). cfg(desktop) mirrors the Cargo.toml target guard -- mobile
     // builds neither pull the plugin nor register it.
+    //
+    // The reveal routes through tray::show_main (ADR-0125, issue #1140):
+    // the window may be HIDDEN (resident behind the tray), where the old
+    // set_focus + unminimize left the second launch visually unresponsive.
     #[cfg(desktop)]
     {
         app_builder = app_builder.plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
-            if let Some(window) = app.get_webview_window("main") {
-                let _ = window.set_focus();
-                let _ = window.unminimize();
-            }
+            tray::show_main(app);
         }));
     }
 
@@ -401,6 +403,42 @@ pub fn run() {
                 }
             };
             app.manage(catalog_store);
+
+            // System tray residency (ADR-0125, issue #1140). The tray is the
+            // resident surface while the main window is hidden: closing the
+            // window hides it instead of killing the process, because a
+            // running turn's execution lives in backend threads + external
+            // CLIs and its approval surface lives in the webview -- a real
+            // destroy would strand the turn. Registered AFTER SessionsRoot
+            // is managed so the first on-click menu rebuild can already read
+            // it. init returns whether the tray is live, and the close
+            // handler below keys off that: an unavailable tray (no icon
+            // resource, or Linux without a StatusNotifierItem host) keeps
+            // close = real exit, so the stranded "window hidden, no tray, no
+            // exit path" state is unreachable by construction (ADR-0125
+            // Decision 2).
+            let tray_available = tray::init(app.handle());
+            if let Some(main_window) = app.get_webview_window("main") {
+                let window_for_close = main_window.clone();
+                main_window.on_window_event(move |event| {
+                    if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                        if !tray_available {
+                            // Degradation path (ADR-0125 Decision 2): no
+                            // resident surface, so the default real close
+                            // runs and the process exits.
+                            return;
+                        }
+                        // Hide, don't destroy: the resident form (ADR-0125
+                        // Decision 1). Windows also drops the taskbar entry
+                        // so the hidden window leaves no dead taskbar
+                        // button; show_main restores it symmetrically.
+                        api.prevent_close();
+                        #[cfg(target_os = "windows")]
+                        let _ = window_for_close.set_skip_taskbar(true);
+                        let _ = window_for_close.hide();
+                    }
+                });
+            }
 
             // Visibility safety net (issue #268). `visible: false` in
             // tauri.conf.json + the window-state plugin's VISIBLE flag mean
