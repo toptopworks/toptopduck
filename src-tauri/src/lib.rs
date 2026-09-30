@@ -325,9 +325,30 @@ pub fn run() {
                 .iter()
                 .find(|w| w.label == "main")
                 .ok_or("main window config missing from tauri.conf.json")?;
-            tauri::WebviewWindowBuilder::from_config(app.handle(), main_window_cfg)?
-                .initialization_script(app_config::boot_seed::boot_seed_script(&boot_cfg))
-                .build()?;
+            let main_window_builder =
+                tauri::WebviewWindowBuilder::from_config(app.handle(), main_window_cfg)?
+                    .initialization_script(app_config::boot_seed::boot_seed_script(&boot_cfg));
+            // Tray-ready handshake state (issue #1142): managed BEFORE
+            // this window build (so the page-load hook below never
+            // observes a missing state) and before tray::init (so menu
+            // clicks from the very first moment find it). Desktop-only,
+            // like the tray surface; a mobile build manages nothing and
+            // the tray dispatch degrades to the direct emit.
+            #[cfg(desktop)]
+            app.manage(tray::TrayReadiness::default());
+            // A page (re)load tears the webview's tray listeners down;
+            // Started is the earliest backend-visible signal of that, so
+            // readiness drops here and the next tray_ready re-arms the
+            // buffer. The lookup is the structural invariant noted above
+            // (managed before this build). The cfg gate mirrors the
+            // managed type (the closure references it).
+            #[cfg(desktop)]
+            let main_window_builder = main_window_builder.on_page_load(|window, payload| {
+                if matches!(payload.event(), tauri::webview::PageLoadEvent::Started) {
+                    window.state::<tray::TrayReadiness>().page_load_started();
+                }
+            });
+            main_window_builder.build()?;
             // ADR-0089 + issue #452: managed sessions directory. Default root
             // is `<Documents>/toptopduck/sessions/` (platform-conventions
             // Documents, not hidden app-data). When app-config carries a
@@ -582,6 +603,9 @@ pub fn run() {
             commands::set_agent_enabled,
             commands::list_skill_sources,
             commands::import_skills,
+            // Desktop-only with the tray surface (issue #1142 handshake).
+            #[cfg(desktop)]
+            commands::tray_ready,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

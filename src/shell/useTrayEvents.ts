@@ -8,8 +8,17 @@
 // (ADR-0092 empty-state navigation). The window reveal itself is handled
 // on the Rust side at click time, so this hook carries only the
 // session-level consequence.
-import { useEffect } from "react";
-import { onTrayNewSession, onTrayOpenSession } from "../api";
+//
+// The tray-ready handshake (issue #1142): a click before the listeners
+// register is buffered on the Rust side, so once BOTH subscriptions
+// resolve the hook fires tray_ready to release the replay. Gated by a ref
+// (not the deps array): a re-subscription is not a page load -- the
+// backend stayed ready -- so the handshake fires once per page load
+// (cold start + each webview reload, which resets the ref with the whole
+// page).
+import { useEffect, useRef } from "react";
+import { log } from "../lib/log";
+import { onTrayNewSession, onTrayOpenSession, trayReady } from "../api";
 import type { SessionMetadata } from "../types/session";
 
 export interface UseTrayEventsDeps {
@@ -29,6 +38,7 @@ export function useTrayEvents({
   openPersisted,
   goToEmptyState,
 }: UseTrayEventsDeps): void {
+  const handshookRef = useRef(false);
   useEffect(() => {
     let disposed = false;
     const unlisteners: Array<() => void> = [];
@@ -38,7 +48,7 @@ export function useTrayEvents({
       if (disposed) unlisten();
       else unlisteners.push(unlisten);
     };
-    void onTrayOpenSession((ev) => {
+    const openPromise = onTrayOpenSession((ev) => {
       // The wire payload carries only the path; the display name comes from
       // the same persisted list the sidebar renders (same scan, same
       // field). An unknown path (deleted between menu build and click)
@@ -47,10 +57,21 @@ export function useTrayEvents({
       const name =
         sessions.find((s) => s.duck_path === ev.duck_path)?.display_name ?? "";
       void openPersisted(ev.duck_path, name);
-    }).then(track);
-    void onTrayNewSession(() => {
+    });
+    const newPromise = onTrayNewSession(() => {
       goToEmptyState();
-    }).then(track);
+    });
+    // Both subscriptions must resolve before the handshake: replaying
+    // after the first would deliver a buffered open/new into a page where
+    // the other listener is still missing.
+    Promise.all([openPromise, newPromise]).then((resolved) => {
+      for (const unlisten of resolved) track(unlisten);
+      if (disposed || handshookRef.current) return;
+      handshookRef.current = true;
+      trayReady().catch((e) => {
+        log.warn("tray", "tray_ready handshake rejected", e);
+      });
+    });
     return () => {
       disposed = true;
       for (const unlisten of unlisteners) unlisten();

@@ -1036,3 +1036,12 @@ export async function onTrayOpenSession(
 export async function onTrayNewSession(cb: () => void): Promise<UnlistenFn> {
   return listen("tray://new-session", () => cb());
 }
+
+// The tray-ready handshake (issue #1142): tell the backend the two tray
+// listeners above are registered. Session actions clicked before this
+// point (cold start, or a webview reload before re-registration) were
+// buffered on the Rust side and replay on this call; the steady path
+// never invokes it -- one shot per page load.
+export async function trayReady(): Promise<void> {
+  return invoke("tray_ready");
+}
