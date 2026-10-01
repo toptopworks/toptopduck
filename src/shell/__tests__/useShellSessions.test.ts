@@ -46,15 +46,9 @@ vi.mock("../../api", async (importOriginal) => {
     listLiveSessions: vi.fn(async () => []),
     createSession: vi.fn(),
     closeSession: vi.fn(async () => false),
-    closeSessionAndWaitRelease: vi.fn(async () => {}),
-    deleteSession: vi.fn(async () => {}),
-    exportSession: vi.fn(async () => {}),
     onResumeProgress: vi.fn(async () => () => {}),
     openDuck: vi.fn(async () => {}),
     prepareImportSession: vi.fn(),
-    renamePersistedSession: vi.fn(async () => {}),
-    renameSession: vi.fn(async () => ""),
-    getSessionName: vi.fn(async () => ""),
     // ADR-0092 cold-start posture application (runtime + auth mode + skill
     // mounts + MCP enables, all before registerOpen). Default no-ops; the
     // posture tests assert calls.
@@ -87,19 +81,15 @@ vi.mock("../../lib/log", () => ({
 import {
   closeSession,
   createSession,
-  exportSession,
-  getSessionName,
   listLiveSessions,
   openDuck,
   onResumeProgress,
   prepareImportSession,
-  renamePersistedSession,
-  renameSession,
   setAuthorizationMode,
   setSessionPosture,
   setSessionRuntime,
 } from "../../api";
-import { open as openDialog, save as saveDialog } from "@tauri-apps/plugin-dialog";
+import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { log } from "../../lib/log";
 import { mountComposerBarStub } from "../../__tests__/setup/barRectStub";
 import { useShellSessions } from "../useShellSessions";
@@ -610,8 +600,9 @@ describe("useShellSessions", () => {
   // --- Issue #204: hook-level coverage gaps --------------------------------
   // These pin the concurrency + branch contracts a regression would silently
   // break (no black-box signal): the busy-gated drop listener, the in-flight
-  // double-drop guard, the renameEntry closed / reject / blank branches, the
-  // dialog-cancel paths, and the multi-session active-id fallback.
+  // double-drop guard, and the multi-session active-id fallback. The
+  // renameEntry / dialog-cancel / export branches moved to
+  // useSessionFileOps.test.ts (#1155).
 
   it("suppresses a webview drop while busy and routes it once busy clears (#204)", async () => {
     // The drop-listener effect early-returns while busy, so a drop during a
@@ -680,100 +671,6 @@ describe("useShellSessions", () => {
     });
     expect(createSession).toHaveBeenCalledTimes(2);
     expect(result.current.openSessions).toHaveLength(2);
-  });
-
-  it("renameEntry rewrites a closed .duck header via renamePersistedSession + refreshes (closed branch, #204)", async () => {
-    // The closed branch (sid=null, path set) rewrites the recipe header in place
-    // by path, then refreshes the sidebar so list_sessions re-derives the name.
-    vi.mocked(renamePersistedSession).mockResolvedValueOnce();
-    const { result, refreshSessions, setShellError } = renderSessions();
-    await act(async () => {
-      await result.current.renameEntry(null, "/x/foo.duck", "new");
-    });
-    expect(renamePersistedSession).toHaveBeenCalledWith("/x/foo.duck", "new");
-    expect(refreshSessions).toHaveBeenCalledTimes(1);
-    expect(setShellError).not.toHaveBeenCalled();
-  });
-
-  it("renameEntry surfaces a renamePersistedSession reject via setShellError and skips refresh (closed branch, #204)", async () => {
-    // The catch returns BEFORE refreshSessions fires, so the sidebar never lists
-    // a name the backend just rejected -- the next list_sessions re-derives the
-    // on-disk truth instead.
-    vi.mocked(renamePersistedSession).mockRejectedValueOnce(
-      new Error("rename rejected"),
-    );
-    const { result, refreshSessions, setShellError } = renderSessions();
-    await act(async () => {
-      await result.current.renameEntry(null, "/x/foo.duck", "new");
-    });
-    expect(renamePersistedSession).toHaveBeenCalledWith("/x/foo.duck", "new");
-    expect(setShellError).toHaveBeenCalledTimes(1);
-    expect(refreshSessions).not.toHaveBeenCalled();
-  });
-
-  it("renameEntry trims input and bails on whitespace-only (no IPC, no refresh, #204)", async () => {
-    // The trim guard runs before either branch: a blank name skips
-    // renameSession / renamePersistedSession AND refreshSessions, so an
-    // accidental empty rename cannot trigger a spurious sidebar re-fetch.
-    const { result, refreshSessions, setShellError } = renderSessions();
-    await act(async () => {
-      await result.current.renameEntry("s1", "/sessions/s1/session.duck", "   ");
-    });
-    expect(renameSession).not.toHaveBeenCalled();
-    expect(renamePersistedSession).not.toHaveBeenCalled();
-    expect(refreshSessions).not.toHaveBeenCalled();
-    expect(setShellError).not.toHaveBeenCalled();
-  });
-
-  it("handleOpenDuck bails on a cancelled open dialog (null path): no open, no refresh, busy clears (#204)", async () => {
-    vi.mocked(openDialog).mockResolvedValueOnce(null);
-    const { result, refreshSessions } = renderSessions();
-    await act(async () => {
-      await result.current.handleOpenDuck();
-    });
-    expect(openDuck).not.toHaveBeenCalled();
-    expect(prepareImportSession).not.toHaveBeenCalled();
-    expect(createSession).not.toHaveBeenCalled();
-    expect(refreshSessions).not.toHaveBeenCalled();
-    expect(result.current.busy).toBe(false);
-  });
-
-  // --- handleExportSession (ADR-0089 Decision 5, issue #449) -----------------
-
-  it("handleExportSession calls exportSession with duck path + save dialog result", async () => {
-    vi.mocked(saveDialog).mockResolvedValueOnce("/dest/my-copy");
-    vi.mocked(exportSession).mockResolvedValueOnce();
-    const { result, setShellError } = renderSessions();
-    await act(async () => {
-      await result.current.handleExportSession("/src/uuid/session.duck", "My Session");
-    });
-    expect(saveDialog).toHaveBeenCalledWith({ defaultPath: "My Session" });
-    expect(exportSession).toHaveBeenCalledWith("/src/uuid/session.duck", "/dest/my-copy");
-    expect(setShellError).not.toHaveBeenCalled();
-    expect(result.current.busy).toBe(false);
-  });
-
-  it("handleExportSession bails on a cancelled save dialog (null): no export, busy clears", async () => {
-    vi.mocked(saveDialog).mockResolvedValueOnce(null);
-    const { result, setShellError } = renderSessions();
-    await act(async () => {
-      await result.current.handleExportSession("/src/uuid/session.duck", "S");
-    });
-    expect(exportSession).not.toHaveBeenCalled();
-    expect(setShellError).not.toHaveBeenCalled();
-    expect(result.current.busy).toBe(false);
-  });
-
-  it("handleExportSession surfaces errors via setShellError", async () => {
-    vi.mocked(saveDialog).mockResolvedValueOnce("/dest/copy");
-    vi.mocked(exportSession).mockRejectedValueOnce(new Error("disk full"));
-    const { result, setShellError } = renderSessions();
-    await act(async () => {
-      await result.current.handleExportSession("/src/uuid/session.duck", "S");
-    });
-    expect(exportSession).toHaveBeenCalled();
-    expect(setShellError).toHaveBeenCalledOnce();
-    expect(result.current.busy).toBe(false);
   });
 
   it("closeOpen falls back to the FIRST remaining session when the active one closes (multi-session, #204)", async () => {
@@ -899,52 +796,6 @@ describe("useShellSessions", () => {
     expect(
       result.current.openSessions.some((s) => s.sid === result.current.activeSessionId),
     ).toBe(true);
-  });
-
-  // ADR-0089 Decision 4: after the first terminal turn, the backend auto-names
-  // the session. syncSessionName reads the live name and updates the in-memory
-  // open-session entry + refreshes the sidebar.
-  describe("syncSessionName (ADR-0089 auto-name sync)", () => {
-    it("reads the backend name, updates the open entry, and refreshes the sidebar", async () => {
-      const { result, refreshSessions } = renderSessions();
-      vi.mocked(createSession).mockResolvedValue(reply("s1"));
-      vi.mocked(getSessionName).mockResolvedValue("how many people?");
-
-      await act(async () => {
-        await result.current.createSessionWithQuestion("q", [], DEFAULT_POSTURE, []);
-      });
-      // name starts empty (ADR-0089 placeholder).
-      expect(result.current.openSessions[0].name).toBe("");
-
-      await act(async () => {
-        await result.current.syncSessionName("s1");
-      });
-
-      expect(getSessionName).toHaveBeenCalledWith("s1");
-      expect(result.current.openSessions[0].name).toBe("how many people?");
-      expect(refreshSessions).toHaveBeenCalled();
-    });
-
-    it("logs a warning + still refreshes sidebar when getSessionName rejects", async () => {
-      const { result, refreshSessions } = renderSessions();
-      vi.mocked(createSession).mockResolvedValue(reply("s2"));
-      vi.mocked(getSessionName).mockRejectedValue(new Error("ipc down"));
-
-      await act(async () => {
-        await result.current.createSessionWithQuestion("q", [], DEFAULT_POSTURE, []);
-      });
-      const originalName = result.current.openSessions[0].name;
-
-      await act(async () => {
-        await result.current.syncSessionName("s2");
-      });
-
-      // Best-effort: the open-session name is unchanged (the fetch failed),
-      // but the sidebar still refreshes so a persisted re-read can catch up.
-      expect(result.current.openSessions[0].name).toBe(originalName);
-      expect(refreshSessions).toHaveBeenCalled();
-      expect(log.warn).toHaveBeenCalled();
-    });
   });
 
   // --- Issue #501: cold-start empty-state drop zone -------------------------
