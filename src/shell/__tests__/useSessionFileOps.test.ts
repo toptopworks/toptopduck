@@ -128,6 +128,20 @@ describe("useSessionFileOps", () => {
     expect(setShellError).not.toHaveBeenCalled();
   });
 
+  it("renameEntry open branch lands the backend-trimmed name via patchOpenName (#204)", async () => {
+    // OPEN branch: the backend owns trimming, so the entry lands whatever
+    // renameSession returns (the landed name, not the raw input).
+    vi.mocked(renameSession).mockResolvedValueOnce("Landed");
+    const { result, patchOpenName, refreshSessions, setShellError } = renderFileOps();
+    await act(async () => {
+      await result.current.renameEntry("s1", "/sessions/s1/session.duck", "new");
+    });
+    expect(renameSession).toHaveBeenCalledWith("s1", "new");
+    expect(patchOpenName).toHaveBeenCalledWith("s1", "Landed");
+    expect(refreshSessions).toHaveBeenCalledTimes(1);
+    expect(setShellError).not.toHaveBeenCalled();
+  });
+
   it("handleOpenDuck bails on a cancelled open dialog (null path): no import, no refresh, busy clears (#204)", async () => {
     vi.mocked(openDialog).mockResolvedValueOnce(null);
     const { result, importAndOpen, refreshSessions } = renderFileOps();
@@ -184,7 +198,7 @@ describe("useSessionFileOps", () => {
   describe("syncSessionName (ADR-0089 auto-name sync)", () => {
     it("reads the backend name, patches the open entry, and refreshes the sidebar", async () => {
       const { result, patchOpenName, refreshSessions } = renderFileOps();
-      vi.mocked(getSessionName).mockResolvedValue("how many people?");
+      vi.mocked(getSessionName).mockResolvedValueOnce("how many people?");
 
       await act(async () => {
         await result.current.syncSessionName("s1");
@@ -197,7 +211,7 @@ describe("useSessionFileOps", () => {
 
     it("logs a warning + still refreshes sidebar when getSessionName rejects", async () => {
       const { result, patchOpenName, refreshSessions } = renderFileOps();
-      vi.mocked(getSessionName).mockRejectedValue(new Error("ipc down"));
+      vi.mocked(getSessionName).mockRejectedValueOnce(new Error("ipc down"));
 
       await act(async () => {
         await result.current.syncSessionName("s2");
@@ -246,9 +260,11 @@ describe("useSessionFileOps", () => {
     });
     expect(waitResolve.unmountOpen).toHaveBeenCalledWith("s2");
     // ADR-0063 Decision 2 ordering: the wait-release resolves FIRST, and the
-    // UI teardown lands only after it (not before the wait).
+    // UI teardown lands only after it (not before the wait). at(-1), not
+    // [0]: Arm 1 already consumed one call on this module-level mock, so
+    // [0] is Arm 1's reject -- only the LATEST invocation is this arm's wait.
     expect(
-      vi.mocked(closeSessionAndWaitRelease).mock.invocationCallOrder[0],
+      vi.mocked(closeSessionAndWaitRelease).mock.invocationCallOrder.at(-1),
     ).toBeLessThan(waitResolve.unmountOpen.mock.invocationCallOrder[0]);
     expect(deleteSession).toHaveBeenCalledWith("/x/b.duck");
     expect(waitResolve.unmountOpen.mock.invocationCallOrder[0]).toBeLessThan(

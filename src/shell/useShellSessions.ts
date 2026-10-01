@@ -902,9 +902,8 @@ export function useShellSessions({
     [mapSessions],
   );
 
-  // Nested facade (#1155): the persisted file-ops species composes in here
-  // and its five members are re-exported unchanged below; persistenceBusy
-  // keeps the old `busy` semantics (resume OR persistence wait).
+  // Nested facade (#1155): the file-ops species destructures here; its
+  // five members ride the return below.
   const {
     deletePersisted,
     renameEntry,

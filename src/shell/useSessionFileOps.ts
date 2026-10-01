@@ -53,8 +53,10 @@ export interface UseSessionFileOpsDeps {
   patchOpenName: (sid: string, name: string) => void;
 }
 
-/** Persisted file-ops species (#1155): five verbatim moves from
- *  useShellSessions + the persistenceBusy axis they privately own. */
+/** Persisted file-ops species (#1155): the five file ops moved from
+ *  useShellSessions -- renameEntry / syncSessionName land names via the
+ *  injected patchOpenName seam, the other three verbatim -- plus the
+ *  persistenceBusy axis they privately own. */
 export function useSessionFileOps({
   intl,
   refreshSessions,

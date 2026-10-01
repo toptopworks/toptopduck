@@ -46,6 +46,9 @@ vi.mock("../../api", async (importOriginal) => {
     listLiveSessions: vi.fn(async () => []),
     createSession: vi.fn(),
     closeSession: vi.fn(async () => false),
+    // The open-branch rename lands the backend-trimmed name; the landing
+    // test overrides per case.
+    renameSession: vi.fn(async () => ""),
     onResumeProgress: vi.fn(async () => () => {}),
     openDuck: vi.fn(async () => {}),
     prepareImportSession: vi.fn(),
@@ -85,6 +88,7 @@ import {
   openDuck,
   onResumeProgress,
   prepareImportSession,
+  renameSession,
   setAuthorizationMode,
   setSessionPosture,
   setSessionRuntime,
@@ -796,6 +800,25 @@ describe("useShellSessions", () => {
     expect(
       result.current.openSessions.some((s) => s.sid === result.current.activeSessionId),
     ).toBe(true);
+  });
+
+  it("renameEntry open branch lands the backend name on the open entry (#1155)", async () => {
+    // The species' injected patchOpenName lands the name in the host's
+    // open-set state -- the mock-boundary species tests cannot see this
+    // write, so the real mapSessions shape is pinned here.
+    vi.mocked(createSession).mockResolvedValueOnce(reply("s1"));
+    vi.mocked(renameSession).mockResolvedValueOnce("Landed");
+    const { result } = renderSessions();
+    await act(async () => {
+      await result.current.createSessionWithQuestion("q", [], DEFAULT_POSTURE, []);
+    });
+    expect(result.current.openSessions[0].name).toBe("");
+
+    await act(async () => {
+      await result.current.renameEntry("s1", "/sessions/s1/session.duck", "new");
+    });
+
+    expect(result.current.openSessions[0].name).toBe("Landed");
   });
 
   // --- Issue #501: cold-start empty-state drop zone -------------------------
