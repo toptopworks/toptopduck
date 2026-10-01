@@ -75,10 +75,9 @@ describe("LiveTurnExchange user-invocation badges (ADR-0119 Decision 5)", () => 
 });
 
 // ADR-0120 Decision 4: the live round block threads mode="streaming" into
-// RoundProse, so
-// a vega-lite fence decodes only after the settle swap. While the round
-// streams, a half-written fence body must never show as source and must never
-// flash a degradation banner.
+// RoundProse for the round still growing, so a vega-lite fence decodes only
+// after the settle swap. While the round streams, a half-written fence body
+// must never show as source and must never flash a degradation banner.
 describe("LiveTurnExchange vega-lite fence placeholder (ADR-0120)", () => {
   it("shows the placeholder for a streaming fence, never the source", () => {
     const { container } = renderExchange({
@@ -99,5 +98,45 @@ describe("LiveTurnExchange vega-lite fence placeholder (ADR-0120)", () => {
     });
     expect(screen.queryByText("图表生成中…")).not.toBeInTheDocument();
     expect(container.querySelector("pre")?.textContent).toContain("print(1)");
+  });
+});
+
+// The caret is the round-is-alive signal (RoundProse's streaming contract),
+// and the rounds array is append-only: only the tail round's text can still
+// grow, so only its prose arms the caret -- arming every round painted a
+// block glyph after every closed prose block for the turn's whole run.
+describe("LiveTurnExchange tail-round streaming posture", () => {
+  // Same two conditions the RoundProse suite pins: the after-content
+  // utility class plus the quoted CSS custom property the pseudo element
+  // reads (jsdom cannot paint pseudo elements).
+  const CARET_CLASS = "after:content-[var(--streamdown-caret)]";
+
+  function caretArmed(prose: Element): boolean {
+    return (
+      prose.className.includes(CARET_CLASS) &&
+      (prose as HTMLElement).style.getPropertyValue("--streamdown-caret") !== ""
+    );
+  }
+
+  it("arms the caret on the tail round only; closed rounds render static", () => {
+    const { container } = renderExchange({
+      ...liveTurnWith(undefined),
+      rounds: [
+        { text: "第一轮已收口。", rows: [] },
+        { text: "第二轮正在流式。", rows: [] },
+      ],
+    });
+    const proses = container.querySelectorAll(".round-text");
+    expect(proses).toHaveLength(2);
+    expect(caretArmed(proses[0])).toBe(false);
+    expect(caretArmed(proses[1])).toBe(true);
+  });
+
+  it("keeps the single-round turn armed (the only round is the tail)", () => {
+    const { container } = renderExchange({
+      ...liveTurnWith(undefined),
+      rounds: [{ text: "唯一一轮。", rows: [] }],
+    });
+    expect(caretArmed(container.querySelector(".round-text")!)).toBe(true);
   });
 });
