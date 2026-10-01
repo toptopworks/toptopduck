@@ -1,23 +1,23 @@
 // The swap-stable turn-exchange head (ADR-0103 live isomorphism, issues
 // #610/#620): the settled TurnCard and the streaming LiveTurnExchange mount
-// the SAME frame -- card wrapper, user bubble, assistant-stream opening -- so
-// the settle swap re-hosts the head without adding or moving an element. Two
-// members are byte-identical on both sides. The runtime attribution marker
+// the SAME frame -- card wrapper, user bubble, assistant-stream opening --
+// so the settle swap re-hosts the head from one code path; every altitude
+// difference rides the optional props below. The runtime attribution marker
 // (issue #818) is the stream's FIRST child -- who answers precedes everything
 // the actor does inside the turn (annotations, rounds); a marker the live
 // side has is re-hosted in place at the swap, and a read landing only after
-// the settle lets the settled card add it (the one sanctioned asymmetry).
-// The StreamHeader annotations (ADR-0103: the app's read of the question --
-// which dataset it named, ADR-0047; which mounted skills drifted since the
-// answer, issue #381) open ahead of the rounds, so the reading order is
-// question -> annotation -> execution -> reply; the chip must already ride
-// the live side so the swap adds no element, while drift badges may appear
-// only at settle. The sides differ only through orthogonal optional props --
-// no variant enum, because anything legal after the swap must not be encoded
-// as a second mode: `live` flips the data-live hook and drops the settled-only
-// hover-reveal group, `weakened` dims the assistant side for Failed/Cancelled
-// (the question never dims, ADR-0028 Why 2), `isStale` ghosts the whole
-// exchange for a stale Materialized turn.
+// the settle lets the settled card add it. The StreamHeader annotations
+// (ADR-0103: the app's read of the question -- which dataset it named,
+// ADR-0047; which mounted skills drifted since the answer, issue #381) open
+// ahead of the rounds, so the reading order is question -> annotation ->
+// execution -> reply; the chip must already ride the live side so the swap
+// adds no element, while the drift badges -- or the whole header, when the
+// live question named no chip -- join the late-read marker as the additions
+// data can only make after the swap. The sides differ only through
+// orthogonal optional props -- no variant enum, because anything legal after
+// the swap must not be encoded as a second mode; the prop type arms `live`
+// against the settled-only flags so the never-legal combinations fail to
+// compile.
 
 import type { ReactNode } from "react";
 import { FormattedMessage } from "react-intl";
@@ -50,24 +50,36 @@ export function TurnExchangeFrame({
    *  side passes the client-known staging, the settled side the User-actor
    *  derivation. Empty renders no badge list. */
   invokedSkills?: string[];
-  isStale?: boolean;
   /** The turn's runtime attribution (issue #818). Only a runtime that can
    *  name its adapter renders the marker -- built-in / unrecorded stay
    *  silent, so an unmarked stretch reads as the default runtime. */
   runtime?: TurnRuntime;
   mentionedDataset: DatasetLabel | null;
-  /** The skills that drifted since the answer (issue #381) -- the settled
-   *  side's StreamHeader badges. The live side passes none: the swap may add
-   *  a badge, never the chip (issue #620). */
-  drifted?: string[];
-  weakened?: boolean;
-  /** The streaming side: flips the data-live hook and drops the settled-only
-   *  hover-reveal group. */
-  live?: boolean;
   /** Everything after the head: the rounds, the outcome body, the artifacts
    *  card, the closing meta row (settled) or the running status (live). */
   children: ReactNode;
-}) {
+} & (
+  | {
+    /** The streaming side: flips the data-live hook and drops the
+       *  settled-only hover-reveal group. */
+    live?: true;
+    weakened?: never;
+    drifted?: never;
+    isStale?: never;
+  }
+  | {
+    live?: false;
+    /** Dims the assistant side for Failed/Cancelled (the question never
+       *  dims, ADR-0028 Why 2). */
+    weakened?: boolean;
+    /** The skills that drifted since the answer (issue #381) -- the
+       *  settled side's StreamHeader badges. The live side passes none: the
+       *  swap may add a badge, never the chip (issue #620). */
+    drifted?: string[];
+    /** Ghosts the whole exchange for a stale Materialized turn. */
+    isStale?: boolean;
+  }
+)) {
   const runtimeName = runtimeMarkerName(runtime);
   return (
     <div

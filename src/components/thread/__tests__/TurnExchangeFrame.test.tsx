@@ -1,8 +1,12 @@
 // The frame's own contract pins (issue #1157): the runtime attribution
-// marker's first-child position + silence matrix and the invocation-badge
-// face, pinned once here instead of per-side on TurnCard / LiveTurnExchange
-// (the twin tests retired with the swap). The visibility matrix itself lives
-// in turnVisual.test.ts (runtimeMarkerName).
+// marker's first-child position, its built-in / pre-id silence cells, and
+// the invocation-badge face, pinned here instead of per-side on TurnCard /
+// LiveTurnExchange (the twin tests retired with the swap). The
+// absent-runtime cell stays per-side -- each side reaches it through its own
+// data path (the card's provenance silence, the live before-ask-time-read
+// silence) -- and the adapters' hand-offs carry their own pins in their
+// suites; the full visibility matrix also lives in turnVisual.test.ts
+// (runtimeMarkerName).
 
 import { describe, expect, it } from "vitest";
 import { renderI18n } from "../../common/__tests__/helpers";

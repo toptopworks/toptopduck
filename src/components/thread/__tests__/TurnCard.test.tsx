@@ -1,12 +1,12 @@
 // The settled card's own surface pins. The head contract -- the marker's
-// first-child position + silence matrix, the invocation-badge face -- and the
-// round width cap ride the swap-stable modules now, pinned once in
-// TurnExchangeFrame.test / RoundBody.test (issue #1157); what stays here is
-// what only the card renders: the Failed marker variant (a weakened stream
-// keeps its attribution), the unrecorded-runtime silence, the per-outcome
-// width caps, and the folds. Issue #818's DOM contract (the marker is the
-// stream's FIRST child) is unverifiable from the pure gate, which is why the
-// remaining render-level pins exist at all.
+// first-child position, its built-in / pre-id silence cells, the
+// invocation-badge face -- and the round width cap ride the swap-stable
+// modules now, pinned in TurnExchangeFrame.test / RoundBody.test (issue
+// #1157); what stays here is what only the card reaches through its own
+// data: the Failed marker variant (a weakened stream keeps its attribution),
+// the unrecorded-runtime silence (the card's provenance path), the
+// User-actor badge derivation hand-off, the per-outcome width caps, the
+// folds, the cancel-reason split (#883), and the textual markdown (#827).
 
 import { describe, expect, it } from "vitest";
 import { render } from "@testing-library/react";
@@ -93,6 +93,25 @@ describe("TurnCard runtime attribution marker (issue #818)", () => {
   it("renders no marker when provenance carries no runtime", () => {
     const { container } = renderCard(recordWith(undefined));
     expect(container.querySelector(".runtime-attribution")).toBeNull();
+  });
+});
+
+// The card derives the badge names (userInvocationNames filters to the User
+// actor, ADR-0119 Decision 5) -- the frame pins the given-prop face, this
+// pins the derivation hand-off: an agent-side skill never lands on the bubble.
+describe("TurnCard user-invocation badges (ADR-0119 Decision 5)", () => {
+  it("renders only the User-actor derivation above the question", () => {
+    const record: TurnRecord = {
+      ...recordWith(undefined),
+      invocations: [
+        { name: "pdf-tools", body: "", actor: "Agent", content_hash: "" },
+        { name: "charting", body: "", actor: "User", content_hash: "" },
+      ],
+    };
+    const { getByText, queryByText, getByLabelText } = renderCard(record);
+    expect(getByText("charting")).toBeInTheDocument();
+    expect(queryByText("pdf-tools")).not.toBeInTheDocument();
+    expect(getByLabelText("随此消息调用的技能")).toBeInTheDocument();
   });
 });
 
