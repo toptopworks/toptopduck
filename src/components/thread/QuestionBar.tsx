@@ -317,7 +317,8 @@ function phaseLabel(phase: TurnPhase, intl: IntlShape): string {
         )
       : intl.formatMessage({ id: "common.thinking", defaultMessage: "Thinking…" });
   }
-  // ToolCallStarted / ToolCallCompleted: the rail renders the call rows; the
-  // bar's compact label just names the running wait.
+  // ToolCallStarted / ToolCallCompleted / TextDelta: the rail renders the
+  // call rows, and streamed prose shows in the tail round with its caret
+  // (issue #1167) -- the bar's compact label just names the running wait.
   return intl.formatMessage({ id: "questionBar.phase.running", defaultMessage: "Running…" });
 }

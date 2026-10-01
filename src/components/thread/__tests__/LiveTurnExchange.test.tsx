@@ -141,3 +141,28 @@ describe("LiveTurnExchange tail-round streaming posture", () => {
     expect(caretArmed(container.querySelector(".round-text")!)).toBe(true);
   });
 });
+
+// The trailing thinking status yields twice over: a dispatched row carries
+// its own motion (the rowInProgress arm, issue #297), and once #1163 streams
+// the tail round's prose the visible text + caret carry the turn's liveness
+// by themselves -- a spinner still claiming 思考中 over visibly streaming
+// text is a doubled, misleading signal. The status reads honestly only while
+// NOTHING is visible: ask start, and each new round's pre-prose thinking.
+describe("LiveTurnExchange trailing thinking status (issue #1167)", () => {
+  it("keeps the status while the tail round has no prose (pre-prose thinking)", () => {
+    renderExchange({
+      ...liveTurnWith(undefined),
+      step: 2,
+      rounds: [{ text: "第一轮已收口。", rows: [] }, { rows: [] }],
+    });
+    expect(screen.getByText("思考中（第 2 步）…")).toBeInTheDocument();
+  });
+
+  it("yields the status once the tail round's prose streams", () => {
+    renderExchange({
+      ...liveTurnWith(undefined),
+      rounds: [{ text: "正文正在流出。", rows: [] }],
+    });
+    expect(screen.queryByText(/思考中/)).not.toBeInTheDocument();
+  });
+});

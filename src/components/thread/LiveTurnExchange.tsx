@@ -108,14 +108,20 @@ export function LiveTurnExchange({
    *  reference onto the settled round). */
   onThinkingExpandedChange: (thinking: ThinkingTrace, expanded: boolean) => void;
 }) {
-  // The running status reads honestly per phase: while a call dispatches (or
-  // waits at the gate) its row carries the motion, so the trailing status
-  // steps aside; otherwise the turn is back on an LLM round-trip and the
-  // status names it, with the step surfaced past the first round-trip
-  // ("step N", ADR-0081).
+  // The running status reads honestly only while NOTHING else on the tail
+  // carries the turn's liveness: while a call dispatches (or waits at the
+  // gate) its row carries the motion, and once #1163 streams the tail round's
+  // prose the visible text + caret carry it by themselves -- a spinner still
+  // claiming 思考中 over visibly streaming text is a doubled, misleading
+  // signal. Only when both step aside (ask start, and each new round's
+  // pre-prose thinking) is the turn back on an LLM round-trip the status
+  // names, with the step surfaced past the first round-trip ("step N",
+  // ADR-0081).
   const rowInProgress = liveTurn.rounds.some((round) =>
     round.rows.some((row) => row.running || row.success === null),
   );
+  const tailIndex = liveTurn.rounds.length - 1;
+  const tailProseVisible = liveTurn.rounds[tailIndex]?.text !== undefined;
   return (
     <TurnExchangeFrame
       question={liveTurn.question}
@@ -131,13 +137,13 @@ export function LiveTurnExchange({
         <LiveRoundBlock
           key={i + 1}
           round={round}
-          proseMode={i === liveTurn.rounds.length - 1 ? "streaming" : "static"}
+          proseMode={i === tailIndex ? "streaming" : "static"}
           onRespondApproval={onRespondApproval}
           onLoadApprovalAttachments={onLoadApprovalAttachments}
           onThinkingExpandedChange={onThinkingExpandedChange}
         />
       ))}
-      {!rowInProgress && (
+      {!rowInProgress && !tailProseVisible && (
         <p
           className="live-thinking m-0 mt-0.5 flex items-center gap-1 text-xs text-muted-foreground"
           role="status"
