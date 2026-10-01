@@ -202,7 +202,7 @@ fn phase_index(phases: &[TurnPhase], label: &str, pred: impl Fn(&TurnPhase) -> b
 
 /// Count-pin counterpart of [`phase_index`] (issue #630): asserts the phase
 /// fired exactly once. `phase_index` only finds the FIRST occurrence, so a
-/// double-fired prelude or repeated fold would hide behind it -- this closes
+/// double-fired delta or repeated fold would hide behind it -- this closes
 /// that gap for the events whose multiplicity is part of the contract.
 fn phase_count(phases: &[TurnPhase], label: &str, pred: impl Fn(&TurnPhase) -> bool) {
     let n = phases.iter().filter(|p| pred(p)).count();
@@ -211,9 +211,10 @@ fn phase_count(phases: &[TurnPhase], label: &str, pred: impl Fn(&TurnPhase) -> b
 
 /// Issue #611: thought + prose chunks ahead of each tool-call batch fold into
 /// per-round slots (round boundary = the tool-call batch split); the live
-/// channel carries ThinkingCompleted + RoundText between the round's Thinking
-/// wait and its call events (the ADR-0103 order); the terminal text is the
-/// trailing stretch only, not the concatenation of every chunk.
+/// channel carries each round's TextDelta on arrival (ADR-0126) and its
+/// ThinkingCompleted at the batch seal, between the round's Thinking wait
+/// and its call events; the terminal text is the trailing stretch only, not
+/// the concatenation of every chunk.
 #[test]
 fn round_prose_and_thinking_group_per_round() {
     let (outcome, phases) = run("round_prose_thinking", 24);
@@ -242,8 +243,10 @@ fn round_prose_and_thinking_group_per_round() {
     assert_eq!(r2.text.as_deref(), Some("refining the query"));
     assert_eq!(r2.calls.len(), 1);
 
-    // Live order: Thinking{1} < ThinkingCompleted < RoundText < Started{tc_1}
-    // < Thinking{2} < ThinkingCompleted < RoundText < Started{tc_2}.
+    // Live order: Thinking{1} < TextDelta{1} < ThinkingCompleted < Started{tc_1}
+    // < Thinking{2} < TextDelta{2} < ThinkingCompleted < Started{tc_2}. The
+    // delta fires on ARRIVAL (ADR-0126), so it precedes the thinking freeze
+    // the batch seal performs.
     let is_think1 = |p: &TurnPhase| matches!(p, TurnPhase::Thinking { attempt: 1 });
     let is_fold1 = |p: &TurnPhase| {
         matches!(
@@ -254,7 +257,7 @@ fn round_prose_and_thinking_group_per_round() {
     let is_prose1 = |p: &TurnPhase| {
         matches!(
             p,
-            TurnPhase::RoundText { text } if text == "checking the data first"
+            TurnPhase::TextDelta { delta } if delta == "checking the data first"
         )
     };
     let is_think2 = |p: &TurnPhase| matches!(p, TurnPhase::Thinking { attempt: 2 });
@@ -267,12 +270,12 @@ fn round_prose_and_thinking_group_per_round() {
     let is_prose2 = |p: &TurnPhase| {
         matches!(
             p,
-            TurnPhase::RoundText { text } if text == "refining the query"
+            TurnPhase::TextDelta { delta } if delta == "refining the query"
         )
     };
     let i_think1 = phase_index(&phases, "Thinking{1}", is_think1);
+    let i_prose1 = phase_index(&phases, "TextDelta{1}", is_prose1);
     let i_fold1 = phase_index(&phases, "ThinkingCompleted{1}", is_fold1);
-    let i_prose1 = phase_index(&phases, "RoundText{1}", is_prose1);
     let i_start1 = phase_index(&phases, "Started{tc_1}", |p| {
         matches!(
             p,
@@ -280,8 +283,8 @@ fn round_prose_and_thinking_group_per_round() {
         )
     });
     let i_think2 = phase_index(&phases, "Thinking{2}", is_think2);
+    let i_prose2 = phase_index(&phases, "TextDelta{2}", is_prose2);
     let i_fold2 = phase_index(&phases, "ThinkingCompleted{2}", is_fold2);
-    let i_prose2 = phase_index(&phases, "RoundText{2}", is_prose2);
     let i_start2 = phase_index(&phases, "Started{tc_2}", |p| {
         matches!(
             p,
@@ -290,12 +293,12 @@ fn round_prose_and_thinking_group_per_round() {
     });
     let mut cursor = i_think1;
     for (i, label) in [
+        (i_prose1, "TextDelta{1}"),
         (i_fold1, "ThinkingCompleted{1}"),
-        (i_prose1, "RoundText{1}"),
         (i_start1, "Started{tc_1}"),
         (i_think2, "Thinking{2}"),
+        (i_prose2, "TextDelta{2}"),
         (i_fold2, "ThinkingCompleted{2}"),
-        (i_prose2, "RoundText{2}"),
         (i_start2, "Started{tc_2}"),
     ] {
         assert!(
@@ -306,24 +309,24 @@ fn round_prose_and_thinking_group_per_round() {
     }
 
     // Count pins (issue #630): the order chain above matches on FIRST
-    // occurrence, so a double-fired prelude or a repeated fold would hide.
-    // Each round's ThinkingCompleted and RoundText fire exactly once, and
+    // occurrence, so a double-fired delta or a repeated fold would hide.
+    // Each round's ThinkingCompleted and TextDelta fire exactly once, and
     // the pre-prompt round 1 marker is a single event.
     phase_count(&phases, "Thinking{1}", is_think1);
+    phase_count(&phases, "TextDelta{1}", is_prose1);
     phase_count(&phases, "ThinkingCompleted{1}", is_fold1);
-    phase_count(&phases, "RoundText{1}", is_prose1);
     phase_count(&phases, "Thinking{2}", is_think2);
+    phase_count(&phases, "TextDelta{2}", is_prose2);
     phase_count(&phases, "ThinkingCompleted{2}", is_fold2);
-    phase_count(&phases, "RoundText{2}", is_prose2);
 }
 
-/// One round, two calls in one batch (issue #630): the round's prelude --
-/// the frozen thinking block + the round prose -- fires once, before the
-/// FIRST call's Started event; the second call adds no second prelude. The
-/// starts and finishes interleave (start, start, finish, finish), the raw
-/// in-batch shape.
+/// One round, two calls in one batch (issue #630): the round's prose delta
+/// fires once on arrival, its thinking freeze once at the batch seal before
+/// the FIRST call's Started event; the second call adds no second freeze.
+/// The starts and finishes interleave (start, start, finish, finish), the
+/// raw in-batch shape.
 #[test]
-fn single_round_two_calls_fire_the_prelude_once() {
+fn single_round_two_calls_fire_the_delta_and_freeze_once() {
     let (outcome, phases) = run("single_round_two_calls", 24);
     assert_eq!(outcome.trace.len(), 1, "both calls share one round");
     assert_eq!(outcome.trace[0].calls.len(), 2);
@@ -339,11 +342,11 @@ fn single_round_two_calls_fire_the_prelude_once() {
     let is_prelude_prose = |p: &TurnPhase| {
         matches!(
             p,
-            TurnPhase::RoundText { text } if text == "batch prelude prose"
+            TurnPhase::TextDelta { delta } if delta == "batch prelude prose"
         )
     };
-    phase_count(&phases, "RoundText", is_prelude_prose);
-    let i_prose = phase_index(&phases, "RoundText", is_prelude_prose);
+    phase_count(&phases, "TextDelta", is_prelude_prose);
+    let i_prose = phase_index(&phases, "TextDelta", is_prelude_prose);
     let i_start1 = phase_index(&phases, "Started{tc_1}", |p| {
         matches!(
             p,
@@ -356,7 +359,10 @@ fn single_round_two_calls_fire_the_prelude_once() {
             TurnPhase::ToolCallStarted { name, .. } if name == "explore SELECT 2"
         )
     });
-    assert!(i_prose < i_start1, "the prelude precedes the first call");
+    assert!(
+        i_prose < i_start1,
+        "the delta precedes the batch's first call"
+    );
     assert!(i_start1 < i_start2, "both starts land in the batch");
     // Two completed rows, both successes.
     let successes = outcome.trace[0].calls.iter().filter(|c| c.success).count();
@@ -364,9 +370,11 @@ fn single_round_two_calls_fire_the_prelude_once() {
 }
 
 /// Issue #611 honest degrade: an agent that never streams thought chunks (and
-/// streams no prose ahead of its batch) yields no thinking folds, no round
-/// prose, and a turn that still succeeds -- the terminal prose AFTER the batch
-/// rides the outcome, not a round slot.
+/// streams no prose ahead of its batch) yields no thinking folds, no
+/// batch-ahead prose deltas, and a turn that still succeeds -- the terminal
+/// prose AFTER the batch streams live as its TextDelta (ADR-0126: the
+/// call-less trailing round gains live text) and rides the outcome, not a
+/// round slot.
 #[test]
 fn absent_thought_stream_degrades_honestly() {
     let (outcome, phases) = run("tool_calls", 24);
@@ -377,10 +385,11 @@ fn absent_thought_stream_degrades_honestly() {
         "no thought chunks -> no ThinkingCompleted"
     );
     assert!(
-        !phases
-            .iter()
-            .any(|p| matches!(p, TurnPhase::RoundText { .. })),
-        "no batch-ahead prose -> no RoundText"
+        phases.iter().any(|p| matches!(
+            p,
+            TurnPhase::TextDelta { delta } if delta == "found 3 rows"
+        )),
+        "the terminal prose streams live as its delta"
     );
     assert_eq!(outcome.trace.len(), 1);
     assert_eq!(outcome.trace[0].thinking, None);
@@ -409,7 +418,7 @@ fn schema_wire_shapes_parse_end_to_end() {
     assert_eq!(outcome.trace[0].text.as_deref(), Some("real prose"));
     assert!(phases.iter().any(|p| matches!(
         p,
-        TurnPhase::RoundText { text } if text == "real prose"
+        TurnPhase::TextDelta { delta } if delta == "real prose"
     )));
 }
 

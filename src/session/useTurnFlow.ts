@@ -12,7 +12,14 @@ import type { AppError } from "../types/error";
 import type { ApprovalResponse, FileAttachment, OperationKind } from "../types/approval";
 import type { TurnPhase } from "../types/session";
 import type { SessionRuntimeChoice } from "../types/runtime";
-import type { ThreadEntry, ThinkingTrace, TraceEntry, TraceRound, TurnRuntime } from "../types/thread";
+import type {
+  ThreadEntry,
+  ThinkingTrace,
+  TraceEntry,
+  TraceRound,
+  TurnOutcome,
+  TurnRuntime,
+} from "../types/thread";
 
 // The turn-orchestration domain (issue #230), extracted from useSessionState
 // (slice 2 of the three-slice deepening). This hook owns the turn-progress
@@ -274,17 +281,6 @@ export function buildLiveRounds(
   }));
 }
 
-/** Project the live rounds onto the round-grouped `TraceRound[]` for the
- *  optimistic thread append (issue #297; round-grouped by #608, ADR-0103;
- *  thinking folded by #610; single-source projection by #620): completed
- *  calls only -- a row still at success===null (a gate-cancelled call,
- *  resolved-deny with no dispatch) has NO backend trace entry, so including
- *  it would diverge from the refetch. Order-preserving by construction (the
- *  live rounds array is already step-ordered), each settled round keeps its
- *  prose and thinking block. The row mapping is identity with the
- *  ToolCallCompleted payload, so the optimistic trace equals the backend's
- *  recorded rounds. */
-
 /** A live row whose completion event has landed (`success` no longer null):
  *  the settled projection's input shape. */
 export type SettledLiveRow = LiveRoundRow & { success: boolean };
@@ -312,21 +308,57 @@ export function traceEntryFromRow(row: SettledLiveRow): TraceEntry {
   };
 }
 
-export function liveRoundsToTrace(rounds: ReadonlyArray<LiveRound>): TraceRound[] {
+/** Whether the outcome settles by terminal text (Textual / Materialized) --
+ *  the settle-mirror fork's predicate (ADR-0126): these outcomes replay the
+ *  trailing prose as their answer (a Materialized may carry a null `body`
+ *  when the terminal text was whitespace-only -- the clear keys on the
+ *  termination, not the body field), while a non-body outcome (Cancelled /
+ *  Failed) has nowhere else to put the partial prose. */
+function outcomeCarriesBody(outcome: TurnOutcome | undefined): boolean {
+  return outcome?.kind === "Textual" || outcome?.kind === "Materialized";
+}
+
+/** Project the live rounds onto the round-grouped `TraceRound[]` for the
+ *  optimistic thread append (issue #297; round-grouped by #608, ADR-0103;
+ *  thinking folded by #610; single-source projection by #620): completed
+ *  calls only -- a row still at success===null (a gate-cancelled call,
+ *  resolved-deny with no dispatch) has NO backend trace entry, so including
+ *  it would diverge from the refetch. Order-preserving by construction (the
+ *  live rounds array is already step-ordered). The ADR-0126 settle mirror
+ *  forks on the ask-resolved `outcome`: a body-bearing outcome (Textual /
+ *  Materialized) clears the trailing call-less round's prose -- it rides
+ *  the outcome -- while any other outcome (or the ask-reject undefined)
+ *  keeps the partial prose (the #628 diagnosis settle), so the turn-end
+ *  refresh converges with no second change. The row mapping is identity
+ *  with the ToolCallCompleted payload, so the optimistic trace equals the
+ *  backend's recorded rounds. */
+export function liveRoundsToTrace(
+  rounds: ReadonlyArray<LiveRound>,
+  outcome?: TurnOutcome,
+): TraceRound[] {
   const trace: TraceRound[] = [];
-  for (const round of rounds) {
+  for (const [i, round] of rounds.entries()) {
     const calls: TraceEntry[] = [];
     for (const row of round.rows) {
       if (!isSettledRow(row)) continue;
       calls.push(traceEntryFromRow(row));
     }
-    // A round with prose or thinking but no completed calls still records
-    // (a cancel mid-batch); an entirely empty round drops.
-    if (calls.length === 0 && round.text === undefined && round.thinking === undefined) {
+    // ADR-0126 settle mirror: a body-bearing outcome clears the trailing
+    // call-less round's prose -- it rides the outcome, not the trace, the
+    // same clear the backend settle applies -- and the emptied round drops
+    // with it. Any other outcome keeps the partial prose (the #628
+    // diagnosis settle the backend records), so the turn-end refresh
+    // converges with no second change. A round with prose or thinking but
+    // no completed calls still records (a cancel mid-batch).
+    const text =
+      i === rounds.length - 1 && round.rows.length === 0 && outcomeCarriesBody(outcome)
+        ? undefined
+        : round.text;
+    if (calls.length === 0 && text === undefined && round.thinking === undefined) {
       continue;
     }
     const settled: TraceRound = { calls };
-    if (round.text !== undefined) settled.text = round.text;
+    if (text !== undefined) settled.text = text;
     if (round.thinking !== undefined) settled.thinking = round.thinking;
     trace.push(settled);
   }
@@ -414,7 +446,7 @@ interface LiveState {
   step: number | null;
   calls: LiveCall[];
   /** Per-round connective prose (index = step-1, null when none), from the
-   *  RoundText events (issue #608). */
+   *  TextDelta stream (ADR-0126; fragments appended in arrival order). */
   roundTexts: Array<string | null>;
   /** Per-round thinking blocks (index = step-1, null when none), from the
    *  ThinkingCompleted events (issues #608/#610). */
@@ -476,17 +508,18 @@ function applyPhase(live: LiveState | null, phase: TurnPhase): LiveState | null 
     // The LLM round-trip wait: surface the 1-based step.
     return { ...live, step: phase.Thinking.attempt };
   }
-  if ("RoundText" in phase) {
-    // ADR-0103 (issue #608): the round's connective prose, attached to the
-    // CURRENT round (the Thinking event that opened it has already arrived).
+  if ("TextDelta" in phase) {
+    // ADR-0126: one streamed prose fragment, APPENDED to the current
+    // round's text (the Thinking event that opened it has already arrived,
+    // the same ordering premise ThinkingCompleted relies on).
     const step = live.step ?? 1;
-    const roundTexts = withRoundSlot(live.roundTexts, step, phase.RoundText.text);
+    const roundTexts = appendRoundText(live.roundTexts, step, phase.TextDelta.delta);
     return { ...live, roundTexts };
   }
   if ("ThinkingCompleted" in phase) {
     // ADR-0103 (issues #608/#610): the round's thinking block completed,
     // attached to the CURRENT round (the Thinking event that opened it has
-    // already arrived, same ordering premise as RoundText). Kept per round
+    // already arrived, same ordering premise as TextDelta). Kept per round
     // on the live state -- the live thinking fold renders from it and the
     // settle projection reuses it via the rounds; a runtime without a
     // thinking data source never fires the event (honest degrade).
@@ -552,7 +585,8 @@ function applyPhase(live: LiveState | null, phase: TurnPhase): LiveState | null 
 
 /** Extend a per-round slot array to `step` and set its value, padding the
  *  untouched rounds with null (a round that emitted none). Generic over the
- *  slot payload (prose strings, thinking blocks). Pure. */
+ *  slot payload (the thinking block is the set-semantics payload; prose
+ *  appends via `appendRoundText`). Pure. */
 function withRoundSlot<T>(
   slots: ReadonlyArray<T | null>,
   step: number,
@@ -562,6 +596,17 @@ function withRoundSlot<T>(
   while (next.length < step - 1) next.push(null);
   next[step - 1] = value;
   return next;
+}
+
+/** The TextDelta arm of the per-round slots: APPEND one fragment to the
+ *  current round's text. `withRoundSlot` is the set semantics a completed
+ *  thinking block wants; prose grows by accumulation (ADR-0126). */
+function appendRoundText(
+  slots: ReadonlyArray<string | null>,
+  step: number,
+  delta: string,
+): Array<string | null> {
+  return withRoundSlot(slots, step, (slots[step - 1] ?? "") + delta);
 }
 
 export function useTurnFlow(sessionId: string, deps: UseTurnFlowDeps): UseTurnFlow {
@@ -770,7 +815,7 @@ export function useTurnFlow(sessionId: string, deps: UseTurnFlowDeps): UseTurnFl
         // the synchronously-mirrored settled rounds (captured above, so the
         // final event's row survives even when its render is still pending),
         // and the app-level approval hook clears this session's folded cards.
-        settledTrace = liveRoundsToTrace(roundsRef.current);
+        settledTrace = liveRoundsToTrace(roundsRef.current, outcome);
         setPhase(null);
         commitLive(null);
         onApprovalsSettled?.();

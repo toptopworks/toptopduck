@@ -216,7 +216,7 @@ impl ToolTurnReply {
     /// through here so the empty-text ->
     /// no-prose contract lives once -- a
     /// later construction site passing a parsed `Some("")` cannot emit an
-    /// empty `RoundText` event and persist `"text": ""` in the recipe round.
+    /// empty `TextDelta` and persist `"text": ""` in the recipe round.
     pub fn tool_calls_with(text: Option<String>, calls: Vec<ToolUse>) -> Self {
         debug_assert!(
             !calls.is_empty(),
@@ -294,7 +294,7 @@ mod tests {
 
     /// Issue #617: the empty-string -> None prose normalization lives in the
     /// constructor (not at each parse point), so a later construction site
-    /// passing a parsed `Some("")` cannot emit an empty `RoundText` event
+    /// passing a parsed `Some("")` cannot emit an empty `TextDelta`
     /// and persist `"text": ""` in the recipe round.
     #[test]
     fn tool_calls_with_normalizes_empty_text_to_none() {

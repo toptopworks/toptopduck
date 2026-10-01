@@ -373,9 +373,10 @@ fn mcp_tool_call_counts_toward_step_cap() {
 
 /// A multi-round trajectory (issue #613): each batch round settles with its
 /// own prose + call, the trailing prose rides the terminal text, and the live
-/// channel fires each round's RoundText BEFORE its batch's ToolCallStarted
-/// plus the round-2 Thinking pointer. No thinking data source exists on this
-/// path, so no ThinkingCompleted phase ever fires.
+/// channel fires each round's TextDelta BEFORE its batch's ToolCallStarted
+/// plus the round-2 Thinking pointer -- the trailing answer streams its own
+/// delta (ADR-0126). No thinking data source exists on this path, so no
+/// ThinkingCompleted phase ever fires.
 #[test]
 fn round_prose_settles_per_round_with_live_variants() {
     let (outcome, phases, _) = run("round_prose", 24);
@@ -395,12 +396,12 @@ fn round_prose_settles_per_round_with_live_variants() {
         outcome.trace.iter().all(|r| r.thinking.is_none()),
         "no thinking data source -- honest degrade"
     );
-    // Each round's RoundText precedes its batch's ToolCallStarted (the
-    // ADR-0103 live order the frontend's round grouping relies on).
+    // Each round's TextDelta precedes its batch's ToolCallStarted (the
+    // live order the frontend's round grouping relies on).
     let round1_text = phases
         .iter()
-        .position(|p| matches!(p, TurnPhase::RoundText { text } if text == "checking the table"))
-        .expect("round-1 RoundText fired");
+        .position(|p| matches!(p, TurnPhase::TextDelta { delta } if delta == "checking the table"))
+        .expect("round-1 TextDelta fired");
     let round1_call = phases
         .iter()
         .position(
@@ -410,8 +411,8 @@ fn round_prose_settles_per_round_with_live_variants() {
     assert!(round1_text < round1_call);
     let round2_text = phases
         .iter()
-        .position(|p| matches!(p, TurnPhase::RoundText { text } if text == "verifying the count"))
-        .expect("round-2 RoundText fired");
+        .position(|p| matches!(p, TurnPhase::TextDelta { delta } if delta == "verifying the count"))
+        .expect("round-2 TextDelta fired");
     let round2_call = phases
         .iter()
         .position(
@@ -425,13 +426,13 @@ fn round_prose_settles_per_round_with_live_variants() {
         .expect("the round-2 wait pointer fired");
     assert!(
         round2_pointer < round2_text,
-        "the round pointer fires at the round's opening, before its RoundText"
+        "the round pointer fires at the round's opening, before its TextDelta"
     );
     assert!(
-        !phases
+        phases
             .iter()
-            .any(|p| matches!(p, TurnPhase::RoundText { text } if text == "the answer is 42")),
-        "the trailing prose rides the terminal text"
+            .any(|p| matches!(p, TurnPhase::TextDelta { delta } if delta == "the answer is 42")),
+        "the trailing prose streams live as its delta (the settle keeps it off the round: it rides the terminal text)"
     );
     assert!(
         !phases

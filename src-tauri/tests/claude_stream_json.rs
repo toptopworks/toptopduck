@@ -180,12 +180,14 @@ fn slow_drip_survives_past_the_cap() {
 }
 
 /// Headless thinking blocks riding the assistant frames, end-to-end (issue
-/// #612): round 1's thinking freezes at the batch prelude; the trailing
+/// #612): round 1's thinking freezes at the batch seal; the trailing
 /// round keeps its thinking through the REAL run loop's trailing freeze and
 /// settle (the unit tests mirror that tail with a hand-written helper).
 /// Pins the wired chain: two rounds carry their frozen thinking, the live
-/// stream sees both ThinkingCompleted events plus the round-2 wait pointer,
-/// and the trailing prose rides the terminal text (no round-2 RoundText).
+/// stream sees both ThinkingCompleted events, the round-2 wait pointer, and
+/// both rounds' prose as TextDeltas -- round 1's connective text and the
+/// trailing answer streaming live (ADR-0126), the settle keeping the
+/// trailing stretch off the round (it rides the terminal text).
 #[test]
 fn thinking_blocks_ride_rounds_end_to_end() {
     let (outcome, phases, _) = run("thinking_rounds", 24);
@@ -198,7 +200,7 @@ fn thinking_blocks_ride_rounds_end_to_end() {
     assert_eq!(
         r1.thinking.as_ref().map(|t| t.text.as_str()),
         Some("plan the query"),
-        "round 1's thinking froze at the batch prelude"
+        "round 1's thinking froze at the batch seal"
     );
     assert_eq!(r1.text.as_deref(), Some("querying"));
     assert_eq!(
@@ -216,7 +218,7 @@ fn thinking_blocks_ride_rounds_end_to_end() {
     assert_eq!(r2.text, None, "the trailing prose rode the terminal text");
     // The live stream: both thinking completions fire (the second only via
     // the run loop's trailing freeze), the round-2 wait pointer fires, and
-    // no round-2 RoundText does.
+    // both rounds' prose streams as its delta.
     let thinking_done: Vec<&str> = phases
         .iter()
         .filter_map(|p| match p {
@@ -228,13 +230,17 @@ fn thinking_blocks_ride_rounds_end_to_end() {
     assert!(phases
         .iter()
         .any(|p| matches!(p, TurnPhase::Thinking { attempt: 2 })));
+    let prose_deltas: Vec<&str> = phases
+        .iter()
+        .filter_map(|p| match p {
+            TurnPhase::TextDelta { delta } => Some(delta.as_str()),
+            _ => None,
+        })
+        .collect();
     assert_eq!(
-        phases
-            .iter()
-            .filter(|p| matches!(p, TurnPhase::RoundText { .. }))
-            .count(),
-        1,
-        "no round-2 RoundText: {phases:?}"
+        prose_deltas,
+        vec!["querying", "the answer is 42"],
+        "both rounds' prose streams live: {phases:?}"
     );
 }
 

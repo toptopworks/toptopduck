@@ -685,9 +685,9 @@ impl JsonPump {
                         String::new(),
                     ),
                 };
-                // The round's first call fires its prose prelude BEFORE the
-                // batch's ToolCallStarted (the ADR-0103 live order the
-                // frontend's round grouping relies on).
+                // The round's first call freezes its thinking BEFORE the
+                // batch's ToolCallStarted (the live order the frontend's
+                // round grouping relies on).
                 let round = self.tracker.call_round(on_phase);
                 on_phase(TurnPhase::ToolCallStarted {
                     name: command,
@@ -749,8 +749,8 @@ impl JsonPump {
                 };
                 // Same-point phase pair + round landing as the
                 // command_execution shape (issue #816): the round's first
-                // call fires its prelude BEFORE the batch's
-                // ToolCallStarted (the ADR-0103 live order).
+                // call freezes the thinking BEFORE the batch's
+                // ToolCallStarted (the live order).
                 let round = self.tracker.call_round(on_phase);
                 on_phase(TurnPhase::ToolCallStarted {
                     name,
@@ -1407,8 +1407,8 @@ mod tests {
         assert!(rounds[0].thinking.is_none(), "no thinking data source");
     }
 
-    /// Same-round agent_message fragments merge into one round prose; the
-    /// live RoundText fires once, with the merged text, at the batch seal.
+    /// Same-round agent_message fragments merge into one round prose at
+    /// settle; each fragment streams live as its own TextDelta (ADR-0126).
     #[test]
     fn same_round_fragments_merge_into_one_prose() {
         let mut pump = JsonPump::new(24, None);
@@ -1438,15 +1438,22 @@ mod tests {
             .settle_rounds(&Termination::Text(String::new()));
         assert_eq!(rounds.len(), 1);
         assert_eq!(rounds[0].text.as_deref(), Some("checking the table"));
-        let round_texts = phases
+        let deltas: Vec<&str> = phases
             .iter()
-            .filter(|p| matches!(p, TurnPhase::RoundText { .. }))
-            .count();
-        assert_eq!(round_texts, 1, "one merged RoundText per round");
+            .filter_map(|p| match p {
+                TurnPhase::TextDelta { delta } => Some(delta.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            deltas,
+            vec!["checking ", "the table"],
+            "one delta per fragment"
+        );
     }
 
     /// A batch round that offered no prose carries no text and fires no
-    /// RoundText.
+    /// TextDelta.
     #[test]
     fn call_without_prose_keeps_round_text_empty() {
         let mut pump = JsonPump::new(24, None);
@@ -1466,15 +1473,15 @@ mod tests {
         assert!(rounds[0].text.is_none());
         assert!(!phases
             .iter()
-            .any(|p| matches!(p, TurnPhase::RoundText { .. })));
+            .any(|p| matches!(p, TurnPhase::TextDelta { .. })));
     }
 
-    /// The live channel's ADR-0103 order for one round: RoundText, then the
-    /// batch's ToolCallStarted / Completed pair. The trailing prose opens
-    /// round 2 -- the round pointer fires -- but fires no RoundText: it rides
-    /// the terminal text.
+    /// The live channel's order for one round (ADR-0126): the TextDelta
+    /// fires on arrival, then the batch's ToolCallStarted / Completed pair.
+    /// The trailing prose opens round 2 -- the round pointer fires -- and
+    /// streams its own delta (the terminal round's first live text).
     #[test]
-    fn live_order_round_text_then_call_then_round_pointer() {
+    fn live_order_delta_then_call_then_round_pointer() {
         let mut pump = JsonPump::new(24, None);
         let mut phases = Vec::new();
         pump.fold(
@@ -1493,8 +1500,8 @@ mod tests {
         );
         assert_eq!(phases.len(), 3);
         match &phases[0] {
-            TurnPhase::RoundText { text } => assert_eq!(text, "let me query"),
-            other => panic!("expected RoundText, got {other:?}"),
+            TurnPhase::TextDelta { delta } => assert_eq!(delta, "let me query"),
+            other => panic!("expected TextDelta, got {other:?}"),
         }
         assert!(matches!(
             &phases[1],
@@ -1507,19 +1514,23 @@ mod tests {
             },
             &mut |p| phases.push(p),
         );
-        assert_eq!(phases.len(), 4);
+        assert_eq!(phases.len(), 5);
         match &phases[3] {
             TurnPhase::Thinking { attempt } => assert_eq!(*attempt, 2),
             other => panic!("expected the round-2 Thinking wait, got {other:?}"),
         }
+        match &phases[4] {
+            TurnPhase::TextDelta { delta } => assert_eq!(delta, "the answer"),
+            other => panic!("expected the trailing delta, got {other:?}"),
+        }
     }
 
-    /// The mcp arm's ADR-0103 order (issue #816), the command arm's
-    /// `live_order` pin mirrored: the round's prose prelude fires BEFORE
-    /// the batch's ToolCallStarted, and consecutive gateway calls share
-    /// one batch round under a single prelude.
+    /// The mcp arm's order (issue #816), the command arm's `live_order` pin
+    /// mirrored: the round's prose delta fires BEFORE the batch's
+    /// ToolCallStarted, and consecutive gateway calls share one batch round
+    /// under a single thinking freeze.
     #[test]
-    fn mcp_tool_call_fold_fires_round_prelude_before_phase_pair() {
+    fn mcp_tool_call_fold_delta_precedes_phase_pair() {
         let mut pump = JsonPump::new(24, None);
         let mut phases = Vec::new();
         pump.fold(
@@ -1550,20 +1561,20 @@ mod tests {
         );
         let round_text = phases
             .iter()
-            .position(|p| matches!(p, TurnPhase::RoundText { .. }))
-            .expect("the round's prose prelude fired");
+            .position(|p| matches!(p, TurnPhase::TextDelta { .. }))
+            .expect("the round's prose delta fired");
         let first_started = phases
             .iter()
             .position(|p| matches!(p, TurnPhase::ToolCallStarted { name, .. } if name == "convert"))
             .expect("the batch's first ToolCallStarted");
-        assert!(round_text < first_started, "the prelude precedes the batch");
+        assert!(round_text < first_started, "the delta precedes the batch");
         assert_eq!(
             phases
                 .iter()
-                .filter(|p| matches!(p, TurnPhase::RoundText { .. }))
+                .filter(|p| matches!(p, TurnPhase::TextDelta { .. }))
                 .count(),
             1,
-            "one prose prelude for the batch"
+            "one prose delta for the batch"
         );
         let rounds = pump
             .tracker
@@ -1605,7 +1616,8 @@ mod tests {
     }
 
     /// Prose stays in the round it was emitted in: cross-round fragments do
-    /// not blend, and each round's seal fires its own prose prelude.
+    /// not blend, and each round's settle carries its own accumulated
+    /// deltas.
     #[test]
     fn cross_round_prose_stays_in_its_round() {
         let mut pump = JsonPump::new(24, None);
@@ -1715,7 +1727,7 @@ mod tests {
         assert_eq!(rounds[0].text.as_deref(), Some("checking"));
         assert!(phases
             .iter()
-            .any(|p| matches!(p, TurnPhase::RoundText { text } if text == "checking")));
+            .any(|p| matches!(p, TurnPhase::TextDelta { delta } if delta == "checking")));
     }
 
     /// An empty agent_message (an item whose `text` is an empty string)
@@ -1793,7 +1805,7 @@ mod tests {
     }
 
     /// Consecutive commands with no prose between them form ONE batch: both
-    /// calls land on the same round, one RoundText prelude fires, and no new
+    /// calls land on the same round, one prose delta fires, and no new
     /// round pointer appears mid-batch.
     #[test]
     fn consecutive_commands_share_one_round() {
@@ -1830,10 +1842,10 @@ mod tests {
         assert_eq!(
             phases
                 .iter()
-                .filter(|p| matches!(p, TurnPhase::RoundText { .. }))
+                .filter(|p| matches!(p, TurnPhase::TextDelta { .. }))
                 .count(),
             1,
-            "one prose prelude for the batch"
+            "one prose delta for the batch"
         );
         assert!(
             !phases
@@ -1846,10 +1858,11 @@ mod tests {
     // --- pump fold: reasoning thinking fold (issue #807) ---------------------
 
     /// A reasoning item folds into the round's thinking via the existing
-    /// prelude mechanism: the buffer holds it until the batch's first call
-    /// freezes it as ThinkingCompleted, followed by the round's prose, then
-    /// the batch's call events. Reasoning, prose, and the call batch share
-    /// ONE round (issue #807's attribution ruling).
+    /// freeze mechanism: the buffer holds it until the batch's first call
+    /// freezes it as ThinkingCompleted (the round's prose already streamed
+    /// as its TextDeltas on arrival), then the batch's call events.
+    /// Reasoning, prose, and the call batch share ONE round (issue #807's
+    /// attribution ruling).
     #[test]
     fn reasoning_folds_into_round_thinking_pinned_zero() {
         let mut pump = JsonPump::new(24, None);
@@ -1862,7 +1875,7 @@ mod tests {
         );
         assert!(
             phases.is_empty(),
-            "the reasoning buffers -- no phase fires until the prelude or turn end"
+            "the reasoning buffers -- no phase fires until the batch seal or turn end"
         );
         pump.fold(
             CodexEvent::AgentMessage {
@@ -1889,16 +1902,17 @@ mod tests {
         assert_eq!(thinking.duration_ms, 0, "no fabricated window");
         assert_eq!(rounds[0].text.as_deref(), Some("let me query"));
         assert_eq!(rounds[0].calls.len(), 1);
-        // The prelude's ADR-0103 live order: ThinkingCompleted, then
-        // RoundText, then the batch's ToolCallStarted.
+        // The live order (ADR-0126): the TextDelta fires on arrival, then
+        // the batch seal's ThinkingCompleted, then the batch's
+        // ToolCallStarted.
         assert!(matches!(
             &phases[0],
-            TurnPhase::ThinkingCompleted { duration_ms, text }
-                if *duration_ms == 0 && text == "planning the query"
+            TurnPhase::TextDelta { delta } if delta == "let me query"
         ));
         assert!(matches!(
             &phases[1],
-            TurnPhase::RoundText { text } if text == "let me query"
+            TurnPhase::ThinkingCompleted { duration_ms, text }
+                if *duration_ms == 0 && text == "planning the query"
         ));
         assert!(matches!(&phases[2], TurnPhase::ToolCallStarted { .. }));
     }

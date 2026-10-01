@@ -463,7 +463,7 @@ fn play_scenario(
         // Issue #611: thought + prose chunks ahead of each tool-call batch,
         // a terminal prose stretch after the last batch. Drives the per-round
         // grouping (round boundary = the tool-call batch split), the
-        // ThinkingCompleted / RoundText live events, and the terminal-text
+        // ThinkingCompleted / TextDelta live events, and the terminal-text
         // rule (the trailing stretch, not the concatenation of every chunk).
         "round_prose_thinking" => {
             notify(out, agent_thought("weighing schema options"));
@@ -980,9 +980,9 @@ fn play_scenario(
         }
         // Issue #630: one round, two calls in the same batch -- starts
         // interleaved (start, start) before the finishes. Pins the saw_call
-        // prelude firing once for the round's FIRST call, not per call. The
-        // starts/finishes interleave on purpose: the adjacent-pair shape has
-        // its own `notify_tool_call_roundtrip`.
+        // thinking freeze firing once for the round's FIRST call, not per
+        // call. The starts/finishes interleave on purpose: the
+        // adjacent-pair shape has its own `notify_tool_call_roundtrip`.
         "single_round_two_calls" => {
             notify(out, agent_message("batch prelude prose"));
             notify(

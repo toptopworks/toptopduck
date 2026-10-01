@@ -421,9 +421,9 @@ impl AcpEngine {
         );
         // Finalize any tool rows still open at turn end (issue #630), then
         // close the trailing round's thought stream: its ThinkingCompleted
-        // fires (the fold renders live), but no RoundText -- whether the
-        // settle keeps the trailing prose on the round depends on the
-        // termination (issues #611/#628).
+        // fires (the fold renders live); the round's prose already streamed
+        // as TextDeltas (ADR-0126) -- whether the settle keeps it on the
+        // round depends on the termination (issues #611/#628).
         pump.drain_unobserved(&mut on_phase);
         pump.tracker.freeze_trailing_thinking(&mut on_phase);
 
@@ -979,10 +979,17 @@ impl RoundTracker {
 
     /// A prose chunk grows BOTH tracks (issue #612): the full-turn
     /// accumulation (the terminal-text fallback) and the current round's
-    /// prose slot.
+    /// prose slot. ADR-0126: the chunk also fires its `TextDelta` the
+    /// moment it arrives (after any round-opening `Thinking`, so
+    /// `live.step` is already known when the delta lands).
     pub(super) fn push_prose(&mut self, text: &str, on_phase: &mut impl FnMut(TurnPhase)) {
         push_capped(&mut self.text, text);
         let round = self.open_round(on_phase);
+        if !text.is_empty() {
+            on_phase(TurnPhase::TextDelta {
+                delta: text.to_string(),
+            });
+        }
         push_capped(&mut round.text, text);
     }
 
@@ -1012,13 +1019,16 @@ impl RoundTracker {
     }
 
     /// The round a tool call belongs to (the current one) and its call
-    /// seal: the round's FIRST call fires the thinking + prose prelude
-    /// before its `ToolCallStarted` event.
+    /// seal: the round's FIRST call freezes its thinking prelude (the
+    /// `ThinkingCompleted` event) before the batch's `ToolCallStarted`.
+    /// The prose prelude is gone -- the round's prose already streamed as
+    /// `TextDelta`s off `push_prose` (ADR-0126), so the batch seal is the
+    /// round's close, not its first text sighting.
     pub(super) fn call_round(&mut self, on_phase: &mut impl FnMut(TurnPhase)) -> usize {
         let idx = self.rounds.len() - 1;
         if !self.rounds[idx].saw_call {
             self.rounds[idx].saw_call = true;
-            self.fire_round_prelude(on_phase);
+            self.freeze_trailing_thinking(on_phase);
         }
         idx
     }
@@ -1030,12 +1040,12 @@ impl RoundTracker {
 
     /// Freeze the trailing round's thought stream into its thinking block +
     /// emit the completion event. Idempotent: a second call finds an empty
-    /// buffer. Always the trailing round -- the prelude's round IS the
+    /// buffer. Always the trailing round -- the batch seal's round IS the
     /// trailing one, so the index parameter collapsed into `last_mut`
-    /// (issue #630). The completion fires (the fold renders live), but no
-    /// RoundText -- the live channel never shows the trailing prose;
-    /// whether the settle keeps it on the round depends on the termination
-    /// (issues #611/#628).
+    /// (issue #630). The completion fires (the fold renders live); the
+    /// round's prose already streamed as `TextDelta`s off `push_prose`
+    /// (ADR-0126), so whether the settle keeps it on the round depends on
+    /// the termination (issues #611/#628).
     pub(super) fn freeze_trailing_thinking(&mut self, on_phase: &mut impl FnMut(TurnPhase)) {
         let round = self.rounds.last_mut().expect("round 1 opens at the prompt");
         if round.thinking_buf.is_empty() {
@@ -1054,22 +1064,6 @@ impl RoundTracker {
             text: trace.text.clone(),
         });
         round.thinking = Some(trace);
-    }
-
-    /// The prelude the round's first tool call fires (issue #611): the
-    /// frozen thinking block, then the round's prose -- both BEFORE the
-    /// batch's `ToolCallStarted` events, the ADR-0103 live order the
-    /// frontend's round grouping relies on. Skipped when the round offered
-    /// neither. Fires on the current (trailing) round -- the same one
-    /// `call_round` returns.
-    fn fire_round_prelude(&mut self, on_phase: &mut impl FnMut(TurnPhase)) {
-        self.freeze_trailing_thinking(on_phase);
-        let round = self.rounds.last().expect("round 1 opens at the prompt");
-        if !round.text.is_empty() {
-            on_phase(TurnPhase::RoundText {
-                text: round.text.clone(),
-            });
-        }
     }
 
     /// The terminal reply text: the trailing prose stretch (the call-less
@@ -1174,8 +1168,8 @@ impl Pump {
                 content,
             } => {
                 self.tool_call_count += 1;
-                // The round's FIRST call fires the prelude once, before this
-                // call's Started event (saw_call latches it).
+                // The round's FIRST call freezes its thinking (ThinkingCompleted)
+                // once, before this call's Started event (saw_call latches it).
                 let idx = self.tracker.call_round(on_phase);
                 let (name, summary) = name_summary(title.as_deref(), tool_call_id);
                 let operation_kind = kind

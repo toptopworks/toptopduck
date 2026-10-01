@@ -8,9 +8,9 @@
 
 3. **发送侧零状态零 flush，频率治理下沉消费侧。** 攒批窗口状态机不进后端（各路径的 turn 结束 flush / cancel flush / 窗口残留均为事故面）。若实测前端渲染吃紧，在 `onTurnProgress` 消费口做时间窗合并——一处改动、协议不动，作为预留后手而非本期交付。
 
-4. **settle 投影按 outcome 分叉。** 正常完成的尾轮 prose 保留进 optimistic `TurnRecord.trace`（权威 record 携带终端文本）；Cancelled/Failed 丢弃尾轮 prose——权威 trace 本就不记未 seal 正文（既有丢弃裁决不变），投影对齐以防 turn-end refresh 后文本回缩闪烁。live 显示半截 → settle 换脸时消失，不构成二次变化。
+4. **settle 投影按 outcome 分叉，镜像后端 settle 语义。** 携带终端文本的 outcome（Textual/Materialized 的 body）下，尾轮 call-less round 的 prose 不进 optimistic `TurnRecord.trace`——正文随 outcome 渲染，镜像后端 settle 对 Text 终止的清理（清空且空轮弹除）；Cancelled/Failed 保留尾轮 prose——外部三路径的权威 trace 记录未 seal 的半截正文（issue #628 的诊断价值裁决），投影与之对齐以防 turn-end refresh 后文本二次变化（rig fold 的未确认轮文本不落 rounds，为该路径既有 durable 差异，见 Decision 5）。live 半截正文在 settle 换脸时保留，refresh 落同一 round。
 
-5. **两项不在 v1 范围。** thinking/reasoning 不做 delta（`ThinkingCompleted` 维持一次性到达）；cancel 时的未 seal prose 不落权威 trace（durable 语义维持现状）。瞬态通道不落库、同体部署零版本偏斜，两者皆可纯加法补做，真实诉求落地时各自另裁。
+5. **两项不在 v1 范围。** thinking/reasoning 不做 delta（`ThinkingCompleted` 维持一次性到达）；cancel 时的未 seal prose 落权威 trace 与否维持各路径现状（外部路径记录、rig fold 不记），统一该语义是 durable 变更，超出正文流式呈现的目标面。瞬态通道不落库、同体部署零版本偏斜，两者皆可纯加法补做，真实诉求落地时各自另裁。
 
 ## Context
 
@@ -36,7 +36,7 @@
 
 - 流内正文含终端轮答案在 turn 进行中逐 delta 可见；streamdown streaming 模式（caret、word cascade）首次获得真实增量输入。
 - 协议端与前端 union 同票原子迁移：`RoundText` 退役后任一路径未迁即该路径正文完全消失，不存在可分批的中间态；外部三路径经 `RoundTracker` 单点收编，迁移面为该 seam 加 rig fold 两处。
-- Cancelled/Failed turn 的 live 半截正文在 settle 换脸时消失且 refresh 后无二次变化；rig 路径终端轮的 delta 累积与 `FinalResponse.output` 的同源性无结构保证（外部三路径的正文与终端文本同源聚合，天然一致），不同源的差异由 fold 侧收敛义务覆盖。
+- Cancelled/Failed turn 的 live 半截正文经 settle 投影保留，与外部路径的权威 trace 一致，refresh 后无二次变化；rig 路径 cancel 与 hook 重试弃置轮的未确认文本不落权威 trace，settle 换脸后 refresh 回缩——该路径既有 durable 差异（Decision 5）；rig 路径终端轮的 delta 累积与 `FinalResponse.output` 的同源性无结构保证（外部三路径的正文与终端文本同源聚合，天然一致），不同源的差异由 fold 侧收敛义务覆盖。
 - 消费侧节流为预留后手，启用判据为实测渲染表现，不改变协议语义。
 - `ipc_contract`、`useTurnFlow`、thread 组件测试面随语义更新；`turn-progress` 事件基数由 round 级升至 delta 级（仅瞬态通道，不落数据库）。
 - **校准 ADR-0059**：开篇「不开 LLM token 流式」与 Considered 的「LLM token 流式」否决项按其出口保留条款兑现——`TextDelta` 走既有 `turn-progress` 侧通道（ask 阻塞契约与 ADR-0009 不变，phase 不进 thread 真相与 ADR-0051 不变），形态为逐条载荷事件流而非该条款设想的一体计数变体；「离散是唯一诚实粒度」（守 ADR-0017）针对虚构进度估计，真实增量载荷流不受其限。

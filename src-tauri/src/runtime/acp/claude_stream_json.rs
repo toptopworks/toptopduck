@@ -581,8 +581,9 @@ impl ClaudePump {
             }
             ClaudeEvent::ToolUse { id, name, input } => {
                 self.tool_call_count += 1;
-                // The batch boundary: the round's prelude (frozen thinking,
-                // prose) fires once, before this call's Started event.
+                // The batch boundary: the round's thinking freeze fires once,
+                // before this call's Started event (the prose already
+                // streamed as its TextDeltas, ADR-0126).
                 let round = self.tracker.call_round(on_phase);
                 // The bare display name: a matching gateway prefix strips
                 // (the merged trace's gateway rows carry the bare name; the
@@ -864,8 +865,9 @@ mod tests {
 
     /// A full assistant frame keeps its block order on the event list:
     /// thinking first, then text, then the tool_use batch -- the order the
-    /// round prelude relies on (thinking frozen, prose fired, then the
-    /// batch's Started events).
+    /// round's live phases rely on (the text streams its TextDelta, then
+    /// the batch seal freezes the thinking, then the batch's Started
+    /// events).
     #[test]
     fn parse_assistant_thinking_text_tool_use_order() {
         let v = json!({
@@ -1165,12 +1167,13 @@ mod tests {
         assert_eq!(rounds[0].calls[0].name, "Bash");
     }
 
-    /// The live channel's ADR-0103 order for one round: ThinkingCompleted,
-    /// then RoundText, then the batch's ToolCallStarted -- the trailing
-    /// call-less prose fires no content phase (it rides the terminal text);
-    /// only the round-2 Thinking wait pointer fires.
+    /// The live channel's order for one round (ADR-0126): the TextDelta on
+    /// arrival, then the batch seal's ThinkingCompleted, then the batch's
+    /// ToolCallStarted -- the trailing call-less prose fires the round-2
+    /// Thinking wait pointer AND streams its own delta (the terminal
+    /// round's first live text).
     #[test]
-    fn live_order_thinking_round_text_then_call() {
+    fn live_order_delta_thinking_freeze_then_call() {
         let mut pump = pump_with_bridge();
         let mut phases = Vec::new();
         pump.fold(
@@ -1195,27 +1198,31 @@ mod tests {
         );
         assert_eq!(phases.len(), 3);
         match &phases[0] {
-            TurnPhase::ThinkingCompleted { text, .. } => assert_eq!(text, "first plan"),
-            other => panic!("expected ThinkingCompleted, got {other:?}"),
+            TurnPhase::TextDelta { delta } => assert_eq!(delta, "let me query"),
+            other => panic!("expected TextDelta, got {other:?}"),
         }
         match &phases[1] {
-            TurnPhase::RoundText { text } => assert_eq!(text, "let me query"),
-            other => panic!("expected RoundText, got {other:?}"),
+            TurnPhase::ThinkingCompleted { text, .. } => assert_eq!(text, "first plan"),
+            other => panic!("expected ThinkingCompleted, got {other:?}"),
         }
         assert!(matches!(phases[2], TurnPhase::ToolCallStarted { .. }));
 
         // The trailing prose opens round 2 -- the live round pointer fires
-        // -- but the prose itself rides the terminal text: no RoundText.
+        // -- and streams its delta live.
         pump.fold(
             ClaudeEvent::AssistantText {
                 text: "the answer".into(),
             },
             &mut |p| phases.push(p),
         );
-        assert_eq!(phases.len(), 4);
+        assert_eq!(phases.len(), 5);
         match &phases[3] {
             TurnPhase::Thinking { attempt } => assert_eq!(*attempt, 2),
             other => panic!("expected the round-2 Thinking wait, got {other:?}"),
+        }
+        match &phases[4] {
+            TurnPhase::TextDelta { delta } => assert_eq!(delta, "the answer"),
+            other => panic!("expected the trailing delta, got {other:?}"),
         }
     }
 
@@ -1274,10 +1281,10 @@ mod tests {
             pump.tracker.text_or_runtime("claude closed stdout"),
             Termination::Text("final answer".into())
         );
-        // The mid-batch prose fired live as its round's RoundText.
+        // The mid-batch prose fired live as its round's TextDelta.
         assert!(phases
             .iter()
-            .any(|p| matches!(p, TurnPhase::RoundText { text } if text == "checking")));
+            .any(|p| matches!(p, TurnPhase::TextDelta { delta } if delta == "checking")));
     }
 
     /// A call left open at turn end lands on the round it opened in, not

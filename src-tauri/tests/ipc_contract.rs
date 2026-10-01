@@ -1173,14 +1173,15 @@ fn turn_phase_serializes_externally_tagged() {
         }),
         r#"{"ToolCallCompleted":{"name":"materialize","operation_kind":"write","summary":"SELECT 1","success":true,"result_excerpt":""}}"#,
     );
-    // ADR-0103 (issue #608): the round-content variants. RoundText carries
-    // the round's connective prose; ThinkingCompleted carries the thinking
-    // block's duration + raw text. Same externally-tagged shape as the rest.
+    // ADR-0126: the round-content variants. TextDelta carries one streamed
+    // prose fragment; ThinkingCompleted (ADR-0103, issue #608) carries the
+    // thinking block's duration + raw text. Same externally-tagged shape as
+    // the rest.
     assert_wire(
-        &TurnPhase::RoundText {
-            text: "先看一眼数据。".into(),
+        &TurnPhase::TextDelta {
+            delta: "先看一眼数据。".into(),
         },
-        r#"{"RoundText":{"text":"先看一眼数据。"}}"#,
+        r#"{"TextDelta":{"delta":"先看一眼数据。"}}"#,
     );
     assert_wire(
         &TurnPhase::ThinkingCompleted {
