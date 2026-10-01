@@ -8,6 +8,7 @@ import { WorkspaceToggle } from "../shell/WorkspaceToggle";
 import { SessionHeaderMenu } from "./SessionHeaderMenu";
 import { useRailFollow } from "./useRailFollow";
 import { useSessionState } from "./useSessionState";
+import { consumePendingPayload } from "./pendingPayload";
 import type { ComposerSessionFields } from "./useComposerState";
 import type { ApprovalEntry, UseApprovalEvents } from "./useApprovalEvents";
 import type { ApprovalResponse } from "../types/approval";
@@ -39,12 +40,9 @@ import { useSkillsRegistry } from "../skills/registry";
 // the bar or its composer controls. It reports its bar-relevant fields
 // (loading / phase / handleAsk / handleCancel / handleIngestFiles) upward via
 // onComposerFields so the shell-level bar can read them for the active session.
-// Pending payloads from a cold-start submit (#500) are consumed on mount in ONE
-// coordinated effect: pendingIngestPaths ingest first (handleIngestMany), then
-// the pendingQuestion fires via handleAsk — but only when the whole batch
-// loaded; a guidance PARK keeps handleIngestMany pending (#748) so the
-// question cannot fire underneath the dialog, and a terminal halt hands it
-// back to the bar draft via onSeedDraft instead.
+// Pending payloads from a cold-start submit (#500) are consumed on mount by
+// consumePendingPayload (pendingPayload.ts) -- the ordering contract and its
+// history live in that module header.
 
 interface SessionPaneProps {
   sessionId: string;
@@ -236,63 +234,22 @@ export function SessionPane({ sessionId, isActive, pendingIngestPaths, onIngestC
     // eslint-disable-next-line react-hooks/exhaustive-deps -- unmount-only: sessionId is constant (keyed component) + onComposerFieldsUnmount is useCallback-stable
   }, []);
 
-  // ADR-0092 (#500): consume the pending payloads from the cold-start bar
-  // submit / window drop. Both props are cleared UPFRONT (onIngestConsumed /
-  // onQuestionConsumed) so a remount cannot re-fire; consumedPendingRef dedups
-  // the payload KEY against a React StrictMode dev double-invoke / a re-render
-  // that lands before the clear does (the same shape as the retired
-  // useIngestFlow consumption effect -- dedup-only, NO cleanup: a cleanup
-  // cancel would fire when the upfront clear flips the props and kill the
-  // in-flight consumption). Ordering is the contract: files ingest FIRST so
-  // the first turn sees the loaded sources; the question fires only when the
-  // whole batch loaded. A NeedsGuidance PARKS the batch on the guidance
-  // dialog (#748): handleIngestMany stays pending until the queue drains or
-  // halts terminally, so the auto-ask cannot fire underneath the dialog. A
-  // terminal halt (cancel / Error / IPC reject) settles the Promise false and hands the
-  // question back to the bar draft via onSeedDraft so it is never silently
-  // lost.
-  // handleAsk catches its own failures internally (sets the session error
-  // state) and never intentionally rejects; the `.catch` below is a defensive
-  // log so an unexpected throw surfaces instead of becoming an unhandled
-  // rejection.
+  // ADR-0092 (#500): the pending payload consumption machine lives in pendingPayload.ts (consumePendingPayload).
   const consumedPendingRef = useRef<string | null>(null);
   useEffect(() => {
-    const paths = pendingIngestPaths;
-    const question = pendingQuestion;
-    const invocations = pendingSkillInvocations;
-    if (paths.length === 0 && question === null) return;
-    // JSON.stringify makes the (paths, question, invocations) triple
-    // collision-free without an ad-hoc separator character.
-    const key = JSON.stringify([paths, question, invocations]);
-    if (consumedPendingRef.current === key) return;
-    consumedPendingRef.current = key;
-    if (paths.length > 0) onIngestConsumed();
-    if (question !== null) onQuestionConsumed();
-    void (async () => {
-      if (paths.length > 0) {
-        const allLoaded = await s.handleIngestMany(paths);
-        if (!allLoaded) {
-          if (question !== null) onSeedDraft(sessionId, question);
-          // Review Important 1 (#991): the staged invocations ride the
-          // abort path back too -- the pick + the question are one atomic
-          // intent, so a resubmit carries both (the question to the draft,
-          // the names to the staging), never the question alone.
-          if (invocations.length > 0) {
-            onSeedInvocations(sessionId, invocations);
-          }
-          return;
-        }
-      }
-      if (question !== null) {
-        // ADR-0119: the staged names are the first ask's user invocations --
-        // they ride the ask itself (submit-time materialization), so the
-        // minted session's first turn carries the picks with no per-session
-        // state.
-        void s.handleAsk(question, invocations).catch((e) =>
-          log.error("SessionPane", "pendingQuestion handleAsk threw unexpectedly", e),
-        );
-      }
-    })();
+    void consumePendingPayload({
+      sessionId,
+      paths: pendingIngestPaths,
+      question: pendingQuestion,
+      invocations: pendingSkillInvocations,
+      consumedRef: consumedPendingRef,
+      onIngestConsumed,
+      onQuestionConsumed,
+      onSeedDraft,
+      onSeedInvocations,
+      ingestMany: s.handleIngestMany,
+      ask: s.handleAsk,
+    });
     // eslint-disable-next-line react-hooks/exhaustive-deps -- one-shot per payload key: s.handleIngestMany / s.handleAsk are stable inside useSessionState, the consumed callbacks are useCallback-stable in useShellSessions
   }, [pendingIngestPaths, pendingQuestion, pendingSkillInvocations, sessionId, onSeedDraft, onSeedInvocations]);
 

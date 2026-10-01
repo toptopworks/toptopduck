@@ -780,8 +780,9 @@ export function useTurnFlow(sessionId: string, deps: UseTurnFlowDeps): UseTurnFl
       // The success tail, finally-wrapped: ANY unexpected throw inside this
       // tail try (choiceToTurnRuntime on an unmapped runtime stamp) still
       // reopens the busy gate -- every fire path's defensive catch logs it
-      // (SessionPane's pendingQuestion and ask-again catches, the shell
-      // submit's fire log, #825), but without this clear the session would
+      // (the pendingQuestion catch in pendingPayload.ts, SessionPane's
+      // ask-again catch, the shell submit's fire log, #825), but without this
+      // clear the session would
       // sit permanently disabled with the log line as the only trace. The
       // designed failure paths (askQuestion rejection, refresh failure)
       // settle internally above and the gate reopens on them too.
