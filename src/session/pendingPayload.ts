@@ -19,10 +19,9 @@ import { log } from "../lib/log";
 // the same halt: the staged invocations seed back into the staging too, so a
 // resubmit carries both (the question to the draft, the names to the
 // staging), never the question alone.
-// ask (the pane's handleAsk) catches its own failures internally (sets the
-// session error state) and never intentionally rejects; the `.catch` below
-// is a defensive log so an unexpected throw surfaces instead of becoming an
-// unhandled rejection.
+// ask catches its own failures internally (sets the session error state)
+// and never intentionally rejects; the `.catch` below is a defensive log so
+// an unexpected throw surfaces instead of becoming an unhandled rejection.
 export type PendingPayloadDeps = {
   sessionId: string;
   paths: string[];

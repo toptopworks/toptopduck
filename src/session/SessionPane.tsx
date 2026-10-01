@@ -40,12 +40,9 @@ import { useSkillsRegistry } from "../skills/registry";
 // the bar or its composer controls. It reports its bar-relevant fields
 // (loading / phase / handleAsk / handleCancel / handleIngestFiles) upward via
 // onComposerFields so the shell-level bar can read them for the active session.
-// Pending payloads from a cold-start submit (#500) are consumed on mount in ONE
-// coordinated effect: pendingIngestPaths ingest first (handleIngestMany), then
-// the pendingQuestion fires via handleAsk — but only when the whole batch
-// loaded; a guidance PARK keeps handleIngestMany pending (#748) so the
-// question cannot fire underneath the dialog, and a terminal halt hands it
-// back to the bar draft via onSeedDraft instead.
+// Pending payloads from a cold-start submit (#500) are consumed on mount by
+// consumePendingPayload (pendingPayload.ts) -- the ordering contract and its
+// history live in that module header.
 
 interface SessionPaneProps {
   sessionId: string;
