@@ -7,11 +7,12 @@
 // outcome glyph for Materialized/Textual; Failed/Cancelled integrate their
 // glyph into the outcome card head, issue #720). App annotations all live on
 // the assistant side; the bubble carries only user output and conversation
-// facts.
+// facts. The head and the round skeleton ride the swap-stable
+// TurnExchangeFrame / RoundBody -- the modules the live exchange mounts too,
+// so the settle swap cannot move a member.
 
 import { useState, type ReactNode } from "react";
 import { FormattedMessage, useIntl } from "react-intl";
-import { PencilLine } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Button } from "../ui/button";
 import { DelegationTraceDialog } from "./DelegationTraceDialog";
@@ -21,16 +22,12 @@ import { ResultPreviewCard } from "./ResultPreviewCard";
 import { CopyButton } from "./CopyButton";
 import { FoldToggle } from "./FoldToggle";
 import { RoundProse } from "./RoundProse";
-import { StreamHeader } from "./StreamHeader";
-import { ThinkingFold } from "./ThinkingFold";
-import { TurnActiveChip } from "./TurnActiveChip";
-import { UserBubble } from "./UserBubble";
+import { RoundBody } from "./RoundBody";
+import { TurnExchangeFrame } from "./TurnExchangeFrame";
 import { StaleChip } from "./StaleChip";
-import { RuntimeAttributionMarker } from "./RuntimeAttributionMarker";
 import {
   HOVER_REVEAL_CLASS,
   outcomeVisual,
-  runtimeMarkerName,
   selectDriftedSkills,
   userInvocationNames,
   type DatasetLabel,
@@ -147,124 +144,87 @@ export function TurnCard({
   // but it is read in the rail, not copied (a deliberate exclusion);
   // Failed/Cancelled carry markers -- nothing textual to copy.
   const replyText = record.outcome.kind === "Textual" ? record.outcome.data.body : null;
-  // Issue #818: the per-turn runtime attribution. Only a runtime that can
-  // name its adapter renders (built-in / unrecorded stay silent).
-  const runtimeName = runtimeMarkerName(record.provenance.runtime);
   return (
-    <div
-      className={cn("turn-card rounded-md py-1.5", isStale && "stale-ghost opacity-50")}
-      data-stale={isStale ? "true" : undefined}
+    <TurnExchangeFrame
+      question={record.question}
+      askedAt={record.asked_at}
+      invokedSkills={userInvocationNames(record)}
+      isStale={isStale}
+      runtime={record.provenance.runtime}
+      mentionedDataset={mentionedDataset}
+      drifted={drifted}
+      weakened={weakened}
     >
-      <UserBubble
-        question={record.question}
-        askedAt={record.asked_at}
-        isStale={isStale}
-        invokedSkills={userInvocationNames(record)}
-      />
-      <div
-        className={cn(
-          "assistant-stream group mt-1 flex flex-col items-start",
-          weakened && "opacity-60",
-        )}
-      >
-        {/* Issue #818: the runtime attribution opens the stream -- who
-            answers precedes everything the actor does inside the turn
-            (annotations, rounds). */}
-        {runtimeName !== null && <RuntimeAttributionMarker adapterId={runtimeName} />}
-        {/* Header annotations (ADR-0103): the app's read of the question --
-            which dataset it named (ADR-0047 active chip) and which mounted
-            skills drifted since the answer (issue #381) -- open the stream,
-            ahead of the rounds, so the reading order is question -> annotation
-            -> execution -> reply. */}
-        {(mentionedDataset || drifted.length > 0) && (
-          <StreamHeader>
-            {mentionedDataset && <TurnActiveChip dataset={mentionedDataset} />}
-            {drifted.map((name) => (
-              <span
-                key={name}
-                className="skill-drift-name inline-flex items-center gap-0.5 rounded-sm bg-muted px-1 py-0.5"
-              >
-                <PencilLine aria-hidden="true" className="w-3 h-3 shrink-0" />
-                <span className="truncate">{name}</span>
-                <FormattedMessage
-                  id="thread.skill.modifiedSuffix"
-                  defaultMessage=" · modified since this answer"
-                />
-              </span>
-            ))}
-          </StreamHeader>
-        )}
-        {record.trace.map((round, i) => (
-          // The trace is append-only within a turn and never reordered, so the
-          // index is a stable key (the same YAGNI call the thread makes).
-          <TraceRoundBlock
-            key={i}
-            round={round}
-            thinkingInitiallyExpanded={thinkingInitiallyExpanded}
-            onSelectViz={onSelectViz}
-            selectedVizSpec={selectedVizSpec}
-          />
-        ))}
-        <TurnBody
-          record={record}
-          selectedResult={selectedResult}
-          onSelectResult={onSelectResult}
+      {record.trace.map((round, i) => (
+        // The trace is append-only within a turn and never reordered, so the
+        // index is a stable key (the same YAGNI call the thread makes).
+        <TraceRoundBlock
+          key={i}
+          round={round}
+          thinkingInitiallyExpanded={thinkingInitiallyExpanded}
           onSelectViz={onSelectViz}
           selectedVizSpec={selectedVizSpec}
-          staleAnchor={staleAnchor}
-          hasJumpTarget={hasJumpTarget}
-          onStaleChipJump={onStaleChipJump}
-          onRetryTurn={onRetryTurn}
-          busy={busy}
-          defaultOpenDetail={defaultOpenDetail}
         />
-        {/* ADR-0124 (issue #1088): the turn's delivered-files card, the
+      ))}
+      <TurnBody
+        record={record}
+        selectedResult={selectedResult}
+        onSelectResult={onSelectResult}
+        onSelectViz={onSelectViz}
+        selectedVizSpec={selectedVizSpec}
+        staleAnchor={staleAnchor}
+        hasJumpTarget={hasJumpTarget}
+        onStaleChipJump={onStaleChipJump}
+        onRetryTurn={onRetryTurn}
+        busy={busy}
+        defaultOpenDetail={defaultOpenDetail}
+      />
+      {/* ADR-0124 (issue #1088): the turn's delivered-files card, the
             ResultPreviewCard's sibling at the same end-of-stream rhythm. It
             renders for EVERY outcome kind -- the manifest is turn-level and
             settle-frozen, not a Materialized byproduct -- so it hangs on the
             stream, never inside TurnBody's per-outcome branches. */}
-        {record.artifacts !== undefined && record.artifacts.length > 0 && (
-          <ArtifactCard
-            artifacts={record.artifacts}
-            activePath={selectedFile}
-            stale={isStale}
-            onSelectFile={onSelectFile}
-          />
-        )}
-        {/* Closing meta row (ADR-0103): the outcome glyph ends the exchange --
+      {record.artifacts !== undefined && record.artifacts.length > 0 && (
+        <ArtifactCard
+          artifacts={record.artifacts}
+          activePath={selectedFile}
+          stale={isStale}
+          onSelectFile={onSelectFile}
+        />
+      )}
+      {/* Closing meta row (ADR-0103): the outcome glyph ends the exchange --
             state, always visible -- for Materialized/Textual (issue #720 moves
             the Failed/Cancelled glyph to the failure card head). The settle
             facts (reply copy + stamp, honest degrade: no settled_at recorded ->
             no time element) are hover-revealed alongside it (HOVER_REVEAL_CLASS
             rides the assistant-stream group). */}
-        {showsMetaRow && (
-          <p className="turn-meta m-0 mt-0.5 flex items-center gap-1.5 text-xs text-muted-foreground">
-            {/* Derived here (not above) so Failed/Cancelled never compute the
+      {showsMetaRow && (
+        <p className="turn-meta m-0 mt-0.5 flex items-center gap-1.5 text-xs text-muted-foreground">
+          {/* Derived here (not above) so Failed/Cancelled never compute the
                 meta-row visual they cannot use -- their glyph derives in
                 TurnBody's card head. */}
-            {glyphInMeta && (
-              <OutcomeGlyph visual={outcomeVisual(intl, record.outcome, isStale)} />
+          {glyphInMeta && (
+            <OutcomeGlyph visual={outcomeVisual(intl, record.outcome, isStale)} />
+          )}
+          <span className={cn("meta-reveal flex items-center gap-1.5", HOVER_REVEAL_CLASS)}>
+            {replyText !== null && (
+              <CopyButton
+                text={replyText}
+                label={intl.formatMessage({
+                  id: "thread.copy.reply",
+                  defaultMessage: "Copy reply",
+                })}
+              />
             )}
-            <span className={cn("meta-reveal flex items-center gap-1.5", HOVER_REVEAL_CLASS)}>
-              {replyText !== null && (
-                <CopyButton
-                  text={replyText}
-                  label={intl.formatMessage({
-                    id: "thread.copy.reply",
-                    defaultMessage: "Copy reply",
-                  })}
-                />
-              )}
-              {record.settled_at !== undefined && (
-                <time dateTime={new Date(record.settled_at).toISOString()}>
-                  {intl.formatTime(record.settled_at)}
-                </time>
-              )}
-            </span>
-          </p>
-        )}
-      </div>
-    </div>
+            {record.settled_at !== undefined && (
+              <time dateTime={new Date(record.settled_at).toISOString()}>
+                {intl.formatTime(record.settled_at)}
+              </time>
+            )}
+          </span>
+        </p>
+      )}
+    </TurnExchangeFrame>
   );
 }
 
@@ -289,17 +249,13 @@ function OutcomeGlyph({ visual }: { visual: ReturnType<typeof outcomeVisual> }) 
 }
 
 // One round of the round-grouped trace (ADR-0103, calibrating ADR-0078): the
-// thinking fold (default collapsed, ADR-0078 long-rail posture), the round's
-// connective prose (always expanded -- the readability mainstay), and the
-// round's step fold (default collapsed). Fold state is session-ephemeral UI
-// state; the trace data persists on the TurnRecord / recipe. Absent members
-// render nothing (honest degrade: no thinking source -> no thinking fold; a
-// pre-v5 migrated round is a bare call list -> just the step fold; an entirely
-// empty round -> no chrome at all). The thinking fold + prose are shared with
-// the live round block (issue #610) via ThinkingFold + RoundProse, so the
-// settle swap does not move them; `thinkingInitiallyExpanded` seeds the
-// thinking fold with the live turn's open posture at the settle swap
-// (issue #620).
+// skeleton (thinking fold + connective prose) rides RoundBody -- the module
+// the live round block mounts too, so the settle swap does not move them;
+// `thinkingInitiallyExpanded` seeds the fold with the live turn's open
+// posture at the settle swap (issue #620). This adapter owns the round's
+// step fold (default collapsed, ADR-0078 long-rail posture). Fold state is
+// session-ephemeral UI state; the trace data persists on the TurnRecord /
+// recipe.
 function TraceRoundBlock({
   round,
   thinkingInitiallyExpanded,
@@ -312,29 +268,18 @@ function TraceRoundBlock({
   selectedVizSpec?: string | null;
 }) {
   const [stepsExpanded, setStepsExpanded] = useState(false);
-  // Destructured const so the aliased guard narrows the binding itself (a
-  // boolean alias of `round.thinking !== undefined` does not narrow the
-  // property access); the render below reads `thinking` with no assertions.
   const { thinking, text, calls } = round;
-  const hasThinking = thinking !== undefined;
-  const hasCalls = calls.length > 0;
-  if (!hasThinking && text === undefined && !hasCalls) return null;
   return (
-    // max-w-full: a non-stretched flex item (the stream's items-start) sizes
-    // its width by fit-content, which floors at min-content -- a nowrap
-    // summary then stretches the round past the card instead of truncating.
-    // The cap hands the overflow back to the row's truncate (issue #826).
-    <div className="trace-round max-w-full">
-      {hasThinking && (
-        <ThinkingFold
-          thinking={thinking}
-          initialExpanded={thinkingInitiallyExpanded?.has(thinking) ?? false}
-        />
-      )}
-      {text !== undefined && (
-        <RoundProse text={text} onSelectViz={onSelectViz} selectedVizSpec={selectedVizSpec} />
-      )}
-      {hasCalls && (
+    <RoundBody
+      thinking={thinking}
+      text={text}
+      initialThinkingExpanded={
+        thinking !== undefined && (thinkingInitiallyExpanded?.has(thinking) ?? false)
+      }
+      onSelectViz={onSelectViz}
+      selectedVizSpec={selectedVizSpec}
+    >
+      {calls.length > 0 && (
         // The round's step fold: the call count reads "Trace · N calls" so a
         // rail scan shows which rounds made multiple calls without expanding.
         <>
@@ -359,7 +304,7 @@ function TraceRoundBlock({
           )}
         </>
       )}
-    </div>
+    </RoundBody>
   );
 }
 

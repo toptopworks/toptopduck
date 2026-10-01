@@ -10,35 +10,32 @@
 //
 // The rounds arrive pre-grouped from the state layer's single derivation
 // (issue #620) -- this component renders them directly and never regroups.
-// The prose / trace-list chrome / thinking fold / active chip ride the shared
-// components the settled form uses, so the settle swap cannot move them.
-// Settle swaps this block for the settled TurnCard: liveRoundsToTrace folds
-// the same rounds into the optimistic TurnRecord.trace; the running status
-// row yields to the outcome body + closing meta row, and the streamed rows
-// fold behind the per-round step fold (the settled default posture,
-// ADR-0078). A thinking fold the user opened while live mounts already open
-// on the settled side via the onThinkingExpandedChange report (issue #620).
+// The head and the round skeleton ride the swap-stable TurnExchangeFrame /
+// RoundBody -- the modules the settled TurnCard mounts too, so the settle
+// swap cannot move a member. Settle swaps this block for the settled
+// TurnCard: liveRoundsToTrace folds the same rounds into the optimistic
+// TurnRecord.trace; the running status row yields to the outcome body +
+// closing meta row, and the streamed rows fold behind the per-round step fold
+// (the settled default posture, ADR-0078). A thinking fold the user opened
+// while live mounts already open on the settled side via the
+// onThinkingExpandedChange report (issue #620).
 
 import { FormattedMessage } from "react-intl";
 import { useCallback } from "react";
 import { Loader2 } from "lucide-react";
-import { UserBubble } from "./UserBubble";
 import { LiveRow } from "./TraceView";
-import { RoundProse } from "./RoundProse";
 import { TraceList } from "./TraceList";
-import { ThinkingFold } from "./ThinkingFold";
-import { StreamHeader } from "./StreamHeader";
-import { TurnActiveChip } from "./TurnActiveChip";
-import { RuntimeAttributionMarker } from "./RuntimeAttributionMarker";
+import { RoundBody } from "./RoundBody";
+import { TurnExchangeFrame } from "./TurnExchangeFrame";
 import type { LiveRound, LiveTurn } from "../../session/useTurnFlow";
 import type { ApprovalResponse, FileAttachment } from "../../types/approval";
 import type { ThinkingTrace } from "../../types/thread";
-import { runtimeMarkerName, type DatasetLabel } from "./turn-visual";
+import type { DatasetLabel } from "./turn-visual";
 
-// One live round: the thinking fold + connective prose render exactly as the
-// settled TraceRoundBlock renders them (isomorphism -- the settle swap must
-// not move them); the round's rows stream UNFOLDED -- the step fold is the
-// settled posture, but streaming calls must be visible as they land.
+// One live round: the skeleton rides RoundBody (see its header for the swap
+// contract); this adapter owns the round's tool rows -- streaming UNFOLDED,
+// where the settled posture folds them (ADR-0078): streaming calls must be
+// visible as they land.
 function LiveRoundBlock({
   round,
   onRespondApproval,
@@ -50,34 +47,21 @@ function LiveRoundBlock({
   onLoadApprovalAttachments?: (requestId: string) => Promise<FileAttachment[]>;
   onThinkingExpandedChange: (thinking: ThinkingTrace, expanded: boolean) => void;
 }) {
-  // Destructured const so the aliased guard narrows the binding itself; the
-  // fold's posture report passes the reference (the settle seed's key).
   const { thinking, text, rows } = round;
   // useCallback so the fold's report effect does not re-fire on an unrelated
-  // parent re-render (the identity must only change with the thinking block).
+  // parent re-render (the identity must only change with the thinking block);
+  // the report passes the reference (the settle seed's key).
   const reportThinkingExpanded = useCallback(
     (expanded: boolean) => thinking !== undefined && onThinkingExpandedChange(thinking, expanded),
     [thinking, onThinkingExpandedChange],
   );
-  const hasThinking = thinking !== undefined;
-  if (!hasThinking && text === undefined && rows.length === 0) {
-    return null;
-  }
   return (
-    // max-w-full: a non-stretched flex item (the stream's items-start) sizes
-    // its width by fit-content, which floors at min-content -- a nowrap
-    // summary then stretches the round past the card instead of truncating.
-    // The cap hands the overflow back to the row's truncate (issue #826).
-    <div className="trace-round max-w-full">
-      {hasThinking && (
-        <ThinkingFold thinking={thinking} onExpandedChange={reportThinkingExpanded} />
-      )}
-      {text !== undefined && (
-        // mode="streaming": a vega-lite fence shows the placeholder while
-        // the round streams and decodes only after the settle swap
-        // (ADR-0120 Decision 4).
-        <RoundProse text={text} mode="streaming" />
-      )}
+    <RoundBody
+      thinking={thinking}
+      text={text}
+      proseMode="streaming"
+      onThinkingExpandedChange={reportThinkingExpanded}
+    >
       {rows.length > 0 && (
         <TraceList>
           {rows.map((row) => (
@@ -90,7 +74,7 @@ function LiveRoundBlock({
           ))}
         </TraceList>
       )}
-    </div>
+    </RoundBody>
   );
 }
 
@@ -125,62 +109,43 @@ export function LiveTurnExchange({
   const rowInProgress = liveTurn.rounds.some((round) =>
     round.rows.some((row) => row.running || row.success === null),
   );
-  // Issue #818: the per-turn runtime attribution, from the ask-time choice
-  // riding the live state (absent until the read lands / on failure -- no
-  // marker, the same silent degrade as the append's omitted runtime).
-  const runtimeName = runtimeMarkerName(liveTurn.runtime);
   return (
-    <div className="live-turn-exchange turn-card rounded-md py-1.5" data-live="true">
-      <UserBubble
-        question={liveTurn.question}
-        askedAt={liveTurn.askedAt}
-        isStale={false}
-        invokedSkills={liveTurn.invocationNames}
-      />
-      <div className="assistant-stream mt-1 flex flex-col items-start">
-        {/* Issue #818: the runtime attribution opens the stream in the same
-            first-child slot the settled TurnCard renders -- a marker the
-            live side has is re-hosted in place at the settle swap (#620);
-            a read landing only after the settle lets the settled card add
-            it. */}
-        {runtimeName !== null && <RuntimeAttributionMarker adapterId={runtimeName} />}
-        {mentionedDataset !== null && (
-          // The stream header opens with the dataset chip only -- the settled
-          // header may add skill-drift badges at settle, but the chip itself
-          // must already be here so the swap adds no element (issue #620).
-          <StreamHeader>
-            <TurnActiveChip dataset={mentionedDataset} />
-          </StreamHeader>
-        )}
-        {liveTurn.rounds.map((round, i) => (
-          // The rounds array is append-only within a turn (round i is round
-          // i+1), so the index is a stable key.
-          <LiveRoundBlock
-            key={i + 1}
-            round={round}
-            onRespondApproval={onRespondApproval}
-            onLoadApprovalAttachments={onLoadApprovalAttachments}
-            onThinkingExpandedChange={onThinkingExpandedChange}
-          />
-        ))}
-        {!rowInProgress && (
-          <p
-            className="live-thinking m-0 mt-0.5 flex items-center gap-1 text-xs text-muted-foreground"
-            role="status"
-          >
-            <Loader2 aria-hidden="true" className="w-3.5 h-3.5 shrink-0 animate-spin" />
-            {liveTurn.step !== null && liveTurn.step > 1 ? (
-              <FormattedMessage
-                id="thread.live.thinkingStep"
-                defaultMessage="Thinking (step {step})…"
-                values={{ step: liveTurn.step }}
-              />
-            ) : (
-              <FormattedMessage id="common.thinking" defaultMessage="Thinking…" />
-            )}
-          </p>
-        )}
-      </div>
-    </div>
+    <TurnExchangeFrame
+      question={liveTurn.question}
+      askedAt={liveTurn.askedAt}
+      invokedSkills={liveTurn.invocationNames}
+      runtime={liveTurn.runtime}
+      mentionedDataset={mentionedDataset}
+      live
+    >
+      {liveTurn.rounds.map((round, i) => (
+        // The rounds array is append-only within a turn (round i is round
+        // i+1), so the index is a stable key.
+        <LiveRoundBlock
+          key={i + 1}
+          round={round}
+          onRespondApproval={onRespondApproval}
+          onLoadApprovalAttachments={onLoadApprovalAttachments}
+          onThinkingExpandedChange={onThinkingExpandedChange}
+        />
+      ))}
+      {!rowInProgress && (
+        <p
+          className="live-thinking m-0 mt-0.5 flex items-center gap-1 text-xs text-muted-foreground"
+          role="status"
+        >
+          <Loader2 aria-hidden="true" className="w-3.5 h-3.5 shrink-0 animate-spin" />
+          {liveTurn.step !== null && liveTurn.step > 1 ? (
+            <FormattedMessage
+              id="thread.live.thinkingStep"
+              defaultMessage="Thinking (step {step})…"
+              values={{ step: liveTurn.step }}
+            />
+          ) : (
+            <FormattedMessage id="common.thinking" defaultMessage="Thinking…" />
+          )}
+        </p>
+      )}
+    </TurnExchangeFrame>
   );
 }

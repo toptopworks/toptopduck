@@ -1,9 +1,13 @@
-// Issue #818: the live side of the runtime attribution marker -- the same
-// first-child position the settled TurnCard renders, so a marker present
-// on the live side is re-hosted in place at the settle swap (#620; a read
-// landing only after the settle lets the settled card add it). The runtime
-// riding LiveTurn is the ask-time choice (it may be absent until the read
-// lands); when it lands is useTurnFlow's contract, pinned in its own tests.
+// The live exchange's own surface pins. The head contract -- the marker's
+// first-child position, its built-in / pre-id silence cells, the
+// invocation-badge face -- and the round width cap ride the swap-stable
+// modules now, pinned in TurnExchangeFrame.test / RoundBody.test (issue
+// #1157); what stays here is what only the live side reaches through its own
+// data: the marker's absence before the ask-time read lands (the runtime
+// riding LiveTurn arrives late -- when it lands is useTurnFlow's contract,
+// pinned in its own tests) and its presence + the staged badge names once
+// they land (the adapter hand-offs -- the frame pins only the given-prop
+// faces), plus the streaming prose postures (ADR-0120).
 
 import { describe, expect, it } from "vitest";
 import { render, screen } from "@testing-library/react";
@@ -38,53 +42,28 @@ const liveTurnWith = (runtime: LiveTurn["runtime"]): LiveTurn => ({
 });
 
 describe("LiveTurnExchange runtime attribution marker (issue #818)", () => {
-  it("opens the assistant stream with the marker naming the adapter", () => {
-    const { container } = renderExchange(
-      liveTurnWith({ kind: "external", data: { adapter_id: "claude-code" } }),
-    );
-    const stream = container.querySelector(".assistant-stream");
-    expect(stream).not.toBeNull();
-    // The same first-child contract as the settled TurnCard: the settle
-    // swap re-hosts the marker without moving it (#620).
-    expect(stream?.firstElementChild).toHaveClass("runtime-attribution");
-    expect(stream?.firstElementChild).toHaveTextContent("claude-code");
-  });
-
   it("renders no marker before the ask-time read lands (runtime absent)", () => {
     const { container } = renderExchange(liveTurnWith(undefined));
     expect(container.querySelector(".runtime-attribution")).toBeNull();
   });
 
-  it("renders no marker for the built-in default", () => {
-    const { container } = renderExchange(liveTurnWith({ kind: "built_in" }));
-    expect(container.querySelector(".runtime-attribution")).toBeNull();
-  });
-
-  it("renders no marker for a pre-id external runtime", () => {
+  it("mounts the marker once the read lands (the LiveTurn hand-off)", () => {
+    // The frame pin covers the given-prop face; this covers the adapter
+    // wiring -- the runtime rides LiveTurn, and dropping the hand-off would
+    // keep the suite green while the marker vanished until the settle swap
+    // (#620).
     const { container } = renderExchange(
-      liveTurnWith({ kind: "external", data: { adapter_id: null } }),
+      liveTurnWith({ kind: "external", data: { adapter_id: "claude-code" } }),
     );
-    expect(container.querySelector(".runtime-attribution")).toBeNull();
+    const marker = container.querySelector(".runtime-attribution");
+    expect(marker).not.toBeNull();
+    expect(marker).toHaveTextContent("claude-code");
   });
 });
 
-describe("LiveTurnExchange trace round width cap (issue #826)", () => {
-  it("caps the live trace round at the stream width so summaries can truncate", () => {
-    // Same cap as the settled TurnCard round: a non-stretched flex item's
-    // fit-content width floors at min-content, so the cap is what lets a
-    // nowrap summary hit the row's truncate instead of stretching the card.
-    const { container } = renderExchange({
-      ...liveTurnWith(undefined),
-      rounds: [{ text: "流", rows: [] }],
-    });
-    expect(container.querySelector(".trace-round")).toHaveClass("max-w-full");
-  });
-});
-
-// Review Important 3 (#991): the live exchange renders the client-known
-// staging as the badge face (ADR-0119 Decision 5) -- the same UserBubble
-// the settled card re-renders from the turn's own records at the swap.
-describe("LiveTurnExchange user-invocation badges (ADR-0119 Decision 5, review I3, #991)", () => {
+// The staged badge names ride LiveTurn.invocationNames (ADR-0119 Decision 5)
+// -- the frame pins the given-prop face, this pins the adapter hand-off.
+describe("LiveTurnExchange user-invocation badges (ADR-0119 Decision 5)", () => {
   it("renders the staged names above the question", () => {
     const { getByText, getByLabelText } = renderExchange({
       ...liveTurnWith(undefined),
@@ -92,11 +71,6 @@ describe("LiveTurnExchange user-invocation badges (ADR-0119 Decision 5, review I
     });
     expect(getByText("sql-coach")).toBeInTheDocument();
     expect(getByLabelText("随此消息调用的技能")).toBeInTheDocument();
-  });
-
-  it("renders no badge list with an empty staging", () => {
-    const { queryByLabelText } = renderExchange(liveTurnWith(undefined));
-    expect(queryByLabelText("随此消息调用的技能")).not.toBeInTheDocument();
   });
 });
 
