@@ -64,3 +64,4 @@ ADR-0009（阻塞式 ask）+ 0021（软取消 ≤120 s）+ 0053（TurnRunner pur
 - **延伸 ADR-0055**：关 tab in-flight 的 phase/listener 收尾与"立即卸前端 + 后台丢弃"一致，无需额外处理。
 - **CONTEXT.md 不动**：渐进反馈是实现/UX 决策，不引入新领域术语。
 - **出口保留**：LLM token 流式（真进度）若成刚需，走 0051 Q5 已 punt 的流式通道（改 ask 契约）；届时 `turn-progress` 可扩 `Streaming{tokens}` 变体。
+- **被 ADR-0126 校准**：出口保留条款兑现——`turn-progress` 扩 `TextDelta` 逐条正文流（`RoundText` 退役），形态为载荷事件流而非一体计数变体；开篇「不开 LLM token 流式」读作「不经 ask 契约返回流」，侧通道流式不破「离散阶段标记」论据（delta 是真实载荷，非 ADR-0017 所禁的虚构进度）；ask 阻塞契约（ADR-0009）与 phase 不进 thread 真相（ADR-0051）不变。
