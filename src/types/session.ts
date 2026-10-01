@@ -195,7 +195,10 @@ export interface ResumeProgress {
 // later land on TurnRecord.trace: Thinking brackets each provider round-trip
 // (`attempt` is the 1-based STEP, rising across round-trips), and the
 // ToolCallStarted / ToolCallCompleted pair wraps each dispatch (a gate-denied
-// call fires only the completion, success: false). Mirrors the Rust
+// call fires only the completion, success: false). ADR-0126 extends the same
+// stream with real-payload fragments: TextDelta streams each prose piece the
+// moment it arrives (the terminal answer included), plus the per-round
+// ThinkingCompleted block. Mirrors the Rust
 // `TurnPhase` (serde externally-tagged, like ResumeEvent); ToolCallCompleted
 // wraps a TraceEntry verbatim (a newtype variant serializes to the same flat
 // object), so the frontend appends the payload as its live trace entry.
@@ -209,11 +212,12 @@ export type TurnPhase =
     };
   }
   | { ToolCallCompleted: TraceEntry }
-  // ADR-0103 (issue #608): the round's connective prose, fired after the
-  // round's Thinking wait and before the batch's call events; and the
-  // round's completed thinking block (duration + raw text), fired only when
-  // the runtime exposes a thinking data source.
-  | { RoundText: { text: string } }
+  // ADR-0126: one streamed prose delta, fired the moment the fragment
+  // arrives -- belongs to the current round (the round's Thinking wait has
+  // already arrived, so the live step is known); and the round's completed
+  // thinking block (ADR-0103 issue #608, duration + raw text), fired only
+  // when the runtime exposes a thinking data source.
+  | { TextDelta: { delta: string } }
   // Wraps the trace's own ThinkingTrace verbatim (the same reuse
   // ToolCallCompleted makes of TraceEntry): the live state stores the block
   // as-is and the round's fold renders it unchanged.

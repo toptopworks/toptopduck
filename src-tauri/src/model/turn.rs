@@ -585,19 +585,22 @@ pub enum TurnPhase {
     /// this, with `success: false`). The excerpt follows the persisted shape
     /// -- empty on success, the bounded failure / denial message on failure.
     ToolCallCompleted(TraceEntryView),
-    /// The connective prose of one provider round (ADR-0103, issue #608):
-    /// text the model emitted alongside its tool-call batch, fired after the
-    /// round's `Thinking` wait and BEFORE the batch's `ToolCallStarted`
-    /// events -- the live counterpart of [`TraceRound::text`], so the rail
-    /// can render the round's prose as it happens. Only fired when the reply
-    /// carried prose; a bare tool-call batch fires nothing here.
-    RoundText { text: String },
+    /// One streamed prose delta (ADR-0126): a fragment of the round's
+    /// connective text or of the terminal answer, fired the moment it
+    /// arrives off the runtime stream -- no merging, no windowing. Belongs
+    /// to the CURRENT round (the round's `Thinking` wait has already
+    /// arrived, so `live.step` is known); the round's seal is the batch's
+    /// first `ToolCallStarted` -- a delta run that ends without one was the
+    /// terminal answer, streaming live for the first time. An empty
+    /// fragment emits nothing (the emission sites gate on payload).
+    TextDelta { delta: String },
     /// One round's thinking block completed (ADR-0103, issue #608): its
     /// duration and raw reasoning text, the live counterpart of
-    /// [`ThinkingTrace`]. Fired after the round's `Thinking` wait and before
-    /// [`RoundText`] / the batch's call events, only when the runtime
-    /// exposes a thinking data source -- otherwise nothing fires and the
-    /// frontend renders the round without a thinking fold (honest degrade).
+    /// [`ThinkingTrace`]. Fired after the round's `Thinking` wait and its
+    /// [`TextDelta`] stream, before the batch's call events, only when the
+    /// runtime exposes a thinking data source -- otherwise nothing fires
+    /// and the frontend renders the round without a thinking fold (honest
+    /// degrade).
     ThinkingCompleted { duration_ms: u64, text: String },
 }
 

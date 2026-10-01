@@ -483,20 +483,27 @@ fn multi_step_success_groups_rounds_and_promotes() {
     assert_eq!(outcome.promotions.len(), 1);
     assert_eq!(outcome.promotions[0].dataset.reference_name, "result_2");
 
-    // The phase rail stays per-turn: one RoundText (round 1's prose only,
-    // never re-emitted for the prose-less round 2), one ThinkingCompleted
-    // per thinking-bearing turn with that turn's thinking alone (never a
+    // The phase rail stays per-turn: round 1's prose and the terminal
+    // answer both stream as their TextDeltas (the prose-less round 2
+    // contributes none; the terminal delta is the same-source pin --
+    // byte-identical to the Termination text asserted above, ADR-0126's
+    // rig terminal-round verification), one ThinkingCompleted per
+    // thinking-bearing turn with that turn's thinking alone (never a
     // cross-turn concatenation), and a Thinking marker for every turn
     // opened -- three turns, the terminal one included.
     let phases = h.phases.lock().unwrap();
     let round_texts: Vec<&str> = phases
         .iter()
         .filter_map(|p| match p {
-            TurnPhase::RoundText { text } => Some(text.as_str()),
+            TurnPhase::TextDelta { delta } => Some(delta.as_str()),
             _ => None,
         })
         .collect();
-    assert_eq!(round_texts, vec!["Looking at the data."]);
+    assert_eq!(
+        round_texts,
+        vec!["Looking at the data.", "There are 2 rows."],
+        "round 1's prose + the terminal answer stream; the terminal delta is byte-same-source with the Termination text"
+    );
     let think_done: Vec<&str> = phases
         .iter()
         .filter_map(|p| match p {

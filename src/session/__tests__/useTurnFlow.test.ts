@@ -268,7 +268,7 @@ describe("useTurnFlow", () => {
       expect(typeof result.current.liveTurn?.askedAt).toBe("number");
     });
 
-    it("attaches RoundText to the current round (issue #608)", async () => {
+    it("appends TextDelta fragments to the current round (ADR-0126)", async () => {
       const { deps } = setup();
       vi.mocked(askQuestion).mockImplementation(
         () => new Promise<TurnOutcome>(() => {}),
@@ -279,7 +279,8 @@ describe("useTurnFlow", () => {
         void result.current.handleAsk("q");
       });
       emitProgress(SID, { Thinking: { attempt: 1 } });
-      emitProgress(SID, { RoundText: { text: "先看一眼数据。" } });
+      emitProgress(SID, { TextDelta: { delta: "先看一眼" } });
+      emitProgress(SID, { TextDelta: { delta: "数据。" } });
       expect(result.current.liveTurn?.rounds).toEqual([{ text: "先看一眼数据。", rows: [] }]);
       // A second round without prose pads nothing; a started call there
       // lands on round 2.
@@ -606,7 +607,7 @@ describe("useTurnFlow", () => {
       emitProgress(SID, {
         ThinkingCompleted: { duration_ms: 500, text: "hmm" },
       });
-      emitProgress(SID, { RoundText: { text: "先看一眼数据。" } });
+      emitProgress(SID, { TextDelta: { delta: "先看一眼数据。" } });
       emitProgress(SID, {
         ToolCallStarted: { name: "explore", operation_kind: "read", summary: "SELECT 1" },
       });
@@ -809,7 +810,7 @@ describe("useTurnFlow", () => {
           ],
         },
       ];
-      // Round 2 emitted prose (the RoundText event); round 1 emitted none.
+      // Round 2 emitted prose (the TextDelta stream); round 1 emitted none.
       expect(liveRoundsToTrace(rounds)).toEqual([
         {
           calls: [
@@ -903,6 +904,75 @@ describe("useTurnFlow", () => {
       // round when the tool-call reply arrives, not when a call completes.
       expect(liveRoundsToTrace([{ text: "先看一眼数据。", rows: [] }])).toEqual([
         { text: "先看一眼数据。", calls: [] },
+      ]);
+    });
+
+    it("liveRoundsToTrace drops the trailing prose on a body-bearing outcome (ADR-0126)", () => {
+      // The settle mirror: a Textual/Materialized outcome carries the
+      // terminal text itself, so the trailing call-less round's prose
+      // clears (and the emptied round drops) -- the same clear the backend
+      // settle applies, so the turn-end refresh converges with no change.
+      const row: LiveTraceRow = {
+        key: "call-0",
+        step: 1,
+        name: "explore",
+        server: null,
+        operationKind: "read",
+        summary: "SELECT 1",
+        approval: null,
+        running: false,
+        success: false,
+        resultExcerpt: "boom",
+      };
+      const rounds: LiveRound[] = [{ rows: [row] }, { text: "部分答案", rows: [] }];
+      const outcome: TurnOutcome = {
+        kind: "Textual",
+        data: { text_kind: "Clarify", body: "部分答案", assumption: null },
+      };
+      expect(liveRoundsToTrace(rounds, outcome)).toEqual([
+        {
+          calls: [
+            {
+              name: "explore",
+              operation_kind: "read",
+              summary: "SELECT 1",
+              success: false,
+              result_excerpt: "boom",
+            },
+          ],
+        },
+      ]);
+    });
+
+    it("liveRoundsToTrace keeps the trailing partial prose on Cancelled (the #628 settle mirror)", () => {
+      // A non-body outcome keeps the trailing partial prose -- the diagnosis
+      // settle the backend records -- so the refresh lands the same round.
+      const row: LiveTraceRow = {
+        key: "call-0",
+        step: 1,
+        name: "explore",
+        server: null,
+        operationKind: "read",
+        summary: "SELECT 1",
+        approval: null,
+        running: false,
+        success: false,
+        resultExcerpt: "boom",
+      };
+      const rounds: LiveRound[] = [{ rows: [row] }, { text: "半截答案", rows: [] }];
+      expect(liveRoundsToTrace(rounds, { kind: "Cancelled", data: null })).toEqual([
+        {
+          calls: [
+            {
+              name: "explore",
+              operation_kind: "read",
+              summary: "SELECT 1",
+              success: false,
+              result_excerpt: "boom",
+            },
+          ],
+        },
+        { text: "半截答案", calls: [] },
       ]);
     });
 

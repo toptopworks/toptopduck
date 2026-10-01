@@ -176,7 +176,19 @@ impl EventFold {
     fn assistant_item(&mut self, content: &StreamedAssistantContent, phases: &PhaseSink) {
         match content {
             StreamedAssistantContent::Text(text) => {
+                // ADR-0126: the fragment streams live the moment it arrives
+                // (after the turn-opening `Thinking`, so `live.step` is
+                // known), while `text_deltas` keeps accumulating toward the
+                // batch-confirmed round. An empty fragment emits nothing.
                 self.open_call(phases);
+                if !text.text.is_empty() {
+                    emit_phase(
+                        phases,
+                        TurnPhase::TextDelta {
+                            delta: text.text.clone(),
+                        },
+                    );
+                }
                 self.text_deltas.push(text.text.clone());
             }
             StreamedAssistantContent::Reasoning { reasoning, .. } => {
@@ -218,15 +230,15 @@ impl EventFold {
                 // first).
                 if !self.batch_open {
                     self.batch_open = true;
+                    // The batch seal builds the round off `text_deltas`; the
+                    // prose already streamed as `TextDelta`s (ADR-0126) --
+                    // there is no batch-confirmation text event.
                     let thinking = self
                         .trailing_thinking
                         .take()
                         .and_then(|round| round.thinking);
                     let prose = self.text_deltas.join("");
                     let text = (!prose.is_empty()).then_some(prose);
-                    if let Some(t) = text.as_ref() {
-                        emit_phase(phases, TurnPhase::RoundText { text: t.clone() });
-                    }
                     self.rounds.push(LoopRound {
                         thinking,
                         text,
