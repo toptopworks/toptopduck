@@ -30,9 +30,9 @@ export function RoundBody({
   thinking?: ThinkingTrace;
   text?: string;
   /** The prose render mode (issue #1128): "streaming" while the round
-   *  streams -- the caret arms and a vega-lite fence holds the placeholder
-   *  until the settle swap (ADR-0120 Decision 4); absent for the settled
-   *  rounds, where a fence decodes. */
+   *  still grows -- the caret arms and a vega-lite fence holds the
+   *  placeholder until the round closes or the turn settles (ADR-0120
+   *  Decision 4); absent for the settled rounds, where a fence decodes. */
   proseMode?: RoundProseMode;
   /** Issue #620: seeds the thinking fold mounted already open -- the settled
    *  adapter reads the live posture out of the thread's seed set. */

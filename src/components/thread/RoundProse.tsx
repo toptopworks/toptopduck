@@ -30,7 +30,8 @@
 // subcomponents so the maps close over nothing. There are two maps --
 // settled and live (the streaming mode; ADR-0120's term) -- differing only
 // in the `pre` door (the vega-lite fence, ADR-0120 Decision 4); each is its
-// own constant, so a mode switch (the settle swap) is the only thing that
+// own constant, so a mode switch (the settle swap, or a closed round
+// flipping to static mid-turn — issue #1161) is the only thing that
 // ever changes identity, and within a mode streamed deltas reconcile in
 // place. The library's own mode prop stays unset on purpose: its default is
 // "streaming", so the remend pass runs on BOTH sides here and what a stream

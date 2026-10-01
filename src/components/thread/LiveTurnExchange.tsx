@@ -26,6 +26,7 @@ import { Loader2 } from "lucide-react";
 import { LiveRow } from "./TraceView";
 import { TraceList } from "./TraceList";
 import { RoundBody } from "./RoundBody";
+import type { RoundProseMode } from "./RoundProse";
 import { TurnExchangeFrame } from "./TurnExchangeFrame";
 import type { LiveRound, LiveTurn } from "../../session/useTurnFlow";
 import type { ApprovalResponse, FileAttachment } from "../../types/approval";
@@ -38,11 +39,17 @@ import type { DatasetLabel } from "./turn-visual";
 // visible as they land.
 function LiveRoundBlock({
   round,
+  proseMode,
   onRespondApproval,
   onLoadApprovalAttachments,
   onThinkingExpandedChange,
 }: {
   round: LiveRound;
+  /** The caret is the round-is-alive signal (RoundProse's streaming
+   *  contract), and only the tail round is alive -- the rounds array is
+   *  append-only, so every earlier round's text is final and renders
+   *  static (caret off, cascade off, its fences decode). */
+  proseMode: RoundProseMode;
   onRespondApproval: (requestId: string, response: ApprovalResponse) => void;
   onLoadApprovalAttachments?: (requestId: string) => Promise<FileAttachment[]>;
   onThinkingExpandedChange: (thinking: ThinkingTrace, expanded: boolean) => void;
@@ -59,7 +66,7 @@ function LiveRoundBlock({
     <RoundBody
       thinking={thinking}
       text={text}
-      proseMode="streaming"
+      proseMode={proseMode}
       onThinkingExpandedChange={reportThinkingExpanded}
     >
       {rows.length > 0 && (
@@ -124,6 +131,7 @@ export function LiveTurnExchange({
         <LiveRoundBlock
           key={i + 1}
           round={round}
+          proseMode={i === liveTurn.rounds.length - 1 ? "streaming" : "static"}
           onRespondApproval={onRespondApproval}
           onLoadApprovalAttachments={onLoadApprovalAttachments}
           onThinkingExpandedChange={onThinkingExpandedChange}
