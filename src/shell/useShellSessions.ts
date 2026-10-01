@@ -2,14 +2,17 @@
 // + active id (ADR-0060 multi-session) + every action that mutates them:
 // register / createSessionWithQuestion / openPersisted /
 // dropFile / onWebviewDrop / clearPendingIngest / clearPendingQuestion /
-// activateSession / goToEmptyState / closeOpen / deletePersisted / renameEntry /
-// handleOpenDuck. The resume + persistence-busy indicators live
-// here too -- they drive the shell `busy` flag that gates the webview drop
-// listener + the sidebar / topbar / hero disabled states.
+// activateSession / goToEmptyState / closeOpen. The persisted file-ops species
+// (deletePersisted / renameEntry / handleOpenDuck / handleExportSession /
+// syncSessionName) composes in via useSessionFileOps (#1155). The resume
+// indicator lives here, and together with the species' persistenceBusy it
+// drives the shell `busy` flag that gates the webview drop listener + the
+// sidebar / topbar / hero disabled states.
 //
 // ADR-0068: this is advisory state held in React (NOT TanStack Query) -- the
-// open set is the shell's in-memory bookkeeping, and resumeStatus /
-// persistenceBusy are UI gates. The queryClient passed in is the SEAM to the
+// open set is the shell's in-memory bookkeeping, and resumeStatus (here) and
+// persistenceBusy (in the composed useSessionFileOps) are UI gates. The
+// queryClient passed in is the SEAM to the
 // session-level Query cache (ADR-0051/0055): unmountOpen drops a session's
 // cache slice (ADR-0058 retry / ADR-0055 close / ADR-0063 delete), and
 // openPersisted invalidates after a resume replay.
@@ -24,26 +27,16 @@
 // ingests per single drop.
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { IntlShape } from "react-intl";
-import {
-  open as openDialog,
-  save as saveDialog,
-} from "@tauri-apps/plugin-dialog";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import type { QueryClient } from "@tanstack/react-query";
 import type { CreateSessionReply, SetPosturePersistOutcome } from "../api";
 import {
   closeSession,
-  closeSessionAndWaitRelease,
   createSession,
-  deleteSession,
-  exportSession,
-  getSessionName,
   listLiveSessions,
   onResumeProgress,
   openDuck,
   prepareImportSession,
-  renamePersistedSession,
-  renameSession,
   setAuthorizationMode,
   setSessionPosture,
   setSessionRuntime,
@@ -58,6 +51,7 @@ import { AUTH_MODE_DEFAULT } from "../types/approval";
 import type { SessionRuntimeChoice } from "../types/runtime";
 import type { OpenSession } from "../session/sidebarModel";
 import { isPointOverComposerBar, type DropPoint } from "./dropTarget";
+import { useSessionFileOps } from "./useSessionFileOps";
 
 /** Composer posture the user picked on the cold-start bar before a session
  *  existed (ADR-0092 Decision 6, issue #500). The shell applies it to a
@@ -164,9 +158,10 @@ export function useShellSessions({
   /** ADR-0092: navigate to the centered empty state (sidebar "+"). Existing
    *  keep-alive sessions stay mounted hidden. */
   goToEmptyState: () => void;
-  /** Shell-wide busy gate: persistenceBusy (save / open / delete wait) OR a
-   *  resume in flight. Drives the sidebar / topbar disabled states and
-   *  suspends the webview drop listener while busy. */
+  /** Shell-wide busy gate: a persistence wait in the composed file-ops
+   *  species (save / open / delete) OR a resume in flight. Drives the
+   *  sidebar / topbar disabled states and suspends the webview drop listener
+   *  while busy. */
   busy: boolean;
   resumeStatus: ResumeStatus;
   /** ADR-0092 (#500): create a session from a cold-start bar submit, carrying
@@ -230,9 +225,6 @@ export function useShellSessions({
   const [resumeStatus, setResumeStatus] = useState<ResumeStatus>({
     kind: "idle",
   });
-  const [persistenceBusy, setPersistenceBusy] = useState(false);
-
-  const busy = persistenceBusy || resumeStatus.kind !== "idle";
 
   // Single pure transition into the merged open-set state (issue #205). Each
   // caller hands back the intended next { sessions, activeId }; apply() then
@@ -647,20 +639,6 @@ export function useShellSessions({
     },
     [activeSessionId, mapSessions, dropFile],
   );
-  useEffect(() => {
-    if (busy) return;
-    const app = getCurrentWebviewWindow();
-    const unlisten = app.onDragDropEvent((event) => {
-      if (event.payload.type === "drop" && event.payload.paths.length > 0) {
-        // The drop position rides along so the cold-start router can hit-test
-        // the centered composer bar (#501).
-        onWebviewDrop(event.payload.paths[0], event.payload.position);
-      }
-    });
-    return () => {
-      void unlisten.then((u) => u());
-    };
-  }, [busy, onWebviewDrop]);
 
   // Clear consumed pending ingest paths (#81 A1, #500): once the SessionPane
   // has kicked off ingest, OpenSession.pendingIngestPaths is emptied so a
@@ -911,151 +889,57 @@ export function useShellSessions({
     [intl, unmountOpen, refreshSessions],
   );
 
-  // Delete a persisted .duck (ADR-0060/0063, irreversible). If the session is
-  // open, close it via the WAIT-RELEASE variant: the UI pane STAYS mounted
-  // during the wait (delete is an explicit user intent -- it does NOT get
-  // close's zero-wait contract, ADR-0063 Decision 2), and only unmounts after
-  // the canonical single-writer key is released. This guarantees deleteSession's
-  // try_acquire gate sees the key free (no misleading "请先关闭" on an entry the
-  // user is already deleting). On wait timeout the entry survives so the user
-  // can retry. persistenceBusy gates the UI for the potentially long wait.
-  const deletePersisted = useCallback(
-    async (path: string, sid: string | null) => {
-      setPersistenceBusy(true);
-      try {
-        if (sid) {
-          try {
-            await closeSessionAndWaitRelease(sid);
-          } catch (e) {
-            // Close-wait failed (timeout, or the backend already detached
-            // the session). Unmount the pane so the entry falls back to the
-            // cold sidebar (sid=null); a retry then takes the pure
-            // deleteSession(path) path -- if the canonical key is now free
-            // the gate succeeds, otherwise the user sees the real gate error.
-            // Without this, the pane stays mounted on a sid the backend no
-            // longer knows and every retry hits NotFound (dead loop).
-            unmountOpen(sid);
-            setShellError(toAppError(e, intl, "shell"));
-            return;
-          }
-          // The wait resolved -- canonical key is free, Session::Drop ran.
-          // NOW unmount the pane (ADR-0063: UI teardown after the wait, not
-          // before).
-          unmountOpen(sid);
-        }
-        try {
-          await deleteSession(path);
-        } catch (e) {
-          setShellError(toAppError(e, intl, "shell"));
-          return;
-        }
-        refreshSessions();
-      } finally {
-        setPersistenceBusy(false);
-      }
+  // Narrow open-set write for the file-ops species (#1155): the one in-memory
+  // name-update move -- renameEntry's landed name and syncSessionName's
+  // auto-name both funnel here, so the species never needs broader open-set
+  // mutation rights.
+  const patchOpenName = useCallback(
+    (sid: string, name: string) => {
+      mapSessions((sessions) =>
+        sessions.map((s) => (s.sid === sid ? { ...s, name } : s)),
+      );
     },
-    [intl, unmountOpen, refreshSessions, setShellError],
+    [mapSessions],
   );
 
-  // Rename a sidebar entry (ADR-0060, single entry point). An OPEN session
-  // renames in-memory + re-persists via its sid; a CLOSED .duck rewrites the
-  // recipe header in place by path. The bound path is untouched either way.
-  const renameEntry = useCallback(
-    async (sid: string | null, path: string, newName: string) => {
-      const trimmed = newName.trim();
-      if (!trimmed) return;
-      try {
-        if (sid) {
-          const landed = await renameSession(sid, trimmed);
-          mapSessions((sessions) =>
-            sessions.map((s) => (s.sid === sid ? { ...s, name: landed } : s)),
-          );
-        } else {
-          await renamePersistedSession(path, trimmed);
-        }
-      } catch (e) {
-        setShellError(toAppError(e, intl, "shell"));
-        return;
-      }
-      refreshSessions();
-    },
-    [intl, mapSessions, refreshSessions, setShellError],
-  );
+  // Nested facade (#1155): the file-ops species destructures here; its
+  // five members ride the return below.
+  const {
+    deletePersisted,
+    renameEntry,
+    handleOpenDuck,
+    handleExportSession,
+    syncSessionName,
+    persistenceBusy,
+  } = useSessionFileOps({
+    intl,
+    refreshSessions,
+    setShellError,
+    unmountOpen,
+    importAndOpen,
+    patchOpenName,
+  });
 
-  // --- Import .duck (ADR-0089 Decision 5, issue #450) ----------------------
-  // Open = import: copy the external .duck (+ companion assets/) into a fresh
-  // per-session directory under the managed sessions root, then resume the
-  // local copy. The original file is never modified.
-  const handleOpenDuck = useCallback(async () => {
-    setPersistenceBusy(true);
-    try {
-      const selected = await openDialog({
-        filters: [{ name: "toptopduck", extensions: ["duck"] }],
-        multiple: false,
-      });
-      const path = typeof selected === "string" ? selected : null;
-      if (!path) return;
-      const stem =
-        path
-          .split(/[\\/]/)
-          .pop()
-          ?.replace(/\.duck$/i, "") ?? "session";
-      await importAndOpen(path, stem);
-      refreshSessions();
-    } catch (e) {
-      setShellError(toAppError(e, intl, "shell"));
-    } finally {
-      setPersistenceBusy(false);
-    }
-  }, [intl, importAndOpen, refreshSessions, setShellError]);
+  const busy = persistenceBusy || resumeStatus.kind !== "idle";
 
-  // --- Export session (ADR-0089 Decision 5, issue #449) -------------------
-  // Export a copy of the per-session directory (session.duck + assets/) to a
-  // user-chosen destination. The save dialog collects a directory name; the
-  // backend copies the files. No rebind, no registry touch — pure file I/O.
-  // Silent on success; errors go to setShellError.
-  const handleExportSession = useCallback(
-    async (duckPath: string, displayName: string) => {
-      setPersistenceBusy(true);
-      try {
-        const dest = await saveDialog({
-          defaultPath: displayName,
-        });
-        if (!dest) return;
-        await exportSession(duckPath, dest);
-      } catch (e) {
-        setShellError(toAppError(e, intl, "shell"));
-      } finally {
-        setPersistenceBusy(false);
+  // Busy-gated webview drop listener (#204): torn down while a resume or a
+  // persistence wait holds `busy`, re-bound once it clears. Declared after
+  // the file-ops composition because `busy` reads the species'
+  // persistenceBusy.
+  useEffect(() => {
+    if (busy) return;
+    const app = getCurrentWebviewWindow();
+    const unlisten = app.onDragDropEvent((event) => {
+      if (event.payload.type === "drop" && event.payload.paths.length > 0) {
+        // The drop position rides along so the cold-start router can hit-test
+        // the centered composer bar (#501).
+        onWebviewDrop(event.payload.paths[0], event.payload.position);
       }
-    },
-    [intl, setShellError],
-  );
-
-  // ADR-0089 Decision 4: after the first terminal turn, the backend auto-names
-  // the session from the first question's bounded truncation. This syncs the
-  // in-memory open-session entry + the persisted sidebar list so both surfaces
-  // reflect the new name without a manual refresh.
-  const syncSessionName = useCallback(
-    async (sid: string) => {
-      try {
-        const name = await getSessionName(sid);
-        mapSessions((sessions) =>
-          sessions.map((s) => (s.sid === sid ? { ...s, name } : s)),
-        );
-      } catch (e) {
-        // Best-effort: a failure here means the sidebar/header keep the old
-        // name until the next refresh. The session itself is unaffected.
-        log.warn(
-          "syncSessionName",
-          "failed to sync auto-named session",
-          fmtError(e, intl),
-        );
-      }
-      refreshSessions();
-    },
-    [intl, mapSessions, refreshSessions],
-  );
+    });
+    return () => {
+      void unlisten.then((u) => u());
+    };
+  }, [busy, onWebviewDrop]);
 
   return {
     openSessions,
