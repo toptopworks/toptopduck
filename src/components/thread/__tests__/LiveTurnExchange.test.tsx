@@ -75,9 +75,10 @@ describe("LiveTurnExchange user-invocation badges (ADR-0119 Decision 5)", () => 
 });
 
 // ADR-0120 Decision 4: the live round block threads mode="streaming" into
-// RoundProse for the round still growing, so a vega-lite fence decodes only
-// after the settle swap. While the round streams, a half-written fence body
-// must never show as source and must never flash a degradation banner.
+// RoundProse for the round still growing, so that round's vega-lite fence
+// decodes only once its text is final -- at the round's close or the settle
+// swap. While the round streams, a half-written fence body must never show
+// as source and must never flash a degradation banner.
 describe("LiveTurnExchange vega-lite fence placeholder (ADR-0120)", () => {
   it("shows the placeholder for a streaming fence, never the source", () => {
     const { container } = renderExchange({
