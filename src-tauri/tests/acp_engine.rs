@@ -202,7 +202,7 @@ fn phase_index(phases: &[TurnPhase], label: &str, pred: impl Fn(&TurnPhase) -> b
 
 /// Count-pin counterpart of [`phase_index`] (issue #630): asserts the phase
 /// fired exactly once. `phase_index` only finds the FIRST occurrence, so a
-/// double-fired prelude or repeated fold would hide behind it -- this closes
+/// double-fired delta or repeated fold would hide behind it -- this closes
 /// that gap for the events whose multiplicity is part of the contract.
 fn phase_count(phases: &[TurnPhase], label: &str, pred: impl Fn(&TurnPhase) -> bool) {
     let n = phases.iter().filter(|p| pred(p)).count();
@@ -322,7 +322,7 @@ fn round_prose_and_thinking_group_per_round() {
 
 /// One round, two calls in one batch (issue #630): the round's prose delta
 /// fires once on arrival, its thinking freeze once at the batch seal before
-/// the FIRST call's Started event; the second call adds no second prelude.
+/// the FIRST call's Started event; the second call adds no second freeze.
 /// The starts and finishes interleave (start, start, finish, finish), the
 /// raw in-batch shape.
 #[test]

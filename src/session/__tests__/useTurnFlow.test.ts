@@ -654,6 +654,41 @@ describe("useTurnFlow", () => {
       expect(entry.data.asked_at).toBeLessThanOrEqual(entry.data.settled_at!);
     });
 
+    it("drops the trailing prose round from the optimistic trace when the ask resolves a body-bearing outcome (ADR-0126)", async () => {
+      const { queryClient, deps } = setup();
+      queryClient.setQueryData(sessionKeys.thread(SID), []);
+      const { result } = renderHook(() => useTurnFlow(SID, deps));
+      await waitFor(() => expect(turnProgressCb.current).not.toBeNull());
+      // The ask promise resolves on our signal so events can land mid-turn.
+      let resolveAsk!: (o: TurnOutcome) => void;
+      vi.mocked(askQuestion).mockImplementation(
+        () => new Promise<TurnOutcome>((res) => (resolveAsk = res)),
+      );
+      let askDone!: Promise<void>;
+      act(() => {
+        askDone = result.current.handleAsk("q");
+      });
+      emitProgress(SID, { Thinking: { attempt: 1 } });
+      emitProgress(SID, { TextDelta: { delta: "部分答案" } });
+      await act(async () => {
+        resolveAsk({
+          kind: "Textual",
+          data: { text_kind: "Agent", body: "部分答案", assumption: null },
+        });
+        await askDone;
+      });
+      const thread = queryClient.getQueryData<ThreadEntry[]>(sessionKeys.thread(SID));
+      expect(thread).toHaveLength(1);
+      const entry = thread?.[0];
+      if (entry?.entry !== "Turn") throw new Error("expected a Turn entry");
+      // The settle mirror at the wiring seam: the trailing prose round
+      // drops from the optimistic trace (it rides the outcome's body, the
+      // same clear the backend settle applies), so the turn-end refresh
+      // lands no second change.
+      expect(entry.data.trace).toEqual([]);
+      expect(result.current.liveTurn).toBeNull();
+    });
+
     it("stamps the optimistic record's User invocations and carries the staging on the live turn (review I3, #991)", async () => {
       const { queryClient, deps } = setup();
       queryClient.setQueryData(sessionKeys.thread(SID), []);
@@ -700,6 +735,20 @@ describe("useTurnFlow", () => {
   });
 
   describe("mergeLiveTrace + buildLiveRounds + liveRoundsToTrace (pure helpers)", () => {
+    const row = (over: Partial<LiveTraceRow> = {}): LiveTraceRow => ({
+      key: "call-0",
+      step: 1,
+      name: "explore",
+      server: null,
+      operationKind: "read",
+      summary: "SELECT 1",
+      approval: null,
+      running: false,
+      success: false,
+      resultExcerpt: "boom",
+      ...over,
+    });
+
     it("choiceToTurnRuntime maps both choice forms onto the attribution shape (#725)", () => {
       // built-in is identity; external lifts the bare adapter string into
       // the attribution's adapter-id object (the only payload difference,
@@ -786,19 +835,6 @@ describe("useTurnFlow", () => {
     });
 
     it("liveRoundsToTrace keeps completed calls, drops unsettled rows, groups by round", () => {
-      const row = (over: Partial<LiveTraceRow> = {}): LiveTraceRow => ({
-        key: "call-0",
-        step: 1,
-        name: "explore",
-        server: null,
-        operationKind: "read",
-        summary: "SELECT 1",
-        approval: null,
-        running: false,
-        success: false,
-        resultExcerpt: "boom",
-        ...over,
-      });
       const rounds: LiveRound[] = [
         { rows: [row()] },
         {
@@ -912,19 +948,7 @@ describe("useTurnFlow", () => {
       // terminal text itself, so the trailing call-less round's prose
       // clears (and the emptied round drops) -- the same clear the backend
       // settle applies, so the turn-end refresh converges with no change.
-      const row: LiveTraceRow = {
-        key: "call-0",
-        step: 1,
-        name: "explore",
-        server: null,
-        operationKind: "read",
-        summary: "SELECT 1",
-        approval: null,
-        running: false,
-        success: false,
-        resultExcerpt: "boom",
-      };
-      const rounds: LiveRound[] = [{ rows: [row] }, { text: "部分答案", rows: [] }];
+      const rounds: LiveRound[] = [{ rows: [row()] }, { text: "部分答案", rows: [] }];
       const outcome: TurnOutcome = {
         kind: "Textual",
         data: { text_kind: "Clarify", body: "部分答案", assumption: null },
@@ -947,19 +971,7 @@ describe("useTurnFlow", () => {
     it("liveRoundsToTrace keeps the trailing partial prose on Cancelled (the #628 settle mirror)", () => {
       // A non-body outcome keeps the trailing partial prose -- the diagnosis
       // settle the backend records -- so the refresh lands the same round.
-      const row: LiveTraceRow = {
-        key: "call-0",
-        step: 1,
-        name: "explore",
-        server: null,
-        operationKind: "read",
-        summary: "SELECT 1",
-        approval: null,
-        running: false,
-        success: false,
-        resultExcerpt: "boom",
-      };
-      const rounds: LiveRound[] = [{ rows: [row] }, { text: "半截答案", rows: [] }];
+      const rounds: LiveRound[] = [{ rows: [row()] }, { text: "半截答案", rows: [] }];
       expect(liveRoundsToTrace(rounds, { kind: "Cancelled", data: null })).toEqual([
         {
           calls: [
@@ -973,6 +985,36 @@ describe("useTurnFlow", () => {
           ],
         },
         { text: "半截答案", calls: [] },
+      ]);
+    });
+
+    it("liveRoundsToTrace keeps a call-bearing trailing round's prose under a body-bearing outcome", () => {
+      // The fork clears only the call-LESS trailing round -- `rows.length
+      // === 0` is the client-side saw_call (no call event landed on the
+      // round). A trailing round that carried calls keeps its prose under a
+      // body-bearing outcome too: the backend re-states that text as the
+      // terminal answer (terminal_text's fallback) while the round keeps
+      // its own slot, so the optimistic trace must match.
+      const rounds: LiveRound[] = [
+        { rows: [row()], text: "answer alongside the batch" },
+      ];
+      const outcome: TurnOutcome = {
+        kind: "Textual",
+        data: { text_kind: "Agent", body: "answer alongside the batch", assumption: null },
+      };
+      expect(liveRoundsToTrace(rounds, outcome)).toEqual([
+        {
+          text: "answer alongside the batch",
+          calls: [
+            {
+              name: "explore",
+              operation_kind: "read",
+              summary: "SELECT 1",
+              success: false,
+              result_excerpt: "boom",
+            },
+          ],
+        },
       ]);
     });
 

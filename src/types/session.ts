@@ -197,8 +197,8 @@ export interface ResumeProgress {
 // ToolCallStarted / ToolCallCompleted pair wraps each dispatch (a gate-denied
 // call fires only the completion, success: false). ADR-0126 extends the same
 // stream with real-payload fragments: TextDelta streams each prose piece the
-// moment it arrives (the terminal answer included), plus the per-round
-// ThinkingCompleted block. Mirrors the Rust
+// moment it arrives (the terminal answer included), alongside the per-round
+// ThinkingCompleted block (ADR-0103, unchanged here). Mirrors the Rust
 // `TurnPhase` (serde externally-tagged, like ResumeEvent); ToolCallCompleted
 // wraps a TraceEntry verbatim (a newtype variant serializes to the same flat
 // object), so the frontend appends the payload as its live trace entry.

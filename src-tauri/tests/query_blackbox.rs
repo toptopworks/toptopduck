@@ -1597,8 +1597,9 @@ fn phase_collector() -> (
 fn ask_with_phase_records_the_tool_call_event_stream_on_a_result_turn() {
     // ADR-0059/0078/0081: a one-call result turn emits the first provider
     // round-trip (Thinking{1}), the materialize dispatch's started/completed
-    // pair, and the terminal-text round-trip (Thinking{2}). The completed
-    // payload mirrors the persisted trace shape (success excerpt emptied).
+    // pair, and the terminal-text round-trip (Thinking{2}) with the answer
+    // streaming live as its TextDelta (ADR-0126). The completed payload
+    // mirrors the persisted trace shape (success excerpt emptied).
     let mut session = session_with(&[("建结果", "SELECT 1 AS n")]);
     let approval = ApprovalState::new();
     let sink = NullSink;
@@ -1633,16 +1634,20 @@ fn ask_with_phase_records_the_tool_call_event_stream_on_a_result_turn() {
                 sub_rounds: None,
             }),
             TurnPhase::Thinking { attempt: 2 },
+            TurnPhase::TextDelta {
+                delta: "完成".into(),
+            },
         ],
-        "a one-call result turn emits Thinking{{1}}, the materialize started/completed pair, Thinking{{2}}"
+        "a one-call result turn emits Thinking{{1}}, the materialize started/completed pair, Thinking{{2}}, then the terminal answer's TextDelta"
     );
 }
 
 #[test]
 fn ask_with_phase_records_only_thinking_on_a_textual_turn() {
     // ADR-0059/0078: a textual turn (terminal text, no tool calls) has only
-    // the provider wait -- no tool dispatch, so the tool-call event stream
-    // stays empty.
+    // the provider wait and the answer streaming live as its TextDelta
+    // (ADR-0126) -- no tool dispatch, so the tool-call event stream stays
+    // empty.
     let provider = FakeProvider::new().scripted_tool_turn("澄清", answer("哪个维度？"));
     let mut session = Session::with_provider(Box::new(provider)).expect("session");
     let approval = ApprovalState::new();
@@ -1663,8 +1668,13 @@ fn ask_with_phase_records_only_thinking_on_a_textual_turn() {
     let phases = phases.lock().expect("phases lock poisoned").clone();
     assert_eq!(
         phases,
-        vec![TurnPhase::Thinking { attempt: 1 }],
-        "a textual turn emits Thinking only -- no query wait"
+        vec![
+            TurnPhase::Thinking { attempt: 1 },
+            TurnPhase::TextDelta {
+                delta: "哪个维度？".into(),
+            },
+        ],
+        "a textual turn emits Thinking, then its answer as the TextDelta -- no query wait"
     );
 }
 

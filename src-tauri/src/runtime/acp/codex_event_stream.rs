@@ -1481,7 +1481,7 @@ mod tests {
     /// The trailing prose opens round 2 -- the round pointer fires -- and
     /// streams its own delta (the terminal round's first live text).
     #[test]
-    fn live_order_round_text_then_call_then_round_pointer() {
+    fn live_order_delta_then_call_then_round_pointer() {
         let mut pump = JsonPump::new(24, None);
         let mut phases = Vec::new();
         pump.fold(

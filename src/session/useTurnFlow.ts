@@ -281,17 +281,6 @@ export function buildLiveRounds(
   }));
 }
 
-/** Project the live rounds onto the round-grouped `TraceRound[]` for the
- *  optimistic thread append (issue #297; round-grouped by #608, ADR-0103;
- *  thinking folded by #610; single-source projection by #620): completed
- *  calls only -- a row still at success===null (a gate-cancelled call,
- *  resolved-deny with no dispatch) has NO backend trace entry, so including
- *  it would diverge from the refetch. Order-preserving by construction (the
- *  live rounds array is already step-ordered), each settled round keeps its
- *  prose and thinking block. The row mapping is identity with the
- *  ToolCallCompleted payload, so the optimistic trace equals the backend's
- *  recorded rounds. */
-
 /** A live row whose completion event has landed (`success` no longer null):
  *  the settled projection's input shape. */
 export type SettledLiveRow = LiveRoundRow & { success: boolean };
@@ -319,14 +308,30 @@ export function traceEntryFromRow(row: SettledLiveRow): TraceEntry {
   };
 }
 
-/** Whether the outcome carries the terminal text itself (its `body`) --
- *  the settle-mirror fork's predicate (ADR-0126): a body-bearing outcome
- *  replays the trailing prose as its answer, a non-body outcome (Cancelled/
+/** Whether the outcome settles by terminal text (Textual / Materialized) --
+ *  the settle-mirror fork's predicate (ADR-0126): these outcomes replay the
+ *  trailing prose as their answer (a Materialized may carry a null `body`
+ *  when the terminal text was whitespace-only -- the clear keys on the
+ *  termination, not the body field), while a non-body outcome (Cancelled /
  *  Failed) has nowhere else to put the partial prose. */
 function outcomeCarriesBody(outcome: TurnOutcome | undefined): boolean {
   return outcome?.kind === "Textual" || outcome?.kind === "Materialized";
 }
 
+/** Project the live rounds onto the round-grouped `TraceRound[]` for the
+ *  optimistic thread append (issue #297; round-grouped by #608, ADR-0103;
+ *  thinking folded by #610; single-source projection by #620): completed
+ *  calls only -- a row still at success===null (a gate-cancelled call,
+ *  resolved-deny with no dispatch) has NO backend trace entry, so including
+ *  it would diverge from the refetch. Order-preserving by construction (the
+ *  live rounds array is already step-ordered). The ADR-0126 settle mirror
+ *  forks on the ask-resolved `outcome`: a body-bearing outcome (Textual /
+ *  Materialized) clears the trailing call-less round's prose -- it rides
+ *  the outcome -- while any other outcome (or the ask-reject undefined)
+ *  keeps the partial prose (the #628 diagnosis settle), so the turn-end
+ *  refresh converges with no second change. The row mapping is identity
+ *  with the ToolCallCompleted payload, so the optimistic trace equals the
+ *  backend's recorded rounds. */
 export function liveRoundsToTrace(
   rounds: ReadonlyArray<LiveRound>,
   outcome?: TurnOutcome,
@@ -601,10 +606,7 @@ function appendRoundText(
   step: number,
   delta: string,
 ): Array<string | null> {
-  const next = slots.slice();
-  while (next.length < step - 1) next.push(null);
-  next[step - 1] = (next[step - 1] ?? "") + delta;
-  return next;
+  return withRoundSlot(slots, step, (slots[step - 1] ?? "") + delta);
 }
 
 export function useTurnFlow(sessionId: string, deps: UseTurnFlowDeps): UseTurnFlow {

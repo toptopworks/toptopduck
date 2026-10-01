@@ -180,7 +180,7 @@ fn slow_drip_survives_past_the_cap() {
 }
 
 /// Headless thinking blocks riding the assistant frames, end-to-end (issue
-/// #612): round 1's thinking freezes at the batch prelude; the trailing
+/// #612): round 1's thinking freezes at the batch seal; the trailing
 /// round keeps its thinking through the REAL run loop's trailing freeze and
 /// settle (the unit tests mirror that tail with a hand-written helper).
 /// Pins the wired chain: two rounds carry their frozen thinking, the live
@@ -200,7 +200,7 @@ fn thinking_blocks_ride_rounds_end_to_end() {
     assert_eq!(
         r1.thinking.as_ref().map(|t| t.text.as_str()),
         Some("plan the query"),
-        "round 1's thinking froze at the batch prelude"
+        "round 1's thinking froze at the batch seal"
     );
     assert_eq!(r1.text.as_deref(), Some("querying"));
     assert_eq!(
