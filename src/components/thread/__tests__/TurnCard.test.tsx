@@ -1,10 +1,12 @@
-// Issue #818: the runtime attribution marker opens every turn's assistant
-// stream. These pin the DOM contract the pure gate cannot: the marker is the
-// stream's FIRST child (ahead of agent activations, header annotations, and
-// rounds), so the live -> settled swap never moves it. The visibility matrix
-// itself lives in turnVisual.test.ts (runtimeMarkerName) and Thread.test.tsx
-// (per-thread rendering); a minimal record with no agent head, dataset chip,
-// or rounds keeps the first-child position directly observable.
+// The settled card's own surface pins. The head contract -- the marker's
+// first-child position + silence matrix, the invocation-badge face -- and the
+// round width cap ride the swap-stable modules now, pinned once in
+// TurnExchangeFrame.test / RoundBody.test (issue #1157); what stays here is
+// what only the card renders: the Failed marker variant (a weakened stream
+// keeps its attribution), the unrecorded-runtime silence, the per-outcome
+// width caps, and the folds. Issue #818's DOM contract (the marker is the
+// stream's FIRST child) is unverifiable from the pure gate, which is why the
+// remaining render-level pins exist at all.
 
 import { describe, expect, it } from "vitest";
 import { render } from "@testing-library/react";
@@ -77,18 +79,6 @@ const previewDataset: DatasetDescriptor = {
 };
 
 describe("TurnCard runtime attribution marker (issue #818)", () => {
-  it("opens the assistant stream with the marker naming the adapter", () => {
-    const { container } = renderCard(
-      recordWith({ kind: "external", data: { adapter_id: "claude-code" } }),
-    );
-    const stream = container.querySelector(".assistant-stream");
-    expect(stream).not.toBeNull();
-    // The position contract: attribution (who answers) precedes everything
-    // the actor did -- activations, annotations, rounds.
-    expect(stream?.firstElementChild).toHaveClass("runtime-attribution");
-    expect(stream?.firstElementChild).toHaveTextContent("claude-code");
-  });
-
   it("keeps the marker on a Failed turn, in the muted caption family", () => {
     const record: TurnRecord = {
       ...recordWith({ kind: "external", data: { adapter_id: "claude-code" } }),
@@ -100,36 +90,9 @@ describe("TurnCard runtime attribution marker (issue #818)", () => {
     expect(marker).toHaveClass("text-muted-foreground");
   });
 
-  it("renders no marker for the built-in default", () => {
-    const { container } = renderCard(recordWith({ kind: "built_in" }));
-    expect(container.querySelector(".runtime-attribution")).toBeNull();
-  });
-
   it("renders no marker when provenance carries no runtime", () => {
     const { container } = renderCard(recordWith(undefined));
     expect(container.querySelector(".runtime-attribution")).toBeNull();
-  });
-
-  it("renders no marker for a pre-id external runtime", () => {
-    const { container } = renderCard(
-      recordWith({ kind: "external", data: { adapter_id: null } }),
-    );
-    expect(container.querySelector(".runtime-attribution")).toBeNull();
-  });
-});
-
-describe("TurnCard trace round width cap (issue #826)", () => {
-  it("caps the trace round at the stream width so summaries can truncate", () => {
-    // A round rides the assistant stream as a non-stretched flex item; the
-    // max-w-full cap keeps a nowrap summary from stretching the round past
-    // the card (the layout breaker -- the row's truncate only engages when
-    // the round stops at the stream width).
-    const record: TurnRecord = {
-      ...recordWith(undefined),
-      trace: [{ text: "答轮", calls: [] }],
-    };
-    const { container } = renderCard(record);
-    expect(container.querySelector(".trace-round")).toHaveClass("max-w-full");
   });
 });
 
@@ -410,48 +373,5 @@ describe("TurnCard textual outcome markdown (issue #827)", () => {
     expect(outcome).toHaveClass("mt-1");
     expect(outcome?.querySelector(".textual-kind")).toHaveClass("m-0");
     expect(container.querySelector(".assumption")).toHaveClass("mt-0.5");
-  });
-});
-
-// Review Important 3 (#991): the settled card's badge face -- the turn's own
-// invocation records filtered to the USER actor (ADR-0119 Decision 5). The
-// agent's invocations read on their trace rows, never on the bubble; the
-// derivation itself is pinned in turnVisual.test.ts, this pins the render.
-describe("TurnCard user-invocation badges (ADR-0119 Decision 5, review I3, #991)", () => {
-  it("renders the User-actor names above the question, not the agent's", () => {
-    const record: TurnRecord = {
-      question: "问",
-      outcome: {
-        kind: "Textual",
-        data: { text_kind: "Agent", body: "答", assumption: null },
-      },
-      trace: [],
-      provenance: { skills: [] },
-      invocations: [
-        { name: "sql-coach", body: "", actor: "User", content_hash: "" },
-        { name: "pdf-tools", body: "", actor: "Agent", content_hash: "" },
-        { name: "charting", body: "", actor: "User", content_hash: "" },
-      ],
-    };
-    const { getByText, queryByText, getByLabelText } = renderCard(record);
-    expect(getByText("sql-coach")).toBeInTheDocument();
-    expect(getByText("charting")).toBeInTheDocument();
-    expect(queryByText("pdf-tools")).not.toBeInTheDocument();
-    // The badge list is decorative with one accessible group label.
-    expect(getByLabelText("随此消息调用的技能")).toBeInTheDocument();
-  });
-
-  it("renders no badge list for a turn without invocations", () => {
-    const record: TurnRecord = {
-      question: "问",
-      outcome: {
-        kind: "Textual",
-        data: { text_kind: "Agent", body: "答", assumption: null },
-      },
-      trace: [],
-      provenance: { skills: [] },
-    };
-    const { queryByLabelText } = renderCard(record);
-    expect(queryByLabelText("随此消息调用的技能")).not.toBeInTheDocument();
   });
 });
