@@ -118,6 +118,10 @@ export type LiveRoundRow = Omit<LiveTraceRow, "step">;
  *  settled calls, so the settle projection is a pure per-row mapping. */
 export interface LiveRound {
   thinking?: ThinkingTrace;
+  /** The round's connective prose: undefined until the round's first
+   *  TextDelta lands, then defined and append-only for the round's
+   *  remaining life (ADR-0126) -- the trailing status gate reads undefined
+   *  as "no prose yet". */
   text?: string;
   rows: LiveRoundRow[];
 }
