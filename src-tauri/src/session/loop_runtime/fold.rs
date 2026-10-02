@@ -40,6 +40,7 @@ use rig_core::streaming::StreamedAssistantContent;
 
 use crate::model::{ThinkingTrace, TurnPhase};
 use crate::session::loop_contract::{push_call, LoopRound};
+use crate::util::{is_latched, push_capped, push_capped_emit};
 
 use super::adapter::{emit_phase, CompletionChannel, PhaseSink};
 use std::sync::Arc;
@@ -63,9 +64,9 @@ pub(crate) struct EventFold {
     pub(crate) landed_calls: usize,
     /// --- Per-model-call accumulation (replaced at each turn open) ---
     call_open: bool,
-    reasoning_committed: Vec<String>,
-    reasoning_deltas: Vec<String>,
-    text_deltas: Vec<String>,
+    reasoning_committed: String,
+    reasoning_deltas: String,
+    text_deltas: String,
     /// The turn's finalized thinking (set at the turn's `CompletionCall`
     /// close).
     thinking_trace: Option<ThinkingTrace>,
@@ -92,9 +93,9 @@ impl EventFold {
             final_output: None,
             landed_calls: 0,
             call_open: false,
-            reasoning_committed: Vec::new(),
-            reasoning_deltas: Vec::new(),
-            text_deltas: Vec::new(),
+            reasoning_committed: String::new(),
+            reasoning_deltas: String::new(),
+            text_deltas: String::new(),
             thinking_trace: None,
             batch_open: false,
             trailing_round: None,
@@ -153,7 +154,22 @@ impl EventFold {
                 self.reset_call();
             }
             MultiTurnStreamItem::FinalResponse(response) => {
-                self.final_output = Some(response.output.clone());
+                // The terminal text rides the outcome body under the same
+                // cap the live rail rode: uncapped it is the provider's
+                // verbatim output (the convergence below), capped it is
+                // the parked accumulation's truncated form -- the exact
+                // bytes the live rail already showed, so the outcome never
+                // reveals text the live stream truncated (four-path parity
+                // with the external settles' capped terminal text, issue
+                // #1171).
+                let capped_park = self
+                    .trailing_round
+                    .as_ref()
+                    .and_then(|round| round.text.as_deref())
+                    .filter(|text| is_latched(text))
+                    .map(str::to_string);
+                let was_capped = capped_park.is_some();
+                self.final_output = Some(capped_park.unwrap_or_else(|| response.output.clone()));
                 // The terminal reply's turn is done: land its waiting
                 // trailing round, if any -- but its prose rides the
                 // `final_output` (the outcome body), mirroring the external
@@ -166,7 +182,13 @@ impl EventFold {
                     // structural side of that as a convergence obligation,
                     // and a divergence is contract drift, caught here in
                     // debug/test the way the #921 exactly-once pairing is.
-                    debug_assert_eq!(round.text.as_deref(), Some(response.output.as_str()));
+                    // A capped park diverges BY DESIGN (the accumulation
+                    // latched its truncation while the provider's terminal
+                    // text ran past it), so the obligation holds for
+                    // uncapped turns only (issue #1171).
+                    if !was_capped {
+                        debug_assert_eq!(round.text.as_deref(), Some(response.output.as_str()));
+                    }
                     round.text = None;
                     if round.thinking.is_some() {
                         self.rounds.push(round);
@@ -215,17 +237,19 @@ impl EventFold {
                 // ADR-0126: the fragment streams live the moment it arrives
                 // (after the turn-opening `Thinking`, so `live.step` is
                 // known), while `text_deltas` keeps accumulating toward the
-                // batch-confirmed round. An empty fragment emits nothing.
+                // batch-confirmed round. The emission rides the track's
+                // byte-cap boundary -- the rig-fold calibration (issue
+                // #1171) -- through the same shared gate the external
+                // paths' `push_prose` uses.
                 self.open_call(phases);
-                if !text.text.is_empty() {
+                push_capped_emit(&mut self.text_deltas, &text.text, &mut |delta| {
                     emit_phase(
                         phases,
                         TurnPhase::TextDelta {
-                            delta: text.text.clone(),
+                            delta: delta.to_string(),
                         },
                     );
-                }
-                self.text_deltas.push(text.text.clone());
+                });
             }
             StreamedAssistantContent::Reasoning { reasoning, .. } => {
                 // A committed block supersedes its deltas (the stream
@@ -234,11 +258,15 @@ impl EventFold {
                 self.open_call(phases);
                 for part in &reasoning.content {
                     match part {
+                        // Settle-only accumulation (no live reasoning
+                        // text): the same byte cap as the prose track
+                        // (issue #1171) -- a crossing block latches the
+                        // marker into the finalized thinking.
                         ReasoningContent::Text { text, .. } => {
-                            self.reasoning_committed.push(text.clone())
+                            push_capped(&mut self.reasoning_committed, text);
                         }
                         ReasoningContent::Summary(summary) => {
-                            self.reasoning_committed.push(summary.clone())
+                            push_capped(&mut self.reasoning_committed, summary);
                         }
                         ReasoningContent::Encrypted(_) | ReasoningContent::Redacted { .. } => {}
                     }
@@ -246,7 +274,7 @@ impl EventFold {
             }
             StreamedAssistantContent::ReasoningDelta { reasoning, .. } => {
                 self.open_call(phases);
-                self.reasoning_deltas.push(reasoning.clone());
+                push_capped(&mut self.reasoning_deltas, reasoning);
             }
             StreamedAssistantContent::ToolCallDelta { .. } => {
                 // Argument fragments carry no trace payload; a delta-level
@@ -273,7 +301,7 @@ impl EventFold {
                     // round's prose is dropped here (superseded by the same
                     // rebuild); only its thinking is taken back.
                     let thinking = self.trailing_round.take().and_then(|round| round.thinking);
-                    let prose = self.text_deltas.join("");
+                    let prose = self.text_deltas.clone();
                     let text = (!prose.is_empty()).then_some(prose);
                     self.rounds.push(LoopRound {
                         thinking,
@@ -355,9 +383,9 @@ impl EventFold {
     /// readable reasoning.
     fn finalize_thinking(&mut self) {
         let thinking_text = if !self.reasoning_committed.is_empty() {
-            self.reasoning_committed.join("")
+            self.reasoning_committed.clone()
         } else {
-            self.reasoning_deltas.join("")
+            self.reasoning_deltas.clone()
         };
         if !thinking_text.is_empty() {
             self.thinking_trace = Some(ThinkingTrace {
@@ -375,7 +403,7 @@ impl EventFold {
     /// batch never confirmed).
     fn park_unconfirmed(&mut self) {
         let thinking = self.thinking_trace.clone();
-        let prose = self.text_deltas.join("");
+        let prose = self.text_deltas.clone();
         let text = (!prose.is_empty()).then_some(prose);
         self.trailing_round = (thinking.is_some() || text.is_some()).then(|| LoopRound {
             thinking,
@@ -406,6 +434,7 @@ impl EventFold {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::util::{ACCUM_MAX_BYTES, TRUNCATION_MARKER};
     use std::sync::Mutex;
 
     fn text_item(t: &str) -> MultiTurnStreamItem {
@@ -438,8 +467,31 @@ mod tests {
         MultiTurnStreamItem::ModelTurnRetried { turn }
     }
 
+    fn committed_reasoning_item(text: &str) -> MultiTurnStreamItem {
+        use rig_core::message::Reasoning;
+        MultiTurnStreamItem::StreamAssistantItem(StreamedAssistantContent::Reasoning {
+            reasoning: Reasoning {
+                id: None,
+                content: vec![ReasoningContent::Text {
+                    text: text.into(),
+                    signature: None,
+                }],
+            },
+            id: "reasoning-0".into(),
+        })
+    }
+
     fn noop_sink() -> PhaseSink {
         Arc::new(Mutex::new(|_p: TurnPhase| {}))
+    }
+
+    fn recording_sink() -> (Arc<Mutex<Vec<TurnPhase>>>, PhaseSink) {
+        let seen: Arc<Mutex<Vec<TurnPhase>>> = Arc::new(Mutex::new(Vec::new()));
+        let sink: PhaseSink = {
+            let seen = Arc::clone(&seen);
+            Arc::new(Mutex::new(move |p: TurnPhase| seen.lock().unwrap().push(p)))
+        };
+        (seen, sink)
     }
 
     /// `round_trips` counts model turns opened -- the driver of the
@@ -453,11 +505,7 @@ mod tests {
     #[test]
     fn round_trips_counts_streamed_turns_including_retries() {
         let channel = Arc::new(CompletionChannel::new());
-        let seen: Arc<Mutex<Vec<TurnPhase>>> = Arc::new(Mutex::new(Vec::new()));
-        let sink: PhaseSink = {
-            let seen = Arc::clone(&seen);
-            Arc::new(Mutex::new(move |p: TurnPhase| seen.lock().unwrap().push(p)))
-        };
+        let (seen, sink) = recording_sink();
         let mut fold = EventFold::new();
         fold.event(&text_item("a"), &channel, &sink);
         fold.event(&close_item(), &channel, &sink);
@@ -666,5 +714,155 @@ mod tests {
         assert_eq!(fold.rounds.len(), 2, "{:?}", fold.rounds);
         assert_eq!(fold.rounds[0].text.as_deref(), Some("first"));
         assert_eq!(fold.rounds[1].text.as_deref(), Some("second"));
+    }
+
+    /// ADR-0126's rig-fold calibration (issue #1171): the prose
+    /// accumulation rides the 8MB cap on both tracks at once -- the
+    /// crossing chunk's delta is followed by one final marker delta and
+    /// later chunks emit nothing (live), while the settle round latches
+    /// the marker and drops later fragments. The live rail and the
+    /// settle round stay byte-identical, the same boundary the external
+    /// paths' `push_prose` rides.
+    #[test]
+    fn prose_cap_latches_marker_and_stops_both_tracks() {
+        let channel = Arc::new(CompletionChannel::new());
+        let (seen, sink) = recording_sink();
+        let mut fold = EventFold::new();
+        fold.event(
+            &text_item(&"x".repeat(ACCUM_MAX_BYTES - 4)),
+            &channel,
+            &sink,
+        );
+        fold.event(&text_item("cross"), &channel, &sink);
+        fold.event(&text_item("tail"), &channel, &sink);
+        fold.event(&close_item(), &channel, &sink);
+        fold.finish();
+        let expected = format!(
+            "{}cross{}",
+            "x".repeat(ACCUM_MAX_BYTES - 4),
+            TRUNCATION_MARKER
+        );
+        assert_eq!(fold.rounds.len(), 1, "{:?}", fold.rounds);
+        let settle = fold.rounds[0]
+            .text
+            .as_deref()
+            .expect("the capped prose parks");
+        assert_eq!(
+            settle.len(),
+            expected.len(),
+            "the settle round latches the marker and drops the tail"
+        );
+        assert!(settle.ends_with(TRUNCATION_MARKER));
+        let deltas = seen
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(|p| match p {
+                TurnPhase::TextDelta { delta } => Some(delta.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            deltas.len(),
+            3,
+            "the crossing chunk delta + one marker delta; the tail emits nothing"
+        );
+        assert_eq!(deltas[0].len(), ACCUM_MAX_BYTES - 4);
+        assert_eq!(deltas[1], "cross");
+        assert_eq!(deltas[2], TRUNCATION_MARKER);
+        assert!(
+            deltas.concat() == settle,
+            "live and settle share the same bytes"
+        );
+    }
+
+    /// The thinking track rides the same cap (issue #1171): a committed
+    /// block crossing 8MB latches the marker into the finalized thinking --
+    /// settle-only, no live prose to diverge.
+    #[test]
+    fn committed_reasoning_cap_latches_marker_into_thinking() {
+        let channel = Arc::new(CompletionChannel::new());
+        let sink = noop_sink();
+        let mut fold = EventFold::new();
+        fold.event(
+            &committed_reasoning_item(&"r".repeat(ACCUM_MAX_BYTES)),
+            &channel,
+            &sink,
+        );
+        fold.event(&close_item(), &channel, &sink);
+        fold.finish();
+        assert_eq!(fold.rounds.len(), 1, "{:?}", fold.rounds);
+        let thinking = fold.rounds[0]
+            .thinking
+            .as_ref()
+            .expect("the capped thinking lands");
+        assert_eq!(
+            thinking.text.len(),
+            ACCUM_MAX_BYTES + TRUNCATION_MARKER.len()
+        );
+        assert!(thinking.text.ends_with(TRUNCATION_MARKER));
+    }
+
+    /// The reasoning-delta track caps independently of the committed one
+    /// (issue #1171): post-cap deltas drop, the finalized thinking carries
+    /// the marker.
+    #[test]
+    fn reasoning_delta_cap_latches_marker_into_thinking() {
+        let channel = Arc::new(CompletionChannel::new());
+        let sink = noop_sink();
+        let mut fold = EventFold::new();
+        fold.event(
+            &reasoning_delta_item(&"d".repeat(ACCUM_MAX_BYTES)),
+            &channel,
+            &sink,
+        );
+        fold.event(&reasoning_delta_item("more"), &channel, &sink);
+        fold.event(&close_item(), &channel, &sink);
+        fold.finish();
+        assert_eq!(fold.rounds.len(), 1, "{:?}", fold.rounds);
+        let thinking = fold.rounds[0]
+            .thinking
+            .as_ref()
+            .expect("the capped thinking lands");
+        assert_eq!(
+            thinking.text.len(),
+            ACCUM_MAX_BYTES + TRUNCATION_MARKER.len(),
+            "the post-cap delta drops"
+        );
+        assert!(thinking.text.ends_with(TRUNCATION_MARKER));
+    }
+
+    /// The `FinalResponse` convergence obligation holds for uncapped turns
+    /// only (issue #1171): a capped park diverges from the provider's own
+    /// terminal text BY DESIGN, so the debug assert stands down -- and the
+    /// outcome body rides the capped form, the exact bytes the live rail
+    /// showed (four-path parity with the external settles' capped
+    /// terminal text).
+    #[test]
+    fn final_response_keeps_the_capped_terminal_body() {
+        let channel = Arc::new(CompletionChannel::new());
+        let sink = noop_sink();
+        let mut fold = EventFold::new();
+        fold.event(&text_item(&"x".repeat(ACCUM_MAX_BYTES)), &channel, &sink);
+        fold.event(&close_item(), &channel, &sink);
+        fold.event(
+            &final_response_item("the full uncapped answer"),
+            &channel,
+            &sink,
+        );
+        assert!(
+            fold.rounds.is_empty(),
+            "a prose-only park drops after the strip"
+        );
+        let body = fold
+            .final_output
+            .as_deref()
+            .expect("the outcome body lands");
+        assert_eq!(
+            body.len(),
+            ACCUM_MAX_BYTES + TRUNCATION_MARKER.len(),
+            "the outcome body rides the capped form, not the raw terminal text"
+        );
+        assert!(body.ends_with(TRUNCATION_MARKER));
     }
 }

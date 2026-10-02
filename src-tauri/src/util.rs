@@ -47,3 +47,76 @@ pub(crate) fn push_unique<T: PartialEq + Clone>(items: &mut Vec<T>, item: &T) {
         items.push(item.clone());
     }
 }
+
+/// The accumulation byte cap for a runtime track (issue #629): 8MB of prose
+/// or thinking before the runaway guard engages -- defense in depth against
+/// a runaway stream, not a normal-truncation budget. One constant for every
+/// accumulation seam (the external paths' `RoundTracker` and the rig fold,
+/// ADR-0126's rig-fold calibration) so the paths cannot drift apart.
+pub(crate) const ACCUM_MAX_BYTES: usize = 8 * 1024 * 1024;
+
+/// The visible truncation marker appended when an accumulation track hits
+/// [`ACCUM_MAX_BYTES`] -- the `TRACE_EXCERPT_MAX` truncation-visible
+/// philosophy (never silently drop).
+pub(crate) const TRUNCATION_MARKER: &str = "\n[truncated]";
+
+/// Append `text` to `buf` under the accumulation byte cap (issue #629): the
+/// first crossing latches the visible truncation marker; appends afterwards
+/// are dropped. The whole chunk lands before the check, so a chunk straddling
+/// the cap overshoots it by the chunk's remainder -- bounded by the chunk's
+/// own length. Returns whether THIS call latched the marker.
+pub(crate) fn push_capped(buf: &mut String, text: &str) -> bool {
+    if is_latched(buf) {
+        return false;
+    }
+    buf.push_str(text);
+    if is_latched(buf) {
+        buf.push_str(TRUNCATION_MARKER);
+        true
+    } else {
+        false
+    }
+}
+
+/// Whether an accumulation track has latched its truncation marker
+/// (issue #1171): the byte length, not a marker-suffix check -- provider
+/// text may legitimately end in the marker, while a latched buffer
+/// always exceeds the cap by the marker's length and an unlatched one
+/// never reaches it. One predicate for every consumer (the gates here,
+/// the fold's terminal discrimination) so the spellings cannot drift.
+pub(crate) fn is_latched(buf: &str) -> bool {
+    buf.len() >= ACCUM_MAX_BYTES
+}
+
+/// The capped prose emission every runtime path shares (ADR-0126's cap
+/// boundary): the chunk's delta emits unless the track already latched, and
+/// the crossing chunk's delta is followed by one final marker delta -- the
+/// live round text stays byte-identical to the settle record. One helper so
+/// a hand-rolled gate at any consumer cannot drift (the `push_unique`
+/// discipline).
+pub(crate) fn push_capped_emit(buf: &mut String, text: &str, emit: &mut impl FnMut(&str)) {
+    let capped = is_latched(buf);
+    if !text.is_empty() && !capped {
+        emit(text);
+    }
+    if push_capped(buf, text) {
+        emit(TRUNCATION_MARKER);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The empty-input arm (issue #1171): an empty fragment emits no
+    /// delta and leaves the buffer untouched -- the ADR-0126 lineage
+    /// contract every runtime path's prose gate shares.
+    #[test]
+    fn an_empty_fragment_emits_nothing_and_leaves_the_buffer() {
+        let mut buf = String::from("seed");
+        let mut emitted: Vec<String> = Vec::new();
+        push_capped_emit(&mut buf, "", &mut |delta| emitted.push(delta.to_string()));
+        assert!(emitted.is_empty(), "an empty fragment emits no delta");
+        assert_eq!(buf, "seed", "the buffer is untouched");
+    }
+}

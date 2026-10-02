@@ -46,6 +46,7 @@ use rig_agent::agent::{AgentHook, HookContext, ModelTurnAction, ModelTurnFinishe
 use rig_core::completion::{CompletionError, FinishReason};
 
 use crate::session::loop_contract::{truncate_trace_excerpt, Termination};
+use crate::util::TRUNCATION_MARKER;
 
 /// Marker appended to a terminal reply whose turn stopped at the output
 /// cap (issue #1003).
@@ -156,16 +157,20 @@ pub(crate) fn marked_reply_excerpt(report: &str, max: usize) -> String {
         max > TRUNCATED_REPLY_MARKER.chars().count(),
         "the excerpt cap must exceed the marker or the bounded result cannot carry it"
     );
-    match report.strip_suffix(TRUNCATED_REPLY_MARKER) {
-        Some(body) => format!(
-            "{}{TRUNCATED_REPLY_MARKER}",
-            truncate_trace_excerpt(
-                body,
-                max.saturating_sub(TRUNCATED_REPLY_MARKER.chars().count()),
-            )
-        ),
-        None => truncate_trace_excerpt(report, max),
-    }
+    // Both markers reserve the same tail room (issue #1171): the
+    // token-cap marker a Length stop appends, and the accumulation
+    // marker a client-side latched park already carries -- whichever
+    // suffix rode the reply, the bounded excerpt keeps it.
+    let Some((body, marker)) = [TRUNCATED_REPLY_MARKER, TRUNCATION_MARKER]
+        .into_iter()
+        .find_map(|marker| report.strip_suffix(marker).map(|body| (body, marker)))
+    else {
+        return truncate_trace_excerpt(report, max);
+    };
+    format!(
+        "{}{marker}",
+        truncate_trace_excerpt(body, max.saturating_sub(marker.chars().count()))
+    )
 }
 
 /// Re-attribute the tool-input parse-error family as an output truncation
@@ -280,6 +285,29 @@ mod tests {
         assert!(
             excerpt.starts_with(&"a".repeat(100)),
             "the report's head survives the cut"
+        );
+    }
+
+    /// The accumulation-cap half (issue #1171): a client-side latched
+    /// park carries the accumulation marker on its tail, and the same
+    /// head-preserving cut would drop it exactly when the report ran
+    /// long -- the reserve serves both markers, so the bounded excerpt
+    /// ends with whichever rode the reply.
+    #[test]
+    fn an_accumulation_capped_report_keeps_the_marker_in_its_excerpt() {
+        let report = format!("{}{}", "x".repeat(600), crate::util::TRUNCATION_MARKER);
+        let excerpt = marked_reply_excerpt(&report, TRACE_EXCERPT_MAX);
+        assert!(
+            excerpt.ends_with(crate::util::TRUNCATION_MARKER),
+            "the accumulation marker rides the excerpt's tail: {excerpt}"
+        );
+        assert!(
+            excerpt.starts_with(&"x".repeat(100)),
+            "the report's head survives the cut"
+        );
+        assert!(
+            excerpt.chars().count() <= TRACE_EXCERPT_MAX,
+            "the bounded excerpt stays within the cap"
         );
     }
 

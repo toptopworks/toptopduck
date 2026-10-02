@@ -39,6 +39,7 @@ use crate::session::loop_runtime::LoopRuntime;
 use crate::session::materializer::RealMaterializer;
 use crate::tools::builtin_table;
 use crate::tools::test_support::inert_deps_with_temp;
+use crate::util::ACCUM_MAX_BYTES;
 use crate::workingset::WorkingSet;
 
 use tempfile::TempDir;
@@ -964,6 +965,53 @@ fn an_over_cap_capped_subagent_report_keeps_the_marker_through_the_landing() {
         row.result_excerpt
             .ends_with(super::truncation::TRUNCATED_REPLY_MARKER),
         "the marker rides the bounded excerpt's tail: {}",
+        row.result_excerpt
+    );
+    // The projection half: the flag keys the one success-excerpt exception
+    // in the reduced mapping, so every trace surface (the live event, the
+    // recorded view, the persisted recipe) renders the notice.
+    let view = crate::model::TraceEntryView::from(row);
+    assert_eq!(
+        view.result_excerpt, row.result_excerpt,
+        "the capped notice survives the reduced projection"
+    );
+}
+
+/// The accumulation-cap half of the same signal (issue #1171): the fold's
+/// 8MB runaway guard latches the parked bytes while the provider's own
+/// finish reason stays a clean turn end -- the flag reads the parked
+/// text's length, not the finish reason alone, so the stamp and the
+/// accumulation marker ride the delegation entry exactly as the
+/// Length-capped half does.
+#[test]
+fn an_accumulation_capped_subagent_report_keeps_the_marker_through_the_landing() {
+    let mut h = Harness::new();
+    h.seed_result_1();
+    h.delegations = vec![analyst_spec()];
+    let oversized = "x".repeat(ACCUM_MAX_BYTES + 2048);
+    let model = MockCompletionModel::from_stream_turns([
+        batch_turn(
+            "delegate",
+            None,
+            &[("tu_d1", "analyst", json!({"prompt": "write a long report"}))],
+        ),
+        text_turn(&oversized),
+        text_turn("main recovered the truncated report"),
+    ]);
+    let outcome = h.run(
+        &delegation_request(&h, "delegate"),
+        mock_runtime(model),
+        Arc::new(CancelToken::new()),
+    );
+    let row = &outcome.trace[0].calls[0];
+    assert!(row.success, "a latched park is still a completed run");
+    assert!(
+        row.output_truncated,
+        "the landing stamps the accumulation cut on the entry"
+    );
+    assert!(
+        row.result_excerpt.ends_with(crate::util::TRUNCATION_MARKER),
+        "the accumulation marker rides the bounded excerpt's tail: {}",
         row.result_excerpt
     );
     // The projection half: the flag keys the one success-excerpt exception
