@@ -142,10 +142,18 @@ fn texts_for(locale: ResponseLocale) -> TrayTexts {
     }
 }
 
+/// The tray is recency-only (ADR-0125 Decision 3). The scan itself now
+/// leads with the pinned block (ADR-0127), which is a sidebar concern, not
+/// a tray one -- re-sort by descending mtime so pinned rows cannot
+/// displace the genuinely recent ones from the 3+10 split.
+fn sort_recency_first(metas: &mut [SessionMetadata]) {
+    metas.sort_by_key(|m| std::cmp::Reverse(m.last_modified_at));
+}
+
 /// Split the session list into (top-level recent, "more" submenu) slices.
-/// `metas` MUST already be newest-first -- [`scan_sessions_dir`] sorts by
-/// descending mtime, and this function preserves that order verbatim
-/// (display-name-only menu, no re-sorting).
+/// `metas` MUST already be newest-first -- the tray's rebuild runs
+/// [`sort_recency_first`] before this point -- and this function preserves
+/// that order verbatim (display-name-only menu, no re-sorting).
 fn split_recent(metas: &[SessionMetadata]) -> (&[SessionMetadata], &[SessionMetadata]) {
     let recent_len = metas.len().min(RECENT_CAP);
     let more_len = (metas.len() - recent_len).min(MORE_CAP);
@@ -486,6 +494,10 @@ fn rebuild_soon(app: AppHandle) {
                     return;
                 }
             };
+        // The tray is recency-only (ADR-0125 Decision 3); the scan's pinned
+        // block (ADR-0127) is a sidebar concern, not a tray one.
+        let mut metas = metas;
+        sort_recency_first(&mut metas);
         let menu = match build_menu(&app, &metas, &current_texts(&app)) {
             Ok(m) => m,
             Err(e) => {
@@ -704,6 +716,43 @@ mod tests {
         // Order is preserved newest-first (the scan's sort).
         assert_eq!(more[0].duck_path.as_str(), "s3.duck");
         assert_eq!(more[9].duck_path.as_str(), "s12.duck");
+    }
+
+    #[test]
+    fn recency_order_puts_mtime_before_the_pinned_block() {
+        // ADR-0125 keeps the tray recency-only; the scan (ADR-0127) leads
+        // with the pinned block instead, so the rebuild re-sorts before the
+        // 3+10 split -- pinned rows must not displace the recent ones.
+        let mut metas = vec![
+            SessionMetadata {
+                last_modified_at: 100,
+                pinned: true,
+                ..meta("pinned-old.duck", "p")
+            },
+            SessionMetadata {
+                last_modified_at: 900,
+                ..meta("fresh.duck", "f")
+            },
+            SessionMetadata {
+                last_modified_at: 500,
+                pinned: true,
+                ..meta("pinned-mid.duck", "p")
+            },
+            SessionMetadata {
+                last_modified_at: 700,
+                ..meta("recent.duck", "r")
+            },
+        ];
+        sort_recency_first(&mut metas);
+        assert_eq!(
+            paths(&metas),
+            vec![
+                "fresh.duck",
+                "recent.duck",
+                "pinned-mid.duck",
+                "pinned-old.duck"
+            ]
+        );
     }
 
     // --- session_label ------------------------------------------------------

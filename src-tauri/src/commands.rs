@@ -1819,7 +1819,7 @@ fn session_dir_uuid_under_root(root: &Path, duck: &str) -> Result<String, StoreC
             root.display()
         ))
     })?;
-    let session_dir = canonical.parent().map(Path::to_path_buf).ok_or_else(|| {
+    let session_dir = canonical.parent().ok_or_else(|| {
         StoreCommandError::IoFailure(
             "path has no parent directory; cannot resolve the sidecar key".into(),
         )
@@ -1845,6 +1845,28 @@ fn session_dir_uuid_under_root(root: &Path, duck: &str) -> Result<String, StoreC
                 session_dir.display()
             ))
         })
+}
+
+/// ADR-0127 Decision 4: open-is-unarchive. After a successful bind, an
+/// archived membership is contradictory ("active but invisible"), so the
+/// sidecar drops it in one write -- file-picker / OS-association entry
+/// points thereby auto-restore without the sidebar. Only ducks under the
+/// managed sessions root are sidecar business: an out-of-root duck is
+/// skipped, so a parent-name collision cannot cross-unarchive a managed
+/// session. Best-effort: the resume already succeeded, an
+/// organization-write failure only logs. Extracted so the wiring is testable
+/// without an AppHandle (the `rename_persisted_session_blocking` precedent).
+fn unarchive_after_open(sessions_root: &Path, duck: &Path) {
+    let uuid = match session_dir_uuid_under_root(sessions_root, &duck.to_string_lossy()) {
+        Ok(uuid) => uuid,
+        Err(_) => return,
+    };
+    if let Err(e) = crate::persistence::organization::set_archived(sessions_root, &uuid, false) {
+        log::warn!(
+            target: "toptopduck::session",
+            "open_duck: failed to unarchive {uuid}: {e}"
+        );
+    }
 }
 
 /// Delete a persisted session (ADR-0060/0089, issue #81). The frontend closes
@@ -2531,22 +2553,8 @@ pub async fn open_duck(
         );
         // ADR-0127 Decision 4: open-is-unarchive. The resume succeeded, so
         // any archived membership is now contradictory ("active but
-        // invisible"); remove it from the sidecar in one write. File-picker /
-        // OS-association entry points thereby auto-restore without the
-        // sidebar. Best-effort: the resume itself already succeeded, an
-        // organization-write failure only logs.
-        if let Some(uuid) =
-            crate::persistence::organization::session_dir_uuid(&path.to_string_lossy())
-        {
-            if let Err(e) =
-                crate::persistence::organization::unarchive_if_archived(&sessions_root_path, &uuid)
-            {
-                log::warn!(
-                    target: "toptopduck::session",
-                    "open_duck: failed to unarchive {uuid}: {e}"
-                );
-            }
-        }
+        // invisible"); remove it from the sidecar in one write.
+        unarchive_after_open(&sessions_root_path, &path);
         Ok::<(), SessionError>(())
     })
     .await;
@@ -4047,6 +4055,102 @@ mod tests {
         );
         // A blank path is a caller bug, refused the same way.
         assert!(session_dir_uuid_under_root(root.path(), "  ").is_err());
+    }
+
+    #[test]
+    fn session_dir_uuid_under_root_refuses_unresolvable_paths() {
+        // The canonicalize-Err arm is the line that keeps a `root/..`
+        // spelling from degrading to a lexical starts_with (which would
+        // pass such a prefix): an in-root ghost and a root-escape spelling
+        // both refuse with the typed IO lane rather than resolve lexically.
+        let root = tempfile::tempdir().expect("tempdir");
+        let ghost = root.path().join("ghost").join("session.duck");
+        for path in [
+            ghost.to_string_lossy().into_owned(),
+            format!("{}/../../elsewhere/session.duck", root.path().display()),
+        ] {
+            let err = session_dir_uuid_under_root(root.path(), &path)
+                .expect_err("an unresolvable path refuses");
+            assert!(
+                matches!(err, StoreCommandError::IoFailure(_)),
+                "typed as the store-command IO lane: {err:?}"
+            );
+        }
+    }
+
+    // ADR-0127 Decision 4 wiring (review Important 1): the seam is what
+    // open_duck calls after a successful bind -- pinned here so deleting the
+    // call can never again pass silently.
+    #[test]
+    fn unarchive_after_open_removes_archived_membership_under_the_root() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let duck = root.path().join("arch-1").join("session.duck");
+        std::fs::create_dir_all(duck.parent().expect("parent")).expect("mkdir");
+        std::fs::write(&duck, "").expect("write");
+        std::fs::create_dir_all(root.path().join("pin-1")).expect("mkdir pin-1");
+        std::fs::write(
+            root.path()
+                .join(crate::persistence::organization::SIDECAR_NAME),
+            r#"{"format":1,"pinned":["pin-1"],"archived":["arch-1"]}"#,
+        )
+        .expect("write sidecar");
+        unarchive_after_open(root.path(), &duck);
+        let sidecar = std::fs::read_to_string(
+            root.path()
+                .join(crate::persistence::organization::SIDECAR_NAME),
+        )
+        .expect("read sidecar");
+        assert!(
+            sidecar.contains("\"pin-1\""),
+            "the unrelated pin is undisturbed: {sidecar}"
+        );
+        assert!(
+            !sidecar.contains("arch-1"),
+            "the archived membership is dropped: {sidecar}"
+        );
+    }
+
+    #[test]
+    fn unarchive_after_open_skips_out_of_root_ducks_and_non_members() {
+        // An out-of-root duck whose parent name collides with an archived
+        // managed session's uuid must not cross-unarchive it; a non-member
+        // under the root writes nothing at all.
+        let managed = tempfile::tempdir().expect("tempdir");
+        let elsewhere = tempfile::tempdir().expect("tempdir");
+        std::fs::create_dir_all(managed.path().join("arch-1")).expect("mkdir managed");
+        std::fs::write(
+            managed
+                .path()
+                .join(crate::persistence::organization::SIDECAR_NAME),
+            r#"{"format":1,"pinned":[],"archived":["arch-1"]}"#,
+        )
+        .expect("write sidecar");
+        let foreign = elsewhere.path().join("arch-1").join("session.duck");
+        std::fs::create_dir_all(foreign.parent().expect("parent")).expect("mkdir foreign");
+        std::fs::write(&foreign, "").expect("write foreign");
+        unarchive_after_open(managed.path(), &foreign);
+        let sidecar = std::fs::read_to_string(
+            managed
+                .path()
+                .join(crate::persistence::organization::SIDECAR_NAME),
+        )
+        .expect("read sidecar");
+        assert!(
+            sidecar.contains("arch-1"),
+            "no cross-root unarchive on a uuid collision: {sidecar}"
+        );
+        let quiet = tempfile::tempdir().expect("tempdir");
+        let duck = quiet.path().join("plain").join("session.duck");
+        std::fs::create_dir_all(duck.parent().expect("parent")).expect("mkdir");
+        std::fs::write(&duck, "").expect("write");
+        unarchive_after_open(quiet.path(), &duck);
+        assert!(
+            !quiet
+                .path()
+                .join(crate::persistence::organization::SIDECAR_NAME)
+                .exists(),
+            "an idempotent no-op never creates the sidecar"
+        );
     }
 
     /// A minimal CliToolConfig for the turn-assembly projection tests: only

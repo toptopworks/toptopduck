@@ -11,7 +11,7 @@
 //! the list stays usable, the visible cost is lost pins, and the next
 //! successful write heals the file.
 
-use crate::persistence::io::save_json_atomic;
+use crate::persistence::io::save_atomic;
 use crate::persistence::SaveError;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
@@ -48,8 +48,11 @@ impl Default for SessionOrganization {
 /// Serializes every read-modify-write of the sidecar (scan sweep, the two
 /// set commands, open-is-unarchive). Whole-file rewrites make concurrent
 /// RMWs last-writer-wins, so a scan's prune-and-rewrite racing a user pin
-/// would silently drop the pin; one process-wide lock removes the race. Same
-/// posture as the single-writer registry in `registry.rs`.
+/// would silently drop the pin; one process-wide lock removes the race.
+/// Writers QUEUE here (ADR-0127 Decision 3: in-process RMW serialization) --
+/// deliberately not the ADR-0035 single-writer gate, which REFUSES a second
+/// opener: the sidecar never crosses process boundaries, so queuing
+/// suffices.
 fn sidecar_lock() -> &'static Mutex<()> {
     static LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
     &LOCK
@@ -92,7 +95,18 @@ fn load(root: &Path) -> SessionOrganization {
         }
     };
     match serde_json::from_str::<SessionOrganization>(&text) {
-        Ok(org) if org.format == SIDECAR_FORMAT => org,
+        // External input: keep the disjoint invariant honest at the parse
+        // boundary (read_duck's precedent). A hand-edited or partially
+        // corrupt-but-valid file can hold one key in both arrays, which the
+        // includeArchived view would float into the pinned head -- and no
+        // later mutation would heal it (set_pinned no-ops on archived
+        // members, the sweep only removes unknown keys). Archived wins,
+        // matching the no-op backstop's direction.
+        Ok(mut org) if org.format == SIDECAR_FORMAT => {
+            let archived: HashSet<&str> = org.archived.iter().map(String::as_str).collect();
+            org.pinned.retain(|k| !archived.contains(k.as_str()));
+            org
+        }
         Ok(org) => {
             log::warn!(
                 target: "toptopduck::persistence",
@@ -127,7 +141,7 @@ fn modify(
     let before = org.clone();
     f(&mut org);
     if org != before {
-        save_json_atomic(&sidecar_path(root), &org)?;
+        save_atomic(&sidecar_path(root), &org)?;
     }
     Ok(org)
 }
@@ -139,9 +153,18 @@ fn modify(
 /// keys are inert anyway (no row to join), so a failed prune save is only
 /// logged, never fatal to the scan.
 pub fn load_and_sweep(root: &Path, known: &HashSet<String>) -> SessionOrganization {
+    // The stale-snapshot guard: `known` is collected before the scan's
+    // per-.duck parse loop, so a directory created (and pinned) after the
+    // read_dir would otherwise be pruned as an orphan when the sweep finally
+    // takes the lock -- exactly the lost-pin window Decision 3's
+    // serialization exists to eliminate. Only keys absent from BOTH the
+    // snapshot and the disk (re-statted under the lock) are orphans; the
+    // re-stat also rides out a transient is_dir failure in the scan.
     modify(root, |org| {
-        org.pinned.retain(|k| known.contains(k));
-        org.archived.retain(|k| known.contains(k));
+        org.pinned
+            .retain(|k| known.contains(k) || root.join(k).is_dir());
+        org.archived
+            .retain(|k| known.contains(k) || root.join(k).is_dir());
     })
     .unwrap_or_else(|e| {
         log::warn!(
@@ -186,17 +209,6 @@ pub fn set_archived(root: &Path, uuid: &str, archived: bool) -> Result<(), SaveE
         } else {
             org.archived.retain(|k| k != uuid);
         }
-    })
-    .map(|_| ())
-}
-
-/// Open-is-unarchive (ADR-0127 Decision 4): after `open_duck` binds, a hit in
-/// `archived` is removed in the same single write. File-picker and
-/// OS-association entry points thereby auto-restore a session without going
-/// through the sidebar -- "open but archived" is unreachable.
-pub fn unarchive_if_archived(root: &Path, uuid: &str) -> Result<(), SaveError> {
-    modify(root, |org| {
-        org.archived.retain(|k| k != uuid);
     })
     .map(|_| ())
 }
@@ -263,7 +275,6 @@ mod tests {
         let root = tempfile::tempdir().expect("tempdir");
         set_pinned(root.path(), "ghost", false).expect("unpin unknown");
         set_archived(root.path(), "ghost", false).expect("unarchive unknown");
-        unarchive_if_archived(root.path(), "ghost").expect("unarchive unknown (open path)");
         assert!(
             !sidecar_exists(root.path()),
             "no-op writes must not create index.json"
@@ -318,15 +329,50 @@ mod tests {
     fn unarchive_removes_the_member_and_leaves_non_members_alone() {
         // ADR-0127 Decision 4: open-is-unarchive -- a member leaves `archived`
         // (and only `archived`; pins are untouched by restore semantics).
+        // The restore face of `set_archived` is what open_duck calls.
         let root = tempfile::tempdir().expect("tempdir");
         set_archived(root.path(), "a", true).expect("archive a");
         set_archived(root.path(), "b", true).expect("archive b");
         set_pinned(root.path(), "c", true).expect("pin c");
-        unarchive_if_archived(root.path(), "a").expect("unarchive a");
-        unarchive_if_archived(root.path(), "ghost").expect("unarchive ghost");
+        set_archived(root.path(), "a", false).expect("unarchive a");
+        set_archived(root.path(), "ghost", false).expect("unarchive ghost");
         let org = read_sidecar(root.path());
         assert_eq!(org.archived, vec!["b"]);
         assert_eq!(org.pinned, vec!["c"]);
+    }
+
+    #[test]
+    fn load_sanitizes_a_key_held_in_both_sets() {
+        // External input at the parse boundary: a hand-edited or partially
+        // corrupt-but-valid sidecar can name one key in both arrays. Archived
+        // wins (the no-op backstop's direction), so the includeArchived view
+        // never floats a contradictory row into the pinned head.
+        let root = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            root.path().join(SIDECAR_NAME),
+            r#"{"format":1,"pinned":["dup","pin"],"archived":["dup","arch"]}"#,
+        )
+        .expect("write sidecar");
+        let org = load(root.path());
+        assert_eq!(org.pinned, vec!["pin"]);
+        assert_eq!(org.archived, vec!["dup", "arch"]);
+    }
+
+    #[test]
+    fn sweep_keeps_keys_whose_directories_exist_but_missed_the_snapshot() {
+        // The stale-snapshot guard: `known` predates the per-.duck parse
+        // loop, so a directory created after the read_dir must not be pruned
+        // as an orphan when the sweep takes the lock -- only keys absent
+        // from BOTH the snapshot and the disk are orphans.
+        let root = tempfile::tempdir().expect("tempdir");
+        set_pinned(root.path(), "late", true).expect("pin late");
+        set_pinned(root.path(), "gone", true).expect("pin gone");
+        std::fs::create_dir_all(root.path().join("late")).expect("mkdir late");
+        // A stale (empty) snapshot: "late" exists on disk, "gone" does not.
+        let swept = load_and_sweep(root.path(), &HashSet::new());
+        assert_eq!(swept.pinned, vec!["late"]);
+        // The prune is persisted, not just projected.
+        assert_eq!(read_sidecar(root.path()), swept);
     }
 
     #[test]

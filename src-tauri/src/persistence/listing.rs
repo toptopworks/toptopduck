@@ -257,7 +257,9 @@ fn scan_sessions_dir_scoped(dir: &Path, include_archived: bool) -> Vec<SessionMe
         .collect();
     metas.sort_by_key(|m| std::cmp::Reverse(m.last_modified_at));
     metas.sort_by_key(|m| m.archived);
-    metas.sort_by_key(|m| {
+    // Cached: the key re-derives the uuid from the duck path (a parse plus
+    // a String allocation), which no comparison should repeat.
+    metas.sort_by_cached_key(|m| {
         organization::session_dir_uuid(m.duck_path.as_str())
             .and_then(|uuid| pinned_rank.get(uuid.as_str()).copied())
             .unwrap_or(usize::MAX)
