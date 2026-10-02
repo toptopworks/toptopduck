@@ -377,9 +377,10 @@ pub struct LoopRound {
     /// the runtime's provider round produced, `None` when the turn ran
     /// thinking-disabled (no posture level) or every block was redacted.
     pub thinking: Option<ThinkingTrace>,
-    /// The round's connective prose (text the model emitted alongside its
-    /// tool-call batch), `None` when the reply carried tool calls and no
-    /// text.
+    /// The round's prose (text the model emitted alongside its tool-call
+    /// batch, or an unconfirmed terminal turn's partial prose recorded at
+    /// a non-Text termination, issue #628), `None` when the reply carried
+    /// no text.
     pub text: Option<String>,
     /// The round's tool calls, dispatch order.
     pub calls: Vec<TraceEntry>,

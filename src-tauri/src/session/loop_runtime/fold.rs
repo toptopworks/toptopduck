@@ -21,8 +21,12 @@
 //! per turn, text-bearing or not, which the gated `Final` item does not),
 //! and the round boundary is the FIRST committed `ToolCall` after it --
 //! the moment the batch is known. A terminal reply (no calls) never opens
-//! a round; its thinking waits as a trailing round, flushed when the next
-//! turn opens, at the run's `FinalResponse`, or when the stream ends.
+//! a round; its thinking and unconfirmed prose wait as a trailing round
+//! (issue #1165), flushed when the next turn opens or when the stream
+//! ends -- a stream cut mid-turn (a cancel before the turn's usage
+//! record) parks the same way at the end -- at the run's `FinalResponse`
+//! the prose is stripped (it rides the outcome body instead, mirroring
+//! the external settle's #628).
 //! Completed calls land on the open round from the shared state's
 //! completion queue, one per executed-tool-result event, in the sequential
 //! strategy's stable call order -- and, for the entries a cancellation
@@ -67,11 +71,17 @@ pub(crate) struct EventFold {
     thinking_trace: Option<ThinkingTrace>,
     /// Whether this turn's batch confirmed (a committed `ToolCall` seen).
     batch_open: bool,
-    /// A finished thinking-only turn awaiting its landing: flushed onto the
-    /// trace when the next turn opens, at the run's `FinalResponse`, or
-    /// when the stream ends, or superseded when the SAME turn's batch
-    /// confirms (the thinking then rides the batch round instead).
-    trailing_thinking: Option<LoopRound>,
+    /// A turn's unconfirmed round awaiting its landing -- call-less by
+    /// construction (parked only when the batch never confirmed): flushed
+    /// onto the trace when the next turn opens or when the stream ends
+    /// (which parks a stream cut mid-turn the same way, its usage record
+    /// never having arrived); at the run's `FinalResponse` the prose is
+    /// stripped instead (it rides the outcome body) and a round the strip
+    /// empties drops; superseded when the SAME turn's batch confirms (the
+    /// thinking then rides the batch round instead; the parked prose is
+    /// dropped there too -- the batch seal rebuilds the round's text off
+    /// `text_deltas`).
+    trailing_round: Option<LoopRound>,
 }
 
 impl EventFold {
@@ -87,7 +97,7 @@ impl EventFold {
             text_deltas: Vec::new(),
             thinking_trace: None,
             batch_open: false,
-            trailing_thinking: None,
+            trailing_round: None,
         }
     }
 
@@ -135,24 +145,50 @@ impl EventFold {
                 self.close_call(phases);
             }
             MultiTurnStreamItem::ModelTurnRetried { .. } => {
-                // The turn's provisional deltas are discarded; a
-                // thinking-only round the failed attempt parked at its close
-                // still lands here (the attempted thinking is recorded
-                // honesty, not rolled back).
+                // The turn's provisional deltas are discarded; the round the
+                // failed attempt parked at its close (its thinking and its
+                // unconfirmed prose, issue #1165) still lands here -- the
+                // attempted content is recorded honesty, not rolled back.
                 // The retry opens a fresh turn (counted on its first item).
                 self.reset_call();
             }
             MultiTurnStreamItem::FinalResponse(response) => {
                 self.final_output = Some(response.output.clone());
                 // The terminal reply's turn is done: land its waiting
-                // thinking-only round, if any.
-                self.flush_trailing();
+                // trailing round, if any -- but its prose rides the
+                // `final_output` (the outcome body), mirroring the external
+                // settle's Text-termination clear of a trailing call-less
+                // round (#628); a round the strip empties drops with it
+                // (the external settle's empty-tail pop).
+                if let Some(mut round) = self.trailing_round.take() {
+                    // The parked prose and the terminal output accumulate
+                    // the same provider text -- ADR-0126 keeps the
+                    // structural side of that as a convergence obligation,
+                    // and a divergence is contract drift, caught here in
+                    // debug/test the way the #921 exactly-once pairing is.
+                    debug_assert_eq!(round.text.as_deref(), Some(response.output.as_str()));
+                    round.text = None;
+                    if round.thinking.is_some() {
+                        self.rounds.push(round);
+                    }
+                }
             }
         }
     }
 
-    /// The stream is over: land whatever the last turn left waiting.
+    /// The stream is over: land whatever the last turn left waiting. A
+    /// stream cut mid-turn (issue #1165: a cancel while the answer
+    /// streamed, before the turn's usage record) never ran `close_call`,
+    /// so nothing parked -- salvage the open turn's unconfirmed thinking
+    /// and prose with the same finalize-and-park the close applies. The
+    /// success path always arrives here closed (its terminal reply's
+    /// `FinalResponse` took the park), so this arm is the cancel and
+    /// abort shapes alone.
     pub(crate) fn finish(&mut self) {
+        if self.call_open && !self.batch_open {
+            self.finalize_thinking();
+            self.park_unconfirmed();
+        }
         self.flush_trailing();
     }
 
@@ -224,19 +260,19 @@ impl EventFold {
                 // batch routes), so the turn is already closed and this is
                 // never a turn's first item. The turn's thinking rides the
                 // batch round -- taken back from the trailing slot it parked
-                // in at the close (the batch supersedes the thinking-only
-                // landing; only an EARLIER turn's parked round flushes, and
-                // there cannot be one: its batch or terminal reply closed it
-                // first).
+                // in at the close (the batch supersedes the parked landing,
+                // taking back only the thinking -- the parked prose drops
+                // in favor of the rebuild below; only an EARLIER turn's
+                // parked round flushes, and there cannot be one: its batch
+                // or terminal reply closed it first).
                 if !self.batch_open {
                     self.batch_open = true;
                     // The batch seal builds the round off `text_deltas`; the
                     // prose already streamed as `TextDelta`s (ADR-0126) --
-                    // there is no batch-confirmation text event.
-                    let thinking = self
-                        .trailing_thinking
-                        .take()
-                        .and_then(|round| round.thinking);
+                    // there is no batch-confirmation text event. The parked
+                    // round's prose is dropped here (superseded by the same
+                    // rebuild); only its thinking is taken back.
+                    let thinking = self.trailing_round.take().and_then(|round| round.thinking);
                     let prose = self.text_deltas.join("");
                     let text = (!prose.is_empty()).then_some(prose);
                     self.rounds.push(LoopRound {
@@ -262,7 +298,7 @@ impl EventFold {
     }
 
     /// The turn's first streamed item: flush the previous turn's waiting
-    /// thinking-only round, open the turn with FRESH per-turn accumulators
+    /// trailing round, open the turn with FRESH per-turn accumulators
     /// (a turn's deltas and committed blocks never bleed into the next --
     /// the scoping is structural, not a convention the close has to
     /// remember), and fire the `Thinking` wait marker. The batch-confirmed
@@ -289,15 +325,35 @@ impl EventFold {
 
     /// The turn's closing boundary (its `CompletionCall` usage record):
     /// finalize the thinking off this turn's accumulators, fire
-    /// `ThinkingCompleted`, park a call-less turn's thinking as the trailing
-    /// round until its batch confirms or the run ends, and end the turn.
-    /// The accumulators themselves are cleared at the next open (the
-    /// committed-ToolCall batch confirmation reads this turn's text after
-    /// the close).
+    /// `ThinkingCompleted`, park a call-less turn's thinking and prose as
+    /// the trailing round until its batch confirms or the run ends, and end
+    /// the turn. The accumulators themselves are cleared at the next open
+    /// (the committed-ToolCall batch confirmation reads this turn's text
+    /// after the close).
     fn close_call(&mut self, phases: &PhaseSink) {
         // Defensive open: a close before any content item (an empty turn)
         // still counts and still closes.
         self.open_call(phases);
+        self.finalize_thinking();
+        if let Some(trace) = self.thinking_trace.as_ref() {
+            emit_phase(
+                phases,
+                TurnPhase::ThinkingCompleted {
+                    duration_ms: trace.duration_ms,
+                    text: trace.text.clone(),
+                },
+            );
+        }
+        if !self.batch_open {
+            self.park_unconfirmed();
+        }
+        self.call_open = false;
+    }
+
+    /// Finalize the turn's thinking off its accumulators: committed
+    /// blocks supersede their deltas. `None` when the turn streamed no
+    /// readable reasoning.
+    fn finalize_thinking(&mut self) {
         let thinking_text = if !self.reasoning_committed.is_empty() {
             self.reasoning_committed.join("")
         } else {
@@ -309,28 +365,28 @@ impl EventFold {
                 text: thinking_text,
             });
         }
-        if let Some(trace) = self.thinking_trace.as_ref() {
-            emit_phase(
-                phases,
-                TurnPhase::ThinkingCompleted {
-                    duration_ms: trace.duration_ms,
-                    text: trace.text.clone(),
-                },
-            );
-        }
-        if !self.batch_open {
-            self.trailing_thinking = self.thinking_trace.clone().map(|thinking| LoopRound {
-                thinking: Some(thinking),
-                text: None,
-                calls: Vec::new(),
-            });
-        }
-        self.call_open = false;
     }
 
-    /// Land the waiting thinking-only round, if one waits.
+    /// Park the turn's unconfirmed thinking and prose together as the
+    /// trailing round -- both or neither, the #628 symmetry the external
+    /// settles apply: a cancel or hook-retry landing keeps the
+    /// unconfirmed prose on the authoritative trace instead of it
+    /// vanishing at the turn boundary. Call-less by construction (the
+    /// batch never confirmed).
+    fn park_unconfirmed(&mut self) {
+        let thinking = self.thinking_trace.clone();
+        let prose = self.text_deltas.join("");
+        let text = (!prose.is_empty()).then_some(prose);
+        self.trailing_round = (thinking.is_some() || text.is_some()).then(|| LoopRound {
+            thinking,
+            text,
+            calls: Vec::new(),
+        });
+    }
+
+    /// Land the waiting trailing round, if one waits.
     fn flush_trailing(&mut self) {
-        if let Some(round) = self.trailing_thinking.take() {
+        if let Some(round) = self.trailing_round.take() {
             self.rounds.push(round);
         }
     }
@@ -352,42 +408,62 @@ mod tests {
     use super::*;
     use std::sync::Mutex;
 
+    fn text_item(t: &str) -> MultiTurnStreamItem {
+        MultiTurnStreamItem::StreamAssistantItem(StreamedAssistantContent::text(t))
+    }
+
+    fn reasoning_delta_item(t: &str) -> MultiTurnStreamItem {
+        MultiTurnStreamItem::StreamAssistantItem(StreamedAssistantContent::ReasoningDelta {
+            id: "reasoning-0".into(),
+            provider_id: None,
+            reasoning: t.into(),
+        })
+    }
+
+    fn close_item() -> MultiTurnStreamItem {
+        MultiTurnStreamItem::CompletionCall(rig_agent::agent::CompletionCall::new(
+            0,
+            rig_core::completion::Usage::new(),
+        ))
+    }
+
+    fn final_response_item(output: &str) -> MultiTurnStreamItem {
+        MultiTurnStreamItem::FinalResponse(rig_agent::agent::PromptResponse::new(
+            output,
+            rig_core::completion::Usage::new(),
+        ))
+    }
+
+    fn retry_item(turn: usize) -> MultiTurnStreamItem {
+        MultiTurnStreamItem::ModelTurnRetried { turn }
+    }
+
+    fn noop_sink() -> PhaseSink {
+        Arc::new(Mutex::new(|_p: TurnPhase| {}))
+    }
+
     /// `round_trips` counts model turns opened -- the driver of the
     /// `Thinking` phase's attempt number. A hook-retried turn discards its
     /// provisional content and the retry opens a fresh turn with the next
     /// attempt number. Pinned through the phase rail: two `Thinking`
     /// markers, the second at attempt 2. The event script mirrors the real
     /// streamed-driver order -- content items, then the turn's
-    /// `CompletionCall` close (the gated `Final` item is deliberately absent,
-    /// as it is for any turn that streamed no text).
+    /// `CompletionCall` close (the gated `Final` item carries no fold
+    /// weight for the attempt count and is omitted).
     #[test]
     fn round_trips_counts_streamed_turns_including_retries() {
         let channel = Arc::new(CompletionChannel::new());
         let seen: Arc<Mutex<Vec<TurnPhase>>> = Arc::new(Mutex::new(Vec::new()));
         let sink: PhaseSink = {
             let seen = Arc::clone(&seen);
-            Arc::new(std::sync::Mutex::new(move |p: TurnPhase| {
-                seen.lock().unwrap().push(p)
-            }))
+            Arc::new(Mutex::new(move |p: TurnPhase| seen.lock().unwrap().push(p)))
         };
         let mut fold = EventFold::new();
-        let text =
-            |t: &str| MultiTurnStreamItem::StreamAssistantItem(StreamedAssistantContent::text(t));
-        let close = || {
-            MultiTurnStreamItem::CompletionCall(rig_agent::agent::CompletionCall::new(
-                0,
-                rig_core::completion::Usage::new(),
-            ))
-        };
-        fold.event(&text("a"), &channel, &sink);
-        fold.event(&close(), &channel, &sink);
-        fold.event(
-            &MultiTurnStreamItem::ModelTurnRetried { turn: 1 },
-            &channel,
-            &sink,
-        );
-        fold.event(&text("b"), &channel, &sink);
-        fold.event(&close(), &channel, &sink);
+        fold.event(&text_item("a"), &channel, &sink);
+        fold.event(&close_item(), &channel, &sink);
+        fold.event(&retry_item(1), &channel, &sink);
+        fold.event(&text_item("b"), &channel, &sink);
+        fold.event(&close_item(), &channel, &sink);
         fold.finish();
         let attempts = seen
             .lock()
@@ -399,5 +475,196 @@ mod tests {
             })
             .collect::<Vec<_>>();
         assert_eq!(attempts, vec![1, 2], "one per turn open, retries included");
+    }
+
+    /// Issue #1165: a cancelled turn (the stream ends after the turn's
+    /// closing usage record, before any batch confirms) lands its
+    /// unconfirmed prose on the trace -- prose-only here (the turn
+    /// streamed no reasoning); the park keeps thinking and prose
+    /// together, both or neither, the #628 symmetry the external
+    /// settles already apply.
+    #[test]
+    fn cancelled_turn_lands_its_unconfirmed_prose() {
+        let channel = Arc::new(CompletionChannel::new());
+        let sink = noop_sink();
+        let mut fold = EventFold::new();
+        fold.event(&text_item("partial answer"), &channel, &sink);
+        fold.event(&close_item(), &channel, &sink);
+        fold.finish();
+        assert_eq!(fold.rounds.len(), 1, "{:?}", fold.rounds);
+        assert_eq!(
+            fold.rounds[0].text.as_deref(),
+            Some("partial answer"),
+            "the unconfirmed prose lands on the trace"
+        );
+        assert!(
+            fold.rounds[0].thinking.is_none(),
+            "a prose-only turn parks no thinking"
+        );
+    }
+
+    /// Issue #1165: a hook-rejected turn's unconfirmed prose lands with
+    /// its parked round (the attempted honesty the retry landing already
+    /// records for thinking); the fresh attempt starts clean.
+    #[test]
+    fn retried_turn_lands_its_unconfirmed_prose() {
+        let channel = Arc::new(CompletionChannel::new());
+        let sink = noop_sink();
+        let mut fold = EventFold::new();
+        fold.event(&text_item("rejected attempt"), &channel, &sink);
+        fold.event(&close_item(), &channel, &sink);
+        fold.event(&retry_item(1), &channel, &sink);
+        assert_eq!(fold.rounds.len(), 1, "{:?}", fold.rounds);
+        assert_eq!(
+            fold.rounds[0].text.as_deref(),
+            Some("rejected attempt"),
+            "the rejected attempt's prose lands as attempted honesty"
+        );
+        assert!(
+            fold.rounds[0].calls.is_empty(),
+            "nothing executed, nothing landed"
+        );
+    }
+
+    /// Issue #1165: the terminal reply's prose rides the `final_output`
+    /// (the outcome body), never the trace -- the parked round lands
+    /// thinking-only when it has thinking, mirroring the external
+    /// settle's Text-termination clear (#628), and a prose-only parked
+    /// round drops entirely.
+    #[test]
+    fn final_response_strips_the_terminal_prose() {
+        let channel = Arc::new(CompletionChannel::new());
+        let sink = noop_sink();
+        let mut fold = EventFold::new();
+        fold.event(&reasoning_delta_item("thinking hard"), &channel, &sink);
+        fold.event(&text_item("the answer"), &channel, &sink);
+        fold.event(&close_item(), &channel, &sink);
+        fold.event(&final_response_item("the answer"), &channel, &sink);
+        assert_eq!(fold.rounds.len(), 1, "{:?}", fold.rounds);
+        assert_eq!(
+            fold.rounds[0]
+                .thinking
+                .as_ref()
+                .expect("the parked thinking lands")
+                .text,
+            "thinking hard"
+        );
+        assert!(
+            fold.rounds[0].text.is_none(),
+            "the terminal prose rides the final_output, not the trace"
+        );
+        assert_eq!(fold.final_output.as_deref(), Some("the answer"));
+
+        // A prose-only terminal turn parks nothing that survives the
+        // strip: no round lands.
+        let mut fold = EventFold::new();
+        fold.event(&text_item("plain answer"), &channel, &sink);
+        fold.event(&close_item(), &channel, &sink);
+        fold.event(&final_response_item("plain answer"), &channel, &sink);
+        assert!(fold.rounds.is_empty(), "{:?}", fold.rounds);
+        assert_eq!(fold.final_output.as_deref(), Some("plain answer"));
+    }
+
+    /// Issue #1165: the both arm of the both-or-neither park -- a
+    /// cancelled turn that streamed reasoning AND prose lands both in the
+    /// same round; a thinking-only turn keeps landing its thinking (the
+    /// pre-widening shape's regression guard).
+    #[test]
+    fn cancelled_turn_lands_thinking_with_its_prose() {
+        let channel = Arc::new(CompletionChannel::new());
+        let sink = noop_sink();
+        let mut fold = EventFold::new();
+        fold.event(&reasoning_delta_item("half a plan"), &channel, &sink);
+        fold.event(&text_item("half an answer"), &channel, &sink);
+        fold.event(&close_item(), &channel, &sink);
+        fold.finish();
+        assert_eq!(fold.rounds.len(), 1, "{:?}", fold.rounds);
+        let round = &fold.rounds[0];
+        assert_eq!(
+            round
+                .thinking
+                .as_ref()
+                .expect("thinking parks with the prose")
+                .text,
+            "half a plan"
+        );
+        assert_eq!(round.text.as_deref(), Some("half an answer"));
+
+        // Thinking-only (the pre-widening shape): the thinking still
+        // lands, and no prose appears.
+        let mut fold = EventFold::new();
+        fold.event(&reasoning_delta_item("only thinking"), &channel, &sink);
+        fold.event(&close_item(), &channel, &sink);
+        fold.finish();
+        assert_eq!(fold.rounds.len(), 1, "{:?}", fold.rounds);
+        assert_eq!(
+            fold.rounds[0]
+                .thinking
+                .as_ref()
+                .expect("the thinking lands")
+                .text,
+            "only thinking"
+        );
+        assert!(
+            fold.rounds[0].text.is_none(),
+            "nothing streamed but thinking"
+        );
+    }
+
+    /// Issue #1165: a stream cut mid-turn (the cancel lands before the
+    /// turn's usage record, so `close_call` never ran) still lands its
+    /// unconfirmed thinking and prose -- `finish` salvages the open turn
+    /// with the same finalize-and-park the close applies. A prose-only
+    /// cut lands the prose alone.
+    #[test]
+    fn mid_stream_cancel_salvages_the_open_turn() {
+        let channel = Arc::new(CompletionChannel::new());
+        let sink = noop_sink();
+        let mut fold = EventFold::new();
+        fold.event(&reasoning_delta_item("cut mid-thought"), &channel, &sink);
+        fold.event(&text_item("cut mid-ans"), &channel, &sink);
+        fold.finish();
+        assert_eq!(fold.rounds.len(), 1, "{:?}", fold.rounds);
+        let round = &fold.rounds[0];
+        assert_eq!(
+            round
+                .thinking
+                .as_ref()
+                .expect("the cut turn's thinking is salvaged")
+                .text,
+            "cut mid-thought"
+        );
+        assert_eq!(round.text.as_deref(), Some("cut mid-ans"));
+        assert!(round.calls.is_empty(), "nothing executed, nothing landed");
+
+        // A prose-only cut: the prose lands alone.
+        let mut fold = EventFold::new();
+        fold.event(&text_item("cut mid-sentence"), &channel, &sink);
+        fold.finish();
+        assert_eq!(fold.rounds.len(), 1, "{:?}", fold.rounds);
+        assert_eq!(fold.rounds[0].text.as_deref(), Some("cut mid-sentence"));
+        assert!(
+            fold.rounds[0].thinking.is_none(),
+            "no reasoning streamed, none salvaged"
+        );
+    }
+
+    /// The next-turn-open flush: two consecutive call-less turns each
+    /// land their own round -- the second turn's open flushes the first
+    /// turn's park before a second park could overwrite it (no
+    /// collision), and the stream-end flush lands the last one.
+    #[test]
+    fn next_open_flushes_the_waiting_round() {
+        let channel = Arc::new(CompletionChannel::new());
+        let sink = noop_sink();
+        let mut fold = EventFold::new();
+        fold.event(&text_item("first"), &channel, &sink);
+        fold.event(&close_item(), &channel, &sink);
+        fold.event(&text_item("second"), &channel, &sink);
+        fold.event(&close_item(), &channel, &sink);
+        fold.finish();
+        assert_eq!(fold.rounds.len(), 2, "{:?}", fold.rounds);
+        assert_eq!(fold.rounds[0].text.as_deref(), Some("first"));
+        assert_eq!(fold.rounds[1].text.as_deref(), Some("second"));
     }
 }
