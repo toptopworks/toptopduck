@@ -981,16 +981,25 @@ impl RoundTracker {
     /// accumulation (the terminal-text fallback) and the current round's
     /// prose slot. ADR-0126: the chunk also fires its `TextDelta` the
     /// moment it arrives (after any round-opening `Thinking`, so
-    /// `live.step` is already known when the delta lands).
+    /// `live.step` is already known when the delta lands). The emission
+    /// rides the round track's cap (issue #1166): once the track latches
+    /// the truncation marker, the crossing chunk's delta is followed by
+    /// one final marker delta and later chunks emit nothing -- the live
+    /// round text stays byte-identical to the settle record.
     pub(super) fn push_prose(&mut self, text: &str, on_phase: &mut impl FnMut(TurnPhase)) {
         push_capped(&mut self.text, text);
         let round = self.open_round(on_phase);
-        if !text.is_empty() {
+        let capped = round.text.len() >= ACCUM_MAX_BYTES;
+        if !text.is_empty() && !capped {
             on_phase(TurnPhase::TextDelta {
                 delta: text.to_string(),
             });
         }
-        push_capped(&mut round.text, text);
+        if push_capped(&mut round.text, text) {
+            on_phase(TurnPhase::TextDelta {
+                delta: TRUNCATION_MARKER.to_string(),
+            });
+        }
     }
 
     /// A thought chunk grows the current round's thinking stream; the first
@@ -1347,14 +1356,17 @@ impl Pump {
 /// first crossing latches the visible truncation marker; appends afterwards
 /// are dropped. The whole chunk lands before the check, so a chunk straddling
 /// the cap overshoots it by the chunk's remainder -- bounded, since a chunk
-/// rides a capped line.
-fn push_capped(buf: &mut String, text: &str) {
+/// rides a capped line. Returns whether THIS call latched the marker.
+fn push_capped(buf: &mut String, text: &str) -> bool {
     if buf.len() >= ACCUM_MAX_BYTES {
-        return;
+        return false;
     }
     buf.push_str(text);
     if buf.len() >= ACCUM_MAX_BYTES {
         buf.push_str(TRUNCATION_MARKER);
+        true
+    } else {
+        false
     }
 }
 
@@ -1664,6 +1676,100 @@ mod tests {
         );
         assert_eq!(tracker.text.matches("[truncated]").count(), 1);
         assert!(tracker.text.ends_with(TRUNCATION_MARKER));
+    }
+
+    /// Issue #1166: the delta stream rides the round track's cap -- pre-cap
+    /// chunks stream one delta each, the straddling crossing chunk's delta
+    /// lands with one marker delta following, and later chunks emit nothing.
+    /// The live concatenation stays byte-identical to the settle record the
+    /// turn-end refresh swaps in (overshoot and marker included).
+    #[test]
+    fn delta_stream_caps_with_a_visible_marker() {
+        let mut tracker = RoundTracker::new();
+        let mut phases = Vec::new();
+        tracker.push_prose("working on it", &mut |p| phases.push(p)); // 13 bytes
+        tracker.push_prose(&"x".repeat(ACCUM_MAX_BYTES - 30), &mut |p| phases.push(p));
+        tracker.push_prose(&"文".repeat(8), &mut |p| phases.push(p)); // 24 bytes
+        tracker.push_prose("post-cap chunk", &mut |p| phases.push(p));
+        // 13 + (cap - 30) = cap - 17, then 24 more -> cap + 7 overshoot; the
+        // fourth chunk drops.
+        let deltas: Vec<&str> = phases
+            .iter()
+            .filter_map(|p| match p {
+                TurnPhase::TextDelta { delta } => Some(delta.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            deltas,
+            vec![
+                "working on it",
+                &"x".repeat(ACCUM_MAX_BYTES - 30),
+                &"文".repeat(8),
+                TRUNCATION_MARKER
+            ],
+            "chunks until the straddling crossing, one marker, then silence"
+        );
+        // The settle round text the turn-end refresh swaps in.
+        let rounds = tracker.settle_rounds(&Termination::Cancelled);
+        let live = deltas.concat();
+        assert_eq!(
+            rounds[0].text.as_deref(),
+            Some(live.as_str()),
+            "the live concatenation equals the settle round text"
+        );
+    }
+
+    /// Issue #1166: the cap rides the ROUND track, so a round that has
+    /// latched its marker must not silence the rounds after it -- the
+    /// whole-turn track (`self.text`, pushed first in `push_prose`) is
+    /// capped too by then, and gating on it would keep round two's deltas
+    /// dark while its fresh `RoundAcc` settled with text. Single-round
+    /// fixtures cannot tell the two reads apart; this pin can.
+    #[test]
+    fn a_capped_round_does_not_silence_the_next_round() {
+        let mut tracker = RoundTracker::new();
+        let mut on_phase = |_p: TurnPhase| {};
+        tracker.push_prose("preamble", &mut on_phase); // 8 bytes
+        tracker.push_prose(&"x".repeat(ACCUM_MAX_BYTES - 4), &mut on_phase);
+        // 8 + (cap - 4) = cap + 4: round one latches its marker (and so does
+        // the whole-turn track, which accumulated the same bytes).
+        let _ = tracker.call_round(&mut on_phase);
+        let mut phases = Vec::new();
+        tracker.push_prose("fresh round streams", &mut |p| phases.push(p));
+        tracker.push_prose("still under", &mut |p| phases.push(p));
+        let deltas: Vec<&str> = phases
+            .iter()
+            .filter_map(|p| match p {
+                TurnPhase::TextDelta { delta } => Some(delta.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            deltas,
+            vec!["fresh round streams", "still under"],
+            "round two streams on its own uncapped track"
+        );
+        // Each round's live concatenation equals its own settle text.
+        let rounds = tracker.settle_rounds(&Termination::Cancelled);
+        assert_eq!(rounds.len(), 2);
+        assert_eq!(
+            rounds[0].text.as_deref(),
+            Some(
+                format!(
+                    "preamble{}{}",
+                    "x".repeat(ACCUM_MAX_BYTES - 4),
+                    TRUNCATION_MARKER
+                )
+                .as_str()
+            ),
+            "round one keeps its capped text with the marker"
+        );
+        assert_eq!(
+            rounds[1].text.as_deref(),
+            Some(deltas.concat().as_str()),
+            "round two's live concatenation equals its settle round text"
+        );
     }
 
     /// Issue #629: the thinking buffer hits the same byte cap, and the

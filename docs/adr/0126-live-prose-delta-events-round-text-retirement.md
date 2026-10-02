@@ -2,7 +2,7 @@
 
 ## Decision
 
-1. **`TurnPhase` 新增 `TextDelta { delta }`，流内正文逐 delta 直通。** 四条 runtime 路径（rig fold / claude stream-json / codex / ACP-native）在正文片段到达即 `emit_phase`，不合并、不定窗。外部三条共用 `RoundTracker::push_prose` 一个累积 seam（一处落点覆盖三条），rig fold 自成一处在 batch 确认前。delta 不带 round 定位：隐式归属当前轮（前端 `live.step ?? 1`，与 `RoundText` 既有语义同款）——`PhaseSink` 为同步回调、单通道 FIFO 保序，且 fold 的 `open_call` 保证每个轮次首个 item 先发 `Thinking`，delta 必然落在 step 已知之后。
+1. **`TurnPhase` 新增 `TextDelta { delta }`，流内正文逐 delta 直通。** 四条 runtime 路径（rig fold / claude stream-json / codex / ACP-native）在正文片段到达即 `emit_phase`，不合并、不定窗。外部三条共用 `RoundTracker::push_prose` 一个累积 seam（一处落点覆盖三条），rig fold 自成一处在 batch 确认前。delta 不带 round 定位：隐式归属当前轮（前端 `live.step ?? 1`，与 `RoundText` 既有语义同款）——`PhaseSink` 为同步回调、单通道 FIFO 保序，且 fold 的 `open_call` 保证每个轮次首个 item 先发 `Thinking`，delta 必然落在 step 已知之后。cap 交界处发射与累积轨同步：轮累积轨触顶的首个跨界 chunk 的 delta 后追发一条截断标记 delta，其后该轮 chunk 停发——发射面与 settle 累积面共享同一截断边界。
 
 2. **`RoundText` 退役。** `TextDelta` 成为唯一正文事件；batch 确认处不再发正文事件（rounds 构建沿用既有 `text_deltas` 聚合），轮次收口由既有 `ToolCallStarted` 天然标记。终端轮（纯文本收尾，无 ToolCall 确认）的 delta 自然流出，turn 结束随 settle 收敛——该轮由此首次获得 live 文本。
 
@@ -39,4 +39,6 @@
 - Cancelled/Failed turn 的 live 半截正文经 settle 投影保留，与四路径的权威 trace 一致，refresh 后无二次变化；rig 路径 cancel 与 hook 重试弃置轮的未确认文本随尾轮 thinking 落权威 trace（issue #1165 统一），终端轮正文随 outcome（`FinalResponse` 处剥离 park 正文）；rig 路径终端轮的 delta 累积与 `FinalResponse.output` 的同源性无结构保证（外部三路径的正文与终端文本同源聚合，天然一致），不同源的差异由 fold 侧收敛义务覆盖。
 - 消费侧节流为预留后手，启用判据为实测渲染表现，不改变协议语义。
 - `ipc_contract`、`useTurnFlow`、thread 组件测试面随语义更新；`turn-progress` 事件基数由 round 级升至 delta 级（仅瞬态通道，不落数据库）。
+- 轮累积轨触 8MB 上限后，live 侧以截断标记 delta 收口、后续 chunk 停发：live 轮文与 settle 轮文逐字节一致（含标记），瞬态通道对齐可见截断哲学——不静默丢流、不无界增长。
+- rig fold 路径的正文累积（`text_deltas`）无上限，其 live 与 settle 同源无分歧，不在本决策的轨语义内；是否设防另裁。
 - **校准 ADR-0059**：开篇「不开 LLM token 流式」与 Considered 的「LLM token 流式」否决项按其出口保留条款兑现——`TextDelta` 走既有 `turn-progress` 侧通道（ask 阻塞契约与 ADR-0009 不变，phase 不进 thread 真相与 ADR-0051 不变），形态为逐条载荷事件流而非该条款设想的一体计数变体；「离散是唯一诚实粒度」（守 ADR-0017）针对虚构进度估计，真实增量载荷流不受其限。
