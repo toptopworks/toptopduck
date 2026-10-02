@@ -437,9 +437,35 @@ export async function onTurnProgress(
 // (ADR-0060/0061, issue #76). The backend scans the managed sessions directory
 // (ADR-0089) and derives each entry from its recipe + mtime; unreadable paths
 // are skipped. duck_path is the .duck path -- pass it back to openDuck to
-// resume.
-export async function listSessions(): Promise<SessionMetadata[]> {
-  return invoke<SessionMetadata[]>("list_sessions");
+// resume. `includeArchived` (ADR-0127) appends the archived rows (mtime desc)
+// after the pinned block + unarchived mtime-desc block -- the archived view's
+// fetch; the default response excludes them so tray / search never see them.
+export async function listSessions(
+  opts?: { includeArchived?: boolean },
+): Promise<SessionMetadata[]> {
+  return invoke<SessionMetadata[]>("list_sessions", {
+    includeArchived: opts?.includeArchived ?? false,
+  });
+}
+
+// Pin or unpin a persisted session (ADR-0127, issue #1174). Organization
+// state lives in the sessions-root sidecar keyed by the session-directory
+// uuid -- the .duck is never rewritten. Unknown paths are idempotent no-ops
+// backend-side; pinning an archived session is a no-op (mutual exclusion).
+// `path` is the .duck file path (SessionMetadata.duck_path).
+export async function setSessionPinned(path: string, pinned: boolean): Promise<void> {
+  await invoke<void>("set_session_pinned", { path, pinned });
+}
+
+// Archive or restore a persisted session (ADR-0127, issue #1174). Archiving
+// removes the session from `pinned` and adds it to `archived` in the SAME
+// atomic sidecar write, so an archived-but-pinned intermediate is never
+// observable. Same path-guard + idempotence posture as setSessionPinned.
+export async function setSessionArchived(
+  path: string,
+  archived: boolean,
+): Promise<void> {
+  await invoke<void>("set_session_archived", { path, archived });
 }
 
 // Delete a persisted .duck file (ADR-0060, issue #81). The frontend closes the

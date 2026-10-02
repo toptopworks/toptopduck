@@ -28,6 +28,8 @@ import {
   getSessionName,
   renamePersistedSession,
   renameSession,
+  setSessionArchived,
+  setSessionPinned,
 } from "../api";
 import { fmtError, toAppError } from "../lib/error-presentation";
 import { log } from "../lib/log";
@@ -66,6 +68,16 @@ export function useSessionFileOps({
   patchOpenName,
 }: UseSessionFileOpsDeps): {
   deletePersisted: (path: string, sid: string | null) => Promise<void>;
+  /** Pin or unpin a persisted session (ADR-0127, issue #1175). Pure sidecar
+   *  write; a reject surfaces on the shell error surface, success bumps the
+   *  epoch refetch. No optimistic update (local IPC is ms-roundtrip). */
+  setPinned: (path: string, pinned: boolean) => Promise<void>;
+  /** Archive or restore a persisted session (ADR-0127, issue #1175).
+   *  Archiving an OPEN session closes it first via the wait-release variant
+   *  (the delete contract, Decision 6 -- an archived-but-open session is the
+   *  "active but invisible" contradiction Decision 4 rules out). Restore
+   *  never closes: the archived row carries no sid. */
+  setArchived: (path: string, archived: boolean, sid: string | null) => Promise<void>;
   renameEntry: (
     sid: string | null,
     path: string,
@@ -77,6 +89,38 @@ export function useSessionFileOps({
   persistenceBusy: boolean;
 } {
   const [persistenceBusy, setPersistenceBusy] = useState(false);
+
+  // Close an open session via the WAIT-RELEASE variant and tear the pane down
+  // after the wait (ADR-0063 ordering: UI teardown AFTER the canonical key is
+  // free, not before). Shared by deletePersisted and the archive face of
+  // setArchived (ADR-0127 Decision 6 cites the delete contract). Returns
+  // false when the wait rejected -- the pane is already unmounted and the
+  // fault already surfaced on the shell error surface, so the caller stops
+  // (the entry survives for a retry against the real backend state). The
+  // caller owns the persistenceBusy window.
+  const closeOpenAndWait = useCallback(
+    async (sid: string): Promise<boolean> => {
+      try {
+        await closeSessionAndWaitRelease(sid);
+      } catch (e) {
+        // Close-wait failed (timeout, or the backend already detached the
+        // session). Unmount the pane so the entry falls back to the cold
+        // sidebar (sid=null); a retry then takes the pure path variant -- if
+        // the canonical key is now free the gate succeeds, otherwise the user
+        // sees the real gate error. Without this, the pane stays mounted on a
+        // sid the backend no longer knows and every retry hits NotFound
+        // (dead loop).
+        unmountOpen(sid);
+        setShellError(toAppError(e, intl, "shell"));
+        return false;
+      }
+      // The wait resolved -- canonical key is free, Session::Drop ran. NOW
+      // unmount the pane (ADR-0063: UI teardown after the wait, not before).
+      unmountOpen(sid);
+      return true;
+    },
+    [intl, unmountOpen, setShellError],
+  );
 
   // Delete a persisted .duck (ADR-0060/0063, irreversible). If the session is
   // open, close it via the WAIT-RELEASE variant: the UI pane STAYS mounted
@@ -90,26 +134,7 @@ export function useSessionFileOps({
     async (path: string, sid: string | null) => {
       setPersistenceBusy(true);
       try {
-        if (sid) {
-          try {
-            await closeSessionAndWaitRelease(sid);
-          } catch (e) {
-            // Close-wait failed (timeout, or the backend already detached
-            // the session). Unmount the pane so the entry falls back to the
-            // cold sidebar (sid=null); a retry then takes the pure
-            // deleteSession(path) path -- if the canonical key is now free
-            // the gate succeeds, otherwise the user sees the real gate error.
-            // Without this, the pane stays mounted on a sid the backend no
-            // longer knows and every retry hits NotFound (dead loop).
-            unmountOpen(sid);
-            setShellError(toAppError(e, intl, "shell"));
-            return;
-          }
-          // The wait resolved -- canonical key is free, Session::Drop ran.
-          // NOW unmount the pane (ADR-0063: UI teardown after the wait, not
-          // before).
-          unmountOpen(sid);
-        }
+        if (sid && !(await closeOpenAndWait(sid))) return;
         try {
           await deleteSession(path);
         } catch (e) {
@@ -121,7 +146,49 @@ export function useSessionFileOps({
         setPersistenceBusy(false);
       }
     },
-    [intl, unmountOpen, refreshSessions, setShellError],
+    [closeOpenAndWait, intl, refreshSessions, setShellError],
+  );
+
+  // Pin or unpin (ADR-0127, issue #1175). A pure sidecar write keyed by the
+  // session-directory uuid -- no .duck rewrite, so no persistenceBusy wait
+  // (contrast deletePersisted): the write is a single atomic JSON save.
+  const setPinned = useCallback(
+    async (path: string, pinned: boolean): Promise<void> => {
+      try {
+        await setSessionPinned(path, pinned);
+      } catch (e) {
+        setShellError(toAppError(e, intl, "shell"));
+        return;
+      }
+      refreshSessions();
+    },
+    [intl, refreshSessions, setShellError],
+  );
+
+  // Archive or restore (ADR-0127, issue #1175). Archiving an OPEN session
+  // closes it first through the shared closeOpenAndWait seam (Decision 6
+  // cites the delete contract + ADR-0055). The wait can be long, hence
+  // persistenceBusy. Restore takes the pure sidecar path -- the archived
+  // row carries no sid.
+  const setArchived = useCallback(
+    async (path: string, archived: boolean, sid: string | null): Promise<void> => {
+      if (archived && sid) {
+        setPersistenceBusy(true);
+        try {
+          if (!(await closeOpenAndWait(sid))) return;
+        } finally {
+          setPersistenceBusy(false);
+        }
+      }
+      try {
+        await setSessionArchived(path, archived);
+      } catch (e) {
+        setShellError(toAppError(e, intl, "shell"));
+        return;
+      }
+      refreshSessions();
+    },
+    [closeOpenAndWait, intl, refreshSessions, setShellError],
   );
 
   // Rename a sidebar entry (ADR-0060, single entry point). An OPEN session
@@ -222,6 +289,8 @@ export function useSessionFileOps({
 
   return {
     deletePersisted,
+    setPinned,
+    setArchived,
     renameEntry,
     handleOpenDuck,
     handleExportSession,

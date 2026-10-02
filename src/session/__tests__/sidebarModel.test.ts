@@ -1,7 +1,8 @@
 import { describe, expect, it } from "vitest";
 import {
+  buildArchivedEntries,
   buildSearchEntries,
-  buildSidebarGroups,
+  buildSidebarModel,
   formatLastModified,
   MAX_SEARCH_RESULTS,
   timeGroupKind,
@@ -32,6 +33,8 @@ function meta(
       turn_count: opts.source_summary?.turn_count ?? 1,
     },
     format_version: opts.format_version ?? 2,
+    pinned: opts.pinned ?? false,
+    archived: opts.archived ?? false,
   };
 }
 
@@ -47,14 +50,14 @@ describe("timeGroupKind", () => {
   });
 });
 
-describe("buildSidebarGroups", () => {
+describe("buildSidebarModel", () => {
   it("groups persisted sessions Chat-style and sorts last-modified descending", () => {
     const today = meta("/a.duck", "alpha", 0);
     const yesterday = meta("/b.duck", "beta", 1);
     const last7 = meta("/c.duck", "gamma", 5);
     const older = meta("/d.duck", "delta", 30);
 
-    const groups = buildSidebarGroups([today, yesterday, last7, older], [], null, NOW, "time");
+    const { groups } = buildSidebarModel([today, yesterday, last7, older], [], null, NOW, "time");
 
     expect(groups.map((g) => g.kind)).toEqual(["today", "yesterday", "last7", "older"]);
     // Within a group the freshest is first; cross-group order is the bucket order.
@@ -69,7 +72,7 @@ describe("buildSidebarGroups", () => {
       { sid: "uuid-a", name: "alpha", path: "/a.duck", pendingIngestPaths: [], pendingQuestion: null, pendingSkillInvocations: [] },
     ];
 
-    const groups = buildSidebarGroups(persisted, open, "uuid-a", NOW, "time");
+    const { groups } = buildSidebarModel(persisted, open, "uuid-a", NOW, "time");
 
     const entry = groups[0].entries[0];
     expect(entry.sid).toBe("uuid-a");
@@ -89,7 +92,7 @@ describe("buildSidebarGroups", () => {
       }),
     ];
 
-    const groups = buildSidebarGroups(persisted, [], null, NOW, "time");
+    const { groups } = buildSidebarModel(persisted, [], null, NOW, "time");
 
     const alpha = groups[0].entries.find((e) => e.name === "alpha")!;
     expect(alpha.sourceCount).toBe(3);
@@ -107,7 +110,7 @@ describe("buildSidebarGroups", () => {
       { sid: "uuid-new", name: "", path: "/sessions/uuid-new/session.duck", pendingIngestPaths: [], pendingQuestion: null, pendingSkillInvocations: [] },
     ];
 
-    const groups = buildSidebarGroups([], open, "uuid-new", NOW, "time");
+    const { groups } = buildSidebarModel([], open, "uuid-new", NOW, "time");
 
     expect(groups).toHaveLength(1);
     expect(groups[0].kind).toBe("today");
@@ -129,7 +132,7 @@ describe("buildSidebarGroups", () => {
       { sid: "uuid-b", name: "beta", path: "/b.duck", pendingIngestPaths: [], pendingQuestion: null, pendingSkillInvocations: [] },
     ];
 
-    const groups = buildSidebarGroups(persisted, open, "uuid-b", NOW, "time");
+    const { groups } = buildSidebarModel(persisted, open, "uuid-b", NOW, "time");
     const active = groups[0].entries.find((e) => e.active);
     expect(active?.name).toBe("beta");
     // alpha is closed (sid null), not active.
@@ -149,7 +152,7 @@ describe("buildSidebarGroups", () => {
     const last7 = meta("/c.duck", "gamma", 5);
     const older = meta("/d.duck", "delta", 30);
 
-    const groups = buildSidebarGroups(
+    const { groups } = buildSidebarModel(
       [today, yesterday, last7, older],
       [],
       null,
@@ -175,7 +178,7 @@ describe("buildSidebarGroups", () => {
       { sid: "uuid-b", name: "beta", path: "/b.duck", pendingIngestPaths: [], pendingQuestion: null, pendingSkillInvocations: [] },
     ];
 
-    const groups = buildSidebarGroups(persisted, open, "uuid-b", NOW, "flat");
+    const { groups } = buildSidebarModel(persisted, open, "uuid-b", NOW, "flat");
 
     expect(groups).toHaveLength(1);
     const active = groups[0].entries.find((e) => e.active);
@@ -187,19 +190,25 @@ describe("buildSidebarGroups", () => {
     // ADR-0072: an empty sidebar renders no group title -- so the grouping
     // toggle's hover affordance has no anchor (the empty-state row renders
     // instead). Both modes return [] here.
-    expect(buildSidebarGroups([], [], null, NOW, "flat")).toEqual([]);
-    expect(buildSidebarGroups([], [], null, NOW, "time")).toEqual([]);
+    expect(buildSidebarModel([], [], null, NOW, "flat")).toEqual({
+      pinned: [],
+      groups: [],
+    });
+    expect(buildSidebarModel([], [], null, NOW, "time")).toEqual({
+      pinned: [],
+      groups: [],
+    });
   });
 
   it("flat/time groups carry their mode discriminant (SidebarGroup invariant pin)", () => {
     // SidebarGroup is a discriminated union on `mode`; this pins the runtime
     // side so a future constructor drift (e.g. flat branch returning a time
     // kind) fails here too, not just at the type level.
-    const flatGroups = buildSidebarGroups([meta("/a.duck", "a", 0)], [], null, NOW, "flat");
+    const { groups: flatGroups } = buildSidebarModel([meta("/a.duck", "a", 0)], [], null, NOW, "flat");
     expect(flatGroups[0].mode).toBe("flat");
     expect(flatGroups[0].kind).toBe("recent");
 
-    const timeGroups = buildSidebarGroups([meta("/a.duck", "a", 0)], [], null, NOW, "time");
+    const { groups: timeGroups } = buildSidebarModel([meta("/a.duck", "a", 0)], [], null, NOW, "time");
     expect(timeGroups[0].mode).toBe("time");
     expect(timeGroups[0].kind).toBe("today");
   });
@@ -387,5 +396,71 @@ describe("buildSearchEntries (ADR-0072, issue #252)", () => {
     ];
     const entries = buildSearchEntries(sameMtime, [], null, "");
     expect(entries.map((e) => e.name)).toEqual(["alpha", "mike", "zulu"]);
+  });
+});
+
+// --- ADR-0127 (issue #1175): the pinned section + the archived rows ---------
+
+describe("buildSidebarModel pinned section (ADR-0127, issue #1175)", () => {
+  it("splits pinned rows out of the grouped body in BOTH modes, server order", () => {
+    // Server order = the response's pinned block (sidecar array position, MRU
+    // head-insert, Decision 5), NOT mtime: p1 is OLDER than p2 yet renders
+    // first. The mtime sort must not reorder the pinned block.
+    const server = [
+      meta("/p1.duck", "pin-old", 30, { pinned: true }),
+      meta("/p2.duck", "pin-new", 1, { pinned: true }),
+      meta("/a.duck", "alpha", 0),
+      meta("/d.duck", "delta", 5),
+    ];
+
+    for (const grouping of ["flat", "time"] as const) {
+      const { pinned, groups } = buildSidebarModel(server, [], null, NOW, grouping);
+      expect(pinned.map((e) => e.name)).toEqual(["pin-old", "pin-new"]);
+      // The grouped body excludes the pinned rows but keeps its own order.
+      const body = groups.flatMap((g) => g.entries.map((e) => e.name));
+      expect(body).toEqual(["alpha", "delta"]);
+    }
+  });
+
+  it("keeps the pinned section when every session is pinned (empty groups)", () => {
+    // The section-render plan keys off pinned.length, not groups.length --
+    // an all-pinned sidebar still shows its rows above an empty body.
+    const server = [meta("/p1.duck", "pin-old", 30, { pinned: true })];
+    const model = buildSidebarModel(server, [], null, NOW, "time");
+    expect(model.pinned.map((e) => e.name)).toEqual(["pin-old"]);
+    expect(model.groups).toEqual([]);
+  });
+
+  it("lands an open session absent from the persisted list in the body, never pinned", () => {
+    // The just-created entry is synthesized with pinned: false -- only the
+    // server's organization join can pin a row.
+    const open: OpenSession[] = [
+      { sid: "uuid-new", name: "new", path: "/sessions/uuid-new/session.duck", pendingIngestPaths: [], pendingQuestion: null, pendingSkillInvocations: [] },
+    ];
+    const model = buildSidebarModel([], open, null, NOW, "flat");
+    expect(model.pinned).toEqual([]);
+    expect(model.groups[0].entries.map((e) => e.name)).toEqual(["new"]);
+  });
+});
+
+describe("buildArchivedEntries (ADR-0127, issue #1175)", () => {
+  it("builds metadata-only rows: no sid, never active, server order verbatim", () => {
+    // Open-is-unarchive (Decision 4) means an archived row can never carry a
+    // runtime binding, so the model bakes sid: null / active: false in.
+    const archived = [
+      meta("/x1.duck", "arch-old", 30, { archived: true }),
+      meta("/x2.duck", "arch-new", 1, { archived: true }),
+    ];
+
+    const entries = buildArchivedEntries(archived);
+
+    expect(entries.map((e) => e.name)).toEqual(["arch-old", "arch-new"]);
+    for (const e of entries) {
+      expect(e.sid).toBeNull();
+      expect(e.active).toBe(false);
+      expect(e.firstSourceName).toBe(`${e.name}_src`);
+      expect(e.sourceCount).toBe(1);
+      expect(e.turnCount).toBe(1);
+    }
   });
 });

@@ -1438,6 +1438,8 @@ describe("App resume + close-in-flight seams (issue #83)", () => {
         last_modified_at: Date.now(),
         source_summary: { first_source_name: "people", source_count: 1, turn_count: 2 },
         format_version: 1,
+        pinned: false,
+        archived: false,
       },
     ]);
     const r1 = src("result_1");
@@ -1473,6 +1475,8 @@ describe("App resume + close-in-flight seams (issue #83)", () => {
         last_modified_at: Date.now(),
         source_summary: { first_source_name: "people", source_count: 1, turn_count: 1 },
         format_version: 1,
+        pinned: false,
+        archived: false,
       },
     ]);
     // Hold openDuck pending so resumeStatus stays visible for assertions.
@@ -2398,6 +2402,8 @@ describe("App Ctrl/⌘+K session-search modal (ADR-0072, issue #252)", () => {
         last_modified_at: 2000,
         source_summary: { first_source_name: "alpha_src", source_count: 1, turn_count: 3 },
         format_version: 2,
+        pinned: false,
+        archived: false,
       },
       {
         duck_path: "/x/beta.duck",
@@ -2405,6 +2411,8 @@ describe("App Ctrl/⌘+K session-search modal (ADR-0072, issue #252)", () => {
         last_modified_at: 1000,
         source_summary: { first_source_name: "beta_src", source_count: 1, turn_count: 7 },
         format_version: 2,
+        pinned: false,
+        archived: false,
       },
     ];
   }
@@ -2660,6 +2668,8 @@ describe("Composer control row (ADR-0083, issues #350/#351)", () => {
         last_modified_at: Date.now(),
         source_summary: { first_source_name: "people", source_count: 1, turn_count: 1 },
         format_version: 1,
+        pinned: false,
+        archived: false,
       },
     ]);
     vi.mocked(createSession).mockResolvedValue({ session_id: "sess-resume", duck_path: "/sessions/sess-resume/session.duck" });

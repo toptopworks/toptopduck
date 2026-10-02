@@ -38,6 +38,8 @@ const SESSION_A: SessionMetadata = {
   last_modified_at: 1000,
   source_summary: { first_source_name: null, source_count: 0, turn_count: 0 },
   format_version: 1,
+  pinned: false,
+  archived: false,
 };
 
 describe("usePersistedSessions", () => {
@@ -47,7 +49,7 @@ describe("usePersistedSessions", () => {
 
   it("loads list_sessions on mount and surfaces the list", async () => {
     vi.mocked(listSessions).mockResolvedValue([SESSION_A]);
-    const { result } = renderHook(() => usePersistedSessions({ intl }));
+    const { result } = renderHook(() => usePersistedSessions({ intl, includeArchived: false }));
     await waitFor(() => expect(result.current.sessions).toEqual([SESSION_A]));
     expect(result.current.sessionsError).toBeNull();
     expect(listSessions).toHaveBeenCalledTimes(1);
@@ -55,7 +57,7 @@ describe("usePersistedSessions", () => {
 
   it("captures a list_sessions reject into sessionsError (not thrown, list stays empty)", async () => {
     vi.mocked(listSessions).mockRejectedValue(new Error("boom"));
-    const { result } = renderHook(() => usePersistedSessions({ intl }));
+    const { result } = renderHook(() => usePersistedSessions({ intl, includeArchived: false }));
     await waitFor(() => expect(result.current.sessionsError).not.toBeNull());
     // The list stays empty; the error message surfaces the reject verbatim.
     expect(result.current.sessions).toEqual([]);
@@ -68,7 +70,7 @@ describe("usePersistedSessions", () => {
     // the epoch from the effect deps, or stops bumping it on refresh, leaves a
     // save/delete/rename stale on the sidebar until a remount.
     vi.mocked(listSessions).mockResolvedValue([]);
-    const { result } = renderHook(() => usePersistedSessions({ intl }));
+    const { result } = renderHook(() => usePersistedSessions({ intl, includeArchived: false }));
     await waitFor(() => expect(listSessions).toHaveBeenCalledTimes(1));
     act(() => result.current.refreshSessions());
     await waitFor(() => expect(listSessions).toHaveBeenCalledTimes(2));
@@ -87,7 +89,7 @@ describe("usePersistedSessions", () => {
     vi.mocked(listSessions).mockImplementation(
       () => new Promise((r) => { resolveList = r; }),
     );
-    const { result } = renderHook(() => usePersistedSessions({ intl }));
+    const { result } = renderHook(() => usePersistedSessions({ intl, includeArchived: false }));
     // First fetch lands SESSION_A.
     await waitFor(() => expect(listSessions).toHaveBeenCalledTimes(1));
     resolveList([SESSION_A]);
@@ -114,7 +116,7 @@ describe("usePersistedSessions", () => {
     vi.mocked(listSessions).mockImplementation(
       () => new Promise((_resolve, reject) => { rejectList = reject; }),
     );
-    const { unmount } = renderHook(() => usePersistedSessions({ intl }));
+    const { unmount } = renderHook(() => usePersistedSessions({ intl, includeArchived: false }));
     await waitFor(() => expect(listSessions).toHaveBeenCalledTimes(1));
     unmount();
     await act(async () => {
@@ -125,5 +127,49 @@ describe("usePersistedSessions", () => {
       expect.any(String),
       expect.anything(),
     );
+  });
+});
+
+// --- ADR-0127 (issue #1175): the archived view's second fetch ----------------
+
+describe("usePersistedSessions archived fetch (ADR-0127, issue #1175)", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("does not fetch archived rows while the view is hidden", async () => {
+    // The hidden view skips the second scan entirely: includeArchived stays
+    // false and archivedSessions is empty (no stale rows from a prior peek).
+    vi.mocked(listSessions).mockResolvedValue([]);
+    const { result } = renderHook(() =>
+      usePersistedSessions({ intl, includeArchived: false }),
+    );
+    await waitFor(() => expect(listSessions).toHaveBeenCalledTimes(1));
+    expect(result.current.archivedSessions).toEqual([]);
+    expect(vi.mocked(listSessions).mock.calls[0][0]).toBeUndefined();
+  });
+
+  it("fetches and filters the archived rows while the view is visible", async () => {
+    // The includeArchived response carries BOTH populations (pinned block +
+    // unarchived + archived tail); the hook filters to the archived tail so
+    // the section's rows are exactly the hidden sessions, while the default
+    // list (tray / search source) never sees an archived row.
+    const ARCH: SessionMetadata = {
+      ...SESSION_A,
+      duck_path: "/x/arch.duck",
+      archived: true,
+    };
+    vi.mocked(listSessions).mockImplementation(async (opts) =>
+      opts?.includeArchived ? [SESSION_A, ARCH] : [SESSION_A],
+    );
+    const { result } = renderHook(() =>
+      usePersistedSessions({ intl, includeArchived: true }),
+    );
+    await waitFor(() =>
+      expect(result.current.archivedSessions.map((m) => m.duck_path)).toEqual([
+        "/x/arch.duck",
+      ]),
+    );
+    expect(result.current.sessions.map((m) => m.duck_path)).toEqual(["/x/a.duck"]);
   });
 });

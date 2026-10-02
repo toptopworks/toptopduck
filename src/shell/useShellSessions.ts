@@ -192,6 +192,12 @@ export function useShellSessions({
   clearPendingQuestion: (sid: string) => void;
   closeOpen: (sid: string) => Promise<void>;
   deletePersisted: (path: string, sid: string | null) => Promise<void>;
+  /** Pin/unpin a persisted session (ADR-0127, issue #1175) -- see
+   *  useSessionFileOps for the error-surface + refetch contract. */
+  setPinned: (path: string, pinned: boolean) => Promise<void>;
+  /** Archive/restore a persisted session (ADR-0127, issue #1175) -- archiving
+   *  an open session closes it first (the delete contract, Decision 6). */
+  setArchived: (path: string, archived: boolean, sid: string | null) => Promise<void>;
   renameEntry: (
     sid: string | null,
     path: string,
@@ -903,9 +909,11 @@ export function useShellSessions({
   );
 
   // Nested facade (#1155): the file-ops species destructures here; its
-  // five members ride the return below.
+  // members ride the return below.
   const {
     deletePersisted,
+    setPinned,
+    setArchived,
     renameEntry,
     handleOpenDuck,
     handleExportSession,
@@ -956,6 +964,8 @@ export function useShellSessions({
     clearPendingQuestion,
     closeOpen,
     deletePersisted,
+    setPinned,
+    setArchived,
     renameEntry,
     handleOpenDuck,
     handleExportSession,

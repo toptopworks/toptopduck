@@ -257,4 +257,12 @@ export interface SessionMetadata {
   last_modified_at: number;
   source_summary: SourceSummary;
   format_version: number;
+  // Shell-layer organization flag joined from the sidecar (ADR-0127): when
+  // true the sidebar floats the row into the pinned section (sidecar array
+  // order, MRU head-insert). Disjoint from `archived` by backend construction.
+  pinned: boolean;
+  // True when the session is archived (ADR-0127): the row is absent from the
+  // default list_sessions response; only the archived view fetches it
+  // (includeArchived). An archived session never carries a runtime sid.
+  archived: boolean;
 }

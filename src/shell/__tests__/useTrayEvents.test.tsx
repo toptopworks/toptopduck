@@ -42,6 +42,8 @@ function persisted(path: string, displayName: string): SessionMetadata {
     last_modified_at: 0,
     source_summary: { first_source_name: null, source_count: 0, turn_count: 0 },
     format_version: 1,
+    pinned: false,
+    archived: false,
   };
 }
 

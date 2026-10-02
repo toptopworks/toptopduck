@@ -1,8 +1,20 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import { FormattedMessage, useIntl } from "react-intl";
-import { Check, FolderOpen, Pencil, Search, Settings } from "lucide-react";
 import {
-  buildSidebarGroups,
+  Archive,
+  ArchiveRestore,
+  Check,
+  FolderOpen,
+  Pencil,
+  Pin,
+  PinOff,
+  Search,
+  Settings,
+  Trash2,
+} from "lucide-react";
+import {
+  buildArchivedEntries,
+  buildSidebarModel,
   type OpenSession,
   type SidebarEntry,
   type SidebarGroupKind,
@@ -105,11 +117,31 @@ interface SessionSidebarProps {
    *  landing non-Failed, a close, or a pane-level cache reset. Keyed by
    *  runtime sid, so only OPEN entries match. */
   turnFailedSids?: ReadonlySet<string>;
+  /** The archived rows (ADR-0127 Decision 7, issue #1175): only fetched while
+   *  `showArchived` is true (the caller's usePersistedSessions gates the
+   *  includeArchived fetch), so this is [] whenever the view is hidden. */
+  archivedSessions: SessionMetadata[];
+  /** The archived view's visibility. NOT persisted (Decision 7: the peek
+   *  semantics reset it to hidden on every startup). */
+  showArchived: boolean;
   onNew: () => void;
   onOpenDuck: () => void;
   onActivate: (sid: string) => void;
   onOpenPersisted: (path: string, name: string) => void;
   onSwitchGrouping: (mode: SidebarGrouping) => void;
+  /** Toggle the archived view's visibility (ADR-0127, issue #1175). */
+  onToggleArchived: () => void;
+  /** Pin/unpin (ADR-0127, issue #1175): mutation contract in
+   *  useSessionFileOps (reject -> shell error surface, success -> refetch). */
+  onSetPinned: (path: string, pinned: boolean) => void;
+  /** Archive/restore (ADR-0127, issue #1175). `sid` is the row's runtime
+   *  binding when archiving a MAIN-list row; restoring passes null (the
+   *  archived row is never open -- open-is-unarchive, Decision 4). */
+  onArchive: (path: string, archived: boolean, sid: string | null) => void;
+  /** Delete an archived row (ADR-0127 Decision 6): routes through the same
+   *  strong-confirm + wait-release contract as the header-menu delete; the
+   *  confirm dialog lives in this component, the mutation in the caller. */
+  onDeleteArchived: (path: string) => void;
   // Open the Ctrl/⌘+K search modal (ADR-0072, issue #252). The
   // shell owns the open state so the global keydown + this button share one
   // entry point; the button is the always-visible affordance for the same
@@ -134,11 +166,17 @@ export function SessionSidebar({
   grouping,
   pendingApprovalSids = NO_PENDING_APPROVALS,
   turnFailedSids = NO_TURN_FAILURES,
+  archivedSessions,
+  showArchived,
   onNew,
   onOpenDuck,
   onActivate,
   onOpenPersisted,
   onSwitchGrouping,
+  onToggleArchived,
+  onSetPinned,
+  onArchive,
+  onDeleteArchived,
   onOpenSearch,
   provider,
   onOpenSettings,
@@ -155,12 +193,220 @@ export function SessionSidebar({
     return () => clearInterval(id);
   }, []);
 
-  const groups = buildSidebarGroups(
+  // The archived-row delete target (ADR-0127 Decision 6): the strong-confirm
+  // dialog state lives here; the mutation rides onDeleteArchived on confirm.
+  const [deleteTarget, setDeleteTarget] = useState<{
+    path: string;
+    name: string;
+  } | null>(null);
+
+  // Single-flight hover-card state (issue #1175): the OPEN key is owned HERE,
+  // not per row, so at most one metadata card exists at any moment -- moving
+  // to a new row swaps the card (unmounting the old portal) instead of
+  // stacking fading ones behind the pointer. A per-row boolean cannot
+  // guarantee that: a pointerleave lost to the pill's pointer-events
+  // toggling strands that row's card open forever (verified live via CDP);
+  // here a lost leave self-heals the moment any other row is entered, and
+  // the list-level leave is the final backstop. Delays keep the old
+  // posture: 300 ms to open (sweep-proof), 200 ms grace on leave (cancelled
+  // by entering the card itself -- read-only per ADR-0127, but the pointer
+  // may still sweep onto it to read).
+  const [hoverKey, setHoverKey] = useState<string | null>(null);
+  const [cardKey, setCardKey] = useState<string | null>(null);
+  const openTimer = useRef<number | undefined>(undefined);
+  const closeTimer = useRef<number | undefined>(undefined);
+  const clearHoverTimers = () => {
+    window.clearTimeout(openTimer.current);
+    window.clearTimeout(closeTimer.current);
+  };
+  const rowHoverEnter = (key: string) => {
+    clearHoverTimers();
+    setHoverKey(key);
+    // Entering a DIFFERENT row retires the shown card immediately. The
+    // 200 ms close grace belongs to the row->card read path only; clearing
+    // the previous row's leave timer without this kept the OLD card on
+    // screen the whole time the pointer traveled (each new row's enter
+    // cancelled the pending close, and the new card only opens after a
+    // 300 ms dwell) -- the card must vanish while moving and reappear
+    // only once the pointer settles.
+    if (cardKey !== null && cardKey !== key) setCardKey(null);
+    openTimer.current = window.setTimeout(() => setCardKey(key), 300);
+  };
+  const rowHoverLeave = (key: string) => {
+    // A stale leave from a row the pointer already left is ignored.
+    if (hoverKey !== key) return;
+    clearHoverTimers();
+    setHoverKey(null);
+    closeTimer.current = window.setTimeout(() => setCardKey(null), 200);
+  };
+  const cardHoverEnter = () => window.clearTimeout(closeTimer.current);
+  // Leaving the CARD schedules its own close -- it must NOT reuse
+  // rowHoverLeave: by the time the pointer reached the card, the row's
+  // leave already nulled hoverKey, so rowHoverLeave's stale-key guard would
+  // swallow the close and strand the card open forever.
+  const cardHoverLeave = () => {
+    window.clearTimeout(closeTimer.current);
+    closeTimer.current = window.setTimeout(() => setCardKey(null), 200);
+  };
+  useEffect(() => clearHoverTimers, []);
+
+  const model = buildSidebarModel(
     sessions,
     openSessions,
     activeSessionId,
     now,
     grouping,
+  );
+  const archivedEntries = showArchived ? buildArchivedEntries(archivedSessions) : [];
+
+  // The section render plan (ADR-0127, issue #1175): the pinned section rides
+  // above the grouped body in BOTH grouping modes (server order), then the
+  // grouped body, then the archived section (only while the view is visible).
+  // The chrome pair (GroupingToggle + the archived-visibility toggle) rides
+  // the FIRST rendered section's title row; with zero sections (an empty
+  // sidebar) it still renders on a bare title row so the archived view stays
+  // reachable when every session is archived (the default list is empty then,
+  // and without an entry point the archived rows would be unreachable).
+  const sections: Array<{
+    key: string;
+    title: ReactNode;
+    entries: SidebarEntry[];
+    variant: "main" | "archived";
+  }> = [];
+  if (model.pinned.length > 0) {
+    sections.push({
+      key: "pinned",
+      title: <FormattedMessage id="sidebar.group.pinned" defaultMessage="Pinned" />,
+      entries: model.pinned,
+      variant: "main",
+    });
+  }
+  for (const g of model.groups) {
+    sections.push({ key: g.kind, title: <GroupTitle kind={g.kind} />, entries: g.entries, variant: "main" });
+  }
+  if (archivedEntries.length > 0) {
+    sections.push({
+      key: "archived",
+      title: <FormattedMessage id="sidebar.group.archived" defaultMessage="Archived" />,
+      entries: archivedEntries,
+      variant: "archived",
+    });
+  }
+
+  // One chrome pair, two anchors (issue #1175): the grouping toggle rides
+  // the FIRST rendered section's title row; on a zero-section sidebar it
+  // renders on the bare fallback row instead. A single element instance is
+  // safe to reuse -- the two anchors are mutually exclusive branches, so
+  // only one GroupingToggle/ArchivedToggle instance ever mounts.
+  const sectionChrome = (
+    <div className="flex items-center gap-0.5">
+      <GroupingToggle
+        grouping={grouping}
+        disabled={disabled}
+        onSwitch={onSwitchGrouping}
+      />
+      <ArchivedToggle
+        visible={showArchived}
+        disabled={disabled}
+        onToggle={onToggleArchived}
+      />
+    </div>
+  );
+
+  const renderSection = (
+    section: (typeof sections)[number],
+    showChrome: boolean,
+  ) => (
+    <li key={section.key} className="session-group mt-1.5 mb-0.5" data-section={section.key}>
+      {/* ADR-0072 (#251): the grouping toggle rides the FIRST rendered
+          section's title row -- one entry point regardless of mode. The
+          archived-visibility toggle (ADR-0127) sits beside it. The triggers
+          are hover-revealed (group-hover) but stay focus-visible for AT
+          users; the open popover also pins it visible via data-[state=open]. */}
+      <div className="session-group-title-row group relative mb-0.5 flex items-center justify-between px-1">
+        <h3 className="session-group-title text-xs uppercase tracking-wider text-muted-foreground">
+          {section.title}
+        </h3>
+        {showChrome && sectionChrome}
+      </div>
+      <ul className="session-group-list list-none m-0 p-0">
+        {section.entries.map((entry) => (
+          <SidebarRow
+            key={entry.key}
+            entry={entry}
+            displayName={resolveDisplayName(entry.name, intl)}
+            now={now}
+            hasPendingApproval={
+              entry.sid !== null && pendingApprovalSids.has(entry.sid)
+            }
+            hasTurnFailed={
+              entry.sid !== null && turnFailedSids.has(entry.sid)
+            }
+            disabled={disabled}
+            archived={section.variant === "archived"}
+            cardOpen={cardKey === entry.key}
+            onHoverEnter={() => rowHoverEnter(entry.key)}
+            onHoverLeave={() => rowHoverLeave(entry.key)}
+            onCardEnter={cardHoverEnter}
+            onCardLeave={cardHoverLeave}
+            onActivate={() => {
+              if (entry.sid) onActivate(entry.sid);
+              else onOpenPersisted(entry.path, entry.name);
+            }}
+            actions={
+              section.variant === "archived" ? (
+                <>
+                  <RowActionButton
+                    label={intl.formatMessage({
+                      id: "sidebar.row.restore",
+                      defaultMessage: "Restore",
+                    })}
+                    onClick={() => onArchive(entry.path, false, null)}
+                  >
+                    <ArchiveRestore className="size-3.5" aria-hidden />
+                  </RowActionButton>
+                  <RowActionButton
+                    label={intl.formatMessage({
+                      id: "sidebar.row.delete",
+                      defaultMessage: "Delete",
+                    })}
+                    onClick={() => setDeleteTarget({ path: entry.path, name: entry.name })}
+                  >
+                    <Trash2 className="size-3.5" aria-hidden />
+                  </RowActionButton>
+                </>
+              ) : (
+                <>
+                  <RowActionButton
+                    label={
+                      entry.pinned
+                        ? intl.formatMessage({ id: "sidebar.row.unpin", defaultMessage: "Unpin" })
+                        : intl.formatMessage({ id: "sidebar.row.pin", defaultMessage: "Pin" })
+                    }
+                    onClick={() => onSetPinned(entry.path, !entry.pinned)}
+                  >
+                    {entry.pinned ? (
+                      <PinOff className="size-3.5" aria-hidden />
+                    ) : (
+                      <Pin className="size-3.5" aria-hidden />
+                    )}
+                  </RowActionButton>
+                  <RowActionButton
+                    label={intl.formatMessage({
+                      id: "sidebar.row.archive",
+                      defaultMessage: "Archive",
+                    })}
+                    onClick={() => onArchive(entry.path, true, entry.sid)}
+                  >
+                    <Archive className="size-3.5" aria-hidden />
+                  </RowActionButton>
+                </>
+              )
+            }
+          />
+        ))}
+      </ul>
+    </li>
   );
 
   // One read feeds both the gear's aria-label and its tooltip -- the last
@@ -238,59 +484,49 @@ export function SessionSidebar({
         </p>
       )}
 
-      <ul className="session-list">
-        {groups.map((group, groupIndex) => (
-          <li key={group.kind} className="session-group mt-1.5 mb-0.5">
-            {/* ADR-0072 (#251): the grouping toggle rides the FIRST group's
-                title row -- one entry point regardless of mode, and naturally
-                hidden on an empty sidebar (no groups render). The trigger is
-                hover-revealed (group-hover) but stays focus-visible for AT
-                users; the open popover also pins it visible via
-                data-[state=open]. */}
-            <div className="session-group-title-row group relative mb-0.5 flex items-center justify-between px-1">
-              <h3 className="session-group-title text-xs uppercase tracking-wider text-muted-foreground">
-                <GroupTitle kind={group.kind} />
-              </h3>
-              {groupIndex === 0 && (
-                <GroupingToggle
-                  grouping={grouping}
-                  disabled={disabled}
-                  onSwitch={onSwitchGrouping}
+      <ul
+        className="session-list"
+        onPointerLeave={() => {
+          if (hoverKey !== null) rowHoverLeave(hoverKey);
+        }}
+      >
+        {sections.map((section, i) => renderSection(section, i === 0))}
+        {sections.length === 0 && (
+          <>
+            {/* Zero sections still gets the chrome row (see the sections
+                plan above): an all-archived sidebar must keep the archived
+                toggle reachable, or the hidden rows would be stranded. */}
+            <li className="session-group mt-1.5 mb-0.5">
+              <div className="session-group-title-row group relative mb-0.5 flex items-center justify-end px-1">
+                {sectionChrome}
+              </div>
+            </li>
+            {!loadError && (
+              <li className="session-empty text-muted-foreground text-sm p-2">
+                <FormattedMessage
+                  id="sidebar.empty"
+                  defaultMessage="No saved sessions yet."
                 />
-              )}
-            </div>
-            <ul className="session-group-list list-none m-0 p-0">
-              {group.entries.map((entry) => (
-                <SidebarRow
-                  key={entry.key}
-                  entry={entry}
-                  displayName={resolveDisplayName(entry.name, intl)}
-                  now={now}
-                  hasPendingApproval={
-                    entry.sid !== null && pendingApprovalSids.has(entry.sid)
-                  }
-                  hasTurnFailed={
-                    entry.sid !== null && turnFailedSids.has(entry.sid)
-                  }
-                  disabled={disabled}
-                  onActivate={() => {
-                    if (entry.sid) onActivate(entry.sid);
-                    else onOpenPersisted(entry.path, entry.name);
-                  }}
-                />
-              ))}
-            </ul>
-          </li>
-        ))}
-        {groups.length === 0 && !loadError && (
-          <li className="session-empty text-muted-foreground text-sm p-2">
-            <FormattedMessage
-              id="sidebar.empty"
-              defaultMessage="No saved sessions yet."
-            />
-          </li>
+              </li>
+            )}
+          </>
         )}
       </ul>
+
+      {/* Archived-row delete (ADR-0127 Decision 6): the same strong-confirm
+          dialog the header menu's delete uses, mounted here for the archived
+          section's rows. An archived session is never open (open-is-unarchive),
+          so the delete takes the pure path variant. */}
+      {deleteTarget && (
+        <DeleteSessionDialog
+          name={deleteTarget.name}
+          onCancel={() => setDeleteTarget(null)}
+          onConfirm={() => {
+            onDeleteArchived(deleteTarget.path);
+            setDeleteTarget(null);
+          }}
+        />
+      )}
 
       {/* Footer: the settings gear (issue #282). The .session-list flex:1
           scroll region above keeps this pinned to the column's bottom. Absent
@@ -434,11 +670,114 @@ function GroupingToggle({
   );
 }
 
+// One trailing row action (ADR-0127, issue #1175): an icon-only button with a
+// Tooltip + matching aria-label (the one-read-two-slots posture, issue #960).
+// Pure-icon buttons have no text content, so aria-label IS the accessible
+// name -- no sr-only span needed (contrast the status labels inside the main
+// button, issue #1005).
+function RowActionButton({
+  label,
+  onClick,
+  children,
+}: {
+  label: string;
+  onClick: () => void;
+  children: ReactNode;
+}) {
+  return (
+    <Tooltip disableHoverableContent>
+      <TooltipTrigger asChild>
+        <button
+          type="button"
+          className={cn(
+            // No cursor-pointer: the pill's icons keep the default arrow
+            // (WorkingSetList's ICON_BUTTON_BASE posture -- on the accent
+            // pill, color alone marks the hot icon).
+            `session-row-action ${bareButtonReset} flex size-7 items-center justify-center rounded-md text-muted-foreground`,
+            "transition-colors hover:text-foreground focus-visible:text-foreground",
+            "focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring",
+            "disabled:cursor-progress disabled:opacity-50",
+          )}
+          aria-label={label}
+          onClick={(e) => {
+            // The action buttons are SIBLINGS of the main activate button,
+            // so a click cannot reach it by bubbling; the stopPropagation is
+            // defensive against a future row-level handler (issue #1175).
+            e.stopPropagation();
+            onClick();
+          }}
+        >
+          {children}
+        </button>
+      </TooltipTrigger>
+      {/* pointer-events-none: the tip must never intercept the pointer on
+          its way up to the row above (the WorkingSetList hint posture). */}
+      <TooltipContent className="pointer-events-none data-[state=closed]:animate-none!">
+        {label}
+      </TooltipContent>
+    </Tooltip>
+  );
+}
+
+// The archived-view visibility toggle (ADR-0127 Decision 7, issue #1175): an
+// icon-only aria-pressed button beside the grouping toggle. Same weak-visible
+// posture as GroupingToggle (opacity-60, brightens on hover/focus/pressed) so
+// keyboard / touch / AT users can discover it without hovering. The state is
+// NEVER persisted -- every startup resets the archived view to hidden.
+function ArchivedToggle({
+  visible,
+  disabled,
+  onToggle,
+}: {
+  visible: boolean;
+  disabled: boolean;
+  onToggle: () => void;
+}) {
+  const intl = useIntl();
+  const label = intl.formatMessage({
+    id: "sidebar.archived.toggle.ariaLabel",
+    defaultMessage: "Show archived sessions",
+  });
+  return (
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <button
+          type="button"
+          className={cn(
+            `sidebar-archived-toggle ${bareButtonReset} cursor-pointer rounded-md p-1 text-muted-foreground`,
+            "opacity-60 transition-opacity group-hover:opacity-100 focus-visible:opacity-100",
+            "aria-pressed:opacity-100 aria-pressed:text-foreground",
+            "hover:bg-accent hover:text-foreground",
+            "focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring",
+            "disabled:cursor-progress disabled:opacity-50",
+          )}
+          aria-pressed={visible}
+          aria-label={label}
+          disabled={disabled}
+          onClick={onToggle}
+        >
+          <Archive className="size-3.5" aria-hidden />
+        </button>
+      </TooltipTrigger>
+      <TooltipContent>{label}</TooltipContent>
+    </Tooltip>
+  );
+}
+
 // One sidebar row: navigation + inline metadata (ADR-0093, issue #511/#513).
 // The row carries the session title, a conditional status dot, and a compact
 // relative-time span. Management actions (rename / export / close / delete)
 // moved to .session-header (slice 2); the persistent sub-line (first source +
 // turn count) is retired in favor of a HoverCard (slice 3, this change).
+// ADR-0127 (issue #1175): the row is now a main activate BUTTON plus a
+// trailing action-group SIBLING (pin/unpin + archive, or restore + delete in
+// the archived view) -- buttons cannot nest, so the whole-row button split.
+// The action group is the WorkingSetList ROW_ACTIONS_OVERLAY posture: an
+// absolute accent pill floating over the row tail with ZERO flex footprint
+// (a flow-laid group would squeeze the truncating session name), revealed on
+// row hover or focus-visible; opacity-0 + pointer-events-none keeps the
+// buttons in the tab order (unlike visibility:hidden), so keyboard focus
+// reveals the pill and the row stays keyboard reachable.
 function SidebarRow({
   entry,
   displayName,
@@ -446,7 +785,14 @@ function SidebarRow({
   hasPendingApproval,
   hasTurnFailed,
   disabled,
+  archived = false,
   onActivate,
+  actions,
+  cardOpen,
+  onHoverEnter,
+  onHoverLeave,
+  onCardEnter,
+  onCardLeave,
 }: {
   entry: SidebarEntry;
   displayName: string;
@@ -462,9 +808,43 @@ function SidebarRow({
    *  hold, the approval dot + label win (the classes coexist on the row). */
   hasTurnFailed: boolean;
   disabled: boolean;
+  /** Archived-view variant (ADR-0127 Decision 7): the main button is
+   *  non-activatable (aria-disabled + an activation guard) + muted --
+   *  archived means gone from the browsing surface -- while the HoverCard
+   *  metadata stays (read-only viewing is not activation). NOT the
+   *  `disabled` attribute: a disabled control stops dispatching pointer
+   *  events in real browsers, which would silently kill the HoverCard
+   *  (jsdom cannot catch that); aria-disabled keeps the hover alive and
+   *  tells AT the row is inert. */
+  archived?: boolean;
   onActivate: () => void;
+  /** Trailing inline action group (ADR-0127, issue #1175), built by the
+   *  section renderer: pin/unpin + archive on main rows, restore + delete
+   *  on archived rows. */
+  actions: ReactNode;
+  /** Controlled metadata-card visibility (issue #1175): parent-owned
+   *  single-flight -- at most one card exists across the list, so sweeping
+   *  rows swaps cards instead of stacking fading ones. */
+  cardOpen: boolean;
+  onHoverEnter: () => void;
+  onHoverLeave: () => void;
+  /** Cancels the close grace while the pointer is ON the card itself. */
+  onCardEnter: () => void;
+  /** Schedules the card's own close (the row-leave guard cannot serve this
+   *  path -- hoverKey is already null once the pointer is on the card). */
+  onCardLeave: () => void;
 }) {
   const intl = useIntl();
+  // Controlled HoverCard open state (issue #1175): the row owns the boolean
+  // instead of Radix's uncontrolled trigger state machine. Sweeping the
+  // pointer down the pills toggles a pill's pointer-events as each row's
+  // :hover flips, which desyncs Radix's trigger/content bookkeeping and
+  // strands stuck-open metadata cards (verified live via CDP); a controlled
+  // open cannot strand. The hand-rolled delays keep the old posture --
+  // 300 ms to open, 200 ms grace on leave, cancelled by entering the card
+  // itself (the card is read-only per ADR-0127, but the user may still
+  // sweep onto it to read, and the grace window keeps that path alive).
+
   // ADR-0093 (issue #511): the MessageSquare leading icon + the inset shadow
   // left bar are retired. Active = accent background only; open = status dot
   // (primary green / warning when pending approval); not-open = equal-width
@@ -477,29 +857,41 @@ function SidebarRow({
   // turn count) in a fixed-width card positioned to the right. The
   // openDelay prevents flicker when the pointer sweeps across the list.
   return (
-    <li
-      className={cn(
-        "session-entry relative my-0.5 flex items-stretch",
-        entry.active && "active",
-        entry.sid && "open",
-        hasPendingApproval && "pending-approval",
-        hasTurnFailed && "turn-failed",
-      )}
-      data-pending-approval={hasPendingApproval ? "true" : undefined}
-      data-turn-failed={hasTurnFailed ? "true" : undefined}
-    >
-      <HoverCard openDelay={300} closeDelay={200}>
-        <HoverCardTrigger asChild>
+    <HoverCard open={cardOpen} openDelay={0} closeDelay={0}>
+      <HoverCardTrigger asChild>
+        <li
+          onPointerEnter={onHoverEnter}
+          onPointerLeave={onHoverLeave}
+          className={cn(
+            "session-entry group/row relative my-0.5 flex items-stretch rounded-md hover:bg-accent",
+            entry.active && "active bg-accent",
+            entry.sid && "open",
+            hasPendingApproval && "pending-approval",
+            hasTurnFailed && "turn-failed",
+            archived && "archived",
+          )}
+          data-pending-approval={hasPendingApproval ? "true" : undefined}
+          data-turn-failed={hasTurnFailed ? "true" : undefined}
+        >
           <button
             type="button"
             className={cn(
-              `session-entry-main ${bareButtonReset} cursor-pointer flex-1 flex flex-row items-center gap-1.5 min-w-0 py-1.5 px-2 rounded-md text-foreground`,
-              "hover:bg-accent disabled:opacity-50 disabled:cursor-progress",
-              entry.active && "bg-accent text-accent-foreground",
+              `session-entry-main ${bareButtonReset} flex-1 flex flex-row items-center gap-1.5 min-w-0 py-1.5 px-2 text-foreground`,
+              "disabled:opacity-50",
+              // No background / radius here: the row li owns them. The
+              // absolute action pill intercepts the pointer over the row
+              // tail, so a button-level :hover would drop the background the
+              // moment the cursor reaches the pill (same posture as
+              // WorkingSetList's row-level hover:bg-accent).
+              !archived && "cursor-pointer disabled:cursor-progress",
+              archived && "cursor-default text-muted-foreground",
+              entry.active && "text-accent-foreground",
             )}
             aria-current={entry.active ? "true" : undefined}
+            aria-disabled={archived || undefined}
             disabled={disabled}
             onClick={(e) => {
+              if (archived) return;
               e.currentTarget.blur();
               onActivate();
             }}
@@ -507,9 +899,9 @@ function SidebarRow({
             <span className="session-name flex-1 min-w-0 text-left text-sm truncate">
               {displayName}
               {/* Highest priority wins (issue #1005): the approval label
-                  outranks the failure label when both states hold. Static
-                  literal ids only -- a ternary id would break the
-                  i18n:check CI gate. */}
+                    outranks the failure label when both states hold. Static
+                    literal ids only -- a ternary id would break the
+                    i18n:check CI gate. */}
               {hasPendingApproval ? (
                 <span className="sr-only">
                   <FormattedMessage
@@ -527,11 +919,11 @@ function SidebarRow({
               ) : null}
             </span>
             {/* Status dot on the right edge (ADR-0093): open = primary dot,
-                pending approval = warning dot, turn failed = destructive dot,
-                not-open = no dot. Priority approval > failure > plain open;
-                the row classes coexist, the dot + label take the highest
-                (issue #1005). shrink-0 prevents truncation from consuming
-                the dot. */}
+                  pending approval = warning dot, turn failed = destructive
+                  dot, not-open = no dot. Priority approval > failure > plain
+                  open; the row classes coexist, the dot + label take the
+                  highest (issue #1005). shrink-0 prevents truncation from
+                  consuming the dot. */}
             {entry.sid && (
               <span
                 className={cn(
@@ -549,15 +941,24 @@ function SidebarRow({
               {formatRelativeTime(entry.lastModifiedAt, now, intl.locale)}
             </span>
           </button>
-        </HoverCardTrigger>
-        <HoverCardContent side="right" align="start">
-          <SidebarRowHoverContent
-            entry={entry}
-            displayName={displayName}
-          />
-        </HoverCardContent>
-      </HoverCard>
-    </li>
+          <div className="session-entry-actions absolute inset-y-0 right-1 z-10 flex items-center gap-0 rounded-md bg-accent opacity-0 pointer-events-none group-hover/row:opacity-100 group-hover/row:pointer-events-auto has-[:focus-visible]:opacity-100 has-[:focus-visible]:pointer-events-auto">
+            {actions}
+          </div>
+        </li>
+      </HoverCardTrigger>
+      <HoverCardContent
+        side="right"
+        align="start"
+        className="data-[state=open]:animate-none! data-[state=closed]:animate-none!"
+        onPointerEnter={onCardEnter}
+        onPointerLeave={onCardLeave}
+      >
+        <SidebarRowHoverContent
+          entry={entry}
+          displayName={displayName}
+        />
+      </HoverCardContent>
+    </HoverCard>
   );
 }
 
