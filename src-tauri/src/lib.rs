@@ -538,6 +538,8 @@ pub fn run() {
             commands::discover_mcp_servers,
             commands::list_sessions,
             commands::delete_session,
+            commands::set_session_pinned,
+            commands::set_session_archived,
             commands::rename_session,
             commands::get_session_name,
             commands::rename_persisted_session,

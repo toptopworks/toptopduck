@@ -56,9 +56,12 @@ pub enum SaveError {
 impl std::fmt::Display for SaveError {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         match self {
-            Self::Serialize(d) => write!(f, "serialize .duck failed: {d}"),
-            Self::Io(d) => write!(f, "write .duck temp file failed: {d}"),
-            Self::Rename(d) => write!(f, "replace .duck failed: {d}"),
+            // Artifact-neutral wording: the atomic-write protocol serves
+            // both recipes and the organization sidecar, so the message
+            // must not name `.duck` for a failed `index.json` write.
+            Self::Serialize(d) => write!(f, "serialize failed: {d}"),
+            Self::Io(d) => write!(f, "write temp file failed: {d}"),
+            Self::Rename(d) => write!(f, "replace failed: {d}"),
             Self::AlreadyOpen(p) => {
                 write!(
                     f,
@@ -135,17 +138,19 @@ pub fn temp_path_for(target: &Path) -> Option<PathBuf> {
     Some(target.with_file_name(format!("{file_name}{TMP_SUFFIX}")))
 }
 
-/// Write a recipe atomically: serialize to JSON (pretty, for human-readable
-/// .duck and git-friendly diffs), write to `<target>.tmp` in the same
-/// directory, `fsync`, then rename over the target. The rename is atomic on
-/// the same volume; a crash before rename leaves the prior target intact and
-/// a stale temp behind (overwritten on the next save).
-pub fn save_atomic(target: &Path, recipe: &Recipe) -> Result<(), SaveError> {
+/// Write any JSON-serializable document atomically (recipes and the
+/// organization sidecar share this crash-posture): serialize to JSON
+/// (pretty, for human-readable artifacts and git-friendly diffs), write to
+/// `<target>.tmp` in the same directory, `fsync`, then rename over the
+/// target. The rename is atomic on the same volume; a crash before rename
+/// leaves the prior target intact and a stale temp behind (overwritten on
+/// the next save).
+pub fn save_atomic<T: serde::Serialize>(target: &Path, value: &T) -> Result<(), SaveError> {
     // pretty + sorted keys is unnecessary (serde_json::to_string_pretty keeps
     // struct order, which is stable), so plain pretty suffices and reads
     // cleanly in a text editor / git diff.
     let json =
-        serde_json::to_string_pretty(recipe).map_err(|e| SaveError::Serialize(e.to_string()))?;
+        serde_json::to_string_pretty(value).map_err(|e| SaveError::Serialize(e.to_string()))?;
     let tmp = temp_path_for(target)
         .ok_or_else(|| SaveError::Io("could not derive temp file path".into()))?;
 
