@@ -621,6 +621,10 @@ mod tests {
                 turn_count: 0,
             },
             format_version: 1,
+            // Organization flags are joined by the scan, not the tray -- the
+            // tray consumes already-trimmed scan output (ADR-0127).
+            pinned: false,
+            archived: false,
         }
     }
 

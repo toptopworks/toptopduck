@@ -9,22 +9,26 @@
 //!
 //! - [`recipe`] -- the durable model (what persists, what does NOT).
 //! - [`io`] -- atomic temp+rename whole-file write + version-checked read.
+//! - [`listing`] -- session-list metadata derivation from a sessions-root scan.
 //! - [`migration`] -- forward migration pipeline for older `format_version`
 //!   (ADR-0036 Decision 1).
+//! - [`organization`] -- pin/archive sidecar `index.json` (ADR-0127): shell
+//!   layer organization state, outside the `.duck` content domain.
 //! - [`registry`] -- in-process single-writer enforcement (ADR-0035 Decision 3, #50):
 //!   tracks the canonical `.duck` paths currently open in this process.
 
 pub mod io;
 pub mod listing;
 pub mod migration;
+pub mod organization;
 pub mod recipe;
 pub mod registry;
 
 pub use io::{read_duck, save_atomic, LoadError, SaveError};
 pub(crate) use listing::{default_sessions_root, validate_sessions_dir};
 pub use listing::{
-    list_session_metadata, scan_sessions_dir, DuckPath, SessionMetadata, SessionsRoot,
-    SourceSummary,
+    list_session_metadata, scan_sessions_dir, scan_sessions_dir_including_archived, DuckPath,
+    SessionMetadata, SessionsRoot, SourceSummary,
 };
 pub use migration::{migrate_to_current, MigrationError};
 pub use recipe::{

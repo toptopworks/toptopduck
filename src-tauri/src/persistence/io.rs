@@ -141,11 +141,18 @@ pub fn temp_path_for(target: &Path) -> Option<PathBuf> {
 /// the same volume; a crash before rename leaves the prior target intact and
 /// a stale temp behind (overwritten on the next save).
 pub fn save_atomic(target: &Path, recipe: &Recipe) -> Result<(), SaveError> {
+    save_json_atomic(target, recipe)
+}
+
+/// Write any JSON-serializable document with the same atomic temp-write /
+/// fsync / rename protocol as [`save_atomic`] (issue #1174: the organization
+/// sidecar `index.json` reuses the crash-posture without re-implementing it).
+pub fn save_json_atomic<T: serde::Serialize>(target: &Path, value: &T) -> Result<(), SaveError> {
     // pretty + sorted keys is unnecessary (serde_json::to_string_pretty keeps
     // struct order, which is stable), so plain pretty suffices and reads
     // cleanly in a text editor / git diff.
     let json =
-        serde_json::to_string_pretty(recipe).map_err(|e| SaveError::Serialize(e.to_string()))?;
+        serde_json::to_string_pretty(value).map_err(|e| SaveError::Serialize(e.to_string()))?;
     let tmp = temp_path_for(target)
         .ok_or_else(|| SaveError::Io("could not derive temp file path".into()))?;
 

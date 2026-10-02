@@ -41,8 +41,8 @@ use crate::model::{
 };
 use crate::persistence::recipe::LastRuntime;
 use crate::persistence::{
-    default_sessions_root, scan_sessions_dir, validate_sessions_dir, SaveError, SessionMetadata,
-    SessionsRoot,
+    default_sessions_root, scan_sessions_dir, scan_sessions_dir_including_archived,
+    validate_sessions_dir, SaveError, SessionMetadata, SessionsRoot,
 };
 use crate::provider::live_config::{ActiveKeyError, LiveProviderConfig};
 use crate::runtime::acp::adapter::{detect_adapter, v1_adapters, AdapterSpec, StreamFormat};
@@ -1736,12 +1736,115 @@ pub fn set_app_config(
 #[tauri::command]
 pub async fn list_sessions(
     sessions_root: State<'_, SessionsRoot>,
+    include_archived: Option<bool>,
 ) -> Result<Vec<SessionMetadata>, String> {
     let dir = sessions_root.path();
-    let list = tauri::async_runtime::spawn_blocking(move || scan_sessions_dir(&dir))
-        .await
-        .map_err(|e| e.to_string())?;
+    let list = tauri::async_runtime::spawn_blocking(move || {
+        if include_archived.unwrap_or(false) {
+            scan_sessions_dir_including_archived(&dir)
+        } else {
+            scan_sessions_dir(&dir)
+        }
+    })
+    .await
+    .map_err(|e| e.to_string())?;
     Ok(list)
+}
+
+/// Pin or unpin a persisted session (ADR-0127, issue #1174). Organization
+/// state lives in the `sessions_root/index.json` sidecar, keyed by the
+/// session-directory uuid -- never in the `.duck` (no recipe rewrite, no
+/// mtime disturbance, no single-writer gate). Path guard mirrors
+/// `delete_session` (canonicalize + under-root check); unknown uuids are
+/// idempotent no-ops. Pinning an archived session is a no-op (mutual
+/// exclusion, enforced backend-side in the same atomic write).
+#[tauri::command]
+pub async fn set_session_pinned(
+    sessions_root: State<'_, SessionsRoot>,
+    path: String,
+    pinned: bool,
+) -> Result<(), StoreCommandError> {
+    let root = sessions_root.path();
+    tauri::async_runtime::spawn_blocking(move || {
+        let uuid = session_dir_uuid_under_root(&root, &path)?;
+        crate::persistence::organization::set_pinned(&root, &uuid, pinned)
+            .map_err(|e| StoreCommandError::IoFailure(e.to_string()))
+    })
+    .await
+    .map_err(|e| StoreCommandError::IoFailure(e.to_string()))?
+}
+
+/// Archive or restore a persisted session (ADR-0127, issue #1174). Archiving
+/// removes the session from `pinned` and adds it to `archived` in the SAME
+/// atomic sidecar write, so an archived-but-pinned intermediate is never
+/// observable. Same path guard and idempotence posture as
+/// [`set_session_pinned`].
+#[tauri::command]
+pub async fn set_session_archived(
+    sessions_root: State<'_, SessionsRoot>,
+    path: String,
+    archived: bool,
+) -> Result<(), StoreCommandError> {
+    let root = sessions_root.path();
+    tauri::async_runtime::spawn_blocking(move || {
+        let uuid = session_dir_uuid_under_root(&root, &path)?;
+        crate::persistence::organization::set_archived(&root, &uuid, archived)
+            .map_err(|e| StoreCommandError::IoFailure(e.to_string()))
+    })
+    .await
+    .map_err(|e| StoreCommandError::IoFailure(e.to_string()))?
+}
+
+/// Resolve a `.duck` path to its sidecar key (the `{uuid}` directory name,
+/// ADR-0089) after the under-root guard. Mirrors `delete_session`'s approach:
+/// canonicalize the duck (parent-dir fallback), require the parent directory
+/// to sit under the canonicalized sessions root. Every sidecar write that can
+/// ADD a key (pin / archive) goes through this guard; the open-is-unarchive
+/// path does not, but it only removes, so a key it fails to address is
+/// inert -- same posture as the unknown-uuid no-op.
+fn session_dir_uuid_under_root(root: &Path, duck: &str) -> Result<String, StoreCommandError> {
+    use crate::persistence::canonicalize_duck;
+    let trimmed = duck.trim();
+    if trimmed.is_empty() {
+        return Err(StoreCommandError::IoFailure(
+            "empty session path; cannot resolve the sidecar key".into(),
+        ));
+    }
+    let canonical = canonicalize_duck(Path::new(trimmed)).map_err(|e| {
+        StoreCommandError::IoFailure(format!("cannot canonicalize session path {trimmed}: {e}"))
+    })?;
+    let canonical_root = std::fs::canonicalize(root).map_err(|e| {
+        StoreCommandError::IoFailure(format!(
+            "cannot canonicalize sessions root {}: {e}",
+            root.display()
+        ))
+    })?;
+    let session_dir = canonical.parent().map(Path::to_path_buf).ok_or_else(|| {
+        StoreCommandError::IoFailure(
+            "path has no parent directory; cannot resolve the sidecar key".into(),
+        )
+    })?;
+    if !session_dir.starts_with(&canonical_root) {
+        return Err(StoreCommandError::IoFailure(format!(
+            "session dir {} is not under the managed sessions root {}",
+            session_dir.display(),
+            canonical_root.display()
+        )));
+    }
+    // The parent of the {uuid} dir is the root itself for a loose root-level
+    // duck -- the file_name then names the root, which is never a scan row's
+    // key (rows key on the root's CHILD directory names), so the write is an
+    // inert miss the next sweep prunes. No special case needed.
+    session_dir
+        .file_name()
+        .and_then(|n| n.to_str())
+        .map(str::to_owned)
+        .ok_or_else(|| {
+            StoreCommandError::IoFailure(format!(
+                "session dir name is not valid UTF-8: {}",
+                session_dir.display()
+            ))
+        })
 }
 
 /// Delete a persisted session (ADR-0060/0089, issue #81). The frontend closes
@@ -2426,6 +2529,24 @@ pub async fn open_duck(
             stale_was_empty,
             &sessions_root_path,
         );
+        // ADR-0127 Decision 4: open-is-unarchive. The resume succeeded, so
+        // any archived membership is now contradictory ("active but
+        // invisible"); remove it from the sidecar in one write. File-picker /
+        // OS-association entry points thereby auto-restore without the
+        // sidebar. Best-effort: the resume itself already succeeded, an
+        // organization-write failure only logs.
+        if let Some(uuid) =
+            crate::persistence::organization::session_dir_uuid(&path.to_string_lossy())
+        {
+            if let Err(e) =
+                crate::persistence::organization::unarchive_if_archived(&sessions_root_path, &uuid)
+            {
+                log::warn!(
+                    target: "toptopduck::session",
+                    "open_duck: failed to unarchive {uuid}: {e}"
+                );
+            }
+        }
         Ok::<(), SessionError>(())
     })
     .await;
@@ -3884,6 +4005,48 @@ mod tests {
             err.contains("cannot write export"),
             "the error names the lane: {err}"
         );
+    }
+
+    // ADR-0127 (issue #1174): the sidecar key guard. A duck under the managed
+    // root resolves to its {uuid} directory name; anything else refuses with
+    // the StoreCommandError::IoFailure convention the other store commands use.
+    #[test]
+    fn session_dir_uuid_under_root_resolves_the_uuid_directory() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let duck = root.path().join("abc-123").join("session.duck");
+        std::fs::create_dir_all(duck.parent().expect("parent")).expect("mkdir");
+        std::fs::write(&duck, "").expect("write");
+        let uuid = session_dir_uuid_under_root(root.path(), &duck.to_string_lossy())
+            .expect("under-root duck resolves");
+        assert_eq!(uuid, "abc-123");
+        // Whitespace is trimmed, mirroring delete_session's input posture.
+        assert_eq!(
+            session_dir_uuid_under_root(root.path(), &format!("  {}  ", duck.to_string_lossy()))
+                .expect("trimmed path resolves"),
+            "abc-123"
+        );
+    }
+
+    #[test]
+    fn session_dir_uuid_under_root_refuses_paths_outside_the_root() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let outside = tempfile::tempdir().expect("tempdir");
+        let duck = outside.path().join("abc-123").join("session.duck");
+        std::fs::create_dir_all(duck.parent().expect("parent")).expect("mkdir");
+        std::fs::write(&duck, "").expect("write");
+        let err = session_dir_uuid_under_root(root.path(), &duck.to_string_lossy())
+            .expect_err("an outside-root duck refuses");
+        assert!(
+            matches!(err, StoreCommandError::IoFailure(_)),
+            "typed as the store-command IO lane: {err:?}"
+        );
+        assert!(
+            err.to_string()
+                .contains("not under the managed sessions root"),
+            "the error names the guard: {err}"
+        );
+        // A blank path is a caller bug, refused the same way.
+        assert!(session_dir_uuid_under_root(root.path(), "  ").is_err());
     }
 
     /// A minimal CliToolConfig for the turn-assembly projection tests: only

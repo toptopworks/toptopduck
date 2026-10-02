@@ -1340,6 +1340,8 @@ fn session_metadata_serializes_flat_snake_case() {
     // entry. duck_path is the .duck path (the stable identity, renamed from
     // session_id in issue #462 to disambiguate from the runtime UUID). Pin the
     // full field order so a rename / reorder is caught before types.ts drifts.
+    // ADR-0127 (issue #1174) appends the organization flags joined from the
+    // sidecar; the frontend type follows in #1175.
     use toptopduck_lib::{DuckPath, SessionMetadata, SourceSummary};
     assert_wire(
         &SessionMetadata {
@@ -1352,8 +1354,10 @@ fn session_metadata_serializes_flat_snake_case() {
                 turn_count: 2,
             },
             format_version: 1,
+            pinned: false,
+            archived: false,
         },
-        r#"{"duck_path":"/x/analysis.duck","display_name":"analysis","last_modified_at":1700000000000,"source_summary":{"first_source_name":"orders","source_count":1,"turn_count":2},"format_version":1}"#,
+        r#"{"duck_path":"/x/analysis.duck","display_name":"analysis","last_modified_at":1700000000000,"source_summary":{"first_source_name":"orders","source_count":1,"turn_count":2},"format_version":1,"pinned":false,"archived":false}"#,
     );
 }
 

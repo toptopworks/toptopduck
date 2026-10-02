@@ -16,6 +16,7 @@
 //! the path into it (`open_duck(new_id, path)`), so the list-sessions path and
 //! the runtime id are deliberately different things.
 
+use crate::persistence::organization;
 use crate::persistence::recipe::RecipeEntry;
 use crate::persistence::{read_duck, LoadError, Recipe};
 use std::path::{Path, PathBuf};
@@ -138,6 +139,15 @@ pub struct SessionMetadata {
     /// readable v1 file; surfaced so a future newer-made file can be honestly
     /// distinguished rather than silently mis-listed.
     pub format_version: u32,
+    /// Shell-layer organization flag joined from the sidecar (ADR-0127):
+    /// this row sits in the pinned section, displayed in sidecar array
+    /// order ahead of the mtime list. False when the sidecar has no entry.
+    pub pinned: bool,
+    /// Shell-layer organization flag joined from the sidecar (ADR-0127):
+    /// archived rows are excluded from the default list (and from the tray /
+    /// search, which consume the same server-trimmed response). False when
+    /// the sidecar has no entry.
+    pub archived: bool,
 }
 
 /// A sidebar entry's working-set summary (ADR-0060): the first source's display
@@ -173,14 +183,29 @@ pub fn list_session_metadata(paths: &[String]) -> Vec<SessionMetadata> {
 
 /// Scan a managed sessions directory (ADR-0089) for per-session subdirectories
 /// `{uuid}/session.duck`. Returns one `SessionMetadata` per readable recipe,
-/// sorted by mtime descending (most-recent first) so the sidebar's default
-/// ordering is immediately useful. A missing / unreadable directory yields an
-/// empty vec -- the app boots cleanly on a first launch with no sessions.
+/// joined with the organization sidecar (ADR-0127): pinned rows first in
+/// sidecar array order, then the rest by mtime descending (most-recent first)
+/// so the sidebar's default ordering is immediately useful. Archived rows are
+/// trimmed server-side -- the tray and search consume this same response and
+/// never see them. A missing / unreadable directory yields an empty vec -- the
+/// app boots cleanly on a first launch with no sessions.
 ///
 /// Each subdirectory that does not contain a readable `session.duck` is
 /// silently skipped (ADR-0017 honest-skip) -- it may be a partial / stale
 /// directory, not a session the sidebar should fabricate metadata for.
 pub fn scan_sessions_dir(dir: &Path) -> Vec<SessionMetadata> {
+    scan_sessions_dir_scoped(dir, false)
+}
+
+/// The archive-view variant of [`scan_sessions_dir`] (ADR-0127 Decision 2):
+/// the same join, but archived rows are returned too, appended after the
+/// pinned section and the live list (each block still mtime-descending).
+/// Only `list_sessions` with `includeArchived` reaches for this.
+pub fn scan_sessions_dir_including_archived(dir: &Path) -> Vec<SessionMetadata> {
+    scan_sessions_dir_scoped(dir, true)
+}
+
+fn scan_sessions_dir_scoped(dir: &Path, include_archived: bool) -> Vec<SessionMetadata> {
     let entries = match std::fs::read_dir(dir) {
         Ok(e) => e,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Vec::new(),
@@ -189,6 +214,7 @@ pub fn scan_sessions_dir(dir: &Path) -> Vec<SessionMetadata> {
             return Vec::new();
         }
     };
+    let mut known: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut metas: Vec<SessionMetadata> = entries
         .flatten()
         .filter_map(|e| {
@@ -196,11 +222,46 @@ pub fn scan_sessions_dir(dir: &Path) -> Vec<SessionMetadata> {
             if !session_dir.is_dir() {
                 return None;
             }
+            // Organization keys survive an unreadable recipe: the DIRECTORY
+            // is the session identity (ADR-0089), so a corrupt .duck
+            // (honest-skip below) must not sweep its pin/archive state --
+            // only a missing directory makes a key orphaned.
+            if let Some(name) = session_dir.file_name().and_then(|n| n.to_str()) {
+                known.insert(name.to_owned());
+            }
             let duck = session_dir.join("session.duck");
             build_session_metadata(&duck)
         })
         .collect();
+    // Join the organization sidecar (ADR-0127): the scan set also drives the
+    // orphan-key sweep, so the sidecar stays bounded and self-heals.
+    let org = organization::load_and_sweep(dir, &known);
+    for m in &mut metas {
+        if let Some(uuid) = organization::session_dir_uuid(m.duck_path.as_str()) {
+            m.pinned = org.pinned.contains(&uuid);
+            m.archived = org.archived.contains(&uuid);
+        }
+    }
+    if !include_archived {
+        metas.retain(|m| !m.archived);
+    }
+    // Stable sort chain, last key wins the top block: mtime-desc base, then
+    // archived rows sink to the tail (only reachable with include_archived --
+    // pinned and archived are disjoint by construction), then pinned rows
+    // float to the head in sidecar array order (position = MRU, Decision 5).
+    let pinned_rank: std::collections::HashMap<&str, usize> = org
+        .pinned
+        .iter()
+        .enumerate()
+        .map(|(i, k)| (k.as_str(), i))
+        .collect();
     metas.sort_by_key(|m| std::cmp::Reverse(m.last_modified_at));
+    metas.sort_by_key(|m| m.archived);
+    metas.sort_by_key(|m| {
+        organization::session_dir_uuid(m.duck_path.as_str())
+            .and_then(|uuid| pinned_rank.get(uuid.as_str()).copied())
+            .unwrap_or(usize::MAX)
+    });
     metas
 }
 
@@ -237,6 +298,11 @@ fn build_session_metadata(path: &Path) -> Option<SessionMetadata> {
         last_modified_at: mtime,
         source_summary: source_summary(&recipe),
         format_version: recipe.format_version(),
+        // Organization flags are joined by the scan, not derived here --
+        // list_session_metadata (test helper, no sessions root) leaves them
+        // false (ADR-0127).
+        pinned: false,
+        archived: false,
     })
 }
 
@@ -600,6 +666,124 @@ mod tests {
         let list = scan_sessions_dir(root.path());
         assert_eq!(list.len(), 1, "only the valid session is listed");
         assert_eq!(list[0].display_name, "ok");
+    }
+
+    // --- organization sidecar join (ADR-0127, issue #1174) -------------------
+
+    /// Write `{uuid}/session.duck` with a one-source recipe named `name`.
+    fn write_named_session(root: &Path, uuid: &str, name: &str) {
+        write_session(
+            root,
+            uuid,
+            Recipe::build(
+                name.into(),
+                vec![csv_source(name)],
+                Vec::new(),
+                Some(name.into()),
+            )
+            .expect("build"),
+        );
+    }
+
+    #[test]
+    fn scan_puts_pinned_rows_first_in_sidecar_array_order() {
+        // ADR-0127 Decision 2/5: pinned rows lead the list in sidecar array
+        // order (MRU head-insert), the rest stay mtime-descending.
+        let root = tempfile::tempdir().expect("tempdir");
+        write_named_session(root.path(), "uuid-old", "old");
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        write_named_session(root.path(), "uuid-mid", "mid");
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        write_named_session(root.path(), "uuid-new", "new");
+        // Pin the OLDEST first, then the middle: array order [mid, old].
+        organization::set_pinned(root.path(), "uuid-old", true).expect("pin old");
+        organization::set_pinned(root.path(), "uuid-mid", true).expect("pin mid");
+
+        let list = scan_sessions_dir(root.path());
+        let names: Vec<&str> = list.iter().map(|m| m.display_name.as_str()).collect();
+        assert_eq!(names, vec!["mid", "old", "new"]);
+        assert!(list[0].pinned && list[1].pinned && !list[2].pinned);
+    }
+
+    #[test]
+    fn scan_trims_archived_rows_by_default_and_returns_them_when_included() {
+        // ADR-0127 Decision 2: archived rows are trimmed server-side, so the
+        // tray and search (which consume scan_sessions_dir / the list_sessions
+        // response verbatim) exclude them with zero changes (issue #1174 AC:
+        // the server-trim regression pin lives here). includeArchived gets
+        // them back, appended after the live list.
+        let root = tempfile::tempdir().expect("tempdir");
+        write_named_session(root.path(), "uuid-old", "old");
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        write_named_session(root.path(), "uuid-mid", "mid");
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        write_named_session(root.path(), "uuid-new", "new");
+        organization::set_archived(root.path(), "uuid-mid", true).expect("archive mid");
+
+        let trimmed = scan_sessions_dir(root.path());
+        let names: Vec<&str> = trimmed.iter().map(|m| m.display_name.as_str()).collect();
+        assert_eq!(
+            names,
+            vec!["new", "old"],
+            "archived row is trimmed by default"
+        );
+        assert!(trimmed.iter().all(|m| !m.archived));
+
+        let full = scan_sessions_dir_including_archived(root.path());
+        let names: Vec<&str> = full.iter().map(|m| m.display_name.as_str()).collect();
+        assert_eq!(
+            names,
+            vec!["new", "old", "mid"],
+            "archived row tails the list"
+        );
+        assert!(full[2].archived && !full[2].pinned);
+    }
+
+    #[test]
+    fn scan_sweeps_sidecar_keys_for_deleted_session_dirs() {
+        // ADR-0127 Decision 2: an externally deleted session directory leaves
+        // an orphan key; the scan prunes it so the sidecar stays bounded.
+        let root = tempfile::tempdir().expect("tempdir");
+        write_named_session(root.path(), "uuid-live", "live");
+        organization::set_pinned(root.path(), "uuid-gone", true).expect("pin gone");
+        organization::set_archived(root.path(), "uuid-gone-too", true).expect("archive gone-too");
+
+        let list = scan_sessions_dir(root.path());
+        assert_eq!(list.len(), 1, "only the live session is listed");
+        let healed: organization::SessionOrganization = serde_json::from_str(
+            &std::fs::read_to_string(root.path().join(organization::SIDECAR_NAME))
+                .expect("read sidecar"),
+        )
+        .expect("parse sidecar");
+        assert!(healed.pinned.is_empty() && healed.archived.is_empty());
+    }
+
+    #[test]
+    fn scan_keeps_organization_keys_for_dirs_with_an_unreadable_duck() {
+        // The directory is the identity (ADR-0089): a corrupt .duck is an
+        // honest-skip for the ROW, but not an orphaned KEY -- a temporarily
+        // unreadable recipe must not cost the session its pin/archive state.
+        let root = tempfile::tempdir().expect("tempdir");
+        write_named_session(root.path(), "uuid-a", "a");
+        organization::set_pinned(root.path(), "uuid-a", true).expect("pin a");
+        std::fs::write(
+            root.path().join("uuid-a").join("session.duck"),
+            "{ not json",
+        )
+        .expect("corrupt the duck");
+
+        let list = scan_sessions_dir(root.path());
+        assert!(list.is_empty(), "the corrupt recipe honest-skips the row");
+        let org: organization::SessionOrganization = serde_json::from_str(
+            &std::fs::read_to_string(root.path().join(organization::SIDECAR_NAME))
+                .expect("read sidecar"),
+        )
+        .expect("parse sidecar");
+        assert_eq!(
+            org.pinned,
+            vec!["uuid-a"],
+            "the key survives the unreadable duck"
+        );
     }
 
     // --- validate_sessions_dir (issue #452) ---------------------------------
