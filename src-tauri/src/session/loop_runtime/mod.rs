@@ -819,8 +819,9 @@ async fn drive_turn(inputs: DriveInputs) -> DriveOutcome {
             }
         }
     };
-    // The stream is over: land whatever the last turn left waiting (a
-    // thinking-only terminal reply's trailing round).
+    // The stream is over: land whatever the last turn left waiting (an
+    // unconfirmed turn's trailing round -- thinking and unconfirmed
+    // prose, issue #1165).
     fold.finish();
     DriveOutcome {
         fold,
