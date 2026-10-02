@@ -47,3 +47,49 @@ pub(crate) fn push_unique<T: PartialEq + Clone>(items: &mut Vec<T>, item: &T) {
         items.push(item.clone());
     }
 }
+
+/// The accumulation byte cap for a runtime track (issue #629): 8MB of prose
+/// or thinking before the runaway guard engages -- defense in depth against
+/// a runaway stream, not a normal-truncation budget. One constant for every
+/// accumulation seam (the external paths' `RoundTracker` and the rig fold,
+/// ADR-0126's rig-fold calibration) so the paths cannot drift apart.
+pub(crate) const ACCUM_MAX_BYTES: usize = 8 * 1024 * 1024;
+
+/// The visible truncation marker appended when an accumulation track hits
+/// [`ACCUM_MAX_BYTES`] -- the `TRACE_EXCERPT_MAX` truncation-visible
+/// philosophy (never silently drop).
+pub(crate) const TRUNCATION_MARKER: &str = "\n[truncated]";
+
+/// Append `text` to `buf` under the accumulation byte cap (issue #629): the
+/// first crossing latches the visible truncation marker; appends afterwards
+/// are dropped. The whole chunk lands before the check, so a chunk straddling
+/// the cap overshoots it by the chunk's remainder -- bounded, since a chunk
+/// rides a capped line. Returns whether THIS call latched the marker.
+pub(crate) fn push_capped(buf: &mut String, text: &str) -> bool {
+    if buf.len() >= ACCUM_MAX_BYTES {
+        return false;
+    }
+    buf.push_str(text);
+    if buf.len() >= ACCUM_MAX_BYTES {
+        buf.push_str(TRUNCATION_MARKER);
+        true
+    } else {
+        false
+    }
+}
+
+/// The capped prose emission every runtime path shares (ADR-0126's cap
+/// boundary): the chunk's delta emits unless the track already latched, and
+/// the crossing chunk's delta is followed by one final marker delta -- the
+/// live round text stays byte-identical to the settle record. One helper so
+/// a hand-rolled gate at any consumer cannot drift (the `push_unique`
+/// discipline).
+pub(crate) fn push_capped_emit(buf: &mut String, text: &str, emit: &mut impl FnMut(&str)) {
+    let capped = buf.len() >= ACCUM_MAX_BYTES;
+    if !text.is_empty() && !capped {
+        emit(text);
+    }
+    if push_capped(buf, text) {
+        emit(TRUNCATION_MARKER);
+    }
+}

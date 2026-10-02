@@ -40,5 +40,5 @@
 - 消费侧节流为预留后手，启用判据为实测渲染表现，不改变协议语义。
 - `ipc_contract`、`useTurnFlow`、thread 组件测试面随语义更新；`turn-progress` 事件基数由 round 级升至 delta 级（仅瞬态通道，不落数据库）。
 - 轮累积轨触 8MB 上限后，live 侧以截断标记 delta 收口、后续 chunk 停发：live 轮文与 settle 轮文逐字节一致（含标记），瞬态通道对齐可见截断哲学——不静默丢流、不无界增长。
-- rig fold 路径的正文累积（`text_deltas`）无上限，其 live 与 settle 同源无分歧，不在本决策的轨语义内；是否设防另裁。
+- rig fold 路径的正文累积（`text_deltas`）是否设防原另裁，后裁定与 thinking 累积轨道同批纳入四路径统一累积上限，live 门控与 settle 逐字节一致、截断标记入权威 trace，语义与外部三路径一致。
 - **校准 ADR-0059**：开篇「不开 LLM token 流式」与 Considered 的「LLM token 流式」否决项按其出口保留条款兑现——`TextDelta` 走既有 `turn-progress` 侧通道（ask 阻塞契约与 ADR-0009 不变，phase 不进 thread 真相与 ADR-0051 不变），形态为逐条载荷事件流而非该条款设想的一体计数变体；「离散是唯一诚实粒度」（守 ADR-0017）针对虚构进度估计，真实增量载荷流不受其限。

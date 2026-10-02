@@ -61,24 +61,13 @@ use crate::session::loop_contract::{
     DEFAULT_NO_PROGRESS_CAP, DEFAULT_STEP_CAP, TRACE_EXCERPT_MAX,
 };
 use crate::session::progress::ProgressClock;
+use crate::util::{push_capped, push_capped_emit};
 
 /// Grace period after the engine sends `session/cancel` for the agent to return
 /// the prompt response before the engine kills the process. Generous for a
 /// cooperative agent (it should respond near-instantly); bounded so a stuck
 /// agent cannot hang the turn past the watchdog.
 const CANCEL_GRACE: Duration = Duration::from_secs(5);
-
-/// Byte cap on each prose / thinking accumulation track (issue #629): a
-/// runaway agent streaming file contents into `agent_message_chunk` /
-/// `agent_thought_chunk` cannot grow the buffers without limit within the
-/// cancel grace window. The first crossing latches the visible truncation
-/// marker; later chunks are dropped.
-const ACCUM_MAX_BYTES: usize = 8 * 1024 * 1024;
-
-/// The visible truncation marker appended when an accumulation track hits
-/// [`ACCUM_MAX_BYTES`] -- the `TRACE_EXCERPT_MAX` truncation-visible
-/// philosophy (never silently drop).
-const TRUNCATION_MARKER: &str = "\n[truncated]";
 
 /// The excerpt a row drained at turn end carries (issue #630): the turn
 /// ended before the agent reported a final status, and an empty excerpt
@@ -989,17 +978,11 @@ impl RoundTracker {
     pub(super) fn push_prose(&mut self, text: &str, on_phase: &mut impl FnMut(TurnPhase)) {
         push_capped(&mut self.text, text);
         let round = self.open_round(on_phase);
-        let capped = round.text.len() >= ACCUM_MAX_BYTES;
-        if !text.is_empty() && !capped {
+        push_capped_emit(&mut round.text, text, &mut |delta| {
             on_phase(TurnPhase::TextDelta {
-                delta: text.to_string(),
+                delta: delta.to_string(),
             });
-        }
-        if push_capped(&mut round.text, text) {
-            on_phase(TurnPhase::TextDelta {
-                delta: TRUNCATION_MARKER.to_string(),
-            });
-        }
+        });
     }
 
     /// A thought chunk grows the current round's thinking stream; the first
@@ -1352,24 +1335,6 @@ impl Pump {
     }
 }
 
-/// Append `text` to `buf` under the accumulation byte cap (issue #629): the
-/// first crossing latches the visible truncation marker; appends afterwards
-/// are dropped. The whole chunk lands before the check, so a chunk straddling
-/// the cap overshoots it by the chunk's remainder -- bounded, since a chunk
-/// rides a capped line. Returns whether THIS call latched the marker.
-fn push_capped(buf: &mut String, text: &str) -> bool {
-    if buf.len() >= ACCUM_MAX_BYTES {
-        return false;
-    }
-    buf.push_str(text);
-    if buf.len() >= ACCUM_MAX_BYTES {
-        buf.push_str(TRUNCATION_MARKER);
-        true
-    } else {
-        false
-    }
-}
-
 /// The bounded (name, summary) pair for a tool title: both ride the IPC
 /// event + the persisted recipe, so both carry the trace-excerpt cap (the
 /// name joins the summary's bounding in issue #629).
@@ -1590,6 +1555,7 @@ impl ApprovalSink for RecordingAcpSink {
 mod tests {
     use super::*;
     use crate::runtime::acp::wire::PermissionOptionKind;
+    use crate::util::{ACCUM_MAX_BYTES, TRUNCATION_MARKER};
 
     /// name_summary prefers a non-empty title and bounds it; falls back to the
     /// id when the title is missing / empty.
