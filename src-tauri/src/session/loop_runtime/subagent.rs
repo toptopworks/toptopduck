@@ -80,6 +80,7 @@ use crate::session::loop_contract::{
     TRACE_EXCERPT_MAX,
 };
 use crate::session::progress::ProgressClock;
+use crate::util::is_latched;
 
 use super::adapter::{emit_phase, next_call_id, DispatchRequest, PhaseSink, SharedTurnState};
 use super::cancel::CancelWatcher;
@@ -317,13 +318,22 @@ fn finish_run(run: &mut SubagentRun, exit: RunExit) -> SubagentReport {
             // The final report's Length stop surfaces as the same explicit
             // marker the main reply mapping appends (issue #1044): the
             // report feeds back as tool text, so a cap-cut report must not
-            // read as a finished one.
-            Some(text) => SubagentReport {
-                text: truncation::marked_reply(text, finish_reason.as_ref()),
-                capped: truncation::is_output_capped(finish_reason.as_ref()),
-                success: true,
-                rounds,
-            },
+            // read as a finished one. The accumulation cap is a second
+            // truncation face the finish reason cannot see (issue #1171):
+            // the fold's runaway guard latches the parked bytes while the
+            // provider's own reason stays a clean turn end, so the flag
+            // reads the parked text's latched length too -- a union with
+            // the Length-only predicate, not a rewrite of it (#1003/#1047).
+            Some(text) => {
+                let accumulation_capped = is_latched(&text);
+                SubagentReport {
+                    text: truncation::marked_reply(text, finish_reason.as_ref()),
+                    capped: truncation::is_output_capped(finish_reason.as_ref())
+                        || accumulation_capped,
+                    success: true,
+                    rounds,
+                }
+            }
             None => SubagentReport {
                 text: failure_text_with_orphans(
                     "sub-agent failed: ended without a final report",

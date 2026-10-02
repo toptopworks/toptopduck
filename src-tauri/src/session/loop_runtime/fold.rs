@@ -40,7 +40,7 @@ use rig_core::streaming::StreamedAssistantContent;
 
 use crate::model::{ThinkingTrace, TurnPhase};
 use crate::session::loop_contract::{push_call, LoopRound};
-use crate::util::{push_capped, push_capped_emit, ACCUM_MAX_BYTES};
+use crate::util::{is_latched, push_capped, push_capped_emit};
 
 use super::adapter::{emit_phase, CompletionChannel, PhaseSink};
 use std::sync::Arc;
@@ -166,7 +166,7 @@ impl EventFold {
                     .trailing_round
                     .as_ref()
                     .and_then(|round| round.text.as_deref())
-                    .filter(|text| text.len() > ACCUM_MAX_BYTES)
+                    .filter(|text| is_latched(text))
                     .map(str::to_string);
                 let was_capped = capped_park.is_some();
                 self.final_output = Some(capped_park.unwrap_or_else(|| response.output.clone()));
@@ -434,7 +434,7 @@ impl EventFold {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::util::TRUNCATION_MARKER;
+    use crate::util::{ACCUM_MAX_BYTES, TRUNCATION_MARKER};
     use std::sync::Mutex;
 
     fn text_item(t: &str) -> MultiTurnStreamItem {
