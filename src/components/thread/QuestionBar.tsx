@@ -302,9 +302,10 @@ export function QuestionBar({ onSubmit, onCancel, loading, phase = null, draft, 
 // Discrete phase label (ADR-0059 + 0017 honesty, calibrated by ADR-0078,
 // issue #297): Thinking with the 1-based STEP shown only past the first
 // round-trip (> 1 -- the bare verb reads cleaner than an "attempt 1" suffix
-// that implies a retry count), and a bare "Running…" for the tool-call
-// events (the rail's live trace card shows the per-call detail; the bar's
-// label only signals which wait the turn is in). i18n'd via react-intl
+// that implies a retry count), and a bare "Running…" for the other phases
+// (the rail carries their detail -- the call rows, the streamed tail prose;
+// the bar's label only signals which wait the turn is in). i18n'd via
+// react-intl
 // (ADR-0052); each formatMessage id is a static literal at the call site so
 // @formatjs/cli extract resolves them.
 function phaseLabel(phase: TurnPhase, intl: IntlShape): string {
@@ -317,7 +318,9 @@ function phaseLabel(phase: TurnPhase, intl: IntlShape): string {
         )
       : intl.formatMessage({ id: "common.thinking", defaultMessage: "Thinking…" });
   }
-  // ToolCallStarted / ToolCallCompleted: the rail renders the call rows; the
-  // bar's compact label just names the running wait.
+  // ToolCallStarted / ToolCallCompleted / TextDelta / ThinkingCompleted: the
+  // rail renders the call rows, and streamed prose shows in the tail round
+  // with its caret (issue #1163) -- the bar's compact label just names the
+  // running wait.
   return intl.formatMessage({ id: "questionBar.phase.running", defaultMessage: "Running…" });
 }

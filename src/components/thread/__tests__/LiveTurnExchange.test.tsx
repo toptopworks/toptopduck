@@ -141,3 +141,62 @@ describe("LiveTurnExchange tail-round streaming posture", () => {
     expect(caretArmed(container.querySelector(".round-text")!)).toBe(true);
   });
 });
+
+// The trailing thinking status yields twice over: a dispatched row carries
+// its own motion (the rowInProgress arm, issue #297), and once #1163 streams
+// the current round's prose the visible text + caret carry the turn's
+// liveness by themselves -- a spinner still claiming 思考中 over visibly
+// streaming text is a doubled, misleading signal. The status reads honestly
+// only while nothing else on the tail carries the CURRENT round's liveness:
+// ask start, the inter-round wait (a Thinking bumps only the step, so the
+// tail is still the previous round's sealed prose), and the current round's
+// pre-prose moment.
+describe("LiveTurnExchange trailing thinking status (issue #1167)", () => {
+  it("keeps the status through the inter-round wait (the tail is a sealed earlier round)", () => {
+    renderExchange({
+      ...liveTurnWith(undefined),
+      step: 2,
+      rounds: [{ text: "第一轮已收口。", rows: [] }],
+    });
+    expect(screen.getByText("思考中（第 2 步）…")).toBeInTheDocument();
+  });
+
+  it("keeps the status while the current round has no prose yet (its thinking landed)", () => {
+    renderExchange({
+      ...liveTurnWith(undefined),
+      step: 2,
+      rounds: [
+        { text: "第一轮已收口。", rows: [] },
+        { thinking: { duration_ms: 900, text: "推理" }, rows: [] },
+      ],
+    });
+    expect(screen.getByText("思考中（第 2 步）…")).toBeInTheDocument();
+  });
+
+  it("yields the status once the current round's prose streams beside settled rows", () => {
+    renderExchange({
+      ...liveTurnWith(undefined),
+      step: 2,
+      rounds: [
+        { text: "第一轮已收口。", rows: [] },
+        {
+          text: "第二轮正文正在流出。",
+          rows: [
+            {
+              key: "call-0",
+              name: "explore",
+              server: null,
+              operationKind: "read",
+              summary: "SELECT 1",
+              approval: null,
+              running: false,
+              success: true,
+              resultExcerpt: "",
+            },
+          ],
+        },
+      ],
+    });
+    expect(screen.queryByText(/思考中/)).not.toBeInTheDocument();
+  });
+});
