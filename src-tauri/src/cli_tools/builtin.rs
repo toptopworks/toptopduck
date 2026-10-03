@@ -145,7 +145,13 @@ pub(crate) static BUILTIN_DEFINITIONS: &[BuiltinCliDefinition] = &[
                       transformation. The script text arrives as a temp \
                       file path argument and runs against the interpreter \
                       installed on this machine (no library ecosystem is \
-                      bundled; libraries are the machine's own).",
+                      bundled). To use a library, install it into the \
+                      session directory: `sys.executable -m pip install \
+                      --target site-packages <pkg>`, and start every \
+                      script that imports it with `sys.path.insert(0, \
+                      str(Path.cwd() / \"site-packages\"))` -- each call \
+                      runs as a new process, so the insert is required \
+                      every time. This never touches the global environment.",
         executables: &["python", "python3"],
         argv_template: &["{script}"],
         params: &[BuiltinCliParam {
@@ -808,6 +814,22 @@ mod tests {
         assert!(is_builtin_name("python"));
         assert!(is_builtin_name("office-cli"));
         assert!(!is_builtin_name("my-own-tool"));
+    }
+
+    #[test]
+    fn python_description_guides_session_local_pip_target() {
+        // The shipped description is the guidance surface: without it a
+        // freestyle agent installs bare (wrong interpreter) or --user
+        // (global pollution) and loses the path on the next call. Pin the
+        // load-bearing fragments, not the full prose.
+        assert!(
+            python().description.contains("--target site-packages"),
+            "python description must keep the session-local install guidance"
+        );
+        assert!(
+            python().description.contains("sys.path.insert"),
+            "python description must keep the per-call path insert guidance"
+        );
     }
 
     // --- baseline (issue #676) ----------------------------------------------
