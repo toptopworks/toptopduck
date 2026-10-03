@@ -289,8 +289,6 @@ export default function App() {
     closeOpen,
     deletePersisted,
     renameEntry,
-    handleOpenDuck,
-    handleExportSession,
     syncSessionName,
     setPinned,
     setArchived,
@@ -966,7 +964,6 @@ export default function App() {
                   pendingApprovalSids={approvalEvents.pendingApprovalSids}
                   turnFailedSids={turnFailureSids}
                   onNew={goToEmptyState}
-                  onOpenDuck={() => void handleOpenDuck()}
                   onActivate={activateSession}
                   onOpenPersisted={(path, name) =>
                     void openPersisted(path, name)}
@@ -1115,7 +1112,6 @@ export default function App() {
                             approvalEvents={approvalEvents}
                             duckPath={s.path}
                             onRename={renameEntry}
-                            onExport={handleExportSession}
                             disabled={busy}
                             onClose={(sid) => {
                               void closeOpen(sid);

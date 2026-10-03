@@ -43,7 +43,6 @@ describe("SessionSidebar shell-skeleton visuals (ADR-0067, issue #171)", () => {
         disabled={false}
         loadError={null}
         onNew={() => {}}
-        onOpenDuck={() => {}}
         onActivate={() => {}}
         onOpenPersisted={() => {}}
         grouping="flat"
@@ -84,7 +83,6 @@ describe("SessionSidebar shell-skeleton visuals (ADR-0067, issue #171)", () => {
         disabled={false}
         loadError={null}
         onNew={() => {}}
-        onOpenDuck={() => {}}
         onActivate={() => {}}
         onOpenPersisted={() => {}}
         grouping="flat"
@@ -121,7 +119,6 @@ describe("SessionSidebar shell-skeleton visuals (ADR-0067, issue #171)", () => {
         disabled={false}
         loadError={null}
         onNew={() => {}}
-        onOpenDuck={() => {}}
         onActivate={() => {}}
         onOpenPersisted={() => {}}
         grouping="flat"
@@ -170,7 +167,6 @@ describe("SessionSidebar shell-skeleton visuals (ADR-0067, issue #171)", () => {
         disabled={false}
         loadError={null}
         onNew={() => {}}
-        onOpenDuck={() => {}}
         onActivate={() => {}}
         onOpenPersisted={() => {}}
         grouping="flat"
@@ -209,7 +205,6 @@ describe("SessionSidebar shell-skeleton visuals (ADR-0067, issue #171)", () => {
         disabled={false}
         loadError={null}
         onNew={() => {}}
-        onOpenDuck={() => {}}
         onActivate={() => {}}
         onOpenPersisted={() => {}}
         grouping="flat"
@@ -266,7 +261,6 @@ describe("SessionSidebar shell-skeleton visuals (ADR-0067, issue #171)", () => {
         disabled={false}
         loadError={null}
         onNew={() => {}}
-        onOpenDuck={() => {}}
         onActivate={() => {}}
         onOpenPersisted={() => {}}
         grouping="flat"
@@ -318,7 +312,6 @@ describe("SessionSidebar shell-skeleton visuals (ADR-0067, issue #171)", () => {
         disabled={true}
         loadError={null}
         onNew={() => {}}
-        onOpenDuck={() => {}}
         onActivate={() => {}}
         onOpenPersisted={() => {}}
         grouping="flat"
@@ -350,7 +343,6 @@ describe("SessionSidebar shell-skeleton visuals (ADR-0067, issue #171)", () => {
         disabled={false}
         loadError={null}
         onNew={() => {}}
-        onOpenDuck={() => {}}
         onActivate={() => {}}
         onOpenPersisted={() => {}}
         grouping="flat"
@@ -415,7 +407,6 @@ describe("SessionSidebar grouping toggle (ADR-0072, issue #251)", () => {
         loadError={null}
         grouping="flat"
         onNew={() => {}}
-        onOpenDuck={() => {}}
         onActivate={() => {}}
         onOpenPersisted={() => {}}
         onSwitchGrouping={() => {}}
@@ -445,7 +436,6 @@ describe("SessionSidebar grouping toggle (ADR-0072, issue #251)", () => {
         loadError={null}
         grouping="flat"
         onNew={() => {}}
-        onOpenDuck={() => {}}
         onActivate={() => {}}
         onOpenPersisted={() => {}}
         onSwitchGrouping={onSwitchGrouping}
@@ -495,7 +485,6 @@ describe("SessionSidebar grouping toggle (ADR-0072, issue #251)", () => {
         loadError={null}
         grouping="time"
         onNew={() => {}}
-        onOpenDuck={() => {}}
         onActivate={() => {}}
         onOpenPersisted={() => {}}
         onSwitchGrouping={() => {}}
@@ -533,7 +522,6 @@ describe("SessionSidebar grouping toggle (ADR-0072, issue #251)", () => {
         loadError={null}
         grouping="flat"
         onNew={() => {}}
-        onOpenDuck={() => {}}
         onActivate={() => {}}
         onOpenPersisted={() => {}}
         onSwitchGrouping={() => {}}
@@ -572,7 +560,6 @@ describe("SessionSidebar grouping toggle (ADR-0072, issue #251)", () => {
         loadError={null}
         grouping="flat"
         onNew={() => {}}
-        onOpenDuck={() => {}}
         onActivate={() => {}}
         onOpenPersisted={() => {}}
         onSwitchGrouping={onSwitchGrouping}
@@ -608,7 +595,6 @@ describe("SessionSidebar grouping toggle (ADR-0072, issue #251)", () => {
         loadError={null}
         grouping="flat"
         onNew={() => {}}
-        onOpenDuck={() => {}}
         onActivate={() => {}}
         onOpenPersisted={() => {}}
         onSwitchGrouping={() => {}}
@@ -669,7 +655,6 @@ describe("SessionSidebar settings footer (issue #282)", () => {
         disabled={false}
         loadError={null}
         onNew={() => {}}
-        onOpenDuck={() => {}}
         onActivate={() => {}}
         onOpenPersisted={() => {}}
         grouping="flat"
@@ -723,7 +708,6 @@ describe("SessionSidebar pending-approval coloring (ADR-0083, issue #297)", () =
       disabled: false,
       loadError: null,
       onNew: () => {},
-      onOpenDuck: () => {},
       onActivate: () => {},
       onOpenPersisted: () => {},
       grouping: "flat" as const,
@@ -783,7 +767,6 @@ describe("SessionSidebar turn-failed coloring (issue #1005)", () => {
       disabled: false,
       loadError: null,
       onNew: () => {},
-      onOpenDuck: () => {},
       onActivate: () => {},
       onOpenPersisted: () => {},
       grouping: "flat" as const,
@@ -894,7 +877,6 @@ describe("SessionSidebar hover card content (ADR-0093, issue #513)", () => {
       disabled: false,
       loadError: null,
       onNew: () => {},
-      onOpenDuck: () => {},
       onActivate: () => {},
       onOpenPersisted: () => {},
       grouping: "flat" as const,
@@ -994,7 +976,6 @@ describe("SessionSidebar organization (ADR-0127, issue #1175)", () => {
       loadError: null,
       grouping: "flat" as const,
       onNew: () => {},
-      onOpenDuck: () => {},
       onActivate: () => {},
       onOpenPersisted: () => {},
       onSwitchGrouping: () => {},
@@ -1242,7 +1223,6 @@ describe("SessionSidebar single-flight hover machine (issue #1175)", () => {
       loadError: null as string | null,
       grouping: "flat" as const,
       onNew: () => {},
-      onOpenDuck: () => {},
       onActivate: () => {},
       onOpenPersisted: () => {},
       onSwitchGrouping: () => {},
@@ -1392,7 +1372,6 @@ describe("SessionSidebar archived-view gating (issue #1175)", () => {
       loadError: null,
       grouping: "flat" as const,
       onNew: () => {},
-      onOpenDuck: () => {},
       onActivate: () => {},
       onOpenPersisted: () => {},
       onSwitchGrouping: () => {},

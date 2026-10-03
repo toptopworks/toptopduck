@@ -6,8 +6,8 @@ import { SessionHeaderMenu } from "../SessionHeaderMenu";
 import { catalogFor } from "../../i18n";
 
 // Session-header context menu tests (ADR-0093, issue #512). The menu renders
-// four management items (Rename / Save a copy / Close / Delete) + opens local
-// dialog state for Rename + Delete.
+// three management items (Rename / Close / Delete) + opens local dialog state
+// for Rename + Delete.
 //
 // Radix DropdownMenu's pointer-event handling recurses under jsdom (known
 // limitation), so the dropdown-menu module is mocked as a simple controlled
@@ -72,12 +72,10 @@ vi.mock("@/components/ui/dropdown-menu", () => {
 
 function renderMenu(overrides: {
   onRename?: (sid: string, path: string, newName: string) => void;
-  onExport?: (path: string, displayName: string) => void;
   onClose?: (sid: string) => void;
   onDelete?: (path: string, sid: string) => void;
 } = {}) {
   const onRename = overrides.onRename ?? vi.fn();
-  const onExport = overrides.onExport ?? vi.fn();
   const onClose = overrides.onClose ?? vi.fn();
   const onDelete = overrides.onDelete ?? vi.fn();
   render(
@@ -87,13 +85,12 @@ function renderMenu(overrides: {
         duckPath="/test/session.duck"
         sessionId="sess-1"
         onRename={onRename}
-        onExport={onExport}
         onClose={onClose}
         onDelete={onDelete}
       />
     </IntlProvider>,
   );
-  return { onRename, onExport, onClose, onDelete };
+  return { onRename, onClose, onDelete };
 }
 
 // With the mock, the DropdownMenuContent always renders (no open/close logic).
@@ -121,10 +118,9 @@ describe("SessionHeaderMenu (issue #512)", () => {
     expect(glyph).toHaveClass("h-3.5", "w-3.5");
   });
 
-  it("shows Rename / Save a copy… / Close / Delete items", () => {
+  it("shows Rename / Close / Delete items", () => {
     renderMenu();
     expect(screen.getByRole("menuitem", { name: /Rename/ })).toBeTruthy();
-    expect(screen.getByRole("menuitem", { name: /Save a copy…/ })).toBeTruthy();
     expect(screen.getByRole("menuitem", { name: /^Close$/ })).toBeTruthy();
     expect(screen.getByRole("menuitem", { name: /^Delete$/ })).toBeTruthy();
   });
@@ -133,12 +129,6 @@ describe("SessionHeaderMenu (issue #512)", () => {
     renderMenu();
     const deleteItem = screen.getByRole("menuitem", { name: /^Delete$/ });
     expect(deleteItem.getAttribute("data-variant")).toBe("destructive");
-  });
-
-  it("Export fires onExport with duckPath + displayName directly (no dialog)", () => {
-    const { onExport } = renderMenu();
-    fireEvent.click(screen.getByRole("menuitem", { name: /Save a copy…/ }));
-    expect(onExport).toHaveBeenCalledWith("/test/session.duck", "My Session");
   });
 
   it("Close fires onClose with the session id directly (no dialog)", () => {

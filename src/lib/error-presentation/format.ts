@@ -166,11 +166,6 @@ function formatStoreCommandError(e: StoreCommandError, intl: IntlShape): string 
         id: "error.session.renameEmpty",
         defaultMessage: "Session name must not be empty",
       });
-    case "DestinationExists":
-      return intl.formatMessage({
-        id: "error.store.destinationExists",
-        defaultMessage: "A folder with this name already exists; choose a different name",
-      });
     case "IoFailure":
       return intl.formatMessage({
         id: "error.store.ioFailure",
@@ -617,12 +612,11 @@ export function errorDetail(e: unknown): string | null {
   if (isStoreCommandError(e)) {
     // The failure variants carry the English technical detail for the fold;
     // OpenConflict / BlankName / NoActiveProfile are self-contained (the
-    // message already names the refusal). DestinationExists carries the path,
-    // UnknownAdapter the offending adapter id, and InvalidCliTool the backend
+    // message already names the refusal). UnknownAdapter carries the offending
+    // adapter id, and InvalidCliTool the backend
     // refusal detail -- the tool name and its remedy ("disable it instead of
     // deleting"), which the generic message cannot carry.
     if (
-      e.kind === "DestinationExists" ||
       e.kind === "IoFailure" ||
       e.kind === "KeychainFailure" ||
       e.kind === "ConfigWriteFailure" ||

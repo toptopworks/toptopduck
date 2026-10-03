@@ -543,8 +543,6 @@ pub fn run() {
             commands::rename_session,
             commands::get_session_name,
             commands::rename_persisted_session,
-            commands::export_session,
-            commands::prepare_import_session,
             commands::set_sessions_dir,
             commands::get_sessions_dir,
             commands::set_default_runtime,

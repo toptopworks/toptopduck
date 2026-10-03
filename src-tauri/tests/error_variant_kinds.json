@@ -70,7 +70,6 @@
   "StoreCommandError": [
     "BlankName",
     "ConfigWriteFailure",
-    "DestinationExists",
     "IoFailure",
     "KeychainFailure",
     "NoActiveProfile",

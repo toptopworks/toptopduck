@@ -4,7 +4,7 @@
 
 会话栏（`SessionSidebar`）每行从「导航 + 管理 + 信息」三角色收缩为**纯导航**，三个维度同步调整：
 
-1. **管理操作移入 `.session-header`。** Rename / Save a copy / Close / Delete 从侧边栏行的 `⋯` 弹菜单迁入 `SessionPane` 的 `.session-header`——会话名称后新增 `⋯` 按钮 → Radix `DropdownMenu`（图标 + 标签格式）。侧边栏行不再承载任何管理入口。
+1. **管理操作移入 `.session-header`。** Rename / Close / Delete 从侧边栏行的 `⋯` 弹菜单迁入 `SessionPane` 的 `.session-header`——会话名称后新增 `⋯` 按钮 → Radix `DropdownMenu`（图标 + 标签格式）。侧边栏行不再承载任何管理入口。
 
 2. **行信息从常驻子行改为 HoverCard 浮层。** 移除常驻子行（首源名 + 轮次数），元信息（完整标题 / 数据源 / 轮次数 / 最近修改）经 Radix `HoverCard` 浮层在 hover + focus 时展示——右侧定位、固定宽度、键值对布局。
 

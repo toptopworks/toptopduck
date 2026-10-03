@@ -145,7 +145,6 @@ export type SaveError =
 export type StoreCommandError =
   | { kind: "OpenConflict" }
   | { kind: "BlankName"; data: RenameSessionError }
-  | { kind: "DestinationExists"; data: string }
   | { kind: "IoFailure"; data: string }
   | { kind: "KeychainFailure"; data: string }
   | { kind: "ConfigWriteFailure"; data: string }

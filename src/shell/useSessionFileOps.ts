@@ -1,31 +1,25 @@
 // Persisted file-ops species (#1155): the persisted-file actions split
-// out of useShellSessions -- deletePersisted / renameEntry / handleOpenDuck /
-// handleExportSession / syncSessionName, plus the ADR-0127 organization pair
-// setPinned / setArchived -- plus their private persistenceBusy
-// axis (save / open / delete wait), which lives HERE and is surfaced so the
-// host can keep its merged `busy` gate semantics (resume OR persistence wait).
-// The host (useShellSessions) composes this hook internally and re-exports the
-// five members unchanged (nested facade), so App.tsx's consumption surface is
-// untouched.
+// out of useShellSessions -- deletePersisted / renameEntry / syncSessionName,
+// plus the ADR-0127 organization pair setPinned / setArchived -- plus their
+// private persistenceBusy axis (delete / archive wait), which lives HERE and
+// is surfaced so the host can keep its merged `busy` gate semantics (resume OR
+// persistence wait). The host (useShellSessions) composes this hook internally
+// and re-exports the members unchanged (nested facade), so App.tsx's
+// consumption surface is untouched.
 //
 // Injection surface (UseSessionFileOpsDeps): intl / refreshSessions /
 // setShellError are the same deps the host already takes (zero new coupling).
-// unmountOpen / importAndOpen / patchOpenName are the NARROW open-set
-// side-effect face: the species never touches the open-set state directly --
-// teardown goes through unmountOpen, import resumes through importAndOpen,
-// and in-memory name updates go through patchOpenName (the host's single
-// mapSessions name-write, shared by renameEntry + syncSessionName). This
-// keeps arbitrary open-set mutation rights with the host.
+// unmountOpen / patchOpenName are the NARROW open-set side-effect face: the
+// species never touches the open-set state directly -- teardown goes through
+// unmountOpen, and in-memory name updates go through patchOpenName (the
+// host's single mapSessions name-write, shared by renameEntry +
+// syncSessionName). This keeps arbitrary open-set mutation rights with the
+// host.
 import { useCallback, useState } from "react";
 import type { IntlShape } from "react-intl";
 import {
-  open as openDialog,
-  save as saveDialog,
-} from "@tauri-apps/plugin-dialog";
-import {
   closeSessionAndWaitRelease,
   deleteSession,
-  exportSession,
   getSessionName,
   renamePersistedSession,
   renameSession,
@@ -39,18 +33,15 @@ import type { AppError } from "../types/error";
 export interface UseSessionFileOpsDeps {
   intl: IntlShape;
   /** Bumps the sidebar's sessionsEpoch so list_sessions re-derives after a
-   *  delete / rename / import lands on disk. */
+   *  delete / rename lands on disk. */
   refreshSessions: () => void;
-  /** Surfaces a shell-layer AppError (kind "shell") for a delete / rename /
-   *  openDuck / export reject. */
+  /** Surfaces a shell-layer AppError (kind "shell") for a delete / rename
+   *  reject. */
   setShellError: (error: AppError | null) => void;
   /** Synchronous UI teardown of an open session (cache slice + open-set
    *  entry + active id). The delete path's ADR-0063 wait-release ordering
    *  funnels through it. */
   unmountOpen: (sid: string) => void;
-  /** Import an external .duck into the managed sessions tree and resume it
-   *  (the host's resume orchestration); handleOpenDuck rides it. */
-  importAndOpen: (externalPath: string, name: string) => Promise<void>;
   /** The one in-memory open-set name-write (renameEntry's landed name +
    *  syncSessionName's auto-name both funnel here). */
   patchOpenName: (sid: string, name: string) => void;
@@ -58,14 +49,13 @@ export interface UseSessionFileOpsDeps {
 
 /** Persisted file-ops species (#1155): the file ops moved from
  *  useShellSessions -- renameEntry / syncSessionName land names via the
- *  injected patchOpenName seam, the other three verbatim -- plus the
+ *  injected patchOpenName seam, the others verbatim -- plus the
  *  persistenceBusy axis they privately own. */
 export function useSessionFileOps({
   intl,
   refreshSessions,
   setShellError,
   unmountOpen,
-  importAndOpen,
   patchOpenName,
 }: UseSessionFileOpsDeps): {
   deletePersisted: (path: string, sid: string | null) => Promise<void>;
@@ -84,8 +74,6 @@ export function useSessionFileOps({
     path: string,
     newName: string,
   ) => Promise<void>;
-  handleOpenDuck: () => Promise<void>;
-  handleExportSession: (duckPath: string, displayName: string) => Promise<void>;
   syncSessionName: (sid: string) => Promise<void>;
   persistenceBusy: boolean;
 } {
@@ -215,56 +203,6 @@ export function useSessionFileOps({
     [intl, patchOpenName, refreshSessions, setShellError],
   );
 
-  // --- Import .duck (ADR-0089 Decision 5, issue #450) ----------------------
-  // Open = import: copy the external .duck (+ companion assets/) into a fresh
-  // per-session directory under the managed sessions root, then resume the
-  // local copy. The original file is never modified.
-  const handleOpenDuck = useCallback(async () => {
-    setPersistenceBusy(true);
-    try {
-      const selected = await openDialog({
-        filters: [{ name: "toptopduck", extensions: ["duck"] }],
-        multiple: false,
-      });
-      const path = typeof selected === "string" ? selected : null;
-      if (!path) return;
-      const stem =
-        path
-          .split(/[\\/]/)
-          .pop()
-          ?.replace(/\.duck$/i, "") ?? "session";
-      await importAndOpen(path, stem);
-      refreshSessions();
-    } catch (e) {
-      setShellError(toAppError(e, intl, "shell"));
-    } finally {
-      setPersistenceBusy(false);
-    }
-  }, [intl, importAndOpen, refreshSessions, setShellError]);
-
-  // --- Export session (ADR-0089 Decision 5, issue #449) -------------------
-  // Export a copy of the per-session directory (session.duck + assets/) to a
-  // user-chosen destination. The save dialog collects a directory name; the
-  // backend copies the files. No rebind, no registry touch — pure file I/O.
-  // Silent on success; errors go to setShellError.
-  const handleExportSession = useCallback(
-    async (duckPath: string, displayName: string) => {
-      setPersistenceBusy(true);
-      try {
-        const dest = await saveDialog({
-          defaultPath: displayName,
-        });
-        if (!dest) return;
-        await exportSession(duckPath, dest);
-      } catch (e) {
-        setShellError(toAppError(e, intl, "shell"));
-      } finally {
-        setPersistenceBusy(false);
-      }
-    },
-    [intl, setShellError],
-  );
-
   // ADR-0089 Decision 4: after the first terminal turn, the backend auto-names
   // the session from the first question's bounded truncation. This syncs the
   // in-memory open-session entry + the persisted sidebar list so both surfaces
@@ -293,8 +231,6 @@ export function useSessionFileOps({
     setPinned,
     setArchived,
     renameEntry,
-    handleOpenDuck,
-    handleExportSession,
     syncSessionName,
     persistenceBusy,
   };

@@ -220,10 +220,6 @@ describe("fmtError — StoreCommandError", () => {
         { kind: "BlankName", data: { kind: "EmptyName" } },
         en["error.session.renameEmpty"],
       ],
-      [
-        { kind: "DestinationExists", data: "/dest/existing" },
-        en["error.store.destinationExists"],
-      ],
       [{ kind: "IoFailure", data: "io-fail" }, en["error.store.ioFailure"]],
       [{ kind: "KeychainFailure", data: "kc-fail" }, en["error.store.keychainFailure"]],
       [{ kind: "ConfigWriteFailure", data: "cfg-fail" }, en["error.store.configWriteFailure"]],
@@ -328,7 +324,6 @@ describe("errorDetail", () => {
   });
 
   it("extracts StoreCommandError failure detail for the fold (issue #130)", () => {
-    expect(errorDetail({ kind: "DestinationExists", data: "/dest/path" })).toBe("/dest/path");
     expect(errorDetail({ kind: "IoFailure", data: "io-fail" })).toBe("io-fail");
     expect(errorDetail({ kind: "KeychainFailure", data: "kc-fail" })).toBe("kc-fail");
     expect(errorDetail({ kind: "ConfigWriteFailure", data: "cfg-fail" })).toBe("cfg-fail");
