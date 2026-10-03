@@ -388,7 +388,7 @@ describe("buildSearchEntries (ADR-0072, issue #252)", () => {
   });
 
   it("sorts mtime desc with a name tiebreaker for deterministic render", () => {
-    // Same mtime -> alphabetical; matches buildSidebarGroups' tiebreaker.
+    // Same mtime -> alphabetical; matches buildSidebarModel' tiebreaker.
     const sameMtime: SessionMetadata[] = [
       { ...meta("/z.duck", "zulu", 1), last_modified_at: 1000 },
       { ...meta("/m.duck", "mike", 1), last_modified_at: 1000 },

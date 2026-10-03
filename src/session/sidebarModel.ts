@@ -13,7 +13,7 @@
 // Grouping mode (ADR-0072, issue #251): the user toggles between `flat` (a
 // single Recent group sorted by mtime descending, the default) and `time` (the
 // ADR-0060 Chat-style Today/Yesterday/Previous 7 days/Older buckets). The mode
-// rides the shell-chrome prefs; buildSidebarGroups takes it as a parameter so
+// rides the shell-chrome prefs; buildSidebarModel takes it as a parameter so
 // the component is a thin caller.
 
 import type { SessionMetadata } from "../types/session";
@@ -104,7 +104,7 @@ export type SearchEntry = SidebarEntry;
 /** A rendered sidebar group: heading kind + its entries (already sorted). The
  *  `mode` discriminant makes the kind/mode correspondence a type-level
  *  invariant -- a flat-mode group only ever carries kind="recent"; a time-mode
- *  group only carries a TimeGroupKind. buildSidebarGroups is the sole
+ *  group only carries a TimeGroupKind. buildSidebarModel is the sole
  *  constructor; consumers narrow on `mode` when they need the guarantee. */
 export type SidebarGroup =
   | { mode: "flat"; kind: "recent"; entries: SidebarEntry[] }
@@ -160,7 +160,7 @@ export function formatLastModified(lastModifiedAt: number, now: number): LastMod
 
 /** Index open sessions by their bound .duck path so a persisted row can look up
  *  its runtime binding in one read. Every session has a path since ADR-0089.
- *  Shared by buildSearchEntries + buildSidebarGroups. */
+ *  Shared by buildSearchEntries + buildSidebarModel. */
 function indexOpenByPath(open: OpenSession[]): Map<string, OpenSession> {
   const byPath = new Map<string, OpenSession>();
   for (const o of open) {
@@ -212,7 +212,7 @@ const BY_MTIME_DESC = (a: SidebarEntry, b: SidebarEntry): number =>
  *  modal (ADR-0072, issue #252). Pure in
  *  (persisted, open, activeSessionId, query): the caller supplies the raw
  *  `list_sessions` result + the open set + the active id + the query string;
- *  this function does the rest. Kept alongside `buildSidebarGroups` because the
+ *  this function does the rest. Kept alongside `buildSidebarModel` because the
  *  per-row shape + the persisted/open merge contract are shared with the sidebar
  *  (a row that is open in this shell carries its runtime sid, so the modal can
  *  activate-by-sid instead of re-resuming).
@@ -228,9 +228,9 @@ const BY_MTIME_DESC = (a: SidebarEntry, b: SidebarEntry): number =>
  *  name (via searchMatcher). An empty / whitespace-only query matches
  *  everything, truncated to the newest MAX_SEARCH_RESULTS -- the modal is a
  *  jump surface, not a browser. Sorted mtime desc with a name tiebreaker for
- *  deterministic rendering, matching `buildSidebarGroups`.
+ *  deterministic rendering, matching `buildSidebarModel`.
  *
- *  Unlike `buildSidebarGroups`, no `now` parameter: the modal is a single flat
+ *  Unlike `buildSidebarModel`, no `now` parameter: the modal is a single flat
  *  list (no time buckets) and each row's dynamic time label is resolved in
  *  the component via `formatLastModified` (a React-layer concern -- it needs
  *  the localized heading text). */
@@ -316,8 +316,9 @@ export function buildSidebarModel(
     });
   }
 
-  // No entries -> no model (ADR-0072: an empty sidebar renders no group title,
-  // so the grouping toggle's hover affordance is hidden too).
+  // No entries -> no model (ADR-0072, recalibrated by ADR-0127: the sidebar
+  // still renders the chrome row on a bare title row, so the grouping +
+  // archived toggles stay reachable on an empty sidebar).
   if (entries.length === 0) return { pinned: [], groups: [] };
 
   // Pinned rows leave the grouped body BEFORE the mtime sort: their display

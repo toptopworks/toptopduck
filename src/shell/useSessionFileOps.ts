@@ -1,6 +1,7 @@
-// Persisted file-ops species (#1155): the five persisted-file actions split
+// Persisted file-ops species (#1155): the persisted-file actions split
 // out of useShellSessions -- deletePersisted / renameEntry / handleOpenDuck /
-// handleExportSession / syncSessionName -- plus their private persistenceBusy
+// handleExportSession / syncSessionName, plus the ADR-0127 organization pair
+// setPinned / setArchived -- plus their private persistenceBusy
 // axis (save / open / delete wait), which lives HERE and is surfaced so the
 // host can keep its merged `busy` gate semantics (resume OR persistence wait).
 // The host (useShellSessions) composes this hook internally and re-exports the
@@ -55,7 +56,7 @@ export interface UseSessionFileOpsDeps {
   patchOpenName: (sid: string, name: string) => void;
 }
 
-/** Persisted file-ops species (#1155): the five file ops moved from
+/** Persisted file-ops species (#1155): the file ops moved from
  *  useShellSessions -- renameEntry / syncSessionName land names via the
  *  injected patchOpenName seam, the other three verbatim -- plus the
  *  persistenceBusy axis they privately own. */
@@ -167,9 +168,9 @@ export function useSessionFileOps({
 
   // Archive or restore (ADR-0127, issue #1175). Archiving an OPEN session
   // closes it first through the shared closeOpenAndWait seam (Decision 6
-  // cites the delete contract + ADR-0055). The wait can be long, hence
-  // persistenceBusy. Restore takes the pure sidecar path -- the archived
-  // row carries no sid.
+  // cites the delete contract, ADR-0060; the wait-release variant itself is
+  // ADR-0063, as above). The wait can be long, hence persistenceBusy.
+  // Restore takes the pure sidecar path -- the archived row carries no sid.
   const setArchived = useCallback(
     async (path: string, archived: boolean, sid: string | null): Promise<void> => {
       if (archived && sid) {

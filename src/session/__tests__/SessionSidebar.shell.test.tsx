@@ -23,7 +23,7 @@ function renderShell(ui: ReactElement) {
 }
 
 // Two never-saved open sessions: the active one carries .active.open; the other
-// carries .open:not(.active). Both land in the Today group (buildSidebarGroups
+// carries .open:not(.active). Both land in the Today group (buildSidebarModel
 // stamps `now` for unsaved sessions).
 function twoOpenSessions(): OpenSession[] {
   return [
@@ -1205,5 +1205,221 @@ describe("SessionSidebar organization (ADR-0127, issue #1175)", () => {
       screen.getByRole("button", { name: "Show archived sessions" }),
     ).toBeInTheDocument();
     expect(container.querySelector(".session-empty")).not.toBeNull();
+  });
+});
+
+// --- ADR-0127 (issue #1175): the single-flight hover machine ------------------
+
+describe("SessionSidebar single-flight hover machine (issue #1175)", () => {
+  // One card max, parent-owned: the machine's transitions -- retire on
+  // foreign enter, 200 ms close grace, card-enter cancel, list-leave
+  // backstop, stale-leave guard -- are pinned with fake timers. The card's
+  // display name renders in a <p> (the row's name is a <span>), so the
+  // p-selector tells WHICH card is mounted without colliding with the row.
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  function meta(path: string, name: string): SessionMetadata {
+    return {
+      duck_path: path,
+      display_name: name,
+      last_modified_at: Date.now(),
+      source_summary: { first_source_name: null, source_count: 0, turn_count: 0 },
+      format_version: 1,
+      pinned: false,
+      archived: false,
+    };
+  }
+
+  function hoverProps() {
+    const base = {
+      collapsed: false,
+      openSessions: [] as OpenSession[],
+      activeSessionId: null,
+      disabled: false,
+      loadError: null as string | null,
+      grouping: "flat" as const,
+      onNew: () => {},
+      onOpenDuck: () => {},
+      onActivate: () => {},
+      onOpenPersisted: () => {},
+      onSwitchGrouping: () => {},
+      archivedSessions: [] as SessionMetadata[],
+      showArchived: false,
+      onToggleArchived: () => {},
+      onSetPinned: () => {},
+      onArchive: () => {},
+      onDeleteArchived: () => {},
+      onOpenSearch: () => {},
+      provider: null,
+      onOpenSettings: () => {},
+    };
+    return {
+      ...base,
+      sessions: [meta("/x/a.duck", "Row A"), meta("/x/b.duck", "Row B")],
+    };
+  }
+
+  function rows(container: HTMLElement): HTMLElement[] {
+    return Array.from(container.querySelectorAll(".session-entry")) as HTMLElement[];
+  }
+
+  it("retires the shown card the moment a different row is entered, before its own dwell", async () => {
+    // The retire line is the sweep fix: without it the OLD card stays on
+    // screen the whole time the pointer travels (every enter cancels the
+    // pending close; the new card only opens after its own 300 ms dwell).
+    vi.useFakeTimers();
+    const { container } = renderShell(<SessionSidebar {...hoverProps()} />);
+    const [a, b] = rows(container);
+
+    fireEvent.pointerEnter(a);
+    await act(async () => {
+      vi.advanceTimersByTime(350);
+    });
+    expect(screen.getByText("Row A", { selector: "p" })).toBeInTheDocument();
+
+    fireEvent.pointerEnter(b);
+    // NO timer advance: A's card must be gone immediately...
+    expect(screen.queryByText("Row A", { selector: "p" })).toBeNull();
+    // ...and B's card opens only after its own dwell.
+    await act(async () => {
+      vi.advanceTimersByTime(299);
+    });
+    expect(screen.queryByText("Row B", { selector: "p" })).toBeNull();
+    await act(async () => {
+      vi.advanceTimersByTime(1);
+    });
+    expect(screen.getByText("Row B", { selector: "p" })).toBeInTheDocument();
+  });
+
+  it("honors the 200 ms close grace, and entering the card cancels the close", async () => {
+    vi.useFakeTimers();
+    const { container } = renderShell(<SessionSidebar {...hoverProps()} />);
+    const [a] = rows(container);
+
+    fireEvent.pointerEnter(a);
+    await act(async () => {
+      vi.advanceTimersByTime(350);
+    });
+    expect(screen.getByText("Row A", { selector: "p" })).toBeInTheDocument();
+
+    // Leave the row: the grace window keeps the card readable...
+    fireEvent.pointerLeave(a);
+    await act(async () => {
+      vi.advanceTimersByTime(199);
+    });
+    expect(screen.getByText("Row A", { selector: "p" })).toBeInTheDocument();
+    // ...and sweeping onto the card itself cancels the pending close
+    // (read-only per ADR-0127, but the pointer may rest there to read).
+    const card = screen.getByText("Data source").closest("[data-state=\"open\"]")!;
+    fireEvent.pointerEnter(card);
+    await act(async () => {
+      vi.advanceTimersByTime(500);
+    });
+    expect(screen.getByText("Row A", { selector: "p" })).toBeInTheDocument();
+    // Leaving the CARD schedules its own close (the row-leave guard cannot
+    // serve this path -- the row's leave already ran).
+    fireEvent.pointerLeave(card);
+    await act(async () => {
+      vi.advanceTimersByTime(200);
+    });
+    expect(screen.queryByText("Row A", { selector: "p" })).toBeNull();
+  });
+
+  it("closes the card when the pointer leaves the whole list (backstop)", async () => {
+    // A pointerleave lost to the pill's pointer-events toggling never
+    // reaches the row; the list-level leave is the final backstop.
+    vi.useFakeTimers();
+    const { container } = renderShell(<SessionSidebar {...hoverProps()} />);
+    const [a] = rows(container);
+    const list = container.querySelector(".session-list")!;
+
+    fireEvent.pointerEnter(a);
+    await act(async () => {
+      vi.advanceTimersByTime(350);
+    });
+    expect(screen.getByText("Row A", { selector: "p" })).toBeInTheDocument();
+    fireEvent.pointerLeave(list);
+    await act(async () => {
+      vi.advanceTimersByTime(200);
+    });
+    expect(screen.queryByText("Row A", { selector: "p" })).toBeNull();
+  });
+
+  it("ignores a stale leave from a row the pointer already left", async () => {
+    // After A -> B, a late leave of A must not clear B's pending open (the
+    // stale-key guard); B's card still opens on schedule.
+    vi.useFakeTimers();
+    const { container } = renderShell(<SessionSidebar {...hoverProps()} />);
+    const [a, b] = rows(container);
+
+    fireEvent.pointerEnter(a);
+    fireEvent.pointerLeave(a);
+    fireEvent.pointerEnter(b);
+    // Stale: the pointer's tracked row is B now.
+    fireEvent.pointerLeave(a);
+    await act(async () => {
+      vi.advanceTimersByTime(300);
+    });
+    expect(screen.getByText("Row B", { selector: "p" })).toBeInTheDocument();
+  });
+});
+
+// --- ADR-0127 (issue #1175): the archived section's render gating -------------
+
+describe("SessionSidebar archived-view gating (issue #1175)", () => {
+  it("renders the archived section only while showArchived is true, independent of the rows prop", () => {
+    // Component-contract guard: the section's visibility is the component's
+    // own gate on showArchived -- it must not depend on the caller keeping
+    // archivedSessions empty while hidden.
+    const archived: SessionMetadata = {
+      duck_path: "/x/arch.duck",
+      display_name: "Archived One",
+      last_modified_at: Date.now(),
+      source_summary: { first_source_name: null, source_count: 0, turn_count: 0 },
+      format_version: 1,
+      pinned: false,
+      archived: true,
+    };
+    const props = (showArchived: boolean) => ({
+      collapsed: false,
+      sessions: [] as SessionMetadata[],
+      openSessions: [] as OpenSession[],
+      activeSessionId: null,
+      disabled: false,
+      loadError: null,
+      grouping: "flat" as const,
+      onNew: () => {},
+      onOpenDuck: () => {},
+      onActivate: () => {},
+      onOpenPersisted: () => {},
+      onSwitchGrouping: () => {},
+      archivedSessions: [archived],
+      showArchived,
+      onToggleArchived: () => {},
+      onSetPinned: () => {},
+      onArchive: () => {},
+      onDeleteArchived: () => {},
+      onOpenSearch: () => {},
+      provider: null,
+      onOpenSettings: () => {},
+    });
+    const view = renderShell(<SessionSidebar {...props(false)} />);
+    // Rows are present in the props but the view is hidden: no section.
+    expect(view.container.querySelector("[data-section=\"archived\"]")).toBeNull();
+    expect(screen.queryByText("Archived One")).toBeNull();
+    // Flipping the toggle alone surfaces them (also pins the non-empty
+    // collection's section rule).
+    view.rerender(
+      <TooltipProvider>
+        <IntlProvider locale="en" messages={{}} onError={() => {}}>
+          <SessionSidebar {...props(true)} />
+        </IntlProvider>
+      </TooltipProvider>,
+    );
+    expect(view.container.querySelector("[data-section=\"archived\"]")).not.toBeNull();
+    expect(screen.getByText("Archived One")).toBeInTheDocument();
   });
 });

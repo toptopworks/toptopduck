@@ -360,5 +360,53 @@ describe("useSessionFileOps", () => {
       expect(refreshSessions).not.toHaveBeenCalled();
       expect(result.current.persistenceBusy).toBe(false);
     });
+
+    it("setArchived write-reject after a successful close: shell error, no refetch", async () => {
+      // The close succeeded (pane torn down), but the sidecar write failed:
+      // the reject surfaces and the list is NOT refetched -- the next epoch
+      // keeps the truth from disk instead of a half-archived UI state.
+      vi.mocked(setSessionArchived).mockRejectedValueOnce(new Error("io"));
+      const { result, unmountOpen, setShellError, refreshSessions } =
+        renderFileOps();
+      await act(async () => {
+        await result.current.setArchived("/x/a.duck", true, "s1");
+      });
+      expect(closeSessionAndWaitRelease).toHaveBeenCalledWith("s1");
+      expect(unmountOpen).toHaveBeenCalledWith("s1");
+      expect(setSessionArchived).toHaveBeenCalledWith("/x/a.duck", true);
+      expect(setShellError).toHaveBeenCalledTimes(1);
+      expect(refreshSessions).not.toHaveBeenCalled();
+      expect(result.current.persistenceBusy).toBe(false);
+    });
+
+    it("setArchived gates busy ONLY over the close wait -- the sidecar write runs ungated", async () => {
+      // The deliberate asymmetry (contrast deletePersisted, whose busy covers
+      // the whole op): a pending wait-release holds persistenceBusy, and the
+      // moment it resolves the busy window closes -- the pure sidecar write
+      // needs no wait.
+      let release!: () => void;
+      vi.mocked(closeSessionAndWaitRelease).mockImplementationOnce(
+        () =>
+          new Promise<void>((resolve) => {
+            release = resolve;
+          }),
+      );
+      const { result, unmountOpen } = renderFileOps();
+      let pending: Promise<void> | undefined;
+      act(() => {
+        pending = result.current.setArchived("/x/a.duck", true, "s1");
+      });
+      // During the wait: busy. The write has not started.
+      expect(result.current.persistenceBusy).toBe(true);
+      expect(setSessionArchived).not.toHaveBeenCalled();
+      await act(async () => {
+        release();
+        await pending;
+      });
+      expect(unmountOpen).toHaveBeenCalledWith("s1");
+      // After the wait: busy closed, and the write ran to completion.
+      expect(setSessionArchived).toHaveBeenCalledWith("/x/a.duck", true);
+      expect(result.current.persistenceBusy).toBe(false);
+    });
   });
 });

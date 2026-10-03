@@ -20,9 +20,11 @@ export interface UsePersistedSessionsDeps {
    *  so fmtError can localize a list_sessions reject at the shell layer. */
   intl: IntlShape;
   /** The archived view's visibility (ADR-0127 Decision 7, issue #1175). While
-   *  true the effect ALSO fetches listSessions({ includeArchived: true }) and
-   *  filters to the archived rows for `archivedSessions`; false skips that
-   *  fetch entirely. Never persisted -- the caller's state resets on startup. */
+   *  true the effect fetches listSessions({ includeArchived: true }) -- one
+   *  scan whose client-side partition feeds both `sessions` (unarchived) and
+   *  `archivedSessions`; false fetches the default (trimmed) response, whose
+   *  partition is empty. Never persisted -- the caller's state resets on
+   *  startup. */
   includeArchived: boolean;
 }
 
@@ -35,10 +37,10 @@ export function usePersistedSessions({
   includeArchived,
 }: UsePersistedSessionsDeps): {
   sessions: SessionMetadata[];
-  /** The archived rows (ADR-0127): only fetched while the archived view is
-   *  visible, empty otherwise. `sessions` NEVER contains archived rows -- the
-   *  default response excludes them, so tray / search consumers stay blind to
-   *  the organization state. */
+  /** The archived rows (ADR-0127): only the includeArchived scan carries
+   *  them, so this is empty while the view is hidden. `sessions` NEVER
+   *  contains archived rows -- the partition below excludes them, so tray /
+   *  search consumers stay blind to the organization state. */
   archivedSessions: SessionMetadata[];
   sessionsError: string | null;
   refreshSessions: () => void;
@@ -53,15 +55,21 @@ export function usePersistedSessions({
 
   // ADR-0061 cold start: load list_sessions on mount (and after a save/delete/
   // rename bumps sessionsEpoch). NOT createSession -- zero instances until the
-  // user acts. The archived fetch (ADR-0127) is a SECOND scan -- only while
-  // the archived view is visible -- so the default list (tray / search source)
-  // never sees archived rows.
+  // user acts. ADR-0127 (issue #1175): while the archived view is visible the
+  // ONE includeArchived scan feeds both lists -- the Rust scan's only
+  // difference is the !include_archived retain, so the response minus its
+  // archived tail is exactly the default list, partitioned client-side. One
+  // fetch also means one reject surface: a failure keeps BOTH lists at their
+  // prior values (a just-archived session stays visible in the main list)
+  // and surfaces once on the shared loadError line -- no second settle order
+  // to race a set against a clear.
   useEffect(() => {
     let cancelled = false;
-    listSessions()
+    listSessions(includeArchived ? { includeArchived: true } : undefined)
       .then((list) => {
         if (cancelled) return;
-        setSessions(list);
+        setSessions(list.filter((m) => !m.archived));
+        setArchivedSessions(list.filter((m) => m.archived));
         setSessionsError(null);
       })
       .catch((e) => {
@@ -76,22 +84,6 @@ export function usePersistedSessions({
         }
         setSessionsError(fmtError(e, intl));
       });
-    if (includeArchived) {
-      listSessions({ includeArchived: true })
-        .then((list) => {
-          if (cancelled) return;
-          setArchivedSessions(list.filter((m) => m.archived));
-        })
-        .catch((e) => {
-          // Same surface as the main list reject: the archived section shares
-          // the sidebar's loadError line, not a second error home.
-          if (!cancelled) setSessionsError(fmtError(e, intl));
-        });
-    }
-    // Hiding the view does NOT clear archivedSessions here: the render side
-    // gates on the visibility flag already, and re-showing re-fetches (the
-    // flag is an effect dep) -- a sync clear would just trip
-    // react-hooks/set-state-in-effect for no observable gain.
     return () => {
       cancelled = true;
     };

@@ -117,9 +117,12 @@ interface SessionSidebarProps {
    *  landing non-Failed, a close, or a pane-level cache reset. Keyed by
    *  runtime sid, so only OPEN entries match. */
   turnFailedSids?: ReadonlySet<string>;
-  /** The archived rows (ADR-0127 Decision 7, issue #1175): only fetched while
-   *  `showArchived` is true (the caller's usePersistedSessions gates the
-   *  includeArchived fetch), so this is [] whenever the view is hidden. */
+  /** The archived rows (ADR-0127 Decision 7, issue #1175): the caller's
+   *  usePersistedSessions partitions the includeArchived scan into this
+   *  while the view is visible; the hidden scan carries no archived rows,
+   *  so this is [] whenever the view is hidden. The component additionally
+   *  gates rendering on `showArchived` -- the props contract does not
+   *  depend on the caller keeping the two in sync. */
   archivedSessions: SessionMetadata[];
   /** The archived view's visibility. NOT persisted (Decision 7: the peek
    *  semantics reset it to hidden on every startup). */
@@ -139,8 +142,10 @@ interface SessionSidebarProps {
    *  archived row is never open -- open-is-unarchive, Decision 4). */
   onArchive: (path: string, archived: boolean, sid: string | null) => void;
   /** Delete an archived row (ADR-0127 Decision 6): routes through the same
-   *  strong-confirm + wait-release contract as the header-menu delete; the
-   *  confirm dialog lives in this component, the mutation in the caller. */
+   *  deletePersisted contract as the header-menu delete -- always the pure
+   *  path variant here, since an archived row never carries a sid
+   *  (open-is-unarchive); the confirm dialog lives in this component, the
+   *  mutation in the caller. */
   onDeleteArchived: (path: string) => void;
   // Open the Ctrl/⌘+K search modal (ADR-0072, issue #252). The
   // shell owns the open state so the global keydown + this button share one
@@ -204,14 +209,18 @@ export function SessionSidebar({
   // not per row, so at most one metadata card exists at any moment -- moving
   // to a new row swaps the card (unmounting the old portal) instead of
   // stacking fading ones behind the pointer. A per-row boolean cannot
-  // guarantee that: a pointerleave lost to the pill's pointer-events
-  // toggling strands that row's card open forever (verified live via CDP);
-  // here a lost leave self-heals the moment any other row is entered, and
-  // the list-level leave is the final backstop. Delays keep the old
-  // posture: 300 ms to open (sweep-proof), 200 ms grace on leave (cancelled
-  // by entering the card itself -- read-only per ADR-0127, but the pointer
-  // may still sweep onto it to read).
-  const [hoverKey, setHoverKey] = useState<string | null>(null);
+  // guarantee that: a pointerleave lost to the pill's pointer-events toggling
+  // strands that row's card open forever; here a lost leave self-heals the
+  // moment any other row is entered, and the list-level leave is the final
+  // backstop. Delays keep the old posture: 300 ms to open (sweep-proof),
+  // 200 ms grace on leave (cancelled by entering the card itself -- read-only
+  // per ADR-0127, but the pointer may still sweep onto it to read).
+  //
+  // hoverKey rides a ref, not state: render consumes only cardKey (the shown
+  // card), while hoverKey feeds the stale-leave guard and the list backstop
+  // -- handler-only reads. State here would re-render every row at
+  // pointer-crossing frequency with no visible change.
+  const hoverKeyRef = useRef<string | null>(null);
   const [cardKey, setCardKey] = useState<string | null>(null);
   const openTimer = useRef<number | undefined>(undefined);
   const closeTimer = useRef<number | undefined>(undefined);
@@ -221,7 +230,7 @@ export function SessionSidebar({
   };
   const rowHoverEnter = (key: string) => {
     clearHoverTimers();
-    setHoverKey(key);
+    hoverKeyRef.current = key;
     // Entering a DIFFERENT row retires the shown card immediately. The
     // 200 ms close grace belongs to the row->card read path only; clearing
     // the previous row's leave timer without this kept the OLD card on
@@ -234,9 +243,9 @@ export function SessionSidebar({
   };
   const rowHoverLeave = (key: string) => {
     // A stale leave from a row the pointer already left is ignored.
-    if (hoverKey !== key) return;
+    if (hoverKeyRef.current !== key) return;
     clearHoverTimers();
-    setHoverKey(null);
+    hoverKeyRef.current = null;
     closeTimer.current = window.setTimeout(() => setCardKey(null), 200);
   };
   const cardHoverEnter = () => window.clearTimeout(closeTimer.current);
@@ -361,6 +370,7 @@ export function SessionSidebar({
                       id: "sidebar.row.restore",
                       defaultMessage: "Restore",
                     })}
+                    disabled={disabled}
                     onClick={() => onArchive(entry.path, false, null)}
                   >
                     <ArchiveRestore className="size-3.5" aria-hidden />
@@ -370,6 +380,7 @@ export function SessionSidebar({
                       id: "sidebar.row.delete",
                       defaultMessage: "Delete",
                     })}
+                    disabled={disabled}
                     onClick={() => setDeleteTarget({ path: entry.path, name: entry.name })}
                   >
                     <Trash2 className="size-3.5" aria-hidden />
@@ -383,6 +394,7 @@ export function SessionSidebar({
                         ? intl.formatMessage({ id: "sidebar.row.unpin", defaultMessage: "Unpin" })
                         : intl.formatMessage({ id: "sidebar.row.pin", defaultMessage: "Pin" })
                     }
+                    disabled={disabled}
                     onClick={() => onSetPinned(entry.path, !entry.pinned)}
                   >
                     {entry.pinned ? (
@@ -396,6 +408,7 @@ export function SessionSidebar({
                       id: "sidebar.row.archive",
                       defaultMessage: "Archive",
                     })}
+                    disabled={disabled}
                     onClick={() => onArchive(entry.path, true, entry.sid)}
                   >
                     <Archive className="size-3.5" aria-hidden />
@@ -487,7 +500,7 @@ export function SessionSidebar({
       <ul
         className="session-list"
         onPointerLeave={() => {
-          if (hoverKey !== null) rowHoverLeave(hoverKey);
+          if (hoverKeyRef.current !== null) rowHoverLeave(hoverKeyRef.current);
         }}
       >
         {sections.map((section, i) => renderSection(section, i === 0))}
@@ -677,10 +690,15 @@ function GroupingToggle({
 // button, issue #1005).
 function RowActionButton({
   label,
+  disabled,
   onClick,
   children,
 }: {
   label: string;
+  /** Busy parity with every sibling control (the WorkingSetList posture):
+   *  the actions are mutations too -- during a long archive-close wait a
+   *  repeat click would double-fire the close on an already-closing sid. */
+  disabled: boolean;
   onClick: () => void;
   children: ReactNode;
 }) {
@@ -689,6 +707,7 @@ function RowActionButton({
       <TooltipTrigger asChild>
         <button
           type="button"
+          disabled={disabled}
           className={cn(
             // No cursor-pointer: the pill's icons keep the default arrow
             // (WorkingSetList's ICON_BUTTON_BASE posture -- on the accent
@@ -822,9 +841,9 @@ function SidebarRow({
    *  section renderer: pin/unpin + archive on main rows, restore + delete
    *  on archived rows. */
   actions: ReactNode;
-  /** Controlled metadata-card visibility (issue #1175): parent-owned
-   *  single-flight -- at most one card exists across the list, so sweeping
-   *  rows swaps cards instead of stacking fading ones. */
+  /** Controlled metadata-card visibility (issue #1175): driven by the
+   *  parent-owned single-flight machine -- see the state block in
+   *  SessionSidebar for the transition contract. */
   cardOpen: boolean;
   onHoverEnter: () => void;
   onHoverLeave: () => void;
@@ -835,15 +854,14 @@ function SidebarRow({
   onCardLeave: () => void;
 }) {
   const intl = useIntl();
-  // Controlled HoverCard open state (issue #1175): the row owns the boolean
-  // instead of Radix's uncontrolled trigger state machine. Sweeping the
-  // pointer down the pills toggles a pill's pointer-events as each row's
-  // :hover flips, which desyncs Radix's trigger/content bookkeeping and
-  // strands stuck-open metadata cards (verified live via CDP); a controlled
-  // open cannot strand. The hand-rolled delays keep the old posture --
-  // 300 ms to open, 200 ms grace on leave, cancelled by entering the card
-  // itself (the card is read-only per ADR-0127, but the user may still
-  // sweep onto it to read, and the grace window keeps that path alive).
+  // Controlled HoverCard open state (issue #1175): the parent owns the
+  // boolean instead of Radix's uncontrolled trigger state machine. Sweeping
+  // the pointer down the pills toggles a pill's pointer-events as each
+  // row's :hover flips, which desyncs Radix's trigger/content bookkeeping
+  // and strands stuck-open metadata cards; a controlled open cannot strand.
+  // The delays (300 ms open dwell, 200 ms close grace, card-enter cancel)
+  // live in the parent's single-flight machine -- see the state block there
+  // for the full transition contract.
 
   // ADR-0093 (issue #511): the MessageSquare leading icon + the inset shadow
   // left bar are retired. Active = accent background only; open = status dot
@@ -854,10 +872,26 @@ function SidebarRow({
   //
   // ADR-0093 slice 3 (issue #513): the row is wrapped in a HoverCard so hover
   // or keyboard focus surfaces the full metadata (title + source summary +
-  // turn count) in a fixed-width card positioned to the right. The
-  // openDelay prevents flicker when the pointer sweeps across the list.
+  // turn count) in a fixed-width card positioned to the right. Sweep flicker
+  // is prevented by the parent machine's 300 ms open dwell (below), not by
+  // Radix's openDelay, which is pinned to 0 under the controlled open.
   return (
-    <HoverCard open={cardOpen} openDelay={0} closeDelay={0}>
+    <HoverCard
+      open={cardOpen}
+      openDelay={0}
+      closeDelay={0}
+      onOpenChange={(open) => {
+        // Bridge Radix's own open/close intents into the parent machine:
+        // Radix wires onFocus/onBlur on the trigger, and under a controlled
+        // open with no change handler that intent is lost -- keyboard focus
+        // is the only remaining path to the card for a non-pointer user.
+        // Pointer-driven intents re-fire what the row-level handlers already
+        // did; both paths are idempotent (timers re-armed, stale-leave
+        // guarded).
+        if (open) onHoverEnter();
+        else onHoverLeave();
+      }}
+    >
       <HoverCardTrigger asChild>
         <li
           onPointerEnter={onHoverEnter}
@@ -1033,9 +1067,10 @@ function SidebarRowHoverContent({
 // destructive Action passes buttonVariants({ variant: "destructive" }); twMerge
 // (in cn) lets it override AlertDialogAction's built-in default variant, reusing
 // the destructive look without forking the copy-in component.
-// Exported for component-level testing (issue #111); the dialog is rendered only
-// by SessionHeaderMenu in production, but the destructive-semantics + ESC routing
-// contract is verified in isolation.
+// Exported for component-level testing (issue #111); the dialog is rendered
+// by SessionHeaderMenu and by the sidebar's archived-section delete (ADR-0127
+// Decision 6), but the destructive-semantics + ESC routing contract is
+// verified in isolation.
 export function DeleteSessionDialog({
   name,
   onCancel,

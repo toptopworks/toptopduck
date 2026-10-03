@@ -130,7 +130,7 @@ describe("usePersistedSessions", () => {
   });
 });
 
-// --- ADR-0127 (issue #1175): the archived view's second fetch ----------------
+// --- ADR-0127 (issue #1175): the archived view's includeArchived scan --------
 
 describe("usePersistedSessions archived fetch (ADR-0127, issue #1175)", () => {
   beforeEach(() => {
@@ -138,30 +138,31 @@ describe("usePersistedSessions archived fetch (ADR-0127, issue #1175)", () => {
   });
 
   it("does not fetch archived rows while the view is hidden", async () => {
-    // The hidden view skips the second scan entirely: includeArchived stays
-    // false and archivedSessions is empty (no stale rows from a prior peek).
-    vi.mocked(listSessions).mockResolvedValue([]);
+    // The hidden view uses the default (trimmed) scan: no includeArchived
+    // argument, and the server contract trims the archived tail, so the
+    // partition lands with an empty archived list.
+    vi.mocked(listSessions).mockResolvedValue([SESSION_A]);
     const { result } = renderHook(() =>
       usePersistedSessions({ intl, includeArchived: false }),
     );
     await waitFor(() => expect(listSessions).toHaveBeenCalledTimes(1));
     expect(result.current.archivedSessions).toEqual([]);
+    expect(result.current.sessions.map((m) => m.duck_path)).toEqual(["/x/a.duck"]);
     expect(vi.mocked(listSessions).mock.calls[0][0]).toBeUndefined();
   });
 
-  it("fetches and filters the archived rows while the view is visible", async () => {
-    // The includeArchived response carries BOTH populations (pinned block +
-    // unarchived + archived tail); the hook filters to the archived tail so
-    // the section's rows are exactly the hidden sessions, while the default
-    // list (tray / search source) never sees an archived row.
+  it("partitions the single includeArchived scan into both lists", async () => {
+    // ONE scan feeds both lists: the includeArchived response carries the
+    // unarchived population PLUS the archived tail, and the hook's
+    // client-side partition splits them -- the section's rows are exactly
+    // the hidden sessions, while `sessions` (tray / search source) never
+    // sees an archived row.
     const ARCH: SessionMetadata = {
       ...SESSION_A,
       duck_path: "/x/arch.duck",
       archived: true,
     };
-    vi.mocked(listSessions).mockImplementation(async (opts) =>
-      opts?.includeArchived ? [SESSION_A, ARCH] : [SESSION_A],
-    );
+    vi.mocked(listSessions).mockResolvedValue([SESSION_A, ARCH]);
     const { result } = renderHook(() =>
       usePersistedSessions({ intl, includeArchived: true }),
     );
@@ -171,5 +172,39 @@ describe("usePersistedSessions archived fetch (ADR-0127, issue #1175)", () => {
       ]),
     );
     expect(result.current.sessions.map((m) => m.duck_path)).toEqual(["/x/a.duck"]);
+    // A single call, parameterized -- no second scan for the archived tail.
+    expect(listSessions).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(listSessions).mock.calls[0][0]).toEqual({
+      includeArchived: true,
+    });
+  });
+
+  it("a reject keeps both lists at their prior values and surfaces once", async () => {
+    // One fetch, one reject surface: after a successful partition, a failing
+    // refresh keeps BOTH lists (a just-archived session stays visible in the
+    // main list instead of vanishing from both sections) and raises the
+    // single shared error -- no second settle order to race a clear against.
+    const ARCH: SessionMetadata = {
+      ...SESSION_A,
+      duck_path: "/x/arch.duck",
+      archived: true,
+    };
+    vi.mocked(listSessions).mockResolvedValueOnce([SESSION_A, ARCH]);
+    const { result } = renderHook(() =>
+      usePersistedSessions({ intl, includeArchived: true }),
+    );
+    await waitFor(() =>
+      expect(result.current.archivedSessions.map((m) => m.duck_path)).toEqual([
+        "/x/arch.duck",
+      ]),
+    );
+    vi.mocked(listSessions).mockRejectedValueOnce(new Error("boom"));
+    act(() => result.current.refreshSessions());
+    await waitFor(() => expect(result.current.sessionsError).not.toBeNull());
+    // Both partitions survive the failed refresh untouched.
+    expect(result.current.sessions.map((m) => m.duck_path)).toEqual(["/x/a.duck"]);
+    expect(result.current.archivedSessions.map((m) => m.duck_path)).toEqual([
+      "/x/arch.duck",
+    ]);
   });
 });
