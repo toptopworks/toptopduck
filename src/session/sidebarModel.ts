@@ -13,7 +13,7 @@
 // Grouping mode (ADR-0072, issue #251): the user toggles between `flat` (a
 // single Recent group sorted by mtime descending, the default) and `time` (the
 // ADR-0060 Chat-style Today/Yesterday/Previous 7 days/Older buckets). The mode
-// rides the shell-chrome prefs; buildSidebarGroups takes it as a parameter so
+// rides the shell-chrome prefs; buildSidebarModel takes it as a parameter so
 // the component is a thin caller.
 
 import type { SessionMetadata } from "../types/session";
@@ -82,6 +82,9 @@ export interface SidebarEntry {
   path: string;
   /** Whether this entry is the currently active session. */
   active: boolean;
+  /** Shell-layer pinned flag (ADR-0127): the row floats to the pinned
+   *  section. False for open-not-yet-persisted and archived rows. */
+  pinned: boolean;
   /** First source display name for the hover card (null = no sources yet). */
   firstSourceName: string | null;
   /** Total loaded source count (ADR-0093, issue #513: hover-card metadata). */
@@ -101,7 +104,7 @@ export type SearchEntry = SidebarEntry;
 /** A rendered sidebar group: heading kind + its entries (already sorted). The
  *  `mode` discriminant makes the kind/mode correspondence a type-level
  *  invariant -- a flat-mode group only ever carries kind="recent"; a time-mode
- *  group only carries a TimeGroupKind. buildSidebarGroups is the sole
+ *  group only carries a TimeGroupKind. buildSidebarModel is the sole
  *  constructor; consumers narrow on `mode` when they need the guarantee. */
 export type SidebarGroup =
   | { mode: "flat"; kind: "recent"; entries: SidebarEntry[] }
@@ -157,7 +160,7 @@ export function formatLastModified(lastModifiedAt: number, now: number): LastMod
 
 /** Index open sessions by their bound .duck path so a persisted row can look up
  *  its runtime binding in one read. Every session has a path since ADR-0089.
- *  Shared by buildSearchEntries + buildSidebarGroups. */
+ *  Shared by buildSearchEntries + buildSidebarModel. */
 function indexOpenByPath(open: OpenSession[]): Map<string, OpenSession> {
   const byPath = new Map<string, OpenSession>();
   for (const o of open) {
@@ -182,11 +185,21 @@ function persistedEntry(
     sid: bound?.sid ?? null,
     path: m.duck_path,
     active: bound !== null && bound.sid === activeSessionId,
+    pinned: m.pinned,
     firstSourceName: m.source_summary.first_source_name,
     sourceCount: m.source_summary.source_count,
     turnCount: m.source_summary.turn_count,
     lastModifiedAt: m.last_modified_at,
   };
+}
+
+/** Build the archived section's rows (ADR-0127 Decision 7, issue #1175).
+ *  Metadata-only: open-is-unarchive (Decision 4) means an archived row never
+ *  carries a runtime sid, so the open-set merge is statically null and the
+ *  row is never active. Server order (the includeArchived response's mtime
+ *  desc tail) is preserved verbatim. */
+export function buildArchivedEntries(archived: SessionMetadata[]): SidebarEntry[] {
+  return archived.map((m) => persistedEntry(m, null, null));
 }
 
 /** Sort comparator: last-modified descending, name ascending as a deterministic
@@ -199,7 +212,7 @@ const BY_MTIME_DESC = (a: SidebarEntry, b: SidebarEntry): number =>
  *  modal (ADR-0072, issue #252). Pure in
  *  (persisted, open, activeSessionId, query): the caller supplies the raw
  *  `list_sessions` result + the open set + the active id + the query string;
- *  this function does the rest. Kept alongside `buildSidebarGroups` because the
+ *  this function does the rest. Kept alongside `buildSidebarModel` because the
  *  per-row shape + the persisted/open merge contract are shared with the sidebar
  *  (a row that is open in this shell carries its runtime sid, so the modal can
  *  activate-by-sid instead of re-resuming).
@@ -215,9 +228,9 @@ const BY_MTIME_DESC = (a: SidebarEntry, b: SidebarEntry): number =>
  *  name (via searchMatcher). An empty / whitespace-only query matches
  *  everything, truncated to the newest MAX_SEARCH_RESULTS -- the modal is a
  *  jump surface, not a browser. Sorted mtime desc with a name tiebreaker for
- *  deterministic rendering, matching `buildSidebarGroups`.
+ *  deterministic rendering, matching `buildSidebarModel`.
  *
- *  Unlike `buildSidebarGroups`, no `now` parameter: the modal is a single flat
+ *  Unlike `buildSidebarModel`, no `now` parameter: the modal is a single flat
  *  list (no time buckets) and each row's dynamic time label is resolved in
  *  the component via `formatLastModified` (a React-layer concern -- it needs
  *  the localized heading text). */
@@ -242,6 +255,17 @@ export function buildSearchEntries(
   return entries.slice(0, MAX_SEARCH_RESULTS);
 }
 
+/** The sidebar's renderable model (ADR-0127, issue #1175): the pinned section
+ *  rides ABOVE the grouped body in BOTH grouping modes. `pinned` holds the
+ *  pinned rows in SERVER order (the includeArchived-less response's pinned
+ *  block = sidecar array position, the MRU order -- NOT mtime), preserved
+ *  verbatim; `groups` is the unpinned remainder. Either collection may be
+ *  empty; an empty collection renders no section. */
+export interface SidebarModel {
+  pinned: SidebarEntry[];
+  groups: SidebarGroup[];
+}
+
 /** Build the merged, grouped, last-modified-descending sidebar model. Pure in
  *  (persisted, open, activeSessionId, now, grouping) -- the component supplies
  *  the raw list_sessions result + the open set + the user's grouping choice;
@@ -252,14 +276,14 @@ export function buildSearchEntries(
  *  Grouping (ADR-0072, issue #251): `flat` -> a single `recent` group sorted by
  *  mtime descending (the "Recent" title); `time` -> the ADR-0060 Chat-style
  *  Today / Yesterday / Previous 7 days / Older buckets. An empty sidebar yields
- *  an empty group list in either mode. */
-export function buildSidebarGroups(
+ *  an empty model in either mode. */
+export function buildSidebarModel(
   persisted: SessionMetadata[],
   open: OpenSession[],
   activeSessionId: string | null,
   now: number,
   grouping: SidebarGrouping,
-): SidebarGroup[] {
+): SidebarModel {
   const openByPath = indexOpenByPath(open);
   const persistedPaths = new Set(persisted.map((m) => m.duck_path));
 
@@ -284,6 +308,7 @@ export function buildSidebarGroups(
       sid: o.sid,
       path: o.path,
       active: o.sid === activeSessionId,
+      pinned: false,
       firstSourceName: null,
       sourceCount: 0,
       turnCount: 0,
@@ -291,15 +316,23 @@ export function buildSidebarGroups(
     });
   }
 
-  // No entries -> no groups (ADR-0072: an empty sidebar renders no group title,
-  // so the grouping toggle's hover affordance is hidden too).
-  if (entries.length === 0) return [];
+  // No entries -> no model (ADR-0072, recalibrated by ADR-0127: the sidebar
+  // still renders the chrome row on a bare title row, so the grouping +
+  // archived toggles stay reachable on an empty sidebar).
+  if (entries.length === 0) return { pinned: [], groups: [] };
 
-  entries.sort(BY_MTIME_DESC);
+  // Pinned rows leave the grouped body BEFORE the mtime sort: their display
+  // order is the server's pinned-block order (sidecar array position, the MRU
+  // order, ADR-0127 Decision 5), which BY_MTIME_DESC would destroy.
+  const pinned = entries.filter((e) => e.pinned);
+  const rest = entries.filter((e) => !e.pinned);
+  if (rest.length === 0) return { pinned, groups: [] };
+
+  rest.sort(BY_MTIME_DESC);
 
   if (grouping === "flat") {
     // ADR-0072 flat mode: a single Recent group, already sorted by mtime desc.
-    return [{ mode: "flat", kind: "recent", entries }];
+    return { pinned, groups: [{ mode: "flat", kind: "recent", entries: rest }] };
   }
 
   if (grouping === "time") {
@@ -307,14 +340,14 @@ export function buildSidebarGroups(
     // Older, each omitted when empty.
     const groups: SidebarGroup[] = [];
     for (const kind of ["today", "yesterday", "last7", "older"] as const) {
-      const groupEntries = entries.filter(
+      const groupEntries = rest.filter(
         (e) => timeGroupKind(e.lastModifiedAt, now) === kind,
       );
       if (groupEntries.length > 0) {
         groups.push({ mode: "time", kind, entries: groupEntries });
       }
     }
-    return groups;
+    return { pinned, groups };
   }
 
   // Exhaustive guard: a future third SidebarGrouping variant must add a branch

@@ -24,6 +24,8 @@ vi.mock("../../api", async (importOriginal) => {
     getSessionName: vi.fn(async () => ""),
     renamePersistedSession: vi.fn(async () => {}),
     renameSession: vi.fn(async () => ""),
+    setSessionArchived: vi.fn(async () => {}),
+    setSessionPinned: vi.fn(async () => {}),
   };
 });
 
@@ -44,6 +46,8 @@ import {
   getSessionName,
   renamePersistedSession,
   renameSession,
+  setSessionArchived,
+  setSessionPinned,
 } from "../../api";
 import { open as openDialog, save as saveDialog } from "@tauri-apps/plugin-dialog";
 import { log } from "../../lib/log";
@@ -284,5 +288,125 @@ describe("useSessionFileOps", () => {
     expect(deleteReject.setShellError).toHaveBeenCalledTimes(1);
     expect(deleteReject.refreshSessions).not.toHaveBeenCalled();
     expect(deleteReject.result.current.persistenceBusy).toBe(false);
+  });
+
+  // --- ADR-0127 (issue #1175): pin / archive organization writes -------------
+
+  describe("setPinned / setArchived (ADR-0127, issue #1175)", () => {
+    it("setPinned: success refreshes; a reject surfaces on the shell error without a refresh", async () => {
+      const ok = renderFileOps();
+      await act(async () => {
+        await ok.result.current.setPinned("/x/a.duck", true);
+      });
+      expect(setSessionPinned).toHaveBeenCalledWith("/x/a.duck", true);
+      expect(ok.refreshSessions).toHaveBeenCalledTimes(1);
+      expect(ok.setShellError).not.toHaveBeenCalled();
+      // A pure sidecar write takes NO persistenceBusy wait (contrast delete).
+      expect(ok.result.current.persistenceBusy).toBe(false);
+
+      vi.mocked(setSessionPinned).mockRejectedValueOnce(new Error("io"));
+      const bad = renderFileOps();
+      await act(async () => {
+        await bad.result.current.setPinned("/x/a.duck", false);
+      });
+      expect(bad.setShellError).toHaveBeenCalledTimes(1);
+      expect(bad.refreshSessions).not.toHaveBeenCalled();
+    });
+
+    it("setArchived restore: pure sidecar path -- no close, no busy", async () => {
+      const { result, unmountOpen, refreshSessions } = renderFileOps();
+      await act(async () => {
+        await result.current.setArchived("/x/a.duck", false, null);
+      });
+      expect(setSessionArchived).toHaveBeenCalledWith("/x/a.duck", false);
+      expect(closeSessionAndWaitRelease).not.toHaveBeenCalled();
+      expect(unmountOpen).not.toHaveBeenCalled();
+      expect(refreshSessions).toHaveBeenCalledTimes(1);
+      expect(result.current.persistenceBusy).toBe(false);
+    });
+
+    it("setArchived on an OPEN session closes it first via wait-release, then writes (Decision 6 delete contract)", async () => {
+      const { result, unmountOpen, refreshSessions } = renderFileOps();
+      await act(async () => {
+        await result.current.setArchived("/x/a.duck", true, "s1");
+      });
+      // Ordering mirrors deletePersisted: wait-release resolves, THEN the
+      // pane tears down, THEN the sidecar write, THEN the refetch.
+      expect(closeSessionAndWaitRelease).toHaveBeenCalledWith("s1");
+      expect(unmountOpen).toHaveBeenCalledWith("s1");
+      expect(
+        vi.mocked(closeSessionAndWaitRelease).mock.invocationCallOrder[0],
+      ).toBeLessThan(unmountOpen.mock.invocationCallOrder[0]);
+      expect(unmountOpen.mock.invocationCallOrder[0]).toBeLessThan(
+        vi.mocked(setSessionArchived).mock.invocationCallOrder[0],
+      );
+      expect(refreshSessions).toHaveBeenCalledTimes(1);
+      expect(result.current.persistenceBusy).toBe(false);
+    });
+
+    it("setArchived wait-reject: falls back cold (unmount + shell error), no archive write", async () => {
+      vi.mocked(closeSessionAndWaitRelease).mockRejectedValueOnce(
+        new Error("timeout"),
+      );
+      const { result, unmountOpen, setShellError, refreshSessions } =
+        renderFileOps();
+      await act(async () => {
+        await result.current.setArchived("/x/a.duck", true, "s1");
+      });
+      expect(unmountOpen).toHaveBeenCalledWith("s1");
+      expect(setShellError).toHaveBeenCalledTimes(1);
+      // The session was NOT archived -- the row survives for a retry.
+      expect(setSessionArchived).not.toHaveBeenCalled();
+      expect(refreshSessions).not.toHaveBeenCalled();
+      expect(result.current.persistenceBusy).toBe(false);
+    });
+
+    it("setArchived write-reject after a successful close: shell error, no refetch", async () => {
+      // The close succeeded (pane torn down), but the sidecar write failed:
+      // the reject surfaces and the list is NOT refetched -- the next epoch
+      // keeps the truth from disk instead of a half-archived UI state.
+      vi.mocked(setSessionArchived).mockRejectedValueOnce(new Error("io"));
+      const { result, unmountOpen, setShellError, refreshSessions } =
+        renderFileOps();
+      await act(async () => {
+        await result.current.setArchived("/x/a.duck", true, "s1");
+      });
+      expect(closeSessionAndWaitRelease).toHaveBeenCalledWith("s1");
+      expect(unmountOpen).toHaveBeenCalledWith("s1");
+      expect(setSessionArchived).toHaveBeenCalledWith("/x/a.duck", true);
+      expect(setShellError).toHaveBeenCalledTimes(1);
+      expect(refreshSessions).not.toHaveBeenCalled();
+      expect(result.current.persistenceBusy).toBe(false);
+    });
+
+    it("setArchived gates busy ONLY over the close wait -- the sidecar write runs ungated", async () => {
+      // The deliberate asymmetry (contrast deletePersisted, whose busy covers
+      // the whole op): a pending wait-release holds persistenceBusy, and the
+      // moment it resolves the busy window closes -- the pure sidecar write
+      // needs no wait.
+      let release!: () => void;
+      vi.mocked(closeSessionAndWaitRelease).mockImplementationOnce(
+        () =>
+          new Promise<void>((resolve) => {
+            release = resolve;
+          }),
+      );
+      const { result, unmountOpen } = renderFileOps();
+      let pending: Promise<void> | undefined;
+      act(() => {
+        pending = result.current.setArchived("/x/a.duck", true, "s1");
+      });
+      // During the wait: busy. The write has not started.
+      expect(result.current.persistenceBusy).toBe(true);
+      expect(setSessionArchived).not.toHaveBeenCalled();
+      await act(async () => {
+        release();
+        await pending;
+      });
+      expect(unmountOpen).toHaveBeenCalledWith("s1");
+      // After the wait: busy closed, and the write ran to completion.
+      expect(setSessionArchived).toHaveBeenCalledWith("/x/a.duck", true);
+      expect(result.current.persistenceBusy).toBe(false);
+    });
   });
 });

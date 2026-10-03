@@ -269,9 +269,12 @@ export default function App() {
   // useShellSessions also takes the QueryClient seam (ADR-0051/0055 cache drop
   // on unmount) + refreshSessions (save/delete/rename re-fetch) + setShellError
   // (shell-layer AppError surface, issue #194).
-  const { sessions, sessionsError, refreshSessions } = usePersistedSessions({
-    intl,
-  });
+  // showArchived (ADR-0127 Decision 7, issue #1175): the archived view's
+  // visibility. Deliberately NOT persisted -- every startup resets the
+  // archived view to hidden (the peek semantics), so plain useState.
+  const [showArchived, setShowArchived] = useState(false);
+  const { sessions, archivedSessions, sessionsError, refreshSessions } =
+    usePersistedSessions({ intl, includeArchived: showArchived });
   const {
     openSessions,
     activeSessionId,
@@ -289,6 +292,8 @@ export default function App() {
     handleOpenDuck,
     handleExportSession,
     syncSessionName,
+    setPinned,
+    setArchived,
   } = useShellSessions({ intl, queryClient, refreshSessions, setShellError });
 
   // System tray events (issue #1140, ADR-0125): routes the tray menu's
@@ -966,6 +971,13 @@ export default function App() {
                   onOpenPersisted={(path, name) =>
                     void openPersisted(path, name)}
                   onSwitchGrouping={switchSidebarGrouping}
+                  archivedSessions={archivedSessions}
+                  showArchived={showArchived}
+                  onToggleArchived={() => setShowArchived((v) => !v)}
+                  onSetPinned={(path, pinned) => void setPinned(path, pinned)}
+                  onArchive={(path, archived, sid) =>
+                    void setArchived(path, archived, sid)}
+                  onDeleteArchived={(path) => void deletePersisted(path, null)}
                   onOpenSearch={openSearch}
                   provider={appConfig?.provider ?? null}
                   onOpenSettings={() => openSettings()}

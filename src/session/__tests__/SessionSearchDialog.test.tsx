@@ -28,6 +28,8 @@ function meta(
       turn_count: 1,
     },
     format_version: opts.format_version ?? 2,
+    pinned: opts.pinned ?? false,
+    archived: opts.archived ?? false,
   };
 }
 

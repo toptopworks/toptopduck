@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { act, fireEvent, render, screen } from "@testing-library/react";
+import { act, fireEvent, render, screen, within } from "@testing-library/react";
 import { IntlProvider } from "react-intl";
 import type { ReactElement } from "react";
 import { DeleteSessionDialog, SessionSidebar } from "../SessionSidebar";
@@ -23,7 +23,7 @@ function renderShell(ui: ReactElement) {
 }
 
 // Two never-saved open sessions: the active one carries .active.open; the other
-// carries .open:not(.active). Both land in the Today group (buildSidebarGroups
+// carries .open:not(.active). Both land in the Today group (buildSidebarModel
 // stamps `now` for unsaved sessions).
 function twoOpenSessions(): OpenSession[] {
   return [
@@ -48,15 +48,23 @@ describe("SessionSidebar shell-skeleton visuals (ADR-0067, issue #171)", () => {
         onOpenPersisted={() => {}}
         grouping="flat"
         onSwitchGrouping={() => {}}
+        archivedSessions={[]}
+        showArchived={false}
+        onToggleArchived={() => {}}
+        onSetPinned={() => {}}
+        onArchive={() => {}}
+        onDeleteArchived={() => {}}
         onOpenSearch={() => {}}
         provider={null}
         onOpenSettings={() => {}}
       />,
     );
+    const activeLi = container.querySelector(".session-entry.active");
+    expect(activeLi).not.toBeNull();
+    expect(activeLi?.className.split(/\s+/)).toContain("bg-accent");
     const active = container.querySelector(".session-entry.active .session-entry-main");
     expect(active).not.toBeNull();
     const classes = active?.className.split(/\s+/);
-    expect(classes).toContain("bg-accent");
     expect(classes).toContain("text-accent-foreground");
     // ADR-0093 (issue #511): the inset shadow left bar is retired — active
     // state is expressed solely via the accent background.
@@ -81,6 +89,12 @@ describe("SessionSidebar shell-skeleton visuals (ADR-0067, issue #171)", () => {
         onOpenPersisted={() => {}}
         grouping="flat"
         onSwitchGrouping={() => {}}
+        archivedSessions={[]}
+        showArchived={false}
+        onToggleArchived={() => {}}
+        onSetPinned={() => {}}
+        onArchive={() => {}}
+        onDeleteArchived={() => {}}
         onOpenSearch={() => {}}
         provider={null}
         onOpenSettings={() => {}}
@@ -112,6 +126,12 @@ describe("SessionSidebar shell-skeleton visuals (ADR-0067, issue #171)", () => {
         onOpenPersisted={() => {}}
         grouping="flat"
         onSwitchGrouping={() => {}}
+        archivedSessions={[]}
+        showArchived={false}
+        onToggleArchived={() => {}}
+        onSetPinned={() => {}}
+        onArchive={() => {}}
+        onDeleteArchived={() => {}}
         onOpenSearch={() => {}}
         provider={null}
         onOpenSettings={() => {}}
@@ -138,6 +158,8 @@ describe("SessionSidebar shell-skeleton visuals (ADR-0067, issue #171)", () => {
       last_modified_at: Date.now(),
       source_summary: { first_source_name: null, source_count: 0, turn_count: 0 },
       format_version: 1,
+      pinned: false,
+      archived: false,
     };
     const { container } = renderShell(
       <SessionSidebar
@@ -153,6 +175,12 @@ describe("SessionSidebar shell-skeleton visuals (ADR-0067, issue #171)", () => {
         onOpenPersisted={() => {}}
         grouping="flat"
         onSwitchGrouping={() => {}}
+        archivedSessions={[]}
+        showArchived={false}
+        onToggleArchived={() => {}}
+        onSetPinned={() => {}}
+        onArchive={() => {}}
+        onDeleteArchived={() => {}}
         onOpenSearch={() => {}}
         provider={null}
         onOpenSettings={() => {}}
@@ -169,6 +197,8 @@ describe("SessionSidebar shell-skeleton visuals (ADR-0067, issue #171)", () => {
       last_modified_at: Date.now(),
       source_summary: { first_source_name: null, source_count: 0, turn_count: 0 },
       format_version: 1,
+      pinned: false,
+      archived: false,
     };
     const { container } = renderShell(
       <SessionSidebar
@@ -184,17 +214,29 @@ describe("SessionSidebar shell-skeleton visuals (ADR-0067, issue #171)", () => {
         onOpenPersisted={() => {}}
         grouping="flat"
         onSwitchGrouping={() => {}}
+        archivedSessions={[]}
+        showArchived={false}
+        onToggleArchived={() => {}}
+        onSetPinned={() => {}}
+        onArchive={() => {}}
+        onDeleteArchived={() => {}}
         onOpenSearch={() => {}}
         provider={null}
         onOpenSettings={() => {}}
       />,
     );
+    const row = container.querySelector(".session-entry");
+    expect(row?.className.split(/\s+/)).toContain("hover:bg-accent");
+    expect(row?.className.split(/\s+/)).toContain("rounded-md");
     const main = container.querySelector(".session-entry-main");
     expect(main).not.toBeNull();
     const classes = main?.className.split(/\s+/);
     expect(classes).toContain("appearance-none");
-    expect(classes).toContain("hover:bg-accent");
-    expect(classes).toContain("rounded-md");
+    // The row li owns the hover background + radius (the absolute action
+    // pill intercepts the pointer over the row tail); the main button keeps
+    // only the reset + busy gating.
+    expect(classes).not.toContain("hover:bg-accent");
+    expect(classes).not.toContain("rounded-md");
     expect(classes).toContain("disabled:opacity-50");
     expect(classes).toContain("disabled:cursor-progress");
     // Default row is not open and not active — no accent tint, no inset bar
@@ -229,6 +271,12 @@ describe("SessionSidebar shell-skeleton visuals (ADR-0067, issue #171)", () => {
         onOpenPersisted={() => {}}
         grouping="flat"
         onSwitchGrouping={() => {}}
+        archivedSessions={[]}
+        showArchived={false}
+        onToggleArchived={() => {}}
+        onSetPinned={() => {}}
+        onArchive={() => {}}
+        onDeleteArchived={() => {}}
         onOpenSearch={onOpenSearch}
         provider={null}
         onOpenSettings={() => {}}
@@ -275,6 +323,12 @@ describe("SessionSidebar shell-skeleton visuals (ADR-0067, issue #171)", () => {
         onOpenPersisted={() => {}}
         grouping="flat"
         onSwitchGrouping={() => {}}
+        archivedSessions={[]}
+        showArchived={false}
+        onToggleArchived={() => {}}
+        onSetPinned={() => {}}
+        onArchive={() => {}}
+        onDeleteArchived={() => {}}
         onOpenSearch={onOpenSearch}
         provider={null}
         onOpenSettings={() => {}}
@@ -301,6 +355,12 @@ describe("SessionSidebar shell-skeleton visuals (ADR-0067, issue #171)", () => {
         onOpenPersisted={() => {}}
         grouping="flat"
         onSwitchGrouping={() => {}}
+        archivedSessions={[]}
+        showArchived={false}
+        onToggleArchived={() => {}}
+        onSetPinned={() => {}}
+        onArchive={() => {}}
+        onDeleteArchived={() => {}}
         onOpenSearch={() => {}}
         provider={null}
         onOpenSettings={() => {}}
@@ -335,12 +395,16 @@ describe("SessionSidebar grouping toggle (ADR-0072, issue #251)", () => {
       last_modified_at: Date.now(),
       source_summary: { first_source_name: null, source_count: 0, turn_count: 0 },
       format_version: 1,
+      pinned: false,
+      archived: false,
     };
   }
 
-  it("hides the grouping toggle on an empty sidebar (no group title to anchor it)", () => {
-    // ADR-0072: empty sidebar renders no group title, so the toggle's hover
-    // affordance has no anchor -- the empty-state row renders instead.
+  it("keeps the chrome row on an empty sidebar (ADR-0127 all-archived escape)", () => {
+    // ADR-0072 -> ADR-0127 recalibration: an empty sidebar renders no group
+    // title, but the chrome row (grouping + archived toggles) still renders
+    // on a bare title row -- an all-archived sidebar must keep the archived
+    // view reachable, or the hidden rows would be stranded forever.
     const { container } = renderShell(
       <SessionSidebar
         collapsed={false}
@@ -355,12 +419,18 @@ describe("SessionSidebar grouping toggle (ADR-0072, issue #251)", () => {
         onActivate={() => {}}
         onOpenPersisted={() => {}}
         onSwitchGrouping={() => {}}
+        archivedSessions={[]}
+        showArchived={false}
+        onToggleArchived={() => {}}
+        onSetPinned={() => {}}
+        onArchive={() => {}}
+        onDeleteArchived={() => {}}
         onOpenSearch={() => {}}
         provider={null}
         onOpenSettings={() => {}}
       />,
     );
-    expect(container.querySelector(".sidebar-grouping-toggle")).toBeNull();
+    expect(container.querySelector(".sidebar-grouping-toggle")).not.toBeNull();
   });
 
   it("reveals the toggle on the first group-title row and opens the popover on click", () => {
@@ -379,6 +449,12 @@ describe("SessionSidebar grouping toggle (ADR-0072, issue #251)", () => {
         onActivate={() => {}}
         onOpenPersisted={() => {}}
         onSwitchGrouping={onSwitchGrouping}
+        archivedSessions={[]}
+        showArchived={false}
+        onToggleArchived={() => {}}
+        onSetPinned={() => {}}
+        onArchive={() => {}}
+        onDeleteArchived={() => {}}
         onOpenSearch={() => {}}
         provider={null}
         onOpenSettings={() => {}}
@@ -423,6 +499,12 @@ describe("SessionSidebar grouping toggle (ADR-0072, issue #251)", () => {
         onActivate={() => {}}
         onOpenPersisted={() => {}}
         onSwitchGrouping={() => {}}
+        archivedSessions={[]}
+        showArchived={false}
+        onToggleArchived={() => {}}
+        onSetPinned={() => {}}
+        onArchive={() => {}}
+        onDeleteArchived={() => {}}
         onOpenSearch={() => {}}
         provider={null}
         onOpenSettings={() => {}}
@@ -455,6 +537,12 @@ describe("SessionSidebar grouping toggle (ADR-0072, issue #251)", () => {
         onActivate={() => {}}
         onOpenPersisted={() => {}}
         onSwitchGrouping={() => {}}
+        archivedSessions={[]}
+        showArchived={false}
+        onToggleArchived={() => {}}
+        onSetPinned={() => {}}
+        onArchive={() => {}}
+        onDeleteArchived={() => {}}
         onOpenSearch={() => {}}
         provider={null}
         onOpenSettings={() => {}}
@@ -488,6 +576,12 @@ describe("SessionSidebar grouping toggle (ADR-0072, issue #251)", () => {
         onActivate={() => {}}
         onOpenPersisted={() => {}}
         onSwitchGrouping={onSwitchGrouping}
+        archivedSessions={[]}
+        showArchived={false}
+        onToggleArchived={() => {}}
+        onSetPinned={() => {}}
+        onArchive={() => {}}
+        onDeleteArchived={() => {}}
         onOpenSearch={() => {}}
         provider={null}
         onOpenSettings={() => {}}
@@ -518,6 +612,12 @@ describe("SessionSidebar grouping toggle (ADR-0072, issue #251)", () => {
         onActivate={() => {}}
         onOpenPersisted={() => {}}
         onSwitchGrouping={() => {}}
+        archivedSessions={[]}
+        showArchived={false}
+        onToggleArchived={() => {}}
+        onSetPinned={() => {}}
+        onArchive={() => {}}
+        onDeleteArchived={() => {}}
         onOpenSearch={() => {}}
         provider={null}
         onOpenSettings={() => {}}
@@ -574,6 +674,12 @@ describe("SessionSidebar settings footer (issue #282)", () => {
         onOpenPersisted={() => {}}
         grouping="flat"
         onSwitchGrouping={() => {}}
+        archivedSessions={[]}
+        showArchived={false}
+        onToggleArchived={() => {}}
+        onSetPinned={() => {}}
+        onArchive={() => {}}
+        onDeleteArchived={() => {}}
         onOpenSearch={() => {}}
         provider={provider}
         onOpenSettings={onOpenSettings}
@@ -622,6 +728,12 @@ describe("SessionSidebar pending-approval coloring (ADR-0083, issue #297)", () =
       onOpenPersisted: () => {},
       grouping: "flat" as const,
       onSwitchGrouping: () => {},
+      archivedSessions: [],
+      showArchived: false,
+      onToggleArchived: () => {},
+      onSetPinned: () => {},
+      onArchive: () => {},
+      onDeleteArchived: () => {},
       onOpenSearch: () => {},
       provider: null,
       onOpenSettings: () => {},
@@ -676,6 +788,12 @@ describe("SessionSidebar turn-failed coloring (issue #1005)", () => {
       onOpenPersisted: () => {},
       grouping: "flat" as const,
       onSwitchGrouping: () => {},
+      archivedSessions: [],
+      showArchived: false,
+      onToggleArchived: () => {},
+      onSetPinned: () => {},
+      onArchive: () => {},
+      onDeleteArchived: () => {},
       onOpenSearch: () => {},
       provider: null,
       onOpenSettings: () => {},
@@ -781,6 +899,12 @@ describe("SessionSidebar hover card content (ADR-0093, issue #513)", () => {
       onOpenPersisted: () => {},
       grouping: "flat" as const,
       onSwitchGrouping: () => {},
+      archivedSessions: [],
+      showArchived: false,
+      onToggleArchived: () => {},
+      onSetPinned: () => {},
+      onArchive: () => {},
+      onDeleteArchived: () => {},
       onOpenSearch: () => {},
       provider: null,
       onOpenSettings: () => {},
@@ -795,10 +919,12 @@ describe("SessionSidebar hover card content (ADR-0093, issue #513)", () => {
       last_modified_at: Date.now() - 3 * 3600_000,
       source_summary: { first_source_name: "data.csv", source_count: 3, turn_count: 5 },
       format_version: 1,
+      pinned: false,
+      archived: false,
     };
     vi.useFakeTimers();
     const { container } = renderShell(<SessionSidebar {...sidebarProps({ sessions: [persisted] })} />);
-    fireEvent.pointerEnter(container.querySelector(".session-entry-main")!);
+    fireEvent.pointerEnter(container.querySelector(".session-entry")!);
     await act(async () => {
       vi.advanceTimersByTime(350);
     });
@@ -819,10 +945,12 @@ describe("SessionSidebar hover card content (ADR-0093, issue #513)", () => {
       last_modified_at: Date.now(),
       source_summary: { first_source_name: null, source_count: 0, turn_count: 0 },
       format_version: 1,
+      pinned: false,
+      archived: false,
     };
     vi.useFakeTimers();
     const { container } = renderShell(<SessionSidebar {...sidebarProps({ sessions: [persisted] })} />);
-    fireEvent.pointerEnter(container.querySelector(".session-entry-main")!);
+    fireEvent.pointerEnter(container.querySelector(".session-entry")!);
     await act(async () => {
       vi.advanceTimersByTime(350);
     });
@@ -851,5 +979,447 @@ describe("DeleteSessionDialog ESC routing (issue #258)", () => {
     const dialog = screen.getByRole("alertdialog");
     fireEvent.keyDown(dialog, { key: "Escape" });
     expect(onCancel).toHaveBeenCalledTimes(1);
+  });
+});
+// --- ADR-0127 (issue #1175): pin / archive organization surface --------------
+
+describe("SessionSidebar organization (ADR-0127, issue #1175)", () => {
+  function orgProps(overrides: Record<string, unknown> = {}) {
+    return {
+      collapsed: false,
+      sessions: [],
+      openSessions: [],
+      activeSessionId: null,
+      disabled: false,
+      loadError: null,
+      grouping: "flat" as const,
+      onNew: () => {},
+      onOpenDuck: () => {},
+      onActivate: () => {},
+      onOpenPersisted: () => {},
+      onSwitchGrouping: () => {},
+      archivedSessions: [],
+      showArchived: false,
+      onToggleArchived: () => {},
+      onSetPinned: () => {},
+      onArchive: () => {},
+      onDeleteArchived: () => {},
+      onOpenSearch: () => {},
+      provider: null,
+      onOpenSettings: () => {},
+      ...overrides,
+    };
+  }
+
+  function pinnedMeta(): SessionMetadata[] {
+    // Server order: the pinned block rides first (array position = MRU), so
+    // Pin Old (older mtime) precedes Pin New; the body follows mtime-desc.
+    return [
+      { duck_path: "/x/p1.duck", display_name: "Pin Old", last_modified_at: Date.now() - 3 * 86_400_000, source_summary: { first_source_name: null, source_count: 0, turn_count: 1 }, format_version: 1, pinned: true, archived: false },
+      { duck_path: "/x/p2.duck", display_name: "Pin New", last_modified_at: Date.now() - 86_400_000, source_summary: { first_source_name: null, source_count: 0, turn_count: 1 }, format_version: 1, pinned: true, archived: false },
+      { duck_path: "/x/plain.duck", display_name: "Plain", last_modified_at: Date.now(), source_summary: { first_source_name: null, source_count: 0, turn_count: 1 }, format_version: 1, pinned: false, archived: false },
+    ];
+  }
+
+  function sectionNames(container: HTMLElement): string[] {
+    return Array.from(
+      container.querySelectorAll<HTMLElement>(".session-list > .session-group"),
+    ).map((li) => li.dataset.section ?? "");
+  }
+
+  it("renders the pinned section above the grouped body in BOTH modes, server order (ADR-0127 Decision 5)", () => {
+    for (const grouping of ["flat", "time"] as const) {
+      const { container } = renderShell(
+        <SessionSidebar {...orgProps({ sessions: pinnedMeta(), grouping })} />,
+      );
+      const sections = container.querySelectorAll<HTMLElement>(
+        ".session-list > .session-group",
+      );
+      expect(sections[0].dataset.section).toBe("pinned");
+      // Array order (Pin Old before Pin New), NOT mtime order.
+      const names = Array.from(
+        sections[0].querySelectorAll(".session-name"),
+      ).map((n) => n.textContent);
+      expect(names).toEqual(["Pin Old", "Pin New"]);
+      // The body keeps its own first section; the pinned rows are gone from it.
+      expect(sections[1].dataset.section).not.toBe("pinned");
+      const bodyNames = Array.from(
+        sections[1].querySelectorAll(".session-name"),
+      ).map((n) => n.textContent);
+      expect(bodyNames).toEqual(["Plain"]);
+    }
+  });
+
+  it("omits the pinned section when no rows are pinned (empty-collection rule)", () => {
+    const sessions: SessionMetadata[] = [
+      { duck_path: "/x/plain.duck", display_name: "Plain", last_modified_at: Date.now(), source_summary: { first_source_name: null, source_count: 0, turn_count: 1 }, format_version: 1, pinned: false, archived: false },
+    ];
+    const { container } = renderShell(
+      <SessionSidebar {...orgProps({ sessions })} />,
+    );
+    expect(sectionNames(container)).toEqual(["recent"]);
+  });
+
+  it("trailing actions fire their callbacks WITHOUT activating the row (sibling buttons)", () => {
+    const onActivate = vi.fn();
+    const onOpenPersisted = vi.fn();
+    const onSetPinned = vi.fn();
+    const onArchive = vi.fn();
+    const { container } = renderShell(
+      <SessionSidebar
+        {...orgProps({
+          sessions: pinnedMeta(),
+          onActivate,
+          onOpenPersisted,
+          onSetPinned,
+          onArchive,
+        })}
+      />,
+    );
+    const rows = container.querySelectorAll<HTMLElement>(".session-entry");
+    const plainRow = rows[rows.length - 1];
+    // Pin the unpinned row; unpin the already-pinned row (label flips).
+    fireEvent.click(within(plainRow).getByRole("button", { name: "Pin" }));
+    expect(onSetPinned).toHaveBeenCalledWith("/x/plain.duck", true);
+    fireEvent.click(within(rows[0]).getByRole("button", { name: "Unpin" }));
+    expect(onSetPinned).toHaveBeenCalledWith("/x/p1.duck", false);
+    fireEvent.click(within(plainRow).getByRole("button", { name: "Archive" }));
+    expect(onArchive).toHaveBeenCalledWith("/x/plain.duck", true, null);
+    // The main activate button never fired from any action click.
+    expect(onActivate).not.toHaveBeenCalled();
+    expect(onOpenPersisted).not.toHaveBeenCalled();
+  });
+
+  it("reveals the action group on hover OR focus-within (keyboard reachability)", () => {
+    const { container } = renderShell(
+      <SessionSidebar {...orgProps({ sessions: pinnedMeta() })} />,
+    );
+    const actions = container.querySelector(".session-entry-actions");
+    expect(actions).not.toBeNull();
+    const classes = actions?.className.split(/\s+/);
+    // The WorkingSetList ROW_ACTIONS_OVERLAY posture: an absolute pill with
+    // zero flex footprint (no squeezing the truncating session name), hidden
+    // via opacity-0 + pointer-events-none, revealed on row hover or
+    // focus-visible (opacity keeps the buttons in the tab order, unlike
+    // visibility:hidden).
+    expect(classes).toContain("absolute");
+    expect(classes).toContain("opacity-0");
+    expect(classes).toContain("pointer-events-none");
+    expect(classes).toContain("group-hover/row:opacity-100");
+    expect(classes).toContain("has-[:focus-visible]:opacity-100");
+  });
+
+  it("archived toggle carries aria-pressed and fires onToggleArchived", () => {
+    const onToggleArchived = vi.fn();
+    const { rerender } = renderShell(
+      <SessionSidebar {...orgProps({ onToggleArchived })} />,
+    );
+    const toggle = screen.getByRole("button", {
+      name: "Show archived sessions",
+    });
+    expect(toggle).toHaveAttribute("aria-pressed", "false");
+    fireEvent.click(toggle);
+    expect(onToggleArchived).toHaveBeenCalledTimes(1);
+    rerender(
+      <TooltipProvider>
+        <IntlProvider locale="en" messages={{}} onError={() => {}}>
+          <SessionSidebar {...orgProps({ showArchived: true, onToggleArchived })} />
+        </IntlProvider>
+      </TooltipProvider>,
+    );
+    expect(
+      screen.getByRole("button", { name: "Show archived sessions" }),
+    ).toHaveAttribute("aria-pressed", "true");
+  });
+
+  it("archived section (visible): rows are greyed + non-activatable; restore + delete act; delete goes through the strong-confirm dialog", async () => {
+    const onOpenPersisted = vi.fn();
+    const onActivate = vi.fn();
+    const onArchive = vi.fn();
+    const onDeleteArchived = vi.fn();
+    const archived: SessionMetadata[] = [
+      { duck_path: "/x/arch.duck", display_name: "Archived One", last_modified_at: Date.now() - 86_400_000, source_summary: { first_source_name: null, source_count: 0, turn_count: 2 }, format_version: 1, pinned: false, archived: true },
+    ];
+    const { container } = renderShell(
+      <SessionSidebar
+        {...orgProps({
+          sessions: pinnedMeta(),
+          archivedSessions: archived,
+          showArchived: true,
+          onOpenPersisted,
+          onActivate,
+          onArchive,
+          onDeleteArchived,
+        })}
+      />,
+    );
+    // The archived section rides BELOW the main sections.
+    const names = sectionNames(container);
+    expect(names.at(-1)).toBe("archived");
+    const row = container.querySelector<HTMLElement>(
+      ".session-group[data-section=\"archived\"] .session-entry",
+    );
+    expect(row?.classList.contains("archived")).toBe(true);
+    // Non-activatable: the main button carries aria-disabled (NOT the
+    // disabled attribute -- that would kill the HoverCard's pointer events in
+    // real browsers) + a click does nothing.
+    const main = row?.querySelector<HTMLButtonElement>(".session-entry-main");
+    expect(main).toHaveAttribute("aria-disabled", "true");
+    expect(main?.disabled).toBe(false);
+    fireEvent.click(main!);
+    expect(onOpenPersisted).not.toHaveBeenCalled();
+    expect(onActivate).not.toHaveBeenCalled();
+    // The HoverCard stays available on the archived row (ADR-0127 Decision 7:
+    // read-only viewing is not activation). The trigger is the row li, so the
+    // probe targets it (pointerenter does not bubble from the button).
+    vi.useFakeTimers();
+    fireEvent.pointerEnter(row!);
+    await act(async () => {
+      vi.advanceTimersByTime(350);
+    });
+    expect(screen.getByText("Data source")).toBeInTheDocument();
+    vi.useRealTimers();
+    // Restore takes the pure path (no sid to close).
+    fireEvent.click(within(row!).getByRole("button", { name: "Restore" }));
+    expect(onArchive).toHaveBeenCalledWith("/x/arch.duck", false, null);
+    // Delete opens the strong-confirm dialog; only a confirm fires the mutation.
+    fireEvent.click(within(row!).getByRole("button", { name: "Delete" }));
+    const dialog = await screen.findByRole("alertdialog");
+    expect(within(dialog).getByText(/Archived One/)).toBeInTheDocument();
+    fireEvent.click(within(dialog).getByRole("button", { name: "Cancel" }));
+    expect(onDeleteArchived).not.toHaveBeenCalled();
+    fireEvent.click(within(row!).getByRole("button", { name: "Delete" }));
+    const dialog2 = await screen.findByRole("alertdialog");
+    fireEvent.click(
+      within(dialog2).getByRole("button", { name: "Delete permanently" }),
+    );
+    expect(onDeleteArchived).toHaveBeenCalledWith("/x/arch.duck");
+  });
+
+  it("keeps the chrome row on an empty sidebar so the archived view stays reachable (all-archived escape)", () => {
+    // With every session archived the default list is empty; without a
+    // chrome anchor the archived toggle would be unfindable and the hidden
+    // rows stranded behind it forever.
+    const { container } = renderShell(<SessionSidebar {...orgProps()} />);
+    expect(
+      screen.getByRole("button", { name: "Show archived sessions" }),
+    ).toBeInTheDocument();
+    expect(container.querySelector(".session-empty")).not.toBeNull();
+  });
+});
+
+// --- ADR-0127 (issue #1175): the single-flight hover machine ------------------
+
+describe("SessionSidebar single-flight hover machine (issue #1175)", () => {
+  // One card max, parent-owned: the machine's transitions -- retire on
+  // foreign enter, 200 ms close grace, card-enter cancel, list-leave
+  // backstop, stale-leave guard -- are pinned with fake timers. The card's
+  // display name renders in a <p> (the row's name is a <span>), so the
+  // p-selector tells WHICH card is mounted without colliding with the row.
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  function meta(path: string, name: string): SessionMetadata {
+    return {
+      duck_path: path,
+      display_name: name,
+      last_modified_at: Date.now(),
+      source_summary: { first_source_name: null, source_count: 0, turn_count: 0 },
+      format_version: 1,
+      pinned: false,
+      archived: false,
+    };
+  }
+
+  function hoverProps() {
+    const base = {
+      collapsed: false,
+      openSessions: [] as OpenSession[],
+      activeSessionId: null,
+      disabled: false,
+      loadError: null as string | null,
+      grouping: "flat" as const,
+      onNew: () => {},
+      onOpenDuck: () => {},
+      onActivate: () => {},
+      onOpenPersisted: () => {},
+      onSwitchGrouping: () => {},
+      archivedSessions: [] as SessionMetadata[],
+      showArchived: false,
+      onToggleArchived: () => {},
+      onSetPinned: () => {},
+      onArchive: () => {},
+      onDeleteArchived: () => {},
+      onOpenSearch: () => {},
+      provider: null,
+      onOpenSettings: () => {},
+    };
+    return {
+      ...base,
+      sessions: [meta("/x/a.duck", "Row A"), meta("/x/b.duck", "Row B")],
+    };
+  }
+
+  function rows(container: HTMLElement): HTMLElement[] {
+    return Array.from(container.querySelectorAll(".session-entry")) as HTMLElement[];
+  }
+
+  it("retires the shown card the moment a different row is entered, before its own dwell", async () => {
+    // The retire line is the sweep fix: without it the OLD card stays on
+    // screen the whole time the pointer travels (every enter cancels the
+    // pending close; the new card only opens after its own 300 ms dwell).
+    vi.useFakeTimers();
+    const { container } = renderShell(<SessionSidebar {...hoverProps()} />);
+    const [a, b] = rows(container);
+
+    fireEvent.pointerEnter(a);
+    await act(async () => {
+      vi.advanceTimersByTime(350);
+    });
+    expect(screen.getByText("Row A", { selector: "p" })).toBeInTheDocument();
+
+    fireEvent.pointerEnter(b);
+    // NO timer advance: A's card must be gone immediately...
+    expect(screen.queryByText("Row A", { selector: "p" })).toBeNull();
+    // ...and B's card opens only after its own dwell.
+    await act(async () => {
+      vi.advanceTimersByTime(299);
+    });
+    expect(screen.queryByText("Row B", { selector: "p" })).toBeNull();
+    await act(async () => {
+      vi.advanceTimersByTime(1);
+    });
+    expect(screen.getByText("Row B", { selector: "p" })).toBeInTheDocument();
+  });
+
+  it("honors the 200 ms close grace, and entering the card cancels the close", async () => {
+    vi.useFakeTimers();
+    const { container } = renderShell(<SessionSidebar {...hoverProps()} />);
+    const [a] = rows(container);
+
+    fireEvent.pointerEnter(a);
+    await act(async () => {
+      vi.advanceTimersByTime(350);
+    });
+    expect(screen.getByText("Row A", { selector: "p" })).toBeInTheDocument();
+
+    // Leave the row: the grace window keeps the card readable...
+    fireEvent.pointerLeave(a);
+    await act(async () => {
+      vi.advanceTimersByTime(199);
+    });
+    expect(screen.getByText("Row A", { selector: "p" })).toBeInTheDocument();
+    // ...and sweeping onto the card itself cancels the pending close
+    // (read-only per ADR-0127, but the pointer may rest there to read).
+    const card = screen.getByText("Data source").closest("[data-state=\"open\"]")!;
+    fireEvent.pointerEnter(card);
+    await act(async () => {
+      vi.advanceTimersByTime(500);
+    });
+    expect(screen.getByText("Row A", { selector: "p" })).toBeInTheDocument();
+    // Leaving the CARD schedules its own close (the row-leave guard cannot
+    // serve this path -- the row's leave already ran).
+    fireEvent.pointerLeave(card);
+    await act(async () => {
+      vi.advanceTimersByTime(200);
+    });
+    expect(screen.queryByText("Row A", { selector: "p" })).toBeNull();
+  });
+
+  it("closes the card when the pointer leaves the whole list (backstop)", async () => {
+    // A pointerleave lost to the pill's pointer-events toggling never
+    // reaches the row; the list-level leave is the final backstop.
+    vi.useFakeTimers();
+    const { container } = renderShell(<SessionSidebar {...hoverProps()} />);
+    const [a] = rows(container);
+    const list = container.querySelector(".session-list")!;
+
+    fireEvent.pointerEnter(a);
+    await act(async () => {
+      vi.advanceTimersByTime(350);
+    });
+    expect(screen.getByText("Row A", { selector: "p" })).toBeInTheDocument();
+    fireEvent.pointerLeave(list);
+    await act(async () => {
+      vi.advanceTimersByTime(200);
+    });
+    expect(screen.queryByText("Row A", { selector: "p" })).toBeNull();
+  });
+
+  it("ignores a stale leave from a row the pointer already left", async () => {
+    // After A -> B, a late leave of A must not clear B's pending open (the
+    // stale-key guard); B's card still opens on schedule.
+    vi.useFakeTimers();
+    const { container } = renderShell(<SessionSidebar {...hoverProps()} />);
+    const [a, b] = rows(container);
+
+    fireEvent.pointerEnter(a);
+    fireEvent.pointerLeave(a);
+    fireEvent.pointerEnter(b);
+    // Stale: the pointer's tracked row is B now.
+    fireEvent.pointerLeave(a);
+    await act(async () => {
+      vi.advanceTimersByTime(300);
+    });
+    expect(screen.getByText("Row B", { selector: "p" })).toBeInTheDocument();
+  });
+});
+
+// --- ADR-0127 (issue #1175): the archived section's render gating -------------
+
+describe("SessionSidebar archived-view gating (issue #1175)", () => {
+  it("renders the archived section only while showArchived is true, independent of the rows prop", () => {
+    // Component-contract guard: the section's visibility is the component's
+    // own gate on showArchived -- it must not depend on the caller keeping
+    // archivedSessions empty while hidden.
+    const archived: SessionMetadata = {
+      duck_path: "/x/arch.duck",
+      display_name: "Archived One",
+      last_modified_at: Date.now(),
+      source_summary: { first_source_name: null, source_count: 0, turn_count: 0 },
+      format_version: 1,
+      pinned: false,
+      archived: true,
+    };
+    const props = (showArchived: boolean) => ({
+      collapsed: false,
+      sessions: [] as SessionMetadata[],
+      openSessions: [] as OpenSession[],
+      activeSessionId: null,
+      disabled: false,
+      loadError: null,
+      grouping: "flat" as const,
+      onNew: () => {},
+      onOpenDuck: () => {},
+      onActivate: () => {},
+      onOpenPersisted: () => {},
+      onSwitchGrouping: () => {},
+      archivedSessions: [archived],
+      showArchived,
+      onToggleArchived: () => {},
+      onSetPinned: () => {},
+      onArchive: () => {},
+      onDeleteArchived: () => {},
+      onOpenSearch: () => {},
+      provider: null,
+      onOpenSettings: () => {},
+    });
+    const view = renderShell(<SessionSidebar {...props(false)} />);
+    // Rows are present in the props but the view is hidden: no section.
+    expect(view.container.querySelector("[data-section=\"archived\"]")).toBeNull();
+    expect(screen.queryByText("Archived One")).toBeNull();
+    // Flipping the toggle alone surfaces them (also pins the non-empty
+    // collection's section rule).
+    view.rerender(
+      <TooltipProvider>
+        <IntlProvider locale="en" messages={{}} onError={() => {}}>
+          <SessionSidebar {...props(true)} />
+        </IntlProvider>
+      </TooltipProvider>,
+    );
+    expect(view.container.querySelector("[data-section=\"archived\"]")).not.toBeNull();
+    expect(screen.getByText("Archived One")).toBeInTheDocument();
   });
 });

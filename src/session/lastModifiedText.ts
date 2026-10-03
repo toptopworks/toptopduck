@@ -35,7 +35,7 @@ export function formatLastModifiedText(
       // Exhaustive guard: a new LastModifiedLabel variant must add a case
       // above. tsconfig strict lacks noImplicitReturns, so without this the
       // implicit return undefined would slip (mirrors sidebarModel.ts
-      // buildSidebarGroups + loadErrorDisplay/api.ts).
+      // buildSidebarModel + loadErrorDisplay/api.ts).
       const _exhaustive: never = label;
       return _exhaustive;
     }
