@@ -567,8 +567,9 @@ mod tests {
     /// The `references/<file>` tokens a SKILL.md body points at (the
     /// progressive-disclosure channel of ADR-0111): a run of path
     /// characters from each standalone `references/` mention -- a match
-    /// inside a longer word (`preferences/`) is not a pointer -- with
-    /// sentence punctuation trimmed.
+    /// inside a longer word (`preferences/`) is not a pointer, and
+    /// neither is a bare directory mention (`references/` with no file
+    /// after the slash) -- with trailing `.` and `/` trimmed.
     fn reference_tokens(body: &str) -> Vec<&str> {
         let mut tokens = Vec::new();
         let mut rest = body;
@@ -577,14 +578,10 @@ mod tests {
             let len = tail
                 .find(|c: char| !(c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | '/')))
                 .unwrap_or(tail.len());
-            let mut token = &tail[..len];
-            while token.ends_with(['.', '/']) {
-                token = &token[..token.len() - 1];
-            }
-            let mid_word = start > 0
-                && rest[..start]
-                    .ends_with(|c: char| c.is_ascii_alphanumeric() || matches!(c, '_' | '-'));
-            if !mid_word {
+            let token = tail[..len].trim_end_matches(['.', '/']);
+            let mid_word = rest[..start]
+                .ends_with(|c: char| c.is_ascii_alphanumeric() || matches!(c, '_' | '-'));
+            if !mid_word && token != "references" {
                 tokens.push(token);
             }
             rest = &tail[len..];
@@ -694,6 +691,22 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// The extractor takes file pointers only, pinned directly (issue
+    /// #1188): the resolution guard sees just the survivors, so its reds
+    /// stay about dangling pointers -- a sentence-punctuated pointer
+    /// extracts clean, a bare directory mention is not a pointer, and a
+    /// match inside a longer word is not one either.
+    #[test]
+    fn reference_tokens_takes_file_pointers_only() {
+        assert_eq!(
+            reference_tokens(
+                "see references/a.md, the bare references/ dir, \
+                 references/b.md. and not preferences/x."
+            ),
+            ["references/a.md", "references/b.md"]
+        );
     }
 
     /// English-only (ADR-0121 Decision 2): the embedded prose carries no
