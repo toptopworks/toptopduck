@@ -564,6 +564,31 @@ mod tests {
         names
     }
 
+    /// The `references/<file>` tokens a SKILL.md body points at (the
+    /// progressive-disclosure channel of ADR-0111): a run of path
+    /// characters from each standalone `references/` mention -- a match
+    /// inside a longer word (`preferences/`) is not a pointer, and
+    /// neither is a bare directory mention (`references/` with no file
+    /// after the slash) -- with trailing `.` and `/` trimmed.
+    fn reference_tokens(body: &str) -> Vec<&str> {
+        let mut tokens = Vec::new();
+        let mut rest = body;
+        while let Some(start) = rest.find("references/") {
+            let tail = &rest[start..];
+            let len = tail
+                .find(|c: char| !(c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | '/')))
+                .unwrap_or(tail.len());
+            let token = tail[..len].trim_end_matches(['.', '/']);
+            let mid_word = rest[..start]
+                .ends_with(|c: char| c.is_ascii_alphanumeric() || matches!(c, '_' | '-'));
+            if !mid_word && token != "references" {
+                tokens.push(token);
+            }
+            rest = &tail[len..];
+        }
+        tokens
+    }
+
     // --- the shipped set ----------------------------------------------------
 
     /// The manifest and the embedded asset tree agree both ways (ADR-0121
@@ -622,6 +647,66 @@ mod tests {
             );
             assert!(!parsed.body.trim().is_empty(), "body must be non-blank");
         }
+    }
+
+    /// The embedded asset tree admits only curated file kinds (issue
+    /// #1188): `include_dir!` embeds whatever sits on disk at compile
+    /// time -- not the git index -- so an untracked stray (editor
+    /// droppings, a crash `*.stackdump`, ...) rides the build into every
+    /// user's `.system/` tree. A clean CI checkout never sees the stray,
+    /// so this local-test red is the only guard that bites. Known
+    /// ceiling: a stray of an admitted kind (a loose `.md`) still rides
+    /// the tree -- the exact-set pin holds that surface for office-cli.
+    #[test]
+    fn the_embedded_asset_tree_admits_only_curated_file_kinds() {
+        assert!(
+            BUILTIN_SKILL_ASSETS.files().next().is_none(),
+            "the asset root carries directories only (stray top-level file?)"
+        );
+        for entry in BUILTIN_SKILL_MANIFEST {
+            for (path, _) in embedded_files(entry.name) {
+                let file = path.rsplit('/').next().unwrap();
+                assert!(
+                    file.ends_with(".md") || matches!(file, "LICENSE" | "NOTICE"),
+                    "`{}/{path}` is not an admitted asset kind (stray file embedded from disk?)",
+                    entry.name
+                );
+            }
+        }
+    }
+
+    /// Every `references/` pointer in an embedded SKILL.md resolves into
+    /// that skill's embedded file set (issue #1188): a dangling pointer
+    /// would otherwise surface only at run time as an agent-facing read
+    /// refusal, with no CI signal.
+    #[test]
+    fn every_skill_md_references_pointer_resolves() {
+        for entry in BUILTIN_SKILL_MANIFEST {
+            let files = embedded_files(entry.name);
+            for token in reference_tokens(&body_of(entry.name)) {
+                assert!(
+                    files.iter().any(|(p, _)| p == token),
+                    "{} body dangles: `{token}` is not in the embedded tree",
+                    entry.name
+                );
+            }
+        }
+    }
+
+    /// The extractor takes file pointers only, pinned directly (issue
+    /// #1188): the resolution guard sees just the survivors, so its reds
+    /// stay about dangling pointers -- a sentence-punctuated pointer
+    /// extracts clean, a bare directory mention is not a pointer, and a
+    /// match inside a longer word is not one either.
+    #[test]
+    fn reference_tokens_takes_file_pointers_only() {
+        assert_eq!(
+            reference_tokens(
+                "see references/a.md, the bare references/ dir, \
+                 references/b.md. and not preferences/x."
+            ),
+            ["references/a.md", "references/b.md"]
+        );
     }
 
     /// English-only (ADR-0121 Decision 2): the embedded prose carries no
@@ -900,6 +985,21 @@ mod tests {
             body_of("skill-creator").len() <= 4096,
             "body is {} bytes (budget 4096)",
             body_of("skill-creator").len()
+        );
+    }
+
+    /// The curation budget for the office-cli body (issue #1188): a
+    /// companion body carries the shared CLI syntax layer and so runs
+    /// wider than a knowledge skill's page -- the ceiling is 8192,
+    /// double the knowledge budget. The body still enters the prompt on
+    /// every `invoke_skill`; format depth lives in `references/`, not
+    /// the body.
+    #[test]
+    fn office_cli_body_stays_within_the_curation_budget() {
+        assert!(
+            body_of("office-cli").len() <= 8192,
+            "body is {} bytes (budget 8192)",
+            body_of("office-cli").len()
         );
     }
 
