@@ -145,9 +145,17 @@ describe("usePersistedSessions archived fetch (ADR-0127, issue #1175)", () => {
     const { result } = renderHook(() =>
       usePersistedSessions({ intl, includeArchived: false }),
     );
-    await waitFor(() => expect(listSessions).toHaveBeenCalledTimes(1));
+    // Wait for the scan to LAND, not just fire: callCount is satisfied when
+    // the effect runs, while the resolved list still needs a microtask hop to
+    // reach setState -- asserting sessions right after the call-count wait
+    // races the settle (CI flake).
+    await waitFor(() =>
+      expect(result.current.sessions.map((m) => m.duck_path)).toEqual(["/x/a.duck"]),
+    );
     expect(result.current.archivedSessions).toEqual([]);
-    expect(result.current.sessions.map((m) => m.duck_path)).toEqual(["/x/a.duck"]);
+    // A single unparameterized call -- the hidden view never pays for the
+    // archived tail (mirrors the partition case's post-wait count assert).
+    expect(listSessions).toHaveBeenCalledTimes(1);
     expect(vi.mocked(listSessions).mock.calls[0][0]).toBeUndefined();
   });
 
