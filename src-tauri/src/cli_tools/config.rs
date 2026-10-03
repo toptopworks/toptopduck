@@ -1131,6 +1131,49 @@ mod tests {
     }
 
     #[test]
+    fn render_call_errors_on_missing_non_array_and_non_string_varargs() {
+        // The hybrid template+varargs shape (issue #1192) is the first
+        // builtin to expose the varargs degrade lanes; pin all three on it.
+        let mut t = tool("hybrid");
+        t.argv_template = vec![
+            placeholder("input"),
+            "-o".to_string(),
+            placeholder("output"),
+        ];
+        t.params = vec![param("input"), param("output"), varargs("extra")];
+
+        let ok = json!({"input": "in.md", "output": "out.docx", "extra": ["-s", "--toc"]});
+        assert_eq!(
+            render_call(&t, &ok, Path::new("/tmp"), "tu_1")
+                .unwrap()
+                .argv,
+            vec!["in.md", "-o", "out.docx", "-s", "--toc"],
+            "template first, varargs tail last"
+        );
+
+        let missing = json!({"input": "in.md", "output": "out.docx"});
+        let err = render_call(&t, &missing, Path::new("/tmp"), "tu_1").unwrap_err();
+        assert!(
+            err.contains("missing required parameter `extra`"),
+            "missing key errors: {err}"
+        );
+
+        let non_array = json!({"input": "in.md", "output": "out.docx", "extra": "-s"});
+        let err = render_call(&t, &non_array, Path::new("/tmp"), "tu_1").unwrap_err();
+        assert!(
+            err.contains("must be an array of strings"),
+            "non-array value errors: {err}"
+        );
+
+        let non_string = json!({"input": "in.md", "output": "out.docx", "extra": [42]});
+        let err = render_call(&t, &non_string, Path::new("/tmp"), "tu_1").unwrap_err();
+        assert!(
+            err.contains("must be an array of strings"),
+            "non-string element errors: {err}"
+        );
+    }
+
+    #[test]
     fn render_call_errors_when_file_params_fold_to_the_same_temp_file() {
         // The render-side degrade twin of validate's collision refusal: a
         // hand-edited config smuggled past the upsert boundary must refuse,
