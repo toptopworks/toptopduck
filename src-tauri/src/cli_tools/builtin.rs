@@ -151,7 +151,7 @@ pub(crate) static BUILTIN_DEFINITIONS: &[BuiltinCliDefinition] = &[
                       script that imports it with `sys.path.insert(0, \
                       str(Path.cwd() / \"site-packages\"))` -- each call \
                       runs as a new process, so the insert is required \
-                      every time. The global environment is never touched.",
+                      every time. This never touches the global environment.",
         executables: &["python", "python3"],
         argv_template: &["{script}"],
         params: &[BuiltinCliParam {
@@ -821,10 +821,14 @@ mod tests {
         // The shipped description is the guidance surface: without it a
         // freestyle agent installs bare (wrong interpreter) or --user
         // (global pollution) and loses the path on the next call. Pin the
-        // load-bearing fragment, not the full prose.
+        // load-bearing fragments, not the full prose.
         assert!(
             python().description.contains("--target site-packages"),
             "python description must keep the session-local install guidance"
+        );
+        assert!(
+            python().description.contains("sys.path.insert"),
+            "python description must keep the per-call path insert guidance"
         );
     }
 
