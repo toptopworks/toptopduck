@@ -14,8 +14,6 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 // reject path runs the real toAppError + fmtError (imported from
 // lib/error-presentation, outside the api mock).
 
-vi.mock("@tauri-apps/plugin-dialog", () => ({ open: vi.fn(), save: vi.fn() }));
-
 // The drop-listener effect registers onDragDropEvent on mount (busy=false) and
 // tears it down when busy flips true (issue #204 busy-gate). The hoisted slot
 // captures the registered callback + clears it on unlisten so a test can assert
@@ -46,12 +44,15 @@ vi.mock("../../api", async (importOriginal) => {
     listLiveSessions: vi.fn(async () => []),
     createSession: vi.fn(),
     closeSession: vi.fn(async () => false),
+    // deletePersisted's wait-release + pure-file delete (the drop test parks
+    // busy on a pending wait; the default resolves immediately).
+    closeSessionAndWaitRelease: vi.fn(async () => {}),
+    deleteSession: vi.fn(async () => {}),
     // The open-branch rename lands the backend-trimmed name; the landing
     // test overrides per case.
     renameSession: vi.fn(async () => ""),
     onResumeProgress: vi.fn(async () => () => {}),
     openDuck: vi.fn(async () => {}),
-    prepareImportSession: vi.fn(),
     // ADR-0092 cold-start posture application (runtime + auth mode + skill
     // mounts + MCP enables, all before registerOpen). Default no-ops; the
     // posture tests assert calls.
@@ -83,17 +84,16 @@ vi.mock("../../lib/log", () => ({
 
 import {
   closeSession,
+  closeSessionAndWaitRelease,
   createSession,
   listLiveSessions,
   openDuck,
   onResumeProgress,
-  prepareImportSession,
   renameSession,
   setAuthorizationMode,
   setSessionPosture,
   setSessionRuntime,
 } from "../../api";
-import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { log } from "../../lib/log";
 import { mountComposerBarStub } from "../../__tests__/setup/barRectStub";
 import { useShellSessions } from "../useShellSessions";
@@ -509,39 +509,6 @@ describe("useShellSessions", () => {
     expect(log.debug).not.toHaveBeenCalled();
   });
 
-  it("handleOpenDuck imports external .duck then resumes the local copy (#450)", async () => {
-    vi.mocked(openDialog).mockResolvedValueOnce("/x/a.duck");
-    // prepareImportSession copies the file + returns the LOCAL duck path;
-    // openDuck resumes from that local copy, not the external path.
-    vi.mocked(prepareImportSession).mockResolvedValueOnce(reply("o1"));
-    vi.mocked(openDuck).mockResolvedValueOnce();
-    const { result, refreshSessions } = renderSessions();
-    await act(async () => {
-      await result.current.handleOpenDuck();
-    });
-    expect(prepareImportSession).toHaveBeenCalledWith("/x/a.duck");
-    expect(openDuck).toHaveBeenCalledWith("o1", "/sessions/o1/session.duck");
-    expect(createSession).not.toHaveBeenCalled();
-    expect(refreshSessions).toHaveBeenCalled();
-  });
-
-  it("handleOpenDuck closes the session + refreshes when openDuck rejects after a successful import (#450)", async () => {
-    // Grilling decision #4: if prepareImportSession succeeds but openDuck
-    // fails, the just-created session is closed best-effort so it does not
-    // linger as a ghost row in the sidebar scan.
-    vi.mocked(openDialog).mockResolvedValueOnce("/x/a.duck");
-    vi.mocked(prepareImportSession).mockResolvedValueOnce(reply("o1"));
-    vi.mocked(openDuck).mockRejectedValueOnce(new Error("resume failed"));
-    const { result, refreshSessions, setShellError } = renderSessions();
-    await act(async () => {
-      await result.current.handleOpenDuck();
-    });
-    expect(closeSession).toHaveBeenCalledWith("o1");
-    expect(refreshSessions).toHaveBeenCalled();
-    expect(setShellError).toHaveBeenCalled();
-    expect(result.current.busy).toBe(false);
-  });
-
   it("openPersisted survives a throw inside the onResumeProgress listener (defensive try/catch, #203)", async () => {
     // Capture the listener Tauri would invoke, then fire a malformed event whose
     // body access throws (null event -> "Source" in null raises a TypeError).
@@ -605,8 +572,7 @@ describe("useShellSessions", () => {
   // These pin the concurrency + branch contracts a regression would silently
   // break (no black-box signal): the busy-gated drop listener, the in-flight
   // double-drop guard, and the multi-session active-id fallback. The
-  // renameEntry / dialog-cancel / export branches moved to
-  // useSessionFileOps.test.ts (#1155).
+  // renameEntry branches moved to useSessionFileOps.test.ts (#1155).
 
   it("suppresses a webview drop while busy and routes it once busy clears (#204)", async () => {
     // The drop-listener effect early-returns while busy, so a drop during a
@@ -614,25 +580,26 @@ describe("useShellSessions", () => {
     // later drop routes normally. Drive both halves through the bound Tauri
     // listener (the real event seam) and assert on the observable mint, not on
     // listener bookkeeping.
-    let resolveDialog: (v: string | null) => void = () => {};
-    vi.mocked(openDialog).mockImplementation(
-      () => new Promise<string | null>((resolve) => { resolveDialog = resolve; }),
+    let releaseWait: () => void = () => {};
+    vi.mocked(closeSessionAndWaitRelease).mockImplementationOnce(
+      () => new Promise<void>((resolve) => { releaseWait = resolve; }),
     );
     vi.mocked(createSession).mockResolvedValue(reply("drop-sid"));
     const { result } = renderSessions();
-    // Enter busy: handleOpenDuck holds persistenceBusy true while openDialog
-    // is pending (cold start -> activeSessionId null -> a routed drop mints).
+    // Enter busy: deletePersisted holds persistenceBusy true while the
+    // wait-release promise is pending (cold start -> activeSessionId null ->
+    // a routed drop mints).
     act(() => {
-      void result.current.handleOpenDuck();
+      void result.current.deletePersisted("/x/a.duck", "s1");
     });
     await waitFor(() => expect(result.current.busy).toBe(true));
     // While busy the listener is unbound, so a drop payload has nowhere to
     // route -- the cold-start mint never fires (the suppress half).
     await waitFor(() => expect(dropListener.current).toBeNull());
     expect(createSession).not.toHaveBeenCalled();
-    // Cancel the dialog -> busy clears -> the effect re-binds the listener.
+    // Resolve the wait -> busy clears -> the effect re-binds the listener.
     await act(async () => {
-      resolveDialog(null);
+      releaseWait();
     });
     await waitFor(() => expect(result.current.busy).toBe(false));
     // The re-bound listener now routes a drop to dropFile -> createSession

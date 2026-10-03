@@ -10,7 +10,7 @@
 
 4. **自动命名——首条提问截断做标题，源做 hover 副提示。** 创建时显示名为占位符（如「新会话」）；首个达终态的轮次一次性将显示名更新为首条提问的有界截断（ADR-0039 同款截断规则），之后永不自动改名（用户可手动 rename）。源文件名不进主标题，仅作 sidebar 条目的 hover tooltip 副提示。统一规则覆盖所有会话类型——DuckDB 中心、纯 MCP / 技能、混合——不依赖源文件存在。
 
-5. **「Save as .duck」语义改为「另存为」；「Open .duck」语义改为导入。** 「另存为」= 将当前 session 目录的内容导出为副本到用户选的位置（recipe + 派生源），原会话不动。「Open」= 将外部 .duck（或 per-session 目录）导入 `sessions/`：复制进新 `{uuid}/` 目录后 resume。sessions/ 是会话的单一真相源——原地打开外部 .duck 会使 sidebar（扫描 sessions/）看不到该会话，破坏 Chat 风格心智。
+5. **会话可移植，但不设应用内导入 / 导出入口。** 可移植性由 per-session 目录本身承载（D3）：复制 / 移动一个目录 = 完整会话；将一个含可读 `session.duck` 的目录复制进 `sessions/` 根即被扫描收录，可在 sidebar 中打开。不设「另存为 / 导入」按钮——`.duck` 不是分享载体（原始数据不入 `.duck`，local-first 下 recipe 只存引用 + 指纹，受方没有同一份数据则分析链断裂；分享过程与结论的自然载体是 thread 文本），应用内文件入口是两阶段保存模型的遗物，与 ADR-0060/0061 的 Chat 风格心智相悖。
 
 6. **空会话 close 时自动清理。** `close_session` 时检测 timeline 是否完全为空（无轮次 AND 无源生命周期事件 AND 无技能生命周期事件）；是则删除 per-session 目录，sidebar 不残留。非空会话（有任何内容）照常保留。
 
@@ -25,7 +25,7 @@ ADR-0034 Decision 5 定「每轮终态自动追加 + 原子写」，但未覆盖
 1. **longevity-local 要求从创建起即持久。** 纯内存阶段是 longevity 承诺的反例——用户做了一晚上分析、崩溃了、全丢。消灭纯内存阶段使崩溃窗口始终 = 当前在飞那一轮（ADR-0034 已有设计），而非「从未保存 = 全丢」。
 2. **Chat 风格心智要求零摩擦。** ADR-0060/0061 选了 ChatGPT 式导航和启动——ChatGPT 不要求手动保存。两阶段模型从传统文件编辑器（Word / Excel）借来心智，与 Chat 风格冲突。自动持久化让用户拖文件即开始分析，不需要先回答「存哪」「叫什么」。
 3. **消灭状态转换简化代码。** `duck_path: None -> Some` 消失后，`save_if_bound` 不再有 no-op 分支，前端不需要「已保存 / 未保存」两态区分，`bind_duck` 的手动触发路径消失。session 恒在绑定态——一个状态，而非两个。
-4. **管理目录是单一真相源。** sidebar 扫描 `sessions/` 即得到全部会话。原地打开外部 .duck 不在 sessions/ 中，sidebar 看不到——导入（复制进 sessions/）使所有会话在一处可见。
+4. **管理目录是单一真相源。** sidebar 扫描 `sessions/` 即得到全部会话。原地打开外部 .duck 不在 sessions/ 中，sidebar 看不到——复制进 sessions/ 使所有会话在一处可见。
 5. **Per-session 目录自包含可移植。** ADR-0087 使会话不再是单个 .duck 文件（`.duck` + `.assets/` 对）。per-session 目录让复制 / 移动 / 删除一个目录 = 完整会话，消灭「复制时漏 .assets」的隐患。
 6. **UUID 目录名 + 固定 session.duck 消灭 rename 链。** 显示名变化不需要 rename 文件 / 更新 single-writer registry canonical path / 处理非法字符 / collision detection。目录名是 UUID（稳定身份），session.duck 是固定名，显示名在 recipe header 中。
 
@@ -43,7 +43,7 @@ ADR-0034 Decision 5 定「每轮终态自动追加 + 原子写」，但未覆盖
 - **recipe 加 `name_is_placeholder: bool` 区分占位符与用户已命名**：schema 变更（format_version bump）不值得——首轮终态一次性触发（检测 timeline 之前无轮次）是确定性事件，无歧义。**否决**。
 - **原地打开外部 .duck（绑定原始路径、写回原文件）**：sessions/ 是 sidebar 的扫描根，原地打开的会话不在其中 → sidebar 看不到 → 破坏「所有会话在一处」。**否决**。
 - **不清理空会话**：sidebar 堆积「新会话」条目。**否决**。
-- **移除「Save as .duck」按钮**：导出 / 分享需求无入口。**否决**——保留但语义改为「另存为」。
+- **保留应用内「另存为 / 导入」入口**：目录复制进出 `sessions/` 双向可达，入口的增量价值仅剩按钮本身；分享闭环不成立（原始数据不入 `.duck`，受方没有同一份数据则分析链断裂）。**否决**。
 
 ## Consequences
 
@@ -54,8 +54,7 @@ ADR-0034 Decision 5 定「每轮终态自动追加 + 原子写」，但未覆盖
 - **CONTEXT.md 不变**：领域模型（Session / Recipe / Turn 等）不变。持久化触发机制（自动 vs 手动）和目录结构是实现层，非领域层。
 - **recipe 格式不变**：不升 format_version——recipe schema 字段不变，session_name 行为变化（自动设置 vs 用户手动）不改字段定义。
 - **`createSession` IPC 行为变化**：从纯内存创建变为内存创建 + 目录创建 + 初始 recipe 写入。`createSession` 现在做 I/O（创建目录 + 写 .duck），需处理磁盘失败。.duck 是几百字节文本，性能影响可忽略。
-- **`save_as_duck` IPC 语义变化**：从「首次持久化绑定」变为「另存为副本」——复制 session.duck + assets/ 到用户选的位置，不改变原会话的绑定。
 - **single-writer registry（ADR-0035 Decision 3）不变**：canonical key 仍是 per-session 目录的 canonical path。createSession 时 `try_acquire` + `bind`；close 时 `release_key` + `Session::Drop`。
-- **前端「已保存 / 未保存」两态 UI 消失**：session 恒在绑定态，无需区分。`persistenceBusy` 状态简化——只在「另存为」导出时短暂 busy。
-- **留实现期**：默认目录的平台 API 获取（Tauri path resolver）、UUID 生成（`uuid` crate）、close-time 空会话检测的具体 IPC 返回值、首次截断的字符上限对齐 ADR-0039、「另存为」导出时派生源缺失的提示文案。
+- **前端「已保存 / 未保存」两态 UI 消失**：session 恒在绑定态，无需区分。`persistenceBusy` 状态简化——只在删除 / 归档的等待窗口短暂 busy。
+- **留实现期**：默认目录的平台 API 获取（Tauri path resolver）、UUID 生成（`uuid` crate）、close-time 空会话检测的具体 IPC 返回值、首次截断的字符上限对齐 ADR-0039。
 - **被 ADR-0095 校准**：session 持久化结构新增 `model` / `thought_level` / `cached_discovered` 三个可选字段，随会话一并持久化与恢复；旧会话文件缺字段按 `None` 反序列化（向后兼容）。

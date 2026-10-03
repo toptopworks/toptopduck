@@ -7,8 +7,8 @@ import { cn } from "@/lib/utils";
 // shadcn/ui v4 new-york copy-in (ADR-0049, issue #512). The DropdownMenu
 // primitive gives portal + focus-trap + click-outside/ESC dismiss + keyboard
 // nav + roving focus for free. It is the management-action surface of the
-// session-header context menu (ADR-0093): Rename / Save a copy / Close /
-// Delete. Token consumption is via var utilities (bg-popover /
+// session-header context menu (ADR-0093): Rename / Close / Delete. Token
+// consumption is via var utilities (bg-popover /
 // text-popover-foreground / border, text-destructive for the delete item);
 // enter/exit animations use tw-animate-css utilities (loaded in app.css).
 // Exports only components (no cva variant map), so react-refresh/

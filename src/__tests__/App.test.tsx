@@ -154,7 +154,6 @@ import { flowFailedMessage } from "../lib/error-presentation";
 const HEADER_MGMT_PROPS = {
   duckPath: "/test/session.duck",
   onRename: () => {},
-  onExport: () => {},
   onClose: () => {},
   onDelete: () => {},
 } as const;

@@ -110,14 +110,11 @@ interface SessionPaneProps {
    *  and binds the respond + settled-clear callbacks to its sessionId. */
   approvalEvents: UseApprovalEvents;
   /** ADR-0093 (issue #512): the bound `.duck` path for session-level
-   *  management actions (export / rename / delete). Always non-null since
+   *  management actions (rename / delete). Always non-null since
    *  ADR-0089: createSession binds immediately. */
   duckPath: string;
   /** ADR-0093 (issue #512): shell callback to rename this session's entry. */
   onRename: (sessionId: string, duckPath: string, newName: string) => void;
-  /** ADR-0093 (issue #512): shell callback to export a copy of the session
-   *  directory. Receives the .duck path + display name (save-dialog default). */
-  onExport: (duckPath: string, displayName: string) => void;
   /** ADR-0093 (issue #512): shell callback to close this session (fires
    *  cancel + approval cleanup + draft drop). */
   onClose: (sessionId: string) => void;
@@ -139,7 +136,7 @@ const NO_APPROVALS: ApprovalEntry[] = [];
 const WORKSPACE_TABS = ["result", "workingSet"] as const;
 type WorkspaceTab = (typeof WORKSPACE_TABS)[number];
 
-export function SessionPane({ sessionId, isActive, pendingIngestPaths, onIngestConsumed, pendingQuestion, pendingSkillInvocations, onQuestionConsumed, onSeedDraft, onSeedInvocations, onComposerFields, onComposerFieldsUnmount, sessionName, onFirstTurnSettled, approvalEvents, duckPath, onRename, onExport, onClose, onDelete, disabled }: SessionPaneProps) {
+export function SessionPane({ sessionId, isActive, pendingIngestPaths, onIngestConsumed, pendingQuestion, pendingSkillInvocations, onQuestionConsumed, onSeedDraft, onSeedInvocations, onComposerFields, onComposerFieldsUnmount, sessionName, onFirstTurnSettled, approvalEvents, duckPath, onRename, onClose, onDelete, disabled }: SessionPaneProps) {
   // This session's slice of the app-level approval map + the two stable
   // sessionId-bound callbacks (ADR-0056 addressing: the channel is global,
   // the pane acts on its own session only). The respond / clearSession
@@ -406,7 +403,7 @@ export function SessionPane({ sessionId, isActive, pendingIngestPaths, onIngestC
       {/* Session header (row 1): session name + management menu + workspace
           toggle. Moved here from the global topbar so session-scoped chrome
           lives with the pane. ADR-0093 (issue #512): the `⋯` management menu
-          (Rename / Save a copy / Close / Delete) sits between the name and the
+          (Rename / Close / Delete) sits between the name and the
           workspace toggle. The workspace toggle (ADR-0083, issue #298) stays at
           the header's right edge: the panel defaults to collapsed and this is
           its manual open/close path. */}
@@ -420,7 +417,6 @@ export function SessionPane({ sessionId, isActive, pendingIngestPaths, onIngestC
           duckPath={duckPath}
           sessionId={sessionId}
           onRename={onRename}
-          onExport={onExport}
           onClose={onClose}
           onDelete={onDelete}
           disabled={disabled}

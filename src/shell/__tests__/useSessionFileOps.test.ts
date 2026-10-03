@@ -3,16 +3,13 @@ import { catalogIntl } from "../../components/common/__tests__/helpers";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 // Issue #1155: useSessionFileOps owns the persisted file-ops species
-// (delete / rename / import / export / auto-name sync) + its private
-// persistenceBusy axis, extracted from useShellSessions. The open-set side
-// effects are INJECTED (unmountOpen / importAndOpen / patchOpenName), so the
-// arrange side mounts only this hook with callback mocks instead of the full
-// host tree; cross-hook orchestration (import -> resume -> close-on-fail)
-// stays covered by the two full-mount tests in useShellSessions.test.ts.
+// (delete / rename / auto-name sync) + its private persistenceBusy axis,
+// extracted from useShellSessions. The open-set side effects are INJECTED
+// (unmountOpen / patchOpenName), so the arrange side mounts only this hook
+// with callback mocks instead of the full host tree; cross-hook orchestration
+// stays covered by the full-mount tests in useShellSessions.test.ts.
 // The api mock stubs the Tauri invoke wrappers; the reject path runs the real
 // toAppError + fmtError (lib/error-presentation, outside the api mock).
-
-vi.mock("@tauri-apps/plugin-dialog", () => ({ open: vi.fn(), save: vi.fn() }));
 
 vi.mock("../../api", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../../api")>();
@@ -20,7 +17,6 @@ vi.mock("../../api", async (importOriginal) => {
     ...actual,
     closeSessionAndWaitRelease: vi.fn(async () => {}),
     deleteSession: vi.fn(async () => {}),
-    exportSession: vi.fn(async () => {}),
     getSessionName: vi.fn(async () => ""),
     renamePersistedSession: vi.fn(async () => {}),
     renameSession: vi.fn(async () => ""),
@@ -42,14 +38,12 @@ vi.mock("../../lib/log", () => ({
 import {
   closeSessionAndWaitRelease,
   deleteSession,
-  exportSession,
   getSessionName,
   renamePersistedSession,
   renameSession,
   setSessionArchived,
   setSessionPinned,
 } from "../../api";
-import { open as openDialog, save as saveDialog } from "@tauri-apps/plugin-dialog";
 import { log } from "../../lib/log";
 import { useSessionFileOps } from "../useSessionFileOps";
 
@@ -57,12 +51,11 @@ const intl = catalogIntl("en-US");
 
 /** Render the species hook with injected callback mocks. Every dep is a
  *  vi.fn so a test asserts on the narrow open-set seam (unmountOpen /
- *  importAndOpen / patchOpenName) rather than the host's open-set state. */
+ *  patchOpenName) rather than the host's open-set state. */
 function renderFileOps() {
   const refreshSessions = vi.fn();
   const setShellError = vi.fn();
   const unmountOpen = vi.fn();
-  const importAndOpen = vi.fn(async () => {});
   const patchOpenName = vi.fn();
   const helpers = renderHook(() =>
     useSessionFileOps({
@@ -70,7 +63,6 @@ function renderFileOps() {
       refreshSessions,
       setShellError,
       unmountOpen,
-      importAndOpen,
       patchOpenName,
     }),
   );
@@ -79,7 +71,6 @@ function renderFileOps() {
     refreshSessions,
     setShellError,
     unmountOpen,
-    importAndOpen,
     patchOpenName,
   };
 }
@@ -144,55 +135,6 @@ describe("useSessionFileOps", () => {
     expect(patchOpenName).toHaveBeenCalledWith("s1", "Landed");
     expect(refreshSessions).toHaveBeenCalledTimes(1);
     expect(setShellError).not.toHaveBeenCalled();
-  });
-
-  it("handleOpenDuck bails on a cancelled open dialog (null path): no import, no refresh, busy clears (#204)", async () => {
-    vi.mocked(openDialog).mockResolvedValueOnce(null);
-    const { result, importAndOpen, refreshSessions } = renderFileOps();
-    await act(async () => {
-      await result.current.handleOpenDuck();
-    });
-    expect(importAndOpen).not.toHaveBeenCalled();
-    expect(refreshSessions).not.toHaveBeenCalled();
-    expect(result.current.persistenceBusy).toBe(false);
-  });
-
-  // --- handleExportSession (ADR-0089 Decision 5, issue #449) -----------------
-
-  it("handleExportSession calls exportSession with duck path + save dialog result", async () => {
-    vi.mocked(saveDialog).mockResolvedValueOnce("/dest/my-copy");
-    vi.mocked(exportSession).mockResolvedValueOnce();
-    const { result, setShellError } = renderFileOps();
-    await act(async () => {
-      await result.current.handleExportSession("/src/uuid/session.duck", "My Session");
-    });
-    expect(saveDialog).toHaveBeenCalledWith({ defaultPath: "My Session" });
-    expect(exportSession).toHaveBeenCalledWith("/src/uuid/session.duck", "/dest/my-copy");
-    expect(setShellError).not.toHaveBeenCalled();
-    expect(result.current.persistenceBusy).toBe(false);
-  });
-
-  it("handleExportSession bails on a cancelled save dialog (null): no export, busy clears", async () => {
-    vi.mocked(saveDialog).mockResolvedValueOnce(null);
-    const { result, setShellError } = renderFileOps();
-    await act(async () => {
-      await result.current.handleExportSession("/src/uuid/session.duck", "S");
-    });
-    expect(exportSession).not.toHaveBeenCalled();
-    expect(setShellError).not.toHaveBeenCalled();
-    expect(result.current.persistenceBusy).toBe(false);
-  });
-
-  it("handleExportSession surfaces errors via setShellError", async () => {
-    vi.mocked(saveDialog).mockResolvedValueOnce("/dest/copy");
-    vi.mocked(exportSession).mockRejectedValueOnce(new Error("disk full"));
-    const { result, setShellError } = renderFileOps();
-    await act(async () => {
-      await result.current.handleExportSession("/src/uuid/session.duck", "S");
-    });
-    expect(exportSession).toHaveBeenCalled();
-    expect(setShellError).toHaveBeenCalledOnce();
-    expect(result.current.persistenceBusy).toBe(false);
   });
 
   // ADR-0089 Decision 4: after the first terminal turn, the backend auto-names

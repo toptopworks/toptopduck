@@ -4,7 +4,6 @@ import {
   Archive,
   ArchiveRestore,
   Check,
-  FolderOpen,
   Pencil,
   Pin,
   PinOff,
@@ -81,7 +80,7 @@ function GroupTitle({ kind }: { kind: SidebarGroupKind }) {
 // lists every persisted .duck (ADR-0061 cold start) merged with the open
 // keep-alive sessions, Chat-style time-grouped and last-modified descending.
 // ADR-0093 (issue #511): each row is pure navigation (title + conditional
-// status dot). Management actions (rename / export / close / delete) moved to
+// status dot). Management actions (rename / close / delete) moved to
 // .session-header (slice 2, #512).
 
 // A frozen empty set so the optional prop's default keeps a stable identity
@@ -128,7 +127,6 @@ interface SessionSidebarProps {
    *  semantics reset it to hidden on every startup). */
   showArchived: boolean;
   onNew: () => void;
-  onOpenDuck: () => void;
   onActivate: (sid: string) => void;
   onOpenPersisted: (path: string, name: string) => void;
   onSwitchGrouping: (mode: SidebarGrouping) => void;
@@ -174,7 +172,6 @@ export function SessionSidebar({
   archivedSessions,
   showArchived,
   onNew,
-  onOpenDuck,
   onActivate,
   onOpenPersisted,
   onSwitchGrouping,
@@ -473,19 +470,6 @@ export function SessionSidebar({
       >
         <Pencil className="size-4 shrink-0" aria-hidden />
         <FormattedMessage id="sidebar.newSession" defaultMessage="New session" />
-      </button>
-      <button
-        type="button"
-        className="sidebar-open-button mb-2 flex w-full cursor-pointer items-center gap-1.5 rounded-md border border-border bg-transparent p-2 text-sm text-foreground hover:bg-accent disabled:opacity-60 disabled:cursor-progress"
-        disabled={disabled}
-        onClick={onOpenDuck}
-        title={intl.formatMessage({
-          id: "sidebar.importSession.title",
-          defaultMessage: "Import a .duck to resume a prior session",
-        })}
-      >
-        <FolderOpen className="size-4 shrink-0" aria-hidden />
-        <FormattedMessage id="sidebar.importSession" defaultMessage="Import session" />
       </button>
 
       {loadError && (

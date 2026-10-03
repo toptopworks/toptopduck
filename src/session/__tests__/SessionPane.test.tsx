@@ -150,7 +150,6 @@ function renderPane() {
             approvalEvents={approvalEvents}
             duckPath="C:/sessions/sid-1.duck"
             onRename={noop}
-            onExport={noop}
             onClose={noop}
             onDelete={noop}
           />

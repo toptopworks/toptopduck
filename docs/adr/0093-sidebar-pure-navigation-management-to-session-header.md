@@ -4,7 +4,7 @@
 
 会话栏（`SessionSidebar`）每行从「导航 + 管理 + 信息」三角色收缩为**纯导航**，三个维度同步调整：
 
-1. **管理操作移入 `.session-header`。** Rename / Save a copy / Close / Delete 从侧边栏行的 `⋯` 弹菜单迁入 `SessionPane` 的 `.session-header`——会话名称后新增 `⋯` 按钮 → Radix `DropdownMenu`（图标 + 标签格式）。侧边栏行不再承载任何管理入口。
+1. **管理操作移入 `.session-header`。** Rename / Close / Delete 从侧边栏行的 `⋯` 弹菜单迁入 `SessionPane` 的 `.session-header`——会话名称后新增 `⋯` 按钮 → Radix `DropdownMenu`（图标 + 标签格式）。侧边栏行不再承载任何管理入口。
 
 2. **行信息从常驻子行改为 HoverCard 浮层。** 移除常驻子行（首源名 + 轮次数），元信息（完整标题 / 数据源 / 轮次数 / 最近修改）经 Radix `HoverCard` 浮层在 hover + focus 时展示——右侧定位、固定宽度、键值对布局。
 
@@ -27,7 +27,7 @@ ADR-0060 行 75 将首源名 + 轮次数 + 修改时间作为常驻子行、行 
 - **侧边栏行保留 `⋯` 上下文菜单 / 行内 hover 操作按钮**：行同时承载导航 + 管理，视觉密度不变；hover 按钮（pin + delete）中 pin 需 recipe 格式变更 + IPC + 排序逻辑（独立决策），单留 delete 与 header 菜单重复。**否决**——职责分离后行更简洁；pin 落地时行内操作按钮随之一并回归。
 - **HoverCard 用 Tooltip / Popover 原语**：Tooltip 是纯提示性，不支持结构化键值对内容；Popover 需点击触发，不符合「鼠标放上去即出」的交互预期。**否决**——HoverCard 支持富内容 + hover/focus 双触发。
 - **浮层显示完整数据源列表**：当前 `SidebarEntry` 仅有首源名 + 源总数，完整列表需新增 IPC。**否决**——首源名 + 总数满足快速辨识，完整列表留后续。
-- **未打开会话保留行内管理入口**：侧边栏行继续承载管理角色，视觉密度不变；且单独的 delete 按钮与 header 菜单重复，`⋯` 菜单也与 header 菜单构成双入口。**否决**——接受「先点开再管理」的路径取舍，重命名 / 删除 / 导出已关闭会话频率低。
+- **未打开会话保留行内管理入口**：侧边栏行继续承载管理角色，视觉密度不变；且单独的 delete 按钮与 header 菜单重复，`⋯` 菜单也与 header 菜单构成双入口。**否决**——接受「先点开再管理」的路径取舍，重命名 / 删除已关闭会话频率低。
 - **行首保留 MessageSquare 图标 / active 保留竖条**：图标 + 圆点并存视觉冗余；竖条 + 背景双重信号冗余。**否决**——圆点直接表达状态，accent 背景单独表达 active。
 
 ## Consequences

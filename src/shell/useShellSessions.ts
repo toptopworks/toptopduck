@@ -3,8 +3,8 @@
 // register / createSessionWithQuestion / openPersisted /
 // dropFile / onWebviewDrop / clearPendingIngest / clearPendingQuestion /
 // activateSession / goToEmptyState / closeOpen. The persisted file-ops species
-// (deletePersisted / renameEntry / handleOpenDuck / handleExportSession /
-// syncSessionName) composes in via useSessionFileOps (#1155). The resume
+// (deletePersisted / renameEntry / syncSessionName) composes in via
+// useSessionFileOps (#1155). The resume
 // indicator lives here, and together with the species' persistenceBusy it
 // drives the shell `busy` flag that gates the webview drop listener + the
 // sidebar / topbar / hero disabled states.
@@ -36,7 +36,6 @@ import {
   listLiveSessions,
   onResumeProgress,
   openDuck,
-  prepareImportSession,
   setAuthorizationMode,
   setSessionPosture,
   setSessionRuntime,
@@ -203,11 +202,6 @@ export function useShellSessions({
     path: string,
     newName: string,
   ) => Promise<void>;
-  handleOpenDuck: () => Promise<void>;
-  /** Export a copy of the session directory to a user-chosen location
-   *  (ADR-0089 Decision 5, issue #449). Opens a save dialog, then calls the
-   *  backend file-copy IPC. Silent on success; errors go to setShellError. */
-  handleExportSession: (duckPath: string, displayName: string) => Promise<void>;
   /** Sync an open session's display name after the backend auto-names it
    *  (ADR-0089 Decision 4: first terminal turn). Reads the live name from the
    *  backend, updates the in-memory open-session entry, and refreshes the
@@ -680,11 +674,11 @@ export function useShellSessions({
     [mapSessions],
   );
 
-  // Shared resume-into-new-session logic (ADR-0061/0034). Both the sidebar
-  // resume path (openPersisted) and the import path (importAndOpen) funnel
-  // through here: the caller provides a `prepare` step that mints the session
-  // id + returns the duck path to resume from, and this helper handles the
-  // resume-progress listener, openDuck call, registerOpen, and error cleanup.
+  // Shared resume-into-new-session logic (ADR-0061/0034). The sidebar resume
+  // path (openPersisted) funnels through here: the caller provides a `prepare`
+  // step that mints the session id + returns the duck path to resume from,
+  // and this helper handles the resume-progress listener, openDuck call,
+  // registerOpen, and error cleanup.
   const resumeIntoNewSession = useCallback(
     async (prepare: () => Promise<CreateSessionReply>, name: string) => {
       setResumeStatus({ kind: "opening" });
@@ -782,20 +776,6 @@ export function useShellSessions({
       }, name);
     },
     [openSessions, apply, resumeIntoNewSession],
-  );
-
-  // Import an external .duck into the managed sessions tree (ADR-0089 Decision
-  // 5, issue #450). prepareImportSession copies the external file (+ companion
-  // assets/) into a fresh sessions/{uuid}/ directory and returns the local duck
-  // path; resumeIntoNewSession then calls openDuck on that local copy.
-  const importAndOpen = useCallback(
-    async (externalPath: string, name: string) => {
-      await resumeIntoNewSession(
-        () => prepareImportSession(externalPath),
-        name,
-      );
-    },
-    [resumeIntoNewSession],
   );
 
   // Synchronous UI teardown for an open session: drop the cache + open-set
@@ -915,8 +895,6 @@ export function useShellSessions({
     setPinned,
     setArchived,
     renameEntry,
-    handleOpenDuck,
-    handleExportSession,
     syncSessionName,
     persistenceBusy,
   } = useSessionFileOps({
@@ -924,7 +902,6 @@ export function useShellSessions({
     refreshSessions,
     setShellError,
     unmountOpen,
-    importAndOpen,
     patchOpenName,
   });
 
@@ -967,8 +944,6 @@ export function useShellSessions({
     setPinned,
     setArchived,
     renameEntry,
-    handleOpenDuck,
-    handleExportSession,
     syncSessionName,
   };
 }

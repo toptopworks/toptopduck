@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { useIntl, FormattedMessage } from "react-intl";
-import { Download, MoreHorizontal, Pencil, Trash2, X } from "lucide-react";
+import { MoreHorizontal, Pencil, Trash2, X } from "lucide-react";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -12,21 +12,20 @@ import { DeleteSessionDialog, RenameSessionDialog } from "./SessionSidebar";
 import { resolveDisplayName } from "./displayName";
 
 // Session-header context menu (ADR-0093, issue #512). The management actions
-// that previously lived in the sidebar row's context menu (Rename / Save a
-// copy / Close / Delete) now live here as session-scoped chrome alongside the
-// workspace toggle. The `⋯` trigger mirrors the WorkspaceToggle's ghost-icon
-// button rule (ADR-0067 #171: h-7 w-7 button + text-foreground/70; the dots
-// glyph uses h-3.5 w-3.5 to match WorkspaceToggle's icon visual weight --
-// issue #774: one 28px hit-area spec across the header chrome family).
+// that previously lived in the sidebar row's context menu (Rename / Close /
+// Delete) now live here as session-scoped chrome alongside the workspace
+// toggle. The `⋯` trigger mirrors the WorkspaceToggle's ghost-icon button rule
+// (ADR-0067 #171: h-7 w-7 button + text-foreground/70; the dots glyph uses
+// h-3.5 w-3.5 to match WorkspaceToggle's icon visual weight -- issue #774:
+// one 28px hit-area spec across the header chrome family).
 //
 // Rename + Delete open local dialog state (the existing RenameSessionDialog /
-// DeleteSessionDialog exported from SessionSidebar); Export + Close fire the
-// shell callbacks directly (no dialog needed — Export opens a native save
-// dialog via the backend, Close is immediate).
+// DeleteSessionDialog exported from SessionSidebar); Close fires the shell
+// callback directly (immediate, no dialog).
 
 type SessionHeaderMenuProps = {
   /** Raw session name for the rename dialog prefill; resolveDisplayName derives
-   *  the display name for export + delete confirmation. */
+   *  the display name for the delete confirmation. */
   sessionName: string;
   /** The bound `.duck` path (ADR-0089: always present since createSession). */
   duckPath: string;
@@ -34,8 +33,6 @@ type SessionHeaderMenuProps = {
   sessionId: string;
   /** Shell callback: rename this session's entry. */
   onRename: (sessionId: string, duckPath: string, newName: string) => void;
-  /** Shell callback: export a copy of the session directory. */
-  onExport: (duckPath: string, displayName: string) => void;
   /** Shell callback: close this session (fires cancel + cleanup). */
   onClose: (sessionId: string) => void;
   /** Shell callback: delete this session permanently. */
@@ -50,7 +47,6 @@ export function SessionHeaderMenu({
   duckPath,
   sessionId,
   onRename,
-  onExport,
   onClose,
   onDelete,
   disabled = false,
@@ -86,15 +82,6 @@ export function SessionHeaderMenu({
             <FormattedMessage
               id="common.rename"
               defaultMessage="Rename"
-            />
-          </DropdownMenuItem>
-          <DropdownMenuItem
-            onSelect={() => onExport(duckPath, displayName)}
-          >
-            <Download aria-hidden />
-            <FormattedMessage
-              id="session.headerMenu.export"
-              defaultMessage="Save a copy…"
             />
           </DropdownMenuItem>
           <DropdownMenuItem onSelect={() => onClose(sessionId)}>

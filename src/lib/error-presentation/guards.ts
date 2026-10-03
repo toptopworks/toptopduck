@@ -189,7 +189,6 @@ export function isStoreCommandError(e: unknown): e is StoreCommandError {
         (d as { kind?: unknown }).kind === "EmptyName"
       );
     }
-    case "DestinationExists":
     case "IoFailure":
     case "KeychainFailure":
     case "ConfigWriteFailure":
