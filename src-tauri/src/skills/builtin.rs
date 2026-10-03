@@ -1032,9 +1032,11 @@ mod tests {
             "teaches the empty-array call"
         );
         assert!(body.contains("no shell"), "teaches no-shell semantics");
-        // The high-frequency flags table.
+        // The high-frequency flags table. `-s` is short enough that a bare
+        // substring pin would be satisfied by `--standalone`; anchor the
+        // backticked flag-table cell instead.
+        assert!(body.contains("`-s` /"), "lists the -s flag row");
         for flag in [
-            "-s",
             "--toc",
             "--reference-doc",
             "--pdf-engine",

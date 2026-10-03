@@ -17,7 +17,7 @@ Use the `pandoc` tool whenever a task needs a document converted between formats
 | `.odt` / `.rtf` | OpenDocument / Rich Text |
 | `.epub` | EPUB e-book |
 | `.tex` / `.latex` | LaTeX |
-| `.pdf` | PDF (engine prerequisite below) |
+| `.pdf` | PDF output (write-only; engine prerequisite below) |
 
 When the source extension is ambiguous or absent, force the reader format with `-f` in `extra` (e.g. `-f html`); the writer format follows the `output` extension (override with `-t`).
 
@@ -56,7 +56,7 @@ Pandoc does not render PDF itself: it generates LaTeX and hands it to an engine 
 
 Produce a standalone HTML file instead and let the user print it to PDF from their browser -- the default template already carries suitable styling:
 
-`extra: ["-s", "--toc", "--embed-resources", "--standalone"]`
+`extra: ["-s", "--toc", "--embed-resources"]`
 
 Say plainly in the reply that the output is print-ready HTML and that the browser's print dialog (print to PDF) completes the delivery. Never attempt to install a LaTeX engine.
 

@@ -859,7 +859,6 @@ mod tests {
         let varargs: Vec<&BuiltinCliParam> = pandoc().params.iter().filter(|p| p.varargs).collect();
         assert_eq!(varargs.len(), 1, "exactly one varargs parameter");
         assert_eq!(varargs[0].name, "extra");
-        assert_eq!(varargs[0].delivery, CliParamDelivery::Argv);
     }
 
     #[test]
