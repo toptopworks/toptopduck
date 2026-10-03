@@ -1003,6 +1003,59 @@ mod tests {
         );
     }
 
+    /// The curation budget for the pandoc body (issue #1192): the same
+    /// companion ceiling as office-cli -- 8192 bytes, double the knowledge
+    /// budget. The body still enters the prompt on every `invoke_skill`;
+    /// pandoc's knowledge is a flat table, so no depth files ride the tree.
+    #[test]
+    fn pandoc_body_stays_within_the_curation_budget() {
+        assert!(
+            body_of("pandoc").len() <= 8192,
+            "body is {} bytes (budget 8192)",
+            body_of("pandoc").len()
+        );
+    }
+
+    /// The pandoc body must teach the whole conversion contract (issue
+    /// #1192): the `extra` tail semantics (one element one argument, no
+    /// shell, empty array for the plain call), the high-frequency flags
+    /// table, the PDF engine prerequisite and selection table, the no-engine
+    /// escape hatch, and the office-cli division. Phrase pins, not verbatim
+    /// -- the CONTRACT items are what must survive a re-curation.
+    #[test]
+    fn pandoc_body_teaches_the_conversion_contract() {
+        let body = body_of("pandoc");
+        // The `extra` passthrough semantics.
+        assert!(body.contains("`extra`"), "names the passthrough parameter");
+        assert!(
+            body.contains("empty array when none are needed"),
+            "teaches the empty-array call"
+        );
+        assert!(body.contains("no shell"), "teaches no-shell semantics");
+        // The high-frequency flags table.
+        for flag in [
+            "-s",
+            "--toc",
+            "--reference-doc",
+            "--pdf-engine",
+            "-f",
+            "--extract-media",
+            "--embed-resources",
+        ] {
+            assert!(body.contains(flag), "lists flag {flag}");
+        }
+        // The engine prerequisite + selection table.
+        for engine in ["pdflatex", "xelatex", "lualatex"] {
+            assert!(body.contains(engine), "lists engine {engine}");
+        }
+        // The no-engine escape hatch and the division sentence.
+        assert!(body.contains("standalone HTML"), "teaches the escape hatch");
+        assert!(
+            body.contains("belongs to office-cli"),
+            "keeps the division sentence"
+        );
+    }
+
     /// Bootstrap (ADR-0122 Decision 8): the skill's own description must
     /// pass the bar its curriculum sets -- each cue has its own assertion
     /// (no disjunctions), so removing a cue entirely -- every carrier of

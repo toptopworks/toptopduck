@@ -291,6 +291,50 @@ fn no_temp_files_left(temp: &TempDir) -> bool {
 }
 
 #[test]
+fn a_varargs_tail_appends_after_the_rendered_template() {
+    // The mixed form (issue #1192): a fixed template carrying the call's
+    // invariants plus one varargs parameter appending pandoc's own flags at
+    // the argv tail. The fixture echoes one argv element per line, so the
+    // stdout order IS the argv order: template first, varargs block last,
+    // one element per argument with spaces preserved.
+    let argv_param = |name: &str, varargs: bool| CliToolParam {
+        name: name.to_string(),
+        description: "argv-delivered".to_string(),
+        delivery: CliParamDelivery::Argv,
+        varargs,
+    };
+    let tool = template_tool(
+        "pandoc-like",
+        &["{input}", "-o", "{output}"],
+        vec![
+            argv_param("input", false),
+            argv_param("output", false),
+            argv_param("extra", true),
+        ],
+    );
+    let outcome = run(
+        &tool,
+        json!({
+            "input": "in.md",
+            "output": "out.docx",
+            "extra": ["-s", "--toc", "--metadata", "title=Quarterly Report"]
+        }),
+    );
+    assert!(!outcome.result.is_error, "{}", outcome.result.content);
+    assert_eq!(
+        outcome.result.content,
+        "in.md\n-o\nout.docx\n-s\n--toc\n--metadata\ntitle=Quarterly Report\n"
+    );
+    // The empty varargs array degenerates to the plain template invocation.
+    let plain = run(
+        &tool,
+        json!({"input": "in.md", "output": "out.docx", "extra": []}),
+    );
+    assert!(!plain.result.is_error, "{}", plain.result.content);
+    assert_eq!(plain.result.content, "in.md\n-o\nout.docx\n");
+}
+
+#[test]
 fn file_delivery_writes_the_temp_file_and_the_argv_receives_the_path() {
     // The child cats back the file the executor wrote for the `code`
     // parameter: the call's value reaches the tool through the temp file,

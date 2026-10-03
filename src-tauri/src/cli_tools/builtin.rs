@@ -121,7 +121,13 @@ pub(crate) static BUILTIN_DEFINITIONS: &[BuiltinCliDefinition] = &[
         name: "pandoc",
         description: "Convert documents between formats (Markdown, HTML, \
                       DOCX, PPTX, EPUB, LaTeX, PDF, ...): reads the source \
-                      document and writes the converted one.",
+                      document and writes the converted one. Producing PDF \
+                      additionally requires a LaTeX engine on PATH \
+                      (pdflatex, xelatex, or lualatex); without one, emit \
+                      standalone HTML for the user to print instead. The \
+                      `extra` parameter passes pandoc's own flags through \
+                      (an empty array when none are needed; elements append \
+                      after the output path, no shell semantics).",
         executables: &["pandoc"],
         argv_template: &["{input}", "-o", "{output}"],
         params: &[
@@ -136,6 +142,15 @@ pub(crate) static BUILTIN_DEFINITIONS: &[BuiltinCliDefinition] = &[
                 description: "Path to write the converted document to.",
                 delivery: CliParamDelivery::Argv,
                 varargs: false,
+            },
+            BuiltinCliParam {
+                name: "extra",
+                description: "Pandoc's own flags and their values, appended \
+                              after the output path: one array element per \
+                              argument, no shell semantics, e.g. \
+                              [\"-s\", \"--toc\", \"--pdf-engine=xelatex\"].",
+                delivery: CliParamDelivery::Argv,
+                varargs: true,
             },
         ],
     },
@@ -829,6 +844,37 @@ mod tests {
         assert!(
             python().description.contains("sys.path.insert"),
             "python description must keep the per-call path insert guidance"
+        );
+    }
+
+    #[test]
+    fn pandoc_registration_keeps_the_fixed_template_with_a_varargs_tail() {
+        // The pandoc shape (issue #1192): `input` / `output` are the call's
+        // invariants and ride the fixed template; pandoc's own flags ride
+        // exactly one varargs parameter appended at the argv tail.
+        assert_eq!(
+            pandoc().argv_template,
+            ["{input}", "-o", "{output}"].as_slice()
+        );
+        let varargs: Vec<&BuiltinCliParam> = pandoc().params.iter().filter(|p| p.varargs).collect();
+        assert_eq!(varargs.len(), 1, "exactly one varargs parameter");
+        assert_eq!(varargs[0].name, "extra");
+        assert_eq!(varargs[0].delivery, CliParamDelivery::Argv);
+    }
+
+    #[test]
+    fn pandoc_description_discloses_the_pdf_engine_prerequisite() {
+        // The description is the planning-stage surface (#1190 precedent):
+        // the engine prerequisite steers PDF plans before any call, and the
+        // `extra` semantics keep the flag passthrough honest. Pin the
+        // load-bearing fragments, not the full prose.
+        assert!(
+            pandoc().description.contains("LaTeX engine"),
+            "pandoc description must keep the PDF engine prerequisite"
+        );
+        assert!(
+            pandoc().description.contains("`extra`"),
+            "pandoc description must name the extra passthrough"
         );
     }
 
