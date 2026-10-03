@@ -3,13 +3,14 @@
 Commands below are written in shell form (`officecli set report.docx ...`) for
 readability. Pass them to the `office-cli` tool as the `args` array, one token
 per element: `["set", "report.docx", "/body", "--prop", "text=Hello"]`. Values
-containing spaces stay one element. There is no shell — no quoting or `$`
-escaping is needed at your layer.
+containing spaces stay one element. Quotation marks in these examples are
+display-only -- never include them in `args` elements. There is no shell — no
+quoting or `$` escaping is needed at your layer.
 
 ## Help-first rule
 
-This file teaches what a good docx looks like, not every flag. When a property
-name, enum value, or alias is uncertain, consult help BEFORE guessing:
+This file teaches what a good docx looks like, not every flag. The help-first
+rule lives in the skill body; the docx shapes you will use most:
 
 ```
 help docx                          # list all docx elements
@@ -18,8 +19,7 @@ help docx set paragraph            # verb-scoped: props usable with `set`
 help docx paragraph --json         # machine-readable schema
 ```
 
-Help is pinned to the installed CLI version. When this file and help disagree,
-**help is authoritative**.
+Help is pinned to the installed CLI version.
 
 ## Mental model
 
@@ -31,18 +31,16 @@ almost never touch raw XML; when you must, use `raw-set` (XML appendix below).
 
 ## Value escapes
 
-The two-char escapes `\n` and `\t` ARE interpreted in `text=` values — `\n`
-becomes a soft line break (`<w:br/>`), `\t` a tab — consistently across
-docx / pptx / xlsx. Double them (`\\n`) for a literal backslash-n (rarely
-wanted). Inside `batch` JSON, standard JSON escaping applies and a real
-newline can be written as `"\n"`. If in doubt, `view text` after writing and
-compare character-for-character.
+`\n` in a `text=` value becomes a soft line break (`<w:br/>`); `\t` a tab.
+Double them (`\\n`) for a literal backslash-n. Inside `batch` JSON, standard
+JSON escaping applies -- a real backslash is `"\\\\"` (the value layer
+doubles it, then JSON doubles each). If in doubt, `view text` after writing
+and compare character-for-character.
 
-**Incremental execution.** The CLI mutates the file on every call. Run one
-command at a time and check each result — a 50-command plan that fails at
-command 3 cascades silently. After any structural op (style, table, TOC,
-section) run `get` on it before stacking more. Many similar ops in one pass:
-`batch` (atomic).
+Structural ops in docx: style, table, TOC, section. The incremental-execution
+discipline (one command, check, continue) lives in the skill body; the
+resident never mutates the disk file until flushed -- `save`/`close` before
+another tool reads it.
 
 ## Requirements for outputs
 
@@ -120,7 +118,7 @@ add report.docx /body --type paragraph --prop text="Q4 Review" --prop style=Head
 add report.docx /body --type paragraph --prop text="Revenue grew 18% year-over-year, ahead of plan." --prop size=11pt --prop spaceAfter=8pt
 add report.docx /body --type paragraph --prop text="Key Drivers" --prop style=Heading2 --prop size=14pt --prop bold=true --prop spaceBefore=12pt --prop spaceAfter=6pt
 add report.docx / --type footer --prop type=default --prop size=9pt --prop text="Page " --prop field=page
-set report.docx "/footer[1]/p[1]" --prop align=center
+set report.docx /footer[1]/p[1] --prop align=center
 save report.docx
 validate report.docx
 ```

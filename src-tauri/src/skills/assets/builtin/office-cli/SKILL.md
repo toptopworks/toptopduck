@@ -17,10 +17,10 @@ Pass the subcommand and its arguments as the `args` list, one argument per eleme
 | Add an element | `add <file> <parent> --type <type> [--prop ...]` |
 | Find / replace text | `set <file> <path> --find X [--replace Y]` |
 | Structural moves | `move <file> <path>`, `swap <file> <p1> <p2>`, `remove <file> <path>` |
-| Multi-step edit | `batch <file> --commands '<json>' --json` (atomic) |
+| Multi-step edit | `batch <file> --commands <json> --json` (atomic) |
 | Escape hatch | `raw <file> <part>`, `raw-set <file> <part> --xpath ... --action ... --xml ...` (last resort) |
 
-For format-specific depth (element catalogs, recipes, QA gates) read `references/docx.md` / `references/xlsx.md` / `references/pptx.md` via `read_skill_file` when working on that format. This page carries only the shared syntax.
+For format-specific depth (element catalogs, recipes, QA gates) read `references/docx.md` / `references/xlsx.md` / `references/pptx.md` via `read_skill_file` when working on that format. This page carries only the shared syntax. After a find/replace, confirm the reported match count is at least 1 (or re-`query` the new text) -- zero matches on a replacement you expected to land is an error, not success.
 
 ## Escalation ladder
 
@@ -49,15 +49,15 @@ Format aliases accepted everywhere: `word`→`docx`, `excel`→`xlsx`, `ppt`/`po
 
 ## Structured output
 
-Add `--json` on `get` / `query` / `view` / `batch` for machine-readable output -- parse it instead of scraping stdout with regex. `query --json` wraps results in `.data.results[]`.
+Add `--json` on `get` / `query` / `view` / `batch` for machine-readable output -- parse it instead of scraping stdout with regex. `query --json` wraps results in `.data.results[]`. A non-zero exit code or an error field in the JSON envelope means the command failed, even when the output looks like data. Before trusting an empty result as a passed check, run one query guaranteed to hit (e.g. a known heading) -- if the control also comes back empty, the selector is broken, not the document clean.
 
-## Resident mode: flush before other tools read
+## Resident mode: flush around other tools
 
-Commands run through a resident that holds the file in memory with delayed disk writes. `office-cli`'s own reads (`get`/`query`/`view`) always see the latest edits -- but **another tool reading the same file (`python`, `pandoc`) sees stale bytes until you flush.** Before any non-office-cli tool touches the file: `args: ["save", "<file>"]` (flush, keep resident) or `args: ["close", "<file>"]` (flush + release). `OFFICECLI_RESIDENT_FLUSH=each` forces a flush on every mutation when the boundary is hard to track; explicit `save` remains the default discipline.
+Commands run through a resident that holds the file in memory with delayed disk writes. `office-cli`'s own reads (`get`/`query`/`view`) always see the latest edits -- but **another tool touching the same file sees stale bytes until you flush.** Before any non-office-cli tool **reads** the file (`python`, `pandoc`): `args: ["save", "<file>"]` (flush, keep resident) or `args: ["close", "<file>"]` (flush + release). Before any non-office-cli tool **writes** the file: `close` it first and reopen after -- the resident never reloads external changes, so its next flush would overwrite them.
 
 ## Batch for multi-step edits
 
-Multi-step edits go through `batch` as one `--commands` JSON argument (atomic by default): any item failing rolls the whole batch back, leaving the file byte-identical. One batch beats N sequential `set` calls on both consistency and round-trips. `dump <file> <path>` emits a replayable batch JSON for round-trip edits.
+Multi-step edits go through `batch` as one `--commands` JSON argument (atomic by default): any item failing rolls the whole batch back, leaving the file byte-identical. After a batch, read the `--json` result and confirm every command reports applied -- never assume the rollback succeeded. One batch beats N sequential `set` calls on both consistency and round-trips. `dump <file> <path>` emits a replayable batch JSON for round-trip edits. Outside batch, run one command at a time and check each result before the next -- after any structural operation, `get` it back before stacking more (the format references define what counts as structural).
 
 `args: ["batch", "data.xlsx", "--commands", "[{\"command\":\"set\",\"path\":\"/Sheet1/A1\",\"props\":{\"value\":\"Name\",\"bold\":\"true\"}}]", "--json"]`
 

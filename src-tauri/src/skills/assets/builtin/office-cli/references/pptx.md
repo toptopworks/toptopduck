@@ -3,13 +3,14 @@
 Commands below are written in shell form (`officecli add deck.pptx ...`) for
 readability. Pass them to the `office-cli` tool as the `args` array, one
 token per element: `["add", "deck.pptx", "/slide[1]", "--type", "shape",
-"--prop", "text=Title"]`. There is no shell — no quoting, no `$` expansion;
-each value is one verbatim element.
+"--prop", "text=Title"]`. Quotation marks in these examples are display-only
+-- never include them in `args` elements. There is no shell — no quoting, no
+`$` expansion; each value is one verbatim element.
 
 ## Help-first rule
 
-This file teaches what good slides look like, not every flag. When a property
-name, enum value, or alias is uncertain, consult help BEFORE guessing:
+This file teaches what good slides look like, not every flag. The help-first
+rule lives in the skill body; the pptx shapes:
 
 ```
 help pptx                    # list all pptx elements
@@ -18,21 +19,20 @@ help pptx add chart          # verb-scoped
 help pptx animation          # preset names + duration syntax
 ```
 
-Help reflects the installed CLI version. When this file and help disagree,
-**help is authoritative**. Triggers to run help immediately: `UNSUPPORTED
-props:` warning, unknown animation preset, `connector.shape=` enum drift,
-prop-vs-alias confusion (`lineWidth` vs `line.width`).
+Help reflects the installed CLI version. Triggers to run help immediately:
+`UNSUPPORTED props:` warning, unknown animation preset, `connector.shape=`
+enum drift, prop-vs-alias confusion (`lineWidth` vs `line.width`).
 
 ## Value escapes
 
-`\n` in a `text=` value IS interpreted — a paragraph break inside the shape;
-`\t` a tab; consistent across formats. Double (`\\n`) for a literal. Inside
-`batch` JSON, standard JSON escaping applies (`"\n"`, `"\""`, a real
-backslash is `"\\\\"`).
+`\n` in a `text=` value is a paragraph break inside the shape; `\t` a tab.
+Double them (`\\n`) for a literal. Inside `batch` JSON, standard JSON
+escaping applies (`"\n"`, `"\""`, a real backslash is `"\\\\"` -- the value
+layer doubles it, then JSON doubles each).
 
-**Incremental execution.** One command → check → continue. After any
-structural op (slide, chart, connector) run `get` before stacking more.
-Repetitive shape grids: `batch` (atomic) with `--commands`.
+Structural ops in pptx: slide, chart, connector. The incremental-execution
+discipline (one command, check, continue) lives in the skill body; repetitive
+shape grids go through `batch` (atomic) with `--commands`.
 
 ## Requirements for outputs
 
@@ -455,7 +455,8 @@ Assume there are problems. First render is almost never correct.
   and report per-slide findings with attempted fixes and likely root —
   don't seesaw.
 - **Flush.** End with `save <file>` (or `close`) before delivery — required
-  final step, always safe.
+  final step; confirm the command succeeds (a file locked open in PowerPoint
+  fails it) before delivering.
 
 ### Per-slide checklist
 

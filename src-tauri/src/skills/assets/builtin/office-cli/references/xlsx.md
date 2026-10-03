@@ -3,13 +3,15 @@
 Commands below are written in shell form (`officecli set data.xlsx ...`) for
 readability. Pass them to the `office-cli` tool as the `args` array, one
 token per element: `["set", "data.xlsx", "/Sheet1/A1", "--prop", "value=42"]`.
-There is no shell — values containing `$` or `!` (number formats, cross-sheet
-refs) pass through verbatim with no escaping needed at your layer.
+Quotation marks in these examples are display-only -- never include them in
+`args` elements. There is no shell — values containing `$` or `!` (number
+formats, cross-sheet refs) pass through verbatim with no escaping needed at
+your layer.
 
 ## Help-first rule
 
-This file teaches what a good xlsx looks like, not every flag. When a property
-name, enum value, or alias is uncertain, consult help BEFORE guessing:
+This file teaches what a good xlsx looks like, not every flag. The help-first
+rule lives in the skill body; the xlsx shapes:
 
 ```
 help xlsx                  # list all xlsx elements
@@ -18,20 +20,17 @@ help xlsx add chart        # verb-scoped
 help xlsx chart --json     # machine-readable
 ```
 
-When this file and help disagree, **help is authoritative**.
-
 ## Value escapes
 
-`\n` in a prop value IS interpreted by the CLI — a real in-cell line break
-(pair with `--prop wrapText=true`); `\t` a tab; consistent across formats.
-Double them (`\\n`) for a literal. Inside `batch` JSON, standard JSON escaping
-applies. Cross-sheet refs (`Sheet1!A1`) and number formats (`$#,##0`) need no
-escaping here — there is no shell to mangle them (upstream docs warn about
-exactly this; it does not apply to the `args` array).
+`\n` in a prop value is a real in-cell line break (pair with `--prop
+wrapText=true`); `\t` a tab. Double them (`\\n`) for a literal. Inside
+`batch` JSON, standard JSON escaping applies -- a real backslash is
+`"\\\\"` (the value layer doubles it, then JSON doubles each). Cross-sheet
+refs (`Sheet1!A1`) and number formats (`$#,##0`) need no escaping here.
 
-**Incremental execution.** One command → check output → continue. After any
-structural op (sheet, chart, named range, pivot), `get` it to confirm shape
-before stacking more. Many cells in one pass: `batch` (atomic).
+Structural ops in xlsx: sheet, chart, named range, pivot. The
+incremental-execution discipline (one command, check, continue) lives in the
+skill body.
 
 ## Requirements for outputs
 
@@ -160,7 +159,10 @@ import data.xlsx /Sheet1 --file data.tsv --format tsv --header
 For custom type coercion or formula injection, generate a `batch` op list
 (with the `python` tool if the source is large) and run it through
 `batch --commands` in chunks (~80 ops per batch is the tested sweet spot for
-pure value-sets; drop to 40 if a chunk fails).
+pure value-sets; drop to 40 if a chunk fails). On a chunk failure, retry only
+that failed chunk -- completed chunks stand. After the import, reconcile the
+landed row count against the source (`view stats`, or `get` the last row): a
+half-landed import must not ship as complete.
 
 ## Reading & analysis
 
