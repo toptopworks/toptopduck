@@ -510,6 +510,22 @@ mod tests {
         }
     }
 
+    /// A Builtin-sourced office-cli registration (enabled by default) -- the
+    /// anchor for the multi-attachment skill's materialization pin.
+    fn builtin_office_cli(enabled: bool) -> CliToolConfig {
+        CliToolConfig {
+            name: "office-cli".to_string(),
+            description: String::new(),
+            executable: "office-cli".to_string(),
+            argv_template: Vec::new(),
+            params: Vec::new(),
+            env: Default::default(),
+            enabled,
+            source: CliToolSource::Builtin,
+            baseline: None,
+        }
+    }
+
     /// The parsed SKILL.md of one embedded skill (every content test reads
     /// through this single door, so the asset->parse pipeline itself is what
     /// the suite pins).
@@ -930,6 +946,38 @@ mod tests {
         // ...and the un-anchored companions materialize nothing.
         assert!(!root.path().join(".system/python").exists());
         assert!(!root.path().join(".system/office-cli").exists());
+    }
+
+    /// The first multi-attachment skill (ADR-0121): the office-cli tree is
+    /// pinned as an exact seven-path set and materialized byte-for-byte,
+    /// nested `references/` directory and Apache 2.0 attribution files
+    /// included. A dropped asset file or a nested-write regression in the
+    /// materializer must fail here, not ship silently -- pandoc's flat
+    /// single-file tree above cannot catch either mutation class.
+    #[test]
+    fn align_materializes_the_office_cli_tree_as_an_exact_pinned_set() {
+        let expected = [
+            "ATTRIBUTION.md",
+            "LICENSE",
+            "NOTICE",
+            "SKILL.md",
+            "references/docx.md",
+            "references/pptx.md",
+            "references/xlsx.md",
+        ];
+        let files = embedded_files("office-cli");
+        let paths: Vec<&str> = files.iter().map(|(p, _)| p.as_str()).collect();
+        assert_eq!(paths, expected, "the embedded office-cli tree is pinned");
+        let root = tempfile::tempdir().expect("root");
+        let outcome = align(root.path(), &registry_with(vec![builtin_office_cli(true)]));
+        assert!(outcome.materialize_failures.is_empty());
+        for (path, bytes) in &files {
+            assert_eq!(
+                &std::fs::read(root.path().join(".system/office-cli").join(path)).unwrap(),
+                bytes,
+                "embedded `{path}` materialized verbatim (nested path included)"
+            );
+        }
     }
 
     /// The quiet path (ADR-0121 Decision 3): a matching fingerprint writes
