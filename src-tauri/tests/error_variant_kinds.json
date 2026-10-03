@@ -70,6 +70,7 @@
   "StoreCommandError": [
     "BlankName",
     "ConfigWriteFailure",
+    "InvalidCliTool",
     "IoFailure",
     "KeychainFailure",
     "NoActiveProfile",
