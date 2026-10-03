@@ -169,6 +169,7 @@ fn store_command_error() -> Vec<StoreCommandError> {
         StoreCommandError::ConfigWriteFailure(String::new()),
         StoreCommandError::NoActiveProfile,
         StoreCommandError::UnknownAdapter(String::new()),
+        StoreCommandError::InvalidCliTool(String::new()),
     ]
 }
 

@@ -109,6 +109,7 @@ const CATALOG_IDS: Readonly<Record<string, Readonly<Record<string, string | null
     ConfigWriteFailure: "error.store.configWriteFailure",
     NoActiveProfile: "error.store.noActiveProfile",
     UnknownAdapter: "error.store.unknownAdapter",
+    InvalidCliTool: "error.store.invalidCliTool",
   },
   SkillError: {
     InvalidName: "error.skill.invalidName",
