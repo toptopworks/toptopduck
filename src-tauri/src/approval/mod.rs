@@ -369,10 +369,14 @@ pub enum GateOutcome {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct GateCancelled;
 
-/// One file-delivery value's content for the approval card (issue #672,
-/// ADR-0109 Decision 8): the approver can expand the parameter's value on
-/// the card. Captured at approval time -- the temp file is deleted when the
-/// call ends, so the payload snapshot is the only durable view.
+/// One expandable audit payload for the approval card (issue #672,
+/// ADR-0109 Decision 8): the approver can expand the value on the card.
+/// Three payload kinds ride this shape -- file-delivery values (issue
+/// #672), the skill markdown body (`skills::create`), and the full
+/// pre-truncation argv rendering when the summary's cap cut it (issue
+/// #1195). Captured at approval time -- for file-delivery values, the
+/// temp file is deleted when the call ends, so the payload snapshot is
+/// the only durable view.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct FileAttachment {
     pub param: String,

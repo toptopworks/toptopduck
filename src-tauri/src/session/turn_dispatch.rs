@@ -754,18 +754,29 @@ fn classify_cli_tool(
         let mut argv = Vec::with_capacity(rendered.argv.len() + 1);
         argv.push(tool.executable.clone());
         argv.extend(rendered.argv.iter().cloned());
-        let attachments = rendered
+        let mut attachments = rendered
             .files
             .into_iter()
             .map(|f| crate::approval::FileAttachment {
                 param: f.param,
                 content: f.content,
             })
-            .collect();
-        (
-            crate::approval::truncate_summary(&argv.join(" "), ARGS_PREVIEW_MAX_CHARS),
-            attachments,
-        )
+            .collect::<Vec<_>>();
+        let full_argv = argv.join(" ");
+        let summary = crate::approval::truncate_summary(&full_argv, ARGS_PREVIEW_MAX_CHARS);
+        // When the cap cut, the ellipsis hides a tail the approver cannot
+        // otherwise see -- the full rendering rides along as an expandable
+        // audit attachment (issue #1195). Mounted only when the summary is
+        // actually shorter than the argv: an in-cap summary already shows
+        // the verbatim full argv, and this comparison mirrors
+        // `truncate_summary`'s own cut decision.
+        if summary.chars().count() < full_argv.chars().count() {
+            attachments.push(crate::approval::FileAttachment {
+                param: "argv".into(),
+                content: full_argv,
+            });
+        }
+        (summary, attachments)
     };
     let (summary, file_attachments) =
         match crate::cli_tools::config::render_call(tool, input, temp_dir, call_id) {
@@ -1089,6 +1100,111 @@ mod tests {
             summary.contains("argv unavailable"),
             "a missing parameter names the failure: {summary}"
         );
+    }
+
+    #[test]
+    fn an_oversize_cli_argv_mounts_the_full_rendering_as_an_audit_attachment() {
+        // Issue #1195: when the summary's cap cuts the argv, the hidden
+        // tail is exactly the flags the approver is signing for, so the
+        // full rendering rides along as an expandable attachment --
+        // mounted only when the cap actually cut (the in-cap case is
+        // pinned by the badge test's empty-attachments assert above).
+        use crate::cli_tools::config::{CliParamDelivery, CliToolConfig, CliToolParam};
+        let tool = CliToolConfig {
+            name: "pandoc".into(),
+            description: "convert".into(),
+            executable: "/bin/pandoc".into(),
+            argv_template: vec![],
+            params: vec![CliToolParam {
+                name: "extra".into(),
+                description: "extra flags".into(),
+                delivery: CliParamDelivery::Argv,
+                varargs: true,
+            }],
+            env: Default::default(),
+            enabled: true,
+            source: Default::default(),
+            baseline: None,
+        };
+        let long_flag = format!("--metadata title={}", "x".repeat(600));
+        let (_, _, summary, attachments) = classify_cli_tool(
+            &tool,
+            &serde_json::json!({ "extra": ["--toc", &long_flag] }),
+            std::path::Path::new("/tmp"),
+            "tu_19",
+        );
+        // The summary keeps its broadcast-budget shape: capped head plus
+        // the ellipsis marker (issue #1009 precedent -- the cap itself is
+        // not moving).
+        assert_eq!(summary.chars().count(), ARGS_PREVIEW_MAX_CHARS);
+        assert!(summary.ends_with("..."));
+        // The argv attachment carries the full rendering verbatim -- the
+        // exact join, separator, and argument order -- and the summary's
+        // head is its prefix, so the approver can verify the card against
+        // what will actually run.
+        let audit = attachments
+            .iter()
+            .find(|a| a.param == "argv")
+            .expect("oversize argv mounts an audit attachment");
+        assert_eq!(
+            audit.content,
+            format!("/bin/pandoc --toc {long_flag}"),
+            "the attachment carries the full verbatim join"
+        );
+        let head = summary.strip_suffix("...").unwrap();
+        assert!(
+            audit.content.starts_with(head),
+            "the card summary is the full rendering's prefix"
+        );
+    }
+
+    #[test]
+    fn an_oversize_cli_argv_mounts_alongside_the_file_delivery_attachments() {
+        // The mount is additive: the file-delivery snapshots the approver
+        // needs (the temp files are deleted at call end) stay in the list
+        // and the argv audit rides after them -- a rebuild instead of a
+        // push would drop them silently.
+        use crate::cli_tools::config::{CliParamDelivery, CliToolConfig, CliToolParam};
+        let tool = CliToolConfig {
+            name: "pandoc".into(),
+            description: "convert".into(),
+            executable: "/bin/pandoc".into(),
+            argv_template: vec!["{input_md}".into()],
+            params: vec![
+                CliToolParam {
+                    name: "input_md".into(),
+                    description: "source document".into(),
+                    delivery: CliParamDelivery::File,
+                    varargs: false,
+                },
+                CliToolParam {
+                    name: "extra".into(),
+                    description: "extra flags".into(),
+                    delivery: CliParamDelivery::Argv,
+                    varargs: true,
+                },
+            ],
+            env: Default::default(),
+            enabled: true,
+            source: Default::default(),
+            baseline: None,
+        };
+        let long_flag = format!("--metadata title={}", "x".repeat(600));
+        let (_, _, summary, attachments) = classify_cli_tool(
+            &tool,
+            &serde_json::json!({ "input_md": "# hi", "extra": ["--toc", &long_flag] }),
+            std::path::Path::new("/tmp"),
+            "tu_20",
+        );
+        assert_eq!(summary.chars().count(), ARGS_PREVIEW_MAX_CHARS);
+        assert_eq!(
+            attachments.len(),
+            2,
+            "the argv mount is additive, not a rebuild"
+        );
+        assert_eq!(attachments[0].param, "input_md");
+        assert_eq!(attachments[0].content, "# hi");
+        assert_eq!(attachments[1].param, "argv");
     }
 
     /// A route failure (unknown slug) surfaces as a tool error the agent
