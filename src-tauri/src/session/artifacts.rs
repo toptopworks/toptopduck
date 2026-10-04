@@ -509,15 +509,33 @@ pub(crate) fn backfill_into_cwd(artifacts_dir: Option<&Path>, cwd: &Path) {
     let Some(dir) = artifacts_dir else {
         return;
     };
-    // read_dir failure = the session never materialized an artifact: resume
-    // proceeds with an empty cwd, exactly like a brand-new session.
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return;
+    let entries = match std::fs::read_dir(dir) {
+        Ok(entries) => entries,
+        // NotFound = the session never materialized an artifact: resume
+        // proceeds with an empty cwd, exactly like a brand-new session.
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return,
+        Err(e) => {
+            log::warn!(
+                target: "toptopduck::session",
+                "artifact backfill skipped: cannot read {}: {e}",
+                dir.display()
+            );
+            return;
+        }
     };
-    for entry in entries.flatten() {
+    for entry in entries.filter_map(|entry| match entry {
+        Ok(entry) => Some(entry),
+        Err(e) => {
+            log::warn!(
+                target: "toptopduck::session",
+                "artifact backfill entry skipped: {e}"
+            );
+            None
+        }
+    }) {
         let path = entry.path();
-        // Flat copy: only files (subdirectories are not part of the manifest
-        // model), fork `_2` versions included.
+        // Flat copy: only files -- subdirectories are not part of the
+        // manifest model.
         if !path.is_file() {
             continue;
         }

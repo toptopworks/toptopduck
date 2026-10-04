@@ -3828,8 +3828,63 @@ fn resume_backfills_persisted_artifacts_into_the_fresh_cwd() {
     );
 }
 
+/// #1202: after a resume, the cwd working copy is the agent's own -- driving
+/// a turn never re-copies the persistent layer over an edited copy (settle
+/// does not backfill), and a re-delivery of the same name rides
+/// `materialize`'s `_2` fork with the persistent original untouched.
+#[test]
+fn resumed_cwd_copy_survives_a_turn_and_a_re_delivery_forks_2() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let duck = dir.path().join("s.duck");
+    let source = plant_people(dir.path());
+    drop(build_single_source_session(&duck, &source));
+
+    // What a previous incarnation's settle-time materialize would have left.
+    let artifacts = dir.path().join("artifacts");
+    fs::create_dir_all(&artifacts).expect("dirs");
+    fs::write(artifacts.join("dashboard.html"), "original").expect("write");
+
+    let provider =
+        FakeProvider::new().scripted_tool_turn("更新仪表盘", answer("已更新 dashboard.html"));
+    let mut resumed = Session::open_duck(
+        &duck,
+        Arc::new(CancelToken::new()),
+        Box::new(provider),
+        Default::default(),
+        |_| {},
+        |_| SourceResolution::Abort,
+        |_| ActiveResolution::Abort,
+    )
+    .expect("resume");
+
+    // The agent edits the backfilled working copy mid-session.
+    fs::write(resumed.temp_cwd().join("dashboard.html"), "edited").expect("edit copy");
+
+    let _ = resumed.ask("更新仪表盘");
+
+    // Settle never re-backfills: the edit survives the turn.
+    assert_eq!(
+        fs::read_to_string(resumed.temp_cwd().join("dashboard.html")).expect("copy"),
+        "edited",
+        "the cwd working copy keeps the turn's edit -- settle does not re-copy"
+    );
+    // The reply's re-delivery of the cwd file rode the `_2` fork with the
+    // edited content; the persistent original stands untouched.
+    assert_eq!(
+        fs::read_to_string(artifacts.join("dashboard.html")).expect("original"),
+        "original",
+        "the persistent original keeps its content"
+    );
+    assert_eq!(
+        fs::read_to_string(artifacts.join("dashboard_2.html")).expect("fork"),
+        "edited",
+        "the re-presented copy lands beside the original as a `_2` fork"
+    );
+}
+
 /// #1202 control: a session with NO artifacts directory resumes into a cwd
-/// that holds exactly its construction-time `tool_output` subdir -- zero
+/// holding only the session's own content -- the construction-time
+/// `tool_output` subdir plus the replay's `people.duckdb` -- zero
 /// behavioral change for artifact-less sessions.
 #[test]
 fn resume_without_artifacts_leaves_the_cwd_untouched() {
@@ -3839,17 +3894,14 @@ fn resume_without_artifacts_leaves_the_cwd_untouched() {
     drop(build_single_source_session(&duck, &source));
 
     let resumed = resume_defaults(&duck, Arc::new(CancelToken::new()), |_| {}).expect("resume");
-    let names: Vec<String> = fs::read_dir(resumed.temp_cwd())
+    let mut names: Vec<String> = fs::read_dir(resumed.temp_cwd())
         .expect("read cwd")
         .map(|e| e.expect("entry").file_name().to_string_lossy().into_owned())
         .collect();
-    // The replay's own `<ref>.duckdb` swap files are pre-#1202 cwd content;
-    // anything else would be a stray backfill. (The `people` reference names
-    // the duckdb, but this pins zero-strays without hardcoding that name.)
-    assert!(
-        names
-            .iter()
-            .all(|n| n == "tool_output" || n.ends_with(".duckdb")),
-        "no artifacts directory -> the cwd holds only its own content, got {names:?}"
+    names.sort();
+    assert_eq!(
+        names,
+        vec!["people.duckdb".to_string(), "tool_output".to_string()],
+        "no artifacts directory -> the cwd holds only its own content",
     );
 }
