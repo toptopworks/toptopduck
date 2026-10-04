@@ -26,7 +26,7 @@ import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { FormattedMessage, useIntl } from "react-intl";
 import { Button } from "../ui/button";
-import { ExternalLink, FileDown, FileWarning } from "lucide-react";
+import { ExternalLink, FileDown, FileWarning, Loader2 } from "lucide-react";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { openPath } from "@tauri-apps/plugin-opener";
 import { readArtifactText } from "../../api";
@@ -162,39 +162,66 @@ function ArtifactStageBody({
   return <ArtifactFallbackFace exists={exists} />;
 }
 
-/** The isolated HTML shell (Decision 4's trust boundary). sandbox is pinned
- *  to exactly "allow-scripts" -- adding allow-same-origin would hand the
- *  opaque origin back its documents; the attribute's absence would kill
- *  interactive reports. */
-function HtmlArtifactShell({ path, fileName }: { path: string; fileName: string }) {
+/** The shared document frame (issue #1201): one relative box per iframe so
+ *  the mounting window -- the frame is attached before the document's first
+ *  paint, seconds for a slow fetch -- reads as "loading" rather than as a
+ *  blank or broken file. The overlay is a passive status (aria-label only,
+ *  no progress or timeout semantics): the escape hatch for a stuck load is
+ *  the header's external-open action, never a spinner guess. */
+function ArtifactFrame({
+  path,
+  fileName,
+  sandbox,
+}: {
+  path: string;
+  fileName: string;
+  /** The branch's trust posture, pinned at the call site: "allow-scripts"
+   *  for html; absent (undefined never renders the attribute) for pdf. */
+  sandbox?: "allow-scripts";
+}) {
+  const [isLoaded, setIsLoaded] = useState(false);
+  const intl = useIntl();
   return (
-    <iframe
-      data-testid="artifact-frame"
-      className="h-full w-full border-0 bg-background"
-      src={convertFileSrc(path)}
-      sandbox="allow-scripts"
-      title={fileName}
-    />
+    <div className="relative h-full w-full">
+      <iframe
+        data-testid="artifact-frame"
+        className="h-full w-full border-0 bg-background"
+        src={convertFileSrc(path)}
+        sandbox={sandbox}
+        title={fileName}
+        onLoad={() => setIsLoaded(true)}
+      />
+      {!isLoaded && (
+        <div
+          role="status"
+          aria-label={intl.formatMessage({
+            id: "workspace.artifact.loading",
+            defaultMessage: "Loading document",
+          })}
+          className="absolute inset-0 flex items-center justify-center bg-background text-muted-foreground"
+        >
+          <Loader2 aria-hidden="true" className="h-6 w-6 animate-spin" />
+        </div>
+      )}
+    </div>
   );
 }
 
-/** The pdf viewer shell (issue #1199): the same asset-protocol iframe as
- *  html, deliberately WITHOUT the sandbox attribute -- the WebView's
- *  built-in viewer is a document renderer, not executable agent HTML, so
- *  there is no script surface to confine to an opaque origin (and an empty
- *  sandbox value would disable the frame entirely). A platform without a
- *  built-in viewer (Linux WebKitGTK) leaves the frame blank -- the header's
- *  external-open action above is the escape hatch, which is exactly why the
- *  header never degrades away. */
+/** The isolated HTML shell (Decision 4's trust boundary): scripts execute
+ *  inside the opaque origin, but it never reads the app page -- the frame
+ *  is pinned to exactly "allow-scripts"; adding allow-same-origin would
+ *  hand the origin back its documents, and the attribute's absence would
+ *  kill interactive reports. */
+function HtmlArtifactShell({ path, fileName }: { path: string; fileName: string }) {
+  return <ArtifactFrame path={path} fileName={fileName} sandbox="allow-scripts" />;
+}
+
+/** The pdf viewer shell (issue #1199): the same frame deliberately WITHOUT
+ *  the sandbox attribute -- the built-in viewer is a document renderer, not
+ *  executable agent HTML, so there is no script surface to confine (an
+ *  empty sandbox value would disable the frame entirely). */
 function PdfArtifactShell({ path, fileName }: { path: string; fileName: string }) {
-  return (
-    <iframe
-      data-testid="artifact-frame"
-      className="h-full w-full border-0 bg-background"
-      src={convertFileSrc(path)}
-      title={fileName}
-    />
-  );
+  return <ArtifactFrame path={path} fileName={fileName} />;
 }
 
 /** md rides the IPC text read (extension-pinned + size-capped server-side)

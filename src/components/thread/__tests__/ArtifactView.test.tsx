@@ -7,7 +7,7 @@
 // opener are mocked; convertFileSrc is a pure transform and stays real.
 
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { IntlProvider } from "react-intl";
 import { openPath } from "@tauri-apps/plugin-opener";
@@ -91,7 +91,11 @@ describe("ArtifactView", () => {
       vi.mocked(openPath).mockRejectedValue(new Error("no association"));
       renderView("C:/sessions/s1/artifacts/report.pdf", "pdf");
       fireEvent.click(await screen.findByRole("button", { name: /外部打开|externally/ }));
-      expect(await screen.findByRole("status")).toHaveTextContent(
+      // Scoped to the header: the frame's loading indicator is a status
+      // region too (issue #1201), and jsdom never fires load so both
+      // coexist here.
+      const header = screen.getByTestId("artifact-header");
+      expect(await within(header).findByRole("status")).toHaveTextContent(
         /无法在外部打开|Could not open/,
       );
     });
@@ -106,9 +110,15 @@ describe("ArtifactView", () => {
       renderView("C:/sessions/s1/artifacts/report.pdf", "pdf");
       const open = await screen.findByRole("button", { name: /外部打开|externally/ });
       fireEvent.click(open);
-      expect(await screen.findByRole("status")).toBeInTheDocument();
+      const header = screen.getByTestId("artifact-header");
+      expect(await within(header).findByRole("status")).toBeInTheDocument();
       fireEvent.click(open);
-      await waitFor(() => expect(screen.queryByRole("status")).not.toBeInTheDocument());
+      // The still-mounted loading indicator (jsdom never fires load) is a
+      // status region outside the header -- only the note vanishing from
+      // the header is the signal.
+      await waitFor(() =>
+        expect(within(header).queryByRole("status")).not.toBeInTheDocument(),
+      );
     });
   });
 
@@ -174,6 +184,35 @@ describe("ArtifactView", () => {
       expect(await screen.findByTestId("artifact-face")).toBeInTheDocument();
       expect(screen.queryByTestId("artifact-frame")).not.toBeInTheDocument();
       expect(await screen.findByText(/已不在磁盘上|no longer on disk/)).toBeInTheDocument();
+    });
+  });
+
+  describe("iframe loading indicator (issue #1201)", () => {
+    it("shows the centered indicator until the pdf frame's load fires", async () => {
+      vi.mocked(artifactExists).mockResolvedValue(true);
+      renderView("C:/sessions/s1/artifacts/report.pdf", "pdf");
+      const frame = await screen.findByTestId("artifact-frame");
+      // jsdom never fires an iframe load on its own, so the indicator is up
+      // at mount; the manual event stands in for the WebView's first paint.
+      expect(screen.getByRole("status", { name: /正在加载|Loading/ })).toBeInTheDocument();
+      fireEvent.load(frame);
+      expect(
+        screen.queryByRole("status", { name: /正在加载|Loading/ }),
+      ).not.toBeInTheDocument();
+    });
+
+    it("covers the html branch identically, sandbox pin riding along untouched", async () => {
+      vi.mocked(artifactExists).mockResolvedValue(true);
+      renderView("C:/sessions/s1/artifacts/page.html", "html");
+      expect(await screen.findByTestId("artifact-frame")).toBeInTheDocument();
+      expect(screen.getByRole("status", { name: /正在加载|Loading/ })).toBeInTheDocument();
+      fireEvent.load(screen.getByTestId("artifact-frame"));
+      // Firing load removed the indicator and nothing else: the trust
+      // posture is the same DOM as before the overlay existed.
+      expect(screen.getByTestId("artifact-frame")).toHaveAttribute("sandbox", "allow-scripts");
+      expect(
+        screen.queryByRole("status", { name: /正在加载|Loading/ }),
+      ).not.toBeInTheDocument();
     });
   });
 
