@@ -338,7 +338,7 @@ pub struct AppConfig {
     #[serde(default)]
     pub cli_tools: CliToolRegistry,
     /// Managed sessions directory override (issue #452, ADR-0089 Decision 2).
-    /// None = runtime-computed default (`<Documents>/toptopduck/sessions/`).
+    /// None = runtime-computed default (`<Documents>/TOPTOPDuck/sessions/`).
     /// Some(path) = user-chosen directory. Forward-compat: a pre-#452 file has
     /// no `sessions_dir` key, so serde(default) fills None rather than
     /// rejecting the whole document. The format_version is NOT bumped — the

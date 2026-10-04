@@ -128,7 +128,7 @@ export interface AppConfig {
   // non-optional here too.
   cli_tools: CliToolRegistry;
   // Managed sessions directory override (issue #452, ADR-0089 Decision 2).
-  // null = runtime-computed default (<Documents>/toptopduck/sessions/).
+  // null = runtime-computed default (<Documents>/TOPTOPDuck/sessions/).
   // serde(default) fills null for a pre-#452 file.
   sessions_dir: string | null;
   // The default runtime new sessions start on (ADR-0098 Decision 2, issue
