@@ -442,8 +442,9 @@ pub struct RenderedCall {
 /// (rendered pre-gate) and the execution (post-gate) share one (tool, param,
 /// call) triple, so the approver signs exactly the path the child receives.
 /// Returns a structured error naming the first problem (missing parameter,
-/// non-string value, or a delivery/template shape a hand-edited config broke
-/// -- the call-time degrade path).
+/// non-string value, a call key the registration does not declare, or a
+/// delivery/template shape a hand-edited config broke -- the call-time
+/// degrade path).
 pub fn render_call(
     tool: &CliToolConfig,
     input: &Value,
@@ -715,6 +716,9 @@ pub fn tool_definitions(tools: &[CliToolConfig]) -> Vec<ToolDefinition> {
                     "type": "object",
                     "properties": properties,
                     "required": required,
+                    // Mirrors render_call's undeclared-key refusal so the
+                    // advertised contract matches what execution enforces.
+                    "additionalProperties": false,
                 }),
             }
         })
@@ -1372,6 +1376,11 @@ mod tests {
             schema["required"],
             json!(["verb", "args"]),
             "every parameter is required"
+        );
+        assert_eq!(
+            schema["additionalProperties"],
+            json!(false),
+            "the advertised contract refuses undeclared keys like render_call"
         );
     }
 }
