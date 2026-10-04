@@ -6,7 +6,7 @@
 // degrade. The IPC reads (artifactExists / readArtifactText) and the OS
 // opener are mocked; convertFileSrc is a pure transform and stays real.
 
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { IntlProvider } from "react-intl";
@@ -56,6 +56,14 @@ function renderView(
 }
 
 describe("ArtifactView", () => {
+  // Reset implementations too (resetAllMocks, not clearAllMocks): without
+  // it, a persistent mockResolvedValue from an earlier case (e.g. the
+  // pdf-missing exists -> false) bleeds into later cases that never set
+  // their own. Every case below sets what its assertions depend on.
+  beforeEach(() => {
+    vi.resetAllMocks();
+  });
+
   describe("file header (the persistent stage chrome)", () => {
     it("shows the file name and the external-open action for an existing file", async () => {
       vi.mocked(artifactExists).mockResolvedValue(true);
@@ -87,6 +95,21 @@ describe("ArtifactView", () => {
         /无法在外部打开|Could not open/,
       );
     });
+
+    it("clears the failure note when a retry opens successfully", async () => {
+      vi.mocked(artifactExists).mockResolvedValue(true);
+      // Fresh Error instances per Once-stage: a reused instance keeps
+      // rejecting through later stages.
+      vi.mocked(openPath)
+        .mockRejectedValueOnce(new Error("no association"))
+        .mockResolvedValueOnce(undefined);
+      renderView("C:/sessions/s1/artifacts/report.pdf", "pdf");
+      const open = await screen.findByRole("button", { name: /外部打开|externally/ });
+      fireEvent.click(open);
+      expect(await screen.findByRole("status")).toBeInTheDocument();
+      fireEvent.click(open);
+      await waitFor(() => expect(screen.queryByRole("status")).not.toBeInTheDocument());
+    });
   });
 
   describe("html branch (the isolated shell)", () => {
@@ -102,14 +125,16 @@ describe("ArtifactView", () => {
       expect(frame.getAttribute("title")).toBe("page.html");
     });
 
-    it("degrades out-of-scope HTML (a user-directory original) to the face", () => {
+    it("degrades out-of-scope HTML (a user-directory original) to the face", async () => {
       vi.mocked(artifactExists).mockResolvedValue(true);
       renderView("C:/Users/me/report.html", "html");
-      expect(screen.getByTestId("artifact-face")).toBeInTheDocument();
+      // findBy waits out the exists query so the assertions land on the
+      // resolved state, not the optimistic pending render.
+      expect(await screen.findByTestId("artifact-face")).toBeInTheDocument();
       expect(screen.queryByTestId("artifact-frame")).not.toBeInTheDocument();
       // The degrade never eats the chrome: name + open stay in the header.
       expect(screen.getByTestId("artifact-header")).toHaveTextContent("report.html");
-      expect(screen.getByRole("button", { name: /外部打开|externally/ })).toBeInTheDocument();
+      expect(await screen.findByRole("button", { name: /外部打开|externally/ })).toBeInTheDocument();
     });
 
     it("degrades a missing in-scope HTML file to the face, not a denial frame", async () => {
@@ -136,10 +161,10 @@ describe("ArtifactView", () => {
       expect(frame.getAttribute("title")).toBe("report.pdf");
     });
 
-    it("degrades an out-of-scope pdf to the face", () => {
+    it("degrades an out-of-scope pdf to the face", async () => {
       vi.mocked(artifactExists).mockResolvedValue(true);
       renderView("C:/Users/me/report.pdf", "pdf");
-      expect(screen.getByTestId("artifact-face")).toBeInTheDocument();
+      expect(await screen.findByTestId("artifact-face")).toBeInTheDocument();
       expect(screen.queryByTestId("artifact-frame")).not.toBeInTheDocument();
     });
 
@@ -171,7 +196,9 @@ describe("ArtifactView", () => {
     it("keeps a vega-lite fence in an md artifact static (issue #1093 pin)", async () => {
       // MarkdownArtifact mounts RoundProse bare -- never through Thread's
       // stage link -- so a delivered report's fences are static content even
-      // while the chart itself draws.
+      // while the chart itself draws. The embed implementation is re-set
+      // here: the suite-wide resetAllMocks clears the module factory's.
+      vi.mocked(embed).mockResolvedValue({ finalize: vi.fn(), view: { resize: vi.fn() } } as never);
       vi.mocked(readArtifactText).mockResolvedValue(
         "# Report\n\n```vega-lite\n{\"mark\": \"bar\"}\n```",
       );

@@ -30,6 +30,7 @@ import { ExternalLink, FileDown, FileWarning } from "lucide-react";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { openPath } from "@tauri-apps/plugin-opener";
 import { readArtifactText } from "../../api";
+import { log } from "../../lib/log";
 import { artifactKeys } from "../../session/queryKeys";
 import { useArtifactExists } from "../../session/useArtifactExists";
 import { isWithinArtifactsDir, type ArtifactRenderKind } from "../../session/workspace";
@@ -61,10 +62,13 @@ export function ArtifactView({
   });
   const handleOpen = () => {
     setOpenFailed(false);
-    // openPath hands the path to the OS opener; a failure surfaces as a
-    // caption note in the header (the RoundProse openUrl twin), not a
-    // thrown promise.
-    openPath(artifact.path).catch(() => setOpenFailed(true));
+    // openPath hands the path to the OS opener; a failure is logged (the
+    // RoundProse openUrl twin) and surfaces as a caption note in the
+    // header, not a thrown promise.
+    openPath(artifact.path).catch((e: unknown) => {
+      log.warn("ArtifactView", "openPath failed", e);
+      setOpenFailed(true);
+    });
   };
   return (
     <div className="flex h-full min-h-0 flex-col">
@@ -120,8 +124,9 @@ export function ArtifactView({
 }
 
 /** The matrix body under the header. Every branch gate degrades to the
- * centered face -- the header above keeps the name and the open entry, so
- * no failure state ever blanks the stage chrome (issue #1199). */
+ * centered face -- the header above keeps the name (and the open entry
+ * whenever the file still exists), so no failure state ever blanks the
+ * stage chrome (issue #1199). */
 function ArtifactStageBody({
   artifact,
   render,

@@ -143,8 +143,9 @@ export function findArtifact(
 /** Whether an artifact path sits inside the per-session artifacts directory
  * (ADR-0124 Decision 4): `artifacts/` under the bound .duck's parent -- the
  * one directory the asset protocol's runtime scope grants. Only in-scope
- * HTML is iframe-servable; a user-directory original (or an unbound temp
- * path) degrades to the card + external open instead of a denied iframe.
+ * html/pdf are iframe-servable; a user-directory original (or an unbound
+ * temp path) degrades to the fallback face under the stage header instead
+ * of a denied iframe.
  * Case-insensitive: Windows (the app's host) folds path case, and a
  * case-differing collision on a case-sensitive host is pathological.
  * ponytail: hand-rolled dirname/sep (no path polyfill in the webview); if

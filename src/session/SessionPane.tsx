@@ -838,11 +838,14 @@ function WorkspaceResult({
       );
     case "file":
       // ADR-0124 Decision 3/4 (issue #1088): the artifact stage -- one file
-      // at a time, rendered per the matrix (iframe shell / prose / card).
+      // at a time, rendered per the matrix (iframe shell / prose / face).
       // No history banner: the manifest is settle-frozen, a file view never
-      // goes "stale" the way a past result does.
+      // goes "stale" the way a past result does. The key pins the view to
+      // the path (the identity): a file-to-file switch remounts, so one
+      // file's open-failure note never rides another file's header.
       return (
         <ArtifactView
+          key={content.path}
           artifact={{ path: content.path, file_name: content.fileName }}
           render={content.render}
           duckPath={duckPath}

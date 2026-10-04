@@ -1594,8 +1594,8 @@ describe("App artifact presentation (issue #1088, ADR-0124 Decision 3/4)", () =>
     vi.mocked(conversation).mockImplementation(async () => state.thread);
     // Re-establish the createSession default: clearAllMocks clears calls,
     // not implementations, and an earlier suite's persistent clobber (a
-    // different duck_path) would route the HTML scope check off the
-    // artifacts dir and degrade the iframe to the card.
+    // different duck_path) would route the html/pdf scope check off the
+    // artifacts dir and degrade the iframe to the fallback face.
     vi.mocked(createSession).mockResolvedValue({
       session_id: "sess-1",
       duck_path: "/sessions/sess-1/session.duck",
