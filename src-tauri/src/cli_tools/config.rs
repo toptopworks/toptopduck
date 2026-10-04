@@ -442,8 +442,9 @@ pub struct RenderedCall {
 /// (rendered pre-gate) and the execution (post-gate) share one (tool, param,
 /// call) triple, so the approver signs exactly the path the child receives.
 /// Returns a structured error naming the first problem (missing parameter,
-/// non-string value, or a delivery/template shape a hand-edited config broke
-/// -- the call-time degrade path).
+/// non-string value, a call key the registration does not declare, or a
+/// delivery/template shape a hand-edited config broke -- the call-time
+/// degrade path).
 pub fn render_call(
     tool: &CliToolConfig,
     input: &Value,
@@ -596,6 +597,40 @@ pub fn render_call(
             ));
         }
     }
+    // A call key the registration never declares is skill-text/schema
+    // drift, not a renderable input: the canonical case is an Edited
+    // builtin whose frozen param set predates a parameter its skill text
+    // now teaches. Dropping the value silently runs the tool without the
+    // model's flags (often still exit 0), so refuse and let the model
+    // self-correct against the registration's own schema.
+    if let Some(obj) = input.as_object() {
+        let mut unknown: Vec<&str> = obj
+            .keys()
+            .map(String::as_str)
+            .filter(|k| !tool.params.iter().any(|p| &p.name == k))
+            .collect();
+        if !unknown.is_empty() {
+            // Deterministic regardless of the map impl behind serde_json's
+            // object (BTreeMap today, insertion-ordered under preserve_order).
+            unknown.sort_unstable();
+            let quoted = |names: Vec<&str>| -> String {
+                names
+                    .iter()
+                    .map(|n| format!("`{n}`"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            };
+            let declared: Vec<&str> = tool.params.iter().map(|p| p.name.as_str()).collect();
+            return Err(format!(
+                "unknown parameter{} {} for tool `{}`; the registration \
+                 declares only [{}]",
+                if unknown.len() > 1 { "s" } else { "" },
+                quoted(unknown),
+                tool.name,
+                quoted(declared)
+            ));
+        }
+    }
     Ok(rendered)
 }
 
@@ -681,6 +716,9 @@ pub fn tool_definitions(tools: &[CliToolConfig]) -> Vec<ToolDefinition> {
                     "type": "object",
                     "properties": properties,
                     "required": required,
+                    // Mirrors render_call's undeclared-key refusal so the
+                    // advertised contract matches what execution enforces.
+                    "additionalProperties": false,
                 }),
             }
         })
@@ -1174,6 +1212,46 @@ mod tests {
     }
 
     #[test]
+    fn render_call_errors_on_undeclared_input_keys() {
+        // The #1192 window (issue #1194): an Edited registration freezes an
+        // older param set while the skill text unconditionally teaches the
+        // newer one, and a call naming it would lose the value silently --
+        // argv missing the flags, tool free to exit 0.
+        let mut t = tool("hybrid");
+        t.argv_template = vec![
+            placeholder("input"),
+            "-o".to_string(),
+            placeholder("output"),
+        ];
+        t.params = vec![param("input"), param("output"), varargs("extra")];
+
+        let drifted =
+            json!({"input": "in.md", "output": "out.docx", "extra": ["-s"], "flags": "--toc"});
+        let err = render_call(&t, &drifted, Path::new("/tmp"), "tu_1").unwrap_err();
+        assert!(
+            err.contains("unknown parameter `flags` for tool `hybrid`"),
+            "the error names the key and the tool: {err}"
+        );
+        assert!(
+            err.contains("declares only [`input`, `output`, `extra`]"),
+            "the error lists the declared set: {err}"
+        );
+        // Every declared key is present and well-typed here, so the error
+        // must not read as any of the missing/non-string/varargs lanes.
+        assert!(!err.contains("missing required parameter"), "{err}");
+        assert!(!err.contains("must be a string"), "{err}");
+        assert!(!err.contains("must be an array of strings"), "{err}");
+
+        // Every undeclared key surfaces, deterministically ordered.
+        let two = json!({"input": "in.md", "output": "out.docx", "extra": [], "z": "1", "a": "2"});
+        let err = render_call(&t, &two, Path::new("/tmp"), "tu_1").unwrap_err();
+        assert!(
+            err.contains("unknown parameters `a`, `z`"),
+            "all undeclared keys are named: {err}"
+        );
+    }
+
+    #[test]
     fn render_call_errors_when_file_params_fold_to_the_same_temp_file() {
         // The render-side degrade twin of validate's collision refusal: a
         // hand-edited config smuggled past the upsert boundary must refuse,
@@ -1298,6 +1376,11 @@ mod tests {
             schema["required"],
             json!(["verb", "args"]),
             "every parameter is required"
+        );
+        assert_eq!(
+            schema["additionalProperties"],
+            json!(false),
+            "the advertised contract refuses undeclared keys like render_call"
         );
     }
 }

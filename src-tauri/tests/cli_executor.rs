@@ -151,6 +151,25 @@ fn invalid_call_errors_before_spawning() {
 }
 
 #[test]
+fn undeclared_call_key_errors_before_spawning() {
+    // The #1194 guard: a well-formed call plus a key the registration never
+    // declares (skill-text/schema drift on an Edited entry) is the call's
+    // own error, not a silent drop that runs the tool without the value.
+    let outcome = run(&tool("fake"), json!({"args": ["--pwd"], "extra": ["-s"]}));
+    assert!(outcome.result.is_error);
+    assert!(
+        outcome.result.content.contains("invalid call"),
+        "the refusal rides the invalid-call channel: {}",
+        outcome.result.content
+    );
+    assert!(
+        outcome.result.content.contains("unknown parameter `extra`"),
+        "the payload names the undeclared key: {}",
+        outcome.result.content
+    );
+}
+
+#[test]
 fn cwd_is_the_session_work_temp_dir() {
     let temp = TempDir::new().unwrap();
     let outcome = execute(
