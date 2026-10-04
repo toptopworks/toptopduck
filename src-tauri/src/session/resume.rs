@@ -776,6 +776,17 @@ impl super::Session {
             resume_baseline,
         );
 
+        // #1202: backfill the persisted artifacts into the fresh cwd before
+        // the resume phases -- the replayed history narrates past deliveries,
+        // and the next turn references them from the working directory
+        // instead of recomputing. The duck path is bound (adopt_resumed
+        // above), so the artifacts dir derives from the same source as the
+        // settle-time materialize.
+        super::artifacts::backfill_into_cwd(
+            super::artifacts::artifacts_dir(session.duck_path()).as_deref(),
+            &session.temp_path,
+        );
+
         // Phase 1: re-read + verify each source (interactive re-link / rebuild).
         // Returns the set of rebuilt (dropped) sources; recipe.sources[i] is
         // updated in place for any relinked path.

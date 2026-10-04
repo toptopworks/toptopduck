@@ -3776,3 +3776,80 @@ fn cancelled_in_flight_turn_writes_recipe_once_at_terminal_not_mid_flight() {
         "terminal Cancelled outcome wrote the recipe exactly once"
     );
 }
+
+// --- resume artifact backfill (#1202) ---------------------------------------
+
+/// #1202: a resumed session's FRESH temp cwd carries a writable copy of every
+/// persisted artifact (fork versions included), a cwd edit never reaches the
+/// persistent original, and a second resume re-backfills the identical set
+/// (idempotent across restarts).
+#[test]
+fn resume_backfills_persisted_artifacts_into_the_fresh_cwd() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let duck = dir.path().join("s.duck");
+    let source = plant_people(dir.path());
+    drop(build_single_source_session(&duck, &source));
+
+    // What a previous incarnation's settle-time materialize would have left:
+    // the primary delivery plus a `_2` fork.
+    let artifacts = dir.path().join("artifacts");
+    fs::create_dir_all(&artifacts).expect("dirs");
+    fs::write(artifacts.join("dashboard.html"), "html").expect("write");
+    fs::write(artifacts.join("dashboard_2.html"), "html2").expect("write");
+
+    let resumed = resume_defaults(&duck, Arc::new(CancelToken::new()), |_| {}).expect("resume");
+    assert_eq!(
+        fs::read_to_string(resumed.temp_cwd().join("dashboard.html")).expect("copy"),
+        "html",
+        "the agent's cwd carries the delivered file under its original name"
+    );
+    assert_eq!(
+        fs::read_to_string(resumed.temp_cwd().join("dashboard_2.html")).expect("copy"),
+        "html2",
+        "a `_2` fork version backfills alongside its base"
+    );
+
+    // The cwd copy is writable and independent: deleting it never deletes
+    // the persistent original (plain copy, never a hardlink).
+    fs::remove_file(resumed.temp_cwd().join("dashboard.html")).expect("remove copy");
+    assert!(
+        artifacts.join("dashboard.html").is_file(),
+        "the persistent original survives cwd edits"
+    );
+
+    // A second restart resumes into another fresh cwd with the same set.
+    drop(resumed);
+    let resumed_again =
+        resume_defaults(&duck, Arc::new(CancelToken::new()), |_| {}).expect("resume again");
+    assert_eq!(
+        fs::read_to_string(resumed_again.temp_cwd().join("dashboard.html")).expect("copy"),
+        "html",
+        "the second resume backfills the identical set"
+    );
+}
+
+/// #1202 control: a session with NO artifacts directory resumes into a cwd
+/// that holds exactly its construction-time `tool_output` subdir -- zero
+/// behavioral change for artifact-less sessions.
+#[test]
+fn resume_without_artifacts_leaves_the_cwd_untouched() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let duck = dir.path().join("s.duck");
+    let source = plant_people(dir.path());
+    drop(build_single_source_session(&duck, &source));
+
+    let resumed = resume_defaults(&duck, Arc::new(CancelToken::new()), |_| {}).expect("resume");
+    let names: Vec<String> = fs::read_dir(resumed.temp_cwd())
+        .expect("read cwd")
+        .map(|e| e.expect("entry").file_name().to_string_lossy().into_owned())
+        .collect();
+    // The replay's own `<ref>.duckdb` swap files are pre-#1202 cwd content;
+    // anything else would be a stray backfill. (The `people` reference names
+    // the duckdb, but this pins zero-strays without hardcoding that name.)
+    assert!(
+        names
+            .iter()
+            .all(|n| n == "tool_output" || n.ends_with(".duckdb")),
+        "no artifacts directory -> the cwd holds only its own content, got {names:?}"
+    );
+}
