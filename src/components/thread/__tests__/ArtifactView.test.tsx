@@ -222,6 +222,9 @@ describe("ArtifactView", () => {
       renderView("C:/sessions/s1/artifacts/notes.md", "markdown");
       expect(await screen.findByText("Body text")).toBeInTheDocument();
       expect(screen.getByRole("heading", { level: 1, name: "Heading" })).toBeInTheDocument();
+      // The loading overlay belongs to the frame branches only (issue
+      // #1201): md rides the IPC text read, so no indicator ever mounts.
+      expect(screen.queryByRole("status", { name: /正在加载|Loading/ })).not.toBeInTheDocument();
     });
 
     it("degrades a refused read (over the size cap) to the face under the intact header", async () => {
@@ -255,6 +258,8 @@ describe("ArtifactView", () => {
       vi.mocked(openPath).mockResolvedValue(undefined);
       renderView("C:/sessions/s1/artifacts/table.xlsx", "card");
       expect(screen.getByTestId("artifact-face")).toBeInTheDocument();
+      // No frame, no frame-loading indicator (issue #1201's scope guard).
+      expect(screen.queryByRole("status", { name: /正在加载|Loading/ })).not.toBeInTheDocument();
       fireEvent.click(await screen.findByRole("button", { name: /外部打开|externally/ }));
       await waitFor(() => expect(openPath).toHaveBeenCalledWith("C:/sessions/s1/artifacts/table.xlsx"));
     });
