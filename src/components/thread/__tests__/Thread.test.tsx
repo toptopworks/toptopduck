@@ -1109,12 +1109,16 @@ describe("Thread", () => {
     it("stamps asked_at on the bubble + settled_at on the closing meta; omits both for pre-v5 turns", () => {
       const { container } = renderChat(chatRecord());
       // <time> carries the machine-readable stamp; the visible text is the
-      // locale time (TZ-dependent in CI, so only the shape is asserted).
+      // Chat-style stamp -- a prior-year stamp includes the year (this
+      // suite's zh-CN provider places the year first, which the ^2024 anchor
+      // relies on; en-US renders "Aug 21, 2024, ..." and would need a looser
+      // match).
       const asked = container.querySelector(".user-bubble time");
       expect(asked?.getAttribute("datetime")).toBe(new Date(ASKED_AT).toISOString());
-      expect(asked?.textContent).toMatch(/^\d{1,2}:\d{2}/);
+      expect(asked?.textContent).toMatch(/^2024/);
       const settled = container.querySelector(".turn-meta time");
       expect(settled?.getAttribute("datetime")).toBe(new Date(SETTLED_AT).toISOString());
+      expect(settled?.textContent).toMatch(/2024/);
       // Honest degrade: no recorded stamp -> no time element, never synthetic.
       const old = renderChat(chatRecord({ asked_at: undefined, settled_at: undefined }));
       expect(old.container.querySelectorAll(".turn-card time")).toHaveLength(0);

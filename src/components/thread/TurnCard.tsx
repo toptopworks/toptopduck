@@ -37,6 +37,7 @@ import type { SkillEntry } from "../../types/skills";
 import type { ThinkingTrace, TraceRound, TurnRecord } from "../../types/thread";
 import { formatTurnFailure, turnFailureDetail } from "../../lib/error-presentation";
 import { TechnicalDetailsFold } from "../common/TechnicalDetailsFold";
+import { formatTurnStamp } from "./turnStamp";
 
 interface TurnCardProps {
   record: TurnRecord;
@@ -218,7 +219,7 @@ export function TurnCard({
             )}
             {record.settled_at !== undefined && (
               <time dateTime={new Date(record.settled_at).toISOString()}>
-                {intl.formatTime(record.settled_at)}
+                {formatTurnStamp(record.settled_at, intl)}
               </time>
             )}
           </span>

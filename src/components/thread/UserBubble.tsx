@@ -9,13 +9,15 @@
 // question, then the assistant-side annotations, then reply.
 //
 // The verbatim question is layer-4 content (ADR-0039) and passes through
-// untranslated; asked_at renders as the locale time (ADR-0052 chrome).
+// untranslated; asked_at renders as the Chat-style conversation stamp
+// (formatTurnStamp, ADR-0052 chrome).
 
 import { useIntl } from "react-intl";
 import { Puzzle } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { CopyButton } from "./CopyButton";
 import { HOVER_REVEAL_CLASS } from "./turn-visual";
+import { formatTurnStamp } from "./turnStamp";
 
 // The stale strike rides dotted (ADR-0041/0047), shared by both shapes: the
 // bare bubble carries it on the bubble element itself, the chips shape on the
@@ -114,7 +116,7 @@ export function UserBubble({
         )}
       >
         {askedAt !== undefined && (
-          <time dateTime={new Date(askedAt).toISOString()}>{intl.formatTime(askedAt)}</time>
+          <time dateTime={new Date(askedAt).toISOString()}>{formatTurnStamp(askedAt, intl)}</time>
         )}
         <CopyButton
           text={question}
