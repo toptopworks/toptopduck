@@ -1594,8 +1594,8 @@ describe("App artifact presentation (issue #1088, ADR-0124 Decision 3/4)", () =>
     vi.mocked(conversation).mockImplementation(async () => state.thread);
     // Re-establish the createSession default: clearAllMocks clears calls,
     // not implementations, and an earlier suite's persistent clobber (a
-    // different duck_path) would route the HTML scope check off the
-    // artifacts dir and degrade the iframe to the card.
+    // different duck_path) would route the html/pdf scope check off the
+    // artifacts dir and degrade the iframe to the fallback face.
     vi.mocked(createSession).mockResolvedValue({
       session_id: "sess-1",
       duck_path: "/sessions/sess-1/session.duck",
@@ -1676,18 +1676,21 @@ describe("App artifact presentation (issue #1088, ADR-0124 Decision 3/4)", () =>
     expect(releaseRefetch).not.toBeNull();
     releaseRefetch!();
     // The manifest lands; the auto-open one-shot fires (no Materialized -> the artifact owns
-    // the stage): the workspace expands and the primary renders as the
-    // file card (pdf -> the card branch, not the iframe).
+    // the stage): the workspace expands and the primary renders in-page (pdf
+    // -> the unsandboxed viewer frame, issue #1199).
     await waitFor(() =>
       expect(document.querySelector(".session-pane")?.classList.contains("workspace-collapsed")).toBe(false),
     );
-    const card = await waitFor(() => {
-      const node = document.querySelector("[data-testid=\"artifact-card\"]");
+    const frame = await waitFor(() => {
+      const node = document.querySelector("[data-testid=\"artifact-frame\"]");
       expect(node).not.toBeNull();
       return node as HTMLElement;
     });
-    expect(card).toHaveTextContent("report.pdf");
-    expect(document.querySelector("[data-testid=\"artifact-frame\"]")).toBeNull();
+    // The viewer rides the asset protocol, deliberately unsandboxed.
+    expect(frame).not.toHaveAttribute("sandbox");
+    expect(frame.getAttribute("src")).toContain("report.pdf");
+    // The header carries the name as the stage chrome.
+    expect(document.querySelector("[data-testid=\"artifact-header\"]")).toHaveTextContent("report.pdf");
   });
 });
 
