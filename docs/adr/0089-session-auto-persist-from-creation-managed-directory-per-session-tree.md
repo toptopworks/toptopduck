@@ -4,7 +4,7 @@
 
 1. **`createSession` 即绑定 .duck——消灭纯内存阶段。** 新建会话时立即生成 UUID、创建 per-session 目录、写入初始 recipe。session 从存在起即处于绑定态，`duck_path` 恒为 `Some`，`RecipePersister` 的 `None -> Some` 状态转换从代码路径中消失。ADR-0034 Decision 5 的「每轮终态自动追加」从 `createSession` 起即生效——不再依赖用户主动首次保存。
 
-2. **管理会话目录——app 管理、用户可见、可配置。** 所有会话存于一个 app 管理的目录，默认 `<Documents>/toptopduck/sessions/`（平台惯例的 Documents 子目录，非隐藏 `%APPDATA%`）。设置中显示当前路径 + 「更改…」+「在文件管理器中打开」。改目录后新会话进新目录，旧会话留原处——不做自动迁移（YAGNI）。根 `toptopduck/` 预留 `sessions/` 子目录层级，为未来扩展（技能库等）留结构空间，不预创建空目录。
+2. **管理会话目录——app 管理、用户可见、可配置。** 所有会话存于一个 app 管理的目录，默认 `<Documents>/TOPTOPDuck/sessions/`（平台惯例的 Documents 子目录，非隐藏 `%APPDATA%`）。设置中显示当前路径 + 「更改…」+「在文件管理器中打开」。改目录后新会话进新目录，旧会话留原处——不做自动迁移（YAGNI）。根 `TOPTOPDuck/` 预留 `sessions/` 子目录层级，为未来扩展（技能库等）留结构空间，不预创建空目录。
 
 3. **Per-session 目录结构。** 每个会话是一个自包含目录 `{sessions}/{uuid}/`，内含固定名 `session.duck`（recipe）与可选 `assets/`（派生源，ADR-0087 D2）。取代 ADR-0087 的扁平 `{duck_stem}.assets/` 模式。复制 / 移动 / 删除一个目录 = 完整会话。`session.duck` 固定文件名——显示名在 recipe header 中，sidebar 是主交互面；UUID 目录名是稳定身份，不随显示名变化。
 

@@ -1,6 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "toptopduck",
+  "productName": "TOPTOPDuck",
+  "mainBinaryName": "TOPTOPDuck",
   "version": "0.1.0",
   "identifier": "dev.toptopduck.app",
   "build": {
@@ -14,7 +15,7 @@
       {
         "label": "main",
         "create": false,
-        "title": "toptopduck",
+        "title": "TOPTOPDuck",
         "width": 1024,
         "height": 768,
         "minWidth": 840,

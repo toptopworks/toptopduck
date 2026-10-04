@@ -28,7 +28,7 @@ use tauri::Manager; // for AppHandle::path()
 
 /// The root directory of all managed sessions (ADR-0089, issue #452). Each
 /// session lives in a per-session subdirectory `{uuid}/session.duck`. Resolved
-/// at setup from `<Documents>/toptopduck/sessions/` (or the app-config
+/// at setup from `<Documents>/TOPTOPDuck/sessions/` (or the app-config
 /// `sessions_dir` override) and managed as Tauri state so every session-scoped
 /// command shares one path source. The inner [`RwLock`] lets
 /// `set_sessions_dir` swap the root at runtime without a restart — readers
@@ -78,10 +78,10 @@ pub(crate) fn validate_sessions_dir(path: &Path) -> Result<(), String> {
 /// setup and `set_sessions_dir` (when the override is cleared, None).
 pub(crate) fn default_sessions_root(app: &tauri::AppHandle) -> PathBuf {
     match app.path().document_dir() {
-        Ok(dir) => dir.join("toptopduck").join("sessions"),
+        Ok(dir) => dir.join("TOPTOPDuck").join("sessions"),
         Err(e) => {
             log::warn!("failed to resolve documents dir; sessions fall back to a temp path: {e}");
-            std::env::temp_dir().join("toptopduck-sessions")
+            std::env::temp_dir().join("TOPTOPDuck-sessions")
         }
     }
 }

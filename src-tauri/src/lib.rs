@@ -357,7 +357,7 @@ pub fn run() {
             // visible), not a lost boot -- best-effort, unlike show above.
             let _ = main_window.set_focus();
             // ADR-0089 + issue #452: managed sessions directory. Default root
-            // is `<Documents>/toptopduck/sessions/` (platform-conventions
+            // is `<Documents>/TOPTOPDuck/sessions/` (platform-conventions
             // Documents, not hidden app-data). When app-config carries a
             // `sessions_dir` override, honor it with honest-degrade — a missing
             // / non-directory path logs a warning and falls back to the default

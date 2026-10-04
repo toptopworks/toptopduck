@@ -575,7 +575,7 @@ pub(crate) fn init(app: &AppHandle) -> bool {
     };
     let built = TrayIconBuilder::with_id(TRAY_ID)
         .icon(icon.clone())
-        .tooltip("toptopduck")
+        .tooltip("TOPTOPDuck")
         .menu(&menu)
         // Tauri v2's default shows the menu on LEFT click too; the resident
         // idiom (ADR-0125 Decision 4) is left = reveal window, right = menu.
