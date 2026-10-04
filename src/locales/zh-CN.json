@@ -660,6 +660,7 @@
   "workingSet.rowCount": "{count} 行",
   "workingSet.staleRow": "已失效",
   "workingSet.staleRow.hint": "因「{name}」{reason, select, Deleted {已删除} Replaced {已更新} other {已变动}}而失效",
+  "workspace.artifact.loading": "正在加载文档",
   "workspace.artifact.missing": "该文件已不在磁盘上",
   "workspace.artifact.openExternal": "在外部打开",
   "workspace.artifact.openFailed": "无法在外部打开该文件",

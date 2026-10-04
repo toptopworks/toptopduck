@@ -660,6 +660,7 @@
   "workingSet.rowCount": "{count, plural, one {# row} other {# rows}}",
   "workingSet.staleRow": "Stale",
   "workingSet.staleRow.hint": "Invalidated because {name} was {reason, select, Deleted {deleted} Replaced {updated} other {changed}}",
+  "workspace.artifact.loading": "Loading document",
   "workspace.artifact.missing": "This file is no longer on disk",
   "workspace.artifact.openExternal": "Open externally",
   "workspace.artifact.openFailed": "Could not open the file externally",

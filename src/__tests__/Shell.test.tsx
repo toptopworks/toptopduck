@@ -1631,6 +1631,45 @@ describe("App artifact presentation (issue #1088, ADR-0124 Decision 3/4)", () =>
     expect(row).toHaveAttribute("aria-current", "true");
   });
 
+  it("resets the loading indicator when switching artifacts (the per-path remount, issue #1201)", async () => {
+    // The frame's isLoaded state lives in ArtifactView, but its reset is
+    // owned upstream: SessionPane keys the view by content.path (#1199's
+    // openFailed scoping), so a rail switch remounts the stage and the
+    // second document loads under its own indicator. The switch is
+    // deliberately same-kind (html to html): a kind change remounts the
+    // shell on its own, so only the same-kind switch discriminates the
+    // key -- without it the view reconciles in place and the switched-to
+    // document renders with no indicator while still fetching.
+    state.workingSet = [src("people")];
+    state.thread = [
+      artifactTurn(["/sessions/sess-1/artifacts/page.html", "/sessions/sess-1/artifacts/report.html"]),
+    ];
+    render(<App />);
+    await openSession();
+    fireEvent.click(await screen.findByRole("button", { name: /page\.html/ }));
+    const first = await waitFor(() => {
+      const node = document.querySelector("[data-testid=\"artifact-frame\"]");
+      expect(node).not.toBeNull();
+      return node as HTMLElement;
+    });
+    // jsdom never fires the frame's load: the manual event stands in for
+    // the WebView's first paint and retires the first document's indicator.
+    expect(screen.getByRole("status", { name: /正在加载|Loading/ })).toBeInTheDocument();
+    fireEvent.load(first);
+    expect(screen.queryByRole("status", { name: /正在加载|Loading/ })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: /report\.html/ }));
+    const second = await waitFor(() => {
+      const node = document.querySelector("[data-testid=\"artifact-frame\"]");
+      expect(node).not.toBeNull();
+      return node as HTMLElement;
+    });
+    // The remount is the contract under test: a fresh frame node carries
+    // the second document, and its indicator is up again from mount.
+    expect(second).not.toBe(first);
+    expect(second.getAttribute("src")).toContain("report.html");
+    expect(screen.getByRole("status", { name: /正在加载|Loading/ })).toBeInTheDocument();
+  });
+
   it("auto-opens the primary when the turn-end refetch lands a manifest (live flow)", async () => {
     state.workingSet = [src("people")];
     const outcome = {
