@@ -374,8 +374,9 @@ pub struct GateCancelled;
 /// Three payload kinds ride this shape -- file-delivery values (issue
 /// #672), the skill markdown body (`skills::create`), and the full
 /// pre-truncation argv rendering when the summary's cap cut it (issue
-/// #1195). Captured at approval time -- the temp file is deleted when the
-/// call ends, so the payload snapshot is the only durable view.
+/// #1195). Captured at approval time -- for file-delivery values, the
+/// temp file is deleted when the call ends, so the payload snapshot is
+/// the only durable view.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct FileAttachment {
     pub param: String,

@@ -1138,20 +1138,73 @@ mod tests {
         // not moving).
         assert_eq!(summary.chars().count(), ARGS_PREVIEW_MAX_CHARS);
         assert!(summary.ends_with("..."));
-        // The argv attachment carries the full rendering: every flag is
-        // verbatim present, and the summary's head is its prefix -- the
-        // approver can verify the card against what will actually run.
+        // The argv attachment carries the full rendering verbatim -- the
+        // exact join, separator, and argument order -- and the summary's
+        // head is its prefix, so the approver can verify the card against
+        // what will actually run.
         let audit = attachments
             .iter()
             .find(|a| a.param == "argv")
             .expect("oversize argv mounts an audit attachment");
-        assert!(audit.content.contains("--toc"));
-        assert!(audit.content.contains(&long_flag));
+        assert_eq!(
+            audit.content,
+            format!("/bin/pandoc --toc {long_flag}"),
+            "the attachment carries the full verbatim join"
+        );
         let head = summary.strip_suffix("...").unwrap();
         assert!(
             audit.content.starts_with(head),
             "the card summary is the full rendering's prefix"
         );
+    }
+
+    #[test]
+    fn an_oversize_cli_argv_mounts_alongside_the_file_delivery_attachments() {
+        // The mount is additive: the file-delivery snapshots the approver
+        // needs (the temp files are deleted at call end) stay in the list
+        // and the argv audit rides after them -- a rebuild instead of a
+        // push would drop them silently.
+        use crate::cli_tools::config::{CliParamDelivery, CliToolConfig, CliToolParam};
+        let tool = CliToolConfig {
+            name: "pandoc".into(),
+            description: "convert".into(),
+            executable: "/bin/pandoc".into(),
+            argv_template: vec!["{input_md}".into()],
+            params: vec![
+                CliToolParam {
+                    name: "input_md".into(),
+                    description: "source document".into(),
+                    delivery: CliParamDelivery::File,
+                    varargs: false,
+                },
+                CliToolParam {
+                    name: "extra".into(),
+                    description: "extra flags".into(),
+                    delivery: CliParamDelivery::Argv,
+                    varargs: true,
+                },
+            ],
+            env: Default::default(),
+            enabled: true,
+            source: Default::default(),
+            baseline: None,
+        };
+        let long_flag = format!("--metadata title={}", "x".repeat(600));
+        let (_, _, summary, attachments) = classify_cli_tool(
+            &tool,
+            &serde_json::json!({ "input_md": "# hi", "extra": ["--toc", &long_flag] }),
+            std::path::Path::new("/tmp"),
+            "tu_20",
+        );
+        assert_eq!(summary.chars().count(), ARGS_PREVIEW_MAX_CHARS);
+        assert_eq!(
+            attachments.len(),
+            2,
+            "the argv mount is additive, not a rebuild"
+        );
+        assert_eq!(attachments[0].param, "input_md");
+        assert_eq!(attachments[0].content, "# hi");
+        assert_eq!(attachments[1].param, "argv");
     }
 
     /// A route failure (unknown slug) surfaces as a tool error the agent
