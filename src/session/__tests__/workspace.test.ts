@@ -299,11 +299,11 @@ describe("artifact derivation (ADR-0124, issue #1088)", () => {
   const MD = "C:/sessions/s1/artifacts/notes.md";
 
   describe("artifactRenderKind (Decision 4 matrix)", () => {
-    it("html/htm -> html, md -> markdown, the rest -> card", () => {
+    it("html/htm -> html, pdf -> pdf, md -> markdown, the rest -> card", () => {
       expect(artifactRenderKind(HTML)).toBe("html");
       expect(artifactRenderKind("x/report.HTM")).toBe("html");
+      expect(artifactRenderKind(PDF)).toBe("pdf");
       expect(artifactRenderKind(MD)).toBe("markdown");
-      expect(artifactRenderKind(PDF)).toBe("card");
       expect(artifactRenderKind("x/table.xlsx")).toBe("card");
       // Extension-less (unreachable via the whitelist) degrades to the card.
       expect(artifactRenderKind("x/README")).toBe("card");

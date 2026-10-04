@@ -8,7 +8,7 @@
 
 3. **结果页单舞台泛化，产物与结果互斥上位。** workspace 的选中状态泛化为 dataset | file 判别联合，最后点击的上位，不引入 tab 或并排分栏。自动打开分情形：turn 仅有产物（无 Materialized 结果）时展开 workspace 并自动打开 primary 产物（一次性触发，以校验签名入 key 防晚到候选重复消费）；两者并存时遵循既有结果提升语义，产物只展开不抢位。
 
-4. **渲染矩阵按格式分层，信任边界收在 iframe 隔离壳。** HTML 经 asset 协议以 `iframe sandbox="allow-scripts"`（无同源）内嵌渲染——脚本可执行（交互式报告可用）但运行于 opaque origin，读不到应用页面与凭据；assetProtocol scope 限 per-session artifacts 物化目录，scope 外产物（含用户目录原位命中）自动降级为卡片+外部打开。md 经 IPC 读文本内嵌渲染（复用 prose 渲染器，不开 asset 面）。pdf/docx/xlsx/pptx 首版一律卡片+外部打开，应用内嵌留独立增强票。
+4. **渲染矩阵按格式分层，信任边界收在 iframe 隔离壳，文件头恒守舞台。** HTML 经 asset 协议以 `iframe sandbox="allow-scripts"`（无同源）内嵌渲染——脚本可执行（交互式报告可用）但运行于 opaque origin，读不到应用页面与凭据。pdf 经同一 asset 协议 iframe 内嵌且不加 sandbox：WebView 自带查看器是文档渲染器而非可执行 agent HTML，无脚本面需要关进 opaque origin。md 经 IPC 读文本内嵌渲染（复用 prose 渲染器，不开 asset 面）。assetProtocol scope 限 per-session artifacts 物化目录，html/pdf 的 scope 外产物或文件缺失降级为主体图标脸，docx/xlsx/pptx 维持不可内嵌的主体图标脸。文件舞台恒为「文件头+主体」两段式——文件头恒显文件名与外部打开入口（存在性门控），一切降级（scope 外、缺失、读取拒绝）只替换主体不吞舞台 chrome；平台无内置查看器时主体留白（Linux WebKitGTK、旧 WKWebView），文件头的外部打开即逃生门。
 
 5. **术语定名「产物」（artifacts），workspace 词汇不动。** `TurnRecord.artifacts`、rail 产物卡、票面域前缀「产物: 」；CONTEXT.md 词条首用即定义（turn 交付给用户的文件清单，与 Materialized 结果并列的内容类型）。workspace 是面板结构词，产物是内容词——概念混淆以词条分离消化，不为新内容改名既有结构。
 
@@ -40,4 +40,4 @@
 - assetProtocol 启用并配置 per-session artifacts 物化目录 scope；CSP 增补 `frame-src asset:` 面。
 - 物化引入 settle 期文件拷贝；会话删除连带清理物化产物（既有 per-session 目录删除语义）。
 - CONTEXT.md 增「产物」词条。
-- 增强票池（独立开票，非本决策范围）：PDF iframe 内嵌、docx 渲染库、file:// 扫描族、分屏对照、共享工作区引入时的词汇整理。
+- 增强票池（独立开票，非本决策范围）：docx 渲染库、file:// 扫描族、分屏对照、共享工作区引入时的词汇整理。

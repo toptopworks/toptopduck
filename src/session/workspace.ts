@@ -100,20 +100,23 @@ export function findLatestMaterializedPrimary(thread: ThreadEntry[]): string | n
 }
 
 /** How a viewed artifact renders (ADR-0124 Decision 4's matrix, keyed by the
- * file's extension): HTML rides the sandboxed asset-protocol iframe, md rides
- * the IPC text read + the prose renderer, everything else (and every degrade)
- * is the file card with the external-open action. */
-export type ArtifactRenderKind = "html" | "markdown" | "card";
+ * file's extension): HTML rides the sandboxed asset-protocol iframe, pdf rides
+ * the asset-protocol iframe UNsandboxed (the WebView's built-in viewer is a
+ * document renderer, not executable agent HTML), md rides the IPC text read +
+ * the prose renderer, everything else (and every degrade) is the fallback
+ * face under the stage's persistent file header. */
+export type ArtifactRenderKind = "html" | "pdf" | "markdown" | "card";
 
 /** The render kind for one artifact path (ADR-0124 Decision 4). Extension-
  * keyed off the path itself (the file_name is a display mirror); the
  * deliverable whitelist (pdf/docx/xlsx/pptx/html/htm/md) makes the
  * extension-less fallthrough unreachable in practice -- it degrades to the
- * card, the honest shape for an unknown format. */
+ * fallback face, the honest shape for an unknown format. */
 export function artifactRenderKind(path: string): ArtifactRenderKind {
   const dot = path.lastIndexOf(".");
   const ext = dot === -1 ? "" : path.slice(dot + 1).toLowerCase();
   if (ext === "html" || ext === "htm") return "html";
+  if (ext === "pdf") return "pdf";
   if (ext === "md") return "markdown";
   return "card";
 }
