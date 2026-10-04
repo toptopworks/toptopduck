@@ -1011,6 +1011,14 @@ impl Session {
         self.persister.duck_path()
     }
 
+    /// The session's temp working directory (ADR-0012 RAII lifecycle): the
+    /// CLI tools' execution cwd and the built-in tool output area's parent.
+    /// Read access for the resume black-box pins (#1202's artifact backfill
+    /// copies land here).
+    pub fn temp_cwd(&self) -> &Path {
+        &self.temp_path
+    }
+
     /// Whether the timeline carries no content at all (ADR-0089 Decision 6):
     /// no turns, no source lifecycle events, no skill lifecycle events. Used by
     /// `close_session` to decide whether to delete the per-session directory so

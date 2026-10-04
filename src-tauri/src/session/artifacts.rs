@@ -496,6 +496,59 @@ fn materialize(path: PathBuf, cwd: &Path, artifacts_dir: Option<&Path>) -> (Path
     }
 }
 
+/// Resume-time backfill (#1202): copy every file under the per-session
+/// persistent `artifacts/` directory flat into the FRESH session cwd, so a
+/// resumed agent can reference past deliveries from its working directory
+/// instead of recomputing them (the replayed history still narrates them).
+/// Plain copies, never hardlinks: an in-place edit on the cwd copy stays
+/// local and never writes through to the persistent layer or bypasses
+/// [`materialize`]'s `_2` versioning. A missing or empty directory is a
+/// silent no-op; a per-file failure logs and continues (the `materialize`
+/// precedent).
+pub(crate) fn backfill_into_cwd(artifacts_dir: Option<&Path>, cwd: &Path) {
+    let Some(dir) = artifacts_dir else {
+        return;
+    };
+    let entries = match std::fs::read_dir(dir) {
+        Ok(entries) => entries,
+        // NotFound = the session never materialized an artifact: resume
+        // proceeds with an empty cwd, exactly like a brand-new session.
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return,
+        Err(e) => {
+            log::warn!(
+                target: "toptopduck::session",
+                "artifact backfill skipped: cannot read {}: {e}",
+                dir.display()
+            );
+            return;
+        }
+    };
+    for entry in entries.filter_map(|entry| match entry {
+        Ok(entry) => Some(entry),
+        Err(e) => {
+            log::warn!(
+                target: "toptopduck::session",
+                "artifact backfill entry skipped: {e}"
+            );
+            None
+        }
+    }) {
+        let path = entry.path();
+        // Flat copy: only files -- subdirectories are not part of the
+        // manifest model.
+        if !path.is_file() {
+            continue;
+        }
+        if let Err(e) = std::fs::copy(&path, cwd.join(entry.file_name())) {
+            log::warn!(
+                target: "toptopduck::session",
+                "artifact backfill skipped for {}: {e}",
+                path.display()
+            );
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1046,6 +1099,82 @@ mod tests {
         assert!(
             Path::new(&manifest[0].path).starts_with(cwd),
             "no copy without a target"
+        );
+    }
+
+    /// #1202 backfill: resume copies every persisted artifact (fork versions
+    /// included) flat into the fresh session cwd, and the cwd copy stays a
+    /// writable independent copy -- editing it never reaches the persistent
+    /// original (plain copy, never a hardlink).
+    #[test]
+    fn backfill_copies_all_persisted_files_flat_into_the_cwd() {
+        let work = tempfile::tempdir().expect("workdir");
+        let session = tempfile::tempdir().expect("session dir");
+        let artifacts_dir = session.path().join(ARTIFACTS_DIR_NAME);
+        std::fs::create_dir_all(&artifacts_dir).expect("dirs");
+        std::fs::write(artifacts_dir.join("dashboard.html"), "html").expect("write");
+        std::fs::write(artifacts_dir.join("dashboard_2.html"), "html2").expect("write");
+
+        backfill_into_cwd(Some(&artifacts_dir), work.path());
+
+        assert_eq!(
+            std::fs::read_to_string(work.path().join("dashboard.html")).expect("copy"),
+            "html",
+            "the flat copy lands in the cwd under the original name"
+        );
+        assert_eq!(
+            std::fs::read_to_string(work.path().join("dashboard_2.html")).expect("copy"),
+            "html2",
+            "a `_2` fork version backfills alongside its base"
+        );
+        std::fs::write(work.path().join("dashboard.html"), "edited").expect("edit copy");
+        assert_eq!(
+            std::fs::read_to_string(artifacts_dir.join("dashboard.html")).expect("original"),
+            "html",
+            "the cwd copy is independent of the persistent original"
+        );
+    }
+
+    /// A session that never materialized an artifact (missing dir) and an
+    /// unbound session (`None`) both resume with an empty cwd -- silent
+    /// no-ops, never an error.
+    #[test]
+    fn backfill_without_an_artifacts_dir_is_a_silent_noop() {
+        let work = tempfile::tempdir().expect("workdir");
+        let session = tempfile::tempdir().expect("session dir");
+        let missing = session.path().join(ARTIFACTS_DIR_NAME);
+        backfill_into_cwd(Some(&missing), work.path());
+        backfill_into_cwd(None, work.path());
+        assert!(
+            std::fs::read_dir(work.path())
+                .expect("read cwd")
+                .next()
+                .is_none(),
+            "neither call lands anything in the cwd"
+        );
+    }
+
+    /// A single uncopyable file (a directory squatting on the target name)
+    /// logs and is skipped; the remaining artifacts still backfill.
+    #[test]
+    fn backfill_skips_a_file_that_cannot_be_copied_and_continues() {
+        let work = tempfile::tempdir().expect("workdir");
+        let session = tempfile::tempdir().expect("session dir");
+        let artifacts_dir = session.path().join(ARTIFACTS_DIR_NAME);
+        std::fs::create_dir_all(&artifacts_dir).expect("dirs");
+        std::fs::write(artifacts_dir.join("good.html"), "html").expect("write");
+        std::fs::write(artifacts_dir.join("blocked.txt"), "txt").expect("write");
+        std::fs::create_dir_all(work.path().join("blocked.txt")).expect("block");
+
+        backfill_into_cwd(Some(&artifacts_dir), work.path());
+
+        assert!(
+            work.path().join("good.html").is_file(),
+            "the sibling artifact still backfills"
+        );
+        assert!(
+            work.path().join("blocked.txt").is_dir(),
+            "the failed target is left untouched (still the squatter)"
         );
     }
 }
