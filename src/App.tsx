@@ -1082,12 +1082,21 @@ export default function App() {
                     ResultView granular boundaries (inside SessionPane) do not
                     catch degrades only THIS session's pane -- sibling panes
                     stay alive. The key bump remounts the whole pane; onReset
-                    drops its cache so the remount re-fetches fresh. */}
+                    drops its cache so the remount re-fetches fresh. The
+                    artifact prefix rides along (issue #1212): its keys are
+                    process-global, and a Query-driven re-render throw lands
+                    HERE (the React 19 nested-boundary gap ADR-0058 records),
+                    so a retry that skipped them would remount against the
+                    cached throwing text entry (staleTime Infinity) and
+                    re-degrade forever. */}
                         <ErrorBoundary
                           name="session"
                           onReset={() => {
                             void queryClient.removeQueries({
                               queryKey: ["session", s.sid],
+                            });
+                            void queryClient.removeQueries({
+                              queryKey: ["artifact"],
                             });
                           }}
                         >
