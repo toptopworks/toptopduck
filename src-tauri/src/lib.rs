@@ -1,4 +1,4 @@
-//! toptopduck -- local-first AI data analysis desktop tool.
+//! TOPTOPDuck -- local-first AI data analysis desktop tool.
 //!
 //! Slice 1 (issue #5): CSV ingest end-to-end tracer bullet. The ingest pipeline
 //! (ingest / session / workingset) is driven as a black box by

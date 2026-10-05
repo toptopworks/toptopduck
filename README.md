@@ -1,8 +1,8 @@
-# TOPTOP Duck
+# TOPTOPDuck
 
 > 本地优先的 AI 数据分析 agent 桌面工具——数据不离本机，仅 LLM 推理联网。
 
-toptopduck 是一个数据分析 agent：用自然语言提问，agent 自主选用合适的工具完成分析。内置 DuckDB SQL 工具覆盖查询、清洗、聚合与描述性统计；用户可配置外部 MCP 工具扩展能力（机器学习、预测等）。完整数据集始终留在本地；只有 schema、最小样本行和查询会发送给你自带密钥（BYOK）的 LLM。
+TOPTOPDuck 是一个数据分析 agent：用自然语言提问，agent 自主选用合适的工具完成分析。内置 DuckDB SQL 工具覆盖查询、清洗、聚合与描述性统计；用户可配置外部 MCP 工具扩展能力（机器学习、预测等）。完整数据集始终留在本地；只有 schema、最小样本行和查询会发送给你自带密钥（BYOK）的 LLM。
 
 ## 核心特性
 

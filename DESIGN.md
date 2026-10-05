@@ -333,7 +333,7 @@ components:
 
 ## Overview
 
-toptopduck is a local-first AI data analysis workbench — not a marketing site. The UI serves long analytical sessions where users upload datasets, ask natural-language questions, review SQL execution traces, and inspect results tables and charts. Every design decision optimizes for **sustained focus and data legibility**, not visual impact.
+TOPTOPDuck is a local-first AI data analysis workbench — not a marketing site. The UI serves long analytical sessions where users upload datasets, ask natural-language questions, review SQL execution traces, and inspect results tables and charts. Every design decision optimizes for **sustained focus and data legibility**, not visual impact.
 
 The visual identity is a **calm, precise instrument**. Teal (`{colors.primary}` — #0d9488) is the sole brand accent — reserved for primary actions, active states, and focus rings. It never appears decoratively. The canvas is pure white in light mode and a dark surface (`{colors.canvas-dark}` — #0f1410) in dark mode. This dark canvas carries a subtle green undertone (G channel highest in RGB 15, 20, 16) that is visually harmonious with the teal brand color.
 

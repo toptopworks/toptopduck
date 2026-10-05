@@ -5,14 +5,14 @@
 // navigation truncates any forward branch, then appends; the cursor walks the
 // stack without growing it.
 //
-// NavEntry describes a toptopduck view: the active session (null = cold-start
+// NavEntry describes a TOPTOPDuck view: the active session (null = cold-start
 // hero) + the settings overlay state (open + section). editProfileId is
 // intentionally excluded -- it is a one-shot mount hint, not a restorable
 // destination (issue #288).
 
 import type { SettingsSection } from "../components/settings/sections";
 
-/** A navigable toptopduck view, captured for the back/forward stack. */
+/** A navigable TOPTOPDuck view, captured for the back/forward stack. */
 export type NavEntry = {
   /** The active session id, or null on the cold-start hero. */
   sessionId: string | null;
