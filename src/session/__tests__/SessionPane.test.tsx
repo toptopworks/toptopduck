@@ -5,6 +5,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 
 import { SessionPane } from "../SessionPane";
 import { useSessionState } from "../useSessionState";
+import { artifactKeys } from "../queryKeys";
 import { getApprovalAttachments, listSkills } from "../../api";
 import { TooltipProvider } from "../../components/ui/tooltip";
 import type { LiveTurn } from "../useTurnFlow";
@@ -33,22 +34,25 @@ vi.mock("../useSessionState", () => ({
 }));
 
 // Hoisted so the ArtifactView mock factory below can read it at import time.
-const { BAD_ARTIFACT_PATH } = vi.hoisted(() => ({
+// The probe's recovered flag lets a test flip the crash off, so the
+// post-retry remount renders the stub instead of re-throwing.
+const { BAD_ARTIFACT_PATH, artifactProbe } = vi.hoisted(() => ({
   BAD_ARTIFACT_PATH: "C:/artifacts/out/bad.md",
+  artifactProbe: { recovered: false },
 }));
 
 // The artifact stage is replaced with a crash probe (issue #1212): the real
 // ArtifactView degrades every data-level failure internally (the render
 // matrix's fallback face), so only a mocked render throw can exercise the
-// pane's face boundary. The matching path throws; every other file renders a
-// stub the assertions can anchor on.
+// pane's face boundary. The matching path throws until the probe recovers;
+// every other file renders a stub the assertions can anchor on.
 vi.mock("../../components/thread/ArtifactView", () => ({
   ArtifactView: function ArtifactView({
     artifact,
   }: {
     artifact: { path: string; file_name: string };
   }) {
-    if (artifact.path === BAD_ARTIFACT_PATH) {
+    if (artifact.path === BAD_ARTIFACT_PATH && !artifactProbe.recovered) {
       throw new Error("artifact render crash");
     }
     return <div data-testid="artifact-stub">{artifact.file_name}</div>;
@@ -190,7 +194,7 @@ function renderPane() {
       </TooltipProvider>
     </QueryClientProvider>
   );
-  return { ...render(ui()), ui, respond };
+  return { ...render(ui()), ui, queryClient, respond };
 }
 
 describe("SessionPane approval wiring", () => {
@@ -224,6 +228,7 @@ describe("SessionPane artifact stage boundary", () => {
   beforeEach(() => {
     vi.mocked(useSessionState).mockImplementation(paneSessionState);
     vi.mocked(listSkills).mockResolvedValue({ skills: [] } as never);
+    artifactProbe.recovered = false;
   });
 
   const fileContent = (path: string, fileName: string) => ({
@@ -262,5 +267,31 @@ describe("SessionPane artifact stage boundary", () => {
 
     expect(screen.queryByRole("alert")).not.toBeInTheDocument();
     expect(screen.getByTestId("artifact-stub")).toHaveTextContent("good.md");
+  });
+
+  it("drops the file's exists/text cache entries on retry and remounts clean", () => {
+    vi.mocked(useSessionState).mockImplementation(() =>
+      paneSessionStateWithWorkspace(fileContent(BAD_ARTIFACT_PATH, "bad.md")),
+    );
+    const { queryClient } = renderPane();
+    // Seed both per-path entries so the drop assertion discriminates: an
+    // unseeded cache is already empty and the removal would pass vacuously.
+    queryClient.setQueryData(artifactKeys.exists(BAD_ARTIFACT_PATH), true);
+    queryClient.setQueryData(artifactKeys.text(BAD_ARTIFACT_PATH), "# poisoned");
+
+    // Flip the probe BEFORE the click: the boundary's retry runs onReset
+    // (the synchronous cache drop) before clearing the error, so the
+    // remounted view must find the entries already gone and render.
+    artifactProbe.recovered = true;
+    fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+
+    expect(
+      queryClient.getQueryState(artifactKeys.exists(BAD_ARTIFACT_PATH)),
+    ).toBeUndefined();
+    expect(
+      queryClient.getQueryState(artifactKeys.text(BAD_ARTIFACT_PATH)),
+    ).toBeUndefined();
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+    expect(screen.getByTestId("artifact-stub")).toHaveTextContent("bad.md");
   });
 });
