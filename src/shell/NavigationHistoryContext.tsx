@@ -13,7 +13,7 @@ import { NavigationHistoryContext, type NavigationHistoryValue } from "./useNavi
 
 // Provider for the in-app back/forward navigation history (issue #288). Owns the
 // browser-style stack (pure transitions in navigationHistory.ts) and is the
-// single seam between toptopduck's state-driven navigation model and the
+// single seam between TOPTOPDuck's state-driven navigation model and the
 // back/forward buttons. There is no router (issue #288 Context: a router's
 // one-Route-at-a-time model is incompatible with ADR-0051 session keep-alive),
 // so the consumer derives a NavEntry "location" from activeSessionId + the
@@ -35,7 +35,7 @@ import { NavigationHistoryContext, type NavigationHistoryValue } from "./useNavi
 // (react-refresh: keep this file component-export-only).
 
 type ProviderProps = {
-  /** The current toptopduck view (active session + settings overlay state),
+  /** The current TOPTOPDuck view (active session + settings overlay state),
    *  derived by the consumer. The provider pushes a new entry on every change. */
   location: NavEntry;
   /** Re-apply a history entry to the app WITHOUT pushing (used by back/forward).

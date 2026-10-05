@@ -628,7 +628,7 @@ mod tests {
     /// Every embedded SKILL.md is spec-valid: parses, carries its manifest
     /// name, a description, a non-blank body, and no metadata mapping (the
     /// retired extension keys, issue #952 -- materialization leaves no
-    /// toptopduck trace).
+    /// TOPTOPDuck trace).
     #[test]
     fn every_embedded_skill_md_is_valid_and_name_matched() {
         for entry in BUILTIN_SKILL_MANIFEST {

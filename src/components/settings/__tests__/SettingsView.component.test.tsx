@@ -161,7 +161,7 @@ describe("SettingsView (ADR-0075 per-control persistence + rail chrome)", () => 
   beforeEach(() => {
     vi.clearAllMocks();
     vi.mocked(listProviderProfiles).mockResolvedValue(profileKeysDefault);
-    vi.mocked(getSessionsDir).mockResolvedValue("/home/user/Documents/toptopduck/sessions");
+    vi.mocked(getSessionsDir).mockResolvedValue("/home/user/Documents/TOPTOPDuck/sessions");
     vi.mocked(listAdapters).mockResolvedValue(mockAdapters);
     vi.mocked(rescanAdapters).mockResolvedValue(mockAdapters);
     vi.mocked(testProfile).mockResolvedValue({ kind: "Ok", data: { models: [] } });
@@ -308,13 +308,13 @@ describe("SettingsView (ADR-0075 per-control persistence + rail chrome)", () => 
   it("displays the backend-resolved sessions directory on mount", async () => {
     renderView();
     expect(
-      await screen.findByText("/home/user/Documents/toptopduck/sessions"),
+      await screen.findByText("/home/user/Documents/TOPTOPDuck/sessions"),
     ).toBeInTheDocument();
   });
 
   it("Save is disabled until Browse picks a directory", async () => {
     renderView();
-    await screen.findByText("/home/user/Documents/toptopduck/sessions");
+    await screen.findByText("/home/user/Documents/TOPTOPDuck/sessions");
     expect(screen.getByRole("button", { name: "Save" })).toBeDisabled();
   });
 
@@ -325,7 +325,7 @@ describe("SettingsView (ADR-0075 per-control persistence + rail chrome)", () => 
     vi.mocked(setSessionsDir).mockResolvedValue(updatedConfig);
 
     renderView({ onSessionsDirChanged });
-    await screen.findByText("/home/user/Documents/toptopduck/sessions");
+    await screen.findByText("/home/user/Documents/TOPTOPDuck/sessions");
 
     fireEvent.click(screen.getByRole("button", { name: "Browse…" }));
     await waitFor(() => expect(vi.mocked(dialogPlugin.open)).toHaveBeenCalled());
@@ -342,7 +342,7 @@ describe("SettingsView (ADR-0075 per-control persistence + rail chrome)", () => 
     vi.mocked(setSessionsDir).mockRejectedValue(new Error("not writable"));
 
     renderView();
-    await screen.findByText("/home/user/Documents/toptopduck/sessions");
+    await screen.findByText("/home/user/Documents/TOPTOPDuck/sessions");
 
     fireEvent.click(screen.getByRole("button", { name: "Browse…" }));
     await waitFor(() => expect(vi.mocked(dialogPlugin.open)).toHaveBeenCalled());
@@ -362,7 +362,7 @@ describe("SettingsView (ADR-0075 per-control persistence + rail chrome)", () => 
     );
 
     const { onClose } = renderView();
-    await screen.findByText("/home/user/Documents/toptopduck/sessions");
+    await screen.findByText("/home/user/Documents/TOPTOPDuck/sessions");
     fireEvent.click(screen.getByRole("button", { name: "Browse…" }));
     await waitFor(() => expect(vi.mocked(dialogPlugin.open)).toHaveBeenCalled());
     fireEvent.click(screen.getByRole("button", { name: "Save" }));
