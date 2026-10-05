@@ -32,6 +32,29 @@ vi.mock("../useSessionState", () => ({
   useSessionState: vi.fn(),
 }));
 
+// Hoisted so the ArtifactView mock factory below can read it at import time.
+const { BAD_ARTIFACT_PATH } = vi.hoisted(() => ({
+  BAD_ARTIFACT_PATH: "C:/artifacts/out/bad.md",
+}));
+
+// The artifact stage is replaced with a crash probe (issue #1212): the real
+// ArtifactView degrades every data-level failure internally (the render
+// matrix's fallback face), so only a mocked render throw can exercise the
+// pane's face boundary. The matching path throws; every other file renders a
+// stub the assertions can anchor on.
+vi.mock("../../components/thread/ArtifactView", () => ({
+  ArtifactView: function ArtifactView({
+    artifact,
+  }: {
+    artifact: { path: string; file_name: string };
+  }) {
+    if (artifact.path === BAD_ARTIFACT_PATH) {
+      throw new Error("artifact render crash");
+    }
+    return <div data-testid="artifact-stub">{artifact.file_name}</div>;
+  },
+}));
+
 const SID = "sid-1";
 
 // One pending approval card riding the live turn (the same shape Thread's
@@ -73,7 +96,10 @@ const noop = () => {};
 // pending-approval posture: an empty recorded thread, the live card, and
 // no-op handlers -- the pane's own callbacks are what is under test, and
 // the never-rendered handlers (workspace tab, dialogs) are never invoked.
-function paneSessionState(): never {
+// The workspace content is parameterizable so the stage-face tests can
+// select the file branch; the shared default mock stays zero-arg because
+// the pane's real call passes the session id as the first argument.
+function paneSessionStateWithWorkspace(workspaceContent: unknown): never {
   return {
     thread: [],
     liveTurn: liveTurnWithPendingApproval(),
@@ -109,8 +135,12 @@ function paneSessionState(): never {
       pollPersistError: vi.fn(async () => {}),
     },
     queryErrors: [],
-    workspaceContent: { kind: "hero" },
+    workspaceContent,
   } as never;
+}
+
+function paneSessionState(): never {
+  return paneSessionStateWithWorkspace({ kind: "hero" });
 }
 
 // Empty-catalog English IntlProvider (the TraceView test convention):
@@ -127,7 +157,10 @@ function renderPane() {
     respond,
     clearSession: vi.fn(),
   };
-  const ui = (
+  // A factory, not an element: a rerender must hand React a FRESH element --
+  // re-rendering the same element reference bails out at the root (identical
+  // props), and the mocked useSessionState would never be re-consulted.
+  const ui = () => (
     <QueryClientProvider client={queryClient}>
       {/* TooltipProvider mounts at the App level above the panes in the real
           tree (the rail card truncation sites use Radix Tooltip). */}
@@ -157,7 +190,7 @@ function renderPane() {
       </TooltipProvider>
     </QueryClientProvider>
   );
-  return { ...render(ui), respond };
+  return { ...render(ui()), ui, respond };
 }
 
 describe("SessionPane approval wiring", () => {
@@ -180,5 +213,54 @@ describe("SessionPane approval wiring", () => {
     const { respond } = renderPane();
     fireEvent.click(screen.getByRole("button", { name: "Allow once" }));
     expect(respond).toHaveBeenCalledWith(SID, "req-1", "allow_once");
+  });
+});
+
+// The artifact stage's render-crash partition (issue #1212): the file face
+// carries its own ErrorBoundary so a crash inside the stage degrades ONLY
+// that face, and the boundary rides the path key so switching files resets a
+// crash degrade instead of pinning the next file to the previous one's card.
+describe("SessionPane artifact stage boundary", () => {
+  beforeEach(() => {
+    vi.mocked(useSessionState).mockImplementation(paneSessionState);
+    vi.mocked(listSkills).mockResolvedValue({ skills: [] } as never);
+  });
+
+  const fileContent = (path: string, fileName: string) => ({
+    kind: "file",
+    path,
+    fileName,
+    render: "markdown",
+  });
+
+  it("degrades only the artifact face when its render crashes -- the thread rail keeps rendering", () => {
+    vi.mocked(useSessionState).mockImplementation(() =>
+      paneSessionStateWithWorkspace(fileContent(BAD_ARTIFACT_PATH, "bad.md")),
+    );
+    renderPane();
+
+    const card = screen.getByRole("alert");
+    expect(card).toHaveAttribute("data-region", "artifact");
+    // The live card rides the same fixture: the crash did not reach the rail.
+    expect(screen.getByRole("button", { name: "Allow once" })).toBeInTheDocument();
+  });
+
+  it("renders another artifact normally after a crash -- the path key resets the boundary", () => {
+    vi.mocked(useSessionState).mockImplementation(() =>
+      paneSessionStateWithWorkspace(fileContent(BAD_ARTIFACT_PATH, "bad.md")),
+    );
+    const view = renderPane();
+    expect(screen.getByRole("alert")).toHaveAttribute("data-region", "artifact");
+
+    // Switching the viewed file remounts the keyed boundary: file B renders
+    // and file A's degrade card is gone (with the key left on the child, the
+    // boundary's error state would survive the switch and pin B to A's card).
+    vi.mocked(useSessionState).mockImplementation(() =>
+      paneSessionStateWithWorkspace(fileContent("C:/artifacts/out/good.md", "good.md")),
+    );
+    view.rerender(view.ui());
+
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+    expect(screen.getByTestId("artifact-stub")).toHaveTextContent("good.md");
   });
 });

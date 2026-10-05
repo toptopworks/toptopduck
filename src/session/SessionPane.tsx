@@ -27,7 +27,7 @@ import { cn } from "@/lib/utils";
 import type { ThreadEntry } from "../types/thread";
 import type { WorkspaceContent } from "./workspace";
 import { VizStageView } from "../components/viz/VizStageView";
-import { sessionKeys } from "./queryKeys";
+import { artifactKeys, sessionKeys } from "./queryKeys";
 import { useSkillsRegistry } from "../skills/registry";
 
 // The per-session pane (ADR-0051/0092). One `<SessionPane key={sid} sessionId={sid} />`
@@ -320,6 +320,19 @@ export function SessionPane({ sessionId, isActive, pendingIngestPaths, onIngestC
   const resetSessionCache = () => {
     void queryClient.resetQueries({ queryKey: sessionKeys.all(sessionId) });
     setRegionRetryEpoch((e) => e + 1);
+  };
+
+  // The artifact face's retry (issue #1212): drop the file's two per-path
+  // cache entries so the remounted ArtifactView re-reads instead of
+  // re-throwing against the stale throwing payload. removeQueries (not
+  // resetQueries): the throwing text entry's observer rides the boundary's
+  // children, already unmounted at retry; the exists entry just re-checks
+  // (its rail-row observers sit outside and the fact is idempotent). The
+  // artifact keys are process-global (outside the session prefix), so
+  // resetSessionCache never touches them.
+  const resetArtifactCache = (path: string) => {
+    queryClient.removeQueries({ queryKey: artifactKeys.exists(path) });
+    queryClient.removeQueries({ queryKey: artifactKeys.text(path) });
   };
 
   // Issue #758: the ask-again sink -- the stale banner's rerun and the rail's
@@ -681,6 +694,7 @@ export function SessionPane({ sessionId, isActive, pendingIngestPaths, onIngestC
                 duckPath={duckPath}
                 hasData={s.datasets.length > 0}
                 onResetRegion={resetSessionCache}
+                onResetArtifact={resetArtifactCache}
                 onJumpToLatest={s.handleJumpToLatest}
                 onRerun={handleAskAgain}
                 busy={s.loading}
@@ -740,6 +754,7 @@ function WorkspaceResult({
   duckPath,
   hasData,
   onResetRegion,
+  onResetArtifact,
   onJumpToLatest,
   onRerun,
   busy,
@@ -754,6 +769,9 @@ function WorkspaceResult({
    *  remounted ResultView re-fetches fresh rows instead of re-throwing against
    *  the stale page that crashed it. */
   onResetRegion: () => void;
+  /** Issue #1212 artifact-partition retry: drop the viewed file's
+   *  exists/text cache entries so a remounted ArtifactView re-reads fresh. */
+  onResetArtifact: (path: string) => void;
   /** Issue #757: the history indicator's "back to latest" exit (moves
    *  viewedResult to the latest Materialized turn's primary). */
   onJumpToLatest: () => void;
@@ -840,22 +858,37 @@ function WorkspaceResult({
       // ADR-0124 Decision 3/4 (issue #1088): the artifact stage -- one file
       // at a time, rendered per the matrix (iframe shell / prose / face).
       // No history banner: the manifest is settle-frozen, a file view never
-      // goes "stale" the way a past result does. The key pins the view to
-      // the path (the identity): a file-to-file switch remounts, so one
-      // file's open-failure note never rides another file's header.
+      // goes "stale" the way a past result does. The boundary scopes a render
+      // crash to this face (the thread rail and composer keep rendering,
+      // ADR-0058's face partition); its retry drops the file's exists/text
+      // cache entries so the remount re-reads fresh. The key rides the
+      // boundary -- NOT ArtifactView -- and carries the path identity twice
+      // over: a file-to-file switch remounts, so one file's open-failure note
+      // never rides another file's header (issue #1199), and the same remount
+      // resets a crash degrade (with the key on the child, the boundary's
+      // error state would survive the switch and pin file B to file A's
+      // fallback card).
       return (
-        <ArtifactView
+        <ErrorBoundary
           key={content.path}
-          artifact={{ path: content.path, file_name: content.fileName }}
-          render={content.render}
-          duckPath={duckPath}
-        />
+          name="artifact"
+          onReset={() => onResetArtifact(content.path)}
+        >
+          <ArtifactView
+            artifact={{ path: content.path, file_name: content.fileName }}
+            render={content.render}
+            duckPath={duckPath}
+          />
+        </ErrorBoundary>
       );
     case "viz":
       // Issue #1093: the fence chart's own stage branch. The chart is the
       // whole view (no stale/question/assumption facts exist for a fence --
       // none are fabricated); the pane's scroll owns the height, and the
-      // export pair rides the frame.
+      // export pair rides the frame. No boundary here on purpose: a decode
+      // failure degrades through the stage's own disclosure and a render
+      // throw is scoped by the chart slot's internal boundary, so an outer
+      // layer would be a defense for a throw that cannot escape.
       return <VizStageView spec={content.spec} />;
     default: {
       const unhandled: never = content;
