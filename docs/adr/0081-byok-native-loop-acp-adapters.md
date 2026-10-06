@@ -4,6 +4,8 @@
 
 > 部分被 [ADR-0115](./0115-turn-watchdog-no-progress-replaces-whole-turn-wall-clock.md) 取代：Decision「墙钟 watchdog（默认 120s，对齐 ADR-0021 `REQUEST_TIMEOUT`）」**重写**为无进展看门狗——仅对 agent 自由活动段（生成）计时，轮次等待外部主体的段冻结；步数上限（24）、cancel = 整轮中止与 ADR-0021 对齐**保留**。详见 ADR-0115。
 
+> 部分被 [ADR-0128](./0128-step-cap-window-continuation-native-resume.md) 取代：Decision「执行级兜底」中「步数上限（默认 24）」的触顶语义**重写**为触顶自动续窗（收敛提示 + 每轮次最多续 3 窗，第 4 次触顶仍 failed）；「步数上限（默认 24）」降为窗粒度预算保留，无进展看门狗与 cancel = 整轮中止**保留**。详见 ADR-0128。
+
 ## Decision
 
 **内置运行时 = Rust 原生 agent 循环**，驱动现有 Provider 层（ADR-0064 anthropic/openai 协议，用各协议**原生 tool-calling**）；key 永不出进程（ADR-0029 不变量完整）。**外部运行时 = 数据定义适配器引擎**：每 CLI 一个纯数据定义（bin / argv builder / 流格式 / MCP 注入方式），通用引擎统一做检测 / 启动 / 解析；传输**优先 ACP**（stdio JSON-RPC；MCP server 描述符经 `session/new` 注入；`session/update` 的 tool_call 系列天然映射执行轨迹）；**每轮恒 `session/new` + 喂全量窗口化上下文**，不持 upstream session handle（运行时无状态，ADR-0076）。v1 验证 ACP 三件套 claude-code / gemini-cli / codex；qwen-code 列二批。**执行级兜底**：步数上限（默认 24）+ 墙钟 watchdog（默认 120s，对齐 ADR-0021 `REQUEST_TIMEOUT`），触顶该轮 failed/cancelled；cancel = 整轮中止（内置：interrupt token 扩至循环；外部：ACP `session/cancel` + SIGTERM fallback）。

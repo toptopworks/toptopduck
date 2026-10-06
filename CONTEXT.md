@@ -78,7 +78,7 @@ _Avoid_: 活跃运行时(active runtime)——「活跃」是接入档案的属�
 _Avoid_: 运行时会话(runtime session)——运行时无状态，无会话可言；上下文段(context segment)
 
 **无进展看门狗 (No-progress Watchdog)**:
-轮次级执行安全网（ADR-0115）：仅度量 agent 自由活动段（生成）的无进展时长，触顶即整轮中止、outcome 落 cancelled；轮次等待外部主体期间不计时——网关工具执行、审批挂起、外部适配器自身工具执行均为冻结段。冻结不等于无界：外部 MCP 的连接阶段（initialize、tools/list）每 server 共享一份预算、每次 `tools/call` 单独计时（server 级 `timeout_ms` 覆盖、缺省 120s，超时即调用级错误、该 server 本轮不可用），cancel 触发杀断全部 MCP 传输（含连接进行中的握手；stdio 与 SSE 在 idle-read park 即杀，慢滴流与 full-channel send 阻塞两种 kill-resistant 形态的解除退化为 phase 预算与 join 宽限；HTTP 的 kill 是 no-op，连接期由 per-read 上界与 phase 预算解除而非杀断）。步数上限（执行轨迹的轮数上限）与之并列、独立计数。
+轮次级执行安全网（ADR-0115）：仅度量 agent 自由活动段（生成）的无进展时长，触顶即整轮中止、outcome 落 cancelled；轮次等待外部主体期间不计时——网关工具执行、审批挂起、外部适配器自身工具执行均为冻结段。冻结不等于无界：外部 MCP 的连接阶段（initialize、tools/list）每 server 共享一份预算、每次 `tools/call` 单独计时（server 级 `timeout_ms` 覆盖、缺省 120s，超时即调用级错误、该 server 本轮不可用），cancel 触发杀断全部 MCP 传输（含连接进行中的握手；stdio 与 SSE 在 idle-read park 即杀，慢滴流与 full-channel send 阻塞两种 kill-resistant 形态的解除退化为 phase 预算与 join 宽限；HTTP 的 kill 是 no-op，连接期由 per-read 上界与 phase 预算解除而非杀断）。步数触顶自动续窗（ADR-0128）：单窗步数预算触顶不结算，注入收敛提示（在飞对话专用、不落档）后自动重开一窗，每轮次最多续 3 窗，第 4 次触顶落 failed——各族走原生续跑通道（内置以错误携带历史重开、ACP 同 session 续发、claude 同进程续写、codex exec resume），与看门狗并列、独立计数。
 _Avoid_: 墙钟(wall clock)——整轮计时语义已被取代；活动监测(activity monitor)——看门狗度量的是流活动停滞，不是进程活性
 
 **上次模型姿势**:
