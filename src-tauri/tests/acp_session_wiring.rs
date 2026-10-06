@@ -18,6 +18,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex, MutexGuard};
 
+use toptopduck_lib::approval::OperationKind;
 use toptopduck_lib::cli_tools::config::{
     CliParamDelivery, CliToolConfig, CliToolParam, CliToolSource,
 };
@@ -239,6 +240,59 @@ fn external_gateway_tool_call_drives_dispatch() {
         }
         other => panic!("gateway_tool_call must complete Textual, got {other:?}"),
     }
+}
+
+/// Issue #1222: the CLI reports its gateway-routed call under its own
+/// flattened rename (`<server>_<tool>`) while the gateway's authoritative
+/// record carries the bare name. The engine's fold normalizes the echo row,
+/// so the settle merge pairs it with the gateway record: ONE persisted row
+/// carrying the gateway's name + SQL summary -- not a degraded renamed row
+/// plus a duplicated authoritative segment (the real-machine symptom).
+#[test]
+fn external_gateway_renamed_call_settles_to_one_authoritative_row() {
+    let (mut session, old_path, _guard) = external_session("gateway_rename");
+    let outcome = session.ask("run one renamed gateway tool call");
+    std::env::set_var("PATH", old_path);
+    match outcome {
+        TurnOutcome::Textual { body, .. } => {
+            assert!(
+                body.contains("done via gateway"),
+                "agent message round-tripped through the pump: got {body:?}"
+            );
+        }
+        other => panic!("gateway_rename must complete Textual, got {other:?}"),
+    }
+    let recipe = session.build_recipe();
+    let last_turn = recipe
+        .history
+        .iter()
+        .rev()
+        .find_map(|e| match e {
+            RecipeEntry::Turn(t) => Some(t),
+            _ => None,
+        })
+        .expect("at least one turn in the recipe");
+    let rows: Vec<_> = last_turn
+        .trace
+        .iter()
+        .flat_map(|r| r.calls.iter())
+        .collect();
+    assert_eq!(
+        rows.len(),
+        1,
+        "one gateway call -> exactly one settled trace row: {rows:?}"
+    );
+    assert_eq!(rows[0].name, "explore", "the gateway's bare name wins");
+    assert_eq!(
+        rows[0].summary, "SELECT 1 AS x",
+        "the gateway's argument summary wins"
+    );
+    assert_eq!(
+        rows[0].operation_kind,
+        OperationKind::Read,
+        "the gateway's authoritative badge wins"
+    );
+    assert!(rows[0].success);
 }
 
 /// Issue #673 (ADR-0108 Decision 6): a registered CLI tool is advertised on

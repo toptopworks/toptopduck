@@ -176,13 +176,13 @@ pub(super) fn turn_outcome_from_loop(
 /// leaves them empty by design, slice 9a); termination is ACP-only
 /// (the gateway serves tools, it does not produce a turn termination).
 ///
-/// TODO(issue #299 E2E): a real ACP CLI drive (e.g. gemini-cli) may re-name MCP
-/// tool calls (e.g. prefixing `mcp__<server>__`) in its `session/update`
-/// notifications, in which case the by-name pairing would miss and the echo
-/// survives as a double row. The slice 9c integration test drives a fake
-/// CLI that emits the gateway's names; real-CLI naming is verified in the
-/// manual E2E checklist, and a normalization layer lands as a follow-up if
-/// the E2E shows a rename.
+/// A real ACP CLI drive (e.g. gemini-cli) re-names MCP tool calls in its
+/// `session/update` notifications (the canonical `mcp__<server>__` form or
+/// gemini-cli's `<server>_<tool>` flattening); the ACP fold layer normalizes
+/// those titles to the bare name before they reach this merge (issue #1222),
+/// so the by-name pairing still hits. The slice 9c integration test drives a
+/// fake CLI that replays the observed renamed shapes; real-CLI naming is
+/// verified in the manual E2E checklist.
 pub fn merge_outcomes(gateway: GatewayOutcome, mut acp: LoopOutcome) -> LoopOutcome {
     acp.promotions = gateway.promotions;
     // ADR-0103 (issues #608 + #611, calibrated by #817): the gateway's

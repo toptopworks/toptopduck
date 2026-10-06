@@ -243,25 +243,16 @@ fn extract_mcp_tool_call(item: &Value) -> Option<CodexEvent> {
 }
 
 /// The badge + argument digest a gateway call's live row carries
-/// (issue #816), replaying the gateway's dispatch classification where the
-/// stream layer can: a builtin name keeps its spec badge; a namespaced
-/// external name keeps `Network`; anything else approximates the gateway's
-/// CLI arm (`Execute`) — a registered CLI tool's name is the common case,
-/// though the registration table itself is not reachable from the stream
-/// layer (a bare unknown name, which the gateway classifies `Network`,
-/// takes the same approximation). The digest is the wire's compact
-/// argument JSON under the trace-excerpt truncation (the
-/// `command_execution` discipline); an empty digest (no arguments, or an
-/// empty argument object) degrades to the tool name so the row never
-/// renders bare.
+/// (issue #816): the badge is [`super::engine::gateway_tool_badge`]'s
+/// classification ladder (shared with the ACP fold layer since issue #1222;
+/// a bare unknown name approximates the gateway's CLI arm as `Execute`
+/// because the registration table is not reachable from the stream layer).
+/// The digest is the wire's compact argument JSON under the trace-excerpt
+/// truncation (the `command_execution` discipline); an empty digest (no
+/// arguments, or an empty argument object) degrades to the tool name so the
+/// row never renders bare.
 fn mcp_tool_call_display(name: &str, arguments: &str) -> (OperationKind, String) {
-    let kind = if let Some(spec) = crate::tools::definitions::builtin_metadata(name) {
-        spec.operation_kind
-    } else if crate::mcp::aggregator::is_namespaced(name) {
-        OperationKind::Network
-    } else {
-        OperationKind::Execute
-    };
+    let kind = super::engine::gateway_tool_badge(name);
     let digest = if arguments.is_empty() || arguments == "{}" {
         name.to_string()
     } else {

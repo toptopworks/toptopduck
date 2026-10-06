@@ -12,7 +12,9 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use toptopduck_lib::approval::{ApprovalResponse, ApprovalSink, ApprovalState, AuthMode};
+use toptopduck_lib::approval::{
+    ApprovalResponse, ApprovalSink, ApprovalState, AuthMode, OperationKind,
+};
 use toptopduck_lib::cancel::CancelToken;
 use toptopduck_lib::model::TurnPhase;
 use toptopduck_lib::runtime::acp::adapter::{codex, gemini_cli, opencode, qwen_code, AdapterSpec};
@@ -191,6 +193,81 @@ fn tool_calls_yields_trace_with_one_successful_entry() {
     assert!(phases
         .iter()
         .any(|p| matches!(p, TurnPhase::ToolCallCompleted(e) if e.success)));
+}
+
+/// Issue #1222: a tool_call notification whose title is the CLI's flattened
+/// gateway rename (`<server>_<tool>`, the real gemini-cli wire shape) folds
+/// to the bare authoritative identity -- name + summary the bare name (this
+/// wire carries no arguments), badge the gateway's classification (Read for
+/// `explore`) overriding the CLI's own Execute kind.
+#[test]
+fn gateway_renamed_tool_call_folds_to_the_bare_identity() {
+    let (outcome, phases) = run("gateway_rename_title", 24);
+    match outcome.termination {
+        Termination::Text(t) => assert_eq!(t, "done via gateway"),
+        other => panic!("expected Text, got {other:?}"),
+    }
+    assert_eq!(outcome.trace.len(), 1);
+    let entry = &outcome.trace[0].calls[0];
+    assert!(entry.success, "the call completed");
+    assert_eq!(
+        entry.name, "explore",
+        "the rename normalizes to the bare name"
+    );
+    assert_eq!(entry.summary, "explore", "the summary degrades to the name");
+    assert_eq!(entry.operation_kind, OperationKind::Read);
+    assert!(
+        phases.iter().any(|p| matches!(
+            p,
+            TurnPhase::ToolCallStarted {
+                name,
+                operation_kind: OperationKind::Read,
+                summary,
+            } if name == "explore" && summary == "explore"
+        )),
+        "the live phase carries the normalized identity"
+    );
+}
+
+/// Issue #1222 (the late-title arm): a pathological start (no title and an
+/// empty id -- the only shape leaving the pending summary empty, so the
+/// late-title arm actually runs) followed by an update carrying the
+/// flattened rename around a namespaced external handle. The arm must apply
+/// the same identity triple as the start path: bare name/summary plus the
+/// gateway ladder's badge -- the wire sent no kind (default Read), and the
+/// ladder classifies the namespaced handle Network, so both the strip and
+/// the badge re-derivation are individually observable.
+#[test]
+fn gateway_renamed_late_title_normalizes_in_the_update_arm() {
+    let (outcome, phases) = run("gateway_rename_late", 24);
+    match outcome.termination {
+        Termination::Text(t) => assert_eq!(t, "done via gateway"),
+        other => panic!("expected Text, got {other:?}"),
+    }
+    assert_eq!(outcome.trace.len(), 1);
+    let entry = &outcome.trace[0].calls[0];
+    assert!(entry.success, "the call completed");
+    assert_eq!(
+        entry.name, "mcp__duckdb__query_snapshot",
+        "the late renamed title normalizes to the bare namespaced name"
+    );
+    assert_eq!(
+        entry.summary, "mcp__duckdb__query_snapshot",
+        "the summary degrades to the name"
+    );
+    assert_eq!(
+        entry.operation_kind,
+        OperationKind::Network,
+        "the badge re-derives from the gateway ladder, not the kind-less default"
+    );
+    assert!(
+        !phases.iter().any(|p| matches!(
+            p,
+            TurnPhase::ToolCallStarted { name, .. }
+                if name.contains("toptopduck-gateway")
+        )),
+        "no phase ever carries the raw renamed title"
+    );
 }
 
 /// Index of the first phase matching `pred` -- the phase-stream order
@@ -554,6 +631,34 @@ fn failed_tool_call_records_failure_anchor() {
         "failure keeps the error excerpt: {}",
         entry.result_excerpt
     );
+}
+
+/// Issue #1222's failure-anchor AC: a renamed + FAILED call normalizes the
+/// identity while the failure anchor still lands from the wire content --
+/// the renamed shape changes the row's identity, never its honesty.
+#[test]
+fn gateway_renamed_failure_keeps_the_failure_anchor() {
+    let (outcome, phases) = run("gateway_rename_failed", 24);
+    match outcome.termination {
+        Termination::Text(t) => assert_eq!(t, "the query failed"),
+        other => panic!("expected Text, got {other:?}"),
+    }
+    assert_eq!(outcome.trace.len(), 1);
+    let entry = &outcome.trace[0].calls[0];
+    assert!(!entry.success);
+    assert_eq!(
+        entry.name, "explore",
+        "the rename normalizes to the bare name"
+    );
+    assert_eq!(entry.operation_kind, OperationKind::Read);
+    assert!(
+        entry.result_excerpt.contains("syntax error"),
+        "failure keeps the error excerpt: {}",
+        entry.result_excerpt
+    );
+    assert!(phases
+        .iter()
+        .any(|p| matches!(p, TurnPhase::ToolCallCompleted(e) if !e.success)));
 }
 
 /// The agent's own max_turns ceiling maps to StepCap (an execution-level cap).
