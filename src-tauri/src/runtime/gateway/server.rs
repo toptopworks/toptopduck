@@ -938,7 +938,22 @@ fn handle_tools_call(msg: &Value, ctx: &mut GatewayCtx, outcome: &mut GatewayOut
             // bool would be stale for exactly the invoke path).
             let (response, is_error, excerpt) = if aggregator::is_namespaced(&call.name) {
                 let route_result = ctx.mcp.route(&call.name, &call.input);
-                let (envelope, is_error, excerpt) = external_call_outcome(&call.name, route_result);
+                // The over-cap spill plan (issue #1218): the `mcp__` prefix
+                // is stripped so `mcp__<slug>__<tool>` spills as
+                // `<slug>__<tool>-<call-id>` -- the CLI channel's naming
+                // family, one data-plane switch across both transports.
+                let stem = call
+                    .name
+                    .strip_prefix(aggregator::NAMESPACED_PREFIX)
+                    .unwrap_or(&call.name);
+                let spill =
+                    crate::cli_tools::executor::SpillPlan::new(ctx.deps.temp_path, stem, &call.id);
+                let (envelope, is_error, excerpt) = external_call_outcome(
+                    &call.name,
+                    route_result,
+                    &spill,
+                    crate::cli_tools::executor::OUTPUT_CAP_BYTES,
+                );
                 (Response::Result(envelope), is_error, excerpt)
             } else if let Some(tool) = cli_tool {
                 // The registered-CLI dispatch arm (issue #673, ADR-0108
@@ -1043,8 +1058,11 @@ fn resolution_failure(message: String) -> Response {
 /// `{content, isError}` shape, so structured content blocks (multi-block /
 /// non-text) survive. Re-wrapping it into a single text block would
 /// double-encode the content array and drop every non-text block the server
-/// emitted. On a route error the gateway builds an `isError` envelope naming
-/// the tool so the agent can self-correct (ADR-0077). Returns
+/// emitted. Over the result cap the relay stops being verbatim BY DESIGN
+/// (issue #1218): the data spills whole to `tool_output/` and the envelope
+/// carries the preview trio instead (see [`spill_external_over_cap`]). On a
+/// route error the gateway builds an `isError` envelope naming the tool so
+/// the agent can self-correct (ADR-0077). Returns
 /// `(envelope, is_error, excerpt)` so the caller pushes one trace row and
 /// returns the envelope.
 /// One dispatched call's [`ToolResult`] → (bridge envelope, is_error,
@@ -1069,6 +1087,8 @@ fn result_envelope(result: ToolResult) -> (Response, bool, String) {
 fn external_call_outcome(
     name: &str,
     route_result: Result<Value, aggregator::RouteError>,
+    spill: &crate::cli_tools::executor::SpillPlan,
+    cap: usize,
 ) -> (Value, bool, String) {
     let envelope = route_result.unwrap_or_else(|e| {
         json!({
@@ -1083,8 +1103,127 @@ fn external_call_outcome(
         .get("isError")
         .and_then(Value::as_bool)
         .unwrap_or(false);
+    let envelope = spill_external_over_cap(envelope, spill, cap);
     let excerpt = aggregator::first_text_block(&envelope);
     (envelope, is_error, excerpt)
+}
+
+/// The over-cap external-result spill arm (issue #1218): the MCP twin of
+/// the CLI stdout tee -- the cap is the data-plane switching point, so an
+/// over-cap result's data lands whole under `tool_output/` (readable by
+/// `read_*` into the working set through the derived-source chain) and the
+/// model context gets the capped head + marker + path instead of the full
+/// bytes. The spill bytes are the `content[]` text blocks concatenated in
+/// order (non-text blocks are skipped -- they are not the engine's data
+/// plane); a result with no text bytes falls back to the
+/// `structuredContent` serialization, else the file would be empty.
+/// Under the cap the envelope passes through untouched (the verbatim
+/// contract). `isError` is orthogonal: an error envelope's text is as
+/// much the data egress as a success's (the CLI channel's non-zero-exit
+/// twin), so it spills the same way. A failed spill withdraws the path
+/// and removes the partial bytes, and the preview carries the truncation
+/// and write-error markers -- a half-trusted file reference is worse than
+/// none (the CLI reader's doctrine).
+fn spill_external_over_cap(
+    mut envelope: Value,
+    spill: &crate::cli_tools::executor::SpillPlan,
+    cap: usize,
+) -> Value {
+    // Measure first, spill later: the under-cap path allocates nothing
+    // (the verbatim relay stays free); only a crossing pays for assembly.
+    let texts: Vec<&str> = envelope
+        .get("content")
+        .and_then(Value::as_array)
+        .map(|blocks| {
+            blocks
+                .iter()
+                .filter(|b| b.get("type").and_then(Value::as_str) == Some("text"))
+                .filter_map(|b| b.get("text").and_then(Value::as_str))
+                .collect()
+        })
+        .unwrap_or_default();
+    let total: usize = texts.iter().map(|t| t.len()).sum();
+    let fallback: Option<String> = if total == 0 {
+        envelope
+            .get("structuredContent")
+            .and_then(|sc| serde_json::to_string(sc).ok())
+    } else {
+        None
+    };
+    let data_len = fallback.as_ref().map_or(total, String::len);
+    if data_len <= cap {
+        return envelope;
+    }
+    let mut data = Vec::with_capacity(data_len);
+    match &fallback {
+        Some(serialized) => data.extend_from_slice(serialized.as_bytes()),
+        None => texts
+            .iter()
+            .for_each(|t| data.extend_from_slice(t.as_bytes())),
+    }
+    let head = String::from_utf8_lossy(&data[..cap]).into_owned();
+    let extension = crate::cli_tools::executor::spill_extension(data.iter().copied());
+    let spilled: Result<std::path::PathBuf, String> = (|| {
+        let (mut file, path) = spill.open(extension).map_err(|e| e.to_string())?;
+        if let Err(e) = file.write_all(&data) {
+            // The half-written file cannot be a data reference: drop the
+            // handle (Windows refuses to delete an open file), then remove
+            // the partial bytes -- the CLI spill's cleanup doctrine.
+            drop(file);
+            let _ = std::fs::remove_file(&path);
+            return Err(e.to_string());
+        }
+        Ok(path)
+    })();
+    let preview = match &spilled {
+        Ok(path) => format!(
+            "{head}\n[tool output truncated: exceeded the {cap}-byte cap; \
+             full output spilled to: {}]",
+            path.display()
+        ),
+        Err(detail) => format!(
+            "{head}\n[tool output truncated: exceeded the {cap}-byte cap]\n\
+             [tool output spill write error: {detail}]"
+        ),
+    };
+    let preview_block = json!({"type": "text", "text": preview});
+    // Collapse the text blocks into the preview block at the first text
+    // block's position; non-text blocks keep theirs (they were never part
+    // of the measured data plane). A missing content array is CREATED --
+    // the structuredContent fallback can cross the cap with no array at
+    // all, and a spilled file the model has no pointer to would be an
+    // orphan.
+    let mut rebuilt = Vec::new();
+    let mut placed = false;
+    if let Some(Value::Array(blocks)) = envelope.get_mut("content") {
+        rebuilt.reserve(blocks.len());
+        for block in blocks.drain(..) {
+            let is_text = block.get("type").and_then(Value::as_str) == Some("text");
+            if !is_text {
+                rebuilt.push(block);
+            } else if !placed {
+                rebuilt.push(preview_block.clone());
+                placed = true;
+            }
+        }
+    }
+    if !placed {
+        // No text block existed (or no content array at all): the preview
+        // opens the content.
+        rebuilt.insert(0, preview_block);
+    }
+    if let Some(object) = envelope.as_object_mut() {
+        object.insert("content".to_string(), Value::Array(rebuilt));
+    }
+    // The spilled data must not also ride the envelope: the fallback's
+    // structuredContent is the bypassed bytes (kept verbatim otherwise --
+    // the text plane spilled, not it, and a FAILED spill bypassed nothing).
+    if spilled.is_ok() && fallback.is_some() {
+        if let Some(object) = envelope.as_object_mut() {
+            object.remove("structuredContent");
+        }
+    }
+    envelope
 }
 
 /// Generate a 64-hex auth token (244-bit entropy). Two uuid v4 values (122
@@ -4307,7 +4446,22 @@ mod tests {
         );
     }
 
-    // --- external_call_outcome (I1: verbatim-relay + excerpt contract) -----
+    // --- external_call_outcome (I1: verbatim-relay + excerpt contract; ----
+    // --- issue #1218: over-cap spill arm) ----------------------------------
+
+    /// The external outcome over the production cap against a fresh temp
+    /// dir -- the under-cap path every pre-#1218 test takes (the spill
+    /// plan is inert there).
+    fn relayed(name: &str, result: Result<Value, aggregator::RouteError>) -> (Value, bool, String) {
+        let temp = TempDir::new().unwrap();
+        let spill = crate::cli_tools::executor::SpillPlan::new(temp.path(), name, "call-1");
+        external_call_outcome(
+            name,
+            result,
+            &spill,
+            crate::cli_tools::executor::OUTPUT_CAP_BYTES,
+        )
+    }
 
     /// A successful route relays the server's envelope VERBATIM -- the content
     /// array + isError flag survive untouched, not re-wrapped into a text
@@ -4319,8 +4473,7 @@ mod tests {
             "content": [{"type": "text", "text": "5"}],
             "isError": false,
         });
-        let (out, is_error, excerpt) =
-            external_call_outcome("mcp__fakemcp__add", Ok(envelope.clone()));
+        let (out, is_error, excerpt) = relayed("mcp__fakemcp__add", Ok(envelope.clone()));
         assert_eq!(out, envelope, "envelope relayed verbatim, not re-wrapped");
         assert!(!is_error);
         assert_eq!(excerpt, "5");
@@ -4339,8 +4492,7 @@ mod tests {
             ],
             "isError": false,
         });
-        let (out, is_error, excerpt) =
-            external_call_outcome("mcp__fakemcp__tool", Ok(envelope.clone()));
+        let (out, is_error, excerpt) = relayed("mcp__fakemcp__tool", Ok(envelope.clone()));
         assert_eq!(out, envelope, "multi-block envelope relayed verbatim");
         assert!(!is_error);
         assert_eq!(excerpt, "first text");
@@ -4355,8 +4507,7 @@ mod tests {
             "content": [{"type": "text", "text": "tool blew up"}],
             "isError": true,
         });
-        let (out, is_error, excerpt) =
-            external_call_outcome("mcp__fakemcp__tool", Ok(envelope.clone()));
+        let (out, is_error, excerpt) = relayed("mcp__fakemcp__tool", Ok(envelope.clone()));
         assert_eq!(out, envelope);
         assert!(is_error);
         assert_eq!(excerpt, "tool blew up");
@@ -4367,7 +4518,7 @@ mod tests {
     /// true and the excerpt carries the failure text.
     #[test]
     fn external_call_outcome_builds_an_error_envelope_on_route_failure() {
-        let (out, is_error, excerpt) = external_call_outcome(
+        let (out, is_error, excerpt) = relayed(
             "mcp__ghost__echo",
             Err(aggregator::RouteError::UnknownServer("ghost".into())),
         );
@@ -4385,6 +4536,235 @@ mod tests {
             "error carries the route failure: {text}"
         );
         assert_eq!(excerpt, text, "excerpt is the error text");
+    }
+
+    /// The over-cap arm (issue #1218): the concatenated text blocks spill
+    /// WHOLE to `tool_output/<slug>__<tool>-<call-id>.<ext>`, and the
+    /// relayed envelope carries the preview trio -- capped head, truncation
+    /// marker, spill path -- in place of the text blocks; the non-text
+    /// block keeps its position and `structuredContent` rides verbatim
+    /// (the text plane spilled, not it).
+    #[test]
+    fn external_call_outcome_spills_over_cap_text_blocks_whole() {
+        let temp = TempDir::new().unwrap();
+        let spill =
+            crate::cli_tools::executor::SpillPlan::new(temp.path(), "fakesrv__query", "call-9");
+        let envelope = json!({
+            "content": [
+                {"type": "text", "text": "AAAA"},
+                {"type": "image", "data": "..."},
+                {"type": "text", "text": "BBBBBBBB"},
+            ],
+            "isError": false,
+            "structuredContent": {"row_count": 2},
+        });
+        let (out, is_error, excerpt) =
+            external_call_outcome("mcp__fakesrv__query", Ok(envelope), &spill, 8);
+        assert!(!is_error);
+        let path = temp
+            .path()
+            .join("tool_output")
+            .join("fakesrv__query-call-9.csv");
+        let spilled =
+            std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("spill file {path:?}: {e}"));
+        assert_eq!(
+            spilled, "AAAABBBBBBBB",
+            "text blocks concatenate in order, whole (not truncated)"
+        );
+        let blocks = out["content"].as_array().unwrap();
+        assert_eq!(blocks.len(), 2, "text blocks collapse into the preview");
+        let preview = blocks[0]["text"].as_str().unwrap();
+        assert!(preview.starts_with("AAAABBBB"), "head preview: {preview}");
+        assert!(
+            preview.contains(
+                "[tool output truncated: exceeded the 8-byte cap; \
+                 full output spilled to: "
+            ),
+            "marker + path: {preview}"
+        );
+        assert!(
+            preview.ends_with(&format!("{}]", path.display())),
+            "marker names the spill file: {preview}"
+        );
+        assert_eq!(blocks[1]["type"], "image", "non-text block keeps its slot");
+        assert_eq!(
+            out["structuredContent"]["row_count"], 2,
+            "structuredContent rides verbatim"
+        );
+        assert!(
+            excerpt.starts_with("AAAABBBB"),
+            "excerpt is the preview head"
+        );
+    }
+
+    /// A JSON-shaped head routes the spill to `.json` -- the extension is
+    /// the derived-source dispatcher's only routing signal, so the sniff
+    /// is shared with the CLI channel's spill.
+    #[test]
+    fn external_call_outcome_sniffs_a_json_head_to_the_json_extension() {
+        let temp = TempDir::new().unwrap();
+        let spill = crate::cli_tools::executor::SpillPlan::new(temp.path(), "fakesrv__query", "c1");
+        let body = r#"{"rows":[1,2,3,4,5,6,7,8,9,10,11,12]}"#;
+        let envelope = json!({
+            "content": [{"type": "text", "text": body}],
+            "isError": false,
+        });
+        let (out, _, _) = external_call_outcome("mcp__fakesrv__query", Ok(envelope), &spill, 8);
+        let path = temp
+            .path()
+            .join("tool_output")
+            .join("fakesrv__query-c1.json");
+        let spilled =
+            std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("spill file {path:?}: {e}"));
+        assert_eq!(spilled, body);
+        assert!(
+            out["content"][0]["text"]
+                .as_str()
+                .unwrap()
+                .contains(&path.display().to_string()),
+            "preview names the .json spill"
+        );
+    }
+
+    /// A result with no text bytes spills the `structuredContent`
+    /// serialization instead (else the file would be empty), and the
+    /// bypassed bytes do not ALSO ride the envelope -- the field is
+    /// removed once the file landed.
+    #[test]
+    fn external_call_outcome_spills_structured_content_when_text_is_empty() {
+        let temp = TempDir::new().unwrap();
+        let spill = crate::cli_tools::executor::SpillPlan::new(temp.path(), "fakesrv__read", "c2");
+        let envelope = json!({
+            "content": [{"type": "resource", "uri": "file:///x"}],
+            "structuredContent": {"big": "0123456789ABCDEF"},
+            "isError": false,
+        });
+        let (out, is_error, _) =
+            external_call_outcome("mcp__fakesrv__read", Ok(envelope), &spill, 8);
+        assert!(!is_error);
+        let path = temp
+            .path()
+            .join("tool_output")
+            .join("fakesrv__read-c2.json");
+        let spilled =
+            std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("spill file {path:?}: {e}"));
+        assert_eq!(spilled, r#"{"big":"0123456789ABCDEF"}"#);
+        let blocks = out["content"].as_array().unwrap();
+        assert_eq!(
+            blocks.len(),
+            2,
+            "preview opens, resource block keeps its slot"
+        );
+        assert_eq!(blocks[0]["type"], "text");
+        assert_eq!(blocks[1]["type"], "resource");
+        assert!(
+            out.get("structuredContent").is_none(),
+            "the bypassed bytes do not ride the envelope twice"
+        );
+    }
+
+    /// A contentless envelope (no content array at all) whose
+    /// structuredContent crosses the cap still spills AND gets a content
+    /// array holding the preview -- a spilled file the model has no
+    /// pointer to would be an orphan.
+    #[test]
+    fn external_call_outcome_creates_content_for_a_contentless_spill() {
+        let temp = TempDir::new().unwrap();
+        let spill = crate::cli_tools::executor::SpillPlan::new(temp.path(), "fakesrv__read", "c5");
+        let envelope = json!({
+            "structuredContent": {"big": "0123456789ABCDEF"},
+            "isError": false,
+        });
+        let (out, is_error, _) =
+            external_call_outcome("mcp__fakesrv__read", Ok(envelope), &spill, 8);
+        assert!(!is_error);
+        let path = temp
+            .path()
+            .join("tool_output")
+            .join("fakesrv__read-c5.json");
+        assert!(
+            std::fs::read_to_string(&path).is_ok(),
+            "the structuredContent fallback spills with no content array"
+        );
+        let blocks = out["content"]
+            .as_array()
+            .expect("a content array is created for the preview");
+        assert_eq!(blocks.len(), 1);
+        let preview = blocks[0]["text"].as_str().unwrap();
+        assert!(
+            preview.contains("spilled to:"),
+            "the model gets the pointer: {preview}"
+        );
+        assert!(
+            out.get("structuredContent").is_none(),
+            "the bypassed bytes do not ride the envelope twice"
+        );
+    }
+
+    /// `isError` is orthogonal to the cap: an error envelope's text is as
+    /// much the data egress as a success's (the CLI channel's non-zero-exit
+    /// twin), so it spills the same way with its flag preserved.
+    #[test]
+    fn external_call_outcome_spills_is_error_envelopes_orthogonally() {
+        let temp = TempDir::new().unwrap();
+        let spill = crate::cli_tools::executor::SpillPlan::new(temp.path(), "fakesrv__fail", "c3");
+        let envelope = json!({
+            "content": [{"type": "text", "text": "ERRORDETAIL-0123456789"}],
+            "isError": true,
+        });
+        let (out, is_error, _) =
+            external_call_outcome("mcp__fakesrv__fail", Ok(envelope), &spill, 8);
+        assert!(is_error, "the error flag survives the spill");
+        assert_eq!(out["isError"], true);
+        let path = temp.path().join("tool_output").join("fakesrv__fail-c3.csv");
+        let spilled =
+            std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("spill file {path:?}: {e}"));
+        assert_eq!(spilled, "ERRORDETAIL-0123456789");
+    }
+
+    /// A failed spill (the `tool_output` path is blocked by a same-named
+    /// file) withdraws the path: no file lands, and the preview carries
+    /// the truncation + write-error markers instead of a half-trusted
+    /// reference. `structuredContent` stays -- nothing was bypassed.
+    #[test]
+    fn external_call_outcome_marks_a_failed_spill_and_keeps_the_envelope() {
+        let temp = TempDir::new().unwrap();
+        // A same-named FILE makes create_dir_all fail -- the blocked-path
+        // stand-in for an un-writable spill directory.
+        std::fs::write(temp.path().join("tool_output"), b"not a dir").unwrap();
+        let spill = crate::cli_tools::executor::SpillPlan::new(temp.path(), "fakesrv__query", "c4");
+        let envelope = json!({
+            "content": [{"type": "text", "text": "0123456789ABCDEF"}],
+            "structuredContent": {"small": true},
+            "isError": false,
+        });
+        let (out, is_error, _) =
+            external_call_outcome("mcp__fakesrv__query", Ok(envelope), &spill, 8);
+        assert!(!is_error);
+        assert!(
+            std::fs::read_dir(temp.path().join("tool_output")).is_err(),
+            "no spill directory was created past the block"
+        );
+        let preview = out["content"][0]["text"].as_str().unwrap();
+        assert!(
+            preview.starts_with("01234567"),
+            "the capped head still rides: {preview}"
+        );
+        assert!(
+            preview.contains(
+                "[tool output truncated: exceeded the 8-byte cap]\n\
+                              [tool output spill write error:"
+            ),
+            "truncation + write-error markers, no path: {preview}"
+        );
+        assert!(
+            !preview.contains("spilled to:"),
+            "no half-trusted path reference: {preview}"
+        );
+        assert_eq!(
+            out["structuredContent"]["small"], true,
+            "nothing was bypassed -- structuredContent stays"
+        );
     }
 
     // --- wire-level pins over a live server (issue #661) -------------------
