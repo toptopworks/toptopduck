@@ -452,6 +452,38 @@ fn play_scenario(
             notify(out, agent_message("found 3 rows"));
             respond_prompt(out, &id, StopReason::EndTurn);
         }
+        // Issue #1222: the tool_call notification carries the CLI's own
+        // flattened gateway rename (`<server>_<tool>`, the real gemini-cli
+        // wire shape) plus a misleading kind -- the fold layer must
+        // normalize the identity AND override the badge with the gateway's
+        // classification.
+        "gateway_rename_title" => {
+            notify_tool_call_roundtrip(
+                out,
+                "tc_1",
+                "toptopduck-gateway_explore",
+                ToolKind::Execute,
+                "rows: 3",
+            );
+            notify(out, agent_message("done via gateway"));
+            respond_prompt(out, &id, StopReason::EndTurn);
+        }
+        // Issue #1222 (the failure-anchor AC): the renamed + FAILED shape --
+        // the identity normalizes while the failure anchor still lands from
+        // the wire content.
+        "gateway_rename_failed" => {
+            notify(
+                out,
+                tool_call_start_failed(
+                    "tc_1",
+                    "toptopduck-gateway_explore",
+                    ToolKind::Execute,
+                    "syntax error in sql",
+                ),
+            );
+            notify(out, agent_message("the query failed"));
+            respond_prompt(out, &id, StopReason::EndTurn);
+        }
         "tool_failure" => {
             notify(
                 out,
@@ -755,6 +787,45 @@ fn play_scenario(
             );
             notify(out, tool_call_start("gw_1", "explore", ToolKind::Search));
             notify(out, tool_call_finish("gw_1", "explore", "rows: 1"));
+            notify(out, agent_message("done via gateway"));
+            respond_prompt(out, &id, StopReason::EndTurn);
+        }
+        // Issue #1222: like gateway_tool_call, but the session/update
+        // notifications carry the CLI's flattened gateway rename instead of
+        // the bare name -- the settle merge must still pair the pump's echo
+        // row with the gateway's authoritative record (one row, gateway
+        // summary), not append a duplicated authoritative segment.
+        "gateway_rename" => {
+            bridge_write(&mcp_request(
+                1,
+                "initialize",
+                serde_json::json!({"protocolVersion":"2024-11-05","clientInfo":{"name":"acp-fake-cli","version":"0.0.0"}}),
+            ));
+            let initialized = bridge_read().expect("initialize response");
+            assert_eq!(
+                initialized["id"],
+                serde_json::json!(1),
+                "the initialize response carries the matching id: {initialized}"
+            );
+            bridge_write(&mcp_request(
+                2,
+                "tools/call",
+                serde_json::json!({"name":"explore","arguments":{"sql":"SELECT 1 AS x"}}),
+            ));
+            let called = bridge_read().expect("tools/call response");
+            assert_eq!(
+                called["result"]["isError"],
+                serde_json::json!(false),
+                "the explore call lands through the gateway: {called}"
+            );
+            notify(
+                out,
+                tool_call_start("gw_1", "toptopduck-gateway_explore", ToolKind::Execute),
+            );
+            notify(
+                out,
+                tool_call_finish("gw_1", "toptopduck-gateway_explore", "rows: 1"),
+            );
             notify(out, agent_message("done via gateway"));
             respond_prompt(out, &id, StopReason::EndTurn);
         }

@@ -1163,10 +1163,8 @@ impl Pump {
                 // The round's FIRST call freezes its thinking (ThinkingCompleted)
                 // once, before this call's Started event (saw_call latches it).
                 let idx = self.tracker.call_round(on_phase);
-                let (name, summary) = name_summary(title.as_deref(), tool_call_id);
-                let operation_kind = kind
-                    .map(|k| k.to_operation_kind())
-                    .unwrap_or(OperationKind::Read);
+                let (name, summary, operation_kind) =
+                    row_identity(title.as_deref(), tool_call_id, *kind);
                 on_phase(TurnPhase::ToolCallStarted {
                     name: name.clone(),
                     operation_kind,
@@ -1209,7 +1207,10 @@ impl Pump {
                     let mut row = self.pending.remove(i);
                     if let Some(t) = title.as_deref() {
                         if row.summary.is_empty() {
-                            let (name, summary) = bounded_name_summary(t);
+                            // A late title rides the same gateway-rename
+                            // normalization (issue #1222).
+                            let source = strip_gateway_rename(t).unwrap_or(t);
+                            let (name, summary) = bounded_name_summary(source);
                             row.name = name;
                             row.summary = summary;
                         }
@@ -1347,12 +1348,73 @@ fn bounded_name_summary(title: &str) -> (String, String) {
 /// the human-readable description; we use its bounded excerpt for both (the
 /// bridge's real tool name arrives MCP-side in slice 9b). Without a title the
 /// id stands in for both, bounded the same way (issue #629): the id rides the
-/// same IPC event + persisted recipe.
+/// same IPC event + persisted recipe. This is the native-title arm of
+/// [`row_identity`] (issue #1222).
 fn name_summary(title: Option<&str>, id: &str) -> (String, String) {
     match title.filter(|t| !t.is_empty()) {
         Some(t) => bounded_name_summary(t),
         None => bounded_name_summary(id),
     }
+}
+
+/// Strip an external CLI's gateway-rename decoration from a tool-call title
+/// (issue #1222, the #299 follow-up). ACP agents report gateway-routed MCP
+/// tools under their own flattened rename -- the canonical app form
+/// `mcp__toptopduck-gateway__<tool>` or gemini-cli's `<server>_<tool>`
+/// flattening -- and the fold layer has no arguments to recover the name
+/// from, only that title. Returns the bare remainder (the built-in name, or
+/// the namespaced external handle -- the same key the gateway's authoritative
+/// trace rows pair by in the settle merge), or `None` for a native tool's
+/// title / a decoration with nothing under it.
+fn strip_gateway_rename(title: &str) -> Option<&str> {
+    let rest = title.strip_prefix(GATEWAY_TOOL_PREFIX).or_else(|| {
+        title
+            .strip_prefix(crate::session::GATEWAY_SERVER_NAME)
+            .and_then(|rest| rest.strip_prefix('_'))
+    })?;
+    (!rest.is_empty()).then_some(rest)
+}
+
+/// The trace badge for a gateway-served tool name (issue #1222): the
+/// built-in table's authoritative classification first, then the namespaced
+/// external handle's Network badge, else Execute (the gateway-served
+/// registration family). Shared by this engine's fold layer and the codex
+/// line's `mcp_tool_call_display`.
+pub(super) fn gateway_tool_badge(name: &str) -> OperationKind {
+    if let Some(spec) = crate::tools::definitions::builtin_metadata(name) {
+        spec.operation_kind
+    } else if crate::mcp::aggregator::is_namespaced(name) {
+        OperationKind::Network
+    } else {
+        OperationKind::Execute
+    }
+}
+
+/// Derive a tool-call row's identity (name, summary, badge) from the wire's
+/// title + id + kind. A gateway-routed call the CLI renamed (issue #1222)
+/// normalizes to the authoritative bare name: the name the gateway's own
+/// trace rows carry, so the settle merge's by-name pairing replaces this row
+/// in place instead of duplicating the segment. The badge comes from the
+/// gateway's classification -- the CLI's `kind` for a renamed MCP tool is its
+/// own guess -- and with no arguments on this wire the summary degrades to
+/// the bare name (single source; the row never renders bare). A native
+/// tool's title keeps the pre-#1222 shape ([`name_summary`]): bounded title
+/// for both name and summary, the wire kind's badge (Read default).
+fn row_identity(
+    title: Option<&str>,
+    id: &str,
+    kind: Option<wire::ToolKind>,
+) -> (String, String, OperationKind) {
+    let title = title.filter(|t| !t.is_empty());
+    let Some(bare) = title.and_then(strip_gateway_rename) else {
+        let (name, summary) = name_summary(title, id);
+        let operation_kind = kind
+            .map(|k| k.to_operation_kind())
+            .unwrap_or(OperationKind::Read);
+        return (name, summary, operation_kind);
+    };
+    let (name, summary) = bounded_name_summary(bare);
+    (name, summary, gateway_tool_badge(bare))
 }
 
 // ---------------------------------------------------------------------------
@@ -1442,23 +1504,32 @@ fn decide_permission(
     let trust: HashSet<ToolKey> = approval.trust_list().into_iter().collect();
     let allowed = classify(&key, mode, &trust) == Classification::Allow;
 
-    let operation_kind = params
-        .tool_call
-        .kind
-        .map(|k| k.to_operation_kind())
-        .unwrap_or(OperationKind::Network);
+    // The card's tool/summary/badge display under the same gateway-rename
+    // normalization the fold layer's row identity applies (issue #1222), so
+    // the frontend's call-row merge predicate (`a.tool === call.name &&
+    // a.summary === call.summary`, useTurnFlow) keeps matching gateway calls
+    // and the card shows the same gateway classification the trace row
+    // carries (the CLI's kind for a renamed MCP tool is its own guess); the
+    // raw title above stays the policy input for `key`.
+    let display = strip_gateway_rename(&tool_name);
+    let display_name = display.unwrap_or(tool_name.as_str());
+    let operation_kind = match display {
+        Some(bare) => gateway_tool_badge(bare),
+        None => params
+            .tool_call
+            .kind
+            .map(|k| k.to_operation_kind())
+            .unwrap_or(OperationKind::Network),
+    };
     let body = crate::approval::ApprovalRequestBody {
         request_id: params.tool_call.tool_call_id.clone(),
         server: key.server.clone(),
-        // The card's tool/summary use the PRE-mapping `tool_name` — the
-        // same source as the `ToolCallStarted` phase event (`name_summary`)
-        // — so the frontend's call-row merge predicate (`a.tool ===
-        // call.name && a.summary === call.summary`, useTurnFlow) keeps
-        // matching gateway calls; the stripped `key` remains the policy
-        // identity (server stays "builtin").
-        tool: tool_name.clone(),
+        tool: display_name.to_string(),
         operation_kind,
-        summary: crate::approval::truncate_summary(&tool_name, crate::approval::SUMMARY_MAX_CHARS),
+        summary: crate::approval::truncate_summary(
+            display_name,
+            crate::approval::SUMMARY_MAX_CHARS,
+        ),
         // ACP permission requests carry no file-delivery values (issue #672
         // is the registered-CLI card's channel); the field rides empty.
         file_attachments: Vec::new(),
@@ -1597,6 +1668,50 @@ mod tests {
             name.ends_with('…'),
             "bounded id fallback name ends with ellipsis"
         );
+    }
+
+    /// Issue #1222: a CLI's flattened gateway rename (`<server>_<tool>`) and
+    /// the canonical namespaced form both normalize to the bare name the
+    /// gateway's trace rows pair by; the badge is the gateway's
+    /// classification (over the CLI's own kind), and the summary degrades to
+    /// the bare name (this wire carries no arguments).
+    #[test]
+    fn row_identity_normalizes_a_gateway_renamed_title() {
+        for renamed in [
+            "toptopduck-gateway_explore",
+            "mcp__toptopduck-gateway__explore",
+        ] {
+            let (name, summary, kind) =
+                row_identity(Some(renamed), "tc_1", Some(wire::ToolKind::Execute));
+            assert_eq!(name, "explore", "from {renamed}");
+            assert_eq!(summary, "explore", "the summary degrades to the name");
+            assert_eq!(
+                kind,
+                OperationKind::Read,
+                "the gateway classification wins over the CLI kind"
+            );
+        }
+    }
+
+    /// A namespaced external handle under the rename keeps its namespaced
+    /// remainder (the gateway records those rows under the same handle) and
+    /// takes the Network badge; a title that is only the server name, or the
+    /// decoration with nothing under it, stays untouched.
+    #[test]
+    fn row_identity_strips_only_a_true_gateway_rename() {
+        let (name, _, kind) = row_identity(
+            Some("toptopduck-gateway_mcp__duckdb__query_snapshot"),
+            "tc_1",
+            None,
+        );
+        assert_eq!(name, "mcp__duckdb__query_snapshot");
+        assert_eq!(kind, OperationKind::Network);
+
+        for native in ["toptopduck-gateway", "toptopduck-gateway_", "bash ls"] {
+            let (name, _, kind) = row_identity(Some(native), "tc_2", Some(wire::ToolKind::Edit));
+            assert_eq!(name, native, "a non-rename title stays verbatim");
+            assert_eq!(kind, OperationKind::Write, "the wire kind keeps deciding");
+        }
     }
 
     /// Issue #629: a prose track hitting the byte cap latches the visible
@@ -1953,9 +2068,9 @@ mod tests {
     /// enumeration — the four DuckDB tools are the primary case (the
     /// CLI-side mirror of ADR-0080 Decision 1), and any non-builtin bridge
     /// tool meeting the same mapping still answers to the gateway's own
-    /// gate at call time. The card body keeps the PRE-mapping name so the
-    /// frontend's call-row merge predicate (`a.tool === call.name`) still
-    /// matches (review follow-up).
+    /// gate at call time. The card body carries the same gateway-rename
+    /// normalization as the fold layer (issue #1222), so the frontend's
+    /// call-row merge predicate (`a.tool === call.name`) still matches.
     #[test]
     fn decide_permission_gateway_tool_allows_under_per_call() {
         use crate::approval::ApprovalState;
@@ -1966,7 +2081,10 @@ mod tests {
             tool_call: wire::PermissionToolCall {
                 tool_call_id: "tc_1".into(),
                 title: Some("mcp__toptopduck-gateway__explore".into()),
-                kind: Some(wire::ToolKind::Other),
+                // A misleading kind on purpose: the card's badge must take
+                // the gateway classification over the CLI's own guess
+                // (issue #1222), matching the trace row's badge.
+                kind: Some(wire::ToolKind::Execute),
             },
             options: vec![
                 wire::PermissionOption {
@@ -1989,16 +2107,21 @@ mod tests {
             }
             other => panic!("expected Selected allow, got {other:?}"),
         }
-        // The card keeps the full namespaced title (the phase event's
-        // `name_summary` source); the stripped key is the policy identity
-        // only.
+        // The card carries the gateway-rename normalization (the same source
+        // as the `ToolCallStarted` phase event's `row_identity`, issue
+        // #1222); the stripped key stays the policy identity only.
         let body = sink
             .last_request
             .lock()
             .unwrap()
             .clone()
             .expect("card emitted");
-        assert_eq!(body.tool, "mcp__toptopduck-gateway__explore");
+        assert_eq!(body.tool, "explore");
+        assert_eq!(
+            body.operation_kind,
+            OperationKind::Read,
+            "the card badges with the gateway classification, not the CLI kind"
+        );
         assert_eq!(
             body.server, "builtin",
             "the policy identity is the builtin lane"
