@@ -829,6 +829,7 @@ mod tests {
             "pandoc",
             "python",
             "office-cli",
+            "dbx",
             "read_skill_file",
         ] {
             let mut t = tool("my-pandoc");

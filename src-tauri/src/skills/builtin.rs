@@ -774,6 +774,18 @@ mod tests {
                 );
             }
         }
+        // The reverse direction of the module-doc 1:1 claim: every
+        // shipped CLI definition must have its companioned skill, so a
+        // CLI-only entry cannot ship green while the doc drifts.
+        for cli in crate::cli_tools::builtin::BUILTIN_DEFINITIONS {
+            assert!(
+                BUILTIN_SKILL_MANIFEST
+                    .iter()
+                    .any(|entry| entry.companion_cli == Some(cli.name)),
+                "{} must have its companioned skill",
+                cli.name
+            );
+        }
     }
 
     // --- curated trigger copy ------------------------------------------------
@@ -1027,6 +1039,20 @@ mod tests {
             body_of("pandoc").len() <= 8192,
             "body is {} bytes (budget 8192)",
             body_of("pandoc").len()
+        );
+    }
+
+    /// The curation budget for the dbx body (issue #1214): the same
+    /// companion ceiling as office-cli and pandoc -- 8192 bytes, double
+    /// the knowledge budget. The body still enters the prompt on every
+    /// `invoke_skill`; the over-cap egress lane it teaches is #1215's
+    /// spill.
+    #[test]
+    fn dbx_body_stays_within_the_curation_budget() {
+        assert!(
+            body_of("dbx").len() <= 8192,
+            "body is {} bytes (budget 8192)",
+            body_of("dbx").len()
         );
     }
 
