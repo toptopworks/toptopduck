@@ -484,6 +484,40 @@ fn play_scenario(
             notify(out, agent_message("the query failed"));
             respond_prompt(out, &id, StopReason::EndTurn);
         }
+        // Issue #1222 (the late-title arm AC): a pathological start (no
+        // title AND an empty id -- the only shape that leaves the pending
+        // row's summary empty) followed by an update carrying the gateway
+        // rename. The late-title arm must normalize through the same
+        // identity triple as the start path: bare name/summary + the
+        // gateway ladder's badge (not a wire kind -- none was sent, so the
+        // un-normalized default Read and the ladder's Network differ here,
+        // making both the strip and the badge re-derivation observable).
+        "gateway_rename_late" => {
+            let line = serde_json::json!({
+                "jsonrpc": "2.0",
+                "method": "session/update",
+                "params": {
+                    "sessionId": "fake-session",
+                    "update": {
+                        "sessionUpdate": "tool_call",
+                        "toolCallId": "",
+                        "status": "in_progress",
+                        "content": [],
+                    },
+                },
+            });
+            write_line(out, &line);
+            notify(
+                out,
+                tool_call_finish(
+                    "",
+                    "toptopduck-gateway_mcp__duckdb__query_snapshot",
+                    "rows: 3",
+                ),
+            );
+            notify(out, agent_message("done via gateway"));
+            respond_prompt(out, &id, StopReason::EndTurn);
+        }
         "tool_failure" => {
             notify(
                 out,

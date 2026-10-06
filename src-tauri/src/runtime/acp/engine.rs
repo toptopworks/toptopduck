@@ -1207,12 +1207,25 @@ impl Pump {
                     let mut row = self.pending.remove(i);
                     if let Some(t) = title.as_deref() {
                         if row.summary.is_empty() {
-                            // A late title rides the same gateway-rename
-                            // normalization (issue #1222).
-                            let source = strip_gateway_rename(t).unwrap_or(t);
-                            let (name, summary) = bounded_name_summary(source);
-                            row.name = name;
-                            row.summary = summary;
+                            // Reachable only under a pathological start (no
+                            // title AND an empty id -- either alone fills the
+                            // summary via `name_summary`); a late renamed
+                            // title takes the same identity triple as
+                            // `row_identity` (issue #1222): bare name/summary
+                            // plus the gateway ladder's badge.
+                            match strip_gateway_rename(t) {
+                                Some(bare) => {
+                                    let (name, summary) = bounded_name_summary(bare);
+                                    row.name = name;
+                                    row.summary = summary;
+                                    row.operation_kind = gateway_tool_badge(bare);
+                                }
+                                None => {
+                                    let (name, summary) = bounded_name_summary(t);
+                                    row.name = name;
+                                    row.summary = summary;
+                                }
+                            }
                         }
                     }
                     if !content.is_empty() {
@@ -1377,9 +1390,11 @@ fn strip_gateway_rename(title: &str) -> Option<&str> {
 
 /// The trace badge for a gateway-served tool name (issue #1222): the
 /// built-in table's authoritative classification first, then the namespaced
-/// external handle's Network badge, else Execute (the gateway-served
-/// registration family). Shared by this engine's fold layer and the codex
-/// line's `mcp_tool_call_display`.
+/// external handle's Network badge, else Execute. The Execute arm is an
+/// approximation -- a bare unknown name approximates the gateway's CLI arm
+/// as Execute because the registration table is not reachable from this
+/// layer (the gateway itself classifies bare unknown names Network). Shared
+/// by this engine's fold layer and the codex line's `mcp_tool_call_display`.
 pub(super) fn gateway_tool_badge(name: &str) -> OperationKind {
     if let Some(spec) = crate::tools::definitions::builtin_metadata(name) {
         spec.operation_kind
@@ -1395,8 +1410,9 @@ pub(super) fn gateway_tool_badge(name: &str) -> OperationKind {
 /// normalizes to the authoritative bare name: the name the gateway's own
 /// trace rows carry, so the settle merge's by-name pairing replaces this row
 /// in place instead of duplicating the segment. The badge comes from the
-/// gateway's classification -- the CLI's `kind` for a renamed MCP tool is its
-/// own guess -- and with no arguments on this wire the summary degrades to
+/// gateway ladder's classification ([`gateway_tool_badge`]'s Execute
+/// approximation caveat applies) -- the CLI's `kind` for a renamed MCP tool
+/// is its own guess -- and with no arguments on this wire the summary degrades to
 /// the bare name (single source; the row never renders bare). A native
 /// tool's title keeps the pre-#1222 shape ([`name_summary`]): bounded title
 /// for both name and summary, the wire kind's badge (Read default).
