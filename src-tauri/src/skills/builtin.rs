@@ -61,8 +61,8 @@ pub(crate) struct BuiltinSkillManifest {
     pub companion_cli: Option<&'static str>,
 }
 
-/// The shipped set: the v1 CLI-companion trio (pandoc, python, office-cli)
-/// plus the knowledge-only pair (`vega-chart` and the distillation
+/// The shipped set: the CLI companions (pandoc, python, office-cli,
+/// dbx) plus the knowledge-only pair (`vega-chart` and the distillation
 /// curriculum `skill-creator`). Additive evolution mirrors the CLI set:
 /// new entries pass the same curation screen.
 pub(crate) static BUILTIN_SKILL_MANIFEST: &[BuiltinSkillManifest] = &[
@@ -77,6 +77,10 @@ pub(crate) static BUILTIN_SKILL_MANIFEST: &[BuiltinSkillManifest] = &[
     BuiltinSkillManifest {
         name: "office-cli",
         companion_cli: Some("office-cli"),
+    },
+    BuiltinSkillManifest {
+        name: "dbx",
+        companion_cli: Some("dbx"),
     },
     BuiltinSkillManifest {
         name: "vega-chart",
@@ -617,7 +621,7 @@ mod tests {
                 "{name} must embed a SKILL.md"
             );
         }
-        // The reserved-name set reads the manifest (ADR-0121): the four
+        // The reserved-name set reads the manifest (ADR-0121): the
         // shipped names refuse create/import/rename, anything else is free.
         for name in &manifest_names {
             assert!(is_reserved_skill_name(name), "{name} is reserved");
@@ -728,20 +732,21 @@ mod tests {
         }
     }
 
-    /// The declared companion wiring: the v1 trio rides its same-named CLI
-    /// entry; the knowledge-only pair (`vega-chart`, `skill-creator`)
-    /// rides `None`. The pairing stays 1:1 with the CLI shipped set and
-    /// same-name (the module-doc invariant -- a divergent pair would
-    /// desync the anchor (companion-keyed) from the reserved-name set
-    /// (name-keyed)).
+    /// The declared companion wiring: the CLI companions ride their
+    /// same-named CLI entry; the knowledge-only pair (`vega-chart`,
+    /// `skill-creator`) rides `None`. The pairing stays 1:1 with the CLI
+    /// shipped set and same-name (the module-doc invariant -- a divergent
+    /// pair would desync the anchor (companion-keyed) from the
+    /// reserved-name set (name-keyed)).
     #[test]
     fn companioned_entries_declare_their_cli_and_vega_chart_rides_none() {
-        let trio: &[(&str, &str)] = &[
+        let companions: &[(&str, &str)] = &[
             ("pandoc", "pandoc"),
             ("python", "python"),
             ("office-cli", "office-cli"),
+            ("dbx", "dbx"),
         ];
-        for (skill, cli) in trio {
+        for (skill, cli) in companions {
             assert_eq!(
                 find_manifest_entry(skill).expect("entry").companion_cli,
                 Some(*cli),
@@ -806,6 +811,14 @@ mod tests {
                  projection, filtering, and aggregation belong to SQL.",
             ),
             (
+                "dbx",
+                "Explore and query the user's external databases through \
+                 the local dbx client — list managed connections, inspect \
+                 schemas, and run read-only SELECTs on postgres, mysql, \
+                 sqlite, or another dbx-managed type. Data already loaded \
+                 into the workspace belongs to the built-in SQL tools.",
+            ),
+            (
                 "vega-chart",
                 "Chart numeric shape — a trend over time, a distribution, a \
                  comparison across categories or groups — by emitting a \
@@ -837,6 +850,7 @@ mod tests {
             ("pandoc", "belongs to office-cli"),
             ("office-cli", "belongs to pandoc"),
             ("python", "belong to SQL"),
+            ("dbx", "belongs to the built-in SQL tools"),
         ];
         for (name, phrase) in pairs {
             assert!(
@@ -1101,6 +1115,7 @@ mod tests {
         // ...and the un-anchored companions materialize nothing.
         assert!(!root.path().join(".system/python").exists());
         assert!(!root.path().join(".system/office-cli").exists());
+        assert!(!root.path().join(".system/dbx").exists());
     }
 
     /// The first multi-attachment skill (ADR-0121): the office-cli tree is

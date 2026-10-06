@@ -109,13 +109,14 @@ impl BuiltinCliDefinition {
     }
 }
 
-/// The v1 curated set (ADR-0109 Decision 4, narrowed 2026-08-25 to three):
-/// pandoc (universal document conversion), the Python interpreter (data
-/// cleaning; script text rides the `file` channel, no runtime is bundled),
-/// and OfficeCLI (agent-oriented Office document processing; registered as
-/// a whole-binary varargs wrapper -- one entry covers every subcommand).
-/// Additive evolution: new entries pass the same curation screen, not a
-/// reopen of the ADR.
+/// The curated set: the v1 trio of ADR-0109 Decision 4 -- pandoc
+/// (universal document conversion), the Python interpreter (data
+/// cleaning; script text rides the `file` channel, no runtime is
+/// bundled), and OfficeCLI (agent-oriented Office document processing)
+/// -- plus dbx (external database exploration and query) joined via
+/// additive evolution. OfficeCLI and dbx are whole-binary varargs
+/// wrappers -- one entry covers every subcommand. New entries pass the
+/// same curation screen, not a reopen of the ADR.
 pub(crate) static BUILTIN_DEFINITIONS: &[BuiltinCliDefinition] = &[
     BuiltinCliDefinition {
         name: "pandoc",
@@ -186,6 +187,26 @@ pub(crate) static BUILTIN_DEFINITIONS: &[BuiltinCliDefinition] = &[
         params: &[BuiltinCliParam {
             name: "args",
             description: "The OfficeCLI subcommand and its arguments.",
+            delivery: CliParamDelivery::Argv,
+            varargs: true,
+        }],
+    },
+    BuiltinCliDefinition {
+        name: "dbx",
+        description: "dbx: explore and query the databases the user \
+                      manages in their dbx client (postgres, mysql, \
+                      sqlite, mongodb, redis, and more; subcommands \
+                      include connections, schema, query, context, \
+                      doctor, capabilities). Queries are read-only by \
+                      default: writes need --allow-writes, dangerous \
+                      statements (DROP/TRUNCATE/ALTER) also \
+                      --allow-dangerous-sql. Pass its subcommand and \
+                      arguments.",
+        executables: &["dbx"],
+        argv_template: &[],
+        params: &[BuiltinCliParam {
+            name: "args",
+            description: "The dbx subcommand and its arguments.",
             delivery: CliParamDelivery::Argv,
             varargs: true,
         }],
@@ -828,6 +849,7 @@ mod tests {
         assert!(is_builtin_name("pandoc"));
         assert!(is_builtin_name("python"));
         assert!(is_builtin_name("office-cli"));
+        assert!(is_builtin_name("dbx"));
         assert!(!is_builtin_name("my-own-tool"));
     }
 
