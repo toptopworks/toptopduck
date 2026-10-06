@@ -50,5 +50,5 @@ ADR-0076 确立网关聚合 + 平铺广告：每轮 `connect_all` 连接启用�
 - **被 ADR-0108 校准**：本 ADR 的「外部工具」指 MCP 运输层；用户注册的 CLI 工具直列进工具面——本 ADR「数量少」的直列依据由此延伸到用户注册工具（数量少、显式注册、稳定存在），三件套维持 MCP 专属。
 - **被 ADR-0110 延伸**：元工具家族新增成员 `activate_skill`——同一装配纪律（网关一处装配、两运行时同面、空集条件挂载）；三件套维持 MCP 专属、直列形态不变。
 - **被 ADR-0111 延伸**：元工具家族新增成员 `read_skill_file`（激活集非空时挂载）——同一装配纪律；三件套维持 MCP 专属、直列形态不变。
-- **校准：Decision 5 的结果透传在超帽处旁路**——外部工具结果的 `content[]` text 块按序拼接总量超过字节帽时（帽 = 数据面切换点，与 CLI 通道 stdout 帽同值同义），全量落盘 `tool_output/<slug>__<tool>-<call-id>.<ext>`（组件卫生与头部嗅探扩展复用 CLI 通道实现，`mcp__` 前缀在网关剥除）；envelope 的 text 块塌缩为截断标记 + 落盘路径 + 帽内首段，非 text 块原位保留；text 全空时以 `structuredContent` 序列化兜底落盘、并为无 content 数组的 envelope 创建承载预览的数组，落盘成功后撤该字段（落盘失败什么都没旁路、字段不动）；`isError` 正交（错误文本同为出数道）；落盘失败撤路径删残留、错误标记可见；帽内调用逐字不变（透传契约保持）。审批面与派生源入集链零改动。
+- **校准：Decision 5 的结果透传在超帽处旁路**——外部工具结果的 `content[]` text 块按序拼接总量超过字节帽时（帽 = 数据面切换点，与 CLI 通道 stdout 帽同值同义），全量落盘 `tool_output/<slug>__<tool>-<call-id>.<ext>`（组件卫生与头部嗅探扩展复用 CLI 通道实现，`mcp__` 前缀在网关剥除）；envelope 的 text 块塌缩为截断标记 + 落盘路径 + 帽内首段，非 text 块原位保留；text 全空时以 `structuredContent` 序列化兜底落盘、并为无 content 数组的 envelope 创建承载预览的数组，落盘成功后撤该字段（落盘失败什么都没旁路、字段不动）；`isError` 正交（错误文本同为出数道）；落盘失败撤路径删残留、错误标记可见；帽内调用逐字不变（透传契约保持）；度量面恒为 text 块（text 非空时 `structuredContent` 不参与度量，兜底仅 text 全空的逃生口）。两条外部分发臂同帽：网关 `external_call_outcome`（外部运行时经桥接）与内置运行时直连臂 `shape_external_outcome`（拍平后的首 text 块超帽同族落盘回三元组）。审批面与派生源入集链零改动。
 

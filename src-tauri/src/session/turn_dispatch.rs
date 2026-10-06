@@ -24,6 +24,7 @@
 //! (ADR-0107 Decision 1, issue #670); the loop is gone, the shared core
 //! stays.
 
+use std::io::Write;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::Path;
 
@@ -535,8 +536,7 @@ fn dispatch_gated_call_inner(
     // never promotes (external tools do not materialize a working-set
     // result), so `promotion` is always `None` there.
     let outcome = if aggregator::is_namespaced(&call.name) {
-        let tool_output_dir = deps.temp_path.join(super::TOOL_OUTPUT_DIR_NAME);
-        route_external_call(call, mcp, &tool_output_dir)
+        route_external_call(call, mcp, deps.temp_path)
     } else if let Some(tool) = cli_tool {
         // The registered-CLI dispatch arm (issue #671, ADR-0108 Decision 3):
         // direct argv spawn, cwd = the session's work temp dir, cancel = the
@@ -657,9 +657,14 @@ fn meta_failure(call: &ToolUse, message: &str) -> ToolResult {
 fn route_external_call(
     call: &ToolUse,
     mcp: &mut McpAggregator,
-    tool_output_dir: &Path,
+    session_temp_dir: &Path,
 ) -> tools::ToolOutcome {
-    shape_external_outcome(mcp.route(&call.name, &call.input), call, tool_output_dir)
+    shape_external_outcome(
+        mcp.route(&call.name, &call.input),
+        call,
+        session_temp_dir,
+        crate::cli_tools::executor::OUTPUT_CAP_BYTES,
+    )
 }
 
 /// Reduce a routed external MCP call's `Result` to the runtime's `ToolOutcome`
@@ -669,12 +674,17 @@ fn route_external_call(
 /// `isError` flag (defaulting to `false` per the MCP spec -- a conformant
 /// server omits it on success); a server-side error envelope keeps the text
 /// (the model self-corrects, ADR-0077) but marks `is_error = true`; a route
-/// failure becomes a tool error naming the tool. No promotion in any branch
-/// (external tools never materialize a working-set result).
+/// failure becomes a tool error naming the tool. Over the output cap the
+/// flattened text spills whole to tool_output/ and the content becomes the
+/// preview trio instead (issue #1218 -- the built-in dispatch's twin of the
+/// gateway's `spill_external_over_cap`; the cap parameter follows the
+/// gateway's `external_call_outcome` testing seam). No promotion in any
+/// branch (external tools never materialize a working-set result).
 fn shape_external_outcome(
     route_result: Result<Value, RouteError>,
     call: &ToolUse,
-    tool_output_dir: &Path,
+    session_temp_dir: &Path,
+    cap: usize,
 ) -> tools::ToolOutcome {
     let (content, is_error) = match route_result {
         Ok(envelope) => {
@@ -683,16 +693,21 @@ fn shape_external_outcome(
                 .and_then(Value::as_bool)
                 .unwrap_or(false);
             let text = aggregator::first_text_block(&envelope);
-            // Issue #442: on a success envelope, structured inline text is
-            // materialized to tool_output/ (ADR-0087 D3/D4). An error's text
-            // is a message, not data.
-            let content = if is_error {
+            // The over-cap arm runs FIRST and is orthogonal to `isError`:
+            // an error envelope's text is as much the data egress as a
+            // success's (the gateway arm's ruling). Issue #442: on a
+            // success envelope under the cap, structured inline text is
+            // materialized to tool_output/ (ADR-0087 D3/D4). An error's
+            // text is a message, not data.
+            let content = if text.len() > cap {
+                spill_text_over_cap(&text, &call.name, &call.id, session_temp_dir, cap)
+            } else if is_error {
                 text
             } else {
                 crate::session::inline_materialize::augment_with_hint(
                     text,
                     &call.id,
-                    tool_output_dir,
+                    &session_temp_dir.join(super::TOOL_OUTPUT_DIR_NAME),
                 )
             };
             (content, is_error)
@@ -707,6 +722,51 @@ fn shape_external_outcome(
         },
         promotion: None,
     }
+}
+
+/// The over-cap spill for the built-in dispatch path (issue #1218): the
+/// gateway twin of this arm lives in the gateway server
+/// (`spill_external_over_cap`, covering external runtimes through the
+/// bridge); this one caps the same results on the built-in loop's own
+/// dispatch. The whole flattened text spills under `tool_output/` as
+/// `<slug>__<tool>-<call-id>` (the `mcp__` prefix stripped -- the CLI
+/// channel's naming family, shared with the gateway arm), and the
+/// model-facing content becomes the capped head + truncation marker +
+/// spill path (the shared [`crate::cli_tools::executor::spill_preview`]).
+/// A failed spill withdraws the path, removes the partial bytes (the CLI
+/// spill's cleanup doctrine), and is logged at warn -- the marker rides
+/// the model context only.
+fn spill_text_over_cap(
+    text: &str,
+    name: &str,
+    call_id: &str,
+    session_temp_dir: &Path,
+    cap: usize,
+) -> String {
+    let stem = name
+        .strip_prefix(aggregator::NAMESPACED_PREFIX)
+        .unwrap_or(name);
+    let spill = crate::cli_tools::executor::SpillPlan::new(session_temp_dir, stem, call_id);
+    let extension = crate::cli_tools::executor::spill_extension(text.bytes());
+    let head = String::from_utf8_lossy(&text.as_bytes()[..cap]).into_owned();
+    let spilled: Result<std::path::PathBuf, String> = (|| {
+        let (mut file, path) = spill.open(extension).map_err(|e| e.to_string())?;
+        if let Err(e) = file.write_all(text.as_bytes()) {
+            // Windows refuses to delete an open file; drop the handle
+            // first, then remove the partial bytes.
+            drop(file);
+            let _ = std::fs::remove_file(&path);
+            return Err(e.to_string());
+        }
+        Ok(path)
+    })();
+    if let Err(detail) = &spilled {
+        log::warn!(
+            target: "toptopduck::turn_dispatch",
+            "external tool spill write failed for `{name}`: {detail}"
+        );
+    }
+    crate::cli_tools::executor::spill_preview(&head, cap, &spilled)
 }
 
 /// Classify a tool call for the approval gateway + the trace: the [`ToolKey`]
@@ -1245,7 +1305,12 @@ mod tests {
             "content": [{"type": "text", "text": "5 rows"}],
             "isError": false,
         });
-        let outcome = shape_external_outcome(Ok(envelope), &call, dir.path());
+        let outcome = shape_external_outcome(
+            Ok(envelope),
+            &call,
+            dir.path(),
+            crate::cli_tools::executor::OUTPUT_CAP_BYTES,
+        );
         assert!(!outcome.result.is_error, "isError:false -> success");
         assert_eq!(outcome.result.content, "5 rows");
         assert_eq!(outcome.result.tool_use_id, "tu_ok");
@@ -1266,7 +1331,12 @@ mod tests {
             "content": [{"type": "text", "text": "rate limited"}],
             "isError": true,
         });
-        let outcome = shape_external_outcome(Ok(envelope), &call, dir.path());
+        let outcome = shape_external_outcome(
+            Ok(envelope),
+            &call,
+            dir.path(),
+            crate::cli_tools::executor::OUTPUT_CAP_BYTES,
+        );
         assert!(outcome.result.is_error, "isError:true -> tool error");
         assert_eq!(outcome.result.content, "rate limited");
         assert!(outcome.promotion.is_none());
@@ -1278,6 +1348,9 @@ mod tests {
     #[test]
     fn shape_external_outcome_materializes_structured_csv_inline_text() {
         let dir = TempDir::new().unwrap();
+        // The inline materializer writes into tool_output/ without creating
+        // it (the session pre-creates the dir in production).
+        std::fs::create_dir_all(dir.path().join("tool_output")).unwrap();
         let call = ToolUse {
             id: "tu_csv".into(),
             name: "mcp__data__export".into(),
@@ -1288,7 +1361,12 @@ mod tests {
             "content": [{"type": "text", "text": csv}],
             "isError": false,
         });
-        let outcome = shape_external_outcome(Ok(envelope), &call, dir.path());
+        let outcome = shape_external_outcome(
+            Ok(envelope),
+            &call,
+            dir.path(),
+            crate::cli_tools::executor::OUTPUT_CAP_BYTES,
+        );
         assert!(!outcome.result.is_error);
         // The content carries the original CSV text plus a materialization hint.
         assert!(
@@ -1305,7 +1383,8 @@ mod tests {
             outcome.result.content
         );
         // The file was written to the tool_output directory.
-        let written = std::fs::read_to_string(dir.path().join("tu_csv.csv")).unwrap();
+        let written =
+            std::fs::read_to_string(dir.path().join("tool_output").join("tu_csv.csv")).unwrap();
         assert_eq!(written, csv);
     }
 
@@ -1314,6 +1393,7 @@ mod tests {
     #[test]
     fn shape_external_outcome_materializes_structured_json_inline_text() {
         let dir = TempDir::new().unwrap();
+        std::fs::create_dir_all(dir.path().join("tool_output")).unwrap();
         let call = ToolUse {
             id: "tu_json".into(),
             name: "mcp__data__export".into(),
@@ -1324,14 +1404,20 @@ mod tests {
             "content": [{"type": "text", "text": json}],
             "isError": false,
         });
-        let outcome = shape_external_outcome(Ok(envelope), &call, dir.path());
+        let outcome = shape_external_outcome(
+            Ok(envelope),
+            &call,
+            dir.path(),
+            crate::cli_tools::executor::OUTPUT_CAP_BYTES,
+        );
         assert!(!outcome.result.is_error);
         assert!(
             outcome.result.content.contains("tu_json.json"),
             "hint names the JSON file: {}",
             outcome.result.content
         );
-        let written = std::fs::read_to_string(dir.path().join("tu_json.json")).unwrap();
+        let written =
+            std::fs::read_to_string(dir.path().join("tool_output").join("tu_json.json")).unwrap();
         assert_eq!(written, json);
     }
 
@@ -1340,6 +1426,7 @@ mod tests {
     #[test]
     fn shape_external_outcome_materializes_structured_tsv_inline_text() {
         let dir = TempDir::new().unwrap();
+        std::fs::create_dir_all(dir.path().join("tool_output")).unwrap();
         let call = ToolUse {
             id: "tu_tsv".into(),
             name: "mcp__data__export".into(),
@@ -1350,14 +1437,20 @@ mod tests {
             "content": [{"type": "text", "text": tsv}],
             "isError": false,
         });
-        let outcome = shape_external_outcome(Ok(envelope), &call, dir.path());
+        let outcome = shape_external_outcome(
+            Ok(envelope),
+            &call,
+            dir.path(),
+            crate::cli_tools::executor::OUTPUT_CAP_BYTES,
+        );
         assert!(!outcome.result.is_error);
         assert!(
             outcome.result.content.contains("tu_tsv.tsv"),
             "hint names the TSV file: {}",
             outcome.result.content
         );
-        let written = std::fs::read_to_string(dir.path().join("tu_tsv.tsv")).unwrap();
+        let written =
+            std::fs::read_to_string(dir.path().join("tool_output").join("tu_tsv.tsv")).unwrap();
         assert_eq!(written, tsv);
     }
 
@@ -1376,12 +1469,92 @@ mod tests {
             "content": [{"type": "text", "text": csv}],
             "isError": true,
         });
-        let outcome = shape_external_outcome(Ok(envelope), &call, dir.path());
+        let outcome = shape_external_outcome(
+            Ok(envelope),
+            &call,
+            dir.path(),
+            crate::cli_tools::executor::OUTPUT_CAP_BYTES,
+        );
         assert!(outcome.result.is_error);
         // No hint appended — content is the raw text only.
         assert_eq!(outcome.result.content, csv);
         // No file was written.
         assert!(dir.path().read_dir().unwrap().next().is_none());
+    }
+
+    /// Over-cap text on the built-in dispatch path spills WHOLE and the
+    /// model-facing content becomes the preview trio (issue #1218) -- the
+    /// built-in twin of the gateway's `external_call_outcome` spill arm.
+    /// The file names `<slug>__<tool>-<call-id>` with the `mcp__` prefix
+    /// stripped (the CLI channel's naming family).
+    #[test]
+    fn shape_external_outcome_spills_over_cap_text_whole() {
+        let dir = TempDir::new().unwrap();
+        let call = ToolUse {
+            id: "tu_big".into(),
+            name: "mcp__data__export".into(),
+            input: serde_json::json!({}),
+        };
+        let envelope = serde_json::json!({
+            "content": [{"type": "text", "text": "0123456789ABCDEF"}],
+            "isError": false,
+        });
+        let outcome = shape_external_outcome(Ok(envelope), &call, dir.path(), 8);
+        assert!(!outcome.result.is_error);
+        let path = dir
+            .path()
+            .join("tool_output")
+            .join("data__export-tu_big.csv");
+        let spilled =
+            std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("spill {path:?}: {e}"));
+        assert_eq!(
+            spilled, "0123456789ABCDEF",
+            "the flattened text spills whole, not truncated"
+        );
+        let content = &outcome.result.content;
+        assert!(
+            content.starts_with("01234567"),
+            "the preview opens with the capped head: {content}"
+        );
+        assert!(
+            content.contains("spilled to:"),
+            "the model gets the spill pointer: {content}"
+        );
+        assert!(
+            content.contains("data__export-tu_big.csv"),
+            "the marker names the stripped-stem file: {content}"
+        );
+    }
+
+    /// `isError` is orthogonal to the cap on this path too: an error
+    /// envelope's text is as much the data egress as a success's (the
+    /// gateway arm's ruling), so it spills the same way with its flag
+    /// preserved -- and never reaches the inline materializer.
+    #[test]
+    fn shape_external_outcome_spills_is_error_envelopes_orthogonally() {
+        let dir = TempDir::new().unwrap();
+        let call = ToolUse {
+            id: "tu_big_err".into(),
+            name: "mcp__data__export".into(),
+            input: serde_json::json!({}),
+        };
+        let envelope = serde_json::json!({
+            "content": [{"type": "text", "text": "ERRORDETAIL-0123456789"}],
+            "isError": true,
+        });
+        let outcome = shape_external_outcome(Ok(envelope), &call, dir.path(), 8);
+        assert!(outcome.result.is_error, "the error flag survives the spill");
+        let path = dir
+            .path()
+            .join("tool_output")
+            .join("data__export-tu_big_err.csv");
+        let spilled =
+            std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("spill {path:?}: {e}"));
+        assert_eq!(spilled, "ERRORDETAIL-0123456789");
+        assert!(
+            outcome.result.content.contains("spilled to:"),
+            "the error path gets the pointer too"
+        );
     }
 
     /// A namespaced name classifies under its server slug (not "unknown") so

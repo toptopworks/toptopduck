@@ -1050,21 +1050,6 @@ fn resolution_failure(message: String) -> Response {
     }))
 }
 
-/// Resolve a routed external MCP call into the response envelope + the trace
-/// inputs (slice C-gw). Pure over the aggregator: takes the route result so
-/// the verbatim-relay + excerpt shape is unit-testable without a live server.
-///
-/// On success the server's envelope is returned VERBATIM -- the server's own
-/// `{content, isError}` shape, so structured content blocks (multi-block /
-/// non-text) survive. Re-wrapping it into a single text block would
-/// double-encode the content array and drop every non-text block the server
-/// emitted. Over the result cap the relay stops being verbatim BY DESIGN
-/// (issue #1218): the data spills whole to `tool_output/` and the envelope
-/// carries the preview trio instead (see [`spill_external_over_cap`]). On a
-/// route error the gateway builds an `isError` envelope naming the tool so
-/// the agent can self-correct (ADR-0077). Returns
-/// `(envelope, is_error, excerpt)` so the caller pushes one trace row and
-/// returns the envelope.
 /// One dispatched call's [`ToolResult`] → (bridge envelope, is_error,
 /// excerpt): the shared tail of the CLI-spawn and builtin-dispatch arms.
 /// The excerpt truncates via borrow BEFORE the move into the envelope -- a
@@ -1084,6 +1069,21 @@ fn result_envelope(result: ToolResult) -> (Response, bool, String) {
     )
 }
 
+/// Resolve a routed external MCP call into the response envelope + the trace
+/// inputs (slice C-gw). Pure over the aggregator: takes the route result so
+/// the verbatim-relay + excerpt shape is unit-testable without a live server.
+///
+/// On success the server's envelope is returned VERBATIM -- the server's own
+/// `{content, isError}` shape, so structured content blocks (multi-block /
+/// non-text) survive. Re-wrapping it into a single text block would
+/// double-encode the content array and drop every non-text block the server
+/// emitted. Over the result cap the relay stops being verbatim BY DESIGN
+/// (issue #1218): the data spills whole to `tool_output/` and the envelope
+/// carries the preview trio instead (see [`spill_external_over_cap`]). On a
+/// route error the gateway builds an `isError` envelope naming the tool so
+/// the agent can self-correct (ADR-0077). Returns
+/// `(envelope, is_error, excerpt)` so the caller pushes one trace row and
+/// returns the envelope.
 fn external_call_outcome(
     name: &str,
     route_result: Result<Value, aggregator::RouteError>,
@@ -1103,7 +1103,7 @@ fn external_call_outcome(
         .get("isError")
         .and_then(Value::as_bool)
         .unwrap_or(false);
-    let envelope = spill_external_over_cap(envelope, spill, cap);
+    let envelope = spill_external_over_cap(envelope, name, spill, cap);
     let excerpt = aggregator::first_text_block(&envelope);
     (envelope, is_error, excerpt)
 }
@@ -1126,11 +1126,17 @@ fn external_call_outcome(
 /// none (the CLI reader's doctrine).
 fn spill_external_over_cap(
     mut envelope: Value,
+    name: &str,
     spill: &crate::cli_tools::executor::SpillPlan,
     cap: usize,
 ) -> Value {
-    // Measure first, spill later: the under-cap path allocates nothing
-    // (the verbatim relay stays free); only a crossing pays for assembly.
+    // Measure first, spill later: the under-cap path assembles no data
+    // buffer (the verbatim relay stays copy-free; the zero-text fallback
+    // still pays one serialization probe); only a crossing pays for
+    // assembly. The measured data plane is the text blocks only: a
+    // non-empty text keeps `structuredContent` out of the measurement
+    // entirely (ADR-0105 Decision 5's calibration -- the fallback below
+    // is the no-text escape hatch, not a second plane).
     let texts: Vec<&str> = envelope
         .get("content")
         .and_then(Value::as_array)
@@ -1154,13 +1160,10 @@ fn spill_external_over_cap(
     if data_len <= cap {
         return envelope;
     }
-    let mut data = Vec::with_capacity(data_len);
-    match &fallback {
-        Some(serialized) => data.extend_from_slice(serialized.as_bytes()),
-        None => texts
-            .iter()
-            .for_each(|t| data.extend_from_slice(t.as_bytes())),
-    }
+    let data: Vec<u8> = match &fallback {
+        Some(serialized) => serialized.as_bytes().to_vec(),
+        None => texts.concat().into_bytes(),
+    };
     let head = String::from_utf8_lossy(&data[..cap]).into_owned();
     let extension = crate::cli_tools::executor::spill_extension(data.iter().copied());
     let spilled: Result<std::path::PathBuf, String> = (|| {
@@ -1175,17 +1178,17 @@ fn spill_external_over_cap(
         }
         Ok(path)
     })();
-    let preview = match &spilled {
-        Ok(path) => format!(
-            "{head}\n[tool output truncated: exceeded the {cap}-byte cap; \
-             full output spilled to: {}]",
-            path.display()
-        ),
-        Err(detail) => format!(
-            "{head}\n[tool output truncated: exceeded the {cap}-byte cap]\n\
-             [tool output spill write error: {detail}]"
-        ),
-    };
+    // Logged at warn, not debug: release builds filter debug, and a failed
+    // spill is an abnormal actionable event -- the model sees the marker,
+    // but the trace excerpt keeps only the preview head, so the operator
+    // would otherwise have no persistent trace of a sustained disk-full.
+    if let Err(detail) = &spilled {
+        log::warn!(
+            target: "toptopduck::gateway",
+            "external tool spill write failed for `{name}`: {detail}"
+        );
+    }
+    let preview = crate::cli_tools::executor::spill_preview(&head, cap, &spilled);
     let preview_block = json!({"type": "text", "text": preview});
     // Collapse the text blocks into the preview block at the first text
     // block's position; non-text blocks keep theirs (they were never part
@@ -1214,12 +1217,10 @@ fn spill_external_over_cap(
     }
     if let Some(object) = envelope.as_object_mut() {
         object.insert("content".to_string(), Value::Array(rebuilt));
-    }
-    // The spilled data must not also ride the envelope: the fallback's
-    // structuredContent is the bypassed bytes (kept verbatim otherwise --
-    // the text plane spilled, not it, and a FAILED spill bypassed nothing).
-    if spilled.is_ok() && fallback.is_some() {
-        if let Some(object) = envelope.as_object_mut() {
+        // The spilled data must not also ride the envelope: the fallback's
+        // structuredContent is the bypassed bytes (kept verbatim otherwise --
+        // the text plane spilled, not it, and a FAILED spill bypassed nothing).
+        if spilled.is_ok() && fallback.is_some() {
             object.remove("structuredContent");
         }
     }
@@ -1583,6 +1584,8 @@ mod tests {
                  "inputSchema": {"type": "object",
                                  "properties": {"a": {"type": "integer"}, "b": {"type": "integer"}},
                                  "required": ["a", "b"]}},
+                {"name": "big", "description": "returns a cap-crossing text",
+                 "inputSchema": {"type": "object"}},
                 {"name": "fail", "description": "always fails",
                  "inputSchema": {"type": "object"}},
             ]}),
@@ -1596,6 +1599,9 @@ mod tests {
                         json!({"content": [{"type": "text", "text": format!("{}", a + b)}],
                                "isError": false})
                     }
+                    "big" => json!({"content": [{"type": "text", "text": "x".repeat(
+                                crate::cli_tools::executor::OUTPUT_CAP_BYTES + 1)}],
+                               "isError": false}),
                     _ => json!({"content": [{"type": "text",
                                 "text": "boom: intentional failure fixture"}],
                                "isError": true}),
@@ -4767,6 +4773,53 @@ mod tests {
         );
     }
 
+    /// Exactly `cap` bytes never cross: the envelope relays byte-identical
+    /// and no spill directory is even created -- the MCP twin of the CLI
+    /// channel's `exactly_cap_does_not_spill`. Pins the boundary against
+    /// `<=` degrading to `<`.
+    #[test]
+    fn external_call_outcome_at_exactly_cap_relays_verbatim() {
+        let temp = TempDir::new().unwrap();
+        let spill = crate::cli_tools::executor::SpillPlan::new(temp.path(), "fakesrv__query", "cx");
+        let envelope = json!({
+            "content": [{"type": "text", "text": "01234567"}],
+            "isError": false,
+        });
+        let (out, is_error, excerpt) =
+            external_call_outcome("mcp__fakesrv__query", Ok(envelope.clone()), &spill, 8);
+        assert!(!is_error);
+        assert_eq!(out, envelope, "exactly cap stays verbatim");
+        assert_eq!(excerpt, "01234567");
+        assert!(
+            !temp.path().join("tool_output").exists(),
+            "the tool_output dir is not even created"
+        );
+    }
+
+    /// The measured data plane is the text blocks only (ADR-0105 Decision
+    /// 5's calibration): a non-empty text block keeps a byte-heavy
+    /// `structuredContent` OUT of the measurement -- it rides verbatim.
+    /// Pins the deliberate asymmetry against accidental widening (the
+    /// same envelope with the text block removed would spill).
+    #[test]
+    fn external_call_outcome_does_not_measure_structured_content_when_text_exists() {
+        let temp = TempDir::new().unwrap();
+        let spill = crate::cli_tools::executor::SpillPlan::new(temp.path(), "fakesrv__read", "cy");
+        let envelope = json!({
+            "content": [{"type": "text", "text": "see data"}],
+            "structuredContent": {"big": "0123456789ABCDEF0123456789ABCDEF"},
+            "isError": false,
+        });
+        let (out, is_error, _) =
+            external_call_outcome("mcp__fakesrv__read", Ok(envelope.clone()), &spill, 8);
+        assert!(!is_error);
+        assert_eq!(
+            out, envelope,
+            "text present -> structuredContent unmeasured, verbatim relay"
+        );
+        assert!(!temp.path().join("tool_output").exists(), "nothing spilled");
+    }
+
     // --- wire-level pins over a live server (issue #661) -------------------
 
     /// A `mcp_search_tools` call without a usable query fails with the SHARED
@@ -4837,6 +4890,70 @@ mod tests {
                 .iter()
                 .any(|r| r.name == meta_tools::META_INVOKE),
             "no mcp_invoke shell row"
+        );
+    }
+
+    /// The over-cap spill wiring pin (issue #1218): the unit family hands
+    /// in pre-stripped stems, so nothing else guards the wiring layer.
+    /// This drives the full invoke chain with a cap-crossing result and
+    /// pins all three wiring facts at once -- the spill stem strips the
+    /// `mcp__` prefix (`<slug>__<tool>-<call-id>`, the CLI channel's
+    /// naming family), the file lands under the ctx's own temp root, and
+    /// the preview the model sees carries the marker + path while the
+    /// file holds the full bytes.
+    #[test]
+    fn handle_tools_call_invoke_over_cap_spills_with_the_stripped_stem() {
+        let server = LiveMcpServer::spawn();
+        let mut ctx = live_ctx(&server);
+        ctx.approval
+            .seed_trust(&ToolKey::external("livemcp", "mcp__livemcp__big"));
+        let mut outcome = GatewayOutcome::default();
+        let msg = json!({
+            "jsonrpc": "2.0", "id": 43, "method": "tools/call",
+            "params": {"name": "mcp_invoke",
+                       "arguments": {"tool": "mcp__livemcp__big", "arguments": {}}}
+        });
+        let temp_root = ctx.deps.temp_path.to_path_buf();
+        match handle_tools_call(&msg, &mut ctx, &mut outcome) {
+            Response::Result(v) => {
+                assert_eq!(v["isError"], false);
+                let preview = v["content"][0]["text"].as_str().unwrap();
+                assert!(
+                    preview.contains("spilled to:"),
+                    "the model gets the spill pointer: {}...",
+                    &preview[..64]
+                );
+                assert!(
+                    preview.starts_with('x'),
+                    "the preview opens with the capped head"
+                );
+            }
+            _ => panic!("over-cap invoke must still return Result"),
+        }
+        let dir = temp_root.join("tool_output");
+        let entries: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap_or_else(|e| panic!("spill dir {dir:?}: {e}"))
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(entries.len(), 1, "one spill file for one over-cap call");
+        let name = entries[0].file_name().into_string().unwrap();
+        assert!(
+            name.starts_with("livemcp__big-"),
+            "stem strips the mcp__ prefix: {name}"
+        );
+        assert!(
+            !name.starts_with("mcp__"),
+            "the wire handle never reaches the filename: {name}"
+        );
+        assert!(
+            name.ends_with(".csv"),
+            "the sniff routes plain text: {name}"
+        );
+        let spilled = std::fs::read(&dir.join(&name)).expect("the spill file is readable whole");
+        assert_eq!(
+            spilled.len(),
+            crate::cli_tools::executor::OUTPUT_CAP_BYTES + 1,
+            "the full bytes landed, not a truncation"
         );
     }
 
