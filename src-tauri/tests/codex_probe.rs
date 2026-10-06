@@ -35,13 +35,15 @@ fn heartbeat_file(tag: &str) -> PathBuf {
 
 /// Process-wide lock so the global `CODEX_APP_SERVER_SCENARIO` env var is not
 /// raced by concurrent tests (the acp_probe.rs convention).
+/// Poison recovery is safe: this mutex only serializes env/scenario
+/// access across tests, it guards no cross-test invariant.
 static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 /// Spawn the fixture under `scenario`, then run the query lifecycle (spawn ->
 /// query -> kill, the same three steps the IPC shell composes) with a short
 /// timeout (the fixture answers in milliseconds). Holds ENV_LOCK.
 fn query_fixture(scenario: &str, timeout: Duration) -> Result<ModelCatalogOutcome, ProbeError> {
-    let _g = ENV_LOCK.lock().unwrap();
+    let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     std::env::set_var("CODEX_APP_SERVER_SCENARIO", scenario);
     let spec = codex();
     let mut child = probe::spawn_child(&spec, Some(&fake_cli()))?;
@@ -58,7 +60,7 @@ fn query_fixture(scenario: &str, timeout: Duration) -> Result<ModelCatalogOutcom
 /// dead child has no query answer -- the test asserts the exit, not a catalog.
 #[test]
 fn fixture_unknown_scenario_exits_nonzero() {
-    let _g = ENV_LOCK.lock().unwrap();
+    let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     std::env::set_var("CODEX_APP_SERVER_SCENARIO", "catalog_tpyo");
     let out = std::process::Command::new(fake_cli())
         .stdin(std::process::Stdio::piped())
@@ -369,7 +371,7 @@ fn query_spawn_failure_is_structured() {
 #[test]
 fn query_kills_the_child_no_orphan() {
     let heartbeat = heartbeat_file("cleanup");
-    let _g = ENV_LOCK.lock().unwrap();
+    let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     std::env::set_var("CODEX_APP_SERVER_TRACE_FILE", &heartbeat);
     std::env::set_var("CODEX_APP_SERVER_SCENARIO", "catalog_silent");
     let spec = codex();

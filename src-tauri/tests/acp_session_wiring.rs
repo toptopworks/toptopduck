@@ -54,6 +54,8 @@ fn fake_cli_adapter() -> AdapterSpec {
 /// this binary do not race. Cargo runs test binaries sequentially, so this
 /// never contends with `acp_engine.rs`'s own lock; it only serializes the
 /// tests within this file. Mirrors the 9a env-lock pattern.
+/// Poison recovery is safe: this mutex only serializes env/scenario
+/// access across tests, it guards no cross-test invariant.
 static ENV_LOCK: Mutex<()> = Mutex::new(());
 
 /// Prepend `dir` to `PATH` so the adapter PATH scan resolves the fixture
@@ -72,7 +74,7 @@ fn prepend_path(dir: &std::path::Path) -> std::ffi::OsString {
 /// session + the prior `PATH` + the env-lock guard (held across the turn so a
 /// sibling test cannot reset the global env mid-drive).
 fn external_session(scenario: &str) -> (Session, std::ffi::OsString, MutexGuard<'static, ()>) {
-    let guard = ENV_LOCK.lock().unwrap();
+    let guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let fake_cli = PathBuf::from(env!("CARGO_BIN_EXE_acp-fake-cli"));
     let old_path = prepend_path(fake_cli.parent().expect("fixture has a parent dir"));
     std::env::set_var("ACP_FAKE_SCENARIO", scenario);

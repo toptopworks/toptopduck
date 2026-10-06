@@ -61,6 +61,8 @@ fn unique_trace_path() -> PathBuf {
 
 /// Process-wide lock so the global `CODEX_FAKE_SCENARIO` env var is not raced
 /// by concurrent tests.
+/// Poison recovery is safe: this mutex only serializes env/scenario
+/// access across tests, it guards no cross-test invariant.
 static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 /// Drive one scenario through the JSON event stream engine, returning the
@@ -83,7 +85,7 @@ fn run_with_cap(
     let eng = AcpEngine::new(codex(), cancel).with_caps(step_cap, Some(cap));
     let approval = ApprovalState::new();
     let mut phases = Vec::new();
-    let _g = ENV_LOCK.lock().unwrap();
+    let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let start = std::time::Instant::now();
     std::env::set_var("CODEX_FAKE_SCENARIO", scenario);
     let outcome = eng.run(&input(), &fake_cli(), &approval, &NoopSink, |p| {
@@ -539,7 +541,7 @@ fn user_cancel_mid_prose_keeps_partial_prose_in_trace() {
     // 30s hold fails loudly if the cancel misses.
     let eng = AcpEngine::new(codex(), Arc::clone(&cancel)).with_caps(24, None);
     let approval = ApprovalState::new();
-    let _g = ENV_LOCK.lock().unwrap();
+    let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     std::env::set_var("CODEX_FAKE_SCENARIO", "cancel_with_prose");
     // Deterministic ordering instead of a wall-clock bet (the
     // claude_stream_json.rs peer's rationale): the scenario emits a
@@ -606,7 +608,7 @@ fn cancel_during_blocked_stdin_write_settles_the_turn() {
     // the fixture's 30s hold fails loudly if the cancel cannot.
     let eng = AcpEngine::new(codex(), Arc::clone(&cancel)).with_caps(24, None);
     let approval = ApprovalState::new();
-    let _g = ENV_LOCK.lock().unwrap();
+    let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     std::env::set_var("CODEX_FAKE_SCENARIO", "no_stdin_hold");
     // 1 MiB of text: past the OS pipe buffer, so the engine's write blocks
     // in the pipe once the fixture stops reading.
@@ -649,7 +651,7 @@ fn no_progress_watchdog_fires_during_blocked_stdin_write() {
     let eng =
         AcpEngine::new(codex(), cancel).with_caps(24, Some(std::time::Duration::from_millis(300)));
     let approval = ApprovalState::new();
-    let _g = ENV_LOCK.lock().unwrap();
+    let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     std::env::set_var("CODEX_FAKE_SCENARIO", "no_stdin_hold");
     // 1 MiB of text: past the OS pipe buffer, so the engine's write blocks
     // in the pipe once the fixture stops reading (the #808 cancel peer's
@@ -690,7 +692,7 @@ fn cli_death_during_stdin_write_settles_runtime() {
     let cancel = Arc::new(CancelToken::new());
     let eng = AcpEngine::new(codex(), Arc::clone(&cancel)).with_caps(24, None);
     let approval = ApprovalState::new();
-    let _g = ENV_LOCK.lock().unwrap();
+    let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     std::env::set_var("CODEX_FAKE_SCENARIO", "die_before_stdin");
     // 1 MiB of text: past the OS pipe buffer, so the engine's write is
     // still in the pipe when the fixture exits -- either the write is
@@ -731,7 +733,7 @@ fn selected_model_and_effort_ride_the_spawn_argv() {
     // The fixture traces its argv to this file (stdout carries the NDJSON
     // event stream the engine owns).
     let trace = unique_trace_path();
-    let _g = ENV_LOCK.lock().unwrap();
+    let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     std::env::set_var("CODEX_FAKE_SCENARIO", "text_reply");
     std::env::set_var("CODEX_FAKE_TRACE_FILE", &trace);
     let outcome = eng.run(&input, &fake_cli(), &approval, &NoopSink, |_| {});
@@ -764,7 +766,7 @@ fn summary_switch_rides_spawn_argv_without_selections() {
     let approval = ApprovalState::new();
     // input() defaults carry no model / thought-level selection.
     let trace = unique_trace_path();
-    let _g = ENV_LOCK.lock().unwrap();
+    let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     std::env::set_var("CODEX_FAKE_SCENARIO", "text_reply");
     std::env::set_var("CODEX_FAKE_TRACE_FILE", &trace);
     let outcome = eng.run(&input(), &fake_cli(), &approval, &NoopSink, |_| {});
