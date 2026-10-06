@@ -40,12 +40,16 @@ fn tool(name: &str) -> CliToolConfig {
     }
 }
 
-fn call(input: Value) -> ToolUse {
+fn call_with_id(call_id: &str, input: Value) -> ToolUse {
     ToolUse {
-        id: "tu_1".to_string(),
+        id: call_id.to_string(),
         name: "fake".to_string(),
         input,
     }
+}
+
+fn call(input: Value) -> ToolUse {
+    call_with_id("tu_1", input)
 }
 
 fn run(tool: &CliToolConfig, input: Value) -> toptopduck_lib::tools::ToolOutcome {
@@ -508,5 +512,175 @@ fn a_broken_stdin_pipe_marks_the_delivery_incomplete() {
         outcome.result.content.contains("stdin delivery incomplete"),
         "the marker names the partial delivery: {}",
         outcome.result.content
+    );
+}
+
+/// `run` keeps the temp dir alive for spill assertions (issue #1215): the
+/// spill file lives under the session temp's `tool_output/`, so the test
+/// must own the dir past the call.
+fn run_keep_temp(
+    tool: &CliToolConfig,
+    input: Value,
+    call_id: &str,
+) -> (toptopduck_lib::tools::ToolOutcome, TempDir) {
+    let temp = TempDir::new().unwrap();
+    let outcome = execute(
+        tool,
+        &call_with_id(call_id, input),
+        temp.path(),
+        &CancelToken::new(),
+    );
+    (outcome, temp)
+}
+
+#[test]
+fn over_cap_stdout_spills_the_full_range_to_tool_output() {
+    // Issue #1215: the stdout cap stops being data loss -- the full byte
+    // range lands in `tool_output/` under the deterministic
+    // `<tool>-<call-id>` name, and the tool result carries the truncation
+    // marker plus the path (the capped head doubles as the preview).
+    let cap = 8 * 1024 * 1024;
+    let overflow = 8192;
+    let (outcome, temp) = run_keep_temp(
+        &tool("fake"),
+        json!({"args": ["--flood", (cap + overflow).to_string()]}),
+        "tu_spill",
+    );
+    assert!(!outcome.result.is_error, "over-cap stays non-fatal");
+    let spilled = temp.path().join("tool_output").join("fake-tu_spill.csv");
+    assert_eq!(
+        std::fs::metadata(&spilled)
+            .expect("the spill file exists")
+            .len() as usize,
+        cap + overflow,
+        "the FULL byte range, not the truncation"
+    );
+    assert!(
+        outcome.result.content.contains("truncated"),
+        "the marker still names the truncation"
+    );
+    assert!(
+        outcome.result.content.contains("spilled to"),
+        "the spill is explicit, not implied: {}",
+        outcome.result.content
+    );
+    assert!(
+        outcome
+            .result
+            .content
+            .contains(spilled.to_string_lossy().as_ref()),
+        "the result names the spill path: {}",
+        outcome.result.content
+    );
+}
+
+#[test]
+fn under_cap_stdout_leaves_no_spill() {
+    // The under-cap contract is unchanged: no file, no marker, not even the
+    // `tool_output/` side effect.
+    let (outcome, temp) =
+        run_keep_temp(&tool("fake"), json!({"args": ["--flood", "1000"]}), "tu_ok");
+    assert!(!outcome.result.is_error);
+    assert!(
+        !outcome.result.content.contains("spilled"),
+        "no spill note under the cap: {}",
+        outcome.result.content
+    );
+    assert!(
+        !temp.path().join("tool_output").exists(),
+        "under-cap: no tool_output side effect"
+    );
+}
+
+#[test]
+fn over_cap_stdout_on_a_nonzero_exit_still_spills_and_the_error_names_the_path() {
+    // Exit-code orthogonality (issue #1215): the tee lives in the reader,
+    // below the exit-status branch, so a failing tool's stdout spills the
+    // same way and the error content carries the path -- without the
+    // capped head (stderr is the error's payload).
+    let cap = 8 * 1024 * 1024;
+    let (outcome, temp) = run_keep_temp(
+        &tool("fake"),
+        json!({"args": ["--flood", (cap + 8192).to_string(), "--exit", "3"]}),
+        "tu_err",
+    );
+    assert!(outcome.result.is_error, "exit 3 stays an error");
+    let spilled = temp.path().join("tool_output").join("fake-tu_err.csv");
+    assert_eq!(
+        std::fs::metadata(&spilled)
+            .expect("spilled despite the non-zero exit")
+            .len() as usize,
+        cap + 8192,
+        "the spill ignores the exit status"
+    );
+    assert!(
+        outcome
+            .result
+            .content
+            .contains(spilled.to_string_lossy().as_ref()),
+        "the error names the spill path: {}",
+        outcome.result.content
+    );
+    assert!(
+        !outcome.result.content.contains("xxxxxxxx"),
+        "the capped head does not ride the error: {}",
+        outcome.result.content.len()
+    );
+}
+
+#[test]
+fn a_json_stdout_spills_with_the_json_extension() {
+    // The extension sniff: a JSON head routes the spill to `.json` so the
+    // derived-source dispatcher can hand it to `read_json_auto` (the
+    // extension is its only routing signal). `--cat` replays a real JSON
+    // byte stream through stdout.
+    let cap = 8 * 1024 * 1024;
+    let payload = format!("  [{}]", "1,".repeat(cap / 2 + 8192));
+    let src = TempDir::new().unwrap();
+    let file = src.path().join("big.json");
+    std::fs::write(&file, &payload).unwrap();
+    let (outcome, temp) = run_keep_temp(
+        &tool("fake"),
+        json!({"args": ["--cat", file.to_string_lossy()]}),
+        "tu_json",
+    );
+    assert!(
+        !outcome.result.is_error,
+        "over-cap is non-fatal: {}",
+        outcome.result.content
+    );
+    let spilled = temp.path().join("tool_output").join("fake-tu_json.json");
+    assert_eq!(
+        std::fs::read(&spilled)
+            .expect("the .json spill exists")
+            .len(),
+        payload.len(),
+        "the full JSON byte range"
+    );
+}
+
+#[test]
+fn distinct_call_ids_keep_distinct_spill_files() {
+    // Deterministic means distinct, not singleton: two over-cap calls of
+    // one tool in one round (distinct call ids, one temp dir) each keep
+    // their own file -- no clobbering.
+    let cap = 8 * 1024 * 1024;
+    let temp = TempDir::new().unwrap();
+    for id in ["tu_a", "tu_b"] {
+        let call = call_with_id(id, json!({"args": ["--flood", (cap + 8192).to_string()]}));
+        let outcome = execute(&tool("fake"), &call, temp.path(), &CancelToken::new());
+        assert!(!outcome.result.is_error);
+    }
+    let names: Vec<String> = std::fs::read_dir(temp.path().join("tool_output"))
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    assert!(
+        names.contains(&"fake-tu_a.csv".to_string()),
+        "both files survive: {names:?}"
+    );
+    assert!(
+        names.contains(&"fake-tu_b.csv".to_string()),
+        "both files survive: {names:?}"
     );
 }

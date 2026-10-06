@@ -71,9 +71,11 @@ pub use resume::{is_resuming, resuming_count};
 pub use turn_runner::TurnInputs;
 
 /// The subdirectory name under the session temp dir where external MCP tools
-/// write their output files (ADR-0087 Decision 3). Created eagerly at session
-/// construction; lifecycle follows the TempDir RAII. The path is passed to each
-/// stdio MCP server via `TOPTOPDUCK_TOOL_OUTPUT_DIR` (see `mcp::client`).
+/// write their output files (ADR-0087 Decision 3), and where the CLI executor
+/// spills an over-cap stdout (the tee semantics whose full byte range becomes
+/// a derived-source candidate). Created eagerly at session construction;
+/// lifecycle follows the TempDir RAII. The path is passed to each stdio MCP
+/// server via `TOPTOPDUCK_TOOL_OUTPUT_DIR` (see `mcp::client`).
 pub(crate) const TOOL_OUTPUT_DIR_NAME: &str = "tool_output";
 
 /// Maximum length of an auto-generated session name, in chars (ADR-0089
