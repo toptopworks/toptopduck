@@ -4949,7 +4949,7 @@ mod tests {
             name.ends_with(".csv"),
             "the sniff routes plain text: {name}"
         );
-        let spilled = std::fs::read(&dir.join(&name)).expect("the spill file is readable whole");
+        let spilled = std::fs::read(dir.join(&name)).expect("the spill file is readable whole");
         assert_eq!(
             spilled.len(),
             crate::cli_tools::executor::OUTPUT_CAP_BYTES + 1,
