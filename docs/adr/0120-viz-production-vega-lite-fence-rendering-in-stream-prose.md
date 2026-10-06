@@ -41,7 +41,7 @@ ADR-0016 定义了 viz 意图与白名单，ADR-0033 补触发与退化披露，
 
 - decode 门禁同时服务两条入口：结果卡（wire 结构含 `kind`）与 fence（裸 JSON 无 `kind`）。
 - 流中图表卡与工作区联动（点击跳转关联结果）及放大查看、报告导出（Vega 视图序列化路线已识别）留尾。
-- **校准（L1 点击联动）**：流中 settled fence 的图表体可点击，fence body 原文为键，图表上台为工作区舞台的第三视图面（viz），单舞台 last-selection-wins 语义不变；接线范围为会话流中的回合卡，委派追踪对话框与 md 产物内 fence 保持静态，流中面不挂导出。
+- **校准（L1 点击联动）**：流中 settled fence 的图表体可点击，fence body 原文为键，图表上台为工作区舞台的第三视图面（viz），单舞台 last-selection-wins 语义不变；接线范围为会话流中的轮次卡，委派追踪对话框与 md 产物内 fence 保持静态，流中面不挂导出。
 - **校准（L2 放大退役）**：视口锚定的放大浮层退役；结果页 viz 视图为其继任查看面，浮层的 max-height 滚动语义移交工作区面板。
 - **校准（导出解冻）**：图导出落结果页 viz 视图与结果卡图——单锚点加下拉菜单（vega-embed 原生动作栏之形、本仓 popover tokens 之皮，锚点视觉对齐 topbar 图标按钮家族；hover 显形含锚点自持，键盘显形仅认可见焦点），PNG / SVG 两项带文字；经 Vega view 序列化（toSVG / toCanvas）落盘走原生另存为对话框加后端写命令（WebView2 默认下载通道静默无反馈，弃用）；命名取 spec `title` 净化值、catalog 词兜底；md 产物内 fence 图导出留尾。
 - 结果卡 `viz` 槽位（ADR-0016/0033 原设计）继续闲置；若未来结果卡图表诉求真实，emit_chart 路线按本 ADR Considered 记录重评。

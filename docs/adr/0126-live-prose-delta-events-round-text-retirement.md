@@ -1,4 +1,4 @@
-# 回合正文事件：delta 粒度直通、RoundText 退役
+# 轮次正文事件：delta 粒度直通、RoundText 退役
 
 ## Decision
 
@@ -14,7 +14,7 @@
 
 ## Context
 
-回合正文（`RoundProse`）长期无流式观感：`TurnPhase` 只有 round 粒度的 `RoundText`（一轮合并全文一次），四条路径一致——rig fold 把正文片段累积到 batch 确认才发；外部三条路径（claude stream-json / codex / ACP-native）的正文 chunk 经共享 `RoundTracker` 累积、首个 tool call 触发的 `fire_round_prelude` 一次性发整段；终端轮更是零 live 正文事件，最终答案只随 settle 的 `TurnRecord` 整体出现。前端接收端（streamdown streaming 模式与 caret）已就绪，始终无增量输入。`RoundText` 事件协议此前未经 ADR 裁决（通道与事件族出自 ADR-0059，其轮次分组与连接话语的展示语境见 ADR-0078/0103）。
+轮次正文（`RoundProse`）长期无流式观感：`TurnPhase` 只有 round 粒度的 `RoundText`（一轮合并全文一次），四条路径一致——rig fold 把正文片段累积到 batch 确认才发；外部三条路径（claude stream-json / codex / ACP-native）的正文 chunk 经共享 `RoundTracker` 累积、首个 tool call 触发的 `fire_round_prelude` 一次性发整段；终端轮更是零 live 正文事件，最终答案只随 settle 的 `TurnRecord` 整体出现。前端接收端（streamdown streaming 模式与 caret）已就绪，始终无增量输入。`RoundText` 事件协议此前未经 ADR 裁决（通道与事件族出自 ADR-0059，其轮次分组与连接话语的展示语境见 ADR-0078/0103）。
 
 ## Why
 
