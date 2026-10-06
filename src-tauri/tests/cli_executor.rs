@@ -515,9 +515,9 @@ fn a_broken_stdin_pipe_marks_the_delivery_incomplete() {
     );
 }
 
-/// `run` keeps the temp dir alive for spill assertions (issue #1215): the
-/// spill file lives under the session temp's `tool_output/`, so the test
-/// must own the dir past the call.
+/// Like `run`, but keeps the temp dir alive for spill assertions (issue
+/// #1215): the spill file lives under the session temp's `tool_output/`, so
+/// the test must own the dir past the call.
 fn run_keep_temp(
     tool: &CliToolConfig,
     input: Value,
@@ -581,6 +581,11 @@ fn under_cap_stdout_leaves_no_spill() {
     let (outcome, temp) =
         run_keep_temp(&tool("fake"), json!({"args": ["--flood", "1000"]}), "tu_ok");
     assert!(!outcome.result.is_error);
+    assert!(
+        !outcome.result.content.contains("truncated"),
+        "no truncation note under the cap: {}",
+        outcome.result.content
+    );
     assert!(
         !outcome.result.content.contains("spilled"),
         "no spill note under the cap: {}",

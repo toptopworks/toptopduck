@@ -288,8 +288,11 @@ struct StreamRead {
     error: Option<String>,
     /// The over-cap stdout spill that landed (issue #1215): the full-byte
     /// range file under `tool_output/`. `None` for stderr (the diagnostic
-    /// stream never spills), under-cap streams, and failed spills (the
-    /// error field carries those -- a half-trusted path is worse than none).
+    /// stream never spills), under-cap streams, and any stream that fell
+    /// short of a complete byte range -- a failed spill or a read error
+    /// past the crossing withdraws the path and removes the partial file
+    /// (a half-trusted reference is worse than none; the error field
+    /// carries the failure).
     spilled: Option<PathBuf>,
 }
 
@@ -313,7 +316,9 @@ impl StreamRead {
 /// failure is NOT EOF: what arrived is kept and the failure rides along
 /// (the caller marks it) -- a partial stream never masquerades as a
 /// complete one (ADR-0108 Decision 5's visible-never-silent, extended from
-/// over-cap to read errors).
+/// over-cap to read errors). A spill opened before a read error is
+/// withdrawn and cleaned up: the prefix of an unknown-length stream is
+/// never advertised as complete.
 fn read_capped<R: Read>(
     mut reader: Option<R>,
     cap: usize,
@@ -333,6 +338,16 @@ fn read_capped<R: Read>(
             Ok(0) => break,
             Err(e) => {
                 error = Some(format!("read error: {e}"));
+                // The stream died before EOF: whatever spilled is a prefix
+                // of an unknown-length stream, not a complete byte range.
+                // Withdraw the path and remove the partial bytes -- the
+                // same half-trusted-file doctrine as the mid-write failure
+                // below (the handle drops first; Windows refuses to delete
+                // an open file).
+                drop(spill_file.take());
+                if let Some(path) = spilled.take() {
+                    let _ = std::fs::remove_file(&path);
+                }
                 break;
             }
             Ok(n) => {
@@ -345,18 +360,24 @@ fn read_capped<R: Read>(
                 // single over-cap chunk arrives before anything is stored.
                 if total > cap && spilled.is_none() && error.is_none() {
                     if let Some(plan) = spill {
-                        let first = stored
-                            .iter()
-                            .chain(chunk[..n].iter())
-                            .find(|b| !b.is_ascii_whitespace())
-                            .copied();
-                        match plan.open(spill_extension(first)) {
+                        let extension =
+                            spill_extension(stored.iter().chain(chunk[..n].iter()).copied());
+                        match plan.open(extension) {
                             Ok((mut file, path)) => {
                                 // The flushed head precedes this chunk in the
                                 // byte range, so writing the chunk whole after
                                 // it has no overlap.
                                 if let Err(e) = file.write_all(&stored) {
                                     error = Some(format!("spill write error: {e}"));
+                                    // The half-written file cannot be a data
+                                    // reference: drop the handle (Windows
+                                    // refuses to delete an open file), then
+                                    // remove the partial bytes -- a
+                                    // deterministic path the model can
+                                    // reconstruct must not hold silent
+                                    // leftovers.
+                                    drop(file);
+                                    let _ = std::fs::remove_file(&path);
                                 } else {
                                     spill_file = Some(file);
                                     spilled = Some(path);
@@ -374,10 +395,14 @@ fn read_capped<R: Read>(
                     if let Err(e) = file.write_all(&chunk[..n]) {
                         // Mid-write failure: the partial file cannot be
                         // trusted as a data reference -- drop the path, keep
-                        // the visible error.
+                        // the visible error, and remove the partial bytes
+                        // (spill_file's None-assign drops the handle first;
+                        // Windows refuses to delete an open file).
                         error = Some(format!("spill write error: {e}"));
                         spill_file = None;
-                        spilled = None;
+                        if let Some(path) = spilled.take() {
+                            let _ = std::fs::remove_file(&path);
+                        }
                     }
                 }
             }
@@ -424,36 +449,64 @@ impl SpillPlan {
     }
 }
 
-/// Neutralize path separators, Windows-reserved characters, and control
-/// characters in a filename component. Both halves of the spill name sit
-/// outside the executor's trust boundary in different ways -- `tool.name`
-/// comes from config, `call.id` from the model (ADR-0080 posture: model
-/// input may be injection-influenced) -- so both pass the same map.
+/// Bound each spill name component so a hostile call id cannot push the
+/// path past platform limits. Wide enough that provider-shaped ids never
+/// collide -- the reason this does not reuse `sanitize_segment`: its
+/// 40-char truncation is non-injective, and unlike the file channel's
+/// die-with-the-call temps, a spill file persists for the session and is
+/// referenced by path, so a truncated-name collision would silently swap
+/// data.
+const SPILL_COMPONENT_MAX_CHARS: usize = 80;
+
+/// Keep one filename component filesystem-safe: an allowlist of
+/// alphanumerics plus `-`, `_`, `.`, with everything else -- path
+/// separators, Windows-reserved characters, control characters, and the
+/// format class (`is_control` alone misses the bidi-override and
+/// zero-width characters) -- folding to `_`. Both halves of the spill
+/// name sit outside the executor's trust boundary in different ways --
+/// `tool.name` comes from config, `call.id` from the model (ADR-0080
+/// posture: model input may be injection-influenced) -- so both pass the
+/// same map and bound.
 fn sanitize_file_component(raw: &str) -> String {
     raw.chars()
         .map(|c| {
-            let hostile =
-                matches!(c, '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|') || c.is_control();
-            if hostile {
-                '_'
-            } else {
+            let safe = c.is_alphanumeric() || matches!(c, '-' | '_' | '.');
+            if safe {
                 c
+            } else {
+                '_'
             }
         })
+        .take(SPILL_COMPONENT_MAX_CHARS)
         .collect()
 }
 
-/// The spill extension, sniffed from the stream's first non-whitespace
-/// byte: a JSON-shaped head (`[` or `{`) spills as `.json`, everything else
-/// as `.csv`. `read_csv_auto` is lenient with plain text (a stray non-CSV
-/// spill still ingests), while JSON under `.csv` would misroute -- the
-/// sniff only has to catch the case that breaks. `None` (an empty head)
-/// takes `.csv`.
-fn spill_extension(first_content_byte: Option<u8>) -> &'static str {
-    match first_content_byte {
-        Some(b'{') | Some(b'[') => "json",
-        _ => "csv",
+/// The spill extension, sniffed from the head's first non-whitespace
+/// byte -- the head being what has arrived by the crossing chunk (a
+/// stream still blank that far takes the default): a JSON-shaped head
+/// (`[` or `{`) spills as `.json`, everything else as `.csv`. A leading
+/// UTF-8 BOM is skipped so a PowerShell-shaped JSON head still routes to
+/// `.json`; a UTF-16 BOM is not trusted for inference and falls to
+/// `.csv` -- the sniff only trusts a brace it can see. `read_csv_auto`
+/// is lenient with plain text (a stray non-CSV spill still ingests),
+/// while JSON under `.csv` would misroute -- the sniff only has to catch
+/// the case that breaks.
+fn spill_extension<I: IntoIterator<Item = u8>>(head: I) -> &'static str {
+    const UTF8_BOM: [u8; 3] = [0xEF, 0xBB, 0xBF];
+    let mut bom = 0usize;
+    for b in head {
+        if bom < UTF8_BOM.len() && b == UTF8_BOM[bom] {
+            bom += 1;
+            continue;
+        }
+        if !b.is_ascii_whitespace() {
+            return match b {
+                b'{' | b'[' => "json",
+                _ => "csv",
+            };
+        }
     }
+    "csv"
 }
 
 /// The visible marker lines for one stream (ADR-0108 Decision 5: over-cap
@@ -861,5 +914,139 @@ mod tests {
         // The marker line is a prefix-free suffix: decorate = head + markers.
         let decorated = decorate("stdout", &read, 8);
         assert!(decorated.ends_with(&markers));
+    }
+
+    /// The planless contract: a stream read without a spill plan never
+    /// creates `tool_output` nor reports a path, however far past the cap
+    /// it runs -- wiring a plan into the stderr call would turn this red.
+    #[test]
+    fn a_planless_over_cap_stream_never_spills() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let read = read_capped(Some(std::io::Cursor::new(vec![b'x'; 20])), 8, None);
+        assert!(read.truncated, "in-cap truncation semantics unchanged");
+        assert!(read.spilled.is_none(), "no path without a plan");
+        assert!(
+            !temp.path().join("tool_output").exists(),
+            "no side effect at all"
+        );
+    }
+
+    /// A chunked crossing pins the byte order and the cap cross-section:
+    /// small reads with a position-distinguishable payload -- the file
+    /// must carry the full range in order, the content exactly the capped
+    /// prefix. Write-order swaps and cross-section regressions both fail
+    /// here (a Cursor's single read hides both: the head is empty at the
+    /// crossing and every byte is identical).
+    #[test]
+    fn a_chunked_crossing_spills_in_order_and_caps_the_head() {
+        let cap = 10;
+        let payload = b"0123456789abcdefghijklmnopqrstuvwxyz".to_vec();
+        // Yields at most `k` bytes per read, so the crossing lands
+        // mid-stream with the head partially stored.
+        struct Chunky {
+            data: Vec<u8>,
+            pos: usize,
+            k: usize,
+        }
+        impl Read for Chunky {
+            fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+                let n = self.k.min(buf.len()).min(self.data.len() - self.pos);
+                buf[..n].copy_from_slice(&self.data[self.pos..self.pos + n]);
+                self.pos += n;
+                Ok(n)
+            }
+        }
+        let temp = tempfile::tempdir().expect("tempdir");
+        let plan = SpillPlan::new(temp.path(), "fake", "tu_1");
+        let read = read_capped(
+            Some(Chunky {
+                data: payload.clone(),
+                pos: 0,
+                k: 3,
+            }),
+            cap,
+            Some(&plan),
+        );
+        assert_eq!(read.content, "0123456789", "exactly the capped prefix");
+        let spilled = read.spilled.as_deref().expect("spilled");
+        assert_eq!(
+            std::fs::read(spilled).expect("spill file readable"),
+            payload,
+            "the full byte range, head before chunk, in order"
+        );
+    }
+
+    /// A read error past the crossing withdraws the spill: the file stops
+    /// at the failure point -- a prefix of an unknown-length stream -- so
+    /// no completeness claim, no leftover bytes, and the read error stays
+    /// visible.
+    #[test]
+    fn a_read_error_past_the_crossing_withdraws_the_spill() {
+        struct SpillThenFail {
+            emitted: bool,
+        }
+        impl Read for SpillThenFail {
+            fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+                if self.emitted {
+                    return Err(std::io::Error::other("broken pipe"));
+                }
+                self.emitted = true;
+                buf[..20].fill(b'x');
+                Ok(20)
+            }
+        }
+        let temp = tempfile::tempdir().expect("tempdir");
+        let cap = 8;
+        let plan = SpillPlan::new(temp.path(), "fake", "tu_1");
+        let read = read_capped(Some(SpillThenFail { emitted: false }), cap, Some(&plan));
+        assert!(read.truncated);
+        assert!(
+            read.error
+                .as_deref()
+                .is_some_and(|e| e.contains("read error")),
+            "the read failure rides: {:?}",
+            read.error
+        );
+        assert!(read.spilled.is_none(), "the path is withdrawn");
+        assert!(
+            !temp
+                .path()
+                .join("tool_output")
+                .join("fake-tu_1.csv")
+                .exists(),
+            "the partial bytes are removed"
+        );
+        let markers = markers("stdout", &read, cap);
+        assert!(!markers.contains("spilled to"), "no completeness claim");
+    }
+
+    /// The BOM blind spot: a UTF-8 BOM before a JSON head still routes to
+    /// `.json` (a PowerShell-shaped output); a UTF-16 BOM is not trusted
+    /// for inference and takes the `.csv` default.
+    #[test]
+    fn the_sniff_skips_a_utf8_bom_and_distrusts_a_utf16_one() {
+        let utf8_bom_json = [0xEF, 0xBB, 0xBF, b' ', b'[', b'1', b']'];
+        assert_eq!(spill_extension(utf8_bom_json), "json");
+        let utf16_bom_json = [0xFF, 0xFE, b'[', b'1', b']'];
+        assert_eq!(spill_extension(utf16_bom_json), "csv");
+        // A BOM alone (a head that never shows content) keeps the default.
+        assert_eq!(spill_extension([0xEF, 0xBB, 0xBF]), "csv");
+    }
+
+    /// The sanitizer's allowlist catches the format class the control-only
+    /// map missed, and the bound keeps a hostile id off the path-length
+    /// cliff.
+    #[test]
+    fn sanitize_folds_format_characters_and_bounds_length() {
+        assert_eq!(
+            sanitize_file_component("a\u{202E}b\u{200B}c"),
+            "a_b_c",
+            "the bidi-override and zero-width classes fold"
+        );
+        assert_eq!(
+            sanitize_file_component(&"t".repeat(300)).chars().count(),
+            SPILL_COMPONENT_MAX_CHARS,
+            "a hostile id cannot push the path past platform limits"
+        );
     }
 }
