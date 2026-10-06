@@ -39,13 +39,15 @@ fn heartbeat_file(tag: &str) -> PathBuf {
 
 /// Process-wide lock so the global `CLAUDE_FAKE_SCENARIO` env var is not
 /// raced by concurrent tests (the codex_probe.rs convention).
+/// Poison recovery is safe: this mutex only serializes env/scenario
+/// access across tests, it guards no cross-test invariant.
 static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 /// Spawn the fixture under `scenario`, then run the query lifecycle (spawn
 /// -> query -> kill, the same three steps the IPC shell composes) with a
 /// short timeout (the fixture answers in milliseconds). Holds ENV_LOCK.
 fn query_fixture(scenario: &str, timeout: Duration) -> Result<ModelCatalogOutcome, ProbeError> {
-    let _g = ENV_LOCK.lock().unwrap();
+    let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     std::env::set_var("CLAUDE_FAKE_SCENARIO", scenario);
     let spec = claude_code();
     // The spawn kernel dispatches the adapter's `probe_argv` (the turn argv
@@ -63,7 +65,7 @@ fn query_fixture(scenario: &str, timeout: Duration) -> Result<ModelCatalogOutcom
 /// answering anything (the codex fixture's issue #543 convention).
 #[test]
 fn fixture_unknown_scenario_exits_nonzero() {
-    let _g = ENV_LOCK.lock().unwrap();
+    let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     std::env::set_var("CLAUDE_FAKE_SCENARIO", "catalog_tpyo");
     let out = std::process::Command::new(fake_cli())
         .arg("--input-format")
@@ -233,7 +235,7 @@ fn query_spawn_failure_is_structured() {
 #[test]
 fn query_kills_the_child_no_orphan() {
     let heartbeat = heartbeat_file("cleanup");
-    let _g = ENV_LOCK.lock().unwrap();
+    let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     std::env::set_var("CLAUDE_FAKE_TRACE_FILE", &heartbeat);
     std::env::set_var("CLAUDE_FAKE_SCENARIO", "catalog_silent");
     let spec = claude_code();

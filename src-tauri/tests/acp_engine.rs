@@ -73,6 +73,8 @@ impl ApprovalSink for RecordingSink {
 
 /// Process-wide lock so the global `ACP_FAKE_SCENARIO` env var is not raced by
 /// concurrent tests (each test sets it + spawns + waits under this mutex).
+/// Poison recovery is safe: this mutex only serializes env/scenario
+/// access across tests, it guards no cross-test invariant.
 static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 /// Drive one scenario through the engine built from `spec`, returning the
@@ -91,7 +93,7 @@ fn run_with_spec(
     let approval = ApprovalState::new();
     let sink = RecordingSink::default();
     let mut phases = Vec::new();
-    let _g = ENV_LOCK.lock().unwrap();
+    let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     std::env::set_var("ACP_FAKE_SCENARIO", scenario);
     // Start the clock AFTER acquiring ENV_LOCK: under the default parallel
     // runner many tests queue on this lock, and a start taken outside the
@@ -607,7 +609,7 @@ fn no_progress_watchdog_fires_on_a_stuck_agent() {
         .with_caps(24, Some(std::time::Duration::from_millis(200)));
     let approval = ApprovalState::new();
     let sink = RecordingSink::default();
-    let _g = ENV_LOCK.lock().unwrap();
+    let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     std::env::set_var("ACP_FAKE_SCENARIO", "stuck");
     let outcome = eng.run(&input(), &fake_cli(), &approval, &sink, |_| {});
     match outcome.termination {
@@ -640,7 +642,7 @@ fn cancel_during_blocked_stdin_write_settles_the_turn() {
     let eng = AcpEngine::new(gemini_cli(), Arc::clone(&cancel)).with_caps(24, None);
     let approval = ApprovalState::new();
     let sink = RecordingSink::default();
-    let _g = ENV_LOCK.lock().unwrap();
+    let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     std::env::set_var("ACP_FAKE_SCENARIO", "no_stdin_hold");
     // 1 MiB of text: past the OS pipe buffer, so the prompt write blocks in
     // the pipe once the fixture stops reading after the handshake.
@@ -694,7 +696,7 @@ fn cli_death_during_stdin_write_settles_runtime() {
     let eng = AcpEngine::new(gemini_cli(), Arc::clone(&cancel)).with_caps(24, None);
     let approval = ApprovalState::new();
     let sink = RecordingSink::default();
-    let _g = ENV_LOCK.lock().unwrap();
+    let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     std::env::set_var("ACP_FAKE_SCENARIO", "die_before_stdin");
     // 1 MiB of text: past the OS pipe buffer, and the fixture never reads
     // the prompt line, so the write can never complete -- it is either still
@@ -747,7 +749,7 @@ fn runaway_output_cancel_keeps_termination_and_partial_prose() {
     let eng = engine(Arc::clone(&cancel), 24);
     let approval = ApprovalState::new();
     let sink = RecordingSink::default();
-    let _g = ENV_LOCK.lock().unwrap();
+    let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     std::env::set_var("ACP_FAKE_SCENARIO", "runaway");
     // The flood gets a fixed 200ms fold window after the prompt goes out
     // (the first lines land within milliseconds of it), then the token fires.
@@ -912,7 +914,7 @@ fn permission_under_no_confirmation_allows() {
     let approval = ApprovalState::new();
     approval.set_auth_mode(AuthMode::NoConfirmation);
     let sink = RecordingSink::default();
-    let _g = ENV_LOCK.lock().unwrap();
+    let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     std::env::set_var("ACP_FAKE_SCENARIO", "permission");
     let outcome = eng.run(&input(), &fake_cli(), &approval, &sink, |_| {});
     assert!(
@@ -941,7 +943,7 @@ fn permission_under_per_call_untrusted_fail_fast_denies() {
     let eng = engine(Arc::clone(&cancel), 24);
     let approval = ApprovalState::new(); // PerCall, empty trust
     let sink = RecordingSink::default();
-    let _g = ENV_LOCK.lock().unwrap();
+    let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     std::env::set_var("ACP_FAKE_SCENARIO", "permission");
     eng.run(&input(), &fake_cli(), &approval, &sink, |_| {});
     assert!(
@@ -962,7 +964,7 @@ fn user_cancel_aborts_the_whole_turn() {
     let eng = engine(Arc::clone(&cancel), 24);
     let approval = ApprovalState::new();
     let sink = RecordingSink::default();
-    let _g = ENV_LOCK.lock().unwrap();
+    let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     std::env::set_var("ACP_FAKE_SCENARIO", "cancel");
     // Fire cancel shortly after run starts (the fixture emits "working..."
     // until cancel arrives). Spawned AFTER ENV_LOCK + env so a wait on the
@@ -996,7 +998,7 @@ fn user_cancel_mid_prose_keeps_partial_prose_in_trace() {
     let eng = engine(Arc::clone(&cancel), 24);
     let approval = ApprovalState::new();
     let sink = RecordingSink::default();
-    let _g = ENV_LOCK.lock().unwrap();
+    let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     std::env::set_var("ACP_FAKE_SCENARIO", "cancel");
     // Same spawn-after-env pattern as `user_cancel_aborts_the_whole_turn`:
     // begin_turn clears a stale `requested`, so the cancel must fire after
@@ -1036,7 +1038,7 @@ fn cancel_stops_folding_content_updates() {
     let eng = engine(Arc::clone(&cancel), 24);
     let approval = ApprovalState::new();
     let sink = RecordingSink::default();
-    let _g = ENV_LOCK.lock().unwrap();
+    let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     std::env::set_var("ACP_FAKE_SCENARIO", "cancel_ignore_updates");
     // Same spawn-after-env pattern as the peer cancel tests: begin_turn
     // clears a stale `requested`, so the cancel fires after the turn starts.
@@ -1079,7 +1081,7 @@ fn accum_cap_keeps_the_turn_completing_with_a_marker() {
     let eng = engine(Arc::clone(&cancel), 24);
     let approval = ApprovalState::new();
     let sink = RecordingSink::default();
-    let _g = ENV_LOCK.lock().unwrap();
+    let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     std::env::set_var("ACP_FAKE_SCENARIO", "accum_cap");
     let outcome = eng.run(&input(), &fake_cli(), &approval, &sink, |_| {});
     let text = match &outcome.termination {
@@ -1102,7 +1104,7 @@ fn overlong_line_is_dropped_and_reading_continues() {
     let eng = engine(Arc::clone(&cancel), 24);
     let approval = ApprovalState::new();
     let sink = RecordingSink::default();
-    let _g = ENV_LOCK.lock().unwrap();
+    let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     std::env::set_var("ACP_FAKE_SCENARIO", "line_cap_overlong");
     let outcome = eng.run(&input(), &fake_cli(), &approval, &sink, |_| {});
     let text = match &outcome.termination {
@@ -1362,7 +1364,7 @@ fn acp_turn_injects_model_and_thought_level() {
     input.model = Some("fake-sonnet".into());
     input.thought_level = Some("high".into());
     let trace = TraceFile::new();
-    let _g = ENV_LOCK.lock().unwrap();
+    let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     std::env::set_var("ACP_FAKE_SCENARIO", "text_reply");
     std::env::set_var("ACP_FAKE_TRACE_FILE", &trace.path);
     let outcome = eng.run(&input, &fake_cli(), &approval, &sink, |_| {});
@@ -1399,7 +1401,7 @@ fn acp_turn_set_config_option_rejection_fails_the_turn() {
     let mut input = input();
     input.model = Some("fake-sonnet".into());
     let trace = TraceFile::new();
-    let _g = ENV_LOCK.lock().unwrap();
+    let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     std::env::set_var("ACP_FAKE_SCENARIO", "set_config_option_reject");
     std::env::set_var("ACP_FAKE_TRACE_FILE", &trace.path);
     let outcome = eng.run(&input, &fake_cli(), &approval, &sink, |_| {});

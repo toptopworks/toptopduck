@@ -36,6 +36,8 @@ fn heartbeat_file(tag: &str) -> PathBuf {
 
 /// Process-wide lock so the global `ACP_FAKE_SCENARIO` env var is not raced
 /// by concurrent tests (the acp_engine.rs convention).
+/// Poison recovery is safe: this mutex only serializes env/scenario
+/// access across tests, it guards no cross-test invariant.
 static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 /// Spawn the fixture under `scenario` with the heartbeat trace wired, then
@@ -57,7 +59,7 @@ fn probe_with(
     scenario: &str,
     timeout: Duration,
 ) -> Result<DiscoveredRuntime, ProbeError> {
-    let _g = ENV_LOCK.lock().unwrap();
+    let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     probe_with_locked(binary, scenario, timeout)
 }
 
@@ -205,7 +207,7 @@ fn probe_spawn_failure_is_structured() {
 #[test]
 fn probe_kills_the_child_no_orphan() {
     let heartbeat = heartbeat_file("cleanup");
-    let _g = ENV_LOCK.lock().unwrap();
+    let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     std::env::set_var("ACP_FAKE_TRACE_FILE", &heartbeat);
     // `probe_with_locked`: this test already holds ENV_LOCK (the trace-file
     // var must be set/cleared under it), and the mutex is not reentrant.
