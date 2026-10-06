@@ -1,6 +1,6 @@
 //! Builtin CLI registration entries (issue #675, ADR-0109 Decisions 1/3/4).
 //!
-//! The shipped definition set is a compile-time constant: three curated
+//! The shipped definition set is a compile-time constant: the curated
 //! entries ride the app version and the definition body is NEVER persisted
 //! (a version asset, not user state). Detection is PATH existence
 //! resolution only -- resolving a candidate name never spawns the
@@ -25,7 +25,7 @@ use crate::cli_tools::config::{
 };
 
 // ---------------------------------------------------------------------------
-// The shipped definition set (ADR-0109 Decision 4: three entries, curated)
+// The shipped definition set (ADR-0109 Decision 4, curated)
 
 /// One parameter of a shipped definition (the static mirror of
 /// [`CliToolParam`]; the strings become owned values in [`BuiltinCliDefinition::to_config`]).
@@ -109,13 +109,18 @@ impl BuiltinCliDefinition {
     }
 }
 
-/// The v1 curated set (ADR-0109 Decision 4, narrowed 2026-08-25 to three):
-/// pandoc (universal document conversion), the Python interpreter (data
-/// cleaning; script text rides the `file` channel, no runtime is bundled),
-/// and OfficeCLI (agent-oriented Office document processing; registered as
-/// a whole-binary varargs wrapper -- one entry covers every subcommand).
-/// Additive evolution: new entries pass the same curation screen, not a
-/// reopen of the ADR.
+/// The curated set: the v1 trio of ADR-0109 Decision 4 -- pandoc
+/// (universal document conversion), the Python interpreter (data
+/// cleaning; script text rides the `file` channel, no runtime is
+/// bundled), and OfficeCLI (agent-oriented Office document processing)
+/// -- plus dbx (external database exploration and query) joined via
+/// additive evolution. OfficeCLI and dbx are whole-binary varargs
+/// wrappers -- one entry covers every subcommand. New entries pass the
+/// same curation screen, not a reopen of the ADR. The dbx name is
+/// shared with Databricks Labs' pip-installed dbx: a machine carrying
+/// that CLI registers it under database semantics and the first call
+/// fails loudly (the registration is kept -- the ADR-0108 probing
+/// posture). Accepted at curation.
 pub(crate) static BUILTIN_DEFINITIONS: &[BuiltinCliDefinition] = &[
     BuiltinCliDefinition {
         name: "pandoc",
@@ -186,6 +191,26 @@ pub(crate) static BUILTIN_DEFINITIONS: &[BuiltinCliDefinition] = &[
         params: &[BuiltinCliParam {
             name: "args",
             description: "The OfficeCLI subcommand and its arguments.",
+            delivery: CliParamDelivery::Argv,
+            varargs: true,
+        }],
+    },
+    BuiltinCliDefinition {
+        name: "dbx",
+        description: "dbx: explore and query the databases the user \
+                      manages in their dbx client (postgres, mysql, \
+                      sqlite, mongodb, redis, and more; subcommands \
+                      include connections, schema, query, context, \
+                      doctor, capabilities). Queries are read-only by \
+                      default: writes need --allow-writes, dangerous \
+                      statements (DROP/TRUNCATE/ALTER/COPY) also \
+                      --allow-dangerous-sql. Pass its subcommand and \
+                      arguments.",
+        executables: &["dbx"],
+        argv_template: &[],
+        params: &[BuiltinCliParam {
+            name: "args",
+            description: "The dbx subcommand and its arguments.",
             delivery: CliParamDelivery::Argv,
             varargs: true,
         }],
@@ -828,6 +853,7 @@ mod tests {
         assert!(is_builtin_name("pandoc"));
         assert!(is_builtin_name("python"));
         assert!(is_builtin_name("office-cli"));
+        assert!(is_builtin_name("dbx"));
         assert!(!is_builtin_name("my-own-tool"));
     }
 
@@ -874,6 +900,28 @@ mod tests {
         assert!(
             pandoc().description.contains("`extra`"),
             "pandoc description must name the extra passthrough"
+        );
+    }
+
+    #[test]
+    fn dbx_description_pins_the_read_only_escalation_ladder() {
+        // The description is the planning-stage surface (#1190/#1192
+        // precedent): the agent sizes its flags against the escalation
+        // ladder before any call, so the read-only default and the two
+        // flags must survive a re-curation. Pin the load-bearing
+        // fragments, not the full prose.
+        let dbx = find_definition("dbx").expect("dbx definition");
+        assert!(
+            dbx.description.contains("read-only by default"),
+            "dbx description must keep the read-only default"
+        );
+        assert!(
+            dbx.description.contains("--allow-writes"),
+            "dbx description must keep the write escalation flag"
+        );
+        assert!(
+            dbx.description.contains("--allow-dangerous-sql"),
+            "dbx description must keep the dangerous-SQL escalation flag"
         );
     }
 
