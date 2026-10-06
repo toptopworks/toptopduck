@@ -70,7 +70,9 @@ const KILL_JOIN_GRACE: Duration = Duration::from_secs(5);
 /// built-in LLM sees `mcp__<server_slug>__<tool>`; the gateway parses the
 /// prefix to route, then forwards the bare `<tool>` to the server. Pinned here
 /// so the trace filter (ADR-0085) + classify + parse all agree on the token.
-const NAMESPACED_PREFIX: &str = "mcp__";
+/// pub(crate): the gateway's spill arm (issue #1218) strips it so the
+/// spill stem names `<slug>__<tool>`, not the wire handle.
+pub(crate) const NAMESPACED_PREFIX: &str = "mcp__";
 
 /// The separator between the server slug and the server-native tool name
 /// within a namespaced name (`mcp__<slug>__<tool>`).

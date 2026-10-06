@@ -34,7 +34,9 @@ use crate::tools::ToolOutcome;
 /// aligned with the existing tool-result content cap family (the ACP
 /// accumulation cap, `ACCUM_MAX_BYTES`). Over the cap the stream truncates
 /// with an explicit marker and the call still resolves (ADR-0108 Decision 5).
-const OUTPUT_CAP_BYTES: usize = 8 * 1024 * 1024;
+/// Shared with the MCP gateway's external-result spill arm (issue #1218):
+/// one cap, one data-plane switching point, two transports.
+pub(crate) const OUTPUT_CAP_BYTES: usize = 8 * 1024 * 1024;
 
 /// How often the wait loop polls the cancel token between child exits (the
 /// approval gate's poll precedent -- a safety interval, not the mechanism).
@@ -420,14 +422,18 @@ fn read_capped<R: Read>(
 /// deterministic `tool_output/<tool>-<call-id>.<ext>` file, resolved into a
 /// real file only at the cap-crossing moment (the extension is sniffed from
 /// the head then -- before that the format is unknown). One plan per
-/// stdout stream; stderr takes none.
-struct SpillPlan {
+/// stdout stream; stderr takes none. The MCP gateway's external-result
+/// spill arm (issue #1218) builds its plan from the prefix-stripped
+/// namespaced stem (the gateway strips `mcp__` itself), spilling as
+/// `<slug>__<tool>-<call-id>` -- one naming surface across both
+/// transports.
+pub(crate) struct SpillPlan {
     dir: PathBuf,
     stem: String,
 }
 
 impl SpillPlan {
-    fn new(session_temp_dir: &Path, tool: &str, call_id: &str) -> Self {
+    pub(crate) fn new(session_temp_dir: &Path, tool: &str, call_id: &str) -> Self {
         Self {
             dir: session_temp_dir.join(crate::session::TOOL_OUTPUT_DIR_NAME),
             stem: format!(
@@ -440,12 +446,34 @@ impl SpillPlan {
 
     /// Create the spill file with the sniffed extension. The extension is
     /// the derived-source pipeline's routing signal (its dispatcher has no
-    /// other one), so it must land in its table.
-    fn open(&self, extension: &str) -> std::io::Result<(File, PathBuf)> {
+    /// other one), so it must land in its table -- and stay LAST in the
+    /// name. Never overwrites an existing file: normalized call ids can
+    /// repeat within a turn, and truncating a collision would silently
+    /// swap the bytes an earlier marker still points at. A collision
+    /// appends `-2`, `-3`, ... before the extension; a stubborn collision
+    /// past 64 attempts fails into the caller's spill-failed path.
+    pub(crate) fn open(&self, extension: &str) -> std::io::Result<(File, PathBuf)> {
         std::fs::create_dir_all(&self.dir)?;
-        let path = self.dir.join(format!("{}.{}", self.stem, extension));
-        let file = File::create(&path)?;
-        Ok((file, path))
+        for attempt in 0..64u32 {
+            let file_name = if attempt == 0 {
+                format!("{}.{}", self.stem, extension)
+            } else {
+                format!("{}-{}.{}", self.stem, attempt + 1, extension)
+            };
+            let path = self.dir.join(file_name);
+            match std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&path)
+            {
+                Ok(file) => return Ok((file, path)),
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(e) => return Err(e),
+            }
+        }
+        Err(std::io::Error::other(
+            "spill name exhausted 64 collision attempts",
+        ))
     }
 }
 
@@ -490,8 +518,10 @@ fn sanitize_file_component(raw: &str) -> String {
 /// `.csv` -- the sniff only trusts a brace it can see. `read_csv_auto`
 /// is lenient with plain text (a stray non-CSV spill still ingests),
 /// while JSON under `.csv` would misroute -- the sniff only has to catch
-/// the case that breaks.
-fn spill_extension<I: IntoIterator<Item = u8>>(head: I) -> &'static str {
+/// the case that breaks. Shared with the MCP gateway's spill arm
+/// (issue #1218): the head bytes come from the concatenated text blocks
+/// instead of the pipe, the sniff is the same.
+pub(crate) fn spill_extension<I: IntoIterator<Item = u8>>(head: I) -> &'static str {
     const UTF8_BOM: [u8; 3] = [0xEF, 0xBB, 0xBF];
     let mut bom = 0usize;
     for b in head {
@@ -507,6 +537,32 @@ fn spill_extension<I: IntoIterator<Item = u8>>(head: I) -> &'static str {
         }
     }
     "csv"
+}
+
+/// The model-facing preview for a capped spill (issue #1218): the capped
+/// head plus the truncation marker, and -- when the spill landed -- the
+/// path the full bytes live at. A failed spill withdraws the path and
+/// names the write error instead (a half-trusted file reference is worse
+/// than none). Shared by the gateway's envelope arm
+/// (`spill_external_over_cap`) and the built-in dispatch's text arm
+/// (`shape_external_outcome`); the CLI channel's stream markers stay
+/// separate (they carry the stream name and no head).
+pub(crate) fn spill_preview(
+    head: &str,
+    cap: usize,
+    spilled: &Result<std::path::PathBuf, String>,
+) -> String {
+    match spilled {
+        Ok(path) => format!(
+            "{head}\n[tool output truncated: exceeded the {cap}-byte cap; \
+             full output spilled to: {}]",
+            path.display()
+        ),
+        Err(detail) => format!(
+            "{head}\n[tool output truncated: exceeded the {cap}-byte cap]\n\
+             [tool output spill write error: {detail}]"
+        ),
+    }
 }
 
 /// The visible marker lines for one stream (ADR-0108 Decision 5: over-cap
@@ -866,6 +922,33 @@ mod tests {
             spilled.file_name().and_then(|n| n.to_str()),
             Some("fake-tu_1_.._evil_id.csv"),
             "separators and reserved characters map to underscores"
+        );
+    }
+
+    /// A same-stem second spill never overwrites the first (issue #1218
+    /// review): the name dedups with a `-2` suffix before the extension,
+    /// and the earlier file's bytes survive -- a truncate-on-collision
+    /// would silently swap the data an earlier marker still points at.
+    #[test]
+    fn a_same_stem_second_spill_dedups_instead_of_overwriting() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let plan = SpillPlan::new(temp.path(), "fake", "tu_1");
+        let (mut first, p1) = plan.open("csv").expect("first open");
+        first.write_all(b"first").unwrap();
+        drop(first);
+        let (mut second, p2) = plan.open("csv").expect("second open");
+        second.write_all(b"second").unwrap();
+        drop(second);
+        assert_ne!(p1, p2, "the collision dedups, not overwrites");
+        assert_eq!(
+            p2.file_name().and_then(|n| n.to_str()),
+            Some("fake-tu_1-2.csv"),
+            "the suffix keeps the extension last (the routing signal)"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&p1).unwrap(),
+            "first",
+            "the earlier spill's bytes survive"
         );
     }
 
