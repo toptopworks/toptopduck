@@ -28,13 +28,20 @@ const RESUME_BAND_PX = 40;
  *    its 200ms transition (styles.css) and the workspace fold/unfold
  *    reflow, but a
  *    window resize or the rail-width handle drag ride the same observer.
+ *    The observer also watches the rail's content wrapper: streamed prose
+ *    and post-commit markdown enrichment (async code highlight, image
+ *    decode) grow the content with neither a React signal nor a rail-box
+ *    resize -- the one gap the append signal cannot cover.
  *    Every source resizes the rail's content box (the observer's default
  *    box), so one observer covers them all, firing per frame through the
  *    transition; the callback rides the same rAF, and the follow tracks the
  *    eased bound instead of holding a stale maxScroll until the next
  *    streaming delta.
  *  - Pause: a scroll event landing beyond RESUME_BAND_PX from the bottom.
- *    Programmatic aligns always land AT the bottom, so they never trip it;
+ *    Programmatic aligns land AT the bottom, and their scroll events are
+ *    recognized as echoes (they land exactly on the written offset while
+ *    following) and skipped -- a delta growing the extent between the write
+ *    and the echo's next-frame delivery must not read as a pause;
  *    a mid-timeline jump (the stale-chip scrollIntoView, Thread.tsx --
  *    smooth, block "center") pauses where its animation first exceeds the
  *    band, with no special case. A chip in the last turn clamps at maxScroll
@@ -116,6 +123,19 @@ export function useRailFollow({
   });
 
   const rafRef = useRef<number | null>(null);
+  // The offset the last landed align actually left the rail on (read back
+  // after the write). A write's scroll event is a DELAYED ECHO -- it fires
+  // in the next frame's scroll steps, by which time a streaming delta may
+  // have grown the extent far past the band; evaluating the band at echo
+  // time reads a stale offset against grown content and self-pauses the
+  // machine (the markdown-stream stall: every later align bails on the
+  // paused gate until a manual scroll back into the band). An event landing
+  // exactly on this offset while following IS that echo -- a pause
+  // invalidates the record (the scroll handler), so the one false positive
+  // left is a genuine scroll pixel-exact on it inside the one-frame window
+  // before the next align lands: swallowed by design, indistinguishable
+  // from the echo it might be.
+  const lastAlignTopRef = useRef<number | null>(null);
   const scheduleAlign = useCallback(() => {
     // One write per frame: a frame already pending absorbs the request, so a
     // burst of streaming deltas costs a single scroll write.
@@ -133,7 +153,18 @@ export function useRailFollow({
       if (!activeRef.current || !followingRef.current) return;
       const el = railRef.current;
       if (el === null) return;
-      el.scrollTop = el.scrollHeight - el.clientHeight;
+      const top = el.scrollHeight - el.clientHeight;
+      el.scrollTop = top;
+      // Record the offset the write LANDED on, read back -- not the computed
+      // value. The computed difference is an integer (scrollHeight/clientHeight
+      // round), but the true maxScroll is a double, so the write clamps to a
+      // fractional offset whenever content heights are fractional (prose at
+      // leading-[1.75] -- 24.5px lines). Comparing against the read-back keeps
+      // the echo check an exact same-source match in either geometry. A
+      // boxless write (the trailing-active race frame above) is a no-op whose
+      // read-back is 0 -- recording it would arm the echo check against the
+      // top of the rail, so only a real layout box records.
+      if (el.clientHeight > 0) lastAlignTopRef.current = el.scrollTop;
       // A landed write is the machine re-entering the follow, so the
       // published mirror rides the same callback (a bail-out no-op when
       // already true). The published boolean is ONLY ever touched from event
@@ -179,20 +210,31 @@ export function useRailFollow({
     scheduleAlign();
   }, [entryCount, liveTurn, scheduleAlign]);
 
-  // The pause/resume machine: every scroll event re-evaluates the band. Our
-  // own aligns land at the bottom (distance 0), so they re-enter "true" as a
-  // no-op; only the user (or a programmatic jump) can land beyond the band.
-  // The listener attaches directly to the rail element: the section is
-  // unconditional within the pane, so one mount-time attach sees its whole
-  // life. Passive: the handler only reads, never scrolls.
+  // The pause/resume machine: every scroll event re-evaluates the band --
+  // except the align's own echo (the lastAlignTopRef doc block above: an
+  // event landing on the recorded offset while following IS the echo).
+  // While paused there are no writes hence no echoes, so the resume path
+  // evaluates every event. Only the user (or a programmatic jump) can land
+  // beyond the band. The listener attaches directly to the rail element:
+  // the section is unconditional within the pane, so one mount-time attach
+  // sees its whole life. Passive: the handler only reads, never scrolls.
   useEffect(() => {
     const el = railRef.current;
     if (el === null) return;
     const onScroll = () => {
+      if (followingRef.current && el.scrollTop === lastAlignTopRef.current) {
+        return;
+      }
       const atBottom =
         el.scrollHeight - el.clientHeight - el.scrollTop <= RESUME_BAND_PX;
       followingRef.current = atBottom;
       setIsFollowing(atBottom);
+      // A pause is proof the fingerprint went stale (content grew past it
+      // or the reader moved), so a post-resume scroll landing exactly on
+      // the pre-pause offset must evaluate the band, not read as a late
+      // echo. Echoes never reach this branch (the guard above returns
+      // first), so the invalidation only ever clears dead state.
+      if (!atBottom) lastAlignTopRef.current = null;
     };
     el.addEventListener("scroll", onScroll, { passive: true });
     return () => el.removeEventListener("scroll", onScroll);
@@ -211,6 +253,15 @@ export function useRailFollow({
     if (typeof ResizeObserver === "undefined") return; // jsdom (test-setup stubs it)
     const observer = new ResizeObserver(() => scheduleAlign());
     observer.observe(el);
+    // Streamed prose grows the CONTENT, not the rail's own box, and its
+    // append signal (liveTurn identity) can miss markdown enrichment that
+    // lands after the commit (async code highlight, image decode) -- the
+    // tail then sits behind the bar until the next delta, or forever on the
+    // last one. Observing the reading column (the rail's single content
+    // wrapper, SessionPane) routes every content growth through the same
+    // gated align; an align write itself resizes nothing, so no loop.
+    const content = el.firstElementChild;
+    if (content !== null) observer.observe(content);
     return () => observer.disconnect();
   }, [scheduleAlign]);
 

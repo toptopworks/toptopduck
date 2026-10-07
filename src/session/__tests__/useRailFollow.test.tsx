@@ -145,7 +145,12 @@ function Host({
   const { railRef, isFollowing } = useRailFollow({ active, entryCount, liveTurn });
   return (
     <main>
-      <section ref={railRef} data-testid="rail" />
+      <section ref={railRef} data-testid="rail">
+        {/* The content wrapper the real rail mounts (the .rail-reading-column,
+            SessionPane): the streamed-content resize source the observer's
+            second target covers. */}
+        <div data-testid="content" />
+      </section>
       <output data-testid="following">{String(isFollowing)}</output>
     </main>
   );
@@ -360,6 +365,129 @@ describe("useRailFollow", () => {
     expect(rig.scrollTop()).toBe(900); // the follow re-lands the bottom
   });
 
+  // --- Pause machine: the align's own scroll echo ---------------------------
+
+  it("never pauses on its own align's scroll echo, even when streaming grew the extent past the band", () => {
+    // Real-frame delivery order: the write's scroll event fires in the NEXT
+    // frame's scroll steps, after any delta that landed in between has grown
+    // the extent. The band math at echo time reads the written offset against
+    // the grown scrollHeight -- a self-inflicted pause that stalls the follow
+    // for the rest of the stream (the tail piling up behind the bar) until a
+    // manual scroll back into the band. Markdown streams hit this: one delta
+    // can grow the extent by hundreds of px, far past the 40px band.
+    const { getByTestId, rerender } = render(
+      <Host active={true} entryCount={3} liveTurn={makeLiveTurn()} />,
+    );
+    const rail = getByTestId("rail") as HTMLElement;
+    const rig = rigRail(rail);
+    flushFrame();
+    expect(rig.scrollTop()).toBe(700); // the align landed bottom
+
+    // A delta lands between the write and its echo's delivery: the extent
+    // grows with no rerender -- the echo, not React, is what carries it.
+    rig.geo.scrollHeight = 1200; // distance at the written offset: 500 >> band
+    act(() => {
+      rail.dispatchEvent(new Event("scroll")); // the write's echo
+    });
+    expect(followingText()).toBe("true"); // NOT paused by its own echo
+
+    // The machine stays live: the next append re-lands the new bottom.
+    rerender(<Host active={true} entryCount={3} liveTurn={makeLiveTurn()} />);
+    flushFrame();
+    expect(rig.scrollTop()).toBe(900);
+  });
+
+  it("still suppresses the echo when the write clamps to a fractional true max (fractional prose heights)", () => {
+    // leading-[1.75] prose (24.5px lines) makes the true maxScroll a double:
+    // the integer computed write clamps to a fractional offset, so a naive
+    // "record the computed value" fingerprint never matches the echo and the
+    // self-pause survives the guard. The hook records the READ-BACK offset,
+    // which matches whatever the clamp landed on.
+    const { getByTestId, rerender } = render(
+      <Host active={true} entryCount={3} liveTurn={makeLiveTurn()} />,
+    );
+    const rail = getByTestId("rail") as HTMLElement;
+    const rig = rigRail(rail);
+    let landed = 0;
+    // This override replaces rigRail's counting setter: rig.scrollTop() and
+    // rig.hookWrites() read a dead closure from here on (stale zeros) --
+    // track position through `landed` in this test.
+    Object.defineProperty(rail, "scrollTop", {
+      configurable: true,
+      get: () => landed,
+      set: (v: number) => {
+        // The browser clamps to the true (fractional) max on assignment.
+        landed = Math.min(v, rig.geo.scrollHeight - rig.geo.clientHeight - 0.4);
+      },
+    });
+    flushFrame();
+    expect(landed).toBeCloseTo(699.6, 5); // the clamp fraction
+
+    rig.geo.scrollHeight = 1200; // a delta grew the extent past the band
+    act(() => {
+      rail.dispatchEvent(new Event("scroll")); // the write's echo
+    });
+    expect(followingText()).toBe("true"); // NOT paused by its own echo
+
+    rerender(<Host active={true} entryCount={3} liveTurn={makeLiveTurn()} />);
+    flushFrame();
+    expect(landed).toBeCloseTo(899.6, 5); // the next align re-lands
+  });
+
+  it("still resumes through a scroll event landing exactly on a stale written offset while paused", () => {
+    // The echo skip only applies while following (no writes happen while
+    // paused, hence no echoes) -- a paused reader scrolling back onto the
+    // old written offset must still evaluate the band and resume.
+    const { getByTestId } = render(<Host active={true} entryCount={3} liveTurn={null} />);
+    const rail = getByTestId("rail") as HTMLElement;
+    const rig = rigRail(rail);
+    flushFrame(); // the mount align writes 700
+
+    rig.userScrollTo(300); // read history -> pause
+    act(() => {
+      rail.dispatchEvent(new Event("scroll"));
+    });
+    expect(followingText()).toBe("false");
+
+    rig.userScrollTo(700); // back exactly ON the stale written offset
+    act(() => {
+      rail.dispatchEvent(new Event("scroll"));
+    });
+    expect(followingText()).toBe("true"); // band eval ran; distance 0
+  });
+
+  it("pauses on a post-resume scroll landing exactly on the pre-pause written offset", () => {
+    // The fingerprint only earns trust from a landed write: a pause
+    // invalidates it, so after a resume a genuine scroll landing exactly
+    // on the PRE-pause offset must evaluate the band, not read as a late
+    // echo -- content streamed during the pause has grown the extent past
+    // the band by then, and the reader keeps their place instead of being
+    // yanked by the next append.
+    const { getByTestId } = render(<Host active={true} entryCount={3} liveTurn={null} />);
+    const rail = getByTestId("rail") as HTMLElement;
+    const rig = rigRail(rail);
+    flushFrame(); // the mount align writes 700
+
+    rig.userScrollTo(300); // read history -> pause (fingerprint invalidated)
+    act(() => {
+      rail.dispatchEvent(new Event("scroll"));
+    });
+    expect(followingText()).toBe("false");
+
+    rig.userScrollTo(660); // back inside the band -> resume
+    act(() => {
+      rail.dispatchEvent(new Event("scroll"));
+    });
+    expect(followingText()).toBe("true");
+
+    rig.geo.scrollHeight = 1300; // streamed while paused: distance at 700 is now 100
+    rig.userScrollTo(700); // exactly on the stale written offset
+    act(() => {
+      rail.dispatchEvent(new Event("scroll"));
+    });
+    expect(followingText()).toBe("false"); // band eval ran, NOT read as an echo
+  });
+
   // --- Submit: force-follow to the bottom ----------------------------------
 
   it("force-follows to the bottom on submit (liveTurn null -> live), overriding a pause", () => {
@@ -393,11 +521,14 @@ describe("useRailFollow", () => {
     flushFrame();
     expect(rig.hookWrites()).toBe(1); // the mount land
 
-    // The observer watches the rail itself: its content box resizes both
+    // The observer watches the rail itself (its content box resizes both
     // when the eased bottom padding (#836's calc) changes and when the
-    // workspace fold/unfold reflow changes the width.
+    // workspace fold/unfold reflow changes the width) AND the content
+    // wrapper: streamed prose and post-commit markdown enrichment (async
+    // code highlight, image decode) grow the content with neither a React
+    // signal nor a rail-box resize -- the append signal's one gap.
     expect(observers).toHaveLength(1);
-    expect(observers[0].observed).toEqual([rail]);
+    expect(observers[0].observed).toEqual([rail, getByTestId("content")]);
 
     // The extent grows with NO rerender -- nothing in {entryCount, liveTurn,
     // active} changed, only the rail's box did (the padding transition's

@@ -511,7 +511,11 @@ export function SessionPane({ sessionId, isActive, pendingIngestPaths, onIngestC
             {/* Issue #833: the rail is the full-width scroll container while the
                 workspace is folded; this wrapper is the centered reading
                 column that caps the thread's measure (.rail-reading-column in
-                styles.css, capped at --reading-column-cap). */}
+                styles.css, capped at --reading-column-cap).
+                useRailFollow's range observer watches this node as the rail's
+                FIRST element child (its content-growth signal) -- keep it
+                first, or teach the hook a selector, when adding rail
+                children (e.g. the planned jump-to-latest affordance). */}
             <div className="rail-reading-column">
               <ErrorBoundary key={`thread-${regionRetryEpoch}`} name="thread" onReset={resetSessionCache}>
                 <Thread
