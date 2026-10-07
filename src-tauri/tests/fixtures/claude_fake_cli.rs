@@ -53,6 +53,8 @@ const HEARTBEAT_INTERVAL: std::time::Duration = std::time::Duration::from_millis
 const SCENARIOS: &[&str] = &[
     // Turn surface.
     "text_reply",
+    "streamed_reply",
+    "streamed_tool_call",
     "tool_call",
     "thinking_rounds",
     "native_tool_denied",
@@ -198,15 +200,30 @@ fn run_turn_window(scenario: &str, window: u32, out: &mut std::io::Stdout) -> bo
             // Window one tops out mid-work (a gateway-routed call batch in
             // flight); window two -- opened by the engine's nudge frame --
             // answers. The rounds must carry across the boundary (the same
-            // tracker, one settle).
+            // tracker, one settle). Window one's prose streams as
+            // partial-message deltas whose complete frame never arrives --
+            // the orphan run the pump's window-boundary guard reset exists
+            // for (issue #1228): the call batch keeps its round while the
+            // latch must not survive into window two (the text-less
+            // tool_use frame leaves the guard latched; a complete frame
+            // would consume it).
             if window == 1 {
                 emit(out, &system_init());
+                for chunk in ["checking the ", "table"] {
+                    emit(
+                        out,
+                        &serde_json::json!({
+                            "type": "stream_event",
+                            "event": {"type": "content_block_delta", "index": 0,
+                                      "delta": {"type": "text_delta", "text": chunk}}
+                        }),
+                    );
+                }
                 emit(
                     out,
                     &serde_json::json!({
                         "type": "assistant",
                         "message": {"content": [
-                            {"type": "text", "text": "checking the table"},
                             {"type": "tool_use", "id": "toolu_1",
                              "name": "mcp__toptopduck-gateway__explore",
                              "input": {"sql": "SELECT 1"}}
@@ -260,6 +277,85 @@ fn run_single_window(scenario: &str, out: &mut std::io::Stdout) {
                 }),
             );
             emit(out, &result_success("the answer is 42"));
+        }
+        "streamed_reply" => {
+            // Partial-message deltas (`--include-partial-messages`, issue
+            // #1228): the text streams as `stream_event` deltas while it
+            // generates, and the complete `assistant` frame repeats the same
+            // content -- the pump must deliver the prose once.
+            emit(out, &system_init());
+            for chunk in ["the answer ", "is 42"] {
+                emit(
+                    out,
+                    &serde_json::json!({
+                        "type": "stream_event",
+                        "event": {"type": "content_block_delta", "index": 0,
+                                  "delta": {"type": "text_delta", "text": chunk}}
+                    }),
+                );
+            }
+            emit(
+                out,
+                &serde_json::json!({
+                    "type": "assistant",
+                    "message": {"role": "assistant", "content": [
+                        {"type": "text", "text": "the answer is 42"}
+                    ]}
+                }),
+            );
+            emit(out, &result_success("the answer is 42"));
+        }
+        "streamed_tool_call" => {
+            // Partial-message deltas around a tool batch (issue #1228):
+            // the preamble streams as `stream_event` deltas and its
+            // trailing frame carries the SAME text plus the tool_use
+            // blocks (the dedupe skips only the text, never the call);
+            // the closing message arrives whole-block with no deltas of
+            // its own -- the guard must have reset on the frame it
+            // skipped.
+            emit(out, &system_init());
+            for chunk in ["checking the ", "table"] {
+                emit(
+                    out,
+                    &serde_json::json!({
+                        "type": "stream_event",
+                        "event": {"type": "content_block_delta", "index": 0,
+                                  "delta": {"type": "text_delta", "text": chunk}}
+                    }),
+                );
+            }
+            emit(
+                out,
+                &serde_json::json!({
+                    "type": "assistant",
+                    "message": {"content": [
+                        {"type": "text", "text": "checking the table"},
+                        {"type": "tool_use", "id": "toolu_1",
+                         "name": "mcp__toptopduck-gateway__explore",
+                         "input": {"sql": "SELECT 1"}}
+                    ]}
+                }),
+            );
+            emit(
+                out,
+                &serde_json::json!({
+                    "type": "user",
+                    "message": {"content": [
+                        {"type": "tool_result", "tool_use_id": "toolu_1",
+                         "content": "1"}
+                    ]}
+                }),
+            );
+            emit(
+                out,
+                &serde_json::json!({
+                    "type": "assistant",
+                    "message": {"content": [
+                        {"type": "text", "text": "found 3 rows"}
+                    ]}
+                }),
+            );
+            emit(out, &result_success("found 3 rows"));
         }
         "tool_call" => {
             // A gateway-routed MCP call: the engine emits phases and lands

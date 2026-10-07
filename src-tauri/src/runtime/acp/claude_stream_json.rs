@@ -18,8 +18,9 @@
 //! the current model -- unknown subtypes are session-hook frames and MUST be
 //! tolerated mid-stream, a measured property, not defensiveness), `assistant`
 //! (message content blocks: `text` + `tool_use`), `user` (`tool_result`
-//! blocks), `stream_event` (partial-message deltas -- the pinned minimal argv
-//! does not request them; the parser maps the vocabulary anyway), `result`
+//! blocks), `stream_event` (partial-message deltas, requested via
+//! `--include-partial-messages` -- the live prose stream; the trailing
+//! complete `assistant` frame deduplicates against them), `result`
 //! (terminal). Control-plane frames (`control_request` / `control_response`)
 //! belong to the probe surface but are tolerated here too.
 //!
@@ -80,9 +81,10 @@ pub(crate) enum ClaudeEvent {
     /// actually runs (honest rendering, ADR-0097 Decision 5).
     SystemInit { model: Option<String> },
     /// Assistant thinking-block content (issue #612): one merged event per
-    /// frame -- headless emits whole blocks, not deltas. Accumulates into
-    /// the current round's thinking stream, frozen at the batch boundary or
-    /// turn end.
+    /// frame -- thinking rides the complete `assistant` frame whole
+    /// (`thinking_delta` stream events are tolerated, not mapped).
+    /// Accumulates into the current round's thinking stream, frozen at the
+    /// batch boundary or turn end.
     ThinkingBlock { text: String },
     /// Assistant text content -- accumulated across the turn.
     AssistantText { text: String },
@@ -95,10 +97,11 @@ pub(crate) enum ClaudeEvent {
     /// A tool invocation settled (`user` `tool_result` block).
     ToolResult { id: String, success: bool },
     /// A partial-message text delta (`stream_event`
-    /// `content_block_delta`/`text_delta`). The pinned minimal argv does not
-    /// request partial messages, so these never co-occur with the complete
-    /// `assistant` text for the same content; the parser maps the vocabulary
-    /// regardless (issue #561 spec).
+    /// `content_block_delta`/`text_delta`, requested via
+    /// `--include-partial-messages`): streams the round's prose the moment
+    /// it is generated (issue #561 spec). The complete `assistant` frame for
+    /// the same content trails its deltas; the pump's `streamed_prose`
+    /// guard deduplicates it.
     StreamDelta { text: String },
     /// The terminal frame. `subtype` is the CLI's own stop classification;
     /// `is_error` marks a failed turn; `text` is the final message (empty
@@ -434,6 +437,8 @@ pub(super) fn run_claude_stream_json(
                 McpServer::Other => None,
             })
             .collect(),
+        streamed_prose: false,
+        streamed_text: String::new(),
     };
 
     let mut termination: Option<Termination>;
@@ -491,6 +496,7 @@ pub(super) fn run_claude_stream_json(
                         {
                             (super::process::StdinWriteOutcome::Done, handed_back) => {
                                 stdin = handed_back;
+                                pump.open_window();
                                 window_resumes += 1;
                                 continue;
                             }
@@ -620,9 +626,34 @@ struct ClaudePump {
     /// (`mcp__<server>__`); a matching prefix strips to the bare display
     /// name the gateway records its row under (issue #817).
     gateway_prefixes: Vec<String>,
+    /// Whether prose deltas streamed since the last complete `assistant`
+    /// frame. With `--include-partial-messages` the CLI emits both the
+    /// `stream_event` text deltas AND the trailing complete frame for one
+    /// message, and `push_prose` appends -- a delta-covered frame must not
+    /// re-append. The guard resets with the frame it skips (a later frame
+    /// arriving without deltas pushes as before) and at every window
+    /// boundary (issue #1228).
+    streamed_prose: bool,
+    /// The concatenation of the current message's text deltas, mirroring
+    /// [`Self::streamed_prose`]: the skip-side comparison for a
+    /// delta-covered frame. The CLI's own SSE assembly guarantees the
+    /// trailing frame repeats its deltas, so a mismatch is upstream drift
+    /// -- the dropped frame text stays answerable in logs (#886's
+    /// doctrine), the push semantics never change.
+    streamed_text: String,
 }
 
 impl ClaudePump {
+    /// Open the next continuation window (ADR-0128). Every window
+    /// boundary must reset the dedupe guard: a boundary can cut
+    /// mid-message (deltas streamed, the complete frame never came), and
+    /// a latched guard would swallow the next window's whole-block frame
+    /// off both tracks (issue #1228).
+    fn open_window(&mut self) {
+        self.streamed_prose = false;
+        self.streamed_text.clear();
+    }
+
     /// Fold one parsed event. Returns `Some(termination)` when the event
     /// ends the turn (the `result` frame).
     fn fold(
@@ -640,10 +671,29 @@ impl ClaudePump {
                 None
             }
             // Complete prose and partial text deltas share the dual track
-            // (round slot + terminal fallback); the pinned argv never emits
-            // deltas, but the vocabulary maps them the same way (issue #561).
-            ClaudeEvent::AssistantText { text } | ClaudeEvent::StreamDelta { text } => {
+            // (round slot + terminal fallback) and push_prose's append
+            // semantics -- with partial messages enabled the CLI emits both
+            // for one message, so the streamed flag deduplicates a complete
+            // frame that trails its deltas (issue #561).
+            ClaudeEvent::StreamDelta { text } => {
+                self.streamed_prose = true;
+                self.streamed_text.push_str(&text);
                 self.tracker.push_prose(&text, on_phase);
+                None
+            }
+            ClaudeEvent::AssistantText { text } => {
+                let streamed = std::mem::take(&mut self.streamed_prose);
+                let deltas = std::mem::take(&mut self.streamed_text);
+                if !streamed {
+                    self.tracker.push_prose(&text, on_phase);
+                } else if text != deltas {
+                    log::warn!(
+                        target: "toptopduck::acp",
+                        "claude delta-covered assistant frame differs from its \
+                         streamed deltas; frame text dropped: {text:?}, \
+                         streamed: {deltas:?}"
+                    );
+                }
                 None
             }
             ClaudeEvent::ToolUse { id, name, input } => {
@@ -910,7 +960,8 @@ mod tests {
 
     /// An assistant frame's thinking block is captured as a
     /// `ThinkingBlock` event (issue #612) -- the round's reasoning text,
-    /// emitted whole (headless sends complete blocks, not deltas).
+    /// emitted whole (thinking rides complete frames; `thinking_delta`
+    /// events are tolerated, not mapped).
     #[test]
     fn parse_assistant_thinking_block_captured() {
         let v = json!({
@@ -1016,7 +1067,8 @@ mod tests {
     // --- parse_events: stream_event --------------------------------------------
 
     /// A partial-message text delta maps to a StreamDelta (vocabulary
-    /// coverage; the pinned argv never requests them).
+    /// coverage; the turn argv requests them via
+    /// `--include-partial-messages`).
     #[test]
     fn parse_stream_event_text_delta() {
         let v = json!({
@@ -1156,7 +1208,100 @@ mod tests {
             current_model: None,
             pending: Vec::new(),
             gateway_prefixes: vec!["mcp__toptopduck-gateway__".to_string()],
+            streamed_prose: false,
+            streamed_text: String::new(),
         }
+    }
+
+    // --- pump fold: partial-message dedupe -------------------------------------
+
+    /// With partial messages on, one message's deltas stream first and its
+    /// complete `assistant` frame trails: the frame must not re-append, so
+    /// the round and terminal tracks carry the text exactly once and the
+    /// delta stream is the chunks alone.
+    #[test]
+    fn streamed_deltas_dedupe_the_trailing_complete_frame() {
+        let mut pump = pump_with_bridge();
+        let mut phases = Vec::new();
+        for chunk in ["the ", "answer"] {
+            pump.fold(ClaudeEvent::StreamDelta { text: chunk.into() }, &mut |p| {
+                phases.push(p)
+            });
+        }
+        pump.fold(
+            ClaudeEvent::AssistantText {
+                text: "the answer".into(),
+            },
+            &mut |p| phases.push(p),
+        );
+        assert_eq!(pump.tracker.terminal_text(), "the answer");
+        let deltas: Vec<String> = phases
+            .into_iter()
+            .filter_map(|p| match p {
+                TurnPhase::TextDelta { delta } => Some(delta),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(deltas, vec!["the ".to_string(), "answer".to_string()]);
+    }
+
+    /// The dedupe guard resets with the frame it skips: a delta-streamed
+    /// message deduplicates, and the NEXT complete frame arriving without a
+    /// streamed run (the whole-block shape) still pushes.
+    #[test]
+    fn the_dedupe_guard_resets_with_each_complete_frame() {
+        let mut pump = pump_with_bridge();
+        let mut phases = Vec::new();
+        pump.fold(ClaudeEvent::StreamDelta { text: "a".into() }, &mut |p| {
+            phases.push(p)
+        });
+        pump.fold(ClaudeEvent::AssistantText { text: "a".into() }, &mut |p| {
+            phases.push(p)
+        });
+        pump.fold(ClaudeEvent::AssistantText { text: "b".into() }, &mut |p| {
+            phases.push(p)
+        });
+        assert_eq!(pump.tracker.terminal_text(), "ab");
+        let deltas: Vec<String> = phases
+            .into_iter()
+            .filter_map(|p| match p {
+                TurnPhase::TextDelta { delta } => Some(delta),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            deltas,
+            vec!["a".to_string(), "b".to_string()],
+            "each text lands as one delta: the streamed chunk and the later whole-block frame"
+        );
+    }
+
+    /// A delta-covered frame whose text differs from its streamed deltas
+    /// still skips -- the streamed text stands and the frame text drops
+    /// with a warn: the comparison is a diagnostic face, never a second
+    /// push path (issue #1228).
+    #[test]
+    fn a_mismatched_delta_covered_frame_still_skips() {
+        let mut pump = pump_with_bridge();
+        let mut phases = Vec::new();
+        pump.fold(ClaudeEvent::StreamDelta { text: "a".into() }, &mut |p| {
+            phases.push(p)
+        });
+        pump.fold(
+            ClaudeEvent::AssistantText {
+                text: "different".into(),
+            },
+            &mut |p| phases.push(p),
+        );
+        assert_eq!(pump.tracker.terminal_text(), "a");
+        let deltas: Vec<String> = phases
+            .into_iter()
+            .filter_map(|p| match p {
+                TurnPhase::TextDelta { delta } => Some(delta),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(deltas, vec!["a".to_string()]);
     }
 
     // --- pump fold: rounds (issue #612) ---------------------------------------
