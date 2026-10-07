@@ -154,6 +154,16 @@ fn main() {
             }
             "user" => {
                 window += 1;
+                // PR #1227 review (Important 2): trace the text this user
+                // frame carries -- the continuation frame must be the
+                // engine's nudge alone, and the trace file is the only
+                // assertable face (stdout is the engine's frame stream).
+                trace_line(&format!(
+                    "CLAUDE_FAKE_PROMPT[{window}]={}",
+                    v.pointer("/message/content/0/text")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or_default()
+                ));
                 if run_turn_window(&scenario, window, &mut out) {
                     return;
                 }

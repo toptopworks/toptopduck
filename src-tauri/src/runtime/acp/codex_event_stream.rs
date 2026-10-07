@@ -717,10 +717,14 @@ impl JsonPump {
                 // The CLI's own turn budget (ADR-0128): the `model_max_turns`
                 // self-stop reads as a turn-limit failure -- the WINDOW-TRIP
                 // signal the driver resumes off; any other failure stays the
-                // turn's own Runtime.
+                // turn's own Runtime. Both classifications log the full
+                // error text: the wording is not yet live-pinned, so drift
+                // must stay answerable from the log.
                 if error.to_ascii_lowercase().contains("turn limit") {
+                    log::warn!("codex turn.failed read as the step window boundary: {error}");
                     Some(Termination::StepCap(self.step_cap))
                 } else {
+                    log::warn!("codex turn.failed read as a runtime failure: {error}");
                     Some(Termination::Runtime(error))
                 }
             }

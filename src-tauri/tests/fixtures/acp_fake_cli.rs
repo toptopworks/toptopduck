@@ -48,6 +48,31 @@ fn trace_line(line: &str) {
     }
 }
 
+/// The text blocks of a received `session/prompt`, block-separated: the
+/// prompt_echo scenario's echo and the ADR-0128 continuation trace share
+/// the extraction (the resumed window's prompt is the nudge alone, and the
+/// trace file is the only assertable face).
+fn received_prompt_text(req: &serde_json::Value) -> String {
+    let mut text = String::new();
+    if let Some(blocks) = req
+        .get("params")
+        .and_then(|p| p.get("prompt"))
+        .and_then(|b| b.as_array())
+    {
+        for block in blocks {
+            let block_text = block
+                .get("text")
+                .and_then(|t| t.as_str())
+                .unwrap_or_default();
+            if !text.is_empty() {
+                text.push_str("\n----\n");
+            }
+            text.push_str(block_text);
+        }
+    }
+    text
+}
+
 /// Heartbeat interval for the `handshake_silent` scenario (issue #534): the
 /// diagnostic-probe cleanup test polls the trace file and asserts the beats
 /// stop after the probe kills this process.
@@ -414,24 +439,7 @@ fn play_scenario(
         // The integration test asserts on the disclosure mix the CLI received
         // (index entries + activated bodies, not full-text mounts).
         "prompt_echo" => {
-            let mut echoed = String::new();
-            if let Some(blocks) = req
-                .get("params")
-                .and_then(|p| p.get("prompt"))
-                .and_then(|b| b.as_array())
-            {
-                for block in blocks {
-                    let text = block
-                        .get("text")
-                        .and_then(|t| t.as_str())
-                        .unwrap_or_default();
-                    if !echoed.is_empty() {
-                        echoed.push_str("\n----\n");
-                    }
-                    echoed.push_str(text);
-                }
-            }
-            notify(out, agent_message(&echoed));
+            notify(out, agent_message(&received_prompt_text(req)));
             respond_prompt(out, &id, StopReason::EndTurn);
         }
         "tool_calls" => {
@@ -623,6 +631,14 @@ fn play_scenario(
         "max_turns_resume" => {
             static WINDOW: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(1);
             let window = WINDOW.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            // PR #1227 review (Important 2): trace the prompt text this
+            // window received -- the resumed window's whole prompt must be
+            // the engine's convergence nudge, and the trace file is the
+            // only assertable face (stdout is the protocol channel).
+            trace_line(&format!(
+                "ACP_FAKE_PROMPT[{window}]={}",
+                received_prompt_text(req)
+            ));
             if window == 1 {
                 notify(out, agent_message("checking the table"));
                 notify_tool_call_roundtrip(

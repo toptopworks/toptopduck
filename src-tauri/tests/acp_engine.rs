@@ -677,10 +677,23 @@ fn max_turns_exhaustion_lands_the_derived_ceiling() {
 /// ADR-0128 continuation: the engine re-sends `session/prompt` to the SAME
 /// session (the nudge as the resumed prompt). Window one's tool round and
 /// window two's answer settle as ONE trajectory, and the nudge leaves no
-/// trace of its own.
+/// trace of its own. The fixture traces each window's received prompt text
+/// (PR #1227 review, Important 2): the resumed window's whole prompt must
+/// be the nudge alone -- re-sending the first window's full context passes
+/// every other assertion and only fails here.
 #[test]
 fn max_turns_resumes_the_same_session() {
-    let (outcome, phases) = run("max_turns_resume", 24);
+    let cancel = Arc::new(CancelToken::new());
+    let eng =
+        AcpEngine::new(gemini_cli(), cancel).with_caps(24, Some(std::time::Duration::from_secs(5)));
+    let approval = ApprovalState::new();
+    let sink = RecordingSink::default();
+    let mut phases = Vec::new();
+    let trace = TraceFile::new();
+    let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    std::env::set_var("ACP_FAKE_SCENARIO", "max_turns_resume");
+    std::env::set_var("ACP_FAKE_TRACE_FILE", &trace.path);
+    let outcome = eng.run(&input(), &fake_cli(), &approval, &sink, |p| phases.push(p));
     match outcome.termination {
         Termination::Text(t) => assert_eq!(t, "the answer is 42"),
         other => panic!("expected Text, got {other:?}"),
@@ -696,6 +709,24 @@ fn max_turns_resumes_the_same_session() {
             .iter()
             .any(|p| format!("{p:?}").contains("step budget for this window")),
         "the nudge must not leak into the live phases"
+    );
+    // Delivered content: the resumed window's prompt is the nudge ALONE,
+    // not the first window's context.
+    let traced = trace.read_all();
+    let prompts: Vec<&str> = traced
+        .lines()
+        .filter(|l| l.starts_with("ACP_FAKE_PROMPT["))
+        .collect();
+    assert_eq!(prompts.len(), 2, "two windows, two prompts: {prompts:?}");
+    assert!(
+        !prompts[0].contains("step budget for this window"),
+        "window one carries the turn's real prompt: {}",
+        prompts[0]
+    );
+    assert!(
+        prompts[1].contains("step budget for this window"),
+        "window two's whole prompt is the convergence nudge: {}",
+        prompts[1]
     );
 }
 

@@ -445,7 +445,9 @@ pub(super) fn run_claude_stream_json(
     // turn's one trajectory. There is deliberately NO app-side counted cap:
     // claude has no budget setting face, so the family is windowless and
     // ceilingless until the CLI reports its own (the honest degrade the
-    // ADR records; the backstops are the watchdog + the loop detector).
+    // ADR records; the backstops on this external path are the no-progress
+    // watchdog and the user's cancel -- the built-in loop's identical-
+    // arguments detector is not wired to the external families' dispatch).
     let mut window_resumes = 0u32;
     let mut discards = super::process::DiscardLog::new();
 

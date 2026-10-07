@@ -339,10 +339,34 @@ fn max_turns_exhaustion_lands_the_derived_ceiling() {
 /// ADR-0128 continuation: the SAME process answers the engine's nudge user
 /// frame -- window one tops out mid-batch, window two lands the terminal
 /// text. One process, one settle: the window-one call round survives and
-/// the nudge leaves no trace of its own.
+/// the nudge leaves no trace of its own. The fixture traces each user
+/// frame's text (PR #1227 review, Important 2): the continuation frame
+/// must carry the nudge alone -- an empty or repeated-context frame passes
+/// every other assertion and only fails here.
 #[test]
 fn max_turns_continues_the_same_process() {
-    let (outcome, phases, _) = run("max_turns_continue", 24);
+    let cancel = Arc::new(CancelToken::new());
+    let eng = AcpEngine::new(claude_code(), cancel)
+        .with_caps(24, Some(std::time::Duration::from_secs(5)));
+    let approval = ApprovalState::new();
+    let mut phases = Vec::new();
+    // The fixture traces received user frames to this file (stdout carries
+    // the frame stream the engine owns).
+    let trace = std::env::temp_dir().join(format!(
+        "claude-fake-trace-{}.log",
+        std::process::id() as u64
+            ^ (std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .subsec_nanos() as u64)
+    ));
+    let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    std::env::set_var("CLAUDE_FAKE_SCENARIO", "max_turns_continue");
+    std::env::set_var("CLAUDE_FAKE_TRACE_FILE", &trace);
+    let outcome = eng.run(&input(), &fake_cli(), &approval, &NoopSink, |p| {
+        phases.push(p)
+    });
+    std::env::remove_var("CLAUDE_FAKE_TRACE_FILE");
     match outcome.termination {
         Termination::Text(t) => assert_eq!(t, "window two answer"),
         other => panic!("expected Text, got {other:?}"),
@@ -365,6 +389,25 @@ fn max_turns_continues_the_same_process() {
     assert!(
         !format!("{:?}", outcome.trace).contains(nudge_fragment),
         "the nudge must not leak into the trace"
+    );
+    // Delivered content: the continuation frame's text is the nudge ALONE,
+    // not empty and not a repeat of the turn's prompt.
+    let argv = std::fs::read_to_string(&trace).unwrap_or_default();
+    let _ = std::fs::remove_file(&trace);
+    let frames: Vec<&str> = argv
+        .lines()
+        .filter(|l| l.starts_with("CLAUDE_FAKE_PROMPT["))
+        .collect();
+    assert_eq!(frames.len(), 2, "one process, two user frames: {frames:?}");
+    assert!(
+        !frames[0].contains(nudge_fragment),
+        "frame one carries the turn's real prompt: {}",
+        frames[0]
+    );
+    assert!(
+        frames[1].contains(nudge_fragment),
+        "frame two's whole text is the convergence nudge: {}",
+        frames[1]
     );
 }
 
