@@ -2,7 +2,7 @@
 
 ## Decision
 
-1. **claude-code 适配器以原生 headless 直连接入，无状态语义与 codex 路径同构**。turn argv = `--print --output-format stream-json --verbose --no-session-persistence`，提问（全量窗口化上下文）为 stdin 文本喂入（与 codex 路径同一喂法、同一窗口装配器）；每轮新 spawn，不用 `--resume` / `--session-id`，`--no-session-persistence` 使 upstream 不落会话文件。resume / 运行时切换 / 窗口管理全在 app 侧（ADR-0076）。
+1. **claude-code 适配器以原生 headless 直连接入，无状态语义与 codex 路径同构**。turn argv = `--print --output-format stream-json --input-format stream-json --include-partial-messages --verbose --no-session-persistence`，输入面自 stdin 平文本喂入校准为 stream-json `user` 消息帧（提问入帧；触顶续窗同进程续写 user 帧，见 ADR-0128；增量流式见 Decision 7）；每轮新 spawn，不用 `--resume` / `--session-id`，`--no-session-persistence` 使 upstream 不落会话文件。resume / 运行时切换 / 窗口管理全在 app 侧（ADR-0076）。
 
 2. **流格式枚举三值化**：`JsonEventStream` 更名 `CodexEventStream`（该值至今单主 codex，中性名掩盖私有词汇归属，且与 claude 官方输出格式名 stream-json 同名，易致 claude-code 适配器被误关联到 codex 解析器）；新增 `ClaudeStreamJson`（claude stream-json 词汇：`system` / `assistant` / `stream_event` / `result` 帧）。枚举值 = 解析器分派单位的不变量（ADR-0094 Decision 1）不变；wire tag 变更使既有目录缓存旧条目按损坏降级路径丢弃、重探测重建（缓存为可弃快照）。
 
@@ -10,11 +10,11 @@
 
 4. **MCP 注入经 `--mcp-config` + `--strict-mcp-config`**：内联网关桥接 server 描述符 JSON，`--strict-mcp-config` 使会话忽略机器自带 MCP 配置——用户机器级自配 MCP 不进入产品会话，外部工具经产品 MCP 配置面接入网关的唯一路径不变；桥接进程形态与 per-session 隔离复用现有。
 
-5. **模型与思考强度经 stream-json 控制平面发现**：探测期 spawn 后发送控制帧 `control_request{initialize}`，从 success `control_response` 的 `models[]` 提取目录——`value`（别名）/ `resolvedModel`（实际解析模型名）/ `displayName` / `supportedEffortLevels[]`（per-model 思考强度值域）/ 能力位。该响应是 claude 唯一的目录通道（`system{init}` 数据帧仅携带当前模型）；provider 感知（第三方端点环境下回传实际模型集，实测），不产生 API 调用。探测 argv 基于 turn argv 追加 `--input-format stream-json`（探测同样不落 upstream 会话文件），spawn 后发 initialize 帧、收目录即退，对位 codex 经 `app-server` 探测的先例（ADR-0096 Decision 2 的 per-format 探测分派新增第三形态）。轮内不重复发现：每轮 `system{init}` 回传当前模型做诚实渲染；initialize 无响应降级空目录。
+5. **模型与思考强度经 stream-json 控制平面发现**：探测期 spawn 后发送控制帧 `control_request{initialize}`，从 success `control_response` 的 `models[]` 提取目录——`value`（别名）/ `resolvedModel`（实际解析模型名）/ `displayName` / `supportedEffortLevels[]`（per-model 思考强度值域）/ 能力位。该响应是 claude 唯一的目录通道（`system{init}` 数据帧仅携带当前模型）；provider 感知（第三方端点环境下回传实际模型集，实测），不产生 API 调用。探测 argv 复用 turn argv（同一 stream-json 控制平面的同一 spawn 形态；探测同样不落 upstream 会话文件），spawn 后发 initialize 帧、收目录即退，对位 codex 经 `app-server` 探测的先例（ADR-0096 Decision 2 的 per-format 探测分派新增第三形态）。轮内不重复发现：每轮 `system{init}` 回传当前模型做诚实渲染；initialize 无响应降级空目录。
 
 6. **注入字段新增 `effort_arg`**：`AdapterSpec` 新增 `Option` 字段 `effort_arg`（argv 形思考强度注入，claude = `--effort`），与既有 `model_arg`（claude 与 codex 均为 `--model`）平行；codex 的 `effort_config_key`（`-c` 配置面拼装）不变。思考强度值域 per-model 动态（来自 `supportedEffortLevels[]`），选择器按所选模型过滤。
 
-7. **argv 最小集，无版本门控基建**：不带增强 flags（partial-messages 增量流式 / thinking-display 等）——flag 越少「未知 option 于参数解析期硬错」的面越小；显示增强随需引入时再随需引入版本探测门控。
+7. **argv 最小集，无版本门控基建**：携带的唯一显示增强 flag 是 `--include-partial-messages`（partial-messages 增量流式——live 正文逐字渲染的数据源；CLI 对同一消息在增量之后尾随完整 `assistant` 帧，引擎按消息去重）；其余增强 flags（thinking-display 等）不带——flag 越少「未知 option 于参数解析期硬错」的面越小；flag 拼写由 argv 钉死、drift-guard 测试守卫，无版本探测门控基建。
 
 ## Context
 
@@ -35,7 +35,7 @@ claude-code 无原生 ACP 模式（实测 2.1.222：`--acp` 选项不存在，sp
 - **保守增值不更名（`JsonEventStream` 实指 codex）/ 中性特征名成对命名**：前者名字持续误导（claude 官方输出格式名同为 stream-json）；后者为至今无第二主的「共享」意图付可读性，推测性泛化。**否决**——更名 + 按主命名。
 - **静态模型别名目录 / 模型自由输入无目录 / 探测实跑问询产目录**：静态集在第三方 provider 下失真（实测回传为 provider 解析集）；自由输入弃选择器目录形态；问询无可靠通道且产生 API 调用成本。**否决**——控制平面 initialize 发现。
 - **turn argv 用 stream-json 输入（统一帧格式预留控制通道）**：轮内控制面已被无状态与阻断决策消除，预留无消费者。**否决**。
-- **增强 flags（partial-messages 增量流式等）+ `--version` 探测门控基建**：为当前不需要的显示增强引入版本门控复杂度与硬错面。**否决**——最小集，随需再引入。
+- **增强 flags（thinking-display 等）+ `--version` 探测门控基建**：为当前不需要的显示增强引入版本门控复杂度与硬错面。**否决**——最小集。
 
 ## Consequences
 

@@ -132,6 +132,28 @@ fn text_reply_yields_text_outcome_and_init_model() {
     );
 }
 
+/// Partial-message deltas (`--include-partial-messages`, issue #1228): the
+/// prose streams chunk by chunk while the message generates, and the
+/// trailing complete `assistant` frame for the same content deduplicates --
+/// the delta stream carries the chunks alone and the turn still resolves to
+/// the answer text.
+#[test]
+fn streamed_reply_deltas_stream_once_without_duplication() {
+    let (outcome, phases, _) = run("streamed_reply", 24);
+    match &outcome.termination {
+        Termination::Text(t) => assert_eq!(t, "the answer is 42"),
+        other => panic!("expected Text, got {other:?}"),
+    }
+    let deltas: Vec<&str> = phases
+        .iter()
+        .filter_map(|p| match p {
+            TurnPhase::TextDelta { delta } => Some(delta.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(deltas, vec!["the answer ", "is 42"]);
+}
+
 /// A gateway-routed tool call: the engine emits the Started/Completed phase
 /// pair naming the BARE tool, and the round keeps its prose with the engine
 /// row landed under the bare name (issue #817) -- the row is the anchor the
@@ -701,9 +723,11 @@ fn spawn_argv_carries_selections_mcp_config_and_stateless_flags() {
 
     // Stateless headless head: the pinned turn argv prefix. ADR-0128: the
     // input face is stream-json (`--input-format stream-json`) -- the
-    // user-frame prompt and the same-process continuation ride it.
+    // user-frame prompt and the same-process continuation ride it. The
+    // partial-message flag turns on `stream_event` text deltas (live
+    // streaming prose).
     assert!(
-        argv.contains("CLAUDE_FAKE_ARGV=--print --output-format stream-json --input-format stream-json --verbose --no-session-persistence"),
+        argv.contains("CLAUDE_FAKE_ARGV=--print --output-format stream-json --input-format stream-json --include-partial-messages --verbose --no-session-persistence"),
         "the stateless headless argv prefix rides verbatim; got: {argv}"
     );
     // AC: no upstream session addressing.

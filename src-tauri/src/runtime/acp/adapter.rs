@@ -361,6 +361,12 @@ pub const fn claude_code() -> AdapterSpec {
             // native continuation channel; stdin stays open across windows).
             "--input-format",
             "stream-json",
+            // The live round streams its prose (issue #1228): with this
+            // flag the CLI emits `stream_event` text deltas while the
+            // message generates (the pump deduplicates the complete
+            // `assistant` frame that trails them); whole-block delivery
+            // alone would land every message at once.
+            "--include-partial-messages",
             "--verbose",
             "--no-session-persistence",
             "--disallowedTools",
@@ -897,6 +903,20 @@ mod tests {
             .position(|a| *a == "--input-format")
             .expect("--input-format rides the turn argv");
         assert_eq!(spec.argv[position + 1], "stream-json");
+    }
+
+    /// The claude-code turn argv requests partial-message deltas
+    /// (`--include-partial-messages`): the live round's prose streams as
+    /// `stream_event` text deltas while the message generates, instead of
+    /// landing whole-block at the trailing `assistant` frame. This test is
+    /// the drift guard: losing the flag silently returns the turn to
+    /// whole-block delivery.
+    #[test]
+    fn claude_turn_argv_requests_partial_message_deltas() {
+        assert!(
+            claude_code().argv.contains(&"--include-partial-messages"),
+            "--include-partial-messages rides the turn argv"
+        );
     }
 
     /// Issue #800: the claude-code turn argv carries `--allowedTools

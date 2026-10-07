@@ -53,6 +53,7 @@ const HEARTBEAT_INTERVAL: std::time::Duration = std::time::Duration::from_millis
 const SCENARIOS: &[&str] = &[
     // Turn surface.
     "text_reply",
+    "streamed_reply",
     "tool_call",
     "thinking_rounds",
     "native_tool_denied",
@@ -250,6 +251,33 @@ fn run_single_window(scenario: &str, out: &mut std::io::Stdout) {
     match scenario {
         "text_reply" => {
             emit(out, &system_init());
+            emit(
+                out,
+                &serde_json::json!({
+                    "type": "assistant",
+                    "message": {"role": "assistant", "content": [
+                        {"type": "text", "text": "the answer is 42"}
+                    ]}
+                }),
+            );
+            emit(out, &result_success("the answer is 42"));
+        }
+        "streamed_reply" => {
+            // Partial-message deltas (`--include-partial-messages`, issue
+            // #1228): the text streams as `stream_event` deltas while it
+            // generates, and the complete `assistant` frame repeats the same
+            // content -- the pump must deliver the prose once.
+            emit(out, &system_init());
+            for chunk in ["the answer ", "is 42"] {
+                emit(
+                    out,
+                    &serde_json::json!({
+                        "type": "stream_event",
+                        "event": {"type": "content_block_delta", "index": 0,
+                                  "delta": {"type": "text_delta", "text": chunk}}
+                    }),
+                );
+            }
             emit(
                 out,
                 &serde_json::json!({
