@@ -34,7 +34,7 @@ use crate::provider::tool_calling::{
 };
 use crate::provider::{Provider, ProviderError};
 use crate::session::engine::AdminEngine;
-use crate::session::loop_contract::{LoopOutcome, Termination};
+use crate::session::loop_contract::{LoopOutcome, Termination, MAX_WINDOW_RESUMES};
 use crate::session::loop_runtime::LoopRuntime;
 use crate::session::materializer::RealMaterializer;
 use crate::tools::builtin_table;
@@ -154,6 +154,59 @@ impl ApprovalSink for RecordingSink {
         _response: ApprovalResponse,
     ) {
     }
+}
+
+/// The pandoc CLI tool config the approval / delegation pins share: a
+/// one-param argv tool the harness cannot actually run (the dispatch parks
+/// on the gate or the spawn fails as a route error -- the card and the
+/// resolved row are what those pins exercise, not a real conversion).
+fn pandoc_tool() -> crate::cli_tools::config::CliToolConfig {
+    use crate::cli_tools::config::{CliParamDelivery, CliToolParam};
+    crate::cli_tools::config::CliToolConfig {
+        name: "pandoc".into(),
+        description: "convert".into(),
+        executable: "/bin/pandoc".into(),
+        argv_template: vec!["-o".into(), "{output}".into()],
+        params: vec![CliToolParam {
+            name: "output".into(),
+            description: "target".into(),
+            delivery: CliParamDelivery::Argv,
+            varargs: false,
+        }],
+        env: Default::default(),
+        enabled: true,
+        source: Default::default(),
+        baseline: None,
+    }
+}
+
+/// The deny-first responder thread the approval pins share: poll the
+/// recording sink for the first request id, park `delay` past its arrival,
+/// then Deny it (the freeze pin parks past the no-progress cap, the resume
+/// pin answers promptly -- the delay is the pin's one degree of freedom).
+fn spawn_first_request_denier(
+    approval: &Arc<ApprovalState>,
+    sink: &Arc<RecordingSink>,
+    delay: Duration,
+) -> std::thread::JoinHandle<()> {
+    let approval = Arc::clone(approval);
+    let sink = Arc::clone(sink);
+    std::thread::spawn(move || {
+        let start = std::time::Instant::now();
+        loop {
+            if let Some(id) = sink.request_ids.lock().unwrap().first().copied() {
+                std::thread::sleep(delay);
+                approval
+                    .respond(id, ApprovalResponse::Deny)
+                    .expect("respond ok");
+                return;
+            }
+            if start.elapsed() > Duration::from_secs(5) {
+                panic!("no approval request arrived");
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    })
 }
 
 /// A scripted app provider driving the bridge path (the cancel / watchdog
@@ -1134,32 +1187,30 @@ fn call_ids_mint_distinct_ids() {
     assert!(round_one.starts_with("gateway-"));
 }
 
-/// The step cap maps onto the rig `max_turns` budget: a turn that never
-/// converges exhausts it and lands `StepCap` carrying the configured cap.
+/// The windowed hard ceiling (ADR-0128): a turn that never converges
+/// exhausts each window's cap, spends every resume reopening, and only
+/// then lands `StepCap` -- carrying the DERIVED total budget `cap x
+/// (1 + MAX_WINDOW_RESUMES)`, never the single window's cap.
 #[test]
 fn step_cap_exhaustion_lands_step_cap() {
     let mut h = Harness::new();
     h.seed_result_1();
-    let model = MockCompletionModel::from_stream_turns([
-        batch_turn(
-            "",
-            None,
-            &[(
-                "tu_1",
-                "explore",
-                json!({"sql": "SELECT count(*) FROM result_1"}),
-            )],
-        ),
-        batch_turn(
-            "",
-            None,
-            &[(
-                "tu_2",
-                "explore",
-                json!({"sql": "SELECT count(*) FROM result_1"}),
-            )],
-        ),
-    ]);
+    // One tool-call turn per window: cap 1 tops out each window on its
+    // first turn, so the resume budget spans exactly four windows.
+    // Per-turn SQL variants: the identical-arguments loop detector
+    // (#926) would otherwise abort before the resume budget runs out.
+    let model =
+        MockCompletionModel::from_stream_turns(["tu_1", "tu_2", "tu_3", "tu_4"].map(|id| {
+            batch_turn(
+                "",
+                None,
+                &[(
+                    id,
+                    "explore",
+                    json!({"sql": format!("SELECT count(*) FROM result_1 -- {id}")}),
+                )],
+            )
+        }));
     let outcome = h.run_with_caps(
         &h.request("never converges"),
         mock_runtime(model),
@@ -1167,18 +1218,108 @@ fn step_cap_exhaustion_lands_step_cap() {
         1,
         None,
     );
-    assert_eq!(outcome.termination, Termination::StepCap(1));
+    assert_eq!(
+        outcome.termination,
+        Termination::StepCap(1 + MAX_WINDOW_RESUMES)
+    );
 }
 
-/// The step-cap wiring seam (issue #921): a cap of 2 with a two-batch
-/// script must run BOTH batches before landing `StepCap` -- asserted off
-/// the trace's round count, because the termination alone renders off the
-/// configured cap either way. A wiring that silently dropped the
-/// `.max_turns` handoff would run rig's default budget of 1 turn and
-/// surface only one round, which this pin catches; the sibling pin above
-/// (cap 1) shares that default's value and so cannot.
+/// The step-cap wiring seam (issue #921, windowed by ADR-0128): a cap of
+/// 2 must run BOTH batches of every window before that window tops out --
+/// asserted off the trace's round count, because the termination alone
+/// renders off the derived budget either way. A wiring that silently
+/// dropped the `.max_turns` handoff would run rig's default budget of 1
+/// turn per window and surface one round per window, which this pin
+/// catches; the sibling pin above (cap 1) shares that default's value and
+/// so cannot.
 #[test]
 fn step_cap_wiring_feeds_the_configured_budget() {
+    let mut h = Harness::new();
+    h.seed_result_1();
+    // Two tool-call turns per window, four windows of resume budget:
+    // 2 x (1 + MAX_WINDOW_RESUMES) scripted turns in all.
+    // Per-turn SQL variants: the identical-arguments loop detector
+    // (#926) would otherwise abort before the resume budget runs out.
+    let model = MockCompletionModel::from_stream_turns(
+        [
+            "tu_1", "tu_2", "tu_3", "tu_4", "tu_5", "tu_6", "tu_7", "tu_8",
+        ]
+        .map(|id| {
+            batch_turn(
+                "",
+                None,
+                &[(
+                    id,
+                    "explore",
+                    json!({"sql": format!("SELECT count(*) FROM result_1 -- {id}")}),
+                )],
+            )
+        }),
+    );
+    let outcome = h.run_with_caps(
+        &h.request("never converges"),
+        mock_runtime(model),
+        Arc::new(CancelToken::new()),
+        2,
+        None,
+    );
+    assert_eq!(
+        outcome.termination,
+        Termination::StepCap(2 * (1 + MAX_WINDOW_RESUMES))
+    );
+    assert_eq!(
+        outcome.trace.len(),
+        2 * (1 + MAX_WINDOW_RESUMES as usize),
+        "every capped batch of every window ran: the configured budget crossed the wiring seam, not rig's default"
+    );
+}
+
+/// Windowed auto-continuation (ADR-0128): an exhausted window reopens on
+/// the error's in-flight history with the convergence nudge as the new
+/// prompt; the fold carries over, so a turn that converges in the second
+/// window lands its terminal text with BOTH windows' rounds on one
+/// continuous trace.
+#[test]
+fn window_resume_converges_after_exhaustion() {
+    let mut h = Harness::new();
+    h.seed_result_1();
+    let model = MockCompletionModel::from_stream_turns([
+        batch_turn(
+            "",
+            None,
+            &[(
+                "tu_1",
+                "explore",
+                json!({"sql": "SELECT count(*) FROM result_1"}),
+            )],
+        ),
+        text_turn("the resumed window's final answer"),
+    ]);
+    let outcome = h.run_with_caps(
+        &h.request("converges one window later"),
+        mock_runtime(model),
+        Arc::new(CancelToken::new()),
+        1,
+        None,
+    );
+    assert_eq!(
+        outcome.termination,
+        Termination::Text("the resumed window's final answer".into())
+    );
+    // The terminal text turn leaves no round (its prose rides the outcome
+    // body), so the trace IS the first window's round: its survival is the
+    // continuity proof -- a resume that rebuilt the fold would drop it.
+    assert_eq!(outcome.trace.len(), 1);
+    assert_eq!(outcome.trace[0].calls.len(), 1);
+    assert_eq!(outcome.trace[0].calls[0].name, "explore");
+}
+
+/// The convergence nudge is in-flight only (ADR-0128): it rides the
+/// reopened window's prompt -- the second model request's last message --
+/// and persists nowhere: no trace round's text carries it (the trace is
+/// what lands on `.duck` and what the next turn's window assembles from).
+#[test]
+fn window_resume_nudge_stays_in_flight() {
     let mut h = Harness::new();
     h.seed_result_1();
     let model = MockCompletionModel::from_stream_turns([
@@ -1197,22 +1338,141 @@ fn step_cap_wiring_feeds_the_configured_budget() {
             &[(
                 "tu_2",
                 "explore",
-                json!({"sql": "SELECT count(*) FROM result_1"}),
+                json!({"sql": "SELECT count(*) AS n FROM result_1"}),
             )],
         ),
     ]);
+    let probe = model.clone();
     let outcome = h.run_with_caps(
         &h.request("never converges"),
         mock_runtime(model),
         Arc::new(CancelToken::new()),
-        2,
+        1,
         None,
     );
-    assert_eq!(outcome.termination, Termination::StepCap(2));
+    // The wire side: every reopened request's prompt IS the nudge.
+    let requests = probe.requests();
+    assert!(requests.len() > 1, "the turn resumed at least one window");
+    for reopened in &requests[1..] {
+        let last = reopened
+            .chat_history
+            .last()
+            .expect("the reopened request carries a prompt");
+        assert!(
+            matches!(last, Message::User { content }
+                if content.iter().any(|b| matches!(b,
+                    UserContent::Text(t) if t.text == super::WINDOW_CONVERGENCE_NUDGE))),
+            "the reopened window's prompt is the convergence nudge"
+        );
+    }
+    // The persistence side: no round's text carries it.
+    for round in &outcome.trace {
+        if let Some(text) = &round.text {
+            assert!(
+                !text.contains(super::WINDOW_CONVERGENCE_NUDGE),
+                "the nudge must never fold onto the trace"
+            );
+        }
+    }
+}
+
+/// The cancel seam rides the reopened window (ADR-0128): a cancel that
+/// lands mid-resume stops the turn exactly as it would mid-first-window
+/// -- the reopened request carries the same watcher hooks, so the
+/// termination is the cancel landing, never a settle of the exhausted
+/// window.
+#[test]
+fn a_cancel_during_a_resumed_window_lands_cancelled() {
+    let mut h = Harness::new();
+    h.seed_result_1();
+    let cancel = Arc::new(CancelToken::new());
+    let completions_seen = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    {
+        let token = Arc::clone(&cancel);
+        let seen = Arc::clone(&completions_seen);
+        h.phase_hook = Some(Arc::new(move |phase: &TurnPhase| {
+            // fetch_add returns the OLD count, so firing on 1 waits for
+            // the second completed call -- the resumed window's; the
+            // first window's call is completion #0.
+            if matches!(phase, TurnPhase::ToolCallCompleted(_))
+                && seen.fetch_add(1, Ordering::SeqCst) == 1
+            {
+                token.request();
+            }
+        }));
+    }
+    let model = MockCompletionModel::from_stream_turns([
+        batch_turn(
+            "",
+            None,
+            &[(
+                "tu_1",
+                "explore",
+                json!({"sql": "SELECT count(*) FROM result_1"}),
+            )],
+        ),
+        batch_turn(
+            "",
+            None,
+            &[(
+                "tu_2",
+                "explore",
+                json!({"sql": "SELECT count(*) AS n FROM result_1"}),
+            )],
+        ),
+    ]);
+    let probe = model.clone();
+    let outcome = h.run_with_caps(
+        &h.request("cancelled mid-resume"),
+        mock_runtime(model),
+        cancel,
+        1,
+        None,
+    );
+    // The reopen is pinned, not assumed: the second completion ran inside
+    // a request the first window never made.
+    assert!(
+        probe.requests().len() > 1,
+        "the turn reopened a window before the cancel landed"
+    );
+    assert!(matches!(outcome.termination, Termination::Cancelled));
+}
+
+/// Last-wins finish reasons across the window boundary (issue #1003 meet
+/// ADR-0128): the resumed window re-registers onto the ONE watcher/record
+/// pair, so a terminal reply that stops at the output cap in the RESUMED
+/// window still carries the truncation marker. A per-window watcher would
+/// drop the marker exactly here, on the long cap-exhausting turns the
+/// windowing exists to serve.
+#[test]
+fn a_length_capped_reply_in_the_resumed_window_keeps_the_marker() {
+    let mut h = Harness::new();
+    h.seed_result_1();
+    let model = MockCompletionModel::from_stream_turns([
+        batch_turn(
+            "",
+            None,
+            &[(
+                "tu_1",
+                "explore",
+                json!({"sql": "SELECT count(*) FROM result_1"}),
+            )],
+        ),
+        length_capped_text_turn("the resumed window's cut-off ans"),
+    ]);
+    let outcome = h.run_with_caps(
+        &h.request("explore then answer"),
+        mock_runtime(model),
+        Arc::new(CancelToken::new()),
+        1,
+        None,
+    );
     assert_eq!(
-        outcome.trace.len(),
-        2,
-        "both capped batches ran: the configured budget crossed the wiring seam, not rig's default"
+        outcome.termination,
+        Termination::Text(format!(
+            "the resumed window's cut-off ans{}",
+            super::truncation::TRUNCATED_REPLY_MARKER
+        ))
     );
 }
 
@@ -1821,24 +2081,8 @@ fn no_progress_silence_lands_no_progress() {
 /// behavior lives in the shared dispatch core, the pin lives here.
 #[test]
 fn approval_pending_survives_past_the_cap() {
-    use crate::cli_tools::config::{CliParamDelivery, CliToolConfig, CliToolParam};
     let mut h = Harness::new();
-    let cli_tool = CliToolConfig {
-        name: "pandoc".into(),
-        description: "convert".into(),
-        executable: "/bin/pandoc".into(),
-        argv_template: vec!["-o".into(), "{output}".into()],
-        params: vec![CliToolParam {
-            name: "output".into(),
-            description: "target".into(),
-            delivery: CliParamDelivery::Argv,
-            varargs: false,
-        }],
-        env: Default::default(),
-        enabled: true,
-        source: Default::default(),
-        baseline: None,
-    };
+    let cli_tool = pandoc_tool();
     let model = MockCompletionModel::from_stream_turns([
         batch_turn(
             "",
@@ -1852,27 +2096,8 @@ fn approval_pending_survives_past_the_cap() {
     // missing, the no-progress clock would kill the turn mid-pending.
     let approval = Arc::new(ApprovalState::new());
     let sink = Arc::new(RecordingSink::default());
-    let responder = {
-        let approval = Arc::clone(&approval);
-        let sink = Arc::clone(&sink);
-        std::thread::spawn(move || {
-            let start = std::time::Instant::now();
-            loop {
-                if let Some(id) = sink.request_ids.lock().unwrap().first().copied() {
-                    // Park past the 100 ms cap before answering.
-                    std::thread::sleep(Duration::from_millis(300));
-                    approval
-                        .respond(id, ApprovalResponse::Deny)
-                        .expect("respond ok");
-                    return;
-                }
-                if start.elapsed() > Duration::from_secs(5) {
-                    panic!("no approval request arrived");
-                }
-                std::thread::sleep(Duration::from_millis(5));
-            }
-        })
-    };
+    // Park past the 100 ms cap before answering.
+    let responder = spawn_first_request_denier(&approval, &sink, Duration::from_millis(300));
     let outcome = h.run_turn(
         &h.request_with_tools("call pandoc", &["pandoc"]),
         mock_runtime(model),
@@ -1888,6 +2113,50 @@ fn approval_pending_survives_past_the_cap() {
         outcome.termination,
         Termination::Text("denied, moving on.".into()),
         "the turn must survive a pending approval past the cap"
+    );
+    assert_eq!(
+        outcome.trace.len(),
+        1,
+        "the denied call leaves exactly its resolved-deny row"
+    );
+}
+
+/// The approval gate interleaves with a window resume (ADR-0128): the
+/// denied call resolves inside the FIRST window, the window tops out, and
+/// the reopened window converges -- the gate's freeze and the resume's
+/// reopen compose, with the denied row on the one continuous trace.
+#[test]
+fn an_approval_gate_interleaves_with_a_window_resume() {
+    let mut h = Harness::new();
+    let cli_tool = pandoc_tool();
+    let model = MockCompletionModel::from_stream_turns([
+        batch_turn(
+            "",
+            None,
+            &[("tu_1", "pandoc", json!({"output": "out.pdf"}))],
+        ),
+        text_turn("denied, moving on."),
+    ]);
+    let approval = Arc::new(ApprovalState::new());
+    let sink = Arc::new(RecordingSink::default());
+    let responder = spawn_first_request_denier(&approval, &sink, Duration::from_millis(50));
+    // Cap 1: the denied batch is the first window's only turn, so the
+    // terminal text lands in the RESUMED window.
+    let outcome = h.run_turn(
+        &h.request_with_tools("call pandoc", &["pandoc"]),
+        mock_runtime(model),
+        Arc::new(CancelToken::new()),
+        1,
+        None,
+        std::slice::from_ref(&cli_tool),
+        approval.as_ref(),
+        sink.as_ref(),
+    );
+    responder.join().unwrap();
+    assert_eq!(
+        outcome.termination,
+        Termination::Text("denied, moving on.".into()),
+        "the reopened window converges after the denial"
     );
     assert_eq!(
         outcome.trace.len(),
@@ -2539,26 +2808,10 @@ fn a_cancel_during_the_subagent_lands_the_whole_turn_cancelled() {
 /// never resolves -- the cancel is the user's answer to it.
 #[test]
 fn an_abandoned_delegation_keeps_its_completed_calls_under_the_entry() {
-    use crate::cli_tools::config::{CliParamDelivery, CliToolConfig, CliToolParam};
     let mut h = Harness::new();
     h.seed_result_1();
     h.delegations = vec![analyst_spec()];
-    let cli_tool = CliToolConfig {
-        name: "pandoc".into(),
-        description: "convert".into(),
-        executable: "/bin/pandoc".into(),
-        argv_template: vec!["-o".into(), "{output}".into()],
-        params: vec![CliToolParam {
-            name: "output".into(),
-            description: "target".into(),
-            delivery: CliParamDelivery::Argv,
-            varargs: false,
-        }],
-        env: Default::default(),
-        enabled: true,
-        source: Default::default(),
-        baseline: None,
-    };
+    let cli_tool = pandoc_tool();
     let model = MockCompletionModel::from_stream_turns([
         batch_turn(
             "",
@@ -2669,25 +2922,9 @@ fn an_abandoned_delegation_keeps_its_completed_calls_under_the_entry() {
 /// their scripted next turns; only the cards are under test.
 #[test]
 fn subagent_gated_calls_carry_their_originator_onto_the_card() {
-    use crate::cli_tools::config::{CliParamDelivery, CliToolConfig, CliToolParam};
     let mut h = Harness::new();
     h.delegations = vec![analyst_spec()];
-    let cli_tool = CliToolConfig {
-        name: "pandoc".into(),
-        description: "convert".into(),
-        executable: "/bin/pandoc".into(),
-        argv_template: vec!["-o".into(), "{output}".into()],
-        params: vec![CliToolParam {
-            name: "output".into(),
-            description: "target".into(),
-            delivery: CliParamDelivery::Argv,
-            varargs: false,
-        }],
-        env: Default::default(),
-        enabled: true,
-        source: Default::default(),
-        baseline: None,
-    };
+    let cli_tool = pandoc_tool();
     let model = MockCompletionModel::from_stream_turns([
         batch_turn(
             "",

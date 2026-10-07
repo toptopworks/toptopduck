@@ -245,6 +245,14 @@ pub(super) fn to_app_messages(history: &[Message]) -> Vec<ToolTurnMessage> {
                 for block in content {
                     match block {
                         rig_core::message::UserContent::Text(text) => {
+                            // The window-reopen nudge is runtime-injected
+                            // guidance, not the caller's conversation
+                            // (ADR-0107's stance: the bridged request keeps
+                            // the shape the window assembled) -- it never
+                            // crosses to the bridged provider.
+                            if text.text == super::WINDOW_CONVERGENCE_NUDGE {
+                                continue;
+                            }
                             converted.push(ToolTurnMessage::User {
                                 content: text.text.clone(),
                             });

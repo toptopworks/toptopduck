@@ -66,7 +66,10 @@ pub(crate) const LIKELY_TRUNCATION_PREFIX: &str = "output likely truncated at th
 /// stream ends. Last-wins is the terminal-turn semantics the reply mapping
 /// needs: the final model turn is the one whose reason the reply carries.
 /// Constructed as a pair with [`FinishReasonRecord`] -- the watcher moves
-/// into the agent's hook stack, the record stays with the driver.
+/// into the agent's hook stack, the record stays with the driver. Cloning
+/// the watcher reopens a step window (ADR-0128) onto the same pair: every
+/// window's hooks report into the one record the driver reads.
+#[derive(Clone)]
 pub(crate) struct FinishReasonWatcher {
     last: Arc<Mutex<Option<FinishReason>>>,
 }

@@ -45,9 +45,11 @@ use std::time::Duration;
 
 use futures::StreamExt;
 use rig_agent::agent::{
-    AgentBuilder, ModelHandle, MultiTurnStreamItem, StreamingError, StreamingPromptRequest,
+    Agent, AgentBuilder, ModelHandle, MultiTurnStreamItem, StreamingError, StreamingPromptRequest,
+    StreamingResult,
 };
 use rig_agent::completion::PromptError;
+use rig_core::completion::Message;
 use std::future::IntoFuture;
 
 use crate::cancel::CancelToken;
@@ -56,7 +58,7 @@ use crate::model::TurnPhase;
 use crate::provider::tool_calling::ToolTurnRequest;
 use crate::session::loop_contract::{
     retain_landed_rounds, truncate_trace_excerpt, LoopOutcome, Termination, TraceEntry,
-    DEFAULT_NO_PROGRESS_CAP, DEFAULT_STEP_CAP, TRACE_EXCERPT_MAX,
+    DEFAULT_NO_PROGRESS_CAP, DEFAULT_STEP_CAP, MAX_WINDOW_RESUMES, TRACE_EXCERPT_MAX,
 };
 use crate::session::materializer::{Materializer, TurnDeps};
 use crate::session::progress::ProgressClock;
@@ -765,32 +767,24 @@ async fn drive_turn(inputs: DriveInputs) -> DriveOutcome {
         .dynamic_tools(tools)
         .build();
     let (finish_watcher, finish_record) = truncation::FinishReasonWatcher::new();
-    let mut stream = StreamingPromptRequest::from_agent(&agent, prompt)
-        .history(history)
-        .max_turns(step_cap as usize)
-        // ADR-0103 (#918): the posture's thought level rides the request
-        // in the protocol's wire shape (anthropic budget / openai effort)
-        // or, on the bridged face, an app-private key the completion-model
-        // bridge reads back.
-        .merge_additional_params(live::thought_level_params(
-            protocol,
-            request.thought_level.as_deref(),
-        ))
-        .tool_concurrency(1)
-        // Memoryless by construction, stated explicitly: the app owns the
-        // windowed history (ADR-0116 Decision 2), so rig's session memory
-        // stays off the run (the MemoryError arm of the terminal mapping is
-        // unreachable).
-        .without_memory()
-        .add_hook(CancelWatcher::new(token, clock.clone(), Arc::clone(&state)))
-        // The finish-reason observer (issue #1003): the run-level response
-        // carries no top-level reason, so the driver learns how the (last)
-        // turn stopped off the hook seam -- the same registration the
-        // cancel watcher rides.
-        .add_hook(finish_watcher)
-        .into_future()
-        .await;
+    let mut stream = open_step_window(
+        &agent,
+        prompt,
+        history,
+        step_cap,
+        protocol,
+        request.thought_level.as_deref(),
+        &token,
+        &clock,
+        &state,
+        &finish_watcher,
+    )
+    .await;
     let mut fold = EventFold::new();
+    // Windowed auto-continuation (ADR-0128): the resumes this turn has
+    // spent reopening exhausted windows. Counted in windows -- the hard
+    // ceiling is the derived budget, never a global step constant.
+    let mut windows_reopened = 0u32;
     let exit = loop {
         tokio::select! {
             biased;
@@ -798,7 +792,41 @@ async fn drive_turn(inputs: DriveInputs) -> DriveOutcome {
             item = stream.next() => {
                 match item {
                     None => break DriveExit::Done,
-                    Some(Err(err)) => break DriveExit::Error(err),
+                    Some(Err(err)) => {
+                        // Windowed auto-continuation (ADR-0128): the
+                        // exhaustion error carries the full in-flight
+                        // history -- including the prompt that could not
+                        // be dispatched -- so under the resume budget the
+                        // turn reopens the request instead of settling.
+                        // The fold (and its round numbering), the cancel
+                        // token, the watchdog clock, the approval gates,
+                        // and the delegation specs all ride on unchanged;
+                        // the convergence nudge is the reopened window's
+                        // prompt alone, so it never folds onto the trace
+                        // and nothing of it persists.
+                        if windows_reopened < MAX_WINDOW_RESUMES {
+                            if let StreamingError::Prompt(e) = &err {
+                                if let PromptError::MaxTurnsError { chat_history, .. } = e.as_ref() {
+                                    windows_reopened += 1;
+                                    stream = open_step_window(
+                                        &agent,
+                                        Message::user(WINDOW_CONVERGENCE_NUDGE),
+                                        chat_history.as_ref().clone(),
+                                        step_cap,
+                                        protocol,
+                                        request.thought_level.as_deref(),
+                                        &token,
+                                        &clock,
+                                        &state,
+                                        &finish_watcher,
+                                    )
+                                    .await;
+                                    continue;
+                                }
+                            }
+                        }
+                        break DriveExit::Error(err)
+                    }
                     Some(Ok(item)) => {
                         // The delegation batch boundary (issue #933): each
                         // turn's usage record arrives exactly once per
@@ -828,6 +856,61 @@ async fn drive_turn(inputs: DriveInputs) -> DriveOutcome {
         exit,
         finish_reason: finish_record.last(),
     }
+}
+
+/// The convergence nudge that reopens an exhausted step window
+/// (ADR-0128): user-role, English, in-flight only -- it rides the
+/// reopened request's prompt and lands nowhere else (no trace entry, no
+/// `.duck` record, no next-turn window assembly).
+const WINDOW_CONVERGENCE_NUDGE: &str = "You have reached the step budget for this window of the turn. Continue the task, but start consolidating: finish the current step and work toward your final answer.";
+
+/// Open one step window's stream over the given prompt and history
+/// (ADR-0128). Every reopen repeats the full builder posture -- budget,
+/// thought level, hooks, memoryless-ness -- so a resumed window keeps the
+/// turn's cancel, watchdog, and finish-reason seams; the same expression
+/// opens the turn's first window. The parameters are the builder's own
+/// inputs, already in scope at both call sites (mirrors `run`'s posture
+/// on the same lint).
+#[allow(clippy::too_many_arguments)]
+async fn open_step_window(
+    agent: &Agent,
+    prompt: Message,
+    history: Vec<Message>,
+    step_cap: u32,
+    protocol: Option<crate::model::Protocol>,
+    thought_level: Option<&str>,
+    token: &Arc<CancelToken>,
+    clock: &Option<Arc<ProgressClock>>,
+    state: &Arc<SharedTurnState>,
+    finish_watcher: &truncation::FinishReasonWatcher,
+) -> StreamingResult {
+    StreamingPromptRequest::from_agent(agent, prompt)
+        .history(history)
+        .max_turns(step_cap as usize)
+        // ADR-0103 (#918): the posture's thought level rides the request
+        // in the protocol's wire shape (anthropic budget / openai effort)
+        // or, on the bridged face, an app-private key the completion-model
+        // bridge reads back.
+        .merge_additional_params(live::thought_level_params(protocol, thought_level))
+        .tool_concurrency(1)
+        // Memoryless by construction, stated explicitly: the app owns the
+        // windowed history (ADR-0116 Decision 2), so rig's session memory
+        // stays off the run (the MemoryError arm of the terminal mapping is
+        // unreachable).
+        .without_memory()
+        .add_hook(CancelWatcher::new(
+            Arc::clone(token),
+            clock.clone(),
+            Arc::clone(state),
+        ))
+        // The finish-reason observer (issue #1003): the run-level response
+        // carries no top-level reason, so the driver learns how the (last)
+        // turn stopped off the hook seam -- the same registration the
+        // cancel watcher rides. The clone reopens a window onto the same
+        // watcher/record pair, keeping the last-turn semantics.
+        .add_hook(finish_watcher.clone())
+        .into_future()
+        .await
 }
 
 /// Assemble the final [`LoopOutcome`]: drain the completed queue a cancellation may have
@@ -880,9 +963,12 @@ fn termination_for_prompt(
 ) -> Termination {
     match err {
         PromptError::MaxTurnsError { .. } => {
-            // The cap, not the turns taken: the wiring seam renders "did
-            // not converge in N steps" off the configured cap.
-            Termination::StepCap(step_cap)
+            // The windowed hard ceiling (ADR-0128), not the turns taken and
+            // not the single window's cap: the wiring seam renders "did not
+            // converge in N steps" off the turn's total budget -- the
+            // derived product `cap * (1 + MAX_WINDOW_RESUMES)`, never an
+            // independent constant.
+            Termination::StepCap(step_cap * (1 + MAX_WINDOW_RESUMES))
         }
         PromptError::PromptCancelled { reason, .. } => {
             // The watcher hook's reason fork (ADR-0116 Decision 3) is pinned
