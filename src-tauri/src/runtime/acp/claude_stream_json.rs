@@ -2,14 +2,17 @@
 //!
 //! Invoked by [`super::engine::AcpEngine::run`] when the adapter's
 //! [`StreamFormat`] is [`ClaudeStreamJson`]. Spawns
-//! `claude --print --output-format stream-json` (the stateless headless
-//! surface -- new process every turn, no `--resume` / `--session-id`,
-//! `--no-session-persistence` keeps upstream from writing a session file),
-//! injects the gateway bridge via `--mcp-config` + `--strict-mcp-config`,
-//! writes the flattened window text to stdin, then reads NDJSON frames from
-//! stdout and maps them to [`TurnPhase`] / [`TraceEntry`] / [`Termination`]
-//! -- the SAME [`LoopOutcome`] shape the ACP path, the codex path, and the
-//! built-in loop return.
+//! `claude --print --output-format stream-json --input-format stream-json`
+//! (the stateless headless surface -- new process every turn, no `--resume`
+//! / `--session-id`, `--no-session-persistence` keeps upstream from writing
+//! a session file), injects the gateway bridge via `--mcp-config` +
+//! `--strict-mcp-config`, writes the flattened window text to stdin as ONE
+//! `user` message frame, then reads NDJSON frames from stdout and maps them
+//! to [`TurnPhase`] / [`TraceEntry`] / [`Termination`] -- the SAME
+//! [`LoopOutcome`] shape the ACP path, the codex path, and the built-in
+//! loop return. The open stdin additionally carries the windowed
+//! continuation channel (ADR-0128): after an `error_max_turns` result
+//! frame, one more user frame continues the SAME process.
 //!
 //! Frame vocabulary (claude stream-json): `system` (subtyped; `init` carries
 //! the current model -- unknown subtypes are session-hook frames and MUST be
@@ -38,6 +41,7 @@
 //! [`ClaudeStreamJson`]: super::adapter::StreamFormat::ClaudeStreamJson
 
 use std::path::Path;
+use std::process::ChildStdin;
 use std::sync::mpsc;
 use std::sync::Arc;
 use std::time::Duration;
@@ -52,7 +56,8 @@ use crate::runtime::acp::adapter::AdapterSpec;
 use crate::runtime::acp::turn_io::{build_model_flags, flatten_prompt};
 use crate::runtime::acp::wire::McpServer;
 use crate::session::loop_contract::{
-    truncate_trace_excerpt, LoopOutcome, LoopRound, Termination, TraceEntry, TRACE_EXCERPT_MAX,
+    derived_step_ceiling, truncate_trace_excerpt, LoopOutcome, LoopRound, Termination, TraceEntry,
+    MAX_WINDOW_RESUMES, TRACE_EXCERPT_MAX, WINDOW_CONVERGENCE_NUDGE,
 };
 use crate::session::progress::ProgressClock;
 use crate::session::turn_dispatch::classify_call;
@@ -376,32 +381,36 @@ pub(super) fn run_claude_stream_json(
         }
     };
 
-    // Write the flattened prompt to stdin, then close stdin so claude begins
-    // processing (headless mode reads the prompt from stdin). The write
-    // rides the cancel-aware helper (issue #808): a CLI that stalls before
-    // draining stdin cannot wedge the turn before the pump loop's cancel
-    // check becomes reachable.
+    // The turn's input face is the stream-json control plane (ADR-0128,
+    // live-measured on 2.1.259): the prompt rides stdin as a `user` message
+    // frame and stdin STAYS OPEN -- after an `error_max_turns` result frame
+    // the same process continues off one more user frame (the native
+    // continuation channel). The write rides the cancel-aware line writer
+    // (issues #808/#813): a CLI that stalls before draining stdin cannot
+    // wedge the turn before the pump loop's cancel check becomes reachable.
     let stdin = child.stdin.take().expect("piped stdin");
-    let prompt = flatten_prompt(&input.prompt_blocks);
-    match super::process::write_prompt_with_cancel(stdin, prompt, &cancel, &mut child) {
-        super::process::StdinWriteOutcome::Done => {}
-        super::process::StdinWriteOutcome::Failed(e) => {
-            return outcome(
-                Termination::Runtime(format!("stdin write failed: {e}")),
-                Vec::new(),
-                None,
-            )
+    let mut stdin = {
+        let prompt = flatten_prompt(&input.prompt_blocks);
+        match write_user_frame(stdin, &prompt, &cancel, &mut child) {
+            (super::process::StdinWriteOutcome::Done, stdin) => stdin,
+            (super::process::StdinWriteOutcome::Failed(e), _) => {
+                return outcome(
+                    Termination::Runtime(format!("stdin write failed: {e}")),
+                    Vec::new(),
+                    None,
+                )
+            }
+            (super::process::StdinWriteOutcome::Cancelled, _) => {
+                // ADR-0115: the pre-pump relabel -- a watchdog fire during the
+                // stdin drain is generation silence past the cap.
+                return outcome(
+                    ProgressClock::cancel_landing(clock.as_ref()),
+                    Vec::new(),
+                    None,
+                );
+            }
         }
-        super::process::StdinWriteOutcome::Cancelled => {
-            // ADR-0115: the pre-pump relabel -- a watchdog fire during the
-            // stdin drain is generation silence past the cap.
-            return outcome(
-                ProgressClock::cancel_landing(clock.as_ref()),
-                Vec::new(),
-                None,
-            );
-        }
-    }
+    };
 
     let stdout = child.stdout.take().expect("piped stdout");
 
@@ -414,7 +423,6 @@ pub(super) fn run_claude_stream_json(
 
     let mut pump = ClaudePump {
         tracker: RoundTracker::new(),
-        tool_call_count: 0,
         step_cap,
         current_model: None,
         pending: Vec::new(),
@@ -428,20 +436,23 @@ pub(super) fn run_claude_stream_json(
             .collect(),
     };
 
-    let mut termination = None;
-    let mut step_cap_tripped = false;
+    let mut termination: Option<Termination>;
+    // Windowed auto-continuation (ADR-0128): the CLI's self-reported budget
+    // (`error_max_turns`) is the window boundary -- under the resume budget
+    // the turn continues the SAME process off one more user frame (the
+    // convergence nudge alone, so nothing of it persists), keeping the
+    // pump's rounds, the cancel token, and the watchdog clock on the
+    // turn's one trajectory. There is deliberately NO app-side counted cap:
+    // claude has no budget setting face, so the family is windowless and
+    // ceilingless until the CLI reports its own (the honest degrade the
+    // ADR records; the backstops are the watchdog + the loop detector).
+    let mut window_resumes = 0u32;
     let mut discards = super::process::DiscardLog::new();
 
     loop {
         // Cancel check (mirrors the other paths' loop-top check).
         if cancel.is_requested() {
             termination = Some(Termination::Cancelled);
-            break;
-        }
-        // Step-cap trip (execution-level cap, ADR-0081). No protocol-level
-        // cancel message on this surface -- kill the child and terminate.
-        if pump.tool_call_count > pump.step_cap {
-            step_cap_tripped = true;
             break;
         }
 
@@ -460,13 +471,42 @@ pub(super) fn run_claude_stream_json(
                         continue; // skip unparseable line
                     }
                 };
+                let mut landed: Option<Termination> = None;
                 for event in parse_events(&value) {
                     if let Some(term) = pump.fold(event, &mut on_phase) {
-                        termination = Some(term);
+                        landed = Some(term);
                         break;
                     }
                 }
-                if termination.is_some() {
+                // A window boundary: continue the same process when the
+                // resume budget allows -- the nudge is the next window's
+                // only input.
+                if matches!(landed, Some(Termination::StepCap(_)))
+                    && window_resumes < MAX_WINDOW_RESUMES
+                {
+                    if let Some(open) = stdin.take() {
+                        match write_user_frame(open, WINDOW_CONVERGENCE_NUDGE, &cancel, &mut child)
+                        {
+                            (super::process::StdinWriteOutcome::Done, handed_back) => {
+                                stdin = handed_back;
+                                window_resumes += 1;
+                                continue;
+                            }
+                            (super::process::StdinWriteOutcome::Cancelled, _) => {
+                                termination = Some(ProgressClock::cancel_landing(clock.as_ref()));
+                                break;
+                            }
+                            (super::process::StdinWriteOutcome::Failed(_), _) => {
+                                termination = Some(Termination::Runtime(
+                                    "claude continuation frame write failed".into(),
+                                ));
+                                break;
+                            }
+                        }
+                    }
+                }
+                if let Some(term) = landed {
+                    termination = Some(term);
                     break;
                 }
             }
@@ -484,9 +524,10 @@ pub(super) fn run_claude_stream_json(
         }
     }
 
-    // If the step cap tripped, override any pending termination.
-    if step_cap_tripped {
-        termination = Some(Termination::StepCap(step_cap));
+    // The whole resume budget spent: the landing carries the derived total
+    // budget every windowed runtime renders (ADR-0128).
+    if let Some(Termination::StepCap(_)) = termination {
+        termination = Some(Termination::StepCap(derived_step_ceiling(step_cap)));
     }
 
     // Finalize any tool rows still open at turn end (honestly unobserved,
@@ -537,14 +578,38 @@ struct PendingClaudeCall {
     summary: String,
 }
 
+/// Write one stream-json `user` message frame to the child's stdin
+/// (ADR-0128): the input face the turn's prompt and every resumed window's
+/// convergence nudge ride. One NDJSON line; the writer hands the stdin back
+/// OPEN so the same process can receive the next frame.
+fn write_user_frame(
+    stdin: ChildStdin,
+    text: &str,
+    cancel: &CancelToken,
+    child: &mut std::process::Child,
+) -> (super::process::StdinWriteOutcome, Option<ChildStdin>) {
+    let frame = serde_json::json!({
+        "type": "user",
+        "message": {"role": "user", "content": [{"type": "text", "text": text}]}
+    });
+    // The json! shape is always serializable; the newline terminates the
+    // NDJSON line the reader expects.
+    let line = format!(
+        "{}\n",
+        serde_json::to_string(&frame).expect("the user frame serializes")
+    );
+    super::process::write_line_with_cancel(stdin, line, cancel, child)
+}
+
 /// Mutable state accumulated while pumping claude frames.
 struct ClaudePump {
     /// The round bookkeeping: per-round thinking/prose/calls + the
     /// terminal-text fallback (ADR-0103, issue #612).
     tracker: RoundTracker,
-    /// Count of tool invocations observed (step-cap counter) -- gateway-routed
-    /// and native alike (the cap bounds the whole turn).
-    tool_call_count: u32,
+    /// The window cap the `error_max_turns` fold reports -- the WINDOW-TRIP
+    /// signal only (ADR-0128): the driver resumes under the budget and
+    /// lands the derived ceiling otherwise, so no app-side counting rides
+    /// this path.
     step_cap: u32,
     /// The `system{init}` reported model (honest rendering).
     current_model: Option<String>,
@@ -580,7 +645,6 @@ impl ClaudePump {
                 None
             }
             ClaudeEvent::ToolUse { id, name, input } => {
-                self.tool_call_count += 1;
                 // The batch boundary: the round's thinking freeze fires once,
                 // before this call's Started event (the prose already
                 // streamed as its TextDeltas, ADR-0126).
@@ -1086,7 +1150,6 @@ mod tests {
     fn pump_with_bridge() -> ClaudePump {
         ClaudePump {
             tracker: RoundTracker::new(),
-            tool_call_count: 0,
             step_cap: 24,
             current_model: None,
             pending: Vec::new(),
@@ -1340,7 +1403,6 @@ mod tests {
             &mut |p| phases.push(p),
         );
         assert!(end.is_none());
-        assert_eq!(pump.tool_call_count, 1);
         let end = pump.fold(
             ClaudeEvent::ToolResult {
                 id: "toolu_1".into(),

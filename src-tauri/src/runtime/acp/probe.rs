@@ -151,16 +151,19 @@ pub enum ProbeError {
 /// full OS pipe buffer and wedge until killed.
 pub fn spawn_child(spec: &AdapterSpec, binary: Option<&Path>) -> Result<ChildHandle, ProbeError> {
     let binary = binary.ok_or_else(|| ProbeError::NotDetected(spec.id.to_string()))?;
-    // probe_argv/stream_format invariant (issue #544, extended by ADR-0097):
-    // every NON-ACP adapter MUST carry a dedicated probe argv (its probe
-    // surface differs from the turn's protocol mode), an ACP adapter MUST
-    // NOT (the probe reuses the turn argv). Enforced at this single
-    // consumption point so a future spec that breaks the pairing fails fast
-    // under test instead of spawning the turn's argv and speaking the wrong
-    // protocol.
+    // probe_argv/stream_format invariant (issue #544, extended by ADR-0097,
+    // re-extended by ADR-0128): an adapter whose probe surface DIFFERS from
+    // the turn's argv must carry a dedicated probe argv -- today that is
+    // only codex (the `app-server` subcommand, a different channel than the
+    // turn's `exec --json`). ACP adapters reuse the turn argv, and since
+    // ADR-0128 folded the stream-json input face into the turn argv,
+    // claude-code does too (both surfaces speak the same control plane).
+    // Enforced at this single consumption point so a future spec that
+    // breaks the pairing fails fast under test instead of spawning the
+    // turn's argv and speaking the wrong protocol.
     debug_assert_eq!(
-        spec.stream_format != StreamFormat::Acp,
-        spec.probe_argv.is_some()
+        spec.probe_argv.is_some(),
+        spec.stream_format == StreamFormat::CodexEventStream
     );
     // Piped stderr (issue #542): the CLI's diagnostics (auth failure, startup
     // panic, version skew) land in the probe's failure detail instead of

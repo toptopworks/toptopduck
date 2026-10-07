@@ -661,14 +661,42 @@ fn gateway_renamed_failure_keeps_the_failure_anchor() {
         .any(|p| matches!(p, TurnPhase::ToolCallCompleted(e) if !e.success)));
 }
 
-/// The agent's own max_turns ceiling maps to StepCap (an execution-level cap).
+/// ADR-0128: the agent's own turn budget (`MaxTurnRequests`) tops out EVERY
+/// window -- the engine spends the whole resume budget (1 + 3 windows) and
+/// lands the DERIVED ceiling, the same product the built-in loop renders
+/// (96 = 24 x 4), never the single cap.
 #[test]
-fn max_turns_stop_reason_maps_to_step_cap() {
+fn max_turns_exhaustion_lands_the_derived_ceiling() {
     let (outcome, _) = run("max_turns", 24);
     match outcome.termination {
-        Termination::StepCap(n) => assert_eq!(n, 24),
+        Termination::StepCap(n) => assert_eq!(n, 96),
         other => panic!("expected StepCap, got {other:?}"),
     }
+}
+
+/// ADR-0128 continuation: the engine re-sends `session/prompt` to the SAME
+/// session (the nudge as the resumed prompt). Window one's tool round and
+/// window two's answer settle as ONE trajectory, and the nudge leaves no
+/// trace of its own.
+#[test]
+fn max_turns_resumes_the_same_session() {
+    let (outcome, phases) = run("max_turns_resume", 24);
+    match outcome.termination {
+        Termination::Text(t) => assert_eq!(t, "the answer is 42"),
+        other => panic!("expected Text, got {other:?}"),
+    }
+    // The window-one call round carried across the boundary; the terminal
+    // text is the fallback track's last stretch (issue #612).
+    assert_eq!(outcome.trace.len(), 1, "{:?}", outcome.trace);
+    assert_eq!(outcome.trace[0].calls.len(), 1);
+    // The nudge never surfaces: no phase carries its wording, and no trace
+    // row appears for it.
+    assert!(
+        !phases
+            .iter()
+            .any(|p| format!("{p:?}").contains("step budget for this window")),
+        "the nudge must not leak into the live phases"
+    );
 }
 
 /// A refusal carries the agent's text (surfaced as a textual outcome the user
@@ -680,25 +708,6 @@ fn refusal_maps_to_text_outcome() {
         Termination::Text(t) => assert!(t.contains("can't do that"), "got: {t}"),
         other => panic!("expected Text, got {other:?}"),
     }
-}
-
-/// A runaway trajectory (more tool calls than the step cap) trips the engine's
-/// own cancel; the cooperative fixture responds Cancelled, so the outcome is
-/// deterministically Cancelled (no race with the success response).
-#[test]
-fn step_cap_overflow_trips_cancel_deterministically() {
-    let (outcome, _, start) = run_with_spec(&gemini_cli(), "step_cap_overflow", 5);
-    assert!(
-        matches!(outcome.termination, Termination::Cancelled),
-        "step-cap trip + cooperative fixture -> Cancelled: {:?}",
-        outcome.termination
-    );
-    // Since ADR-0115 the watchdog no longer collapses to Cancelled (it
-    // lands NoProgress), so the termination match alone CAN tell the paths
-    // apart (the #356 regression is gone); the 2s bound now pins the freeze
-    // semantics' cost on top. The step-cap path resolves in well under 1s;
-    // pin it.
-    assert_not_via_watchdog("step_cap_overflow", start);
 }
 
 /// The no-progress watchdog fires the shared token on a stuck agent (one
@@ -1286,18 +1295,6 @@ fn engine_outcome_is_identical_across_all_v1_specs() {
             "{}: Thinking phase fires before the prompt",
             spec.id
         );
-
-        // Fallback path: a runaway trajectory trips the step cap -> Cancelled
-        // for every spec (cancel / step-cap behave isomorphically). Timed so
-        // a watchdog fallback fails the test, not just slows it (#356).
-        let (outcome, _, start) = run_with_spec(spec, "step_cap_overflow", 5);
-        assert!(
-            matches!(outcome.termination, Termination::Cancelled),
-            "{}: step-cap trip -> Cancelled, got {:?}",
-            spec.id,
-            outcome.termination
-        );
-        assert_not_via_watchdog(&format!("{} step_cap_overflow", spec.id), start);
     }
 }
 
@@ -1322,7 +1319,8 @@ fn acp_adapters_are_acp_format() {
 /// ADR-0094: the codex adapter uses native `exec --json` direct-connect. Pin
 /// the detection binary (`codex`, not the retired `codex-acp`), the exec argv
 /// shape, and the `CodexEventStream` format so a regression is caught at the
-/// spec level.
+/// spec level. No `--ephemeral` since ADR-0128: `exec resume` reads the
+/// rollout file the first window's process must leave on disk.
 #[test]
 fn codex_adapter_is_native_exec_codex_event_stream() {
     use toptopduck_lib::runtime::acp::adapter::StreamFormat;
@@ -1335,7 +1333,6 @@ fn codex_adapter_is_native_exec_codex_event_stream() {
             "exec",
             "--json",
             "--skip-git-repo-check",
-            "--ephemeral",
             "--sandbox",
             "read-only",
             "-c",

@@ -57,8 +57,9 @@ use crate::runtime::acp::wire::{
     Response, SessionUpdate, SessionUpdateParams, StopReason, ToolCallContent, ToolCallStatus,
 };
 use crate::session::loop_contract::{
-    truncate_trace_excerpt, DiscoveredRuntime, LoopOutcome, LoopRound, Termination, TraceEntry,
-    DEFAULT_NO_PROGRESS_CAP, DEFAULT_STEP_CAP, TRACE_EXCERPT_MAX,
+    derived_step_ceiling, truncate_trace_excerpt, DiscoveredRuntime, LoopOutcome, LoopRound,
+    Termination, TraceEntry, DEFAULT_NO_PROGRESS_CAP, DEFAULT_STEP_CAP, MAX_WINDOW_RESUMES,
+    TRACE_EXCERPT_MAX, WINDOW_CONVERGENCE_NUDGE,
 };
 use crate::session::progress::ProgressClock;
 use crate::util::{push_capped, push_capped_emit};
@@ -335,79 +336,92 @@ impl AcpEngine {
             }
         }
 
-        // Loop-top cancel check (mirrors the built-in loop's pre-step check).
-        if self.cancel.is_requested() {
-            let outcome = self.outcome(
-                ProgressClock::cancel_landing(clock.as_ref()),
-                Vec::new(),
-                discovered,
-            );
-            child.kill_and_wait();
-            return outcome;
-        }
-        // ADR-0059: signal the "thinking" wait once before the prompt -- the
-        // round 1 marker (attempt = 1); later rounds bump it via `open_round`
-        // as calls interleave with thought/prose.
-        on_phase(TurnPhase::Thinking { attempt: 1 });
-
-        let prompt = Request::new(
-            RequestId::Num(3),
-            "session/prompt",
-            PromptParams {
-                session_id: session_id.clone(),
-                prompt: input.prompt_blocks.clone(),
-            },
-        );
-        // Issue #813: the prompt is the whole windowed context (often past
-        // the OS pipe buffer), so the send rides the cancel-aware bounded
-        // writer -- a child that stalls before draining stdin cannot wedge
-        // the turn, and the handed-back stdin keeps the channel alive for
-        // the pump's mid-turn writes.
-        match io.write_json_with_cancel(&prompt, &self.cancel, &mut child) {
-            super::process::StdinWriteOutcome::Done => {}
-            // The dead-channel send keeps its pre-#813 message, now with the
-            // io detail riding along (the sibling drivers' #808 shape).
-            super::process::StdinWriteOutcome::Failed(e) => {
-                let outcome = self.outcome(
-                    Termination::Runtime(format!("session/prompt: broken pipe before send: {e}")),
-                    Vec::new(),
-                    discovered,
-                );
-                child.kill_and_wait();
-                return outcome;
-            }
-            super::process::StdinWriteOutcome::Cancelled => {
-                // ADR-0115: the pre-pump relabel -- a watchdog fire during
-                // the stdin drain is generation silence past the cap.
-                let outcome = self.outcome(
-                    ProgressClock::cancel_landing(clock.as_ref()),
-                    Vec::new(),
-                    discovered,
-                );
-                child.kill_and_wait();
-                return outcome;
-            }
-        }
-
         let mut pump = Pump {
             tracker: RoundTracker::new(),
             pending: Vec::new(),
-            tool_call_count: 0,
             cancel_sent_at: None,
-            step_cap: self.step_cap,
             clock: clock.clone(),
             open_freeze: None,
         };
-        let end = io.pump_until_prompt_response(
-            &self.cancel,
-            &self.adapter,
-            &session_id,
-            &mut child,
-            &mut pump,
-            approval,
-            sink,
-            &mut on_phase,
-        );
+        // Windowed auto-continuation (ADR-0128): the agent's own turn budget
+        // (`MaxTurnRequests`) is the window boundary -- under the resume
+        // budget the engine re-sends `session/prompt` to the SAME session
+        // (the agent holds the full state; the convergence nudge is the
+        // resumed prompt alone, so nothing of it persists), keeping the
+        // pump's rounds, the cancel token, the watchdog clock, and the
+        // approval gate on the turn's one trajectory. The whole budget
+        // spent lands the derived ceiling below.
+        let mut window_resumes = 0u32;
+        let end = loop {
+            // Loop-top cancel check (mirrors the built-in loop's pre-step
+            // check).
+            if self.cancel.is_requested() {
+                break PromptEnd::Cancelled;
+            }
+            // ADR-0059: signal the "thinking" wait before the turn's first
+            // prompt -- the round 1 marker (attempt = 1); later rounds bump
+            // it via `open_round` as calls interleave with thought/prose,
+            // resumed windows included (their first generation chunk opens
+            // the next round).
+            if window_resumes == 0 {
+                on_phase(TurnPhase::Thinking { attempt: 1 });
+            }
+            let prompt_blocks = if window_resumes == 0 {
+                input.prompt_blocks.clone()
+            } else {
+                vec![ContentBlock::text(WINDOW_CONVERGENCE_NUDGE)]
+            };
+            let prompt = Request::new(
+                RequestId::Num(3),
+                "session/prompt",
+                PromptParams {
+                    session_id: session_id.clone(),
+                    prompt: prompt_blocks,
+                },
+            );
+            // Issue #813: the prompt is the whole windowed context (often past
+            // the OS pipe buffer), so the send rides the cancel-aware bounded
+            // writer -- a child that stalls before draining stdin cannot wedge
+            // the turn, and the handed-back stdin keeps the channel alive for
+            // the pump's mid-turn writes.
+            match io.write_json_with_cancel(&prompt, &self.cancel, &mut child) {
+                super::process::StdinWriteOutcome::Done => {}
+                // The dead-channel send keeps its pre-#813 message, now with the
+                // io detail riding along (the sibling drivers' #808 shape).
+                super::process::StdinWriteOutcome::Failed(e) => {
+                    break PromptEnd::Failed(format!(
+                        "session/prompt: broken pipe before send: {e}"
+                    ));
+                }
+                super::process::StdinWriteOutcome::Cancelled => {
+                    // ADR-0115: the pre-pump relabel -- a watchdog fire during
+                    // the stdin drain is generation silence past the cap.
+                    break PromptEnd::Cancelled;
+                }
+            }
+            // Fresh cancel grace per window: the sentinel tracks only the
+            // in-flight prompt.
+            pump.cancel_sent_at = None;
+            let end = io.pump_until_prompt_response(
+                &self.cancel,
+                &self.adapter,
+                &session_id,
+                &mut child,
+                &mut pump,
+                approval,
+                sink,
+                &mut on_phase,
+            );
+            match end {
+                PromptEnd::Stop(StopReason::MaxTurnRequests)
+                    if window_resumes < MAX_WINDOW_RESUMES =>
+                {
+                    window_resumes += 1;
+                    continue;
+                }
+                other => break other,
+            }
+        };
         // Finalize any tool rows still open at turn end (issue #630), then
         // close the trailing round's thought stream: its ThinkingCompleted
         // fires (the fold renders live); the round's prose already streamed
@@ -421,11 +435,14 @@ impl AcpEngine {
                 Termination::Text(pump.tracker.terminal_text())
             }
             PromptEnd::Stop(StopReason::Cancelled) => Termination::Cancelled,
-            // The agent's own turn/token ceilings are execution-level caps;
-            // map onto our StepCap (the wiring seam renders Failed either way).
-            PromptEnd::Stop(StopReason::MaxTurnRequests | StopReason::MaxTokens) => {
-                Termination::StepCap(self.step_cap)
+            // The agent's own turn ceiling windows the turn (ADR-0128): the
+            // whole resume budget is spent, so the landing carries the
+            // derived total budget every windowed runtime renders. The
+            // token ceiling is not a window -- it keeps the single cap.
+            PromptEnd::Stop(StopReason::MaxTurnRequests) => {
+                Termination::StepCap(derived_step_ceiling(self.step_cap))
             }
+            PromptEnd::Stop(StopReason::MaxTokens) => Termination::StepCap(self.step_cap),
             PromptEnd::Cancelled => Termination::Cancelled,
             // Reader EOF / pipe break before a response: an external-runtime
             // failure (the agent crashed or closed stdout).
@@ -673,10 +690,12 @@ impl AcpIo {
         let prompt_id_value = serde_json::to_value(RequestId::Num(3)).unwrap_or(Value::Null);
         let mut discards = super::process::DiscardLog::new();
         loop {
-            // Cancel / step-cap trip: send session/cancel once, record when.
+            // Cancel: send session/cancel once, record when. (The retired
+            // app-side count trip is ADR-0128's doing: the window boundary
+            // is the agent's own `MaxTurnRequests`, so the pump never kills
+            // on a counted cap -- the resume loop owns the budget.)
             let user_cancelled = cancel.is_requested();
-            let step_cap_tripped = pump.tool_call_count > pump.step_cap;
-            if (user_cancelled || step_cap_tripped) && pump.cancel_sent_at.is_none() {
+            if user_cancelled && pump.cancel_sent_at.is_none() {
                 let _ = self.write_json_with_cancel(
                     &wire::Notification::new(
                         "session/cancel",
@@ -891,11 +910,8 @@ struct Pump {
     tracker: RoundTracker,
     /// Tool calls that started but have not yet reached a terminal status.
     pending: Vec<PendingToolCall>,
-    /// Distinct tool calls observed this turn (step-cap counter, ADR-0081).
-    tool_call_count: u32,
     /// When `session/cancel` was sent, if it has been (grace tracking).
     cancel_sent_at: Option<Instant>,
-    step_cap: u32,
     /// The turn's no-progress clock (ADR-0115): the agent's own tool
     /// executions are freeze segments (an open `pending` window), invisible
     /// to the gateway's freeze.
@@ -1159,7 +1175,6 @@ impl Pump {
                 kind,
                 content,
             } => {
-                self.tool_call_count += 1;
                 // The round's FIRST call freezes its thinking (ThinkingCompleted)
                 // once, before this call's Started event (saw_call latches it).
                 let idx = self.tracker.call_round(on_phase);

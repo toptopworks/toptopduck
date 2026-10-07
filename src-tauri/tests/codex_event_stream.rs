@@ -357,22 +357,6 @@ fn failed_mcp_tool_call_lands_failed_row_with_error_anchor() {
         .any(|p| matches!(p, TurnPhase::ToolCallCompleted(e) if !e.success)));
 }
 
-/// A gateway call counts toward the step cap exactly like a command
-/// execution (issue #816): with cap 0, the first `mcp_tool_call` trips it.
-#[test]
-fn mcp_tool_call_counts_toward_step_cap() {
-    let (outcome, _, elapsed) = run("mcp_tool_call", 0);
-    match outcome.termination {
-        Termination::StepCap(n) => assert_eq!(n, 0),
-        other => panic!("expected StepCap, got {other:?}"),
-    }
-    // The step-cap path resolves well under the 5s no-progress cap.
-    assert!(
-        elapsed < std::time::Duration::from_secs(3),
-        "took {elapsed:?} -- resolved via the no-progress watchdog, not the step-cap path"
-    );
-}
-
 /// A multi-round trajectory (issue #613): each batch round settles with its
 /// own prose + call, the trailing prose rides the terminal text, and the live
 /// channel fires each round's TextDelta BEFORE its batch's ToolCallStarted
@@ -458,20 +442,77 @@ fn turn_failed_maps_to_runtime() {
 
 /// A runaway trajectory (more command_execution events than the step cap) trips
 /// the engine's step cap -> StepCap termination.
+/// ADR-0128: the CLI's own `model_max_turns` self-stop (a turn-limit
+/// `turn.failed`) tops out EVERY window -- the engine spends the whole
+/// resume budget (1 + 3 spawns) and lands the DERIVED ceiling, the same
+/// product the built-in loop renders (96 = 24 x 4), never the single cap.
 #[test]
-fn step_cap_overflow_yields_step_cap_termination() {
-    let (outcome, _, elapsed) = run("step_cap_overflow", 3);
+fn turn_limit_exhaustion_lands_the_derived_ceiling() {
+    let (outcome, _, _) = run("turn_limit_exhausted", 24);
     match outcome.termination {
-        Termination::StepCap(n) => assert_eq!(n, 3),
+        Termination::StepCap(n) => assert_eq!(n, 96),
         other => panic!("expected StepCap, got {other:?}"),
     }
-    // The step-cap path resolves in well under 1s; a watchdog fallback takes
-    // 5s. Pin it so a regression does not silently fall back to the watchdog.
-    // The elapsed time comes from `run` (measured after the scenario lock) so
-    // parallel tests' lock-queue wait does not pollute the pin.
+}
+
+/// ADR-0128 continuation: the engine resumes the SAME conversation via
+/// `codex exec resume <thread_id>` (the nudge as the resumed window's
+/// prompt). The two processes' rounds settle as ONE trajectory, and the
+/// resume spawn carries the same injected window budget.
+#[test]
+fn turn_limit_resumes_via_exec_resume() {
+    // Direct `eng.run` under this test's own ENV_LOCK hold (the `run`
+    // helper locks it again -- the non-reentrant mutex would deadlock; the
+    // argv-trace tests' convention).
+    let cancel = Arc::new(CancelToken::new());
+    let eng =
+        AcpEngine::new(codex(), cancel).with_caps(24, Some(std::time::Duration::from_secs(5)));
+    let approval = ApprovalState::new();
+    let trace = unique_trace_path();
+    let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    std::env::set_var("CODEX_FAKE_SCENARIO", "turn_limit_continue");
+    std::env::set_var("CODEX_FAKE_TRACE_FILE", &trace);
+    let outcome = eng.run(&input(), &fake_cli(), &approval, &NoopSink, |_| {});
+    std::env::remove_var("CODEX_FAKE_TRACE_FILE");
+    let argv = std::fs::read_to_string(&trace).unwrap_or_default();
+    let _ = std::fs::remove_file(&trace);
+
+    match outcome.termination {
+        Termination::Text(t) => assert_eq!(t, "the answer is 42"),
+        other => panic!("expected Text, got {other:?}"),
+    }
+    // Window one's call round and window two's call round both settle (the
+    // one tracker carried across the two processes); each window's trailing
+    // prose rides the terminal text.
+    assert_eq!(outcome.trace.len(), 2, "{:?}", outcome.trace);
+    assert_eq!(outcome.trace[0].calls.len(), 1);
+    assert_eq!(outcome.trace[1].calls.len(), 1);
+    // Two spawns: the window-one exec and the resume. The resume addresses
+    // the thread the `thread.started` capture latched and carries the same
+    // window budget; the nudge rides as the PROMPT positional.
+    let lines: Vec<&str> = argv
+        .lines()
+        .filter(|l| l.starts_with("CODEX_FAKE_ARGV="))
+        .collect();
+    assert_eq!(lines.len(), 2, "one exec spawn + one resume spawn: {argv}");
     assert!(
-        elapsed < std::time::Duration::from_secs(3),
-        "took {elapsed:?} -- resolved via the no-progress watchdog, not the step-cap path"
+        lines.iter().all(|l| l.contains("-c model_max_turns=24")),
+        "every window's spawn carries the budget; got: {argv}"
+    );
+    assert!(
+        lines[1].contains(" resume 01aa-fixture-thread-id "),
+        "the resume spawn addresses the captured thread id; got: {}",
+        lines[1]
+    );
+    assert!(
+        lines[1].contains("step budget for this window"),
+        "the convergence nudge rides the resume spawn as the prompt; got: {}",
+        lines[1]
+    );
+    assert!(
+        !lines[0].contains(" resume "),
+        "the window-one spawn is a plain exec; got: {}",
+        lines[0]
     );
 }
 
@@ -742,8 +783,15 @@ fn selected_model_and_effort_ride_the_spawn_argv() {
     let argv = std::fs::read_to_string(&trace).unwrap_or_default();
     let _ = std::fs::remove_file(&trace);
     assert!(
-        argv.contains("CODEX_FAKE_ARGV=exec --json --skip-git-repo-check --ephemeral --sandbox read-only -c model_reasoning_summary=detailed --model gpt-5.1 -c model_reasoning_effort=high"),
+        argv.contains("CODEX_FAKE_ARGV=exec --json --skip-git-repo-check --sandbox read-only -c model_reasoning_summary=detailed --model gpt-5.1 -c model_reasoning_effort=high"),
         "model + effort must ride the spawn argv in the documented order; got: {argv}"
+    );
+    // ADR-0128: the CLI's own turn budget rides the config surface (the
+    // app-side count-and-kill is retired; the window boundary is the
+    // CLI's `model_max_turns` self-stop).
+    assert!(
+        argv.contains("-c model_max_turns=24"),
+        "the window budget must ride the spawn argv; got: {argv}"
     );
     // Issue #800 (review follow-up): the gateway approval exemption rides
     // the REAL spawn argv — the pure-builder pin alone would miss a
@@ -775,7 +823,7 @@ fn summary_switch_rides_spawn_argv_without_selections() {
     let argv = std::fs::read_to_string(&trace).unwrap_or_default();
     let _ = std::fs::remove_file(&trace);
     assert!(
-        argv.contains("CODEX_FAKE_ARGV=exec --json --skip-git-repo-check --ephemeral --sandbox read-only -c model_reasoning_summary=detailed"),
+        argv.contains("CODEX_FAKE_ARGV=exec --json --skip-git-repo-check --sandbox read-only -c model_reasoning_summary=detailed"),
         "the summary switch must ride the spawn argv with no selections; got: {argv}"
     );
 }

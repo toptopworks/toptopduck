@@ -138,13 +138,14 @@ pub struct AdapterSpec {
     pub argv: &'static [&'static str],
     /// The argv prefix the diagnostic probe uses to spawn this CLI (ADR-0096).
     /// `None` on ACP adapters -- the probe reuses [`Self::argv`] (the same
-    /// protocol mode the turn drives). Every non-ACP adapter carries a
-    /// dedicated probe argv (the probe surface differs from the turn's
-    /// protocol mode): codex probes via the `app-server` subcommand, a
-    /// different surface from the turn's `exec --json` mode; claude-code
-    /// probes via the turn argv extended with `--input-format stream-json`
-    /// (the stream-json control plane, ADR-0097 Decision 5). Like
-    /// [`Self::argv`], pure CLI-specific data: the probe kernel reads it and
+    /// protocol mode the turn drives). A non-ACP adapter whose probe surface
+    /// differs from the turn's protocol mode carries a dedicated probe argv:
+    /// codex probes via the `app-server` subcommand, a different surface from
+    /// the turn's `exec --json` mode; claude-code probes via the turn argv
+    /// itself (both surfaces speak the stream-json control plane since
+    /// ADR-0128 folded the input face into the turn argv, ADR-0097 Decision
+    /// 5). Like [`Self::argv`], pure CLI-specific data: the probe kernel
+    /// reads it and
     /// names no CLI.
     pub probe_argv: Option<&'static [&'static str]>,
     /// The wire protocol the CLI speaks over stdio (ADR-0094). Selects the
@@ -225,7 +226,12 @@ pub const fn codex() -> AdapterSpec {
             "exec",
             "--json",
             "--skip-git-repo-check",
-            "--ephemeral",
+            // No `--ephemeral` (ADR-0128): the native continuation channel
+            // is `codex exec resume <session_id>`, which reads the rollout
+            // file the first window's process must leave on disk -- an
+            // ephemeral spawn writes none, killing the resume channel at
+            // the source. The cost (one session file per app-driven turn
+            // under the user's CODEX_HOME) is the ADR-recorded price.
             "--sandbox",
             "read-only",
             // Issue #811: codex exec's default `model_reasoning_summary=auto`
@@ -304,13 +310,16 @@ pub const fn opencode() -> AdapterSpec {
 /// The claude-code adapter (ADR-0097, issue #561). claude-code has no native
 /// ACP mode (measured on 2.1.222: no `--acp` option; the spawn errors), so the
 /// only structured interface is its headless mode: `--print --output-format
-/// stream-json` emits NDJSON frames (`system` / `assistant` / `stream_event` /
-/// `result`) on stdout while the prompt rides stdin as flattened text -- the
-/// SAME stateless per-turn spawn shape the codex path drives (new spawn every
-/// turn, no `--resume` / `--session-id`; `--no-session-persistence` keeps
-/// upstream from writing a session file). The stream format is
-/// `ClaudeStreamJson`, so the engine dispatches to the claude stream-json
-/// path, never the codex parser.
+/// stream-json --input-format stream-json` emits NDJSON frames (`system` /
+/// `assistant` / `stream_event` / `result`) on stdout while the turn's prompt
+/// rides stdin as a `user` message frame -- the SAME stateless per-turn spawn
+/// shape the codex path drives (new spawn every turn, no `--resume` /
+/// `--session-id`; `--no-session-persistence` keeps upstream from writing a
+/// session file). The stream-json input face additionally carries the native
+/// continuation channel (ADR-0128): after an `error_max_turns` result frame,
+/// one more user frame on the SAME stdin continues the SAME process. The
+/// stream format is `ClaudeStreamJson`, so the engine dispatches to the claude
+/// stream-json path, never the codex parser.
 ///
 /// Native tools are blocked wholesale (ADR-0097 Decision 3): the
 /// `--disallowedTools` deny list below names claude-code's native tool
@@ -345,6 +354,13 @@ pub const fn claude_code() -> AdapterSpec {
             "--print",
             "--output-format",
             "stream-json",
+            // ADR-0128 (live-measured on 2.1.259): the turn's input face is
+            // the stream-json control plane -- the prompt rides stdin as a
+            // `user` message frame, and after an `error_max_turns` result
+            // frame the SAME process continues off one more user frame (the
+            // native continuation channel; stdin stays open across windows).
+            "--input-format",
+            "stream-json",
             "--verbose",
             "--no-session-persistence",
             "--disallowedTools",
@@ -354,29 +370,13 @@ pub const fn claude_code() -> AdapterSpec {
             "mcp__toptopduck-gateway",
         ],
         stream_format: StreamFormat::ClaudeStreamJson,
-        // The probe surface is the stream-json CONTROL PLANE (ADR-0097
-        // Decision 5): the turn argv extended with `--input-format
-        // stream-json` so the probe can send a `control_request{initialize}`
-        // frame and read the per-model catalog back -- the same spawn ->
-        // query -> kill lifecycle the codex `app-server` probe drives, a
-        // different wire surface. The turn argv prefix is repeated verbatim
-        // (const fn cannot concatenate slices); the
-        // `claude_probe_argv_is_turn_argv_plus_stream_json_input` test pins
-        // the pairing so a drift fails instead of probing the wrong surface.
-        probe_argv: Some(&[
-            "--print",
-            "--output-format",
-            "stream-json",
-            "--verbose",
-            "--no-session-persistence",
-            "--disallowedTools",
-            "Task,Bash,Glob,Grep,Read,Edit,Write,NotebookEdit,WebFetch,WebSearch,\
-             TodoWrite,BashOutput,KillShell,SlashCommand",
-            "--allowedTools",
-            "mcp__toptopduck-gateway",
-            "--input-format",
-            "stream-json",
-        ]),
+        // The probe reuses the turn argv (ADR-0097 Decision 5): both surfaces
+        // speak the same stream-json control plane -- the probe sends a
+        // `control_request{initialize}` frame, the turn sends `user` frames,
+        // one spawn shape for both. (Before ADR-0128 the turn read flattened
+        // text off stdin, so the probe needed its own `--input-format`
+        // extension; the turn's input-face switch folded the two into one.)
+        probe_argv: None,
         // ADR-0095/0097: claude-code's headless mode takes the model as
         // `--model <id>` and the reasoning effort as `--effort <level>` --
         // both argv-shaped (no `-c` config surface on this CLI).
@@ -868,68 +868,59 @@ mod tests {
     }
 
     /// ADR-0096 D2: the probe argv is `None` on ACP adapters (the probe reuses
-    /// the turn argv); every non-ACP adapter carries a dedicated probe
-    /// surface -- the `app-server` subcommand on codex, the turn argv +
-    /// `--input-format stream-json` on claude-code (ADR-0097 Decision 5).
-    /// The spawn kernel enforces this pairing via a debug_assert.
+    /// the turn argv); a non-ACP adapter whose probe surface differs from the
+    /// turn's protocol mode carries a dedicated one -- the `app-server`
+    /// subcommand on codex. claude-code is `None` too: since ADR-0128 folded
+    /// the stream-json input face into the turn argv, both surfaces speak the
+    /// same control plane (the probe reuses the turn argv again, the
+    /// ADR-0097 Decision 5 posture restored at one spawn shape).
     #[test]
     fn adapters_declare_probe_argv_per_format() {
-        for spec in [gemini_cli(), qwen_code(), opencode()] {
+        for spec in [gemini_cli(), qwen_code(), opencode(), claude_code()] {
             assert!(spec.probe_argv.is_none(), "{}", spec.id);
         }
         assert_eq!(codex().probe_argv, Some(&["app-server"][..]));
-        assert!(claude_code().probe_argv.is_some());
     }
 
-    /// The claude-code probe argv is the turn argv extended with
-    /// `--input-format stream-json` (ADR-0097 Decision 5: the probe spawns
-    /// the SAME stateless surface and speaks the control plane over stdin,
-    /// probing without an upstream session file just like the turn). const
-    /// fn cannot concatenate slices, so the two literals repeat the prefix --
-    /// this test is the drift guard.
+    /// ADR-0128: the claude-code TURN argv carries `--input-format
+    /// stream-json` (live-measured on 2.1.259) -- the input face the native
+    /// continuation channel rides (prompt as a `user` frame, the resumed
+    /// window as one more user frame on the same stdin). This test is the
+    /// drift guard: losing the flag silently returns the turn to flattened
+    /// text, which the CLI answers with a parse failure.
     #[test]
-    fn claude_probe_argv_is_turn_argv_plus_stream_json_input() {
+    fn claude_turn_argv_carries_the_stream_json_input_face() {
         let spec = claude_code();
-        let probe = spec
-            .probe_argv
-            .expect("claude-code probes via its own argv");
-        assert!(
-            probe.len() == spec.argv.len() + 2,
-            "probe argv = turn argv + [--input-format, stream-json]"
-        );
-        assert_eq!(&probe[..spec.argv.len()], spec.argv);
-        assert_eq!(
-            &probe[spec.argv.len()..],
-            &["--input-format", "stream-json"]
-        );
+        let position = spec
+            .argv
+            .iter()
+            .position(|a| *a == "--input-format")
+            .expect("--input-format rides the turn argv");
+        assert_eq!(spec.argv[position + 1], "stream-json");
     }
 
-    /// Issue #800: both claude-code argv surfaces carry `--allowedTools
+    /// Issue #800: the claude-code turn argv carries `--allowedTools
     /// mcp__toptopduck-gateway` so headless `--print` mode does not
     /// auto-reject the gateway MCP tools. With deny and allow both present
     /// deny wins on overlap, so the native-tool deny list stays sealed. The
     /// literal is drift-guarded against the canonical gateway server name —
     /// a rename there must fail here instead of silently un-allowing the
-    /// gateway surface.
+    /// gateway surface. (The probe reuses the turn argv, so the one surface
+    /// carries the pairing for both.)
     #[test]
     fn claude_code_allows_the_gateway_mcp_surface() {
         let spec = claude_code();
         let expected = format!("mcp__{}", crate::session::GATEWAY_SERVER_NAME);
-        for surface in [
-            spec.argv,
-            spec.probe_argv
-                .expect("claude-code probes via its own argv"),
-        ] {
-            let position = surface
-                .iter()
-                .position(|a| *a == "--allowedTools")
-                .expect("--allowedTools rides the argv");
-            assert_eq!(
-                surface[position + 1],
-                expected,
-                "the allow value is the gateway server prefix"
-            );
-        }
+        let position = spec
+            .argv
+            .iter()
+            .position(|a| *a == "--allowedTools")
+            .expect("--allowedTools rides the argv");
+        assert_eq!(
+            spec.argv[position + 1],
+            expected,
+            "the allow value is the gateway server prefix"
+        );
     }
 
     /// v1_adapters is internally consistent: non-empty, unique ids, every
@@ -958,11 +949,13 @@ mod tests {
             // CodexEventStream, or ClaudeStreamJson). The specific
             // per-adapter assignment is pinned in the per-adapter tests
             // above, not here.
-            // Every non-ACP adapter carries a dedicated probe argv; ACP
-            // adapters reuse the turn argv (the spawn kernel's invariant).
+            // The spawn kernel's probe-argv invariant (ADR-0128): only an
+            // adapter whose probe surface differs from the turn argv (today
+            // codex's `app-server`) carries one; ACP and claude-code reuse
+            // the turn argv.
             assert_eq!(
-                a.stream_format != StreamFormat::Acp,
                 a.probe_argv.is_some(),
+                a.stream_format == StreamFormat::CodexEventStream,
                 "{}: probe argv pairing",
                 a.id
             );
@@ -999,7 +992,8 @@ mod tests {
                 "exec",
                 "--json",
                 "--skip-git-repo-check",
-                "--ephemeral",
+                // No `--ephemeral` (ADR-0128): `exec resume` reads the
+                // rollout file the first window's process must leave on disk.
                 "--sandbox",
                 "read-only",
                 "-c",
