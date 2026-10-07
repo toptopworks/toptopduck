@@ -20,8 +20,10 @@ use crate::approval::OperationKind;
 use crate::model::{Promotion, ThinkingTrace, TraceEntryView, TraceRound};
 use crate::persistence::recipe::{RecipeTraceEntry, RecipeTraceRound};
 
-/// Default step cap (ADR-0081): a turn may make up to this many tool-call
-/// round-trips before the loop aborts as [`Termination::StepCap`]. The agent is
+/// Default step cap (ADR-0081, windowed by ADR-0128): one WINDOW of a turn
+/// may make up to this many tool-call round-trips before the built-in loop
+/// reopens the request under [`MAX_WINDOW_RESUMES`] -- the turn aborts as
+/// [`Termination::StepCap`] only once that budget is spent. The agent is
 /// expected to converge well within this; the cap is the last-line safety net
 /// for a non-converging trajectory, not a target.
 pub(crate) const DEFAULT_STEP_CAP: u32 = 24;
@@ -86,9 +88,14 @@ pub enum Termination {
     /// rides `body`, the prose answer -- #847).
     Text(String),
     /// The step cap was reached without a terminal reply (the agent did not
-    /// converge). Carries the cap value so the wiring seam can render an honest
-    /// "did not converge in N steps" detail. Maps to `TurnOutcome::Failed`
-    /// (ADR-0081 execution-level cap).
+    /// converge): on the built-in path, every window topped out and the whole
+    /// resume budget is spent (ADR-0128 partially supersedes ADR-0081's
+    /// hit-and-fail cap posture). Carries the runtime's total step ceiling --
+    /// the derived `cap * (1 + MAX_WINDOW_RESUMES)` on the windowed built-in
+    /// path, the single cap on the external runtimes not yet windowed (#1225)
+    /// -- so the wiring seam can render an honest "did not converge in N
+    /// steps" detail. Maps to `TurnOutcome::Failed` (ADR-0081
+    /// execution-level cap).
     StepCap(u32),
     /// A cancel (user / close) aborted the turn (ADR-0021). Maps to
     /// `TurnOutcome::Cancelled`. The watchdog is NOT one of these causes
