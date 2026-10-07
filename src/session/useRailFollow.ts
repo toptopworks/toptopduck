@@ -130,7 +130,11 @@ export function useRailFollow({
   // time reads a stale offset against grown content and self-pauses the
   // machine (the markdown-stream stall: every later align bails on the
   // paused gate until a manual scroll back into the band). An event landing
-  // exactly on this offset while following IS that echo.
+  // exactly on this offset while following IS that echo -- a pause
+  // invalidates the record (the scroll handler), so the one false positive
+  // left is a genuine scroll pixel-exact on it inside the one-frame window
+  // before the next align lands: swallowed by design, indistinguishable
+  // from the echo it might be.
   const lastAlignTopRef = useRef<number | null>(null);
   const scheduleAlign = useCallback(() => {
     // One write per frame: a frame already pending absorbs the request, so a
@@ -156,8 +160,11 @@ export function useRailFollow({
       // round), but the true maxScroll is a double, so the write clamps to a
       // fractional offset whenever content heights are fractional (prose at
       // leading-[1.75] -- 24.5px lines). Comparing against the read-back keeps
-      // the echo check an exact same-source match in either geometry.
-      lastAlignTopRef.current = el.scrollTop;
+      // the echo check an exact same-source match in either geometry. A
+      // boxless write (the trailing-active race frame above) is a no-op whose
+      // read-back is 0 -- recording it would arm the echo check against the
+      // top of the rail, so only a real layout box records.
+      if (el.clientHeight > 0) lastAlignTopRef.current = el.scrollTop;
       // A landed write is the machine re-entering the follow, so the
       // published mirror rides the same callback (a bail-out no-op when
       // already true). The published boolean is ONLY ever touched from event
@@ -222,6 +229,12 @@ export function useRailFollow({
         el.scrollHeight - el.clientHeight - el.scrollTop <= RESUME_BAND_PX;
       followingRef.current = atBottom;
       setIsFollowing(atBottom);
+      // A pause is proof the fingerprint went stale (content grew past it
+      // or the reader moved), so a post-resume scroll landing exactly on
+      // the pre-pause offset must evaluate the band, not read as a late
+      // echo. Echoes never reach this branch (the guard above returns
+      // first), so the invalidation only ever clears dead state.
+      if (!atBottom) lastAlignTopRef.current = null;
     };
     el.addEventListener("scroll", onScroll, { passive: true });
     return () => el.removeEventListener("scroll", onScroll);

@@ -409,6 +409,9 @@ describe("useRailFollow", () => {
     const rail = getByTestId("rail") as HTMLElement;
     const rig = rigRail(rail);
     let landed = 0;
+    // This override replaces rigRail's counting setter: rig.scrollTop() and
+    // rig.hookWrites() read a dead closure from here on (stale zeros) --
+    // track position through `landed` in this test.
     Object.defineProperty(rail, "scrollTop", {
       configurable: true,
       get: () => landed,
@@ -451,6 +454,38 @@ describe("useRailFollow", () => {
       rail.dispatchEvent(new Event("scroll"));
     });
     expect(followingText()).toBe("true"); // band eval ran; distance 0
+  });
+
+  it("pauses on a post-resume scroll landing exactly on the pre-pause written offset", () => {
+    // The fingerprint only earns trust from a landed write: a pause
+    // invalidates it, so after a resume a genuine scroll landing exactly
+    // on the PRE-pause offset must evaluate the band, not read as a late
+    // echo -- content streamed during the pause has grown the extent past
+    // the band by then, and the reader keeps their place instead of being
+    // yanked by the next append.
+    const { getByTestId } = render(<Host active={true} entryCount={3} liveTurn={null} />);
+    const rail = getByTestId("rail") as HTMLElement;
+    const rig = rigRail(rail);
+    flushFrame(); // the mount align writes 700
+
+    rig.userScrollTo(300); // read history -> pause (fingerprint invalidated)
+    act(() => {
+      rail.dispatchEvent(new Event("scroll"));
+    });
+    expect(followingText()).toBe("false");
+
+    rig.userScrollTo(660); // back inside the band -> resume
+    act(() => {
+      rail.dispatchEvent(new Event("scroll"));
+    });
+    expect(followingText()).toBe("true");
+
+    rig.geo.scrollHeight = 1300; // streamed while paused: distance at 700 is now 100
+    rig.userScrollTo(700); // exactly on the stale written offset
+    act(() => {
+      rail.dispatchEvent(new Event("scroll"));
+    });
+    expect(followingText()).toBe("false"); // band eval ran, NOT read as an echo
   });
 
   // --- Submit: force-follow to the bottom ----------------------------------
