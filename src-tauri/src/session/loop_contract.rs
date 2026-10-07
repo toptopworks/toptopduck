@@ -26,6 +26,13 @@ use crate::persistence::recipe::{RecipeTraceEntry, RecipeTraceRound};
 /// for a non-converging trajectory, not a target.
 pub(crate) const DEFAULT_STEP_CAP: u32 = 24;
 
+/// Windowed auto-continuation budget (ADR-0128): how many times a turn
+/// reopens the request after a window exhausts the step cap, before the
+/// hard ceiling lands as [`Termination::StepCap`]. The ceiling the wiring
+/// renders is the derived product `cap * (1 + MAX_WINDOW_RESUMES)` --
+/// never an independent constant.
+pub(crate) const MAX_WINDOW_RESUMES: u32 = 3;
+
 /// Default no-progress cap (ADR-0081 as redefined by ADR-0115, aligned with
 /// ADR-0021 `REQUEST_TIMEOUT`). The watchdog fires cancel when the
 /// generation segment goes silent past the cap; the loop lands as

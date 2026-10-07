@@ -751,19 +751,22 @@ fn posture_thought_level_stamps_every_built_in_round_trip_request() {
 
 #[test]
 fn step_cap_exhaustion_lands_a_failed_turn() {
-    // ADR-0081 execution-level safety net: an agent that never converges
-    // (keeps exploring) is aborted by the step cap (default 24) as a Failed
-    // turn carrying an honest non-convergence detail. The no-progress watchdog
-    // (Cancelled) shares the cancel path; its deterministic coverage lives at
-    // the loop runtime's offline seam (the 120s default is not tunable
-    // through the Session facade).
+    // ADR-0081 execution-level safety net, windowed by ADR-0128: an agent
+    // that never converges (keeps exploring) reopens each exhausted window
+    // on the resume budget until the derived hard ceiling lands as a Failed
+    // turn carrying an honest non-convergence detail. The ceiling is the
+    // per-window cap (default 24) x the four windows a turn may consume,
+    // so 96 round-trips in all; the no-progress watchdog (Cancelled) shares
+    // the cancel path; its deterministic coverage lives at the loop
+    // runtime's offline seam (the 120s default is not tunable through the
+    // Session facade).
     //
     // The trajectory must
     // VARY its call to reach the cap: identical repeated calls are stopped
     // earlier by loop detection (steer at 3, abort on the repeat
     // after the nudge -- that path has its own pins). A draw-time-unique SQL
     // keeps every call distinct, so nothing but the cap ends the run.
-    let trajectory: Vec<Result<ToolTurnReply, ProviderError>> = (0..24)
+    let trajectory: Vec<Result<ToolTurnReply, ProviderError>> = (0..96)
         .map(|n| Ok(explore(&format!("SELECT {n}"))))
         .collect();
     let provider = FakeProvider::new().scripted_tool_turn_seq("不收敛", trajectory);
@@ -776,13 +779,13 @@ fn step_cap_exhaustion_lands_a_failed_turn() {
         other => panic!("expected Execute, got {other:?}"),
     };
     assert!(
-        detail.contains("did not converge within 24 steps"),
-        "the detail carries the default cap value: got {detail:?}"
+        detail.contains("did not converge within 96 steps"),
+        "the detail carries the derived windowed ceiling: got {detail:?}"
     );
     assert_eq!(
         captured.lock().expect("capture lock").len(),
-        24,
-        "the cap stops the run at exactly the default 24 round-trips"
+        96,
+        "the windowed ceiling stops the run at exactly 4 x 24 round-trips"
     );
     assert!(session.get("result_1").is_none());
 }
