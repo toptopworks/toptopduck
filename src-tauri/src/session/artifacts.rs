@@ -388,27 +388,45 @@ pub(crate) fn settle_manifest(
         .collect()
 }
 
-/// Materialize one resolved hit (the persistence ruling, ADR-0124 Decision
-/// 2): a hit under the session temp working directory is COPIED into the
-/// per-session `artifacts/` directory (the temp dir dies with the session;
-/// the manifest must survive a close/reopen) and the copy's path is
-/// returned; anything else (a user-directory absolute hit) returns
-/// unchanged -- the app does not copy user files. Best-effort + logged: a
-/// copy failure leaves the temp path in place (the card degrades after
-/// close, honestly). A same-name collision takes a `_2`, `_3`, ... suffix
-/// so two distinct same-named files never overwrite each other. The
-/// returned flag is the entry's [`TurnArtifact::durable`] honest face:
-/// `true` for a materialized copy or a user-directory original, `false`
-/// for a temp path the copy could not move (openable until the session
-/// closes).
 /// Whether `path` names something strictly inside `dir` (the session
-/// working directory -- the materialization trigger). `Path::starts_with`
-/// compares components byte-exactly, so on Windows -- where the FS is
-/// case-insensitive and a model may echo an absolute temp path with
-/// drifted casing -- the comparison folds case through the same lens as
-/// [`dedup_key`], keeping the dedup and materialization decisions on one
-/// case semantics (PR #1089 review).
+/// working directory -- the materialization trigger). When both sides
+/// resolve, the comparison runs on canonicalized spellings: filesystem
+/// aliasing -- a Windows 8.3 short name inherited from the process TMP
+/// (`ADMINI~1` vs `Administrator`, #1232), an extended-length `\\?\`
+/// prefix, a junction -- collapses to one form on both sides, while the
+/// lexical walk sees two different paths and misjudges the hit as a
+/// user-directory original. A side that does not resolve (a
+/// declared-but-missing entry) falls back to the lexical walk, logging the
+/// fallback when the entry exists so the aliasing residue stays diagnosable.
 fn is_within(path: &Path, dir: &Path) -> bool {
+    if let (Ok(path), Ok(dir)) = (std::fs::canonicalize(path), std::fs::canonicalize(dir)) {
+        return is_within_components(&path, &dir);
+    }
+    // An unresolvable-but-existing entry (an exclusive handle at settle
+    // time, a traverse denial): the lexical walk cannot see filesystem
+    // aliasing, so under an aliased cwd spelling the hit may be misjudged
+    // as a user-directory original -- #1232's failure shape, narrowed to
+    // this corner. Logged, not silent.
+    if path.is_file() {
+        log::warn!(
+            target: "toptopduck::session",
+            "artifact containment check fell back to the lexical walk \
+             (canonicalize failed): {}",
+            path.display()
+        );
+    }
+    is_within_components(path, dir)
+}
+
+/// The component walk behind [`is_within`]. `Path::starts_with` compares
+/// components byte-exactly, so on Windows -- where the FS is
+/// case-insensitive and a model may echo an absolute temp path with
+/// drifted casing -- the walk folds case through the same lens as
+/// [`dedup_key`], keeping the dedup and materialization decisions on one
+/// case semantics (PR #1089 review). Aliasing is NOT this lens's job
+/// (the canonical layer above owns it; [`dedup_key`] stays lexical, so
+/// one file under two spellings dedupes twice -- #1232 scope ruling).
+fn is_within_components(path: &Path, dir: &Path) -> bool {
     let mut dir_comps = dir.components();
     for comp in path.components() {
         match dir_comps.next() {
@@ -435,6 +453,19 @@ fn component_eq(a: &std::path::Component, b: &std::path::Component) -> bool {
     a == b
 }
 
+/// Materialize one resolved hit (the persistence ruling, ADR-0124 Decision
+/// 2): a hit under the session temp working directory is COPIED into the
+/// per-session `artifacts/` directory (the temp dir dies with the session;
+/// the manifest must survive a close/reopen) and the copy's path is
+/// returned; anything else (a user-directory absolute hit) returns
+/// unchanged -- the app does not copy user files. Best-effort + logged: a
+/// copy failure leaves the temp path in place (the card degrades after
+/// close, honestly). A same-name collision takes a `_2`, `_3`, ... suffix
+/// so two distinct same-named files never overwrite each other. The
+/// returned flag is the entry's [`TurnArtifact::durable`] honest face:
+/// `true` for a materialized copy or a user-directory original, `false`
+/// for a temp path the copy could not move (openable until the session
+/// closes).
 fn materialize(path: PathBuf, cwd: &Path, artifacts_dir: Option<&Path>) -> (PathBuf, bool) {
     let Some(dir) = artifacts_dir else {
         return (path, false);
@@ -764,6 +795,41 @@ mod tests {
             manifest[0].path
         );
         assert!(Path::new(&manifest[0].path).is_file(), "the copy exists");
+    }
+
+    /// Windows spelling aliasing (#1232): the cwd arrives in one spelling
+    /// (here the extended-length `\\?\` prefix -- the lexical stand-in for
+    /// a short-name TMP component like `ADMINI~1`) while the declared
+    /// absolute path echoes the normal spelling. A component walk sees two
+    /// different paths and misjudges the hit as a user-directory original;
+    /// the containment check must compare canonicalized spellings.
+    /// Deterministic: it leans on prefix semantics, not the volume's 8.3
+    /// name generation.
+    #[cfg(windows)]
+    #[test]
+    fn settle_manifest_materializes_across_windows_spelling_aliases() {
+        let work = tempfile::tempdir().expect("workdir");
+        let session = tempfile::tempdir().expect("session dir");
+        std::fs::write(work.path().join("page.html"), "x").expect("write");
+        // The SAME directory, re-spelled with the verbatim prefix: the walk
+        // sees a different prefix component; canonicalization resolves both
+        // spellings to one path.
+        let verbatim_cwd = PathBuf::from(format!("\\\\?\\{}", work.path().display()));
+        let declared = work.path().join("page.html").to_string_lossy().into_owned();
+        let manifest = settle_manifest(
+            &[declared],
+            "",
+            &verbatim_cwd,
+            Some(&session.path().join(ARTIFACTS_DIR_NAME)),
+        );
+        assert_eq!(manifest.len(), 1);
+        assert!(
+            Path::new(&manifest[0].path).starts_with(session.path()),
+            "the aliased-spelling temp hit still materializes: {}",
+            manifest[0].path
+        );
+        assert!(Path::new(&manifest[0].path).is_file(), "the copy exists");
+        assert!(manifest[0].durable, "the materialized copy is durable");
     }
 
     /// The manifest caps at [`ARTIFACT_CAP`] entries; the cap keeps the
