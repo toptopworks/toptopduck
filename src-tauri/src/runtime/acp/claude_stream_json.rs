@@ -81,9 +81,10 @@ pub(crate) enum ClaudeEvent {
     /// actually runs (honest rendering, ADR-0097 Decision 5).
     SystemInit { model: Option<String> },
     /// Assistant thinking-block content (issue #612): one merged event per
-    /// frame -- headless emits whole blocks, not deltas. Accumulates into
-    /// the current round's thinking stream, frozen at the batch boundary or
-    /// turn end.
+    /// frame -- thinking rides the complete `assistant` frame whole
+    /// (`thinking_delta` stream events are tolerated, not mapped).
+    /// Accumulates into the current round's thinking stream, frozen at the
+    /// batch boundary or turn end.
     ThinkingBlock { text: String },
     /// Assistant text content -- accumulated across the turn.
     AssistantText { text: String },
@@ -437,6 +438,7 @@ pub(super) fn run_claude_stream_json(
             })
             .collect(),
         streamed_prose: false,
+        streamed_text: String::new(),
     };
 
     let mut termination: Option<Termination>;
@@ -494,13 +496,7 @@ pub(super) fn run_claude_stream_json(
                         {
                             (super::process::StdinWriteOutcome::Done, handed_back) => {
                                 stdin = handed_back;
-                                // The dedupe guard is per-message: a window
-                                // boundary can cut mid-message (deltas
-                                // streamed, the complete frame never came),
-                                // and a latched guard would swallow the next
-                                // window's whole-block frame off both tracks
-                                // (issue #1228).
-                                pump.streamed_prose = false;
+                                pump.open_window();
                                 window_resumes += 1;
                                 continue;
                             }
@@ -638,9 +634,26 @@ struct ClaudePump {
     /// arriving without deltas pushes as before) and at every window
     /// boundary (issue #1228).
     streamed_prose: bool,
+    /// The concatenation of the current message's text deltas, mirroring
+    /// [`Self::streamed_prose`]: the skip-side comparison for a
+    /// delta-covered frame. The CLI's own SSE assembly guarantees the
+    /// trailing frame repeats its deltas, so a mismatch is upstream drift
+    /// -- the dropped frame text stays answerable in logs (#886's
+    /// doctrine), the push semantics never change.
+    streamed_text: String,
 }
 
 impl ClaudePump {
+    /// Open the next continuation window (ADR-0128). Every window
+    /// boundary must reset the dedupe guard: a boundary can cut
+    /// mid-message (deltas streamed, the complete frame never came), and
+    /// a latched guard would swallow the next window's whole-block frame
+    /// off both tracks (issue #1228).
+    fn open_window(&mut self) {
+        self.streamed_prose = false;
+        self.streamed_text.clear();
+    }
+
     /// Fold one parsed event. Returns `Some(termination)` when the event
     /// ends the turn (the `result` frame).
     fn fold(
@@ -664,12 +677,22 @@ impl ClaudePump {
             // frame that trails its deltas (issue #561).
             ClaudeEvent::StreamDelta { text } => {
                 self.streamed_prose = true;
+                self.streamed_text.push_str(&text);
                 self.tracker.push_prose(&text, on_phase);
                 None
             }
             ClaudeEvent::AssistantText { text } => {
-                if !std::mem::take(&mut self.streamed_prose) {
+                let streamed = std::mem::take(&mut self.streamed_prose);
+                let deltas = std::mem::take(&mut self.streamed_text);
+                if !streamed {
                     self.tracker.push_prose(&text, on_phase);
+                } else if text != deltas {
+                    log::warn!(
+                        target: "toptopduck::acp",
+                        "claude delta-covered assistant frame differs from its \
+                         streamed deltas; frame text dropped: {text:?}, \
+                         streamed: {deltas:?}"
+                    );
                 }
                 None
             }
@@ -937,7 +960,8 @@ mod tests {
 
     /// An assistant frame's thinking block is captured as a
     /// `ThinkingBlock` event (issue #612) -- the round's reasoning text,
-    /// emitted whole (headless sends complete blocks, not deltas).
+    /// emitted whole (thinking rides complete frames; `thinking_delta`
+    /// events are tolerated, not mapped).
     #[test]
     fn parse_assistant_thinking_block_captured() {
         let v = json!({
@@ -1185,6 +1209,7 @@ mod tests {
             pending: Vec::new(),
             gateway_prefixes: vec!["mcp__toptopduck-gateway__".to_string()],
             streamed_prose: false,
+            streamed_text: String::new(),
         }
     }
 
@@ -1249,6 +1274,34 @@ mod tests {
             vec!["a".to_string(), "b".to_string()],
             "each text lands as one delta: the streamed chunk and the later whole-block frame"
         );
+    }
+
+    /// A delta-covered frame whose text differs from its streamed deltas
+    /// still skips -- the streamed text stands and the frame text drops
+    /// with a warn: the comparison is a diagnostic face, never a second
+    /// push path (issue #1228).
+    #[test]
+    fn a_mismatched_delta_covered_frame_still_skips() {
+        let mut pump = pump_with_bridge();
+        let mut phases = Vec::new();
+        pump.fold(ClaudeEvent::StreamDelta { text: "a".into() }, &mut |p| {
+            phases.push(p)
+        });
+        pump.fold(
+            ClaudeEvent::AssistantText {
+                text: "different".into(),
+            },
+            &mut |p| phases.push(p),
+        );
+        assert_eq!(pump.tracker.terminal_text(), "a");
+        let deltas: Vec<String> = phases
+            .into_iter()
+            .filter_map(|p| match p {
+                TurnPhase::TextDelta { delta } => Some(delta),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(deltas, vec!["a".to_string()]);
     }
 
     // --- pump fold: rounds (issue #612) ---------------------------------------

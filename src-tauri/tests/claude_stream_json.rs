@@ -3,8 +3,10 @@
 //! Drives the real [`AcpEngine`] (via the `ClaudeStreamJson` dispatch arm)
 //! against the claude fake-CLI fixture (`claude-fake-cli`, declared as a
 //! `[[bin]]`) across every observable pump branch: clean text reply,
-//! headless thinking-block rounds (issue #612), a gateway-routed tool
-//! trajectory (phases + the prose round + the landed anchor row), a
+//! partial-message streamed replies and the tool-interleaved streaming
+//! shape (issue #1228), headless thinking-block rounds (issue #612), a
+//! gateway-routed tool trajectory (phases + the prose round + the landed
+//! anchor row), a
 //! native tool slipping past the deny list (engine trace row), hook-frame
 //! tolerance, result-frame errors, the max-turns cap mapping, crash /
 //! empty-stdout fallbacks, step-cap overflow, and the spawn argv injection
@@ -152,6 +154,36 @@ fn streamed_reply_deltas_stream_once_without_duplication() {
         })
         .collect();
     assert_eq!(deltas, vec!["the answer ", "is 42"]);
+}
+
+/// Partial-message deltas around a tool batch (issue #1228): the streamed
+/// preamble's trailing frame carries the same text PLUS the tool_use
+/// blocks (the dedupe skips only the text, never the call), and the
+/// closing message arrives whole-block with no deltas of its own -- the
+/// delta stream is the two streamed chunks plus that closing frame, the
+/// trace keeps the gateway row, and the turn resolves to the final text.
+#[test]
+fn streamed_tool_call_keeps_the_tool_row_and_lands_text_once() {
+    let (outcome, phases, _) = run("streamed_tool_call", 24);
+    match &outcome.termination {
+        Termination::Text(t) => assert_eq!(t, "found 3 rows"),
+        other => panic!("expected Text, got {other:?}"),
+    }
+    assert_eq!(outcome.trace.len(), 1, "{:?}", outcome.trace);
+    assert_eq!(outcome.trace[0].calls.len(), 1);
+    assert_eq!(outcome.trace[0].calls[0].name, "explore");
+    let deltas: Vec<&str> = phases
+        .iter()
+        .filter_map(|p| match p {
+            TurnPhase::TextDelta { delta } => Some(delta.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        deltas,
+        vec!["checking the ", "table", "found 3 rows"],
+        "streamed preamble chunks + the whole-block closing frame, each exactly once"
+    );
 }
 
 /// A gateway-routed tool call: the engine emits the Started/Completed phase
@@ -361,7 +393,12 @@ fn max_turns_exhaustion_lands_the_derived_ceiling() {
 /// ADR-0128 continuation: the SAME process answers the engine's nudge user
 /// frame -- window one tops out mid-batch, window two lands the terminal
 /// text. One process, one settle: the window-one call round survives and
-/// the nudge leaves no trace of its own. The fixture traces each user
+/// the nudge leaves no trace of its own. Window one's prose streams as
+/// partial-message deltas whose complete frame never arrives (the orphan
+/// run, issue #1228): the delta assertion below pins the window-boundary
+/// guard reset -- a latched guard would swallow window two's whole-block
+/// frame while the result-frame termination assertion above it stays
+/// green. The fixture traces each user
 /// frame's text (PR #1227 review, Important 2): the continuation frame
 /// must carry the nudge alone -- an empty or repeated-context frame passes
 /// every other assertion and only fails here.
@@ -399,6 +436,24 @@ fn max_turns_continues_the_same_process() {
     assert_eq!(outcome.trace.len(), 1, "{:?}", outcome.trace);
     assert_eq!(outcome.trace[0].calls.len(), 1);
     assert_eq!(outcome.trace[0].calls[0].name, "explore");
+    // The orphan delta run pins the window-boundary guard reset (issue
+    // #1228): window one's prose streamed with no complete frame, so a
+    // latched guard would swallow window two's whole-block frame -- the
+    // delta stream loses the third chunk while the termination assertion
+    // above stays green (the result frame wins the terminal text). Exactly
+    // the two streamed chunks plus window two's whole-block frame.
+    let deltas: Vec<&str> = phases
+        .iter()
+        .filter_map(|p| match p {
+            TurnPhase::TextDelta { delta } => Some(delta.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        deltas,
+        vec!["checking the ", "table", "window two answer"],
+        "two streamed chunks, then window two's whole-block frame"
+    );
     // The convergence nudge never surfaces: no phase, no trace row, no
     // terminal-text contamination carries its wording.
     let nudge_fragment = "step budget for this window";
