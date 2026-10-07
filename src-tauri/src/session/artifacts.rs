@@ -388,19 +388,6 @@ pub(crate) fn settle_manifest(
         .collect()
 }
 
-/// Materialize one resolved hit (the persistence ruling, ADR-0124 Decision
-/// 2): a hit under the session temp working directory is COPIED into the
-/// per-session `artifacts/` directory (the temp dir dies with the session;
-/// the manifest must survive a close/reopen) and the copy's path is
-/// returned; anything else (a user-directory absolute hit) returns
-/// unchanged -- the app does not copy user files. Best-effort + logged: a
-/// copy failure leaves the temp path in place (the card degrades after
-/// close, honestly). A same-name collision takes a `_2`, `_3`, ... suffix
-/// so two distinct same-named files never overwrite each other. The
-/// returned flag is the entry's [`TurnArtifact::durable`] honest face:
-/// `true` for a materialized copy or a user-directory original, `false`
-/// for a temp path the copy could not move (openable until the session
-/// closes).
 /// Whether `path` names something strictly inside `dir` (the session
 /// working directory -- the materialization trigger). When both sides
 /// resolve, the comparison runs on canonicalized spellings: filesystem
@@ -409,10 +396,24 @@ pub(crate) fn settle_manifest(
 /// prefix, a junction -- collapses to one form on both sides, while the
 /// lexical walk sees two different paths and misjudges the hit as a
 /// user-directory original. A side that does not resolve (a
-/// declared-but-missing entry) falls back to the lexical walk unchanged.
+/// declared-but-missing entry) falls back to the lexical walk, logging the
+/// fallback when the entry exists so the aliasing residue stays diagnosable.
 fn is_within(path: &Path, dir: &Path) -> bool {
     if let (Ok(path), Ok(dir)) = (std::fs::canonicalize(path), std::fs::canonicalize(dir)) {
         return is_within_components(&path, &dir);
+    }
+    // An unresolvable-but-existing entry (an exclusive handle at settle
+    // time, a traverse denial): the lexical walk cannot see filesystem
+    // aliasing, so under an aliased cwd spelling the hit may be misjudged
+    // as a user-directory original -- #1232's failure shape, narrowed to
+    // this corner. Logged, not silent.
+    if path.is_file() {
+        log::warn!(
+            target: "toptopduck::session",
+            "artifact containment check fell back to the lexical walk \
+             (canonicalize failed): {}",
+            path.display()
+        );
     }
     is_within_components(path, dir)
 }
@@ -452,6 +453,19 @@ fn component_eq(a: &std::path::Component, b: &std::path::Component) -> bool {
     a == b
 }
 
+/// Materialize one resolved hit (the persistence ruling, ADR-0124 Decision
+/// 2): a hit under the session temp working directory is COPIED into the
+/// per-session `artifacts/` directory (the temp dir dies with the session;
+/// the manifest must survive a close/reopen) and the copy's path is
+/// returned; anything else (a user-directory absolute hit) returns
+/// unchanged -- the app does not copy user files. Best-effort + logged: a
+/// copy failure leaves the temp path in place (the card degrades after
+/// close, honestly). A same-name collision takes a `_2`, `_3`, ... suffix
+/// so two distinct same-named files never overwrite each other. The
+/// returned flag is the entry's [`TurnArtifact::durable`] honest face:
+/// `true` for a materialized copy or a user-directory original, `false`
+/// for a temp path the copy could not move (openable until the session
+/// closes).
 fn materialize(path: PathBuf, cwd: &Path, artifacts_dir: Option<&Path>) -> (PathBuf, bool) {
     let Some(dir) = artifacts_dir else {
         return (path, false);
