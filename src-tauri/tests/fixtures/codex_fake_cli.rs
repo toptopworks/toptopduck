@@ -95,8 +95,11 @@ fn main() {
     let scenario = std::env::var("CODEX_FAKE_SCENARIO").unwrap_or_else(|_| "text_reply".into());
 
     // ADR-0095: trace the spawn argv so the integration test can assert the
-    // engine's model / thought-level injection.
+    // engine's model / thought-level injection. ADR-0128: a `resume` element
+    // marks a continuation-window spawn (`codex exec resume <thread_id>`),
+    // the turn-limit scenarios' second shape.
     let argv: Vec<String> = std::env::args().skip(1).collect();
+    let is_resume = argv.iter().any(|a| a == "resume");
     trace_argv(&argv);
 
     // Issue #808: a CLI that stalls BEFORE draining stdin (e.g. wedged in
@@ -201,6 +204,33 @@ fn main() {
                 &mut out,
                 &serde_json::json!({"type": "turn.failed", "error": "rate limited"}),
             );
+        }
+        // ADR-0128 window boundary: the CLI's own `model_max_turns` budget
+        // self-stops (the turn-limit failure, the measured object-shaped
+        // error). Window one carries a tool batch before the limit; the
+        // RESUME spawn (argv carries `resume`) -- the engine's continuation
+        // window -- finishes the thread. Rounds must carry across the two
+        // processes (the same tracker, one settle).
+        "turn_limit_continue" => {
+            if is_resume {
+                emit(&mut out, &thread_started());
+                emit(&mut out, &agent_message("item_r1", "resumed and finishing"));
+                emit(&mut out, &command_execution("item_r2", "explore SELECT 2"));
+                emit(&mut out, &agent_message("item_r3", "the answer is 42"));
+                emit(&mut out, &serde_json::json!({"type": "turn.completed"}));
+            } else {
+                emit(&mut out, &thread_started());
+                emit(&mut out, &agent_message("item_1", "checking the table"));
+                emit(&mut out, &command_execution("item_2", "explore SELECT 1"));
+                emit(&mut out, &turn_limit_failed());
+            }
+        }
+        // Every window (the initial spawn and each resume) hits the limit:
+        // the engine exhausts its resume budget (1 + 3 windows) and lands
+        // the derived ceiling.
+        "turn_limit_exhausted" => {
+            emit(&mut out, &thread_started());
+            emit(&mut out, &turn_limit_failed());
         }
         // Gateway-served MCP tool calls (issue #816): two completed
         // `mcp_tool_call` items — a registered-CLI-shaped bare name and a
@@ -349,23 +379,6 @@ fn main() {
             emit(&mut out, &agent_message("item_6", "the answer is 42"));
             emit(&mut out, &serde_json::json!({"type": "turn.completed"}));
         }
-        "step_cap_overflow" => {
-            // Emit more command_execution items than the step cap (tests pass
-            // cap=3); the engine kills the child once tool_call_count exceeds
-            // the cap, so we emit up front. The engine's recv_timeout loop will
-            // break and kill before consuming all of these.
-            for i in 1..=50u32 {
-                let _ = writeln!(
-                    out,
-                    r#"{{"type":"item.completed","item":{{"id":"item_{i}","type":"command_execution","command":"call {i}","aggregated_output":"","exit_code":0,"status":"completed"}}}}"#
-                );
-            }
-            let _ = out.flush();
-            // Block so the engine has time to notice the step-cap trip and kill
-            // us. Without this, the process exits immediately and the pump sees
-            // Disconnected instead of the step-cap path.
-            std::thread::sleep(std::time::Duration::from_secs(30));
-        }
         "line_cap_overlong" => {
             // A single line past the 4-MiB line cap (issue #639's cap
             // reaching the stream path): the shared reader drops it and
@@ -423,4 +436,18 @@ fn emit(out: &mut std::io::Stdout, value: &serde_json::Value) {
         let _ = writeln!(out, "{s}");
         let _ = out.flush();
     }
+}
+
+/// The conversation-open event carrying the thread id -- the `exec resume`
+/// handle (ADR-0128; live-measured on 0.154: `thread.started` precedes the
+/// turn events, and a resumed process echoes the SAME id).
+fn thread_started() -> serde_json::Value {
+    serde_json::json!({"type": "thread.started", "thread_id": "01aa-fixture-thread-id"})
+}
+
+/// The `model_max_turns` self-stop (the ADR-0128 window boundary): a
+/// `turn.failed` whose error names the turn limit, the object-shaped wire
+/// the real CLI emits (live-measured on 0.154).
+fn turn_limit_failed() -> serde_json::Value {
+    serde_json::json!({"type": "turn.failed", "error": {"message": "Turn limit reached"}})
 }

@@ -57,8 +57,9 @@ use crate::mcp::aggregator::McpAggregator;
 use crate::model::TurnPhase;
 use crate::provider::tool_calling::ToolTurnRequest;
 use crate::session::loop_contract::{
-    retain_landed_rounds, truncate_trace_excerpt, LoopOutcome, Termination, TraceEntry,
-    DEFAULT_NO_PROGRESS_CAP, DEFAULT_STEP_CAP, MAX_WINDOW_RESUMES, TRACE_EXCERPT_MAX,
+    derived_step_ceiling, retain_landed_rounds, truncate_trace_excerpt, LoopOutcome, Termination,
+    TraceEntry, DEFAULT_NO_PROGRESS_CAP, DEFAULT_STEP_CAP, MAX_WINDOW_RESUMES, TRACE_EXCERPT_MAX,
+    WINDOW_CONVERGENCE_NUDGE,
 };
 use crate::session::materializer::{Materializer, TurnDeps};
 use crate::session::progress::ProgressClock;
@@ -858,12 +859,6 @@ async fn drive_turn(inputs: DriveInputs) -> DriveOutcome {
     }
 }
 
-/// The convergence nudge that reopens an exhausted step window
-/// (ADR-0128): user-role, English, in-flight only -- it rides the
-/// reopened request's prompt and lands nowhere else (no trace entry, no
-/// `.duck` record, no next-turn window assembly).
-const WINDOW_CONVERGENCE_NUDGE: &str = "You have reached the step budget for this window of the turn. Continue the task, but start consolidating: finish the current step and work toward your final answer.";
-
 /// Open one step window's stream over the given prompt and history
 /// (ADR-0128). Every reopen repeats the full builder posture -- budget,
 /// thought level, hooks, memoryless-ness -- so a resumed window keeps the
@@ -965,10 +960,10 @@ fn termination_for_prompt(
         PromptError::MaxTurnsError { .. } => {
             // The windowed hard ceiling (ADR-0128), not the turns taken and
             // not the single window's cap: the wiring seam renders "did not
-            // converge in N steps" off the turn's total budget -- the
-            // derived product `cap * (1 + MAX_WINDOW_RESUMES)`, never an
+            // converge in N steps" off the turn's total budget -- the one
+            // derived product every windowed runtime lands, never an
             // independent constant.
-            Termination::StepCap(step_cap * (1 + MAX_WINDOW_RESUMES))
+            Termination::StepCap(derived_step_ceiling(step_cap))
         }
         PromptError::PromptCancelled { reason, .. } => {
             // The watcher hook's reason fork (ADR-0116 Decision 3) is pinned

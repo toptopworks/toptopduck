@@ -40,6 +40,8 @@
 
 - 触顶轮次继续而非失败：trace 连续、单次结算、收敛提示零持久化痕迹；用户感知仅为该轮跑得久、轮数多。
 - 内置落账文案渲染全局值而非单窗值；防失控分层定格为续 3 窗（慢速发散）+ 看门狗（静默）+ 同参重复检测（循环）三层，子代理预算独立不变。
-- claude 输入面换轨波及每次 claude 轮次（不只触顶路径），argv 拼写沿 live E2E 钉死惯例；codex session id 捕获与 result 后续写行为以真机实测钉死，均留实施期。
+- claude 输入面换轨波及每次 claude 轮次（不只触顶路径），argv 拼写沿 live E2E 钉死惯例；codex session id 捕获与 result 后续写行为以真机实测钉死。
+- 实施期真机钉死（claude 2.1.259 / codex 0.154.0）：claude 的 `user` 帧提示与 result 帧后同进程续写（第二条 `user` 帧得到第二个 result 帧验证），probe 与轮次驱动共享同一输入面（`--input-format stream-json` 折入轮次 argv）；codex 的会话句柄即 `thread.started` 的 `thread_id`（`exec resume` 直收），rollout 落 `CODEX_HOME/sessions`，故 codex argv 退役 `--ephemeral`（ephemeral 禁写 rollout 会杀死续跑通道，session 文件落盘成为该通道的记录在案代价）。
+- 外部三族的 app 侧计数即杀全面退役：窗边界是各族原生自报（ACP `MaxTurnRequests` / claude `error_max_turns` / codex `model_max_turns` 自停），codex 的耗尽事件措辞（`turn.failed` 的 turn-limit 判别子串）尚未实测钉死，留待真机补钉。
 - 取消、看门狗、审批门在续窗路径的既有语义不变，测试面随续窗用例扩展。
 - **部分取代 ADR-0081**：执行级兜底的步数触顶语义从「触顶即 failed」重写为「触顶自动续窗 + 限续 3 窗，第 4 次触顶仍 failed」；单窗 24 作为窗粒度预算保留，看门狗与整轮取消保留。

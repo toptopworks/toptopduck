@@ -35,7 +35,8 @@ use crate::runtime::acp::adapter::AdapterSpec;
 use crate::runtime::acp::turn_io::{build_model_flags, flatten_prompt};
 use crate::runtime::acp::wire::McpServer;
 use crate::session::loop_contract::{
-    truncate_trace_excerpt, LoopOutcome, LoopRound, Termination, TraceEntry, TRACE_EXCERPT_MAX,
+    derived_step_ceiling, truncate_trace_excerpt, LoopOutcome, LoopRound, Termination, TraceEntry,
+    MAX_WINDOW_RESUMES, TRACE_EXCERPT_MAX, WINDOW_CONVERGENCE_NUDGE,
 };
 use crate::session::progress::ProgressClock;
 
@@ -48,6 +49,11 @@ use crate::session::progress::ProgressClock;
 /// are ignored by the engine.
 #[derive(Debug, PartialEq)]
 pub(crate) enum CodexEvent {
+    /// The conversation thread opened (`thread.started`): the `thread_id`
+    /// is the session handle the windowed continuation resumes via
+    /// `codex exec resume <thread_id>` (ADR-0128; live-measured on 0.154 --
+    /// the id is a UUID the resume positional accepts directly).
+    ThreadStarted { thread_id: String },
     /// The agent started its turn (`turn.started`).
     TurnStarted,
     /// The agent finished normally (`turn.completed`).
@@ -122,11 +128,19 @@ pub(crate) enum CodexEvent {
 /// row, so only its EXECUTION item types parse (into
 /// [`CodexEvent::ExecutionStarted`], the no-progress freeze window opener,
 /// ADR-0115); every other started item stays [`CodexEvent::Other`] like
-/// every other unmeasured type (`thread.started`, ...); the reasoning item
-/// folds only its completed envelope (issue #807).
+/// every other unmeasured type; the reasoning item folds only its completed
+/// envelope (issue #807), and `thread.started` parses into the resume-handle
+/// capture (ADR-0128) -- no longer one of the ignored kinds.
 pub(crate) fn parse_event(value: &Value) -> CodexEvent {
     let event_type = value.get("type").and_then(|v| v.as_str()).unwrap_or("");
     match event_type {
+        "thread.started" => value
+            .get("thread_id")
+            .and_then(|v| v.as_str())
+            .map(|thread_id| CodexEvent::ThreadStarted {
+                thread_id: thread_id.to_string(),
+            })
+            .unwrap_or(CodexEvent::Other),
         "turn.started" => CodexEvent::TurnStarted,
         "turn.completed" => CodexEvent::TurnCompleted,
         "turn.failed" => CodexEvent::TurnFailed {
@@ -426,7 +440,13 @@ pub(super) fn run_codex_event_stream(
     // the ADR-0095 model / thought-level selections: the model rides
     // `[model_arg, id]` right after the argv prefix, the thought level rides
     // a `-c {key}={value}` override (the same `-c` mechanism as the bridge).
-    let config_flags = build_config_overrides(&input.mcp_servers);
+    let mut config_flags = build_config_overrides(&input.mcp_servers);
+    // Windowed auto-continuation (ADR-0128): the window boundary is the
+    // CLI's OWN budget -- `model_max_turns` self-stops the window (the
+    // app-side count-and-kill retires), and `codex exec resume <thread_id>`
+    // continues the same session into the next window.
+    config_flags.push("-c".to_string());
+    config_flags.push(format!("model_max_turns={step_cap}"));
     let model_flags = build_model_flags(
         adapter,
         input.model.as_deref(),
@@ -475,7 +495,7 @@ pub(super) fn run_codex_event_stream(
     let stdout = child.stdout.take().expect("piped stdout");
 
     // Reader thread (shared, line-capped -- issue #639).
-    let rx = super::process::spawn_line_reader(stdout);
+    let mut rx = super::process::spawn_line_reader(stdout);
 
     // Signal Thinking once before the event pump (one exec invocation = one
     // turn = one thinking wait).
@@ -483,22 +503,21 @@ pub(super) fn run_codex_event_stream(
 
     let mut pump = JsonPump::new(step_cap, clock.clone());
 
-    let mut termination = None;
-    let mut step_cap_tripped = false;
+    let mut termination: Option<Termination>;
+    // Windowed auto-continuation (ADR-0128): the CLI's own `model_max_turns`
+    // self-stop is the window boundary -- under the resume budget the
+    // engine spawns `exec resume <thread_id>` (the convergence nudge is the
+    // resumed window's prompt alone, so nothing of it persists), keeping
+    // the pump's rounds, the cancel token, and the watchdog clock on the
+    // turn's one trajectory. The whole budget spent lands the derived
+    // ceiling below.
+    let mut window_resumes = 0u32;
     let mut discards = super::process::DiscardLog::new();
 
     loop {
         // Cancel check (mirrors the ACP loop-top check).
         if cancel.is_requested() {
             termination = Some(Termination::Cancelled);
-            break;
-        }
-        // Step-cap trip (execution-level cap, ADR-0081). Unlike the ACP path
-        // there is no protocol-level cancel message — kill the child and
-        // terminate. Counting tool_call_count > step_cap means the cap was
-        // exceeded, so the agent did not converge.
-        if pump.tool_call_count > pump.step_cap {
-            step_cap_tripped = true;
             break;
         }
 
@@ -518,6 +537,49 @@ pub(super) fn run_codex_event_stream(
                     }
                 };
                 if let Some(term) = pump.fold(parse_event(&value), &mut on_phase) {
+                    // A window boundary (the CLI's turn-limit self-stop):
+                    // resume the same session when the budget allows and the
+                    // thread id is in hand.
+                    let window_trip = matches!(term, Termination::StepCap(_))
+                        && window_resumes < MAX_WINDOW_RESUMES
+                        && pump.thread_id.is_some();
+                    if window_trip {
+                        let thread_id = pump.thread_id.clone().expect("checked above");
+                        window_resumes += 1;
+                        super::process::kill_and_reap(&mut child);
+                        let resume_argv: Vec<&str> = adapter
+                            .argv
+                            .iter()
+                            .copied()
+                            .chain(["resume", thread_id.as_str(), WINDOW_CONVERGENCE_NUDGE])
+                            .collect();
+                        match super::process::spawn_turn(
+                            binary,
+                            &resume_argv,
+                            &model_flags,
+                            &config_flags,
+                            &input.cwd,
+                        ) {
+                            Ok(c) => {
+                                child = c;
+                                // The nudge rides the PROMPT positional; a
+                                // held-open stdin would block the CLI's
+                                // "additional input from stdin" read, so the
+                                // pipe closes (EOF) at once.
+                                drop(child.stdin.take());
+                                let stdout = child.stdout.take().expect("piped stdout");
+                                rx = super::process::spawn_line_reader(stdout);
+                                continue;
+                            }
+                            Err(e) => {
+                                termination = Some(Termination::Runtime(format!(
+                                    "failed to spawn codex exec resume `{}`: {e}",
+                                    adapter.id
+                                )));
+                                break;
+                            }
+                        }
+                    }
                     termination = Some(term);
                     break;
                 }
@@ -537,9 +599,10 @@ pub(super) fn run_codex_event_stream(
         }
     }
 
-    // If the step cap tripped, override any pending termination.
-    if step_cap_tripped {
-        termination = Some(Termination::StepCap(step_cap));
+    // The whole resume budget spent: the landing carries the derived total
+    // budget every windowed runtime renders (ADR-0128).
+    if let Some(Termination::StepCap(_)) = termination {
+        termination = Some(Termination::StepCap(derived_step_ceiling(step_cap)));
     }
 
     super::process::kill_and_reap(&mut child);
@@ -574,8 +637,14 @@ pub(super) fn run_codex_event_stream(
 /// frame, so no pending-row drain exists here.
 struct JsonPump {
     tracker: RoundTracker,
-    /// Count of command/tool executions observed (step-cap counter).
-    tool_call_count: u32,
+    /// The conversation's thread id once `thread.started` arrives -- the
+    /// `codex exec resume` handle (ADR-0128). `None` before the frame (or
+    /// on a stream that never sent one), in which case a window trip has
+    /// no resume channel and lands the ceiling.
+    thread_id: Option<String>,
+    /// The window cap the turn-limit fold reports -- the WINDOW-TRIP signal
+    /// only (ADR-0128): the driver resumes under the budget and lands the
+    /// derived ceiling otherwise, so no app-side counting rides this path.
     step_cap: u32,
     /// The turn's no-progress clock (ADR-0115): open execution windows
     /// freeze it -- a silent native codex command running past the cap is
@@ -595,7 +664,7 @@ impl JsonPump {
     fn new(step_cap: u32, clock: Option<Arc<ProgressClock>>) -> Self {
         Self {
             tracker: RoundTracker::new(),
-            tool_call_count: 0,
+            thread_id: None,
             step_cap,
             clock,
             exec_depth: 0,
@@ -625,6 +694,14 @@ impl JsonPump {
         on_phase: &mut impl FnMut(TurnPhase),
     ) -> Option<Termination> {
         match event {
+            CodexEvent::ThreadStarted { thread_id } => {
+                // The resume handle (ADR-0128): first writer wins -- a
+                // resumed window's `thread.started` echoes the SAME id (the
+                // conversation thread is the session), so the latch is
+                // idempotent by construction.
+                self.thread_id.get_or_insert(thread_id);
+                None
+            }
             // Already signaled Thinking before the pump; a redundant signal
             // would confuse the UI. No-op.
             CodexEvent::TurnStarted => None,
@@ -636,7 +713,21 @@ impl JsonPump {
                 None
             }
             CodexEvent::TurnCompleted => Some(Termination::Text(self.tracker.terminal_text())),
-            CodexEvent::TurnFailed { error } => Some(Termination::Runtime(error)),
+            CodexEvent::TurnFailed { error } => {
+                // The CLI's own turn budget (ADR-0128): the `model_max_turns`
+                // self-stop reads as a turn-limit failure -- the WINDOW-TRIP
+                // signal the driver resumes off; any other failure stays the
+                // turn's own Runtime. Both classifications log the full
+                // error text: the wording is not yet live-pinned, so drift
+                // must stay answerable from the log.
+                if error.to_ascii_lowercase().contains("turn limit") {
+                    log::warn!("codex turn.failed read as the step window boundary: {error}");
+                    Some(Termination::StepCap(self.step_cap))
+                } else {
+                    log::warn!("codex turn.failed read as a runtime failure: {error}");
+                    Some(Termination::Runtime(error))
+                }
+            }
             CodexEvent::AgentMessage { text } => {
                 // Empty text (an `agent_message` item carrying an empty
                 // text string) would open a ghost round and fire a phantom
@@ -655,7 +746,6 @@ impl JsonPump {
                 // The completion echo closes the execution window.
                 self.exec_depth = self.exec_depth.saturating_sub(1);
                 self.reconcile_exec_freeze();
-                self.tool_call_count += 1;
                 // exit_code maps the row's success (issue #804): zero (or
                 // absent -- an unknown outcome) succeeds, non-zero fails
                 // with the code as the failure anchor.
@@ -706,7 +796,6 @@ impl JsonPump {
                 // The completion echo closes the execution window.
                 self.exec_depth = self.exec_depth.saturating_sub(1);
                 self.reconcile_exec_freeze();
-                self.tool_call_count += 1;
                 // The badge + digest replay the gateway's dispatch row
                 // where the stream layer can (issue #816). The settle-time
                 // merge (`merge_outcomes`) replaces this echo in place with
@@ -1096,8 +1185,15 @@ mod tests {
     }
 
     #[test]
-    fn parse_thread_started_is_other() {
-        assert_eq!(fixture_event(MEASURED_TURN_NDJSON[0]), CodexEvent::Other);
+    fn parse_thread_started_captures_the_resume_handle() {
+        // ADR-0128: the thread id is the `exec resume` handle -- the first
+        // line of the measured capture now parses into the capture variant.
+        assert_eq!(
+            fixture_event(MEASURED_TURN_NDJSON[0]),
+            CodexEvent::ThreadStarted {
+                thread_id: "<uuid>".into()
+            }
+        );
     }
 
     /// A completed reasoning item folds its text (issue #807): the

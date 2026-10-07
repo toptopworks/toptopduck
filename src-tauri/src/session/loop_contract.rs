@@ -43,6 +43,24 @@ pub(crate) const MAX_WINDOW_RESUMES: u32 = 3;
 /// [`TurnOutcome::Cancelled`]).
 pub(crate) const DEFAULT_NO_PROGRESS_CAP: Duration = Duration::from_secs(120);
 
+/// The convergence nudge that reopens an exhausted step window (ADR-0128):
+/// user-role, English, in-flight only -- every runtime injects it into the
+/// reopened request's prompt (the built-in loop as the reopened rig prompt,
+/// ACP as the same-session `session/prompt`, claude as the same-process
+/// stream-json user frame, codex as the `exec resume` prompt) and it lands
+/// nowhere else (no trace entry, no `.duck` record, no next-turn window
+/// assembly).
+pub(crate) const WINDOW_CONVERGENCE_NUDGE: &str = "You have reached the step budget for this window of the turn. Continue the task, but start consolidating: finish the current step and work toward your final answer.";
+
+/// The windowed hard ceiling a turn renders when the whole resume budget is
+/// spent (ADR-0128): the derived product `cap * (1 + MAX_WINDOW_RESUMES)` --
+/// every windowed runtime (the built-in loop and the three external
+/// families) lands the SAME product off its window cap, never an
+/// independent constant.
+pub(crate) fn derived_step_ceiling(cap: u32) -> u32 {
+    cap * (1 + MAX_WINDOW_RESUMES)
+}
+
 /// Maximum length of a trace entry's result excerpt (ADR-0078). The full result
 /// rides the trace; the far window carries only a summary, so an excerpt is all
 /// the loop needs to keep for the collapsible trace. Shared across runtimes --
@@ -88,12 +106,13 @@ pub enum Termination {
     /// rides `body`, the prose answer -- #847).
     Text(String),
     /// The step cap was reached without a terminal reply (the agent did not
-    /// converge): on the built-in path, every window topped out and the whole
-    /// resume budget is spent (ADR-0128 partially supersedes ADR-0081's
-    /// hit-and-fail cap posture). Carries the runtime's total step ceiling --
-    /// the derived `cap * (1 + MAX_WINDOW_RESUMES)` on the windowed built-in
-    /// path, the single cap on the external runtimes not yet windowed (#1225)
-    /// -- so the wiring seam can render an honest "did not converge in N
+    /// converge): every window topped out and the whole resume budget is
+    /// spent (ADR-0128 partially supersedes ADR-0081's hit-and-fail cap
+    /// posture). Carries the runtime's total step ceiling -- the derived
+    /// `cap * (1 + MAX_WINDOW_RESUMES)` every windowed runtime lands via
+    /// [`derived_step_ceiling`] (the built-in loop and the three external
+    /// families alike; a non-windowed token ceiling keeps the single cap) --
+    /// so the wiring seam can render an honest "did not converge in N
     /// steps" detail. Maps to `TurnOutcome::Failed` (ADR-0081
     /// execution-level cap).
     StepCap(u32),
@@ -705,6 +724,15 @@ mod tests {
         let cut = truncate_trace_excerpt(&long, 10);
         assert_eq!(cut.chars().count(), 10);
         assert!(cut.ends_with('…'), "ends with ellipsis: {cut}");
+    }
+
+    /// The windowed ceiling is the derived product every windowed runtime
+    /// lands (ADR-0128): `cap * (1 + MAX_WINDOW_RESUMES)` -- the one helper,
+    /// so the built-in loop and the three external families cannot drift.
+    #[test]
+    fn derived_step_ceiling_is_the_resume_budget_product() {
+        assert_eq!(derived_step_ceiling(24), 96);
+        assert_eq!(derived_step_ceiling(1), 1 + MAX_WINDOW_RESUMES);
     }
 
     /// The nested sub-trace projection (ADR-0117 Decision 6, issue #934): a

@@ -29,13 +29,6 @@ use toptopduck_lib::runtime::acp::wire::{
     ToolCallStatus, ToolKind,
 };
 
-/// Tool-call starts emitted by the `step_cap_overflow` scenario. Must exceed
-/// any caller's step cap (the integration tests pass `cap=5`) so the engine's
-/// `tool_call_count` crosses the cap and fires `session/cancel`; any fewer and
-/// the scenario would block on `drain_once` waiting for a cancel that never
-/// arrives.
-const OVERFLOW_COUNT: u32 = 50;
-
 /// Append one trace line to the file named by `ACP_FAKE_TRACE_FILE` (when
 /// set). The integration test passes a temp file so it can assert on what the
 /// CLI received (stdout belongs to the engine's protocol channel; stderr
@@ -53,6 +46,31 @@ fn trace_line(line: &str) {
     {
         let _ = writeln!(f, "{line}");
     }
+}
+
+/// The text blocks of a received `session/prompt`, block-separated: the
+/// prompt_echo scenario's echo and the ADR-0128 continuation trace share
+/// the extraction (the resumed window's prompt is the nudge alone, and the
+/// trace file is the only assertable face).
+fn received_prompt_text(req: &serde_json::Value) -> String {
+    let mut text = String::new();
+    if let Some(blocks) = req
+        .get("params")
+        .and_then(|p| p.get("prompt"))
+        .and_then(|b| b.as_array())
+    {
+        for block in blocks {
+            let block_text = block
+                .get("text")
+                .and_then(|t| t.as_str())
+                .unwrap_or_default();
+            if !text.is_empty() {
+                text.push_str("\n----\n");
+            }
+            text.push_str(block_text);
+        }
+    }
+    text
 }
 
 /// Heartbeat interval for the `handshake_silent` scenario (issue #534): the
@@ -421,24 +439,7 @@ fn play_scenario(
         // The integration test asserts on the disclosure mix the CLI received
         // (index entries + activated bodies, not full-text mounts).
         "prompt_echo" => {
-            let mut echoed = String::new();
-            if let Some(blocks) = req
-                .get("params")
-                .and_then(|p| p.get("prompt"))
-                .and_then(|b| b.as_array())
-            {
-                for block in blocks {
-                    let text = block
-                        .get("text")
-                        .and_then(|t| t.as_str())
-                        .unwrap_or_default();
-                    if !echoed.is_empty() {
-                        echoed.push_str("\n----\n");
-                    }
-                    echoed.push_str(text);
-                }
-            }
-            notify(out, agent_message(&echoed));
+            notify(out, agent_message(&received_prompt_text(req)));
             respond_prompt(out, &id, StopReason::EndTurn);
         }
         "tool_calls" => {
@@ -617,8 +618,41 @@ fn play_scenario(
             );
             respond_prompt(out, &id, StopReason::EndTurn);
         }
+        // ADR-0128: the agent's own turn budget tops out EVERY window -- the
+        // scenario replays per `session/prompt`, so the engine exhausts its
+        // resume budget (1 + 3 windows) and lands the derived ceiling.
         "max_turns" => {
             respond_prompt(out, &id, StopReason::MaxTurnRequests);
+        }
+        // ADR-0128 continuation: window one tops out mid-work (a tool batch
+        // in flight); the RESUMED prompt -- the engine's convergence nudge
+        // on the same session -- answers. Rounds must carry across the
+        // windows (the same pump, one settle).
+        "max_turns_resume" => {
+            static WINDOW: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(1);
+            let window = WINDOW.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            // PR #1227 review (Important 2): trace the prompt text this
+            // window received -- the resumed window's whole prompt must be
+            // the engine's convergence nudge, and the trace file is the
+            // only assertable face (stdout is the protocol channel).
+            trace_line(&format!(
+                "ACP_FAKE_PROMPT[{window}]={}",
+                received_prompt_text(req)
+            ));
+            if window == 1 {
+                notify(out, agent_message("checking the table"));
+                notify_tool_call_roundtrip(
+                    out,
+                    "tc_1",
+                    "explore SELECT 1",
+                    ToolKind::Search,
+                    "rows: 3",
+                );
+                respond_prompt(out, &id, StopReason::MaxTurnRequests);
+            } else {
+                notify(out, agent_message("the answer is 42"));
+                respond_prompt(out, &id, StopReason::EndTurn);
+            }
         }
         "refusal" => {
             notify(out, agent_message("I can't do that"));
@@ -631,39 +665,6 @@ fn play_scenario(
             // Read the client's response (drain until the matching id).
             drain_until_response(reader, &req_id, cancel_seen);
             notify(out, agent_message("done"));
-            respond_prompt(out, &id, StopReason::EndTurn);
-        }
-        "step_cap_overflow" => {
-            // Emit more tool-call starts than the step cap, THEN drain for
-            // session/cancel. Emitting + draining interleaved deadlocks:
-            // drain_once blocks on read_line before the engine has anything
-            // to send (the cap is only tripped after enough starts cross the
-            // wire), so the turn would only ever resolve via the wall-clock
-            // watchdog, not the step-cap path this scenario exists to
-            // exercise. Emitting all starts up front lets the engine's
-            // tool_call_count cross the cap and fire cancel promptly; the
-            // drain then finds it in milliseconds.
-            for i in 1..=OVERFLOW_COUNT {
-                notify(
-                    out,
-                    tool_call_start(&format!("tc_{i}"), &format!("call {i}"), ToolKind::Search),
-                );
-            }
-            // Drain until session/cancel arrives (the engine sends it as soon
-            // as tool_call_count exceeds the step cap), then cooperate.
-            // Blocking is safe here -- the engine is guaranteed to send
-            // cancel once the cap is exceeded; an EOF before cancel stops
-            // producing so the scenario terminates deterministically.
-            while !*cancel_seen {
-                if !drain_once(reader, cancel_seen) {
-                    break;
-                }
-            }
-            if *cancel_seen {
-                respond_prompt(out, &id, StopReason::Cancelled);
-                return;
-            }
-            notify(out, agent_message("ran many calls"));
             respond_prompt(out, &id, StopReason::EndTurn);
         }
         "stuck" => {

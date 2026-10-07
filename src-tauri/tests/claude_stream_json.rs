@@ -323,15 +323,92 @@ fn result_error_maps_to_runtime() {
     }
 }
 
-/// The CLI's own max-turns ceiling maps onto the execution-level StepCap
-/// (the ACP path's MaxTurnRequests precedent).
+/// ADR-0128: the CLI's self-reported budget (`error_max_turns`) tops out
+/// EVERY window -- the engine spends the whole resume budget (1 + 3
+/// windows) and lands the DERIVED ceiling, the same product the built-in
+/// loop renders (96 = 24 x 4), never the single cap.
 #[test]
-fn max_turns_maps_to_step_cap() {
+fn max_turns_exhaustion_lands_the_derived_ceiling() {
     let (outcome, _, _) = run("max_turns", 24);
     match outcome.termination {
-        Termination::StepCap(n) => assert_eq!(n, 24),
+        Termination::StepCap(n) => assert_eq!(n, 96),
         other => panic!("expected StepCap, got {other:?}"),
     }
+}
+
+/// ADR-0128 continuation: the SAME process answers the engine's nudge user
+/// frame -- window one tops out mid-batch, window two lands the terminal
+/// text. One process, one settle: the window-one call round survives and
+/// the nudge leaves no trace of its own. The fixture traces each user
+/// frame's text (PR #1227 review, Important 2): the continuation frame
+/// must carry the nudge alone -- an empty or repeated-context frame passes
+/// every other assertion and only fails here.
+#[test]
+fn max_turns_continues_the_same_process() {
+    let cancel = Arc::new(CancelToken::new());
+    let eng = AcpEngine::new(claude_code(), cancel)
+        .with_caps(24, Some(std::time::Duration::from_secs(5)));
+    let approval = ApprovalState::new();
+    let mut phases = Vec::new();
+    // The fixture traces received user frames to this file (stdout carries
+    // the frame stream the engine owns).
+    let trace = std::env::temp_dir().join(format!(
+        "claude-fake-trace-{}.log",
+        std::process::id() as u64
+            ^ (std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .subsec_nanos() as u64)
+    ));
+    let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    std::env::set_var("CLAUDE_FAKE_SCENARIO", "max_turns_continue");
+    std::env::set_var("CLAUDE_FAKE_TRACE_FILE", &trace);
+    let outcome = eng.run(&input(), &fake_cli(), &approval, &NoopSink, |p| {
+        phases.push(p)
+    });
+    std::env::remove_var("CLAUDE_FAKE_TRACE_FILE");
+    match outcome.termination {
+        Termination::Text(t) => assert_eq!(t, "window two answer"),
+        other => panic!("expected Text, got {other:?}"),
+    }
+    // Window one's gateway call carries across the boundary (the round
+    // list is the one tracker's); window two's trailing prose rides the
+    // terminal text, so exactly one call-bearing round settles.
+    assert_eq!(outcome.trace.len(), 1, "{:?}", outcome.trace);
+    assert_eq!(outcome.trace[0].calls.len(), 1);
+    assert_eq!(outcome.trace[0].calls[0].name, "explore");
+    // The convergence nudge never surfaces: no phase, no trace row, no
+    // terminal-text contamination carries its wording.
+    let nudge_fragment = "step budget for this window";
+    assert!(
+        !phases
+            .iter()
+            .any(|p| format!("{p:?}").contains(nudge_fragment)),
+        "the nudge must not leak into the live phases"
+    );
+    assert!(
+        !format!("{:?}", outcome.trace).contains(nudge_fragment),
+        "the nudge must not leak into the trace"
+    );
+    // Delivered content: the continuation frame's text is the nudge ALONE,
+    // not empty and not a repeat of the turn's prompt.
+    let argv = std::fs::read_to_string(&trace).unwrap_or_default();
+    let _ = std::fs::remove_file(&trace);
+    let frames: Vec<&str> = argv
+        .lines()
+        .filter(|l| l.starts_with("CLAUDE_FAKE_PROMPT["))
+        .collect();
+    assert_eq!(frames.len(), 2, "one process, two user frames: {frames:?}");
+    assert!(
+        !frames[0].contains(nudge_fragment),
+        "frame one carries the turn's real prompt: {}",
+        frames[0]
+    );
+    assert!(
+        frames[1].contains(nudge_fragment),
+        "frame two's whole text is the convergence nudge: {}",
+        frames[1]
+    );
 }
 
 /// Stdout closes mid-turn after assistant text but no result frame: the
@@ -358,26 +435,6 @@ fn empty_stdout_lands_as_runtime() {
         }
         other => panic!("expected Runtime, got {other:?}"),
     }
-}
-
-/// A runaway trajectory (more tool_use frames than the step cap) trips the
-/// engine's step cap -> StepCap termination.
-#[test]
-fn step_cap_overflow_yields_step_cap_termination() {
-    let (outcome, _, elapsed) = run("step_cap_overflow", 3);
-    match outcome.termination {
-        Termination::StepCap(n) => assert_eq!(n, 3),
-        other => panic!("expected StepCap, got {other:?}"),
-    }
-    // The step-cap path resolves in well under 1s; a watchdog fallback
-    // takes 5s. Pin it so a regression does not silently fall back to the
-    // watchdog. The elapsed time comes from `run` (measured after the
-    // scenario lock) so parallel tests' lock-queue wait does not pollute
-    // the pin.
-    assert!(
-        elapsed < std::time::Duration::from_secs(3),
-        "took {elapsed:?} -- resolved via the no-progress watchdog, not the step-cap path"
-    );
 }
 
 /// A stuck agent (system{init}, then stdout held open in silence = a
@@ -642,9 +699,11 @@ fn spawn_argv_carries_selections_mcp_config_and_stateless_flags() {
     let argv = std::fs::read_to_string(&trace).unwrap_or_default();
     let _ = std::fs::remove_file(&trace);
 
-    // Stateless headless head: the pinned turn argv prefix.
+    // Stateless headless head: the pinned turn argv prefix. ADR-0128: the
+    // input face is stream-json (`--input-format stream-json`) -- the
+    // user-frame prompt and the same-process continuation ride it.
     assert!(
-        argv.contains("CLAUDE_FAKE_ARGV=--print --output-format stream-json --verbose --no-session-persistence"),
+        argv.contains("CLAUDE_FAKE_ARGV=--print --output-format stream-json --input-format stream-json --verbose --no-session-persistence"),
         "the stateless headless argv prefix rides verbatim; got: {argv}"
     );
     // AC: no upstream session addressing.
