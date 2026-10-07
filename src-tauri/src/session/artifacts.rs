@@ -402,13 +402,30 @@ pub(crate) fn settle_manifest(
 /// for a temp path the copy could not move (openable until the session
 /// closes).
 /// Whether `path` names something strictly inside `dir` (the session
-/// working directory -- the materialization trigger). `Path::starts_with`
-/// compares components byte-exactly, so on Windows -- where the FS is
-/// case-insensitive and a model may echo an absolute temp path with
-/// drifted casing -- the comparison folds case through the same lens as
-/// [`dedup_key`], keeping the dedup and materialization decisions on one
-/// case semantics (PR #1089 review).
+/// working directory -- the materialization trigger). When both sides
+/// resolve, the comparison runs on canonicalized spellings: filesystem
+/// aliasing -- a Windows 8.3 short name inherited from the process TMP
+/// (`ADMINI~1` vs `Administrator`, #1232), an extended-length `\\?\`
+/// prefix, a junction -- collapses to one form on both sides, while the
+/// lexical walk sees two different paths and misjudges the hit as a
+/// user-directory original. A side that does not resolve (a
+/// declared-but-missing entry) falls back to the lexical walk unchanged.
 fn is_within(path: &Path, dir: &Path) -> bool {
+    if let (Ok(path), Ok(dir)) = (std::fs::canonicalize(path), std::fs::canonicalize(dir)) {
+        return is_within_components(&path, &dir);
+    }
+    is_within_components(path, dir)
+}
+
+/// The component walk behind [`is_within`]. `Path::starts_with` compares
+/// components byte-exactly, so on Windows -- where the FS is
+/// case-insensitive and a model may echo an absolute temp path with
+/// drifted casing -- the walk folds case through the same lens as
+/// [`dedup_key`], keeping the dedup and materialization decisions on one
+/// case semantics (PR #1089 review). Aliasing is NOT this lens's job
+/// (the canonical layer above owns it; [`dedup_key`] stays lexical, so
+/// one file under two spellings dedupes twice -- #1232 scope ruling).
+fn is_within_components(path: &Path, dir: &Path) -> bool {
     let mut dir_comps = dir.components();
     for comp in path.components() {
         match dir_comps.next() {
@@ -764,6 +781,41 @@ mod tests {
             manifest[0].path
         );
         assert!(Path::new(&manifest[0].path).is_file(), "the copy exists");
+    }
+
+    /// Windows spelling aliasing (#1232): the cwd arrives in one spelling
+    /// (here the extended-length `\\?\` prefix -- the lexical stand-in for
+    /// a short-name TMP component like `ADMINI~1`) while the declared
+    /// absolute path echoes the normal spelling. A component walk sees two
+    /// different paths and misjudges the hit as a user-directory original;
+    /// the containment check must compare canonicalized spellings.
+    /// Deterministic: it leans on prefix semantics, not the volume's 8.3
+    /// name generation.
+    #[cfg(windows)]
+    #[test]
+    fn settle_manifest_materializes_across_windows_spelling_aliases() {
+        let work = tempfile::tempdir().expect("workdir");
+        let session = tempfile::tempdir().expect("session dir");
+        std::fs::write(work.path().join("page.html"), "x").expect("write");
+        // The SAME directory, re-spelled with the verbatim prefix: the walk
+        // sees a different prefix component; canonicalization resolves both
+        // spellings to one path.
+        let verbatim_cwd = PathBuf::from(format!("\\\\?\\{}", work.path().display()));
+        let declared = work.path().join("page.html").to_string_lossy().into_owned();
+        let manifest = settle_manifest(
+            &[declared],
+            "",
+            &verbatim_cwd,
+            Some(&session.path().join(ARTIFACTS_DIR_NAME)),
+        );
+        assert_eq!(manifest.len(), 1);
+        assert!(
+            Path::new(&manifest[0].path).starts_with(session.path()),
+            "the aliased-spelling temp hit still materializes: {}",
+            manifest[0].path
+        );
+        assert!(Path::new(&manifest[0].path).is_file(), "the copy exists");
+        assert!(manifest[0].durable, "the materialized copy is durable");
     }
 
     /// The manifest caps at [`ARTIFACT_CAP`] entries; the cap keeps the
