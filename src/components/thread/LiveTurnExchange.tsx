@@ -46,9 +46,12 @@ function LiveRoundBlock({
 }: {
   round: LiveRound;
   /** The caret is the round-is-alive signal (RoundProse's streaming
-   *  contract), and only the tail round is alive -- the rounds array is
-   *  append-only, so every earlier round's text is final and renders
-   *  static (caret off, cascade off, its fences decode). */
+   *  contract), and the only alive prose is the tail's while it has no
+   *  rows: the rounds array is append-only, so every earlier round's text
+   *  is final, and a row-bearing tail is sealed too (prose after a call
+   *  opens the next round, issue #1236) -- all of them render static
+   *  (caret off, cascade off, their fences decode) while the trailing
+   *  status names the wait. */
   proseMode: RoundProseMode;
   onRespondApproval: (requestId: string, response: ApprovalResponse) => void;
   onLoadApprovalAttachments?: (requestId: string) => Promise<FileAttachment[]>;
@@ -113,7 +116,7 @@ export function LiveTurnExchange({
   // at the gate) its row carries the motion, and while #1163 streams the
   // current round's prose -- prose that can still grow, a call-less tail --
   // the visible text + caret carry it by themselves (a tail beside rows has
-  // its prose sealed; the proseStreaming arm below excludes that window) --
+  // its prose sealed; both live arms below exclude that window) --
   // a spinner still claiming 思考中 over visibly streaming text is a
   // doubled, misleading signal. The prose arm requires the tail to BE the
   // current round -- a Thinking that opens the next round bumps only the
@@ -150,11 +153,14 @@ export function LiveTurnExchange({
     >
       {liveTurn.rounds.map((round, i) => (
         // The rounds array is append-only within a turn (round i is round
-        // i+1), so the index is a stable key.
+        // i+1), so the index is a stable key. The mode judgment is the same
+        // seal discriminant as the proseStreaming arm above: a row-bearing
+        // tail is sealed prose -- static, the status names the wait
+        // (issue #1236).
         <LiveRoundBlock
           key={i + 1}
           round={round}
-          proseMode={i === tailIndex ? "streaming" : "static"}
+          proseMode={i === tailIndex && round.rows.length === 0 ? "streaming" : "static"}
           onRespondApproval={onRespondApproval}
           onLoadApprovalAttachments={onLoadApprovalAttachments}
           onThinkingExpandedChange={onThinkingExpandedChange}
