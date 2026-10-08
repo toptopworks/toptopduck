@@ -144,13 +144,15 @@ describe("LiveTurnExchange tail-round streaming posture", () => {
 
 // The trailing thinking status yields twice over: a dispatched row carries
 // its own motion (the rowInProgress arm, issue #297), and once #1163 streams
-// the current round's prose the visible text + caret carry the turn's
-// liveness by themselves -- a spinner still claiming 思考中 over visibly
-// streaming text is a doubled, misleading signal. The status reads honestly
-// only while nothing else on the tail carries the CURRENT round's liveness:
-// ask start, the inter-round wait (a Thinking bumps only the step, so the
-// tail is still the previous round's sealed prose), and the current round's
-// pre-prose moment.
+// the current round's call-less prose the visible text + caret carry the
+// turn's liveness by themselves -- a spinner still claiming 思考中 over
+// visibly streaming text is a doubled, misleading signal. A round beside
+// rows has its prose SEALED (prose after a call opens the next round), so
+// its text is not liveness -- the status reads honestly only while nothing
+// else on the tail carries the CURRENT round's liveness: ask start, the
+// inter-round wait (a Thinking bumps only the step, so the tail is still
+// the previous round's sealed prose), the current round's pre-prose moment,
+// and the current round's post-settle round trip.
 describe("LiveTurnExchange trailing thinking status (issue #1167)", () => {
   it("keeps the status through the inter-round wait (the tail is a sealed earlier round)", () => {
     renderExchange({
@@ -173,14 +175,58 @@ describe("LiveTurnExchange trailing thinking status (issue #1167)", () => {
     expect(screen.getByText("思考中（第 2 步）…")).toBeInTheDocument();
   });
 
-  it("yields the status once the current round's prose streams beside settled rows", () => {
+  it("keeps the status while the current round's sealed prose waits beside a settled call (the round-trip wait)", () => {
+    // A round that has landed a call cannot grow more prose (prose after a
+    // call opens the next round), so a text-bearing tail with a settled row
+    // and no running row is the LLM round-trip wait -- the status must name
+    // it, not defer to the sealed text's caret (the fake-hang window).
+    renderExchange({
+      ...liveTurnWith(undefined),
+      step: 1,
+      rounds: [
+        {
+          text: "再按网关前缀搜索工具：",
+          rows: [
+            {
+              key: "call-0",
+              name: "ToolSearch",
+              server: "tools",
+              operationKind: "read",
+              summary: "query=toptopduck",
+              approval: null,
+              running: false,
+              success: true,
+              resultExcerpt: "",
+            },
+          ],
+        },
+      ],
+    });
+    expect(screen.getByText("思考中…")).toBeInTheDocument();
+  });
+
+  it("yields nothing while the call-less tail's prose streams (the caret carries liveness)", () => {
+    // The suppression arm's own pin: a still-growing tail keeps the status
+    // away, so a regression to "never show" cannot pass the suite silently.
+    renderExchange({
+      ...liveTurnWith(undefined),
+      step: 1,
+      rounds: [{ text: "正文正在流出。", rows: [] }],
+    });
+    expect(screen.queryByText(/思考中/)).not.toBeInTheDocument();
+  });
+
+  it("keeps the status when the current round's prose is sealed by its settled rows (the round-trip wait)", () => {
+    // Prose after a call opens the next round, so a text-bearing round beside
+    // settled rows is NOT streaming prose -- it is the round-trip wait, and
+    // the status must name it (the sealed-tail correction of the #1167 pin).
     renderExchange({
       ...liveTurnWith(undefined),
       step: 2,
       rounds: [
         { text: "第一轮已收口。", rows: [] },
         {
-          text: "第二轮正文正在流出。",
+          text: "第二轮正文已封口。",
           rows: [
             {
               key: "call-0",
@@ -197,6 +243,6 @@ describe("LiveTurnExchange trailing thinking status (issue #1167)", () => {
         },
       ],
     });
-    expect(screen.queryByText(/思考中/)).not.toBeInTheDocument();
+    expect(screen.getByText("思考中（第 2 步）…")).toBeInTheDocument();
   });
 });
