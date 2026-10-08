@@ -42,6 +42,24 @@ const liveTurnWith = (runtime: LiveTurn["runtime"]): LiveTurn => ({
   runtime,
 });
 
+// The settled-call fixture (the sibling suites' Partial-override
+// convention, Thread's liveRow and TraceView's rowWith): seating a
+// completed row seals the round's prose (prose after a call opens the
+// next round) -- callers override the settled posture to reach other
+// windows, like the mid-call one (a running row, success still null).
+const settledRow = (over: Partial<LiveRoundRow> = {}): LiveRoundRow => ({
+  key: "call-0",
+  name: "explore",
+  server: null,
+  operationKind: "read",
+  summary: "SELECT 1",
+  approval: null,
+  running: false,
+  success: true,
+  resultExcerpt: "",
+  ...over,
+});
+
 describe("LiveTurnExchange runtime attribution marker (issue #818)", () => {
   it("renders no marker before the ask-time read lands (runtime absent)", () => {
     const { container } = renderExchange(liveTurnWith(undefined));
@@ -108,17 +126,6 @@ describe("LiveTurnExchange vega-lite fence placeholder (ADR-0120)", () => {
     // through the settled door -- the decode face (ADR-0120) whose
     // unrenderable-body arm discloses honestly (embed never runs for a
     // non-whitelisted body, so jsdom needs no canvas here).
-    const settledRow = (): LiveRoundRow => ({
-      key: "call-0",
-      name: "explore",
-      server: null,
-      operationKind: "read",
-      summary: "SELECT 1",
-      approval: null,
-      running: false,
-      success: true,
-      resultExcerpt: "",
-    });
     const { container } = renderExchange({
       ...liveTurnWith(undefined),
       step: 1,
@@ -152,20 +159,6 @@ describe("LiveTurnExchange tail-round streaming posture", () => {
       (prose as HTMLElement).style.getPropertyValue("--streamdown-caret") !== ""
     );
   }
-
-  // The settled-call fixture (the sibling suites' Partial-override
-  // convention): a completed row beside the tail's prose seals it.
-  const settledRow = (): LiveRoundRow => ({
-    key: "call-0",
-    name: "explore",
-    server: null,
-    operationKind: "read",
-    summary: "SELECT 1",
-    approval: null,
-    running: false,
-    success: true,
-    resultExcerpt: "",
-  });
 
   it("arms the caret on the tail round only; closed rounds render static", () => {
     const { container } = renderExchange({
@@ -202,6 +195,18 @@ describe("LiveTurnExchange tail-round streaming posture", () => {
     expect(caretArmed(container.querySelector(".round-text")!)).toBe(false);
     expect(screen.getByText("思考中…")).toBeInTheDocument();
   });
+
+  it("keeps the caret retired while the sealing row is still running (the mid-call window)", () => {
+    // CallStart lands the row running (success still null), and the seal
+    // reads rows alone -- refining the judgment to settled-only rows would
+    // re-arm the caret over prose that can no longer grow.
+    const { container } = renderExchange({
+      ...liveTurnWith(undefined),
+      step: 1,
+      rounds: [{ text: "已封口。", rows: [settledRow({ running: true, success: null })] }],
+    });
+    expect(caretArmed(container.querySelector(".round-text")!)).toBe(false);
+  });
 });
 
 // The trailing thinking status yields twice over: a dispatched row carries
@@ -216,22 +221,6 @@ describe("LiveTurnExchange tail-round streaming posture", () => {
 // the previous round's sealed prose), the current round's pre-prose moment,
 // and the current round's post-settle round trip.
 describe("LiveTurnExchange trailing thinking status (issue #1167)", () => {
-  // The settled-call fixture every keep test seats beside the tail's prose
-  // (the sibling suites' Partial-override convention, Thread's liveRow and
-  // TraceView's rowWith, with this suite's settled posture as the default).
-  const settledRow = (over: Partial<LiveRoundRow> = {}): LiveRoundRow => ({
-    key: "call-0",
-    name: "explore",
-    server: null,
-    operationKind: "read",
-    summary: "SELECT 1",
-    approval: null,
-    running: false,
-    success: true,
-    resultExcerpt: "",
-    ...over,
-  });
-
   it("keeps the status through the inter-round wait (the tail is a sealed earlier round)", () => {
     renderExchange({
       ...liveTurnWith(undefined),
