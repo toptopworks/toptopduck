@@ -1,8 +1,12 @@
 ---
 name: vega-chart
-description: "Chart numeric shape — a trend over time, a distribution, a comparison across categories or groups — by emitting a vega-lite fence in the reply. Flowcharts, diagrams, and lone KPI figures are out of scope; they belong to plain prose or a table."
+description: "Chart numeric shape — trend, distribution, comparison — as vega-lite fences: one fence in the reply for an immediate answer, or a `.md` report with embedded fences for a deliverable or several charts. Flowcharts, diagrams, and lone KPI figures stay out of scope."
 ---
-Produce charts as vega-lite fences written directly into the reply prose: one fence per chart, a self-contained Vega-Lite JSON object with the data inlined, interleaved freely with the surrounding text. The app renders each such fence as a chart; every other code block stays plain text.
+Produce charts as vega-lite fences: one fence per chart, a self-contained Vega-Lite JSON object with the data inlined. The app renders each such fence as a chart wherever it appears; every other code block stays plain text.
+
+Delivery split -- where the charts live:
+- a single chart supporting an immediate answer: emit the fence directly in the reply prose, interleaved freely with the surrounding text;
+- a report or deliverable the user asked for, or two or more charts planned: write `<name>.md` to the working directory with the fences embedded, and keep the reply to a summary plus a pointer to the file, mirroring the pandoc delivery convention. The `.md` rides the same artifact delivery chain (manifest, results pane, open externally) as any other deliverable.
 
 When to chart -- the substance is numeric shape:
 - a trend over time (line, area);
@@ -29,7 +33,7 @@ Data discipline:
 - aggregate in SQL first, then inline the aggregated rows as the fence's `data.values` array;
 - roughly 150 rows per chart is the ceiling (day-grain lines and mid-size heatmaps sit at the boundary) -- pre-bin, sample, or top-N anything larger.
 
-A minimal fence to imitate (single-line or pretty-printed, both render):
+A minimal fence to imitate (single-line or pretty-printed, both render; in a report the same fence goes inside the `.md`):
 
 ```vega-lite
 {"$schema":"https://vega.github.io/schema/vega-lite/v5.json","mark":"bar","data":{"values":[{"k":"A","v":12},{"k":"B","v":19}]},"encoding":{"x":{"field":"k","type":"nominal"},"y":{"field":"v","type":"quantitative"}}}

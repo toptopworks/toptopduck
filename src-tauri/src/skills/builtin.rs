@@ -832,11 +832,11 @@ mod tests {
             ),
             (
                 "vega-chart",
-                "Chart numeric shape — a trend over time, a distribution, a \
-                 comparison across categories or groups — by emitting a \
-                 vega-lite fence in the reply. Flowcharts, diagrams, and lone \
-                 KPI figures are out of scope; they belong to plain prose or \
-                 a table.",
+                "Chart numeric shape — trend, distribution, comparison — as \
+                 vega-lite fences: one fence in the reply for an immediate \
+                 answer, or a `.md` report with embedded fences for a \
+                 deliverable or several charts. Flowcharts, diagrams, and \
+                 lone KPI figures stay out of scope.",
             ),
             (
                 "skill-creator",
@@ -950,6 +950,30 @@ mod tests {
             serde_json::from_str(example).expect("the example fence is strict JSON");
         assert!(spec.get("$schema").is_some());
         assert_eq!(spec["mark"], "bar");
+    }
+
+    /// The delivery split (issue #1238): the body teaches both lanes -- the
+    /// immediate single chart in the reply prose, and the report or
+    /// multi-chart case delivered as a `.md` written to the working
+    /// directory with the reply left as a summary plus a pointer. Phrase
+    /// pins, not verbatim: the split rules are what must survive a
+    /// re-curation.
+    #[test]
+    fn vega_chart_body_teaches_the_delivery_split() {
+        let body = body_of("vega-chart");
+        assert!(body.contains("Delivery split"), "names the split section");
+        assert!(
+            body.contains("working directory"),
+            "the report lane writes to the working directory"
+        );
+        assert!(
+            body.contains("two or more charts"),
+            "the >=2 charts fallback rule"
+        );
+        assert!(
+            body.contains("summary") && body.contains("pointer"),
+            "the reply stays a summary plus a pointer"
+        );
     }
 
     /// The curation budget for the vega-chart body (issue #1012): the body
