@@ -926,7 +926,7 @@ mod tests {
         let body = body_of("vega-chart");
         assert!(body.contains("`vega-lite`"), "names the fence language");
         assert!(body.contains("$schema"), "requires $schema");
-        assert!(body.contains("v5.json"), "pins the v5 schema URL");
+        assert!(body.contains("v6.json"), "pins the v6 schema URL");
         assert!(body.contains("case-sensitive"), "teaches case sensitivity");
         for t in ["quantitative", "nominal", "ordinal", "temporal"] {
             assert!(body.contains(t), "lists type {t}");

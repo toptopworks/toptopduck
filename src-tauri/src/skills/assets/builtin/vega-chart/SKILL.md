@@ -16,7 +16,7 @@ A couple of numbers, a lone KPI figure, a flowchart, or a diagram is not a chart
 
 The fence contract (a broken fence never renders silently: a wrong fence language stays a plain code block, and a spec that fails to decode renders a visible error disclosure):
 - the fence language is exactly `vega-lite` -- never `vega`, never a bare `json` fence;
-- `$schema` is mandatory: `https://vega.github.io/schema/vega-lite/v5.json`;
+- `$schema` is mandatory: `https://vega.github.io/schema/vega-lite/v6.json`;
 - the content is strict JSON: double-quoted keys and strings, no trailing commas, no comments, no JavaScript expressions;
 - the spec's key names are case-sensitive -- top-level `mark` and `encoding`, and `field` and `type` inside each encoding channel, verbatim, and every `field` must match a key of the inlined data;
 - each encoding channel's `type` is one of `quantitative`, `nominal`, `ordinal`, `temporal`.
@@ -36,5 +36,5 @@ Data discipline:
 A minimal fence to imitate (single-line or pretty-printed, both render; in a report the same fence goes inside the `.md`):
 
 ```vega-lite
-{"$schema":"https://vega.github.io/schema/vega-lite/v5.json","mark":"bar","data":{"values":[{"k":"A","v":12},{"k":"B","v":19}]},"encoding":{"x":{"field":"k","type":"nominal"},"y":{"field":"v","type":"quantitative"}}}
+{"$schema":"https://vega.github.io/schema/vega-lite/v6.json","mark":"bar","data":{"values":[{"k":"A","v":12},{"k":"B","v":19}]},"encoding":{"x":{"field":"k","type":"nominal"},"y":{"field":"v","type":"quantitative"}}}
 ```
