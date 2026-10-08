@@ -110,22 +110,35 @@ export function LiveTurnExchange({
 }) {
   // The running status reads honestly only while nothing else on the tail
   // carries the CURRENT round's liveness: while a call dispatches (or waits
-  // at the gate) its row carries the motion, and once #1163 streams the
-  // current round's prose the visible text + caret carry it by themselves --
+  // at the gate) its row carries the motion, and while #1163 streams the
+  // current round's prose -- prose that can still grow, a call-less tail --
+  // the visible text + caret carry it by themselves (a tail beside rows has
+  // its prose sealed; the proseStreaming arm below excludes that window) --
   // a spinner still claiming 思考中 over visibly streaming text is a
   // doubled, misleading signal. The prose arm requires the tail to BE the
   // current round -- a Thinking that opens the next round bumps only the
   // step, leaving the tail at the previous round's sealed prose where a
   // caret is not the new round's motion -- so the status names every LLM
   // round-trip wait (ask start, the inter-round wait, the new round's
-  // pre-prose thinking), with the step surfaced past the first round-trip
-  // ("step N", ADR-0081).
+  // pre-prose thinking, the sealed-tail wait beside settled rows), with the
+  // step surfaced past the first round-trip ("step N", ADR-0081).
   const rowInProgress = liveTurn.rounds.some((round) =>
     round.rows.some((row) => row.running || row.success === null),
   );
   const tailIndex = liveTurn.rounds.length - 1;
+  // The tail's text carries liveness only while it can still grow. A round
+  // that has observed a call has SEALED its prose (the round boundary is the
+  // first content after a call -- later prose opens the next round), so a
+  // text-bearing tail beside rows is the LLM round-trip wait: the settled
+  // rows move nothing and the adapter fires nothing until the next round's
+  // first chunk, which is exactly the window the status must name (the
+  // fake-hang window).
+  const tail = liveTurn.rounds[tailIndex];
   const proseStreaming =
-    tailIndex === (liveTurn.step ?? 1) - 1 && liveTurn.rounds[tailIndex]?.text !== undefined;
+    tailIndex === (liveTurn.step ?? 1) - 1 &&
+    tail !== undefined &&
+    tail.text !== undefined &&
+    tail.rows.length === 0;
   return (
     <TurnExchangeFrame
       question={liveTurn.question}
