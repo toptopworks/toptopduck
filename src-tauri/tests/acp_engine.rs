@@ -216,16 +216,14 @@ fn gateway_renamed_tool_call_folds_to_the_bare_identity() {
     );
     assert_eq!(entry.summary, "explore", "the summary degrades to the name");
     assert_eq!(entry.operation_kind, OperationKind::Read);
+    // The gateway echo is live-silent (issue #1242): the gateway serve emits
+    // the row's authoritative phases itself, so the fold-side stream carries
+    // no tool-call phase for the renamed call -- only the settle row above.
     assert!(
-        phases.iter().any(|p| matches!(
-            p,
-            TurnPhase::ToolCallStarted {
-                name,
-                operation_kind: OperationKind::Read,
-                summary,
-            } if name == "explore" && summary == "explore"
-        )),
-        "the live phase carries the normalized identity"
+        !phases
+            .iter()
+            .any(|p| matches!(p, TurnPhase::ToolCallStarted { .. })),
+        "the gateway echo emits nothing live: {phases:?}"
     );
 }
 
@@ -656,9 +654,14 @@ fn gateway_renamed_failure_keeps_the_failure_anchor() {
         "failure keeps the error excerpt: {}",
         entry.result_excerpt
     );
-    assert!(phases
-        .iter()
-        .any(|p| matches!(p, TurnPhase::ToolCallCompleted(e) if !e.success)));
+    // The failed gateway echo is live-silent too (issue #1242): the
+    // failure row lands settle-side only.
+    assert!(
+        !phases
+            .iter()
+            .any(|p| matches!(p, TurnPhase::ToolCallCompleted(_))),
+        "the failed gateway echo emits nothing live: {phases:?}"
+    );
 }
 
 /// ADR-0128: the agent's own turn budget (`MaxTurnRequests`) tops out EVERY

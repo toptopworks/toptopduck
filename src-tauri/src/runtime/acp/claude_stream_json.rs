@@ -28,15 +28,16 @@
 //! `--disallowedTools` deny list + headless auto-refusal (ADR-0097 Decision
 //! 3); the ONLY tool plane is the gateway bridge. A `tool_use` whose name
 //! carries an injected server's `mcp__<server>__` prefix is therefore
-//! gateway-routed: the driver emits the live phases AND lands an engine-side
-//! trace row under the bare name -- the row is the in-place-replacement
-//! anchor the settle merge pairs the gateway's authoritative record against
-//! (ADR-0085 single enforcement point; [`crate::session::outcome_merge::merge_outcomes`]
-//! replaces a paired echo with the gateway row -- per-name quota with
-//! built-ins included, or the `mcp_invoke` pool (issues #820 + #817)). An
-//! unprefixed `tool_use` (a native tool that
-//! slipped past the deny list upstream) rides the engine trace like the
-//! codex path's native events.
+//! gateway-routed: the driver lands an engine-side trace row under the bare
+//! name -- the row is the in-place-replacement anchor the settle merge pairs
+//! the gateway's authoritative record against (ADR-0085 single enforcement
+//! point; [`crate::session::outcome_merge::merge_outcomes`] replaces a paired
+//! echo with the gateway row -- per-name quota with built-ins included, or
+//! the `mcp_invoke` pool (issues #820 + #817)) -- but emits NOTHING live
+//! (issue #1242): the gateway serve's direct emission is the row's only
+//! live source. An unprefixed `tool_use` (a native tool that slipped past
+//! the deny list upstream) rides the engine trace like the codex path's
+//! native events, live pair included.
 //!
 //! [`StreamFormat`]: super::adapter::StreamFormat
 //! [`ClaudeStreamJson`]: super::adapter::StreamFormat::ClaudeStreamJson
@@ -584,6 +585,10 @@ struct PendingClaudeCall {
     name: String,
     operation_kind: OperationKind,
     summary: String,
+    /// A gateway-routed echo (issue #1242): the gateway serve emits the
+    /// row's live phases itself, so every fold-side emission is suppressed
+    /// (the fold still lands -- the settle merge's anchor).
+    gateway: bool,
 }
 
 /// Write one stream-json `user` message frame to the child's stdin
@@ -703,29 +708,36 @@ impl ClaudePump {
                 let round = self.tracker.call_round(on_phase);
                 // The bare display name: a matching gateway prefix strips
                 // (the merged trace's gateway rows carry the bare name; the
-                // live phases must read the same).
-                let bare = self
+                // live phases must read the same). A match also marks the
+                // call as a gateway-routed echo (issue #1242): the gateway
+                // serve emits its live phases itself, so the echo stays
+                // live-silent and only folds.
+                let gateway_bare = self
                     .gateway_prefixes
                     .iter()
                     .find_map(|prefix| name.strip_prefix(prefix))
-                    .unwrap_or(name.as_str());
+                    .filter(|bare| !bare.is_empty());
+                let bare = gateway_bare.unwrap_or(name.as_str());
                 let (_, operation_kind, summary) = classify_call(&ToolUse {
                     id: id.clone(),
                     name: bare.to_string(),
                     input,
                 });
                 let summary = truncate_trace_excerpt(&summary, TRACE_EXCERPT_MAX);
-                on_phase(TurnPhase::ToolCallStarted {
-                    name: bare.to_string(),
-                    operation_kind,
-                    summary: summary.clone(),
-                });
+                if gateway_bare.is_none() {
+                    on_phase(TurnPhase::ToolCallStarted {
+                        name: bare.to_string(),
+                        operation_kind,
+                        summary: summary.clone(),
+                    });
+                }
                 self.pending.push(PendingClaudeCall {
                     round,
                     tool_use_id: id,
                     name: bare.to_string(),
                     operation_kind,
                     summary,
+                    gateway: gateway_bare.is_some(),
                 });
                 None
             }
@@ -781,6 +793,7 @@ impl ClaudePump {
         end: RowEnd,
         on_phase: &mut impl FnMut(TurnPhase),
     ) {
+        let gateway = row.gateway;
         // The claude wire carries no per-call result text on the tool_result
         // frame; a failure still needs its bounded anchor (ADR-0078) -- the
         // ACP pump's honest "failed" marker. A row the agent never reported
@@ -808,7 +821,11 @@ impl ClaudePump {
                 UNOBSERVED_EXCERPT,
             ),
         };
-        on_phase(TurnPhase::ToolCallCompleted(TraceEntryView::from(&entry)));
+        // The gateway echo's completion is silent too (issue #1242): the
+        // gateway serve emits the row's authoritative completed phase.
+        if !gateway {
+            on_phase(TurnPhase::ToolCallCompleted(TraceEntryView::from(&entry)));
+        }
         // Gateway-routed rows land too (issue #817): the engine row is the
         // in-place-replacement anchor the settle merge pairs the gateway's
         // authoritative record against -- the paired row keeps only its
@@ -1215,6 +1232,99 @@ mod tests {
 
     // --- pump fold: partial-message dedupe -------------------------------------
 
+    /// Issue #1242: a gateway-prefixed tool_use (the bridge's flattened
+    /// rename) folds into the rounds -- the settle merge's replacement
+    /// anchor -- but emits NOTHING live: the gateway serve's direct
+    /// emission is the row's only live source, so the echo never doubles it
+    /// mid-flight. A native (unprefixed) call keeps its live pair.
+    #[test]
+    fn gateway_prefixed_call_is_silent_live_native_keeps_its_pair() {
+        let mut pump = pump_with_bridge();
+        let mut phases = Vec::new();
+        pump.fold(
+            ClaudeEvent::ToolUse {
+                id: "tu_1".into(),
+                name: "mcp__toptopduck-gateway__explore".into(),
+                input: serde_json::json!({"sql": "SELECT 1"}),
+            },
+            &mut |p| phases.push(p),
+        );
+        pump.fold(
+            ClaudeEvent::ToolResult {
+                id: "tu_1".into(),
+                success: true,
+            },
+            &mut |p| phases.push(p),
+        );
+        assert!(
+            phases.is_empty(),
+            "the gateway echo emits no live phase: {phases:?}"
+        );
+        let rounds = pump
+            .tracker
+            .settle_rounds(&Termination::Text("done".into()));
+        assert_eq!(rounds.len(), 1);
+        assert_eq!(rounds[0].calls.len(), 1);
+        assert_eq!(rounds[0].calls[0].name, "explore");
+
+        // The native counterpart: no prefix, live pair intact.
+        let mut pump = pump_with_bridge();
+        let mut phases = Vec::new();
+        pump.fold(
+            ClaudeEvent::ToolUse {
+                id: "tu_2".into(),
+                name: "Bash".into(),
+                input: serde_json::json!({"command": "ls"}),
+            },
+            &mut |p| phases.push(p),
+        );
+        pump.fold(
+            ClaudeEvent::ToolResult {
+                id: "tu_2".into(),
+                success: true,
+            },
+            &mut |p| phases.push(p),
+        );
+        assert_eq!(phases.len(), 2, "the native call keeps its live pair");
+        assert!(matches!(
+            &phases[0],
+            TurnPhase::ToolCallStarted { name, .. } if name == "Bash"
+        ));
+        assert!(matches!(&phases[1], TurnPhase::ToolCallCompleted(_)));
+    }
+
+    /// Issue #1242, the drain half: a gateway-prefixed call the agent never
+    /// reports a result for drains unobserved at turn end with NO live
+    /// phase -- the gateway's own emission was the row's only live source,
+    /// so no duplicate row may appear at drain time.
+    #[test]
+    fn gateway_echo_pending_at_turn_end_drains_silent_live() {
+        let mut pump = pump_with_bridge();
+        let mut phases = Vec::new();
+        pump.fold(
+            ClaudeEvent::ToolUse {
+                id: "tu_3".into(),
+                name: "mcp__toptopduck-gateway__explore".into(),
+                input: serde_json::json!({"sql": "SELECT 1"}),
+            },
+            &mut |p| phases.push(p),
+        );
+        pump.finalize_pending(&mut |p| phases.push(p));
+        assert!(
+            phases.is_empty(),
+            "the gateway echo drains live-silent: {phases:?}"
+        );
+        let rounds = pump
+            .tracker
+            .settle_rounds(&Termination::Text("done".into()));
+        assert_eq!(rounds[0].calls.len(), 1);
+        assert_eq!(rounds[0].calls[0].name, "explore");
+        assert!(
+            !rounds[0].calls[0].success,
+            "the unobserved drain lands the honest failed marker"
+        );
+    }
+
     /// With partial messages on, one message's deltas stream first and its
     /// complete `assistant` frame trails: the frame must not re-append, so
     /// the round and terminal tracks carry the text exactly once and the
@@ -1532,13 +1642,14 @@ mod tests {
         );
     }
 
-    /// A gateway-routed tool_use + tool_result emits phases AND lands an
-    /// engine trace row (issue #817): the row is the in-place-replacement
-    /// anchor the settle merge pairs the gateway's authoritative record
-    /// against, so the gateway's values land inside the round the call ran
-    /// in -- no leading all-gateway round.
+    /// A gateway-routed tool_use + tool_result lands an engine trace row
+    /// (issue #817) and emits NOTHING live (issue #1242): the row is the
+    /// in-place-replacement anchor the settle merge pairs the gateway's
+    /// authoritative record against, so the gateway's values land inside the
+    /// round the call ran in -- no leading all-gateway round -- while the
+    /// live face belongs to the gateway serve's own emission.
     #[test]
-    fn gateway_routed_tool_call_lands_row_and_emits_phases() {
+    fn gateway_routed_tool_call_lands_row_silently() {
         let mut pump = pump_with_bridge();
         let mut phases = Vec::new();
         let end = pump.fold(
@@ -1558,6 +1669,10 @@ mod tests {
             &mut |p| phases.push(p),
         );
         assert!(end.is_none());
+        assert!(
+            phases.is_empty(),
+            "the gateway echo's live face is the gateway serve's emission: {phases:?}"
+        );
         let rounds = pump
             .tracker
             .settle_rounds(&Termination::Text(String::new()));
@@ -1566,12 +1681,6 @@ mod tests {
         // anchor), under the BARE name the gateway records.
         assert_eq!(rounds[0].calls.len(), 1, "the anchor row lands");
         assert_eq!(rounds[0].calls[0].name, "explore");
-        // The phases name the BARE tool (the merged gateway row's name).
-        match &phases[0] {
-            TurnPhase::ToolCallStarted { name, .. } => assert_eq!(name, "explore"),
-            other => panic!("expected ToolCallStarted, got {other:?}"),
-        }
-        assert!(matches!(phases[1], TurnPhase::ToolCallCompleted(_)));
     }
 
     /// A native (unprefixed) tool_use rides the engine trace (the codex

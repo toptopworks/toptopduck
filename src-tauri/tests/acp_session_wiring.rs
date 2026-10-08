@@ -23,7 +23,7 @@ use toptopduck_lib::cli_tools::config::{
     CliParamDelivery, CliToolConfig, CliToolParam, CliToolSource,
 };
 use toptopduck_lib::mcp::config::{McpServerConfig, McpServerId, McpTransport};
-use toptopduck_lib::model::{SkillLifecycleActor, SkillProvenance};
+use toptopduck_lib::model::{SkillLifecycleActor, SkillProvenance, TurnPhase};
 use toptopduck_lib::persistence::recipe::{RecipeEntry, RuntimeKind};
 use toptopduck_lib::runtime::acp::adapter::{AdapterId, AdapterSpec};
 use toptopduck_lib::skills::{resolve_prompt_fragments, SkillPromptFragment};
@@ -251,7 +251,28 @@ fn external_gateway_tool_call_drives_dispatch() {
 #[test]
 fn external_gateway_renamed_call_settles_to_one_authoritative_row() {
     let (mut session, old_path, _guard) = external_session("gateway_rename");
-    let outcome = session.ask("run one renamed gateway tool call");
+    // Collect the turn's live phases (issue #1242): the tap shares ONE
+    // channel between the engine thread and the gateway serve, and this
+    // callback is the only vantage point that sees the composition -- a
+    // broken tap wiring or a leaky echo stays invisible to the settle
+    // assertions below.
+    let phases: Arc<Mutex<Vec<TurnPhase>>> = Arc::new(Mutex::new(Vec::new()));
+    let phase_sink = Arc::clone(&phases);
+    struct NoopSink;
+    impl ApprovalSink for NoopSink {
+        fn emit_request(&self, _: &ApprovalRequestBody) {}
+        fn emit_resolved(&self, _: &ApprovalRequestBody, _: ApprovalResponse) {}
+    }
+    let approval = ApprovalState::new();
+    let keychain = KeychainStore::new();
+    let inputs = TurnInputs::empty(&keychain);
+    let outcome = session.ask_with_phase(
+        "run one renamed gateway tool call",
+        &approval,
+        &NoopSink,
+        move |p| phase_sink.lock().unwrap().push(p),
+        &inputs,
+    );
     std::env::set_var("PATH", old_path);
     match outcome {
         TurnOutcome::Textual { body, .. } => {
@@ -293,6 +314,52 @@ fn external_gateway_renamed_call_settles_to_one_authoritative_row() {
         "the gateway's authoritative badge wins"
     );
     assert!(rows[0].success);
+
+    // The live half (issue #1242): exactly one Started + one Completed over
+    // the shared tap -- the gateway serve's authoritative pair, with the
+    // renamed echo silent at its fold layer. A broken tap wiring (no phases
+    // at all) or a leaky echo (a second Started) both fail here while the
+    // settle assertions above stay green.
+    let phases = phases.lock().unwrap();
+    let starts: Vec<_> = phases
+        .iter()
+        .filter_map(|p| match p {
+            TurnPhase::ToolCallStarted {
+                name,
+                operation_kind,
+                summary,
+            } => Some((name.clone(), *operation_kind, summary.clone())),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        starts.len(),
+        1,
+        "one gateway call -> exactly one live Started: {starts:?}"
+    );
+    assert_eq!(
+        starts[0].0, "explore",
+        "the gateway's bare name on the live rail"
+    );
+    assert_eq!(
+        starts[0].2, "SELECT 1 AS x",
+        "the gateway's argument summary on the live rail"
+    );
+    assert_eq!(starts[0].1, OperationKind::Read);
+    let completeds: Vec<_> = phases
+        .iter()
+        .filter_map(|p| match p {
+            TurnPhase::ToolCallCompleted(view) => Some(view.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        completeds.len(),
+        1,
+        "one gateway call -> exactly one live Completed: {completeds:?}"
+    );
+    assert_eq!(completeds[0].name, "explore");
+    assert!(completeds[0].success);
 }
 
 /// Issue #673 (ADR-0108 Decision 6): a registered CLI tool is advertised on

@@ -26,7 +26,7 @@ use std::sync::Arc;
 
 use crate::approval::{ApprovalSink, ApprovalState};
 use crate::mcp::config::McpServerConfig;
-use crate::model::{TurnFailure, TurnOutcome, TurnPhase, TurnRecord, TurnRuntime};
+use crate::model::{TurnFailure, TurnOutcome, TurnPhase, TurnPhaseSink, TurnRecord, TurnRuntime};
 use crate::provider::keychain::KeychainStore;
 use crate::provider::prompt::ResponseLocale;
 use crate::runtime::acp::adapter::{detect_adapter, AdapterSpec};
@@ -636,6 +636,15 @@ impl super::Session {
         // The kill-log face (#886): captured before the engine takes
         // ownership of the spec below.
         let runtime_face = adapter.id.as_str();
+        // The shared phase tap (issue #1242): the engine thread's
+        // fold-layer emissions and the gateway serve's authoritative
+        // tool-call rows both ride the caller's ONE `on_phase` channel
+        // through this `&dyn` face, so the two emission families
+        // interleave on the same live rail. Declared BEFORE the scope: a
+        // scope-body-local borrow does not promote to `'scope` (the
+        // `engine_done` Arc's rationale), and both threads only borrow it.
+        let tap = GatewayPhaseTap(std::sync::Mutex::new(on_phase));
+        let tap_ref = &tap;
         let (acp_outcome, gateway_result) = std::thread::scope(|s| {
             let engine = AcpEngine::new(adapter, Arc::clone(&self.cancel));
             // Deterministic serve terminator (issue #357 / ADR-0085): a one-shot
@@ -661,7 +670,7 @@ impl super::Session {
             let engine_done = Arc::new(AtomicBool::new(false));
             let done_flag = Arc::clone(&engine_done);
             let eng = s.spawn(move || {
-                let outcome = engine.run(&input, &binary, approval, sink, on_phase);
+                let outcome = engine.run(&input, &binary, approval, sink, |p| tap_ref.emit(p));
                 done_flag.store(true, Ordering::SeqCst);
                 outcome
             });
@@ -752,6 +761,7 @@ impl super::Session {
                 materializer: &mut *self.materializer,
                 approval,
                 sink,
+                events: &tap,
                 cancel: &self.cancel,
                 mcp,
                 // The enabled CLI registrations ride the same turn inputs
@@ -813,6 +823,20 @@ impl super::Session {
 /// face is log prose, the wire tag is a persisted enum -- correlating a
 /// kill log against persisted turns needs to know both spellings (#890).
 pub(super) const BUILT_IN_RUNTIME_FACE: &str = "built-in";
+
+/// The shared phase tap the external turn's two threads emit through
+/// (issue #1242): wraps the caller's `FnMut` `on_phase` in a mutex-backed
+/// [`TurnPhaseSink`] so the ACP engine thread (fold-layer emissions) and the
+/// gateway serve thread (authoritative tool-call rows, `GatewayCtx::events`)
+/// feed ONE channel -- the emission families interleave on the same live
+/// rail, in arrival order, without either thread owning the channel.
+struct GatewayPhaseTap<O>(std::sync::Mutex<O>);
+
+impl<O: FnMut(TurnPhase) + Send> TurnPhaseSink for GatewayPhaseTap<O> {
+    fn emit(&self, phase: TurnPhase) {
+        (self.0.lock().expect("phase channel lock"))(phase);
+    }
+}
 
 /// Resolve the ACP bridge binary path (issue #299 slice 9c, ADR-0085).
 ///

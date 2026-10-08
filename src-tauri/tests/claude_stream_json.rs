@@ -5,8 +5,8 @@
 //! `[[bin]]`) across every observable pump branch: clean text reply,
 //! partial-message streamed replies and the tool-interleaved streaming
 //! shape (issue #1228), headless thinking-block rounds (issue #612), a
-//! gateway-routed tool trajectory (phases + the prose round + the landed
-//! anchor row), a
+//! gateway-routed tool trajectory (the prose round + the landed anchor row,
+//! live-silent per issue #1242), a
 //! native tool slipping past the deny list (engine trace row), hook-frame
 //! tolerance, result-frame errors, the max-turns cap mapping, crash /
 //! empty-stdout fallbacks, step-cap overflow, and the spawn argv injection
@@ -186,13 +186,14 @@ fn streamed_tool_call_keeps_the_tool_row_and_lands_text_once() {
     );
 }
 
-/// A gateway-routed tool call: the engine emits the Started/Completed phase
-/// pair naming the BARE tool, and the round keeps its prose with the engine
+/// A gateway-routed tool call: the round keeps its prose with the engine
 /// row landed under the bare name (issue #817) -- the row is the anchor the
 /// settle merge replaces with the gateway's authoritative record in place,
-/// so no leading all-gateway round exists after the merge.
+/// so no leading all-gateway round exists after the merge -- and the echo
+/// emits NOTHING live (issue #1242: the gateway serve's direct emission is
+/// the row's only live source).
 #[test]
-fn gateway_tool_call_emits_phases_keeps_prose_round() {
+fn gateway_tool_call_lands_silently_keeps_prose_round() {
     let (outcome, phases, _) = run("tool_call", 24);
     match &outcome.termination {
         Termination::Text(t) => assert_eq!(t, "found 3 rows"),
@@ -211,14 +212,14 @@ fn gateway_tool_call_emits_phases_keeps_prose_round() {
     assert_eq!(outcome.trace[0].calls.len(), 1, "the anchor row lands");
     assert_eq!(outcome.trace[0].calls[0].name, "explore");
     assert!(
-        phases
+        !phases
             .iter()
             .any(|p| matches!(p, TurnPhase::ToolCallStarted { name, .. } if name == "explore")),
-        "the Started phase names the bare tool: {phases:?}"
+        "the gateway echo is silent live: {phases:?}"
     );
-    assert!(phases
+    assert!(!phases
         .iter()
-        .any(|p| matches!(p, TurnPhase::ToolCallCompleted(e) if e.success)));
+        .any(|p| matches!(p, TurnPhase::ToolCallCompleted(_))));
 }
 
 /// The survival half of ADR-0115: a generation segment that keeps producing
