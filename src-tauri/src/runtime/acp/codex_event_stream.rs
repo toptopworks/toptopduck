@@ -15,7 +15,10 @@
 //! command still runs and lands here as a `command_execution` trace row
 //! (ADR-0094's trace second source; measured on codex 0.147.0 on Windows,
 //! issue #804). Gateway-served tool calls arrive as `mcp_tool_call` items
-//! and render live the same way (issue #816).
+//! under a bare name; they fold into the trace but emit nothing live
+//! (issue #1242) — the gateway serve's direct emission is the row's only
+//! live source, while a namespaced `mcp_tool_call` (a native MCP server
+//! codex reaches itself) renders its live pair here (issue #816).
 //!
 //! [`StreamFormat`]: super::adapter::StreamFormat
 //! [`CodexEventStream`]: super::adapter::StreamFormat::CodexEventStream
@@ -256,8 +259,9 @@ fn extract_mcp_tool_call(item: &Value) -> Option<CodexEvent> {
     })
 }
 
-/// The badge + argument digest a gateway call's live row carries
-/// (issue #816): the badge is [`super::engine::gateway_tool_badge`]'s
+/// The badge + argument digest a gateway call's settle trace row carries
+/// (issue #816; the echo classes are live-silent since #1242): the badge is
+/// [`super::engine::gateway_tool_badge`]'s
 /// classification ladder (shared with the ACP fold layer since issue #1222;
 /// a bare unknown name approximates the gateway's CLI arm as `Execute`
 /// because the registration table is not reachable from the stream layer).
@@ -796,6 +800,13 @@ impl JsonPump {
                 // The completion echo closes the execution window.
                 self.exec_depth = self.exec_depth.saturating_sub(1);
                 self.reconcile_exec_freeze();
+                // A BARE name is the bridge face (the built-in / CLI / meta
+                // tools the gateway advertises; codex surfaces its own MCP
+                // servers namespaced). A gateway-routed echo stays
+                // live-silent (issue #1242): the gateway serve emits the
+                // row's authoritative phases itself, so this fold only
+                // accumulates the settle merge's anchor.
+                let gateway_routed = !crate::mcp::aggregator::is_namespaced(&name);
                 // The badge + digest replay the gateway's dispatch row
                 // where the stream layer can (issue #816). The settle-time
                 // merge (`merge_outcomes`) replaces this echo in place with
@@ -830,14 +841,17 @@ impl JsonPump {
                 // Same-point phase pair + round landing as the
                 // command_execution shape (issue #816): the round's first
                 // call freezes the thinking BEFORE the batch's
-                // ToolCallStarted (the live order).
+                // ToolCallStarted (the live order). A gateway-routed echo
+                // skips the pair (issue #1242) -- the landing stays.
                 let round = self.tracker.call_round(on_phase);
-                on_phase(TurnPhase::ToolCallStarted {
-                    name,
-                    operation_kind,
-                    summary,
-                });
-                on_phase(TurnPhase::ToolCallCompleted(TraceEntryView::from(&entry)));
+                if !gateway_routed {
+                    on_phase(TurnPhase::ToolCallStarted {
+                        name,
+                        operation_kind,
+                        summary,
+                    });
+                    on_phase(TurnPhase::ToolCallCompleted(TraceEntryView::from(&entry)));
+                }
                 self.tracker.land_call(round, entry);
                 None
             }
@@ -1563,6 +1577,58 @@ mod tests {
             .any(|p| matches!(p, TurnPhase::TextDelta { .. })));
     }
 
+    /// Issue #1242: a gateway-routed mcp call (a BARE tool name -- the
+    /// built-in / CLI / meta faces the bridge advertises; codex surfaces
+    /// native MCP servers namespaced) folds into the rounds but emits
+    /// NOTHING live -- the gateway serve's direct emission is the row's
+    /// only live source. A namespaced native call keeps its live pair.
+    #[test]
+    fn gateway_routed_mcp_call_is_silent_live_native_keeps_its_pair() {
+        let mut pump = JsonPump::new(24, None);
+        let mut phases = Vec::new();
+        pump.fold(
+            CodexEvent::McpToolCall {
+                call_id: "c1".into(),
+                name: "explore".into(),
+                arguments: r#"{"sql":"SELECT 1"}"#.into(),
+                failed: false,
+                error_message: None,
+            },
+            &mut |p| phases.push(p),
+        );
+        assert!(
+            phases.is_empty(),
+            "the gateway echo emits no live phase: {phases:?}"
+        );
+        let rounds = pump
+            .tracker
+            .settle_rounds(&Termination::Text("done".into()));
+        assert_eq!(rounds.len(), 1);
+        assert_eq!(rounds[0].calls.len(), 1);
+        assert_eq!(rounds[0].calls[0].name, "explore");
+
+        // The namespaced counterpart (a native MCP server codex reaches
+        // itself): no gateway in the path, live pair intact.
+        let mut pump = JsonPump::new(24, None);
+        let mut phases = Vec::new();
+        pump.fold(
+            CodexEvent::McpToolCall {
+                call_id: "c2".into(),
+                name: "mcp__duckdb__query_snapshot".into(),
+                arguments: "{}".into(),
+                failed: false,
+                error_message: None,
+            },
+            &mut |p| phases.push(p),
+        );
+        assert_eq!(phases.len(), 2, "the native call keeps its live pair");
+        assert!(matches!(
+            &phases[0],
+            TurnPhase::ToolCallStarted { name, .. } if name == "mcp__duckdb__query_snapshot"
+        ));
+        assert!(matches!(&phases[1], TurnPhase::ToolCallCompleted(_)));
+    }
+
     /// The live channel's order for one round (ADR-0126): the TextDelta
     /// fires on arrival, then the batch's ToolCallStarted / Completed pair.
     /// The trailing prose opens round 2 -- the round pointer fires -- and
@@ -1614,8 +1680,10 @@ mod tests {
 
     /// The mcp arm's order (issue #816), the command arm's `live_order` pin
     /// mirrored: the round's prose delta fires BEFORE the batch's
-    /// ToolCallStarted, and consecutive gateway calls share one batch round
-    /// under a single thinking freeze.
+    /// ToolCallStarted, and consecutive native calls share one batch round
+    /// under a single thinking freeze. The names are namespaced native MCP
+    /// calls -- a bare (bridge-face) name is a gateway echo and stays
+    /// live-silent (issue #1242), pinned by its own test.
     #[test]
     fn mcp_tool_call_fold_delta_precedes_phase_pair() {
         let mut pump = JsonPump::new(24, None);
@@ -1629,7 +1697,7 @@ mod tests {
         pump.fold(
             CodexEvent::McpToolCall {
                 call_id: "item_1".into(),
-                name: "convert".into(),
+                name: "mcp__duckdb__query_snapshot".into(),
                 arguments: r#"{"input":"a.csv"}"#.into(),
                 failed: false,
                 error_message: None,
@@ -1639,7 +1707,7 @@ mod tests {
         pump.fold(
             CodexEvent::McpToolCall {
                 call_id: "item_2".into(),
-                name: "convert".into(),
+                name: "mcp__duckdb__query_snapshot".into(),
                 arguments: String::new(),
                 failed: false,
                 error_message: None,
@@ -1652,7 +1720,13 @@ mod tests {
             .expect("the round's prose delta fired");
         let first_started = phases
             .iter()
-            .position(|p| matches!(p, TurnPhase::ToolCallStarted { name, .. } if name == "convert"))
+            .position(|p| {
+                matches!(
+                    p,
+                    TurnPhase::ToolCallStarted { name, .. }
+                        if name == "mcp__duckdb__query_snapshot"
+                )
+            })
             .expect("the batch's first ToolCallStarted");
         assert!(round_text < first_started, "the delta precedes the batch");
         assert_eq!(

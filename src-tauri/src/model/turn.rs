@@ -616,3 +616,13 @@ pub struct TurnProgress {
     pub session_id: SessionId,
     pub phase: TurnPhase,
 }
+
+/// A shared live-phase emission face (issue #1242): the external turn's two
+/// parallel threads -- the ACP engine driving its fold-layer emissions and
+/// the gateway serve emitting its authoritative tool-call rows -- both feed
+/// ONE caller-owned channel through a `&dyn` reference (the
+/// `sink: &dyn ApprovalSink` shape, ADR-0085), so neither thread owns the
+/// channel and the two emission families interleave on the same live rail.
+pub trait TurnPhaseSink: Send + Sync {
+    fn emit(&self, phase: TurnPhase);
+}

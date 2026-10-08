@@ -328,8 +328,10 @@ pub enum SessionUpdate {
         /// ONE content block, same `ContentChunk` shape as the message chunk.
         content: ContentBlock,
     },
-    /// A new tool call started. Maps to a `ToolCallStarted` phase event + opens
-    /// a trace row.
+    /// A new tool call started. Opens a trace row; the fold layer emits the
+    /// `ToolCallStarted` phase event for NATIVE calls only -- a
+    /// gateway-renamed title is a gateway-routed echo and stays live-silent
+    /// (issue #1242: the gateway serve emits the row's phases itself).
     ToolCall {
         tool_call_id: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]

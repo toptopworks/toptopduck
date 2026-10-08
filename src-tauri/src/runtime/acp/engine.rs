@@ -1145,7 +1145,10 @@ impl RoundTracker {
 /// A tool call that opened a trace row but has not finalized (Completed /
 /// Failed). Carries the index of the round it opened in -- a late completion
 /// (or the turn-end drain) lands the entry on that round, not whichever round
-/// happens to be current.
+/// happens to be current. `gateway` marks a gateway-routed echo (issue
+/// #1242): its live phases come from the gateway serve's direct emission, so
+/// every fold-side emission for the row is suppressed (the fold itself is
+/// untouched -- the settle merge still pairs on it).
 struct PendingToolCall {
     round: usize,
     tool_use_id: String,
@@ -1153,6 +1156,7 @@ struct PendingToolCall {
     operation_kind: OperationKind,
     summary: String,
     content: Vec<ToolCallContent>,
+    gateway: bool,
 }
 
 impl Pump {
@@ -1178,13 +1182,22 @@ impl Pump {
                 // The round's FIRST call freezes its thinking (ThinkingCompleted)
                 // once, before this call's Started event (saw_call latches it).
                 let idx = self.tracker.call_round(on_phase);
+                // A gateway-renamed title is the gateway-routed echo (issue
+                // #1242): the gateway serve emits this row's authoritative
+                // phases itself, so the echo stays live-silent and only folds
+                // (the settle merge's in-place-replacement anchor).
+                let gateway = title
+                    .as_deref()
+                    .is_some_and(|t| strip_gateway_rename(t).is_some());
                 let (name, summary, operation_kind) =
                     row_identity(title.as_deref(), tool_call_id, *kind);
-                on_phase(TurnPhase::ToolCallStarted {
-                    name: name.clone(),
-                    operation_kind,
-                    summary: summary.clone(),
-                });
+                if !gateway {
+                    on_phase(TurnPhase::ToolCallStarted {
+                        name: name.clone(),
+                        operation_kind,
+                        summary: summary.clone(),
+                    });
+                }
                 if let Some(end) = RowEnd::from_wire_status(*status) {
                     self.finalize_row(
                         idx,
@@ -1194,6 +1207,7 @@ impl Pump {
                         &summary,
                         content,
                         end,
+                        !gateway,
                         on_phase,
                     );
                 } else {
@@ -1204,6 +1218,7 @@ impl Pump {
                         operation_kind,
                         summary,
                         content: content.clone(),
+                        gateway,
                     });
                     self.reconcile_pending_freeze();
                 }
@@ -1221,6 +1236,14 @@ impl Pump {
                 if let Some(i) = pos {
                     let mut row = self.pending.remove(i);
                     if let Some(t) = title.as_deref() {
+                        // A late gateway rename marks the row as a gateway
+                        // echo regardless of whether the identity
+                        // re-derivation below runs (its pathological-start
+                        // guard): the gateway serve owns the row's live face
+                        // (issue #1242).
+                        if strip_gateway_rename(t).is_some() {
+                            row.gateway = true;
+                        }
                         if row.summary.is_empty() {
                             // Reachable only under a pathological start (no
                             // title AND an empty id -- either alone fills the
@@ -1248,6 +1271,7 @@ impl Pump {
                     }
                     if let Some(final_status) = *status {
                         if let Some(end) = RowEnd::from_wire_status(final_status) {
+                            let emit_live = !row.gateway;
                             self.finalize_row(
                                 row.round,
                                 &row.tool_use_id,
@@ -1256,6 +1280,7 @@ impl Pump {
                                 &row.summary,
                                 &row.content,
                                 end,
+                                emit_live,
                                 on_phase,
                             );
                             self.reconcile_pending_freeze();
@@ -1296,6 +1321,7 @@ impl Pump {
         // The take empties `pending`: the open tool-call window closes here.
         self.reconcile_pending_freeze();
         for row in rows {
+            let emit_live = !row.gateway;
             self.finalize_row(
                 row.round,
                 &row.tool_use_id,
@@ -1304,6 +1330,7 @@ impl Pump {
                 &row.summary,
                 &row.content,
                 RowEnd::Unobserved,
+                emit_live,
                 on_phase,
             );
         }
@@ -1319,6 +1346,7 @@ impl Pump {
         summary: &str,
         content: &[ToolCallContent],
         end: RowEnd,
+        emit_live: bool,
         on_phase: &mut impl FnMut(TurnPhase),
     ) {
         let (success, result_excerpt) = match end {
@@ -1359,7 +1387,11 @@ impl Pump {
                 result_excerpt,
             )
         };
-        on_phase(TurnPhase::ToolCallCompleted(TraceEntryView::from(&entry)));
+        // The gateway echo's completion is silent too (issue #1242): the
+        // gateway serve emits the row's authoritative completed phase.
+        if emit_live {
+            on_phase(TurnPhase::ToolCallCompleted(TraceEntryView::from(&entry)));
+        }
         self.tracker.land_call(round, entry);
     }
 }
@@ -1743,6 +1775,112 @@ mod tests {
             assert_eq!(name, native, "a non-rename title stays verbatim");
             assert_eq!(kind, OperationKind::Write, "the wire kind keeps deciding");
         }
+    }
+
+    /// A bare fold-layer pump for the live-silence pins (issue #1242): no
+    /// clock, no open freeze -- the fold paths under test touch neither.
+    fn fold_pump() -> Pump {
+        Pump {
+            tracker: RoundTracker::new(),
+            pending: Vec::new(),
+            cancel_sent_at: None,
+            clock: None,
+            open_freeze: None,
+        }
+    }
+
+    /// Issue #1242: the fold layer routes a gateway-renamed call's echo into
+    /// the rounds (the settle merge's in-place-replacement anchor) but emits
+    /// NOTHING live -- the gateway serve's direct emission is the row's only
+    /// live source, so the echo never doubles it mid-flight.
+    #[test]
+    fn fold_silences_a_gateway_renamed_call_live() {
+        let mut pump = fold_pump();
+        let mut phases = Vec::new();
+        pump.fold_update(
+            &SessionUpdate::ToolCall {
+                tool_call_id: "tc_1".into(),
+                title: Some("mcp__toptopduck-gateway__explore".into()),
+                status: wire::ToolCallStatus::Completed,
+                kind: Some(wire::ToolKind::Execute),
+                content: Vec::new(),
+            },
+            &mut |p| phases.push(p),
+        );
+        assert!(
+            phases.is_empty(),
+            "the gateway echo emits no live phase: {phases:?}"
+        );
+        // The fold itself is untouched: the row lands as the settle merge's
+        // anchor, normalized to the bare gateway name (issue #1222).
+        let rounds = pump.tracker.settle_rounds(&Termination::Cancelled);
+        assert_eq!(rounds.len(), 1);
+        assert_eq!(rounds[0].calls.len(), 1);
+        assert_eq!(rounds[0].calls[0].name, "explore");
+        assert!(rounds[0].calls[0].success);
+    }
+
+    /// Issue #1242, the pending-row half: a gateway echo that opens pending
+    /// (no terminal status on the open frame) and completes via the update
+    /// frame stays silent across BOTH frames -- the gateway's direct
+    /// emission owns the row's live face end to end.
+    #[test]
+    fn fold_silences_a_gateway_call_completed_by_update() {
+        let mut pump = fold_pump();
+        let mut phases = Vec::new();
+        pump.fold_update(
+            &SessionUpdate::ToolCall {
+                tool_call_id: "tc_1".into(),
+                title: Some("toptopduck-gateway_explore".into()),
+                status: wire::ToolCallStatus::Pending,
+                kind: Some(wire::ToolKind::Execute),
+                content: Vec::new(),
+            },
+            &mut |p| phases.push(p),
+        );
+        pump.fold_update(
+            &SessionUpdate::ToolCallUpdate {
+                tool_call_id: "tc_1".into(),
+                status: Some(wire::ToolCallStatus::Completed),
+                title: None,
+                content: Vec::new(),
+            },
+            &mut |p| phases.push(p),
+        );
+        assert!(
+            phases.is_empty(),
+            "neither the open nor the closing frame emits live: {phases:?}"
+        );
+        let rounds = pump.tracker.settle_rounds(&Termination::Cancelled);
+        assert_eq!(rounds[0].calls.len(), 1);
+        assert_eq!(rounds[0].calls[0].name, "explore");
+    }
+
+    /// The native-call counterpart (issue #1242): a title that is not a
+    /// gateway rename keeps its live Started / Completed pair -- the silence
+    /// is scoped to the gateway-routed echoes, never the CLI's own tools.
+    #[test]
+    fn fold_keeps_the_live_pair_for_a_native_call() {
+        let mut pump = fold_pump();
+        let mut phases = Vec::new();
+        pump.fold_update(
+            &SessionUpdate::ToolCall {
+                tool_call_id: "tc_2".into(),
+                title: Some("bash ls".into()),
+                status: wire::ToolCallStatus::Completed,
+                kind: Some(wire::ToolKind::Execute),
+                content: Vec::new(),
+            },
+            &mut |p| phases.push(p),
+        );
+        assert_eq!(phases.len(), 2, "the native call keeps its live pair");
+        assert!(matches!(
+            &phases[0],
+            TurnPhase::ToolCallStarted { name, .. } if name == "bash ls"
+        ));
+        assert!(matches!(&phases[1], TurnPhase::ToolCallCompleted(_)));
+        let rounds = pump.tracker.settle_rounds(&Termination::Cancelled);
+        assert_eq!(rounds[0].calls.len(), 1);
     }
 
     /// Issue #629: a prose track hitting the byte cap latches the visible

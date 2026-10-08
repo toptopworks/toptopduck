@@ -209,18 +209,18 @@ fn failed_command_lands_failed_trace_row() {
     assert_eq!(entry.result_excerpt, "command exited with code 1");
 }
 
-/// Gateway-served MCP tool calls render live (issue #816): each completed
-/// `mcp_tool_call` item fires its phase pair at the same point (the
-/// `command_execution` shape) and lands one trace row on the round. The
-/// row's name is the wire's `tool` verbatim — the identity the gateway's
-/// dispatch row carries for every class but external dispatches, which
-/// it records under the resolved handle — so the settle-time merge
+/// Gateway-served MCP tool calls land one trace row per call on the round
+/// (issue #816), their name the wire's `tool` verbatim — the identity the
+/// gateway's dispatch row carries for every class but external dispatches,
+/// which it records under the resolved handle — so the settle-time merge
 /// (`merge_outcomes`) replaces the echo in place with the gateway's
 /// authoritative row whenever the gateway can account for the call:
 /// per-name quota (built-ins included) or the `mcp_invoke` pool (issues
-/// #820 + #817).
+/// #820 + #817). Live, the two name classes split (issue #1242): a BARE
+/// name is a gateway echo and stays silent (the gateway serve emits the
+/// row's phases itself); a namespaced native call keeps its phase pair.
 #[test]
-fn mcp_tool_call_renders_live_and_lands_trace_rows() {
+fn mcp_tool_call_bare_echo_is_silent_native_keeps_its_pair() {
     let (outcome, phases, _) = run("mcp_tool_call", 24);
     match outcome.termination {
         Termination::Text(t) => assert_eq!(t, "converted 2 rows"),
@@ -240,12 +240,13 @@ fn mcp_tool_call_renders_live_and_lands_trace_rows() {
     // external-arm classification).
     assert_eq!(calls[1].name, "mcp__duckdb__query_snapshot");
     assert_eq!(calls[1].operation_kind, OperationKind::Network);
-    // Live: the Started/Completed pair fires per call, Started naming the
-    // wire tool with the same badge the row carries.
-    assert!(phases.iter().any(
-        |p| matches!(p, TurnPhase::ToolCallStarted { name, operation_kind: OperationKind::Execute, .. }
-            if name == "convert")
-    ));
+    // Live: the bare (gateway echo) call emits NOTHING; the namespaced
+    // native call keeps its pair (issue #1242).
+    assert!(
+        !phases.iter().any(|p| matches!(p,
+            TurnPhase::ToolCallStarted { name, .. } if name == "convert")),
+        "the gateway echo is silent live"
+    );
     assert!(phases.iter().any(
         |p| matches!(p, TurnPhase::ToolCallStarted { name, operation_kind: OperationKind::Network, .. }
             if name == "mcp__duckdb__query_snapshot")
@@ -255,8 +256,8 @@ fn mcp_tool_call_renders_live_and_lands_trace_rows() {
             .iter()
             .filter(|p| matches!(p, TurnPhase::ToolCallCompleted(e) if e.success))
             .count(),
-        2,
-        "both live rows complete successfully"
+        1,
+        "only the native call's live row completes"
     );
 }
 
@@ -340,7 +341,8 @@ fn mcp_tool_call_rounds_settle_in_place_after_the_merge() {
 
 /// A failed gateway call (status "failed" + error.message) lands a failed
 /// row anchored on the wire's error message (issue #816) — the failure
-/// anchor the cross-turn retrospection surface renders.
+/// anchor the cross-turn retrospection surface renders. The bare name is a
+/// gateway echo, so the failure row lands silent (issue #1242).
 #[test]
 fn failed_mcp_tool_call_lands_failed_row_with_error_anchor() {
     let (outcome, phases, _) = run("mcp_tool_call_failed", 24);
@@ -352,9 +354,12 @@ fn failed_mcp_tool_call_lands_failed_row_with_error_anchor() {
     assert_eq!(calls.len(), 1);
     assert!(!calls[0].success);
     assert_eq!(calls[0].result_excerpt, "converter crashed");
-    assert!(phases
-        .iter()
-        .any(|p| matches!(p, TurnPhase::ToolCallCompleted(e) if !e.success)));
+    assert!(
+        !phases
+            .iter()
+            .any(|p| matches!(p, TurnPhase::ToolCallCompleted(_))),
+        "the failed gateway echo lands its row without a live phase (issue #1242)"
+    );
 }
 
 /// A multi-round trajectory (issue #613): each batch round settles with its

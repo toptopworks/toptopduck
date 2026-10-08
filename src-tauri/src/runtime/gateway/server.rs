@@ -35,7 +35,7 @@ use crate::bounded_line::{BoundedLineReader, LineRead, LINE_MAX_BYTES};
 use crate::cancel::CancelToken;
 use crate::mcp::aggregator::{self, McpAggregator};
 use crate::mcp::meta_tools;
-use crate::model::Promotion;
+use crate::model::{Promotion, TraceEntryView, TurnPhase, TurnPhaseSink};
 use crate::provider::tool_calling::{ToolDefinition, ToolResult, ToolUse};
 use crate::session::loop_contract::{
     truncate_trace_excerpt, TraceEntry, DENIED_BY_GATEWAY_CONTENT, TRACE_EXCERPT_MAX,
@@ -113,6 +113,13 @@ pub struct GatewayCtx<'a> {
     pub approval: &'a ApprovalState,
     /// The session's approval event sink (the card UI's pending/resolved channel).
     pub sink: &'a dyn ApprovalSink,
+    /// The turn's live-phase emitter (issue #1242): the serve emits the
+    /// authoritative `ToolCallStarted` / `ToolCallCompleted` pair around each
+    /// served `tools/call` -- the same phases the built-in loop's dispatch
+    /// core emits, over the same channel the ACP engine's fold layer feeds
+    /// (one live rail, one channel; the external lines' echoes stay silent,
+    /// so the gateway's row is the call's only live source).
+    pub events: &'a dyn TurnPhaseSink,
     /// The turn's shared cancel token; the gate suspends on it, dispatch checks it.
     pub cancel: &'a CancelToken,
     /// The connected external MCP servers (slice C-gw). Owned (turn-local
@@ -729,7 +736,7 @@ fn handle_tools_call(msg: &Value, ctx: &mut GatewayCtx, outcome: &mut GatewayOut
     let resolved;
     let call: &ToolUse = match meta_tools::resolve_meta_call(&ctx.mcp, &call) {
         meta_tools::MetaDispatch::Local { summary, payload } => {
-            return local_meta_result(&call, &summary, payload, outcome);
+            return local_meta_result(&call, &summary, payload, outcome, ctx.events);
         }
         meta_tools::MetaDispatch::Refused(message) => return resolution_failure(message),
         meta_tools::MetaDispatch::Resolved(replacement) => {
@@ -750,7 +757,7 @@ fn handle_tools_call(msg: &Value, ctx: &mut GatewayCtx, outcome: &mut GatewayOut
         return match crate::skills::invocation::resolve_skill_invocation(call, &mut ctx.invocations)
         {
             crate::skills::invocation::SkillInvocationOutcome::Local { summary, payload } => {
-                local_meta_result(call, &summary, payload, outcome)
+                local_meta_result(call, &summary, payload, outcome, ctx.events)
             }
             crate::skills::invocation::SkillInvocationOutcome::Refused(message) => {
                 resolution_failure(message)
@@ -766,7 +773,7 @@ fn handle_tools_call(msg: &Value, ctx: &mut GatewayCtx, outcome: &mut GatewayOut
     if call.name == crate::skills::read::READ_SKILL_FILE {
         return match crate::skills::read::resolve_skill_read(call, &ctx.read) {
             crate::skills::read::SkillReadOutcome::Local { summary, payload } => {
-                local_meta_result(call, &summary, payload, outcome)
+                local_meta_result(call, &summary, payload, outcome, ctx.events)
             }
             crate::skills::read::SkillReadOutcome::Refused(message) => resolution_failure(message),
         };
@@ -813,18 +820,29 @@ fn handle_tools_call(msg: &Value, ctx: &mut GatewayCtx, outcome: &mut GatewayOut
                 match ctx.approval.gate(gate_req, ctx.sink, ctx.cancel) {
                     Err(GateCancelled) => Response::Error(-32000, "turn cancelled".into()),
                     Ok(GateOutcome::Denied) => {
-                        outcome.trace.push(TraceEntry::denied(
+                        let entry = TraceEntry::denied(
                             call.id.clone(),
                             call.name.clone(),
                             OperationKind::Write,
                             summary,
-                        ));
+                        );
+                        // Only the completed phase (issue #1242): the card was
+                        // the call's pending face, the resolved denial
+                        // replaces it -- the dispatch core's contract.
+                        land_completed(ctx.events, outcome, entry);
                         Response::Result(json!({
                             "content": [{"type": "text", "text": DENIED_BY_GATEWAY_CONTENT}],
                             "isError": true,
                         }))
                     }
                     Ok(GateOutcome::Allow) => {
+                        // Post-gate start (issue #1242): the card (if any)
+                        // resolved, so the running row can exist.
+                        ctx.events.emit(TurnPhase::ToolCallStarted {
+                            name: call.name.clone(),
+                            operation_kind: OperationKind::Write,
+                            summary: summary.clone(),
+                        });
                         // The gate-pending window can race a same-name mint
                         // -- the typed error rides the result so the model
                         // self-corrects.
@@ -835,13 +853,14 @@ fn handle_tools_call(msg: &Value, ctx: &mut GatewayCtx, outcome: &mut GatewayOut
                         ) {
                             Ok(entry) => {
                                 let text = crate::skills::create::created_skill_result(&entry);
-                                outcome.trace.push(TraceEntry::succeeded(
+                                let trace_entry = TraceEntry::succeeded(
                                     call.id.clone(),
                                     call.name.clone(),
                                     OperationKind::Write,
                                     summary,
                                     String::new(),
-                                ));
+                                );
+                                land_completed(ctx.events, outcome, trace_entry);
                                 Response::Result(json!({
                                     "content": [{"type": "text", "text": text}],
                                     "isError": false,
@@ -850,13 +869,14 @@ fn handle_tools_call(msg: &Value, ctx: &mut GatewayCtx, outcome: &mut GatewayOut
                             Err(e) => {
                                 let message = format!("create_skill: {e}");
                                 let excerpt = truncate_trace_excerpt(&message, TRACE_EXCERPT_MAX);
-                                outcome.trace.push(TraceEntry::failed(
+                                let trace_entry = TraceEntry::failed(
                                     call.id.clone(),
                                     call.name.clone(),
                                     OperationKind::Write,
                                     summary,
                                     excerpt,
-                                ));
+                                );
+                                land_completed(ctx.events, outcome, trace_entry);
                                 Response::Result(json!({
                                     "content": [{"type": "text", "text": message}],
                                     "isError": true,
@@ -902,18 +922,30 @@ fn handle_tools_call(msg: &Value, ctx: &mut GatewayCtx, outcome: &mut GatewayOut
     match ctx.approval.gate(gate_req, ctx.sink, ctx.cancel) {
         Err(GateCancelled) => Response::Error(-32000, "turn cancelled".into()),
         Ok(GateOutcome::Denied) => {
-            outcome.trace.push(TraceEntry::denied(
-                call.id.clone(),
-                call.name.clone(),
-                operation_kind,
-                summary,
-            ));
+            let entry =
+                TraceEntry::denied(call.id.clone(), call.name.clone(), operation_kind, summary);
+            // Only the completed phase (issue #1242): the card was the call's
+            // pending face, the resolved denial replaces it -- no started row
+            // ever exists (the dispatch core's ADR-0080 contract).
+            land_completed(ctx.events, outcome, entry);
             Response::Result(json!({
                 "content": [{"type": "text", "text": DENIED_BY_GATEWAY_CONTENT}],
                 "isError": true,
             }))
         }
         Ok(GateOutcome::Allow) => {
+            // The gateway's own authoritative start (issue #1242): this
+            // emission is the row's ONLY live source (the external lines'
+            // echoes are silenced at their fold layers), firing post-gate so
+            // the pending card is never doubled by a running row. The name is
+            // the call's final identity (an `mcp_invoke` fall-through already
+            // resolved), the summary the real argument summary -- the same
+            // facts the settle trace row carries.
+            ctx.events.emit(TurnPhase::ToolCallStarted {
+                name: call.name.clone(),
+                operation_kind,
+                summary: summary.clone(),
+            });
             // Route by name shape (ADR-0076 gateway routing + ADR-0105
             // Decision 4 + ADR-0108 Decision 6): a namespaced name (an
             // `mcp_invoke` fall-through) routes to the external server and
@@ -1007,10 +1039,21 @@ fn handle_tools_call(msg: &Value, ctx: &mut GatewayCtx, outcome: &mut GatewayOut
                     excerpt,
                 )
             };
-            outcome.trace.push(entry);
+            // The completed phase is the trace row itself (issue #1242): the
+            // same entry the settle merge later pairs, so the live row and
+            // the settled row are one construction, never two.
+            land_completed(ctx.events, outcome, entry);
             response
         }
     }
+}
+
+/// Emit the row's completed phase and land it on the outcome (issue #1242):
+/// one construction feeds both the live rail and the settle trace, in that
+/// order -- the live row and the settled row are the same entry, never two.
+fn land_completed(events: &dyn TurnPhaseSink, outcome: &mut GatewayOutcome, entry: TraceEntry) {
+    events.emit(TurnPhase::ToolCallCompleted(TraceEntryView::from(&entry)));
+    outcome.trace.push(entry);
 }
 
 /// Serve one locally-executed meta-tool (`mcp_list_servers` /
@@ -1018,20 +1061,29 @@ fn handle_tools_call(msg: &Value, ctx: &mut GatewayCtx, outcome: &mut GatewayOut
 /// record a trace entry. These never touch a backend server, so there is no
 /// gate suspension (catalog reads carry the built-in read tools' trust
 /// shape) and no envelope relay -- the payload is the gateway's own JSON.
+/// Emits the standard live pair (issue #1242), mirroring the built-in path's
+/// `local_meta_call`, so a locally-served call renders like any other call.
 fn local_meta_result(
     call: &ToolUse,
     summary: &str,
     payload: Value,
     outcome: &mut GatewayOutcome,
+    events: &dyn TurnPhaseSink,
 ) -> Response {
+    events.emit(TurnPhase::ToolCallStarted {
+        name: call.name.clone(),
+        operation_kind: OperationKind::Read,
+        summary: summary.to_string(),
+    });
     let excerpt = crate::mcp::meta_tools::meta_payload_text(payload);
-    outcome.trace.push(TraceEntry::succeeded(
+    let entry = TraceEntry::succeeded(
         call.id.clone(),
         call.name.clone(),
         OperationKind::Read,
         summary.to_string(),
         truncate_trace_excerpt(&excerpt, TRACE_EXCERPT_MAX),
-    ));
+    );
+    land_completed(events, outcome, entry);
     Response::Result(json!({
         "content": [{"type": "text", "text": excerpt}],
         "isError": false,
@@ -1284,6 +1336,23 @@ mod tests {
         fn emit_resolved(&self, _: &ApprovalRequestBody, _: ApprovalResponse) {}
     }
 
+    /// A phase sink that records nothing -- the ctx default every
+    /// live-emission test overwrites with a recorder (issue #1242).
+    struct NoopPhaseSink;
+    impl TurnPhaseSink for NoopPhaseSink {
+        fn emit(&self, _: TurnPhase) {}
+    }
+
+    /// A recording phase sink (issue #1242): the live-emission tests'
+    /// assertions read the emitted phases back in arrival order. Leak-boxed
+    /// by the tests that use it (the ctx is `GatewayCtx<'static>`).
+    struct RecPhaseSink(std::sync::Mutex<Vec<TurnPhase>>);
+    impl TurnPhaseSink for RecPhaseSink {
+        fn emit(&self, phase: TurnPhase) {
+            self.0.lock().unwrap().push(phase);
+        }
+    }
+
     /// A recording sink for the approval-free assertions (issue #701): the
     /// NoopSink default hides whether the gate was ever asked.
     struct RecSink {
@@ -1351,6 +1420,7 @@ mod tests {
         let refs: &'static mut HashMap<String, crate::session::materializer::CachedDerivedRef> =
             Box::leak(Box::new(HashMap::new()));
         let cancel: &'static CancelToken = Box::leak(Box::new(CancelToken::new()));
+        let events: &'static NoopPhaseSink = Box::leak(Box::new(NoopPhaseSink));
         let deps = TurnDeps::test_deps(&engine.admin_engine, ws, sources, engine.temp.path(), refs);
         GatewayCtx {
             deps,
@@ -1367,6 +1437,9 @@ mod tests {
             materializer,
             approval,
             sink,
+            // Inert by default; the live-emission tests (issue #1242)
+            // overwrite this field with a recorder (same purpose).
+            events,
             cancel,
             mcp: McpAggregator::default(),
             cli,
@@ -3205,6 +3278,159 @@ mod tests {
         assert!(
             outcome.promotions.is_empty(),
             "explore produces no promotion"
+        );
+    }
+
+    // --- live emission (issue #1242) ----------------------------------------
+
+    /// A leak-boxed recording phase sink: the live-emission pins overwrite
+    /// `ctx.events` with one and read the phases back in arrival order.
+    fn phase_recorder() -> &'static RecPhaseSink {
+        Box::leak(Box::new(RecPhaseSink(std::sync::Mutex::new(Vec::new()))))
+    }
+
+    /// Issue #1242: the gateway emits the authoritative live pair itself --
+    /// Started after the gate (with the real argument summary + badge), then
+    /// the completed phase over the SAME trace entry the settle merge later
+    /// pairs (one construction, two consumers).
+    #[test]
+    fn tools_call_emits_the_live_pair_on_the_allow_path() {
+        let phases = phase_recorder();
+        let mut ctx = fresh_ctx();
+        ctx.events = phases;
+        let mut outcome = GatewayOutcome::default();
+        let msg = json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": {"name": "explore", "arguments": {"sql": "SELECT 1 AS x"}}
+        });
+        handle_tools_call(&msg, &mut ctx, &mut outcome);
+        let got = phases.0.lock().unwrap().clone();
+        assert_eq!(
+            got,
+            vec![
+                TurnPhase::ToolCallStarted {
+                    name: "explore".into(),
+                    operation_kind: OperationKind::Read,
+                    summary: "SELECT 1 AS x".into(),
+                },
+                TurnPhase::ToolCallCompleted(TraceEntryView::from(&outcome.trace[0])),
+            ],
+            "the pair is post-gate, carries the argument summary, and the \
+             completed phase is the trace row itself"
+        );
+    }
+
+    /// Issue #1242: a gate denial fires ONLY the completed phase (the
+    /// built-in loop's dispatch-core contract): the pending card was the
+    /// call's live face while it waited, and the resolved denial replaces
+    /// it -- no started row ever exists.
+    #[test]
+    fn tools_call_denial_emits_only_the_completed_phase() {
+        let approval: &'static ApprovalState = Box::leak(Box::new(ApprovalState::new()));
+        let sink: &'static AnsweringSink = Box::leak(Box::new(AnsweringSink::new(
+            approval,
+            ApprovalResponse::Deny,
+        )));
+        let phases = phase_recorder();
+        let mut ctx = gate_ctx(vec![cli_fixture()], approval, sink);
+        ctx.events = phases;
+        let mut outcome = GatewayOutcome::default();
+        let msg = json!({
+            "jsonrpc": "2.0",
+            "id": 4,
+            "method": "tools/call",
+            "params": {
+                "name": "doc-convert",
+                "arguments": {"value": "yes", "doc": "hello body"}
+            }
+        });
+        handle_tools_call(&msg, &mut ctx, &mut outcome);
+        let got = phases.0.lock().unwrap().clone();
+        assert_eq!(
+            got,
+            vec![TurnPhase::ToolCallCompleted(TraceEntryView::from(
+                &outcome.trace[0]
+            ))],
+            "a denied call never started -- only its failed row surfaces live"
+        );
+        assert!(!outcome.trace[0].success);
+    }
+
+    /// Issue #1242: the gate-pending window is silent on the live rail --
+    /// the approval card IS the call's pending face. The sink observes from
+    /// inside the pending window: no phase may have fired when the card
+    /// lands, and the pair only follows the allow.
+    #[test]
+    fn the_gate_pending_window_is_silent_on_the_live_rail() {
+        struct PendingWindowSink<'a> {
+            state: &'static ApprovalState,
+            phases: &'a RecPhaseSink,
+        }
+        impl ApprovalSink for PendingWindowSink<'_> {
+            fn emit_request(&self, body: &ApprovalRequestBody) {
+                let fired = self.phases.0.lock().unwrap().len();
+                assert_eq!(fired, 0, "the pending card is the call's only live face");
+                let id: uuid::Uuid = body.request_id.parse().expect("request_id is a uuid");
+                self.state
+                    .respond(id, ApprovalResponse::AllowOnce)
+                    .expect("respond");
+            }
+            fn emit_resolved(&self, _: &ApprovalRequestBody, _: ApprovalResponse) {}
+        }
+        let approval: &'static ApprovalState = Box::leak(Box::new(ApprovalState::new()));
+        let phases = phase_recorder();
+        let sink: &'static PendingWindowSink<'static> = Box::leak(Box::new(PendingWindowSink {
+            state: approval,
+            phases,
+        }));
+        let mut ctx = gate_ctx(vec![cli_fixture()], approval, sink);
+        ctx.events = phases;
+        let mut outcome = GatewayOutcome::default();
+        let msg = json!({
+            "jsonrpc": "2.0",
+            "id": 5,
+            "method": "tools/call",
+            "params": {
+                "name": "doc-convert",
+                "arguments": {"value": "yes", "doc": "hello body"}
+            }
+        });
+        handle_tools_call(&msg, &mut ctx, &mut outcome);
+        let got = phases.0.lock().unwrap().clone();
+        assert_eq!(got.len(), 2, "the pair only follows the allow: {got:?}");
+        assert_eq!(outcome.trace.len(), 1);
+    }
+
+    /// Issue #1242: the locally-served meta tools emit the standard pair too
+    /// (mirroring the built-in path's `local_meta_call`), so a catalog call
+    /// renders like any other call while it runs.
+    #[test]
+    fn tools_call_local_meta_emits_the_live_pair() {
+        let phases = phase_recorder();
+        let mut ctx = fresh_ctx();
+        ctx.events = phases;
+        let mut outcome = GatewayOutcome::default();
+        let msg = json!({
+            "jsonrpc": "2.0",
+            "id": 7,
+            "method": "tools/call",
+            "params": {"name": "mcp_list_servers", "arguments": {}}
+        });
+        handle_tools_call(&msg, &mut ctx, &mut outcome);
+        let got = phases.0.lock().unwrap().clone();
+        assert_eq!(
+            got,
+            vec![
+                TurnPhase::ToolCallStarted {
+                    name: "mcp_list_servers".into(),
+                    operation_kind: OperationKind::Read,
+                    summary: meta_tools::LIST_SUMMARY.to_string(),
+                },
+                TurnPhase::ToolCallCompleted(TraceEntryView::from(&outcome.trace[0])),
+            ],
+            "a locally-served call renders like any other call live"
         );
     }
 
