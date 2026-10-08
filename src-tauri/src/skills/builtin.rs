@@ -963,6 +963,10 @@ mod tests {
         let body = body_of("vega-chart");
         assert!(body.contains("Delivery split"), "names the split section");
         assert!(
+            body.contains("in the reply"),
+            "the immediate lane emits in the reply prose"
+        );
+        assert!(
             body.contains("working directory"),
             "the report lane writes to the working directory"
         );
