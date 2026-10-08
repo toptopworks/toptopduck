@@ -751,8 +751,7 @@ impl ClaudePump {
                     } else {
                         RowEnd::Failed
                     };
-                    let emit_live = !row.gateway;
-                    self.finalize_row(row, end, emit_live, on_phase);
+                    self.finalize_row(row, end, on_phase);
                 }
                 None
             }
@@ -792,9 +791,9 @@ impl ClaudePump {
         &mut self,
         row: PendingClaudeCall,
         end: RowEnd,
-        emit_live: bool,
         on_phase: &mut impl FnMut(TurnPhase),
     ) {
+        let gateway = row.gateway;
         // The claude wire carries no per-call result text on the tool_result
         // frame; a failure still needs its bounded anchor (ADR-0078) -- the
         // ACP pump's honest "failed" marker. A row the agent never reported
@@ -824,7 +823,7 @@ impl ClaudePump {
         };
         // The gateway echo's completion is silent too (issue #1242): the
         // gateway serve emits the row's authoritative completed phase.
-        if emit_live {
+        if !gateway {
             on_phase(TurnPhase::ToolCallCompleted(TraceEntryView::from(&entry)));
         }
         // Gateway-routed rows land too (issue #817): the engine row is the
@@ -839,8 +838,7 @@ impl ClaudePump {
     //  marker, issue #630).
     fn finalize_pending(&mut self, on_phase: &mut impl FnMut(TurnPhase)) {
         for row in std::mem::take(&mut self.pending) {
-            let emit_live = !row.gateway;
-            self.finalize_row(row, RowEnd::Unobserved, emit_live, on_phase);
+            self.finalize_row(row, RowEnd::Unobserved, on_phase);
         }
     }
 }
@@ -1293,6 +1291,38 @@ mod tests {
             TurnPhase::ToolCallStarted { name, .. } if name == "Bash"
         ));
         assert!(matches!(&phases[1], TurnPhase::ToolCallCompleted(_)));
+    }
+
+    /// Issue #1242, the drain half: a gateway-prefixed call the agent never
+    /// reports a result for drains unobserved at turn end with NO live
+    /// phase -- the gateway's own emission was the row's only live source,
+    /// so no duplicate row may appear at drain time.
+    #[test]
+    fn gateway_echo_pending_at_turn_end_drains_silent_live() {
+        let mut pump = pump_with_bridge();
+        let mut phases = Vec::new();
+        pump.fold(
+            ClaudeEvent::ToolUse {
+                id: "tu_3".into(),
+                name: "mcp__toptopduck-gateway__explore".into(),
+                input: serde_json::json!({"sql": "SELECT 1"}),
+            },
+            &mut |p| phases.push(p),
+        );
+        pump.finalize_pending(&mut |p| phases.push(p));
+        assert!(
+            phases.is_empty(),
+            "the gateway echo drains live-silent: {phases:?}"
+        );
+        let rounds = pump
+            .tracker
+            .settle_rounds(&Termination::Text("done".into()));
+        assert_eq!(rounds[0].calls.len(), 1);
+        assert_eq!(rounds[0].calls[0].name, "explore");
+        assert!(
+            !rounds[0].calls[0].success,
+            "the unobserved drain lands the honest failed marker"
+        );
     }
 
     /// With partial messages on, one message's deltas stream first and its

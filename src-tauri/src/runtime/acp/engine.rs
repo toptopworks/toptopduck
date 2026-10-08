@@ -1207,7 +1207,7 @@ impl Pump {
                         &summary,
                         content,
                         end,
-                        !gateway,
+                        gateway,
                         on_phase,
                     );
                 } else {
@@ -1240,7 +1240,10 @@ impl Pump {
                         // echo regardless of whether the identity
                         // re-derivation below runs (its pathological-start
                         // guard): the gateway serve owns the row's live face
-                        // (issue #1242).
+                        // (issue #1242). A native-identity open that already
+                        // emitted its Started strands that live row -- the
+                        // rename cannot recall it -- accepted: real echoes
+                        // open titled, so this shape is defensive only.
                         if strip_gateway_rename(t).is_some() {
                             row.gateway = true;
                         }
@@ -1271,7 +1274,6 @@ impl Pump {
                     }
                     if let Some(final_status) = *status {
                         if let Some(end) = RowEnd::from_wire_status(final_status) {
-                            let emit_live = !row.gateway;
                             self.finalize_row(
                                 row.round,
                                 &row.tool_use_id,
@@ -1280,7 +1282,7 @@ impl Pump {
                                 &row.summary,
                                 &row.content,
                                 end,
-                                emit_live,
+                                row.gateway,
                                 on_phase,
                             );
                             self.reconcile_pending_freeze();
@@ -1321,7 +1323,6 @@ impl Pump {
         // The take empties `pending`: the open tool-call window closes here.
         self.reconcile_pending_freeze();
         for row in rows {
-            let emit_live = !row.gateway;
             self.finalize_row(
                 row.round,
                 &row.tool_use_id,
@@ -1330,7 +1331,7 @@ impl Pump {
                 &row.summary,
                 &row.content,
                 RowEnd::Unobserved,
-                emit_live,
+                row.gateway,
                 on_phase,
             );
         }
@@ -1346,7 +1347,7 @@ impl Pump {
         summary: &str,
         content: &[ToolCallContent],
         end: RowEnd,
-        emit_live: bool,
+        gateway: bool,
         on_phase: &mut impl FnMut(TurnPhase),
     ) {
         let (success, result_excerpt) = match end {
@@ -1389,7 +1390,7 @@ impl Pump {
         };
         // The gateway echo's completion is silent too (issue #1242): the
         // gateway serve emits the row's authoritative completed phase.
-        if emit_live {
+        if !gateway {
             on_phase(TurnPhase::ToolCallCompleted(TraceEntryView::from(&entry)));
         }
         self.tracker.land_call(round, entry);
@@ -1881,6 +1882,82 @@ mod tests {
         assert!(matches!(&phases[1], TurnPhase::ToolCallCompleted(_)));
         let rounds = pump.tracker.settle_rounds(&Termination::Cancelled);
         assert_eq!(rounds[0].calls.len(), 1);
+    }
+
+    /// Issue #1242, the late-rename latch: a row that opened under a native
+    /// title (its Started already emitted) and is revealed as a gateway echo
+    /// only by the update frame's rename latches `gateway` -- the completed
+    /// stays silent. The already-emitted Started is stranded by design (the
+    /// update arm's comment): real echoes open titled, so the shape is
+    /// defensive only.
+    #[test]
+    fn fold_latches_a_late_gateway_rename_silencing_the_completed() {
+        let mut pump = fold_pump();
+        let mut phases = Vec::new();
+        pump.fold_update(
+            &SessionUpdate::ToolCall {
+                tool_call_id: "tc_3".into(),
+                title: Some("bash ls".into()),
+                status: wire::ToolCallStatus::Pending,
+                kind: Some(wire::ToolKind::Execute),
+                content: Vec::new(),
+            },
+            &mut |p| phases.push(p),
+        );
+        pump.fold_update(
+            &SessionUpdate::ToolCallUpdate {
+                tool_call_id: "tc_3".into(),
+                title: Some("toptopduck-gateway_explore".into()),
+                status: Some(wire::ToolCallStatus::Completed),
+                content: Vec::new(),
+            },
+            &mut |p| phases.push(p),
+        );
+        assert_eq!(
+            phases.len(),
+            1,
+            "the native Started stays, the latched completed is silent: {phases:?}"
+        );
+        assert!(matches!(&phases[0], TurnPhase::ToolCallStarted { name, .. } if name == "bash ls"));
+        // The fold itself is untouched: the row still lands as the anchor.
+        // Its identity stays native -- the re-derivation only runs on a
+        // pathological empty summary (its guard above), so the rename
+        // latches the echo flag without re-writing a non-empty identity.
+        let rounds = pump.tracker.settle_rounds(&Termination::Cancelled);
+        assert_eq!(rounds[0].calls.len(), 1);
+        assert_eq!(rounds[0].calls[0].name, "bash ls");
+    }
+
+    /// Issue #1242, the drain half: a gateway echo that never reports a
+    /// final status drains unobserved at turn end with NO live phase -- the
+    /// gateway's own emission was the row's only live source, so a duplicate
+    /// row must not appear at drain time either.
+    #[test]
+    fn fold_silences_a_gateway_call_drained_at_turn_end() {
+        let mut pump = fold_pump();
+        let mut phases = Vec::new();
+        pump.fold_update(
+            &SessionUpdate::ToolCall {
+                tool_call_id: "tc_4".into(),
+                title: Some("toptopduck-gateway_explore".into()),
+                status: wire::ToolCallStatus::Pending,
+                kind: Some(wire::ToolKind::Execute),
+                content: Vec::new(),
+            },
+            &mut |p| phases.push(p),
+        );
+        pump.drain_unobserved(&mut |p| phases.push(p));
+        assert!(
+            phases.is_empty(),
+            "the gateway echo drains live-silent: {phases:?}"
+        );
+        let rounds = pump.tracker.settle_rounds(&Termination::Cancelled);
+        assert_eq!(rounds[0].calls.len(), 1);
+        assert_eq!(rounds[0].calls[0].name, "explore");
+        assert!(
+            !rounds[0].calls[0].success,
+            "the unobserved drain lands the honest failed marker"
+        );
     }
 
     /// Issue #629: a prose track hitting the byte cap latches the visible

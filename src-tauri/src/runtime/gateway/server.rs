@@ -926,7 +926,7 @@ fn handle_tools_call(msg: &Value, ctx: &mut GatewayCtx, outcome: &mut GatewayOut
                 TraceEntry::denied(call.id.clone(), call.name.clone(), operation_kind, summary);
             // Only the completed phase (issue #1242): the card was the call's
             // pending face, the resolved denial replaces it -- no started row
-            // ever exists (the dispatch core's ADR-0080 contract).
+            // ever exists (the dispatch core's contract).
             land_completed(ctx.events, outcome, entry);
             Response::Result(json!({
                 "content": [{"type": "text", "text": DENIED_BY_GATEWAY_CONTENT}],
