@@ -7,7 +7,8 @@
 // riding LiveTurn arrives late -- when it lands is useTurnFlow's contract,
 // pinned in its own tests) and its presence + the staged badge names once
 // they land (the adapter hand-offs -- the frame pins only the given-prop
-// faces), plus the streaming prose postures (ADR-0120).
+// faces), plus the streaming prose postures (ADR-0120) and the trailing
+// thinking-status postures (issue #1167).
 
 import { describe, expect, it } from "vitest";
 import { render, screen } from "@testing-library/react";
@@ -15,7 +16,7 @@ import { IntlProvider } from "react-intl";
 import { TooltipProvider } from "../../ui/tooltip";
 import { catalogFor } from "../../../i18n";
 import { LiveTurnExchange } from "../LiveTurnExchange";
-import type { LiveTurn } from "../../../session/useTurnFlow";
+import type { LiveRoundRow, LiveTurn } from "../../../session/useTurnFlow";
 
 function renderExchange(liveTurn: LiveTurn) {
   return render(
@@ -143,7 +144,7 @@ describe("LiveTurnExchange tail-round streaming posture", () => {
 });
 
 // The trailing thinking status yields twice over: a dispatched row carries
-// its own motion (the rowInProgress arm, issue #297), and once #1163 streams
+// its own motion (the rowInProgress arm, issue #297), and while #1163 streams
 // the current round's call-less prose the visible text + caret carry the
 // turn's liveness by themselves -- a spinner still claiming 思考中 over
 // visibly streaming text is a doubled, misleading signal. A round beside
@@ -154,11 +155,27 @@ describe("LiveTurnExchange tail-round streaming posture", () => {
 // the previous round's sealed prose), the current round's pre-prose moment,
 // and the current round's post-settle round trip.
 describe("LiveTurnExchange trailing thinking status (issue #1167)", () => {
+  // The settled-call fixture every keep test seats beside the tail's prose
+  // (the sibling suites' Partial-override convention, Thread's liveRow and
+  // TraceView's rowWith, with this suite's settled posture as the default).
+  const settledRow = (over: Partial<LiveRoundRow> = {}): LiveRoundRow => ({
+    key: "call-0",
+    name: "explore",
+    server: null,
+    operationKind: "read",
+    summary: "SELECT 1",
+    approval: null,
+    running: false,
+    success: true,
+    resultExcerpt: "",
+    ...over,
+  });
+
   it("keeps the status through the inter-round wait (the tail is a sealed earlier round)", () => {
     renderExchange({
       ...liveTurnWith(undefined),
       step: 2,
-      rounds: [{ text: "第一轮已收口。", rows: [] }],
+      rounds: [{ text: "第一轮已收口。", rows: [settledRow()] }],
     });
     expect(screen.getByText("思考中（第 2 步）…")).toBeInTheDocument();
   });
@@ -168,7 +185,7 @@ describe("LiveTurnExchange trailing thinking status (issue #1167)", () => {
       ...liveTurnWith(undefined),
       step: 2,
       rounds: [
-        { text: "第一轮已收口。", rows: [] },
+        { text: "第一轮已收口。", rows: [settledRow()] },
         { thinking: { duration_ms: 900, text: "推理" }, rows: [] },
       ],
     });
@@ -186,28 +203,31 @@ describe("LiveTurnExchange trailing thinking status (issue #1167)", () => {
       rounds: [
         {
           text: "再按网关前缀搜索工具：",
-          rows: [
-            {
-              key: "call-0",
-              name: "ToolSearch",
-              server: "tools",
-              operationKind: "read",
-              summary: "query=toptopduck",
-              approval: null,
-              running: false,
-              success: true,
-              resultExcerpt: "",
-            },
-          ],
+          rows: [settledRow({ name: "ToolSearch", server: "tools", summary: "query=toptopduck" })],
         },
       ],
     });
     expect(screen.getByText("思考中…")).toBeInTheDocument();
   });
 
+  it("keeps the status while a call-bearing tail round has no prose yet (the round-trip wait)", () => {
+    // A first-round call can land before any prose (rows may lead the slot
+    // arrays), so the tail can be the current round with settled rows and
+    // no text -- the wait discriminated through the text and row arms
+    // rather than the step arm.
+    renderExchange({
+      ...liveTurnWith(undefined),
+      step: 1,
+      rounds: [{ rows: [settledRow()] }],
+    });
+    expect(screen.getByText("思考中…")).toBeInTheDocument();
+  });
+
   it("yields nothing while the call-less tail's prose streams (the caret carries liveness)", () => {
     // The suppression arm's own pin: a still-growing tail keeps the status
-    // away, so a regression to "never show" cannot pass the suite silently.
+    // away, so a regression to "always show" -- the spinner leaking over
+    // visibly streaming text -- cannot pass the suite silently (the keep
+    // tests above own the "never show" direction).
     renderExchange({
       ...liveTurnWith(undefined),
       step: 1,
@@ -219,27 +239,15 @@ describe("LiveTurnExchange trailing thinking status (issue #1167)", () => {
   it("keeps the status when the current round's prose is sealed by its settled rows (the round-trip wait)", () => {
     // Prose after a call opens the next round, so a text-bearing round beside
     // settled rows is NOT streaming prose -- it is the round-trip wait, and
-    // the status must name it (the sealed-tail correction of the #1167 pin).
+    // the status must name it (the sealed-tail reading of the #1167 window).
     renderExchange({
       ...liveTurnWith(undefined),
       step: 2,
       rounds: [
-        { text: "第一轮已收口。", rows: [] },
+        { text: "第一轮已收口。", rows: [settledRow()] },
         {
           text: "第二轮正文已封口。",
-          rows: [
-            {
-              key: "call-0",
-              name: "explore",
-              server: null,
-              operationKind: "read",
-              summary: "SELECT 1",
-              approval: null,
-              running: false,
-              success: true,
-              resultExcerpt: "",
-            },
-          ],
+          rows: [settledRow()],
         },
       ],
     });

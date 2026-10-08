@@ -121,7 +121,9 @@ export interface LiveRound {
   /** The round's connective prose: undefined until the round's first
    *  TextDelta lands, then defined and append-only for the round's
    *  remaining life (ADR-0126) -- the trailing status gate reads undefined
-   *  as "no prose yet". */
+   *  as "no prose yet", and a defined text only counts as streaming while
+   *  the round has no rows (a round that has observed a call has sealed
+   *  its prose, issue #1234). */
   text?: string;
   rows: LiveRoundRow[];
 }
@@ -146,7 +148,8 @@ export interface LiveTurn {
    *  `TurnRecord.invocations` instead. */
   invocationNames: string[];
   /** The 1-based step of the latest Thinking event (round-trip count,
-   *  ADR-0081); null until the first event arrives. */
+   *  ADR-0081); null until the first event arrives -- every reader treats
+   *  null as round 1 (the shared `?? 1`). */
   step: number | null;
   /** The round-grouped live trace -- the SINGLE derivation (issue #620): the
    *  exchange renders it directly and the settle projection consumes it, so
