@@ -791,10 +791,12 @@ mod tests {
     // --- curated trigger copy ------------------------------------------------
 
     /// The locked trigger copy (curation brief, verbatim): sentence 1 is
-    /// capability + trigger timing, sentence 2 the neighbor-tool boundary.
-    /// With progressive disclosure the metadata index is the only discovery
-    /// surface, so the wording itself is load-bearing -- pinned byte for
-    /// byte. English-only since ADR-0121 Decision 2.
+    /// capability + trigger timing, sentence 2 the boundary clause where
+    /// one applies -- the neighbor-tool division for most skills, an
+    /// out-of-scope declination for vega-chart. With progressive
+    /// disclosure the metadata index is the only discovery surface, so
+    /// the wording itself is load-bearing -- pinned byte for byte.
+    /// English-only since ADR-0121 Decision 2.
     #[test]
     fn descriptions_carry_the_locked_trigger_copy() {
         let expected: &[(&str, &str)] = &[
@@ -832,11 +834,11 @@ mod tests {
             ),
             (
                 "vega-chart",
-                "Chart numeric shape — trend, distribution, comparison — as \
-                 vega-lite fences: one fence in the reply for an immediate \
-                 answer, or a `.md` report with embedded fences for a \
-                 deliverable or several charts. Flowcharts, diagrams, and \
-                 lone KPI figures stay out of scope.",
+                "Vega-lite fences in replies, only when the user explicitly \
+                 asks for them — names vega, or requests the in-app \
+                 fence/markdown chart form. Default chart deliverables \
+                 (reports, dashboards, files) are out of scope; flowcharts, \
+                 diagrams, and lone KPI figures stay out of scope.",
             ),
             (
                 "skill-creator",
@@ -952,27 +954,28 @@ mod tests {
         assert_eq!(spec["mark"], "bar");
     }
 
-    /// The delivery split (issue #1238): the body teaches both lanes -- the
+    /// The explicit-trigger reversal (issue #1252): the body teaches the
+    /// trigger rule -- fire only on an explicit ask, never self-selected --
+    /// and the two delivery lanes for when the skill is invoked: the
     /// immediate single chart in the reply prose, and the report or
-    /// multi-chart case delivered as a `.md` written to the working
-    /// directory with the reply left as a summary plus a pointer. Phrase
-    /// pins, not verbatim: the split rules are what must survive a
-    /// re-curation.
+    /// multi-chart case delivered as a `.md` with the reply left as a
+    /// summary plus a pointer. Phrase pins, not verbatim: the rules are
+    /// what must survive a re-curation.
     #[test]
-    fn vega_chart_body_teaches_the_delivery_split() {
+    fn vega_chart_body_teaches_explicit_trigger_and_delivery() {
         let body = body_of("vega-chart");
-        assert!(body.contains("Delivery split"), "names the split section");
+        assert!(body.contains("explicit only"), "names the trigger rule");
+        assert!(
+            body.contains("never self-select"),
+            "forbids self-selection for a chart request"
+        );
         assert!(
             body.contains("in the reply"),
             "the immediate lane emits in the reply prose"
         );
         assert!(
-            body.contains("working directory"),
-            "the report lane writes to the working directory"
-        );
-        assert!(
-            body.contains("two or more charts"),
-            "the >=2 charts fallback rule"
+            body.contains("`<name>.md`"),
+            "the report lane writes a named .md deliverable"
         );
         assert!(
             body.contains("summary") && body.contains("pointer"),
@@ -1088,7 +1091,9 @@ mod tests {
     /// #1192): the `extra` tail semantics (one element one argument, no
     /// shell, empty array for the plain call), the high-frequency flags
     /// table, the PDF engine prerequisite and selection table, the no-engine
-    /// escape hatch, and the office-cli division. Phrase pins, not verbatim
+    /// escape hatch, the vega-fence degradation disclosure (issue #1252 --
+    /// charted markdown regenerates via the `python` tool), and the
+    /// office-cli division. Phrase pins, not verbatim
     /// -- the CONTRACT items are what must survive a re-curation.
     #[test]
     fn pandoc_body_teaches_the_conversion_contract() {
@@ -1123,6 +1128,16 @@ mod tests {
         assert!(
             body.contains("belongs to office-cli"),
             "keeps the division sentence"
+        );
+        // The vega-fence degradation disclosure (issue #1252): pandoc has no
+        // vega engine, so charted markdown must route to python instead.
+        assert!(
+            body.contains("`vega-lite`"),
+            "discloses the vega fence degradation"
+        );
+        assert!(
+            body.contains("`python` tool"),
+            "routes charted markdown to the python tool"
         );
     }
 

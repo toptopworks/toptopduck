@@ -1,12 +1,14 @@
 ---
 name: vega-chart
-description: "Chart numeric shape — trend, distribution, comparison — as vega-lite fences: one fence in the reply for an immediate answer, or a `.md` report with embedded fences for a deliverable or several charts. Flowcharts, diagrams, and lone KPI figures stay out of scope."
+description: "Vega-lite fences in replies, only when the user explicitly asks for them — names vega, or requests the in-app fence/markdown chart form. Default chart deliverables (reports, dashboards, files) are out of scope; flowcharts, diagrams, and lone KPI figures stay out of scope."
 ---
 Produce charts as vega-lite fences: one fence per chart, a self-contained Vega-Lite JSON object with the data inlined. The app renders each such fence as a chart wherever it appears; every other code block stays plain text.
 
-Delivery split -- where the charts live:
-- a single chart supporting an immediate answer: emit the fence directly in the reply prose, interleaved freely with the surrounding text;
-- a report or deliverable the user asked for, or two or more charts planned: write `<name>.md` to the working directory with the fences embedded, and keep the reply to a summary plus a pointer to the file, mirroring the pandoc delivery convention. The `.md` rides the same artifact delivery chain (manifest, results pane, open externally) as any other deliverable.
+Trigger -- explicit only: fire this skill only when the user names vega or explicitly asks for the fence/markdown chart form; never self-select it for a chart request.
+
+Delivery when invoked -- where the charts live:
+- a single chart: emit the fence directly in the reply prose, interleaved freely with the surrounding text;
+- a report or several charts: write `<name>.md` with the fences embedded, and keep the reply to a summary plus a pointer to the file, mirroring the pandoc delivery convention. The `.md` rides the same artifact delivery chain as any other deliverable.
 
 When to chart -- the substance is numeric shape:
 - a trend over time (line, area);
