@@ -147,66 +147,119 @@ function clampedY(y: ClampTarget): ClampableY {
 }
 
 /** Guard the zero-baseline encoding against an explicit y domain that
- * excludes 0 (#1245, #1247). The extrapolation lives inside each baseline
- * mark, not in the view structure, so the gate runs on a single view's
- * top-level pair and on every layer entry of a layered view. A layer
- * carrying its own encoding.y is judged (and patched) there; a layer
- * without one inherits the top-level encoding (vega-lite encoding
- * inheritance), so a shared y is judged against its baseline layers and
- * patched at the top -- the place it takes effect. Everything else passes
- * through untouched. cf. keepsDefaultWidth below -- an orthogonal gate over
- * width semantics only: this gate now reaches into layer entries while that
- * one treats a layered view like any other operable view. Different
- * questions; never merge the two gates. */
-function withZeroBaselineClamp(spec: TopLevelSpec): TopLevelSpec {
-  const s = spec as {
+ * excludes 0 (#1245, #1247, #1249). The extrapolation lives inside each
+ * baseline mark, not in the view structure, so the gate recurses through the
+ * whole spec tree: a view's own mark+encoding pair, layer entries (including
+ * layer-in-layer groups, which carry no mark of their own), facet/repeat
+ * subviews, and concat entries. A child without its own encoding.y inherits
+ * the nearest declared one up the chain (vega-lite encoding inheritance), is
+ * judged against its baseline marks there, and the patch lands at the
+ * declaration -- the place it takes effect; a view declaring its own y is
+ * judged (and patched) in place. The walk sets no depth cap and needs no
+ * cycle guard (the entry chains only hand over vega-lite JSON) and rebuilds
+ * nothing when nothing hits -- a no-hit spec comes back by reference.
+ * Everything else passes through untouched. cf. keepsDefaultWidth below --
+ * an orthogonal gate over width semantics only: this gate now reaches across
+ * the full tree while that one treats a composite layout like any other
+ * operable view. Different questions; never merge the two gates. */
+
+/** The outcome of walking one view node: the (possibly patched) view, plus
+ * the inherited y a baseline child hit -- non-null only when that y was
+ * declared above the caller, whose encoding owes the patch. */
+type ClampWalk = { view: unknown; sharedHit: ClampTarget | null };
+
+function walkClampView(
+  view: unknown,
+  inherited: ClampableEncoding | undefined,
+): ClampWalk {
+  if (!view || typeof view !== "object" || Array.isArray(view))
+    return { view, sharedHit: null };
+  const s = view as {
     mark?: unknown;
     encoding?: ClampableEncoding;
     layer?: unknown;
+    spec?: unknown;
+    vconcat?: unknown;
+    hconcat?: unknown;
+    concat?: unknown;
   };
+  // Whether this view declares its own y -- the predicate behind both the
+  // judging source below and the declarer-patches interception.
+  const declaresY = s.encoding?.y !== undefined;
+  const childInherited = declaresY ? s.encoding : inherited;
+  const patchOwn = (patched: ClampTarget, rest?: object): ClampWalk => ({
+    view: {
+      ...view,
+      encoding: { ...s.encoding, y: clampedY(patched) },
+      ...rest,
+    },
+    sharedHit: null,
+  });
 
-  // Single view: the top-level mark+encoding is the whole decision.
+  // Single view: the own-or-inherited mark+encoding pair is the whole
+  // decision. An inherited hit is reported up -- the declarer patches.
   const topMark = markTypeName(s.mark);
   if (topMark !== undefined) {
-    const y = zeroBaselineClampTarget(topMark, s.encoding);
-    if (!y) return spec;
-    return {
-      ...spec,
-      encoding: { ...s.encoding, y: clampedY(y) },
-    } as TopLevelSpec;
+    const y = zeroBaselineClampTarget(
+      topMark,
+      declaresY ? s.encoding : inherited,
+    );
+    if (!y) return { view, sharedHit: null };
+    if (declaresY) return patchOwn(y);
+    return { view, sharedHit: y };
   }
 
-  // Layered view: judge each layer entry; track whether the layers array or
-  // a shared top-level y needs the rebuild.
-  if (!Array.isArray(s.layer)) return spec;
-  let sharedY: ClampTarget | null = null;
-  let layersChanged = false;
-  const layers = s.layer.map((entry: unknown) => {
-    if (!entry || typeof entry !== "object" || Array.isArray(entry)) return entry;
-    const layer = entry as { mark?: unknown; encoding?: ClampableEncoding };
-    const layerMark = markTypeName(layer.mark);
-    if (layerMark === undefined) return entry;
-    if (layer.encoding?.y !== undefined) {
-      const y = zeroBaselineClampTarget(layerMark, layer.encoding);
-      if (!y) return entry;
-      layersChanged = true;
-      return {
-        ...layer,
-        encoding: { ...layer.encoding, y: clampedY(y) },
-      };
-    }
-    if (!sharedY) sharedY = zeroBaselineClampTarget(layerMark, s.encoding);
-    return entry;
-  });
-  if (sharedY) {
-    return {
-      ...spec,
-      encoding: { ...s.encoding, y: clampedY(sharedY) },
-      layer: layers,
-    } as TopLevelSpec;
+  // Walk an entry list, aggregating rebuilds and the first inherited hit
+  // (several children may hit one shared declaration; it patches once).
+  const walkChildren = (entries: unknown[]) => {
+    let sharedHit: ClampTarget | null = null;
+    let changed = false;
+    const walked = entries.map((entry) => {
+      const child = walkClampView(entry, childInherited);
+      if (child.view !== entry) changed = true;
+      if (!sharedHit) sharedHit = child.sharedHit;
+      return child.view;
+    });
+    return { entries: walked, changed, sharedHit };
+  };
+
+  // Layered view: walk every entry; a layer-in-layer group recurses here by
+  // carrying a layer array of its own (no mark -- the single-view branch
+  // lets it through to this one).
+  if (Array.isArray(s.layer)) {
+    const { entries, changed, sharedHit } = walkChildren(s.layer);
+    if (sharedHit && declaresY) return patchOwn(sharedHit, { layer: entries });
+    if (changed) return { view: { ...view, layer: entries }, sharedHit };
+    return { view, sharedHit };
   }
-  if (layersChanged) return { ...spec, layer: layers } as TopLevelSpec;
-  return spec;
+
+  // Composite wrappers (#1249): the facet/repeat subview and the concat
+  // entries are full views -- the baseline mark lives inside them, so the
+  // gate reaches it through the same walk.
+  if (s.spec !== undefined) {
+    const child = walkClampView(s.spec, childInherited);
+    if (child.sharedHit && declaresY)
+      return patchOwn(child.sharedHit, { spec: child.view });
+    if (child.view !== s.spec)
+      return {
+        view: { ...view, spec: child.view },
+        sharedHit: child.sharedHit,
+      };
+    return { view, sharedHit: child.sharedHit };
+  }
+  for (const key of ["vconcat", "hconcat", "concat"] as const) {
+    if (!Array.isArray(s[key])) continue;
+    const { entries, changed, sharedHit } = walkChildren(s[key]);
+    if (sharedHit && declaresY)
+      return patchOwn(sharedHit, { [key]: entries });
+    if (changed) return { view: { ...view, [key]: entries }, sharedHit };
+    return { view, sharedHit };
+  }
+  return { view, sharedHit: null };
+}
+
+function withZeroBaselineClamp(spec: TopLevelSpec): TopLevelSpec {
+  return walkClampView(spec, undefined).view as TopLevelSpec;
 }
 
 /** Prepare one spec for embedding: the spec to pass (widthless plain specs

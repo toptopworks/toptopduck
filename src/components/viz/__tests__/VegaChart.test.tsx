@@ -419,6 +419,240 @@ describe("VegaChart (ADR-0016/0033/0050)", () => {
       });
       expect(scaleOf(embedSpec())?.clamp).toBeUndefined();
     });
+
+    // #1249: the #1247 walk descended exactly one level, so two same-mechanism
+    // gaps passed through: a layer entry that is itself a layer group (vega-lite
+    // admits {layer: [...]} entries, which carry no mark) and composite wrappers
+    // (facet/repeat subviews, concat entries). The walk recurses through the
+    // whole spec tree; a child without its own encoding.y inherits the nearest
+    // declared one up the chain and the patch lands at that declaration -- the
+    // place it takes effect.
+    const yScaleAt = (spec: TopLevelSpec, path: (string | number)[]) =>
+      path.reduce<unknown>(
+        (node, key) => (node as Record<string, unknown>)[key],
+        spec,
+      ) as { clamp?: boolean } | undefined;
+
+    it("injects into a bar nested inside a layer-in-layer entry", async () => {
+      await renderSpec({
+        layer: [
+          {
+            layer: [
+              {
+                mark: "bar",
+                encoding: {
+                  y: { type: "quantitative", scale: { domain: [3.7, 4.05] } },
+                },
+              },
+            ],
+          },
+        ],
+      });
+      expect(
+        yScaleAt(embedSpec(), [
+          "layer",
+          0,
+          "layer",
+          0,
+          "encoding",
+          "y",
+          "scale",
+        ])?.clamp,
+      ).toBe(true);
+    });
+
+    it("injects at the group level when the nested group declares the shared encoding", async () => {
+      // The group is the declaration point: its y is judged against the inner
+      // baseline layers and patched there -- not at the outer top.
+      await renderSpec({
+        layer: [
+          {
+            encoding: {
+              y: { type: "quantitative", scale: { domain: [3.7, 4.05] } },
+            },
+            layer: [{ mark: "bar" }],
+          },
+        ],
+      });
+      expect(
+        yScaleAt(embedSpec(), ["layer", 0, "encoding", "y", "scale"])?.clamp,
+      ).toBe(true);
+    });
+
+    it("injects at the top when an inner bar inherits through a nested group", async () => {
+      // A nested group with no encoding of its own: the declared top-level y
+      // reaches the innermost bar through vega-lite inheritance, so the patch
+      // lands at that declaration -- the entries stay mark-only.
+      await renderSpec({
+        encoding: {
+          y: { type: "quantitative", scale: { domain: [3.7, 4.05] } },
+        },
+        layer: [{ layer: [{ mark: "bar" }] }],
+      });
+      expect(scaleOf(embedSpec())?.clamp).toBe(true);
+      const group = (
+        embedSpec() as {
+          layer?: Array<{ layer?: Array<{ encoding?: unknown }> }>;
+        }
+      ).layer?.[0];
+      expect(group?.layer?.[0]?.encoding).toBeUndefined();
+    });
+
+    it("injects at the top through a three-level inheritance chain", async () => {
+      await renderSpec({
+        encoding: {
+          y: { type: "quantitative", scale: { domain: [3.7, 4.05] } },
+        },
+        layer: [{ layer: [{ layer: [{ mark: "bar" }] }] }],
+      });
+      expect(scaleOf(embedSpec())?.clamp).toBe(true);
+      // The declaration is the only patch point: no intermediate group and
+      // no innermost entry carries its own y encoding.
+      type Group = { encoding?: unknown; layer?: Group[] };
+      const outer = (embedSpec() as { layer?: Group[] }).layer?.[0];
+      expect(outer?.encoding).toBeUndefined();
+      expect(outer?.layer?.[0]?.encoding).toBeUndefined();
+      expect(outer?.layer?.[0]?.layer?.[0]?.encoding).toBeUndefined();
+    });
+
+    it.each([
+      { key: "facet", layout: { field: "a", type: "nominal" } },
+      { key: "repeat", layout: { row: ["a", "b"] } },
+    ] as const)("injects into the $key subview", async ({ key, layout }) => {
+      await renderSpec({
+        [key]: layout,
+        spec: {
+          mark: "bar",
+          encoding: {
+            y: { type: "quantitative", scale: { domain: [3.7, 4.05] } },
+          },
+        },
+      });
+      // The subview rides the top-level "spec" key for both layouts.
+      expect(
+        yScaleAt(embedSpec(), ["spec", "encoding", "y", "scale"])?.clamp,
+      ).toBe(true);
+    });
+
+    it.each(["vconcat", "hconcat", "concat"] as const)(
+      "injects into a %s entry with an explicit non-zero domain",
+      async (key) => {
+        await renderSpec({
+          [key]: [
+            {
+              mark: "bar",
+              encoding: {
+                y: { type: "quantitative", scale: { domain: [3.7, 4.05] } },
+              },
+            },
+          ],
+        });
+        expect(
+          yScaleAt(embedSpec(), [key, 0, "encoding", "y", "scale"])?.clamp,
+        ).toBe(true);
+      },
+    );
+
+    it("injects at the top when a facet subview inherits the shared encoding", async () => {
+      await renderSpec({
+        facet: { field: "a", type: "nominal" },
+        encoding: {
+          y: { type: "quantitative", scale: { domain: [3.7, 4.05] } },
+        },
+        spec: { mark: "bar" },
+      });
+      expect(scaleOf(embedSpec())?.clamp).toBe(true);
+    });
+
+    it("injects at the top when a concat entry inherits the shared encoding", async () => {
+      // Two entries hit one shared declaration -- it patches once, at the
+      // top; both entries stay mark-only.
+      await renderSpec({
+        encoding: {
+          y: { type: "quantitative", scale: { domain: [3.7, 4.05] } },
+        },
+        vconcat: [{ mark: "bar" }, { mark: "bar" }],
+      });
+      expect(scaleOf(embedSpec())?.clamp).toBe(true);
+      const entries = (
+        embedSpec() as { vconcat?: Array<{ encoding?: unknown }> }
+      ).vconcat;
+      expect(entries?.[0]?.encoding).toBeUndefined();
+      expect(entries?.[1]?.encoding).toBeUndefined();
+    });
+
+    it("leaves nested and composite views without a triggering pair untouched", async () => {
+      await renderSpec({
+        layer: [
+          {
+            layer: [
+              {
+                mark: "line",
+                encoding: {
+                  y: { type: "quantitative", scale: { domain: [3.7, 4.05] } },
+                },
+              },
+              {
+                mark: "bar",
+                encoding: {
+                  y: { type: "quantitative", scale: { domain: [-1, 4.05] } },
+                },
+              },
+            ],
+          },
+        ],
+        vconcat: [
+          { mark: "area", encoding: { y: { type: "quantitative" } } },
+          {
+            mark: "line",
+            encoding: {
+              y: { type: "quantitative", scale: { domain: [3.7, 4.05] } },
+            },
+          },
+        ],
+      });
+      expect(
+        yScaleAt(embedSpec(), [
+          "layer",
+          0,
+          "layer",
+          0,
+          "encoding",
+          "y",
+          "scale",
+        ])?.clamp,
+      ).toBeUndefined();
+      expect(
+        yScaleAt(embedSpec(), [
+          "layer",
+          0,
+          "layer",
+          1,
+          "encoding",
+          "y",
+          "scale",
+        ])?.clamp,
+      ).toBeUndefined();
+      expect(
+        yScaleAt(embedSpec(), ["vconcat", 0, "encoding", "y", "scale"])?.clamp,
+      ).toBeUndefined();
+      // A composite wrapper around a non-baseline mark passes through too.
+      expect(
+        yScaleAt(embedSpec(), ["vconcat", 1, "encoding", "y", "scale"])?.clamp,
+      ).toBeUndefined();
+    });
+
+    it("hands a no-hit spec through by reference", async () => {
+      // The injection is structural: no hit, no rebuild -- the caller's spec
+      // object is the object embed receives. width "container" takes the
+      // early-return branch so the width pass cannot mint a fresh wrapper.
+      const spec = {
+        width: "container" as const,
+        layer: [{ layer: [{ mark: "line" }] }],
+      };
+      await renderSpec(spec);
+      expect(embedSpec()).toBe(spec);
+    });
   });
 
   describe("host resize (container-width tracking, #1051)", () => {
