@@ -791,10 +791,12 @@ mod tests {
     // --- curated trigger copy ------------------------------------------------
 
     /// The locked trigger copy (curation brief, verbatim): sentence 1 is
-    /// capability + trigger timing, sentence 2 the neighbor-tool boundary.
-    /// With progressive disclosure the metadata index is the only discovery
-    /// surface, so the wording itself is load-bearing -- pinned byte for
-    /// byte. English-only since ADR-0121 Decision 2.
+    /// capability + trigger timing, sentence 2 the boundary clause where
+    /// one applies -- the neighbor-tool division for most skills, an
+    /// out-of-scope declination for vega-chart. With progressive
+    /// disclosure the metadata index is the only discovery surface, so
+    /// the wording itself is load-bearing -- pinned byte for byte.
+    /// English-only since ADR-0121 Decision 2.
     #[test]
     fn descriptions_carry_the_locked_trigger_copy() {
         let expected: &[(&str, &str)] = &[
@@ -1089,7 +1091,9 @@ mod tests {
     /// #1192): the `extra` tail semantics (one element one argument, no
     /// shell, empty array for the plain call), the high-frequency flags
     /// table, the PDF engine prerequisite and selection table, the no-engine
-    /// escape hatch, and the office-cli division. Phrase pins, not verbatim
+    /// escape hatch, the vega-fence degradation disclosure (issue #1252 --
+    /// charted markdown regenerates via the `python` tool), and the
+    /// office-cli division. Phrase pins, not verbatim
     /// -- the CONTRACT items are what must survive a re-curation.
     #[test]
     fn pandoc_body_teaches_the_conversion_contract() {
