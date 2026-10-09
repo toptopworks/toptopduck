@@ -166,8 +166,10 @@ pub(super) fn turn_outcome_from_loop(
 ///   FIFO in gateway trace order.
 ///
 /// An engine row the gateway cannot account for stays silently -- the
-/// runtime's own work (bash / edit / etc. never touch the gateway), or
-/// wire drift for a built-in the gateway under-recorded; a same-named row
+/// runtime's own work (bash / edit / etc. never touch the gateway), wire
+/// drift for a built-in the gateway under-recorded, or a call the
+/// gateway deliberately recorded nothing for (issue #1244's accepted
+/// boundary); a same-named row
 /// past the gateway's count stays too, with a warn -- a name collision is
 /// a suspicion, not proof, and the audit surface never silently
 /// under-reports. A gateway row no echo consumed (wire drift, a CLI that
@@ -205,7 +207,9 @@ pub fn merge_outcomes(gateway: GatewayOutcome, mut acp: LoopOutcome) -> LoopOutc
     // recorded (ADR-0085). An echo whose arm has nothing left keeps the
     // engine row with a warn; a name the gateway has NO row under stays
     // silently -- the runtime's own work for a native tool name, wire
-    // drift for a built-in the gateway under-recorded.
+    // drift for a built-in the gateway under-recorded, or a call the
+    // gateway deliberately recorded nothing for (issue #1244's accepted
+    // live/settle boundary, detailed at the keep arms below).
     let mut by_name: HashMap<String, VecDeque<usize>> = HashMap::new();
     let mut invoke_pool: VecDeque<usize> = VecDeque::new();
     for (index, entry) in gateway.trace.iter().enumerate() {
@@ -224,9 +228,19 @@ pub fn merge_outcomes(gateway: GatewayOutcome, mut acp: LoopOutcome) -> LoopOutc
         // `mcp_invoke` echo takes one pool row, a same-named row takes the
         // name's next queued row. A name the gateway has NO row under stays
         // silently -- the runtime's own work for a native tool name, wire
-        // drift for a built-in the gateway under-recorded; either way the
-        // row is real, so it stays, and past the queued rows it stays with
-        // a warn (the audit surface never silently under-reports).
+        // drift for a built-in the gateway under-recorded, or a call the
+        // gateway deliberately recorded nothing for (issue #1244): a
+        // resolution-refused call answers ahead of the gate with no trace
+        // row (the call never reached a tool), and a call suspended at the
+        // approval gate when the turn cancels lands nothing either (the
+        // gate returns `GateCancelled`, the bridge gets its error). Either
+        // way the row is real, so it stays -- for the zero-record
+        // scenarios it is the turn's only record, the engine-side fact
+        // that the model emitted the call and self-corrected off the
+        // error -- and past the queued rows it stays with a warn (the
+        // audit surface never silently under-reports). Live carries no
+        // row for those scenarios; the turn-end refresh materializes
+        // this one -- an accepted boundary, not a defect.
         round.calls = round
             .calls
             .into_iter()
