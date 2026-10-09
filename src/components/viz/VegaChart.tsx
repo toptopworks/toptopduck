@@ -10,6 +10,7 @@ import {
   onThemeChange,
   type VegaThemeConfig,
 } from "../../theme/vega-theme";
+import { markTypeName } from "./viz";
 import type { VizFailureReason } from "./viz";
 
 // Vega-Lite chart renderer (ADR-0016/0033/0050). Owns three concerns that the
@@ -75,46 +76,57 @@ function vegaConfig(theme: VegaThemeConfig): object {
   };
 }
 
-/** Guard the zero-baseline encoding against an explicit y domain that
- * excludes 0 (#1245). Vega draws a bar/area baseline at y2 = scale(0); a
- * linear scale whose domain excludes 0 extrapolates that baseline outside
+/** The slice of a y encoding the zero-baseline clamp decision reads and
+ * patches -- kept structural (like DecodedVizSpec) so the decision works on
+ * a top-level encoding and a layer entry's encoding alike. */
+type ClampableY = {
+  type?: unknown;
+  scale?: { type?: unknown; domain?: unknown; clamp?: unknown };
+};
+type ClampableEncoding = { y?: ClampableY };
+
+/** A y encoding whose scale object has passed the guard -- the shape the
+ * decision hands back for patching. */
+type ClampTarget = ClampableY & { scale: NonNullable<ClampableY["scale"]> };
+
+/** The zero-baseline clamp decision for one candidate view (a top-level
+ * single view, or one layer entry): the y encoding needing `scale.clamp:
+ * true`, or null when this mark+encoding pair passes through untouched.
+ * Vega draws a bar/area baseline at y2 = scale(0); an explicit domain
+ * excluding 0 makes a continuous scale extrapolate that baseline outside
  * the range (0 -> plotHeight * domainMin / span, measured -3171px), which
  * blows the autosize canvas height up while the in-range render segment
- * happens to look fine. Clamping pins the baseline to the range floor --
- * the truncated-axis look the spec author asked for -- at a sane canvas
- * size. Everything that cannot extrapolate passes through untouched: a
- * domain including 0, no explicit domain, a non-linear scale (a log domain
- * must exclude 0 by definition), marks without a baseline encoding, and an
- * already-present clamp (the spec author's own decision). */
-function withZeroBaselineClamp(spec: TopLevelSpec): TopLevelSpec {
-  const s = spec as {
-    mark?: unknown;
-    encoding?: {
-      y?: {
-        type?: unknown;
-        scale?: { type?: unknown; domain?: unknown; clamp?: unknown };
-      };
-    };
-  };
-  const mark =
-    typeof s.mark === "string"
-      ? s.mark
-      : s.mark && typeof s.mark === "object" && "type" in s.mark
-        ? s.mark.type
-        : undefined;
-  if (mark !== "bar" && mark !== "area") return spec;
-  const encoding = s.encoding;
+ * happens to look fine (#1245). The extrapolation is a property of any
+ * continuous, invertible-at-0 scale, so linear, pow, and sqrt all trigger
+ * (#1247 -- on a tight domain sqrt extrapolates harder than linear,
+ * measured -21.6 vs -10.6 plot heights on [3.7, 4.05]). Everything else
+ * passes through untouched: a domain including 0, no explicit domain, a
+ * log scale (its domain must exclude 0 by definition), a symlog scale
+ * (released conservatively -- symlog is continuous and invertible at 0,
+ * so the principle above would cover it too, but no measured case backs
+ * judging it), a non-quantitative y, and an already-present clamp (the
+ * spec author's own decision). */
+function zeroBaselineClampTarget(
+  mark: string,
+  encoding: ClampableEncoding | undefined,
+): ClampTarget | null {
+  if (mark !== "bar" && mark !== "area") return null;
   const y = encoding?.y;
   const scale = y?.scale;
   // No scale object, or a nested non-array domain (signal/datum form) -- the
   // numeric-extrapolation precondition cannot be judged, so leave it be.
   if (!y || !scale || typeof scale !== "object" || !Array.isArray(scale.domain))
-    return spec;
-  // Only the default linear scale extrapolates the baseline this way.
-  if (scale.type !== undefined && scale.type !== "linear") return spec;
+    return null;
+  if (
+    scale.type !== undefined &&
+    scale.type !== "linear" &&
+    scale.type !== "pow" &&
+    scale.type !== "sqrt"
+  )
+    return null;
   // An unset field type with a numeric domain is quantitative in practice;
   // non-numeric domains fall to the array-shape guard below.
-  if (y.type !== undefined && y.type !== "quantitative") return spec;
+  if (y.type !== undefined && y.type !== "quantitative") return null;
   const domain = scale.domain;
   if (
     domain.length !== 2 ||
@@ -124,15 +136,77 @@ function withZeroBaselineClamp(spec: TopLevelSpec): TopLevelSpec {
     // extrapolation to guard against.
     (domain[0] <= 0 && domain[1] >= 0)
   )
-    return spec;
-  if (scale.clamp !== undefined) return spec;
-  return {
-    ...spec,
-    encoding: {
-      ...encoding,
-      y: { ...y, scale: { ...scale, clamp: true } },
-    },
-  } as TopLevelSpec;
+    return null;
+  if (scale.clamp !== undefined) return null;
+  return y as ClampTarget;
+}
+
+/** Patch `clamp: true` into the decided y encoding's scale. */
+function clampedY(y: ClampTarget): ClampableY {
+  return { ...y, scale: { ...y.scale, clamp: true } };
+}
+
+/** Guard the zero-baseline encoding against an explicit y domain that
+ * excludes 0 (#1245, #1247). The extrapolation lives inside each baseline
+ * mark, not in the view structure, so the gate runs on a single view's
+ * top-level pair and on every layer entry of a layered view. A layer
+ * carrying its own encoding.y is judged (and patched) there; a layer
+ * without one inherits the top-level encoding (vega-lite encoding
+ * inheritance), so a shared y is judged against its baseline layers and
+ * patched at the top -- the place it takes effect. Everything else passes
+ * through untouched. cf. keepsDefaultWidth below -- an orthogonal gate over
+ * width semantics only: this gate now reaches into layer entries while that
+ * one treats a layered view like any other operable view. Different
+ * questions; never merge the two gates. */
+function withZeroBaselineClamp(spec: TopLevelSpec): TopLevelSpec {
+  const s = spec as {
+    mark?: unknown;
+    encoding?: ClampableEncoding;
+    layer?: unknown;
+  };
+
+  // Single view: the top-level mark+encoding is the whole decision.
+  const topMark = markTypeName(s.mark);
+  if (topMark !== undefined) {
+    const y = zeroBaselineClampTarget(topMark, s.encoding);
+    if (!y) return spec;
+    return {
+      ...spec,
+      encoding: { ...s.encoding, y: clampedY(y) },
+    } as TopLevelSpec;
+  }
+
+  // Layered view: judge each layer entry; track whether the layers array or
+  // a shared top-level y needs the rebuild.
+  if (!Array.isArray(s.layer)) return spec;
+  let sharedY: ClampTarget | null = null;
+  let layersChanged = false;
+  const layers = s.layer.map((entry: unknown) => {
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) return entry;
+    const layer = entry as { mark?: unknown; encoding?: ClampableEncoding };
+    const layerMark = markTypeName(layer.mark);
+    if (layerMark === undefined) return entry;
+    if (layer.encoding?.y !== undefined) {
+      const y = zeroBaselineClampTarget(layerMark, layer.encoding);
+      if (!y) return entry;
+      layersChanged = true;
+      return {
+        ...layer,
+        encoding: { ...layer.encoding, y: clampedY(y) },
+      };
+    }
+    if (!sharedY) sharedY = zeroBaselineClampTarget(layerMark, s.encoding);
+    return entry;
+  });
+  if (sharedY) {
+    return {
+      ...spec,
+      encoding: { ...s.encoding, y: clampedY(sharedY) },
+      layer: layers,
+    } as TopLevelSpec;
+  }
+  if (layersChanged) return { ...spec, layer: layers } as TopLevelSpec;
+  return spec;
 }
 
 /** Prepare one spec for embedding: the spec to pass (widthless plain specs

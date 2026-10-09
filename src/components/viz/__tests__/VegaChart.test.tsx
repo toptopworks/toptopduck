@@ -262,6 +262,163 @@ describe("VegaChart (ADR-0016/0033/0050)", () => {
       });
       expect(scaleOf(embedSpec())?.clamp).toBe(false);
     });
+
+    // #1247: the gate originally read only the top-level mark + encoding, so
+    // two same-mechanism gaps passed through: a bar layer inside spec.layer
+    // (no top-level mark at all) and pow/sqrt scales (continuous scales that
+    // extrapolate the baseline harder than linear on a tight domain --
+    // measured -21.6 vs -10.6 plot heights on [3.7, 4.05]).
+    const layerScaleOf = (spec: TopLevelSpec, index: number) =>
+      (
+        spec as {
+          layer?: Array<{
+            encoding?: { y?: { scale?: { clamp?: boolean } } };
+          }>;
+        }
+      ).layer?.[index]?.encoding?.y?.scale;
+
+    it("injects into a bar layer carrying its own explicit non-zero domain", async () => {
+      await renderSpec({
+        layer: [
+          {
+            mark: "bar",
+            encoding: {
+              y: { type: "quantitative", scale: { domain: [3.7, 4.05] } },
+            },
+          },
+          {
+            mark: "line",
+            encoding: {
+              y: { type: "quantitative", scale: { domain: [3.7, 4.05] } },
+            },
+          },
+        ],
+      });
+      expect(layerScaleOf(embedSpec(), 0)?.clamp).toBe(true);
+      // The line layer has no baseline to pin.
+      expect(layerScaleOf(embedSpec(), 1)?.clamp).toBeUndefined();
+    });
+
+    it("injects at the top level when a bar layer inherits the shared encoding", async () => {
+      // A layer without its own encoding.y takes the top-level one (vega-lite
+      // encoding inheritance), so the shared y is judged against its baseline
+      // layers and patched where it is declared -- the place it takes effect.
+      await renderSpec({
+        encoding: {
+          y: { type: "quantitative", scale: { domain: [3.7, 4.05] } },
+        },
+        layer: [{ mark: "bar" }, { mark: "line" }],
+      });
+      expect(scaleOf(embedSpec())?.clamp).toBe(true);
+      // The patch lands at the top only: the entries stay mark-only, no
+      // per-layer y encoding is minted (the injection point IS the ruling).
+      const entries = (
+        embedSpec() as { layer?: Array<{ encoding?: unknown }> }
+      ).layer;
+      expect(entries?.[0]?.encoding).toBeUndefined();
+      expect(entries?.[1]?.encoding).toBeUndefined();
+    });
+
+    it("injects at both levels when one layer owns its y and another inherits", async () => {
+      // Mixed inheritance: the bar layer's own domain patches inside its
+      // entry while the mark-only area layer triggers the shared top-level
+      // y -- both patches land in one pass.
+      await renderSpec({
+        encoding: {
+          y: { type: "quantitative", scale: { domain: [10, 50] } },
+        },
+        layer: [
+          {
+            mark: "bar",
+            encoding: {
+              y: { type: "quantitative", scale: { domain: [3.7, 4.05] } },
+            },
+          },
+          { mark: "area" },
+        ],
+      });
+      expect(layerScaleOf(embedSpec(), 0)?.clamp).toBe(true);
+      expect(scaleOf(embedSpec())?.clamp).toBe(true);
+    });
+
+    it("leaves a layer without an explicit domain untouched", async () => {
+      await renderSpec({
+        layer: [{ mark: "bar", encoding: { y: { type: "quantitative" } } }],
+      });
+      expect(layerScaleOf(embedSpec(), 0)?.clamp).toBeUndefined();
+    });
+
+    it("leaves a layer whose domain includes zero untouched", async () => {
+      await renderSpec({
+        layer: [
+          {
+            mark: "bar",
+            encoding: {
+              y: { type: "quantitative", scale: { domain: [-1, 4.05] } },
+            },
+          },
+        ],
+      });
+      expect(layerScaleOf(embedSpec(), 0)?.clamp).toBeUndefined();
+    });
+
+    it("keeps a malformed layer entry while injecting its valid neighbor", async () => {
+      // The decode gate admits malformed JSON on purpose, so the walk hands
+      // a non-record entry to vega-embed untouched instead of throwing
+      // inside the effect (prepareEmbed runs outside the embed catch).
+      await renderSpec({
+        layer: [
+          null,
+          {
+            mark: "bar",
+            encoding: {
+              y: { type: "quantitative", scale: { domain: [3.7, 4.05] } },
+            },
+          },
+        ],
+      });
+      expect((embedSpec() as { layer?: unknown[] }).layer?.[0]).toBeNull();
+      expect(layerScaleOf(embedSpec(), 1)?.clamp).toBe(true);
+    });
+
+    it("injects for a pow scale on an explicit non-zero domain", async () => {
+      await renderSpec({
+        mark: "bar",
+        encoding: {
+          y: {
+            type: "quantitative",
+            scale: { type: "pow", exponent: 2, domain: [3.7, 4.05] },
+          },
+        },
+      });
+      expect(scaleOf(embedSpec())?.clamp).toBe(true);
+    });
+
+    it("injects for a sqrt scale on an explicit non-zero domain", async () => {
+      await renderSpec({
+        mark: "bar",
+        encoding: {
+          y: {
+            type: "quantitative",
+            scale: { type: "sqrt", domain: [3.7, 4.05] },
+          },
+        },
+      });
+      expect(scaleOf(embedSpec())?.clamp).toBe(true);
+    });
+
+    it("leaves a symlog scale untouched (released conservatively)", async () => {
+      await renderSpec({
+        mark: "bar",
+        encoding: {
+          y: {
+            type: "quantitative",
+            scale: { type: "symlog", domain: [1, 100] },
+          },
+        },
+      });
+      expect(scaleOf(embedSpec())?.clamp).toBeUndefined();
+    });
   });
 
   describe("host resize (container-width tracking, #1051)", () => {

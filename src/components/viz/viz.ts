@@ -99,10 +99,24 @@ export function decodeViz(viz: VizSpec): DecodeResult {
 
 /** Narrow `unknown` to a plain record (a non-null, non-array object) -- the
  * shape `DecodedVizSpec` names. One predicate serves decodeVizSpec's gate and
- * readMark's mark-object probe, so both carry the typed value with no
+ * markTypeName's mark-object probe, so both carry the typed value with no
  * narrowing cast. */
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/** Read a mark field's type string, whether the field is a bare string
+ * ("bar") or a mark object ({"type":"bar"}); undefined when absent or oddly
+ * shaped. One shared reading for the decode gate (readMark, top level only)
+ * and VegaChart's zero-baseline clamp gate, which judges the same shape at
+ * the top level and inside layer entries. */
+export function markTypeName(mark: unknown): string | undefined {
+  if (typeof mark === "string") return mark;
+  if (isRecord(mark)) {
+    const type = mark.type;
+    if (typeof type === "string") return type;
+  }
+  return undefined;
 }
 
 /** Read a Vega-Lite spec's top-level mark type, whether `mark` is a string
@@ -115,13 +129,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
  * cf. keepsDefaultWidth in VegaChart -- an orthogonal gate whose exemption
  * set rules `layer` the opposite way on purpose; never merge the two. */
 function readMark(spec: DecodedVizSpec): string | null {
-  const mark = spec.mark;
-  if (typeof mark === "string") return mark;
-  if (isRecord(mark)) {
-    const type = mark.type;
-    if (typeof type === "string") return type;
-  }
-  return null;
+  return markTypeName(spec.mark) ?? null;
 }
 
 /** Filesystem-hostile characters for an export file stem (issue #1093):
