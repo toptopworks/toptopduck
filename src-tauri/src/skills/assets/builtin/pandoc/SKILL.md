@@ -66,3 +66,4 @@ Say plainly in the reply that the output is print-ready HTML and that the browse
 - `Unicode character ... not set up for use with LaTeX`: pdflatex cannot encode the source -- switch to `--pdf-engine=xelatex`.
 - Images broken after a DOCX-to-Markdown conversion: the embedded media was not extracted -- add `--extract-media` (e.g. `extra: ["--extract-media", "media"]`).
 - Output is a bare fragment instead of a full page: add `-s`.
+- Charts in a Markdown source with `vega-lite` fences degrade to plain code blocks: pandoc has no vega engine, so the fences never convert -- when the goal is a charted report, regenerate it as a self-contained HTML file with the `python` tool rather than converting the `.md`.

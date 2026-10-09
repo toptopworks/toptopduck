@@ -1125,6 +1125,16 @@ mod tests {
             body.contains("belongs to office-cli"),
             "keeps the division sentence"
         );
+        // The vega-fence degradation disclosure (issue #1252): pandoc has no
+        // vega engine, so charted markdown must route to python instead.
+        assert!(
+            body.contains("`vega-lite`"),
+            "discloses the vega fence degradation"
+        );
+        assert!(
+            body.contains("`python` tool"),
+            "routes charted markdown to the python tool"
+        );
     }
 
     /// Bootstrap (ADR-0122 Decision 8): the skill's own description must
