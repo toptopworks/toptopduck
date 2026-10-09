@@ -1093,10 +1093,11 @@ mod tests {
     /// table, the PDF engine prerequisite and selection table, the no-engine
     /// escape hatch, the vega-fence degradation disclosure (issue #1252 --
     /// charted markdown regenerates via the `python` tool) promoted into
-    /// the main flow ahead of the Troubleshooting index (issue #1255 --
-    /// the degradation is silent, so nothing routes a model to the
-    /// symptom index), and the office-cli division. Phrase pins, not
-    /// verbatim -- the CONTRACT items are what must survive a re-curation.
+    /// the main flow ahead of the Troubleshooting index, whose fallback
+    /// row stays (issue #1255 -- the degradation is silent, so nothing
+    /// routes a model to the symptom index), and the office-cli division.
+    /// Phrase pins, not verbatim -- the CONTRACT items are what must
+    /// survive a re-curation.
     #[test]
     fn pandoc_body_teaches_the_conversion_contract() {
         let body = body_of("pandoc");
@@ -1137,14 +1138,9 @@ mod tests {
             body.contains("`python` tool"),
             "routes charted markdown to the python tool"
         );
-        // The pre-conversion promotion (issue #1255): the degradation is
-        // silent -- exit 0, artifact on disk, the fence a plain code block
-        // -- so no error signal routes a model to a symptom-indexed row.
-        // The disclosure must stand in the main flow, ahead of the
-        // Troubleshooting index, and the index row stays as the fallback.
-        // Splitting on the index heading is the position pin -- the fence
-        // phrase itself stays a phrase pin, free to ride any section
-        // wording a re-curation chooses.
+        // The pre-conversion promotion (issue #1255): split on the index
+        // heading as the position pin -- the fence phrase itself stays a
+        // phrase pin, riding whatever section a re-curation chooses.
         let (main_flow, troubleshooting) = body
             .split_once("## Troubleshooting")
             .expect("a Troubleshooting section to split on");
