@@ -832,11 +832,11 @@ mod tests {
             ),
             (
                 "vega-chart",
-                "Chart numeric shape — trend, distribution, comparison — as \
-                 vega-lite fences: one fence in the reply for an immediate \
-                 answer, or a `.md` report with embedded fences for a \
-                 deliverable or several charts. Flowcharts, diagrams, and \
-                 lone KPI figures stay out of scope.",
+                "Vega-lite fences in replies, only when the user explicitly \
+                 asks for them — names vega, or requests the in-app \
+                 fence/markdown chart form. Default chart deliverables \
+                 (reports, dashboards, files) are out of scope; flowcharts, \
+                 diagrams, and lone KPI figures stay out of scope.",
             ),
             (
                 "skill-creator",
@@ -952,27 +952,28 @@ mod tests {
         assert_eq!(spec["mark"], "bar");
     }
 
-    /// The delivery split (issue #1238): the body teaches both lanes -- the
+    /// The explicit-trigger reversal (issue #1252): the body teaches the
+    /// trigger rule -- fire only on an explicit ask, never self-selected --
+    /// and the two delivery lanes for when the skill is invoked: the
     /// immediate single chart in the reply prose, and the report or
-    /// multi-chart case delivered as a `.md` written to the working
-    /// directory with the reply left as a summary plus a pointer. Phrase
-    /// pins, not verbatim: the split rules are what must survive a
-    /// re-curation.
+    /// multi-chart case delivered as a `.md` with the reply left as a
+    /// summary plus a pointer. Phrase pins, not verbatim: the rules are
+    /// what must survive a re-curation.
     #[test]
-    fn vega_chart_body_teaches_the_delivery_split() {
+    fn vega_chart_body_teaches_explicit_trigger_and_delivery() {
         let body = body_of("vega-chart");
-        assert!(body.contains("Delivery split"), "names the split section");
+        assert!(body.contains("explicit only"), "names the trigger rule");
+        assert!(
+            body.contains("never self-select"),
+            "forbids self-selection for a chart request"
+        );
         assert!(
             body.contains("in the reply"),
             "the immediate lane emits in the reply prose"
         );
         assert!(
-            body.contains("working directory"),
-            "the report lane writes to the working directory"
-        );
-        assert!(
-            body.contains("two or more charts"),
-            "the >=2 charts fallback rule"
+            body.contains("`<name>.md`"),
+            "the report lane writes a named .md deliverable"
         );
         assert!(
             body.contains("summary") && body.contains("pointer"),
