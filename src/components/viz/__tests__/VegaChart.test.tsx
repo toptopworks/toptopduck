@@ -145,6 +145,98 @@ describe("VegaChart (ADR-0016/0033/0050)", () => {
     });
   });
 
+  describe("zero-baseline clamp (#1245: explicit non-zero y domain blows up the canvas)", () => {
+    // Vega encodes a bar/area baseline as y2 = scale(0). An explicit y domain
+    // excluding 0 linearly extrapolates that baseline outside the range and the
+    // autosize canvas height blows up (measured 3487px for a 300px view).
+    // prepareEmbed injects scale.clamp so the baseline pins to the range floor
+    // -- the truncated-axis look the spec author asked for, at a sane canvas
+    // size. The spec reaching embed carries the injection.
+    function embedSpec(): TopLevelSpec {
+      return vi.mocked(embed).mock.calls[0]?.[1] as TopLevelSpec;
+    }
+
+    const scaleOf = (spec: TopLevelSpec) =>
+      (spec as { encoding?: { y?: { scale?: { clamp?: boolean } } } }).encoding?.y
+        ?.scale;
+
+    function renderSpec(spec: unknown) {
+      vi.mocked(embed).mockResolvedValue({
+        finalize: vi.fn(),
+      } as unknown as Awaited<ReturnType<typeof embed>>);
+      renderI18n(<VegaChart spec={spec as TopLevelSpec} onError={() => {}} />);
+      return waitFor(() => expect(embed).toHaveBeenCalledTimes(1));
+    }
+
+    it("injects scale.clamp for a bar with an explicit non-zero y domain", async () => {
+      await renderSpec({
+        mark: "bar",
+        width: 560,
+        encoding: { y: { type: "quantitative", scale: { domain: [3.7, 4.05] } } },
+      });
+      expect(scaleOf(embedSpec())?.clamp).toBe(true);
+      // The fixed-width passthrough rides the same spec untouched (#1245's
+      // measured case carries both fields at once).
+      expect((embedSpec() as { width?: unknown }).width).toBe(560);
+    });
+
+    it("injects through a mark-object form", async () => {
+      await renderSpec({
+        mark: { type: "area" },
+        encoding: { y: { type: "quantitative", scale: { domain: [10, 50] } } },
+      });
+      expect(scaleOf(embedSpec())?.clamp).toBe(true);
+    });
+
+    it("injects for a negative domain (zero below the domain)", async () => {
+      await renderSpec({
+        mark: "bar",
+        encoding: { y: { scale: { domain: [-10, -1] } } },
+      });
+      expect(scaleOf(embedSpec())?.clamp).toBe(true);
+    });
+
+    it("leaves a domain that includes zero untouched", async () => {
+      await renderSpec({
+        mark: "bar",
+        encoding: { y: { scale: { domain: [-1, 4.05] } } },
+      });
+      expect(scaleOf(embedSpec())?.clamp).toBeUndefined();
+    });
+
+    it("leaves a spec without an explicit domain untouched", async () => {
+      await renderSpec({
+        mark: "bar",
+        encoding: { y: { type: "quantitative" } },
+      });
+      expect(scaleOf(embedSpec())?.clamp).toBeUndefined();
+    });
+
+    it("leaves a non-linear scale untouched (a log domain must exclude zero anyway)", async () => {
+      await renderSpec({
+        mark: "bar",
+        encoding: { y: { scale: { type: "log", domain: [1, 100] } } },
+      });
+      expect(scaleOf(embedSpec())?.clamp).toBeUndefined();
+    });
+
+    it("leaves marks without a zero baseline (line) untouched", async () => {
+      await renderSpec({
+        mark: "line",
+        encoding: { y: { type: "quantitative", scale: { domain: [3.7, 4.05] } } },
+      });
+      expect(scaleOf(embedSpec())?.clamp).toBeUndefined();
+    });
+
+    it("respects an explicit clamp already in the spec", async () => {
+      await renderSpec({
+        mark: "bar",
+        encoding: { y: { scale: { domain: [3.7, 4.05], clamp: false } } },
+      });
+      expect(scaleOf(embedSpec())?.clamp).toBe(false);
+    });
+  });
+
   describe("host resize (container-width tracking, #1051)", () => {
     // jsdom has no ResizeObserver, so the component skips observing entirely.
     // Stub one the test can fire by hand with a measured host width.
