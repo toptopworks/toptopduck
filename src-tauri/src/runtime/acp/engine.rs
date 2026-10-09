@@ -1185,7 +1185,11 @@ impl Pump {
                 // A gateway-renamed title is the gateway-routed echo (issue
                 // #1242): the gateway serve emits this row's authoritative
                 // phases itself, so the echo stays live-silent and only folds
-                // (the settle merge's in-place-replacement anchor).
+                // (the settle merge's in-place-replacement anchor) -- or,
+                // when the gateway deliberately recorded nothing
+                // (resolution refusal, a gate cancelled mid-suspension),
+                // the unpaired anchor the merge keeps as the turn's only
+                // record (issue #1244's accepted boundary).
                 let gateway = title
                     .as_deref()
                     .is_some_and(|t| strip_gateway_rename(t).is_some());
