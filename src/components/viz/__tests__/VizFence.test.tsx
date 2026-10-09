@@ -44,7 +44,7 @@ describe("VizFence (ADR-0120)", () => {
   it("normalizes an explicit numeric spec width to the container (#1245)", async () => {
     // A declared number froze the chart at a size the host may not match;
     // the host clamp owns the paint either way, so the fence embeds
-    // full-width like every other chart.
+    // full-width like any single-view chart.
     vi.mocked(embed).mockResolvedValue(embedOk());
     const body = { mark: "bar", width: 240, data: { values: [{ a: 1 }] } };
     renderI18n(<VizFence spec={JSON.stringify(body)} />);

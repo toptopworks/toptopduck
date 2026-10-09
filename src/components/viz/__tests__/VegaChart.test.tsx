@@ -161,9 +161,7 @@ describe("VegaChart (ADR-0016/0033/0050)", () => {
         ?.scale;
 
     function renderSpec(spec: unknown) {
-      vi.mocked(embed).mockResolvedValue({
-        finalize: vi.fn(),
-      } as unknown as Awaited<ReturnType<typeof embed>>);
+      vi.mocked(embed).mockResolvedValue(embedOk());
       renderI18n(<VegaChart spec={spec as TopLevelSpec} onError={() => {}} />);
       return waitFor(() => expect(embed).toHaveBeenCalledTimes(1));
     }
@@ -197,6 +195,18 @@ describe("VegaChart (ADR-0016/0033/0050)", () => {
       expect((embedSpec() as { width?: unknown }).width).toEqual(width);
     });
 
+    it("keeps a numeric width on a composite layout (the keyword would be dropped)", async () => {
+      // vega-lite warns and DROPS width "container" on composite layouts, so
+      // normalizing the number there would silently discard the author's
+      // width and leave the observer re-feeding a signal the compiled view
+      // does not carry.
+      await renderSpec({
+        width: 560,
+        vconcat: [{ mark: "bar" }, { mark: "line" }],
+      });
+      expect((embedSpec() as { width?: unknown }).width).toBe(560);
+    });
+
     it("injects through a mark-object form", async () => {
       await renderSpec({
         mark: { type: "area" },
@@ -205,7 +215,7 @@ describe("VegaChart (ADR-0016/0033/0050)", () => {
       expect(scaleOf(embedSpec())?.clamp).toBe(true);
     });
 
-    it("injects for a negative domain (zero below the domain)", async () => {
+    it("injects for a negative domain (zero above the domain)", async () => {
       await renderSpec({
         mark: "bar",
         encoding: { y: { scale: { domain: [-10, -1] } } },
@@ -351,6 +361,40 @@ describe("VegaChart (ADR-0016/0033/0050)", () => {
       await waitFor(() => expect(embed).toHaveBeenCalledTimes(1));
       fire(0);
       expect(view.signal).not.toHaveBeenCalledWith("width", 0);
+      expect(view.signal).not.toHaveBeenCalled();
+    });
+
+    it("keeps the plain resize for a keeps-default-width view (#1245)", async () => {
+      // A faceted spec keeps vega's default per-band width (a numeric width
+      // stays declared on it too), so the observer takes the plain resize
+      // reflow -- not the width-signal re-feed a container view needs.
+      const view = {
+        signal: vi.fn(),
+        runAsync: vi.fn().mockResolvedValue(undefined),
+        resize: vi.fn().mockResolvedValue(undefined),
+      };
+      vi.mocked(embed).mockResolvedValue(embedResultWith(view));
+      const fire = stubResizeObserver();
+      renderI18n(
+        <VegaChart
+          spec={
+            {
+              mark: "bar",
+              width: 560,
+              encoding: { row: { field: "g", type: "nominal" } },
+            } as unknown as TopLevelSpec
+          }
+          onError={() => {}}
+        />,
+      );
+      await waitFor(() => expect(embed).toHaveBeenCalledTimes(1));
+      // The declared number survives on the faceted spec (same ruling as the
+      // composite-layout case in the clamp describe above).
+      expect(
+        (vi.mocked(embed).mock.calls[0]?.[1] as { width?: unknown }).width,
+      ).toBe(560);
+      fire(283);
+      await waitFor(() => expect(view.resize).toHaveBeenCalled());
       expect(view.signal).not.toHaveBeenCalled();
     });
   });
