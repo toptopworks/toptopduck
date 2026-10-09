@@ -75,44 +75,111 @@ function vegaConfig(theme: VegaThemeConfig): object {
   };
 }
 
+/** Guard the zero-baseline encoding against an explicit y domain that
+ * excludes 0 (#1245). Vega draws a bar/area baseline at y2 = scale(0); a
+ * linear scale whose domain excludes 0 extrapolates that baseline outside
+ * the range (0 -> plotHeight * domainMin / span, measured -3171px), which
+ * blows the autosize canvas height up while the in-range render segment
+ * happens to look fine. Clamping pins the baseline to the range floor --
+ * the truncated-axis look the spec author asked for -- at a sane canvas
+ * size. Everything that cannot extrapolate passes through untouched: a
+ * domain including 0, no explicit domain, a non-linear scale (a log domain
+ * must exclude 0 by definition), marks without a baseline encoding, and an
+ * already-present clamp (the spec author's own decision). */
+function withZeroBaselineClamp(spec: TopLevelSpec): TopLevelSpec {
+  const s = spec as {
+    mark?: unknown;
+    encoding?: {
+      y?: {
+        type?: unknown;
+        scale?: { type?: unknown; domain?: unknown; clamp?: unknown };
+      };
+    };
+  };
+  const mark =
+    typeof s.mark === "string"
+      ? s.mark
+      : s.mark && typeof s.mark === "object" && "type" in s.mark
+        ? s.mark.type
+        : undefined;
+  if (mark !== "bar" && mark !== "area") return spec;
+  const encoding = s.encoding;
+  const y = encoding?.y;
+  const scale = y?.scale;
+  // No scale object, or a nested non-array domain (signal/datum form) -- the
+  // numeric-extrapolation precondition cannot be judged, so leave it be.
+  if (!y || !scale || typeof scale !== "object" || !Array.isArray(scale.domain))
+    return spec;
+  // Only the default linear scale extrapolates the baseline this way.
+  if (scale.type !== undefined && scale.type !== "linear") return spec;
+  // An unset field type with a numeric domain is quantitative in practice;
+  // non-numeric domains fall to the array-shape guard below.
+  if (y.type !== undefined && y.type !== "quantitative") return spec;
+  const domain = scale.domain;
+  if (
+    domain.length !== 2 ||
+    typeof domain[0] !== "number" ||
+    typeof domain[1] !== "number" ||
+    // A domain spanning zero keeps scale(0) inside the range -- no
+    // extrapolation to guard against.
+    (domain[0] <= 0 && domain[1] >= 0)
+  )
+    return spec;
+  if (scale.clamp !== undefined) return spec;
+  return {
+    ...spec,
+    encoding: {
+      ...encoding,
+      y: { ...y, scale: { ...scale, clamp: true } },
+    },
+  } as TopLevelSpec;
+}
+
 /** Prepare one spec for embedding: the spec to pass (widthless plain specs
  * stretch to the container instead of vega-lite's fixed per-band step) plus
  * whether the embedded view is container-width, so the resize observer and
- * the embed call read the same decision from one place. Everything that owns
- * its width passes through untouched: an explicit width other than
- * "container", facets (row/column channels or a top-level facet), and
- * composite concat/repeat layouts -- vega-lite warns and DROPS the
- * "container" keyword on everything but single and layered views, and the
- * warning rides the logger, never embed's rejection, so a misapplied
- * injection would degrade silently. */
+ * the embed call read the same decision from one place. A numeric width
+ * falls through as if undeclared (#1245): a plain single/layered view
+ * normalizes to "container" -- the host clamp owns the chart's paint either
+ * way, so a declared number only froze it at a size the host may not match
+ * (narrow it overflowed, wide it floated in whitespace) -- while facets
+ * (row/column channels or a top-level facet) and composite concat/repeat
+ * layouts keep the declared number, because vega-lite warns and DROPS the
+ * "container" keyword on everything but single and layered views and the
+ * warning rides the logger, never embed's rejection: an injected keyword
+ * would degrade silently and leave the observer re-feeding a width signal
+ * the compiled view does not carry. An expr-driven width stays untouched
+ * (the author's own responsive rule). The zero-baseline clamp guard (#1245)
+ * runs ahead of the width branch -- an explicit-width spec is exactly the
+ * kind that also carries an explicit domain. */
 function prepareEmbed(spec: TopLevelSpec): {
   spec: TopLevelSpec;
   containerWidth: boolean;
 } {
-  if ("width" in spec) {
-    // An explicit "container" keyword still needs the observer's re-feed;
-    // any other explicit width is a fixed one.
-    return {
-      spec,
-      containerWidth: (spec as { width?: number | string }).width === "container",
-    };
+  const clamped = withZeroBaselineClamp(spec);
+  // A declared non-number width owns itself: the "container" keyword still
+  // needs the observer's re-feed, an expr form is the author's own rule.
+  const declared = (clamped as { width?: unknown }).width;
+  if (declared !== undefined && typeof declared !== "number") {
+    return { spec: clamped, containerWidth: declared === "container" };
   }
-  const encoding = (spec as { encoding?: Record<string, unknown> }).encoding;
+  const encoding = (clamped as { encoding?: Record<string, unknown> })
+    .encoding;
   // cf. readMark in viz.ts -- an orthogonal gate whose exemption set rules
   // `layer` the opposite way on purpose; never merge the two.
   const keepsDefaultWidth =
     Boolean(encoding && ("row" in encoding || "column" in encoding)) ||
-    "facet" in spec ||
-    "vconcat" in spec ||
-    "hconcat" in spec ||
-    "concat" in spec ||
-    "repeat" in spec;
-  if (keepsDefaultWidth) return { spec, containerWidth: false };
+    "facet" in clamped ||
+    "vconcat" in clamped ||
+    "hconcat" in clamped ||
+    "concat" in clamped ||
+    "repeat" in clamped;
+  if (keepsDefaultWidth) return { spec: clamped, containerWidth: false };
   // The spread over the TopLevelSpec union needs one syntax-level assertion
   // to keep the result in the union; the "container" keyword itself is a
   // legal vega-lite width on every arm that reaches here.
   return {
-    spec: { ...spec, width: "container" } as TopLevelSpec,
+    spec: { ...clamped, width: "container" } as TopLevelSpec,
     containerWidth: true,
   };
 }

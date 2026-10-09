@@ -41,12 +41,18 @@ describe("VizFence (ADR-0120)", () => {
     });
   });
 
-  it("respects an explicit spec width (no container override)", async () => {
+  it("normalizes an explicit numeric spec width to the container (#1245)", async () => {
+    // A declared number froze the chart at a size the host may not match;
+    // the host clamp owns the paint either way, so the fence embeds
+    // full-width like any single-view chart.
     vi.mocked(embed).mockResolvedValue(embedOk());
     const body = { mark: "bar", width: 240, data: { values: [{ a: 1 }] } };
     renderI18n(<VizFence spec={JSON.stringify(body)} />);
     await waitFor(() => expect(embed).toHaveBeenCalledTimes(1));
-    expect(vi.mocked(embed).mock.calls[0]?.[1]).toEqual(body);
+    expect(vi.mocked(embed).mock.calls[0]?.[1]).toEqual({
+      ...body,
+      width: "container",
+    });
   });
 
   it("keeps row/column-faceted specs at their default width", async () => {

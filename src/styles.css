@@ -41,14 +41,17 @@
    container-sized chart (the chart measures the host) — width:100% gives the
    container-width default a real measurement basis. */
 .viz-chart { margin: 0.5rem 0; width: 100%; max-width: 100%; overflow: auto; }
-/* Container-width charts carry vega-embed's fit-x class on this host. During
-   layout transitions (workspace fold/unfold, window maximize/restore) the
-   async follow chain (ResizeObserver -> width signal -> runAsync) lags the
-   host by frames, and the overflow:auto above would flash a horizontal
-   scrollbar on every chart at once. Clamping the svg's paint width keeps the
-   overflow lane reserved for what it exists for -- fixed-width specs -- and
-   is paint-only: the scenegraph (and the #1093 exports) are unaffected. */
-.viz-chart.fit-x svg { max-width: 100%; }
+/* Chart svgs clamp to the host width. Widthless and numeric-width
+   single/layered embeds go full-width (prepareEmbed normalizes them to
+   "container", #1245), so for those this is a guard rail rather than the
+   primary sizing: it keeps the async follow chain (ResizeObserver -> width
+   signal -> runAsync) from flashing a horizontal scrollbar during layout
+   transitions (workspace fold/unfold, window maximize/restore). Faceted and
+   concat layouts keep vega's default per-band width and never receive the
+   keyword, so for them this clamp is the sizing, in place of scrolling: a
+   chart that outdraws its host scales down proportionally. Paint-only: the
+   scenegraph (and the #1093 exports) are unaffected. */
+.viz-chart svg { max-width: 100%; height: auto; }
 
 /* Working-set tab grid (legacy .layout). ADR-0067 Decision 1: a 280px/1fr
    two-column master-detail grid is layout semantics, not a utility long-string,
