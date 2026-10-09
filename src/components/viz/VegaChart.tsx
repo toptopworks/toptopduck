@@ -138,12 +138,15 @@ function withZeroBaselineClamp(spec: TopLevelSpec): TopLevelSpec {
 /** Prepare one spec for embedding: the spec to pass (widthless plain specs
  * stretch to the container instead of vega-lite's fixed per-band step) plus
  * whether the embedded view is container-width, so the resize observer and
- * the embed call read the same decision from one place. Everything that owns
- * its width passes through untouched: an explicit width other than
- * "container", facets (row/column channels or a top-level facet), and
- * composite concat/repeat layouts -- vega-lite warns and DROPS the
- * "container" keyword on everything but single and layered views, and the
- * warning rides the logger, never embed's rejection, so a misapplied
+ * the embed call read the same decision from one place. A numeric width
+ * normalizes to "container" (#1245): the host clamp owns the chart's paint
+ * either way, so a declared number only freezes it at a size the host may
+ * not match -- narrow it overflowed, wide it floated in whitespace. An
+ * expr-driven width stays untouched (the author's own responsive rule).
+ * Facets (row/column channels or a top-level facet) and composite
+ * concat/repeat layouts keep their default width -- vega-lite warns and
+ * DROPS the "container" keyword on everything but single and layered views,
+ * and the warning rides the logger, never embed's rejection, so a misapplied
  * injection would degrade silently. The zero-baseline clamp guard (#1245)
  * runs ahead of the width branch -- an explicit-width spec is exactly the
  * kind that also carries an explicit domain. */
@@ -153,13 +156,16 @@ function prepareEmbed(spec: TopLevelSpec): {
 } {
   const clamped = withZeroBaselineClamp(spec);
   if ("width" in clamped) {
-    // An explicit "container" keyword still needs the observer's re-feed;
-    // any other explicit width is a fixed one.
-    return {
-      spec: clamped,
-      containerWidth:
-        (clamped as { width?: number | string }).width === "container",
-    };
+    const declared = (clamped as { width?: unknown }).width;
+    if (typeof declared === "number") {
+      return {
+        spec: { ...clamped, width: "container" } as TopLevelSpec,
+        containerWidth: true,
+      };
+    }
+    // The "container" keyword still needs the observer's re-feed; any other
+    // (expr-form) width owns itself.
+    return { spec: clamped, containerWidth: declared === "container" };
   }
   const encoding = (clamped as { encoding?: Record<string, unknown> })
     .encoding;

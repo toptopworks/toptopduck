@@ -175,9 +175,26 @@ describe("VegaChart (ADR-0016/0033/0050)", () => {
         encoding: { y: { type: "quantitative", scale: { domain: [3.7, 4.05] } } },
       });
       expect(scaleOf(embedSpec())?.clamp).toBe(true);
-      // The fixed-width passthrough rides the same spec untouched (#1245's
+      // The numeric width normalizes to "container" on the same spec (#1245's
       // measured case carries both fields at once).
-      expect((embedSpec() as { width?: unknown }).width).toBe(560);
+      expect((embedSpec() as { width?: unknown }).width).toBe("container");
+    });
+
+    it("normalizes a numeric width to the container", async () => {
+      // A declared number freezes the chart at a size the host may not match
+      // -- narrow it overflowed, wide it floats in whitespace. The host clamp
+      // owns the paint either way, so the embed goes full-width and the
+      // observer's re-feed chain follows resizes.
+      await renderSpec({ mark: "bar", width: 240, data: { values: [{ a: 1 }] } });
+      expect((embedSpec() as { width?: unknown }).width).toBe("container");
+    });
+
+    it("leaves a signal-form width untouched", async () => {
+      // An expr-driven width is the spec author's own responsive rule --
+      // normalizing it would overwrite a decision, not a freeze.
+      const width = { expr: "bandStep('x')" };
+      await renderSpec({ mark: "bar", width, data: { values: [{ a: 1 }] } });
+      expect((embedSpec() as { width?: unknown }).width).toEqual(width);
     });
 
     it("injects through a mark-object form", async () => {
@@ -279,7 +296,10 @@ describe("VegaChart (ADR-0016/0033/0050)", () => {
       expect(view.resize).not.toHaveBeenCalled();
     });
 
-    it("keeps the plain resize for a fixed-width view", async () => {
+    it("re-feeds a normalized numeric width through the observer (#1245)", async () => {
+      // A numeric width no longer pins a fixed-width view -- prepareEmbed
+      // normalizes it to "container", so the observer owns the resize just
+      // like any other full-width chart.
       const view = {
         signal: vi.fn(),
         runAsync: vi.fn().mockResolvedValue(undefined),
@@ -292,8 +312,8 @@ describe("VegaChart (ADR-0016/0033/0050)", () => {
       );
       await waitFor(() => expect(embed).toHaveBeenCalledTimes(1));
       fire(283);
-      await waitFor(() => expect(view.resize).toHaveBeenCalled());
-      expect(view.signal).not.toHaveBeenCalled();
+      await waitFor(() => expect(view.signal).toHaveBeenCalledWith("width", 283));
+      expect(view.resize).not.toHaveBeenCalled();
     });
 
     it("re-feeds an explicitly container-width spec (the keyword is honored)", async () => {
