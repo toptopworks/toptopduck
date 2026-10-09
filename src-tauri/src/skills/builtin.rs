@@ -1092,9 +1092,11 @@ mod tests {
     /// shell, empty array for the plain call), the high-frequency flags
     /// table, the PDF engine prerequisite and selection table, the no-engine
     /// escape hatch, the vega-fence degradation disclosure (issue #1252 --
-    /// charted markdown regenerates via the `python` tool), and the
-    /// office-cli division. Phrase pins, not verbatim
-    /// -- the CONTRACT items are what must survive a re-curation.
+    /// charted markdown regenerates via the `python` tool) promoted into
+    /// the main flow ahead of the Troubleshooting index (issue #1255 --
+    /// the degradation is silent, so nothing routes a model to the
+    /// symptom index), and the office-cli division. Phrase pins, not
+    /// verbatim -- the CONTRACT items are what must survive a re-curation.
     #[test]
     fn pandoc_body_teaches_the_conversion_contract() {
         let body = body_of("pandoc");
@@ -1132,12 +1134,27 @@ mod tests {
         // The vega-fence degradation disclosure (issue #1252): pandoc has no
         // vega engine, so charted markdown must route to python instead.
         assert!(
-            body.contains("`vega-lite`"),
-            "discloses the vega fence degradation"
-        );
-        assert!(
             body.contains("`python` tool"),
             "routes charted markdown to the python tool"
+        );
+        // The pre-conversion promotion (issue #1255): the degradation is
+        // silent -- exit 0, artifact on disk, the fence a plain code block
+        // -- so no error signal routes a model to a symptom-indexed row.
+        // The disclosure must stand in the main flow, ahead of the
+        // Troubleshooting index, and the index row stays as the fallback.
+        // Splitting on the index heading is the position pin -- the fence
+        // phrase itself stays a phrase pin, free to ride any section
+        // wording a re-curation chooses.
+        let (main_flow, troubleshooting) = body
+            .split_once("## Troubleshooting")
+            .expect("a Troubleshooting section to split on");
+        assert!(
+            main_flow.contains("`vega-lite`"),
+            "discloses the vega fence degradation ahead of the Troubleshooting index"
+        );
+        assert!(
+            troubleshooting.contains("`vega-lite`"),
+            "keeps the Troubleshooting fallback row"
         );
     }
 
