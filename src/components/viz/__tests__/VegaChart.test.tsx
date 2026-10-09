@@ -477,6 +477,8 @@ describe("VegaChart (ADR-0016/0033/0050)", () => {
       expect(
         yScaleAt(embedSpec(), ["layer", 0, "encoding", "y", "scale"])?.clamp,
       ).toBe(true);
+      // The outer top declares nothing and mints nothing.
+      expect((embedSpec() as { encoding?: unknown }).encoding).toBeUndefined();
     });
 
     it("injects at the top when an inner bar inherits through a nested group", async () => {
@@ -553,7 +555,28 @@ describe("VegaChart (ADR-0016/0033/0050)", () => {
       },
     );
 
-    it("injects at the top when a facet subview inherits the shared encoding", async () => {
+    it("injects at the top when a layered view also carries a top-level mark", async () => {
+      // vega-lite's normalize compiles a mark+layer pairing by the layer
+      // and drops the top-level mark, so the walk judges the composite: the
+      // declared top-level y reaches the bar layer and patches there.
+      await renderSpec({
+        mark: "line",
+        encoding: {
+          y: { type: "quantitative", scale: { domain: [3.7, 4.05] } },
+        },
+        layer: [{ mark: "bar" }],
+      });
+      expect(scaleOf(embedSpec())?.clamp).toBe(true);
+      const entries = (embedSpec() as { layer?: Array<{ encoding?: unknown }> })
+        .layer;
+      expect(entries?.[0]?.encoding).toBeUndefined();
+    });
+
+    it("patches at the top when a facet wrapper carries the declared encoding", async () => {
+      // Off the engine's grammar: vega-lite honors a shared encoding only
+      // inside layer specs -- the facet/repeat/concat wrapper types carry
+      // no encoding member. The pin holds the walk's declaration-point
+      // judgment over the decode gate's arbitrary-JSON latitude.
       await renderSpec({
         facet: { field: "a", type: "nominal" },
         encoding: {
@@ -564,9 +587,10 @@ describe("VegaChart (ADR-0016/0033/0050)", () => {
       expect(scaleOf(embedSpec())?.clamp).toBe(true);
     });
 
-    it("injects at the top when a concat entry inherits the shared encoding", async () => {
+    it("patches at the top when a concat wrapper carries the declared encoding", async () => {
       // Two entries hit one shared declaration -- it patches once, at the
-      // top; both entries stay mark-only.
+      // top; both entries stay mark-only. Same off-grammar shape as the
+      // facet pin above: the wrapper judgment is defensive.
       await renderSpec({
         encoding: {
           y: { type: "quantitative", scale: { domain: [3.7, 4.05] } },
@@ -581,7 +605,7 @@ describe("VegaChart (ADR-0016/0033/0050)", () => {
       expect(entries?.[1]?.encoding).toBeUndefined();
     });
 
-    it("leaves nested and composite views without a triggering pair untouched", async () => {
+    it("leaves nested layers without a triggering pair untouched", async () => {
       await renderSpec({
         layer: [
           {
@@ -601,16 +625,9 @@ describe("VegaChart (ADR-0016/0033/0050)", () => {
             ],
           },
         ],
-        vconcat: [
-          { mark: "area", encoding: { y: { type: "quantitative" } } },
-          {
-            mark: "line",
-            encoding: {
-              y: { type: "quantitative", scale: { domain: [3.7, 4.05] } },
-            },
-          },
-        ],
       });
+      // A non-baseline mark and a baseline whose domain spans 0: neither
+      // triggers, at any depth.
       expect(
         yScaleAt(embedSpec(), [
           "layer",
@@ -633,6 +650,22 @@ describe("VegaChart (ADR-0016/0033/0050)", () => {
           "scale",
         ])?.clamp,
       ).toBeUndefined();
+    });
+
+    it("leaves concat entries without a triggering pair untouched", async () => {
+      await renderSpec({
+        vconcat: [
+          { mark: "area", encoding: { y: { type: "quantitative" } } },
+          {
+            mark: "line",
+            encoding: {
+              y: { type: "quantitative", scale: { domain: [3.7, 4.05] } },
+            },
+          },
+        ],
+      });
+      // A single-key fixture: the concat branch actually walks these
+      // entries (a layer sibling would win the branch order first).
       expect(
         yScaleAt(embedSpec(), ["vconcat", 0, "encoding", "y", "scale"])?.clamp,
       ).toBeUndefined();
@@ -649,6 +682,17 @@ describe("VegaChart (ADR-0016/0033/0050)", () => {
       const spec = {
         width: "container" as const,
         layer: [{ layer: [{ mark: "line" }] }],
+      };
+      await renderSpec(spec);
+      expect(embedSpec()).toBe(spec);
+    });
+
+    it("hands a composite no-hit spec through by reference", async () => {
+      // The concat branch rebuilds nothing either -- the no-hit contract
+      // holds for composite keys the same as for nested layers.
+      const spec = {
+        width: "container" as const,
+        vconcat: [{ mark: "line" }],
       };
       await renderSpec(spec);
       expect(embedSpec()).toBe(spec);
