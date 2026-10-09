@@ -85,6 +85,10 @@ type ClampableY = {
 };
 type ClampableEncoding = { y?: ClampableY };
 
+/** A y encoding whose scale object has passed the guard -- the shape the
+ * decision hands back for patching. */
+type ClampTarget = ClampableY & { scale: NonNullable<ClampableY["scale"]> };
+
 /** The zero-baseline clamp decision for one candidate view (a top-level
  * single view, or one layer entry): the y encoding needing `scale.clamp:
  * true`, or null when this mark+encoding pair passes through untouched.
@@ -95,15 +99,17 @@ type ClampableEncoding = { y?: ClampableY };
  * happens to look fine (#1245). The extrapolation is a property of any
  * continuous, invertible-at-0 scale, so linear, pow, and sqrt all trigger
  * (#1247 -- on a tight domain sqrt extrapolates harder than linear,
- * measured -21.6 vs -10.6 plot heights on [3.7, 4.05]). Everything that
- * cannot extrapolate passes through untouched: a domain including 0, no
- * explicit domain, a log/symlog scale (a log domain must exclude 0 by
- * definition), a non-quantitative y, and an already-present clamp (the
+ * measured -21.6 vs -10.6 plot heights on [3.7, 4.05]). Everything else
+ * passes through untouched: a domain including 0, no explicit domain, a
+ * log scale (its domain must exclude 0 by definition), a symlog scale
+ * (released conservatively -- symlog is continuous and invertible at 0,
+ * so the principle above would cover it too, but no measured case backs
+ * judging it), a non-quantitative y, and an already-present clamp (the
  * spec author's own decision). */
 function zeroBaselineClampTarget(
-  mark: string | undefined,
+  mark: string,
   encoding: ClampableEncoding | undefined,
-): ClampableY | null {
+): ClampTarget | null {
   if (mark !== "bar" && mark !== "area") return null;
   const y = encoding?.y;
   const scale = y?.scale;
@@ -132,12 +138,11 @@ function zeroBaselineClampTarget(
   )
     return null;
   if (scale.clamp !== undefined) return null;
-  return y;
+  return y as ClampTarget;
 }
 
-/** Patch `clamp: true` into the decided y encoding's scale -- the scale has
- * already passed the object guard in zeroBaselineClampTarget. */
-function clampedY(y: ClampableY): ClampableY {
+/** Patch `clamp: true` into the decided y encoding's scale. */
+function clampedY(y: ClampTarget): ClampableY {
   return { ...y, scale: { ...y.scale, clamp: true } };
 }
 
@@ -174,7 +179,7 @@ function withZeroBaselineClamp(spec: TopLevelSpec): TopLevelSpec {
   // Layered view: judge each layer entry; track whether the layers array or
   // a shared top-level y needs the rebuild.
   if (!Array.isArray(s.layer)) return spec;
-  let sharedY: ClampableY | null = null;
+  let sharedY: ClampTarget | null = null;
   let layersChanged = false;
   const layers = s.layer.map((entry: unknown) => {
     if (!entry || typeof entry !== "object" || Array.isArray(entry)) return entry;

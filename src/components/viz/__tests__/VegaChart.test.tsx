@@ -362,6 +362,25 @@ describe("VegaChart (ADR-0016/0033/0050)", () => {
       expect(layerScaleOf(embedSpec(), 0)?.clamp).toBeUndefined();
     });
 
+    it("keeps a malformed layer entry while injecting its valid neighbor", async () => {
+      // The decode gate admits malformed JSON on purpose, so the walk hands
+      // a non-record entry to vega-embed untouched instead of throwing
+      // inside the effect (prepareEmbed runs outside the embed catch).
+      await renderSpec({
+        layer: [
+          null,
+          {
+            mark: "bar",
+            encoding: {
+              y: { type: "quantitative", scale: { domain: [3.7, 4.05] } },
+            },
+          },
+        ],
+      });
+      expect((embedSpec() as { layer?: unknown[] }).layer?.[0]).toBeNull();
+      expect(layerScaleOf(embedSpec(), 1)?.clamp).toBe(true);
+    });
+
     it("injects for a pow scale on an explicit non-zero domain", async () => {
       await renderSpec({
         mark: "bar",
@@ -388,7 +407,7 @@ describe("VegaChart (ADR-0016/0033/0050)", () => {
       expect(scaleOf(embedSpec())?.clamp).toBe(true);
     });
 
-    it("leaves a symlog scale untouched (same pass-through family as log)", async () => {
+    it("leaves a symlog scale untouched (released conservatively)", async () => {
       await renderSpec({
         mark: "bar",
         encoding: {
