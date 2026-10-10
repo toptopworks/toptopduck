@@ -42,6 +42,10 @@ Every element of the `extra` array is appended to the invocation verbatim, after
 | `--extract-media=DIR` | On DOCX/EPUB to Markdown, extract embedded images into DIR and rewrite the links to point there |
 | `--embed-resources` | Inline images and CSS into one self-contained HTML file |
 
+## Charts in the source
+
+Pandoc has no vega engine: a `vega-lite` fence in the Markdown source degrades to a plain code block in every output format, and the conversion itself succeeds -- nothing errors, so check the source before converting. When the goal is a charted report, skip the conversion and regenerate the content as a self-contained HTML file with the `python` tool instead.
+
 ## PDF output and the engine prerequisite
 
 Pandoc does not render PDF itself: it generates LaTeX and hands it to an engine that must already be on PATH. Without one, the call fails with an error like `pdflatex not found`. Pick the engine by source content:
