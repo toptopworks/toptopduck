@@ -534,12 +534,17 @@ fn empty_mount_set_omits_skill_section_and_provenance() {
         system.contains("默认工具"),
         "tool-selection section missing"
     );
-    // The mount-conditional surface (ADR-0119 D4): an EMPTY discovery
-    // snapshot pays no standing tool cost -- the trio's posture
+    // The mount-conditional surface (ADR-0119 D4; the read tool's gate
+    // calibrated by #1260): an EMPTY discovery snapshot pays no standing
+    // tool cost for either skill meta-tool -- the trio's posture
     // (ADR-0105 D6).
     assert!(
         !guard[0].tools.iter().any(|t| t.name == "invoke_skill"),
         "an empty discovery snapshot must not mount invoke_skill"
+    );
+    assert!(
+        !guard[0].tools.iter().any(|t| t.name == "read_skill_file"),
+        "an empty discovery snapshot must not mount read_skill_file"
     );
     drop(guard);
 
@@ -729,10 +734,12 @@ impl toptopduck_lib::Provider for ProbeHandle {
     }
 }
 
-/// The read-surface probe (issue #714): round 1 of each turn inspects the
-/// turn's tool table (does `read_skill_file` ride it?); round 1 of turn 1
-/// activates mid-turn; round 2 of turn 2 captures the served read result the
-/// provider sees fed back.
+/// The read-surface probe (issue #714; recalibrated #1260): round 1 of each
+/// turn inspects the turn's tool table (does `read_skill_file` ride it?);
+/// round 1 of turn 1 invokes mid-turn; round 2 of turn 1 reads the invoked
+/// body's reference IN THE SAME TURN; round 3 captures the served read
+/// result the provider sees fed back; turn 2 repeats the read off the
+/// session fold.
 struct ReadSurfaceProbeProvider {
     calls: std::sync::atomic::AtomicUsize,
     read_mounted: [std::sync::atomic::AtomicBool; 2],
@@ -763,21 +770,55 @@ impl toptopduck_lib::Provider for ReadSurfaceProbeProvider {
                     ]),
                 })
             }
+            // Turn 1, round 2: read in the INVOKING turn (#1260) -- the
+            // pre-#1260 table mounted nothing here, making the body's
+            // reference channel a dead pointer until the next turn.
             1 => Ok(toptopduck_lib::provider::tool_calling::ToolTurnOutcome {
                 thinking: Vec::new(),
-                reply: ToolTurnReply::Text("turn one done".into()),
+                reply: ToolTurnReply::tool_calls(vec![
+                    toptopduck_lib::provider::tool_calling::ToolUse {
+                        id: "tu_r".into(),
+                        name: "read_skill_file".into(),
+                        input: serde_json::json!({
+                            "name": "sql-coach",
+                            "path": "references/template.html"
+                        }),
+                    },
+                ]),
             }),
+            // Turn 1, round 3: capture the LAST tool result -- the invoke
+            // body rode the first one this turn.
             2 => {
+                *self.served_text.lock().unwrap() = request
+                    .messages
+                    .iter()
+                    .filter_map(|m| match m {
+                        toptopduck_lib::provider::tool_calling::ToolTurnMessage::ToolResult {
+                            content,
+                            ..
+                        } => Some(content.clone()),
+                        _ => None,
+                    })
+                    .next_back()
+                    .unwrap_or_default();
+                Ok(toptopduck_lib::provider::tool_calling::ToolTurnOutcome {
+                    thinking: Vec::new(),
+                    reply: ToolTurnReply::Text("turn one done".into()),
+                })
+            }
+            // Turn 2: the session fold carries the name; read again off
+            // the monotonic base set.
+            3 => {
                 self.read_mounted[1].store(has_read, Ordering::SeqCst);
                 Ok(toptopduck_lib::provider::tool_calling::ToolTurnOutcome {
                     thinking: Vec::new(),
                     reply: ToolTurnReply::tool_calls(vec![
                         toptopduck_lib::provider::tool_calling::ToolUse {
-                            id: "tu_r".into(),
+                            id: "tu_r2".into(),
                             name: "read_skill_file".into(),
                             input: serde_json::json!({
                                 "name": "sql-coach",
-                                "path": "references/notes.md"
+                                "path": "references/template.html"
                             }),
                         },
                     ]),
@@ -787,13 +828,14 @@ impl toptopduck_lib::Provider for ReadSurfaceProbeProvider {
                 *self.served_text.lock().unwrap() = request
                     .messages
                     .iter()
-                    .find_map(|m| match m {
+                    .filter_map(|m| match m {
                         toptopduck_lib::provider::tool_calling::ToolTurnMessage::ToolResult {
                             content,
                             ..
                         } => Some(content.clone()),
                         _ => None,
                     })
+                    .next_back()
                     .unwrap_or_default();
                 Ok(toptopduck_lib::provider::tool_calling::ToolTurnOutcome {
                     thinking: Vec::new(),
@@ -822,16 +864,17 @@ impl toptopduck_lib::Provider for ReadProbeHandle {
     }
 }
 
-/// The read surface's mount condition + mid-turn timing, end to end (issue
-/// #714, ADR-0111 Decisions 1/3 calibrated by ADR-0119 Decision 4): turn 1
-/// (invoked set EMPTY) mounts NO `read_skill_file` even though the skill is
-/// in the snapshot -- reading rides the invoked gate; the agent's mid-turn
-/// `invoke_skill` lands the record on the turn but never widens the CURRENT
-/// turn's table; turn 2 -- whose turn-start fold carries the name -- mounts
-/// the tool and serves the file text into the tool result the provider's
-/// next round sees.
+/// The read surface's mount condition + same-turn timing, end to end
+/// (issue #1260, ADR-0111 Decision 1 calibrated by ADR-0119 Decision 4):
+/// turn 1 mounts `read_skill_file` off the discovery snapshot alone (the
+/// SAME gate as `invoke_skill` -- nothing is invoked yet, and a session
+/// with no skills still pays no standing tool cost); the agent's mid-turn
+/// `invoke_skill` opens the skill's files for reads in the INVOKING turn
+/// (the resolver unions the turn's pending invocations with the turn-start
+/// fold); turn 2 -- whose turn-start fold carries the name -- keeps
+/// serving, the monotonic base set unchanged.
 #[test]
-fn read_surface_mounts_next_turn_and_serves_after_midturn_invocation() {
+fn read_surface_mounts_with_a_snapshot_and_serves_within_the_invoking_turn() {
     use std::sync::atomic::Ordering;
     let skills_root = tempfile::tempdir().unwrap();
     let skills_root = skills_root.path().to_path_buf();
@@ -841,8 +884,8 @@ fn read_surface_mounts_next_turn_and_serves_after_midturn_invocation() {
         skills_root
             .join("sql-coach")
             .join("references")
-            .join("notes.md"),
-        "Use CTEs.\n",
+            .join("template.html"),
+        "Report scaffold.\n",
     )
     .unwrap();
 
@@ -862,7 +905,8 @@ fn read_surface_mounts_next_turn_and_serves_after_midturn_invocation() {
     let fragments = resolve_prompt_fragments(&skills_root, &session.discovery_snapshot());
     let approval = ApprovalState::new();
 
-    // Turn 1: the invoked set is empty -- no read surface.
+    // Turn 1: nothing is invoked yet -- the snapshot alone mounts the read
+    // surface.
     let outcome = session.ask_with_phase(
         "查询",
         &approval,
@@ -885,8 +929,13 @@ fn read_surface_mounts_next_turn_and_serves_after_midturn_invocation() {
         "got {outcome:?}"
     );
     assert!(
-        !provider.read_mounted[0].load(Ordering::SeqCst),
-        "an empty invoked set mounts no read tool"
+        provider.read_mounted[0].load(Ordering::SeqCst),
+        "a non-empty discovery snapshot mounts the read tool from round one"
+    );
+    assert_eq!(
+        *provider.served_text.lock().unwrap(),
+        "Report scaffold.\n",
+        "the same-turn read served the invoked body's reference"
     );
     assert_eq!(
         session.invoked_skills(),
@@ -930,7 +979,7 @@ fn read_surface_mounts_next_turn_and_serves_after_midturn_invocation() {
     );
     assert_eq!(
         *provider.served_text.lock().unwrap(),
-        "Use CTEs.\n",
-        "the file text rode the tool result back to the provider"
+        "Report scaffold.\n",
+        "the fold-based read still serves -- the monotonic base set is unchanged"
     );
 }
