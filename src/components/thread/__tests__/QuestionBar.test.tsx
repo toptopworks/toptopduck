@@ -569,3 +569,51 @@ describe("QuestionBar skill picker (ADR-0112, issue #716)", () => {
     expect(screen.queryByText("暂无技能")).not.toBeInTheDocument();
   });
 });
+
+describe("QuestionBar turn clock (issue #1264)", () => {
+  it("carries the continuous elapsed figure on the phase label across every phase", () => {
+    renderQuestionBar(
+      <QuestionBar
+        onSubmit={() => {}}
+        onCancel={() => {}}
+        loading={true}
+        phase={{ TextDelta: { delta: "答" } }}
+        turnStartedAt={Date.now() - 46_000}
+      />,
+    );
+    expect(screen.getByText("执行中…")).toBeInTheDocument();
+    // No threshold: any phase, any age -- the turn is running, the figure
+    // runs with it (a stalled gap can't hide behind a phase boundary).
+    expect(screen.getByText("· 46s")).toBeInTheDocument();
+  });
+
+  it("freezes the figure while an approval holds the turn on the gate", () => {
+    renderQuestionBar(
+      <QuestionBar
+        onSubmit={() => {}}
+        onCancel={() => {}}
+        loading={true}
+        phase={{ ToolCallStarted: { name: "write", operation_kind: "write", summary: "r" } }}
+        turnStartedAt={Date.now() - 100_000}
+        turnPausedSince={Date.now() - 40_000}
+      />,
+    );
+    expect(screen.getByText("执行中…")).toBeInTheDocument();
+    // 100s since the ask, the last 40s on the user: the figure reads the
+    // clock as of the pause's start -- user think-time stays out.
+    expect(screen.getByText("· 60s")).toBeInTheDocument();
+  });
+
+  it("renders no figure when no turn clock is running", () => {
+    renderQuestionBar(
+      <QuestionBar
+        onSubmit={() => {}}
+        onCancel={() => {}}
+        loading={true}
+        phase={{ ToolCallStarted: { name: "explore", operation_kind: "read", summary: "S" } }}
+      />,
+    );
+    expect(screen.getByText("执行中…")).toBeInTheDocument();
+    expect(screen.queryByText(/· \d+s/)).toBeNull();
+  });
+});

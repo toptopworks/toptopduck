@@ -84,6 +84,10 @@ interface ThreadProps {
    * for call sites / tests that do not exercise live rendering; defaults to
    * null (no live exchange). */
   liveTurn?: LiveTurn | null;
+  /** The LLM round-trip wait stamp (issue #1264): threaded to the live
+   *  exchange so the trailing status line renders the elapsed-seconds
+   *  suffix. Optional; defaults to null (no suffix). */
+  waitStartedAt?: number | null;
   /** Answers a pending approval request (the live card's three buttons,
    * ADR-0083). Wired to the app-level approval hook; defaults to a no-op so
    * tests that render a pending card without the hook do not crash. */
@@ -144,6 +148,7 @@ export function Thread({
   datasetLabels = [],
   skillIndex,
   liveTurn = null,
+  waitStartedAt = null,
   onRespondApproval = NOOP_RESPOND,
   onLoadApprovalAttachments,
   onRetryTurn,
@@ -467,6 +472,7 @@ export function Thread({
       {liveTurn !== null && (
         <LiveTurnExchange
           liveTurn={liveTurn}
+          waitStartedAt={waitStartedAt}
           mentionedDataset={findMentionedDataset(liveTurn.question, datasetLabels)}
           onRespondApproval={onRespondApproval}
           onLoadApprovalAttachments={onLoadApprovalAttachments}

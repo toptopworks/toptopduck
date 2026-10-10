@@ -24,6 +24,11 @@ export interface ComposerSessionFields {
    *  in-flight window must not flip the bar's Ask/Stop button. */
   loading: boolean;
   phase: TurnPhase | null;
+  /** The turn clock (issue #1264 turn-clock ruling): the bar's phase label
+   *  derives its continuous elapsed-seconds figure from it, freezing while
+   *  an approval holds the turn. null when no turn is in flight. */
+  turnStartedAt: number | null;
+  turnPausedSince: number | null;
   handleAsk: (question: string, invocations?: string[]) => Promise<void>;
   handleCancel: () => Promise<void>;
   /** Multi-file ingest from the composer "+" file section (ADR-0083). Routed
@@ -78,6 +83,8 @@ const idleHandleIngestFiles = (): void => {};
 export const IDLE_SESSION_FIELDS: ComposerSessionFields = {
   loading: false,
   phase: null,
+  turnStartedAt: null,
+  turnPausedSince: null,
   handleAsk: idleHandleAsk,
   handleCancel: idleHandleCancel,
   handleIngestFiles: idleHandleIngestFiles,

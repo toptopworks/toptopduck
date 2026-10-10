@@ -18,12 +18,13 @@ import { catalogFor } from "../../../i18n";
 import { LiveTurnExchange } from "../LiveTurnExchange";
 import type { LiveRoundRow, LiveTurn } from "../../../session/useTurnFlow";
 
-function renderExchange(liveTurn: LiveTurn) {
+function renderExchange(liveTurn: LiveTurn, waitStartedAt: number | null = null) {
   return render(
     <IntlProvider locale="zh-CN" messages={catalogFor("zh-CN")}>
       <TooltipProvider>
         <LiveTurnExchange
           liveTurn={liveTurn}
+          waitStartedAt={waitStartedAt}
           mentionedDataset={null}
           onRespondApproval={() => {}}
           onThinkingExpandedChange={() => {}}
@@ -302,5 +303,31 @@ describe("LiveTurnExchange trailing thinking status (issue #1167)", () => {
       ],
     });
     expect(screen.getByText("思考中（第 2 步）…")).toBeInTheDocument();
+  });
+});
+
+describe("LiveTurnExchange wait-elapsed suffix (issue #1264)", () => {
+  // The sealed-tail wait: a settled row + sealed prose beside it -- the
+  // status names the round-trip wait, and the suffix rides inside it.
+  const sealedTailWait: LiveTurn = {
+    question: "问",
+    askedAt: 0,
+    invocationNames: [],
+    step: 2,
+    rounds: [{ text: "第一轮已收口。", rows: [settledRow()] }],
+  };
+
+  it("renders the elapsed suffix inside the wait status when the stamp is open", () => {
+    // The stamp rides the real clock (a fresh window opens at Date.now),
+    // so the 12s-old stamp reads as 12 elapsed seconds.
+    renderExchange(sealedTailWait, Date.now() - 12_000);
+    expect(screen.getByText("思考中（第 2 步）…")).toBeInTheDocument();
+    expect(screen.getByText("· 12s")).toBeInTheDocument();
+  });
+
+  it("renders no suffix outside a wait window (stamp null)", () => {
+    renderExchange(sealedTailWait);
+    expect(screen.getByText("思考中（第 2 步）…")).toBeInTheDocument();
+    expect(screen.queryByText(/· \d+s/)).toBeNull();
   });
 });

@@ -165,6 +165,37 @@ export interface LiveTurn {
   runtime?: TurnRuntime;
 }
 
+/** Whether the live turn sits in an LLM round-trip wait -- the trailing
+ *  status line's gate and the wait-elapsed stamp's arm (issue #1264): true
+ *  while nothing else on the tail carries the CURRENT round's liveness.
+ *  While a call dispatches (or waits at the gate) its row carries the
+ *  motion, and while #1163 streams the current round's prose -- prose that
+ *  can still grow, a call-less tail -- the visible text + caret carry it by
+ *  themselves (a tail beside rows has its prose sealed; both arms below
+ *  exclude that window) -- a status still claiming 思考中 over visibly
+ *  streaming text is a doubled, misleading signal. The prose arm requires
+ *  the tail to BE the current round -- a Thinking that opens the next round
+ *  bumps only the step, leaving the tail at the previous round's sealed
+ *  prose where a caret is not the new round's motion -- so the wait names
+ *  every LLM round-trip wait (ask start, the inter-round wait, the new
+ *  round's pre-prose thinking, the sealed-tail wait beside settled rows),
+ *  with the step surfaced past the first round-trip ("step N", ADR-0081).
+ *  One predicate for the rail's status gate and the hook's stamp, so the
+ *  two can never drift. */
+export function isRoundTripWait(turn: Pick<LiveTurn, "rounds" | "step">): boolean {
+  const rowInProgress = turn.rounds.some((round) =>
+    round.rows.some((row) => row.running || row.success === null),
+  );
+  const tailIndex = turn.rounds.length - 1;
+  const tail = turn.rounds[tailIndex];
+  const proseStreaming =
+    tailIndex === (turn.step ?? 1) - 1 &&
+    tail !== undefined &&
+    tail.text !== undefined &&
+    tail.rows.length === 0;
+  return !rowInProgress && !proseStreaming;
+}
+
 /** Merge the two live channels into one ordered row list (pure -- unit-tested
  *  without the hook). Calls keep dispatch order; each call absorbs the
  *  matching approval entry (same tool name + summary: both channels source
@@ -431,6 +462,22 @@ export interface UseTurnFlow {
    *  entries; folds into the optimistic TurnRecord.trace when the turn
    *  settles. */
   liveTurn: LiveTurn | null;
+  /** The LLM round-trip wait window's start stamp (issue #1264): non-null
+   *  while the live turn sits in isRoundTripWait -- the rail's trailing
+   *  status line derives its elapsed-seconds suffix from it (the bar reads
+   *  the turn clock below instead). null outside a wait window. */
+  waitStartedAt: number | null;
+  /** The turn clock's start (issue #1264 turn-clock ruling): the ask's
+   *  submit stamp while a turn is in flight, null otherwise -- the
+   *  QuestionBar's continuous elapsed figure derives from it, across every
+   *  phase of the turn (a slow gap can't hide behind a phase boundary). */
+  turnStartedAt: number | null;
+  /** The turn clock's pause origin: the earliest PENDING approval's
+   *  arrival stamp -- the displayed figure freezes there while the user
+   *  decides; on release it jumps to the turn's true wall age (the hold is
+   *  hidden while it lasts, never subtracted). null while no approval is
+   *  pending. */
+  turnPausedSince: number | null;
   // Declared Promise<void> (not void) so the contract reflects the async
   // implementation: callers can await/.catch to chain post-ask work. Fire-
   // and-forget callers (QuestionBar onSubmit/onCancel) still accept it via
@@ -662,9 +709,30 @@ export function useTurnFlow(sessionId: string, deps: UseTurnFlowDeps): UseTurnFl
   // memo recomputes the same value). useCallback-stable (it closes over refs
   // + a setter + module constants only), so the listener effect mounts once
   // and handleAsk keeps its identity across renders.
+  const [waitStartedAt, setWaitStartedAt] = useState<number | null>(null);
+  // The wait stamp's synchronous mirror (the same refs-first idiom as the
+  // live mirrors above).
+  const waitStartedAtRef = useRef<number | null>(null);
   const commitLive = useCallback((next: LiveState | null) => {
     liveRef.current = next;
     roundsRef.current = next === null ? NO_ROUNDS : buildLiveRounds(next, approvalsRef.current);
+    // The wait stamp rides the same commits the live state takes (issue
+    // #1264): a commit whose rounds sit in the round-trip wait opens the
+    // window once -- the falsy guard keeps the opening stamp across the
+    // window's later commits -- and any other commit closes it: a live arm
+    // engaged (row dispatching / tail streaming), or the ask finally's
+    // null (a successor turn opens its own window, never inherits this
+    // one's). Render sites derive the elapsed-seconds suffix from the
+    // stamp -- derive-from-stamp, so a hidden keep-alive page's throttled
+    // ticker heals to the true elapsed time on visibility.
+    const waiting =
+      next !== null && isRoundTripWait({ rounds: roundsRef.current, step: next.step });
+    if (waiting && waitStartedAtRef.current === null) {
+      waitStartedAtRef.current = Date.now();
+    } else if (!waiting && waitStartedAtRef.current !== null) {
+      waitStartedAtRef.current = null;
+    }
+    setWaitStartedAt(waitStartedAtRef.current);
     setLive(next);
   }, []);
 
@@ -965,5 +1033,23 @@ export function useTurnFlow(sessionId: string, deps: UseTurnFlowDeps): UseTurnFl
     }
   }, [sessionId, intl, setError]);
 
-  return { phase, liveTurn, handleAsk, handleCancel };
+  // The turn clock (issue #1264 turn-clock ruling): derived, never stored --
+  // the ask stamp rides the live state, and the pause origin is the first
+  // PENDING approval in arrival order (the rail renders cards in the order
+  // the gateway raised them, so the first pending is the earliest hold).
+  // The QuestionBar displays the elapsed-with-user-pauses figure; the rail's
+  // wait-window stamp above stays the per-window figure.
+  const turnStartedAt = live?.askedAt ?? null;
+  const turnPausedSince =
+    approvals.find((a) => a.status.kind === "pending")?.receivedAt ?? null;
+
+  return {
+    phase,
+    liveTurn,
+    waitStartedAt,
+    turnStartedAt,
+    turnPausedSince,
+    handleAsk,
+    handleCancel,
+  };
 }

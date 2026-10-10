@@ -6,6 +6,7 @@ import { Button } from "../ui/button";
 import { SkillPickerPanel } from "./SkillPickerPanel";
 import { skillPickerOptionId } from "./skillPickerLogic";
 import { useSkillPicker } from "./useSkillPicker";
+import { WaitElapsedSuffix } from "./WaitElapsedSuffix";
 
 type QuestionBarProps = {
   onSubmit: (question: string) => void;
@@ -20,6 +21,15 @@ type QuestionBarProps = {
    *  (the listener clears it on outcome, incl. Cancelled). Optional so call
    *  sites / tests that don't exercise phase feedback omit it. */
   phase?: TurnPhase | null;
+  /** The turn clock (issue #1264 turn-clock ruling): while non-null and the
+   *  bar is loading, the phase label carries the elapsed-seconds figure --
+   *  continuous across every phase of the in-flight turn, so a slow gap
+   *  (round-trip wait, tool dispatch, the pre-approval stretch) can't read
+   *  as a frozen UI. `turnPausedSince` freezes the figure while an approval
+   *  holds the turn on the gate. Optional so call sites / tests that don't
+   *  exercise a running turn omit it (no figure). */
+  turnStartedAt?: number | null;
+  turnPausedSince?: number | null;
   /** Left-side toolbar controls rendered inside the unified container (the
    *  composer "+" / auth-mode slots threaded from the shell, ADR-0092). */
   children?: ReactNode;
@@ -87,7 +97,7 @@ const SKILL_PICKER_PANEL_ID = "question-bar-skill-picker";
 /** The textarea's DOM id -- the shell's one anchor for seating focus on the
  *  composer (the create exit's focus hand-off, issue #1040). */
 export const COMPOSER_INPUT_ID = "question-bar-input";
-export function QuestionBar({ onSubmit, onCancel, loading, phase = null, draft, setDraft, children, trailing, skillPicker }: QuestionBarProps) {
+export function QuestionBar({ onSubmit, onCancel, loading, phase = null, turnStartedAt = null, turnPausedSince = null, draft, setDraft, children, trailing, skillPicker }: QuestionBarProps) {
   const intl = useIntl();
   const [localDraft, setLocalDraft] = useState("");
   const value = draft ?? localDraft;
@@ -256,6 +266,7 @@ export function QuestionBar({ onSubmit, onCancel, loading, phase = null, draft, 
               aria-live="polite"
             >
               {phaseLabel(phase, intl)}
+              <WaitElapsedSuffix startedAt={turnStartedAt} pausedSince={turnPausedSince} />
             </span>
           )}
           {loading ? (

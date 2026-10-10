@@ -28,7 +28,9 @@ import { TraceList } from "./TraceList";
 import { RoundBody } from "./RoundBody";
 import type { RoundProseMode } from "./RoundProse";
 import { TurnExchangeFrame } from "./TurnExchangeFrame";
+import { isRoundTripWait } from "../../session/useTurnFlow";
 import type { LiveRound, LiveTurn } from "../../session/useTurnFlow";
+import { WaitElapsedSuffix } from "./WaitElapsedSuffix";
 import type { ApprovalResponse, FileAttachment } from "../../types/approval";
 import type { ThinkingTrace } from "../../types/thread";
 import type { DatasetLabel } from "./turn-visual";
@@ -90,12 +92,18 @@ function LiveRoundBlock({
 
 export function LiveTurnExchange({
   liveTurn,
+  waitStartedAt = null,
   mentionedDataset,
   onRespondApproval,
   onLoadApprovalAttachments,
   onThinkingExpandedChange,
 }: {
   liveTurn: LiveTurn;
+  /** The LLM round-trip wait stamp (issue #1264): while non-null the
+   *  trailing status line carries the elapsed-seconds suffix -- the same
+   *  stamp the QuestionBar phase label reads. Optional so call sites /
+   *  tests that do not exercise the wait window omit it (no suffix). */
+  waitStartedAt?: number | null;
   /** The dataset the question explicitly names (the same findMentionedDataset
    *  read the settled header performs, computed by the thread) -- rendered
    *  here so the settle swap does not insert the chip (issue #620). null
@@ -111,37 +119,13 @@ export function LiveTurnExchange({
    *  reference onto the settled round). */
   onThinkingExpandedChange: (thinking: ThinkingTrace, expanded: boolean) => void;
 }) {
-  // The running status reads honestly only while nothing else on the tail
-  // carries the CURRENT round's liveness: while a call dispatches (or waits
-  // at the gate) its row carries the motion, and while #1163 streams the
-  // current round's prose -- prose that can still grow, a call-less tail --
-  // the visible text + caret carry it by themselves (a tail beside rows has
-  // its prose sealed; both live arms below exclude that window) --
-  // a spinner still claiming 思考中 over visibly streaming text is a
-  // doubled, misleading signal. The prose arm requires the tail to BE the
-  // current round -- a Thinking that opens the next round bumps only the
-  // step, leaving the tail at the previous round's sealed prose where a
-  // caret is not the new round's motion -- so the status names every LLM
-  // round-trip wait (ask start, the inter-round wait, the new round's
-  // pre-prose thinking, the sealed-tail wait beside settled rows), with the
-  // step surfaced past the first round-trip ("step N", ADR-0081).
-  const rowInProgress = liveTurn.rounds.some((round) =>
-    round.rows.some((row) => row.running || row.success === null),
-  );
+  // The trailing status names the LLM round-trip wait and carries the
+  // elapsed-seconds suffix (issue #1264). Its gate is the shared predicate
+  // -- one round-trip-wait definition feeds the status line here and the
+  // wait stamp the QuestionBar label reads (see isRoundTripWait for the
+  // honest-liveness reasoning: which arms carry the motion, and why the
+  // prose arm requires the tail to BE the current round).
   const tailIndex = liveTurn.rounds.length - 1;
-  // The tail's text carries liveness only while it can still grow. A round
-  // that has observed a call has SEALED its prose (the round boundary is the
-  // first content after a call -- later prose opens the next round), so a
-  // text-bearing tail beside rows is the LLM round-trip wait: the settled
-  // rows move nothing and the adapter fires nothing until the next round's
-  // first chunk, which is exactly the window the status must name (the
-  // fake-hang window).
-  const tail = liveTurn.rounds[tailIndex];
-  const proseStreaming =
-    tailIndex === (liveTurn.step ?? 1) - 1 &&
-    tail !== undefined &&
-    tail.text !== undefined &&
-    tail.rows.length === 0;
   return (
     <TurnExchangeFrame
       question={liveTurn.question}
@@ -154,9 +138,9 @@ export function LiveTurnExchange({
       {liveTurn.rounds.map((round, i) => (
         // The rounds array is append-only within a turn (round i is round
         // i+1), so the index is a stable key. The mode judgment is the same
-        // seal discriminant as the proseStreaming arm above: a row-bearing
-        // tail is sealed prose -- static, the status names the wait
-        // (issue #1236).
+        // seal discriminant the round-trip-wait predicate reads: a
+        // row-bearing tail is sealed prose -- static, the status names the
+        // wait (issue #1236).
         <LiveRoundBlock
           key={i + 1}
           round={round}
@@ -166,7 +150,7 @@ export function LiveTurnExchange({
           onThinkingExpandedChange={onThinkingExpandedChange}
         />
       ))}
-      {!rowInProgress && !proseStreaming && (
+      {isRoundTripWait(liveTurn) && (
         <p
           className="live-thinking m-0 mt-0.5 flex items-center gap-1 text-xs text-muted-foreground"
           role="status"
@@ -181,6 +165,7 @@ export function LiveTurnExchange({
           ) : (
             <FormattedMessage id="common.thinking" defaultMessage="Thinking…" />
           )}
+          <WaitElapsedSuffix startedAt={waitStartedAt} />
         </p>
       )}
     </TurnExchangeFrame>

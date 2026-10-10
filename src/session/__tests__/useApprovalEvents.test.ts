@@ -77,10 +77,31 @@ describe("useApprovalEvents", () => {
         tool: "fetch",
         operationKind: "network",
         summary: "GET /x",
+        // The client arrival stamp (issue #1264 turn-clock pause): set at
+        // the listener, not asserted to a fixed clock here.
+        receivedAt: expect.any(Number),
         status: { kind: "pending" },
       },
     ]);
     expect(result.current.pendingApprovalSids.has(SID)).toBe(true);
+  });
+
+  it("refreshes receivedAt on a re-emitted request (de-dupe: one entry, fresh stamp)", async () => {
+    const { result } = renderHook(() => useApprovalEvents());
+    await waitFor(() => expect(approvalCbs.request).not.toBeNull());
+    act(() => approvalCbs.request!(requestEvent()));
+    const first = result.current.approvalsBySession.get(SID)![0].receivedAt;
+    // Emit retry (same request_id) after the clock moved: the fresh payload
+    // wins -- still one entry, now carrying the NEW arrival stamp (the turn
+    // clock's freeze origin follows it). The spy stays live through the
+    // assertions: the stamp is read inside the deferred setState updater,
+    // which runs at the act flush, not at the event call.
+    const nowSpy = vi.spyOn(Date, "now").mockReturnValue(first + 5_000);
+    act(() => approvalCbs.request!(requestEvent()));
+    const entries = result.current.approvalsBySession.get(SID);
+    expect(entries).toHaveLength(1);
+    expect(entries![0].receivedAt).toBe(first + 5_000);
+    nowSpy.mockRestore();
   });
 
   it("maps file_attachments from the request event onto the entry (issue #672)", async () => {

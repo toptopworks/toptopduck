@@ -11,6 +11,8 @@ import {
 const SESSION_FIELDS: ComposerSessionFields = {
   loading: true,
   phase: null,
+  turnStartedAt: null,
+  turnPausedSince: null,
   handleAsk: vi.fn(),
   handleCancel: vi.fn(),
   handleIngestFiles: vi.fn(),
