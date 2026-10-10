@@ -1,0 +1,178 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{{TITLE}}</title>
+<style>
+  /* Color tokens: light by default, dark when the OS prefers it. No external
+     references of any kind -- system font stack, no CDN, opens offline. */
+  :root {
+    --bg: #f6f7f9;
+    --fg: #1c2128;
+    --muted: #59626e;
+    --panel: #ffffff;
+    --border: #d9dee5;
+    --accent: #2f6fed;
+    --track: #e7eaef;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #14171c;
+      --fg: #e6e9ee;
+      --muted: #9aa4b2;
+      --panel: #1d2129;
+      --border: #333a45;
+      --accent: #6f9bff;
+      --track: #2a313c;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0 auto;
+    padding: 2rem 1.25rem 3rem;
+    max-width: 60rem;
+    background: var(--bg);
+    color: var(--fg);
+    font: 15px/1.6 system-ui, -apple-system, "Segoe UI", Roboto,
+      "Helvetica Neue", Arial, "PingFang SC", "Hiragino Sans GB",
+      "Microsoft YaHei", sans-serif;
+  }
+  /* Report header: the page title block. */
+  .report-header h1 { margin: 0 0 .25rem; font-size: 1.7rem; }
+  .report-header .subtitle { margin: 0 0 1.5rem; color: var(--muted); }
+  /* KPI row: one .kpi card per headline metric. */
+  .kpi-row {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(10rem, 1fr));
+    gap: .75rem;
+    margin: 0 0 1.5rem;
+  }
+  .kpi {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: .5rem;
+    padding: .75rem 1rem;
+  }
+  .kpi-label { display: block; color: var(--muted); font-size: .85rem; }
+  .kpi-value { display: block; font-size: 1.5rem; font-weight: 650; }
+  .kpi-delta { display: block; font-size: .85rem; color: var(--muted); }
+  /* Panel: a titled card grouping one chart or table. */
+  .panel {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: .5rem;
+    padding: 1rem 1.25rem;
+    margin: 0 0 1.5rem;
+  }
+  .panel h2 { margin: 0 0 .75rem; font-size: 1.05rem; }
+  /* Bar list: one .bar per category; .bar-fill width is the value share. */
+  .bar { display: flex; align-items: center; gap: .6rem; margin: .35rem 0; }
+  .bar-label { flex: 0 0 6rem; color: var(--muted); }
+  .bar-track {
+    flex: 1;
+    height: .8rem;
+    background: var(--track);
+    border-radius: .25rem;
+    overflow: hidden;
+  }
+  .bar-fill { height: 100%; background: var(--accent); border-radius: .25rem; }
+  .bar-value { flex: 0 0 auto; font-variant-numeric: tabular-nums; }
+  /* Progress: a single 0-100% ratio. */
+  .progress {
+    height: .6rem;
+    background: var(--track);
+    border-radius: .25rem;
+    overflow: hidden;
+  }
+  .progress-fill { height: 100%; background: var(--accent); }
+  /* Table: zebra-free rows, hairline rules; tabular numbers for value cells. */
+  table { width: 100%; border-collapse: collapse; font-size: .92rem; }
+  th, td { padding: .4rem .6rem; text-align: left; border-bottom: 1px solid var(--border); }
+  th { color: var(--muted); font-weight: 600; }
+  td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
+  /* Pill: an inline status tag. */
+  .pill {
+    display: inline-block;
+    padding: .1rem .55rem;
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    font-size: .8rem;
+    color: var(--muted);
+  }
+  /* Callout: a highlighted note. */
+  .callout {
+    border-left: 3px solid var(--accent);
+    background: var(--panel);
+    padding: .6rem .9rem;
+    margin: 0 0 1.5rem;
+    border-radius: 0 .4rem .4rem 0;
+  }
+  /* Sparkline and inline SVG charts: geometry is computed by the generator
+     script; every <svg> carries role="img" and an aria-label. */
+  svg { max-width: 100%; height: auto; }
+  .spark { stroke: var(--accent); fill: none; stroke-width: 2; }
+  /* Print: flatten to ink-friendly light output, keep panels unbroken. */
+  @media print {
+    body { max-width: none; padding: 0; background: #fff; color: #000; }
+    .panel, .kpi { break-inside: avoid; }
+  }
+</style>
+</head>
+<body>
+<header class="report-header">
+  <h1>{{TITLE}}</h1>
+  <p class="subtitle">One-line report summary or period label</p>
+</header>
+<main>
+{{BODY}}
+</main>
+<!--
+  Component cookbook -- every block below is copy-paste ready for {{BODY}}.
+  The subtitle in the header above is optional; edit or drop it freely.
+
+  KPI row:
+  <div class="kpi-row">
+    <div class="kpi"><span class="kpi-label">Revenue</span><span class="kpi-value">1.2M</span><span class="kpi-delta">+8% vs last period</span></div>
+    <div class="kpi"><span class="kpi-label">Orders</span><span class="kpi-value">3,412</span><span class="kpi-delta">-2% vs last period</span></div>
+  </div>
+
+  Panel wrapping a bar list (div bars, CSS only -- the tier for metric rows):
+  <section class="panel">
+    <h2>Top categories</h2>
+    <div class="bar-list">
+      <div class="bar"><span class="bar-label">Alpha</span><div class="bar-track"><div class="bar-fill" style="width:82%"></div></div><span class="bar-value">820</span></div>
+      <div class="bar"><span class="bar-label">Beta</span><div class="bar-track"><div class="bar-fill" style="width:47%"></div></div><span class="bar-value">470</span></div>
+    </div>
+  </section>
+
+  Progress bar (a single 0-100% ratio):
+  <div class="progress"><div class="progress-fill" style="width:64%"></div></div>
+
+  Table (add class "num" to numeric columns):
+  <section class="panel">
+    <h2>Detail</h2>
+    <table>
+      <thead><tr><th>Region</th><th class="num">Units</th><th class="num">Share</th></tr></thead>
+      <tbody><tr><td>North</td><td class="num">412</td><td class="num">31%</td></tr></tbody>
+    </table>
+  </section>
+
+  Pill (an inline status tag) and callout (a highlighted note):
+  <p><span class="pill">updated weekly</span></p>
+  <div class="callout">Sampled to the top 20 rows; the full table ships as a dataset.</div>
+
+  Sparkline (the tier for trends -- inline SVG, geometry computed in the
+  generator script; width/height and the polyline points are yours to emit,
+  and role="img" plus aria-label are mandatory on every svg):
+  <svg class="sparkline" width="240" height="40" role="img" aria-label="Daily orders trend, rising from 12 to 19">
+    <polyline class="spark" points="0,30 40,22 80,26 120,14 160,18 200,8 240,10"></polyline>
+  </svg>
+
+  Larger charts (distributions, relationships) are the same deal: emit the
+  full literal SVG -- rects for bars, circles for points, path/polyline for
+  lines -- with all coordinates computed in the script. No script tag, no
+  external references, ever: the file must open offline.
+-->
+</body>
+</html>
