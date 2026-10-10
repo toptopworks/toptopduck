@@ -892,6 +892,7 @@ mod tests {
             ("office-cli", "belongs to pandoc"),
             ("python", "belong to SQL"),
             ("dbx", "belongs to the built-in SQL tools"),
+            ("html-report", "belongs to pandoc"),
         ];
         for (name, phrase) in pairs {
             assert!(
@@ -1210,8 +1211,9 @@ mod tests {
     /// #1192): the `extra` tail semantics (one element one argument, no
     /// shell, empty array for the plain call), the high-frequency flags
     /// table, the PDF engine prerequisite and selection table, the no-engine
-    /// escape hatch, the vega-fence degradation disclosure (issue #1252 --
-    /// charted markdown regenerates via the `python` tool) promoted into
+    /// escape hatch, the vega-fence degradation disclosure (issue #1252,
+    /// rerouted issue #1254 -- charted markdown regenerates via the
+    /// `html-report` skill) promoted into
     /// the main flow ahead of the Troubleshooting index, whose fallback
     /// row stays (issue #1255 -- the degradation is silent, so nothing
     /// routes a model to the symptom index), and the office-cli division.
@@ -1251,11 +1253,12 @@ mod tests {
             body.contains("belongs to office-cli"),
             "keeps the division sentence"
         );
-        // The vega-fence degradation disclosure (issue #1252): pandoc has no
-        // vega engine, so charted markdown must route to python instead.
+        // The vega-fence degradation disclosure (issue #1252, rerouted issue
+        // #1254): pandoc has no vega engine, so charted markdown must route
+        // to the html-report skill instead.
         assert!(
-            body.contains("`python` tool"),
-            "routes charted markdown to the python tool"
+            body.contains("`html-report` skill"),
+            "routes charted markdown to the html-report skill"
         );
         // The pre-conversion promotion (issue #1255): split on the index
         // heading as the position pin -- the fence phrase itself stays a

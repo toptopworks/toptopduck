@@ -44,7 +44,7 @@ Every element of the `extra` array is appended to the invocation verbatim, after
 
 ## Charts in the source
 
-Pandoc has no vega engine: a `vega-lite` fence in the Markdown source degrades to a plain code block in every output format, and the conversion itself succeeds -- nothing errors, so check the source before converting. When the goal is a charted report, skip the conversion and regenerate the content as a self-contained HTML file with the `python` tool instead.
+Pandoc has no vega engine: a `vega-lite` fence in the Markdown source degrades to a plain code block in every output format, and the conversion itself succeeds -- nothing errors, so check the source before converting. When the goal is a charted report, skip the conversion and regenerate the content with the `html-report` skill instead.
 
 ## PDF output and the engine prerequisite
 
@@ -70,4 +70,4 @@ Say plainly in the reply that the output is print-ready HTML and that the browse
 - `Unicode character ... not set up for use with LaTeX`: pdflatex cannot encode the source -- switch to `--pdf-engine=xelatex`.
 - Images broken after a DOCX-to-Markdown conversion: the embedded media was not extracted -- add `--extract-media` (e.g. `extra: ["--extract-media", "media"]`).
 - Output is a bare fragment instead of a full page: add `-s`.
-- Charts in a Markdown source with `vega-lite` fences degrade to plain code blocks: pandoc has no vega engine -- when the goal is a charted report, regenerate it as a self-contained HTML file with the `python` tool rather than converting the `.md`.
+- Charts in a Markdown source with `vega-lite` fences degrade to plain code blocks: pandoc has no vega engine -- when the goal is a charted report, regenerate it with the `html-report` skill rather than converting the `.md`.
