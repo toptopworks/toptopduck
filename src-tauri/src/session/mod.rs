@@ -566,8 +566,8 @@ pub struct Session {
     /// ([`crate::persistence::recipe::Recipe::invoked_skills`]) -- monotonic
     /// by construction, nothing can un-invoke a past turn. Grown by
     /// `record_turn` (both actors' invocations land there) and re-folded at
-    /// resume. The `read_skill_file` gate and the invoked-set-conditional
-    /// tool mounts read through it.
+    /// resume. The `read_skill_file` gate's eligibility base (its
+    /// turn-start snapshot) reads through it.
     invoked_skills: Vec<String>,
 }
 

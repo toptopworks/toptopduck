@@ -326,22 +326,30 @@ fn dispatch_gated_call_inner(
     }
     // The skill-attachment read surface (ADR-0111, issue #714): intercepted
     // beside the invocation arm, equally ahead of any classification / gate
-    // -- reading is the injected body's risk class, so the session-invoked
-    // set is the trust gate (ADR-0111 calibrated by ADR-0119 Decision 4).
-    // The classification is pure (no transitions, no persist); this site
-    // maps the two variants exactly as the invocation arm does (a Local
-    // read gets the started / completed phase pair + a trace row, a Refused
-    // read is the bare error result with no trace entry).
+    // -- reading is the injected body's risk class, so the invoked set is
+    // the trust gate (ADR-0111 calibrated by ADR-0119 Decision 4). The
+    // resolver unions the turn's pending invocations with the turn-start
+    // snapshot (issue #1260), so a mid-turn `invoke_skill` reads in its
+    // own turn. The classification is pure (no transitions, no persist);
+    // this site maps the two variants exactly as the invocation arm does
+    // (a Local read gets the started / completed phase pair + a trace row,
+    // a Refused read is the bare error result with no trace entry).
     if call.name == crate::skills::read::READ_SKILL_FILE {
-        return Ok(match crate::skills::read::resolve_skill_read(call, read) {
-            crate::skills::read::SkillReadOutcome::Local { summary, payload } => {
-                let (result, entry) = local_meta_call(call, &summary, payload, on_phase);
-                (result, Some(entry), None)
-            }
-            crate::skills::read::SkillReadOutcome::Refused(message) => {
-                (meta_failure(call, &message), None, None)
-            }
-        });
+        return Ok(
+            match crate::skills::read::resolve_skill_read(
+                call,
+                read,
+                invocations.pending.as_slice(),
+            ) {
+                crate::skills::read::SkillReadOutcome::Local { summary, payload } => {
+                    let (result, entry) = local_meta_call(call, &summary, payload, on_phase);
+                    (result, Some(entry), None)
+                }
+                crate::skills::read::SkillReadOutcome::Refused(message) => {
+                    (meta_failure(call, &message), None, None)
+                }
+            },
+        );
     }
     // The skill-creation meta-tool (ADR-0122 Decisions 1 + 3): unlike the
     // two read-shaped skill meta-tools above, the mint PERSISTS across

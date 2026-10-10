@@ -967,10 +967,10 @@ fn play_scenario(
         // invocations alone. This scenario drives the agent-side
         // `invoke_skill` through the gateway (the invocation channel's
         // external consumer) and lists the tools first so the wiring test
-        // can pin the read surface's turn-start mount off the same turn:
+        // can pin the read surface's snapshot mount off the same turn:
         // `read_skill_file` appears on the bridge's tools/list only when
-        // the turn-start invoked set is non-empty (the read gate's
-        // external wiring -- asserting it HERE makes an empty-set
+        // the discovery snapshot is non-empty (the read gate's
+        // external wiring -- asserting it HERE makes an empty-snapshot
         // regression fail loudly at the source).
         "invoke_skill_mid_turn" => {
             bridge_write(&mcp_request(
@@ -989,7 +989,7 @@ fn play_scenario(
                 .collect();
             assert!(
                 names.contains(&"read_skill_file"),
-                "the turn-start invoked set mounts the read surface on the bridge: {names:?}"
+                "the discovery snapshot mounts the read surface on the bridge: {names:?}"
             );
             bridge_write(&mcp_request(
                 3,

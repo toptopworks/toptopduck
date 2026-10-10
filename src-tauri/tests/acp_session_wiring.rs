@@ -577,9 +577,9 @@ fn put_skill(root: &Path, name: &str, description: &str, body: &str) {
 /// read-surface mount had no positive pin either (emptying `start_invoked`
 /// left this file green while reddening the built-in face's read-gate
 /// pins). One turn closes both halves: the CLI's `tools/list` pins the
-/// turn-start read mount (`read_skill_file` appears only with a non-empty
-/// invoked set -- the fixture asserts it at the source), and the CLI's
-/// mid-turn `invoke_skill` pins the binding. The record-count assertion is
+/// turn-start read mount (`read_skill_file` appears with a non-empty
+/// discovery snapshot -- the fixture asserts it at the source), and the
+/// CLI's mid-turn `invoke_skill` pins the binding. The record-count assertion is
 /// the discriminant: provenance alone cannot see the mid-turn agent record
 /// (the fold collapses same-name records), so the raw invocation records
 /// are counted by actor.
@@ -596,8 +596,9 @@ fn external_mid_turn_invoke_lands_on_the_turn() {
     let approval = ApprovalState::new();
     let sink = NullSink;
     let keychain = KeychainStore::new();
-    // The user invocation seeds the turn-start invoked set (mounting the
-    // read surface the fixture asserts) and leaves the discriminating gap:
+    // The user invocation seeds the turn's records (the read mount rides
+    // the discovery snapshot the fixture asserts) and leaves the
+    // discriminating gap:
     // a detached-vec rebinding keeps this record (seeded in the real vec
     // before the turn starts) and drops only the agent's.
     let user_invocations =

@@ -40,10 +40,11 @@ use serde_json::{json, Value};
 
 use crate::provider::tool_calling::{ToolDefinition, ToolUse};
 
-/// The `read_skill_file` tool name. Invoked-conditional (ADR-0111 Decision 1
-/// calibrated by ADR-0119 Decision 4): only a turn whose session-INVOKED set
-/// is non-empty pays the standing tool cost -- skills never invoked this
-/// session have no readable files by definition.
+/// The `read_skill_file` tool name. Snapshot-conditional (ADR-0111 Decision 1
+/// calibrated by ADR-0119 Decision 4, re-gated by #1260): only a turn whose
+/// discovery snapshot is non-empty pays the standing tool cost -- the same
+/// gate as `invoke_skill`, so a mid-turn invocation's references need no
+/// next-turn mount.
 pub(crate) const READ_SKILL_FILE: &str = "read_skill_file";
 
 /// The byte cap for one served file (ADR-0111 Decision 6): what rides
@@ -75,10 +76,11 @@ const BINARY_SNIFF_BYTES: usize = 8 * 1024;
 /// the registry root for the live name resolution (a mid-session registry
 /// delete is an honest error, never a stale turn-start snapshot).
 pub(crate) struct SkillReadGate<'a> {
-    /// The turn-start invoked names -- read eligibility. The session-level
-    /// invoked set (a monotonic fold of the turn invocation records),
-    /// snapshotted at the turn boundary so a mid-turn `invoke_skill` lands
-    /// the read surface on the NEXT turn.
+    /// The turn-start invoked names -- the read-eligibility BASE set. The
+    /// session-level invoked set (a monotonic fold of the turn invocation
+    /// records), snapshotted at the turn boundary; the resolver unions it
+    /// with the turn's pending invocations at read time (issue #1260), so
+    /// a mid-turn `invoke_skill` opens its files in the SAME turn.
     pub(crate) invoked: &'a [String],
     /// The machine-level disabled skill names (ADR-0118 enablement axis) --
     /// the same list the submit-time materialization consults, so a name
@@ -118,22 +120,26 @@ pub(crate) enum SkillReadOutcome {
 }
 
 /// The tool definition as advertised on both tool surfaces (the built-in
-/// table and the gateway `tools/list`), attached only when the session's
-/// invoked set is non-empty. English by the two-surface language split.
+/// table and the gateway `tools/list`), attached only when the turn's
+/// discovery snapshot is non-empty (the same gate as `invoke_skill`).
+/// English by the two-surface language split.
 /// The description teaches the rules and carries the execution pointer
 /// (ADR-0111 Decision 7) but never enumerates files (Decision 4).
 pub(crate) fn read_skill_file_definition() -> ToolDefinition {
     ToolDefinition {
         name: READ_SKILL_FILE.to_string(),
         description: format!(
-            "Read one attachment file of an INVOKED skill -- any file in its directory \
+            "Read one attachment file of an invoked skill -- any file in its directory \
              tree (references/, assets/, scripts/, or SKILL.md itself; no subdirectory is \
-             privileged). Paths are '/'-separated and relative to the skill's root; `..` \
-             components, absolute paths, and Windows drive / UNC forms are refused. Only \
-             text files up to {} MiB are served. A missing, out-of-bounds, or directory \
-             path lists the skill's readable files. To execute a script, read its text \
-             here and pass it to a registered CLI tool's content parameter (for example \
-             python's `script`).",
+             privileged). A skill is readable from the moment it is invoked -- including \
+             an `invoke_skill` call earlier in this same turn; the skill body names its \
+             reference files, read them here without waiting. A skill never invoked is \
+             refused with the invoked names listed. Paths are '/'-separated and relative \
+             to the skill's root; `..` components, absolute paths, and Windows drive / \
+             UNC forms are refused. Only text files up to {} MiB are served. A missing, \
+             out-of-bounds, or directory path lists the skill's readable files. To \
+             execute a script, read its text here and pass it to a registered CLI \
+             tool's content parameter (for example python's `script`).",
             MAX_READ_BYTES / 1024 / 1024
         ),
         input_schema: json!({
@@ -156,20 +162,37 @@ pub(crate) fn read_skill_file_definition() -> ToolDefinition {
 }
 
 /// Classify one `read_skill_file` call against the gate (ADR-0111 Decisions
-/// 2-4, calibrated by ADR-0119 Decision 4): served / name disabled on the
-/// enable axis (its invocation record landed, its files stay closed) / name
-/// not invoked this session (points at `invoke_skill` and lists the
-/// already-invoked names) / path missing, out of bounds, or a directory
-/// (lists the skill's readable files). Pure -- no state changes anywhere.
-pub(crate) fn resolve_skill_read(call: &ToolUse, gate: &SkillReadGate<'_>) -> SkillReadOutcome {
+/// 2-4, calibrated by ADR-0119 Decision 4; same-turn reach issue #1260):
+/// served / name disabled on the enable axis (its invocation record
+/// landed, its files stay closed) / name not invoked (turn-start snapshot
+/// or this turn's pending invocations -- points at `invoke_skill` and
+/// lists the live invoked names) / path missing, out of bounds, or a
+/// directory (lists the skill's readable files). Pure -- no state changes
+/// anywhere.
+pub(crate) fn resolve_skill_read(
+    call: &ToolUse,
+    gate: &SkillReadGate<'_>,
+    pending: &[crate::model::SkillInvocation],
+) -> SkillReadOutcome {
     let Some(name) = str_param(&call.input, "name") else {
         return SkillReadOutcome::Refused(missing_param_failure("name"));
     };
     let Some(path) = str_param(&call.input, "path") else {
         return SkillReadOutcome::Refused(missing_param_failure("path"));
     };
-    if !gate.invoked.iter().any(|a| a == name) {
-        return SkillReadOutcome::Refused(not_invoked_failure(name, gate.invoked));
+    // The live invoked set (issue #1260): the turn-start snapshot unioned
+    // with this turn's pending invocations -- a mid-turn `invoke_skill`
+    // opens its files for reads in the SAME turn. The snapshot stays the
+    // monotonic base; a pending name joins it on the next turn's fold.
+    if !gate.invoked.iter().any(|a| a == name) && !pending.iter().any(|p| p.name == name) {
+        let mut live: Vec<&str> = gate.invoked.iter().map(String::as_str).collect();
+        for p in pending {
+            let n = p.name.as_str();
+            if !live.contains(&n) {
+                live.push(n);
+            }
+        }
+        return SkillReadOutcome::Refused(not_invoked_failure(name, &live));
     }
     if gate.disabled.iter().any(|d| d == name) {
         return SkillReadOutcome::Refused(disabled_failure(name));
@@ -265,10 +288,11 @@ fn missing_param_failure(param: &str) -> String {
 }
 
 /// The not-invoked failure (ADR-0111 Decision 4, calibrated by ADR-0119
-/// Decision 4): reading rides the session's invoked set, so the fix is one
-/// `invoke_skill` away -- and the error lists every already-invoked name so
-/// the agent can route to a readable skill in one hop.
-fn not_invoked_failure(name: &str, invoked: &[String]) -> String {
+/// Decision 4): reading rides the live invoked set (the turn-start
+/// snapshot unioned with this turn's pending invocations, issue #1260), so
+/// the fix is one `invoke_skill` away -- and the error lists every
+/// live-invoked name so the agent can route to a readable skill in one hop.
+fn not_invoked_failure(name: &str, invoked: &[&str]) -> String {
     if invoked.is_empty() {
         format!(
             "read_skill_file: `{name}` has not been invoked. No skills are invoked yet \
@@ -592,7 +616,7 @@ mod tests {
             input,
         };
         let activated = activated(&["sql-coach"]);
-        resolve_skill_read(&call, &fx.gate(&activated))
+        resolve_skill_read(&call, &fx.gate(&activated), &[])
     }
 
     fn read(fx: &Fixture, path: &str) -> SkillReadOutcome {
@@ -719,6 +743,77 @@ mod tests {
 
     /// An unmounted name is refused with EVERY mounted name in the error --
     /// the one-hop self-correction signal, mirroring `invoke_skill`.
+    /// A mid-turn invocation reads in the SAME turn (issue #1260): the
+    /// resolver unions the turn-start snapshot with the turn's pending
+    /// invocations, so the body `invoke_skill` lands opens its references
+    /// immediately -- an empty turn-start set refuses nothing the turn
+    /// itself invoked.
+    #[test]
+    fn a_pending_invocation_reads_in_the_same_turn() {
+        let fx = Fixture::new();
+        fx.put_skill("sql-coach");
+        fx.put_file("sql-coach", "references/notes.md", b"Use CTEs.\n");
+        let call = ToolUse {
+            id: "tu_r".to_string(),
+            name: READ_SKILL_FILE.to_string(),
+            input: json!({"name": "sql-coach", "path": "references/notes.md"}),
+        };
+        let pending = vec![crate::model::SkillInvocation {
+            name: "sql-coach".to_string(),
+            body: String::new(),
+            actor: crate::model::SkillLifecycleActor::Agent,
+            content_hash: String::new(),
+        }];
+        match resolve_skill_read(&call, &fx.gate(&[]), &pending) {
+            SkillReadOutcome::Local { summary, payload } => {
+                assert_eq!(summary, "sql-coach: references/notes.md");
+                assert_eq!(payload, Value::String("Use CTEs.\n".to_string()));
+            }
+            other => panic!("expected Local, got {other:?}"),
+        }
+    }
+
+    /// The not-invoked refusal lists the LIVE set (issue #1260): a
+    /// mid-turn pending name rides the listing alongside the turn-start
+    /// names, deduplicated when a name sits in both.
+    #[test]
+    fn not_invoked_refusal_lists_pending_names() {
+        let fx = Fixture::new();
+        fx.put_skill("sql-coach");
+        let call = ToolUse {
+            id: "tu_r".to_string(),
+            name: READ_SKILL_FILE.to_string(),
+            input: json!({"name": "ghost", "path": "SKILL.md"}),
+        };
+        let pending = vec![
+            crate::model::SkillInvocation {
+                name: "pdf-tools".to_string(),
+                body: String::new(),
+                actor: crate::model::SkillLifecycleActor::Agent,
+                content_hash: String::new(),
+            },
+            // A name already in the turn-start snapshot rides once.
+            crate::model::SkillInvocation {
+                name: "sql-coach".to_string(),
+                body: String::new(),
+                actor: crate::model::SkillLifecycleActor::Agent,
+                content_hash: String::new(),
+            },
+        ];
+        let snapshot = activated(&["sql-coach"]);
+        match resolve_skill_read(&call, &fx.gate(&snapshot), &pending) {
+            SkillReadOutcome::Refused(message) => {
+                assert!(message.contains("ghost"), "{message}");
+                assert!(
+                    message.matches("sql-coach").count() == 1,
+                    "a name in both sets lists once: {message}"
+                );
+                assert!(message.contains("pdf-tools"), "{message}");
+            }
+            other => panic!("expected Refused, got {other:?}"),
+        }
+    }
+
     #[test]
     fn not_invoked_name_lists_every_invoked_name() {
         let fx = Fixture::new();
@@ -730,7 +825,7 @@ mod tests {
             input: json!({"name": "ghost", "path": "SKILL.md"}),
         };
         let activated = activated(&["sql-coach"]);
-        match resolve_skill_read(&call, &fx.gate(&activated)) {
+        match resolve_skill_read(&call, &fx.gate(&activated), &[]) {
             SkillReadOutcome::Refused(message) => {
                 assert!(message.contains("ghost"), "{message}");
                 assert!(message.contains("sql-coach"), "{message}");
@@ -753,7 +848,7 @@ mod tests {
             name: READ_SKILL_FILE.to_string(),
             input: json!({"name": "ghost", "path": "SKILL.md"}),
         };
-        match resolve_skill_read(&call, &fx.gate(&[])) {
+        match resolve_skill_read(&call, &fx.gate(&[]), &[]) {
             SkillReadOutcome::Refused(message) => assert_eq!(
                 message,
                 "read_skill_file: `ghost` has not been invoked. No skills are invoked yet \
@@ -777,7 +872,7 @@ mod tests {
             input: json!({"name": "sql-coach", "path": "SKILL.md"}),
         };
         let activated = activated(&["other-skill"]);
-        match resolve_skill_read(&call, &fx.gate(&activated)) {
+        match resolve_skill_read(&call, &fx.gate(&activated), &[]) {
             SkillReadOutcome::Refused(message) => {
                 assert!(message.contains("sql-coach"), "{message}");
                 assert!(message.contains("invoke_skill"), "{message}");
@@ -807,7 +902,7 @@ mod tests {
                 input,
             };
             let activated = activated(&["sql-coach"]);
-            match resolve_skill_read(&call, &fx.gate(&activated)) {
+            match resolve_skill_read(&call, &fx.gate(&activated), &[]) {
                 SkillReadOutcome::Refused(message) => {
                     let param = if message.contains("`name`") {
                         "name"
@@ -1103,7 +1198,7 @@ mod tests {
             name: READ_SKILL_FILE.to_string(),
             input: json!({ "name": "sql-coach", "path": "SKILL.md" }),
         };
-        match resolve_skill_read(&call, &fx.gated(&activated(&["sql-coach"]), &disabled)) {
+        match resolve_skill_read(&call, &fx.gated(&activated(&["sql-coach"]), &disabled), &[]) {
             SkillReadOutcome::Refused(message) => {
                 assert!(message.contains("disabled"), "{message}");
             }
@@ -1186,7 +1281,7 @@ mod tests {
             input: json!({"name": "linked-skill", "path": "references/x.md"}),
         };
         let activated = activated(&["linked-skill"]);
-        match resolve_skill_read(&call, &fx.gate(&activated)) {
+        match resolve_skill_read(&call, &fx.gate(&activated), &[]) {
             SkillReadOutcome::Local { payload, .. } => {
                 assert_eq!(payload, Value::String("through the link\n".to_string()));
             }

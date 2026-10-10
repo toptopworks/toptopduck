@@ -197,12 +197,14 @@ impl super::Session {
         let mut pending_invocations: Vec<crate::model::SkillInvocation> =
             inputs.user_invocations.to_vec();
         // The turn-start invoked-set snapshot (ADR-0119 Decision 4): the
-        // read-gate eligibility and the read-tool mount read this. The
-        // session's monotonic fold PLUS this turn's user invocations -- a
-        // user invocation is turn INPUT (assembled ahead of the question),
-        // not a mid-turn mutation, so it reads within its own turn (unlike
-        // an agent's mid-turn invoke_skill, which joins the NEXT turn's
-        // snapshot -- the ADR-0111 no-competition posture, carried over).
+        // read-gate eligibility base reads this (the read-tool mount rides
+        // the discovery snapshot since issue #1260). The session's
+        // monotonic fold PLUS this turn's user invocations -- a user
+        // invocation is turn INPUT (assembled ahead of the question), not
+        // a mid-turn mutation, so it reads within its own turn; an agent's
+        // mid-turn invoke_skill joins this snapshot only on the NEXT turn's
+        // fold -- its same-turn reads ride the resolver's live union with
+        // the pending invocations (issue #1260).
         let turn_invoked = turn_start_invoked(&self.invoked_skills, inputs.user_invocations);
         // The turn-scope skill bundle (issue #989 D): the pending records +
         // the turn-start snapshot travel as one parameter through both
@@ -332,12 +334,12 @@ impl super::Session {
                     }
                     // The skill-attachment read surface (ADR-0111 Decision 1
                     // calibrated by ADR-0119 Decision 4): mounted iff the
-                    // session-INVOKED set is non-empty -- only an invoked
-                    // skill's files are readable, so a session that invoked
-                    // nothing pays no standing tool cost. A mid-turn
-                    // invocation joins the NEXT turn's snapshot (Decision 3's
-                    // no-competition posture, carried over).
-                    if !skill_state.start_invoked.is_empty() {
+                    // turn's discovery snapshot is non-empty -- the SAME
+                    // gate as `invoke_skill` above, so a mid-turn
+                    // invocation's references need no next-turn mount
+                    // (issue #1260); a session with no skills pays no
+                    // standing tool cost.
+                    if !inputs.skills.is_empty() {
                         request
                             .tools
                             .push(crate::skills::read::read_skill_file_definition());
@@ -383,10 +385,12 @@ impl super::Session {
                     // The attachment read gate (ADR-0111, calibrated by
                     // ADR-0119): pure classification (no transitions, no
                     // persist), so an immutable bundle -- the turn-start
-                    // session-INVOKED snapshot for eligibility, the
-                    // enable-axis disabled names (a disabled name's landed
-                    // record opens no files), and the registry root for
-                    // the live name resolution.
+                    // session-INVOKED snapshot for the eligibility BASE
+                    // (the resolver unions the turn's pending invocations
+                    // at read time, issue #1260), the enable-axis disabled
+                    // names (a disabled name's landed record opens no
+                    // files), and the registry root for the live name
+                    // resolution.
                     let read_gate = crate::skills::read::SkillReadGate {
                         invoked: skill_state.start_invoked,
                         disabled: inputs.disabled_skills,
@@ -725,12 +729,13 @@ impl super::Session {
             // The bridge face's read gate (issue #714; calibrated by
             // ADR-0119): the same immutable bundle the built-in loop's
             // dispatch server gets -- one read semantics on both runtime
-            // surfaces (ADR-0111 Decision 7). Eligibility is the turn-start
-            // invoked snapshot, derived ONCE at the submit boundary and
-            // passed in -- no per-branch refold of the pending vec's
-            // user-invocation names. The disabled cross matches the
-            // built-in face's gate -- a disabled name's landed record
-            // opens no files on either runtime surface.
+            // surfaces (ADR-0111 Decision 7). The eligibility BASE is the
+            // turn-start invoked snapshot, derived ONCE at the submit
+            // boundary and passed in -- no per-branch refold of the pending
+            // vec's user-invocation names; the resolver unions the turn's
+            // pending invocations at read time (issue #1260). The disabled
+            // cross matches the built-in face's gate -- a disabled name's
+            // landed record opens no files on either runtime surface.
             let read_gate = crate::skills::read::SkillReadGate {
                 invoked: skill_state.start_invoked,
                 disabled: inputs.disabled_skills,
@@ -896,9 +901,11 @@ const ENV_TOKEN: &str = "TOPTOPDUCK_GATEWAY_TOKEN";
 /// session's monotonic fold plus the turn's user invocations -- a user
 /// invocation is turn INPUT (assembled ahead of the question), so it reads
 /// within its own turn, unlike an agent's mid-turn invoke which joins the
-/// next turn's snapshot. Derived ONCE at the submit boundary and passed into
-/// both runtime faces -- the gateway branch used to refold the pending vec's
-/// user-invocation names (equivalent only by comment, retired #987).
+/// next turn's snapshot (its same-turn reads ride the resolver's live
+/// union with the pending invocations, issue #1260). Derived ONCE at the
+/// submit boundary and passed into both runtime faces -- the gateway
+/// branch used to refold the pending vec's user-invocation names
+/// (equivalent only by comment, retired #987).
 fn turn_start_invoked(
     session_fold: &[String],
     user_invocations: &[crate::model::SkillInvocation],

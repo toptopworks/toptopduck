@@ -651,10 +651,12 @@ fn handle_method(
                 ));
             }
             // The skill-attachment read surface (ADR-0111 Decision 1
-            // calibrated by ADR-0119 Decision 4): mounted iff the session-
-            // INVOKED set is non-empty -- the bridge mirrors the built-in
-            // table's condition verbatim (one tool plane, two callers).
-            if !ctx.read.invoked.is_empty() {
+            // calibrated by ADR-0119 Decision 4): mounted iff the turn's
+            // discovery snapshot is non-empty -- the SAME gate as
+            // `invoke_skill` above (one tool plane, two callers), so a
+            // mid-turn invocation's references need no next-turn mount
+            // (issue #1260).
+            if !ctx.invocations.snapshot.is_empty() {
                 tools.push(tool_to_mcp(
                     &crate::skills::read::read_skill_file_definition(),
                 ));
@@ -766,12 +768,17 @@ fn handle_tools_call(msg: &Value, ctx: &mut GatewayCtx, outcome: &mut GatewayOut
     }
     // The skill-attachment read surface (ADR-0111, issue #714): intercepted
     // beside the invocation arm, equally ahead of any classification / gate
-    // (reading rides the session-invoked set -- ADR-0111 calibrated by
-    // ADR-0119 Decision 4). A served
-    // read gets a trace row through the shared local-meta mapper; a refused
-    // read is the bare isError envelope with no trace entry.
+    // (reading rides the live invoked set -- ADR-0111 calibrated by
+    // ADR-0119 Decision 4; the resolver unions the turn's pending
+    // invocations, issue #1260). A served read gets a trace row through the
+    // shared local-meta mapper; a refused read is the bare isError
+    // envelope with no trace entry.
     if call.name == crate::skills::read::READ_SKILL_FILE {
-        return match crate::skills::read::resolve_skill_read(call, &ctx.read) {
+        return match crate::skills::read::resolve_skill_read(
+            call,
+            &ctx.read,
+            ctx.invocations.pending.as_slice(),
+        ) {
             crate::skills::read::SkillReadOutcome::Local { summary, payload } => {
                 local_meta_result(call, &summary, payload, outcome, ctx.events)
             }
@@ -3905,15 +3912,43 @@ mod tests {
         );
     }
 
-    /// The read surface's mount condition (issue #714, ADR-0111 Decision 1
-    /// calibrated by ADR-0119 Decision 4): an EMPTY invoked set lists no
-    /// `read_skill_file` even with skills in the snapshot; a non-empty
-    /// invoked set mounts it -- the bridge mirrors the built-in table's
-    /// condition.
+    /// The read surface's mount condition (issue #1260, ADR-0111 Decision 1
+    /// calibrated by ADR-0119 Decision 4): mounted iff the turn's discovery
+    /// snapshot is non-empty -- the SAME gate as `invoke_skill`, so a
+    /// mid-turn invocation's references need no next-turn mount. A session
+    /// with no skills pays no standing read cost; an empty turn-start
+    /// INVOKED set still mounts -- the pre-#1260 invoked gate left the
+    /// invoked body's reference channel a dead pointer in its own turn.
     #[test]
-    fn tools_list_mounts_read_skill_file_only_with_a_nonempty_invoked_set() {
-        // Snapshot skills but nothing INVOKED yet: the read surface stays
-        // off (reading rides the invoked gate, not the snapshot).
+    fn tools_list_mounts_read_skill_file_only_with_a_nonempty_snapshot() {
+        // An empty discovery snapshot pays no standing read cost.
+        let mut ctx = fresh_ctx();
+        match handle_method(
+            "tools/list",
+            &json!({"jsonrpc": "2.0", "id": 1, "method": "tools/list"}),
+            &mut ctx,
+            &mut GatewayOutcome::default(),
+        ) {
+            Response::Result(v) => {
+                let names: Vec<&str> = v["tools"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|t| t["name"].as_str().unwrap())
+                    .collect();
+                assert!(
+                    !names.contains(&"read_skill_file"),
+                    "a session with no skills pays no standing read cost"
+                );
+            }
+            Response::Error(code, m) => {
+                panic!("tools/list must return Result, got error {code}: {m}")
+            }
+            Response::None => panic!("tools/list must return Result, got None"),
+        }
+
+        // A non-empty snapshot mounts the read surface with NOTHING invoked
+        // yet (the snapshot gate, not the invoked gate).
         let mut ctx = skill_ctx(vec!["sql-coach".to_string()]);
         let tmp = tempfile::tempdir().unwrap();
         ctx.read = crate::skills::read::SkillReadGate {
@@ -3935,35 +3970,8 @@ mod tests {
                     .map(|t| t["name"].as_str().unwrap())
                     .collect();
                 assert!(
-                    !names.contains(&"read_skill_file"),
-                    "a session that invoked nothing pays no read cost"
-                );
-            }
-            Response::Error(code, m) => {
-                panic!("tools/list must return Result, got error {code}: {m}")
-            }
-            Response::None => panic!("tools/list must return Result, got None"),
-        }
-
-        let mut ctx = fresh_ctx();
-        let tmp = tempfile::tempdir().unwrap();
-        ctx.read = leaked_read_gate(&tmp);
-        match handle_method(
-            "tools/list",
-            &json!({"jsonrpc": "2.0", "id": 1, "method": "tools/list"}),
-            &mut ctx,
-            &mut GatewayOutcome::default(),
-        ) {
-            Response::Result(v) => {
-                let names: Vec<&str> = v["tools"]
-                    .as_array()
-                    .unwrap()
-                    .iter()
-                    .map(|t| t["name"].as_str().unwrap())
-                    .collect();
-                assert!(
                     names.contains(&"read_skill_file"),
-                    "a non-empty invoked set mounts the read surface"
+                    "a non-empty snapshot mounts the read surface with nothing invoked yet"
                 );
             }
             Response::Error(code, m) => {
@@ -4019,6 +4027,114 @@ mod tests {
             sink.requests.lock().unwrap().is_empty(),
             "reading is approval-free on the bridge face too -- the intercept sits ahead of the gate"
         );
+    }
+
+    /// The bridge face's same-turn closed loop (issue #1260): the mid-turn
+    /// `invoke_skill` lands the agent record on the turn's pending
+    /// invocations, and the read interception unions the pending names with
+    /// the turn-start snapshot -- the invoked body's reference files are
+    /// readable in the INVOKING turn. The turn-start set stays empty here;
+    /// the pre-#1260 resolver refused this read as not-invoked.
+    #[test]
+    fn handle_tools_call_read_skill_file_serves_a_mid_turn_invocation() {
+        let mut ctx = fresh_ctx();
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path().join("sql-coach");
+        std::fs::create_dir_all(dir.join("references")).unwrap();
+        std::fs::write(dir.join("references/template.html"), "Report scaffold.\n").unwrap();
+        std::fs::write(
+            dir.join("SKILL.md"),
+            "---\nname: sql-coach\ndescription: Coach SQL.\n---\nCoach the SQL.\n",
+        )
+        .unwrap();
+        let pending: &'static mut Vec<crate::model::SkillInvocation> =
+            Box::leak(Box::new(Vec::new()));
+        ctx.invocations = crate::skills::invocation::SkillInvocationCtx {
+            pending,
+            snapshot: Box::leak(vec!["sql-coach".to_string()].into_boxed_slice()),
+            root: Box::leak(root.path().to_path_buf().into_boxed_path()),
+            disabled: &[],
+        };
+        // The turn-start invoked set is EMPTY -- the only eligibility
+        // source is the pending record the invoke below lands.
+        ctx.read = crate::skills::read::SkillReadGate {
+            invoked: &[],
+            disabled: &[],
+            root: Box::leak(root.path().to_path_buf().into_boxed_path()),
+        };
+        let mut outcome = GatewayOutcome::default();
+        // 1) The agent invokes the skill mid-turn.
+        let invoke = json!({
+            "jsonrpc": "2.0",
+            "id": 21,
+            "method": "tools/call",
+            "params": {"name": "invoke_skill", "arguments": {"name": "sql-coach"}}
+        });
+        match handle_tools_call(&invoke, &mut ctx, &mut outcome) {
+            Response::Result(v) => {
+                assert_eq!(v["isError"], false, "an invocation is a success");
+            }
+            Response::Error(code, m) => {
+                panic!("invoke_skill must return Result, got error {code}: {m}")
+            }
+            Response::None => panic!("invoke_skill must return Result, got None"),
+        }
+        // 2) The SAME turn's read serves the invoked body's reference.
+        let read = json!({
+            "jsonrpc": "2.0",
+            "id": 22,
+            "method": "tools/call",
+            "params": {"name": "read_skill_file", "arguments": {
+                "name": "sql-coach", "path": "references/template.html"
+            }}
+        });
+        match handle_tools_call(&read, &mut ctx, &mut outcome) {
+            Response::Result(v) => {
+                assert_eq!(
+                    v["isError"], false,
+                    "the mid-turn invocation reads in its own turn"
+                );
+                assert_eq!(
+                    v["content"][0]["text"], "Report scaffold.\n",
+                    "the file text rides the result verbatim"
+                );
+            }
+            Response::Error(code, m) => {
+                panic!("read_skill_file must return Result, got error {code}: {m}")
+            }
+            Response::None => panic!("read_skill_file must return Result, got None"),
+        }
+        // 3) A name never invoked is still refused, and the refusal lists
+        //    the LIVE set -- the pending name rides the listing.
+        let ghost = json!({
+            "jsonrpc": "2.0",
+            "id": 23,
+            "method": "tools/call",
+            "params": {"name": "read_skill_file", "arguments": {
+                "name": "ghost", "path": "SKILL.md"
+            }}
+        });
+        match handle_tools_call(&ghost, &mut ctx, &mut outcome) {
+            Response::Result(v) => {
+                assert_eq!(v["isError"], true, "a never-invoked name stays refused");
+                let text = v["content"][0]["text"].as_str().unwrap_or_default();
+                assert!(text.contains("ghost"), "{text}");
+                assert!(
+                    text.contains("sql-coach"),
+                    "the refusal lists the live invoked set (the pending name): {text}"
+                );
+            }
+            Response::Error(code, m) => {
+                panic!("a refused read is still a Result, got error {code}: {m}")
+            }
+            Response::None => panic!("a refused read must return Result, got None"),
+        }
+        // The invoke + the served read each left one trace row; the refused
+        // read is traceless.
+        assert_eq!(outcome.trace.len(), 2, "one invoke + one read -> two rows");
+        assert_eq!(outcome.trace[0].name, "invoke_skill");
+        assert_eq!(outcome.trace[1].name, "read_skill_file");
+        assert!(outcome.trace[1].success);
     }
 
     /// The bridge face's `read_skill_file` Refused arm (issue #714): a bad
