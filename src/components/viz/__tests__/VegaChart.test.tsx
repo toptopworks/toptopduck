@@ -427,7 +427,7 @@ describe("VegaChart (ADR-0016/0033/0050)", () => {
     // whole spec tree; a child without its own encoding.y inherits the nearest
     // declared one up the chain and the patch lands at that declaration -- the
     // place it takes effect.
-    const yScaleAt = (spec: TopLevelSpec, path: (string | number)[]) =>
+    const scaleAt = (spec: TopLevelSpec, path: (string | number)[]) =>
       path.reduce<unknown>(
         (node, key) => (node as Record<string, unknown>)[key],
         spec,
@@ -449,7 +449,7 @@ describe("VegaChart (ADR-0016/0033/0050)", () => {
         ],
       });
       expect(
-        yScaleAt(embedSpec(), [
+        scaleAt(embedSpec(), [
           "layer",
           0,
           "layer",
@@ -475,7 +475,7 @@ describe("VegaChart (ADR-0016/0033/0050)", () => {
         ],
       });
       expect(
-        yScaleAt(embedSpec(), ["layer", 0, "encoding", "y", "scale"])?.clamp,
+        scaleAt(embedSpec(), ["layer", 0, "encoding", "y", "scale"])?.clamp,
       ).toBe(true);
       // The outer top declares nothing and mints nothing.
       expect((embedSpec() as { encoding?: unknown }).encoding).toBeUndefined();
@@ -532,7 +532,7 @@ describe("VegaChart (ADR-0016/0033/0050)", () => {
       });
       // The subview rides the top-level "spec" key for both layouts.
       expect(
-        yScaleAt(embedSpec(), ["spec", "encoding", "y", "scale"])?.clamp,
+        scaleAt(embedSpec(), ["spec", "encoding", "y", "scale"])?.clamp,
       ).toBe(true);
     });
 
@@ -550,7 +550,7 @@ describe("VegaChart (ADR-0016/0033/0050)", () => {
           ],
         });
         expect(
-          yScaleAt(embedSpec(), [key, 0, "encoding", "y", "scale"])?.clamp,
+          scaleAt(embedSpec(), [key, 0, "encoding", "y", "scale"])?.clamp,
         ).toBe(true);
       },
     );
@@ -629,7 +629,7 @@ describe("VegaChart (ADR-0016/0033/0050)", () => {
       // A non-baseline mark and a baseline whose domain spans 0: neither
       // triggers, at any depth.
       expect(
-        yScaleAt(embedSpec(), [
+        scaleAt(embedSpec(), [
           "layer",
           0,
           "layer",
@@ -640,7 +640,7 @@ describe("VegaChart (ADR-0016/0033/0050)", () => {
         ])?.clamp,
       ).toBeUndefined();
       expect(
-        yScaleAt(embedSpec(), [
+        scaleAt(embedSpec(), [
           "layer",
           0,
           "layer",
@@ -667,11 +667,11 @@ describe("VegaChart (ADR-0016/0033/0050)", () => {
       // A single-key fixture: the concat branch actually walks these
       // entries (a layer sibling would win the branch order first).
       expect(
-        yScaleAt(embedSpec(), ["vconcat", 0, "encoding", "y", "scale"])?.clamp,
+        scaleAt(embedSpec(), ["vconcat", 0, "encoding", "y", "scale"])?.clamp,
       ).toBeUndefined();
       // A composite wrapper around a non-baseline mark passes through too.
       expect(
-        yScaleAt(embedSpec(), ["vconcat", 1, "encoding", "y", "scale"])?.clamp,
+        scaleAt(embedSpec(), ["vconcat", 1, "encoding", "y", "scale"])?.clamp,
       ).toBeUndefined();
     });
 
@@ -693,6 +693,182 @@ describe("VegaChart (ADR-0016/0033/0050)", () => {
       const spec = {
         width: "container" as const,
         vconcat: [{ mark: "line" }],
+      };
+      await renderSpec(spec);
+      expect(embedSpec()).toBe(spec);
+    });
+
+    // #1257: the gate judged only the y channel, so a horizontal bar (a
+    // nominal y band, a quantitative x measure) with an explicit non-zero x
+    // domain extrapolated its baseline sideways -- vega translated the whole
+    // root group thousands of pixels out of an otherwise sane viewBox, a
+    // flat color block with no warning. The judgment now runs per channel:
+    // x and y pass the same predicate independently, patching in place or
+    // at the declaring ancestor exactly as y always did.
+    const xScaleOf = (spec: TopLevelSpec) =>
+      (spec as { encoding?: { x?: { scale?: { clamp?: boolean } } } })
+        .encoding?.x?.scale;
+
+    it("injects scale.clamp for a horizontal bar with an explicit non-zero x domain", async () => {
+      await renderSpec({
+        mark: "bar",
+        encoding: {
+          x: {
+            field: "rating",
+            type: "quantitative",
+            scale: { domain: [3.7, 4] },
+          },
+          y: { field: "category", type: "nominal" },
+        },
+      });
+      expect(xScaleOf(embedSpec())?.clamp).toBe(true);
+      // The discrete band axis carries no scale of its own -- untouched.
+      expect(scaleOf(embedSpec())?.clamp).toBeUndefined();
+    });
+
+    it("judges the two channels independently when both carry explicit non-zero domains", async () => {
+      await renderSpec({
+        mark: "bar",
+        encoding: {
+          x: { type: "quantitative", scale: { domain: [3.7, 4] } },
+          y: { type: "quantitative", scale: { domain: [10, 50] } },
+        },
+      });
+      expect(xScaleOf(embedSpec())?.clamp).toBe(true);
+      expect(scaleOf(embedSpec())?.clamp).toBe(true);
+    });
+
+    it("injects into a bar layer carrying its own explicit non-zero x domain", async () => {
+      await renderSpec({
+        layer: [
+          {
+            mark: "bar",
+            encoding: {
+              x: { type: "quantitative", scale: { domain: [3.7, 4] } },
+            },
+          },
+          { mark: "line" },
+        ],
+      });
+      const layerXScale = (index: number) =>
+        (
+          embedSpec() as {
+            layer?: Array<{
+              encoding?: { x?: { scale?: { clamp?: boolean } } };
+            }>;
+          }
+        ).layer?.[index]?.encoding?.x?.scale;
+      expect(layerXScale(0)?.clamp).toBe(true);
+      // The line layer has no baseline to pin.
+      expect(layerXScale(1)?.clamp).toBeUndefined();
+    });
+
+    it("injects x at the declaring level when a mark-only bar inherits it", async () => {
+      await renderSpec({
+        encoding: {
+          x: { type: "quantitative", scale: { domain: [3.7, 4] } },
+        },
+        layer: [{ mark: "bar" }, { mark: "line" }],
+      });
+      expect(xScaleOf(embedSpec())?.clamp).toBe(true);
+      // The patch lands at the declaration only: the entries stay mark-only.
+      const entries = (
+        embedSpec() as { layer?: Array<{ encoding?: unknown }> }
+      ).layer;
+      expect(entries?.[0]?.encoding).toBeUndefined();
+      expect(entries?.[1]?.encoding).toBeUndefined();
+    });
+
+    it.each([
+      { key: "facet", layout: { field: "a", type: "nominal" } },
+      { key: "repeat", layout: { row: ["a", "b"] } },
+    ] as const)("injects x into the $key subview", async ({ key, layout }) => {
+      await renderSpec({
+        [key]: layout,
+        spec: {
+          mark: "bar",
+          encoding: {
+            x: { type: "quantitative", scale: { domain: [3.7, 4] } },
+          },
+        },
+      });
+      // The subview rides the top-level "spec" key for both layouts.
+      expect(
+        scaleAt(embedSpec(), ["spec", "encoding", "x", "scale"])?.clamp,
+      ).toBe(true);
+    });
+
+    it.each(["vconcat", "hconcat", "concat"] as const)(
+      "injects x into a %s entry with an explicit non-zero domain",
+      async (key) => {
+        await renderSpec({
+          [key]: [
+            {
+              mark: "bar",
+              encoding: {
+                x: { type: "quantitative", scale: { domain: [3.7, 4] } },
+              },
+            },
+          ],
+        });
+        expect(
+          scaleAt(embedSpec(), [key, 0, "encoding", "x", "scale"])?.clamp,
+        ).toBe(true);
+      },
+    );
+
+    it("leaves an x domain that includes zero untouched", async () => {
+      await renderSpec({
+        mark: "bar",
+        encoding: {
+          x: { type: "quantitative", scale: { domain: [-1, 4.05] } },
+        },
+      });
+      expect(xScaleOf(embedSpec())?.clamp).toBeUndefined();
+    });
+
+    it("leaves a non-linear x scale untouched", async () => {
+      await renderSpec({
+        mark: "bar",
+        encoding: {
+          x: { type: "quantitative", scale: { type: "log", domain: [1, 100] } },
+        },
+      });
+      expect(xScaleOf(embedSpec())?.clamp).toBeUndefined();
+    });
+
+    it("leaves a non-quantitative x channel untouched", async () => {
+      // A numeric domain on a nominal channel is malformed vega-lite, but
+      // the walk judges arbitrary JSON -- pin the channel-type gate itself.
+      await renderSpec({
+        mark: "bar",
+        encoding: {
+          x: { type: "nominal", scale: { domain: [3.7, 4] } },
+        },
+      });
+      expect(xScaleOf(embedSpec())?.clamp).toBeUndefined();
+    });
+
+    it("leaves marks without a zero baseline (point) untouched on x", async () => {
+      await renderSpec({
+        mark: "point",
+        encoding: {
+          x: { type: "quantitative", scale: { domain: [3.7, 4] } },
+        },
+      });
+      expect(xScaleOf(embedSpec())?.clamp).toBeUndefined();
+    });
+
+    it("hands a horizontal-bar no-hit spec through by reference", async () => {
+      // The x judgment walking a channel and finding no hit rebuilds nothing
+      // either -- the no-hit contract holds on the measure axis the same as
+      // on y.
+      const spec = {
+        width: "container" as const,
+        mark: "bar",
+        encoding: {
+          x: { type: "quantitative", scale: { domain: [-1, 4.05] } },
+        },
       };
       await renderSpec(spec);
       expect(embedSpec()).toBe(spec);
