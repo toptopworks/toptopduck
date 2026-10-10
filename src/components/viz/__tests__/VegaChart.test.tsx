@@ -750,17 +750,14 @@ describe("VegaChart (ADR-0016/0033/0050)", () => {
           { mark: "line" },
         ],
       });
-      const layerXScale = (index: number) =>
-        (
-          embedSpec() as {
-            layer?: Array<{
-              encoding?: { x?: { scale?: { clamp?: boolean } } };
-            }>;
-          }
-        ).layer?.[index]?.encoding?.x?.scale;
-      expect(layerXScale(0)?.clamp).toBe(true);
-      // The line layer has no baseline to pin.
-      expect(layerXScale(1)?.clamp).toBeUndefined();
+      expect(
+        scaleAt(embedSpec(), ["layer", 0, "encoding", "x", "scale"])?.clamp,
+      ).toBe(true);
+      // The line layer has no baseline to pin -- it carries no encoding at
+      // all.
+      expect(
+        scaleAt(embedSpec(), ["layer", 1, "encoding"]),
+      ).toBeUndefined();
     });
 
     it("injects x at the declaring level when a mark-only bar inherits it", async () => {
@@ -872,6 +869,57 @@ describe("VegaChart (ADR-0016/0033/0050)", () => {
       };
       await renderSpec(spec);
       expect(embedSpec()).toBe(spec);
+    });
+
+    // #1257 review: the per-channel plumbing -- the inheritance merge, the
+    // own/pass routing, and the pass-through of surviving hits -- is
+    // indistinguishable from the pre-PR y-only logic on every fixture whose
+    // intermediate nodes declare only the inherited channel. One
+    // mixed-declaration nest exercises all three at once: x rides two hops
+    // up to its declarer while y patches at the middle declaration.
+    it("patches each channel at its own declarer across nested mixed declarations", async () => {
+      await renderSpec({
+        encoding: {
+          x: { type: "quantitative", scale: { domain: [3.7, 4] } },
+        },
+        layer: [
+          {
+            encoding: {
+              y: { type: "quantitative", scale: { domain: [10, 50] } },
+            },
+            layer: [{ mark: "bar" }],
+          },
+        ],
+      });
+      // x is declared at the top only -- its patch lands there, not at the
+      // y-declaring middle level.
+      expect(xScaleOf(embedSpec())?.clamp).toBe(true);
+      expect(
+        scaleAt(embedSpec(), ["layer", 0, "encoding", "x"]),
+      ).toBeUndefined();
+      expect(
+        scaleAt(embedSpec(), ["layer", 0, "encoding", "y", "scale"])?.clamp,
+      ).toBe(true);
+      // The inner bar stays mark-only.
+      expect(
+        scaleAt(embedSpec(), ["layer", 0, "layer", 0, "encoding"]),
+      ).toBeUndefined();
+    });
+
+    // An explicit null is vega-lite's channel-disable form: declared, so no
+    // inheritance fallback, and inert, so the predicate never hits on it.
+    it("leaves an explicit null channel disable untouched", async () => {
+      await renderSpec({
+        encoding: {
+          y: { type: "quantitative", scale: { domain: [5, 10] } },
+        },
+        layer: [{ mark: "bar", encoding: { y: null } }, { mark: "bar" }],
+      });
+      // The disable survives verbatim -- no fallback judging, no wholesale
+      // replacement with the declarer's clamped definition.
+      expect(scaleAt(embedSpec(), ["layer", 0, "encoding", "y"])).toBeNull();
+      // The mark-only sibling's legitimate hit still lands at the declarer.
+      expect(scaleOf(embedSpec())?.clamp).toBe(true);
     });
   });
 

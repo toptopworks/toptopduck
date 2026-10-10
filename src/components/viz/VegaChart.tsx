@@ -84,9 +84,14 @@ type ClampableChannel = {
   scale?: { type?: unknown; domain?: unknown; clamp?: unknown };
 };
 
-/** The judged channels. */
-type Channel = "x" | "y";
-type ClampableEncoding = Partial<Record<Channel, ClampableChannel>>;
+/** The judged channels; the array is the single source of truth the type
+ * derives from, so neither can drift from the other. */
+const CHANNELS = ["x", "y"] as const;
+type Channel = (typeof CHANNELS)[number];
+
+/** An encoding's measure-channel members: a channel slice, or an explicit
+ * null -- vega-lite's channel-disable form, declared but inert. */
+type ClampableEncoding = Partial<Record<Channel, ClampableChannel | null>>;
 
 /** A measure encoding whose scale object has passed the guard -- the shape
  * the decision hands back for patching. */
@@ -96,7 +101,6 @@ type ClampTarget = ClampableChannel & {
 
 /** The hits one walk hop reports up, keyed by the channel that hit. */
 type ClampHits = Partial<Record<Channel, ClampTarget>>;
-const CHANNELS: readonly Channel[] = ["x", "y"];
 
 /** The zero-baseline clamp decision for one candidate view (a top-level
  * single view, or one layer entry): the measure encoding needing
@@ -118,11 +122,12 @@ const CHANNELS: readonly Channel[] = ["x", "y"];
  * (the spec author's own decision). */
 function zeroBaselineClampTarget(
   mark: string,
-  channel: ClampableChannel | undefined,
+  channel: ClampableChannel | null | undefined,
 ): ClampTarget | null {
   if (mark !== "bar" && mark !== "area") return null;
   const scale = channel?.scale;
-  // No scale object, or a nested non-array domain (signal/datum form) -- the
+  // A missing channel, an explicit null disable, no scale object, or a
+  // nested non-array domain (signal/datum form) -- the
   // numeric-extrapolation precondition cannot be judged, so leave it be.
   if (
     !channel ||
@@ -156,8 +161,8 @@ function zeroBaselineClampTarget(
   return channel as ClampTarget;
 }
 
-/** Patch `clamp: true` into the decided encoding's scale. */
-function clampedScale(channel: ClampTarget): ClampableChannel {
+/** Patch `clamp: true` into the decided channel encoding's scale. */
+function clampedChannel(channel: ClampTarget): ClampableChannel {
   return { ...channel, scale: { ...channel.scale, clamp: true } };
 }
 
@@ -230,18 +235,18 @@ function walkClampView(
     return { own, pass };
   };
   // rest must never carry encoding -- it spreads after the patched pair
-  // and would clobber it.
+  // and would clobber it; the never-typed member pins it at compile time.
   const patchOwn = (
     own: ClampHits,
-    rest?: object,
-    pass: ClampHits = {},
+    pass: ClampHits,
+    rest?: Record<string, unknown> & { encoding?: never },
   ): ClampWalk => ({
     view: {
       ...view,
       encoding: {
         ...s.encoding,
-        ...(own.x ? { x: clampedScale(own.x) } : {}),
-        ...(own.y ? { y: clampedScale(own.y) } : {}),
+        ...(own.x ? { x: clampedChannel(own.x) } : {}),
+        ...(own.y ? { y: clampedChannel(own.y) } : {}),
       },
       ...rest,
     },
@@ -273,7 +278,7 @@ function walkClampView(
     if (!Array.isArray(s[key])) continue;
     const { entries, changed, sharedHits } = walkChildren(s[key]);
     const { own, pass } = splitHits(sharedHits);
-    if (own.x || own.y) return patchOwn(own, { [key]: entries }, pass);
+    if (own.x || own.y) return patchOwn(own, pass, { [key]: entries });
     if (changed) return { view: { ...view, [key]: entries }, sharedHits: pass };
     return { view, sharedHits: pass };
   }
@@ -281,7 +286,7 @@ function walkClampView(
   if (s.spec !== undefined) {
     const child = walkClampView(s.spec, childInherited);
     const { own, pass } = splitHits(child.sharedHits);
-    if (own.x || own.y) return patchOwn(own, { spec: child.view }, pass);
+    if (own.x || own.y) return patchOwn(own, pass, { spec: child.view });
     if (child.view !== s.spec)
       return { view: { ...view, spec: child.view }, sharedHits: pass };
     return { view, sharedHits: pass };
@@ -293,14 +298,18 @@ function walkClampView(
   if (topMark !== undefined) {
     const hits: ClampHits = {};
     for (const ch of CHANNELS) {
+      // An explicit null disables the channel -- it is judged as the view's
+      // own copy (the predicate digests it) and never falls back to the
+      // inherited declaration.
+      const own = s.encoding?.[ch];
       const hit = zeroBaselineClampTarget(
         topMark,
-        s.encoding?.[ch] ?? inherited?.[ch],
+        own === undefined ? inherited?.[ch] : own,
       );
       if (hit) hits[ch] = hit;
     }
     const { own, pass } = splitHits(hits);
-    if (own.x || own.y) return patchOwn(own, undefined, pass);
+    if (own.x || own.y) return patchOwn(own, pass);
     return { view, sharedHits: pass };
   }
   return { view, sharedHits: {} };
