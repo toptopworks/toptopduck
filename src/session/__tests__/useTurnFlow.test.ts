@@ -469,6 +469,7 @@ describe("useTurnFlow", () => {
         tool: "fetch",
         operationKind: "network",
         summary: "GET /x",
+        receivedAt: 1_000,
         status: { kind: "resolved", response: "allow_once" },
       };
       const { deps } = setup();
@@ -524,6 +525,7 @@ describe("useTurnFlow", () => {
         tool: "fetch",
         operationKind: "network",
         summary: "GET /x",
+        receivedAt: 1_000,
         status: { kind: "pending" },
       };
       const { deps } = setup();
@@ -777,6 +779,7 @@ describe("useTurnFlow", () => {
       tool: "fetch",
       operationKind: "network",
       summary: "GET /x",
+      receivedAt: 1_000,
       status: { kind: "pending" },
       ...over,
     });
@@ -1533,6 +1536,76 @@ describe("useTurnFlow", () => {
       });
       expect(result.current.waitStartedAt).toBeNull();
       nowSpy.mockRestore();
+    });
+  });
+
+  describe("turn clock (issue #1264 turn-clock ruling)", () => {
+    // The bar's continuous figure: the ask stamp while the turn is in
+    // flight, frozen at the earliest PENDING approval's arrival while the
+    // gate holds the user's turn. Derived, never stored.
+    it("starts at the ask stamp and dies with the turn", async () => {
+      const { deps } = setup();
+      const nowSpy = vi.spyOn(Date, "now").mockReturnValue(1_000);
+      let resolveAsk!: (outcome: TurnOutcome) => void;
+      vi.mocked(askQuestion).mockImplementationOnce(
+        () =>
+          new Promise<TurnOutcome>((res) => {
+            resolveAsk = res;
+          }),
+      );
+      const { result } = renderHook(() => useTurnFlow(SID, deps));
+      expect(result.current.turnStartedAt).toBeNull();
+      await waitFor(() => expect(turnProgressCb.current).not.toBeNull());
+      let askPromise!: Promise<void>;
+      act(() => {
+        askPromise = result.current.handleAsk("问");
+      });
+      expect(result.current.turnStartedAt).toBe(1_000);
+      expect(result.current.turnPausedSince).toBeNull();
+      await act(async () => {
+        resolveAsk(textualOutcome("答案"));
+        await askPromise;
+      });
+      expect(result.current.turnStartedAt).toBeNull();
+      nowSpy.mockRestore();
+    });
+
+    it("freezes at the earliest pending approval's arrival while the gate holds", () => {
+      const { deps } = setup();
+      vi.mocked(askQuestion).mockImplementation(
+        () => new Promise<TurnOutcome>(() => {}),
+      );
+      const entry = (receivedAt: number, kind: "pending" | "resolved") =>
+        ({
+          requestId: `req-${receivedAt}`,
+          server: "acme",
+          tool: "fetch",
+          operationKind: "network",
+          summary: "GET /x",
+          receivedAt,
+          status:
+            kind === "pending"
+              ? ({ kind: "pending" } as const)
+              : ({ kind: "resolved", response: "allow_once" } as const),
+        }) satisfies ApprovalEntry;
+      const { result, rerender } = renderHook(
+        ({ approvals }: { approvals: ApprovalEntry[] }) =>
+          useTurnFlow(SID, { ...deps, approvals }),
+        { initialProps: { approvals: [entry(5_000, "pending"), entry(9_000, "pending")] } },
+      );
+      act(() => {
+        void result.current.handleAsk("问");
+      });
+      // Arrival order is gateway order -- the FIRST pending is the earliest
+      // hold, and the figure freezes there.
+      expect(result.current.turnPausedSince).toBe(5_000);
+      // The first approval resolves: the clock resumes (null) only when no
+      // pending remains -- the later hold re-freezes the figure at ITS
+      // arrival.
+      rerender({ approvals: [entry(5_000, "resolved"), entry(9_000, "pending")] });
+      expect(result.current.turnPausedSince).toBe(9_000);
+      rerender({ approvals: [entry(5_000, "resolved"), entry(9_000, "resolved")] });
+      expect(result.current.turnPausedSince).toBeNull();
     });
   });
 });

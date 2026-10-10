@@ -11,10 +11,13 @@ import { IntlProvider } from "react-intl";
 import { catalogFor } from "../../../i18n";
 import { WaitElapsedSuffix } from "../WaitElapsedSuffix";
 
-function renderSuffix(startedAt: number | null) {
+function renderSuffix(
+  startedAt: number | null,
+  opts: { pausedSince?: number | null } = {},
+) {
   return render(
     <IntlProvider locale="zh-CN" messages={catalogFor("zh-CN")}>
-      <WaitElapsedSuffix startedAt={startedAt} />
+      <WaitElapsedSuffix startedAt={startedAt} pausedSince={opts.pausedSince ?? null} />
     </IntlProvider>,
   );
 }
@@ -62,5 +65,22 @@ describe("WaitElapsedSuffix (issue #1264)", () => {
   it("keeps the ticking number out of the host live regions' announcements (aria-hidden)", () => {
     const { container } = renderSuffix(Date.now());
     expect(container.firstElementChild).toHaveAttribute("aria-hidden", "true");
+  });
+
+  it("freezes at the pause origin and stops ticking while the turn waits on the user", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(2026, 0, 1, 12, 1, 0));
+    const start = Date.now() - 30_000; // 12:00:30
+    const paused = Date.now() - 10_000; // 12:00:50
+    const { container } = renderSuffix(start, { pausedSince: paused });
+    // The figure reads the clock as of the pause's start (20s of system
+    // time; the last 10s are the user's).
+    expect(container.textContent).toContain("· 20s");
+    // The ticker is stopped while paused: advancing wall time (and any
+    // timer the pause left behind -- there are none to fire) moves nothing.
+    act(() => {
+      vi.advanceTimersByTime(5_000);
+    });
+    expect(container.textContent).toContain("· 20s");
   });
 });

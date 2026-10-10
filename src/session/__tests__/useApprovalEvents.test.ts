@@ -77,6 +77,9 @@ describe("useApprovalEvents", () => {
         tool: "fetch",
         operationKind: "network",
         summary: "GET /x",
+        // The client arrival stamp (issue #1264 turn-clock pause): set at
+        // the listener, not asserted to a fixed clock here.
+        receivedAt: expect.any(Number),
         status: { kind: "pending" },
       },
     ]);

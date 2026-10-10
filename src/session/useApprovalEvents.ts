@@ -37,6 +37,11 @@ export interface ApprovalEntry {
    * undefined for a main-loop / external-runtime call (the backend omits the
    * field); the card renders it as "sub-agent X wants to call Y". */
   originAgent?: string;
+  /** Client arrival stamp of the latest announcement of this request (issue
+   * #1264 turn-clock pause): when the pending entry entered the map -- the
+   * turn clock freezes here while the user decides. Refreshed on a
+   * re-emitted request (the de-dupe's fresh payload wins). */
+  receivedAt: number;
   status: { kind: "pending" } | { kind: "resolved"; response: ApprovalResponse };
 }
 
@@ -87,6 +92,7 @@ export function useApprovalEvents(): UseApprovalEvents {
           summary: ev.summary,
           fileAttachments: ev.file_attachments,
           originAgent: ev.origin_agent,
+          receivedAt: Date.now(),
           status: { kind: "pending" },
         };
         const existing = prev.get(ev.session_id) ?? [];

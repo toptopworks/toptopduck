@@ -463,10 +463,20 @@ export interface UseTurnFlow {
    *  settles. */
   liveTurn: LiveTurn | null;
   /** The LLM round-trip wait window's start stamp (issue #1264): non-null
-   *  while the live turn sits in isRoundTripWait -- the two render sites
-   *  (the rail's trailing status line, the QuestionBar phase label) derive
-   *  the same elapsed-seconds suffix from it. null outside a wait window. */
+   *  while the live turn sits in isRoundTripWait -- the rail's trailing
+   *  status line derives its elapsed-seconds suffix from it (the bar reads
+   *  the turn clock below instead). null outside a wait window. */
   waitStartedAt: number | null;
+  /** The turn clock's start (issue #1264 turn-clock ruling): the ask's
+   *  submit stamp while a turn is in flight, null otherwise -- the
+   *  QuestionBar's continuous elapsed figure derives from it, across every
+   *  phase of the turn (a slow gap can't hide behind a phase boundary). */
+  turnStartedAt: number | null;
+  /** The turn clock's pause origin (Codex-style pause): the earliest
+   *  PENDING approval's arrival stamp -- the displayed figure freezes there
+   *  while the user decides, so user think-time stays out of the elapsed
+   *  figure. null while no approval is pending. */
+  turnPausedSince: number | null;
   // Declared Promise<void> (not void) so the contract reflects the async
   // implementation: callers can await/.catch to chain post-ask work. Fire-
   // and-forget callers (QuestionBar onSubmit/onCancel) still accept it via
@@ -1022,5 +1032,23 @@ export function useTurnFlow(sessionId: string, deps: UseTurnFlowDeps): UseTurnFl
     }
   }, [sessionId, intl, setError]);
 
-  return { phase, liveTurn, waitStartedAt, handleAsk, handleCancel };
+  // The turn clock (issue #1264 turn-clock ruling): derived, never stored --
+  // the ask stamp rides the live state, and the pause origin is the first
+  // PENDING approval in arrival order (the rail renders cards in the order
+  // the gateway raised them, so the first pending is the earliest hold).
+  // The QuestionBar displays the elapsed-with-user-pauses figure; the rail's
+  // wait-window stamp above stays the per-window figure.
+  const turnStartedAt = live?.askedAt ?? null;
+  const turnPausedSince =
+    approvals.find((a) => a.status.kind === "pending")?.receivedAt ?? null;
+
+  return {
+    phase,
+    liveTurn,
+    waitStartedAt,
+    turnStartedAt,
+    turnPausedSince,
+    handleAsk,
+    handleCancel,
+  };
 }

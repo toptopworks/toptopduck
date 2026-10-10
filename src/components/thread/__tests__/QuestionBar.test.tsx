@@ -570,22 +570,41 @@ describe("QuestionBar skill picker (ADR-0112, issue #716)", () => {
   });
 });
 
-describe("QuestionBar wait-elapsed suffix (issue #1264)", () => {
-  it("appends the elapsed suffix to the phase label while the wait window is open", () => {
+describe("QuestionBar turn clock (issue #1264)", () => {
+  it("carries the continuous elapsed figure on the phase label across every phase", () => {
     renderQuestionBar(
       <QuestionBar
         onSubmit={() => {}}
         onCancel={() => {}}
         loading={true}
-        phase={{ Thinking: { attempt: 1 } }}
-        waitStartedAt={Date.now() - 5_000}
+        phase={{ TextDelta: { delta: "答" } }}
+        turnStartedAt={Date.now() - 46_000}
       />,
     );
-    expect(screen.getByText("思考中…")).toBeInTheDocument();
-    expect(screen.getByText("· 5s")).toBeInTheDocument();
+    expect(screen.getByText("执行中…")).toBeInTheDocument();
+    // No threshold: any phase, any age -- the turn is running, the figure
+    // runs with it (a stalled gap can't hide behind a phase boundary).
+    expect(screen.getByText("· 46s")).toBeInTheDocument();
   });
 
-  it("renders no suffix while the stamp is null (the running arms stay untimed)", () => {
+  it("freezes the figure while an approval holds the turn on the gate", () => {
+    renderQuestionBar(
+      <QuestionBar
+        onSubmit={() => {}}
+        onCancel={() => {}}
+        loading={true}
+        phase={{ ToolCallStarted: { name: "write", operation_kind: "write", summary: "r" } }}
+        turnStartedAt={Date.now() - 100_000}
+        turnPausedSince={Date.now() - 40_000}
+      />,
+    );
+    expect(screen.getByText("执行中…")).toBeInTheDocument();
+    // 100s since the ask, the last 40s on the user: the figure reads the
+    // clock as of the pause's start -- user think-time stays out.
+    expect(screen.getByText("· 60s")).toBeInTheDocument();
+  });
+
+  it("renders no figure when no turn clock is running", () => {
     renderQuestionBar(
       <QuestionBar
         onSubmit={() => {}}

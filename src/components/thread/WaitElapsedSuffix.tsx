@@ -1,31 +1,51 @@
 import { FormattedMessage } from "react-intl";
 import { useEffect, useState } from "react";
 
-// Derive the whole elapsed seconds since the wait-window stamp, re-derived
-// by a 1s interval. The value derives from the TIMESTAMP (not a
-// self-incrementing counter), so a hidden keep-alive page's throttled
-// interval heals to the true elapsed time on visibility -- no cumulative
-// drift (issue #1264).
-function useElapsedSeconds(startedAt: number | null): number | null {
+// A 1s-ticking `now` while `ticking` is true; frozen otherwise (the stale
+// value costs nothing -- the reader clamps and the pause math never reads
+// past the freeze). Leaf-local on purpose: the tick re-renders only this
+// component, never the hosts (issue #1264).
+function useNow(ticking: boolean): number {
   const [now, setNow] = useState(() => Date.now());
   useEffect(() => {
-    if (startedAt === null) return;
+    if (!ticking) return;
     const id = setInterval(() => setNow(Date.now()), 1_000);
     return () => clearInterval(id);
-  }, [startedAt]);
-  // Clamped at 0: a fresh stamp can postdate the stale `now` a previous
-  // window's ticker left behind, for up to one tick.
-  return startedAt === null ? null : Math.max(0, Math.floor((now - startedAt) / 1000));
+  }, [ticking]);
+  return now;
 }
 
-/** The wait-elapsed suffix leaf ("· 12s"): ticks once a second off the
- *  turn-flow-owned wait stamp, rendered inside the rail's trailing wait
- *  status line and the QuestionBar phase label -- both role="status" live
- *  regions, so the ticking number is aria-hidden: the per-second change is
- *  decoration, never a live-region re-announcement. Renders null outside a
- *  wait window (stamp null). */
-export function WaitElapsedSuffix({ startedAt }: { startedAt: number | null }) {
-  const seconds = useElapsedSeconds(startedAt);
+// The elapsed seconds a turn clock displays (issue #1264): derived from the
+// TIMESTAMP (not a self-incrementing counter), so a hidden keep-alive page's
+// throttled ticker heals to the true elapsed time on visibility -- no
+// cumulative drift. `pausedSince` freezes the figure while the turn waits on
+// the user (Codex-style pause: user think-time stays out of the elapsed
+// figure) -- the display reads the clock as of the pause's start and the
+// ticker stops with it. Clamped at 0: a fresh stamp can postdate the stale
+// `now` a previous window left behind, for up to one tick.
+function useElapsedSeconds(startedAt: number | null, pausedSince: number | null): number | null {
+  const now = useNow(startedAt !== null && pausedSince === null);
+  if (startedAt === null) return null;
+  const end = pausedSince !== null ? Math.min(now, pausedSince) : now;
+  return Math.max(0, Math.floor((end - startedAt) / 1000));
+}
+
+/** The elapsed-seconds suffix leaf ("· 12s"): ticks once a second off a
+ *  turn-flow-owned stamp, rendered inside the rail's trailing wait status
+ *  line and the QuestionBar phase label -- both role="status" live regions,
+ *  so the ticking number is aria-hidden: the per-second change is
+ *  decoration, never a live-region re-announcement. Renders null when no
+ *  clock is running (stamp null). */
+export function WaitElapsedSuffix({
+  startedAt,
+  pausedSince = null,
+}: {
+  startedAt: number | null;
+  /** The turn clock's pause origin: the figure freezes at the pause's start
+   *  and the ticker stops (the turn is waiting on the user). */
+  pausedSince?: number | null;
+}) {
+  const seconds = useElapsedSeconds(startedAt, pausedSince);
   if (seconds === null) return null;
   return (
     <span aria-hidden="true">

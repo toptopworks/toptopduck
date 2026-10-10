@@ -96,9 +96,14 @@ export interface UseSessionState {
    *  the optimistic TurnRecord.trace when the turn settles. */
   liveTurn: LiveTurn | null;
   /** The LLM round-trip wait window's start stamp (issue #1264): feeds the
-   *  rail status line's and the QuestionBar label's elapsed-seconds suffix.
-   *  null outside a wait window. */
+   *  rail status line's elapsed-seconds suffix. null outside a wait
+   *  window. */
   waitStartedAt: number | null;
+  /** The turn clock (issue #1264 turn-clock ruling): the bar's phase label
+   *  derives its continuous elapsed-seconds figure from it, freezing while
+   *  an approval holds the turn. null when no turn is in flight. */
+  turnStartedAt: number | null;
+  turnPausedSince: number | null;
   error: AppError | null;
   /** The most recent per-turn save failure as a typed SaveError (issue #120),
    *  rendered via the locale catalog in the session pane's persist-warning
@@ -324,16 +329,17 @@ export function useSessionState(
     },
     [markProduced, notePromotion],
   );
-  const { phase, liveTurn, waitStartedAt, handleAsk, handleCancel } = useTurnFlow(sessionId, {
-    queryClient,
-    intl,
-    setTurnLoading,
-    setError,
-    pollPersistError,
-    viewed: { markProduced: markProducedWithExpand, suppressInit },
-    approvals,
-    onApprovalsSettled,
-  });
+  const { phase, liveTurn, waitStartedAt, turnStartedAt, turnPausedSince, handleAsk, handleCancel } =
+    useTurnFlow(sessionId, {
+      queryClient,
+      intl,
+      setTurnLoading,
+      setError,
+      pollPersistError,
+      viewed: { markProduced: markProducedWithExpand, suppressInit },
+      approvals,
+      onApprovalsSettled,
+    });
 
   // ADR-0089 Decision 4: wrap handleAsk so the first terminal turn triggers a
   // sidebar + header name sync. Reading the query cache directly (not the
@@ -460,6 +466,8 @@ export function useSessionState(
     phase,
     liveTurn,
     waitStartedAt,
+    turnStartedAt,
+    turnPausedSince,
     error,
     persistError,
     guidance,
