@@ -83,4 +83,55 @@ describe("WaitElapsedSuffix (issue #1264)", () => {
     });
     expect(container.textContent).toContain("· 20s");
   });
+
+  it("re-arms the ticker on release: the figure jumps to the wall age and ticks on", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(2026, 0, 1, 12, 1, 0));
+    const start = Date.now() - 30_000; // 12:00:30
+    const paused = Date.now() - 10_000; // 12:00:50
+    // A factory per rerender: a reused element would bail out at the root
+    // and never re-derive from the changed props.
+    const tree = (pausedSince: number | null) => (
+      <IntlProvider locale="zh-CN" messages={catalogFor("zh-CN")}>
+        <WaitElapsedSuffix startedAt={start} pausedSince={pausedSince} />
+      </IntlProvider>
+    );
+    const { rerender, container } = render(tree(paused));
+    expect(container.textContent).toContain("· 20s");
+    // The user answers: the figure jumps to the turn's true wall age -- the
+    // hold is hidden while it lasted, never subtracted.
+    rerender(tree(null));
+    expect(container.textContent).toContain("· 30s");
+    // The interval is running again: a mount-only-arming regression would
+    // leave the figure frozen at the pause value for the rest of the turn.
+    act(() => {
+      vi.advanceTimersByTime(5_000);
+    });
+    expect(container.textContent).toContain("· 35s");
+  });
+
+  it("clamps at 0 when a fresh stamp postdates the stale now a tick left behind", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(2026, 0, 1, 12, 0, 0));
+    const t0 = Date.now();
+    const tree = (startedAt: number) => (
+      <IntlProvider locale="zh-CN" messages={catalogFor("zh-CN")}>
+        <WaitElapsedSuffix startedAt={startedAt} />
+      </IntlProvider>
+    );
+    const { rerender, container } = render(tree(t0));
+    act(() => {
+      vi.advanceTimersByTime(1_000);
+    });
+    expect(container.textContent).toContain("· 1s");
+    // A host that keeps the leaf mounted across windows hands it a stamp
+    // the stale now trails (the shipped hosts remount per window -- this is
+    // the defensive pin for the documented clamp).
+    rerender(tree(t0 + 2_500));
+    expect(container.textContent).toContain("· 0s");
+    act(() => {
+      vi.advanceTimersByTime(1_000);
+    });
+    expect(container.textContent).toContain("· 0s");
+  });
 });

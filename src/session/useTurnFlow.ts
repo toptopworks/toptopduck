@@ -472,10 +472,11 @@ export interface UseTurnFlow {
    *  QuestionBar's continuous elapsed figure derives from it, across every
    *  phase of the turn (a slow gap can't hide behind a phase boundary). */
   turnStartedAt: number | null;
-  /** The turn clock's pause origin (Codex-style pause): the earliest
-   *  PENDING approval's arrival stamp -- the displayed figure freezes there
-   *  while the user decides, so user think-time stays out of the elapsed
-   *  figure. null while no approval is pending. */
+  /** The turn clock's pause origin: the earliest PENDING approval's
+   *  arrival stamp -- the displayed figure freezes there while the user
+   *  decides; on release it jumps to the turn's true wall age (the hold is
+   *  hidden while it lasts, never subtracted). null while no approval is
+   *  pending. */
   turnPausedSince: number | null;
   // Declared Promise<void> (not void) so the contract reflects the async
   // implementation: callers can await/.catch to chain post-ask work. Fire-

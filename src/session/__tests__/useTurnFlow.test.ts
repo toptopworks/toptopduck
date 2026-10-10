@@ -1427,6 +1427,12 @@ describe("useTurnFlow", () => {
       // The wait continues -- the window keeps its opening stamp.
       emitProgress(SID, { Thinking: { attempt: 1 } });
       expect(result.current.waitStartedAt).toBe(1_000);
+      // And it keeps it across the window's LATER commits too: the clock
+      // moves INSIDE the window, so a re-stamping regression (a fresh stamp
+      // per waiting commit) would read 3_000 here.
+      nowSpy.mockReturnValue(3_000);
+      emitProgress(SID, { Thinking: { attempt: 2 } });
+      expect(result.current.waitStartedAt).toBe(1_000);
       nowSpy.mockRestore();
     });
 

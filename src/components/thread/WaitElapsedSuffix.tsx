@@ -2,8 +2,8 @@ import { FormattedMessage } from "react-intl";
 import { useEffect, useState } from "react";
 
 // A 1s-ticking `now` while `ticking` is true; frozen otherwise (the stale
-// value costs nothing -- the reader clamps and the pause math never reads
-// past the freeze). Leaf-local on purpose: the tick re-renders only this
+// value costs nothing -- the paused reader never reads it, and the running
+// reader clamps). Leaf-local on purpose: the tick re-renders only this
 // component, never the hosts (issue #1264).
 function useNow(ticking: boolean): number {
   const [now, setNow] = useState(() => Date.now());
@@ -18,15 +18,18 @@ function useNow(ticking: boolean): number {
 // The elapsed seconds a turn clock displays (issue #1264): derived from the
 // TIMESTAMP (not a self-incrementing counter), so a hidden keep-alive page's
 // throttled ticker heals to the true elapsed time on visibility -- no
-// cumulative drift. `pausedSince` freezes the figure while the turn waits on
-// the user (Codex-style pause: user think-time stays out of the elapsed
-// figure) -- the display reads the clock as of the pause's start and the
-// ticker stops with it. Clamped at 0: a fresh stamp can postdate the stale
-// `now` a previous window left behind, for up to one tick.
+// cumulative drift. `pausedSince` freezes the figure while the turn waits
+// on the user: the display reads the clock as of the pause's start and the
+// ticker stops with it; on release the figure jumps to the turn's true wall
+// age (the hold is hidden while it lasts, never subtracted). Clamped at 0:
+// a fresh stamp can postdate the stale `now` a previous window left
+// behind, for up to one tick.
 function useElapsedSeconds(startedAt: number | null, pausedSince: number | null): number | null {
   const now = useNow(startedAt !== null && pausedSince === null);
   if (startedAt === null) return null;
-  const end = pausedSince !== null ? Math.min(now, pausedSince) : now;
+  // The pause reads the origin DIRECTLY (not min(now, origin)): the frozen
+  // figure stays exact even when the last tick predates the pause's start.
+  const end = pausedSince !== null ? pausedSince : now;
   return Math.max(0, Math.floor((end - startedAt) / 1000));
 }
 
