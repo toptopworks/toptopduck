@@ -200,6 +200,7 @@ export function SessionPane({ sessionId, isActive, pendingIngestPaths, onIngestC
     onComposerFields(sessionId, {
       loading: s.turnLoading,
       phase: s.phase,
+      waitStartedAt: s.waitStartedAt,
       handleAsk: s.handleAsk,
       handleCancel: s.handleCancel,
       handleIngestFiles: s.handleIngestMany,
@@ -209,6 +210,7 @@ export function SessionPane({ sessionId, isActive, pendingIngestPaths, onIngestC
     sessionId,
     s.turnLoading,
     s.phase,
+    s.waitStartedAt,
     s.handleAsk,
     s.handleCancel,
     s.handleIngestMany,
@@ -533,6 +535,7 @@ export function SessionPane({ sessionId, isActive, pendingIngestPaths, onIngestC
                   // trace card (tool-call rows + approval cards) trails the
                   // recorded thread while a turn runs.
                   liveTurn={s.liveTurn}
+                  waitStartedAt={s.waitStartedAt}
                   onRespondApproval={handleRespondApproval}
                   onLoadApprovalAttachments={handleLoadApprovalAttachments}
                   onRetryTurn={handleAskAgain}

@@ -569,3 +569,32 @@ describe("QuestionBar skill picker (ADR-0112, issue #716)", () => {
     expect(screen.queryByText("暂无技能")).not.toBeInTheDocument();
   });
 });
+
+describe("QuestionBar wait-elapsed suffix (issue #1264)", () => {
+  it("appends the elapsed suffix to the phase label while the wait window is open", () => {
+    renderQuestionBar(
+      <QuestionBar
+        onSubmit={() => {}}
+        onCancel={() => {}}
+        loading={true}
+        phase={{ Thinking: { attempt: 1 } }}
+        waitStartedAt={Date.now() - 5_000}
+      />,
+    );
+    expect(screen.getByText("思考中…")).toBeInTheDocument();
+    expect(screen.getByText("· 5s")).toBeInTheDocument();
+  });
+
+  it("renders no suffix while the stamp is null (the running arms stay untimed)", () => {
+    renderQuestionBar(
+      <QuestionBar
+        onSubmit={() => {}}
+        onCancel={() => {}}
+        loading={true}
+        phase={{ ToolCallStarted: { name: "explore", operation_kind: "read", summary: "S" } }}
+      />,
+    );
+    expect(screen.getByText("执行中…")).toBeInTheDocument();
+    expect(screen.queryByText(/· \d+s/)).toBeNull();
+  });
+});

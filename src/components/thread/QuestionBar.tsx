@@ -6,6 +6,7 @@ import { Button } from "../ui/button";
 import { SkillPickerPanel } from "./SkillPickerPanel";
 import { skillPickerOptionId } from "./skillPickerLogic";
 import { useSkillPicker } from "./useSkillPicker";
+import { WaitElapsedSuffix } from "./WaitElapsedSuffix";
 
 type QuestionBarProps = {
   onSubmit: (question: string) => void;
@@ -20,6 +21,12 @@ type QuestionBarProps = {
    *  (the listener clears it on outcome, incl. Cancelled). Optional so call
    *  sites / tests that don't exercise phase feedback omit it. */
   phase?: TurnPhase | null;
+  /** The LLM round-trip wait stamp (issue #1264): while non-null and the
+   *  bar is loading, the phase label carries the elapsed-seconds suffix --
+   *  the same stamp the rail's trailing status line reads (one window, one
+   *  suffix source). Optional so call sites / tests that don't exercise the
+   *  wait window omit it (no suffix). */
+  waitStartedAt?: number | null;
   /** Left-side toolbar controls rendered inside the unified container (the
    *  composer "+" / auth-mode slots threaded from the shell, ADR-0092). */
   children?: ReactNode;
@@ -87,7 +94,7 @@ const SKILL_PICKER_PANEL_ID = "question-bar-skill-picker";
 /** The textarea's DOM id -- the shell's one anchor for seating focus on the
  *  composer (the create exit's focus hand-off, issue #1040). */
 export const COMPOSER_INPUT_ID = "question-bar-input";
-export function QuestionBar({ onSubmit, onCancel, loading, phase = null, draft, setDraft, children, trailing, skillPicker }: QuestionBarProps) {
+export function QuestionBar({ onSubmit, onCancel, loading, phase = null, waitStartedAt = null, draft, setDraft, children, trailing, skillPicker }: QuestionBarProps) {
   const intl = useIntl();
   const [localDraft, setLocalDraft] = useState("");
   const value = draft ?? localDraft;
@@ -256,6 +263,7 @@ export function QuestionBar({ onSubmit, onCancel, loading, phase = null, draft, 
               aria-live="polite"
             >
               {phaseLabel(phase, intl)}
+              <WaitElapsedSuffix startedAt={waitStartedAt} />
             </span>
           )}
           {loading ? (

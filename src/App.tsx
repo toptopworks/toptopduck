@@ -1243,6 +1243,7 @@ export default function App() {
                         onCancel={handleShellCancel}
                         loading={composer.loading}
                         phase={composer.phase}
+                        waitStartedAt={composer.waitStartedAt}
                         draft={composer.draft}
                         setDraft={composer.setDraft}
                         skillPicker={{

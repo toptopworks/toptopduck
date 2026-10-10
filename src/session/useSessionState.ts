@@ -95,6 +95,10 @@ export interface UseSessionState {
    *  cards). null when no turn is running. Client UI state only; folds into
    *  the optimistic TurnRecord.trace when the turn settles. */
   liveTurn: LiveTurn | null;
+  /** The LLM round-trip wait window's start stamp (issue #1264): feeds the
+   *  rail status line's and the QuestionBar label's elapsed-seconds suffix.
+   *  null outside a wait window. */
+  waitStartedAt: number | null;
   error: AppError | null;
   /** The most recent per-turn save failure as a typed SaveError (issue #120),
    *  rendered via the locale catalog in the session pane's persist-warning
@@ -320,7 +324,7 @@ export function useSessionState(
     },
     [markProduced, notePromotion],
   );
-  const { phase, liveTurn, handleAsk, handleCancel } = useTurnFlow(sessionId, {
+  const { phase, liveTurn, waitStartedAt, handleAsk, handleCancel } = useTurnFlow(sessionId, {
     queryClient,
     intl,
     setTurnLoading,
@@ -455,6 +459,7 @@ export function useSessionState(
     turnLoading,
     phase,
     liveTurn,
+    waitStartedAt,
     error,
     persistError,
     guidance,

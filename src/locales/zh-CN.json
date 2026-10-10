@@ -38,6 +38,7 @@
   "common.stop": "停止",
   "common.testing": "测试中…",
   "common.thinking": "思考中…",
+  "common.waitElapsed": "{seconds}s",
   "composer.authMode.ariaLabel": "授权模式：{mode}",
   "composer.authMode.desc.fullAccess": "本会话内所有调用自动放行，恢复后复位",
   "composer.authMode.desc.requestApproval": "每次外部工具调用前征求批准",

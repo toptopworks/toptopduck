@@ -1399,4 +1399,140 @@ describe("useTurnFlow", () => {
       expect(setError).toHaveBeenCalledTimes(1);
     });
   });
+
+  describe("wait stamp (issue #1264)", () => {
+    // The LLM round-trip wait window's start stamp. The Date.now spy keys
+    // each window's stamp so the persistence / fresh-window assertions are
+    // deterministic (a real clock can return the same millisecond twice in
+    // a fast run).
+    function stampNow(value: number) {
+      return vi.spyOn(Date, "now").mockReturnValue(value);
+    }
+    const staysInFlight = () => new Promise<TurnOutcome>(() => {});
+
+    it("opens at ask start (empty rounds already name the wait) and persists through a bare Thinking", async () => {
+      const { deps } = setup();
+      const nowSpy = stampNow(1_000);
+      vi.mocked(askQuestion).mockImplementation(staysInFlight);
+      const { result } = renderHook(() => useTurnFlow(SID, deps));
+      expect(result.current.waitStartedAt).toBeNull();
+      await waitFor(() => expect(turnProgressCb.current).not.toBeNull());
+      act(() => {
+        void result.current.handleAsk("问");
+      });
+      expect(result.current.waitStartedAt).toBe(1_000);
+      // The wait continues -- the window keeps its opening stamp.
+      emitProgress(SID, { Thinking: { attempt: 1 } });
+      expect(result.current.waitStartedAt).toBe(1_000);
+      nowSpy.mockRestore();
+    });
+
+    it("closes when a call dispatches (the running row carries the liveness)", async () => {
+      const { deps } = setup();
+      const nowSpy = stampNow(1_000);
+      vi.mocked(askQuestion).mockImplementation(staysInFlight);
+      const { result } = renderHook(() => useTurnFlow(SID, deps));
+      await waitFor(() => expect(turnProgressCb.current).not.toBeNull());
+      act(() => {
+        void result.current.handleAsk("问");
+      });
+      expect(result.current.waitStartedAt).toBe(1_000);
+      emitProgress(SID, {
+        ToolCallStarted: { name: "explore", operation_kind: "read", summary: "SELECT 1" },
+      });
+      expect(result.current.waitStartedAt).toBeNull();
+      nowSpy.mockRestore();
+    });
+
+    it("closes while the tail round streams prose (the caret carries the liveness)", async () => {
+      const { deps } = setup();
+      const nowSpy = stampNow(1_000);
+      vi.mocked(askQuestion).mockImplementation(staysInFlight);
+      const { result } = renderHook(() => useTurnFlow(SID, deps));
+      await waitFor(() => expect(turnProgressCb.current).not.toBeNull());
+      act(() => {
+        void result.current.handleAsk("问");
+      });
+      emitProgress(SID, { Thinking: { attempt: 1 } });
+      expect(result.current.waitStartedAt).toBe(1_000);
+      emitProgress(SID, { TextDelta: { delta: "答" } });
+      expect(result.current.waitStartedAt).toBeNull();
+      nowSpy.mockRestore();
+    });
+
+    it("opens a FRESH stamp for the next round-trip window (no cross-window carry)", async () => {
+      const { deps } = setup();
+      const nowSpy = stampNow(1_000);
+      vi.mocked(askQuestion).mockImplementation(staysInFlight);
+      const { result } = renderHook(() => useTurnFlow(SID, deps));
+      await waitFor(() => expect(turnProgressCb.current).not.toBeNull());
+      act(() => {
+        void result.current.handleAsk("问");
+      });
+      expect(result.current.waitStartedAt).toBe(1_000);
+      emitProgress(SID, {
+        ToolCallStarted: { name: "explore", operation_kind: "read", summary: "SELECT 1" },
+      });
+      expect(result.current.waitStartedAt).toBeNull();
+      // The dispatch completes: the sealed row waits on the next round-trip
+      // -- a NEW window, stamped from the clock at ITS opening.
+      nowSpy.mockReturnValue(9_000);
+      emitProgress(SID, {
+        ToolCallCompleted: {
+          name: "explore",
+          operation_kind: "read",
+          summary: "SELECT 1",
+          success: true,
+          result_excerpt: "",
+        },
+      });
+      expect(result.current.waitStartedAt).toBe(9_000);
+      emitProgress(SID, { Thinking: { attempt: 2 } });
+      expect(result.current.waitStartedAt).toBe(9_000);
+      nowSpy.mockRestore();
+    });
+
+    it("dies with the turn: a settled ask clears the stamp (cancel rides the same finally)", async () => {
+      const { deps } = setup();
+      const nowSpy = stampNow(1_000);
+      let resolveAsk!: (outcome: TurnOutcome) => void;
+      vi.mocked(askQuestion).mockImplementationOnce(
+        () =>
+          new Promise<TurnOutcome>((res) => {
+            resolveAsk = res;
+          }),
+      );
+      const { result } = renderHook(() => useTurnFlow(SID, deps));
+      await waitFor(() => expect(turnProgressCb.current).not.toBeNull());
+      let askPromise!: Promise<void>;
+      act(() => {
+        askPromise = result.current.handleAsk("问");
+      });
+      expect(result.current.waitStartedAt).toBe(1_000);
+      await act(async () => {
+        resolveAsk(textualOutcome("答案"));
+        await askPromise;
+      });
+      expect(result.current.waitStartedAt).toBeNull();
+      nowSpy.mockRestore();
+    });
+
+    it("dies with the turn: an ask that rejects (IPC failure) clears the stamp too", async () => {
+      const { deps } = setup();
+      const nowSpy = stampNow(1_000);
+      vi.mocked(askQuestion).mockRejectedValueOnce(new Error("ipc down"));
+      const { result } = renderHook(() => useTurnFlow(SID, deps));
+      await waitFor(() => expect(turnProgressCb.current).not.toBeNull());
+      let askPromise!: Promise<void>;
+      act(() => {
+        askPromise = result.current.handleAsk("问");
+      });
+      expect(result.current.waitStartedAt).toBe(1_000);
+      await act(async () => {
+        await askPromise;
+      });
+      expect(result.current.waitStartedAt).toBeNull();
+      nowSpy.mockRestore();
+    });
+  });
 });
