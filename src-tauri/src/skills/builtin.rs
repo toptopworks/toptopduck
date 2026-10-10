@@ -1147,16 +1147,25 @@ mod tests {
     /// both slots present, zero script tags, zero external references,
     /// and the color scheme follows the OS preference -- the template is
     /// what the deliverable's opens-offline AC is built on.
-    #[test]
-    fn the_html_report_template_carries_the_offline_contract() {
-        let template = String::from_utf8(
+    /// The embedded html-report template asset as UTF-8.
+    fn html_report_template() -> String {
+        String::from_utf8(
             embedded_files("html-report")
                 .into_iter()
                 .find(|(p, _)| p == "references/template.html")
                 .expect("template.html")
                 .1,
         )
-        .expect("template.html is UTF-8");
+        .expect("template.html is UTF-8")
+    }
+
+    /// The offline contract of the template asset itself (issue #1254):
+    /// both slots present, zero script tags, zero external references,
+    /// and the color scheme follows the OS preference -- the template is
+    /// what the deliverable's opens-offline AC is built on.
+    #[test]
+    fn the_html_report_template_carries_the_offline_contract() {
+        let template = html_report_template();
         assert!(template.contains("{{TITLE}}"), "the TITLE slot");
         assert!(template.contains("{{BODY}}"), "the BODY slot");
         assert!(!template.contains("<script"), "zero JS");
@@ -1172,6 +1181,27 @@ mod tests {
         assert!(
             template.contains("aria-label"),
             "teaches the svg accessibility contract"
+        );
+    }
+
+    /// The panel scroll contract of the template asset (issue #1262):
+    /// a table's width floors at its min-content, so a wide table inside
+    /// a panel overflows the card and widens the whole document unless
+    /// the panel scrolls horizontally -- the deliverable stays
+    /// viewport-wide and the overflow stays local to its panel.
+    #[test]
+    fn the_html_report_template_scrolls_wide_tables_inside_panels() {
+        let template = html_report_template();
+        let panel_rule = template
+            .split(".panel {")
+            .nth(1)
+            .expect("a .panel rule exists")
+            .split('}')
+            .next()
+            .expect("the .panel rule closes");
+        assert!(
+            panel_rule.contains("overflow-x: auto"),
+            "panels scroll overflowing tables horizontally"
         );
     }
 
