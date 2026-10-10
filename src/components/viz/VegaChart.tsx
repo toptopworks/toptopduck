@@ -76,26 +76,40 @@ function vegaConfig(theme: VegaThemeConfig): object {
   };
 }
 
-/** The slice of a y encoding the zero-baseline clamp decision reads and
- * patches -- kept structural (like DecodedVizSpec) so the decision works on
- * a top-level encoding and a layer entry's encoding alike. */
-type ClampableY = {
+/** The slice of one measure encoding (x or y) the zero-baseline clamp
+ * decision reads and patches -- kept structural (like DecodedVizSpec) so the
+ * decision works on a top-level encoding and a layer entry's encoding alike. */
+type ClampableChannel = {
   type?: unknown;
   scale?: { type?: unknown; domain?: unknown; clamp?: unknown };
 };
-type ClampableEncoding = { y?: ClampableY };
 
-/** A y encoding whose scale object has passed the guard -- the shape the
- * decision hands back for patching. */
-type ClampTarget = ClampableY & { scale: NonNullable<ClampableY["scale"]> };
+/** The judged channels; the array is the single source of truth the type
+ * derives from, so neither can drift from the other. */
+const CHANNELS = ["x", "y"] as const;
+type Channel = (typeof CHANNELS)[number];
+
+/** An encoding's measure-channel members: a channel slice, or an explicit
+ * null -- vega-lite's channel-disable form, declared but inert. */
+type ClampableEncoding = Partial<Record<Channel, ClampableChannel | null>>;
+
+/** A measure encoding whose scale object has passed the guard -- the shape
+ * the decision hands back for patching. */
+type ClampTarget = ClampableChannel & {
+  scale: NonNullable<ClampableChannel["scale"]>;
+};
+
+/** The hits one walk hop reports up, keyed by the channel that hit. */
+type ClampHits = Partial<Record<Channel, ClampTarget>>;
 
 /** The zero-baseline clamp decision for one candidate view (a top-level
- * single view, or one layer entry): the y encoding needing `scale.clamp:
- * true`, or null when this mark+encoding pair passes through untouched.
- * Vega draws a bar/area baseline at y2 = scale(0); an explicit domain
- * excluding 0 makes a continuous scale extrapolate that baseline outside
- * the range (0 -> plotHeight * domainMin / span, measured -3171px), which
- * blows the autosize canvas height up while the in-range render segment
+ * single view, or one layer entry): the measure encoding needing
+ * `scale.clamp: true`, or null when this mark+encoding pair passes through
+ * untouched. Vega draws a bar/area baseline at the measure axis' scale(0)
+ * -- y2 on a vertical bar, x2 on a horizontal one (#1257); an explicit
+ * domain excluding 0 makes a continuous scale extrapolate that baseline
+ * outside the range (0 -> plotHeight * domainMin / span, measured -3171px),
+ * which blows the autosize canvas up while the in-range render segment
  * happens to look fine (#1245). The extrapolation is a property of any
  * continuous, invertible-at-0 scale, so linear, pow, and sqrt all trigger
  * (#1247 -- on a tight domain sqrt extrapolates harder than linear,
@@ -104,18 +118,23 @@ type ClampTarget = ClampableY & { scale: NonNullable<ClampableY["scale"]> };
  * log scale (its domain must exclude 0 by definition), a symlog scale
  * (released conservatively -- symlog is continuous and invertible at 0,
  * so the principle above would cover it too, but no measured case backs
- * judging it), a non-quantitative y, and an already-present clamp (the
- * spec author's own decision). */
+ * judging it), a non-quantitative channel, and an already-present clamp
+ * (the spec author's own decision). */
 function zeroBaselineClampTarget(
   mark: string,
-  encoding: ClampableEncoding | undefined,
+  channel: ClampableChannel | null | undefined,
 ): ClampTarget | null {
   if (mark !== "bar" && mark !== "area") return null;
-  const y = encoding?.y;
-  const scale = y?.scale;
-  // No scale object, or a nested non-array domain (signal/datum form) -- the
+  const scale = channel?.scale;
+  // A missing channel, an explicit null disable, no scale object, or a
+  // nested non-array domain (signal/datum form) -- the
   // numeric-extrapolation precondition cannot be judged, so leave it be.
-  if (!y || !scale || typeof scale !== "object" || !Array.isArray(scale.domain))
+  if (
+    !channel ||
+    !scale ||
+    typeof scale !== "object" ||
+    !Array.isArray(scale.domain)
+  )
     return null;
   if (
     scale.type !== undefined &&
@@ -126,7 +145,8 @@ function zeroBaselineClampTarget(
     return null;
   // An unset field type with a numeric domain is quantitative in practice;
   // non-numeric domains fall to the array-shape guard below.
-  if (y.type !== undefined && y.type !== "quantitative") return null;
+  if (channel.type !== undefined && channel.type !== "quantitative")
+    return null;
   const domain = scale.domain;
   if (
     domain.length !== 2 ||
@@ -138,39 +158,44 @@ function zeroBaselineClampTarget(
   )
     return null;
   if (scale.clamp !== undefined) return null;
-  return y as ClampTarget;
+  return channel as ClampTarget;
 }
 
-/** Patch `clamp: true` into the decided y encoding's scale. */
-function clampedY(y: ClampTarget): ClampableY {
-  return { ...y, scale: { ...y.scale, clamp: true } };
+/** Patch `clamp: true` into the decided channel encoding's scale. */
+function clampedChannel(channel: ClampTarget): ClampableChannel {
+  return { ...channel, scale: { ...channel.scale, clamp: true } };
 }
 
 /** The outcome of walking one view node: the (possibly patched) view, plus
- * the inherited y a baseline child hit -- non-null only when that y was
- * declared above the caller, whose encoding owes the patch. */
-type ClampWalk = { view: unknown; sharedHit: ClampTarget | null };
+ * the measure encodings a baseline child hit -- present only for a channel
+ * declared above the caller, which owes the patch. */
+type ClampWalk = { view: unknown; sharedHits: ClampHits };
 
-/** Guard the zero-baseline encoding against an explicit y domain that
- * excludes 0 (#1245, #1247, #1249). The extrapolation lives inside each
- * baseline mark, not in the view structure, so the gate recurses through
- * the whole spec tree: layer entries (including layer-in-layer groups,
- * which carry no mark of their own), facet/repeat subviews, concat
- * entries, and a view's own mark+encoding pair. Composite keys lead the
- * unit pair because vega-lite's normalize compiles a spec carrying both a
- * mark and a composite key by the composite and drops the mark -- the
- * walk judges what the engine renders. A child without its own encoding.y
- * inherits the nearest declared one up the chain, is judged against its
- * baseline marks there, and the patch lands at the declaration -- the
- * place it takes effect; a view declaring its own y is judged (and
- * patched) in place. The inheritance is the engine's own rule inside
- * layer groups; threading it across the facet/repeat/concat wrappers too
- * is defensive -- their types carry no encoding member, so the engine
- * rejects those shapes regardless. The walk sets no depth cap and needs
- * no cycle guard (the entry chains only hand over vega-lite JSON) and
- * rebuilds nothing when nothing hits -- a no-hit spec comes back by
- * reference. Everything else passes through untouched. cf.
- * keepsDefaultWidth below -- an orthogonal gate over width semantics
+/** Guard the zero-baseline encoding against an explicit measure-axis domain
+ * that excludes 0, on either channel (#1245, #1247, #1249; #1257 -- a
+ * horizontal bar's baseline lives on x, and its explicit non-zero domain
+ * translated the whole compiled group out of an otherwise sane viewBox).
+ * The extrapolation lives inside each baseline mark, not in the view
+ * structure, so the gate recurses through the whole spec tree: layer
+ * entries (including layer-in-layer groups, which carry no mark of their
+ * own), facet/repeat subviews, concat entries, and a view's own
+ * mark+encoding pair. Composite keys lead the unit pair because vega-lite's
+ * normalize compiles a spec carrying both a mark and a composite key by the
+ * composite and drops the mark -- the walk judges what the engine renders.
+ * x and y are judged independently by the same predicate -- a legal
+ * bar/area spec keeps at most one discrete band axis, so a quantitative
+ * channel IS the measure; no direction inference is needed. A child
+ * without its own copy of a channel inherits the nearest declared one up
+ * the chain, is judged against its baseline marks there, and the patch
+ * lands at the declaration -- the place it takes effect; a view declaring
+ * its own copy is judged (and patched) in place. The inheritance is the
+ * engine's own rule inside layer groups; threading it across the
+ * facet/repeat/concat wrappers too is defensive -- their types carry no
+ * encoding member, so the engine rejects those shapes regardless. The walk
+ * sets no depth cap and needs no cycle guard (the entry chains only hand
+ * over vega-lite JSON) and rebuilds nothing when nothing hits -- a no-hit
+ * spec comes back by reference. Everything else passes through untouched.
+ * cf. keepsDefaultWidth below -- an orthogonal gate over width semantics
  * only: this gate reaches across the full tree while that one treats a
  * composite layout like any other operable view. Different questions;
  * never merge the two gates. */
@@ -179,7 +204,7 @@ function walkClampView(
   inherited: ClampableEncoding | undefined,
 ): ClampWalk {
   if (!view || typeof view !== "object" || Array.isArray(view))
-    return { view, sharedHit: null };
+    return { view, sharedHits: {} };
   const s = view as {
     mark?: unknown;
     encoding?: ClampableEncoding;
@@ -189,33 +214,61 @@ function walkClampView(
     hconcat?: unknown;
     concat?: unknown;
   };
-  // Whether this view declares its own y -- the predicate behind both the
-  // judging source below and the declarer-patches interception.
-  const declaresY = s.encoding?.y !== undefined;
-  const childInherited = declaresY ? s.encoding : inherited;
+  // Children inherit per channel: the nearest declared copy of each channel
+  // wins (vega-lite's own rule inside layer groups). A composite wrapper's
+  // encoding is defensive -- the engine rejects those shapes -- but the walk
+  // threads it the same way.
+  const childInherited: ClampableEncoding | undefined = s.encoding
+    ? { ...inherited, ...s.encoding }
+    : inherited;
+  // Split a hop's reported hits: a channel this view declares patches here;
+  // anything else keeps moving up to its declarer.
+  const splitHits = (hits: ClampHits): { own: ClampHits; pass: ClampHits } => {
+    const own: ClampHits = {};
+    const pass: ClampHits = {};
+    for (const ch of CHANNELS) {
+      const hit = hits[ch];
+      if (!hit) continue;
+      if (s.encoding?.[ch] !== undefined) own[ch] = hit;
+      else pass[ch] = hit;
+    }
+    return { own, pass };
+  };
   // rest must never carry encoding -- it spreads after the patched pair
-  // and would clobber it.
-  const patchOwn = (patched: ClampTarget, rest?: object): ClampWalk => ({
+  // and would clobber it; the never-typed member pins it at compile time.
+  const patchOwn = (
+    own: ClampHits,
+    pass: ClampHits,
+    rest?: Record<string, unknown> & { encoding?: never },
+  ): ClampWalk => ({
     view: {
       ...view,
-      encoding: { ...s.encoding, y: clampedY(patched) },
+      encoding: {
+        ...s.encoding,
+        ...(own.x ? { x: clampedChannel(own.x) } : {}),
+        ...(own.y ? { y: clampedChannel(own.y) } : {}),
+      },
       ...rest,
     },
-    sharedHit: null,
+    sharedHits: pass,
   });
 
   // Walk an entry list, aggregating rebuilds and the first inherited hit
-  // (several children may hit one shared declaration; it patches once).
+  // per channel (several children may hit one shared declaration; it
+  // patches once).
   const walkChildren = (entries: unknown[]) => {
-    let sharedHit: ClampTarget | null = null;
+    const sharedHits: ClampHits = {};
     let changed = false;
     const walked = entries.map((entry) => {
       const child = walkClampView(entry, childInherited);
       if (child.view !== entry) changed = true;
-      if (!sharedHit) sharedHit = child.sharedHit;
+      for (const ch of CHANNELS) {
+        const hit = child.sharedHits[ch];
+        if (hit && !sharedHits[ch]) sharedHits[ch] = hit;
+      }
       return child.view;
     });
-    return { entries: walked, changed, sharedHit };
+    return { entries: walked, changed, sharedHits };
   };
 
   // Layered and concatenated children first (#1249): a legal spec carries
@@ -223,36 +276,43 @@ function walkClampView(
   // here by carrying a layer array of its own and no mark.
   for (const key of ["layer", "vconcat", "hconcat", "concat"] as const) {
     if (!Array.isArray(s[key])) continue;
-    const { entries, changed, sharedHit } = walkChildren(s[key]);
-    if (sharedHit && declaresY) return patchOwn(sharedHit, { [key]: entries });
-    if (changed) return { view: { ...view, [key]: entries }, sharedHit };
-    return { view, sharedHit };
+    const { entries, changed, sharedHits } = walkChildren(s[key]);
+    const { own, pass } = splitHits(sharedHits);
+    if (own.x || own.y) return patchOwn(own, pass, { [key]: entries });
+    if (changed) return { view: { ...view, [key]: entries }, sharedHits: pass };
+    return { view, sharedHits: pass };
   }
   // The facet/repeat subview is a single child, not a list.
   if (s.spec !== undefined) {
     const child = walkClampView(s.spec, childInherited);
-    if (child.sharedHit && declaresY)
-      return patchOwn(child.sharedHit, { spec: child.view });
+    const { own, pass } = splitHits(child.sharedHits);
+    if (own.x || own.y) return patchOwn(own, pass, { spec: child.view });
     if (child.view !== s.spec)
-      return {
-        view: { ...view, spec: child.view },
-        sharedHit: child.sharedHit,
-      };
-    return { view, sharedHit: child.sharedHit };
+      return { view: { ...view, spec: child.view }, sharedHits: pass };
+    return { view, sharedHits: pass };
   }
   // Unit view last: the own-or-inherited mark+encoding pair is the whole
-  // decision. An inherited hit is reported up -- the declarer patches.
+  // decision, judged channel by channel. An inherited hit is reported up --
+  // the declarer patches.
   const topMark = markTypeName(s.mark);
   if (topMark !== undefined) {
-    const y = zeroBaselineClampTarget(
-      topMark,
-      declaresY ? s.encoding : inherited,
-    );
-    if (!y) return { view, sharedHit: null };
-    if (declaresY) return patchOwn(y);
-    return { view, sharedHit: y };
+    const hits: ClampHits = {};
+    for (const ch of CHANNELS) {
+      // An explicit null disables the channel -- it is judged as the view's
+      // own copy (the predicate digests it) and never falls back to the
+      // inherited declaration.
+      const own = s.encoding?.[ch];
+      const hit = zeroBaselineClampTarget(
+        topMark,
+        own === undefined ? inherited?.[ch] : own,
+      );
+      if (hit) hits[ch] = hit;
+    }
+    const { own, pass } = splitHits(hits);
+    if (own.x || own.y) return patchOwn(own, pass);
+    return { view, sharedHits: pass };
   }
-  return { view, sharedHit: null };
+  return { view, sharedHits: {} };
 }
 
 function withZeroBaselineClamp(spec: TopLevelSpec): TopLevelSpec {
