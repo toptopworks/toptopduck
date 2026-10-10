@@ -129,8 +129,9 @@ fn empty_fragment(name: &str) -> SkillPromptFragment {
 /// core below is shared, only the honest-degrade tail is face-specific --
 /// the activation channel anchors a whole-file hash and gates
 /// `read_skill_file` on the invoked set (a truncated skill is in it by
-/// definition -- its invocation record has landed, though a mid-turn
-/// invocation joins the turn-start snapshot the next turn), while the
+/// definition -- its invocation record has landed, and a mid-turn
+/// invocation reads in its own turn through the resolver's live union,
+/// issue #1260), while the
 /// delegation channel has neither: the bound skill is typically NOT in
 /// the main turn's invoked set, so a read-back referral would be a dead
 /// end and the user-relay remedy is the only honest one.

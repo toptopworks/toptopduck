@@ -534,12 +534,17 @@ fn empty_mount_set_omits_skill_section_and_provenance() {
         system.contains("默认工具"),
         "tool-selection section missing"
     );
-    // The mount-conditional surface (ADR-0119 D4): an EMPTY discovery
-    // snapshot pays no standing tool cost -- the trio's posture
+    // The mount-conditional surface (ADR-0119 D4; the read tool's gate
+    // calibrated by #1260): an EMPTY discovery snapshot pays no standing
+    // tool cost for either skill meta-tool -- the trio's posture
     // (ADR-0105 D6).
     assert!(
         !guard[0].tools.iter().any(|t| t.name == "invoke_skill"),
         "an empty discovery snapshot must not mount invoke_skill"
+    );
+    assert!(
+        !guard[0].tools.iter().any(|t| t.name == "read_skill_file"),
+        "an empty discovery snapshot must not mount read_skill_file"
     );
     drop(guard);
 

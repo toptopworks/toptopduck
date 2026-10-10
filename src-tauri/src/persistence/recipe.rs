@@ -925,8 +925,8 @@ impl Recipe {
     /// invocation records (ADR-0119 Decision 4, issue #983): a derived view
     /// that only ever grows -- invocation is a turn-input fact, nothing can
     /// un-invoke a past turn. First-invocation insertion order; the
-    /// `read_skill_file` gate and the invoked-set-conditional tool mounts
-    /// read through this fold (a live session memoizes it).
+    /// `read_skill_file` gate's eligibility base (its turn-start snapshot)
+    /// reads through this fold (a live session memoizes it).
     pub fn invoked_skills(&self) -> Vec<String> {
         let mut invoked: Vec<String> = Vec::new();
         for entry in &self.history {

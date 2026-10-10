@@ -20,12 +20,14 @@
 //! Like [`crate::skills::invocation`], this is a gateway-local meta call
 //! served BEFORE the approval gate on both dispatch faces: reading is the
 //! same risk class as the invoked body (a prompt-injection surface), so
-//! the session-invoked set plus the lexical/canonical bounds above are the
-//! only trust gates (Decision 5, calibrated by ADR-0119 Decision 4). The
+//! the live invoked set (the turn-start snapshot unioned with this turn's
+//! pending invocations, issue #1260) plus the lexical/canonical bounds
+//! above are the only trust gates (Decision 5, calibrated by ADR-0119
+//! Decision 4). The
 //! classification IS pure -- a read mutates nothing, so unlike invocation
 //! there is no transition and no persist. Failure states carry
 //! self-correcting signals (ADR-0077): a name nobody invoked this session
-//! points at `invoke_skill` (and lists the already-invoked names), and a
+//! points at `invoke_skill` (and lists the live invoked names), and a
 //! bad path lists the skill's real readable files (Decision 4 -- discovery
 //! rides the invocation, never a directory advertisement).
 //!
@@ -67,9 +69,10 @@ const LISTING_ENTRY_CAP: usize = 50;
 const BINARY_SNIFF_BYTES: usize = 8 * 1024;
 
 /// What one read classifies against: the turn-start session-INVOKED
-/// snapshot (read eligibility -- a mid-turn invocation joins the NEXT turn's
-/// snapshot, the no-competition-with-assembly posture of ADR-0111 Decision 3
-/// carried over by ADR-0119 Decision 4), the enable-axis disabled names
+/// snapshot (the read-eligibility BASE set -- the resolver unions it with
+/// the turn's pending invocations at read time, issue #1260, so a
+/// mid-turn `invoke_skill` opens its files in the SAME turn; calibrated
+/// by ADR-0119 Decision 4), the enable-axis disabled names
 /// (ADR-0119 Decision 3's eligibility gate crosses the read surface: a
 /// disabled name's invocation record still lands -- the honest-degrade
 /// shape -- but its files stay closed until the axis re-enables it), and
@@ -106,7 +109,7 @@ impl SkillReadGate<'_> {
 }
 
 /// The resolver's outcome -- the two-variant shape of
-/// [`crate::skills::activation::SkillActivationOutcome`], which is itself the
+/// [`crate::skills::invocation::SkillInvocationOutcome`], which is itself the
 /// owning pair of [`crate::mcp::meta_tools::MetaDispatch`]'s two servable
 /// arms: both dispatch faces keep their matches total with no panicking arms.
 #[derive(Debug)]
@@ -187,10 +190,7 @@ pub(crate) fn resolve_skill_read(
     if !gate.invoked.iter().any(|a| a == name) && !pending.iter().any(|p| p.name == name) {
         let mut live: Vec<&str> = gate.invoked.iter().map(String::as_str).collect();
         for p in pending {
-            let n = p.name.as_str();
-            if !live.contains(&n) {
-                live.push(n);
-            }
+            crate::util::push_unique(&mut live, &p.name.as_str());
         }
         return SkillReadOutcome::Refused(not_invoked_failure(name, &live));
     }
