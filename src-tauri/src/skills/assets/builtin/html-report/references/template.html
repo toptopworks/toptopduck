@@ -64,6 +64,7 @@
     border-radius: .5rem;
     padding: 1rem 1.25rem;
     margin: 0 0 1.5rem;
+    overflow-x: auto;
   }
   .panel h2 { margin: 0 0 .75rem; font-size: 1.05rem; }
   /* Bar list: one .bar per category; .bar-fill width is the value share. */
@@ -149,7 +150,8 @@
   Progress bar (a single 0-100% ratio):
   <div class="progress"><div class="progress-fill" style="width:64%"></div></div>
 
-  Table (add class "num" to numeric columns):
+  Table (add class "num" to numeric columns; a table wider than its
+  panel scrolls horizontally inside it):
   <section class="panel">
     <h2>Detail</h2>
     <table>
