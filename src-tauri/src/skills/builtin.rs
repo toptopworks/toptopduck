@@ -1108,6 +1108,15 @@ mod tests {
         assert!(body.contains("150 rows"), "carries the row ceiling");
         assert!(body.contains("belongs to vega-chart"), "diverts fences");
         assert!(body.contains("belongs to pandoc"), "diverts conversions");
+        assert!(body.contains("is not a report"), "the declination boundary");
+        assert!(
+            body.contains("summary") && body.contains("pointer"),
+            "the reply stays a summary plus a pointer"
+        );
+        assert!(
+            body.contains("out of scope"),
+            "keeps interactive charts out of scope"
+        );
     }
 
     /// The curation budget for the html-report body (issue #1254): the
@@ -1159,6 +1168,7 @@ mod tests {
             template.contains("prefers-color-scheme"),
             "follows the OS color scheme"
         );
+        assert!(template.contains("@media print"), "keeps the print block");
         assert!(
             template.contains("aria-label"),
             "teaches the svg accessibility contract"
@@ -1255,11 +1265,9 @@ mod tests {
         );
         // The vega-fence degradation disclosure (issue #1252, rerouted issue
         // #1254): pandoc has no vega engine, so charted markdown must route
-        // to the html-report skill instead.
-        assert!(
-            body.contains("`html-report` skill"),
-            "routes charted markdown to the html-report skill"
-        );
+        // to the html-report skill instead -- both disclosure rows carry the
+        // reroute, so each half gets its own pin (a body-level contains
+        // would ride either row and let one revert silently).
         // The pre-conversion promotion (issue #1255): split on the index
         // heading as the position pin -- the fence phrase itself stays a
         // phrase pin, riding whatever section a re-curation chooses.
@@ -1267,8 +1275,16 @@ mod tests {
             .split_once("## Troubleshooting")
             .expect("a Troubleshooting section to split on");
         assert!(
+            main_flow.contains("`html-report` skill"),
+            "routes charted markdown to the html-report skill ahead of the index"
+        );
+        assert!(
             main_flow.contains("`vega-lite`"),
             "discloses the vega fence degradation ahead of the Troubleshooting index"
+        );
+        assert!(
+            troubleshooting.contains("`html-report` skill"),
+            "keeps the Troubleshooting reroute to the html-report skill"
         );
         assert!(
             troubleshooting.contains("`vega-lite`"),
