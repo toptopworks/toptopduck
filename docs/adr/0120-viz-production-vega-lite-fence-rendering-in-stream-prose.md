@@ -46,7 +46,7 @@ ADR-0016 定义了 viz 意图与白名单，ADR-0033 补触发与退化披露，
 - **校准（导出解冻）**：图导出落结果页 viz 视图与结果卡图——单锚点加下拉菜单（vega-embed 原生动作栏之形、本仓 popover tokens 之皮，锚点视觉对齐 topbar 图标按钮家族；hover 显形含锚点自持，键盘显形仅认可见焦点），PNG / SVG 两项带文字；经 Vega view 序列化（toSVG / toCanvas）落盘走原生另存为对话框加后端写命令（WebView2 默认下载通道静默无反馈，弃用）；命名取 spec `title` 净化值、catalog 词兜底；md 产物内 fence 图导出留尾。
 - 结果卡 `viz` 槽位（ADR-0016/0033 原设计）继续闲置；若未来结果卡图表诉求真实，emit_chart 路线按本 ADR Considered 记录重评。
 - **校准（报告交付分流）**：报告/交付场景的图表随 `.md` 产物交付——Decision 1 的「流内 fence 表面」读作「回复 prose 与报告产物并列的双宿主」，md 产物内 fence 与流中 fence 走同一 decode 门禁（复用 prose 渲染器）；生成分流判据（用户要交付物或计划产出 ≥2 图）由 `vega-chart` 技能教学承担，渲染端零变更。
-- **校准（fence 显式触发）**：`vega-chart` 收窄为显式触发——仅当用户点名 vega 或显式要求 fence/markdown 图表形态时才产出 fence；图表交付物（报告、仪表盘、文件）默认不经此技能，回落工具面自选（python 直产自包含 HTML 为主流形态）。显式点名场景的 `.md` fence 报告仍是渲染消费面，但 fence 不再是图表交付的默认形态。
+- **校准（fence 显式触发）**：`vega-chart` 收窄为显式触发——仅当用户点名 vega 或显式要求 fence/markdown 图表形态时才产出 fence；图表交付物（报告、仪表盘、文件）默认不经此技能，由内置技能 `html-report` 认领——主流形态为单文件自包含 HTML（零 CDN、断网可开，经 `python` 工具产出）。显式点名场景的 `.md` fence 报告仍是渲染消费面，但 fence 不再是图表交付的默认形态。
 - **校准 ADR-0016**：白名单增 heatmap；图表生产表面增流内 fence 一路，结果卡槽位与降级/主题路径不变。
 - **被 ADR-0121 校准**：Decision 7 的「技能单文件、双语（en-US / zh-CN 随响应 locale），不启用 references 多文件物化」读作「技能为文件树、英文单语、支持 scripts/references 多文件」；Considered 的「references/ 多文件渐进披露」否决项就此翻案（复杂技能压力就此真实）；Why 4 所引「用户可编辑 / hash 漂移跟踪」治理随 ADR-0109 校准失效；伴随关系可选化与自动包含判定不变。
 - **留实施期**：白名单增 `rect` 与 catalog 扩词、markdown 管道 fence 渲染分支与 live/settled 通路、内置技能可选伴随字段与自动包含判定分发、现有三个伴随定义补字段（行为不变）、`vega-chart` 双语定义文案。

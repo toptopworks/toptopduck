@@ -1,8 +1,8 @@
 //! Builtin skills (ADR-0121): the app-authored skills that ship with the
 //! app binary. Most are CLI companions, one per builtin CLI registration
 //! entry (same name, 1:1); knowledge-only skills (`vega-chart`,
-//! `skill-creator`) ship without a CLI counterpart and are anchored
-//! unconditionally.
+//! `skill-creator`, `html-report`) ship without a CLI counterpart and are
+//! anchored unconditionally.
 //!
 //! The definition body is a compile-time-embedded FILE TREE
 //! (`src/skills/assets/builtin/<name>/`, `include_dir!`): `SKILL.md` plus any
@@ -55,16 +55,18 @@ pub(crate) struct BuiltinSkillManifest {
     pub name: &'static str,
     /// The builtin CLI entry this skill rides, if any (ADR-0120 Decision 7).
     /// `Some` -- the CLI companions: alignment and auto-include gate on the
-    /// entry. `None` -- a knowledge-only skill (`vega-chart` or
-    /// `skill-creator`): the anchor is unconditional, so alignment
-    /// takes no CLI condition and auto-include drops the CLI conjunct.
+    /// entry. `None` -- a knowledge-only skill (`vega-chart`,
+    /// `skill-creator`, or `html-report`): the anchor is unconditional, so
+    /// alignment takes no CLI condition and auto-include drops the CLI
+    /// conjunct.
     pub companion_cli: Option<&'static str>,
 }
 
 /// The shipped set: the CLI companions (pandoc, python, office-cli,
-/// dbx) plus the knowledge-only pair (`vega-chart` and the distillation
-/// curriculum `skill-creator`). Additive evolution mirrors the CLI set:
-/// new entries pass the same curation screen.
+/// dbx) plus the knowledge-only set (`vega-chart`, the distillation
+/// curriculum `skill-creator`, and the chart-report deliverable
+/// `html-report`). Additive evolution mirrors the CLI set: new entries
+/// pass the same curation screen.
 pub(crate) static BUILTIN_SKILL_MANIFEST: &[BuiltinSkillManifest] = &[
     BuiltinSkillManifest {
         name: "pandoc",
@@ -88,6 +90,10 @@ pub(crate) static BUILTIN_SKILL_MANIFEST: &[BuiltinSkillManifest] = &[
     },
     BuiltinSkillManifest {
         name: "skill-creator",
+        companion_cli: None,
+    },
+    BuiltinSkillManifest {
+        name: "html-report",
         companion_cli: None,
     },
 ];
@@ -658,9 +664,12 @@ mod tests {
     /// time -- not the git index -- so an untracked stray (editor
     /// droppings, a crash `*.stackdump`, ...) rides the build into every
     /// user's `.system/` tree. A clean CI checkout never sees the stray,
-    /// so this local-test red is the only guard that bites. Known
-    /// ceiling: a stray of an admitted kind (a loose `.md`) still rides
-    /// the tree -- the exact-set pin holds that surface for office-cli.
+    /// so this local-test red is the only guard that bites. Admitted
+    /// kinds: `.md` bodies and reference docs, `.html` (the html-report
+    /// template asset, issue #1254), and the office-cli license set.
+    /// Known ceiling: a stray of an admitted kind (a loose `.md`) still
+    /// rides the tree -- the exact-set pins hold that surface for
+    /// office-cli and html-report.
     #[test]
     fn the_embedded_asset_tree_admits_only_curated_file_kinds() {
         assert!(
@@ -671,7 +680,9 @@ mod tests {
             for (path, _) in embedded_files(entry.name) {
                 let file = path.rsplit('/').next().unwrap();
                 assert!(
-                    file.ends_with(".md") || matches!(file, "LICENSE" | "NOTICE"),
+                    file.ends_with(".md")
+                        || file.ends_with(".html")
+                        || matches!(file, "LICENSE" | "NOTICE"),
                     "`{}/{path}` is not an admitted asset kind (stray file embedded from disk?)",
                     entry.name
                 );
@@ -733,11 +744,11 @@ mod tests {
     }
 
     /// The declared companion wiring: the CLI companions ride their
-    /// same-named CLI entry; the knowledge-only pair (`vega-chart`,
-    /// `skill-creator`) rides `None`. The pairing stays 1:1 with the CLI
-    /// shipped set and same-name (the module-doc invariant -- a divergent
-    /// pair would desync the anchor (companion-keyed) from the
-    /// reserved-name set (name-keyed)).
+    /// same-named CLI entry; the knowledge-only set (`vega-chart`,
+    /// `skill-creator`, `html-report`) rides `None`. The pairing stays
+    /// 1:1 with the CLI shipped set and same-name (the module-doc
+    /// invariant -- a divergent pair would desync the anchor
+    /// (companion-keyed) from the reserved-name set (name-keyed)).
     #[test]
     fn companioned_entries_declare_their_cli_and_vega_chart_rides_none() {
         let companions: &[(&str, &str)] = &[
@@ -759,6 +770,13 @@ mod tests {
                 .companion_cli,
             None,
             "vega-chart is knowledge-only"
+        );
+        assert_eq!(
+            find_manifest_entry("html-report")
+                .expect("entry")
+                .companion_cli,
+            None,
+            "html-report is knowledge-only"
         );
         for entry in BUILTIN_SKILL_MANIFEST {
             if let Some(companion) = entry.companion_cli {
@@ -848,6 +866,15 @@ mod tests {
                  wants a new skill; drafts the document and calls the \
                  create_skill tool.",
             ),
+            (
+                "html-report",
+                "Generate chart reports and dashboards as a single \
+                 self-contained HTML file via the python tool — the default \
+                 deliverable form for data the user keeps, shares, or prints; \
+                 opens offline, no CDN. In-reply vega fences belong to \
+                 vega-chart; converting an existing document belongs to \
+                 pandoc.",
+            ),
         ];
         for (name, en) in expected {
             assert_eq!(&description_of(name), en, "{name} description");
@@ -865,6 +892,7 @@ mod tests {
             ("office-cli", "belongs to pandoc"),
             ("python", "belong to SQL"),
             ("dbx", "belongs to the built-in SQL tools"),
+            ("html-report", "belongs to pandoc"),
         ];
         for (name, phrase) in pairs {
             assert!(
@@ -1045,6 +1073,108 @@ mod tests {
         );
     }
 
+    /// The html-report body must teach the whole delivery contract (issue
+    /// #1254): the deliverable-intent trigger, the three boundary
+    /// diversions, the literal-SVG method through the template's two
+    /// slots, the zero-CDN policy with its single explicitly-named-library
+    /// exception, and both contract details (svg accessibility, the row
+    /// ceiling). Phrase pins, not verbatim -- the CONTRACT items are what
+    /// must survive a re-curation.
+    #[test]
+    fn html_report_body_teaches_the_delivery_contract() {
+        let body = body_of("html-report");
+        assert!(body.contains("`python` tool"), "names the renderer");
+        assert!(
+            body.contains("`references/template.html`"),
+            "points at the template asset"
+        );
+        assert!(
+            body.contains("{{TITLE}}") && body.contains("{{BODY}}"),
+            "teaches both template slots"
+        );
+        assert!(body.contains("zero CDN"), "carries the offline policy");
+        assert!(
+            body.contains("explicitly names"),
+            "the exception latches on an explicitly named online library"
+        );
+        assert!(
+            body.contains("disclose"),
+            "the exception requires in-reply disclosure"
+        );
+        assert!(
+            body.contains("role=\"img\"") && body.contains("aria-label"),
+            "carries the svg accessibility contract"
+        );
+        assert!(body.contains("150 rows"), "carries the row ceiling");
+        assert!(body.contains("belongs to vega-chart"), "diverts fences");
+        assert!(body.contains("belongs to pandoc"), "diverts conversions");
+        assert!(body.contains("is not a report"), "the declination boundary");
+        assert!(
+            body.contains("summary") && body.contains("pointer"),
+            "the reply stays a summary plus a pointer"
+        );
+        assert!(
+            body.contains("out of scope"),
+            "keeps interactive charts out of scope"
+        );
+    }
+
+    /// The curation budget for the html-report body (issue #1254): the
+    /// knowledge-only ceiling, 4096 bytes -- same as vega-chart and
+    /// skill-creator.
+    #[test]
+    fn html_report_body_stays_within_the_curation_budget() {
+        assert!(
+            body_of("html-report").len() <= 4096,
+            "body is {} bytes (budget 4096)",
+            body_of("html-report").len()
+        );
+    }
+
+    /// The html-report tree is pinned as an exact two-path set (issue
+    /// #1254): with `.html` an admitted asset kind, a stray HTML file in
+    /// the tree would otherwise ride the embed silently -- this exact-set
+    /// pin holds that surface, mirroring the office-cli pin.
+    #[test]
+    fn the_html_report_tree_is_an_exact_pinned_set() {
+        let expected = ["SKILL.md", "references/template.html"];
+        let files = embedded_files("html-report");
+        let paths: Vec<&str> = files.iter().map(|(p, _)| p.as_str()).collect();
+        assert_eq!(paths, expected, "the embedded html-report tree is pinned");
+    }
+
+    /// The offline contract of the template asset itself (issue #1254):
+    /// both slots present, zero script tags, zero external references,
+    /// and the color scheme follows the OS preference -- the template is
+    /// what the deliverable's opens-offline AC is built on.
+    #[test]
+    fn the_html_report_template_carries_the_offline_contract() {
+        let template = String::from_utf8(
+            embedded_files("html-report")
+                .into_iter()
+                .find(|(p, _)| p == "references/template.html")
+                .expect("template.html")
+                .1,
+        )
+        .expect("template.html is UTF-8");
+        assert!(template.contains("{{TITLE}}"), "the TITLE slot");
+        assert!(template.contains("{{BODY}}"), "the BODY slot");
+        assert!(!template.contains("<script"), "zero JS");
+        assert!(
+            !template.contains("http://") && !template.contains("https://"),
+            "no external references"
+        );
+        assert!(
+            template.contains("prefers-color-scheme"),
+            "follows the OS color scheme"
+        );
+        assert!(template.contains("@media print"), "keeps the print block");
+        assert!(
+            template.contains("aria-label"),
+            "teaches the svg accessibility contract"
+        );
+    }
+
     /// The curation budget for the office-cli body (issue #1188): a
     /// companion body carries the shared CLI syntax layer and so runs
     /// wider than a knowledge skill's page -- the ceiling is 8192,
@@ -1091,8 +1221,9 @@ mod tests {
     /// #1192): the `extra` tail semantics (one element one argument, no
     /// shell, empty array for the plain call), the high-frequency flags
     /// table, the PDF engine prerequisite and selection table, the no-engine
-    /// escape hatch, the vega-fence degradation disclosure (issue #1252 --
-    /// charted markdown regenerates via the `python` tool) promoted into
+    /// escape hatch, the vega-fence degradation disclosure (issue #1252,
+    /// rerouted issue #1254 -- charted markdown regenerates via the
+    /// `html-report` skill) promoted into
     /// the main flow ahead of the Troubleshooting index, whose fallback
     /// row stays (issue #1255 -- the degradation is silent, so nothing
     /// routes a model to the symptom index), and the office-cli division.
@@ -1132,12 +1263,11 @@ mod tests {
             body.contains("belongs to office-cli"),
             "keeps the division sentence"
         );
-        // The vega-fence degradation disclosure (issue #1252): pandoc has no
-        // vega engine, so charted markdown must route to python instead.
-        assert!(
-            body.contains("`python` tool"),
-            "routes charted markdown to the python tool"
-        );
+        // The vega-fence degradation disclosure (issue #1252, rerouted issue
+        // #1254): pandoc has no vega engine, so charted markdown must route
+        // to the html-report skill instead -- both disclosure rows carry the
+        // reroute, so each half gets its own pin (a body-level contains
+        // would ride either row and let one revert silently).
         // The pre-conversion promotion (issue #1255): split on the index
         // heading as the position pin -- the fence phrase itself stays a
         // phrase pin, riding whatever section a re-curation chooses.
@@ -1145,8 +1275,16 @@ mod tests {
             .split_once("## Troubleshooting")
             .expect("a Troubleshooting section to split on");
         assert!(
+            main_flow.contains("`html-report` skill"),
+            "routes charted markdown to the html-report skill ahead of the index"
+        );
+        assert!(
             main_flow.contains("`vega-lite`"),
             "discloses the vega fence degradation ahead of the Troubleshooting index"
+        );
+        assert!(
+            troubleshooting.contains("`html-report` skill"),
+            "keeps the Troubleshooting reroute to the html-report skill"
         );
         assert!(
             troubleshooting.contains("`vega-lite`"),
