@@ -625,6 +625,11 @@ pub(super) struct TurnAudit {
     /// The turn's persisted round-grouped execution trace (ADR-0078, grouped
     /// per ADR-0103); empty for no-tool turns.
     trace: Vec<RecipeTraceRound>,
+    /// The turn's token usage (ADR-0129, issue #1270): the audit-face twin
+    /// of [`TurnRecord::usage`] -- the same settle-frozen value on both
+    /// halves of the timeline entry, persisted with the trace (Decision 4:
+    /// turn level, the .duck audit anchor).
+    usage: Option<crate::model::TurnUsage>,
     /// The turn's runtime + skill provenance (ADR-0078/0081/0101). The
     /// PERSISTED shape (recipe::TurnProvenance, aliased here): the runtime
     /// kind + the external adapter id + the mounted skills, for the .duck
@@ -646,6 +651,7 @@ impl TurnAudit {
     /// attribution.
     fn from_execution(
         rounds: Vec<LoopRound>,
+        usage: Option<crate::model::TurnUsage>,
         skills: Vec<SkillProvenance>,
         runtime: TurnRuntime,
     ) -> Self {
@@ -658,6 +664,7 @@ impl TurnAudit {
                 .into_iter()
                 .map(RecipeTraceRound::from_live_round)
                 .collect(),
+            usage,
             provenance: PersistedTurnProvenance {
                 runtime: Some(runtime_kind),
                 adapter_id,
@@ -673,6 +680,7 @@ impl TurnAudit {
     fn from_recipe_turn(turn: &RecipeTurn) -> Self {
         Self {
             trace: turn.trace.clone(),
+            usage: turn.usage.clone(),
             provenance: turn.provenance.clone(),
         }
     }
@@ -689,13 +697,23 @@ impl TurnAudit {
         &self.provenance
     }
 
+    /// Read-only access to the turn's token usage (ADR-0129, issue #1270;
+    /// for RecipePersister's projection).
+    pub(super) fn usage(&self) -> Option<&crate::model::TurnUsage> {
+        self.usage.as_ref()
+    }
+
     /// Test-only constructor with explicit trace + provenance (issue #415).
     #[cfg(test)]
     pub(super) fn test_new(
         trace: Vec<RecipeTraceRound>,
         provenance: PersistedTurnProvenance,
     ) -> Self {
-        Self { trace, provenance }
+        Self {
+            trace,
+            usage: None,
+            provenance,
+        }
     }
 }
 
@@ -1182,6 +1200,7 @@ impl Session {
         runtime: TurnRuntime,
         asked_at: Option<u64>,
         presented: Vec<String>,
+        usage: Option<crate::model::TurnUsage>,
     ) -> TurnOutcome {
         // Identical repeats collapse (review Important 3, issue #983): the
         // user channel dedupes at staging, so this catches the agent's
@@ -1285,6 +1304,10 @@ impl Session {
                 },
                 invocations: invocations.clone(),
                 artifacts,
+                // ADR-0129 (issue #1270): the usage rides the record
+                // (display) and the audit (persistence) -- the same
+                // settle-frozen value on both halves.
+                usage: usage.clone(),
             },
             // ADR-0078 (issue #319) + ADR-0101: the loop's real multi-call
             // trace (mapped to the recipe form) + the runtime attribution +
@@ -1294,7 +1317,7 @@ impl Session {
             // PERSISTED form rides the Session (the recipe is its .duck
             // layer, read by build_recipe); the TurnRecord's display view
             // above is the same bounded shape.
-            audit: TurnAudit::from_execution(rounds, skills, runtime),
+            audit: TurnAudit::from_execution(rounds, usage, skills, runtime),
         });
         // ADR-0034 per-terminal-turn atomic write: the recipe is rewritten
         // whole-file at the bound path (temp + rename). No-op when no .duck
@@ -2393,6 +2416,7 @@ mod tests {
             settled_at: None,
             invocations: Vec::new(),
             artifacts: Vec::new(),
+            usage: None,
         };
 
         // Inject the timeline entry -- simulates a resumed session whose
@@ -2454,6 +2478,7 @@ mod tests {
             },
             None,
             Vec::new(),
+            None, // no usage evidence (test fixture)
         );
         // ADR-0102 (issue #589): the same attribution snapshot stamps the
         // recipe-header `last_runtime` -- here the external turn's adapter.
@@ -2470,6 +2495,7 @@ mod tests {
             TurnRuntime::BuiltIn,
             None,
             Vec::new(),
+            None, // no usage evidence (test fixture)
         );
 
         let external = match &session.timeline[0] {
@@ -3090,6 +3116,7 @@ mod tests {
             TurnRuntime::BuiltIn,
             None,
             Vec::new(),
+            None, // no usage evidence (test fixture)
         );
 
         assert_eq!(
@@ -3114,6 +3141,7 @@ mod tests {
             TurnRuntime::BuiltIn,
             None,
             Vec::new(),
+            None, // no usage evidence (test fixture)
         );
         assert_eq!(session.session_name(), Some("first question"));
 
@@ -3129,6 +3157,7 @@ mod tests {
             TurnRuntime::BuiltIn,
             None,
             Vec::new(),
+            None, // no usage evidence (test fixture)
         );
         assert_eq!(
             session.session_name(),
@@ -3153,6 +3182,7 @@ mod tests {
             TurnRuntime::BuiltIn,
             None,
             Vec::new(),
+            None, // no usage evidence (test fixture)
         );
         let name = session.session_name().expect("name set");
         let chars: Vec<char> = name.chars().collect();
@@ -3188,6 +3218,7 @@ mod tests {
             TurnRuntime::BuiltIn,
             None,
             Vec::new(),
+            None, // no usage evidence (test fixture)
         );
         assert_eq!(
             session.session_name(),
@@ -3210,6 +3241,7 @@ mod tests {
             TurnRuntime::BuiltIn,
             None,
             Vec::new(),
+            None, // no usage evidence (test fixture)
         );
         assert_eq!(
             session.session_name(),
@@ -3245,6 +3277,7 @@ mod tests {
             TurnRuntime::BuiltIn,
             None,
             Vec::new(),
+            None, // no usage evidence (test fixture)
         );
         assert_eq!(
             session.session_name(),
@@ -3271,6 +3304,7 @@ mod tests {
             TurnRuntime::BuiltIn,
             None,
             Vec::new(),
+            None, // no usage evidence (test fixture)
         );
         assert_eq!(
             session_a.session_name(),
@@ -3287,6 +3321,7 @@ mod tests {
             TurnRuntime::BuiltIn,
             None,
             Vec::new(),
+            None, // no usage evidence (test fixture)
         );
         assert_eq!(
             session_b.session_name(),
@@ -3335,6 +3370,7 @@ mod tests {
             TurnRuntime::BuiltIn,
             None,
             Vec::new(),
+            None, // no usage evidence (test fixture)
         );
         assert!(
             !session.is_timeline_empty(),

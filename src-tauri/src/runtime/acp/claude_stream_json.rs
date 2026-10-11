@@ -112,6 +112,16 @@ pub(crate) enum ClaudeEvent {
         is_error: bool,
         text: String,
     },
+    /// A usage report off a frame (ADR-0129, issue #1270): each `assistant`
+    /// frame carries its own round-trip's `message.usage` (collected per
+    /// frame, summed onto the turn), and the terminal `result` frame
+    /// carries the CLI's turn-total -- the FALLBACK when no assistant frame
+    /// reported (`terminal: true`, never added on top of assistant
+    /// evidence: the two would double-count).
+    Usage {
+        usage: crate::model::TokenUsage,
+        terminal: bool,
+    },
 }
 
 /// Parse one NDJSON line (already deserialized to [`Value`]) into zero or
@@ -135,7 +145,23 @@ pub(crate) fn parse_events(value: &Value) -> Vec<ClaudeEvent> {
                 Vec::new()
             }
         }
-        "assistant" => parse_message_blocks(value, true),
+        "assistant" => {
+            let mut events = parse_message_blocks(value, true);
+            if let Some(usage) = value
+                .get("message")
+                .and_then(|m| m.get("usage"))
+                .and_then(parse_claude_usage)
+            {
+                events.insert(
+                    0,
+                    ClaudeEvent::Usage {
+                        usage,
+                        terminal: false,
+                    },
+                );
+            }
+            events
+        }
         "user" => parse_message_blocks(value, false),
         "stream_event" => parse_stream_event(value),
         "result" => {
@@ -153,11 +179,28 @@ pub(crate) fn parse_events(value: &Value) -> Vec<ClaudeEvent> {
                 .and_then(|v| v.as_str())
                 .unwrap_or("")
                 .to_string();
-            vec![ClaudeEvent::Result {
-                subtype,
-                is_error,
-                text,
-            }]
+            let usage = value
+                .get("usage")
+                .and_then(parse_claude_usage)
+                .map(|usage| ClaudeEvent::Usage {
+                    usage,
+                    terminal: true,
+                });
+            match usage {
+                Some(usage) => vec![
+                    usage,
+                    ClaudeEvent::Result {
+                        subtype,
+                        is_error,
+                        text,
+                    },
+                ],
+                None => vec![ClaudeEvent::Result {
+                    subtype,
+                    is_error,
+                    text,
+                }],
+            }
         }
         // control_request / control_response / anything else: not turn data.
         _ => Vec::new(),
@@ -266,6 +309,31 @@ fn parse_stream_event(value: &Value) -> Vec<ClaudeEvent> {
     } else {
         vec![ClaudeEvent::StreamDelta { text }]
     }
+}
+
+/// Parse + normalize one claude stream-json usage object (ADR-0129
+/// Decision 1 -- the claude channel's collection point). The CLI repeats
+/// the Anthropic API's usage shape verbatim: cache read/write ride
+/// ALONGSIDE `input_tokens` (never inside it), so the total-side input is
+/// the three-way sum; the CLI does not split reasoning out of output, so
+/// the split stays empty (Decision 1's honest-absent rule). An absent or
+/// all-zero object is the fail-closed sentinel (`None`, Decision 3).
+fn parse_claude_usage(value: &Value) -> Option<crate::model::TokenUsage> {
+    let field = |name: &str| value.get(name).and_then(|v| v.as_u64()).unwrap_or(0);
+    let ordinary = field("input_tokens");
+    let read = field("cache_read_input_tokens");
+    let write = field("cache_creation_input_tokens");
+    let output = field("output_tokens");
+    if ordinary == 0 && read == 0 && write == 0 && output == 0 {
+        return None;
+    }
+    Some(crate::model::TokenUsage {
+        input_tokens: ordinary.saturating_add(read).saturating_add(write),
+        cache_read_tokens: read,
+        cache_write_tokens: write,
+        output_tokens: output,
+        reasoning_tokens: None,
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -381,6 +449,7 @@ pub(super) fn run_claude_stream_json(
                 )),
                 Vec::new(),
                 None,
+                None,
             )
         }
     };
@@ -402,6 +471,7 @@ pub(super) fn run_claude_stream_json(
                     Termination::Runtime(format!("stdin write failed: {e}")),
                     Vec::new(),
                     None,
+                    None,
                 )
             }
             (super::process::StdinWriteOutcome::Cancelled, _) => {
@@ -410,6 +480,7 @@ pub(super) fn run_claude_stream_json(
                 return outcome(
                     ProgressClock::cancel_landing(clock.as_ref()),
                     Vec::new(),
+                    None,
                     None,
                 );
             }
@@ -440,6 +511,8 @@ pub(super) fn run_claude_stream_json(
             .collect(),
         streamed_prose: false,
         streamed_text: String::new(),
+        usage: crate::model::TokenUsage::default(),
+        result_usage: None,
     };
 
     let mut termination: Option<Termination>;
@@ -557,6 +630,9 @@ pub(super) fn run_claude_stream_json(
     // ADR-0097 Decision 5: `system{init}` reports the model this turn
     // actually ran -- the honest-rendering catalog (the probe channel owns
     // the full directory; the turn never re-discovers).
+    // Read ahead of the partial moves below -- `current_model.map` and
+    // `settle_rounds` both consume out of the pump.
+    let usage = pump.settle_usage();
     let discovered = pump.current_model.map(|model| {
         let mut d = crate::session::loop_contract::DiscoveredRuntime::empty();
         d.current_model = Some(model);
@@ -572,7 +648,7 @@ pub(super) fn run_claude_stream_json(
         other => other,
     };
     let rounds = pump.tracker.settle_rounds(&term);
-    outcome(term, rounds, discovered)
+    outcome(term, rounds, discovered, usage)
 }
 
 /// A `tool_use` awaiting its `tool_result` (live-phase bookkeeping). Carries
@@ -646,6 +722,12 @@ struct ClaudePump {
     /// -- the dropped frame text stays answerable in logs (#886's
     /// doctrine), the push semantics never change.
     streamed_text: String,
+    /// The assistant frames' usage sum (ADR-0129, issue #1270): each frame
+    /// reports its own round-trip, collected per frame. `result_usage`
+    /// holds the terminal frame's turn-total fallback -- adopted only when
+    /// no assistant frame reported (double-adoption would double-count).
+    usage: crate::model::TokenUsage,
+    result_usage: Option<crate::model::TokenUsage>,
 }
 
 impl ClaudePump {
@@ -657,6 +739,23 @@ impl ClaudePump {
     fn open_window(&mut self) {
         self.streamed_prose = false;
         self.streamed_text.clear();
+    }
+
+    /// The turn's usage (ADR-0129, issue #1270): the assistant frames'
+    /// round-trip sum, falling back to the terminal frame's turn-total
+    /// when no assistant frame reported -- and `None` when neither did
+    /// (fail-closed, Decision 3). An external CLI reports only its own
+    /// process aggregate, so attribution never splits (Decision 6).
+    fn settle_usage(&self) -> Option<crate::model::TurnUsage> {
+        let total = if self.usage.is_zero() {
+            self.result_usage?
+        } else {
+            self.usage
+        };
+        Some(crate::model::TurnUsage {
+            total,
+            subagents: Vec::new(),
+        })
     }
 
     /// Fold one parsed event. Returns `Some(termination)` when the event
@@ -755,6 +854,14 @@ impl ClaudePump {
                 }
                 None
             }
+            ClaudeEvent::Usage { usage, terminal } => {
+                if terminal {
+                    self.result_usage = Some(usage);
+                } else {
+                    self.usage.add(&usage);
+                }
+                None
+            }
             ClaudeEvent::Result {
                 subtype,
                 is_error,
@@ -848,6 +955,7 @@ fn outcome(
     termination: Termination,
     rounds: Vec<LoopRound>,
     discovered: Option<crate::session::loop_contract::DiscoveredRuntime>,
+    usage: Option<crate::model::TurnUsage>,
 ) -> LoopOutcome {
     LoopOutcome {
         termination,
@@ -861,6 +969,7 @@ fn outcome(
         // call-less -- the wiring merge's empty-round pass only ever drops
         // a round the pump itself left hollow.
         trace: rounds,
+        usage,
         discovered_runtime: discovered,
     }
 }
@@ -1119,7 +1228,9 @@ mod tests {
 
     // --- parse_events: result ---------------------------------------------------
 
-    /// A successful result frame carries the terminal text.
+    /// A successful result frame carries the terminal text -- and, per
+    /// ADR-0129 (issue #1270), its `usage` object parses onto the
+    /// terminal-marked fallback event ahead of the Result event.
     #[test]
     fn parse_result_success() {
         let v = json!({
@@ -1132,12 +1243,127 @@ mod tests {
         });
         assert_eq!(
             parse_events(&v),
-            vec![ClaudeEvent::Result {
-                subtype: "success".into(),
-                is_error: false,
-                text: "the answer is 42".into()
-            }]
+            vec![
+                ClaudeEvent::Usage {
+                    usage: crate::model::TokenUsage {
+                        input_tokens: 10,
+                        cache_read_tokens: 0,
+                        cache_write_tokens: 0,
+                        output_tokens: 5,
+                        reasoning_tokens: None,
+                    },
+                    terminal: true,
+                },
+                ClaudeEvent::Result {
+                    subtype: "success".into(),
+                    is_error: false,
+                    text: "the answer is 42".into()
+                }
+            ]
         );
+    }
+
+    // --- usage collection (ADR-0129, issue #1270) -------------------------------
+
+    /// ADR-0129 Decision 1: the claude CLI repeats the Anthropic usage
+    /// shape -- cache read/write ride alongside input, so the normalized
+    /// total-side input is the three-way sum.
+    #[test]
+    fn assistant_frame_usage_normalizes_the_anthropic_shape() {
+        let v = json!({
+            "type": "assistant",
+            "message": {
+                "content": [{"type": "text", "text": "hi"}],
+                "usage": {
+                    "input_tokens": 100,
+                    "cache_read_input_tokens": 30,
+                    "cache_creation_input_tokens": 20,
+                    "output_tokens": 50,
+                },
+            },
+        });
+        let events = parse_events(&v);
+        let usage = events.first().expect("the usage event leads the blocks");
+        assert_eq!(
+            usage,
+            &ClaudeEvent::Usage {
+                usage: crate::model::TokenUsage {
+                    input_tokens: 150,
+                    cache_read_tokens: 30,
+                    cache_write_tokens: 20,
+                    output_tokens: 50,
+                    reasoning_tokens: None,
+                },
+                terminal: false,
+            }
+        );
+        // A frame with no usage object parses to blocks only.
+        let bare = json!({
+            "type": "assistant",
+            "message": {"content": [{"type": "text", "text": "hi"}]},
+        });
+        assert!(parse_events(&bare)
+            .iter()
+            .all(|e| !matches!(e, ClaudeEvent::Usage { .. })));
+    }
+
+    /// ADR-0129 Decision 2/3: assistant frames sum per round-trip; the
+    /// result frame's turn-total is the FALLBACK alone -- never added on
+    /// top (double-adoption would double-count); neither reporting fails
+    /// the turn closed.
+    #[test]
+    fn usage_sums_assistant_frames_and_adopts_the_result_only_as_fallback() {
+        fn frame(input: u64, output: u64) -> Value {
+            json!({
+                "type": "assistant",
+                "message": {
+                    "content": [{"type": "text", "text": "step"}],
+                    "usage": {"input_tokens": input, "output_tokens": output},
+                },
+            })
+        }
+        let result = json!({
+            "type": "result",
+            "subtype": "success",
+            "result": "done",
+            "usage": {"input_tokens": 999, "output_tokens": 999},
+        });
+        // Two assistant frames + the result: the sum wins, the fallback is
+        // never added on top.
+        let mut pump = pump_with_bridge();
+        for v in [frame(100, 40), frame(50, 10)] {
+            for event in parse_events(&v) {
+                pump.fold(event, &mut |_| {});
+            }
+        }
+        for event in parse_events(&result) {
+            pump.fold(event, &mut |_| {});
+        }
+        assert_eq!(
+            pump.settle_usage().map(|u| u.total),
+            Some(crate::model::TokenUsage {
+                input_tokens: 150,
+                cache_read_tokens: 0,
+                cache_write_tokens: 0,
+                output_tokens: 50,
+                reasoning_tokens: None,
+            })
+        );
+        // The result alone (no assistant frame reported): adopted.
+        let mut pump = pump_with_bridge();
+        for event in parse_events(&result) {
+            pump.fold(event, &mut |_| {});
+        }
+        assert_eq!(pump.settle_usage().map(|u| u.total.input_tokens), Some(999));
+        // Neither reported: fail-closed.
+        let mut pump = pump_with_bridge();
+        pump.fold(
+            ClaudeEvent::AssistantText {
+                text: "no usage anywhere".into(),
+            },
+            &mut |_| {},
+        );
+        assert!(pump.settle_usage().is_none());
     }
 
     /// An error result frame maps the same shape (the driver decides the
@@ -1227,6 +1453,8 @@ mod tests {
             gateway_prefixes: vec!["mcp__toptopduck-gateway__".to_string()],
             streamed_prose: false,
             streamed_text: String::new(),
+            usage: crate::model::TokenUsage::default(),
+            result_usage: None,
         }
     }
 

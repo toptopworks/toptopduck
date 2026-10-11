@@ -73,6 +73,16 @@ fn text_turn(text: &str) -> Vec<MockStreamEvent> {
     ]
 }
 
+/// Script one terminal text turn whose stream terminal carries a NON-ZERO
+/// usage record (ADR-0129, issue #1270): the wiring-level collection pins
+/// need real evidence -- the default terminal reports the zero sentinel.
+fn usage_turn(text: &str, usage: Usage) -> Vec<MockStreamEvent> {
+    vec![
+        MockStreamEvent::text(text),
+        MockStreamEvent::FinalResponse(StreamFinal::new("mock", usage)),
+    ]
+}
+
 /// Script one terminal text turn that stopped at the output-token cap
 /// (issue #1003): the stream terminal carries `FinishReason::Length`.
 fn length_capped_text_turn(text: &str) -> Vec<MockStreamEvent> {
@@ -833,6 +843,61 @@ fn the_seam_stamp_reaches_the_subagent_contexts_cap() {
     // request -- the assembled 512 appears in neither.
     assert_eq!(requests[0].max_tokens, Some(2048));
     assert_eq!(requests[1].max_tokens, Some(2048));
+}
+
+/// ADR-0129 Decision 6 (issue #1270): a delegated turn's usage composes
+/// END TO END -- the sub-agent's own fold reports onto the shared table,
+/// the finish composes it INTO the turn total (never a side table alone),
+/// and the outcome carries both. The bridged face's default scripts
+/// report the zero sentinel everywhere, which is exactly the wiring this
+/// pin holds: silently dropping the run's report or the compose leaves
+/// CI green without it.
+#[test]
+fn delegation_usage_composes_into_the_turn_total_end_to_end() {
+    let mut h = Harness::new();
+    h.seed_result_1();
+    h.delegations = vec![analyst_spec()];
+    let model = MockCompletionModel::from_stream_turns([
+        batch_turn(
+            "delegate",
+            None,
+            &[("tu_d1", "analyst", json!({"prompt": "count the rows"}))],
+        ),
+        usage_turn(
+            "sub done",
+            Usage {
+                input_tokens: 40,
+                cached_input_tokens: 10,
+                output_tokens: 12,
+                ..Usage::new()
+            },
+        ),
+        usage_turn(
+            "main done",
+            Usage {
+                input_tokens: 100,
+                cached_input_tokens: 30,
+                output_tokens: 20,
+                ..Usage::new()
+            },
+        ),
+    ]);
+    let outcome = h.run(
+        &delegation_request(&h, "count"),
+        mock_runtime(model.clone()),
+        Arc::new(CancelToken::new()),
+    );
+    assert_eq!(outcome.termination, Termination::Text("main done".into()));
+    let usage = outcome.usage.as_ref().expect("the turn settles a usage");
+    // The compose (Decision 6): main (verbatim 100/30/20) + sub (40/10/12).
+    assert_eq!(usage.total.input_tokens, 140);
+    assert_eq!(usage.total.cache_read_tokens, 40);
+    assert_eq!(usage.total.output_tokens, 32);
+    // The attribution table rides alongside, never a fabricated split.
+    assert_eq!(usage.subagents.len(), 1);
+    assert_eq!(usage.subagents[0].name, "analyst");
+    assert_eq!(usage.subagents[0].usage.input_tokens, 40);
+    assert_eq!(usage.subagents[0].usage.output_tokens, 12);
 }
 
 /// A cap-stamped run surfaces the tool-input truncation shape at the

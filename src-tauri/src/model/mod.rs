@@ -6,8 +6,10 @@ mod dataset;
 mod provider;
 mod thread;
 mod turn;
+mod usage;
 
 pub use dataset::*;
 pub use provider::*;
 pub use thread::*;
 pub use turn::*;
+pub use usage::*;

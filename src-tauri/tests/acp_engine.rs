@@ -1563,3 +1563,19 @@ fn acp_turn_set_config_option_rejection_fails_the_turn() {
         "the fixture must have seen the injection before rejecting it"
     );
 }
+
+// --- usage_update: occupancy, not metering (ADR-0129, issue #1270) -----------
+
+/// The spec's usage_update is a context-occupancy snapshot (`used`/`size`
+/// -- no input/output split), not a billing-grade report: the engine
+/// recognizes the update but the turn stays fail-closed on usage; the
+/// text still settles normally.
+#[test]
+fn usage_update_occupancy_is_recognized_not_metered() {
+    let (outcome, _) = run("usage_update", 24);
+    assert!(matches!(outcome.termination, Termination::Text(_)));
+    assert!(
+        outcome.usage.is_none(),
+        "an occupancy snapshot is not metering evidence -- fail-closed"
+    );
+}

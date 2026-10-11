@@ -9,13 +9,13 @@
 // folds, the cancel-reason split (#883), and the textual markdown (#827).
 
 import { describe, expect, it } from "vitest";
-import { render } from "@testing-library/react";
+import { fireEvent, render, screen } from "@testing-library/react";
 import { IntlProvider } from "react-intl";
 import { TooltipProvider } from "../../ui/tooltip";
 import { catalogFor } from "../../../i18n";
 import { TurnCard } from "../TurnCard";
 import type { DatasetDescriptor } from "../../../types/dataset";
-import type { TextKind, TurnRecord } from "../../../types/thread";
+import type { TextKind, TraceEntry, TurnRecord } from "../../../types/thread";
 
 // Thread chrome routes through react-intl (ADR-0052); zh-CN matches the
 // shared fixture convention, and the marker's label is the raw adapter id
@@ -392,5 +392,117 @@ describe("TurnCard textual outcome markdown (issue #827)", () => {
     expect(outcome).toHaveClass("mt-1");
     expect(outcome?.querySelector(".textual-kind")).toHaveClass("m-0");
     expect(container.querySelector(".assumption")).toHaveClass("mt-0.5");
+  });
+});
+
+// The turn card's usage footer surface (ADR-0129 Decision 5, issue #1270):
+// a usage-bearing turn mounts the always-visible token line on the closing
+// meta row; a turn without usage (fail-closed, or recorded before the
+// field) renders none -- the honest-degrade rule.
+describe("TurnCard usage footer (ADR-0129, issue #1270)", () => {
+  it("renders the token line when the record carries usage", () => {
+    const record = recordWith(undefined);
+    record.usage = {
+      total: {
+        input_tokens: 1500,
+        cache_read_tokens: 1000,
+        cache_write_tokens: 0,
+        output_tokens: 300,
+      },
+    };
+    renderCard(record);
+    // zh-CN catalog wording (the suite's fixture locale): the segments
+    // resolve from the catalog, not literals, so the pin tracks the
+    // wording (issue #139 convention).
+    // zh compact has no thousands separator (1500, not 1,500).
+    expect(screen.getByText("入 1500")).toBeInTheDocument();
+    expect(screen.getByText("缓存 1000")).toBeInTheDocument();
+    expect(screen.getByText("出 300")).toBeInTheDocument();
+  });
+
+  it("renders no token line for a turn without usage", () => {
+    renderCard(recordWith(undefined));
+    expect(screen.queryByText(/^入 /)).not.toBeInTheDocument();
+  });
+});
+
+// The sub-agent subtotal pairing (ADR-0129 Decision 6, issue #1270): the
+// name-ordinal walk runs at TURN scope -- a same-spec re-delegation in a
+// later round must reach the SECOND table entry (a per-round cursor reads
+// the first again), and a refused row (no sub-trace) consumes no ordinal.
+// Each delegation dialog annotates its own run's subtotal, never a
+// same-name sibling's.
+describe("TurnCard sub-agent subtotal pairing (ADR-0129, issue #1270)", () => {
+  const analystRun = (): TraceEntry => ({
+    name: "analyst",
+    operation_kind: "execute",
+    summary: "count the rows",
+    success: true,
+    result_excerpt: "",
+    sub_rounds: [{ calls: [] }],
+  });
+  const analystRefusal = (): TraceEntry => ({
+    name: "analyst",
+    operation_kind: "execute",
+    summary: "count the rows",
+    success: false,
+    result_excerpt: "refused",
+  });
+  const usageOf = (input: number, output: number) => ({
+    input_tokens: input,
+    cache_read_tokens: 0,
+    cache_write_tokens: 0,
+    output_tokens: output,
+  });
+  // The turn total stays visually distinct from both subtotals (999).
+  const dualRunRecord = (): TurnRecord => {
+    const record = recordWith(undefined);
+    record.trace = [{ calls: [analystRun()] }, { calls: [analystRun()] }];
+    record.usage = {
+      total: usageOf(999, 500),
+      subagents: [
+        { name: "analyst", usage: usageOf(30, 10) },
+        { name: "analyst", usage: usageOf(5, 5) },
+      ],
+    };
+    return record;
+  };
+  const openSubtrace = (roundIndex: number) => {
+    renderCard(dualRunRecord());
+    screen.getAllByText("轨迹 · 1 次调用").forEach((t) => fireEvent.click(t));
+    fireEvent.click(screen.getAllByText("子轨迹")[roundIndex]);
+  };
+
+  it("round 1's dialog carries the first run's subtotal", () => {
+    openSubtrace(0);
+    expect(screen.getByText("入 30")).toBeInTheDocument();
+    expect(screen.getByText("出 10")).toBeInTheDocument();
+  });
+
+  it("a same-spec re-delegation in a later round reaches the second entry", () => {
+    openSubtrace(1);
+    // The pairing bug reads the first entry again (入 30); the turn-scope
+    // ordinal must reach the second run.
+    expect(screen.getByText("入 5")).toBeInTheDocument();
+    expect(screen.getByText("出 5")).toBeInTheDocument();
+  });
+
+  it("a refused row (no sub-trace) consumes no ordinal", () => {
+    const record = recordWith(undefined);
+    // One round: the refusal lands a trace row without a table entry; the
+    // real run behind it must still pair with the FIRST table entry.
+    record.trace = [{ calls: [analystRefusal(), analystRun()] }];
+    record.usage = {
+      total: usageOf(999, 500),
+      subagents: [{ name: "analyst", usage: usageOf(30, 10) }],
+    };
+    renderCard(record);
+    fireEvent.click(screen.getByText("轨迹 · 2 次调用"));
+    // The refusal renders no sub-trace affordance (the dialog's own
+    // self-guard) -- exactly one openable dialog remains.
+    const buttons = screen.getAllByText("子轨迹");
+    expect(buttons).toHaveLength(1);
+    fireEvent.click(buttons[0]);
+    expect(screen.getByText("入 30")).toBeInTheDocument();
   });
 });

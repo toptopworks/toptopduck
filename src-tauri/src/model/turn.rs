@@ -433,6 +433,14 @@ pub struct TurnRecord {
     /// enters the LLM window (like [`Self::trace`]).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub artifacts: Vec<TurnArtifact>,
+    /// The turn's token usage (ADR-0129, issue #1270): the normalized
+    /// aggregate + the built-in sub-agent subtotals. `None` for fail-closed
+    /// turns (the channel reported no provider evidence) and for turns
+    /// recorded before the field -- the display layer renders nothing for
+    /// either (honest degrade, ADR-0129 Decision 3). Display-only: never
+    /// enters the LLM window (like [`Self::trace`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage: Option<crate::model::TurnUsage>,
 }
 
 /// One delivered artifact on a turn's manifest (ADR-0124, issue #1087):

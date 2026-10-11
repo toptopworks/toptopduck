@@ -231,7 +231,7 @@ impl super::Session {
         // ADR-0078). `on_phase` moves into exactly one arm (match arms are
         // exclusive), so the built-in closure and the external engine cannot
         // both hold it.
-        let (outcome, trace) = match self.external_runtime.clone() {
+        let (outcome, trace, usage) = match self.external_runtime.clone() {
             Some(adapter) => self.run_external_turn(
                 question,
                 &turns,
@@ -278,7 +278,7 @@ impl super::Session {
                 // Session fields, so they coexist without widening to
                 // `&mut self`. The block scope drops the borrows before
                 // `record_turn` takes its own `&mut self`.
-                let (outcome, trace) = {
+                let (outcome, trace, usage) = {
                     // Connect the user's configured external MCP servers
                     // (issue #301 slice C-loop / slice D): same per-turn
                     // lifecycle as the gateway path (ADR-0076 Decision +
@@ -442,6 +442,7 @@ impl super::Session {
                                 termination,
                                 promotions: Vec::new(),
                                 trace: Vec::new(),
+                                usage: None,
                                 discovered_runtime: None,
                             },
                             Ok(runner) => runner.run(
@@ -464,6 +465,11 @@ impl super::Session {
                     // The MCP cancel-teardown watcher stands down through
                     // `mcp_turn_done`'s Drop at block end (issue #889) --
                     // no manual store to skip on an unwinding path.
+                    // ADR-0129 (issue #1270): the usage rides alongside
+                    // the trace, the same move-out-before-mapping pattern
+                    // (`turn_outcome_from_loop` reads only `termination` +
+                    // `promotions`).
+                    let usage = std::mem::take(&mut loop_outcome.usage);
                     // The loop's real multi-call trace rides alongside the
                     // mapped outcome to record_turn (ADR-0078, issue #319): the
                     // mapper stays focused on the four-way classification, so
@@ -483,9 +489,10 @@ impl super::Session {
                             BUILT_IN_RUNTIME_FACE,
                         ),
                         trace,
+                        usage,
                     )
                 };
-                (outcome, trace)
+                (outcome, trace, usage)
             }
         };
         // ADR-0055 post-turn discard: if `close_session` marked this session
@@ -515,6 +522,7 @@ impl super::Session {
             attribution,
             asked_at,
             presented_files,
+            usage,
         )
     }
 
@@ -549,7 +557,7 @@ impl super::Session {
         on_phase: O,
         skill_state: &mut SkillTurnState<'_>,
         inputs: &TurnInputs<'_>,
-    ) -> (TurnOutcome, Vec<LoopRound>) {
+    ) -> (TurnOutcome, Vec<LoopRound>, Option<crate::model::TurnUsage>) {
         // 1. Resolve the CLI binary. Not-on-PATH -> an external-runtime
         //    failure (the engine never spawns; nothing to clean up).
         let binary = match detect_adapter(&adapter) {
@@ -560,6 +568,7 @@ impl super::Session {
                         detail: format!("external runtime `{}` not found on PATH", adapter.id),
                     }),
                     Vec::new(),
+                    None,
                 );
             }
         };
@@ -574,6 +583,7 @@ impl super::Session {
                         detail: format!("gateway bind failed: {e}"),
                     }),
                     Vec::new(),
+                    None,
                 );
             }
         };
@@ -589,6 +599,7 @@ impl super::Session {
                 return (
                     TurnOutcome::Failed(TurnFailure::Runtime { detail }),
                     Vec::new(),
+                    None,
                 );
             }
         };
@@ -805,6 +816,10 @@ impl super::Session {
                         detail: format!("gateway serve failed: {e}"),
                     }),
                     acp_outcome.trace,
+                    // ADR-0129 (issue #1270): the engine already ran -- its
+                    // reported round-trips still count (a failed turn keeps
+                    // its evidence, Decision 3).
+                    acp_outcome.usage.clone(),
                 );
             }
         };
@@ -813,9 +828,11 @@ impl super::Session {
         self.snapshot_discovered_runtime(&acp_outcome);
         let mut merged = merge_outcomes(gateway_outcome, acp_outcome);
         let trace = std::mem::take(&mut merged.trace);
+        let usage = std::mem::take(&mut merged.usage);
         (
             turn_outcome_from_loop(merged, self.session_id.as_ref(), runtime_face),
             trace,
+            usage,
         )
     }
 }

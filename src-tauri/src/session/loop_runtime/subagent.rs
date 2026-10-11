@@ -306,6 +306,23 @@ fn finish_run(run: &mut SubagentRun, exit: RunExit) -> SubagentReport {
     // persists no empty ghost round under the delegation entry.
     retain_landed_rounds(&mut run.fold.rounds);
     let rounds = std::mem::take(&mut run.fold.rounds);
+    // ADR-0129 Decision 6 (issue #1270): report the run's usage subtotal
+    // onto the shared table -- the sub-agent's fold is as private as its
+    // rounds, so the finished run reports here and the turn's finish
+    // composes the table. A run that never saw a usage record reports
+    // nothing (fail-closed, Decision 3); a cancelled run keeps its
+    // already-reported round-trips, like the main fold.
+    if let Some(usage) = run.fold.usage() {
+        run.ctx
+            .state
+            .subagent_usage
+            .lock()
+            .expect("subagent usage lock poisoned")
+            .push(crate::model::SubagentUsage {
+                name: run.name.clone(),
+                usage,
+            });
+    }
     // Promotions still ride the shared list: a sub-agent's `result_N` lands
     // on the working set regardless of the sub-agent's fate.
     let promoted = promoted_since(&run.ctx.state, run.promotions_before);
@@ -463,7 +480,7 @@ async fn run_subagent(spec: &DelegationSpec, task: &str, ctx: &Arc<SubagentCtx>)
         task: task.to_string(),
         channel: Arc::clone(&channel),
         promotions_before,
-        fold: EventFold::new(),
+        fold: EventFold::new(ctx.protocol),
         finish_record,
         armed: true,
     };

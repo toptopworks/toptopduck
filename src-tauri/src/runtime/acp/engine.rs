@@ -488,6 +488,9 @@ impl AcpEngine {
             Termination::Cancelled => ProgressClock::cancel_landing(clock.as_ref()),
             other => other,
         };
+        // ADR-0129 (issue #1270): the spec's usage_update carries only a
+        // context-occupancy snapshot, so the ACP turn lands no usage
+        // (fail-closed, Decision 3).
         let rounds = pump.tracker.settle_rounds(&termination);
         let outcome = self.outcome(termination, rounds, discovered);
         child.kill_and_wait();
@@ -510,6 +513,9 @@ impl AcpEngine {
             // boundary, with per-round thinking + prose slots; the built-in
             // loop's flat wrap no longer funnels through here.
             trace: rounds,
+            // ADR-0129 (issue #1270): always None -- the ACP spec's
+            // usage_update is an occupancy snapshot, not metering.
+            usage: None,
             // ADR-0095: the handshake's extracted catalog rides every
             // post-handshake exit (None before / on handshake failure).
             discovered_runtime: discovered,
@@ -1335,6 +1341,13 @@ impl Pump {
                 }
                 // An update with no matching pending row (missed the start) is
                 // dropped -- the trace stays consistent with the starts seen.
+            }
+            SessionUpdate::UsageUpdate { .. } => {
+                // Recognized, deliberately uncollected (ADR-0129 issue
+                // #1270, live-pinned against the spec): the update is a
+                // context-occupancy snapshot, not a metering report -- the
+                // spec offers no billing-grade usage source, so the ACP
+                // turn stays fail-closed on usage (Decision 3).
             }
             SessionUpdate::Other => {}
         }

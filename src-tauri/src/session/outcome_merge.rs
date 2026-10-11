@@ -371,6 +371,7 @@ mod tests {
             termination: Termination::Text("acp reply".into()),
             promotions: Vec::new(),
             trace: LoopRound::flat_wrap(trace),
+            usage: None,
             discovered_runtime: None,
         }
     }
@@ -409,6 +410,7 @@ mod tests {
                 sql: "SELECT 1".into(),
             }],
             trace: Vec::new(),
+            usage: None,
             discovered_runtime: None,
         };
         match turn_outcome_from_loop(outcome, None, BUILT_IN_RUNTIME_FACE) {
@@ -433,6 +435,7 @@ mod tests {
             termination: Termination::Runtime("external runtime `cli-a` not found on PATH".into()),
             promotions: Vec::new(),
             trace: Vec::new(),
+            usage: None,
             discovered_runtime: None,
         };
         match turn_outcome_from_loop(outcome, None, BUILT_IN_RUNTIME_FACE) {
@@ -458,6 +461,7 @@ mod tests {
             }),
             promotions: Vec::new(),
             trace: Vec::new(),
+            usage: None,
             discovered_runtime: None,
         };
         match turn_outcome_from_loop(outcome, None, BUILT_IN_RUNTIME_FACE) {
@@ -510,6 +514,7 @@ mod tests {
                 sql: "SELECT 1".into(),
             }],
             trace: Vec::new(),
+            usage: None,
             discovered_runtime: None,
         };
         match turn_outcome_from_loop(outcome, None, BUILT_IN_RUNTIME_FACE) {
@@ -793,6 +798,7 @@ mod tests {
         let acp = LoopOutcome {
             termination: Termination::Text("acp reply".into()),
             promotions: Vec::new(),
+            usage: None,
             discovered_runtime: None,
             trace: vec![
                 LoopRound {
@@ -837,6 +843,7 @@ mod tests {
     fn merge_outcomes_termination_from_acp() {
         let gateway = gateway_outcome(Vec::new());
         let acp = LoopOutcome {
+            usage: None,
             discovered_runtime: None,
             termination: Termination::Text("done".into()),
             promotions: Vec::new(),
@@ -875,6 +882,7 @@ mod tests {
         let acp = LoopOutcome {
             termination: Termination::Text("acp reply".into()),
             promotions: Vec::new(),
+            usage: None,
             discovered_runtime: None,
             trace: vec![LoopRound {
                 thinking: Some(ThinkingTrace {
@@ -1039,6 +1047,7 @@ mod tests {
         let acp = LoopOutcome {
             termination: Termination::Text("acp reply".into()),
             promotions: Vec::new(),
+            usage: None,
             discovered_runtime: None,
             trace: vec![LoopRound {
                 thinking: None,

@@ -151,6 +151,23 @@ fn main() {
                 &serde_json::json!({"type": "turn.completed", "usage": {"input_tokens": 0, "output_tokens": 0}}),
             );
         }
+        // ADR-0129 (issue #1270): the terminal usage rides `turn.completed`
+        // (live-measured on 0.154) -- non-zero evidence the end-to-end test
+        // settles as the turn's usage.
+        "usage_turn" => {
+            emit(&mut out, &serde_json::json!({"type": "turn.started"}));
+            emit(&mut out, &agent_message("item_0", "the answer is 42"));
+            emit(
+                &mut out,
+                &serde_json::json!({"type": "turn.completed", "usage": {
+                    "input_tokens": 20552,
+                    "cached_input_tokens": 3840,
+                    "cache_write_input_tokens": 12,
+                    "output_tokens": 5,
+                    "reasoning_output_tokens": 0
+                }}),
+            );
+        }
         // The command arrives as the measured item.started / item.completed
         // pair: the streaming variant must not double the trace row.
         "tool_call" => {

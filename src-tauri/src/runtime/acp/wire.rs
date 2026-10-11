@@ -356,9 +356,23 @@ pub enum SessionUpdate {
         #[serde(default)]
         content: Vec<ToolCallContent>,
     },
+    /// The ACP `usage_update` notification (ADR-0129 issue #1270,
+    /// live-pinned against the spec): a CONTEXT-OCCUPANCY snapshot, not a
+    /// metering report -- `used` is the tokens currently in context and
+    /// `size` the window total, with no input/output split and no
+    /// per-round-trip accounting (the optional `cost` money field stays
+    /// unmodeled, Decision 5). The spec offers no billing-grade usage
+    /// source, so the engine recognizes the update but collects NOTHING
+    /// from it -- ACP turns stay fail-closed on usage (Decision 3).
+    UsageUpdate {
+        #[serde(default)]
+        used: u64,
+        #[serde(default)]
+        size: u64,
+    },
     /// Any other update kind (user_message_chunk, plan,
     /// available_commands_update, current_mode_update, config_option_update,
-    /// session_info_update, usage_update). Ignored by the engine.
+    /// session_info_update). Ignored by the engine.
     #[serde(other)]
     Other,
 }
@@ -899,7 +913,7 @@ mod tests {
         let raw = serde_json::json!({
             "sessionId": "s1",
             "update": {
-                "sessionUpdate": "usage_update",
+                "sessionUpdate": "plan",
                 "contextWindow": 200000,
                 "tokensUsed": 42,
             },
@@ -907,6 +921,48 @@ mod tests {
         let params: SessionUpdateParams =
             serde_json::from_value(raw).expect("unknown update kind must not reject");
         assert_eq!(params.update, SessionUpdate::Other);
+    }
+
+    /// ADR-0129 (issue #1270): `usage_update` deserializes onto the modeled
+    /// variant in its REAL spec shape -- an occupancy snapshot (`used` /
+    /// `size`; the spec has no input/output split, and the unmodeled
+    /// `cost` field is ignored) -- and a payload missing the fields still
+    /// parses (the same forward-compatibility posture as `Other`). The
+    /// engine recognizes the update but collects nothing from it; the
+    /// fail-closed billing posture is pinned in the engine tests.
+    #[test]
+    fn usage_update_deserializes_the_occupancy_shape() {
+        let raw = serde_json::json!({
+            "sessionId": "s1",
+            "update": {
+                "sessionUpdate": "usage_update",
+                "used": 1500,
+                "size": 200_000,
+                "cost": {"amount": "1.25", "currency": "USD"},
+            },
+        });
+        let params: SessionUpdateParams =
+            serde_json::from_value(raw).expect("the spec shape parses");
+        match params.update {
+            SessionUpdate::UsageUpdate { used, size } => {
+                assert_eq!(used, 1500);
+                assert_eq!(size, 200_000);
+            }
+            other => panic!("expected UsageUpdate, got {other:?}"),
+        }
+        // A bare update still parses: serde defaults absorb absent fields.
+        let bare = serde_json::json!({
+            "sessionId": "s1",
+            "update": {"sessionUpdate": "usage_update"},
+        });
+        let params: SessionUpdateParams =
+            serde_json::from_value(bare).expect("a bare update degrades");
+        match params.update {
+            SessionUpdate::UsageUpdate { used, size } => {
+                assert_eq!((used, size), (0, 0));
+            }
+            other => panic!("expected UsageUpdate, got {other:?}"),
+        }
     }
 
     /// A tool_call update deserializes with the discriminated shape.

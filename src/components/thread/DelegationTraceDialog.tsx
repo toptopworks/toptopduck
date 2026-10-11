@@ -12,7 +12,8 @@ import {
 import { RoundProse } from "./RoundProse";
 import { ThinkingFold } from "./ThinkingFold";
 import { TraceRowList } from "./TraceRow";
-import type { TraceEntry, TraceRound } from "../../types/thread";
+import { UsageFooter } from "./UsageFooter";
+import type { SubagentUsage, TraceEntry, TraceRound } from "../../types/thread";
 
 // The delegation entry's nested sub-trace viewer (ADR-0117 Decision 6, issue
 // #934; the modal form was decided on the issue, triage comment): a
@@ -53,7 +54,13 @@ function DelegationSubTraceBody({ rounds }: { rounds: ReadonlyArray<TraceRound> 
 
 /** The delegation row's view affordance + the modal it opens. Owns the open
  *  state; the row renders the trigger button. */
-export function DelegationTraceDialog({ entry }: { entry: TraceEntry }) {
+export function DelegationTraceDialog({
+  entry,
+  subtotal,
+}: {
+  entry: TraceEntry;
+  subtotal?: SubagentUsage;
+}) {
   const [open, setOpen] = useState(false);
   const rounds = entry.sub_rounds ?? [];
   // Self-guarding: an entry without sub-rounds renders nothing at all -- the
@@ -96,6 +103,15 @@ export function DelegationTraceDialog({ entry }: { entry: TraceEntry }) {
             <DialogDescription className="subtrace-task text-left">
               {entry.summary}
             </DialogDescription>
+            {/* ADR-0129 Decision 6 (issue #1270): the sub-agent's usage
+                subtotal, when the turn's table carried one -- the row-level
+                attribution the built-in runtime's private folds make
+                possible. */}
+            {subtotal !== undefined && (
+              <div className="subtrace-usage text-xs text-muted-foreground">
+                <UsageFooter usage={subtotal.usage} />
+              </div>
+            )}
           </DialogHeader>
           <div className="max-h-[60vh] overflow-y-auto">
             <DelegationSubTraceBody rounds={rounds} />

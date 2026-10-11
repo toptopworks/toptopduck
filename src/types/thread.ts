@@ -237,6 +237,44 @@ export interface TurnRecord {
   // recorded before the field. Rendering rides #1088; existence is
   // checked at render time, the manifest is never rewritten.
   artifacts?: TurnArtifact[];
+  // The turn's token usage (ADR-0129, #1270): the five-field normalized
+  // aggregate + the built-in sub-agent subtotals. Absent for fail-closed
+  // turns (the channel reported no provider evidence) and turns recorded
+  // before the field -- the footer renders nothing for either (honest
+  // degrade). Display-only, never enters the LLM window (like trace).
+  usage?: TurnUsage;
+}
+
+// Five-field normalized token usage (ADR-0129, #1270). Mirrors the Rust
+// model::TokenUsage. input_tokens is the total-side input (ordinary +
+// cache write + cache read); the two cache counters are breakdown SUBSETS
+// of it (never re-added into any total -- the double-count guard the
+// normalization contract pins). reasoning_tokens is a subset of
+// output_tokens, absent when the upstream does not split it. The grand
+// total is derived (input + output), never carried.
+export interface TokenUsage {
+  input_tokens: number;
+  cache_read_tokens: number;
+  cache_write_tokens: number;
+  output_tokens: number;
+  reasoning_tokens?: number;
+}
+
+// One turn's usage aggregate (ADR-0129, #1270): the turn total plus the
+// built-in sub-agent subtotal table. External-runtime turns carry an empty
+// table -- attribution falls to the host turn unannotated (Decision 6).
+// Mirrors the Rust model::TurnUsage.
+export interface TurnUsage {
+  total: TokenUsage;
+  subagents?: SubagentUsage[];
+}
+
+// One named built-in sub-agent's usage subtotal (ADR-0129, #1270). The
+// name is the delegation spec's identity -- the same one the delegation
+// trace dialog keys on (#933).
+export interface SubagentUsage {
+  name: string;
+  usage: TokenUsage;
 }
 
 // One delivered artifact on a turn's manifest (ADR-0124, #1087). Mirrors

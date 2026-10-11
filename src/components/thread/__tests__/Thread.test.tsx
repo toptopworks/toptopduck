@@ -2915,3 +2915,70 @@ describe("Thread", () => {
     expect(onSelectViz).toHaveBeenCalledWith(BODY);
   });
 });
+
+// The session header's derived usage total (ADR-0129 Decision 4, issue
+// #1270): the sum over the turns that carry evidence -- turns without
+// usage contribute nothing and annotate nothing, and a session with no
+// evidence at all renders no total.
+describe("session usage total (ADR-0129, issue #1270)", () => {
+  // The suite's turnEntry helper is describe-local; a local twin keeps
+  // this block self-contained (the record shape is the only contract).
+  const turnEntry = (record: TurnRecord): ThreadEntry => ({
+    entry: "Turn",
+    data: record,
+  });
+  const usageRecord = (input: number, output: number): TurnRecord => ({
+    question: "问",
+    outcome: {
+      kind: "Textual",
+      data: { text_kind: "Agent", body: "答", assumption: null },
+    },
+    trace: [],
+    provenance: { skills: [], runtime: undefined },
+    usage: {
+      total: {
+        input_tokens: input,
+        cache_read_tokens: 0,
+        cache_write_tokens: 0,
+        output_tokens: output,
+      },
+    },
+  });
+
+  it("sums the evidence-bearing turns into the header total", () => {
+    renderThread(
+      <Thread
+        entries={[turnEntry(usageRecord(1000, 200)), turnEntry(usageRecord(24, 6))]}
+        selectedResult={null}
+        onSelectResult={() => {}}
+      />,
+    );
+    // 1000 + 200 + 24 + 6 = 1230 -> the zh-CN compact form ("1230":
+    // Chinese does not abbreviate below 万, no thousands separator).
+    expect(screen.getByText("· 累计 1230")).toBeInTheDocument();
+  });
+
+  it("counts a partial (output-only) turn and skips a zero-usage turn", () => {
+    // The zero-usage turn contributes nothing; the partial (output-only)
+    // turn still counts -- evidence is per-field growth, not all-fields.
+    renderThread(
+      <Thread
+        entries={[turnEntry(usageRecord(0, 0)), turnEntry(usageRecord(50, 0))]}
+        selectedResult={null}
+        onSelectResult={() => {}}
+      />,
+    );
+    expect(screen.getByText("· 累计 50")).toBeInTheDocument();
+  });
+
+  it("renders no total when no turn carries evidence", () => {
+    renderThread(
+      <Thread
+        entries={[turnEntry(usageRecord(0, 0))]}
+        selectedResult={null}
+        onSelectResult={() => {}}
+      />,
+    );
+    expect(screen.queryByText(/^· 累计/)).not.toBeInTheDocument();
+  });
+});

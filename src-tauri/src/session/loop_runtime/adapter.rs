@@ -123,6 +123,12 @@ pub(crate) struct SharedTurnState {
     /// An honest termination overriding the fold's derivation (a dispatch
     /// panic, issue #321).
     pub(crate) aborted: Mutex<Option<Termination>>,
+    /// The built-in sub-agents' usage subtotals (ADR-0129 Decision 6,
+    /// issue #1270), one entry per delegation run in collection order.
+    /// Each sub-agent's fold is private (usage included, like its rounds),
+    /// so the finished run reports here -- the turn's finish composes the
+    /// table onto the outcome's aggregate.
+    pub(crate) subagent_usage: Mutex<Vec<crate::model::SubagentUsage>>,
 }
 
 impl SharedTurnState {
@@ -145,6 +151,7 @@ impl SharedTurnState {
             promotions: Mutex::new(Vec::new()),
             gate_cancelled: AtomicBool::new(false),
             aborted: Mutex::new(None),
+            subagent_usage: Mutex::new(Vec::new()),
         }
     }
 }

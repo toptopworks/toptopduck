@@ -270,6 +270,10 @@ impl RecipePersister {
                     // ADR-0124 (issue #1087): the artifact manifest rides
                     // the persisted turn verbatim (settle-frozen).
                     turn.artifacts = record.artifacts.clone();
+                    // ADR-0129 (issue #1270): the turn's usage rides the
+                    // persisted turn from the audit half (the record's own
+                    // copy is the same settle-frozen value).
+                    turn.usage = audit.usage().cloned();
                     Some(RecipeEntry::Turn(turn))
                 }
                 TimelineEntry::Source(ev) => Some(RecipeEntry::Source(ev.clone())),
@@ -611,6 +615,7 @@ mod tests {
                 settled_at: None,
                 invocations: Vec::new(),
                 artifacts: Vec::new(),
+                usage: None,
             },
             audit: TurnAudit::test_new(
                 Vec::new(),
@@ -840,6 +845,7 @@ mod tests {
                 settled_at: None,
                 invocations: Vec::new(),
                 artifacts: Vec::new(),
+                usage: None,
             },
             audit: TurnAudit::test_new(trace.clone(), provenance.clone()),
         }];
@@ -888,6 +894,7 @@ mod tests {
                 settled_at: None,
                 invocations: Vec::new(),
                 artifacts: Vec::new(),
+                usage: None,
             },
             audit: TurnAudit::test_new(Vec::new(), Default::default()),
         }];
@@ -934,6 +941,7 @@ mod tests {
                 settled_at: None,
                 invocations: Vec::new(),
                 artifacts: Vec::new(),
+                usage: None,
             },
             audit: TurnAudit::test_new(Vec::new(), Default::default()),
         }];

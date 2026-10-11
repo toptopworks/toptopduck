@@ -414,6 +414,22 @@ fn play_scenario(
             notify(out, agent_message("the answer is 42"));
             respond_prompt(out, &id, StopReason::EndTurn);
         }
+        // ADR-0129 (issue #1270): the spec's usage_update is a
+        // context-occupancy snapshot -- modeled in its REAL shape
+        // (`used`/`size`; no input/output split exists at this boundary).
+        // The integration test pins that the turn stays fail-closed on
+        // usage despite the update arriving.
+        "usage_update" => {
+            notify(
+                out,
+                SessionUpdate::UsageUpdate {
+                    used: 1500,
+                    size: 200_000,
+                },
+            );
+            notify(out, agent_message("the answer is 42"));
+            respond_prompt(out, &id, StopReason::EndTurn);
+        }
         // `prompt_response_raw` (issue #851): the prompt response as a raw
         // schema-shaped line -- `stopReason: "end_turn"`, the spelling the
         // schema crate named by `wire::MODELED_SCHEMA` defines. The typed

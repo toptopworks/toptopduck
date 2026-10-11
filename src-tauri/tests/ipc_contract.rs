@@ -697,6 +697,7 @@ fn turn_record_pairs_question_and_outcome() {
             settled_at: None,
             invocations: Vec::new(),
             artifacts: Vec::new(),
+            usage: None,
         },
         r#"{"question":"总行数？","outcome":{"kind":"Failed","data":{"kind":"NotWired"}},"trace":[],"provenance":{"skills":[]}}"#,
     );
@@ -889,6 +890,7 @@ fn thread_entry_turn_wraps_a_turn_record_under_data() {
             settled_at: None,
             invocations: Vec::new(),
             artifacts: Vec::new(),
+            usage: None,
         }),
         r#"{"entry":"Turn","data":{"question":"总行数？","outcome":{"kind":"Failed","data":{"kind":"StaleReference","data":{"reference_name":"result_1"}}},"trace":[],"provenance":{"skills":[]}}}"#,
     );
@@ -1226,6 +1228,7 @@ fn turn_record_carries_round_grouped_trace_and_timestamps() {
         settled_at: Some(1_700_000_002_400),
         invocations: Vec::new(),
         artifacts: Vec::new(),
+        usage: None,
     };
     assert_wire(
         &record,
