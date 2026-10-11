@@ -111,6 +111,7 @@ vi.mock("../api", async (importOriginal) => {
     // real @tauri-apps/api/event listen (absent in jsdom) from firing.
     onApprovalRequest: vi.fn(async () => () => {}),
     onApprovalResolved: vi.fn(async () => () => {}),
+    onApprovalAbandoned: vi.fn(async () => () => {}),
     respondToolApproval: vi.fn(async () => {}),
     // The tray channel (issue #1140) mounts on App render; no Shell.test
     // scenario drives tray events, so inert no-op listeners suffice.

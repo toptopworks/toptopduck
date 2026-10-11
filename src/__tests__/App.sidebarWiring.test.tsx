@@ -135,6 +135,7 @@ vi.mock("../api", async (importOriginal) => {
       return () => {};
     }),
     onApprovalResolved: vi.fn(async () => () => {}),
+    onApprovalAbandoned: vi.fn(async () => () => {}),
     respondToolApproval: vi.fn(async () => {}),
     // The tray channel (issue #1140) mounts on App render; no sidebar
     // wiring scenario drives tray events, so inert no-op listeners suffice.
