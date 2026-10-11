@@ -272,9 +272,7 @@ export function QuestionBar({ onSubmit, onCancel, loading, phase = null, turnSta
               aria-live="polite"
             >
               {phase !== null && phaseLabel(phase, intl)}
-              {turnStartedAt !== null && (
-                <WaitElapsedSuffix startedAt={turnStartedAt} pausedSince={turnPausedSince} />
-              )}
+              <WaitElapsedSuffix startedAt={turnStartedAt} pausedSince={turnPausedSince} />
             </span>
           )}
           {loading ? (

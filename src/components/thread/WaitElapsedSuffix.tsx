@@ -35,8 +35,8 @@ function useElapsedSeconds(startedAt: number | null, pausedSince: number | null)
 
 /** The elapsed-seconds suffix leaf ("· 12s"): ticks once a second off a
  *  turn-flow-owned stamp, rendered inside the rail's trailing wait status
- *  line and the QuestionBar phase label -- both role="status" live regions,
- *  so the ticking number is aria-hidden: the per-second change is
+ *  line and the QuestionBar wait-feedback slot -- both role="status" live
+ *  regions, so the ticking number is aria-hidden: the per-second change is
  *  decoration, never a live-region re-announcement. Renders null when no
  *  clock is running (stamp null). */
 export function WaitElapsedSuffix({

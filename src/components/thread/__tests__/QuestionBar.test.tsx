@@ -632,6 +632,9 @@ describe("QuestionBar pre-first-event wait window (issue #1266)", () => {
         turnStartedAt={Date.now() - 46_000}
       />,
     );
+    // The slot itself must exist as the live region -- the figure's text
+    // alone would pass if the span lost role="status".
+    expect(screen.getByRole("status")).toBeInTheDocument();
     expect(screen.queryByText("执行中…")).toBeNull();
     expect(screen.getByText("· 46s")).toBeInTheDocument();
   });
