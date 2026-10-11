@@ -24,6 +24,7 @@ import { FoldToggle } from "./FoldToggle";
 import { RoundProse } from "./RoundProse";
 import { RoundBody } from "./RoundBody";
 import { TurnExchangeFrame } from "./TurnExchangeFrame";
+import { UsageFooter } from "./UsageFooter";
 import { StaleChip } from "./StaleChip";
 import {
   HOVER_REVEAL_CLASS,
@@ -34,7 +35,13 @@ import {
 } from "./turn-visual";
 import type { StaleAnchor } from "../../types/dataset";
 import type { SkillEntry } from "../../types/skills";
-import type { ThinkingTrace, TraceRound, TurnRecord } from "../../types/thread";
+import type {
+  SubagentUsage,
+  ThinkingTrace,
+  TraceEntry,
+  TraceRound,
+  TurnRecord,
+} from "../../types/thread";
 import { formatTurnFailure, turnFailureDetail } from "../../lib/error-presentation";
 import { TechnicalDetailsFold } from "../common/TechnicalDetailsFold";
 import { formatTurnStamp } from "./turnStamp";
@@ -139,7 +146,11 @@ export function TurnCard({
   // renders only while it carries content (the glyph for the other outcomes,
   // or the settle stamp).
   const glyphInMeta = !weakened;
-  const showsMetaRow = glyphInMeta || record.settled_at !== undefined;
+  // ADR-0129 (issue #1270): a usage-bearing turn always mounts the footer
+  // row -- the token line is always-visible display (Decision 5), not a
+  // hover fact.
+  const showsMetaRow =
+    glyphInMeta || record.settled_at !== undefined || record.usage !== undefined;
   // The reply copy (ADR-0103 closing meta) exists only when the turn's answer
   // IS text: a Textual turn's body. A Materialized turn carries prose (#847)
   // but it is read in the rail, not copied (a deliberate exclusion);
@@ -165,6 +176,7 @@ export function TurnCard({
           thinkingInitiallyExpanded={thinkingInitiallyExpanded}
           onSelectViz={onSelectViz}
           selectedVizSpec={selectedVizSpec}
+          subagentUsage={record.usage?.subagents}
         />
       ))}
       <TurnBody
@@ -200,13 +212,19 @@ export function TurnCard({
             no time element) are hover-revealed alongside it (HOVER_REVEAL_CLASS
             rides the assistant-stream group). */}
       {showsMetaRow && (
-        <p className="turn-meta m-0 mt-0.5 flex items-center gap-1.5 text-xs text-muted-foreground">
+        // A <div>, not a <p>: the usage footer's technical fold is a
+        // native <details> (flow content, illegal inside a <p>).
+        <div className="turn-meta m-0 mt-0.5 flex items-center gap-1.5 text-xs text-muted-foreground">
           {/* Derived here (not above) so Failed/Cancelled never compute the
                 meta-row visual they cannot use -- their glyph derives in
                 TurnBody's card head. */}
           {glyphInMeta && (
             <OutcomeGlyph visual={outcomeVisual(intl, record.outcome, isStale)} />
           )}
+          {/* ADR-0129 Decision 5 (issue #1270): the always-visible token
+              line -- outside the hover-reveal span by decision (usage is
+              primary reading surface, not a hover fact). */}
+          {record.usage !== undefined && <UsageFooter usage={record.usage.total} />}
           <span className={cn("meta-reveal flex items-center gap-1.5", HOVER_REVEAL_CLASS)}>
             {replyText !== null && (
               <CopyButton
@@ -223,7 +241,7 @@ export function TurnCard({
               </time>
             )}
           </span>
-        </p>
+        </div>
       )}
     </TurnExchangeFrame>
   );
@@ -262,14 +280,33 @@ function TraceRoundBlock({
   thinkingInitiallyExpanded,
   onSelectViz,
   selectedVizSpec,
+  subagentUsage,
 }: {
   round: TraceRound;
   thinkingInitiallyExpanded: ReadonlySet<ThinkingTrace> | undefined;
   onSelectViz?: (spec: string) => void;
   selectedVizSpec?: string | null;
+  /** ADR-0129 Decision 6 (issue #1270): the turn's built-in sub-agent
+   *  subtotal table, keyed into the delegation dialog by the entry's name
+   *  (external-runtime turns carry none -- their rows never annotate). */
+  subagentUsage?: ReadonlyArray<SubagentUsage>;
 }) {
   const [stepsExpanded, setStepsExpanded] = useState(false);
   const { thinking, text, calls } = round;
+  // Pair each delegation row with ITS subtotal (ADR-0129 Decision 6): the
+  // table collects one entry per run in collection order, and two runs of
+  // the same spec name must not both read the first entry -- pair by
+  // name-ordinal, recomputed per render (pure; the table is settle-frozen).
+  const subtotalByEntry = new Map<TraceEntry, SubagentUsage>();
+  {
+    const cursor = new Map<string, number>();
+    for (const entry of calls) {
+      const idx = cursor.get(entry.name) ?? 0;
+      cursor.set(entry.name, idx + 1);
+      const match = subagentUsage?.filter((s) => s.name === entry.name)[idx];
+      if (match) subtotalByEntry.set(entry, match);
+    }
+  }
   return (
     <RoundBody
       thinking={thinking}
@@ -300,7 +337,9 @@ function TraceRoundBlock({
           {stepsExpanded && (
             <TraceRowList
               entries={calls}
-              renderSubTrace={(entry) => <DelegationTraceDialog entry={entry} />}
+              renderSubTrace={(entry) => (
+                <DelegationTraceDialog entry={entry} subtotal={subtotalByEntry.get(entry)} />
+              )}
             />
           )}
         </>

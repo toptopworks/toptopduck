@@ -38,12 +38,52 @@ use rig_agent::agent::MultiTurnStreamItem;
 use rig_core::message::ReasoningContent;
 use rig_core::streaming::StreamedAssistantContent;
 
-use crate::model::{ThinkingTrace, TurnPhase};
+use crate::model::{Protocol, ThinkingTrace, TokenUsage, TurnPhase};
 use crate::session::loop_contract::{push_call, LoopRound};
 use crate::util::{is_latched, push_capped, push_capped_emit};
 
 use super::adapter::{emit_phase, CompletionChannel, PhaseSink};
 use std::sync::Arc;
+
+/// Normalize rig's crate-level `Usage` onto the app's five-field shape at
+/// the collection point (ADR-0129 Decision 1 -- the ONE place the built-in
+/// channel touches upstream usage fields). Rig keeps the two wire
+/// families' input semantics distinct:
+/// - Anthropic wires report cache read/write ALONGSIDE `input_tokens`
+///   (rig's `anthropic_usage_totals` leaves the crate-level field
+///   ordinary-only), so the total-side input is the three-way sum.
+/// - The OpenAI family reports input with cache inside; `cached` is a
+///   subset and the total-side input is taken verbatim.
+///
+/// Rig documents zero-valued `Usage` as "the provider reported no usage
+/// metrics" -- the fail-closed sentinel (ADR-0129 Decision 3): a zero
+/// report normalizes to `None`, never a zero bill.
+pub(crate) fn normalize_rig_usage(
+    usage: &rig_core::completion::Usage,
+    protocol: Option<Protocol>,
+) -> Option<TokenUsage> {
+    let ordinary_input = usage.input_tokens;
+    let read = usage.cached_input_tokens;
+    let write = usage.cache_creation_input_tokens;
+    if ordinary_input == 0 && usage.output_tokens == 0 && read == 0 && write == 0 {
+        return None;
+    }
+    let input = match protocol {
+        Some(Protocol::Anthropic) => ordinary_input.saturating_add(read).saturating_add(write),
+        // The OpenAI family's input already contains its cache; adding the
+        // subsets would double-count. The bridged test face rides the same
+        // arm: its scripted replies either report nothing (zero sentinel)
+        // or carry a total-side shape already.
+        Some(Protocol::Openai) | None => ordinary_input,
+    };
+    Some(TokenUsage {
+        input_tokens: input,
+        cache_read_tokens: read,
+        cache_write_tokens: write,
+        output_tokens: usage.output_tokens,
+        reasoning_tokens: (usage.reasoning_tokens > 0).then_some(usage.reasoning_tokens),
+    })
+}
 
 /// What the fold accumulated off the event stream: the round-grouped trace,
 /// the completed model-call count, and the terminal reply's text (the
@@ -62,6 +102,15 @@ pub(crate) struct EventFold {
     /// landed side of the exactly-once pairing the runner's finish
     /// asserts against the shared state's record count (#921).
     pub(crate) landed_calls: usize,
+    /// The round-trip usage sum (ADR-0129 Decision 2): each
+    /// `CompletionCall` record normalizes onto the five-field shape and
+    /// accumulates here. The protocol rides the fold because rig's
+    /// crate-level `Usage` keeps the two wire families' input semantics
+    /// distinct (Anthropic reports cache alongside input; the OpenAI
+    /// family inside it) -- the collection point must split on it or
+    /// double-count cache (ADR-0129 Decision 1).
+    usage: TokenUsage,
+    protocol: Option<Protocol>,
     /// --- Per-model-call accumulation (replaced at each turn open) ---
     call_open: bool,
     reasoning_committed: String,
@@ -86,12 +135,16 @@ pub(crate) struct EventFold {
 }
 
 impl EventFold {
-    pub(crate) fn new() -> Self {
+    /// `protocol` selects the normalization arm for rig's `Usage`
+    /// (see [`Self::usage`]); `None` is the bridged test face.
+    pub(crate) fn new(protocol: Option<Protocol>) -> Self {
         Self {
             rounds: Vec::new(),
             round_trips: 0,
             final_output: None,
             landed_calls: 0,
+            usage: TokenUsage::default(),
+            protocol,
             call_open: false,
             reasoning_committed: String::new(),
             reasoning_deltas: String::new(),
@@ -100,6 +153,13 @@ impl EventFold {
             batch_open: false,
             trailing_round: None,
         }
+    }
+
+    /// The fold's accumulated usage (ADR-0129): the round-trip sum, or
+    /// `None` when no round-trip ever reported (fail-closed, Decision 3) --
+    /// which also covers a turn cancelled before its first usage record.
+    pub(crate) fn usage(&self) -> Option<TokenUsage> {
+        (!self.usage.is_zero()).then_some(self.usage)
     }
 
     /// Fold one event. `channel` supplies the dispatch-recorded trace
@@ -135,7 +195,7 @@ impl EventFold {
                     self.landed_calls += 1;
                 }
             }
-            MultiTurnStreamItem::CompletionCall(_) => {
+            MultiTurnStreamItem::CompletionCall(call) => {
                 // The model call's usage record -- emitted exactly once per
                 // turn, after every content item, whether or not the turn
                 // streamed text. That makes it the turn's closing boundary
@@ -143,6 +203,14 @@ impl EventFold {
                 // rig's emit_final, so a reasoning-plus-calls turn with no
                 // prose would otherwise never close): finalize the thinking,
                 // park a call-less turn's trailing round, end the turn.
+                // ADR-0129 (issue #1270): the same record is the round
+                // trip's usage evidence -- normalize + accumulate ahead of
+                // the close, so a turn cut after this point (a cancel
+                // between rounds) keeps its already-reported round-trips
+                // (Decision 3's cancelled-turn rule).
+                if let Some(round_usage) = normalize_rig_usage(&call.usage, self.protocol) {
+                    self.usage.add(&round_usage);
+                }
                 self.close_call(phases);
             }
             MultiTurnStreamItem::ModelTurnRetried { .. } => {
@@ -435,6 +503,7 @@ impl EventFold {
 mod tests {
     use super::*;
     use crate::util::{ACCUM_MAX_BYTES, TRUNCATION_MARKER};
+    use rig_core::completion::Usage;
     use std::sync::Mutex;
 
     fn text_item(t: &str) -> MultiTurnStreamItem {
@@ -450,10 +519,23 @@ mod tests {
     }
 
     fn close_item() -> MultiTurnStreamItem {
-        MultiTurnStreamItem::CompletionCall(rig_agent::agent::CompletionCall::new(
-            0,
-            rig_core::completion::Usage::new(),
-        ))
+        close_item_with(Usage::new())
+    }
+
+    fn close_item_with(usage: Usage) -> MultiTurnStreamItem {
+        MultiTurnStreamItem::CompletionCall(rig_agent::agent::CompletionCall::new(0, usage))
+    }
+
+    fn rig_usage(input: u64, cached: u64, write: u64, output: u64) -> Usage {
+        Usage {
+            input_tokens: input,
+            output_tokens: output,
+            total_tokens: input + cached + write + output,
+            cached_input_tokens: cached,
+            cache_creation_input_tokens: write,
+            tool_use_prompt_tokens: 0,
+            reasoning_tokens: 0,
+        }
     }
 
     fn final_response_item(output: &str) -> MultiTurnStreamItem {
@@ -506,7 +588,7 @@ mod tests {
     fn round_trips_counts_streamed_turns_including_retries() {
         let channel = Arc::new(CompletionChannel::new());
         let (seen, sink) = recording_sink();
-        let mut fold = EventFold::new();
+        let mut fold = EventFold::new(None);
         fold.event(&text_item("a"), &channel, &sink);
         fold.event(&close_item(), &channel, &sink);
         fold.event(&retry_item(1), &channel, &sink);
@@ -535,7 +617,7 @@ mod tests {
     fn cancelled_turn_lands_its_unconfirmed_prose() {
         let channel = Arc::new(CompletionChannel::new());
         let sink = noop_sink();
-        let mut fold = EventFold::new();
+        let mut fold = EventFold::new(None);
         fold.event(&text_item("partial answer"), &channel, &sink);
         fold.event(&close_item(), &channel, &sink);
         fold.finish();
@@ -558,7 +640,7 @@ mod tests {
     fn retried_turn_lands_its_unconfirmed_prose() {
         let channel = Arc::new(CompletionChannel::new());
         let sink = noop_sink();
-        let mut fold = EventFold::new();
+        let mut fold = EventFold::new(None);
         fold.event(&text_item("rejected attempt"), &channel, &sink);
         fold.event(&close_item(), &channel, &sink);
         fold.event(&retry_item(1), &channel, &sink);
@@ -583,7 +665,7 @@ mod tests {
     fn final_response_strips_the_terminal_prose() {
         let channel = Arc::new(CompletionChannel::new());
         let sink = noop_sink();
-        let mut fold = EventFold::new();
+        let mut fold = EventFold::new(None);
         fold.event(&reasoning_delta_item("thinking hard"), &channel, &sink);
         fold.event(&text_item("the answer"), &channel, &sink);
         fold.event(&close_item(), &channel, &sink);
@@ -605,7 +687,7 @@ mod tests {
 
         // A prose-only terminal turn parks nothing that survives the
         // strip: no round lands.
-        let mut fold = EventFold::new();
+        let mut fold = EventFold::new(None);
         fold.event(&text_item("plain answer"), &channel, &sink);
         fold.event(&close_item(), &channel, &sink);
         fold.event(&final_response_item("plain answer"), &channel, &sink);
@@ -621,7 +703,7 @@ mod tests {
     fn cancelled_turn_lands_thinking_with_its_prose() {
         let channel = Arc::new(CompletionChannel::new());
         let sink = noop_sink();
-        let mut fold = EventFold::new();
+        let mut fold = EventFold::new(None);
         fold.event(&reasoning_delta_item("half a plan"), &channel, &sink);
         fold.event(&text_item("half an answer"), &channel, &sink);
         fold.event(&close_item(), &channel, &sink);
@@ -640,7 +722,7 @@ mod tests {
 
         // Thinking-only (the pre-widening shape): the thinking still
         // lands, and no prose appears.
-        let mut fold = EventFold::new();
+        let mut fold = EventFold::new(None);
         fold.event(&reasoning_delta_item("only thinking"), &channel, &sink);
         fold.event(&close_item(), &channel, &sink);
         fold.finish();
@@ -668,7 +750,7 @@ mod tests {
     fn mid_stream_cancel_salvages_the_open_turn() {
         let channel = Arc::new(CompletionChannel::new());
         let sink = noop_sink();
-        let mut fold = EventFold::new();
+        let mut fold = EventFold::new(None);
         fold.event(&reasoning_delta_item("cut mid-thought"), &channel, &sink);
         fold.event(&text_item("cut mid-ans"), &channel, &sink);
         fold.finish();
@@ -686,7 +768,7 @@ mod tests {
         assert!(round.calls.is_empty(), "nothing executed, nothing landed");
 
         // A prose-only cut: the prose lands alone.
-        let mut fold = EventFold::new();
+        let mut fold = EventFold::new(None);
         fold.event(&text_item("cut mid-sentence"), &channel, &sink);
         fold.finish();
         assert_eq!(fold.rounds.len(), 1, "{:?}", fold.rounds);
@@ -705,7 +787,7 @@ mod tests {
     fn next_open_flushes_the_waiting_round() {
         let channel = Arc::new(CompletionChannel::new());
         let sink = noop_sink();
-        let mut fold = EventFold::new();
+        let mut fold = EventFold::new(None);
         fold.event(&text_item("first"), &channel, &sink);
         fold.event(&close_item(), &channel, &sink);
         fold.event(&text_item("second"), &channel, &sink);
@@ -727,7 +809,7 @@ mod tests {
     fn prose_cap_latches_marker_and_stops_both_tracks() {
         let channel = Arc::new(CompletionChannel::new());
         let (seen, sink) = recording_sink();
-        let mut fold = EventFold::new();
+        let mut fold = EventFold::new(None);
         fold.event(
             &text_item(&"x".repeat(ACCUM_MAX_BYTES - 4)),
             &channel,
@@ -783,7 +865,7 @@ mod tests {
     fn committed_reasoning_cap_latches_marker_into_thinking() {
         let channel = Arc::new(CompletionChannel::new());
         let sink = noop_sink();
-        let mut fold = EventFold::new();
+        let mut fold = EventFold::new(None);
         fold.event(
             &committed_reasoning_item(&"r".repeat(ACCUM_MAX_BYTES)),
             &channel,
@@ -810,7 +892,7 @@ mod tests {
     fn reasoning_delta_cap_latches_marker_into_thinking() {
         let channel = Arc::new(CompletionChannel::new());
         let sink = noop_sink();
-        let mut fold = EventFold::new();
+        let mut fold = EventFold::new(None);
         fold.event(
             &reasoning_delta_item(&"d".repeat(ACCUM_MAX_BYTES)),
             &channel,
@@ -842,7 +924,7 @@ mod tests {
     fn final_response_keeps_the_capped_terminal_body() {
         let channel = Arc::new(CompletionChannel::new());
         let sink = noop_sink();
-        let mut fold = EventFold::new();
+        let mut fold = EventFold::new(None);
         fold.event(&text_item(&"x".repeat(ACCUM_MAX_BYTES)), &channel, &sink);
         fold.event(&close_item(), &channel, &sink);
         fold.event(
@@ -864,5 +946,91 @@ mod tests {
             "the outcome body rides the capped form, not the raw terminal text"
         );
         assert!(body.ends_with(TRUNCATION_MARKER));
+    }
+
+    // --- usage collection (ADR-0129, issue #1270) -------------------------------
+
+    /// ADR-0129 Decision 1: Anthropic wires report cache alongside input,
+    /// so the normalized total-side input is the three-way sum and the
+    /// subsets land in their breakdown slots untouched.
+    #[test]
+    fn anthropic_normalization_sums_the_three_way_input() {
+        let n = normalize_rig_usage(&rig_usage(100, 30, 20, 50), Some(Protocol::Anthropic))
+            .expect("a non-zero report normalizes");
+        assert_eq!(n.input_tokens, 150, "ordinary + cache read + cache write");
+        assert_eq!(n.cache_read_tokens, 30);
+        assert_eq!(n.cache_write_tokens, 20);
+        assert_eq!(n.output_tokens, 50);
+        assert_eq!(n.total_tokens(), 200, "derived: input + output");
+    }
+
+    /// ADR-0129 Decision 1: the OpenAI family's input already contains its
+    /// cache -- the same counters normalize to a SMALLER input than the
+    /// Anthropic arm, and adding the subsets again would double-count.
+    #[test]
+    fn openai_normalization_takes_input_verbatim() {
+        let n = normalize_rig_usage(&rig_usage(100, 30, 20, 50), Some(Protocol::Openai))
+            .expect("a non-zero report normalizes");
+        assert_eq!(n.input_tokens, 100, "input taken verbatim (cache inside)");
+        assert_eq!(
+            n.cache_read_tokens, 30,
+            "the subset rides its breakdown slot"
+        );
+    }
+
+    /// ADR-0129 Decision 3: rig's zero `Usage` is the reported-nothing
+    /// sentinel -- it normalizes to `None`, never a zero bill.
+    #[test]
+    fn zero_report_normalizes_to_none() {
+        assert!(normalize_rig_usage(&Usage::new(), Some(Protocol::Anthropic)).is_none());
+        let thinking_only = Usage {
+            reasoning_tokens: 7,
+            ..Usage::new()
+        };
+        assert!(
+            normalize_rig_usage(&thinking_only, Some(Protocol::Openai)).is_none(),
+            "a reasoning counter with zero input/output is a malformed report, not evidence"
+        );
+    }
+
+    /// ADR-0129 Decision 2: each `CompletionCall` record accumulates onto
+    /// the fold's round-trip sum -- and a turn cut AFTER its usage record
+    /// (the cancelled-between-rounds shape) keeps what arrived: `finish`
+    /// never clears the sum.
+    #[test]
+    fn usage_accumulates_per_round_trip_and_survives_a_cut() {
+        let channel = Arc::new(CompletionChannel::new());
+        let sink = noop_sink();
+        let mut fold = EventFold::new(Some(Protocol::Anthropic));
+        fold.event(&text_item("querying"), &channel, &sink);
+        fold.event(
+            &close_item_with(rig_usage(100, 30, 20, 50)),
+            &channel,
+            &sink,
+        );
+        fold.event(&text_item("cut mid-answer"), &channel, &sink);
+        fold.finish(); // the cancel shape: no second CompletionCall arrived
+        let usage = fold.usage().expect("the reported round-trip survives");
+        assert_eq!(usage.input_tokens, 150);
+        assert_eq!(usage.output_tokens, 50);
+        // A second reported round-trip would add on top.
+        fold.event(&close_item_with(rig_usage(10, 0, 0, 5)), &channel, &sink);
+        let usage = fold.usage().expect("still accumulating");
+        assert_eq!(usage.input_tokens, 160);
+        assert_eq!(usage.output_tokens, 55);
+    }
+
+    /// ADR-0129 Decision 3: a turn whose every record was the zero
+    /// sentinel (the bridged test face's default) folds no usage at all --
+    /// the fail-closed `None`.
+    #[test]
+    fn unreported_usage_folds_to_none() {
+        let channel = Arc::new(CompletionChannel::new());
+        let sink = noop_sink();
+        let mut fold = EventFold::new(None);
+        fold.event(&text_item("answer"), &channel, &sink);
+        fold.event(&close_item(), &channel, &sink);
+        fold.finish();
+        assert!(fold.usage().is_none());
     }
 }

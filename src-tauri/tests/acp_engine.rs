@@ -1563,3 +1563,43 @@ fn acp_turn_set_config_option_rejection_fails_the_turn() {
         "the fixture must have seen the injection before rejecting it"
     );
 }
+
+// --- usage_update: the cumulative family (ADR-0129, issue #1270) --------------
+
+/// Two monotone `usage_update` reports settle as the turn's GROWTH, not the
+/// raw counter: the first reading counts in full (a fresh process's counter
+/// starts at zero -- it already spent this turn), the second contributes its
+/// delta, and the ACP v1 cache-alongside convention folds into the
+/// total-side input at the collection point. Attribution never splits (the
+/// host turn carries it, subagents empty).
+#[test]
+fn usage_update_settles_the_boundary_growth() {
+    let (outcome, _) = run("usage_update", 24);
+    assert!(matches!(outcome.termination, Termination::Text(_)));
+    let usage = outcome.usage.as_ref().expect("the turn settles a usage");
+    // The fresh process's counter starts at zero, so the boundary growth IS
+    // the final reading: input 150 ordinary + 30 read + 20 write (the ACP
+    // cache-alongside convention summed at the collection point), output 70.
+    assert_eq!(usage.total.input_tokens, 200, "final counter, total-side");
+    assert_eq!(usage.total.cache_read_tokens, 30);
+    assert_eq!(usage.total.cache_write_tokens, 20);
+    assert_eq!(usage.total.output_tokens, 70);
+    assert!(
+        usage.subagents.is_empty(),
+        "an external agent's process aggregate never splits"
+    );
+}
+
+/// The resume signature: a report BELOW the latched baseline (a second
+/// process whose counter started over) re-latches and fails the turn's
+/// usage closed -- the text still settles normally, only the usage is
+/// refused (a partial bill would read as the complete one).
+#[test]
+fn usage_update_reset_fails_the_turn_closed() {
+    let (outcome, _) = run("usage_update_reset", 24);
+    assert!(matches!(outcome.termination, Termination::Text(_)));
+    assert!(
+        outcome.usage.is_none(),
+        "the negative boundary delta fails the usage closed"
+    );
+}

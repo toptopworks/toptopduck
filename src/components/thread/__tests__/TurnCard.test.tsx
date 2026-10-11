@@ -9,7 +9,7 @@
 // folds, the cancel-reason split (#883), and the textual markdown (#827).
 
 import { describe, expect, it } from "vitest";
-import { render } from "@testing-library/react";
+import { render, screen } from "@testing-library/react";
 import { IntlProvider } from "react-intl";
 import { TooltipProvider } from "../../ui/tooltip";
 import { catalogFor } from "../../../i18n";
@@ -392,5 +392,36 @@ describe("TurnCard textual outcome markdown (issue #827)", () => {
     expect(outcome).toHaveClass("mt-1");
     expect(outcome?.querySelector(".textual-kind")).toHaveClass("m-0");
     expect(container.querySelector(".assumption")).toHaveClass("mt-0.5");
+  });
+});
+
+// The turn card's usage footer surface (ADR-0129 Decision 5, issue #1270):
+// a usage-bearing turn mounts the always-visible token line on the closing
+// meta row; a turn without usage (fail-closed, or recorded before the
+// field) renders none -- the honest-degrade rule.
+describe("TurnCard usage footer (ADR-0129, issue #1270)", () => {
+  it("renders the token line when the record carries usage", () => {
+    const record = recordWith(undefined);
+    record.usage = {
+      total: {
+        input_tokens: 1500,
+        cache_read_tokens: 1000,
+        cache_write_tokens: 0,
+        output_tokens: 300,
+      },
+    };
+    renderCard(record);
+    // zh-CN catalog wording (the suite's fixture locale): the segments
+    // resolve from the catalog, not literals, so the pin tracks the
+    // wording (issue #139 convention).
+    // zh compact has no thousands separator (1500, not 1,500).
+    expect(screen.getByText("入 1500")).toBeInTheDocument();
+    expect(screen.getByText("缓存 1000")).toBeInTheDocument();
+    expect(screen.getByText("出 300")).toBeInTheDocument();
+  });
+
+  it("renders no token line for a turn without usage", () => {
+    renderCard(recordWith(undefined));
+    expect(screen.queryByText(/^入 /)).not.toBeInTheDocument();
   });
 });

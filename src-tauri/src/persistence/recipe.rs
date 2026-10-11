@@ -186,6 +186,11 @@ pub struct ProductiveTurn {
 /// retired the event's writer and its fold).
 /// Adjacently-tagged so a future reader narrows on `entry` uniformly, mirroring
 /// the IPC `ThreadEntry` shape.
+// The turn variant dwarfs the lifecycle events (the ADR-0129 usage
+// aggregate widened it past clippy's threshold); the recipe is a
+// load/parse-time structure, not a hot loop, so the size rides -- the
+// same posture ThreadEntry takes.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "entry", content = "data")]
 pub enum RecipeEntry {
@@ -466,6 +471,13 @@ pub struct RecipeTurn {
     /// (serde default).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub invocations: Vec<crate::model::SkillInvocation>,
+    /// The turn's token usage (ADR-0129, issue #1270): the five-field
+    /// normalized aggregate (+ the built-in sub-agent subtotals). Absent for
+    /// turns recorded before the field and for fail-closed turns (serde
+    /// default -- strictly additive, no format_version bump, the same
+    /// precedent as `invocations`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage: Option<crate::model::TurnUsage>,
     /// The turn's delivered-artifact manifest (ADR-0124, issue #1087):
     /// absolute paths + file names + the durable flag, merged from the
     /// dual channels at settle and frozen here. Empty for turns that
@@ -492,6 +504,7 @@ impl RecipeTurn {
             asked_at: None,
             settled_at: None,
             invocations: Vec::new(),
+            usage: None,
 
             artifacts: Vec::new(),
         }
@@ -519,6 +532,7 @@ impl RecipeTurn {
             asked_at: timestamps.asked_at,
             settled_at: timestamps.settled_at,
             invocations: Vec::new(),
+            usage: None,
 
             artifacts: Vec::new(),
         }
@@ -1586,6 +1600,70 @@ mod tests {
     }
 
     #[test]
+    fn usage_round_trips_and_old_recipes_open_without_it() {
+        // ADR-0129 (issue #1270): a usage-bearing turn round-trips the
+        // aggregate + the built-in sub-agent subtotals verbatim; a turn
+        // without usage omits the key (lean .duck); and a turn persisted
+        // BEFORE the field (no usage key on disk) deserializes with `None`
+        // -- the old-.duck zero-migration rule (Decision 4: serde default,
+        // no format_version bump).
+        let mut turn = RecipeTurn::without_audit(
+            "问一句",
+            RecipeOutcome::Textual {
+                text_kind: TextKind::Agent,
+                body: "答一句".into(),
+                assumption: None,
+            },
+        );
+        turn.usage = Some(crate::model::TurnUsage {
+            total: crate::model::TokenUsage {
+                input_tokens: 150,
+                cache_read_tokens: 30,
+                cache_write_tokens: 20,
+                output_tokens: 50,
+                reasoning_tokens: None,
+            },
+            subagents: vec![crate::model::SubagentUsage {
+                name: "analyst".into(),
+                usage: crate::model::TokenUsage {
+                    input_tokens: 40,
+                    cache_read_tokens: 0,
+                    cache_write_tokens: 0,
+                    output_tokens: 10,
+                    reasoning_tokens: None,
+                },
+            }],
+        });
+        let json = serde_json::to_string(&turn).expect("serialize");
+        let back: RecipeTurn = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(back.usage, turn.usage, "the aggregate round-trips verbatim");
+        // A pre-field turn (usage key absent) opens with None.
+        let mut legacy_value: serde_json::Value = serde_json::from_str(&json).expect("valid json");
+        legacy_value
+            .as_object_mut()
+            .expect("a turn serializes to an object")
+            .remove("usage");
+        let legacy = serde_json::to_string(&legacy_value).expect("re-serialize");
+        assert_ne!(legacy, json, "the legacy form actually dropped the key");
+        let old: RecipeTurn = serde_json::from_str(&legacy).expect("old .duck opens");
+        assert!(old.usage.is_none(), "the old turn degrades to no usage");
+        // A no-usage turn omits the key entirely.
+        let bare = RecipeTurn::without_audit(
+            "哪种名字",
+            RecipeOutcome::Textual {
+                text_kind: TextKind::Clarify,
+                body: "按姓还是名？".into(),
+                assumption: None,
+            },
+        );
+        let bare_json = serde_json::to_string(&bare).expect("serialize");
+        assert!(
+            !bare_json.contains("usage"),
+            "no usage key on a fail-closed turn"
+        );
+    }
+
+    #[test]
     fn external_provenance_round_trips_adapter_id() {
         // ADR-0101: an External turn persists the adapter id alongside the
         // runtime kind, so a mixed thread's reader can tell WHICH external CLI
@@ -1675,6 +1753,7 @@ mod tests {
         // back identically on resume -- the foundation for the v2 display-part
         // contract (ADR-0078/0082).
         let turn = RecipeTurn {
+            usage: None,
             question: "多少人".into(),
             outcome: RecipeOutcome::Materialized {
                 promotions: vec![RecipePromotion {

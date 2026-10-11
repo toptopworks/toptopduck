@@ -356,11 +356,62 @@ pub enum SessionUpdate {
         #[serde(default)]
         content: Vec<ToolCallContent>,
     },
+    /// The agent's cumulative token usage counter (ACP `usage_update`,
+    /// ADR-0129 issue #1270): a PROCESS-level cumulative report the engine
+    /// differences at the turn boundary (the cumulative family, Decision 2)
+    /// -- never summed as-is. A negative boundary delta (a resumed process
+    /// resetting the counter) fails the turn closed.
+    UsageUpdate {
+        #[serde(default)]
+        usage: SessionUsage,
+    },
     /// Any other update kind (user_message_chunk, plan,
     /// available_commands_update, current_mode_update, config_option_update,
-    /// session_info_update, usage_update). Ignored by the engine.
+    /// session_info_update). Ignored by the engine.
     #[serde(other)]
     Other,
+}
+
+/// The `usage_update` payload's usage object (ACP v1): every counter is
+/// cumulative for the agent process, and cache read/write ride ALONGSIDE
+/// `inputTokens` (the Anthropic convention the schema borrowed) -- the
+/// normalized total-side input is the three-way sum. Serde defaults absorb
+/// an agent that omits the optional cache fields; an all-zero report is the
+/// fail-closed sentinel (ADR-0129 Decision 3).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionUsage {
+    #[serde(default)]
+    pub input_tokens: u64,
+    #[serde(default)]
+    pub output_tokens: u64,
+    #[serde(default)]
+    pub cache_read_input_tokens: u64,
+    #[serde(default)]
+    pub cache_write_input_tokens: u64,
+}
+
+impl SessionUsage {
+    /// Normalize onto the app's five-field shape (ADR-0129 Decision 1 --
+    /// the ACP channel's collection point). `None` for the zero sentinel.
+    pub fn to_usage(&self) -> Option<crate::model::TokenUsage> {
+        if self.input_tokens == 0
+            && self.output_tokens == 0
+            && self.cache_read_input_tokens == 0
+            && self.cache_write_input_tokens == 0
+        {
+            return None;
+        }
+        let read = self.cache_read_input_tokens;
+        let write = self.cache_write_input_tokens;
+        Some(crate::model::TokenUsage {
+            input_tokens: self.input_tokens.saturating_add(read).saturating_add(write),
+            cache_read_tokens: read,
+            cache_write_tokens: write,
+            output_tokens: self.output_tokens,
+            reasoning_tokens: None,
+        })
+    }
 }
 
 /// Tool-call lifecycle status (ACP `ToolCallStatus`).
@@ -899,7 +950,7 @@ mod tests {
         let raw = serde_json::json!({
             "sessionId": "s1",
             "update": {
-                "sessionUpdate": "usage_update",
+                "sessionUpdate": "plan",
                 "contextWindow": 200000,
                 "tokensUsed": 42,
             },
@@ -907,6 +958,54 @@ mod tests {
         let params: SessionUpdateParams =
             serde_json::from_value(raw).expect("unknown update kind must not reject");
         assert_eq!(params.update, SessionUpdate::Other);
+    }
+
+    /// ADR-0129 (issue #1270): `usage_update` deserializes onto the modeled
+    /// variant (it left the ignored set when the usage channel landed), the
+    /// cache fields riding their camelCase names -- and a payload missing
+    /// its `usage` object degrades to the zero sentinel instead of
+    /// rejecting the message (the same forward-compatibility posture as
+    /// `Other`).
+    #[test]
+    fn usage_update_deserializes_and_normalizes() {
+        let raw = serde_json::json!({
+            "sessionId": "s1",
+            "update": {
+                "sessionUpdate": "usage_update",
+                "usage": {
+                    "inputTokens": 100,
+                    "outputTokens": 40,
+                    "cacheReadInputTokens": 30,
+                    "cacheWriteInputTokens": 20,
+                },
+            },
+        });
+        let params: SessionUpdateParams =
+            serde_json::from_value(raw).expect("the modeled usage kind parses");
+        match params.update {
+            SessionUpdate::UsageUpdate { usage } => {
+                let n = usage.to_usage().expect("a non-zero report normalizes");
+                // ACP v1's counters ride alongside input (the Anthropic
+                // convention): total-side input is the three-way sum.
+                assert_eq!(n.input_tokens, 150);
+                assert_eq!(n.cache_read_tokens, 30);
+                assert_eq!(n.cache_write_tokens, 20);
+                assert_eq!(n.output_tokens, 40);
+            }
+            other => panic!("expected UsageUpdate, got {other:?}"),
+        }
+        // The zero sentinel (including a missing usage object) normalizes
+        // to `None` -- fail-closed, never a zero bill.
+        let bare = serde_json::json!({
+            "sessionId": "s1",
+            "update": {"sessionUpdate": "usage_update"},
+        });
+        let params: SessionUpdateParams =
+            serde_json::from_value(bare).expect("a missing usage object degrades");
+        match params.update {
+            SessionUpdate::UsageUpdate { usage } => assert!(usage.to_usage().is_none()),
+            other => panic!("expected UsageUpdate, got {other:?}"),
+        }
     }
 
     /// A tool_call update deserializes with the discriminated shape.

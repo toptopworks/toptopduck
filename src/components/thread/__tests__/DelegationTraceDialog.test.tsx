@@ -151,3 +151,47 @@ it("keeps a vega-lite fence in the sub-trace static (issue #1093 pin)", async ()
     screen.queryByRole("button", { name: "View chart in the results pane" }),
   ).not.toBeInTheDocument();
 });
+
+// The dialog's usage subtotal row (ADR-0129 Decision 6, issue #1270): a
+// built-in turn's delegation row carries the sub-agent's subtotal under
+// the task description; absent for external-runtime turns (their process
+// aggregate never splits).
+describe("DelegationTraceDialog usage subtotal (ADR-0129, issue #1270)", () => {
+  it("renders the sub-agent's subtotal when provided", async () => {
+    renderWithProviders(
+      <TraceRowList
+        entries={[DELEGATION]}
+        renderSubTrace={(entry) => (
+          <DelegationTraceDialog
+            entry={entry}
+            subtotal={{
+              name: entry.name,
+              usage: {
+                input_tokens: 40,
+                cache_read_tokens: 0,
+                cache_write_tokens: 0,
+                output_tokens: 10,
+              },
+            }}
+          />
+        )}
+      />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: /Sub-trace/ }));
+    await waitFor(() => expect(screen.getByRole("dialog")).toBeInTheDocument());
+    expect(screen.getByText("In 40")).toBeInTheDocument();
+    expect(screen.getByText("Out 10")).toBeInTheDocument();
+  });
+
+  it("renders no subtotal when the turn carried none", async () => {
+    renderWithProviders(
+      <TraceRowList
+        entries={[DELEGATION]}
+        renderSubTrace={(entry) => <DelegationTraceDialog entry={entry} />}
+      />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: /Sub-trace/ }));
+    await waitFor(() => expect(screen.getByRole("dialog")).toBeInTheDocument());
+    expect(screen.queryByText(/^In /)).not.toBeInTheDocument();
+  });
+});

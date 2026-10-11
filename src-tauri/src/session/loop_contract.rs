@@ -568,6 +568,13 @@ pub struct LoopOutcome {
     /// a turn with several promotions records the LAST as the turn's primary
     /// result at the wiring seam.
     pub promotions: Vec<Promotion>,
+    /// The turn's token usage (ADR-0129, issue #1270): the round-trip sum
+    /// (built-in / claude channels) or the counter growth (ACP / codex),
+    /// plus the built-in sub-agent subtotal table. `None` = fail-closed --
+    /// the channel reported no provider evidence for the turn (Decision 3);
+    /// a cancelled turn keeps its already-reported round-trips (the fold
+    /// only ever accumulates what arrived).
+    pub usage: Option<crate::model::TurnUsage>,
     /// The full round-grouped execution trace (ADR-0078, grouped per
     /// ADR-0103, issue #608): one [`LoopRound`] per provider round-trip.
     /// Collapsible; never enters the far window verbatim -- only its summary

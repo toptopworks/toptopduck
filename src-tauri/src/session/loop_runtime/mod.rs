@@ -263,7 +263,7 @@ impl LoopRuntime {
                     {
                         Ok(rt) => rt,
                         Err(e) => {
-                            let fold = EventFold::new();
+                            let fold = EventFold::new(protocol);
                             *state.aborted.lock().expect("aborted lock poisoned") = Some(
                                 Termination::Transient(format!("loop runtime build failed: {e}")),
                             );
@@ -440,7 +440,7 @@ impl LoopRuntime {
                 *state.aborted.lock().expect("aborted lock poisoned") =
                     Some(panic_to_transient("loop runtime driver", &*payload));
                 DriveOutcome {
-                    fold: EventFold::new(),
+                    fold: EventFold::new(self.protocol),
                     exit: DriveExit::Done,
                     finish_reason: None,
                 }
@@ -684,7 +684,7 @@ async fn drive_turn(inputs: DriveInputs) -> DriveOutcome {
         }
         None => {
             return DriveOutcome {
-                fold: EventFold::new(),
+                fold: EventFold::new(protocol),
                 finish_reason: None,
                 exit: DriveExit::Error(StreamingError::Completion(
                     rig_core::completion::CompletionError::ProviderError(
@@ -781,7 +781,7 @@ async fn drive_turn(inputs: DriveInputs) -> DriveOutcome {
         &finish_watcher,
     )
     .await;
-    let mut fold = EventFold::new();
+    let mut fold = EventFold::new(protocol);
     // Windowed auto-continuation (ADR-0128): the resumes this turn has
     // spent reopening exhausted windows. Counted in windows -- the hard
     // ceiling is the derived budget, never a global step constant.
@@ -935,12 +935,32 @@ fn finish(
         fold.landed_calls - drained,
     );
     retain_landed_rounds(&mut fold.rounds);
+    // ADR-0129 (issue #1270): compose the turn's usage -- the main fold's
+    // round-trip sum with the finished sub-agents folded INTO the total
+    // (Decision 6: the subtotals are a split OF the total, and a
+    // delegated turn's footer / session total must not under-report the
+    // delegation spend), plus the subtotal table. `None` when the main
+    // fold never saw a usage record (fail-closed, Decision 3) even if a
+    // sub-agent reported one: the table never rides without the host
+    // turn's own evidence.
+    let usage = fold.usage().map(|total| {
+        crate::model::TurnUsage::compose(
+            total,
+            std::mem::take(
+                &mut *state
+                    .subagent_usage
+                    .lock()
+                    .expect("subagent usage lock poisoned"),
+            ),
+        )
+    });
     LoopOutcome {
         termination,
         promotions: std::mem::take(
             &mut *state.promotions.lock().expect("promotions lock poisoned"),
         ),
         trace: fold.rounds,
+        usage,
         discovered_runtime: None,
     }
 }

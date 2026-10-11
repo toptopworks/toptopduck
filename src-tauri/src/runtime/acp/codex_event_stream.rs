@@ -33,7 +33,7 @@ use serde_json::Value;
 use super::engine::RoundTracker;
 use crate::approval::OperationKind;
 use crate::cancel::CancelToken;
-use crate::model::{TraceEntryView, TurnPhase};
+use crate::model::{CumulativeUsageDelta, TokenUsage, TraceEntryView, TurnPhase, TurnUsage};
 use crate::runtime::acp::adapter::AdapterSpec;
 use crate::runtime::acp::turn_io::{build_model_flags, flatten_prompt};
 use crate::runtime::acp::wire::McpServer;
@@ -66,6 +66,13 @@ pub(crate) enum CodexEvent {
     /// Agent text fragment — accumulated across the turn (the `text` of an
     /// `agent_message` item).
     AgentMessage { text: String },
+    /// The process's cumulative token usage report (`token_count.updated`,
+    /// ADR-0129 issue #1270): `info.total_token_usage`, the session-wide
+    /// counter the pump differences at the turn boundary (the cumulative
+    /// family, Decision 2). `last_token_usage` (the latest active context
+    /// size) is occupancy-side data the app does not consume (Decision 5:
+    /// the last round-trip's input is the occupancy snapshot).
+    TokenCount { total: TokenUsage },
     /// A completed reasoning item (the `text` of a `reasoning` item,
     /// issue #807) — the turn's thinking text. Never empty: an empty or
     /// missing text stays [`Self::Other`] at the parse boundary.
@@ -144,6 +151,12 @@ pub(crate) fn parse_event(value: &Value) -> CodexEvent {
                 thread_id: thread_id.to_string(),
             })
             .unwrap_or(CodexEvent::Other),
+        "token_count.updated" => value
+            .get("info")
+            .and_then(|info| info.get("total_token_usage"))
+            .and_then(parse_codex_usage)
+            .map(|total| CodexEvent::TokenCount { total })
+            .unwrap_or(CodexEvent::Other),
         "turn.started" => CodexEvent::TurnStarted,
         "turn.completed" => CodexEvent::TurnCompleted,
         "turn.failed" => CodexEvent::TurnFailed {
@@ -192,6 +205,30 @@ pub(crate) fn parse_event(value: &Value) -> CodexEvent {
         }
         _ => CodexEvent::Other,
     }
+}
+
+/// Parse + normalize one codex usage counter object (ADR-0129 Decision 1 --
+/// the codex channel's collection point). The counters follow the OpenAI
+/// family convention: `input_tokens` already contains `cached_input_tokens`
+/// (a subset -- taken verbatim, never re-added), and
+/// `reasoning_output_tokens` is the output split. An absent or all-zero
+/// object is the fail-closed sentinel (`None`, Decision 3).
+fn parse_codex_usage(value: &Value) -> Option<TokenUsage> {
+    let field = |name: &str| value.get(name).and_then(|v| v.as_u64()).unwrap_or(0);
+    let input = field("input_tokens");
+    let output = field("output_tokens");
+    let cached = field("cached_input_tokens");
+    let reasoning = field("reasoning_output_tokens");
+    if input == 0 && output == 0 {
+        return None;
+    }
+    Some(TokenUsage {
+        input_tokens: input,
+        cache_read_tokens: cached,
+        cache_write_tokens: 0,
+        output_tokens: output,
+        reasoning_tokens: (reasoning > 0).then_some(reasoning),
+    })
 }
 
 /// Parse the nested `item` of an `item.completed` envelope. Only the item
@@ -468,6 +505,7 @@ pub(super) fn run_codex_event_stream(
             return outcome(
                 Termination::Runtime(format!("failed to spawn codex exec `{}`: {e}", adapter.id)),
                 Vec::new(),
+                None,
             )
         }
     };
@@ -487,12 +525,17 @@ pub(super) fn run_codex_event_stream(
             return outcome(
                 Termination::Runtime(format!("stdin write failed: {e}")),
                 Vec::new(),
+                None,
             )
         }
         super::process::StdinWriteOutcome::Cancelled => {
             // ADR-0115: the pre-pump relabel -- a watchdog fire during
             // the stdin drain is generation silence past the cap.
-            return outcome(ProgressClock::cancel_landing(clock.as_ref()), Vec::new());
+            return outcome(
+                ProgressClock::cancel_landing(clock.as_ref()),
+                Vec::new(),
+                None,
+            );
         }
     }
 
@@ -631,8 +674,10 @@ pub(super) fn run_codex_event_stream(
         Termination::Cancelled => ProgressClock::cancel_landing(clock.as_ref()),
         other => other,
     };
+    // Read ahead of the settle -- `settle_rounds` consumes the tracker.
+    let usage = pump.settle_usage();
     let rounds = pump.tracker.settle_rounds(&term);
-    outcome(term, rounds)
+    outcome(term, rounds, usage)
 }
 
 /// Mutable state accumulated while pumping codex events. The round
@@ -660,6 +705,13 @@ struct JsonPump {
     /// the pump, and the guard dies with it (the ACP pending-window
     /// lifecycle).
     exec_depth: u32,
+    /// The cumulative usage counter's boundary differentiator (ADR-0129
+    /// issue #1270): `token_count.updated` reports `total_token_usage`, a
+    /// process-level cumulative value the pump differences at the turn
+    /// boundary (Decision 2). A resumed window (`codex exec resume`) is a
+    /// NEW process whose counter starts over -- the negative boundary
+    /// delta re-latches the baseline and fails the turn closed.
+    usage_delta: CumulativeUsageDelta,
     /// Held while `exec_depth` > 0 (the open execution window).
     exec_freeze: Option<crate::session::progress::FreezeGuard>,
 }
@@ -673,7 +725,18 @@ impl JsonPump {
             clock,
             exec_depth: 0,
             exec_freeze: None,
+            usage_delta: CumulativeUsageDelta::new(),
         }
+    }
+
+    /// The turn's usage off the cumulative counter (ADR-0129 issue #1270):
+    /// the boundary growth as a HOST-turn aggregate -- codex reports only
+    /// its process aggregate, so attribution never splits (Decision 6).
+    fn settle_usage(&self) -> Option<TurnUsage> {
+        self.usage_delta.settle().map(|total| TurnUsage {
+            total,
+            subagents: Vec::new(),
+        })
     }
 
     /// Reconcile the execution freeze with the in-flight depth (ADR-0115):
@@ -704,6 +767,14 @@ impl JsonPump {
                 // conversation thread is the session), so the latch is
                 // idempotent by construction.
                 self.thread_id.get_or_insert(thread_id);
+                None
+            }
+            CodexEvent::TokenCount { total } => {
+                // ADR-0129 Decision 2 (issue #1270): feed the cumulative
+                // counter; the differentiator owns the boundary semantics
+                // (first reading counts in full, a resumed process's reset
+                // fails the turn closed).
+                self.usage_delta.feed(&total);
                 None
             }
             // Already signaled Thinking before the pump; a redundant signal
@@ -861,7 +932,11 @@ impl JsonPump {
 }
 
 /// Build the [`LoopOutcome`] (same shape as the ACP engine's `outcome`).
-fn outcome(termination: Termination, rounds: Vec<LoopRound>) -> LoopOutcome {
+fn outcome(
+    termination: Termination,
+    rounds: Vec<LoopRound>,
+    usage: Option<TurnUsage>,
+) -> LoopOutcome {
     LoopOutcome {
         termination,
         // Promotions are gateway-side (ADR-0085: the bridge -> gateway ->
@@ -872,6 +947,7 @@ fn outcome(termination: Termination, rounds: Vec<LoopRound>) -> LoopOutcome {
         // batch round carries its prose); an empty trajectory stays an
         // empty round list (no ghost round).
         trace: rounds,
+        usage,
         // ADR-0095: `exec --json` exposes no config catalog -- no discovery.
         discovered_runtime: None,
     }
@@ -885,6 +961,7 @@ fn outcome(termination: Termination, rounds: Vec<LoopRound>) -> LoopOutcome {
 mod tests {
     use super::*;
     use crate::runtime::acp::wire::McpServer;
+    use serde_json::json;
     use std::collections::BTreeMap;
 
     // --- parse_event --------------------------------------------------------
@@ -2280,5 +2357,78 @@ mod tests {
             .expect("measured reasoning folds");
         assert_eq!(thinking.text, "thinking...");
         assert_eq!(thinking.duration_ms, 0);
+    }
+
+    // --- usage collection (ADR-0129, issue #1270) -------------------------------
+
+    fn token_count_event(input: u64, cached: u64, output: u64, reasoning: u64) -> CodexEvent {
+        let v = json!({
+            "type": "token_count.updated",
+            "info": {
+                "last_token_usage": {
+                    "input_tokens": 10,
+                    "cached_input_tokens": 5,
+                    "output_tokens": 3,
+                    "reasoning_output_tokens": 0,
+                    "total_tokens": 18,
+                },
+                "total_token_usage": {
+                    "input_tokens": input,
+                    "cached_input_tokens": cached,
+                    "output_tokens": output,
+                    "reasoning_output_tokens": reasoning,
+                    "total_tokens": input + cached + output + reasoning,
+                },
+            },
+        });
+        parse_event(&v)
+    }
+
+    /// ADR-0129 Decision 1: the OpenAI-family counters normalize verbatim --
+    /// input already contains its cache (a subset), reasoning rides its
+    /// output split. The event parses off `info.total_token_usage`
+    /// (`last_token_usage` is occupancy-side data the app does not consume,
+    /// Decision 5).
+    #[test]
+    fn token_count_parses_the_cumulative_counter() {
+        match token_count_event(100, 80, 50, 20) {
+            CodexEvent::TokenCount { total } => {
+                assert_eq!(total.input_tokens, 100, "taken verbatim (cache inside)");
+                assert_eq!(total.cache_read_tokens, 80);
+                assert_eq!(total.cache_write_tokens, 0);
+                assert_eq!(total.output_tokens, 50);
+                assert_eq!(total.reasoning_tokens, Some(20));
+            }
+            other => panic!("expected TokenCount, got {other:?}"),
+        }
+        // An all-zero counter parses to Other (the fail-closed sentinel).
+        assert!(matches!(token_count_event(0, 0, 0, 0), CodexEvent::Other));
+    }
+
+    /// ADR-0129 Decision 2/3: the counter is process-cumulative -- the
+    /// turn's usage is the boundary growth; a `codex exec resume` window
+    /// is a NEW process whose counter starts over, and the negative delta
+    /// re-latches + fails the turn closed (no partial bill).
+    #[test]
+    fn token_count_differences_the_boundary_and_fails_closed_on_resume() {
+        let mut pump = JsonPump::new(24, None);
+        pump.fold(token_count_event(100, 80, 50, 20), &mut |_| {});
+        pump.fold(token_count_event(150, 110, 70, 25), &mut |_| {});
+        let usage = pump.settle_usage().expect("a monotone chain settles");
+        // The FIRST reading counts in full (the per-turn process's counter
+        // starts at zero -- that reading already spent this turn); the
+        // second contributes only its growth.
+        assert_eq!(usage.total.input_tokens, 150);
+        assert_eq!(usage.total.cache_read_tokens, 110);
+        assert_eq!(usage.total.output_tokens, 70);
+        assert_eq!(usage.total.reasoning_tokens, Some(25));
+        assert!(
+            usage.subagents.is_empty(),
+            "external attribution never splits"
+        );
+        // The resume signature: the new process's counter dropped below the
+        // latched baseline.
+        pump.fold(token_count_event(5, 0, 2, 0), &mut |_| {});
+        assert!(pump.settle_usage().is_none(), "the turn fails closed");
     }
 }
