@@ -941,8 +941,10 @@ fn finish(
     // delegated turn's footer / session total must not under-report the
     // delegation spend), plus the subtotal table. `None` when the main
     // fold never saw a usage record (fail-closed, Decision 3) even if a
-    // sub-agent reported one: the table never rides without the host
-    // turn's own evidence.
+    // sub-agent reported one: a composed total would present a
+    // sub-agents-only lower bound in complete-bill form, and a lower
+    // bound is indistinguishable from the complete bill -- the table
+    // never rides without the host turn's own evidence.
     let usage = fold.usage().map(|total| {
         crate::model::TurnUsage::compose(
             total,
