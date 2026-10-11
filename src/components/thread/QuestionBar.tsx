@@ -22,12 +22,13 @@ type QuestionBarProps = {
    *  sites / tests that don't exercise phase feedback omit it. */
   phase?: TurnPhase | null;
   /** The turn clock (issue #1264 turn-clock ruling): while non-null and the
-   *  bar is loading, the phase label carries the elapsed-seconds figure --
-   *  continuous across every phase of the in-flight turn, so a slow gap
-   *  (round-trip wait, tool dispatch, the pre-approval stretch) can't read
-   *  as a frozen UI. `turnPausedSince` freezes the figure while an approval
-   *  holds the turn on the gate. Optional so call sites / tests that don't
-   *  exercise a running turn omit it (no figure). */
+   *  bar is loading, the wait-feedback slot carries the elapsed-seconds
+   *  figure -- continuous across every phase of the in-flight turn, so a
+   *  slow gap (round-trip wait, tool dispatch, the pre-approval stretch)
+   *  can't read as a frozen UI. Before the first phase event the figure
+   *  hosts the slot alone (issue #1266); `turnPausedSince` freezes it while
+   *  an approval holds the turn on the gate. Optional so call sites / tests
+   *  that don't exercise a running turn omit it (no figure). */
   turnStartedAt?: number | null;
   turnPausedSince?: number | null;
   /** Left-side toolbar controls rendered inside the unified container (the
@@ -251,11 +252,16 @@ export function QuestionBar({ onSubmit, onCancel, loading, phase = null, turnSta
             right border on narrow bars. */}
         <div className="flex min-w-0 items-center gap-2">
           {trailing}
-          {loading && phase !== null && (
-            // ADR-0059 discrete phase feedback. The attempt number surfaces only
-            // on a blind retry (>1); the first attempt shows the bare verb
-            // (ADR-0017 -- honest, not fabricated, and the first attempt needs
-            // no attempt-number noise).
+          {loading && (phase !== null || turnStartedAt !== null) && (
+            // The wait-feedback slot: the phase label when a phase event has
+            // arrived (ADR-0059 -- the attempt number surfaces only on a
+            // blind retry (>1); the first attempt shows the bare verb,
+            // ADR-0017 -- honest, not fabricated, and the first attempt needs
+            // no attempt-number noise), plus the turn clock's elapsed figure
+            // whenever a clock runs. Before the first phase event the label
+            // has nothing to name, so the figure hosts the slot alone
+            // (issue #1266) -- the slow first round trip can't read as a
+            // frozen bar, and no phase text is invented for it.
             // ADR-0067 (issue #185): the .phase-indicator visual rule (font-size +
             // color + white-space) retired onto utility here; the class hook had no
             // selector / test dependent (Shell.test.tsx queries role="status", not
@@ -265,8 +271,10 @@ export function QuestionBar({ onSubmit, onCancel, loading, phase = null, turnSta
               role="status"
               aria-live="polite"
             >
-              {phaseLabel(phase, intl)}
-              <WaitElapsedSuffix startedAt={turnStartedAt} pausedSince={turnPausedSince} />
+              {phase !== null && phaseLabel(phase, intl)}
+              {turnStartedAt !== null && (
+                <WaitElapsedSuffix startedAt={turnStartedAt} pausedSince={turnPausedSince} />
+              )}
             </span>
           )}
           {loading ? (
