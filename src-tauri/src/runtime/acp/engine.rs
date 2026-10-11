@@ -264,9 +264,7 @@ impl AcpEngine {
         // failure (the engine never panics into the host).
         let mut child = match spawn(binary, &self.adapter) {
             Ok(c) => c,
-            Err(detail) => {
-                return self.outcome(Termination::Runtime(detail), Vec::new(), None)
-            }
+            Err(detail) => return self.outcome(Termination::Runtime(detail), Vec::new(), None),
         };
         let stdout = child.inner.stdout.take().expect("piped stdout");
         let stdin = child.inner.stdin.take().expect("piped stdin");

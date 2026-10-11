@@ -25,8 +25,8 @@ use std::thread;
 use toptopduck_lib::runtime::acp::wire::{
     self, ContentBlock, InitializeResult, NewSessionResult, Notification, PermissionOption,
     PermissionOptionKind, PermissionToolCall, PromptResult, RequestId, RequestPermissionParams,
-    Response, RpcError, SessionUpdate, SessionUpdateParams, StopReason,
-    ToolCallContent, ToolCallStatus, ToolKind,
+    Response, RpcError, SessionUpdate, SessionUpdateParams, StopReason, ToolCallContent,
+    ToolCallStatus, ToolKind,
 };
 
 /// Append one trace line to the file named by `ACP_FAKE_TRACE_FILE` (when

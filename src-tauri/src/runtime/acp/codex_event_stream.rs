@@ -1079,7 +1079,10 @@ mod tests {
         });
         match parse_event(&zero) {
             CodexEvent::TurnCompleted { usage } => {
-                assert!(usage.is_none(), "a cache-only survivor is malformed, not evidence")
+                assert!(
+                    usage.is_none(),
+                    "a cache-only survivor is malformed, not evidence"
+                )
             }
             other => panic!("expected TurnCompleted, got {other:?}"),
         }
@@ -1971,10 +1974,7 @@ mod tests {
             },
             &mut |_| {},
         );
-        let end = pump.fold(
-            CodexEvent::TurnCompleted { usage: None },
-            &mut |_| {},
-        );
+        let end = pump.fold(CodexEvent::TurnCompleted { usage: None }, &mut |_| {});
         assert_eq!(end, Some(Termination::Text("part one part two".into())));
         assert!(pump
             .tracker
@@ -1987,10 +1987,7 @@ mod tests {
     #[test]
     fn turn_completed_without_prose_yields_empty_text() {
         let mut pump = JsonPump::new(24, None);
-        let end = pump.fold(
-            CodexEvent::TurnCompleted { usage: None },
-            &mut |_| {},
-        );
+        let end = pump.fold(CodexEvent::TurnCompleted { usage: None }, &mut |_| {});
         assert_eq!(end, Some(Termination::Text(String::new())));
     }
 

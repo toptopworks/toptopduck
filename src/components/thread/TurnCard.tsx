@@ -156,6 +156,30 @@ export function TurnCard({
   // but it is read in the rail, not copied (a deliberate exclusion);
   // Failed/Cancelled carry markers -- nothing textual to copy.
   const replyText = record.outcome.kind === "Textual" ? record.outcome.data.body : null;
+  // Pair each delegation row with ITS subtotal (ADR-0129 Decision 6), at
+  // TURN scope: the table collects one entry per evidence-bearing run in
+  // completion order, so the ordinal walks the trace's calls in order --
+  // across rounds, not per round (a same-spec re-delegation in a later
+  // round must reach the SECOND entry, not re-read the first). A
+  // delegation row that never ran (a refusal -- no sub-trace) consumes no
+  // ordinal; a run that failed closed (sub-trace present, no table entry)
+  // still does and shifts later same-name rows -- distinguishing it needs
+  // a Rust-side anchor, out of scope here. Recomputed per render (pure;
+  // the table is settle-frozen).
+  const subtotalByEntry = new Map<TraceEntry, SubagentUsage>();
+  {
+    const subagents = record.usage?.subagents;
+    const cursor = new Map<string, number>();
+    for (const round of record.trace) {
+      for (const entry of round.calls) {
+        if (entry.sub_rounds === undefined) continue;
+        const idx = cursor.get(entry.name) ?? 0;
+        cursor.set(entry.name, idx + 1);
+        const match = subagents?.filter((s) => s.name === entry.name)[idx];
+        if (match) subtotalByEntry.set(entry, match);
+      }
+    }
+  }
   return (
     <TurnExchangeFrame
       question={record.question}
@@ -176,7 +200,7 @@ export function TurnCard({
           thinkingInitiallyExpanded={thinkingInitiallyExpanded}
           onSelectViz={onSelectViz}
           selectedVizSpec={selectedVizSpec}
-          subagentUsage={record.usage?.subagents}
+          subtotalByEntry={subtotalByEntry}
         />
       ))}
       <TurnBody
@@ -280,33 +304,20 @@ function TraceRoundBlock({
   thinkingInitiallyExpanded,
   onSelectViz,
   selectedVizSpec,
-  subagentUsage,
+  subtotalByEntry,
 }: {
   round: TraceRound;
   thinkingInitiallyExpanded: ReadonlySet<ThinkingTrace> | undefined;
   onSelectViz?: (spec: string) => void;
   selectedVizSpec?: string | null;
-  /** ADR-0129 Decision 6 (issue #1270): the turn's built-in sub-agent
-   *  subtotal table, keyed into the delegation dialog by the entry's name
-   *  (external-runtime turns carry none -- their rows never annotate). */
-  subagentUsage?: ReadonlyArray<SubagentUsage>;
+  /** ADR-0129 Decision 6 (issue #1270): the turn-scoped entry-to-subtotal
+   *  pairing computed once in the card (see TurnCard) -- a delegation row
+   *  annotates its dialog with ITS run's subtotal, never a same-name
+   *  sibling's (external-runtime turns carry none). */
+  subtotalByEntry: ReadonlyMap<TraceEntry, SubagentUsage>;
 }) {
   const [stepsExpanded, setStepsExpanded] = useState(false);
   const { thinking, text, calls } = round;
-  // Pair each delegation row with ITS subtotal (ADR-0129 Decision 6): the
-  // table collects one entry per run in collection order, and two runs of
-  // the same spec name must not both read the first entry -- pair by
-  // name-ordinal, recomputed per render (pure; the table is settle-frozen).
-  const subtotalByEntry = new Map<TraceEntry, SubagentUsage>();
-  {
-    const cursor = new Map<string, number>();
-    for (const entry of calls) {
-      const idx = cursor.get(entry.name) ?? 0;
-      cursor.set(entry.name, idx + 1);
-      const match = subagentUsage?.filter((s) => s.name === entry.name)[idx];
-      if (match) subtotalByEntry.set(entry, match);
-    }
-  }
   return (
     <RoundBody
       thinking={thinking}

@@ -156,16 +156,21 @@ fn usage_turn_settles_the_terminal_usage() {
         .usage
         .as_ref()
         .expect("the terminal evidence settles");
-    assert_eq!(usage.total.input_tokens, 20552, "taken verbatim (cache inside)");
+    assert_eq!(
+        usage.total.input_tokens, 20552,
+        "taken verbatim (cache inside)"
+    );
     assert_eq!(usage.total.cache_read_tokens, 3840);
     assert_eq!(usage.total.cache_write_tokens, 12);
     assert_eq!(usage.total.output_tokens, 5);
     assert_eq!(
-        usage.total.reasoning_tokens,
-        None,
+        usage.total.reasoning_tokens, None,
         "a zero split folds away to unsplit"
     );
-    assert!(usage.subagents.is_empty(), "external attribution never splits");
+    assert!(
+        usage.subagents.is_empty(),
+        "external attribution never splits"
+    );
 }
 
 /// A tool-call trajectory: one command_execution (emitted as the measured
