@@ -194,31 +194,6 @@ fn is_read_timeout(kind: io::ErrorKind) -> bool {
     matches!(kind, io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut)
 }
 
-/// Accept one bridge connection, verify its token, and drive the MCP subset
-/// (`initialize` / `tools/list` / `tools/call`) until the bridge disconnects
-/// (read EOF, or a reset -- a hard bridge death, issue #801 -- or a failed
-/// response write to the dead bridge), the cancel token fires, OR the
-/// engine-completion flag (`engine_done`) is set.
-///
-/// `engine_done` is the deterministic terminator: the caller sets it when the
-/// ACP engine's prompt pump returns. The pump returning means the CLI sent its
-/// final `session/prompt` response, so every `tools/call` it sent was already
-/// served synchronously (the CLI blocks on each tools/call reply before sending
-/// the next message) -- serve has no in-flight request to drop, so returning on
-/// the flag is safe. This removes the implicit dependency on the bridge closing
-/// the TCP connection to terminate the serve loop (ADR-0085 serve-termination
-/// consequence): the bridge is spawned by the external CLI, so whether its stdin
-/// write-end closes promptly depends on the spawner, not on this process.
-///
-/// Rot-risk: this premise holds for ACP v1's request/response ordering. If a
-/// future protocol revision allows pipelining (sending the next message before
-/// the prior response) or adds cancellation notifications, this early return
-/// could drop an in-flight tools/call -- re-evaluate then.
-///
-/// Blocks for the connection's lifetime. The caller spawns it on a scoped
-/// thread and drives the ACP engine in parallel; the bridge's tool calls land
-/// their trace + promotions in the returned [`GatewayOutcome`] for the turn
-/// assembler to merge.
 /// The keep-alive cadence for a gated `tools/call` (issue #1267): the
 /// bridge client's request timeout (opencode's SDK defaults to ~60s absent
 /// configuration) resets on every progress notification, so an interval
@@ -263,10 +238,30 @@ fn spawn_keepalive(
             }
             progress += 1;
             let frame = progress_notification(&token, progress);
-            let Ok(mut w) = writer.lock() else { break };
-            // A dead bridge leaves nothing to keep alive; the serve's own
-            // read-side reset handling owns that exit.
+            let Ok(mut w) = writer.lock() else {
+                log::debug!(
+                    target: "toptopduck::gateway",
+                    "keep-alive companion exiting on a poisoned writer lock"
+                );
+                break;
+            };
+            // Re-check the flag under the lock: the earlier check ran before
+            // the lock could be contended, so only this one orders the
+            // companion's last frame (if any) before the serve's response
+            // write -- the lock, not the timing, carries the safety.
+            if stop_c.load(Ordering::SeqCst) {
+                break;
+            }
+            // A dead bridge leaves nothing to keep alive. While the gate
+            // parks the serve thread the read-side reset handling cannot
+            // run (it resumes only after the gate returns), so this failed
+            // write is the one mid-park signal that the bridge died --
+            // logged, not discarded.
             if framing::write_message(&mut *w, &frame).is_err() {
+                log::debug!(
+                    target: "toptopduck::gateway",
+                    "keep-alive companion exiting on a failed write (bridge gone mid-park)"
+                );
                 break;
             }
         }
@@ -274,6 +269,31 @@ fn spawn_keepalive(
     (stop, handle)
 }
 
+/// Accept one bridge connection, verify its token, and drive the MCP subset
+/// (`initialize` / `tools/list` / `tools/call`) until the bridge disconnects
+/// (read EOF, or a reset -- a hard bridge death, issue #801 -- or a failed
+/// response write to the dead bridge), the cancel token fires, OR the
+/// engine-completion flag (`engine_done`) is set.
+///
+/// `engine_done` is the deterministic terminator: the caller sets it when the
+/// ACP engine's prompt pump returns. The pump returning means the CLI sent its
+/// final `session/prompt` response, so every `tools/call` it sent was already
+/// served synchronously (the CLI blocks on each tools/call reply before sending
+/// the next message) -- serve has no in-flight request to drop, so returning on
+/// the flag is safe. This removes the implicit dependency on the bridge closing
+/// the TCP connection to terminate the serve loop (ADR-0085 serve-termination
+/// consequence): the bridge is spawned by the external CLI, so whether its stdin
+/// write-end closes promptly depends on the spawner, not on this process.
+///
+/// Rot-risk: this premise holds for ACP v1's request/response ordering. If a
+/// future protocol revision allows pipelining (sending the next message before
+/// the prior response) or adds cancellation notifications, this early return
+/// could drop an in-flight tools/call -- re-evaluate then.
+///
+/// Blocks for the connection's lifetime. The caller spawns it on a scoped
+/// thread and drives the ACP engine in parallel; the bridge's tool calls land
+/// their trace + promotions in the returned [`GatewayOutcome`] for the turn
+/// assembler to merge.
 pub fn serve_connection(
     handle: GatewayHandle,
     mut ctx: GatewayCtx,
@@ -314,8 +334,9 @@ pub fn serve_connection(
     // Shared write half (issue #1267): a `tools/call` carrying a progress
     // token gets a keep-alive companion thread that writes progress
     // notifications while the serve thread is parked in the approval gate.
-    // Both writers serialize through this lock (in time they do not overlap
-    // either -- the companion stops before the serve writes its response).
+    // Both writers serialize through this lock -- the companion re-checks
+    // its stop flag after acquiring it, so any late frame still lands
+    // before the response envelope the serve writes here.
     let writer = Arc::new(Mutex::new(writer));
 
     let mut outcome = GatewayOutcome::default();

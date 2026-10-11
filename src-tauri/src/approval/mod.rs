@@ -667,7 +667,10 @@ impl ApprovalState {
                 request_id,
                 // The parked call's id rides the slot (issue #1267) for the
                 // fold layer's echo alignment -- `parked_call_id` reads it.
-                call_id: request.call_id.clone(),
+                // Degenerate empty ids (the gateway normalizes a missing
+                // JSON-RPC id to "") park unalignable, same None tier as
+                // the built-in line.
+                call_id: request.call_id.filter(|id| !id.is_empty()),
                 response: None,
                 // The uncut originals move into the slot; the broadcast body
                 // above already holds its own capped copies (issue #1009).
@@ -1355,6 +1358,44 @@ mod tests {
 
         poll_for_request(&sink, Duration::from_secs(2)).expect("request emitted");
         assert_eq!(state.parked_call_id(), None);
+        state.abandon_pending();
+        assert_eq!(
+            handle.join().expect("gate thread").unwrap_err(),
+            GateCancelled
+        );
+    }
+
+    /// A degenerate empty call id parks unalignable too (issue #1267): the
+    /// gateway normalizes a missing JSON-RPC id to "", and an id that never
+    /// identifies anything must not occupy the alignable tier -- the gate
+    /// entry filters it to None before the slot installs.
+    #[test]
+    fn gate_with_an_empty_call_id_parks_unalignable() {
+        let state = Arc::new(ApprovalState::new());
+        let cancel = Arc::new(CancelToken::new());
+        let sink = Arc::new(RecordingSink::default());
+
+        let state_c = Arc::clone(&state);
+        let sink_c = Arc::clone(&sink);
+        let cancel_c = Arc::clone(&cancel);
+        let handle = std::thread::spawn(move || {
+            let req = ApprovalRequest {
+                key: ToolKey::external("acme", "fetch"),
+                operation_kind: OperationKind::Network,
+                summary: "GET /x".into(),
+                file_attachments: Vec::new(),
+                origin_agent: None,
+                call_id: Some(String::new()),
+            };
+            state_c.gate(req, &*sink_c as &dyn ApprovalSink, &cancel_c)
+        });
+
+        poll_for_request(&sink, Duration::from_secs(2)).expect("request emitted");
+        assert_eq!(
+            state.parked_call_id(),
+            None,
+            "the degenerate empty id is filtered to the unalignable tier"
+        );
         state.abandon_pending();
         assert_eq!(
             handle.join().expect("gate thread").unwrap_err(),

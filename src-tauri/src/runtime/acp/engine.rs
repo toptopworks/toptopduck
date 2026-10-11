@@ -111,7 +111,11 @@ impl RowEnd {
 /// not written yet). Only an EXACT call-id match fires -- the parked slot's
 /// id is non-`None` only for bridge-originated calls, so a same-turn
 /// sibling's echo (or any built-in-line state) can never match; no match,
-/// no abandonment (the frontend's turn-settle sweep catches the rest).
+/// no abandonment. A miss is NOT backstopped while the gate stays parked:
+/// the frontend's turn-settle sweep only runs once the turn thread returns,
+/// which a parked gate blocks -- so a live id mismatch would hang the turn
+/// until the user answers or cancels. The gateway already reports call.id
+/// as the tool_use id, so the two spaces are same-origin in practice.
 fn abandon_on_terminal_echo(approval: &crate::approval::ApprovalState, update: &SessionUpdate) {
     let echo_call_id = match update {
         SessionUpdate::ToolCall {
