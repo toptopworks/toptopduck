@@ -47,7 +47,7 @@ use crate::approval::{
     classify, ApprovalResponse, ApprovalSink, Classification, OperationKind, ToolKey,
 };
 use crate::cancel::CancelToken;
-use crate::model::{CumulativeUsageDelta, ThinkingTrace, TraceEntryView, TurnPhase, TurnUsage};
+use crate::model::{ThinkingTrace, TraceEntryView, TurnPhase};
 use crate::runtime::acp::adapter::{
     extract_discovered_runtime, AdapterSpec, StreamFormat, MODEL_CATEGORY, THOUGHT_LEVEL_CATEGORY,
 };
@@ -265,7 +265,7 @@ impl AcpEngine {
         let mut child = match spawn(binary, &self.adapter) {
             Ok(c) => c,
             Err(detail) => {
-                return self.outcome(Termination::Runtime(detail), Vec::new(), None, None)
+                return self.outcome(Termination::Runtime(detail), Vec::new(), None)
             }
         };
         let stdout = child.inner.stdout.take().expect("piped stdout");
@@ -286,7 +286,7 @@ impl AcpEngine {
                     Termination::Cancelled => ProgressClock::cancel_landing(clock.as_ref()),
                     other => other,
                 };
-                let outcome = self.outcome(term, Vec::new(), None, None);
+                let outcome = self.outcome(term, Vec::new(), None);
                 child.kill_and_wait();
                 return outcome;
             }
@@ -345,7 +345,7 @@ impl AcpEngine {
                         Termination::Cancelled => ProgressClock::cancel_landing(clock.as_ref()),
                         other => other,
                     };
-                    let outcome = self.outcome(term, Vec::new(), discovered, None);
+                    let outcome = self.outcome(term, Vec::new(), discovered);
                     child.kill_and_wait();
                     return outcome;
                 }
@@ -361,7 +361,6 @@ impl AcpEngine {
                             )),
                             Vec::new(),
                             discovered,
-                            None,
                         );
                         child.kill_and_wait();
                         return outcome;
@@ -376,7 +375,6 @@ impl AcpEngine {
             cancel_sent_at: None,
             clock: clock.clone(),
             open_freeze: None,
-            usage_delta: CumulativeUsageDelta::new(),
         };
         // Windowed auto-continuation (ADR-0128): the agent's own turn budget
         // (`MaxTurnRequests`) is the window boundary -- under the resume
@@ -492,14 +490,11 @@ impl AcpEngine {
             Termination::Cancelled => ProgressClock::cancel_landing(clock.as_ref()),
             other => other,
         };
-        // ADR-0129 (issue #1270): the cumulative family's turn usage is the
-        // counter's boundary growth. An external agent reports only a
-        // process aggregate -- attribution never splits (Decision 6: the
-        // host turn carries it, unannotated). Read ahead of the settle --
-        // `settle_rounds` consumes the tracker out of the pump.
-        let usage = pump.settle_usage();
+        // ADR-0129 (issue #1270): the spec's usage_update carries only a
+        // context-occupancy snapshot, so the ACP turn lands no usage
+        // (fail-closed, Decision 3).
         let rounds = pump.tracker.settle_rounds(&termination);
-        let outcome = self.outcome(termination, rounds, discovered, usage);
+        let outcome = self.outcome(termination, rounds, discovered);
         child.kill_and_wait();
         outcome
     }
@@ -509,7 +504,6 @@ impl AcpEngine {
         termination: Termination,
         rounds: Vec<LoopRound>,
         discovered: Option<DiscoveredRuntime>,
-        usage: Option<TurnUsage>,
     ) -> LoopOutcome {
         LoopOutcome {
             termination,
@@ -521,9 +515,11 @@ impl AcpEngine {
             // boundary, with per-round thinking + prose slots; the built-in
             // loop's flat wrap no longer funnels through here.
             trace: rounds,
+            // ADR-0129 (issue #1270): always None -- the ACP spec's
+            // usage_update is an occupancy snapshot, not metering.
+            usage: None,
             // ADR-0095: the handshake's extracted catalog rides every
             // post-handshake exit (None before / on handshake failure).
-            usage,
             discovered_runtime: discovered,
         }
     }
@@ -967,12 +963,6 @@ struct Pump {
     clock: Option<Arc<ProgressClock>>,
     /// Held while `pending` is non-empty (the open tool-call window).
     open_freeze: Option<crate::session::progress::FreezeGuard>,
-    /// The cumulative usage counter's boundary differentiator (ADR-0129
-    /// issue #1270): `usage_update` reports a process-level cumulative
-    /// value, and the turn's usage is its growth across the turn
-    /// (Decision 2) -- a negative delta (a resumed process resetting the
-    /// counter) re-latches the baseline and fails the turn closed.
-    usage_delta: CumulativeUsageDelta,
 }
 
 /// One round's in-flight accumulation: the thought + prose streams the model
@@ -1354,28 +1344,15 @@ impl Pump {
                 // An update with no matching pending row (missed the start) is
                 // dropped -- the trace stays consistent with the starts seen.
             }
-            SessionUpdate::UsageUpdate { usage } => {
-                // ADR-0129 Decision 2 (issue #1270): feed the cumulative
-                // counter; the differentiator owns the boundary semantics
-                // (first reading counts in full, negative delta fails the
-                // turn closed) and the settle lands the turn's usage.
-                if let Some(cumulative) = usage.to_usage() {
-                    self.usage_delta.feed(&cumulative);
-                }
+            SessionUpdate::UsageUpdate { .. } => {
+                // Recognized, deliberately uncollected (ADR-0129 issue
+                // #1270, live-pinned against the spec): the update is a
+                // context-occupancy snapshot, not a metering report -- the
+                // spec offers no billing-grade usage source, so the ACP
+                // turn stays fail-closed on usage (Decision 3).
             }
             SessionUpdate::Other => {}
         }
-    }
-
-    /// The turn's usage off the cumulative counter (ADR-0129 issue #1270):
-    /// the boundary growth as a HOST-turn aggregate -- an external agent
-    /// reports only a process aggregate, so attribution never splits
-    /// (Decision 6) and the subtotal table stays empty.
-    fn settle_usage(&self) -> Option<TurnUsage> {
-        self.usage_delta.settle().map(|total| TurnUsage {
-            total,
-            subagents: Vec::new(),
-        })
     }
 
     /// Reconcile the freeze guard with `pending` (ADR-0115): an open
@@ -1872,7 +1849,6 @@ mod tests {
             cancel_sent_at: None,
             clock: None,
             open_freeze: None,
-            usage_delta: CumulativeUsageDelta::new(),
         }
     }
 

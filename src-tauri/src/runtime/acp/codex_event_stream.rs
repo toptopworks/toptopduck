@@ -59,8 +59,14 @@ pub(crate) enum CodexEvent {
     ThreadStarted { thread_id: String },
     /// The agent started its turn (`turn.started`).
     TurnStarted,
-    /// The agent finished normally (`turn.completed`).
-    TurnCompleted,
+    /// The agent finished normally (`turn.completed`), carrying the turn's
+    /// own usage report (ADR-0129 issue #1270, live-measured on 0.154: the
+    /// `usage` field rides this event -- `exec --json` emits no
+    /// `token_count.updated`). The payload is the turn's terminal value,
+    /// not a process cumulative: each continuation window reports its own
+    /// (ADR-0128), so the pump accumulates them. `None` when the event
+    /// carried no usage or an all-zero one (the fail-closed sentinel).
+    TurnCompleted { usage: Option<TokenUsage> },
     /// The turn failed with an error message (`turn.failed` + `error`).
     TurnFailed { error: String },
     /// Agent text fragment — accumulated across the turn (the `text` of an
@@ -158,7 +164,9 @@ pub(crate) fn parse_event(value: &Value) -> CodexEvent {
             .map(|total| CodexEvent::TokenCount { total })
             .unwrap_or(CodexEvent::Other),
         "turn.started" => CodexEvent::TurnStarted,
-        "turn.completed" => CodexEvent::TurnCompleted,
+        "turn.completed" => CodexEvent::TurnCompleted {
+            usage: value.get("usage").and_then(parse_codex_usage),
+        },
         "turn.failed" => CodexEvent::TurnFailed {
             error: extract_error(value),
         },
@@ -208,16 +216,21 @@ pub(crate) fn parse_event(value: &Value) -> CodexEvent {
 }
 
 /// Parse + normalize one codex usage counter object (ADR-0129 Decision 1 --
-/// the codex channel's collection point). The counters follow the OpenAI
-/// family convention: `input_tokens` already contains `cached_input_tokens`
-/// (a subset -- taken verbatim, never re-added), and
-/// `reasoning_output_tokens` is the output split. An absent or all-zero
-/// object is the fail-closed sentinel (`None`, Decision 3).
+/// the codex channel's collection point; the same shape serves both the
+/// `turn.completed` terminal value and the `token_count.updated` fallback).
+/// The counters follow the OpenAI family convention: `input_tokens` already
+/// contains `cached_input_tokens` (a subset -- taken verbatim, never
+/// re-added), `cache_write_input_tokens` is the cache-write subset, and
+/// `reasoning_output_tokens` is the output split. An absent object, or one
+/// whose MAIN PAIR (input + output) is all-zero, is the fail-closed
+/// sentinel (`None`, Decision 3): a breakdown surviving an all-zero main
+/// pair is a malformed report, not evidence.
 fn parse_codex_usage(value: &Value) -> Option<TokenUsage> {
     let field = |name: &str| value.get(name).and_then(|v| v.as_u64()).unwrap_or(0);
     let input = field("input_tokens");
     let output = field("output_tokens");
     let cached = field("cached_input_tokens");
+    let cache_write = field("cache_write_input_tokens");
     let reasoning = field("reasoning_output_tokens");
     if input == 0 && output == 0 {
         return None;
@@ -225,7 +238,7 @@ fn parse_codex_usage(value: &Value) -> Option<TokenUsage> {
     Some(TokenUsage {
         input_tokens: input,
         cache_read_tokens: cached,
-        cache_write_tokens: 0,
+        cache_write_tokens: cache_write,
         output_tokens: output,
         reasoning_tokens: (reasoning > 0).then_some(reasoning),
     })
@@ -710,8 +723,16 @@ struct JsonPump {
     /// process-level cumulative value the pump differences at the turn
     /// boundary (Decision 2). A resumed window (`codex exec resume`) is a
     /// NEW process whose counter starts over -- the negative boundary
-    /// delta re-latches the baseline and fails the turn closed.
+    /// delta re-latches the baseline and fails the turn closed. A FALLBACK
+    /// only: live-measured on 0.154, `exec --json` emits no
+    /// `token_count.updated` -- the turn's usage rides `turn.completed`.
     usage_delta: CumulativeUsageDelta,
+    /// The `turn.completed` usage sum (ADR-0129 issue #1270): each event
+    /// carries its own window's terminal value (ADR-0128 continuation
+    /// emits one per window), accumulated so a multi-window turn carries
+    /// its full spend. The authoritative source -- `settle_usage` adopts
+    /// it whenever it is non-zero, the differentiator only otherwise.
+    turn_usage: crate::model::TokenUsage,
     /// Held while `exec_depth` > 0 (the open execution window).
     exec_freeze: Option<crate::session::progress::FreezeGuard>,
 }
@@ -726,14 +747,23 @@ impl JsonPump {
             exec_depth: 0,
             exec_freeze: None,
             usage_delta: CumulativeUsageDelta::new(),
+            turn_usage: crate::model::TokenUsage::default(),
         }
     }
 
-    /// The turn's usage off the cumulative counter (ADR-0129 issue #1270):
-    /// the boundary growth as a HOST-turn aggregate -- codex reports only
-    /// its process aggregate, so attribution never splits (Decision 6).
+    /// The turn's usage (ADR-0129 issue #1270): the `turn.completed`
+    /// terminal sum when the stream reported one (the authoritative source,
+    /// live-measured on 0.154), the cumulative counter's boundary growth
+    /// otherwise (the `token_count.updated` fallback). Either way a
+    /// HOST-turn aggregate -- codex reports only a process aggregate or a
+    /// window terminal value, so attribution never splits (Decision 6).
     fn settle_usage(&self) -> Option<TurnUsage> {
-        self.usage_delta.settle().map(|total| TurnUsage {
+        let total = if self.turn_usage.is_zero() {
+            self.usage_delta.settle()?
+        } else {
+            self.turn_usage
+        };
+        Some(TurnUsage {
             total,
             subagents: Vec::new(),
         })
@@ -787,7 +817,15 @@ impl JsonPump {
                 self.reconcile_exec_freeze();
                 None
             }
-            CodexEvent::TurnCompleted => Some(Termination::Text(self.tracker.terminal_text())),
+            CodexEvent::TurnCompleted { usage } => {
+                // ADR-0129 issue #1270: the event's terminal usage is the
+                // window's own report -- accumulate (one event per
+                // continuation window, ADR-0128), never difference.
+                if let Some(usage) = usage {
+                    self.turn_usage.add(&usage);
+                }
+                Some(Termination::Text(self.tracker.terminal_text()))
+            }
             CodexEvent::TurnFailed { error } => {
                 // The CLI's own turn budget (ADR-0128): the `model_max_turns`
                 // self-stop reads as a turn-limit failure -- the WINDOW-TRIP
@@ -979,7 +1017,7 @@ mod tests {
         r#"{"type":"item.started","item":{"id":"item_1","type":"command_execution","command":"<command>","aggregated_output":"","exit_code":null,"status":"in_progress"}}"#,
         r#"{"type":"item.completed","item":{"id":"item_1","type":"command_execution","command":"<command>","aggregated_output":"<output>","exit_code":0,"status":"completed"}}"#,
         r#"{"type":"item.completed","item":{"id":"item_2","type":"agent_message","text":"the answer"}}"#,
-        r#"{"type":"turn.completed","usage":{"input_tokens":0,"output_tokens":0}}"#,
+        r#"{"type":"turn.completed","usage":{"input_tokens":20552,"cached_input_tokens":3840,"cache_write_input_tokens":0,"output_tokens":5,"reasoning_output_tokens":0}}"#,
     ];
 
     /// Parse one fixture line (the lines are literals; a deserialization
@@ -1011,13 +1049,40 @@ mod tests {
         );
     }
 
-    /// The terminal event carries a usage payload the parser ignores.
+    /// The terminal event carries the turn's own usage (live-measured on
+    /// 0.154: usage rides `turn.completed`; `exec --json` emits no
+    /// `token_count.updated`), parsed with the OpenAI-family verbatim
+    /// input, the cache-write subset, and the zero-split fold.
     #[test]
     fn parse_turn_completed_with_usage() {
-        assert_eq!(
-            fixture_event(MEASURED_TURN_NDJSON[6]),
-            CodexEvent::TurnCompleted
-        );
+        match fixture_event(MEASURED_TURN_NDJSON[6]) {
+            CodexEvent::TurnCompleted { usage } => {
+                let usage = usage.expect("a non-zero report is evidence");
+                assert_eq!(usage.input_tokens, 20552, "taken verbatim (cache inside)");
+                assert_eq!(usage.cache_read_tokens, 3840);
+                assert_eq!(usage.cache_write_tokens, 0);
+                assert_eq!(usage.output_tokens, 5);
+                assert_eq!(usage.reasoning_tokens, None, "a zero split folds away");
+            }
+            other => panic!("expected TurnCompleted, got {other:?}"),
+        }
+        // An all-zero object -- or a breakdown surviving an all-zero main
+        // pair -- is a malformed report, not evidence: the fail-closed
+        // sentinel (Decision 3).
+        let zero = json!({
+            "type": "turn.completed",
+            "usage": {
+                "input_tokens": 0,
+                "output_tokens": 0,
+                "cached_input_tokens": 500,
+            },
+        });
+        match parse_event(&zero) {
+            CodexEvent::TurnCompleted { usage } => {
+                assert!(usage.is_none(), "a cache-only survivor is malformed, not evidence")
+            }
+            other => panic!("expected TurnCompleted, got {other:?}"),
+        }
     }
 
     /// The `error` field never triggered in the captured turns; both field
@@ -1906,7 +1971,10 @@ mod tests {
             },
             &mut |_| {},
         );
-        let end = pump.fold(CodexEvent::TurnCompleted, &mut |_| {});
+        let end = pump.fold(
+            CodexEvent::TurnCompleted { usage: None },
+            &mut |_| {},
+        );
         assert_eq!(end, Some(Termination::Text("part one part two".into())));
         assert!(pump
             .tracker
@@ -1919,7 +1987,10 @@ mod tests {
     #[test]
     fn turn_completed_without_prose_yields_empty_text() {
         let mut pump = JsonPump::new(24, None);
-        let end = pump.fold(CodexEvent::TurnCompleted, &mut |_| {});
+        let end = pump.fold(
+            CodexEvent::TurnCompleted { usage: None },
+            &mut |_| {},
+        );
         assert_eq!(end, Some(Termination::Text(String::new())));
     }
 
@@ -2430,5 +2501,30 @@ mod tests {
         // latched baseline.
         pump.fold(token_count_event(5, 0, 2, 0), &mut |_| {});
         assert!(pump.settle_usage().is_none(), "the turn fails closed");
+    }
+
+    /// The `turn.completed` terminal values are the AUTHORITATIVE source
+    /// (live-measured on 0.154): one event per continuation window
+    /// (ADR-0128), accumulated into the turn sum, and outranking the
+    /// cumulative counter when both arrived -- feeding both would
+    /// double-count.
+    #[test]
+    fn turn_completed_usage_accumulates_and_outranks_the_counter() {
+        let terminal = |input: u64, output: u64| CodexEvent::TurnCompleted {
+            usage: Some(crate::model::TokenUsage {
+                input_tokens: input,
+                output_tokens: output,
+                ..Default::default()
+            }),
+        };
+        let mut pump = JsonPump::new(24, None);
+        pump.fold(token_count_event(100, 0, 50, 0), &mut |_| {});
+        let end = pump.fold(terminal(30, 12), &mut |_| {});
+        assert_eq!(end, Some(Termination::Text(String::new())));
+        // The second continuation window's terminal adds on top.
+        pump.fold(terminal(5, 3), &mut |_| {});
+        let usage = pump.settle_usage().expect("terminal evidence settles");
+        assert_eq!(usage.total.input_tokens, 35, "both windows' terminals sum");
+        assert_eq!(usage.total.output_tokens, 15);
     }
 }

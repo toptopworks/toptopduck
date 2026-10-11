@@ -25,7 +25,7 @@ use std::thread;
 use toptopduck_lib::runtime::acp::wire::{
     self, ContentBlock, InitializeResult, NewSessionResult, Notification, PermissionOption,
     PermissionOptionKind, PermissionToolCall, PromptResult, RequestId, RequestPermissionParams,
-    Response, RpcError, SessionUpdate, SessionUpdateParams, SessionUsage, StopReason,
+    Response, RpcError, SessionUpdate, SessionUpdateParams, StopReason,
     ToolCallContent, ToolCallStatus, ToolKind,
 };
 
@@ -414,62 +414,20 @@ fn play_scenario(
             notify(out, agent_message("the answer is 42"));
             respond_prompt(out, &id, StopReason::EndTurn);
         }
-        // ADR-0129 (issue #1270): the cumulative-family usage channel --
-        // two monotone `usage_update` reports bracketing the reply; the
-        // engine's boundary differentiator settles the GROWTH (the
-        // integration test asserts the delta, never the raw counter).
+        // ADR-0129 (issue #1270): the spec's usage_update is a
+        // context-occupancy snapshot -- modeled in its REAL shape
+        // (`used`/`size`; no input/output split exists at this boundary).
+        // The integration test pins that the turn stays fail-closed on
+        // usage despite the update arriving.
         "usage_update" => {
             notify(
                 out,
                 SessionUpdate::UsageUpdate {
-                    usage: SessionUsage {
-                        input_tokens: 100,
-                        output_tokens: 40,
-                        cache_read_input_tokens: 30,
-                        cache_write_input_tokens: 20,
-                    },
+                    used: 1500,
+                    size: 200_000,
                 },
             );
             notify(out, agent_message("the answer is 42"));
-            notify(
-                out,
-                SessionUpdate::UsageUpdate {
-                    usage: SessionUsage {
-                        input_tokens: 150,
-                        output_tokens: 70,
-                        cache_read_input_tokens: 30,
-                        cache_write_input_tokens: 20,
-                    },
-                },
-            );
-            respond_prompt(out, &id, StopReason::EndTurn);
-        }
-        // The resume signature (ADR-0129 Decision 2): a second process
-        // whose counter started over reports BELOW the latched baseline --
-        // the engine re-latches and fails the turn's usage closed (the
-        // text still settles normally; only the usage is refused).
-        "usage_update_reset" => {
-            notify(
-                out,
-                SessionUpdate::UsageUpdate {
-                    usage: SessionUsage {
-                        input_tokens: 150,
-                        output_tokens: 70,
-                        ..SessionUsage::default()
-                    },
-                },
-            );
-            notify(out, agent_message("the answer is 42"));
-            notify(
-                out,
-                SessionUpdate::UsageUpdate {
-                    usage: SessionUsage {
-                        input_tokens: 5,
-                        output_tokens: 2,
-                        ..SessionUsage::default()
-                    },
-                },
-            );
             respond_prompt(out, &id, StopReason::EndTurn);
         }
         // `prompt_response_raw` (issue #851): the prompt response as a raw

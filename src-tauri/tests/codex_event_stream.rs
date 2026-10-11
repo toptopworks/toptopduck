@@ -145,6 +145,29 @@ fn text_reply_folds_reasoning_into_a_thinking_round() {
     );
 }
 
+/// ADR-0129 (issue #1270): the terminal `turn.completed` usage (the
+/// live-measured 0.154 shape -- `exec --json` emits no
+/// `token_count.updated`) settles as the turn's usage end to end.
+#[test]
+fn usage_turn_settles_the_terminal_usage() {
+    let (outcome, _, _) = run("usage_turn", 24);
+    assert!(matches!(outcome.termination, Termination::Text(_)));
+    let usage = outcome
+        .usage
+        .as_ref()
+        .expect("the terminal evidence settles");
+    assert_eq!(usage.total.input_tokens, 20552, "taken verbatim (cache inside)");
+    assert_eq!(usage.total.cache_read_tokens, 3840);
+    assert_eq!(usage.total.cache_write_tokens, 12);
+    assert_eq!(usage.total.output_tokens, 5);
+    assert_eq!(
+        usage.total.reasoning_tokens,
+        None,
+        "a zero split folds away to unsplit"
+    );
+    assert!(usage.subagents.is_empty(), "external attribution never splits");
+}
+
 /// A tool-call trajectory: one command_execution (emitted as the measured
 /// item.started / item.completed pair — the streaming variant must not double
 /// the row) + agent_message + completed. The trace carries one successful
