@@ -188,6 +188,7 @@ function renderPane(
     pendingApprovalSids: new Set(),
     respond: () => {},
     clearSession: () => {},
+    settleSession: () => {},
   };
   // ADR-0092: SessionPane no longer renders QuestionBar. Capture the composer
   // fields (handleAsk etc.) so tests can trigger questions directly.
@@ -1390,6 +1391,7 @@ describe("SessionPane pending-payload consumption (#500)", () => {
       pendingApprovalSids: new Set(),
       respond: () => {},
       clearSession: () => {},
+      settleSession: () => {},
     };
     const pane = (
       <SessionPane

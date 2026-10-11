@@ -1,5 +1,10 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { onApprovalRequest, onApprovalResolved, respondToolApproval } from "../api";
+import {
+  onApprovalAbandoned,
+  onApprovalRequest,
+  onApprovalResolved,
+  respondToolApproval,
+} from "../api";
 import type { ApprovalResponse, FileAttachment, OperationKind } from "../types/approval";
 import { log } from "../lib/log";
 
@@ -22,7 +27,10 @@ import { log } from "../lib/log";
 
 /** One approval card's lifecycle as the rail renders it (ADR-0083): pending
  *  (three live buttons) until the user answers or a cancel/close resolves it,
- *  then resolved in place (the response badge) until the turn settles. */
+ *  then resolved in place (the response badge) until the turn settles; or,
+ *  when the external caller drops the call with no answer (issue #1267),
+ *  abandoned in place (the abandoned badge) -- same terminal visibility,
+ *  nobody's answer involved. */
 export interface ApprovalEntry {
   requestId: string;
   server: string;
@@ -42,7 +50,10 @@ export interface ApprovalEntry {
    * turn clock freezes here while the user decides. Refreshed on a
    * re-emitted request (the de-dupe's fresh payload wins). */
   receivedAt: number;
-  status: { kind: "pending" } | { kind: "resolved"; response: ApprovalResponse };
+  status:
+    | { kind: "pending" }
+    | { kind: "resolved"; response: ApprovalResponse }
+    | { kind: "abandoned" };
 }
 
 export interface UseApprovalEvents {
@@ -66,6 +77,12 @@ export interface UseApprovalEvents {
    *  resolved cards fold into the optimistic thread record) and when the
    *  session closes (its cards can never be answered). */
   clearSession: (sessionId: string) => void;
+  /** Settle a session's turn-end cards (issue #1267): the local sweep that
+   *  backstops every backend path the echo-aligned abandonment could miss --
+   *  no entry may stay pending past its turn. The settled turn owns the
+   *  record; the session's entries are gone once this returns, exactly like
+   *  clearSession (the naming carries the turn-settle semantics). */
+  settleSession: (sessionId: string) => void;
 }
 
 export function useApprovalEvents(): UseApprovalEvents {
@@ -125,6 +142,32 @@ export function useApprovalEvents(): UseApprovalEvents {
           existing.map((e) =>
             e.requestId === ev.request_id
               ? { ...e, status: { kind: "resolved", response: ev.response } }
+              : e,
+          ),
+        );
+        return updated;
+      });
+    }).then((un) => {
+      if (!active) {
+        un();
+        return;
+      }
+      unlistens.push(un);
+    });
+    void onApprovalAbandoned((ev) => {
+      if (!active) return;
+      setApprovalsBySession((prev) => {
+        const existing = prev.get(ev.session_id);
+        // Same honest no-op as a resolved event for an unknown request, and
+        // the same guard in reverse: an entry that already holds an answer
+        // keeps it -- the abandonment lost that race by definition.
+        if (!existing?.some((e) => e.requestId === ev.request_id)) return prev;
+        const updated = new Map(prev);
+        updated.set(
+          ev.session_id,
+          existing.map((e) =>
+            e.requestId === ev.request_id && e.status.kind === "pending"
+              ? { ...e, status: { kind: "abandoned" } }
               : e,
           ),
         );
@@ -218,5 +261,19 @@ export function useApprovalEvents(): UseApprovalEvents {
     });
   }, []);
 
-  return { approvalsBySession, pendingApprovalSids, respond, clearSession };
+  const settleSession = useCallback(
+    (sessionId: string) => {
+      // Issue #1267's sweep: the turn settled, so nothing pending may
+      // outlive it -- the backend's echo-aligned abandonment already
+      // flipped the dropped calls' cards to their abandoned terminal state
+      // mid-turn, and this local sweep backstops every path it could miss.
+      // Same drop as clearSession (the naming carries the turn-settle
+      // semantics); a visible pending->abandoned flip has no consumer once
+      // the settled turn owns the record.
+      clearSession(sessionId);
+    },
+    [clearSession],
+  );
+
+  return { approvalsBySession, pendingApprovalSids, respond, clearSession, settleSession };
 }

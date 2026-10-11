@@ -86,12 +86,14 @@ export interface LiveTraceRow {
   summary: string;
   /** The approval card's state when this call went through the gate:
    *  `response` null while PENDING (three live buttons), the user's answer
-   *  once resolved (badge). null for ungated built-in calls. The
-   *  fileAttachments snapshot (issue #672) rides the pending card; the card
-   *  is its only surface (the settled trace keeps the argv summary). */
+   *  once resolved (badge), or `"abandoned"` when the external caller
+   *  dropped the call with no answer (issue #1267 -- abandoned badge). null
+   *  for ungated built-in calls. The fileAttachments snapshot (issue #672)
+   *  rides the pending card; the card is its only surface (the settled
+   *  trace keeps the argv summary). */
   approval: {
     requestId: string;
-    response: ApprovalResponse | null;
+    response: ApprovalResponse | "abandoned" | null;
     fileAttachments?: FileAttachment[];
     /** The delegating sub-agent's name (issue #934): the card renders it as
      *  "sub-agent X wants to call Y". undefined for a main-loop call. */
@@ -227,7 +229,7 @@ export function mergeLiveTrace(
         summary: call.summary,
         approval: {
           requestId: match.requestId,
-          response: match.status.kind === "resolved" ? match.status.response : null,
+          response: liveApprovalResponse(match.status),
           fileAttachments: match.fileAttachments,
           originAgent: match.originAgent,
         },
@@ -268,7 +270,7 @@ export function mergeLiveTrace(
       summary: a.summary,
       approval: {
         requestId: a.requestId,
-        response: a.status.kind === "resolved" ? a.status.response : null,
+        response: liveApprovalResponse(a.status),
         fileAttachments: a.fileAttachments,
         originAgent: a.originAgent,
       },
@@ -278,6 +280,17 @@ export function mergeLiveTrace(
     });
   }
   return rows;
+}
+
+/** Map an approval entry's status onto the live row's `response` field
+ *  (issue #1267): the resolved answer rides through, an abandonment maps to
+ *  the `"abandoned"` terminal marker, everything else (pending) is null. */
+function liveApprovalResponse(
+  status: ApprovalEntry["status"],
+): ApprovalResponse | "abandoned" | null {
+  if (status.kind === "resolved") return status.response;
+  if (status.kind === "abandoned") return "abandoned";
+  return null;
 }
 
 /** The SINGLE round grouping (issue #620): merge the two live channels, then

@@ -160,6 +160,7 @@ function renderPane() {
     pendingApprovalSids: new Set<string>(),
     respond,
     clearSession: vi.fn(),
+    settleSession: vi.fn(),
   };
   // A factory, not an element: a rerender must hand React a FRESH element --
   // re-rendering the same element reference bails out at the root (identical

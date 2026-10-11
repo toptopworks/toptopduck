@@ -40,6 +40,7 @@ import type {
 } from "./types/provider";
 import type { ThreadEntry, TurnOutcome } from "./types/thread";
 import type {
+  ApprovalAbandonedPayload,
   ApprovalRequestPayload,
   ApprovalResolvedPayload,
   ApprovalResponse,
@@ -881,6 +882,15 @@ export async function onApprovalResolved(
   cb: (ev: ApprovalResolvedPayload) => void,
 ): Promise<UnlistenFn> {
   return listen<ApprovalResolvedPayload>("approval-resolved", (e) => cb(e.payload));
+}
+
+// Subscribe to approval-abandoned events (issue #1267). The external caller
+// dropped the call with no answer; the frontend flips the pending card to
+// its abandoned terminal state in place.
+export async function onApprovalAbandoned(
+  cb: (ev: ApprovalAbandonedPayload) => void,
+): Promise<UnlistenFn> {
+  return listen<ApprovalAbandonedPayload>("approval-abandoned", (e) => cb(e.payload));
 }
 
 // --- Runtime selector (issue #353, ADR-0076/0081/0083) ---------------------

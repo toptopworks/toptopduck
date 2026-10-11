@@ -78,3 +78,11 @@ export interface ApprovalResolvedPayload {
   request_id: string;
   response: ApprovalResponse;
 }
+
+// An `approval-abandoned` event (issue #1267) -- the external caller dropped
+// the `tools/call` with no answer, so the card flips to its abandoned
+// terminal state in place: nobody refused anything, and the call is gone.
+export interface ApprovalAbandonedPayload {
+  session_id: string;
+  request_id: string;
+}

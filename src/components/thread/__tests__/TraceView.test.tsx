@@ -150,6 +150,24 @@ describe("LiveRow caption tokens (issue #826)", () => {
     );
     expect(resolved.container.querySelector(".approval-resolved")).toHaveClass("text-xs");
   });
+
+  it("renders the abandoned badge for a dropped call (issue #1267)", () => {
+    // The external caller dropped the call: the row keeps its identity but
+    // carries the terminal abandoned marker -- no answer buttons exist for
+    // a call nobody is waiting on anymore.
+    const abandoned = renderWithProviders(
+      <LiveRow
+        row={rowWith({
+          approval: { requestId: "req-1", response: "abandoned", fileAttachments: [] },
+          running: false,
+          success: null,
+        })}
+        onRespond={vi.fn()}
+      />,
+    );
+    expect(abandoned.container.querySelector(".approval-abandoned")).toHaveClass("text-xs");
+    expect(abandoned.container.querySelector(".approval-allow-once")).toBeNull();
+  });
 });
 
 describe("LiveRow excerpt gate (issue #1047)", () => {

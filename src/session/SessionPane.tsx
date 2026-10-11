@@ -145,7 +145,7 @@ export function SessionPane({ sessionId, isActive, pendingIngestPaths, onIngestC
   // render -- depending on the methods (not the object) keeps these two
   // callbacks identity-stable across renders (the same pattern useTurnFlow
   // uses for the viewed methods, issue #229).
-  const { approvalsBySession, respond, clearSession } = approvalEvents;
+  const { approvalsBySession, respond, settleSession } = approvalEvents;
   const sessionApprovals = approvalsBySession.get(sessionId) ?? NO_APPROVALS;
   const handleRespondApproval = useCallback(
     (requestId: string, response: ApprovalResponse) => respond(sessionId, requestId, response),
@@ -159,8 +159,10 @@ export function SessionPane({ sessionId, isActive, pendingIngestPaths, onIngestC
     [sessionId],
   );
   const handleApprovalsSettled = useCallback(
-    () => clearSession(sessionId),
-    [clearSession, sessionId],
+    // Issue #1267: the turn-settle sweep -- nothing pending outlives its
+    // turn, backstopping the backend's abandonment paths.
+    () => settleSession(sessionId),
+    [settleSession, sessionId],
   );
   const s = useSessionState(
     sessionId,

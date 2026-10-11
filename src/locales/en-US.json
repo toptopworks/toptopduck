@@ -578,6 +578,7 @@
   "thread.approval.resolved.allowOnce": "Allowed",
   "thread.approval.resolved.alwaysAllow": "Always allowed",
   "thread.approval.resolved.deny": "Denied",
+  "thread.approval.abandoned": "Abandoned",
   "thread.approval.viewFiles": "View file values ({count})",
   "thread.ariaLabel": "Conversation history",
   "thread.artifacts.label": "Delivered files ({count})",

@@ -1,5 +1,5 @@
 import { Loader2 } from "lucide-react";
-import { ApprovalCard, ApprovalResolvedBadge } from "./ApprovalCard";
+import { ApprovalAbandonedBadge, ApprovalCard, ApprovalResolvedBadge } from "./ApprovalCard";
 import { DelegationTraceDialog } from "./DelegationTraceDialog";
 import { OperationBadge, TraceRow } from "./TraceRow";
 import { TraceSummaryFold } from "./TraceSummaryFold";
@@ -53,12 +53,17 @@ export function LiveRow({
       />
     );
   }
-  // A resolved approval merges its badge onto the call row (one row per call,
-  // ADR-0083): the answer marker rides beside the name; the row otherwise
-  // renders its running / completed state like any call.
-  const resolvedResponse = row.approval !== null ? row.approval.response : null;
+  // A terminal approval merges its badge onto the call row (one row per call,
+  // ADR-0083): the user's answer marker, or the abandoned marker when the
+  // external caller dropped the call (issue #1267), rides beside the name;
+  // the row otherwise renders its running / completed state like any call.
+  const terminalResponse = row.approval !== null ? row.approval.response : null;
   const resolvedBadge =
-    resolvedResponse !== null ? <ApprovalResolvedBadge response={resolvedResponse} /> : null;
+    terminalResponse === "abandoned" ? (
+      <ApprovalAbandonedBadge />
+    ) : terminalResponse !== null ? (
+      <ApprovalResolvedBadge response={terminalResponse} />
+    ) : null;
   if (row.running || !isSettledRow(row)) {
     return (
       <li className="trace-row live-running py-0.5 text-xs">

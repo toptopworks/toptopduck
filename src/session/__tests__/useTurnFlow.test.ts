@@ -799,6 +799,13 @@ describe("useTurnFlow", () => {
       });
     });
 
+    it("maps an abandoned entry onto the row's abandoned marker (issue #1267)", () => {
+      // The dropped call's card renders its terminal state, not a pending
+      // card: the merge carries the abandonment through as the marker.
+      const rows = mergeLiveTrace([], [approval({ status: { kind: "abandoned" } })], 1);
+      expect(rows[0]?.approval).toMatchObject({ requestId: "req-1", response: "abandoned" });
+    });
+
     it("carries the fileAttachments snapshot onto the approval card row (issue #672)", () => {
       // The pending card is the snapshot's only surface: the approver
       // expands it against a value whose temp file is deleted when the call

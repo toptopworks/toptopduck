@@ -2427,6 +2427,27 @@ impl ApprovalSink for TauriApprovalSink {
             );
         }
     }
+
+    fn emit_abandoned(&self, body: &ApprovalRequestBody) {
+        // Same reconciliation stakes as a dropped resolved event: a dropped
+        // abandonment leaves a stale pending card (issue #1267) -- the
+        // gateway's state is already advanced, so log for diagnosability.
+        if let Err(e) = self.app.emit(
+            "approval-abandoned",
+            &crate::approval::ApprovalAbandonedPayload {
+                session_id: self.session_id.clone(),
+                request_id: body.request_id.clone(),
+            },
+        ) {
+            log::warn!(
+                target: "approval",
+                "approval-abandoned emit failed (session {}, request {}); frontend may show a stale pending card: {}",
+                self.session_id,
+                body.request_id,
+                e,
+            );
+        }
+    }
 }
 
 /// Answer the session's in-flight approval request (ADR-0083 three-button

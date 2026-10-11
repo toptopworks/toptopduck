@@ -335,6 +335,16 @@ pub struct ApprovalResolvedPayload {
     pub response: ApprovalResponse,
 }
 
+/// Full `approval-abandoned` event payload (issue #1267) -- the frontend
+/// flips the pending card to its abandoned terminal state in place: the
+/// external caller dropped the call, so no answer exists to report. Carries
+/// the same addressing pair as `ApprovalResolvedPayload`.
+#[derive(Debug, Clone, Serialize)]
+pub struct ApprovalAbandonedPayload {
+    pub session_id: SessionId,
+    pub request_id: String,
+}
+
 /// Emit side-channel for approval events (ADR-0083). Implemented at the
 /// command boundary with a Tauri `AppHandle` + the session id; the gate calls
 /// it to surface the card and to announce the resolution. The trait keeps the
@@ -346,6 +356,12 @@ pub trait ApprovalSink: Send + Sync {
     fn emit_request(&self, body: &ApprovalRequestBody);
     /// Announce that a pending request was answered (emits `approval-resolved`).
     fn emit_resolved(&self, body: &ApprovalRequestBody, response: ApprovalResponse);
+    /// Announce that a pending request was abandoned (emits
+    /// `approval-abandoned`, issue #1267): the external caller dropped the
+    /// call with no answer -- nobody refused anything, so this is a distinct
+    /// terminal state from `emit_resolved`'s denial. Default no-op: only
+    /// broadcasting sinks surface it.
+    fn emit_abandoned(&self, _body: &ApprovalRequestBody) {}
 }
 
 // ---------------------------------------------------------------------------
@@ -399,6 +415,12 @@ pub struct ApprovalRequest {
     /// card renders it ("sub-agent X wants to call Y") so the approver
     /// knows WHO is asking, not just what.
     pub origin_agent: Option<String>,
+    /// The caller-side call identifier for abandon detection (issue #1267):
+    /// the gateway serve's JSON-RPC id for bridge-originated calls, `None`
+    /// for every built-in / in-flow shape (no external echo exists to match
+    /// against). Rides the pending slot so the fold layer can align a
+    /// terminal gateway echo with the parked gate before abandoning it.
+    pub call_id: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -411,6 +433,10 @@ pub struct ApprovalRequest {
 /// previous one returns.
 struct Pending {
     request_id: uuid::Uuid,
+    /// The parked call's caller-side id (issue #1267): read by
+    /// [`ApprovalState::parked_call_id`] so the fold layer can align a
+    /// terminal gateway echo with this gate before abandoning it.
+    call_id: Option<String>,
     response: Option<ApprovalResponse>,
     /// The pre-truncation file attachments (issue #1009): the broadcast copy
     /// caps each content at [`FILE_ATTACHMENT_MAX_CHARS`] as a budget (the
@@ -447,6 +473,12 @@ pub struct ApprovalState {
     /// Latched by [`Self::interrupt_pending`] so a cancel that arrives before
     /// the gate enters the wait is not lost (the gate checks this on entry).
     interrupted: AtomicBool,
+    /// Latched by [`Self::abandon_pending`] (issue #1267): the external
+    /// caller dropped the `tools/call` (its terminal gateway echo aligned
+    /// with the parked call's id). Same latching discipline as
+    /// `interrupted` -- cleared on gate entry so a stale abandonment from a
+    /// prior gate cannot leak into this one's wait.
+    abandoned: AtomicBool,
 }
 
 impl Default for ApprovalState {
@@ -471,6 +503,7 @@ impl ApprovalState {
             pending: Mutex::new(None),
             cv: Condvar::new(),
             interrupted: AtomicBool::new(false),
+            abandoned: AtomicBool::new(false),
         }
     }
 
@@ -531,6 +564,30 @@ impl ApprovalState {
     pub fn interrupt_pending(&self) {
         self.interrupted.store(true, Ordering::SeqCst);
         self.cv.notify_all();
+    }
+
+    /// Wake any waiting gate as abandoned (issue #1267): the external caller
+    /// dropped the `tools/call` (its terminal gateway echo aligned with the
+    /// parked call's id). Idempotent: a no-op if no gate is waiting. The gate
+    /// settles the card via [`ApprovalSink::emit_abandoned`] and returns the
+    /// same cancelled exit `interrupt_pending` produces, so the serve's
+    /// existing error-reply handling covers both.
+    pub fn abandon_pending(&self) {
+        self.abandoned.store(true, Ordering::SeqCst);
+        self.cv.notify_all();
+    }
+
+    /// The parked gate's caller-side call id (issue #1267): `Some` only while
+    /// a gate is suspended on a bridge-originated call (one carrying a call
+    /// id). The fold layer aligns a terminal gateway echo against this before
+    /// calling [`Self::abandon_pending`] -- no match, no abandonment (a
+    /// same-turn sibling call's echo must not end this gate).
+    pub fn parked_call_id(&self) -> Option<String> {
+        self.pending
+            .lock()
+            .expect("pending lock poisoned")
+            .as_ref()
+            .and_then(|p| p.call_id.clone())
     }
 
     /// Drive a tool call through the policy gate (ADR-0080).
@@ -594,6 +651,9 @@ impl ApprovalState {
         // landed between install and clear (a window future reset call sites
         // outside the session_lock serializer would reopen).
         self.interrupted.store(false, Ordering::SeqCst);
+        // Same discipline for the abandonment latch (issue #1267): a stale
+        // abandonment from a prior gate must not leak into this one's wait.
+        self.abandoned.store(false, Ordering::SeqCst);
         // Install the pending slot, THEN emit. A respond() that races ahead of
         // the wait still finds the slot (matched by request_id) and stores its
         // answer durably in the mutex -- the gate's subsequent wait sees it
@@ -605,6 +665,9 @@ impl ApprovalState {
             // it defensively so the new request is observable, then install.
             *g = Some(Pending {
                 request_id,
+                // The parked call's id rides the slot (issue #1267) for the
+                // fold layer's echo alignment -- `parked_call_id` reads it.
+                call_id: request.call_id.clone(),
                 response: None,
                 // The uncut originals move into the slot; the broadcast body
                 // above already holds its own capped copies (issue #1009).
@@ -625,7 +688,10 @@ impl ApprovalState {
                         break Some(resp);
                     }
                 }
-                if self.interrupted.load(Ordering::SeqCst) || cancel.is_requested() {
+                if self.interrupted.load(Ordering::SeqCst)
+                    || self.abandoned.load(Ordering::SeqCst)
+                    || cancel.is_requested()
+                {
                     break None;
                 }
                 let (g2, _) = self
@@ -660,6 +726,17 @@ impl ApprovalState {
                 self.apply_response(&request.key, resp, &body, sink)
             }
             (None, None) => {
+                if self.abandoned.load(Ordering::SeqCst) {
+                    // Abandoned (issue #1267): the external caller dropped the
+                    // `tools/call` with no answer. The card settles to the
+                    // abandoned terminal state -- NOT a denial: nobody refused
+                    // anything, and no self-correctable denial exists to feed
+                    // because the caller is gone. The gate returns the same
+                    // cancelled exit the serve already maps to its JSON-RPC
+                    // error reply, so the turn-level outcome is untouched.
+                    sink.emit_abandoned(&body);
+                    return Err(GateCancelled);
+                }
                 // Cancelled / closed with no landed answer. The card resolves
                 // to a denial so the frontend does not leave a stale pending
                 // entry; the agent loop sees `Cancelled` (not the card's
@@ -801,6 +878,7 @@ mod tests {
     struct RecordingSink {
         requests: Mutex<Vec<ApprovalRequestBody>>,
         resolved: Mutex<Vec<(ApprovalRequestBody, ApprovalResponse)>>,
+        abandoned: Mutex<Vec<ApprovalRequestBody>>,
         cv: Condvar,
     }
 
@@ -813,6 +891,9 @@ mod tests {
         fn emit_resolved(&self, body: &ApprovalRequestBody, response: ApprovalResponse) {
             self.resolved.lock().unwrap().push((body.clone(), response));
         }
+        fn emit_abandoned(&self, body: &ApprovalRequestBody) {
+            self.abandoned.lock().unwrap().push(body.clone());
+        }
     }
 
     impl RecordingSink {
@@ -821,6 +902,9 @@ mod tests {
         }
         fn request_count(&self) -> usize {
             self.requests.lock().unwrap().len()
+        }
+        fn abandoned_count(&self) -> usize {
+            self.abandoned.lock().unwrap().len()
         }
     }
 
@@ -867,6 +951,7 @@ mod tests {
             summary: "GET /x".into(),
             file_attachments: Vec::new(),
             origin_agent: None,
+            call_id: None,
         };
         let outcome = state.gate(req, &sink, &cancel).expect("trusted allowed");
         assert_eq!(outcome, GateOutcome::Allow);
@@ -893,6 +978,7 @@ mod tests {
                 summary: "GET /x".into(),
                 file_attachments: Vec::new(),
                 origin_agent: Some("analyst".into()),
+                call_id: None,
             };
             state_c.gate(req, &*sink_c as &dyn ApprovalSink, &cancel_c)
         });
@@ -948,6 +1034,7 @@ mod tests {
                 summary: "GET /x".into(),
                 file_attachments: Vec::new(),
                 origin_agent: None,
+                call_id: None,
             };
             (
                 state_c.gate(req, &*sink_c as &dyn ApprovalSink, &cancel_c),
@@ -1003,6 +1090,7 @@ mod tests {
                     },
                 ],
                 origin_agent: None,
+                call_id: None,
             };
             (
                 state_c.gate(req, &*sink_c as &dyn ApprovalSink, &cancel_c),
@@ -1060,6 +1148,7 @@ mod tests {
                     },
                 ],
                 origin_agent: None,
+                call_id: None,
             };
             (
                 state_c.gate(req, &*sink_c as &dyn ApprovalSink, &cancel_c),
@@ -1133,6 +1222,7 @@ mod tests {
                 summary: "run".into(),
                 file_attachments: Vec::new(),
                 origin_agent: None,
+                call_id: None,
             };
             state_c.gate(req, &*sink_c as &dyn ApprovalSink, &cancel_c)
         });
@@ -1149,6 +1239,127 @@ mod tests {
             state.pending_attachments(request_id),
             Err(RespondError::NoPending)
         ));
+    }
+
+    /// The abandonment release path (issue #1267): `abandon_pending` wakes
+    /// the parked gate with the same cancelled exit the cancel path uses,
+    /// but the card settles via `emit_abandoned` -- nobody answered, so no
+    /// denial exists to report -- and the slot is taken so the pending
+    /// window closes like every other release.
+    #[test]
+    fn gate_abandonment_wakes_and_settles_the_card_without_a_denial() {
+        let state = Arc::new(ApprovalState::new());
+        let cancel = Arc::new(CancelToken::new());
+        let sink = Arc::new(RecordingSink::default());
+
+        let state_c = Arc::clone(&state);
+        let sink_c = Arc::clone(&sink);
+        let cancel_c = Arc::clone(&cancel);
+        let handle = std::thread::spawn(move || {
+            let req = ApprovalRequest {
+                key: ToolKey::external("acme", "fetch"),
+                operation_kind: OperationKind::Network,
+                summary: "GET /x".into(),
+                file_attachments: Vec::new(),
+                origin_agent: None,
+                call_id: Some("rpc-42".into()),
+            };
+            state_c.gate(req, &*sink_c as &dyn ApprovalSink, &cancel_c)
+        });
+
+        let request_id = poll_for_request(&sink, Duration::from_secs(2)).expect("request emitted");
+        assert_eq!(
+            state.parked_call_id(),
+            Some("rpc-42".into()),
+            "the parked call's id is observable for echo alignment"
+        );
+        state.abandon_pending();
+        assert_eq!(
+            handle.join().expect("gate thread").unwrap_err(),
+            GateCancelled,
+            "abandonment shares the cancelled exit the serve maps to its error reply"
+        );
+        assert_eq!(sink.abandoned_count(), 1, "the card settles as abandoned");
+        assert!(
+            sink.resolved.lock().unwrap().is_empty(),
+            "no denial exists to report -- nobody answered"
+        );
+        assert!(matches!(
+            state.pending_attachments(request_id),
+            Err(RespondError::NoPending)
+        ));
+    }
+
+    /// A durable answer beats an abandonment racing it (issue #1267): the
+    /// respond() that lands first is honored exactly like the existing
+    /// cancel race -- the abandonment only settles a card nobody answered.
+    #[test]
+    fn gate_abandonment_racing_a_landed_answer_honors_the_answer() {
+        let state = Arc::new(ApprovalState::new());
+        let cancel = Arc::new(CancelToken::new());
+        let sink = Arc::new(RecordingSink::default());
+
+        let state_c = Arc::clone(&state);
+        let sink_c = Arc::clone(&sink);
+        let cancel_c = Arc::clone(&cancel);
+        let handle = std::thread::spawn(move || {
+            let req = ApprovalRequest {
+                key: ToolKey::external("acme", "fetch"),
+                operation_kind: OperationKind::Network,
+                summary: "GET /x".into(),
+                file_attachments: Vec::new(),
+                origin_agent: None,
+                call_id: Some("rpc-43".into()),
+            };
+            state_c.gate(req, &*sink_c as &dyn ApprovalSink, &cancel_c)
+        });
+
+        let request_id = poll_for_request(&sink, Duration::from_secs(2)).expect("request emitted");
+        state
+            .respond(request_id, ApprovalResponse::AllowOnce)
+            .expect("respond ok");
+        state.abandon_pending();
+        assert_eq!(
+            handle.join().expect("gate thread").expect("answer honored"),
+            GateOutcome::Allow
+        );
+        assert_eq!(sink.abandoned_count(), 0);
+        assert_eq!(sink.resolved.lock().unwrap().len(), 1);
+    }
+
+    /// A gate with no call id parks unalignable (issue #1267):
+    /// `parked_call_id` stays `None`, so the fold layer's echo alignment can
+    /// never fire on it -- the "no match, no abandonment" rule starts here.
+    /// The plain abandonment still settles (the latch is not id-gated); the
+    /// id gate lives in the caller, which only abandons on an aligned echo.
+    #[test]
+    fn gate_without_a_call_id_parks_unalignable() {
+        let state = Arc::new(ApprovalState::new());
+        let cancel = Arc::new(CancelToken::new());
+        let sink = Arc::new(RecordingSink::default());
+
+        let state_c = Arc::clone(&state);
+        let sink_c = Arc::clone(&sink);
+        let cancel_c = Arc::clone(&cancel);
+        let handle = std::thread::spawn(move || {
+            let req = ApprovalRequest {
+                key: ToolKey::external("acme", "fetch"),
+                operation_kind: OperationKind::Network,
+                summary: "GET /x".into(),
+                file_attachments: Vec::new(),
+                origin_agent: None,
+                call_id: None,
+            };
+            state_c.gate(req, &*sink_c as &dyn ApprovalSink, &cancel_c)
+        });
+
+        poll_for_request(&sink, Duration::from_secs(2)).expect("request emitted");
+        assert_eq!(state.parked_call_id(), None);
+        state.abandon_pending();
+        assert_eq!(
+            handle.join().expect("gate thread").unwrap_err(),
+            GateCancelled
+        );
     }
 
     #[test]
@@ -1169,6 +1380,7 @@ mod tests {
                 summary: "GET /x".into(),
                 file_attachments: Vec::new(),
                 origin_agent: None,
+                call_id: None,
             };
             state_c.gate(req, &*sink_c as &dyn ApprovalSink, &cancel_c)
         });
@@ -1193,6 +1405,7 @@ mod tests {
             summary: "GET /y".into(),
             file_attachments: Vec::new(),
             origin_agent: None,
+            call_id: None,
         };
         let outcome2 = state.gate(req, &sink2, &cancel2).expect("trusted now");
         assert_eq!(outcome2, GateOutcome::Allow);
@@ -1215,6 +1428,7 @@ mod tests {
                 summary: "GET /x".into(),
                 file_attachments: Vec::new(),
                 origin_agent: None,
+                call_id: None,
             };
             state_c.gate(req, &*sink_c as &dyn ApprovalSink, &cancel_c)
         });
@@ -1246,6 +1460,7 @@ mod tests {
                 summary: "GET /x".into(),
                 file_attachments: Vec::new(),
                 origin_agent: None,
+                call_id: None,
             };
             state_c.gate(req, &*sink_c as &dyn ApprovalSink, &cancel_c)
         });
@@ -1289,6 +1504,7 @@ mod tests {
                 summary: "GET /x".into(),
                 file_attachments: Vec::new(),
                 origin_agent: None,
+                call_id: None,
             };
             state_c.gate(req, &*sink_arc_c, &cancel_c)
         });
@@ -1312,6 +1528,7 @@ mod tests {
                 summary: "GET /x".into(),
                 file_attachments: Vec::new(),
                 origin_agent: None,
+                call_id: None,
             };
             state_c.gate(req, &*sink_c as &dyn ApprovalSink, &cancel_c)
         });
@@ -1377,6 +1594,7 @@ mod tests {
                 summary: "GET /x".into(),
                 file_attachments: Vec::new(),
                 origin_agent: None,
+                call_id: None,
             };
             a_c.gate(req, &*sink_c as &dyn ApprovalSink, &cancel_c)
         });
@@ -1391,6 +1609,7 @@ mod tests {
             summary: "GET /y".into(),
             file_attachments: Vec::new(),
             origin_agent: None,
+            call_id: None,
         };
         let b_cancel = CancelToken::new();
         let b_sink = RecordingSink::default();
@@ -1432,6 +1651,7 @@ mod tests {
                 summary: "GET /x".into(),
                 file_attachments: Vec::new(),
                 origin_agent: None,
+                call_id: None,
             };
             state_c.gate(req, &*sink_c as &dyn ApprovalSink, &cancel_c)
         });
@@ -1478,6 +1698,7 @@ mod tests {
                 summary: "GET /x".into(),
                 file_attachments: Vec::new(),
                 origin_agent: None,
+                call_id: None,
             };
             state_c.gate(req, &*sink_c as &dyn ApprovalSink, &cancel_c)
         });
@@ -1648,6 +1869,7 @@ mod tests {
                 summary: "S".repeat(1000),
                 file_attachments: Vec::new(),
                 origin_agent: None,
+                call_id: None,
             };
             state_c.gate(req, &*sink_c as &dyn ApprovalSink, &cancel_c)
         });
