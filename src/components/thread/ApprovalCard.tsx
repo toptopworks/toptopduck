@@ -285,3 +285,21 @@ export function ApprovalResolvedBadge({ response }: { response: ApprovalResponse
     </Badge>
   );
 }
+
+// The abandoned marker a gated call merges onto its row (issue #1267): the
+// external caller dropped the call with no answer -- a neutral terminal
+// state, never an answer. Same truncate family as the resolved badge.
+export function ApprovalAbandonedBadge() {
+  const intl = useIntl();
+  return (
+    <Badge
+      variant="secondary"
+      className="approval-abandoned min-w-0 shrink truncate px-1 py-0 text-xs font-normal"
+    >
+      {intl.formatMessage({
+        id: "thread.approval.abandoned",
+        defaultMessage: "Abandoned",
+      })}
+    </Badge>
+  );
+}

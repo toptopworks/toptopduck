@@ -89,6 +89,7 @@ vi.mock("../api", async (importOriginal) => {
     // jsdom) from rejecting unhandled.
     onApprovalRequest: vi.fn(async () => () => {}),
     onApprovalResolved: vi.fn(async () => () => {}),
+    onApprovalAbandoned: vi.fn(async () => () => {}),
     respondToolApproval: vi.fn(async () => {}),
     // The tray channel (issue #1140) mounts on App render; same inert
     // no-op treatment as the approval listeners above.

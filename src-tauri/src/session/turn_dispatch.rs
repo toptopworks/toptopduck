@@ -385,6 +385,7 @@ fn dispatch_gated_call_inner(
                         // The originator annotation rides the gate like every
                         // other call's (issue #934).
                         origin_agent: origin.map(str::to_string),
+                        call_id: None,
                     };
                     match gate.approval.gate(gate_req, gate.sink, gate.cancel) {
                         Err(GateCancelled) => return Err(GateCancelled),
@@ -490,6 +491,7 @@ fn dispatch_gated_call_inner(
         // name rides the gate so the approval card reads "sub-agent X wants
         // to call Y"; a main-loop call carries none.
         origin_agent: origin.map(str::to_string),
+        call_id: None,
     };
     // ADR-0080: every tool call passes the gate before dispatch. Built-in tools
     // classify Allow (zero approval); external tools would suspend here.

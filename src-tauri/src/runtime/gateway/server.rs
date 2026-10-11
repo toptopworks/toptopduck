@@ -22,8 +22,9 @@
 //! external arm and surface the gate's pending card.
 
 use std::io::{self, BufRead, BufReader, Write};
-use std::net::TcpListener;
+use std::net::{TcpListener, TcpStream};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
@@ -193,6 +194,81 @@ fn is_read_timeout(kind: io::ErrorKind) -> bool {
     matches!(kind, io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut)
 }
 
+/// The keep-alive cadence for a gated `tools/call` (issue #1267): the
+/// bridge client's request timeout (opencode's SDK defaults to ~60s absent
+/// configuration) resets on every progress notification, so an interval
+/// well under it keeps the request alive for an unbounded human wait.
+const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(20);
+
+/// One `notifications/progress` keep-alive frame (issue #1267). Pure so
+/// tests pin the wire shape without a clock.
+fn progress_notification(token: &Value, progress: u64) -> Value {
+    json!({
+        "jsonrpc": "2.0",
+        "method": "notifications/progress",
+        "params": {
+            "progressToken": token,
+            "progress": progress,
+            "message": "awaiting approval",
+        }
+    })
+}
+
+/// Spawn the keep-alive sender riding a progress-tokened `tools/call`
+/// (issue #1267): while the serve thread is parked in the approval gate it
+/// cannot write frames, so this companion thread holds the connection's
+/// shared write half and emits periodic progress notifications to reset the
+/// bridge client's request timeout. Returns the stop flag (the serve sets it
+/// once its handler returns) and the join handle (tests join for
+/// determinism; production drops it -- the thread exits on its own within
+/// one interval sleep, never blocking the response write).
+fn spawn_keepalive(
+    writer: Arc<Mutex<TcpStream>>,
+    token: Value,
+    interval: Duration,
+) -> (Arc<AtomicBool>, std::thread::JoinHandle<()>) {
+    let stop = Arc::new(AtomicBool::new(false));
+    let stop_c = Arc::clone(&stop);
+    let handle = std::thread::spawn(move || {
+        let mut progress: u64 = 0;
+        loop {
+            std::thread::sleep(interval);
+            if stop_c.load(Ordering::SeqCst) {
+                break;
+            }
+            progress += 1;
+            let frame = progress_notification(&token, progress);
+            let Ok(mut w) = writer.lock() else {
+                log::debug!(
+                    target: "toptopduck::gateway",
+                    "keep-alive companion exiting on a poisoned writer lock"
+                );
+                break;
+            };
+            // Re-check the flag under the lock: the earlier check ran before
+            // the lock could be contended, so only this one orders the
+            // companion's last frame (if any) before the serve's response
+            // write -- the lock, not the timing, carries the safety.
+            if stop_c.load(Ordering::SeqCst) {
+                break;
+            }
+            // A dead bridge leaves nothing to keep alive. While the gate
+            // parks the serve thread the read-side reset handling cannot
+            // run (it resumes only after the gate returns), so this failed
+            // write is the one mid-park signal that the bridge died --
+            // logged, not discarded.
+            if framing::write_message(&mut *w, &frame).is_err() {
+                log::debug!(
+                    target: "toptopduck::gateway",
+                    "keep-alive companion exiting on a failed write (bridge gone mid-park)"
+                );
+                break;
+            }
+        }
+    });
+    (stop, handle)
+}
+
 /// Accept one bridge connection, verify its token, and drive the MCP subset
 /// (`initialize` / `tools/list` / `tools/call`) until the bridge disconnects
 /// (read EOF, or a reset -- a hard bridge death, issue #801 -- or a failed
@@ -255,6 +331,13 @@ pub fn serve_connection(
     // read resumes the same line instead of re-framing from the stream's
     // mid-line position.
     let mut frames = framing::FrameReader::new(reader);
+    // Shared write half (issue #1267): a `tools/call` carrying a progress
+    // token gets a keep-alive companion thread that writes progress
+    // notifications while the serve thread is parked in the approval gate.
+    // Both writers serialize through this lock -- the companion re-checks
+    // its stop flag after acquiring it, so any late frame still lands
+    // before the response envelope the serve writes here.
+    let writer = Arc::new(Mutex::new(writer));
 
     let mut outcome = GatewayOutcome::default();
     loop {
@@ -326,14 +409,38 @@ pub fn serve_connection(
         };
         let id = msg.get("id").cloned();
         let method = msg.get("method").and_then(|v| v.as_str()).unwrap_or("");
+        // The keep-alive companion (issue #1267): a `tools/call` carrying a
+        // progress token gets periodic `notifications/progress` while the
+        // serve thread may be parked in the approval gate -- resetting the
+        // bridge client's request timeout so the approval wait stays
+        // human-unbounded (ADR-0115 posture) instead of expiring on the
+        // caller's side. Token-less calls and other methods spawn nothing.
+        let keepalive_stop = if method == "tools/call" {
+            msg.get("params")
+                .and_then(|p| p.get("_meta"))
+                .and_then(|m| m.get("progressToken"))
+                .cloned()
+                .map(|token| spawn_keepalive(Arc::clone(&writer), token, KEEPALIVE_INTERVAL).0)
+        } else {
+            None
+        };
         let response = handle_method(method, &msg, &mut ctx, &mut outcome);
+        // The serve owns the wire again: stop the companion (it exits after
+        // at most one more interval sleep; no join -- the response write
+        // must not wait on it).
+        if let Some(stop) = &keepalive_stop {
+            stop.store(true, Ordering::SeqCst);
+        }
         if let Some(id) = id {
             if let Some(envelope) = response.into_envelope(id) {
                 // The write twin of the read-side reset arm (issue #801): a
                 // bridge that dies mid-response aborts the write with a
                 // reset / broken pipe. The request was served; the turn's
                 // fate belongs to the ACP engine.
-                if let Err(e) = framing::write_message(&mut writer, &envelope) {
+                if let Err(e) = framing::write_message(
+                    &mut *writer.lock().expect("gateway writer lock"),
+                    &envelope,
+                ) {
                     if is_bridge_gone(e.kind()) {
                         log::debug!(
                             target: "toptopduck::gateway",
@@ -823,6 +930,7 @@ fn handle_tools_call(msg: &Value, ctx: &mut GatewayCtx, outcome: &mut GatewayOut
                     // no sub-agent originator (delegation is built-in-only,
                     // ADR-0117's v1 calibration).
                     origin_agent: None,
+                    call_id: Some(call.id.clone()),
                 };
                 match ctx.approval.gate(gate_req, ctx.sink, ctx.cancel) {
                     Err(GateCancelled) => Response::Error(-32000, "turn cancelled".into()),
@@ -925,6 +1033,7 @@ fn handle_tools_call(msg: &Value, ctx: &mut GatewayCtx, outcome: &mut GatewayOut
         // calibration scopes the delegation family to the built-in runtime;
         // external bridge faces carry none).
         origin_agent: None,
+        call_id: Some(call.id.clone()),
     };
     match ctx.approval.gate(gate_req, ctx.sink, ctx.cancel) {
         Err(GateCancelled) => Response::Error(-32000, "turn cancelled".into()),
@@ -1727,6 +1836,54 @@ mod tests {
     }
 
     // --- pure helpers ------------------------------------------------------
+
+    /// The keep-alive frame's wire shape (issue #1267): a `notifications/progress`
+    /// notification echoing the request's progress token, a monotonically
+    /// increasing progress counter, and a message naming the approval wait --
+    /// everything the bridge client's timeout reset needs.
+    #[test]
+    fn progress_notification_pins_the_wire_shape() {
+        let token = json!("tok-7");
+        let f1 = progress_notification(&token, 1);
+        assert_eq!(f1["method"], "notifications/progress");
+        assert_eq!(f1["params"]["progressToken"], "tok-7");
+        assert_eq!(f1["params"]["progress"], 1);
+        assert_eq!(f1["params"]["message"], "awaiting approval");
+        assert!(f1.get("id").is_none(), "a notification carries no id");
+        let f3 = progress_notification(&token, 3);
+        assert_eq!(f3["params"]["progress"], 3, "the counter is monotonic");
+    }
+
+    /// The keep-alive companion's lifecycle (issue #1267): it emits one
+    /// progress notification per interval on the shared write half while
+    /// running, and stops emitting once the serve sets the stop flag (joined
+    /// for determinism -- production drops the handle).
+    #[test]
+    fn spawn_keepalive_emits_per_interval_then_stops() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let port = listener.local_addr().expect("addr").port();
+        let client = TcpStream::connect(("127.0.0.1", port)).expect("connect");
+        let (server, _) = listener.accept().expect("accept");
+        let writer = Arc::new(Mutex::new(server));
+        let (stop, handle) = spawn_keepalive(
+            Arc::clone(&writer),
+            json!("tok-1"),
+            Duration::from_millis(30),
+        );
+        let mut reader = BufReader::new(client);
+        let mut line = String::new();
+        reader.read_line(&mut line).expect("first frame");
+        let frame: Value = serde_json::from_str(line.trim()).expect("json frame");
+        assert_eq!(frame["method"], "notifications/progress");
+        assert_eq!(frame["params"]["progressToken"], "tok-1");
+        // Two more intervals prove cadence, then the stop flag ends it.
+        let mut line2 = String::new();
+        reader.read_line(&mut line2).expect("second frame");
+        let mut line3 = String::new();
+        reader.read_line(&mut line3).expect("third frame");
+        stop.store(true, Ordering::SeqCst);
+        handle.join().expect("companion exits");
+    }
 
     #[test]
     fn bind_gateway_mints_port_and_64_hex_token() {

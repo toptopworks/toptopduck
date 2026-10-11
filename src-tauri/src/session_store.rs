@@ -1118,6 +1118,7 @@ mod tests {
                 summary: "GET /x".into(),
                 file_attachments: Vec::new(),
                 origin_agent: None,
+                call_id: None,
             };
             approval_c.gate(req, &*sink_c as &dyn ApprovalSink, &cancel_c)
         });

@@ -578,6 +578,7 @@
   "thread.approval.resolved.allowOnce": "已允许",
   "thread.approval.resolved.alwaysAllow": "已始终允许",
   "thread.approval.resolved.deny": "已拒绝",
+  "thread.approval.abandoned": "已放弃",
   "thread.approval.viewFiles": "查看传值文件（{count}）",
   "thread.ariaLabel": "对话历史",
   "thread.artifacts.label": "交付文件（{count}）",

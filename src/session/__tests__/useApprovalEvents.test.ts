@@ -2,6 +2,7 @@ import { act, renderHook, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { useApprovalEvents } from "../useApprovalEvents";
 import type {
+  ApprovalAbandonedPayload,
   ApprovalRequestPayload,
   ApprovalResolvedPayload,
 } from "../../types/approval";
@@ -16,6 +17,7 @@ import type {
 const approvalCbs = vi.hoisted(() => ({
   request: null as null | ((ev: ApprovalRequestPayload) => void),
   resolved: null as null | ((ev: ApprovalResolvedPayload) => void),
+  abandoned: null as null | ((ev: ApprovalAbandonedPayload) => void),
 }));
 
 vi.mock("../../api", async (importOriginal) => {
@@ -29,6 +31,10 @@ vi.mock("../../api", async (importOriginal) => {
     }),
     onApprovalResolved: vi.fn(async (cb: (ev: ApprovalResolvedPayload) => void) => {
       approvalCbs.resolved = cb;
+      return () => {};
+    }),
+    onApprovalAbandoned: vi.fn(async (cb: (ev: ApprovalAbandonedPayload) => void) => {
+      approvalCbs.abandoned = cb;
       return () => {};
     }),
   };
@@ -55,6 +61,7 @@ describe("useApprovalEvents", () => {
     vi.clearAllMocks();
     approvalCbs.request = null;
     approvalCbs.resolved = null;
+    approvalCbs.abandoned = null;
   });
 
   it("mounts BOTH listeners once (long-lived, ADR-0059 C-4 pattern)", async () => {
@@ -220,5 +227,45 @@ describe("useApprovalEvents", () => {
     expect(result.current.approvalsBySession.has("sess-1")).toBe(false);
     expect(result.current.approvalsBySession.get("sess-2")).toHaveLength(1);
     expect([...result.current.pendingApprovalSids]).toEqual(["sess-2"]);
+  });
+
+  it("flips the matching entry to ABANDONED in place on approval-abandoned (issue #1267)", async () => {
+    const { result } = renderHook(() => useApprovalEvents());
+    await waitFor(() => expect(approvalCbs.abandoned).not.toBeNull());
+    act(() => approvalCbs.request!(requestEvent()));
+    act(() => approvalCbs.abandoned!({ session_id: SID, request_id: "req-1" }));
+    const entries = result.current.approvalsBySession.get(SID);
+    expect(entries?.[0].status).toEqual({ kind: "abandoned" });
+    // No pending left -> the sid drops out of the coloring set.
+    expect(result.current.pendingApprovalSids.has(SID)).toBe(false);
+  });
+
+  it("keeps an already-RESOLVED entry on an abandoned event (the answer won the race)", async () => {
+    const { result } = renderHook(() => useApprovalEvents());
+    await waitFor(() => expect(approvalCbs.resolved).not.toBeNull());
+    act(() => approvalCbs.request!(requestEvent()));
+    act(() =>
+      approvalCbs.resolved!({ session_id: SID, request_id: "req-1", response: "allow_once" }),
+    );
+    act(() => approvalCbs.abandoned!({ session_id: SID, request_id: "req-1" }));
+    const entries = result.current.approvalsBySession.get(SID);
+    expect(entries?.[0].status).toEqual({ kind: "resolved", response: "allow_once" });
+  });
+
+  it("ignores an abandoned event for an unknown request (no card to flip)", async () => {
+    const { result } = renderHook(() => useApprovalEvents());
+    await waitFor(() => expect(approvalCbs.abandoned).not.toBeNull());
+    const before = result.current.approvalsBySession;
+    act(() => approvalCbs.abandoned!({ session_id: SID, request_id: "ghost" }));
+    expect(result.current.approvalsBySession).toBe(before); // unchanged ref
+  });
+
+  it("settleSession drops the session's entries, pending included (issue #1267 sweep)", async () => {
+    const { result } = renderHook(() => useApprovalEvents());
+    await waitFor(() => expect(approvalCbs.request).not.toBeNull());
+    act(() => approvalCbs.request!(requestEvent({ session_id: "sess-1", request_id: "r1" })));
+    act(() => result.current.settleSession("sess-1"));
+    expect(result.current.approvalsBySession.has("sess-1")).toBe(false);
+    expect([...result.current.pendingApprovalSids]).toEqual([]);
   });
 });

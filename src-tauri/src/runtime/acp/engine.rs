@@ -104,6 +104,37 @@ impl RowEnd {
     }
 }
 
+/// The abandon-detection fallback (issue #1267): a TERMINAL tool-call echo
+/// arriving while this session's approval gate is still parked means the
+/// external caller dropped the `tools/call` on its side (the healthy path's
+/// echo lands only after the gateway's response, which a parked gate has
+/// not written yet). Only an EXACT call-id match fires -- the parked slot's
+/// id is non-`None` only for bridge-originated calls, so a same-turn
+/// sibling's echo (or any built-in-line state) can never match; no match,
+/// no abandonment. A miss is NOT backstopped while the gate stays parked:
+/// the frontend's turn-settle sweep only runs once the turn thread returns,
+/// which a parked gate blocks -- so a live id mismatch would hang the turn
+/// until the user answers or cancels. The gateway already reports call.id
+/// as the tool_use id, so the two spaces are same-origin in practice.
+fn abandon_on_terminal_echo(approval: &crate::approval::ApprovalState, update: &SessionUpdate) {
+    let echo_call_id = match update {
+        SessionUpdate::ToolCall {
+            tool_call_id,
+            status,
+            ..
+        } if RowEnd::from_wire_status(*status).is_some() => tool_call_id.as_str(),
+        SessionUpdate::ToolCallUpdate {
+            tool_call_id,
+            status,
+            ..
+        } if status.is_some_and(|s| RowEnd::from_wire_status(s).is_some()) => tool_call_id.as_str(),
+        _ => return,
+    };
+    if approval.parked_call_id().as_deref() == Some(echo_call_id) {
+        approval.abandon_pending();
+    }
+}
+
 /// One ACP turn input. The wiring seam assembles `prompt_blocks` from the
 /// same window the built-in loop reads; `mcp_servers` is the bridge
 /// descriptor.
@@ -825,7 +856,13 @@ impl AcpIo {
                             match serde_json::from_value::<SessionUpdateParams>(
                                 v.get("params").cloned().unwrap_or(Value::Null),
                             ) {
-                                Ok(params) => pump.fold_update(&params.update, on_phase),
+                                Ok(params) => {
+                                    pump.fold_update(&params.update, on_phase);
+                                    // Issue #1267: after folding, probe the
+                                    // echo for an abandonment the gateway's
+                                    // parked gate needs to hear about.
+                                    abandon_on_terminal_echo(approval, &params.update);
+                                }
                                 // Dropped, not fatal (protocol robustness) --
                                 // but never silent: a shape miss here renders
                                 // a whole turn empty while tests stay green,
@@ -1666,6 +1703,7 @@ impl ApprovalSink for NullAcpSink {
 #[cfg(test)]
 struct RecordingAcpSink {
     last_request: std::sync::Mutex<Option<crate::approval::ApprovalRequestBody>>,
+    abandoned: std::sync::atomic::AtomicUsize,
 }
 
 #[cfg(test)]
@@ -1673,6 +1711,7 @@ impl RecordingAcpSink {
     fn new() -> Self {
         Self {
             last_request: std::sync::Mutex::new(None),
+            abandoned: std::sync::atomic::AtomicUsize::new(0),
         }
     }
 }
@@ -1687,6 +1726,10 @@ impl ApprovalSink for RecordingAcpSink {
         _body: &crate::approval::ApprovalRequestBody,
         _response: ApprovalResponse,
     ) {
+    }
+    fn emit_abandoned(&self, _body: &crate::approval::ApprovalRequestBody) {
+        self.abandoned
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     }
 }
 
@@ -1864,6 +1907,128 @@ mod tests {
     /// The native-call counterpart (issue #1242): a title that is not a
     /// gateway rename keeps its live Started / Completed pair -- the silence
     /// is scoped to the gateway-routed echoes, never the CLI's own tools.
+    /// Park an approval gate on a background thread under the given call id
+    /// (issue #1267 tests): returns the shared state, the recording sink,
+    /// and the gate's join handle.
+    fn park_gated_call(
+        call_id: &str,
+    ) -> (
+        Arc<crate::approval::ApprovalState>,
+        Arc<RecordingAcpSink>,
+        std::thread::JoinHandle<
+            Result<crate::approval::GateOutcome, crate::approval::GateCancelled>,
+        >,
+    ) {
+        let call_id = call_id.to_string();
+        let approval = Arc::new(crate::approval::ApprovalState::new());
+        let sink = Arc::new(RecordingAcpSink::new());
+        let cancel = Arc::new(CancelToken::new());
+        let handle = {
+            let approval = Arc::clone(&approval);
+            let sink = Arc::clone(&sink);
+            let cancel = Arc::clone(&cancel);
+            std::thread::spawn(move || {
+                let req = crate::approval::ApprovalRequest {
+                    key: crate::approval::ToolKey::external("acme", "fetch"),
+                    operation_kind: crate::approval::OperationKind::Network,
+                    summary: "GET /x".into(),
+                    file_attachments: Vec::new(),
+                    origin_agent: None,
+                    call_id: Some(call_id),
+                };
+                approval.gate(req, &*sink, &cancel)
+            })
+        };
+        (approval, sink, handle)
+    }
+
+    /// Wait (bounded) until the helper's gate is parked (issue #1267 tests).
+    fn wait_until_parked(approval: &crate::approval::ApprovalState) {
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        while approval.parked_call_id().is_none() {
+            assert!(std::time::Instant::now() < deadline, "gate never parked");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    /// Issue #1267: a terminal echo whose call id matches the parked gate's
+    /// call id abandons the gate -- the card settles abandoned (no denial:
+    /// nobody answered) and the gate returns the cancelled exit the serve
+    /// already maps to its JSON-RPC error reply.
+    #[test]
+    fn terminal_echo_matching_the_parked_call_abandons_the_gate() {
+        let (approval, sink, gate) = park_gated_call("tc_1");
+        wait_until_parked(&approval);
+        abandon_on_terminal_echo(
+            &approval,
+            &SessionUpdate::ToolCall {
+                tool_call_id: "tc_1".into(),
+                title: Some("mcp__toptopduck-gateway__explore".into()),
+                status: wire::ToolCallStatus::Failed,
+                kind: Some(wire::ToolKind::Execute),
+                content: Vec::new(),
+            },
+        );
+        assert!(gate.join().expect("gate thread").is_err());
+        assert_eq!(
+            sink.abandoned.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "the card settles abandoned"
+        );
+    }
+
+    /// Issue #1267: no match, no abandonment -- a sibling call's terminal
+    /// echo (different id) and a non-terminal status on the matching id
+    /// both leave the gate parked; only the aligned TERMINAL echo ends it.
+    #[test]
+    fn unmatched_or_pending_echo_never_abandons_the_gate() {
+        let (approval, _sink, gate) = park_gated_call("tc_9");
+        wait_until_parked(&approval);
+        // A sibling's terminal echo: different call id.
+        abandon_on_terminal_echo(
+            &approval,
+            &SessionUpdate::ToolCall {
+                tool_call_id: "tc_other".into(),
+                title: Some("mcp__toptopduck-gateway__explore".into()),
+                status: wire::ToolCallStatus::Completed,
+                kind: Some(wire::ToolKind::Execute),
+                content: Vec::new(),
+            },
+        );
+        assert_eq!(
+            approval.parked_call_id(),
+            Some("tc_9".into()),
+            "a sibling's echo must not end this gate"
+        );
+        // The matching id at a NON-terminal status: still parked.
+        abandon_on_terminal_echo(
+            &approval,
+            &SessionUpdate::ToolCall {
+                tool_call_id: "tc_9".into(),
+                title: Some("mcp__toptopduck-gateway__explore".into()),
+                status: wire::ToolCallStatus::Pending,
+                kind: Some(wire::ToolKind::Execute),
+                content: Vec::new(),
+            },
+        );
+        assert_eq!(
+            approval.parked_call_id(),
+            Some("tc_9".into()),
+            "a pending status is not an abandonment signal"
+        );
+        // The aligned terminal echo via the update frame ends it.
+        abandon_on_terminal_echo(
+            &approval,
+            &SessionUpdate::ToolCallUpdate {
+                tool_call_id: "tc_9".into(),
+                status: Some(wire::ToolCallStatus::Completed),
+                title: None,
+                content: Vec::new(),
+            },
+        );
+        assert!(gate.join().expect("gate thread").is_err());
+    }
+
     #[test]
     fn fold_keeps_the_live_pair_for_a_native_call() {
         let mut pump = fold_pump();
