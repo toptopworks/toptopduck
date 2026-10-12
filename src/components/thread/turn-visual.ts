@@ -513,3 +513,61 @@ export function runtimeMarkerName(runtime: TurnRuntime | undefined): string | nu
   if (runtime?.kind !== "external") return null;
   return runtime.data.adapter_id;
 }
+
+// ADR-0130 (issue #1272): the session's usage weak-sum shape -- the popover's
+// secondary line. The same derivation the retired Thread-header total rode
+// (ADR-0129 Decision 4), widened to the fields the popover's secondary line
+// and technical fold render.
+export interface SessionUsageTotal {
+  input: number;
+  cache_read: number;
+  cache_write: number;
+  output: number;
+  // The reasoning split: the evidence sum, null when no turn reported one.
+  reasoning: number | null;
+}
+
+// ADR-0130 (issue #1272): the session's derived usage total -- the sum over
+// the turns that carry evidence. Turns without usage (fail-closed, or
+// recorded before the field) contribute nothing and annotate nothing (the
+// "weak sum": it may sit below the true consumption -- the accepted error,
+// no lower-bound marker). null when no turn carried evidence at all.
+export function sessionUsageTotal(
+  entries: readonly ThreadEntry[],
+): SessionUsageTotal | null {
+  const total: SessionUsageTotal = {
+    input: 0,
+    cache_read: 0,
+    cache_write: 0,
+    output: 0,
+    reasoning: null,
+  };
+  let sawEvidence = false;
+  for (const entry of entries) {
+    if (entry.entry !== "Turn") continue;
+    const total_usage = entry.data.usage?.total;
+    if (total_usage === undefined) continue;
+    sawEvidence = true;
+    total.input += total_usage.input_tokens;
+    total.cache_read += total_usage.cache_read_tokens;
+    total.cache_write += total_usage.cache_write_tokens;
+    total.output += total_usage.output_tokens;
+    if (total_usage.reasoning_tokens !== undefined) {
+      total.reasoning = (total.reasoning ?? 0) + total_usage.reasoning_tokens;
+    }
+  }
+  // The zero-value guard mirrors the fail-closed sentinel (ADR-0129
+  // Decision 3): a usage object whose every field is zero is the
+  // no-evidence shape, not a zero bill.
+  if (
+    !sawEvidence ||
+    (total.input === 0 &&
+      total.output === 0 &&
+      total.cache_read === 0 &&
+      total.cache_write === 0)
+  ) {
+    return null;
+  }
+  if (total.reasoning === 0) total.reasoning = null;
+  return total;
+}

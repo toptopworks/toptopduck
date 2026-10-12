@@ -243,6 +243,9 @@ export interface TurnRecord {
   // before the field -- the footer renders nothing for either (honest
   // degrade). Display-only, never enters the LLM window (like trace).
   usage?: TurnUsage;
+  // ADR-0130 (issue #1272): the turn's occupancy reading -- its own channel,
+  // never folded into `usage`. The composer ring reads the LATEST one.
+  occupancy?: OccupancySnapshot;
 }
 
 // Five-field normalized token usage (ADR-0129, #1270). Mirrors the Rust
@@ -258,6 +261,17 @@ export interface TokenUsage {
   cache_write_tokens: number;
   output_tokens: number;
   reasoning_tokens?: number;
+}
+
+// The turn's context-occupancy reading (ADR-0130, issue #1272): the last
+// round-trip's measured context size plus, when the channel reported one,
+// the window it filled (ACP usage_update's used/size). Occupancy channel,
+// never billing evidence -- a reference figure for the composer ring.
+// Mirrors the Rust model::OccupancySnapshot; absent for turns with no
+// reading and turns recorded before the field (honest hollow).
+export interface OccupancySnapshot {
+  tokens: number;
+  limit?: number | null;
 }
 
 // One turn's usage aggregate (ADR-0129, #1270): the turn total plus the

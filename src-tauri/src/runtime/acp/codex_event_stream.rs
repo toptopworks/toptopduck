@@ -988,6 +988,10 @@ fn outcome(
         usage,
         // ADR-0095: `exec --json` exposes no config catalog -- no discovery.
         discovered_runtime: None,
+        // ADR-0130: the event stream's turn_usage is billing evidence, not
+        // an occupancy snapshot -- no occupancy primitive, so always None
+        // (honest hollow).
+        occupancy: None,
     }
 }
 

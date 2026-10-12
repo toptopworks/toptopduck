@@ -1578,4 +1578,16 @@ fn usage_update_occupancy_is_recognized_not_metered() {
         outcome.usage.is_none(),
         "an occupancy snapshot is not metering evidence -- fail-closed"
     );
+    // ADR-0130 (issue #1272): the same snapshot feeds the OCCUPANCY channel
+    // -- the pump latches it onto the LoopOutcome alongside, end to end
+    // (the pump-level unit pins cover the freshest-wins / zero-degrade
+    // rules; this pins the channel boundary through the real engine).
+    assert_eq!(
+        outcome.occupancy,
+        Some(toptopduck_lib::model::OccupancySnapshot {
+            tokens: 1500,
+            limit: Some(200_000),
+        }),
+        "the fixture's (used, size) rides the outcome verbatim"
+    );
 }

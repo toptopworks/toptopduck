@@ -928,8 +928,9 @@ mod tests {
     /// `size`; the spec has no input/output split, and the unmodeled
     /// `cost` field is ignored) -- and a payload missing the fields still
     /// parses (the same forward-compatibility posture as `Other`). The
-    /// engine recognizes the update but collects nothing from it; the
-    /// fail-closed billing posture is pinned in the engine tests.
+    /// engine latches the snapshot into the OCCUPANCY channel (ADR-0130);
+    /// the billing channel's fail-closed posture is pinned in the engine
+    /// tests.
     #[test]
     fn usage_update_deserializes_the_occupancy_shape() {
         let raw = serde_json::json!({

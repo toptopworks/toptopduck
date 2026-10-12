@@ -590,6 +590,13 @@ pub struct LoopOutcome {
     /// "this runtime does not support discovery" from "discovery found
     /// nothing".
     pub discovered_runtime: Option<DiscoveredRuntime>,
+    /// The turn's context-occupancy reading (ADR-0130): the last
+    /// round-trip's context size, plus the window when the channel reported
+    /// one (ACP `usage_update`). Occupancy channel, not billing -- rides
+    /// alongside `usage` and never enters it. `None` = no occupancy evidence
+    /// (built-in turn with no reported round-trip; CLI stream channels, whose
+    /// usage frames are billing evidence, never fabricate one).
+    pub occupancy: Option<crate::model::OccupancySnapshot>,
 }
 
 #[cfg(test)]

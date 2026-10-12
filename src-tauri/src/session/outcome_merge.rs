@@ -372,6 +372,7 @@ mod tests {
             promotions: Vec::new(),
             trace: LoopRound::flat_wrap(trace),
             usage: None,
+            occupancy: None,
             discovered_runtime: None,
         }
     }
@@ -411,6 +412,7 @@ mod tests {
             }],
             trace: Vec::new(),
             usage: None,
+            occupancy: None,
             discovered_runtime: None,
         };
         match turn_outcome_from_loop(outcome, None, BUILT_IN_RUNTIME_FACE) {
@@ -436,6 +438,7 @@ mod tests {
             promotions: Vec::new(),
             trace: Vec::new(),
             usage: None,
+            occupancy: None,
             discovered_runtime: None,
         };
         match turn_outcome_from_loop(outcome, None, BUILT_IN_RUNTIME_FACE) {
@@ -462,6 +465,7 @@ mod tests {
             promotions: Vec::new(),
             trace: Vec::new(),
             usage: None,
+            occupancy: None,
             discovered_runtime: None,
         };
         match turn_outcome_from_loop(outcome, None, BUILT_IN_RUNTIME_FACE) {
@@ -515,6 +519,7 @@ mod tests {
             }],
             trace: Vec::new(),
             usage: None,
+            occupancy: None,
             discovered_runtime: None,
         };
         match turn_outcome_from_loop(outcome, None, BUILT_IN_RUNTIME_FACE) {
@@ -799,6 +804,7 @@ mod tests {
             termination: Termination::Text("acp reply".into()),
             promotions: Vec::new(),
             usage: None,
+            occupancy: None,
             discovered_runtime: None,
             trace: vec![
                 LoopRound {
@@ -844,6 +850,7 @@ mod tests {
         let gateway = gateway_outcome(Vec::new());
         let acp = LoopOutcome {
             usage: None,
+            occupancy: None,
             discovered_runtime: None,
             termination: Termination::Text("done".into()),
             promotions: Vec::new(),
@@ -883,6 +890,7 @@ mod tests {
             termination: Termination::Text("acp reply".into()),
             promotions: Vec::new(),
             usage: None,
+            occupancy: None,
             discovered_runtime: None,
             trace: vec![LoopRound {
                 thinking: Some(ThinkingTrace {
@@ -1048,6 +1056,7 @@ mod tests {
             termination: Termination::Text("acp reply".into()),
             promotions: Vec::new(),
             usage: None,
+            occupancy: None,
             discovered_runtime: None,
             trace: vec![LoopRound {
                 thinking: None,

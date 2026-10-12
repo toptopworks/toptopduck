@@ -272,8 +272,10 @@ impl RecipePersister {
                     turn.artifacts = record.artifacts.clone();
                     // ADR-0129 (issue #1270): the turn's usage rides the
                     // persisted turn from the audit half (the record's own
-                    // copy is the same settle-frozen value).
+                    // copy is the same settle-frozen value). ADR-0130: the
+                    // occupancy reading rides the same projection (Copy).
                     turn.usage = audit.usage().cloned();
+                    turn.occupancy = audit.occupancy();
                     Some(RecipeEntry::Turn(turn))
                 }
                 TimelineEntry::Source(ev) => Some(RecipeEntry::Source(ev.clone())),
@@ -616,6 +618,7 @@ mod tests {
                 invocations: Vec::new(),
                 artifacts: Vec::new(),
                 usage: None,
+                occupancy: None,
             },
             audit: TurnAudit::test_new(
                 Vec::new(),
@@ -846,6 +849,7 @@ mod tests {
                 invocations: Vec::new(),
                 artifacts: Vec::new(),
                 usage: None,
+                occupancy: None,
             },
             audit: TurnAudit::test_new(trace.clone(), provenance.clone()),
         }];
@@ -895,6 +899,7 @@ mod tests {
                 invocations: Vec::new(),
                 artifacts: Vec::new(),
                 usage: None,
+                occupancy: None,
             },
             audit: TurnAudit::test_new(Vec::new(), Default::default()),
         }];
@@ -942,6 +947,7 @@ mod tests {
                 invocations: Vec::new(),
                 artifacts: Vec::new(),
                 usage: None,
+                occupancy: None,
             },
             audit: TurnAudit::test_new(Vec::new(), Default::default()),
         }];

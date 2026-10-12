@@ -4,7 +4,6 @@ import { LifecycleFold, LifecycleFoldMembers } from "./LifecycleFold";
 import { LiveTurnExchange } from "./LiveTurnExchange";
 import { SourceMarker } from "./SourceMarker";
 import { TurnCard } from "./TurnCard";
-import { formatTokens } from "./tokenFormat";
 import {
   primaryReferenceName,
   findMentionedDataset,
@@ -265,23 +264,6 @@ export function Thread({
     [entries, staleCountsByKey],
   );
   const runMarks = useMemo(() => lifecycleRunMarks(visualRows), [visualRows]);
-  // The session's usage total (ADR-0129 Decision 4, issue #1270): derived,
-  // never stored -- the sum over the turns that carry evidence. Turns
-  // without usage (fail-closed, or recorded before the field) contribute
-  // nothing and annotate nothing (the "weak sum": it may sit below the true
-  // consumption -- the accepted error, no lower-bound marker).
-  const sessionUsage = useMemo(() => {
-    let input = 0;
-    let output = 0;
-    for (const entry of entries) {
-      if (entry.entry !== "Turn") continue;
-      const total = entry.data.usage?.total;
-      if (total === undefined) continue;
-      input += total.input_tokens;
-      output += total.output_tokens;
-    }
-    return input + output > 0 ? { input, output } : null;
-  }, [entries]);
   // The jump contract's member -> group index (issue #737): a stale-chip
   // target inside a collapsed group must expand it before the scroll (below).
   const foldByMember = useMemo(() => {
@@ -369,19 +351,12 @@ export function Thread({
         defaultMessage: "Conversation history",
       })}
     >
+      {/* ADR-0130 (issue #1272): the header's derived session total retired
+          with the composer occupancy popover -- the popover's secondary line
+          is the session total's one display surface (the consumption point
+          moved to the send decision). */}
       <h2 className="m-0 mb-1.5 text-xs text-muted-foreground uppercase tracking-wider">
         <FormattedMessage id="thread.title" defaultMessage="Conversation" />
-        {/* ADR-0129 (issue #1270): the header's derived session total --
-            rendered only when at least one turn carried evidence. */}
-        {sessionUsage !== null && (
-          <span className="session-usage ml-1.5 normal-case tracking-normal">
-            <FormattedMessage
-              id="thread.sessionUsage"
-              defaultMessage="· Total {n}"
-              values={{ n: formatTokens(sessionUsage.input + sessionUsage.output, intl) }}
-            />
-          </span>
-        )}
       </h2>
       <ol className="list-none m-0 p-0">
         {visualRows.map((row, vi) => {

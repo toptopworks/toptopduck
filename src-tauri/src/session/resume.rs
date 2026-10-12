@@ -569,6 +569,10 @@ impl<'a> Resumer<'a> {
                             // verbatim (a turn recorded before the field, or
                             // a fail-closed turn, resumes without one).
                             usage: turn.usage.clone(),
+                            // ADR-0130: same round-trip for the occupancy
+                            // reading (its own channel, hollow until a new
+                            // turn lands one).
+                            occupancy: turn.occupancy,
                         },
                         // ADR-0078 (issue #319): the persisted audit round-trips
                         // verbatim from the recipe turn -- trace + provenance

@@ -441,6 +441,14 @@ pub struct TurnRecord {
     /// enters the LLM window (like [`Self::trace`]).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub usage: Option<crate::model::TurnUsage>,
+    /// The turn's context-occupancy reading (ADR-0130): the last
+    /// round-trip's context size (+ the window when the channel reported
+    /// one). `None` for turns with no occupancy evidence and for turns
+    /// recorded before the field (serde default) -- the composer ring
+    /// renders nothing for either (honest degrade). Display-only, its own
+    /// channel: never enters [`Self::usage`] or the LLM window.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub occupancy: Option<crate::model::OccupancySnapshot>,
 }
 
 /// One delivered artifact on a turn's manifest (ADR-0124, issue #1087):
