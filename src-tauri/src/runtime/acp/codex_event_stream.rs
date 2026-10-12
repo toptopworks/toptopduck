@@ -76,8 +76,11 @@ pub(crate) enum CodexEvent {
     /// ADR-0129 issue #1270): `info.total_token_usage`, the session-wide
     /// counter the pump differences at the turn boundary (the cumulative
     /// family, Decision 2). `last_token_usage` (the latest active context
-    /// size) is occupancy-side data the app does not consume (Decision 5:
-    /// the last round-trip's input is the occupancy snapshot).
+    /// size) stays unconsumed: the occupancy numerator rides the
+    /// completed-window records, live-measured on 0.154 (`exec --json`
+    /// emits no `token_count.updated` at all) -- a version that reports
+    /// the counter mid-window could adopt it as a fresher latch
+    /// (ADR-0130, issue #1274).
     TokenCount { total: TokenUsage },
     /// A completed reasoning item (the `text` of a `reasoning` item,
     /// issue #807) — the turn's thinking text. Never empty: an empty or
@@ -519,6 +522,7 @@ pub(super) fn run_codex_event_stream(
                 Termination::Runtime(format!("failed to spawn codex exec `{}`: {e}", adapter.id)),
                 Vec::new(),
                 None,
+                None,
             )
         }
     };
@@ -539,6 +543,7 @@ pub(super) fn run_codex_event_stream(
                 Termination::Runtime(format!("stdin write failed: {e}")),
                 Vec::new(),
                 None,
+                None,
             )
         }
         super::process::StdinWriteOutcome::Cancelled => {
@@ -547,6 +552,7 @@ pub(super) fn run_codex_event_stream(
             return outcome(
                 ProgressClock::cancel_landing(clock.as_ref()),
                 Vec::new(),
+                None,
                 None,
             );
         }
@@ -689,8 +695,9 @@ pub(super) fn run_codex_event_stream(
     };
     // Read ahead of the settle -- `settle_rounds` consumes the tracker.
     let usage = pump.settle_usage();
+    let occupancy = pump.occupancy();
     let rounds = pump.tracker.settle_rounds(&term);
-    outcome(term, rounds, usage)
+    outcome(term, rounds, usage, occupancy)
 }
 
 /// Mutable state accumulated while pumping codex events. The round
@@ -733,6 +740,13 @@ struct JsonPump {
     /// its full spend. The authoritative source -- `settle_usage` adopts
     /// it whenever it is non-zero, the differentiator only otherwise.
     turn_usage: crate::model::TokenUsage,
+    /// The LAST completed window's usage (ADR-0130, issue #1274): the
+    /// occupancy numerator's latch -- the same per-record replace the
+    /// built-in fold applies. Each `turn.completed` with a usage report
+    /// replaces it (the freshest context measurement); a window without a
+    /// usage report replaces nothing (the reading it earned stays).
+    /// `None` until the first report (fail-closed, no zero reading).
+    last_window_usage: Option<crate::model::TokenUsage>,
     /// Held while `exec_depth` > 0 (the open execution window).
     exec_freeze: Option<crate::session::progress::FreezeGuard>,
 }
@@ -748,6 +762,7 @@ impl JsonPump {
             exec_freeze: None,
             usage_delta: CumulativeUsageDelta::new(),
             turn_usage: crate::model::TokenUsage::default(),
+            last_window_usage: None,
         }
     }
 
@@ -766,6 +781,21 @@ impl JsonPump {
         Some(TurnUsage {
             total,
             subagents: Vec::new(),
+        })
+    }
+
+    /// The turn's occupancy numerator (ADR-0130, issue #1274): the LAST
+    /// completed window's context size, the OpenAI arm of the protocol
+    /// split (server-side chaining: the derived total IS the active
+    /// context). The cumulative counter (the BILLING fallback) never
+    /// produces a reading; `None` when no window completed (fail-closed,
+    /// no zero reading) -- a hollow ring, never a fabricated zero.
+    fn occupancy(&self) -> Option<crate::model::OccupancySnapshot> {
+        self.last_window_usage.map(|last| {
+            crate::model::OccupancySnapshot::from_last_roundtrip(
+                last,
+                Some(crate::model::Protocol::Openai),
+            )
         })
     }
 
@@ -823,6 +853,12 @@ impl JsonPump {
                 // continuation window, ADR-0128), never difference.
                 if let Some(usage) = usage {
                     self.turn_usage.add(&usage);
+                    // ADR-0130 (issue #1274): the window's usage is also
+                    // the occupancy numerator's latch -- the freshest
+                    // context measurement wins, a cancel keeps the reading
+                    // it earned (the same already-reported rule the usage
+                    // sum applies).
+                    self.last_window_usage = Some(usage);
                 }
                 Some(Termination::Text(self.tracker.terminal_text()))
             }
@@ -974,6 +1010,7 @@ fn outcome(
     termination: Termination,
     rounds: Vec<LoopRound>,
     usage: Option<TurnUsage>,
+    occupancy: Option<crate::model::OccupancySnapshot>,
 ) -> LoopOutcome {
     LoopOutcome {
         termination,
@@ -988,10 +1025,12 @@ fn outcome(
         usage,
         // ADR-0095: `exec --json` exposes no config catalog -- no discovery.
         discovered_runtime: None,
-        // ADR-0130: the event stream's turn_usage is billing evidence, not
-        // an occupancy snapshot -- no occupancy primitive, so always None
-        // (honest hollow).
-        occupancy: None,
+        // ADR-0130 (issue #1274): the event stream joins the occupancy
+        // channel -- the LAST completed window's usage is the numerator
+        // (the built-in fold's OpenAI arm, the same per-record replace).
+        // The BILLING channel is untouched: usage stays the windows' sum
+        // with its counter fallback (ADR-0129).
+        occupancy,
     }
 }
 
@@ -2459,8 +2498,8 @@ mod tests {
     /// ADR-0129 Decision 1: the OpenAI-family counters normalize verbatim --
     /// input already contains its cache (a subset), reasoning rides its
     /// output split. The event parses off `info.total_token_usage`
-    /// (`last_token_usage` is occupancy-side data the app does not consume,
-    /// Decision 5).
+    /// (`last_token_usage` stays unconsumed: the occupancy numerator rides
+    /// the completed-window records, ADR-0130 issue #1274).
     #[test]
     fn token_count_parses_the_cumulative_counter() {
         match token_count_event(100, 80, 50, 20) {
@@ -2527,5 +2566,59 @@ mod tests {
         let usage = pump.settle_usage().expect("terminal evidence settles");
         assert_eq!(usage.total.input_tokens, 35, "both windows' terminals sum");
         assert_eq!(usage.total.output_tokens, 15);
+    }
+
+    /// ADR-0130 (issue #1274): the event stream's occupancy numerator
+    /// latches the LAST completed window's usage -- the built-in fold's
+    /// OpenAI arm (server-side chaining: the window's derived total IS the
+    /// active context). A turn cut after its last completed window keeps
+    /// the reading it earned; no completed window: fail-closed -- and the
+    /// cumulative counter (the BILLING fallback) never produces one.
+    #[test]
+    fn occupancy_latches_the_last_completed_window_openai_arm() {
+        let terminal = |input: u64, output: u64| CodexEvent::TurnCompleted {
+            usage: Some(crate::model::TokenUsage {
+                input_tokens: input,
+                output_tokens: output,
+                ..Default::default()
+            }),
+        };
+        // Two windows: the LAST window's derived total is the reading.
+        let mut pump = JsonPump::new(24, None);
+        pump.fold(terminal(30, 12), &mut |_| {});
+        pump.fold(terminal(5, 3), &mut |_| {});
+        assert_eq!(
+            pump.occupancy(),
+            Some(crate::model::OccupancySnapshot {
+                tokens: 8, // 5 + 3: the OpenAI arm's derived total
+                limit: None,
+            })
+        );
+        // The BILLING channel is untouched by the latch: the windows' sum
+        // stands.
+        let usage = pump.settle_usage().expect("terminal evidence settles");
+        assert_eq!(usage.total.input_tokens, 35);
+        assert_eq!(usage.total.output_tokens, 15);
+        // A turn cut after its first completed window keeps that window's
+        // reading (the same already-reported rule the usage sum applies).
+        let mut pump = JsonPump::new(24, None);
+        pump.fold(terminal(30, 12), &mut |_| {});
+        assert_eq!(
+            pump.occupancy(),
+            Some(crate::model::OccupancySnapshot {
+                tokens: 42, // 30 + 12
+                limit: None,
+            })
+        );
+        // No completed window: fail-closed -- and the cumulative counter
+        // (the BILLING fallback) never produces a reading.
+        let mut pump = JsonPump::new(24, None);
+        pump.fold(token_count_event(100, 0, 50, 0), &mut |_| {});
+        let usage = pump
+            .settle_usage()
+            .expect("billing settles off the counter");
+        assert_eq!(usage.total.input_tokens, 100);
+        assert_eq!(usage.total.output_tokens, 50);
+        assert!(pump.occupancy().is_none());
     }
 }
