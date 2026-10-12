@@ -17,7 +17,7 @@ use std::sync::Arc;
 
 use toptopduck_lib::approval::{ApprovalResponse, ApprovalSink, ApprovalState, OperationKind};
 use toptopduck_lib::cancel::CancelToken;
-use toptopduck_lib::model::TurnPhase;
+use toptopduck_lib::model::{OccupancySnapshot, TurnPhase};
 use toptopduck_lib::runtime::acp::adapter::codex;
 use toptopduck_lib::runtime::acp::engine::{AcpEngine, AcpTurnInput};
 use toptopduck_lib::runtime::acp::wire::{ContentBlock, McpServer};
@@ -170,6 +170,16 @@ fn usage_turn_settles_the_terminal_usage() {
     assert!(
         usage.subagents.is_empty(),
         "external attribution never splits"
+    );
+    // ADR-0130 (issue #1274): the same terminal window also latches the
+    // turn's occupancy numerator end to end -- the OpenAI arm's derived
+    // total (input + output), window None (a config matter, Decision 4).
+    assert_eq!(
+        outcome.occupancy,
+        Some(OccupancySnapshot {
+            tokens: 20557,
+            limit: None,
+        })
     );
 }
 

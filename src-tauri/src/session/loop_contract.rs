@@ -592,8 +592,9 @@ pub struct LoopOutcome {
     pub discovered_runtime: Option<DiscoveredRuntime>,
     /// The turn's context-occupancy reading (ADR-0130): the last
     /// round-trip's context size, plus the window when the channel reported
-    /// one (ACP `usage_update`; the stream channels carry `None` -- the
-    /// window is a config matter there, Decision 4). Occupancy channel, not
+    /// one (ACP `usage_update`; the stream channels carry a `None`
+    /// window -- the window is a config matter there, Decision 4).
+    /// Occupancy channel, not
     /// billing -- rides alongside `usage` and never enters it. `None` = no
     /// occupancy evidence (a turn whose channel reported no round-trip
     /// usage -- fail-closed, never a fabricated zero).
