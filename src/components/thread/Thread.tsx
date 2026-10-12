@@ -351,10 +351,11 @@ export function Thread({
         defaultMessage: "Conversation history",
       })}
     >
-      {/* ADR-0130 (issue #1272): the header's derived session total retired
-          with the composer occupancy popover -- the popover's secondary line
-          is the session total's one display surface (the consumption point
-          moved to the send decision). */}
+      {/* ADR-0130 (issues #1272/#1276): the header's derived session total
+          retired with the composer occupancy popover, whose secondary line
+          retired in turn with the pill -- the session total has no
+          standalone display surface; the turn footer is the billing
+          display. */}
       <h2 className="m-0 mb-1.5 text-xs text-muted-foreground uppercase tracking-wider">
         <FormattedMessage id="thread.title" defaultMessage="Conversation" />
       </h2>

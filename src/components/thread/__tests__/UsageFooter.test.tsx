@@ -5,7 +5,7 @@
 // rules -- a labeled native toggle whose numbers ride the [open] gate.
 
 import { describe, expect, it } from "vitest";
-import { render, screen, within } from "@testing-library/react";
+import { fireEvent, render, screen, within } from "@testing-library/react";
 import { IntlProvider } from "react-intl";
 
 import { UsageFooter } from "../UsageFooter";
@@ -100,5 +100,19 @@ describe("UsageFooter technical fold (ADR-0129, issue #1276)", () => {
     // the labeled summary line itself.
     expect(fold.textContent).not.toContain("…");
     expect(fold.querySelector(".usage-fold-body")).toBeNull();
+  });
+
+  it("keeps the marker spaced in the reasoning-only fold, and the summary is a real toggle", () => {
+    // Reasoning without cache write (OpenAI-style reporting): the marker's
+    // space sits outside the cache-write branch, so the label never glues
+    // to the glyph; the native summary flips the open attribute.
+    renderFooter(usage({ cache_write_tokens: 0, reasoning_tokens: 12 }));
+    const fold = screen.getByRole("group");
+    expect(fold.textContent).toContain("▸ reasoning 12");
+    expect(fold.querySelectorAll(".usage-fold-num")).toHaveLength(1);
+    expect(fold.hasAttribute("open")).toBe(false);
+    const summary = fold.querySelector("summary") as HTMLElement;
+    fireEvent.click(summary);
+    expect(fold.hasAttribute("open")).toBe(true);
   });
 });

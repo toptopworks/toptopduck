@@ -7,9 +7,10 @@ import { Tooltip, TooltipContent, TooltipTrigger } from "../ui/tooltip";
 import { formatPercent, formatTokens } from "./tokenFormat";
 import type { OccupancySnapshot, ThreadEntry } from "../../types/thread";
 
-// The composer's occupancy ring (ADR-0130, issue #1272): the QuestionBar's
-// leading constant -- a three-state reading whose every state maps an
-// evidence shape, never a guess:
+// The composer's occupancy ring (ADR-0130, issue #1272): the send
+// cluster's head constant, ahead of the runtime picker (issue #1276) -- a
+// three-state reading whose every state maps an evidence shape, never a
+// guess:
 // - FULL ring: denominator known (the active profile's context_limit, or the
 //   ACP snapshot's own window) -- a percentage arc, warning above 70%,
 //   danger above 90%.
@@ -69,7 +70,7 @@ export function OccupancyRing({ entries, contextLimit = null }: OccupancyRingPro
       <TooltipTrigger asChild>
         <button
           type="button"
-          className="occupancy-ring inline-flex size-4 shrink-0 cursor-pointer items-center justify-center rounded-full text-muted-foreground transition-colors hover:text-foreground outline-none focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring"
+          className="inline-flex size-4 shrink-0 cursor-pointer items-center justify-center rounded-full text-muted-foreground transition-colors hover:text-foreground outline-none focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring"
           aria-label={intl.formatMessage({
             id: "thread.occupancy.ariaLabel",
             defaultMessage: "Context occupancy",

@@ -8,8 +8,8 @@ import type { TokenUsage } from "../../types/thread";
 // The usage footer (ADR-0129 Decision 5, issue #1270): the turn card's
 // always-visible token line -- input (with its cache-read breakdown) and
 // output as absolute numbers on the fixed K/M scale (ADR-0130 Decision 5;
-// 1.2K, 3.4M -- locale-independent), segments parted by the popup line's
-// ` · ` shape. The cache-write and reasoning counters persist as a labeled
+// 1.2K, 3.4M -- locale-independent), segments parted by ` · `. The
+// cache-write and reasoning counters persist as a labeled
 // native <details> toggle (issue #1276): collapsed it names its items, open
 // it carries their numbers inline (the [open] gate lives in app.css).
 // Labels read muted, numbers foreground tabular -- the turn card's
@@ -26,7 +26,10 @@ function UsageNumber({ children, className }: { children: string; className?: st
 }
 
 /** The always-visible segment pair: input (with the cache-read breakdown
- * when non-zero) and output. Pure -- unit-tested without the fold. */
+ * when non-zero) and output. The separators ride whitespace-pre spans:
+ * bare text children of the flex root wrap into anonymous flex items
+ * whose flanking spaces collapse, gluing the dot to its neighbors (issue
+ * #1276). Pure -- unit-tested without the fold. */
 function UsageSegments({ usage }: { usage: TokenUsage }) {
   const intl = useIntl();
   return (
@@ -42,7 +45,7 @@ function UsageSegments({ usage }: { usage: TokenUsage }) {
       </span>
       {usage.cache_read_tokens > 0 && (
         <>
-          {" · "}
+          <span className="whitespace-pre">{" · "}</span>
           <span className="usage-seg text-muted-foreground">
             <FormattedMessage
               id="thread.usage.cache"
@@ -58,7 +61,7 @@ function UsageSegments({ usage }: { usage: TokenUsage }) {
           </span>
         </>
       )}
-      {" · "}
+      <span className="whitespace-pre">{" · "}</span>
       <span className="usage-seg text-muted-foreground">
         <FormattedMessage
           id="thread.usage.output"
@@ -87,7 +90,7 @@ export function UsageFooter({ usage }: { usage: TokenUsage }) {
       <UsageSegments usage={usage} />
       {hasFold && (
         <>
-          {" · "}
+          <span className="whitespace-pre">{" · "}</span>
           {/* The technical fold: cache write + reasoning as a labeled
               native <details> -- the same self-contained toggle posture the
               trace's folds take (no controlled state, zero JS). Collapsed
@@ -98,23 +101,21 @@ export function UsageFooter({ usage }: { usage: TokenUsage }) {
               <span className="usage-fold-marker" aria-hidden="true">
                 ▸
               </span>
+              {" "}
               {usage.cache_write_tokens > 0 && (
-                <>
-                  {" "}
-                  <span className="text-muted-foreground">
-                    <FormattedMessage
-                      id="thread.usage.cacheWrite"
-                      defaultMessage="cache write {n}"
-                      values={{
-                        n: (
-                          <UsageNumber className="usage-fold-num">
-                            {formatTokens(usage.cache_write_tokens, intl)}
-                          </UsageNumber>
-                        ),
-                      }}
-                    />
-                  </span>
-                </>
+                <span className="text-muted-foreground">
+                  <FormattedMessage
+                    id="thread.usage.cacheWrite"
+                    defaultMessage="cache write {n}"
+                    values={{
+                      n: (
+                        <UsageNumber className="usage-fold-num">
+                          {formatTokens(usage.cache_write_tokens, intl)}
+                        </UsageNumber>
+                      ),
+                    }}
+                  />
+                </span>
               )}
               {usage.cache_write_tokens > 0 &&
                 usage.reasoning_tokens !== undefined && " · "}

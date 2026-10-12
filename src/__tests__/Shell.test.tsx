@@ -3370,6 +3370,13 @@ describe("shell submit fire-path defensive log (#825)", () => {
       await waitFor(() => expect(conversation).toHaveBeenCalled());
       const ring = await screen.findByRole("button", { name: "上下文占用" });
       expect(ring.querySelectorAll("circle")).toHaveLength(2);
+      // ADR-0130 (issue #1276): the ring rides the trailing send cluster's
+      // head -- ahead of the runtime picker in DOM order.
+      const picker = screen.getByRole("button", { name: /运行时：/ });
+      const FOLLOWING = Node.DOCUMENT_POSITION_FOLLOWING;
+      expect(
+        ring.compareDocumentPosition(picker) & FOLLOWING,
+      ).toBeTruthy();
     } finally {
       // clearAllMocks only clears call history: restore the factory default
       // so the appConfig state does not leak into later tests.

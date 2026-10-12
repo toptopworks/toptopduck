@@ -19,8 +19,8 @@ export function formatTokens(
   _intl: IntlShape,
 ): string {
   if (n < 1_000) return String(n);
-  if (n < 1_000_000) return `${scaled(n, 100, 10)}K`;
-  return `${scaled(n, 100_000, 10)}M`;
+  if (n < 1_000_000) return `${scaled(n, 100)}K`;
+  return `${scaled(n, 100_000)}M`;
 }
 
 /** The occupancy pill's percentage (ADR-0130): the same shape rules as
@@ -33,9 +33,9 @@ export function formatPercent(tokens: number, limit: number): string {
   return oneFlooredDecimal(Math.floor(pct * 10) / 10);
 }
 
-/** One floored decimal at the given scale: `floor(n / divisor) / tenths`. */
-function scaled(n: number, divisor: number, tenths: number): string {
-  return oneFlooredDecimal(Math.floor(n / divisor) / tenths);
+/** One floored decimal at the given scale: `floor(n / divisor) / 10`. */
+function scaled(n: number, divisor: number): string {
+  return oneFlooredDecimal(Math.floor(n / divisor) / 10);
 }
 
 /** The shared floored-decimal form: one digit past the unit, the trailing
