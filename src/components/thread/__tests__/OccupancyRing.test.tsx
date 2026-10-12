@@ -7,10 +7,17 @@
 
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { act, fireEvent, render, screen, within } from "@testing-library/react";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { IntlProvider } from "react-intl";
 
-import { OccupancyRing } from "../OccupancyRing";
+import { OccupancyRing, ComposerOccupancy } from "../OccupancyRing";
+import { conversation } from "../../../api";
+import { sessionKeys } from "../../../session/queryKeys";
 import type { ThreadEntry, TurnRecord } from "../../../types/thread";
+
+// Only the shell-mount describe touches the api module; the other
+// describes feed the entries prop directly and never fetch.
+vi.mock("../../../api", () => ({ conversation: vi.fn() }));
 
 // defaultMessage-only (the UsageFooter precedent): the en literals are the
 // contract under test.
@@ -196,5 +203,48 @@ describe("OccupancyRing popover secondary line (ADR-0130, issue #1272)", () => {
     const popover = hoverOpen();
     expect(popover.queryByRole("group")).toBeNull();
     expect(popover.queryByText(/^Input /)).toBeNull();
+  });
+});
+
+// The shell-side mount (ADR-0130): the composer's ring rides the SAME
+// TanStack cache the SessionPane owner's query fills -- one key, one
+// fetch, the mount only adds a reader at the shell; the disabled
+// (null-session) form matches no session's key and never requests.
+describe("ComposerOccupancy shell mount (ADR-0130, issue #1272)", () => {
+  function renderMounted(sessionId: string | null, prefill?: readonly ThreadEntry[]) {
+    // Mirrors the app client's globals (queryClient.ts): staleTime
+    // Infinity is what lets the prefilled owner cache serve without a
+    // refetch on mount.
+    const queryClient = new QueryClient({
+      defaultOptions: { queries: { retry: false, staleTime: Infinity } },
+    });
+    if (prefill != null) {
+      queryClient.setQueryData(sessionKeys.thread("sess-1"), prefill);
+    }
+    return render(
+      <IntlProvider locale="en" messages={{}} onError={() => {}}>
+        <QueryClientProvider client={queryClient}>
+          <ComposerOccupancy sessionId={sessionId} />
+        </QueryClientProvider>
+      </IntlProvider>,
+    );
+  }
+
+  it("reads the owner query's cache -- the SessionPane key, no second fetch", () => {
+    renderMounted("sess-1", [turnEntry({ occupancy: { tokens: 9000, limit: null } })]);
+    // The ring renders off the OWNER-shaped cache entry: a key drift
+    // would leave the mount cache-less (it would have to fetch, and the
+    // spy below stays silent).
+    expect(screen.getByRole("button", { name: "Context occupancy" })).toBeInTheDocument();
+    expect(vi.mocked(conversation)).not.toHaveBeenCalled();
+  });
+
+  it("cold start renders nothing and never fetches", () => {
+    const { container } = renderMounted(null);
+    // Not even a conversation("__no_session__"): the disabled query's
+    // enabled gate is the only thing standing between cold start and a
+    // dead IPC.
+    expect(container.firstChild).toBeNull();
+    expect(vi.mocked(conversation)).not.toHaveBeenCalled();
   });
 });
