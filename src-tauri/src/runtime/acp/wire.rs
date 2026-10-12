@@ -362,8 +362,10 @@ pub enum SessionUpdate {
     /// `size` the window total, with no input/output split and no
     /// per-round-trip accounting (the optional `cost` money field stays
     /// unmodeled, Decision 5). The spec offers no billing-grade usage
-    /// source, so the engine recognizes the update but collects NOTHING
-    /// from it -- ACP turns stay fail-closed on usage (Decision 3).
+    /// source, so the engine collects no BILLING from it -- ACP turns
+    /// stay fail-closed on usage (Decision 3). Occupancy is the one thing
+    /// the snapshot does feed: the pump latches it into the occupancy
+    /// channel (ADR-0130).
     UsageUpdate {
         #[serde(default)]
         used: u64,

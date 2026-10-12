@@ -103,10 +103,11 @@ pub struct ProviderProfile {
     #[serde(default = "default_provider_model")]
     pub model: String,
     /// The model's context window, in tokens (ADR-0130 Decision 4): the
-    /// occupancy ring's denominator. The ONLY denominator source -- never
-    /// probed, never guessed. `None` (the default) = window unknown: the
-    /// ring renders hollow. Absent for profiles stored before the field
-    /// (serde default, zero migration).
+    /// occupancy ring's denominator. The only CONFIG denominator source,
+    /// outranked by a reading that carries its own window (the ACP
+    /// snapshot's `size`) -- never probed, never guessed. `None` (the
+    /// default) = window unknown: the ring renders hollow. Absent for
+    /// profiles stored before the field (serde default, zero migration).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context_limit: Option<u64>,
 }

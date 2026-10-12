@@ -102,6 +102,18 @@ describe("OccupancyRing three states (ADR-0130, issue #1272)", () => {
     ).toBeInTheDocument();
   });
 
+  it("a non-positive snapshot window is the no-window shape, never a divide-by hazard", () => {
+    renderRing(
+      [turnEntry({ occupancy: { tokens: 9000, limit: 0 } })],
+      null,
+    );
+    const ring = screen.getByRole("button", { name: "Context occupancy" });
+    // Track only -- the glyph and the popover agree on hollow, never
+    // "100% · ... / window 0" under a windowless arc.
+    expect(ring.querySelectorAll("circle")).toHaveLength(1);
+    expect(hoverOpen().getByText("last round-trip 9K tokens")).toBeInTheDocument();
+  });
+
   it("the arc takes the warning color above 70% and danger above 90%", () => {
     const warn = renderRing(
       [turnEntry({ occupancy: { tokens: 150_000, limit: 200_000 } })],

@@ -1939,6 +1939,31 @@ mod tests {
                 limit: None,
             })
         );
+        // A DECREASING replacement is still freshest-wins (context
+        // compaction makes the reading non-monotonic): the smaller later
+        // reading replaces, not a keep-max gate.
+        pump.fold_update(
+            &SessionUpdate::UsageUpdate {
+                used: 180_000,
+                size: 200_000,
+            },
+            &mut |_| {},
+        );
+        pump.fold_update(
+            &SessionUpdate::UsageUpdate {
+                used: 20_000,
+                size: 200_000,
+            },
+            &mut |_| {},
+        );
+        assert_eq!(
+            pump.occupancy,
+            Some(crate::model::OccupancySnapshot {
+                tokens: 20_000,
+                limit: Some(200_000),
+            }),
+            "the later smaller reading replaces, not a keep-max gate"
+        );
     }
 
     /// ADR-0130: an agent that never sends `usage_update` leaves the pump's

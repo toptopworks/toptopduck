@@ -60,9 +60,11 @@ export function OccupancyRing({ entries, contextLimit = null }: OccupancyRingPro
   // No reading ever reported: no ring at all (the not-rendered state).
   if (occupancy == null) return null;
   // The denominator merge: the reading's own window (ACP) outranks the
-  // config; a non-positive window is the no-window shape, never a divide-by
-  // hazard.
-  const limit = occupancy.limit ?? (contextLimit != null && contextLimit > 0 ? contextLimit : null);
+  // config; a non-positive window on EITHER side is the no-window shape,
+  // never a divide-by hazard.
+  const limit =
+    (occupancy.limit != null && occupancy.limit > 0 ? occupancy.limit : null) ??
+    (contextLimit != null && contextLimit > 0 ? contextLimit : null);
   const sessionTotal: SessionUsageTotal | null = sessionUsageTotal(entries);
   return (
     <HoverCard openDelay={100} closeDelay={150}>
