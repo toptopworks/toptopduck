@@ -175,3 +175,18 @@
     animation: none;
   }
 }
+
+/* Usage footer's technical fold (issue #1276): a labeled native <details>
+ * toggle -- collapsed it names its items, open it carries their numbers
+ * inline, and the marker swings from the right-pointing to the
+ * down-pointing posture. The gate is pure CSS off the [open] attribute;
+ * no JS, no controlled state. */
+.usage-fold-marker {
+  display: inline-block;
+}
+.usage-fold:not([open]) .usage-fold-num {
+  display: none;
+}
+.usage-fold[open] .usage-fold-marker {
+  transform: rotate(90deg);
+}

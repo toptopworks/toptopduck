@@ -175,7 +175,7 @@ export function ComposerAuthModeChip({ sessionId, pendingMode, onPendingModeChan
       <SelectTrigger
         aria-label={ariaLabel}
         className={cn(
-          "gap-1.5 px-2.5",
+          "cursor-pointer gap-1.5 px-2.5",
           noConfirmation ? TRIGGER_WARNING : TRIGGER_NEUTRAL,
         )}
       >
