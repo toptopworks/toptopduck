@@ -1276,22 +1276,28 @@ export default function App() {
                             onBackspace: handleChipBackspace,
                           },
                         }}
-                        trailing={
-                          providerPicker ? (
-                            <ComposerProviderPicker
+                        trailing={(
+                          <>
+                            {/* ADR-0130 calibration: the ring rides the
+                                trailing cluster's head (before the runtime
+                                picker), not the leading controls -- keeps the
+                                reading adjacent to the send decision point. */}
+                            <ComposerOccupancy
                               sessionId={activeSessionId}
-                              coldStart={
-                                isColdStart ? coldStartSelection.channel : null
-                              }
-                              {...providerPicker}
+                              contextLimit={activeContextLimit}
                             />
-                          ) : undefined
-                        }
+                            {providerPicker ? (
+                              <ComposerProviderPicker
+                                sessionId={activeSessionId}
+                                coldStart={
+                                  isColdStart ? coldStartSelection.channel : null
+                                }
+                                {...providerPicker}
+                              />
+                            ) : undefined}
+                          </>
+                        )}
                       >
-                        <ComposerOccupancy
-                          sessionId={activeSessionId}
-                          contextLimit={activeContextLimit}
-                        />
                         <ComposerContextPanel
                           onIngestFiles={handleShellIngestFiles}
                           loading={composer.loading}
