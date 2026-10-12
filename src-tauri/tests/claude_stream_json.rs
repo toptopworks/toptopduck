@@ -23,7 +23,7 @@ use std::sync::Arc;
 
 use toptopduck_lib::approval::{ApprovalResponse, ApprovalSink, ApprovalState};
 use toptopduck_lib::cancel::CancelToken;
-use toptopduck_lib::model::TurnPhase;
+use toptopduck_lib::model::{OccupancySnapshot, TurnPhase};
 use toptopduck_lib::runtime::acp::adapter::claude_code;
 use toptopduck_lib::runtime::acp::engine::{AcpEngine, AcpTurnInput};
 use toptopduck_lib::runtime::acp::wire::{ContentBlock, McpServer};
@@ -131,6 +131,17 @@ fn text_reply_yields_text_outcome_and_init_model() {
     assert!(
         discovered.models.is_empty(),
         "the turn path reports ONLY the current model, never a catalog"
+    );
+    // ADR-0130 (issue #1274): the occupancy numerator lands end to end --
+    // the scenario's assistant frame carries no usage, so the reading
+    // rides the result-fallback arm (the Anthropic arm reads the input
+    // side alone), window None (Decision 4).
+    assert_eq!(
+        outcome.occupancy,
+        Some(OccupancySnapshot {
+            tokens: 1,
+            limit: None,
+        })
     );
 }
 

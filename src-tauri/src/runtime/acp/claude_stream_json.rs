@@ -450,6 +450,7 @@ pub(super) fn run_claude_stream_json(
                 Vec::new(),
                 None,
                 None,
+                None,
             )
         }
     };
@@ -472,6 +473,7 @@ pub(super) fn run_claude_stream_json(
                     Vec::new(),
                     None,
                     None,
+                    None,
                 )
             }
             (super::process::StdinWriteOutcome::Cancelled, _) => {
@@ -480,6 +482,7 @@ pub(super) fn run_claude_stream_json(
                 return outcome(
                     ProgressClock::cancel_landing(clock.as_ref()),
                     Vec::new(),
+                    None,
                     None,
                     None,
                 );
@@ -513,6 +516,7 @@ pub(super) fn run_claude_stream_json(
         streamed_text: String::new(),
         usage: crate::model::TokenUsage::default(),
         result_usage: None,
+        last_roundtrip_usage: None,
     };
 
     let mut termination: Option<Termination>;
@@ -633,6 +637,7 @@ pub(super) fn run_claude_stream_json(
     // Read ahead of the partial moves below -- `current_model.map` and
     // `settle_rounds` both consume out of the pump.
     let usage = pump.settle_usage();
+    let occupancy = pump.occupancy();
     let discovered = pump.current_model.map(|model| {
         let mut d = crate::session::loop_contract::DiscoveredRuntime::empty();
         d.current_model = Some(model);
@@ -648,7 +653,7 @@ pub(super) fn run_claude_stream_json(
         other => other,
     };
     let rounds = pump.tracker.settle_rounds(&term);
-    outcome(term, rounds, discovered, usage)
+    outcome(term, rounds, discovered, usage, occupancy)
 }
 
 /// A `tool_use` awaiting its `tool_result` (live-phase bookkeeping). Carries
@@ -728,6 +733,13 @@ struct ClaudePump {
     /// no assistant frame reported (double-adoption would double-count).
     usage: crate::model::TokenUsage,
     result_usage: Option<crate::model::TokenUsage>,
+    /// The LAST round-trip's normalized usage (ADR-0130, issue #1274): the
+    /// occupancy numerator's latch -- the same per-frame replace the
+    /// built-in fold applies. Each assistant frame replaces it (the
+    /// freshest context measurement); a cancel keeps the reading it
+    /// earned. `None` until the first report (fail-closed, no zero
+    /// reading).
+    last_roundtrip_usage: Option<crate::model::TokenUsage>,
 }
 
 impl ClaudePump {
@@ -755,6 +767,21 @@ impl ClaudePump {
         Some(crate::model::TurnUsage {
             total,
             subagents: Vec::new(),
+        })
+    }
+
+    /// The turn's occupancy numerator (ADR-0130, issue #1274): the LAST
+    /// round-trip's context size, the Anthropic arm of the protocol split
+    /// (the total-side input, cache included -- full-resend semantics).
+    /// The terminal frame's turn-total is the fallback when no frame
+    /// reported; `None` when neither did (fail-closed, no zero reading) --
+    /// a hollow ring, never a fabricated zero.
+    fn occupancy(&self) -> Option<crate::model::OccupancySnapshot> {
+        self.last_roundtrip_usage.or(self.result_usage).map(|last| {
+            crate::model::OccupancySnapshot::from_last_roundtrip(
+                last,
+                Some(crate::model::Protocol::Anthropic),
+            )
         })
     }
 
@@ -859,6 +886,12 @@ impl ClaudePump {
                     self.result_usage = Some(usage);
                 } else {
                     self.usage.add(&usage);
+                    // ADR-0130 (issue #1274): the frame's usage is also the
+                    // occupancy numerator's latch -- the freshest context
+                    // measurement wins, a cancel keeps the reading it
+                    // earned (the same already-reported rule the usage sum
+                    // applies).
+                    self.last_roundtrip_usage = Some(usage);
                 }
                 None
             }
@@ -956,6 +989,7 @@ fn outcome(
     rounds: Vec<LoopRound>,
     discovered: Option<crate::session::loop_contract::DiscoveredRuntime>,
     usage: Option<crate::model::TurnUsage>,
+    occupancy: Option<crate::model::OccupancySnapshot>,
 ) -> LoopOutcome {
     LoopOutcome {
         termination,
@@ -971,10 +1005,12 @@ fn outcome(
         trace: rounds,
         usage,
         discovered_runtime: discovered,
-        // ADR-0130: the stream-json channel's usage frames are billing
-        // evidence, not occupancy snapshots -- no occupancy primitive, so
-        // always None (honest hollow).
-        occupancy: None,
+        // ADR-0130 (issue #1274): the stream channel joins the occupancy
+        // channel -- the LAST round-trip's usage is the numerator (the
+        // built-in fold's Anthropic arm, the same per-frame replace), the
+        // terminal turn-total only as the fallback. The BILLING channel is
+        // untouched: usage stays the frames' sum (ADR-0129).
+        occupancy,
     }
 }
 
@@ -1370,6 +1406,101 @@ mod tests {
         assert!(pump.settle_usage().is_none());
     }
 
+    /// ADR-0130 (issue #1274): the stream channel's occupancy numerator
+    /// latches the LAST round-trip's usage -- the built-in fold's Anthropic
+    /// arm (full-resend semantics: the total-side input IS the measured
+    /// context). The terminal frame's turn-total is the fallback only when
+    /// no assistant frame reported (the same source order the usage sum
+    /// applies); neither reported: fail-closed, no zero reading.
+    #[test]
+    fn occupancy_latches_the_last_round_trip_anthropic_arm() {
+        fn frame(input: u64, output: u64) -> Value {
+            json!({
+                "type": "assistant",
+                "message": {
+                    "content": [{"type": "text", "text": "step"}],
+                    "usage": {"input_tokens": input, "output_tokens": output},
+                },
+            })
+        }
+        let result = json!({
+            "type": "result",
+            "subtype": "success",
+            "result": "done",
+            "usage": {"input_tokens": 999, "output_tokens": 999},
+        });
+        // Two assistant frames + the result: the LAST frame's total-side
+        // input is the reading -- the result's turn-total never wins while
+        // a frame reported.
+        let mut pump = pump_with_bridge();
+        for v in [frame(100, 40), frame(50, 10)] {
+            for event in parse_events(&v) {
+                pump.fold(event, &mut |_| {});
+            }
+        }
+        for event in parse_events(&result) {
+            pump.fold(event, &mut |_| {});
+        }
+        assert_eq!(
+            pump.occupancy(),
+            Some(crate::model::OccupancySnapshot {
+                tokens: 50,
+                limit: None,
+            })
+        );
+        // The BILLING channel is untouched by the latch: the frames' sum
+        // stands, the result's turn-total stays out of it.
+        assert_eq!(
+            pump.settle_usage().map(|u| u.total),
+            Some(crate::model::TokenUsage {
+                input_tokens: 150,
+                cache_read_tokens: 0,
+                cache_write_tokens: 0,
+                output_tokens: 50,
+                reasoning_tokens: None,
+            })
+        );
+        // A turn cut before its result frame (a cancel mid-window) keeps
+        // the reading its frames earned -- the last frame latched, the
+        // sum intact.
+        let mut pump = pump_with_bridge();
+        for v in [frame(100, 40), frame(50, 10)] {
+            for event in parse_events(&v) {
+                pump.fold(event, &mut |_| {});
+            }
+        }
+        assert_eq!(
+            pump.occupancy(),
+            Some(crate::model::OccupancySnapshot {
+                tokens: 50,
+                limit: None,
+            })
+        );
+        assert_eq!(pump.settle_usage().map(|u| u.total.input_tokens), Some(150));
+        // The result alone (no assistant frame reported): adopted as the
+        // reading (the same fallback the usage sum applies).
+        let mut pump = pump_with_bridge();
+        for event in parse_events(&result) {
+            pump.fold(event, &mut |_| {});
+        }
+        assert_eq!(
+            pump.occupancy(),
+            Some(crate::model::OccupancySnapshot {
+                tokens: 999,
+                limit: None,
+            })
+        );
+        // Neither reported: fail-closed -- no reading, never a zero.
+        let mut pump = pump_with_bridge();
+        pump.fold(
+            ClaudeEvent::AssistantText {
+                text: "no usage anywhere".into(),
+            },
+            &mut |_| {},
+        );
+        assert!(pump.occupancy().is_none());
+    }
+
     /// An error result frame maps the same shape (the driver decides the
     /// termination semantics).
     #[test]
@@ -1459,6 +1590,7 @@ mod tests {
             streamed_text: String::new(),
             usage: crate::model::TokenUsage::default(),
             result_usage: None,
+            last_roundtrip_usage: None,
         }
     }
 

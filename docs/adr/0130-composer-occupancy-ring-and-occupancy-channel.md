@@ -4,11 +4,11 @@
 
 1. **占用显示立法：composer 三态环。** QuestionBar 行首（姿势选择框前）常驻占用环，三态：全环（窗口已知：百分比弧，超 70% 警示色、超 90% 危险色）、空心环（只有分子：轨道无弧，读数为末次往返计数）、不渲染（无任何占用上报）。hover 触发弹层：主行占用读数——有分母「N% · 末次往返 N / 窗口 N」、无分母降级「末次往返 N tokens」；次行会话合计（输入含缓存拆项与输出，缓存写与思考数进技术折叠）。会话合计自 Thread 标题行迁入弹层，标题行合计退役——会话合计显示面唯一化。绝不以猜测的分母呈现百分比。
 
-2. **分子按协议分轨取末次往返。** 内置循环在 fold 的末次往返处 latch：Anthropic 协议取末次往返 total-side input（普通输入 + 缓存读 + 缓存写——全量重发语义下末次往返的输入即上下文规模实测）；OpenAI 协议取末次往返 total（输入 + 输出——server-side chaining 下 total 即活跃上下文规模）。ACP 通道直接采用占用快照的 used。占用随轮次持久（审计面轮级可选字段，serde default，旧 recipe 零迁移），经前端轮次类型透传。
+2. **分子按协议分轨取末次往返。** 协议分轨在每个逐往返通道的采集点一次做对：内置循环在 fold 的末次往返处 latch，claude stream-json 通道 latch 末个 assistant 帧的 usage（缺帧按 result 帧兜底，与账单同源同序），codex 事件流通道 latch 末个完成窗口的 usage——Anthropic 协议取末次往返 total-side input（普通输入 + 缓存读 + 缓存写——全量重发语义下末次往返的输入即上下文规模实测）；OpenAI 协议取末次往返 total（输入 + 输出——server-side chaining 下 total 即活跃上下文规模）。ACP 通道直接采用占用快照的 used。latch 为替换式——末次往返即最新上下文实测，取消的轮次保留其已报读数；无已报往返即无占用（fail-closed，绝不落零读数）。占用随轮次持久（审计面轮级可选字段，serde default，旧 recipe 零迁移），经前端轮次类型透传。
 
 3. **占用通道与账单通道分界。** ACP 占用快照（used / size）进占用显示通道，不进 ADR-0129 的账单归集——该通道轮次账单仍恒 fail-closed，ADR-0129 账单侧裁决一字不动。快照无输入输出拆分、不构成计量证据的判断不变；但它是唯一协议自报的占用原语，占用 UI 立法后有了合法去向。
 
-4. **分母唯一来源是显式配置。** ProviderProfile 增可选 context_limit（serde default 零迁移），缺省即空心环。CLI 通道探测面——claude-code 控制面 initialize 的 models[] 条目与 codex app-server v2 Model——均无窗口字段（逐字段核验），空心环是这些通道的终态，不设探测扩展。
+4. **分母唯一来源是显式配置。** ProviderProfile 增可选 context_limit（serde default 零迁移），缺省即空心环。CLI 通道探测面——claude-code 控制面 initialize 的 models[] 条目与 codex app-server v2 Model——均无窗口字段（逐字段核验），空心环是这些通道自身的终态，配置 context_limit 后经分母合并出全环，不设探测扩展。
 
 5. **显示词汇与数字格式校准。** 计量词汇统一全称（输入 / 输出 / 缓存写入；思考数不变），轮卡 footer 与弹层同源词条；compact 数字弃 Intl 记法（zh-CN 渲染「万」、de 系小数点与千分位歧义），换固定 K/M 缩放（一位小数、剥尾零），格式化单咽喉不变——0129 的绝对数显示与单一格式化面裁决保持。
 
