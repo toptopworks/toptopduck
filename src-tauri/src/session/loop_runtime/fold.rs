@@ -111,6 +111,13 @@ pub(crate) struct EventFold {
     /// double-count cache (ADR-0129 Decision 1).
     usage: TokenUsage,
     protocol: Option<Protocol>,
+    /// The LAST round-trip's normalized usage (ADR-0130 Decision 2): the
+    /// occupancy numerator's latch. Each usage record replaces it -- the
+    /// last round-trip is the freshest context measurement, so a turn cut
+    /// after a record (a cancel between rounds) keeps the reading it earned
+    /// (the same already-reported rule the usage sum applies). `None` until
+    /// the first round-trip reports (fail-closed, no zero reading).
+    last_roundtrip_usage: Option<TokenUsage>,
     /// --- Per-model-call accumulation (replaced at each turn open) ---
     call_open: bool,
     reasoning_committed: String,
@@ -145,6 +152,7 @@ impl EventFold {
             landed_calls: 0,
             usage: TokenUsage::default(),
             protocol,
+            last_roundtrip_usage: None,
             call_open: false,
             reasoning_committed: String::new(),
             reasoning_deltas: String::new(),
@@ -160,6 +168,15 @@ impl EventFold {
     /// which also covers a turn cancelled before its first usage record.
     pub(crate) fn usage(&self) -> Option<TokenUsage> {
         (!self.usage.is_zero()).then_some(self.usage)
+    }
+
+    /// The turn's occupancy numerator (ADR-0130 Decision 2): the LAST
+    /// round-trip's context size, protocol-split. `None` when no round-trip
+    /// reported usage (the same fail-closed posture as [`Self::usage`]) --
+    /// a hollow ring, never a zero reading.
+    pub(crate) fn occupancy(&self) -> Option<crate::model::OccupancySnapshot> {
+        self.last_roundtrip_usage
+            .map(|last| crate::model::OccupancySnapshot::from_last_roundtrip(last, self.protocol))
     }
 
     /// Fold one event. `channel` supplies the dispatch-recorded trace
@@ -210,6 +227,7 @@ impl EventFold {
                 // (Decision 3's cancelled-turn rule).
                 if let Some(round_usage) = normalize_rig_usage(&call.usage, self.protocol) {
                     self.usage.add(&round_usage);
+                    self.last_roundtrip_usage = Some(round_usage);
                 }
                 self.close_call(phases);
             }
@@ -1032,5 +1050,42 @@ mod tests {
         fold.event(&close_item(), &channel, &sink);
         fold.finish();
         assert!(fold.usage().is_none());
+        // ADR-0130: the occupancy latch shares the posture -- no round-trip
+        // evidence, no reading (hollow, never zero).
+        assert!(fold.occupancy().is_none());
+    }
+
+    /// ADR-0130 Decision 2: the occupancy numerator latches the LAST
+    /// round-trip (the freshest context measurement), protocol-split --
+    /// Anthropic reads the last input (total-side: ordinary + both cache
+    /// buckets), the OpenAI family its derived total. A turn cut after a
+    /// record (the cancelled-between-rounds shape) keeps the reading, the
+    /// same already-reported rule the usage sum applies.
+    #[test]
+    fn occupancy_latches_the_last_round_trip_protocol_split() {
+        let channel = Arc::new(CompletionChannel::new());
+        let sink = noop_sink();
+        let mut fold = EventFold::new(Some(Protocol::Anthropic));
+        fold.event(
+            &close_item_with(rig_usage(100, 30, 20, 50)),
+            &channel,
+            &sink,
+        );
+        fold.event(&close_item_with(rig_usage(60, 10, 0, 20)), &channel, &sink);
+        fold.finish(); // the cancel shape: no further record arrives
+        let occupancy = fold.occupancy().expect("the last round-trip latched");
+        // Anthropic: total-side input of the LAST record (60 + 10 + 0).
+        assert_eq!(occupancy.tokens, 70);
+        assert_eq!(
+            occupancy.limit, None,
+            "the built-in channel carries no window"
+        );
+
+        // OpenAI arm: the same last record reads its derived total
+        // (input 60 -- cached rides inside it on that family -- + output 20).
+        let mut fold = EventFold::new(Some(Protocol::Openai));
+        fold.event(&close_item_with(rig_usage(60, 10, 0, 20)), &channel, &sink);
+        let occupancy = fold.occupancy().expect("the record latched");
+        assert_eq!(occupancy.tokens, 80);
     }
 }

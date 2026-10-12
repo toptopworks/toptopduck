@@ -362,8 +362,10 @@ pub enum SessionUpdate {
     /// `size` the window total, with no input/output split and no
     /// per-round-trip accounting (the optional `cost` money field stays
     /// unmodeled, Decision 5). The spec offers no billing-grade usage
-    /// source, so the engine recognizes the update but collects NOTHING
-    /// from it -- ACP turns stay fail-closed on usage (Decision 3).
+    /// source, so the engine collects no BILLING from it -- ACP turns
+    /// stay fail-closed on usage (Decision 3). Occupancy is the one thing
+    /// the snapshot does feed: the pump latches it into the occupancy
+    /// channel (ADR-0130).
     UsageUpdate {
         #[serde(default)]
         used: u64,
@@ -928,8 +930,9 @@ mod tests {
     /// `size`; the spec has no input/output split, and the unmodeled
     /// `cost` field is ignored) -- and a payload missing the fields still
     /// parses (the same forward-compatibility posture as `Other`). The
-    /// engine recognizes the update but collects nothing from it; the
-    /// fail-closed billing posture is pinned in the engine tests.
+    /// engine latches the snapshot into the OCCUPANCY channel (ADR-0130);
+    /// the billing channel's fail-closed posture is pinned in the engine
+    /// tests.
     #[test]
     fn usage_update_deserializes_the_occupancy_shape() {
         let raw = serde_json::json!({

@@ -414,15 +414,16 @@ describe("TurnCard usage footer (ADR-0129, issue #1270)", () => {
     // zh-CN catalog wording (the suite's fixture locale): the segments
     // resolve from the catalog, not literals, so the pin tracks the
     // wording (issue #139 convention).
-    // zh compact has no thousands separator (1500, not 1,500).
-    expect(screen.getByText("入 1500")).toBeInTheDocument();
-    expect(screen.getByText("缓存 1000")).toBeInTheDocument();
-    expect(screen.getByText("出 300")).toBeInTheDocument();
+    // ADR-0130: the fixed K/M scale (1500 -> "1.5K", 1000 -> "1K"; 300
+    // stays verbatim below 1K).
+    expect(screen.getByText("输入 1.5K")).toBeInTheDocument();
+    expect(screen.getByText("缓存 1K")).toBeInTheDocument();
+    expect(screen.getByText("输出 300")).toBeInTheDocument();
   });
 
   it("renders no token line for a turn without usage", () => {
     renderCard(recordWith(undefined));
-    expect(screen.queryByText(/^入 /)).not.toBeInTheDocument();
+    expect(screen.queryByText(/^输入 /)).not.toBeInTheDocument();
   });
 });
 
@@ -475,16 +476,16 @@ describe("TurnCard sub-agent subtotal pairing (ADR-0129, issue #1270)", () => {
 
   it("round 1's dialog carries the first run's subtotal", () => {
     openSubtrace(0);
-    expect(screen.getByText("入 30")).toBeInTheDocument();
-    expect(screen.getByText("出 10")).toBeInTheDocument();
+    expect(screen.getByText("输入 30")).toBeInTheDocument();
+    expect(screen.getByText("输出 10")).toBeInTheDocument();
   });
 
   it("a same-spec re-delegation in a later round reaches the second entry", () => {
     openSubtrace(1);
     // The pairing bug reads the first entry again (入 30); the turn-scope
     // ordinal must reach the second run.
-    expect(screen.getByText("入 5")).toBeInTheDocument();
-    expect(screen.getByText("出 5")).toBeInTheDocument();
+    expect(screen.getByText("输入 5")).toBeInTheDocument();
+    expect(screen.getByText("输出 5")).toBeInTheDocument();
   });
 
   it("a refused row (no sub-trace) consumes no ordinal", () => {
@@ -503,6 +504,6 @@ describe("TurnCard sub-agent subtotal pairing (ADR-0129, issue #1270)", () => {
     const buttons = screen.getAllByText("子轨迹");
     expect(buttons).toHaveLength(1);
     fireEvent.click(buttons[0]);
-    expect(screen.getByText("入 30")).toBeInTheDocument();
+    expect(screen.getByText("输入 30")).toBeInTheDocument();
   });
 });

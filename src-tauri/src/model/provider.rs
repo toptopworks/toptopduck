@@ -102,6 +102,14 @@ pub struct ProviderProfile {
     /// Model id to request (ADR-0007: default Sonnet-class, pinned).
     #[serde(default = "default_provider_model")]
     pub model: String,
+    /// The model's context window, in tokens (ADR-0130 Decision 4): the
+    /// occupancy ring's denominator. The only CONFIG denominator source,
+    /// outranked by a reading that carries its own window (the ACP
+    /// snapshot's `size`) -- never probed, never guessed. `None` (the
+    /// default) = window unknown: the ring renders hollow. Absent for
+    /// profiles stored before the field (serde default, zero migration).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_limit: Option<u64>,
 }
 
 impl ProviderProfile {
@@ -118,6 +126,7 @@ impl ProviderProfile {
             protocol: Protocol::Anthropic,
             base_url: DEFAULT_PROVIDER_BASE_URL.to_string(),
             model: DEFAULT_PROVIDER_MODEL.to_string(),
+            context_limit: None,
         }
     }
 }
@@ -429,6 +438,7 @@ mod tests {
                 protocol: Protocol::Anthropic,
                 base_url: "https://api.anthropic.example.test".into(),
                 model: "claude-sonnet-4-6".into(),
+                context_limit: None,
             },
             ProviderProfile {
                 id: openai_id.clone(),
@@ -436,6 +446,7 @@ mod tests {
                 protocol: Protocol::Openai,
                 base_url: "https://api.openai.example.test".into(),
                 model: "gpt-4o".into(),
+                context_limit: None,
             },
         ];
         cfg.active_profile = Some(anthropic_id.clone());
@@ -510,6 +521,24 @@ mod tests {
     }
 
     #[test]
+    fn context_limit_is_optional_and_lean() {
+        // ADR-0130 Decision 4: the occupancy ring's denominator is an
+        // explicit, optional config field -- absent for every profile
+        // stored before it (serde default, zero migration), key-less when
+        // unset (lean app-config), verbatim when set.
+        let mut profile = ProviderProfile::default_anthropic();
+        let json = serde_json::to_string(&profile).expect("serialize");
+        assert!(!json.contains("context_limit"), "unset stays key-less");
+        let pre_field: serde_json::Value = serde_json::from_str(&json).expect("json");
+        let back: ProviderProfile = serde_json::from_value(pre_field).expect("legacy opens");
+        assert_eq!(back.context_limit, None);
+        profile.context_limit = Some(200_000);
+        let json = serde_json::to_string(&profile).expect("serialize");
+        let back: ProviderProfile = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(back.context_limit, Some(200_000), "round-trips verbatim");
+    }
+
+    #[test]
     fn view_surfaces_the_active_profile_endpoint_verbatim() {
         // With an active profile the view carries its endpoint fields verbatim
         // plus the key read outcome (ADR-0029: a boolean + read-fault detail
@@ -521,6 +550,7 @@ mod tests {
             protocol: Protocol::Anthropic,
             base_url: "https://gateway.example.test".into(),
             model: "claude-opus-4-8".into(),
+            context_limit: None,
         };
         cfg.active_profile = Some(profile.id.clone());
         cfg.profiles.push(profile);

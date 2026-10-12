@@ -179,8 +179,8 @@ describe("DelegationTraceDialog usage subtotal (ADR-0129, issue #1270)", () => {
     );
     fireEvent.click(screen.getByRole("button", { name: /Sub-trace/ }));
     await waitFor(() => expect(screen.getByRole("dialog")).toBeInTheDocument());
-    expect(screen.getByText("In 40")).toBeInTheDocument();
-    expect(screen.getByText("Out 10")).toBeInTheDocument();
+    expect(screen.getByText("Input 40")).toBeInTheDocument();
+    expect(screen.getByText("Output 10")).toBeInTheDocument();
   });
 
   it("renders no subtotal when the turn carried none", async () => {

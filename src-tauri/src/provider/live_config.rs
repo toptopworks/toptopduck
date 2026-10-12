@@ -2275,6 +2275,7 @@ mod tests {
                 protocol: Protocol::Anthropic,
                 base_url: "https://api.anthropic.example.test".into(),
                 model: "claude-sonnet-4-6".into(),
+                context_limit: None,
             },
             ProviderProfile {
                 id: openai_id.clone(),
@@ -2282,6 +2283,7 @@ mod tests {
                 protocol: Protocol::Openai,
                 base_url: "https://api.openai.example.test".into(),
                 model: "gpt-4o".into(),
+                context_limit: None,
             },
         ];
         cfg.provider.active_profile = Some(anthropic_id.clone());
@@ -2327,6 +2329,7 @@ mod tests {
                 protocol: Protocol::Anthropic,
                 base_url: DEFAULT_PROVIDER_BASE_URL.into(),
                 model: DEFAULT_PROVIDER_MODEL.into(),
+                context_limit: None,
             },
             ProviderProfile {
                 id: ProfileId("__test_list_b".into()),
@@ -2334,6 +2337,7 @@ mod tests {
                 protocol: Protocol::Openai,
                 base_url: "https://api.deepseek.example.test".into(),
                 model: "deepseek-chat".into(),
+                context_limit: None,
             },
         ];
         live.store(cfg).expect("store");

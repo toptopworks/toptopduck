@@ -264,7 +264,9 @@ impl AcpEngine {
         // failure (the engine never panics into the host).
         let mut child = match spawn(binary, &self.adapter) {
             Ok(c) => c,
-            Err(detail) => return self.outcome(Termination::Runtime(detail), Vec::new(), None),
+            Err(detail) => {
+                return self.outcome(Termination::Runtime(detail), Vec::new(), None, None)
+            }
         };
         let stdout = child.inner.stdout.take().expect("piped stdout");
         let stdin = child.inner.stdin.take().expect("piped stdin");
@@ -284,7 +286,7 @@ impl AcpEngine {
                     Termination::Cancelled => ProgressClock::cancel_landing(clock.as_ref()),
                     other => other,
                 };
-                let outcome = self.outcome(term, Vec::new(), None);
+                let outcome = self.outcome(term, Vec::new(), None, None);
                 child.kill_and_wait();
                 return outcome;
             }
@@ -343,7 +345,7 @@ impl AcpEngine {
                         Termination::Cancelled => ProgressClock::cancel_landing(clock.as_ref()),
                         other => other,
                     };
-                    let outcome = self.outcome(term, Vec::new(), discovered);
+                    let outcome = self.outcome(term, Vec::new(), discovered, None);
                     child.kill_and_wait();
                     return outcome;
                 }
@@ -359,6 +361,7 @@ impl AcpEngine {
                             )),
                             Vec::new(),
                             discovered,
+                            None,
                         );
                         child.kill_and_wait();
                         return outcome;
@@ -373,6 +376,7 @@ impl AcpEngine {
             cancel_sent_at: None,
             clock: clock.clone(),
             open_freeze: None,
+            occupancy: None,
         };
         // Windowed auto-continuation (ADR-0128): the agent's own turn budget
         // (`MaxTurnRequests`) is the window boundary -- under the resume
@@ -490,9 +494,12 @@ impl AcpEngine {
         };
         // ADR-0129 (issue #1270): the spec's usage_update carries only a
         // context-occupancy snapshot, so the ACP turn lands no usage
-        // (fail-closed, Decision 3).
+        // (fail-closed, Decision 3). ADR-0130: that same snapshot is the
+        // occupancy channel's primitive -- the pump's latch rides the
+        // outcome alongside.
         let rounds = pump.tracker.settle_rounds(&termination);
-        let outcome = self.outcome(termination, rounds, discovered);
+        let occupancy = pump.occupancy;
+        let outcome = self.outcome(termination, rounds, discovered, occupancy);
         child.kill_and_wait();
         outcome
     }
@@ -502,6 +509,7 @@ impl AcpEngine {
         termination: Termination,
         rounds: Vec<LoopRound>,
         discovered: Option<DiscoveredRuntime>,
+        occupancy: Option<crate::model::OccupancySnapshot>,
     ) -> LoopOutcome {
         LoopOutcome {
             termination,
@@ -519,6 +527,10 @@ impl AcpEngine {
             // ADR-0095: the handshake's extracted catalog rides every
             // post-handshake exit (None before / on handshake failure).
             discovered_runtime: discovered,
+            // ADR-0130: the occupancy channel's settle (the pump's latch
+            // off `usage_update`; None when the agent never sent one --
+            // honest hollow, never fabricated).
+            occupancy,
         }
     }
 }
@@ -961,6 +973,10 @@ struct Pump {
     clock: Option<Arc<ProgressClock>>,
     /// Held while `pending` is non-empty (the open tool-call window).
     open_freeze: Option<crate::session::progress::FreezeGuard>,
+    /// The last occupancy snapshot seen on `usage_update` (ADR-0130): the
+    /// occupancy channel's pickup -- the freshest reading wins, settle takes
+    /// the last. Never touches the billing channel (Decision 3).
+    occupancy: Option<crate::model::OccupancySnapshot>,
 }
 
 /// One round's in-flight accumulation: the thought + prose streams the model
@@ -1342,12 +1358,22 @@ impl Pump {
                 // An update with no matching pending row (missed the start) is
                 // dropped -- the trace stays consistent with the starts seen.
             }
-            SessionUpdate::UsageUpdate { .. } => {
-                // Recognized, deliberately uncollected (ADR-0129 issue
-                // #1270, live-pinned against the spec): the update is a
-                // context-occupancy snapshot, not a metering report -- the
-                // spec offers no billing-grade usage source, so the ACP
-                // turn stays fail-closed on usage (Decision 3).
+            SessionUpdate::UsageUpdate { used, size } => {
+                // ADR-0130: the update is a context-occupancy snapshot --
+                // the occupancy channel's only self-reported primitive, so
+                // it latches here for the composer ring (the freshest
+                // reading wins; settle takes the last). A zero `used` is
+                // the spec's absent-field degrade, not a reading -- nothing
+                // latches (no fabricated zero occupancy). The BILLING
+                // channel stays fail-closed on the ACP path (ADR-0129
+                // Decision 3: the snapshot has no input/output split, so it
+                // is not metering evidence and never lands on `usage`).
+                if *used > 0 {
+                    self.occupancy = Some(crate::model::OccupancySnapshot {
+                        tokens: *used,
+                        limit: (*size > 0).then_some(*size),
+                    });
+                }
             }
             SessionUpdate::Other => {}
         }
@@ -1847,6 +1873,7 @@ mod tests {
             cancel_sent_at: None,
             clock: None,
             open_freeze: None,
+            occupancy: None,
         }
     }
 
@@ -1854,6 +1881,106 @@ mod tests {
     /// the rounds (the settle merge's in-place-replacement anchor) but emits
     /// NOTHING live -- the gateway serve's direct emission is the row's only
     /// live source, so the echo never doubles it mid-flight.
+    /// ADR-0130: the pump latches the `usage_update` occupancy snapshot
+    /// (the freshest reading wins) into the occupancy channel -- while the
+    /// BILLING channel stays fail-closed on the ACP path (ADR-0129
+    /// Decision 3: the snapshot has no input/output split, so it is not
+    /// metering evidence). A zero `used` (the spec's absent-field degrade)
+    /// latches nothing and never clobbers a real reading.
+    #[test]
+    fn usage_update_latches_occupancy_and_never_usage() {
+        let mut pump = fold_pump();
+        pump.fold_update(
+            &SessionUpdate::UsageUpdate {
+                used: 1_500,
+                size: 200_000,
+            },
+            &mut |_| {},
+        );
+        assert_eq!(
+            pump.occupancy,
+            Some(crate::model::OccupancySnapshot {
+                tokens: 1_500,
+                limit: Some(200_000),
+            }),
+            "the snapshot latches with its window"
+        );
+        // The freshest reading wins.
+        pump.fold_update(
+            &SessionUpdate::UsageUpdate {
+                used: 3_000,
+                size: 200_000,
+            },
+            &mut |_| {},
+        );
+        assert_eq!(pump.occupancy.expect("still latched").tokens, 3_000);
+        // A zero-used frame is an absent-field degrade, not a reading: no
+        // clobber of the real latch.
+        pump.fold_update(
+            &SessionUpdate::UsageUpdate { used: 0, size: 0 },
+            &mut |_| {},
+        );
+        assert_eq!(
+            pump.occupancy.expect("the real reading survives").tokens,
+            3_000
+        );
+        // A window-less snapshot (size 0) latches numerator-only.
+        pump.fold_update(
+            &SessionUpdate::UsageUpdate {
+                used: 7_000,
+                size: 0,
+            },
+            &mut |_| {},
+        );
+        assert_eq!(
+            pump.occupancy,
+            Some(crate::model::OccupancySnapshot {
+                tokens: 7_000,
+                limit: None,
+            })
+        );
+        // A DECREASING replacement is still freshest-wins (context
+        // compaction makes the reading non-monotonic): the smaller later
+        // reading replaces, not a keep-max gate.
+        pump.fold_update(
+            &SessionUpdate::UsageUpdate {
+                used: 180_000,
+                size: 200_000,
+            },
+            &mut |_| {},
+        );
+        pump.fold_update(
+            &SessionUpdate::UsageUpdate {
+                used: 20_000,
+                size: 200_000,
+            },
+            &mut |_| {},
+        );
+        assert_eq!(
+            pump.occupancy,
+            Some(crate::model::OccupancySnapshot {
+                tokens: 20_000,
+                limit: Some(200_000),
+            }),
+            "the later smaller reading replaces, not a keep-max gate"
+        );
+    }
+
+    /// ADR-0130: an agent that never sends `usage_update` leaves the pump's
+    /// latch empty -- the honest hollow, never a fabricated reading.
+    #[test]
+    fn no_usage_update_leaves_occupancy_none() {
+        let mut pump = fold_pump();
+        pump.fold_update(
+            &SessionUpdate::AgentMessageChunk {
+                message_id: None,
+                content: ContentBlock::text("partial"),
+            },
+            &mut |_| {},
+        );
+        assert_eq!(pump.occupancy, None);
+    }
+
     #[test]
     fn fold_silences_a_gateway_renamed_call_live() {
         let mut pump = fold_pump();

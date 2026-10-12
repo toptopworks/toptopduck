@@ -139,6 +139,47 @@ pub struct SubagentUsage {
     pub usage: TokenUsage,
 }
 
+/// The turn's context-occupancy reading (ADR-0130): the last round-trip's
+/// measured context size plus, when the reporting channel knows it, the
+/// window it filled. A reference figure for the composer ring, never
+/// billing evidence (ADR-0130 Decision 3) -- it never enters
+/// [`TurnUsage`], and the billing channel's fail-closed posture is
+/// untouched by its presence.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OccupancySnapshot {
+    /// The numerator: the context size measured at the last round-trip.
+    /// Built-in: protocol-split off the last round-trip's usage (Decision 2
+    /// -- the two wire families' totals read oppositely, so the split
+    /// happens once at the collection point). ACP: the occupancy snapshot's
+    /// `used`.
+    pub tokens: u64,
+    /// The denominator: the context window, when the channel reported one
+    /// (ACP `size`). The built-in channel carries `None` -- the window is a
+    /// config matter there (Decision 4: explicit `context_limit`, never
+    /// guessed).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<u64>,
+}
+
+impl OccupancySnapshot {
+    /// The built-in channel's numerator (ADR-0130 Decision 2), protocol-split
+    /// off one round-trip's normalized usage: Anthropic's full-resend
+    /// semantics make the last input (total-side: ordinary + both cache
+    /// buckets) the measured context; the OpenAI family's server-side
+    /// chaining makes its derived total the active context. `None` protocol
+    /// rides the OpenAI arm (the same fallback the normalization applies).
+    pub fn from_last_roundtrip(last: TokenUsage, protocol: Option<super::Protocol>) -> Self {
+        let tokens = match protocol {
+            Some(super::Protocol::Anthropic) => last.input_tokens,
+            Some(super::Protocol::Openai) | None => last.total_tokens(),
+        };
+        Self {
+            tokens,
+            limit: None,
+        }
+    }
+}
+
 impl TurnUsage {
     /// Compose one built-in turn's aggregate (ADR-0129 Decision 6): the
     /// sub-agents' usage folds INTO the total (a subtotal is a split OF
@@ -393,5 +434,40 @@ mod tests {
         let mut d = CumulativeUsageDelta::new();
         d.feed(&usage(0, 0));
         assert!(d.settle().is_none());
+    }
+
+    /// ADR-0130 Decision 2: the built-in occupancy numerator is
+    /// protocol-split off the last round-trip's normalized usage -- the two
+    /// wire families' totals read oppositely, so the split is the one place
+    /// it happens. Anthropic: the total-side input (the breakdowns are
+    /// subsets, never re-added). OpenAI (+ the None fallback): the derived
+    /// total.
+    #[test]
+    fn occupancy_numerator_splits_on_protocol() {
+        let last = usage(150, 50);
+        assert_eq!(
+            OccupancySnapshot::from_last_roundtrip(last, Some(crate::model::Protocol::Anthropic))
+                .tokens,
+            150,
+            "Anthropic: the total-side input as-is -- breakdowns never re-added"
+        );
+        assert_eq!(
+            OccupancySnapshot::from_last_roundtrip(last, Some(crate::model::Protocol::Openai))
+                .tokens,
+            200,
+            "OpenAI: input + output (the active context under chaining)"
+        );
+        assert_eq!(
+            OccupancySnapshot::from_last_roundtrip(last, None).tokens,
+            200,
+            "None protocol rides the OpenAI arm (the normalization fallback)"
+        );
+        // The built-in snapshot never carries a window (Decision 4: the
+        // denominator is a config matter, never guessed).
+        assert_eq!(
+            OccupancySnapshot::from_last_roundtrip(last, Some(crate::model::Protocol::Anthropic))
+                .limit,
+            None
+        );
     }
 }

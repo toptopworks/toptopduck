@@ -956,6 +956,10 @@ fn finish(
             ),
         )
     });
+    // ADR-0130: the occupancy numerator rides alongside -- the LAST
+    // round-trip's protocol-split reading, host-turn only (a sub-agent's
+    // context is not this session's context).
+    let occupancy = fold.occupancy();
     LoopOutcome {
         termination,
         promotions: std::mem::take(
@@ -964,6 +968,7 @@ fn finish(
         trace: fold.rounds,
         usage,
         discovered_runtime: None,
+        occupancy,
     }
 }
 

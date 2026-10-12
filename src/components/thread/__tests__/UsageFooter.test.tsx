@@ -33,18 +33,18 @@ function usage(over: Partial<TokenUsage> = {}): TokenUsage {
 }
 
 describe("UsageFooter (ADR-0129, issue #1270)", () => {
-  it("renders the always-visible input / cache / output segments in compact notation", () => {
+  it("renders the always-visible input / cache / output segments on the fixed K/M scale", () => {
     renderFooter(usage());
     // 1234 -> "1.2K" under the en compact formatter.
-    expect(screen.getByText("In 1.2K")).toBeInTheDocument();
+    expect(screen.getByText("Input 1.2K")).toBeInTheDocument();
     expect(screen.getByText("cache 800")).toBeInTheDocument();
-    expect(screen.getByText("Out 567")).toBeInTheDocument();
+    expect(screen.getByText("Output 567")).toBeInTheDocument();
   });
 
   it("omits the cache segment when the breakdown is zero", () => {
     renderFooter(usage({ cache_read_tokens: 0 }));
     expect(screen.queryByText(/^cache /)).not.toBeInTheDocument();
-    expect(screen.getByText("In 1.2K")).toBeInTheDocument();
+    expect(screen.getByText("Input 1.2K")).toBeInTheDocument();
   });
 
   it("mounts the technical fold for cache write / reasoning and stays flat without them", () => {

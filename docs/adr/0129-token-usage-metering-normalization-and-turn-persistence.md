@@ -4,13 +4,13 @@
 
 1. **归一化采总量派五字段。** 所有采集通道在归集点把上游 usage 归一为：`input_tokens`（总输入 = 普通输入 + 缓存写 + 缓存读）、`cache_read_tokens` 与 `cache_write_tokens`（恒为 `input_tokens` 的 breakdown 子集，任何汇总不得把它们再相加进输入）、`output_tokens`、`reasoning_tokens`（恒为 `output_tokens` 子集，上游不拆分时留空）。Anthropic 协议 wire 的 `input_tokens` 不含缓存，总量为三值相加；OpenAI 协议 wire 的输入字段已含缓存、cached 为其子集，直取。总量不设独立字段，恒由输入 + 输出派生。上游字段名不得直通持久层——新通道必须在归集点完成本归一化。
 
-2. **采集通道按上游证据形态分族。** 逐往返族（往返即执行轨迹的一轮，一次 provider 调用）：内置循环（provider 响应的 usage 随每次往返到达）与 claude stream-json 通道（assistant 帧的 message.usage），逐往返采集、往返求和成轮次；轮次终值族：codex 事件流的 usage 挂在 turn.completed（每续跑窗口一报，逐窗口累加成轮次）。进程累计差分仅保留为兜底：token_count.updated 的 total_token_usage 若上游发出，在轮次边界差分，差分为负（resume 后新进程累计归零）即基线失效信号——重置基线、该轮次不落 usage。ACP 会话更新的 usage_update 实测（规范 v1/v2 一致、opencode 实发同形）为上下文占用快照（used/size，无输入输出拆分、另有金额字段），不构成计量证据：引擎识别该更新但不采集，ACP 通道轮次恒 fail-closed。
+2. **采集通道按上游证据形态分族。** 逐往返族（往返即执行轨迹的一轮，一次 provider 调用）：内置循环（provider 响应的 usage 随每次往返到达）与 claude stream-json 通道（assistant 帧的 message.usage），逐往返采集、往返求和成轮次；轮次终值族：codex 事件流的 usage 挂在 turn.completed（每续跑窗口一报，逐窗口累加成轮次）。进程累计差分仅保留为兜底：token_count.updated 的 total_token_usage 若上游发出，在轮次边界差分，差分为负（resume 后新进程累计归零）即基线失效信号——重置基线、该轮次不落 usage。ACP 会话更新的 usage_update 实测（规范 v1/v2 一致、opencode 实发同形）为上下文占用快照（used/size，无输入输出拆分、另有金额字段），不构成计量证据：引擎识别并采其占用（进占用显示通道，ADR-0130）、不采账单，ACP 通道轮次账单恒 fail-closed。
 
 3. **轮次级 fail-closed。** 一个轮次缺少 provider 证据（断基线、通道未上报、帧缺字段）时该轮次 usage 为空，显示层不渲染任何部分小计；已上报的往返照常计入——其立法语境是中途取消：取消的轮次按其已报往返计量。宿主通道零证据时整轮 fail-closed，内置子代理小计表随之弃置：合成总量将以完整账单形态呈现仅含子代理花费的下界，而下界与完整账单不可辨——漏报是 fail-closed 的既定姿态，下界伪装不是。会话合计是有证据轮次的求和，不持久、不作下界标注。
 
 4. **持久到轮次级，会话合计纯派生。** usage 以可选字段挂轮次持久（trace / provenance 同位的审计面），旧 recipe 反序列化为空照常打开；会话合计由消费端对有证据轮次求和，不落任何聚合值。
 
-5. **显示为绝对数。** 轮卡常显输入（含缓存拆项）与输出，缓存写与思考数进技术折叠；不做价格换算、上下文百分比、模型上下文上限表。上下文占用不设专门计数器与 UI——末次往返 `input_tokens` 即该轮次结束时上下文规模的实测快照，随常显面表达。
+5. **显示为绝对数。** 轮卡常显输入（含缓存拆项）与输出，缓存写与思考数进技术折叠；账单面不做价格换算、上下文百分比、模型上下文上限表。上下文占用的显示与占用采集通道立法于 ADR-0130——末次往返 `input_tokens` 即该轮次结束时上下文规模的实测快照，占用原语语义保持。
 
 6. **委派归属仅内置可拆。** 内置循环的子智能体往返在采集点携带归属标记，轮次级持久总量 + 子智能体小计表；外部运行时的子智能体消耗发生于 agent 进程内，上游只报进程聚合值，usage 归宿主轮次、不标注不拆分。
 
@@ -49,5 +49,5 @@
 - recipe schema 增轮次级可选字段，旧 `.duck` 零迁移打开；空值轮次与旧会话轮次在显示层同形（不渲染），会话合计对其静默跳过。
 - 会话合计是弱语义（有证据轮次之和）：中途取消轮次的未报往返无法计入，合计可能低于真实消耗——接受的误差，不设标注。
 - 末次往返输入作占用表达在外部运行时为非单调读数（agent 自动的上下文压缩使数值跳降），仅作参考，不驱动任何决策。
-- claude stream-json 的 assistant 帧逐帧携带 usage、codex 的帧位与口径已真机钉死：codex `exec --json`（0.154 实测）不发 token_count.updated，usage 挂在 turn.completed（轮次终值，含 cache_write_input_tokens 与 reasoning_output_tokens 拆分，逐窗口累加），差分路径保留为未观测到的兜底；claude 帧缺 usage 时按 result 帧兜底，再缺则该轮次 fail-closed；ACP usage_update 为上下文占用快照（used/size），无计量数据源，该通道轮次恒 fail-closed。
-- 缓存写与思考数持久但仅进技术折叠；价格换算、百分比、上限表、组成拆解保持未决，出现可信上限来源或成本问责需求时另启决策。
+- claude stream-json 的 assistant 帧逐帧携带 usage、codex 的帧位与口径已真机钉死：codex `exec --json`（0.154 实测）不发 token_count.updated，usage 挂在 turn.completed（轮次终值，含 cache_write_input_tokens 与 reasoning_output_tokens 拆分，逐窗口累加），差分路径保留为未观测到的兜底；claude 帧缺 usage 时按 result 帧兜底，再缺则该轮次 fail-closed；ACP usage_update 为上下文占用快照（used/size），无计量数据源，该通道轮次账单恒 fail-closed。
+- 缓存写与思考数持久但仅进技术折叠；价格换算、上限表、组成拆解保持未决，出现可信上限来源或成本问责需求时另启决策；占用显示与占用百分比已立法于 ADR-0130。

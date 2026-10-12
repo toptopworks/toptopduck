@@ -971,6 +971,10 @@ fn outcome(
         trace: rounds,
         usage,
         discovered_runtime: discovered,
+        // ADR-0130: the stream-json channel's usage frames are billing
+        // evidence, not occupancy snapshots -- no occupancy primitive, so
+        // always None (honest hollow).
+        occupancy: None,
     }
 }
 

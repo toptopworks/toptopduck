@@ -3330,4 +3330,50 @@ describe("shell submit fire-path defensive log (#825)", () => {
       ),
     );
   });
+
+  it("the composer ring takes the active profile's context_limit as its denominator (ADR-0130)", async () => {
+    // The active profile carries a window; the thread's turn carries a
+    // windowless reading -- the shell mount must merge them into the arc
+    // (50K of the config's 200K draws track + arc; a broken contextLimit
+    // plumb leaves the hollow track's single circle).
+    try {
+      vi.mocked(getAppConfig).mockResolvedValue({
+        ...baseAppConfig({ sidebar_collapsed: false }),
+        provider: {
+          profiles: [
+            {
+              id: "default",
+              display_name: "Default",
+              protocol: "openai",
+              base_url: "https://api.example.com",
+              model: "m1",
+              context_limit: 200_000,
+            },
+          ],
+          active_profile: "default",
+        },
+      });
+      const turn = recordedTurn("总共几行", {
+        kind: "Textual",
+        data: { text_kind: "Agent", body: "答", assumption: null },
+      });
+      // Inline-narrowed to the Turn arm: recordedTurn's ThreadEntry union
+      // does not carry the TurnRecord shape TS needs for the occupancy
+      // field without the guard.
+      if (turn.entry !== "Turn") throw new Error("fixture shape");
+      state.thread = [
+        { entry: "Turn", data: { ...turn.data, occupancy: { tokens: 50_000, limit: null } } },
+      ];
+      render(<App />);
+      await waitFor(() => expect(screen.getByLabelText("提问")).toBeInTheDocument());
+      await openSession();
+      await waitFor(() => expect(conversation).toHaveBeenCalled());
+      const ring = await screen.findByRole("button", { name: "上下文占用" });
+      expect(ring.querySelectorAll("circle")).toHaveLength(2);
+    } finally {
+      // clearAllMocks only clears call history: restore the factory default
+      // so the appConfig state does not leak into later tests.
+      vi.mocked(getAppConfig).mockResolvedValue(null as unknown as AppConfig);
+    }
+  });
 });

@@ -478,6 +478,13 @@ pub struct RecipeTurn {
     /// precedent as `invocations`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub usage: Option<crate::model::TurnUsage>,
+    /// The turn's context-occupancy reading (ADR-0130): the last
+    /// round-trip's context size (+ the window when the ACP channel
+    /// reported one). Absent for turns recorded before the field and for
+    /// turns with no occupancy evidence (serde default -- strictly
+    /// additive, no format_version bump, the same precedent as `usage`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub occupancy: Option<crate::model::OccupancySnapshot>,
     /// The turn's delivered-artifact manifest (ADR-0124, issue #1087):
     /// absolute paths + file names + the durable flag, merged from the
     /// dual channels at settle and frozen here. Empty for turns that
@@ -505,7 +512,7 @@ impl RecipeTurn {
             settled_at: None,
             invocations: Vec::new(),
             usage: None,
-
+            occupancy: None,
             artifacts: Vec::new(),
         }
     }
@@ -533,7 +540,7 @@ impl RecipeTurn {
             settled_at: timestamps.settled_at,
             invocations: Vec::new(),
             usage: None,
-
+            occupancy: None,
             artifacts: Vec::new(),
         }
     }
@@ -1664,6 +1671,43 @@ mod tests {
     }
 
     #[test]
+    fn occupancy_round_trips_and_old_recipes_open_without_it() {
+        // ADR-0130: an occupancy-bearing turn round-trips the reading
+        // verbatim (numerator + the ACP-reported window); a turn with no
+        // reading omits the key; and a turn persisted BEFORE the field
+        // deserializes with `None` -- the same old-.duck zero-migration
+        // rule `usage` rides (serde default, no format_version bump).
+        let mut turn = RecipeTurn::without_audit(
+            "问一句",
+            RecipeOutcome::Textual {
+                text_kind: TextKind::Agent,
+                body: "答一句".into(),
+                assumption: None,
+            },
+        );
+        turn.occupancy = Some(crate::model::OccupancySnapshot {
+            tokens: 9_000,
+            limit: Some(200_000),
+        });
+        let json = serde_json::to_string(&turn).expect("serialize");
+        assert!(json.contains("\"occupancy\""), "the reading persists");
+        let back: RecipeTurn = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(back.occupancy, turn.occupancy, "round-trips verbatim");
+        // A pre-field turn (occupancy key absent) opens with None.
+        let mut legacy_value: serde_json::Value = serde_json::from_str(&json).expect("json");
+        legacy_value
+            .as_object_mut()
+            .expect("object")
+            .remove("occupancy");
+        let legacy: RecipeTurn = serde_json::from_value(legacy_value).expect("legacy opens");
+        assert_eq!(legacy.occupancy, None, "honest hollow, no backfill");
+        // No reading -> lean key-less shape.
+        turn.occupancy = None;
+        let json = serde_json::to_string(&turn).expect("serialize");
+        assert!(!json.contains("occupancy"), "absent reading omits the key");
+    }
+
+    #[test]
     fn external_provenance_round_trips_adapter_id() {
         // ADR-0101: an External turn persists the adapter id alongside the
         // runtime kind, so a mixed thread's reader can tell WHICH external CLI
@@ -1754,6 +1798,7 @@ mod tests {
         // contract (ADR-0078/0082).
         let turn = RecipeTurn {
             usage: None,
+            occupancy: None,
             question: "多少人".into(),
             outcome: RecipeOutcome::Materialized {
                 promotions: vec![RecipePromotion {

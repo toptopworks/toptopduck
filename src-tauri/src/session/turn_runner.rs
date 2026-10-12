@@ -231,7 +231,7 @@ impl super::Session {
         // ADR-0078). `on_phase` moves into exactly one arm (match arms are
         // exclusive), so the built-in closure and the external engine cannot
         // both hold it.
-        let (outcome, trace, usage) = match self.external_runtime.clone() {
+        let (outcome, trace, usage, occupancy) = match self.external_runtime.clone() {
             Some(adapter) => self.run_external_turn(
                 question,
                 &turns,
@@ -278,7 +278,7 @@ impl super::Session {
                 // Session fields, so they coexist without widening to
                 // `&mut self`. The block scope drops the borrows before
                 // `record_turn` takes its own `&mut self`.
-                let (outcome, trace, usage) = {
+                let (outcome, trace, usage, occupancy) = {
                     // Connect the user's configured external MCP servers
                     // (issue #301 slice C-loop / slice D): same per-turn
                     // lifecycle as the gateway path (ADR-0076 Decision +
@@ -444,6 +444,7 @@ impl super::Session {
                                 trace: Vec::new(),
                                 usage: None,
                                 discovered_runtime: None,
+                                occupancy: None,
                             },
                             Ok(runner) => runner.run(
                                 &request,
@@ -470,6 +471,10 @@ impl super::Session {
                     // (`turn_outcome_from_loop` reads only `termination` +
                     // `promotions`).
                     let usage = std::mem::take(&mut loop_outcome.usage);
+                    // ADR-0130: the occupancy reading rides the same
+                    // move-out-before-mapping pattern (the mapper never
+                    // reads it).
+                    let occupancy = loop_outcome.occupancy.take();
                     // The loop's real multi-call trace rides alongside the
                     // mapped outcome to record_turn (ADR-0078, issue #319): the
                     // mapper stays focused on the four-way classification, so
@@ -490,9 +495,10 @@ impl super::Session {
                         ),
                         trace,
                         usage,
+                        occupancy,
                     )
                 };
-                (outcome, trace, usage)
+                (outcome, trace, usage, occupancy)
             }
         };
         // ADR-0055 post-turn discard: if `close_session` marked this session
@@ -523,6 +529,7 @@ impl super::Session {
             asked_at,
             presented_files,
             usage,
+            occupancy,
         )
     }
 
@@ -557,7 +564,12 @@ impl super::Session {
         on_phase: O,
         skill_state: &mut SkillTurnState<'_>,
         inputs: &TurnInputs<'_>,
-    ) -> (TurnOutcome, Vec<LoopRound>, Option<crate::model::TurnUsage>) {
+    ) -> (
+        TurnOutcome,
+        Vec<LoopRound>,
+        Option<crate::model::TurnUsage>,
+        Option<crate::model::OccupancySnapshot>,
+    ) {
         // 1. Resolve the CLI binary. Not-on-PATH -> an external-runtime
         //    failure (the engine never spawns; nothing to clean up).
         let binary = match detect_adapter(&adapter) {
@@ -568,6 +580,7 @@ impl super::Session {
                         detail: format!("external runtime `{}` not found on PATH", adapter.id),
                     }),
                     Vec::new(),
+                    None,
                     None,
                 );
             }
@@ -584,6 +597,7 @@ impl super::Session {
                     }),
                     Vec::new(),
                     None,
+                    None,
                 );
             }
         };
@@ -599,6 +613,7 @@ impl super::Session {
                 return (
                     TurnOutcome::Failed(TurnFailure::Runtime { detail }),
                     Vec::new(),
+                    None,
                     None,
                 );
             }
@@ -820,6 +835,9 @@ impl super::Session {
                     // reported round-trips still count (a failed turn keeps
                     // its evidence, Decision 3).
                     acp_outcome.usage.clone(),
+                    // ADR-0130: the occupancy reading the engine collected
+                    // before the gap still rides (the same honest-keep).
+                    acp_outcome.occupancy,
                 );
             }
         };
@@ -829,10 +847,12 @@ impl super::Session {
         let mut merged = merge_outcomes(gateway_outcome, acp_outcome);
         let trace = std::mem::take(&mut merged.trace);
         let usage = std::mem::take(&mut merged.usage);
+        let occupancy = merged.occupancy.take();
         (
             turn_outcome_from_loop(merged, self.session_id.as_ref(), runtime_face),
             trace,
             usage,
+            occupancy,
         )
     }
 }

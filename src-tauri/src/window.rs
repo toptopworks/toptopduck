@@ -490,6 +490,7 @@ mod tests {
             invocations: Vec::new(),
             artifacts: Vec::new(),
             usage: None,
+            occupancy: None,
         }
     }
 
@@ -680,6 +681,7 @@ mod tests {
             invocations: Vec::new(),
             artifacts: Vec::new(),
             usage: None,
+            occupancy: None,
         }];
         let payload = assemble("probe", &[], &ws, &history);
         let full = format!("{:?}", payload.history);
@@ -776,6 +778,7 @@ mod tests {
             invocations: Vec::new(),
             artifacts: Vec::new(),
             usage: None,
+            occupancy: None,
         }];
         let payload = assemble("probe", &[], &ws, &history);
         let find = |name: &str| {
@@ -924,6 +927,7 @@ mod tests {
             invocations: Vec::new(),
             artifacts: Vec::new(),
             usage: None,
+            occupancy: None,
         }
     }
 
@@ -943,6 +947,7 @@ mod tests {
             invocations: Vec::new(),
             artifacts: Vec::new(),
             usage: None,
+            occupancy: None,
         }
     }
 

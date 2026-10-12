@@ -5,7 +5,8 @@ import type { TokenUsage } from "../../types/thread";
 
 // The usage footer (ADR-0129 Decision 5, issue #1270): the turn card's
 // always-visible token line -- input (with its cache-read breakdown) and
-// output as absolute numbers in the locale's compact notation (1.2K, 3.4M).
+// output as absolute numbers on the fixed K/M scale (ADR-0130 Decision 5;
+// 1.2K, 3.4M -- locale-independent).
 // The cache-write and reasoning counters persist but ride the technical
 // fold (a collapsed <details>): they are billing-side detail, not the
 // reading surface. No price conversion, no percentage, no model-cap table
@@ -23,7 +24,7 @@ function UsageSegments({ usage }: { usage: TokenUsage }) {
       <span className="usage-seg">
         <FormattedMessage
           id="thread.usage.input"
-          defaultMessage="In {n}"
+          defaultMessage="Input {n}"
           values={{ n: formatTokens(usage.input_tokens, intl) }}
         />
       </span>
@@ -39,7 +40,7 @@ function UsageSegments({ usage }: { usage: TokenUsage }) {
       <span className="usage-seg">
         <FormattedMessage
           id="thread.usage.output"
-          defaultMessage="Out {n}"
+          defaultMessage="Output {n}"
           values={{ n: formatTokens(usage.output_tokens, intl) }}
         />
       </span>
