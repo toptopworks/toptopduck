@@ -3,24 +3,24 @@ import { FormattedMessage, useIntl } from "react-intl";
 
 import { conversation } from "../../api";
 import { sessionKeys } from "../../session/queryKeys";
-import { HoverCard, HoverCardContent, HoverCardTrigger } from "../ui/hover-card";
-import { formatTokens } from "./tokenFormat";
-import { sessionUsageTotal, type SessionUsageTotal } from "./turn-visual";
+import { Tooltip, TooltipContent, TooltipTrigger } from "../ui/tooltip";
+import { formatPercent, formatTokens } from "./tokenFormat";
 import type { OccupancySnapshot, ThreadEntry } from "../../types/thread";
 
-// The composer's occupancy ring (ADR-0130, issue #1272): the QuestionBar's
-// leading constant -- a three-state reading whose every state maps an
-// evidence shape, never a guess:
+// The composer's occupancy ring (ADR-0130, issue #1272): the send
+// cluster's head constant, ahead of the runtime picker (issue #1276) -- a
+// three-state reading whose every state maps an evidence shape, never a
+// guess:
 // - FULL ring: denominator known (the active profile's context_limit, or the
 //   ACP snapshot's own window) -- a percentage arc, warning above 70%,
 //   danger above 90%.
 // - HOLLOW ring: numerator only (a reading landed, no window) -- the track
 //   renders, no arc, no invented percentage.
 // - NOT RENDERED: no reading ever landed (the channel stayed fail-closed).
-// Hover opens the popover: the primary occupancy line + the session total's
-// secondary line (the retired Thread-header total's one display surface)
-// with cache-write / reasoning in a technical fold -- the same source
-// entries the turn footer rides (ADR-0130 Decision 5).
+// Hover opens the runtime picker's tooltip pill: a single line, the
+// occupancy figure alone -- the session total retired from it, the turn
+// footer stays the billing display (ADR-0130 Decision 1). Numbers ride the
+// fixed K/M scale (ADR-0130 Decision 5).
 
 /** Above this filled fraction the arc takes the warning color. */
 const WARNING_THRESHOLD = 0.7;
@@ -31,7 +31,7 @@ const RING_RADIUS = 6;
 const RING_CIRCUMFERENCE = 2 * Math.PI * RING_RADIUS;
 
 export type OccupancyRingProps = {
-  /** The timeline the reading and the session total derive from. Empty /
+  /** The timeline the reading derives from. Empty /
    * null (cold start, no active session) renders nothing. */
   entries: readonly ThreadEntry[] | null;
   /** The active profile's configured context window (ADR-0130 Decision 4).
@@ -65,13 +65,12 @@ export function OccupancyRing({ entries, contextLimit = null }: OccupancyRingPro
   const limit =
     (occupancy.limit != null && occupancy.limit > 0 ? occupancy.limit : null) ??
     (contextLimit != null && contextLimit > 0 ? contextLimit : null);
-  const sessionTotal: SessionUsageTotal | null = sessionUsageTotal(entries);
   return (
-    <HoverCard openDelay={100} closeDelay={150}>
-      <HoverCardTrigger asChild>
+    <Tooltip>
+      <TooltipTrigger asChild>
         <button
           type="button"
-          className="occupancy-ring inline-flex size-4 shrink-0 items-center justify-center rounded-sm text-muted-foreground transition-colors hover:text-foreground outline-none focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring"
+          className="inline-flex size-4 shrink-0 cursor-pointer items-center justify-center rounded-full text-muted-foreground transition-colors hover:text-foreground outline-none focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring"
           aria-label={intl.formatMessage({
             id: "thread.occupancy.ariaLabel",
             defaultMessage: "Context occupancy",
@@ -79,90 +78,31 @@ export function OccupancyRing({ entries, contextLimit = null }: OccupancyRingPro
         >
           <RingGlyph tokens={occupancy.tokens} limit={limit} />
         </button>
-      </HoverCardTrigger>
-      {/* Denser than the sidebar hover card (p-4): the composer-bar reading
-          is a two-line figure, and the bar's own chrome is 13px-scale. */}
-      <HoverCardContent className="w-72 p-3 text-xs" side="top" align="start">
-        <div className="flex flex-col gap-1.5">
-          <p className="m-0 font-medium text-foreground">
-            {limit != null ? (
-              <FormattedMessage
-                id="thread.occupancy.main"
-                defaultMessage="{pct}% · last round-trip {used} / window {limit}"
-                values={{
-                  pct: Math.min(100, Math.round((occupancy.tokens / limit) * 100)),
-                  used: formatTokens(occupancy.tokens, intl),
-                  limit: formatTokens(limit, intl),
-                }}
-              />
-            ) : (
-              <FormattedMessage
-                id="thread.occupancy.hollow"
-                defaultMessage="last round-trip {n} tokens"
-                values={{ n: formatTokens(occupancy.tokens, intl) }}
-              />
-            )}
-          </p>
-          {sessionTotal != null && (
-            <p className="m-0 text-muted-foreground">
-              {/* One <span> per segment (the UsageSegments rule): each number
-                  stays its own element so queries and copy stay clean. */}
-              <span className="usage-seg">
-                <FormattedMessage
-                  id="thread.usage.input"
-                  defaultMessage="Input {n}"
-                  values={{ n: formatTokens(sessionTotal.input, intl) }}
-                />
-              </span>
-              {sessionTotal.cache_read > 0 && (
-                <>
-                  {" "}
-                  <span className="usage-seg">
-                    <FormattedMessage
-                      id="thread.occupancy.cacheParen"
-                      defaultMessage="(cache {n})"
-                      values={{ n: formatTokens(sessionTotal.cache_read, intl) }}
-                    />
-                  </span>
-                </>
-              )}
-              {" · "}
-              <span className="usage-seg">
-                <FormattedMessage
-                  id="thread.usage.output"
-                  defaultMessage="Output {n}"
-                  values={{ n: formatTokens(sessionTotal.output, intl) }}
-                />
-              </span>
-            </p>
-          )}
-          {sessionTotal != null &&
-            (sessionTotal.cache_write > 0 || sessionTotal.reasoning !== null) && (
-            <details className="usage-fold mt-0.5">
-              <summary className="cursor-pointer list-none text-muted-foreground">
-                <FormattedMessage id="thread.usage.more" defaultMessage="…" />
-              </summary>
-              <span className="block">
-                {sessionTotal.cache_write > 0 && (
-                  <FormattedMessage
-                    id="thread.usage.cacheWrite"
-                    defaultMessage="cache write {n}"
-                    values={{ n: formatTokens(sessionTotal.cache_write, intl) }}
-                  />
-                )}
-                {sessionTotal.reasoning !== null && (
-                  <FormattedMessage
-                    id="thread.usage.reasoning"
-                    defaultMessage="reasoning {n}"
-                    values={{ n: formatTokens(sessionTotal.reasoning, intl) }}
-                  />
-                )}
-              </span>
-            </details>
-          )}
-        </div>
-      </HoverCardContent>
-    </HoverCard>
+      </TooltipTrigger>
+      {/* The runtime picker's pill shape (same component, same tokens): one
+          line, the occupancy figure alone -- the glance is a send-decision
+          reference, the billing sums live on the turn footer (ADR-0130
+          Decision 1). */}
+      <TooltipContent side="top">
+        {limit != null ? (
+          <FormattedMessage
+            id="thread.occupancy.main"
+            defaultMessage="{pct}% · {used} / {limit} of context used"
+            values={{
+              pct: formatPercent(occupancy.tokens, limit),
+              used: formatTokens(occupancy.tokens, intl),
+              limit: formatTokens(limit, intl),
+            }}
+          />
+        ) : (
+          <FormattedMessage
+            id="thread.occupancy.hollow"
+            defaultMessage="{n} tokens used · context window unknown"
+            values={{ n: formatTokens(occupancy.tokens, intl) }}
+          />
+        )}
+      </TooltipContent>
+    </Tooltip>
   );
 }
 

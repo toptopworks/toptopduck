@@ -8,7 +8,7 @@ import { cancelled, failed, sourceAdded } from "../../../session/__tests__/fixtu
 import { embedOk } from "../../common/__tests__/helpers";
 import embed from "vega-embed";
 import { Thread } from "../Thread";
-import { sessionUsageTotal } from "../turn-visual";
+
 import type { LiveRound, LiveRoundRow, LiveTurn } from "../../../session/useTurnFlow";
 import type { DatasetDescriptor } from "../../../types/dataset";
 import type { SkillEntry } from "../../../types/skills";
@@ -2914,57 +2914,5 @@ describe("Thread", () => {
     expect(host).toHaveAttribute("aria-current", "true");
     fireEvent.click(host);
     expect(onSelectViz).toHaveBeenCalledWith(BODY);
-  });
-});
-
-// The session usage weak-sum (ADR-0129 Decision 4, retired from the header
-// by ADR-0130 issue #1272): the pure derivation the composer popover's
-// secondary line consumes -- turns without usage contribute nothing and
-// annotate nothing, and a session with no evidence at all yields null.
-describe("sessionUsageTotal (ADR-0129/0130, issue #1272)", () => {
-  const turnEntry = (record: TurnRecord): ThreadEntry => ({
-    entry: "Turn",
-    data: record,
-  });
-  const usageRecord = (input: number, output: number): TurnRecord => ({
-    question: "问",
-    outcome: {
-      kind: "Textual",
-      data: { text_kind: "Agent", body: "答", assumption: null },
-    },
-    trace: [],
-    provenance: { skills: [], runtime: undefined },
-    usage: {
-      total: {
-        input_tokens: input,
-        cache_read_tokens: 0,
-        cache_write_tokens: 0,
-        output_tokens: output,
-      },
-    },
-  });
-
-  it("sums the evidence-bearing turns", () => {
-    expect(
-      sessionUsageTotal([turnEntry(usageRecord(1000, 200)), turnEntry(usageRecord(24, 6))]),
-    ).toEqual({
-      input: 1024,
-      cache_read: 0,
-      cache_write: 0,
-      output: 206,
-      reasoning: null,
-    });
-  });
-
-  it("counts a partial (output-only) turn and skips a zero-usage turn", () => {
-    // The zero-usage turn contributes nothing; the partial (output-only)
-    // turn still counts -- evidence is per-field growth, not all-fields.
-    expect(
-      sessionUsageTotal([turnEntry(usageRecord(0, 0)), turnEntry(usageRecord(50, 0))]),
-    ).toMatchObject({ input: 50, output: 0 });
-  });
-
-  it("yields null when no turn carries evidence", () => {
-    expect(sessionUsageTotal([turnEntry(usageRecord(0, 0))])).toBeNull();
   });
 });

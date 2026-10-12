@@ -19,14 +19,28 @@ export function formatTokens(
   _intl: IntlShape,
 ): string {
   if (n < 1_000) return String(n);
-  if (n < 1_000_000) return `${scaled(n, 100, 10)}K`;
-  return `${scaled(n, 100_000, 10)}M`;
+  if (n < 1_000_000) return `${scaled(n, 100)}K`;
+  return `${scaled(n, 100_000)}M`;
 }
 
-/** One floored decimal at the given scale: `floor(n / divisor) / tenths`,
- * the trailing ".0" stripped. */
-function scaled(n: number, divisor: number, tenths: number): string {
-  const v = Math.floor(n / divisor) / tenths;
+/** The occupancy pill's percentage (ADR-0130): the same shape rules as
+ * formatTokens applied to a percent -- one floored decimal stripped of a
+ * trailing zero -- capped at 100, since a reading never reads past the
+ * window however far over it runs (the full arc plus the danger color
+ * carry the overage). */
+export function formatPercent(tokens: number, limit: number): string {
+  const pct = Math.min(100, (tokens / limit) * 100);
+  return oneFlooredDecimal(Math.floor(pct * 10) / 10);
+}
+
+/** One floored decimal at the given scale: `floor(n / divisor) / 10`. */
+function scaled(n: number, divisor: number): string {
+  return oneFlooredDecimal(Math.floor(n / divisor) / 10);
+}
+
+/** The shared floored-decimal form: one digit past the unit, the trailing
+ * ".0" stripped ("25", "1.5", "999.9"). */
+function oneFlooredDecimal(v: number): string {
   const s = v.toFixed(1);
   return s.endsWith(".0") ? s.slice(0, -2) : s;
 }

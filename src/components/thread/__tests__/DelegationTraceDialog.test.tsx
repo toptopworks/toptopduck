@@ -179,8 +179,10 @@ describe("DelegationTraceDialog usage subtotal (ADR-0129, issue #1270)", () => {
     );
     fireEvent.click(screen.getByRole("button", { name: /Sub-trace/ }));
     await waitFor(() => expect(screen.getByRole("dialog")).toBeInTheDocument());
-    expect(screen.getByText("Input 40")).toBeInTheDocument();
-    expect(screen.getByText("Output 10")).toBeInTheDocument();
+    // The label/number level split (issue #1276): the figures ride their
+    // own elements inside the footer line.
+    const footer = document.querySelector(".usage-footer");
+    expect(footer?.textContent).toContain("Input 40 · Output 10");
   });
 
   it("renders no subtotal when the turn carried none", async () => {
