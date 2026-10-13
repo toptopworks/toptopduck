@@ -354,7 +354,7 @@ export function Thread({
       {/* ADR-0130 (issues #1272/#1276): the header's derived session total
           retired with the composer occupancy popover, whose secondary line
           retired in turn with the pill -- the session total has no
-          standalone display surface; the turn footer is the billing
+          standalone display surface; the turn's usage pill is the billing
           display. */}
       <h2 className="m-0 mb-1.5 text-xs text-muted-foreground uppercase tracking-wider">
         <FormattedMessage id="thread.title" defaultMessage="Conversation" />

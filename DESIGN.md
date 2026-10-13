@@ -209,8 +209,8 @@ components:
     backgroundColor: "{colors.popover}"
     textColor: "{colors.ink}"
     typography: "{typography.body-md}"
-    rounded: "{rounded.lg}"
-    padding: 24px
+    rounded: "{rounded.md}"
+    padding: 16px
   popover-dark:
     backgroundColor: "{colors.popover-dark}"
     textColor: "{colors.ink-dark}"
@@ -496,8 +496,8 @@ These ride the Tailwind shadow scale directly (no custom `--shadow-*` token per 
 | `{rounded.none}` | 0px | Reserved |
 | `{rounded.xs}` | 4px | Inline code chips, small tags |
 | `{rounded.sm}` | 4px | Inline code chips, small tags |
-| `{rounded.md}` | 6px | Badges, buttons, form inputs, text fields — the canonical radius |
-| `{rounded.lg}` | 8px | Conversation rail, popovers, dialogs |
+| `{rounded.md}` | 6px | Badges, buttons, form inputs, text fields, popovers — the canonical radius |
+| `{rounded.lg}` | 8px | Conversation rail, dialogs |
 | `{rounded.xl}` | 10px | Cards (shadcn default) |
 | `{rounded.pill}` | 9999px | Status indicators, warning dots |
 
@@ -526,7 +526,7 @@ All radius values derive from a single `{rounded.md}` token (6px): `xs/sm = md -
 
 **`card` / `card-dark`** — Generic content card. Background `{colors.card}`, text `{colors.ink}`, rounded `{rounded.xl}` (10px, shadcn default), padding 24px (`py-6 px-6`), 1px `{colors.border}` hairline, `shadow-sm` lift. Used for turn cards, result containers, settings sections.
 
-**`popover` / `popover-dark`** — Dialog, dropdown, and popover surface. Background `{colors.popover}`, rounded `{rounded.lg}`, padding 16px (`p-4`, the component default; compact detail faces tighten to `p-3`, the usage pill's popover). Same surface as card.
+**`popover` / `popover-dark`** — Dialog, dropdown, and popover surface. Background `{colors.popover}`, rounded `{rounded.md}`, padding 16px (`p-4`, the component default; compact detail faces tighten to `p-3`, the usage pill's popover). Same surface as card.
 
 ### Buttons
 

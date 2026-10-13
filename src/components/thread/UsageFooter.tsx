@@ -2,7 +2,6 @@ import { FormattedMessage, useIntl } from "react-intl";
 import { Zap } from "lucide-react";
 
 import { Popover, PopoverContent, PopoverTrigger } from "../ui/popover";
-import { cn } from "@/lib/utils";
 
 import { formatPercent, formatTokens } from "./tokenFormat";
 import type { TokenUsage } from "../../types/thread";
@@ -29,8 +28,8 @@ import type { TokenUsage } from "../../types/thread";
  * against the muted label text -- the react-intl element value keeps
  * the locale string whole ("Input {n}") while the number lands in its
  * own element, so queries and copy stay clean. */
-function UsageNumber({ children, className }: { children: string; className?: string }) {
-  return <span className={cn("text-foreground tabular-nums", className)}>{children}</span>;
+function UsageNumber({ children }: { children: string }) {
+  return <span className="text-foreground tabular-nums">{children}</span>;
 }
 
 /** The turn card's usage pill. The zero/absent shapes never mount this

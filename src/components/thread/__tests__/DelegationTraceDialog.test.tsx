@@ -157,7 +157,9 @@ it("keeps a vega-lite fence in the sub-trace static (issue #1093 pin)", async ()
 // the task description; absent for external-runtime turns (their process
 // aggregate never splits).
 describe("DelegationTraceDialog usage subtotal (ADR-0129, issue #1270)", () => {
-  it("renders the sub-agent's subtotal when provided", async () => {
+  // The shared subtotal fixture: one delegation entry whose sub-agent
+  // carried input 40 + output 10 (no cache buckets).
+  function renderSubtotalTrace() {
     renderWithProviders(
       <TraceRowList
         entries={[DELEGATION]}
@@ -177,12 +179,31 @@ describe("DelegationTraceDialog usage subtotal (ADR-0129, issue #1270)", () => {
         )}
       />,
     );
+  }
+
+  it("renders the sub-agent's subtotal when provided", async () => {
+    renderSubtotalTrace();
     fireEvent.click(screen.getByRole("button", { name: /Sub-trace/ }));
     await waitFor(() => expect(screen.getByRole("dialog")).toBeInTheDocument());
     // The pill form (issue #1278): the subtotal reads as the derived
     // total (input 40 + output 10); the buckets ride the pill's Popover.
     const footer = document.querySelector(".usage-footer");
     expect(footer?.textContent).toContain("Used 50");
+  });
+
+  it("opens the subtotal pill's bucket detail inside the dialog (the first Popover-in-Dialog wiring)", async () => {
+    renderSubtotalTrace();
+    fireEvent.click(screen.getByRole("button", { name: /Sub-trace/ }));
+    await waitFor(() => expect(screen.getByRole("dialog")).toBeInTheDocument());
+    fireEvent.click(screen.getByRole("button", { name: "Used 50" }));
+    // The detail portals to body, outside the dialog's tree, and Radix
+    // gives it the dialog role too -- the title picks the surface out
+    // where a second single-role query would be ambiguous. The
+    // zero-cache fixture keeps the rows to input and output.
+    const detail = screen.getByText("Turn usage").closest("[role=dialog]");
+    expect(detail).not.toBeNull();
+    expect(detail?.textContent).toContain("Input 40");
+    expect(detail?.textContent).toContain("Output 10");
   });
 
   it("renders no subtotal when the turn carried none", async () => {

@@ -18,8 +18,9 @@ import type { OccupancySnapshot, ThreadEntry } from "../../types/thread";
 //   renders, no arc, no invented percentage.
 // - NOT RENDERED: no reading ever landed (the channel stayed fail-closed).
 // Hover opens the runtime picker's tooltip pill: a single line, the
-// occupancy figure alone -- the session total retired from it, the turn
-// footer stays the billing display (ADR-0130 Decision 1). Numbers ride the
+// occupancy figure alone -- the session total retired from it, the
+// turn's usage pill stays the billing display (ADR-0130 Decision 1).
+// Numbers ride the
 // fixed K/M scale (ADR-0130 Decision 5).
 
 /** Above this filled fraction the arc takes the warning color. */
@@ -81,7 +82,7 @@ export function OccupancyRing({ entries, contextLimit = null }: OccupancyRingPro
       </TooltipTrigger>
       {/* The runtime picker's pill shape (same component, same tokens): one
           line, the occupancy figure alone -- the glance is a send-decision
-          reference, the billing sums live on the turn footer (ADR-0130
+          reference, the billing sums live on the turn's usage pill (ADR-0130
           Decision 1). */}
       <TooltipContent side="top">
         {limit != null ? (
