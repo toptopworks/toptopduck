@@ -9,6 +9,7 @@
 //! non-converging trajectory exhausts the execution caps. Fully local,
 //! deterministic, no network, no real LLM -- the fake stands in for the
 //! provider (ADR-0007); the loop under test never knows it is not a real model.
+mod common;
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -22,10 +23,10 @@ use toptopduck_lib::provider::tool_calling::{
 use toptopduck_lib::session::PosturePair;
 use toptopduck_lib::{
     ActiveResolution, ApprovalRequestBody, ApprovalResponse, ApprovalSink, ApprovalState,
-    CancelToken, DatasetPrivacy, ExportRowsError, FakeProvider, KeychainStore, LoadOutcome,
-    OperationKind, ProviderError, ResumeEvent, ResumeProgress, RowReadError, Session, SessionId,
-    SourceResolution, TextKind, ThreadEntry, TraceEntryView, TurnFailure, TurnInputs, TurnOutcome,
-    TurnPhase, TurnProgress, TurnRecord,
+    CancelToken, DatasetPrivacy, ExportRowsError, FakeProvider, LoadOutcome, OperationKind,
+    ProviderError, ResumeEvent, ResumeProgress, RowReadError, Session, SessionId, SourceResolution,
+    TextKind, ThreadEntry, TraceEntryView, TurnFailure, TurnInputs, TurnOutcome, TurnPhase,
+    TurnProgress, TurnRecord,
 };
 
 fn fixtures_dir() -> PathBuf {
@@ -1612,7 +1613,7 @@ fn ask_with_phase_records_the_tool_call_event_stream_on_a_result_turn() {
         &approval,
         &sink,
         collect,
-        &TurnInputs::empty(&KeychainStore::new()),
+        &TurnInputs::empty(&common::keychain()),
     );
     assert!(
         matches!(outcome, TurnOutcome::Materialized { .. }),
@@ -1662,7 +1663,7 @@ fn ask_with_phase_records_only_thinking_on_a_textual_turn() {
         &approval,
         &sink,
         collect,
-        &TurnInputs::empty(&KeychainStore::new()),
+        &TurnInputs::empty(&common::keychain()),
     );
     assert!(
         matches!(outcome, TurnOutcome::Textual { .. }),
@@ -1724,7 +1725,7 @@ fn turn_progress_events_for_one_turn_share_one_session_id() {
                     phase,
                 });
         },
-        &TurnInputs::empty(&KeychainStore::new()),
+        &TurnInputs::empty(&common::keychain()),
     );
     assert!(
         matches!(outcome, TurnOutcome::Materialized { .. }),

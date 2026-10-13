@@ -72,11 +72,26 @@ fn key_account(profile_id: &ProfileId) -> String {
 /// [`crate::provider::LiveProviderConfig`]) for the IPC commands, and the real
 /// provider fetches the key per turn via the [`ProviderConfigSource`] impl on
 /// [`crate::provider::LiveProviderConfig`].
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct KeychainStore;
+
+// Hand-written instead of derived so `default()` shares `new()`'s path --
+// including the cfg(test) mock pin. A derived Default would bypass it and
+// hand unit tests the real backend on daemon-less CI.
+impl Default for KeychainStore {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 impl KeychainStore {
     pub fn new() -> Self {
+        // Unit tests run in this crate's own process, so this cfg(test) hook
+        // pins the CI mock for them (issue #730; see pin_mock_keyring).
+        // Integration-test binaries link the lib as an external crate, where
+        // cfg(test) is inert -- they pin via tests/common::keychain instead.
+        #[cfg(all(test, target_os = "linux"))]
+        pin_mock_keyring();
         Self
     }
 
@@ -205,6 +220,24 @@ fn keychain_err(e: keyring::Error) -> String {
     format!("keychain access failed: {e}")
 }
 
+/// Pin keyring's default credential builder to the in-memory mock, once per
+/// process (idempotent). Issue #730 turned Linux's default backend into the
+/// real Secret Service, but CI's ubuntu runners have no daemon to serve it --
+/// every read/write there would fault into the `Err` channel. The suites were
+/// written against the pre-#730 in-memory mock (whose per-`Entry::new`
+/// throwaway semantics the blackbox read paths tolerate), so tests pin the
+/// mock to keep that baseline on CI. This is a TEST-ONLY seam: a real desktop
+/// with a missing daemon must surface the fault (issue #243 honest degrade),
+/// never silently degrade to a store whose writes vanish -- that is exactly
+/// the write-and-forget bug #730 exists to fix.
+#[doc(hidden)]
+pub fn pin_mock_keyring() {
+    static PINNED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+    PINNED.get_or_init(|| {
+        keyring::set_default_credential_builder(keyring::mock::default_credential_builder());
+    });
+}
+
 /// Test double for [`ProviderConfigSource`]: fixed key + base URL + model +
 /// locale + protocol, no OS access. Lets the real provider's HTTP/auth/parse
 /// path run against a mockito server without any keychain (the orchestrator
@@ -280,5 +313,24 @@ mod tests {
             protocol: Protocol::Anthropic,
         };
         assert!(cfg.api_key().is_none());
+    }
+
+    /// `default()` must share `new()`'s path, including the cfg(test) mock
+    /// pin (issue #730): a regression to a derived Default bypasses the pin,
+    /// and on a daemon-less Linux CI runner the real backend faults this read
+    /// with `Err` while the pinned mock answers `Ok(None)`. Windows/macOS
+    /// apply no pin either way, so the probe stays green there.
+    #[cfg(target_os = "linux")]
+    // Walking `default()` itself is the test -- clippy's suggested
+    // `KeychainStore` literal would sidestep the exact path under test.
+    #[allow(clippy::default_constructed_unit_structs)]
+    #[test]
+    fn default_shares_the_mock_pin_with_new() {
+        assert!(
+            KeychainStore::default()
+                .get_secret("default-pin-probe")
+                .is_ok(),
+            "default() read faulted -- it no longer shares new()'s mock pin"
+        );
     }
 }

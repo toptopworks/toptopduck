@@ -13,6 +13,7 @@
 //! The empty-mount case is covered by every existing black-box test --
 //! they pass `&[]` for skills and see no skill section -- so this file focuses
 //! on the disclosure-positive paths.
+mod common;
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -28,7 +29,7 @@ use toptopduck_lib::skills::{resolve_prompt_fragments, SkillPromptFragment};
 use toptopduck_lib::util::sha256_hex;
 use toptopduck_lib::{
     ApprovalRequestBody, ApprovalResponse, ApprovalSink, ApprovalState, FakeProvider,
-    KeychainStore, LiveProviderConfig, Session, TurnInputs, TurnOutcome,
+    LiveProviderConfig, Session, TurnInputs, TurnOutcome,
 };
 
 /// A no-op approval sink (the turn runs ungated). Mirrors the NullSink in
@@ -138,7 +139,7 @@ fn user_invocation_body_in_prompt_and_provenance() {
         |_| {},
         &TurnInputs {
             mcp_servers: &[],
-            keychain: &KeychainStore::new(),
+            keychain: &common::keychain(),
             skills: &fragments,
             skills_root: &skills_root,
             live_config: None,
@@ -264,7 +265,7 @@ fn snapshot_skill_without_invocation_lands_index_row_not_body() {
         |_| {},
         &TurnInputs {
             mcp_servers: &[],
-            keychain: &KeychainStore::new(),
+            keychain: &common::keychain(),
             skills: &fragments,
             skills_root: &skills_root,
             live_config: None,
@@ -352,7 +353,7 @@ fn invocation_resides_in_history_and_index_stays_constant() {
             |_| {},
             &TurnInputs {
                 mcp_servers: &[],
-                keychain: &KeychainStore::new(),
+                keychain: &common::keychain(),
                 skills: &fragments,
                 skills_root,
                 live_config: None,
@@ -510,7 +511,7 @@ fn empty_mount_set_omits_skill_section_and_provenance() {
         &approval,
         &sink,
         |_| {},
-        &TurnInputs::empty(&KeychainStore::new()),
+        &TurnInputs::empty(&common::keychain()),
     );
     assert!(
         matches!(outcome, TurnOutcome::Textual { .. }),
@@ -564,7 +565,7 @@ fn empty_mount_set_omits_skill_section_and_provenance() {
 fn disabled_mcp_server_stays_out_of_the_enabled_slice() {
     // A live config carrying the server, toggled OFF.
     let cfg_dir = tempfile::tempdir().unwrap();
-    let live = LiveProviderConfig::new(KeychainStore::new(), cfg_dir.path().join("config.json"));
+    let live = LiveProviderConfig::new(common::keychain(), cfg_dir.path().join("config.json"));
     live.upsert_mcp_server(McpServerConfig {
         id: McpServerId("off-b".into()),
         display_name: "Off B".into(),
@@ -657,7 +658,7 @@ fn agent_invocation_survives_a_failed_turn_and_a_restart() {
         |_| {},
         &TurnInputs {
             mcp_servers: &[],
-            keychain: &KeychainStore::new(),
+            keychain: &common::keychain(),
             skills: &fragments,
             skills_root: &skills_root,
             live_config: None,
@@ -914,7 +915,7 @@ fn read_surface_mounts_with_a_snapshot_and_serves_within_the_invoking_turn() {
         |_| {},
         &TurnInputs {
             mcp_servers: &[],
-            keychain: &KeychainStore::new(),
+            keychain: &common::keychain(),
             skills: &fragments,
             user_invocations: &[],
             disabled_skills: &[],
@@ -959,7 +960,7 @@ fn read_surface_mounts_with_a_snapshot_and_serves_within_the_invoking_turn() {
         |_| {},
         &TurnInputs {
             mcp_servers: &[],
-            keychain: &KeychainStore::new(),
+            keychain: &common::keychain(),
             skills: &fragments,
             user_invocations: &[],
             disabled_skills: &[],
