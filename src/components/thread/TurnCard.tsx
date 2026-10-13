@@ -146,9 +146,9 @@ export function TurnCard({
   // renders only while it carries content (the glyph for the other outcomes,
   // or the settle stamp).
   const glyphInMeta = !weakened;
-  // ADR-0129 (issue #1270): a usage-bearing turn always mounts the footer
-  // row -- the token line is always-visible display (Decision 5), not a
-  // hover fact.
+  // ADR-0129 (issue #1270; the pill form is issue #1278's Decision 5
+  // recalibration): a usage-bearing turn always mounts the usage pill --
+  // always-visible display, not a hover fact.
   const showsMetaRow =
     glyphInMeta || record.settled_at !== undefined || record.usage !== undefined;
   // The reply copy (ADR-0103 closing meta) exists only when the turn's answer
@@ -236,8 +236,9 @@ export function TurnCard({
             no time element) are hover-revealed alongside it (HOVER_REVEAL_CLASS
             rides the assistant-stream group). */}
       {showsMetaRow && (
-        // A <div>, not a <p>: the usage footer's technical fold is a
-        // native <details> (flow content, illegal inside a <p>).
+        // A <div>: the row is a control cluster (the outcome glyph, the
+        // usage pill's dialog trigger, copy), not prose -- the flex layout
+        // owns it, so it never becomes a <p>.
         <div className="turn-meta m-0 mt-0.5 flex items-center gap-1.5 text-xs text-muted-foreground">
           {/* Derived here (not above) so Failed/Cancelled never compute the
                 meta-row visual they cannot use -- their glyph derives in
@@ -245,9 +246,10 @@ export function TurnCard({
           {glyphInMeta && (
             <OutcomeGlyph visual={outcomeVisual(intl, record.outcome, isStale)} />
           )}
-          {/* ADR-0129 Decision 5 (issue #1270): the always-visible token
-              line -- outside the hover-reveal span by decision (usage is
-              primary reading surface, not a hover fact). */}
+          {/* ADR-0129 Decision 5 (issue #1270; pill form #1278): the
+              always-visible usage pill -- outside the hover-reveal span by
+              decision (usage is primary reading surface, not a hover
+              fact). */}
           {record.usage !== undefined && <UsageFooter usage={record.usage.total} />}
           <span className={cn("meta-reveal flex items-center gap-1.5", HOVER_REVEAL_CLASS)}>
             {replyText !== null && (

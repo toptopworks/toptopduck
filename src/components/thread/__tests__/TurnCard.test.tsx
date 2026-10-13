@@ -395,19 +395,19 @@ describe("TurnCard textual outcome markdown (issue #827)", () => {
   });
 });
 
-// The turn card's usage footer surface (ADR-0129 Decision 5, issue #1270):
-// a usage-bearing turn mounts the always-visible token line on the closing
-// meta row; a turn without usage (fail-closed, or recorded before the
-// field) renders none -- the honest-degrade rule. The label/number level
-// split (issue #1276) puts each figure in its own element, so the pins
-// read the footer's line text via the usage-footer hook.
+// The turn card's usage pill surface (ADR-0129 Decision 5, issue #1270;
+// the pill form is issue #1278's recalibration): a usage-bearing turn
+// mounts the always-visible total pill on the closing meta row; a turn
+// without usage (fail-closed, or recorded before the field) renders none
+// -- the honest-degrade rule. The pins read the pill's text via the
+// usage-footer hook.
 const usageLines = () =>
   Array.from(document.querySelectorAll(".usage-footer")).map((el) => el.textContent);
 const expectUsageLine = (text: string) => {
   expect(usageLines().some((t) => t?.includes(text))).toBe(true);
 };
 describe("TurnCard usage footer (ADR-0129, issue #1270)", () => {
-  it("renders the token line when the record carries usage", () => {
+  it("renders the usage pill when the record carries usage", () => {
     const record = recordWith(undefined);
     record.usage = {
       total: {
@@ -418,15 +418,15 @@ describe("TurnCard usage footer (ADR-0129, issue #1270)", () => {
       },
     };
     renderCard(record);
-    // zh-CN catalog wording (the suite's fixture locale): the segments
-    // resolve from the catalog, not literals, so the pin tracks the
+    // zh-CN catalog wording (the suite's fixture locale): the pill label
+    // resolves from the catalog, not literals, so the pin tracks the
     // wording (issue #139 convention).
-    // ADR-0130: the fixed K/M scale (1500 -> "1.5K", 1000 -> "1K"; 300
-    // stays verbatim below 1K).
-    expectUsageLine("输入 1.5K · 缓存 1K · 输出 300");
+    // ADR-0130: the fixed K/M scale (1500 + 300 = 1800 -> "1.8K"); the
+    // bucket detail rides the pill's Popover (issue #1278), not the line.
+    expectUsageLine("已用 1.8K");
   });
 
-  it("renders no token line for a turn without usage", () => {
+  it("renders no usage pill for a turn without usage", () => {
     renderCard(recordWith(undefined));
     expect(document.querySelector(".usage-footer")).toBeNull();
   });
@@ -481,14 +481,14 @@ describe("TurnCard sub-agent subtotal pairing (ADR-0129, issue #1270)", () => {
 
   it("round 1's dialog carries the first run's subtotal", () => {
     openSubtrace(0);
-    expectUsageLine("输入 30 · 输出 10");
+    expectUsageLine("已用 40");
   });
 
   it("a same-spec re-delegation in a later round reaches the second entry", () => {
     openSubtrace(1);
     // The pairing bug reads the first entry again (入 30); the turn-scope
     // ordinal must reach the second run.
-    expectUsageLine("输入 5 · 输出 5");
+    expectUsageLine("已用 10");
   });
 
   it("a refused row (no sub-trace) consumes no ordinal", () => {
@@ -507,6 +507,6 @@ describe("TurnCard sub-agent subtotal pairing (ADR-0129, issue #1270)", () => {
     const buttons = screen.getAllByText("子轨迹");
     expect(buttons).toHaveLength(1);
     fireEvent.click(buttons[0]);
-    expectUsageLine("输入 30");
+    expectUsageLine("已用 40");
   });
 });

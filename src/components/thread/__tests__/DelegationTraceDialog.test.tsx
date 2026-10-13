@@ -179,10 +179,10 @@ describe("DelegationTraceDialog usage subtotal (ADR-0129, issue #1270)", () => {
     );
     fireEvent.click(screen.getByRole("button", { name: /Sub-trace/ }));
     await waitFor(() => expect(screen.getByRole("dialog")).toBeInTheDocument());
-    // The label/number level split (issue #1276): the figures ride their
-    // own elements inside the footer line.
+    // The pill form (issue #1278): the subtotal reads as the derived
+    // total (input 40 + output 10); the buckets ride the pill's Popover.
     const footer = document.querySelector(".usage-footer");
-    expect(footer?.textContent).toContain("Input 40 · Output 10");
+    expect(footer?.textContent).toContain("Used 50");
   });
 
   it("renders no subtotal when the turn carried none", async () => {
@@ -194,6 +194,6 @@ describe("DelegationTraceDialog usage subtotal (ADR-0129, issue #1270)", () => {
     );
     fireEvent.click(screen.getByRole("button", { name: /Sub-trace/ }));
     await waitFor(() => expect(screen.getByRole("dialog")).toBeInTheDocument());
-    expect(screen.queryByText(/^In /)).not.toBeInTheDocument();
+    expect(screen.queryByText(/^Used /)).not.toBeInTheDocument();
   });
 });
