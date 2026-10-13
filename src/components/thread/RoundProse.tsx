@@ -75,8 +75,9 @@
 // holds. The plugin skips pre/svg/math/annotation subtrees (code blocks and
 // the vega fence body never cascade; markdown never produces the MathML
 // annotation); its keyframes live in the library's
-// styles.css (imported at the CSS entry) with a prefers-reduced-motion
-// cutoff in app.css, which the library ships without.
+// styles.css (imported at the CSS entry), silenced by the global
+// prefers-reduced-motion cutoff in app.css, which the library ships
+// without.
 //
 // Direction stays
 // untouched: any per-block direction (auto probing included) wraps every
