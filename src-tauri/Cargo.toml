@@ -179,11 +179,17 @@ url = "2"
 # any it silently falls back to the in-memory mock whose entries live only
 # inside each `Entry::new` handle -- a key "write" then lands in a dropped
 # entry and every later read sees `NoEntry`, so Set key never persisted (the
-# bug this line fixed). Windows gets the Credential Manager, macOS the
-# Keychain; Linux stays on the mock fallback until a persistent store is
-# picked (secret-service needs a daemon + dbus in CI; keyutils does not
-# survive a reboot) -- a deliberate follow-up, not an oversight.
-keyring = { version = "3", features = ["windows-native", "apple-native"] }
+# bug this line fixed). Windows gets the Credential Manager, macOS the Keychain,
+# Linux the Secret Service (issue #730): sync-secret-service is the desktop
+# standard -- persistent across reboots, unlike the keyutils linux-native
+# feature whose keys die with the login session; the async zbus flavor would
+# drag an async stack in for no gain. The dbus-secret-service dep itself is
+# target-gated to Linux, so Windows/macOS builds never see it. CI runners have
+# no Secret Service daemon: the test suites pin keyring's default credential
+# builder to the in-memory mock there (see provider::keychain's
+# pin_mock_keyring), and an absent daemon on a real desktop must surface as a
+# keychain fault, never a fake success (issue #243 honest degrade).
+keyring = { version = "3", features = ["windows-native", "apple-native", "sync-secret-service"] }
 # `log` facade for diagnostic warnings (silent type-inference degradation on
 # Excel error/undecodable-date cells, rollback failures). calamine already
 # pulls `log` in transitively; declaring it explicitly makes the call sites

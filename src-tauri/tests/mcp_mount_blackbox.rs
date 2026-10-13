@@ -9,12 +9,13 @@
 //! session facade) -- no unit seam covers that extend end-to-end, and the
 //! FakeProvider's captured tool-turn request is the honest read of what the
 //! provider was offered.
+mod common;
 
 use toptopduck_lib::mcp::config::{McpServerConfig, McpServerId, McpTransport};
 use toptopduck_lib::provider::tool_calling::ToolTurnReply;
 use toptopduck_lib::{
-    ApprovalRequestBody, ApprovalResponse, ApprovalSink, ApprovalState, FakeProvider,
-    KeychainStore, Session, TurnInputs, TurnOutcome,
+    ApprovalRequestBody, ApprovalResponse, ApprovalSink, ApprovalState, FakeProvider, Session,
+    TurnInputs, TurnOutcome,
 };
 
 /// A no-op approval sink (the scripted turn never gates). Mirrors the
@@ -60,7 +61,7 @@ fn a_configured_mcp_server_mounts_the_trio_on_the_provider_tool_surface() {
         |_| {},
         &TurnInputs {
             mcp_servers: &[server],
-            keychain: &KeychainStore::new(),
+            keychain: &common::keychain(),
             skills: &[],
             skills_root: std::path::Path::new(""),
             live_config: None,
@@ -104,7 +105,7 @@ fn an_empty_effective_set_mounts_no_meta_tools() {
         |_| {},
         &TurnInputs {
             mcp_servers: &[],
-            keychain: &KeychainStore::new(),
+            keychain: &common::keychain(),
             skills: &[],
             user_invocations: &[],
             disabled_skills: &[],
@@ -147,7 +148,7 @@ fn a_live_config_mounts_create_skill_on_the_provider_tool_surface() {
 
     let config_dir = tempfile::tempdir().expect("config dir");
     let live = toptopduck_lib::LiveProviderConfig::new(
-        KeychainStore::new(),
+        common::keychain(),
         config_dir.path().join("config.json"),
     );
     let approval = ApprovalState::new();
@@ -159,7 +160,7 @@ fn a_live_config_mounts_create_skill_on_the_provider_tool_surface() {
         |_| {},
         &TurnInputs {
             mcp_servers: &[],
-            keychain: &KeychainStore::new(),
+            keychain: &common::keychain(),
             skills: &[],
             skills_root: std::path::Path::new(""),
             live_config: Some(&live),
@@ -228,7 +229,7 @@ fn a_connect_phase_token_fire_bounds_the_built_in_turn_with_a_hung_server() {
         |_| {},
         &TurnInputs {
             mcp_servers: &[hang],
-            keychain: &KeychainStore::new(),
+            keychain: &common::keychain(),
             skills: &[],
             skills_root: std::path::Path::new(""),
             live_config: None,

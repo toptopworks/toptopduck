@@ -72,11 +72,26 @@ fn key_account(profile_id: &ProfileId) -> String {
 /// [`crate::provider::LiveProviderConfig`]) for the IPC commands, and the real
 /// provider fetches the key per turn via the [`ProviderConfigSource`] impl on
 /// [`crate::provider::LiveProviderConfig`].
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct KeychainStore;
+
+// Hand-written instead of derived so `default()` shares `new()`'s path --
+// including the cfg(test) mock pin. A derived Default would bypass it and
+// hand unit tests the real backend on daemon-less CI.
+impl Default for KeychainStore {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 impl KeychainStore {
     pub fn new() -> Self {
+        // Unit tests run in this crate's own process, so this cfg(test) hook
+        // pins the CI mock for them (issue #730; see pin_mock_keyring).
+        // Integration-test binaries link the lib as an external crate, where
+        // cfg(test) is inert -- they pin via tests/common::keychain instead.
+        #[cfg(all(test, target_os = "linux"))]
+        pin_mock_keyring();
         Self
     }
 
@@ -203,6 +218,24 @@ impl KeychainStore {
 /// wording lives in the catalog, not here. No key is leaked (ADR-0029).
 fn keychain_err(e: keyring::Error) -> String {
     format!("keychain access failed: {e}")
+}
+
+/// Pin keyring's default credential builder to the in-memory mock, once per
+/// process (idempotent). Issue #730 turned Linux's default backend into the
+/// real Secret Service, but CI's ubuntu runners have no daemon to serve it --
+/// every read/write there would fault into the `Err` channel. The suites were
+/// written against the pre-#730 in-memory mock (whose per-`Entry::new`
+/// throwaway semantics the blackbox read paths tolerate), so tests pin the
+/// mock to keep that baseline on CI. This is a TEST-ONLY seam: a real desktop
+/// with a missing daemon must surface the fault (issue #243 honest degrade),
+/// never silently degrade to a store whose writes vanish -- that is exactly
+/// the write-and-forget bug #730 exists to fix.
+#[doc(hidden)]
+pub fn pin_mock_keyring() {
+    static PINNED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+    PINNED.get_or_init(|| {
+        keyring::set_default_credential_builder(keyring::mock::default_credential_builder());
+    });
 }
 
 /// Test double for [`ProviderConfigSource`]: fixed key + base URL + model +

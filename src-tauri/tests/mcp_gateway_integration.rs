@@ -9,6 +9,7 @@
 //! kills them (per-turn lifecycle, issue #301 Q2) -- a leaked child would hold
 //! the stdin pipe open and hang the test process at exit, so the tests passing
 //! + the process exiting cleanly is the implicit kill-on-drop check.
+mod common;
 
 use std::collections::BTreeMap;
 
@@ -18,7 +19,6 @@ use toptopduck_lib::mcp::aggregator::{McpAggregator, RouteError};
 use toptopduck_lib::mcp::client::SecretEnv;
 use toptopduck_lib::mcp::config::{McpServerConfig, McpServerId, McpTransport};
 use toptopduck_lib::mcp::McpClient;
-use toptopduck_lib::provider::keychain::KeychainStore;
 
 /// Path to the compiled fake MCP server fixture (Cargo sets this at build time;
 /// the `[[bin]]` declaration in Cargo.toml is what makes it available).
@@ -125,7 +125,7 @@ fn catalog_handles(catalog: &Value) -> Vec<String> {
 
 #[test]
 fn connect_all_mounts_the_trio_and_discovers_by_handle() {
-    let keychain = KeychainStore::new();
+    let keychain = common::keychain();
     let mut agg = McpAggregator::empty();
     let results = agg.connect_all(&[fake_config("srv-1", "FakeMCP")], &keychain);
 
@@ -221,7 +221,7 @@ fn connect_all_mounts_the_trio_and_discovers_by_handle() {
 /// advertised order), invoke resolution, and the manifest.
 #[test]
 fn connect_all_folds_a_multi_page_server_into_the_catalog() {
-    let keychain = KeychainStore::new();
+    let keychain = common::keychain();
     let mut agg = McpAggregator::empty();
     let results = agg.connect_all(&[paginated_config("srv-pages", "PageMCP")], &keychain);
 
@@ -259,7 +259,7 @@ fn connect_all_folds_a_multi_page_server_into_the_catalog() {
 /// silently-partial catalog) and the manifest carries the outcome.
 #[test]
 fn connect_all_page_cap_marks_the_server_failed_with_reason() {
-    let keychain = KeychainStore::new();
+    let keychain = common::keychain();
     let mut agg = McpAggregator::empty();
     let results = agg.connect_all(&[cursor_loop_config("srv-loop", "LoopMCP")], &keychain);
 
@@ -296,7 +296,7 @@ fn connect_all_assigns_unique_slug_suffix_on_display_name_collision() {
     // Two servers sharing display name "FakeMCP": the first keeps the bare slug
     // "fakemcp", the second gets "fakemcp_2" so both stay routable
     // (unique_slug, ADR-0076 same-name distinctness).
-    let keychain = KeychainStore::new();
+    let keychain = common::keychain();
     let mut agg = McpAggregator::empty();
     agg.connect_all(
         &[
@@ -330,7 +330,7 @@ fn connect_all_assigns_unique_slug_suffix_on_display_name_collision() {
 /// search catalog stays honestly empty.
 #[test]
 fn all_failed_connects_still_mount_the_trio() {
-    let keychain = KeychainStore::new();
+    let keychain = common::keychain();
     let mut agg = McpAggregator::empty();
     agg.connect_all(&[broken_config("bad", "Bad")], &keychain);
     assert_eq!(
@@ -360,7 +360,7 @@ fn connect_all_skips_a_server_that_fails_to_spawn_without_bricking_others() {
     // A misconfigured server (command does not exist) is logged + skipped; the
     // turn still aggregates the good server's tools. This is the
     // "a misconfigured server must not brick the gateway" contract.
-    let keychain = KeychainStore::new();
+    let keychain = common::keychain();
     let mut agg = McpAggregator::empty();
     let good = fake_config("good", "Good");
     agg.connect_all(&[broken_config("bad", "Bad"), good], &keychain);
@@ -401,7 +401,7 @@ fn route_to_unknown_slug_surfaces_unknown_server_error() {
     // A namespaced shape but a slug no connected server owns -> UnknownServer.
     // The gateway surfaces this as a tool-level error the agent self-corrects
     // from (ADR-0077) rather than silently dropping the call.
-    let keychain = KeychainStore::new();
+    let keychain = common::keychain();
     let mut agg = McpAggregator::empty();
     agg.connect_all(&[fake_config("srv-1", "FakeMCP")], &keychain);
     let err = agg
@@ -487,7 +487,7 @@ fn connect_all_returns_per_server_connect_results_with_failure_reasons() {
     // (The fourth path, tools/list failure, needs a fixture that corrupts
     // tools/list; its construction site is byte-identical to the other two
     // skip paths and is shape-covered by them.)
-    let keychain = KeychainStore::new();
+    let keychain = common::keychain();
     let mut agg = McpAggregator::empty();
     let bad_spawn = broken_config("bad-spawn", "BadSpawn");
     let http_fail = McpServerConfig {
@@ -1124,7 +1124,7 @@ fn http_transport_aggregator_connect_and_route() {
         timeout_ms: None,
         enabled: true,
     };
-    let keychain = KeychainStore::new();
+    let keychain = common::keychain();
     let mut agg = McpAggregator::empty();
     let results = agg.connect_all(&[config], &keychain);
     assert_eq!(results.len(), 1);
@@ -1266,7 +1266,7 @@ fn sse_transport_aggregator_connect_and_route() {
         timeout_ms: None,
         enabled: true,
     };
-    let keychain = KeychainStore::new();
+    let keychain = common::keychain();
     let mut agg = McpAggregator::empty();
     let results = agg.connect_all(&[config], &keychain);
     assert_eq!(results.len(), 1);
@@ -1310,7 +1310,7 @@ fn with_tool_output_injects_env_var_into_child() {
     use toptopduck_lib::mcp::client::TOOL_OUTPUT_ENV;
     let dir = "/tmp/toptopduck-test-tool-output-432";
     let mut agg = McpAggregator::with_tool_output(dir.to_string());
-    agg.connect_all(&[fake_config("srv-1", "EnvMCP")], &KeychainStore::new());
+    agg.connect_all(&[fake_config("srv-1", "EnvMCP")], &common::keychain());
 
     let result = agg
         .route("mcp__envmcp__echo_env", &json!({"key": TOOL_OUTPUT_ENV}))
@@ -1329,7 +1329,7 @@ fn empty_aggregator_does_not_inject_tool_output_env() {
     // tests and probes that don't set a tool_output dir get a clean child env.
     use toptopduck_lib::mcp::client::TOOL_OUTPUT_ENV;
     let mut agg = McpAggregator::empty();
-    agg.connect_all(&[fake_config("srv-1", "NoEnvMCP")], &KeychainStore::new());
+    agg.connect_all(&[fake_config("srv-1", "NoEnvMCP")], &common::keychain());
 
     let result = agg
         .route("mcp__noenvmcp__echo_env", &json!({"key": TOOL_OUTPUT_ENV}))
@@ -1360,7 +1360,7 @@ fn tool_output_env_overrides_user_configured_value() {
 
     let gateway_dir = "/tmp/toptopduck-test-tool-output-override";
     let mut agg = McpAggregator::with_tool_output(gateway_dir.to_string());
-    agg.connect_all(&[config], &KeychainStore::new());
+    agg.connect_all(&[config], &common::keychain());
 
     let result = agg
         .route(
@@ -1463,7 +1463,7 @@ fn connect_deadline_skips_a_never_responding_stdio_server() {
     let mut agg = McpAggregator::empty();
     let results = agg.connect_all(
         &[hang_config("hang-1", "HungMCP", 250)],
-        &KeychainStore::new(),
+        &common::keychain(),
     );
 
     assert!(
@@ -1495,7 +1495,7 @@ fn route_deadline_attributed_and_server_unavailable_for_the_turn() {
     let mut agg = McpAggregator::empty();
     agg.connect_all(
         &[hang_call_config("hang-2", "HangCall", 2_000)],
-        &KeychainStore::new(),
+        &common::keychain(),
     );
     assert_eq!(
         meta_names(&agg).len(),
@@ -1552,7 +1552,7 @@ fn cancel_teardown_unblocks_a_parked_call_and_stands_down_when_done() {
     // A long budget: only the CANCEL path can unblock this test in time.
     agg.connect_all(
         &[hang_call_config("hang-3", "HangCancel", 60_000)],
-        &KeychainStore::new(),
+        &common::keychain(),
     );
     agg.arm_cancel_teardown(Arc::clone(&cancel), Arc::clone(&turn_done));
 
@@ -1581,7 +1581,7 @@ fn cancel_teardown_unblocks_a_parked_call_and_stands_down_when_done() {
     let cancel = Arc::new(CancelToken::new());
     let turn_done = Arc::new(AtomicBool::new(true));
     let mut agg = McpAggregator::empty();
-    let results = agg.connect_all(&[fake_config("live-1", "LiveMCP")], &KeychainStore::new());
+    let results = agg.connect_all(&[fake_config("live-1", "LiveMCP")], &common::keychain());
     assert!(
         results[0].connected,
         "the live server connected -- otherwise the route below fails for a \
@@ -1626,7 +1626,7 @@ fn route_deadline_bounds_a_silent_sse_connection() {
         enabled: true,
     };
     let mut agg = McpAggregator::empty();
-    let results = agg.connect_all(&[config], &KeychainStore::new());
+    let results = agg.connect_all(&[config], &common::keychain());
     assert!(
         results[0].connected,
         "the handshake answered normally -- only tools/call goes silent"
@@ -1676,7 +1676,7 @@ fn cancel_teardown_unblocks_a_silent_sse_park() {
     let cancel = Arc::new(CancelToken::new());
     let turn_done = Arc::new(AtomicBool::new(false));
     let mut agg = McpAggregator::empty();
-    let results = agg.connect_all(&[config], &KeychainStore::new());
+    let results = agg.connect_all(&[config], &common::keychain());
     assert!(results[0].connected, "the handshake answered normally");
     agg.arm_cancel_teardown(Arc::clone(&cancel), Arc::clone(&turn_done));
 
@@ -1750,7 +1750,7 @@ fn connect_phase_cancel_unblocks_a_silent_sse_handshake() {
     });
 
     let started = Instant::now();
-    let results = agg.connect_all(&[config], &KeychainStore::new());
+    let results = agg.connect_all(&[config], &common::keychain());
     assert!(
         started.elapsed() < Duration::from_secs(5),
         "cancel unblocks the parked handshake well under the 60s budget"
@@ -1789,7 +1789,7 @@ fn route_after_a_server_death_fails_fast_with_server_closed() {
     let mut agg = McpAggregator::empty();
     let results = agg.connect_all(
         &[die_call_config("die-1", "DieAfterCall")],
-        &KeychainStore::new(),
+        &common::keychain(),
     );
     assert!(
         results[0].connected,
@@ -1878,7 +1878,7 @@ fn connect_phase_cancel_unblocks_hung_servers_without_stacking() {
             hang_config("stack-2", "StackTwo", 60_000),
             hang_config("stack-3", "StackThree", 60_000),
         ],
-        &KeychainStore::new(),
+        &common::keychain(),
     );
 
     assert!(
@@ -1941,7 +1941,7 @@ fn arming_consumes_a_stale_cancel_request_before_the_connects() {
     // A healthy fake server: the stale request must not skip it. Under the
     // mutant (arming does not clear), this lands as the gap check's
     // "skipped" outcome and connected=false.
-    let results = agg.connect_all(&[fake_config("stale-1", "StaleOne")], &KeychainStore::new());
+    let results = agg.connect_all(&[fake_config("stale-1", "StaleOne")], &common::keychain());
     assert_eq!(results.len(), 1);
     assert!(
         results[0].connected,
@@ -1962,7 +1962,7 @@ fn connect_deadline_bounds_a_tools_list_hang() {
     let mut agg = McpAggregator::empty();
     let results = agg.connect_all(
         &[hang_list_config("hang-list-1", "HangListMCP", 250)],
-        &KeychainStore::new(),
+        &common::keychain(),
     );
 
     assert!(
@@ -2302,7 +2302,7 @@ fn sse_transport_guard_trips_on_a_declared_secret_name_without_a_resolved_value(
     };
     // No keychain entry exists, so the resolved header_secrets are empty --
     // exactly the shape the merged-map check would have waved through.
-    let keychain = KeychainStore::new();
+    let keychain = common::keychain();
     let mut agg = McpAggregator::empty();
     agg.connect_all(&[config], &keychain);
 

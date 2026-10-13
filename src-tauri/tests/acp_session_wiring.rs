@@ -11,6 +11,7 @@
 //! same engine. The trace-merge dedup is unit-tested at the merge function;
 //! these tests pin the WIRING -- the scoped-thread serve, the bridge
 //! spawn/connect, and the parallel engine drive rejoin without deadlock.
+mod common;
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -29,8 +30,8 @@ use toptopduck_lib::runtime::acp::adapter::{AdapterId, AdapterSpec};
 use toptopduck_lib::skills::{resolve_prompt_fragments, SkillPromptFragment};
 use toptopduck_lib::util::sha256_hex;
 use toptopduck_lib::{
-    ApprovalRequestBody, ApprovalResponse, ApprovalSink, ApprovalState, KeychainStore, Session,
-    TurnFailure, TurnInputs, TurnOutcome,
+    ApprovalRequestBody, ApprovalResponse, ApprovalSink, ApprovalState, Session, TurnFailure,
+    TurnInputs, TurnOutcome,
 };
 
 /// The fake-CLI adapter: the fixture binary (named `acp-fake-cli`) driven with
@@ -187,7 +188,7 @@ fn a_connect_phase_token_fire_bounds_the_external_turn_with_a_hung_server() {
 
     let approval = ApprovalState::new();
     let sink = NullSink;
-    let keychain = KeychainStore::new();
+    let keychain = common::keychain();
     let started = Instant::now();
     let outcome = session.ask_with_phase(
         "run one turn",
@@ -264,7 +265,7 @@ fn external_gateway_renamed_call_settles_to_one_authoritative_row() {
         fn emit_resolved(&self, _: &ApprovalRequestBody, _: ApprovalResponse) {}
     }
     let approval = ApprovalState::new();
-    let keychain = KeychainStore::new();
+    let keychain = common::keychain();
     let inputs = TurnInputs::empty(&keychain);
     let outcome = session.ask_with_phase(
         "run one renamed gateway tool call",
@@ -390,7 +391,7 @@ fn external_cli_tool_call_routes_through_the_gateway() {
         source: CliToolSource::User,
         baseline: None,
     };
-    let keychain = KeychainStore::new();
+    let keychain = common::keychain();
     let inputs = TurnInputs {
         mcp_servers: &[],
         keychain: &keychain,
@@ -595,7 +596,7 @@ fn external_mid_turn_invoke_lands_on_the_turn() {
 
     let approval = ApprovalState::new();
     let sink = NullSink;
-    let keychain = KeychainStore::new();
+    let keychain = common::keychain();
     // The user invocation seeds the turn's records (the read mount rides
     // the discovery snapshot the fixture asserts) and leaves the
     // discriminating gap:
@@ -688,7 +689,7 @@ fn external_turn_records_invocation_set_provenance() {
 
     let approval = ApprovalState::new();
     let sink = NullSink;
-    let keychain = KeychainStore::new();
+    let keychain = common::keychain();
     // Only one of the two snapshot skills is invoked -- the convergence's
     // discriminating case (see the doc comment).
     let user_invocations =
@@ -811,7 +812,7 @@ fn resumed_external_turn_without_invocations_records_empty_provenance() {
         |_| {},
         &TurnInputs {
             mcp_servers: &[],
-            keychain: &KeychainStore::new(),
+            keychain: &common::keychain(),
             skills: &fragments,
             skills_root: &skills_root,
             live_config: None,
@@ -886,7 +887,7 @@ fn external_turn_prompt_carries_disclosure_not_full_text() {
     // The user invokes one of the two snapshot skills.
     let user_invocations =
         session.materialize_user_invocations(&["sql-coach".to_string()], &skills_root, &[]);
-    let keychain = KeychainStore::new();
+    let keychain = common::keychain();
     let outcome = session.ask_with_phase(
         "what is the answer?",
         &ApprovalState::new(),
@@ -1046,7 +1047,7 @@ fn external_cancel_unblocks_a_turn_parked_on_a_hung_mcp_call() {
         timeout_ms: Some(60_000),
         enabled: true,
     };
-    let keychain = KeychainStore::new();
+    let keychain = common::keychain();
     let inputs = TurnInputs {
         mcp_servers: &[hang],
         keychain: &keychain,
