@@ -12,7 +12,7 @@ import { describe, expect, it } from "vitest";
 import { fireEvent, render, screen } from "@testing-library/react";
 import { IntlProvider } from "react-intl";
 import { TooltipProvider } from "../../ui/tooltip";
-import { catalogFor } from "../../../i18n";
+import { catalogFor, type EffectiveLocale } from "../../../i18n";
 import { TurnCard } from "../TurnCard";
 import type { DatasetDescriptor } from "../../../types/dataset";
 import type { TextKind, TraceEntry, TurnRecord } from "../../../types/thread";
@@ -22,9 +22,9 @@ import type { TextKind, TraceEntry, TurnRecord } from "../../../types/thread";
 // (layer-4 content, untranslated) so the assertions hold under any locale.
 // Split element / render so the default-open pins (#1005) can rerender the
 // same tree.
-function cardEl(record: TurnRecord, defaultOpenDetail?: boolean) {
+function cardEl(record: TurnRecord, defaultOpenDetail?: boolean, locale: EffectiveLocale = "zh-CN") {
   return (
-    <IntlProvider locale="zh-CN" messages={catalogFor("zh-CN")}>
+    <IntlProvider locale={locale} messages={catalogFor(locale)}>
       <TooltipProvider>
         <TurnCard
           record={record}
@@ -44,8 +44,8 @@ function cardEl(record: TurnRecord, defaultOpenDetail?: boolean) {
   );
 }
 
-function renderCard(record: TurnRecord, defaultOpenDetail?: boolean) {
-  return render(cardEl(record, defaultOpenDetail));
+function renderCard(record: TurnRecord, defaultOpenDetail?: boolean, locale: EffectiveLocale = "zh-CN") {
+  return render(cardEl(record, defaultOpenDetail, locale));
 }
 
 function recordWith(runtime: TurnRecord["provenance"]["runtime"]): TurnRecord {
@@ -475,6 +475,9 @@ describe("TurnCard sub-agent subtotal pairing (ADR-0129, issue #1270)", () => {
   };
   const openSubtrace = (roundIndex: number) => {
     renderCard(dualRunRecord());
+    // Issue #1282: the per-round folds live inside the turn-level process
+    // fold -- the head opens first.
+    fireEvent.click(screen.getByRole("button", { name: /已回答/ }));
     screen.getAllByText("轨迹 · 1 次调用").forEach((t) => fireEvent.click(t));
     fireEvent.click(screen.getAllByText("子轨迹")[roundIndex]);
   };
@@ -501,6 +504,8 @@ describe("TurnCard sub-agent subtotal pairing (ADR-0129, issue #1270)", () => {
       subagents: [{ name: "analyst", usage: usageOf(30, 10) }],
     };
     renderCard(record);
+    // Issue #1282: the head opens first; the per-round fold lives inside it.
+    fireEvent.click(screen.getByRole("button", { name: /已回答/ }));
     fireEvent.click(screen.getByText("轨迹 · 2 次调用"));
     // The refusal renders no sub-trace affordance (the dialog's own
     // self-guard) -- exactly one openable dialog remains.
@@ -508,5 +513,144 @@ describe("TurnCard sub-agent subtotal pairing (ADR-0129, issue #1270)", () => {
     expect(buttons).toHaveLength(1);
     fireEvent.click(buttons[0]);
     expectUsageLine("已用 40");
+  });
+});
+
+// The turn-level process fold (issue #1282): the settled card's process face
+// (per-round thinking folds + connective prose + step folds) tucks behind ONE
+// collapsed head, so the card reads question -> one head -> answer. The head
+// speaks the outcome vocabulary (the meta row glyph's aria-label word) and
+// the frozen wall clock -- the scan face of a rail of collapsed cards. The
+// head is the settle swap's resting posture (the live exchange streams
+// unfurled, ADR-0078).
+describe("TurnCard turn process fold (issue #1282)", () => {
+  const tracedRecord = (): TurnRecord => {
+    const record = recordWith(undefined);
+    record.asked_at = 1_000_000;
+    record.settled_at = 1_040_000; // 40s of wall clock
+    record.trace = [
+      {
+        thinking: { duration_ms: 3200, text: "推理" },
+        text: "先看表",
+        calls: [
+          {
+            name: "explore",
+            operation_kind: "read",
+            summary: "SELECT 1",
+            success: true,
+            result_excerpt: "",
+          },
+        ],
+      },
+      {
+        calls: [
+          {
+            name: "materialize",
+            operation_kind: "write",
+            summary: "SELECT 2",
+            success: true,
+            result_excerpt: "",
+          },
+        ],
+      },
+    ];
+    return record;
+  };
+
+  it("collapses the whole process behind one head; the answer stays out", () => {
+    const { container } = renderCard(tracedRecord());
+    const head = container.querySelector("button.process-toggle");
+    expect(head).not.toBeNull();
+    expect(head).toHaveAttribute("aria-expanded", "false");
+    // The per-round face mounts inside the fold on expand -- none of it at rest.
+    expect(screen.queryByText("轨迹 · 1 次调用")).not.toBeInTheDocument();
+    expect(screen.queryByText("先看表")).not.toBeInTheDocument();
+    // The answer is the reading mainstay -- outside the fold.
+    expect(container.querySelector(".turn-outcome.textual")).not.toBeNull();
+  });
+
+  it("heads the fold with the outcome word and the frozen duration", () => {
+    renderCard(tracedRecord());
+    // The head's face joins into one text run (the outcome label and the
+    // #1280 tier face are bare text nodes), so the pin reads the button's
+    // own text: the Textual Agent outcome word, seconds tier, fed by
+    // settled_at - asked_at.
+    const head = document.querySelector("button.process-toggle");
+    expect(head?.textContent).toBe("已回答 · 40秒");
+  });
+
+  it("expands to the incumbent per-round face (thinking, prose, steps)", () => {
+    renderCard(tracedRecord());
+    fireEvent.click(screen.getByRole("button", { name: /已回答/ }));
+    expect(screen.getByText("先看表")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "思考 · 3.2s" })).toBeInTheDocument();
+    expect(screen.getAllByText("轨迹 · 1 次调用")).toHaveLength(2);
+  });
+
+  it("renders no head when the trace carries no content at all", () => {
+    const { container } = renderCard(recordWith(undefined));
+    expect(container.querySelector("button.process-toggle")).toBeNull();
+    // The migrated empty-round shape (every member missing) guards the same.
+    const emptyRound = renderCard({ ...recordWith(undefined), trace: [{ calls: [] }] });
+    expect(emptyRound.container.querySelector("button.process-toggle")).toBeNull();
+  });
+
+  it("mounts the head for the pre-v5 migrated single round of bare calls", () => {
+    const record = recordWith(undefined);
+    record.trace = [
+      {
+        calls: [
+          {
+            name: "explore",
+            operation_kind: "read",
+            summary: "SELECT 1",
+            success: true,
+            result_excerpt: "",
+          },
+        ],
+      },
+    ];
+    const { container } = renderCard(record);
+    expect(container.querySelector("button.process-toggle")).not.toBeNull();
+  });
+
+  it("renders the en face with the latin tier suffix", () => {
+    renderCard(tracedRecord(), undefined, "en-US");
+    expect(document.querySelector("button.process-toggle")?.textContent).toBe("Answered · 40s");
+  });
+
+  it("keeps the collapsed head on a Failed turn with the failure card outside", () => {
+    const record = tracedRecord();
+    record.outcome = { kind: "Failed", data: { kind: "Execute", data: { detail: "boom" } } };
+    const { container } = renderCard(record);
+    const head = container.querySelector("button.process-toggle");
+    expect(head).toHaveAttribute("aria-expanded", "false");
+    // The head word follows the outcome: the failure vocabulary.
+    expect(head?.textContent).toBe("失败 · 40秒");
+    // The terminal story stays outside: the failure card with its reason.
+    expect(screen.getByText("boom")).toBeInTheDocument();
+  });
+
+  it("degrades honestly without stamps: the head carries no duration", () => {
+    const record = tracedRecord();
+    delete record.asked_at;
+    delete record.settled_at;
+    renderCard(record);
+    expect(document.querySelector("button.process-toggle")?.textContent).toBe("已回答");
+  });
+
+  it("degrades honestly with one stamp missing: the head still carries no duration", () => {
+    const record = tracedRecord();
+    delete record.settled_at;
+    renderCard(record);
+    expect(document.querySelector("button.process-toggle")?.textContent).toBe("已回答");
+  });
+
+  it("degrades honestly on inverted stamps: no floor-seconds face", () => {
+    const record = tracedRecord();
+    record.asked_at = 1e12;
+    record.settled_at = 1e12 - 1500;
+    renderCard(record);
+    expect(document.querySelector("button.process-toggle")?.textContent).toBe("已回答");
   });
 });
