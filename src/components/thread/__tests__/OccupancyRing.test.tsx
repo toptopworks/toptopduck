@@ -181,7 +181,7 @@ describe("OccupancyRing pill shape and scope (ADR-0130, issue #1276)", () => {
     const pill = await hoverOpen();
     expect(pill.getByText("1% · 1K / 100K of context used")).toBeInTheDocument();
     // The session total and its technical fold retired from the popup:
-    // the billing sums live on the turn footer (ADR-0130 Decision 1).
+    // the billing sums live on the turn's usage pill (ADR-0130 Decision 1).
     expect(pill.queryByText(/^Input /)).toBeNull();
     expect(pill.queryByText(/^Output /)).toBeNull();
     expect(pill.queryByRole("group")).toBeNull();

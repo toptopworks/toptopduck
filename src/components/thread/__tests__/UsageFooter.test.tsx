@@ -1,21 +1,25 @@
-// The usage footer's own pins (ADR-0129 Decision 5, issue #1270; the line
-// rework is issue #1276): the always-visible segments parted by ` · `
-// (input with its cache-read breakdown, output), the label/number level
-// split, the absent-breakdown shape, and the technical fold's presence
-// rules -- a labeled native toggle whose numbers ride the [open] gate.
+// The usage pill's own pins (ADR-0129 Decision 5 as recalibrated by
+// issue #1278): the always-visible pill names the turn's derived total
+// (input + output) on the fixed K/M scale, its click-open Popover carries
+// the bucket detail -- input with its cache-read breakdown and hit rate,
+// cache write, output, reasoning -- at the label/number level split, and
+// the zero-breakdown shapes omit the cache row and the rate entirely. A
+// zh-CN case pins the catalog's detail wording -- extract is never run,
+// so this suite is the zh entry's only guard.
 
 import { describe, expect, it } from "vitest";
 import { fireEvent, render, screen, within } from "@testing-library/react";
 import { IntlProvider } from "react-intl";
 
 import { UsageFooter } from "../UsageFooter";
+import { catalogFor } from "../../../i18n";
 import type { TokenUsage } from "../../../types/thread";
 
 // defaultMessage-only (the dialog-test precedent): the en literals are the
 // contract under test, so an empty message catalog + a silenced reporter
 // keeps the assertions on the source strings.
 function renderFooter(usage: TokenUsage) {
-  return render(
+  render(
     <IntlProvider locale="en" messages={{}} onError={() => {}}>
       <UsageFooter usage={usage} />
     </IntlProvider>,
@@ -33,86 +37,89 @@ function usage(over: Partial<TokenUsage> = {}): TokenUsage {
   };
 }
 
-describe("UsageFooter segments (ADR-0129/0130, issue #1276)", () => {
-  it("renders the input / cache / output segments on the fixed K/M scale, parted by ` · `", () => {
-    const { container } = renderFooter(usage());
-    // 1234 -> "1.2K" under the fixed formatter; labels and numbers read as
-    // separate elements (the muted-label / tabular-number level split).
-    expect(screen.getByText("Input")).toBeInTheDocument();
-    expect(screen.getByText("1.2K")).toBeInTheDocument();
-    expect(screen.getByText("cache")).toBeInTheDocument();
-    expect(screen.getByText("800")).toBeInTheDocument();
-    expect(screen.getByText("Output")).toBeInTheDocument();
-    expect(screen.getByText("567")).toBeInTheDocument();
-    expect(container.textContent).toContain("Input 1.2K · cache 800 · Output 567");
+// The pill trigger opens the Popover on click (the picker-test precedent),
+// and the bucket detail rides the portal's dialog surface.
+function openDetail() {
+  fireEvent.click(screen.getByRole("button", { name: /Used / }));
+  return screen.getByRole("dialog");
+}
+
+describe("UsageFooter pill (ADR-0129 recalibrated, issue #1278)", () => {
+  it("renders the always-visible pill with the derived total on the fixed K/M scale", () => {
+    renderFooter(usage());
+    // 1234 + 567 = 1801 -> "1.8K" under the fixed formatter; the pill is
+    // a keyboard-reachable dialog trigger, not a hover fact (Decision 5's
+    // always-visible essence, recalibrated).
+    const pill = screen.getByRole("button", { name: "Used 1.8K" });
+    expect(pill).toHaveAttribute("aria-haspopup", "dialog");
+    expect(pill.getAttribute("aria-expanded")).toBe("false");
   });
 
-  it("levels the line: muted labels against foreground tabular numbers", () => {
+  it("opens the bucket detail on click: cache-read breakdown with its hit rate", () => {
     renderFooter(usage());
-    // The muted-prefix convention (the turn card's `Thinking · 0.2s`
-    // posture): the label spans carry the mute, the number spans the
-    // foreground + tabular utilities.
-    const label = screen.getByText("Output").closest("span.usage-seg");
-    expect(label?.className).toContain("text-muted-foreground");
+    const pill = screen.getByRole("button", { name: "Used 1.8K" });
+    fireEvent.click(pill);
+    // The open flip (the closed false is pinned above): Radix owns the
+    // attribute, this pins that the wiring rides it.
+    expect(pill.getAttribute("aria-expanded")).toBe("true");
+    const detail = screen.getByRole("dialog");
+    expect(within(detail).getByText("Turn usage")).toBeInTheDocument();
+    // 1234 -> "1.2K", 800 verbatim below 1K; the hit rate is cache-read
+    // over input on the shared floored-decimal percent (64.8).
+    expect(detail.textContent).toContain("Input 1.2K");
+    expect(detail.textContent).toContain("cache 800 · 64.8%");
+    expect(detail.textContent).toContain("Output 567");
+  });
+
+  it("levels the detail rows: muted labels against foreground tabular numbers", () => {
+    renderFooter(usage());
+    openDetail();
+    // The muted-prefix convention (the turn card's posture): the row
+    // carries the mute, the figure its own foreground + tabular element.
+    expect(screen.getByText("Output").className).toContain("text-muted-foreground");
     expect(screen.getByText("567").className).toContain("tabular-nums");
     expect(screen.getByText("567").className).toContain("text-foreground");
   });
 
-  it("omits the cache segment when the breakdown is zero", () => {
+  it("omits the cache row and the hit rate when the read breakdown is zero", () => {
     renderFooter(usage({ cache_read_tokens: 0 }));
-    expect(screen.queryByText("cache")).not.toBeInTheDocument();
-    expect(screen.getByText("Input")).toBeInTheDocument();
+    const detail = openDetail();
+    // A zero read after normalization cannot distinguish "no hits" from
+    // "upstream did not report one" -- no row, no rate, no percent sign;
+    // the bare-word check covers both cache buckets (the fixture zeroes
+    // read and write alike, so a wrongly-present write row fails here too).
+    expect(detail.textContent).not.toContain("cache");
+    expect(detail.textContent).not.toContain("%");
+    expect(detail.textContent).toContain("Input 1.2K");
   });
-});
 
-describe("UsageFooter technical fold (ADR-0129, issue #1276)", () => {
-  it("mounts the labeled fold for cache write / reasoning and stays flat without them", () => {
-    const { rerender } = renderFooter(usage());
-    expect(screen.queryByRole("group")).not.toBeInTheDocument();
-    rerender(
-      <IntlProvider locale="en" messages={{}} onError={() => {}}>
-        <UsageFooter
-          usage={usage({ cache_write_tokens: 2300, reasoning_tokens: 641 })}
-        />
+  it("rides cache write / reasoning rows only when the fields report", () => {
+    renderFooter(usage({ cache_write_tokens: 2300, reasoning_tokens: 641 }));
+    const detail = openDetail();
+    expect(within(detail).getByText(/cache write/).textContent).toContain("2.3K");
+    expect(within(detail).getByText(/reasoning/).textContent).toContain("641");
+  });
+
+  it("keeps the technical rows out when neither reports", () => {
+    renderFooter(usage());
+    const detail = openDetail();
+    expect(within(detail).queryByText(/cache write/)).not.toBeInTheDocument();
+    expect(within(detail).queryByText(/reasoning/)).not.toBeInTheDocument();
+  });
+
+  it("renders the zh-CN detail rows from the catalog (issue #139 convention)", () => {
+    render(
+      <IntlProvider locale="zh-CN" messages={catalogFor("zh-CN")}>
+        <UsageFooter usage={usage()} />
       </IntlProvider>,
     );
-    // The native <details> is the fold's group. Collapsed, the toggle
-    // names its items -- the numbers ride the [open] gate (app.css), so
-    // they sit in the DOM inside their gated spans in both postures.
-    const fold = screen.getByRole("group");
-    expect(fold.hasAttribute("open")).toBe(false);
-    expect(within(fold).getByText("cache write")).toBeInTheDocument();
-    expect(within(fold).getByText("reasoning")).toBeInTheDocument();
-    const nums = fold.querySelectorAll(".usage-fold-num");
-    expect(nums).toHaveLength(2);
-    expect(nums[0].textContent).toBe("2.3K");
-    expect(nums[1].textContent).toBe("641");
-    // The full line reads as one flow, the toggle after the segments.
-    expect(fold.textContent).toContain("cache write 2.3K · reasoning 641");
-  });
-
-  it("the marker is the fold's pointer, not a bare ellipsis", () => {
-    renderFooter(usage({ cache_write_tokens: 90 }));
-    const fold = screen.getByRole("group");
-    const marker = fold.querySelector(".usage-fold-marker");
-    expect(marker?.textContent).toBe("▸");
-    // No legacy ellipsis summary, no dangling block body: the toggle is
-    // the labeled summary line itself.
-    expect(fold.textContent).not.toContain("…");
-    expect(fold.querySelector(".usage-fold-body")).toBeNull();
-  });
-
-  it("keeps the marker spaced in the reasoning-only fold, and the summary is a real toggle", () => {
-    // Reasoning without cache write (OpenAI-style reporting): the marker's
-    // space sits outside the cache-write branch, so the label never glues
-    // to the glyph; the native summary flips the open attribute.
-    renderFooter(usage({ cache_write_tokens: 0, reasoning_tokens: 12 }));
-    const fold = screen.getByRole("group");
-    expect(fold.textContent).toContain("▸ reasoning 12");
-    expect(fold.querySelectorAll(".usage-fold-num")).toHaveLength(1);
-    expect(fold.hasAttribute("open")).toBe(false);
-    const summary = fold.querySelector("summary") as HTMLElement;
-    fireEvent.click(summary);
-    expect(fold.hasAttribute("open")).toBe(true);
+    fireEvent.click(screen.getByRole("button", { name: "已用 1.8K" }));
+    const detail = screen.getByRole("dialog");
+    // The catalog wording carries the same {pct} suffix the en literal
+    // does; extract is never run, so this pin is the zh cache entry's
+    // only guard.
+    expect(detail.textContent).toContain("缓存 800 · 64.8%");
+    expect(detail.textContent).toContain("输入 1.2K");
+    expect(detail.textContent).toContain("输出 567");
   });
 });
