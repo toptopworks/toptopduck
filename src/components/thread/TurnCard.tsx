@@ -1,8 +1,9 @@
 // TurnCard + TraceRoundBlock + TurnBody + AssumptionNote form the turn's chat
 // projection (ADR-0103, issue #609): a right-aligned user bubble (UserBubble,
 // question in full + asked_at + copy) over a left assistant stream -- header
-// annotations (active chip, skill drift), the round-grouped trace as per-round
-// thinking folds + always-expanded connective prose + per-round step folds,
+// annotations (active chip, skill drift), the round-grouped trace tucked
+// behind the turn-level process fold (issue #1282: per-round thinking folds +
+// connective prose + per-round step folds inside, one collapsed head),
 // the outcome body, and a closing meta row (reply copy + settled_at + the
 // outcome glyph for Materialized/Textual; Failed/Cancelled integrate their
 // glyph into the outcome card head, issue #720). App annotations all live on
@@ -23,6 +24,7 @@ import { CopyButton } from "./CopyButton";
 import { FoldToggle } from "./FoldToggle";
 import { RoundProse } from "./RoundProse";
 import { RoundBody } from "./RoundBody";
+import { TurnProcessFold } from "./TurnProcessFold";
 import { TurnExchangeFrame } from "./TurnExchangeFrame";
 import { UsageFooter } from "./UsageFooter";
 import { StaleChip } from "./StaleChip";
@@ -137,6 +139,11 @@ export function TurnCard({
 }: TurnCardProps) {
   const intl = useIntl();
   const isStale = !!staleAnchor;
+  // The outcome mark, computed once at the card level: the process fold's
+  // head word (issue #1282) and the meta row's glyph read the same
+  // vocabulary, so every outcome kind's mark serves both -- the head always
+  // speaks it, the meta row only mounts the glyph where one renders.
+  const outcome = outcomeVisual(intl, record.outcome, isStale);
   const drifted = selectDriftedSkills(record, skillIndex);
   // ADR-0028 Why 2 + ADR-0103 attribution: Failed/Cancelled weaken the stream
   // only. Stale only lands on Materialized turns, so the two dims never stack.
@@ -191,18 +198,25 @@ export function TurnCard({
       drifted={drifted}
       weakened={weakened}
     >
-      {record.trace.map((round, i) => (
-        // The trace is append-only within a turn and never reordered, so the
-        // index is a stable key (the same YAGNI call the thread makes).
-        <TraceRoundBlock
-          key={i}
-          round={round}
-          thinkingInitiallyExpanded={thinkingInitiallyExpanded}
-          onSelectViz={onSelectViz}
-          selectedVizSpec={selectedVizSpec}
-          subtotalByEntry={subtotalByEntry}
-        />
-      ))}
+      <TurnProcessFold
+        trace={record.trace}
+        label={outcome.label}
+        askedAt={record.asked_at}
+        settledAt={record.settled_at}
+      >
+        {record.trace.map((round, i) => (
+          // The trace is append-only within a turn and never reordered, so the
+          // index is a stable key (the same YAGNI call the thread makes).
+          <TraceRoundBlock
+            key={i}
+            round={round}
+            thinkingInitiallyExpanded={thinkingInitiallyExpanded}
+            onSelectViz={onSelectViz}
+            selectedVizSpec={selectedVizSpec}
+            subtotalByEntry={subtotalByEntry}
+          />
+        ))}
+      </TurnProcessFold>
       <TurnBody
         record={record}
         selectedResult={selectedResult}
@@ -240,12 +254,10 @@ export function TurnCard({
         // usage pill's dialog trigger, copy), not prose -- the flex layout
         // owns it, so it never becomes a <p>.
         <div className="turn-meta m-0 mt-0.5 flex items-center gap-1.5 text-xs text-muted-foreground">
-          {/* Derived here (not above) so Failed/Cancelled never compute the
-                meta-row visual they cannot use -- their glyph derives in
-                TurnBody's card head. */}
-          {glyphInMeta && (
-            <OutcomeGlyph visual={outcomeVisual(intl, record.outcome, isStale)} />
-          )}
+          {/* The glyph rides the card-level mark (see above); Failed/Cancelled
+                never mount it here -- their glyph derives in TurnBody's card
+                head, and the process fold's head word carries the vocabulary. */}
+          {glyphInMeta && <OutcomeGlyph visual={outcome} />}
           {/* ADR-0129 Decision 5 (issue #1270; pill form #1278): the
               always-visible usage pill -- outside the hover-reveal span by
               decision (usage is primary reading surface, not a hover

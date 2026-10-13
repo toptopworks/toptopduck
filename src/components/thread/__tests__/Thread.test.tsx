@@ -997,7 +997,7 @@ describe("Thread", () => {
       };
     }
 
-    it("defaults COLLAPSED: question + outcome always visible, trace rows hidden", () => {
+    it("defaults COLLAPSED: question + outcome visible, the process behind the turn head", () => {
       renderThread(
         <Thread
           entries={[turnEntry(tracedRecord())]}
@@ -1006,10 +1006,12 @@ describe("Thread", () => {
         />,
       );
       // The question + outcome stay visible (ADR-0039 handle, ADR-0028 always-
-      // visible); the trace toggle advertises the call count, rows hidden.
+      // visible). Issue #1282: one turn-level process head at the card level;
+      // the per-round folds + rows mount inside it on expand.
       expect(screen.getByText("多少行")).toBeInTheDocument();
-      const toggle = screen.getByRole("button", { name: /轨迹 · 2 次调用/ });
-      expect(toggle).toHaveAttribute("aria-expanded", "false");
+      const head = screen.getByRole("button", { name: /已取消/ });
+      expect(head).toHaveAttribute("aria-expanded", "false");
+      expect(screen.queryByRole("button", { name: /轨迹 · 2 次调用/ })).not.toBeInTheDocument();
       expect(screen.queryByText("no such table")).not.toBeInTheDocument();
       expect(screen.queryByText("SELECT count(*) FROM people")).not.toBeInTheDocument();
     });
@@ -1022,6 +1024,8 @@ describe("Thread", () => {
           onSelectResult={() => {}}
         />,
       );
+      // Issue #1282: the head opens first; the per-round folds live inside it.
+      fireEvent.click(screen.getByRole("button", { name: /已取消/ }));
       fireEvent.click(screen.getByRole("button", { name: /轨迹 · 2 次调用/ }));
       const toggle = screen.getByRole("button", { name: /轨迹 · 2 次调用/ });
       expect(toggle).toHaveAttribute("aria-expanded", "true");
@@ -1244,9 +1248,13 @@ describe("Thread", () => {
       expect(screen.getByRole("tooltip").textContent).toBe("复制回复");
     });
 
-    it("renders each round's prose always expanded with thinking + steps folds default collapsed", () => {
+    it("tucks the per-round prose + folds behind the collapsed turn head", () => {
       renderChat(chatRecord());
-      // Connective prose is the readability mainstay -- always visible.
+      // Issue #1282: the settled resting posture is ONE process head; the
+      // per-round face -- connective prose, thinking folds, step folds --
+      // mounts inside it on expand.
+      expect(screen.queryByText("我先查一下数据")).not.toBeInTheDocument();
+      fireEvent.click(screen.getByRole("button", { name: /已回答/ }));
       expect(screen.getByText("我先查一下数据")).toBeInTheDocument();
       expect(screen.getByText("再聚合一次")).toBeInTheDocument();
       // Thinking + steps folds are per round, both default collapsed.
@@ -1262,6 +1270,8 @@ describe("Thread", () => {
 
     it("expands each round's thinking + steps folds independently", () => {
       renderChat(chatRecord());
+      // Issue #1282: the head opens first; the per-round folds live inside it.
+      fireEvent.click(screen.getByRole("button", { name: /已回答/ }));
       fireEvent.click(screen.getByRole("button", { name: "思考 · 1.5s" }));
       expect(screen.getByText("先推理一下")).toBeInTheDocument();
       fireEvent.click(screen.getByRole("button", { name: "轨迹 · 2 次调用" }));
@@ -1273,7 +1283,7 @@ describe("Thread", () => {
       expect(screen.getByText("SELECT 3")).toBeInTheDocument();
     });
 
-    it("renders an all-prose round (no calls, no thinking) as bare prose with no fold chrome", () => {
+    it("folds an all-prose round (no calls, no thinking) behind the head, with no inner fold chrome", () => {
       renderChat(
         chatRecord({
           trace: [
@@ -1281,6 +1291,9 @@ describe("Thread", () => {
           ],
         }),
       );
+      // The prose is process discourse: it rides inside the turn-level fold
+      // (issue #1282) and carries no per-round fold chrome of its own.
+      fireEvent.click(screen.getByRole("button", { name: /已回答/ }));
       expect(screen.getByText("直接答复")).toBeInTheDocument();
       expect(screen.queryByRole("button", { name: /轨迹/ })).not.toBeInTheDocument();
       expect(screen.queryByRole("button", { name: /思考/ })).not.toBeInTheDocument();
@@ -1853,6 +1866,9 @@ describe("Thread", () => {
           </TooltipProvider>
         </IntlProvider>,
       );
+      // Issue #1282: the settled card tucks its process behind the turn-level
+      // head; expanding it reveals the seeded per-round face.
+      fireEvent.click(screen.getByRole("button", { name: /已回答/ }));
       // The prose stays (identical markup) and the opened fold stays open;
       // the untouched fold stays collapsed. The answer body closes the turn.
       expect(screen.getByText("先看一眼数据。")).toBeInTheDocument();
@@ -1926,6 +1942,8 @@ describe("Thread", () => {
           </TooltipProvider>
         </IntlProvider>,
       );
+      // Issue #1282: expand the settled card's process head to reach the folds.
+      fireEvent.click(screen.getByRole("button", { name: /已取消/ }));
       // The opened fold now sits at trace index 0 (the gate round dropped);
       // the reference seed keeps it open and leaves the other collapsed.
       const toggles = document.querySelectorAll(".turn-entry .thinking-toggle");
@@ -2035,6 +2053,8 @@ describe("Thread", () => {
           </TooltipProvider>
         </IntlProvider>,
       );
+      // Issue #1282: expand the settled card's process head to reach the folds.
+      fireEvent.click(screen.getByRole("button", { name: /已取消/ }));
       const toggles = document.querySelectorAll(".turn-entry .thinking-toggle");
       expect(toggles).toHaveLength(1);
       expect(toggles[0]?.getAttribute("aria-expanded")).toBe("true");
@@ -2098,6 +2118,8 @@ describe("Thread", () => {
           </TooltipProvider>
         </IntlProvider>,
       );
+      // Issue #1282: expand the settled card's process head to reach the fold.
+      fireEvent.click(screen.getByRole("button", { name: /已取消/ }));
       const settledToggle = document.querySelector(".turn-entry .thinking-toggle");
       expect(settledToggle?.getAttribute("aria-expanded")).toBe("true");
       expect(screen.getByText("推理二版")).toBeInTheDocument();
@@ -2139,6 +2161,9 @@ describe("Thread", () => {
           </TooltipProvider>
         </IntlProvider>,
       );
+      // Issue #1282: the head expansion reveals the fold; the re-closed
+      // posture mounts collapsed inside it.
+      fireEvent.click(screen.getByRole("button", { name: /已取消/ }));
       const settledToggle = document.querySelector(".turn-entry .thinking-toggle");
       expect(settledToggle?.getAttribute("aria-expanded")).toBe("false");
       expect(screen.queryByText("推理")).not.toBeInTheDocument();
@@ -2190,6 +2215,8 @@ describe("Thread", () => {
           </TooltipProvider>
         </IntlProvider>,
       );
+      // Issue #1282: expand the settled card's process head to reach the fold.
+      fireEvent.click(screen.getByRole("button", { name: /已取消/ }));
       expect(document.querySelector(".turn-entry .thinking-toggle")?.getAttribute("aria-expanded")).toBe(
         "true",
       );
@@ -2225,6 +2252,12 @@ describe("Thread", () => {
           </TooltipProvider>
         </IntlProvider>,
       );
+      // Issue #1282: every still-collapsed head opens (A's is already open
+      // from the previous settle) -- each fold mounts inside its own.
+      screen
+        .getAllByRole("button", { name: /已取消/ })
+        .filter((head) => head.getAttribute("aria-expanded") === "false")
+        .forEach((head) => fireEvent.click(head));
       const toggles = document.querySelectorAll(".turn-entry .thinking-toggle");
       expect(toggles).toHaveLength(2);
       expect(toggles[0]?.getAttribute("aria-expanded")).toBe("true");
