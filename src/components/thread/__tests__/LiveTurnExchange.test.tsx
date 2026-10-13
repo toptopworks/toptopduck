@@ -322,12 +322,12 @@ describe("LiveTurnExchange wait-elapsed suffix (issue #1264)", () => {
     // so the 12s-old stamp reads as 12 elapsed seconds.
     renderExchange(sealedTailWait, Date.now() - 12_000);
     expect(screen.getByText("思考中（第 2 步）…")).toBeInTheDocument();
-    expect(screen.getByText("· 12s")).toBeInTheDocument();
+    expect(screen.getByText("· 12秒")).toBeInTheDocument();
   });
 
   it("renders no suffix outside a wait window (stamp null)", () => {
     renderExchange(sealedTailWait);
     expect(screen.getByText("思考中（第 2 步）…")).toBeInTheDocument();
-    expect(screen.queryByText(/· \d+s/)).toBeNull();
+    expect(screen.queryByText(/· \d+(s|秒)/)).toBeNull();
   });
 });
