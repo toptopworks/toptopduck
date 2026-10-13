@@ -579,12 +579,14 @@ All radius values derive from a single `{rounded.md}` token (6px): `xs/sm = md -
 - Support both light and dark modes as equals. Neither is the "default."
 - Apply `{typography.label-caps}` with CSS `text-transform: uppercase` for badges and section labels.
 - Collapse shell panels with animated grid-template-columns transitions (180ms ease), not display:none.
+- Gate all motion behind `prefers-reduced-motion: reduce`. The global cutoff block in `app.css` cuts every animation family to instant: the streamdown word cascade, the dialog enter/exit utilities, the loading spinners and the status pulse, and the shell fold transitions. Spinners and status pulses keep their glyphs under reduce — the static shape still reads as loading/state; only the motion stops. Shell folds cut to instant rather than selectively keeping color/opacity micro-fades, because the fold chain is orchestration-coupled (delayed fades park on the fold finishing) and a partial cut would desync it. New motion stays inside this block's coverage: the wildcard selectors (`*`, `::before`/`::after`, `::marker`) cut anything animated on an element or a pseudo-element automatically — bare `*` does not match pseudo-elements, which is why `::marker` is named explicitly.
 
 ### Don't
 - Don't introduce a secondary brand color. Teal is the only chromatic accent.
 - Don't use decorative drop shadows. The 3-tier functional shadow scale (`shadow-sm` / `shadow-md` / `shadow-lg`) is the only shadow usage — no ad-hoc shadow values, no custom shadow tokens.
 - Don't use font weight 700. Display caps at 600; body stays at 400.
 - Don't animate layout-bound properties (width, height, top, left). Animate `grid-template-columns` and `opacity` for panel transitions.
+- Don't ship motion that escapes the reduced-motion cutoff, and don't build state signals that depend on animation timing — under reduce every animation and transition is instant, so a paused spinner or a snapped fold must still read as its terminal state.
 - Don't use `{colors.warning}` as a solid fill for alert backgrounds. Use tinted backgrounds (`bg-warning/10`) with warning indicator dots.
 - Don't use pure `#000000` for dark canvas. `{colors.canvas-dark}` (#0f1410) carries a green undertone that distinguishes the dark palette from neutral gray-black.
 - Don't use pure `#ffffff` for dark-mode text. `{colors.ink-dark}` (#e8eae8) is softer for long sessions.

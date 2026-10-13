@@ -164,15 +164,33 @@
   }
 }
 
-/* Reduced-motion cutoff for the streamdown word cascade (issue #1137): the
- * library ships no prefers-reduced-motion handling of its own, so both
- * animated surfaces turn off here -- the word spans and the list ::marker
- * fade (which animates color -- ::marker ignores opacity/transform
- * animations, color it does honor). */
+/* Global reduced-motion cutoff (issue #1139, extends #1137). Four animation
+ * families live in src/: the streamdown word cascade (issue #1137), the
+ * tw-animate-css dialog enter/exit utilities (ADR-0049, issue #105), the
+ * async-load spinners plus one status pulse (issue #1128), and the shell
+ * fold system in styles.css -- 280ms grid-template-columns folds with
+ * delayed opacity/bottom fades riding them. The fold chain is
+ * orchestration-coupled (a delayed fade parks on the fold finishing), so
+ * cutting only the positional transitions would desync its follow-ups;
+ * every animation and transition cuts to instant instead. Longhands with
+ * !important outrank every shorthand in the imported sheets (streamdown,
+ * tw-animate-css, Tailwind utilities, styles.css). The bare `*` matches
+ * elements only, so ::marker is named alongside it -- the streamdown
+ * cascade fades its list markers in on the pseudo-element itself
+ * (issue #1137). animation-iteration-count: 1 parks the infinite
+ * spinner/pulse on their initial frame -- the
+ * glyphs keep rendering as static loading/state indicators; only the
+ * motion stops. */
 @media (prefers-reduced-motion: reduce) {
-  [data-sd-animate],
-  [data-sd-animate-marker]::marker {
-    animation: none;
+  *,
+  ::before,
+  ::after,
+  ::marker {
+    animation-duration: 0.01ms !important;
+    animation-delay: 0s !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0s !important;
+    transition-delay: 0s !important;
   }
 }
 
