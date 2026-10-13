@@ -616,7 +616,7 @@ describe("QuestionBar turn clock (issue #1264)", () => {
       />,
     );
     expect(screen.getByText("执行中…")).toBeInTheDocument();
-    expect(screen.queryByText(/· \d+(s|秒)/)).toBeNull();
+    expect(screen.queryByText(/· \d/)).toBeNull();
   });
 });
 
@@ -681,7 +681,7 @@ describe("QuestionBar pre-first-event wait window (issue #1266)", () => {
         turnStartedAt={Date.now() - 46_000}
       />,
     );
-    expect(screen.queryByText(/· \d+(s|秒)/)).toBeNull();
+    expect(screen.queryByText(/· \d/)).toBeNull();
     expect(screen.queryByRole("status")).toBeNull();
   });
 
@@ -691,7 +691,7 @@ describe("QuestionBar pre-first-event wait window (issue #1266)", () => {
     renderQuestionBar(
       <QuestionBar onSubmit={() => {}} onCancel={() => {}} loading={true} />,
     );
-    expect(screen.queryByText(/· \d+(s|秒)/)).toBeNull();
+    expect(screen.queryByText(/· \d/)).toBeNull();
     expect(screen.queryByRole("status")).toBeNull();
   });
 });

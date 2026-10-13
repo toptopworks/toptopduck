@@ -328,6 +328,6 @@ describe("LiveTurnExchange wait-elapsed suffix (issue #1264)", () => {
   it("renders no suffix outside a wait window (stamp null)", () => {
     renderExchange(sealedTailWait);
     expect(screen.getByText("思考中（第 2 步）…")).toBeInTheDocument();
-    expect(screen.queryByText(/· \d+(s|秒)/)).toBeNull();
+    expect(screen.queryByText(/· \d/)).toBeNull();
   });
 });

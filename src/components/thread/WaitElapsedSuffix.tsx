@@ -23,7 +23,8 @@ function useNow(ticking: boolean): number {
 // ticker stops with it; on release the figure jumps to the turn's true wall
 // age (the hold is hidden while it lasts, never subtracted). Clamped at 0:
 // a fresh stamp can postdate the stale `now` a previous window left
-// behind, for up to one tick.
+// behind, for up to one tick. The leaf layers its first-second floor
+// (issue #1280) on top, so the rendered face never reads zero.
 function useElapsedSeconds(startedAt: number | null, pausedSince: number | null): number | null {
   const now = useNow(startedAt !== null && pausedSince === null);
   if (startedAt === null) return null;
@@ -33,7 +34,7 @@ function useElapsedSeconds(startedAt: number | null, pausedSince: number | null)
   return Math.max(0, Math.floor((end - startedAt) / 1000));
 }
 
-/** The elapsed-seconds suffix leaf ("· 12s"): ticks once a second off a
+/** The elapsed-seconds suffix leaf ("· 12s" / "· 12秒"): ticks once a second off a
  *  turn-flow-owned stamp, rendered inside the rail's trailing wait status
  *  line and the QuestionBar wait-feedback slot -- both role="status" live
  *  regions, so the ticking number is aria-hidden: the per-second change is

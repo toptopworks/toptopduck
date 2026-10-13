@@ -11,12 +11,12 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { act, render } from "@testing-library/react";
 import { IntlProvider } from "react-intl";
-import { catalogFor } from "../../../i18n";
+import { catalogFor, type EffectiveLocale } from "../../../i18n";
 import { WaitElapsedSuffix } from "../WaitElapsedSuffix";
 
 function renderSuffix(
   startedAt: number | null,
-  opts: { pausedSince?: number | null; locale?: "zh-CN" | "en-US" } = {},
+  opts: { pausedSince?: number | null; locale?: EffectiveLocale } = {},
 ) {
   const locale = opts.locale ?? "zh-CN";
   return render(
