@@ -49,9 +49,15 @@ fn absent_daemon_write_surfaces_err_not_fake_success() {
             detail.starts_with("keychain access failed:"),
             "fault detail should ride the keychain_err channel, got: {detail}"
         ),
-        Ok(()) => panic!(
-            "write returned Ok with no Secret Service daemon -- the value \
-             cannot have persisted, this is the write-and-forget bug"
-        ),
+        Ok(()) => {
+            // This machine has a daemon (a real keychain answered the write):
+            // clear the sentinel before failing loud so the probe leaves no
+            // credential behind.
+            let _ = store.clear_secret("toptopduck-degrade-pin");
+            panic!(
+                "write returned Ok with a Secret Service daemon present -- \
+                 revisit the pinning strategy (see the module doc)"
+            )
+        }
     }
 }

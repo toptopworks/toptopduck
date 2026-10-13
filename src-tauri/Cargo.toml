@@ -188,8 +188,14 @@ url = "2"
 # no Secret Service daemon: the test suites pin keyring's default credential
 # builder to the in-memory mock there (see provider::keychain's
 # pin_mock_keyring), and an absent daemon on a real desktop must surface as a
-# keychain fault, never a fake success (issue #243 honest degrade).
-keyring = { version = "3", features = ["windows-native", "apple-native", "sync-secret-service"] }
+# keychain fault, never a fake success (issue #243 honest degrade). crypto-rust
+# turns on the DH-encrypted Secret Service session (a pure-Rust AES/HKDF
+# stack, no new system dependency; keyring forwards it to dbus-secret-service)
+# so the key never crosses the session bus in plain text -- without it the
+# session falls back to Plain transport. Build-time note: the dbus crate
+# links system libdbus through pkg-config, so bare-container builds need
+# libdbus-1-dev (the GitHub ubuntu runners ship it).
+keyring = { version = "3", features = ["windows-native", "apple-native", "sync-secret-service", "crypto-rust"] }
 # `log` facade for diagnostic warnings (silent type-inference degradation on
 # Excel error/undecodable-date cells, rollback failures). calamine already
 # pulls `log` in transitively; declaring it explicitly makes the call sites

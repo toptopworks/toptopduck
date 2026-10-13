@@ -124,6 +124,22 @@ fn catalog_handles(catalog: &Value) -> Vec<String> {
 }
 
 #[test]
+fn the_factory_keychain_reads_ok_under_the_ci_pin() {
+    // The factory's Linux mock pin (issue #730) is invisible to the gateway
+    // paths: every keychain read in this suite swallows an Err into a skip
+    // (collect_secrets), so the mock and a daemon-less real backend behave
+    // identically through connect_all. This probe is the one discriminating
+    // read -- the pinned mock answers Ok(None), while the pin dropped on a
+    // daemon-less Linux runner faults with Err. On Windows/macOS the real
+    // platform keychain answers Ok(None) too, so the probe stays green there.
+    assert!(
+        common::keychain().get_secret("factory-pin-probe").is_ok(),
+        "factory keychain read faulted -- the Linux mock pin is missing and \
+         the suite only looks green because its reads swallow the Err"
+    );
+}
+
+#[test]
 fn connect_all_mounts_the_trio_and_discovers_by_handle() {
     let keychain = common::keychain();
     let mut agg = McpAggregator::empty();

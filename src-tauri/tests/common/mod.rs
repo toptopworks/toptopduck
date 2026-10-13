@@ -9,7 +9,9 @@ use toptopduck_lib::provider::keychain::KeychainStore;
 /// ubuntu runners have no Secret Service daemon, and the suites were written
 /// against the pre-#730 mock baseline. Windows/macOS keep the real OS
 /// keychain (their CI baseline). Every test that builds a keychain goes
-/// through here, so the pin lands before that test's first OS entry access.
+/// through here, so the pin lands before that test's first OS entry access
+/// (one deliberate exception: keychain_degrade_linux.rs bypasses the factory
+/// to keep the real backend).
 #[cfg(target_os = "linux")]
 pub fn keychain() -> KeychainStore {
     toptopduck_lib::provider::keychain::pin_mock_keyring();

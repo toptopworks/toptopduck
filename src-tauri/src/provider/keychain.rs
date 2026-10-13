@@ -314,4 +314,23 @@ mod tests {
         };
         assert!(cfg.api_key().is_none());
     }
+
+    /// `default()` must share `new()`'s path, including the cfg(test) mock
+    /// pin (issue #730): a regression to a derived Default bypasses the pin,
+    /// and on a daemon-less Linux CI runner the real backend faults this read
+    /// with `Err` while the pinned mock answers `Ok(None)`. Windows/macOS
+    /// apply no pin either way, so the probe stays green there.
+    #[cfg(target_os = "linux")]
+    // Walking `default()` itself is the test -- clippy's suggested
+    // `KeychainStore` literal would sidestep the exact path under test.
+    #[allow(clippy::default_constructed_unit_structs)]
+    #[test]
+    fn default_shares_the_mock_pin_with_new() {
+        assert!(
+            KeychainStore::default()
+                .get_secret("default-pin-probe")
+                .is_ok(),
+            "default() read faulted -- it no longer shares new()'s mock pin"
+        );
+    }
 }
