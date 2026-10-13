@@ -39,6 +39,8 @@
   "common.testing": "Testing…",
   "common.thinking": "Thinking…",
   "common.waitElapsed": "{seconds}s",
+  "common.waitElapsedHours": "{hours}h {minutes}m {seconds}s",
+  "common.waitElapsedMinutes": "{minutes}m {seconds}s",
   "composer.authMode.ariaLabel": "Authorization mode: {mode}",
   "composer.authMode.desc.fullAccess": "All calls auto-pass for this session. Resets on resume",
   "composer.authMode.desc.requestApproval": "Ask for approval before each external tool call",

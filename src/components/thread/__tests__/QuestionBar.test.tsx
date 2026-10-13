@@ -585,7 +585,7 @@ describe("QuestionBar turn clock (issue #1264)", () => {
     expect(screen.getByText("执行中…")).toBeInTheDocument();
     // No threshold: any phase, any age -- the turn is running, the figure
     // runs with it (a stalled gap can't hide behind a phase boundary).
-    expect(screen.getByText("· 46s")).toBeInTheDocument();
+    expect(screen.getByText("· 46秒")).toBeInTheDocument();
   });
 
   it("freezes the figure while an approval holds the turn on the gate", () => {
@@ -601,8 +601,9 @@ describe("QuestionBar turn clock (issue #1264)", () => {
     );
     expect(screen.getByText("执行中…")).toBeInTheDocument();
     // 100s since the ask, the last 40s on the user: the figure reads the
-    // clock as of the pause's start -- user think-time stays out.
-    expect(screen.getByText("· 60s")).toBeInTheDocument();
+    // clock as of the pause's start -- user think-time stays out. 60s lands
+    // exactly on the minutes tier (zero-padded seconds).
+    expect(screen.getByText("· 1分00秒")).toBeInTheDocument();
   });
 
   it("renders no figure when no turn clock is running", () => {
@@ -615,7 +616,7 @@ describe("QuestionBar turn clock (issue #1264)", () => {
       />,
     );
     expect(screen.getByText("执行中…")).toBeInTheDocument();
-    expect(screen.queryByText(/· \d+s/)).toBeNull();
+    expect(screen.queryByText(/· \d/)).toBeNull();
   });
 });
 
@@ -636,7 +637,7 @@ describe("QuestionBar pre-first-event wait window (issue #1266)", () => {
     // alone would pass if the span lost role="status".
     expect(screen.getByRole("status")).toBeInTheDocument();
     expect(screen.queryByText("执行中…")).toBeNull();
-    expect(screen.getByText("· 46s")).toBeInTheDocument();
+    expect(screen.getByText("· 46秒")).toBeInTheDocument();
   });
 
   it("hands the slot to the phase label on the first event, clock uninterrupted", () => {
@@ -662,12 +663,12 @@ describe("QuestionBar pre-first-event wait window (issue #1266)", () => {
       </QueryClientProvider>
     );
     const { rerender } = render(tree(null));
-    expect(screen.getByText("· 46s")).toBeInTheDocument();
+    expect(screen.getByText("· 46秒")).toBeInTheDocument();
     // First phase event: the label joins, the figure keeps reading the same
     // turnStartedAt -- no reset, no jump.
     rerender(tree({ TextDelta: { delta: "答" } }));
     expect(screen.getByText("执行中…")).toBeInTheDocument();
-    expect(screen.getByText("· 46s")).toBeInTheDocument();
+    expect(screen.getByText("· 46秒")).toBeInTheDocument();
   });
 
   it("leaves the slot empty once no turn is in flight", () => {
@@ -680,7 +681,7 @@ describe("QuestionBar pre-first-event wait window (issue #1266)", () => {
         turnStartedAt={Date.now() - 46_000}
       />,
     );
-    expect(screen.queryByText(/· \d+s/)).toBeNull();
+    expect(screen.queryByText(/· \d/)).toBeNull();
     expect(screen.queryByRole("status")).toBeNull();
   });
 
@@ -690,7 +691,7 @@ describe("QuestionBar pre-first-event wait window (issue #1266)", () => {
     renderQuestionBar(
       <QuestionBar onSubmit={() => {}} onCancel={() => {}} loading={true} />,
     );
-    expect(screen.queryByText(/· \d+s/)).toBeNull();
+    expect(screen.queryByText(/· \d/)).toBeNull();
     expect(screen.queryByRole("status")).toBeNull();
   });
 });
