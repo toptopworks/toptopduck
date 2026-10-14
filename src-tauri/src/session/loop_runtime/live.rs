@@ -317,11 +317,12 @@ mod tests {
     /// the 2nd+ call, regardless of whether another test already
     /// initialized the client (tests run in parallel, so `before` may
     /// already be non-zero) -- the probe face's `EGRESS_AGENT` pin is the
-    /// precedent this mirrors. The `<= 2` bound tolerates one racing first
-    /// build landing between the snapshots: the #1001 live-cap pin is now
-    /// a concurrent Ok-path caller of `egress_client` (it constructs the
-    /// live runtime, which builds), where the other live tests refuse at
-    /// the key/scheme gates before any build.
+    /// precedent this mirrors. The `<= 3` bound tolerates racing first
+    /// builds landing between the snapshots: the #1001 live-cap pin and
+    /// the #1290 model-name pin are now concurrent Ok-path callers of
+    /// `egress_client` (each constructs the live runtime, which builds),
+    /// where the other live tests refuse at the key/scheme gates before
+    /// any build.
     #[test]
     fn egress_client_builds_only_once_across_calls() {
         let before = EGRESS_CLIENT_BUILDS.load(std::sync::atomic::Ordering::Relaxed);
@@ -332,7 +333,7 @@ mod tests {
         let after_third = EGRESS_CLIENT_BUILDS.load(std::sync::atomic::Ordering::Relaxed);
 
         assert!(
-            after_first - before <= 2,
+            after_first - before <= 3,
             "the first call builds the client at most once (got {} builds)",
             after_first - before
         );
