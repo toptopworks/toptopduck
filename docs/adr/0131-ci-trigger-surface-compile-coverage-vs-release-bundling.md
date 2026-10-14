@@ -2,7 +2,7 @@
 
 ## Decision
 
-1. **PR 触发的 CI 不制作 bundle。** 三平台完整 `tauri build` 与 bundle artifact 上传仅由 push main 触发，发版取产物链路不变；PR 与 push develop 维持纯质量门。
+1. **PR 触发的 CI 不制作 bundle。** 三平台完整 `tauri build` 与 bundle artifact 上传仅由 push main 触发，发版取产物链路不变；PR 面收窄为纯质量门，push develop 面不变。
 2. **多 OS 编译覆盖由 rust 质量门 matrix 承担。** `rust` job 为三平台 matrix（ubuntu / windows / macos）：clippy 三平台执行，check 档 `--all-targets` 编译连同各平台依赖图与平台条件分支即编译覆盖；fmt 与 test 仍仅 ubuntu 执行。
 3. **质量门三触发源同面。** PR、push develop、push main 执行同一 rust matrix，不做按改动路径的条件启停。
 
@@ -29,3 +29,4 @@
 - PR 反馈面不再包含打包结果；打包类改动（如 externalBin 装配）的 mac / linux 问题后置到 push main 暴露，在发版 draft 流程内修一版再 push 即可。
 - 三平台测试化不在本决策内，待首个平台特有缺陷或用户报告出现再议。
 - windows / macos clippy 腿首跑各付一次冷缓存编译，显著长于温态；此后随 rust-cache 温态。
+- 发版面 build 腿不再被 PR run 保温：两次发版间隔通常超出缓存保留期，push main 的三平台打包为冷缓存；clippy 腿的 check 档缓存不覆盖 release 档产物。
