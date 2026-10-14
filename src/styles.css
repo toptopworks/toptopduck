@@ -139,7 +139,7 @@
   height: 100vh;
   display: grid;
   position: relative;
-  grid-template-columns: var(--sidebar-width, 238px) 1fr;
+  grid-template-columns: var(--sidebar-width, 280px) 1fr;
   grid-template-rows: auto auto 1fr;
   overflow: hidden;
   /* Shared 4-track conversation grid (ADR-0083/0090). Both .session-body and
@@ -166,7 +166,7 @@
    * px ↔ px pair did. */
   --workspace-min-width: 320px;
   --track-grid:
-    0fr minmax(0, var(--rail-width, 350px)) minmax(var(--workspace-min-width), 1fr) 0fr;
+    0fr minmax(0, var(--rail-width, 460px)) minmax(var(--workspace-min-width), 1fr) 0fr;
   --track-grid-collapsed: 0fr minmax(0, 100%) minmax(0, 0fr) 0fr;
   /* Collapsed reading column cap (issue #833): the retired centered fold
    * track capped the RAIL box at 800px and the rail's horizontal gutter
@@ -223,7 +223,7 @@
   position: absolute;
   top: 40px; /* below the topbar (height: 40px, grid-row: 1) */
   bottom: 0;
-  left: var(--sidebar-width, 238px);
+  left: var(--sidebar-width, 280px);
   width: 6px;
   margin-left: -3px; /* center the 6px hit area on the column boundary */
   cursor: col-resize;
@@ -341,7 +341,7 @@
 .settings-overlay {
   grid-column: 1; grid-row: 1;
   display: grid;
-  grid-template-columns: var(--sidebar-width, 238px) 1fr;
+  grid-template-columns: var(--sidebar-width, 280px) 1fr;
   grid-template-rows: 1fr;
   height: 100vh;
   overflow: hidden;
@@ -712,7 +712,7 @@
   position: absolute;
   top: var(--session-header-height);
   bottom: 0;
-  left: var(--rail-width, 350px);
+  left: var(--rail-width, 460px);
   width: 6px;
   margin-left: -3px; /* center the 6px hit area on the column boundary */
   cursor: col-resize;
