@@ -95,8 +95,8 @@ export function useSidebarResize(options?: {
   const onResizeStart = useCallback((e: ReactPointerEvent) => {
     e.preventDefault();
     // Pointer capture for the same hover-stuck fix as useRailResize
-    // (release re-runs the hover hit-test after a clamped handle leaves
-    // the pointer).
+    // (release re-runs the hover hit-test once the handle stops at a
+    // clamp bound and pointerup lands outside it).
     e.currentTarget?.setPointerCapture?.(e.pointerId);
     draggingRef.current = true;
     resizeShrunkRef.current = false;
