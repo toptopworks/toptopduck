@@ -1,0 +1,25 @@
+# ACP bridge process (ADR-0085, issue #299 slice 9b): a thin stdio<->TCP proxy
+# the external CLI launches as its MCP server (per the McpServer::stdio_bridge
+# descriptor). Pure std besides the bounded-line crate: no app-lib import, no
+# serde, no JSON parsing. Own package (#1295), so the same-package lib linkage
+# rule no longer applies at all; the workspace release profile (`lto` +
+# `strip`, root Cargo.toml) keeps the shipped bridge tiny -- Tauri + DuckDB
+# never reach it. The bin name keeps the product prefix so the dev sibling
+# lookup, the CARGO_BIN_EXE_* test macro, and the packaging vocabulary all
+# stay pinned to one string.
+[package]
+name = "acp-bridge"
+version = "0.1.0"
+edition = "2021"
+# Workspace-internal crate; never published to crates.io.
+publish = false
+# MSRV matches the app crate (ADR-0116).
+rust-version = "1.86"
+
+[[bin]]
+name = "toptopduck-acp-bridge"
+path = "src/main.rs"
+
+[dependencies]
+# The one shared piece: the bounded-line handshake reader (pure std).
+bounded-line = { path = "../bounded-line" }

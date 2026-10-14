@@ -3,6 +3,13 @@
 version = 4
 
 [[package]]
+name = "acp-bridge"
+version = "0.1.0"
+dependencies = [
+ "bounded-line",
+]
+
+[[package]]
 name = "adler2"
 version = "2.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -640,6 +647,10 @@ dependencies = [
  "quote",
  "syn 2.0.118",
 ]
+
+[[package]]
+name = "bounded-line"
+version = "0.1.0"
 
 [[package]]
 name = "brotli"
@@ -5875,6 +5886,7 @@ name = "toptopduck"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "bounded-line",
  "calamine",
  "csv",
  "duckdb",

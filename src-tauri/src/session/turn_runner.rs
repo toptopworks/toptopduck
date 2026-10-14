@@ -888,15 +888,16 @@ impl<O: FnMut(TurnPhase) + Send> TurnPhaseSink for GatewayPhaseTap<O> {
 /// consistent with the `detect_adapter` and `bind_gateway` failure paths in
 /// [`super::Session::run_external_turn`] -- instead of poisoning the session mutex
 /// with a panic. The var is read at run time (`env!`/`option_env!` are
-/// compile-time, and cargo only sets `CARGO_BIN_EXE_toptopduck-acp-bridge`
-/// while compiling same-package integration tests, which the lib build never
-/// sees). Injectors: dev builds resolve the `current_exe()` sibling in
-/// `.setup()` (debug-only; an explicit export wins); integration tests set it
-/// (serially, mirroring the 9a `ACP_FAKE_SCENARIO` env lock) to
-/// `env!("CARGO_BIN_EXE_toptopduck-acp-bridge")` before driving a turn.
+/// compile-time; the bridge binary lives in the sibling `crates/acp-bridge`
+/// workspace member, so its path is resolved from the shared target dir, not
+/// macro-minted). Injectors: dev builds resolve the `current_exe()` sibling
+/// in `.setup()` (debug-only; an explicit export wins); integration tests
+/// set it (serially, mirroring the 9a `ACP_FAKE_SCENARIO` env lock) from
+/// the wiring suite's `acp_bridge_bin` helper before driving a turn.
 /// Production Tauri sidecar bundling is a packaging-time decision (ADR-0085
-/// Consequences: the bridge bin production path) -- the `[[bin]]` does not
-/// enter the default Tauri bundle, so a shipped app cannot yet resolve this
+/// Consequences: the bridge bin production path) -- the bridge crate's
+/// binary does not enter the default Tauri bundle, so a shipped app cannot
+/// yet resolve this
 /// path; a follow-up ADR wires the sidecar. Centralizing the lookup here
 /// means the follow-up changes one site.
 fn bridge_bin_path() -> Result<String, String> {
@@ -910,13 +911,12 @@ fn bridge_bin_path() -> Result<String, String> {
             "{ACP_BRIDGE_BIN_ENV} is not set, so no ACP bridge binary is \
              available. Injection sources: tauri dev resolves the sibling \
              built by beforeDevCommand; integration tests inject it from \
-             CARGO_BIN_EXE_toptopduck-acp-bridge; production sidecar \
+             the shared workspace target dir; production sidecar \
              bundling is the ADR-0085 packaging-time follow-up. For a dev \
              run bypassing the tauri CLI (e.g. cargo run), build the bridge \
-             first: cargo build --manifest-path src-tauri/Cargo.toml \
-             --bin toptopduck-acp-bridge. A release-profile or cross-target \
-             dev run also needs the sibling built for the matching profile, \
-             or an explicit export"
+             first: cargo build -p acp-bridge. A release-profile or \
+             cross-target dev run also needs the sibling built for the \
+             matching profile, or an explicit export"
         )),
         Err(std::env::VarError::NotUnicode(_)) => Err(format!(
             "{ACP_BRIDGE_BIN_ENV} is set but not valid Unicode, so the ACP \

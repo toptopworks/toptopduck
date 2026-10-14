@@ -71,6 +71,33 @@ fn prepend_path(dir: &std::path::Path) -> std::ffi::OsString {
     old
 }
 
+/// The `toptopduck-acp-bridge` binary, resolved from the shared workspace
+/// target dir. `CARGO_BIN_EXE_*` only exists for same-package bins; the
+/// bridge lives in the sibling `crates/acp-bridge` member, so the path is
+/// computed instead. `cargo test --workspace` (CI) builds every member's
+/// binaries before any suite runs; a member-only invocation from `src-tauri`
+/// skips the bridge build, so a missing file fails here with the build
+/// command instead of an opaque spawn error. Debug profile, matching every
+/// suite in this tree. Local to this suite: `tests/common` is compiled into
+/// every suite that declares `mod common;`, and the others never spawn the
+/// bridge -- a shared helper would trip their dead-code lint.
+fn acp_bridge_bin() -> PathBuf {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("target")
+        .join("debug")
+        .join(format!(
+            "toptopduck-acp-bridge{}",
+            std::env::consts::EXE_SUFFIX
+        ));
+    assert!(
+        path.is_file(),
+        "bridge binary missing at {}; build it first: cargo build -p acp-bridge",
+        path.display()
+    );
+    path
+}
+
 /// Lock the global env, point it at the fixture (scenario + bridge binary +
 /// PATH), and build a Session wired to the fake-CLI adapter. Returns the
 /// session + the prior `PATH` + the env-lock guard (held across the turn so a
@@ -80,10 +107,7 @@ fn external_session(scenario: &str) -> (Session, std::ffi::OsString, MutexGuard<
     let fake_cli = PathBuf::from(env!("CARGO_BIN_EXE_acp-fake-cli"));
     let old_path = prepend_path(fake_cli.parent().expect("fixture has a parent dir"));
     std::env::set_var("ACP_FAKE_SCENARIO", scenario);
-    std::env::set_var(
-        "TOPTOPDUCK_ACP_BRIDGE_BIN",
-        env!("CARGO_BIN_EXE_toptopduck-acp-bridge"),
-    );
+    std::env::set_var("TOPTOPDUCK_ACP_BRIDGE_BIN", acp_bridge_bin());
     // Pre-warm the two fixture images (issue #897 review): a first spawn on
     // a cold Windows box pays tens of seconds of image load per binary, and
     // the arming-order pin's fire must land AFTER the CLI stores its
@@ -102,7 +126,7 @@ fn external_session(scenario: &str) -> (Session, std::ffi::OsString, MutexGuard<
         .expect("prewarm: fake CLI spawns");
     drop(warm_cli.stdin.take());
     let _ = warm_cli.wait().expect("prewarm: fake CLI exits");
-    let mut warm_bridge = std::process::Command::new(env!("CARGO_BIN_EXE_toptopduck-acp-bridge"))
+    let mut warm_bridge = std::process::Command::new(acp_bridge_bin())
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())

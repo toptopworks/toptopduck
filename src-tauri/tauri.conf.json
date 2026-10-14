@@ -7,7 +7,7 @@
   "build": {
     "frontendDist": "../dist",
     "devUrl": "http://localhost:1420",
-    "beforeDevCommand": "cargo build --manifest-path src-tauri/Cargo.toml --bin toptopduck-acp-bridge && npm run dev",
+    "beforeDevCommand": "cargo build -p acp-bridge && npm run dev",
     "beforeBuildCommand": "npm run build"
   },
   "app": {

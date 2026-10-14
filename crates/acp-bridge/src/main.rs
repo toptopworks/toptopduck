@@ -10,11 +10,12 @@
 //! (ADR-0085: the bridge is transport only). The MCP stdio transport already
 //! carries one JSON-RPC message per line; the bridge forwards that identical
 //! framing on both sides, so it has nothing to parse. All semantics live in the
-//! gateway ([`toptopduck_lib::runtime::gateway::server::serve_connection`]):
+//! gateway (`toptopduck_lib::runtime::gateway::server::serve_connection`):
 //! approval, dispatch, materialization. Keeping this binary protocol-blind is
 //! what lets the gateway stay the single enforcement point. (The bounded-line
-//! handshake reader below is the one shared piece -- compiled in from the lib's
-//! source by `#[path]`, so the binary still links nothing.)
+//! handshake reader below is the one shared piece -- it lives in the
+//! pure-std `bounded-line` crate, so the binary links nothing beyond std
+//! and that one crate.)
 //!
 //! Wire protocol (one turn, one bridge process):
 //! 1. `TcpStream::connect("127.0.0.1:{TOPTOPDUCK_GATEWAY_PORT}")`.
@@ -38,15 +39,12 @@ use std::process::ExitCode;
 use std::sync::mpsc;
 use std::thread;
 
-// The bounded-line handshake reader, source-shared rather than crate-linked:
-// this binary must not `use` the lib (ADR-0085 zero-dependency -- release LTO
-// dead-strips Tauri/DuckDB out of the per-turn-spawned binary), while issue
-// #643's single-implementation rule says no duplicate constant or function.
-// The lib's `bounded_line` module file is pure std precisely so it can be
-// compiled in here by path.
-#[path = "../bounded_line.rs"]
-mod bounded_line;
-use bounded_line::{read_line_bounded, LineRead, LINE_MAX_BYTES};
+// The bounded-line handshake reader comes from the `bounded-line` crate: this
+// binary must not `use` the app crate (ADR-0085: no app-crate dependency, so
+// release LTO dead-strips Tauri/DuckDB out of the per-turn-spawned binary),
+// while issue #643's single-implementation rule says no duplicate constant or
+// function, so both sides link the same small crate.
+use bounded_line::bounded_line::{read_line_bounded, LineRead, LINE_MAX_BYTES};
 
 /// The env var carrying the gateway's OS-assigned localhost port.
 const ENV_PORT: &str = "TOPTOPDUCK_GATEWAY_PORT";

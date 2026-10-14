@@ -11,10 +11,10 @@
 //! stays a compile-time constant (see [`LINE_MAX_BYTES`]).
 //!
 //! This file is deliberately pure std. The bridge binary must not link the
-//! lib crate (ADR-0085: a zero-dependency `[[bin]]` so release LTO
-//! dead-strips Tauri/DuckDB out of the per-turn-spawned binary), so it
-//! includes this module by `#[path]` instead of importing the crate --
-//! anything non-std here breaks that constraint.
+//! app crate (ADR-0085: no app-crate linkage, so release LTO dead-strips
+//! Tauri/DuckDB out of the per-turn-spawned process), so this module lives
+//! in its own crate that both sides depend on -- anything non-std here
+//! breaks that constraint.
 //!
 //! An over-long line is drained and surfaced as [`LineRead::Overlong`]; the
 //! disposition is the caller's -- the ACP readers drop it with a warning, the
@@ -43,11 +43,11 @@ use std::io::{BufRead, Read};
 /// refuse policy is the caller's). A compile-time constant on purpose: it
 /// is a security invariant against untrusted output, not a user tunable --
 /// raising it is an evidence-driven default change, not a config knob.
-pub(crate) const LINE_MAX_BYTES: usize = 4 * 1024 * 1024;
+pub const LINE_MAX_BYTES: usize = 4 * 1024 * 1024;
 
 /// One step of [`read_line_bounded`].
 #[derive(Debug)]
-pub(crate) enum LineRead {
+pub enum LineRead {
     /// A complete line (including a final unterminated line at EOF).
     Line(String),
     /// The line exceeded the cap; its remainder was drained.
@@ -64,10 +64,7 @@ pub(crate) enum LineRead {
 /// partial line is discarded when an error (a read timeout included)
 /// propagates. Callers that retry on read timeouts and must not lose that
 /// progress read through [`BoundedLineReader`] instead (issue #649).
-pub(crate) fn read_line_bounded(
-    reader: &mut impl BufRead,
-    max: usize,
-) -> std::io::Result<LineRead> {
+pub fn read_line_bounded(reader: &mut impl BufRead, max: usize) -> std::io::Result<LineRead> {
     BoundedLineReader::new(reader).read_line_bounded(max)
 }
 
@@ -75,13 +72,13 @@ pub(crate) fn read_line_bounded(
 /// line stays with the reader across calls, so a caller that retries after
 /// a read timeout (`TimedOut` / `WouldBlock`) resumes the same line at the
 /// stream's current position instead of re-framing the tail as a new line.
-pub(crate) struct BoundedLineReader<R> {
+pub struct BoundedLineReader<R> {
     reader: R,
     partial: Vec<u8>,
 }
 
 impl<R: BufRead> BoundedLineReader<R> {
-    pub(crate) fn new(reader: R) -> Self {
+    pub fn new(reader: R) -> Self {
         Self {
             reader,
             partial: Vec::new(),
@@ -94,7 +91,7 @@ impl<R: BufRead> BoundedLineReader<R> {
     /// bounds the accumulated line, not each call's read: a retry under a
     /// smaller cap than the bytes already buffered fails the line as
     /// over-long rather than emitting a line past the cap.
-    pub(crate) fn read_line_bounded(&mut self, max: usize) -> std::io::Result<LineRead> {
+    pub fn read_line_bounded(&mut self, max: usize) -> std::io::Result<LineRead> {
         // A zero budget can never read a byte, so it reports EOF -- the
         // stateless shape's answer to the same degenerate input (the
         // over-long check below would otherwise fire on `0 == 0`). Every
