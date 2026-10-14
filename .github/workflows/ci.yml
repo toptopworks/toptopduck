@@ -44,15 +44,24 @@ jobs:
       - name: Test (Vitest)
         run: npm test
 
+  # Three-OS matrix (ADR-0131): clippy runs on every leg as the check-profile
+  # --all-targets compile of the platform dependency graph — that compile is
+  # the multi-OS coverage. fmt and tests stay ubuntu-only: fmt results are
+  # platform-independent, and the suite has only ever run on Linux CI.
   rust:
-    name: Rust (fmt + clippy + test)
-    runs-on: ubuntu-latest
+    name: Rust (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
     steps:
       - uses: actions/checkout@v5
 
       # Tauri v2 compiles the webview layer on Linux even when bundling is off;
       # duckdb "bundled" also needs a C/C++ toolchain (build-essential).
       - name: Install Tauri Linux build dependencies
+        if: runner.os == 'Linux'
         run: |
           sudo apt-get update
           sudo apt-get install -y \
@@ -75,21 +84,23 @@ jobs:
       - uses: Swatinem/rust-cache@v2
 
       - name: rustfmt
+        if: runner.os == 'Linux'
         run: cargo fmt --all --check
 
       - name: clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
 
       - name: test
+        if: runner.os == 'Linux'
         run: cargo test --workspace
 
-  # ADR-0008's last gap: the desktop bundles have never been built outside a
-  # dev machine (Windows-only). Packaging verification runs on PRs and pushes
-  # to main only — a develop push is mid-chain and stays quality-gate-only,
-  # since every feature PR already exercised all three packaging legs.
+  # Release face (ADR-0131): the full tauri build and bundle artifact upload
+  # run on pushes to main only — the release flow picks the artifacts up from
+  # there. PR-side multi-OS compile coverage lives in the rust matrix above;
+  # a develop push is mid-chain and stays quality-gate-only.
   build:
     name: Build (${{ matrix.os }})
-    if: github.event_name == 'pull_request' || github.ref == 'refs/heads/main'
+    if: github.ref == 'refs/heads/main'
     runs-on: ${{ matrix.os }}
     strategy:
       # Let sibling legs finish when one fails — the per-OS report is the
