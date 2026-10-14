@@ -154,6 +154,13 @@ export function useRailResize(options?: {
 
   const onResizeStart = useCallback((e: ReactPointerEvent) => {
     e.preventDefault();
+    // Capture the pointer to the handle: the implicit capture drop on
+    // pointerup makes the browser re-run the hover hit-test, clearing the
+    // :hover that sticks when a clamped handle stops at the workspace floor
+    // and shrinks out from under the held pointer (hover recomputation is
+    // frozen while a button is pressed, so without this the line highlight
+    // survives the drag and only a fresh click clears it).
+    e.currentTarget?.setPointerCapture?.(e.pointerId);
     draggingRef.current = true;
     startXRef.current = e.clientX;
     startWidthRef.current = widthRef.current;
