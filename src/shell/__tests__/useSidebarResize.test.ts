@@ -78,6 +78,21 @@ describe("useSidebarResize", () => {
     expect(document.body.style.userSelect).toBe("none");
   });
 
+  it("captures the pointer on drag start (the implicit release re-runs the hover hit-test)", () => {
+    // Same proxy assertion as useRailResize: jsdom has no hover model, so
+    // the capture call pins the stuck-:hover fix.
+    const { result } = renderHook(() => useSidebarResize());
+    const capture = vi.fn();
+    act(() => {
+      result.current.onResizeStart({
+        preventDefault: vi.fn(),
+        pointerId: 7,
+        currentTarget: { setPointerCapture: capture },
+      } as unknown as React.PointerEvent);
+    });
+    expect(capture).toHaveBeenCalledWith(7);
+  });
+
   it("updates width on pointermove while dragging, clamped to range", () => {
     const { result } = renderHook(() => useSidebarResize());
     act(() => {

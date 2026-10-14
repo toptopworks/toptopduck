@@ -77,6 +77,23 @@ describe("useRailResize", () => {
     expect(document.body.style.userSelect).toBe("none");
   });
 
+  it("captures the pointer on drag start (the implicit release re-runs the hover hit-test)", () => {
+    // jsdom has no hover model, so the capture call is the testable proxy
+    // for the stuck-:hover fix: a clamped handle shrinks out from under the
+    // held pointer, and only the capture release forces the browser to
+    // recompute hover.
+    const { result } = renderHook(() => useRailResize());
+    const capture = vi.fn();
+    act(() => {
+      result.current.onResizeStart({
+        preventDefault: vi.fn(),
+        pointerId: 7,
+        currentTarget: { setPointerCapture: capture },
+      } as unknown as React.PointerEvent);
+    });
+    expect(capture).toHaveBeenCalledWith(7);
+  });
+
   it("updates width by delta on pointermove, clamped to range", () => {
     const { result } = renderHook(() => useRailResize());
     // Pointer down at clientX=500; rail starts at default (460).
