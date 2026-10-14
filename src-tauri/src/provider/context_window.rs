@@ -29,8 +29,10 @@ use super::output_cap::hits_family;
 /// their own models and carry their own rows. Prefixes are stored
 /// lowercase; the lookup normalizes the model name (the audit holds both
 /// invariants). Scope: the families the `Protocol` docs name as the
-/// compatible surface (OpenAI direct / DeepSeek / GLM / Qwen / Ollama)
-/// plus the two CLI runtimes' model families (Anthropic / OpenAI).
+/// compatible surface (OpenAI direct / DeepSeek / GLM / Qwen / Ollama),
+/// the two CLI runtimes' model families (Anthropic / OpenAI), and the
+/// further families user-configurable endpoints commonly serve
+/// (llama / mistral / kimi / minimax / gemini / grok).
 ///
 /// Values follow models.dev at family granularity: each row carries its
 /// generation's standard window, and dated / suffixed variants ride their
@@ -39,7 +41,10 @@ use super::output_cap::hits_family;
 /// value stands. Generation rows that RAISED the window inside a
 /// hyphenated family (claude 4-6+ inside `claude-opus-4`, mistral
 /// `large-4` inside `mistral-large`) carry their own rows so the longest
-/// prefix can outrank the parent's older window. Refresh the rows as
+/// prefix can outrank the parent's older window. Dated variants that
+/// LOWERED the window carry their own rows on the same terms
+/// (`mistral-large-2411` at 131_072 under the 262_144 family row).
+/// Refresh the rows as
 /// families ship.
 const CONTEXT_WINDOW_PREFIXES: &[(&str, u64)] = &[
     // anthropic -- 4.5 and earlier document 200K; every line from 4.6 on
@@ -180,8 +185,11 @@ mod tests {
     /// The window floor for the catalog audit: every entry sits at or above
     /// this, so a hand-maintained row that dropped a thousands factor (200
     /// for 200_000) reddens the audit instead of silently shrinking every
-    /// ring on that family.
-    const CONTEXT_WINDOW_FLOOR: u64 = 1_000;
+    /// ring on that family. The floor sits above every divided-by-1000
+    /// landing (a 1M row lands at exactly 1_000, which an inclusive
+    /// 1_000 floor passed) and at or below the table's smallest
+    /// legitimate window (8_192).
+    const CONTEXT_WINDOW_FLOOR: u64 = 8_000;
 
     /// A hit carries the family's window, dated and suffixed variants ride
     /// their base entry, and casing never matters.
@@ -234,6 +242,10 @@ mod tests {
         assert_eq!(context_window(""), None);
         // an uncataloged family that shares no prefix with a cataloged one
         assert_eq!(context_window("doubao-1.5-pro"), None);
+        // dotted generations miss their parent families (the shared
+        // boundary rule, pinned here at this catalog's call site)
+        assert_eq!(context_window("glm-4.9"), None);
+        assert_eq!(context_window("gpt-4.2"), None);
     }
 
     /// The stamp only fills a windowless reading: a channel-reported window

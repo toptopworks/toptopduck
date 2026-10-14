@@ -705,7 +705,8 @@ struct ClaudePump {
     /// lands the derived ceiling otherwise, so no app-side counting rides
     /// this path.
     step_cap: u32,
-    /// The `system{init}` reported model (honest rendering).
+    /// The `system{init}` reported model: honest rendering and the
+    /// occupancy denominator's catalog key (#1290).
     current_model: Option<String>,
     pending: Vec<PendingClaudeCall>,
     /// The injected MCP servers' claude-side name prefixes

@@ -264,8 +264,9 @@ export interface TokenUsage {
 }
 
 // The turn's context-occupancy reading (ADR-0130, issue #1272): the last
-// round-trip's measured context size plus, when the channel reported one,
-// the window it filled (ACP usage_update's used/size). Occupancy channel,
+// round-trip's measured context size plus the window it filled -- a
+// channel-reported one (ACP usage_update's used/size) or the backend's
+// catalog stamp off the serving model (#1290). Occupancy channel,
 // never billing evidence -- a reference figure for the composer ring.
 // Mirrors the Rust model::OccupancySnapshot; absent for turns with no
 // reading and turns recorded before the field (honest hollow).

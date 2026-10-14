@@ -463,8 +463,9 @@ mod tests {
             200,
             "None protocol rides the OpenAI arm (the normalization fallback)"
         );
-        // The built-in snapshot never carries a window (Decision 4: the
-        // denominator is a config matter, never guessed).
+        // The built-in snapshot leaves the window absent (Decision 4 as
+        // calibrated): the collection point builds it windowless and the
+        // settle stamp fills the denominator off the serving model.
         assert_eq!(
             OccupancySnapshot::from_last_roundtrip(last, Some(crate::model::Protocol::Anthropic))
                 .limit,
