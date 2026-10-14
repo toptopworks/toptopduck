@@ -18,7 +18,7 @@ import { railMaxWidth, sidebarMaxWidth } from "../layoutBounds";
 
 /** Simulated shell width (px) — the default window width; mutable because
  *  the entry-3 scenario shrinks the window mid-test. */
-let shellWidth = 1024;
+let shellWidth = 1200;
 
 // Bridge standing in for the measured DOM: the rail's ceiling reads the
 // track host (shell minus sidebar) and lags one drag event behind the
@@ -77,7 +77,7 @@ function useColumnPair() {
 describe("column resize composition", () => {
   beforeEach(() => {
     localStorage.clear();
-    shellWidth = 1024;
+    shellWidth = 1200;
     sidebarWidthLive = SIDEBAR_DEFAULT_WIDTH;
     document.body.style.cursor = "";
     document.body.style.userSelect = "";
@@ -101,16 +101,24 @@ describe("column resize composition", () => {
     act(() => {
       window.dispatchEvent(new PointerEvent("pointermove", { clientX: 300 }));
     });
-    // 238 -> 300; the rail absorbs the 62px delta (350 -> 288) so the
+    // 280 -> 300; the rail absorbs the 20px delta (460 -> 440) so the
     // two columns move as one and the workspace keeps its width.
     expect(result.current.sidebar.width).toBe(300);
-    expect(result.current.rail.width).toBe(288);
+    expect(result.current.rail.width).toBe(440);
     expect(result.current.sidebar.width + result.current.rail.width).toBe(
       sumBefore,
     );
   });
 
   it("the drag tops out exactly where the rail bottoms out, leaving the workspace its floor", () => {
+    // The premise needs a shell narrow enough that the sidebar's availability
+    // ceiling (shell − 600) sits below its static max (518), and wide enough
+    // that reaching it yields a rail delta (≥ 180) that bottoms the rail out;
+    // the 1200 default window overshoots the first bound (its 600 ceiling
+    // exceeds the 518 static max, so the static max binds and the sum
+    // assertion breaks), and below ~1060 the delta falls short — this
+    // scenario pins the 1100 shell.
+    shellWidth = 1100;
     const { result } = renderHook(() => useColumnPair());
     act(() => {
       result.current.sidebar.onResizeStart({
@@ -122,9 +130,9 @@ describe("column resize composition", () => {
         new PointerEvent("pointermove", { clientX: 9999 }),
       );
     });
-    // 1024 - 424 - 280 = 320: the sidebar's availability ceiling and the
+    // 1100 - 500 - 280 = 320: the sidebar's availability ceiling and the
     // rail's compensated floor meet with exactly the workspace floor left.
-    expect(result.current.sidebar.width).toBe(424);
+    expect(result.current.sidebar.width).toBe(500);
     expect(result.current.rail.width).toBe(280);
     expect(result.current.sidebar.width + result.current.rail.width).toBe(
       shellWidth - 320,
@@ -145,8 +153,8 @@ describe("column resize composition", () => {
       window.dispatchEvent(new PointerEvent("pointermove", { clientX: 260 }));
     });
     expect(result.current.sidebar.width).toBe(260);
-    // 288 + (300 - 260): the reverse delta flows back to the rail.
-    expect(result.current.rail.width).toBe(328);
+    // 440 + (300 - 260): the reverse delta flows back to the rail.
+    expect(result.current.rail.width).toBe(480);
   });
 
   // --- Window-shrink re-clamp entries (issue #781) ------------------------
@@ -155,15 +163,15 @@ describe("column resize composition", () => {
     vi.stubGlobal("ResizeObserver", ResizeObserverStub);
     localStorage.setItem("toptopduck.sidebar-width", "518");
     const { result } = renderHook(() => useColumnPair());
-    // Sidebar restore: min(518, sidebarMaxWidth(1024) = 424) -> 424, which
-    // leaves a 600px track host — the rail's default 350 no longer fits.
-    expect(result.current.sidebar.width).toBe(424);
+    // Sidebar restore: min(518, sidebarMaxWidth(1200) = 600) -> 518, which
+    // leaves a 682px track host — the rail's default 460 no longer fits.
+    expect(result.current.sidebar.width).toBe(518);
     // The layout settles at the restored sidebar, then the rail's initial
-    // container observation re-clamps 350 -> 280.
-    sidebarWidthLive = 424;
+    // container observation re-clamps 460 -> 362.
+    sidebarWidthLive = 518;
     act(() => fireRailContainerChange?.());
-    expect(result.current.rail.width).toBe(280);
-    // 424 + 280 = 1024 - 320: the workspace keeps exactly its floor.
+    expect(result.current.rail.width).toBe(362);
+    // 518 + 362 = 1200 - 320: the workspace keeps exactly its floor.
     expect(result.current.sidebar.width + result.current.rail.width).toBe(
       shellWidth - 320,
     );
@@ -177,14 +185,17 @@ describe("column resize composition", () => {
     vi.stubGlobal("ResizeObserver", ResizeObserverStub);
     shellWidth = 840;
     const { result } = renderHook(() => useColumnPair());
-    // Factory entry: no stored sidebar, both columns at their defaults.
-    expect(result.current.sidebar.width).toBe(SIDEBAR_DEFAULT_WIDTH);
-    // The layout settles (H = 840 - 238 = 602 -> ceiling 282) and the
-    // rail's initial container observation re-clamps 350 -> 282. The
-    // bridge already reads the factory sidebar, so no manual sync needed.
+    // Factory entry: no stored sidebar; the 280 default exceeds the 840
+    // window's availability ceiling (840 − 280 − 320 = 240), so the load
+    // path clamps it to 240 before first render.
+    expect(result.current.sidebar.width).toBe(240);
+    // The layout settles (H = 840 - 240 = 600 -> ceiling 280) and the
+    // rail's initial container observation re-clamps 460 -> 280. The load
+    // clamp bypasses onDelta, so the bridge syncs by hand like entries 1/3.
+    sidebarWidthLive = 240;
     act(() => fireRailContainerChange?.());
-    expect(result.current.rail.width).toBe(282);
-    // 238 + 282 = 840 - 320: the workspace keeps exactly its floor.
+    expect(result.current.rail.width).toBe(280);
+    // 240 + 280 = 840 - 320: the workspace keeps exactly its floor.
     expect(result.current.sidebar.width + result.current.rail.width).toBe(
       shellWidth - 320,
     );

@@ -79,7 +79,7 @@ describe("useRailResize", () => {
 
   it("updates width by delta on pointermove, clamped to range", () => {
     const { result } = renderHook(() => useRailResize());
-    // Pointer down at clientX=500; rail starts at default (350).
+    // Pointer down at clientX=500; rail starts at default (460).
     act(() => {
       result.current.onResizeStart({
         preventDefault: vi.fn(),
@@ -87,19 +87,19 @@ describe("useRailResize", () => {
       } as unknown as React.PointerEvent);
     });
 
-    // Move right by 100 → width should be 350 + 100 = 450.
+    // Move right by 100 → width should be 460 + 100 = 560.
     act(() => {
       window.dispatchEvent(new PointerEvent("pointermove", { clientX: 600 }));
     });
-    expect(result.current.width).toBe(450);
+    expect(result.current.width).toBe(560);
 
-    // Move left past the floor (delta = 200 - 500 = -300 → 350 - 300 = 50 → clamped to 350).
+    // Move left past the floor (delta = 200 - 500 = -300 → 460 - 300 = 160 → clamped to 350).
     act(() => {
       window.dispatchEvent(new PointerEvent("pointermove", { clientX: 200 }));
     });
     expect(result.current.width).toBe(350);
 
-    // Move right past the ceiling (delta = 1000 - 500 = 500 → 350 + 500 = 850 → clamped to 600).
+    // Move right past the ceiling (delta = 1000 - 500 = 500 → 460 + 500 = 960 → clamped to 600).
     act(() => {
       window.dispatchEvent(new PointerEvent("pointermove", { clientX: 1000 }));
     });
@@ -183,18 +183,19 @@ describe("useRailResize", () => {
 
   it("adjustWidth with negative delta shrinks the rail", () => {
     const { result } = renderHook(() => useRailResize());
-    // Default width is 350.
+    // Default width is 460.
     act(() => {
       result.current.adjustWidth(-50);
     });
-    expect(result.current.width).toBe(300);
+    expect(result.current.width).toBe(410);
   });
 
   it("adjustWidth clamps to COMPENSATED_MIN_WIDTH (280), not MIN_WIDTH (350)", () => {
     const { result } = renderHook(() => useRailResize());
-    // Push from 350 down past 280 — should stop at 280, not 350.
+    // Push from 460 down past 280 — should stop at 280
+    // (COMPENSATED_MIN_WIDTH), not 350 (MIN_WIDTH).
     act(() => {
-      result.current.adjustWidth(-100);
+      result.current.adjustWidth(-200);
     });
     expect(result.current.width).toBe(280);
 
@@ -227,7 +228,7 @@ describe("useRailResize", () => {
     const { result } = renderHook(() => useRailResize());
     // Simulate sidebar compensation pushing rail to 280.
     act(() => {
-      result.current.adjustWidth(-70);
+      result.current.adjustWidth(-180);
     });
     expect(result.current.width).toBe(280);
 
@@ -249,7 +250,7 @@ describe("useRailResize", () => {
   it("direct drag from 280 clamps at 280 when moving left (no further shrink)", () => {
     const { result } = renderHook(() => useRailResize());
     act(() => {
-      result.current.adjustWidth(-70);
+      result.current.adjustWidth(-180);
     });
     expect(result.current.width).toBe(280);
 
@@ -279,7 +280,7 @@ describe("useRailResize", () => {
         clientX: 500,
       } as unknown as React.PointerEvent);
     });
-    // 350 + 500 = 850 → min(600, 466) = 466.
+    // 460 + 500 = 960 → min(600, 466) = 466.
     act(() => {
       window.dispatchEvent(new PointerEvent("pointermove", { clientX: 1000 }));
     });
@@ -349,11 +350,12 @@ describe("useRailResize", () => {
 
   it("re-clamps to the availability ceiling on the initial container observation (cold start)", () => {
     vi.stubGlobal("ResizeObserver", ResizeObserverStub);
-    // Factory entry at W=840, sidebar 238: track host 602 -> ceiling 282.
+    // A narrow track host sinks the availability ceiling to 282, below the
+    // 460 default.
     const result = renderWithTarget(() => 282);
     // The observe-time callback is asynchronous: the first render keeps the
     // default width, then the initial observation clamps it.
-    expect(result.current.width).toBe(350);
+    expect(result.current.width).toBe(RAIL_DEFAULT_WIDTH);
     act(() => fireContainerChange?.());
     expect(result.current.width).toBe(282);
   });
@@ -387,7 +389,10 @@ describe("useRailResize", () => {
     vi.stubGlobal("ResizeObserver", ResizeObserverStub);
     let ceiling = 466;
     const result = renderWithTarget(() => ceiling);
-    act(() => fireContainerChange?.()); // initial observation: no-op (350 <= 466)
+    act(() => fireContainerChange?.()); // initial observation: no-op (460 <= 466)
+    // A ceiling above the default leaves the cold-start width untouched —
+    // the wide-shell half of the no-re-clamp claim, pinned not narrated.
+    expect(result.current.width).toBe(RAIL_DEFAULT_WIDTH);
     ceiling = 280;
     act(() => fireContainerChange?.());
     expect(result.current.width).toBe(280);
@@ -417,14 +422,14 @@ describe("useRailResize", () => {
     act(() => {
       window.dispatchEvent(
         new PointerEvent("pointermove", { clientX: 616 }),
-      ); // 350 + 116 = 466
+      ); // 460 + 116 = 576 -> min(600, 466)
     });
     expect(result.current.width).toBe(466);
     ceiling = 280;
     act(() => fireContainerChange?.()); // mid-drag container shrink
     expect(result.current.width).toBe(280);
     // Further moves recompute from the re-anchored width. Without the
-    // re-anchor, startWidth(466) + delta with floor min(350, 466) = 350
+    // re-anchor, startWidth(460) + delta with floor min(350, 466) = 350
     // would clamp back up to 350 (inverted range) and the handle would
     // jump outside the rendered rail again.
     act(() => {

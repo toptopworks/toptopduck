@@ -22,10 +22,13 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import type { PointerEvent as ReactPointerEvent, RefObject } from "react";
 import { COMPENSATED_MIN_WIDTH, mergeCeiling } from "./layoutBounds";
 
-/** Default rail width in pixels. Equals MIN_WIDTH so the cold-start width
- *  is always within the clamp range (no handle/column boundary offset on
- *  first render). */
-export const RAIL_DEFAULT_WIDTH = 350;
+/** Default rail width in pixels. Within the clamp range and at or below the
+ *  availability ceiling for windows at the 1200px default width (track host
+ *  920 minus the 320 workspace floor = 600), so the cold-start width needs
+ *  no re-clamp there at the factory sidebar; narrower windows — or a stored
+ *  sidebar wide enough to sink the ceiling below the default — re-clamp via
+ *  the container observer. */
+export const RAIL_DEFAULT_WIDTH = 460;
 
 /** Minimum width when dragged directly via the rail handle -- protects the
  *  QuestionBar toolbar (submit button + auth chip + context + provider triggers). */

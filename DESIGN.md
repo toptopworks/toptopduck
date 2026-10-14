@@ -148,7 +148,7 @@ components:
     backgroundColor: "{colors.canvas}"
     textColor: "{colors.ink}"
     typography: "{typography.nav-link}"
-    width: 220px
+    width: 280px
 
   # --- App shell (dark) ---
   app-shell-dark:
@@ -162,14 +162,14 @@ components:
     backgroundColor: "{colors.canvas-dark}"
     textColor: "{colors.ink-dark}"
     typography: "{typography.nav-link}"
-    width: 220px
+    width: 280px
 
   # --- Conversation rail + workspace ---
   conversation-rail:
     backgroundColor: "{colors.card}"
     textColor: "{colors.ink}"
     typography: "{typography.body-sm}"
-    width: 320px
+    width: 460px
   conversation-rail-dark:
     backgroundColor: "{colors.card-dark}"
     textColor: "{colors.ink-dark}"
@@ -339,7 +339,7 @@ The visual identity is a **calm, precise instrument**. Teal (`{colors.primary}` 
 
 Type runs the **system font stack** (`system-ui, -apple-system, "Segoe UI", Roboto, sans-serif`) across every UI role. SQL, data values, and code switch to the **system monospace stack** (`ui-monospace, SFMono-Regular, Menlo, ...`). The hierarchy is compact: the largest display token is 22px (cold-start hero only); the workhorse body size is 14px.
 
-The structural signature is a **three-column shell**: session sidebar (220px) + conversation rail (320px) + workspace (flexible). Each column collapses independently — the shell animates panel width to zero rather than snapping. This is the product's spatial identity.
+The structural signature is a **three-column shell**: session sidebar (280px) + conversation rail (460px) + workspace (flexible). Each column collapses independently — the shell animates panel width to zero rather than snapping. This is the product's spatial identity.
 
 **Key Characteristics:**
 - Single brand accent: `{colors.primary}` (teal #0d9488) for primary CTAs, active states, focus rings.
@@ -443,16 +443,16 @@ The **system monospace stack** (`ui-monospace, SFMono-Regular, Menlo, Monaco, Co
 ### Three-Column Shell
 The structural signature. Three independently collapsible columns:
 
-1. **Session sidebar** (220px): Session list grouped by recency. Collapses to 0 width (animated).
-2. **Conversation rail** (320px): Thread of turns (questions + outcomes + source lifecycle events). Collapses to 0 width.
+1. **Session sidebar** (280px): Session list grouped by recency. Collapses to 0 width (animated).
+2. **Conversation rail** (460px): Thread of turns (questions + outcomes + source lifecycle events). Collapses to 0 width.
 3. **Workspace** (flexible): Result tables, charts, dataset detail, privacy controls. Default collapsed in cold-start; expands when a turn produces results.
 
 When the workspace folds, the conversation column promotes to primary surface — the rail scroll container spans the pane's full width (scrollbar pinned to the window edge; both flanks are rail surface and wheel-scroll), while the thread content caps to a centered reading column of `800px` minus the rail's gutter (`--rail-gutter` per side). The rail reserves its scrollbar gutter on both inline edges (`scrollbar-gutter: stable both-edges`), so the reading column's axis matches the bar card's whether or not the scrollbar is showing, and the scrollbar's appearance costs no reflow (issue #839); engines without the property — outside the shipped WebView2 target — silently keep the pre-#839 axis drift and reflow instead. The rail's horizontal padding relaxes by up to the measured scrollbar width (10px cap), pulling the reading column's edges to within a few pixels of the bar card's. The shell-level question bar overlays the scroll container's lower strip as a floating layer (ADR-0092): the rail runs the pane's full height so its scrollbar reaches the window's bottom edge, and the thread tail scrolls behind the bar. An opaque backdrop spans the conversation column up to the rail's scrollbar — its width measured once at startup, so overflow into the rail's padding stays covered too — keeping the scrollbar visible and, via a pointer-events passthrough on the strip, draggable, while a dynamic bottom padding sized from the bar's measured height keeps the last element readable at max scroll (issue #836). The bar forwards its wheel to the rail too — the whole bottom strip scrolls the conversation (issue #834).
 
 ### Grid
-- Shell: `grid-template-columns: 220px 1fr` (sidebar + main block).
+- Shell: `grid-template-columns: var(--sidebar-width, 280px) 1fr` (sidebar + main block).
 - Session pane: 4-track conversation grid — `0fr minmax(0, var(--rail-width)) 1fr 0fr` (spacer / conversation rail / workspace / spacer); the workspace-folded form `0fr minmax(0, 100%) 0fr 0fr` gives the conversation track the full width, with the reading measure capped by the `.rail-reading-column` content wrapper. The shell-level question bar mirrors the same tracks so the bar sits under the conversation column; in the folded form the bar card rides the reading column's axis rather than its exact width (the card follows `min(--reading-column-cap, track - 2 * gutter)`): below the cap under classic scrollbars it runs a few pixels wider per side than the thread column, and at the cap the two meet flush (ADR-0092, issue #839).
-- Settings overlay: `grid-template-columns: 220px 1fr` (nav + content) — matches the sidebar width so the left boundary stays fixed when switching views.
+- Settings overlay: `grid-template-columns: var(--sidebar-width, 280px) 1fr` (nav + content) — matches the sidebar width so the left boundary stays fixed when switching views.
 
 ### Whitespace Philosophy
 Desktop workbench density — tighter than a web app, looser than an IDE. The canvas creates depth through surface brightness steps, so whitespace can stay compact without feeling crowded. 16px between cards; 8px between elements within a card.
@@ -514,11 +514,11 @@ All radius values derive from a single `{rounded.md}` token (6px): `xs/sm = md -
 
 **`topbar` / `topbar-dark`** — Thin 40px strip spanning the full viewport width. Same background as the shell. Houses the sidebar toggle, session name, and window controls. Height is deliberately compact — this is chrome, not content. Header-chrome icon buttons sharing the topbar ghost style (sidebar toggle, back/forward nav, workspace toggle, session-actions menu trigger) carry a 28px hit area (`h-7 w-7`) with a 14px glyph (`h-3.5 w-3.5`) — the WCAG 2.5.8 24px minimum plus margin. The window controls are a separate titlebar family (Windows-style 32px × 44px hit) and are not bound by this note.
 
-**`sidebar` / `sidebar-dark`** — Session sidebar at 220px width. Same background as the shell. Uses `{typography.nav-link}` for session entries. Collapsible to 0 width with a 180ms grid-template-columns animation.
+**`sidebar` / `sidebar-dark`** — Session sidebar at a 280px default width (user-resizable). Same background as the shell. Uses `{typography.nav-link}` for session entries. Collapsible to 0 width with a 180ms grid-template-columns animation.
 
 ### Conversation Surfaces
 
-**`conversation-rail` / `conversation-rail-dark`** — The thread rail at 320px width. Background `{colors.card}` / `{colors.card-dark}` (one brightness step above canvas). Houses turn cards and source lifecycle markers. Uses `{typography.body-sm}` as default text size.
+**`conversation-rail` / `conversation-rail-dark`** — The thread rail at a 460px default width (user-resizable). Background `{colors.card}` / `{colors.card-dark}` (one brightness step above canvas). Houses turn cards and source lifecycle markers. Uses `{typography.body-sm}` as default text size.
 
 **`chat-exchange`** — One turn rendered as a chat exchange (ADR-0103), live and settled in the same form: the in-flight streaming exchange and the settled card share every piece of chrome, so the settle swap moves nothing. The user side is the **user bubble** — right-aligned, `{colors.secondary}` surface + `{colors.secondary-foreground}` text, type `{typography.body-md}`, rounded `{rounded.lg}` with the top-right corner stepped to `{rounded.sm}` (the bubble points at the user's side), max-width 85% of the rail, padding 8px × 12px, full-text wrap; the ask stamp and the copy affordance ride a hover-revealed `{typography.caption}` `{colors.muted-foreground}` meta row under the bubble. The assistant side is a left-aligned stream of, in reading order: the runtime attribution marker (a muted `{typography.caption}` `{colors.muted-foreground}` line with a terminal glyph naming the external adapter, per turn — built-in and unrecorded turns stay silent, so an unmarked stretch reads as the default runtime, issue #818 — same slot live and settled, so the settle swap moves nothing); the agent-activation head (the turn's agent-initiated skill activations as bare tone-colored lifecycle glyphs, issues #722/#727 — same slot live and settled, so the settle swap moves nothing); the stream header (the active-dataset chip — `badge-primary` — plus skill-drift notes, `{typography.caption}` `{colors.muted-foreground}`); per-round blocks — a thinking fold (chevron toggle + honest duration label in `{typography.caption}` `{colors.muted-foreground}`; the expanded block is a `{colors.muted}`-surfaced, `{rounded.md}` 8px-padded, height-capped scroll box), connective prose (`{typography.body-md}` `{colors.ink}`) rendered as markdown (issue #746) — body line-height floats a step above the body-md token at 1.75 (`leading-[1.75]`, issue #828), since CJK discourse reads cramped at the token's 1.5 once answers run long; blocks sit on a 16px rhythm owned outright by the prose root's `space-y-4` — the mapped blocks that sit directly under the root carry no margins of their own, since any `m-0` would outrank the selector and flatten the rhythm back to flush blocks; while a round streams, a block caret trails its last block (the " ▋" glyph set through the streamdown caret token `--streamdown-caret`, suppressed while the last block is an unclosed fence, issue #1128), and the streaming prose's words cascade in — the streamdown animate pass wraps each newly arrived word in a 150ms opacity fade (word separation, the library's stagger defaults; issue #1137), skipping code blocks and the chart fence (inline code chips do cascade), with `prefers-reduced-motion` cutting the cascade off (the library ships no such handling of its own); headings compress to a compact ladder instead of full-size document headings (h1 at 17px stepping down 1px per level, h4 and below at body size gaining weight only; weight caps at 600), bullet/numbered lists, left-ruled blockquotes, GFM pipe tables in a hairline-bordered horizontal-scroll container, inline code as `code-inline` chips, fenced code as `code-block` surfaces, embedded HTML shown as raw tag text (never rendered), images degraded to their alt text with the URL beside it (the CSP blocks remote fetches), and http(s) links opened in the OS default browser — an opener failure surfaces a caption-sized live note beside the link — while every other scheme degrades to plain text with its surviving target — and the round's call rows on a 1px `{colors.border}` left rail (tool name + operation badge + a truncated monospace summary); then the outcome body — on Textual turns it renders through the same markdown pipeline as the connective prose (issue #827), with the Clarify/Refuse kind badge standing on its own `{typography.caption}` row ahead of the prose (the Agent kind carries no badge — its body is the reply); on Materialized turns the terminal text rides the same pipeline (issue #847) between the result link row and the inline preview card, in the same link-row, prose, note rhythm the Textual face uses; on either face the assumption note trails the prose when the turn carries one (a reserved slot — no live agent source emits one, so it renders only on turns persisted before #847) — and the closing meta row (the always-visible usage pill when the turn carries usage — a muted `{rounded.pill}` pill naming the turn's derived total (input + output) as a fixed-scale K/M absolute number, opening a popover whose bucket rows read muted labels against tabular-nums foreground figures (input with its cache-read split and hit rate, cache write, output, reasoning), ADR-0129/0130; the delegation dialog's header carries the sub-agent's subtotal — hover-revealed reply copy + settle stamp, plus the outcome glyph on Materialized/Textual turns; Failed/Cancelled turns instead close on one content-width tinted outcome card — `border-destructive/40` + `bg-destructive/10` with the glyph + reason on the card head and the technical-details fold inside for Failed, the same shape over `{colors.muted}` for Cancelled). Live rounds stream their rows unfurled on the shared rail chrome; the settled card tucks its whole process face — the per-round thinking folds, connective prose, and call rows — behind one collapsed turn-level process fold head (the outcome word + the turn's frozen wall-clock duration, `{typography.caption}` `{colors.muted-foreground}`; no head when the trace carries nothing at all), so the settled card reads question → one process head → answer, while expanding mounts the incumbent per-round blocks verbatim (the long-rail posture, ADR-0078, issue #1282).
 

@@ -15,8 +15,9 @@ import { mergeCeiling } from "./layoutBounds";
 
 const STORAGE_KEY = "toptopduck.sidebar-width";
 
-/** Default sidebar width in pixels (matches the CSS fallback). */
-export const SIDEBAR_DEFAULT_WIDTH = 238;
+/** Default sidebar width in pixels (matches the CSS fallback). Above the
+ *  840px-min-window ceiling (240), so the factory entry re-clamps narrow. */
+export const SIDEBAR_DEFAULT_WIDTH = 280;
 
 /** Minimum resizable width -- keeps session entries readable. */
 const MIN_WIDTH = 238;

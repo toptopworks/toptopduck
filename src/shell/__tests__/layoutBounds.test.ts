@@ -17,7 +17,7 @@ describe("layoutBounds", () => {
   });
 
   it("sidebar ceiling = shell width − rail floor − workspace floor", () => {
-    // Default 1024px window: 1024 − 280 − 320 = 424.
+    // A 1024px shell: 1024 − 280 − 320 = 424.
     expect(sidebarMaxWidth(1024)).toBe(424);
     // New minimum window width 840: 840 − 600 = 240 — still above the 238
     // static floor, so all three column floors stay simultaneously

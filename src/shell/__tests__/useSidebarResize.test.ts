@@ -39,7 +39,9 @@ describe("useSidebarResize", () => {
   it("clamps a stored width below the minimum to the minimum", () => {
     localStorage.setItem(STORAGE_KEY, "100");
     const { result } = renderHook(() => useSidebarResize());
-    expect(result.current.width).toBe(SIDEBAR_DEFAULT_WIDTH);
+    // 238 = the static floor (MIN_WIDTH), pinned as a literal like the 518
+    // ceiling asserts above (default no longer equals the floor).
+    expect(result.current.width).toBe(238);
   });
 
   it("clamps a stored width above the maximum to the maximum", () => {
@@ -94,7 +96,8 @@ describe("useSidebarResize", () => {
     act(() => {
       window.dispatchEvent(new PointerEvent("pointermove", { clientX: 50 }));
     });
-    expect(result.current.width).toBe(SIDEBAR_DEFAULT_WIDTH);
+    // 238 = the static floor (MIN_WIDTH), pinned as a literal.
+    expect(result.current.width).toBe(238);
 
     // Above maximum
     act(() => {
@@ -189,7 +192,7 @@ describe("useSidebarResize", () => {
       } as unknown as React.PointerEvent);
     });
 
-    // Sidebar starts at default (238). Move to 300 → delta = 62.
+    // Sidebar starts at default (280). Move to 300 → delta = 20.
     act(() => {
       window.dispatchEvent(new PointerEvent("pointermove", { clientX: 300 }));
     });
@@ -198,11 +201,14 @@ describe("useSidebarResize", () => {
       window.dispatchEvent(new PointerEvent("pointermove", { clientX: 350 }));
     });
 
-    expect(deltas).toEqual([62, 50]);
+    expect(deltas).toEqual([20, 50]);
   });
 
   it("does not fire onDelta when delta is zero (clamped to same value)", () => {
     const onDelta = vi.fn();
+    // Seed the static floor as the current width so the clamped move
+    // collapses back onto it (the 280 default no longer sits at the floor).
+    localStorage.setItem(STORAGE_KEY, "238");
     const { result } = renderHook(() => useSidebarResize({ onDelta }));
 
     act(() => {
@@ -211,7 +217,8 @@ describe("useSidebarResize", () => {
       } as unknown as React.PointerEvent);
     });
 
-    // clientX below MIN_WIDTH → clamped to 238 (the current width) → delta = 0.
+    // clientX below the floor clamps back to the stored 238 (the current
+    // width) → delta = 0.
     act(() => {
       window.dispatchEvent(new PointerEvent("pointermove", { clientX: 50 }));
     });
@@ -242,7 +249,7 @@ describe("useSidebarResize", () => {
       } as unknown as React.PointerEvent);
     });
 
-    // Move to 300 first (delta = 62).
+    // Move to 300 first (delta = 20).
     act(() => {
       window.dispatchEvent(new PointerEvent("pointermove", { clientX: 300 }));
     });
@@ -251,7 +258,7 @@ describe("useSidebarResize", () => {
       window.dispatchEvent(new PointerEvent("pointermove", { clientX: 260 }));
     });
 
-    expect(deltas).toEqual([62, -40]);
+    expect(deltas).toEqual([20, -40]);
   });
 
   it("onDelta is optional — hook works without it", () => {
@@ -354,10 +361,12 @@ describe("useSidebarResize", () => {
   });
 
   it("window widen does not grow the live width (one-way re-clamp)", () => {
+    // The initial ceiling must sit at or above the 280 default, or the
+    // cold-start load clamp would mask the default-width assertion.
     const { result, rerender } = renderHook(
       ({ getMaxWidth }: { getMaxWidth: () => number | undefined }) =>
         useSidebarResize({ getMaxWidth }),
-      { initialProps: { getMaxWidth: () => 240 } },
+      { initialProps: { getMaxWidth: () => 300 } },
     );
     expect(result.current.width).toBe(SIDEBAR_DEFAULT_WIDTH);
 
