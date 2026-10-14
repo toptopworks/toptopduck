@@ -18,7 +18,7 @@ import { railMaxWidth, sidebarMaxWidth } from "../layoutBounds";
 
 /** Simulated shell width (px) — the default window width; mutable because
  *  the entry-3 scenario shrinks the window mid-test. */
-let shellWidth = 1024;
+let shellWidth = 1200;
 
 // Bridge standing in for the measured DOM: the rail's ceiling reads the
 // track host (shell minus sidebar) and lags one drag event behind the
@@ -114,8 +114,10 @@ describe("column resize composition", () => {
     // The premise needs a shell narrow enough that the sidebar's availability
     // ceiling (shell − 600) sits below its static max (518), and wide enough
     // that reaching it yields a rail delta (≥ 180) that bottoms the rail out;
-    // the 1200 default window clears the first bound, and below ~1060 the
-    // delta falls short — this scenario pins the 1100 shell.
+    // the 1200 default window overshoots the first bound (its 600 ceiling
+    // exceeds the 518 static max, so the static max binds and the sum
+    // assertion breaks), and below ~1060 the delta falls short — this
+    // scenario pins the 1100 shell.
     shellWidth = 1100;
     const { result } = renderHook(() => useColumnPair());
     act(() => {
@@ -188,8 +190,9 @@ describe("column resize composition", () => {
     // path clamps it to 240 before first render.
     expect(result.current.sidebar.width).toBe(240);
     // The layout settles (H = 840 - 240 = 600 -> ceiling 280) and the
-    // rail's initial container observation re-clamps 460 -> 280. The
-    // bridge already reads the factory sidebar, so no manual sync needed.
+    // rail's initial container observation re-clamps 460 -> 280. The load
+    // clamp bypasses onDelta, so the bridge syncs by hand like entries 1/3.
+    sidebarWidthLive = 240;
     act(() => fireRailContainerChange?.());
     expect(result.current.rail.width).toBe(280);
     // 240 + 280 = 840 - 320: the workspace keeps exactly its floor.

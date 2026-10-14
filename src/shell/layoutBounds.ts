@@ -1,7 +1,7 @@
 // Width algebra for the three-column session shell (sidebar / conversation
 // rail / workspace), issue #770. The 320px workspace floor matches the
 // "minimum usable column" convention — the conversation rail's 320px
-// flex-basis floor (issue #350; DESIGN.md's conversation-rail width token)
+// flex-basis floor (issue #350; the rail's pre-#1286 320px width token)
 // is the prior art. The CSS side mirrors this constant as
 // --workspace-min-width on .shell (styles.css cross-references it).
 

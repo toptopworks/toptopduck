@@ -192,7 +192,8 @@ describe("useRailResize", () => {
 
   it("adjustWidth clamps to COMPENSATED_MIN_WIDTH (280), not MIN_WIDTH (350)", () => {
     const { result } = renderHook(() => useRailResize());
-    // Push from 460 down past 280 — should stop at 280, not 460.
+    // Push from 460 down past 280 — should stop at 280
+    // (COMPENSATED_MIN_WIDTH), not 350 (MIN_WIDTH).
     act(() => {
       result.current.adjustWidth(-200);
     });
@@ -279,7 +280,7 @@ describe("useRailResize", () => {
         clientX: 500,
       } as unknown as React.PointerEvent);
     });
-    // 350 + 500 = 850 → min(600, 466) = 466.
+    // 460 + 500 = 960 → min(600, 466) = 466.
     act(() => {
       window.dispatchEvent(new PointerEvent("pointermove", { clientX: 1000 }));
     });
@@ -389,6 +390,9 @@ describe("useRailResize", () => {
     let ceiling = 466;
     const result = renderWithTarget(() => ceiling);
     act(() => fireContainerChange?.()); // initial observation: no-op (460 <= 466)
+    // A ceiling above the default leaves the cold-start width untouched —
+    // the wide-shell half of the no-re-clamp claim, pinned not narrated.
+    expect(result.current.width).toBe(RAIL_DEFAULT_WIDTH);
     ceiling = 280;
     act(() => fireContainerChange?.());
     expect(result.current.width).toBe(280);
@@ -425,7 +429,7 @@ describe("useRailResize", () => {
     act(() => fireContainerChange?.()); // mid-drag container shrink
     expect(result.current.width).toBe(280);
     // Further moves recompute from the re-anchored width. Without the
-    // re-anchor, startWidth(466) + delta with floor min(350, 466) = 350
+    // re-anchor, startWidth(460) + delta with floor min(350, 466) = 350
     // would clamp back up to 350 (inverted range) and the handle would
     // jump outside the rendered rail again.
     act(() => {

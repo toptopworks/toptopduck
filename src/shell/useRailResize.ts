@@ -25,7 +25,9 @@ import { COMPENSATED_MIN_WIDTH, mergeCeiling } from "./layoutBounds";
 /** Default rail width in pixels. Within the clamp range and at or below the
  *  availability ceiling for windows at the 1200px default width (track host
  *  920 minus the 320 workspace floor = 600), so the cold-start width needs
- *  no re-clamp there; narrower windows re-clamp via the container observer. */
+ *  no re-clamp there at the factory sidebar; narrower windows — or a stored
+ *  sidebar wide enough to sink the ceiling below the default — re-clamp via
+ *  the container observer. */
 export const RAIL_DEFAULT_WIDTH = 460;
 
 /** Minimum width when dragged directly via the rail handle -- protects the

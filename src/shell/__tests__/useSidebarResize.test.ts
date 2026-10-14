@@ -206,6 +206,9 @@ describe("useSidebarResize", () => {
 
   it("does not fire onDelta when delta is zero (clamped to same value)", () => {
     const onDelta = vi.fn();
+    // Seed the static floor as the current width so the clamped move
+    // collapses back onto it (the 280 default no longer sits at the floor).
+    localStorage.setItem(STORAGE_KEY, "238");
     const { result } = renderHook(() => useSidebarResize({ onDelta }));
 
     act(() => {
@@ -214,9 +217,10 @@ describe("useSidebarResize", () => {
       } as unknown as React.PointerEvent);
     });
 
-    // clientX equal to the current width → same value → delta = 0.
+    // clientX below the floor clamps back to the stored 238 (the current
+    // width) → delta = 0.
     act(() => {
-      window.dispatchEvent(new PointerEvent("pointermove", { clientX: 280 }));
+      window.dispatchEvent(new PointerEvent("pointermove", { clientX: 50 }));
     });
 
     expect(onDelta).not.toHaveBeenCalled();

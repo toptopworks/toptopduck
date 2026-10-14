@@ -290,7 +290,7 @@ function LivePre({ node }: { node?: HastElement }) {
 // wrapper div, out of the root's space-y reach.)
 const BASE_MARKDOWN_COMPONENTS: Components = {
   // The chat-stream heading ladder: full-size document headings would shout
-  // over the discourse in the 320px rail, so markdown headings compress -- h1
+  // over the discourse in the 460px rail, so markdown headings compress -- h1
   // lands at 17px and each level steps down 1px; h4 and below stay at body
   // size and only gain weight. Weight caps at 600 (DESIGN.md forbids 700).
   h1: ({ children }) => <h1 className="text-[1.0625rem] font-semibold">{children}</h1>,
