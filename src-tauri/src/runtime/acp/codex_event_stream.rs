@@ -567,7 +567,7 @@ pub(super) fn run_codex_event_stream(
     // turn = one thinking wait).
     on_phase(TurnPhase::Thinking { attempt: 1 });
 
-    let mut pump = JsonPump::new(step_cap, clock.clone());
+    let mut pump = JsonPump::new(step_cap, clock.clone(), input.model.clone());
 
     let mut termination: Option<Termination>;
     // Windowed auto-continuation (ADR-0128): the CLI's own `model_max_turns`
@@ -749,10 +749,15 @@ struct JsonPump {
     last_window_usage: Option<crate::model::TokenUsage>,
     /// Held while `exec_depth` > 0 (the open execution window).
     exec_freeze: Option<crate::session::progress::FreezeGuard>,
+    /// The session's model id (ADR-0130 Decision 4, #1290): the
+    /// occupancy denominator's catalog
+    /// key. `None` when the turn input carried no model (the CLI's own
+    /// default then serves, unidentifiable) -- the reading stays hollow.
+    model: Option<String>,
 }
 
 impl JsonPump {
-    fn new(step_cap: u32, clock: Option<Arc<ProgressClock>>) -> Self {
+    fn new(step_cap: u32, clock: Option<Arc<ProgressClock>>, model: Option<String>) -> Self {
         Self {
             tracker: RoundTracker::new(),
             thread_id: None,
@@ -763,6 +768,7 @@ impl JsonPump {
             usage_delta: CumulativeUsageDelta::new(),
             turn_usage: crate::model::TokenUsage::default(),
             last_window_usage: None,
+            model,
         }
     }
 
@@ -790,12 +796,17 @@ impl JsonPump {
     /// context). The cumulative counter (the BILLING fallback) never
     /// produces a reading; `None` when no window completed (fail-closed,
     /// no zero reading) -- a hollow ring, never a fabricated zero.
+    /// ADR-0130 Decision 4 (#1290):
+    /// the denominator stamps here off the session's model id -- an absent
+    /// or uncataloged id stays hollow.
     fn occupancy(&self) -> Option<crate::model::OccupancySnapshot> {
         self.last_window_usage.map(|last| {
-            crate::model::OccupancySnapshot::from_last_roundtrip(
+            let mut snapshot = crate::model::OccupancySnapshot::from_last_roundtrip(
                 last,
                 Some(crate::model::Protocol::Openai),
-            )
+            );
+            crate::provider::context_window::stamp(&mut snapshot, self.model.as_deref());
+            snapshot
         })
     }
 
@@ -1660,7 +1671,7 @@ mod tests {
     /// the terminal text, not a round of its own.
     #[test]
     fn rounds_carry_prose_and_calls() {
-        let mut pump = JsonPump::new(24, None);
+        let mut pump = JsonPump::new(24, None, None);
         let mut phases = Vec::new();
         // Round 1: prose + one command (its result implicit -- success
         // defaults to true).
@@ -1700,7 +1711,7 @@ mod tests {
     /// settle; each fragment streams live as its own TextDelta (ADR-0126).
     #[test]
     fn same_round_fragments_merge_into_one_prose() {
-        let mut pump = JsonPump::new(24, None);
+        let mut pump = JsonPump::new(24, None, None);
         let mut phases = Vec::new();
         pump.fold(
             CodexEvent::AgentMessage {
@@ -1745,7 +1756,7 @@ mod tests {
     /// TextDelta.
     #[test]
     fn call_without_prose_keeps_round_text_empty() {
-        let mut pump = JsonPump::new(24, None);
+        let mut pump = JsonPump::new(24, None, None);
         let mut phases = Vec::new();
         pump.fold(
             CodexEvent::CommandExecution {
@@ -1772,7 +1783,7 @@ mod tests {
     /// only live source. A namespaced native call keeps its live pair.
     #[test]
     fn gateway_routed_mcp_call_is_silent_live_native_keeps_its_pair() {
-        let mut pump = JsonPump::new(24, None);
+        let mut pump = JsonPump::new(24, None, None);
         let mut phases = Vec::new();
         pump.fold(
             CodexEvent::McpToolCall {
@@ -1797,7 +1808,7 @@ mod tests {
 
         // The namespaced counterpart (a native MCP server codex reaches
         // itself): no gateway in the path, live pair intact.
-        let mut pump = JsonPump::new(24, None);
+        let mut pump = JsonPump::new(24, None, None);
         let mut phases = Vec::new();
         pump.fold(
             CodexEvent::McpToolCall {
@@ -1823,7 +1834,7 @@ mod tests {
     /// streams its own delta (the terminal round's first live text).
     #[test]
     fn live_order_delta_then_call_then_round_pointer() {
-        let mut pump = JsonPump::new(24, None);
+        let mut pump = JsonPump::new(24, None, None);
         let mut phases = Vec::new();
         pump.fold(
             CodexEvent::AgentMessage {
@@ -1874,7 +1885,7 @@ mod tests {
     /// live-silent (issue #1242), pinned by its own test.
     #[test]
     fn mcp_tool_call_fold_delta_precedes_phase_pair() {
-        let mut pump = JsonPump::new(24, None);
+        let mut pump = JsonPump::new(24, None, None);
         let mut phases = Vec::new();
         pump.fold(
             CodexEvent::AgentMessage {
@@ -1942,7 +1953,7 @@ mod tests {
     /// controlled excerpt.
     #[test]
     fn failed_mcp_tool_call_anchor_truncates_at_trace_excerpt_max() {
-        let mut pump = JsonPump::new(24, None);
+        let mut pump = JsonPump::new(24, None, None);
         pump.fold(
             CodexEvent::McpToolCall {
                 call_id: "item_1".into(),
@@ -1969,7 +1980,7 @@ mod tests {
     /// deltas.
     #[test]
     fn cross_round_prose_stays_in_its_round() {
-        let mut pump = JsonPump::new(24, None);
+        let mut pump = JsonPump::new(24, None, None);
         let mut phases = Vec::new();
         for (text, call) in [("checking", "call_1"), ("verifying", "call_2")] {
             pump.fold(CodexEvent::AgentMessage { text: text.into() }, &mut |p| {
@@ -2004,7 +2015,7 @@ mod tests {
     /// records no round.
     #[test]
     fn call_less_turn_answers_with_all_prose() {
-        let mut pump = JsonPump::new(24, None);
+        let mut pump = JsonPump::new(24, None, None);
         pump.fold(
             CodexEvent::AgentMessage {
                 text: "part one ".into(),
@@ -2029,7 +2040,7 @@ mod tests {
     /// degrade shape the answer path already returns.
     #[test]
     fn turn_completed_without_prose_yields_empty_text() {
-        let mut pump = JsonPump::new(24, None);
+        let mut pump = JsonPump::new(24, None, None);
         let end = pump.fold(CodexEvent::TurnCompleted { usage: None }, &mut |_| {});
         assert_eq!(end, Some(Termination::Text(String::new())));
     }
@@ -2039,7 +2050,7 @@ mod tests {
     /// semantics, the claude path's EOF precedent).
     #[test]
     fn eof_after_batch_answers_with_trailing_stretch_only() {
-        let mut pump = JsonPump::new(24, None);
+        let mut pump = JsonPump::new(24, None, None);
         let mut phases = Vec::new();
         pump.fold(
             CodexEvent::AgentMessage {
@@ -2085,7 +2096,7 @@ mod tests {
     /// push_prose).
     #[test]
     fn empty_agent_message_opens_no_round() {
-        let mut pump = JsonPump::new(24, None);
+        let mut pump = JsonPump::new(24, None, None);
         let mut phases = Vec::new();
         pump.fold(
             CodexEvent::AgentMessage {
@@ -2126,7 +2137,7 @@ mod tests {
     /// still sits in its round slot.
     #[test]
     fn eof_after_batch_without_trailing_falls_back_to_full_text() {
-        let mut pump = JsonPump::new(24, None);
+        let mut pump = JsonPump::new(24, None, None);
         pump.fold(
             CodexEvent::AgentMessage {
                 text: "checking".into(),
@@ -2158,7 +2169,7 @@ mod tests {
     /// round pointer appears mid-batch.
     #[test]
     fn consecutive_commands_share_one_round() {
-        let mut pump = JsonPump::new(24, None);
+        let mut pump = JsonPump::new(24, None, None);
         let mut phases = Vec::new();
         pump.fold(
             CodexEvent::AgentMessage {
@@ -2214,7 +2225,7 @@ mod tests {
     /// attribution ruling).
     #[test]
     fn reasoning_folds_into_round_thinking_pinned_zero() {
-        let mut pump = JsonPump::new(24, None);
+        let mut pump = JsonPump::new(24, None, None);
         let mut phases = Vec::new();
         pump.fold(
             CodexEvent::Reasoning {
@@ -2274,7 +2285,7 @@ mod tests {
     fn reasoning_after_last_batch_survives_turn_end_freeze() {
         // Shape A: reasoning -> closing prose. The prose rides the terminal
         // text; the thinking stays on the round.
-        let mut pump = JsonPump::new(24, None);
+        let mut pump = JsonPump::new(24, None, None);
         let mut phases = Vec::new();
         pump.fold(
             CodexEvent::CommandExecution {
@@ -2312,7 +2323,7 @@ mod tests {
         );
 
         // Shape B: reasoning-only trailing round -- no prose follows.
-        let mut pump = JsonPump::new(24, None);
+        let mut pump = JsonPump::new(24, None, None);
         let mut phases = Vec::new();
         pump.fold(
             CodexEvent::CommandExecution {
@@ -2344,7 +2355,7 @@ mod tests {
     /// to Other at the boundary (issue #807 acceptance criteria 6).
     #[test]
     fn reasoning_started_variant_never_doubles() {
-        let mut pump = JsonPump::new(24, None);
+        let mut pump = JsonPump::new(24, None, None);
         let mut phases = Vec::new();
         pump.fold(
             fixture_event(
@@ -2371,7 +2382,7 @@ mod tests {
     /// behavior, not an observed shape.
     #[test]
     fn two_reasoning_items_in_one_round_concatenate_verbatim() {
-        let mut pump = JsonPump::new(24, None);
+        let mut pump = JsonPump::new(24, None, None);
         let mut phases = Vec::new();
         for text in ["block one", "block two"] {
             pump.fold(CodexEvent::Reasoning { text: text.into() }, &mut |p| {
@@ -2391,7 +2402,7 @@ mod tests {
     /// keeps the code (the cross-turn retrospection surface renders it).
     #[test]
     fn nonzero_exit_lands_failed_trace_row() {
-        let mut pump = JsonPump::new(24, None);
+        let mut pump = JsonPump::new(24, None, None);
         pump.fold(
             CodexEvent::CommandExecution {
                 call_id: "item_7".into(),
@@ -2412,7 +2423,7 @@ mod tests {
     /// succeeded row (the pre-#804 default-true behavior).
     #[test]
     fn unknown_exit_stays_succeeded() {
-        let mut pump = JsonPump::new(24, None);
+        let mut pump = JsonPump::new(24, None, None);
         pump.fold(
             CodexEvent::CommandExecution {
                 call_id: "call_1".into(),
@@ -2437,7 +2448,7 @@ mod tests {
     /// could fire (issue #804 acceptance criteria 1-4).
     #[test]
     fn measured_turn_sequence_settles_as_text() {
-        let mut pump = JsonPump::new(24, None);
+        let mut pump = JsonPump::new(24, None, None);
         let mut phases = Vec::new();
         let mut termination = None;
         for line in MEASURED_TURN_NDJSON {
@@ -2522,7 +2533,7 @@ mod tests {
     /// re-latches + fails the turn closed (no partial bill).
     #[test]
     fn token_count_differences_the_boundary_and_fails_closed_on_resume() {
-        let mut pump = JsonPump::new(24, None);
+        let mut pump = JsonPump::new(24, None, None);
         pump.fold(token_count_event(100, 80, 50, 20), &mut |_| {});
         pump.fold(token_count_event(150, 110, 70, 25), &mut |_| {});
         let usage = pump.settle_usage().expect("a monotone chain settles");
@@ -2557,7 +2568,7 @@ mod tests {
                 ..Default::default()
             }),
         };
-        let mut pump = JsonPump::new(24, None);
+        let mut pump = JsonPump::new(24, None, None);
         pump.fold(token_count_event(100, 0, 50, 0), &mut |_| {});
         let end = pump.fold(terminal(30, 12), &mut |_| {});
         assert_eq!(end, Some(Termination::Text(String::new())));
@@ -2584,14 +2595,16 @@ mod tests {
             }),
         };
         // Two windows: the LAST window's derived total is the reading.
-        let mut pump = JsonPump::new(24, None);
+        // #1290: a cataloged session model stamps the denominator -- the
+        // catalog's answer for `gpt-5` rides the same reading.
+        let mut pump = JsonPump::new(24, None, Some("gpt-5".into()));
         pump.fold(terminal(30, 12), &mut |_| {});
         pump.fold(terminal(5, 3), &mut |_| {});
         assert_eq!(
             pump.occupancy(),
             Some(crate::model::OccupancySnapshot {
-                tokens: 8, // 5 + 3: the OpenAI arm's derived total
-                limit: None,
+                tokens: 8,            // 5 + 3: the OpenAI arm's derived total
+                limit: Some(400_000), // the context-window catalog's gpt-5 row
             })
         );
         // The BILLING channel is untouched by the latch: the windows' sum
@@ -2601,7 +2614,9 @@ mod tests {
         assert_eq!(usage.total.output_tokens, 15);
         // A turn cut after its first completed window keeps that window's
         // reading (the same already-reported rule the usage sum applies).
-        let mut pump = JsonPump::new(24, None);
+        // #1290: an uncataloged model id never stamps a window -- the
+        // hollow ring is the miss's terminal state.
+        let mut pump = JsonPump::new(24, None, Some("doubao-1.5-pro".into()));
         pump.fold(terminal(30, 12), &mut |_| {});
         assert_eq!(
             pump.occupancy(),
@@ -2612,7 +2627,7 @@ mod tests {
         );
         // No completed window: fail-closed -- and the cumulative counter
         // (the BILLING fallback) never produces a reading.
-        let mut pump = JsonPump::new(24, None);
+        let mut pump = JsonPump::new(24, None, None);
         pump.fold(token_count_event(100, 0, 50, 0), &mut |_| {});
         let usage = pump
             .settle_usage()

@@ -1088,4 +1088,47 @@ mod tests {
         let occupancy = fold.occupancy().expect("the record latched");
         assert_eq!(occupancy.tokens, 80);
     }
+
+    /// #1290 (Decision 4 as calibrated): the built-in settle's denominator
+    /// stamp -- the windowless reading takes the catalog's answer for the
+    /// serving model at the same settle the numerator froze; a catalog miss
+    /// or the bridged face's absent name stays hollow. Pinned at the
+    /// finish seam (where the stamp lives), not the pump helpers.
+    #[test]
+    fn finish_stamps_the_denominator_off_the_serving_model() {
+        use crate::session::loop_contract::Termination;
+        use crate::session::loop_runtime::adapter::SharedTurnState;
+
+        let stamped = |model: Option<&str>| {
+            let channel = Arc::new(CompletionChannel::new());
+            let sink = noop_sink();
+            let state = Arc::new(SharedTurnState::new());
+            let mut fold = EventFold::new(Some(Protocol::Anthropic));
+            fold.event(&close_item_with(rig_usage(50, 0, 0, 10)), &channel, &sink);
+            super::super::finish(fold, &state, Termination::Text("done".into()), false, model)
+                .occupancy
+        };
+        assert_eq!(
+            stamped(Some("claude-sonnet-4-5")),
+            Some(crate::model::OccupancySnapshot {
+                tokens: 50,
+                limit: Some(200_000),
+            })
+        );
+        // A catalog miss and the bridged face's absent name: hollow.
+        assert_eq!(
+            stamped(Some("doubao-1.5-pro")),
+            Some(crate::model::OccupancySnapshot {
+                tokens: 50,
+                limit: None,
+            })
+        );
+        assert_eq!(
+            stamped(None),
+            Some(crate::model::OccupancySnapshot {
+                tokens: 50,
+                limit: None,
+            })
+        );
+    }
 }

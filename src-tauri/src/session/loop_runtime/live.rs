@@ -97,13 +97,17 @@ fn live_runtime(facts: TurnModelFacts) -> Result<LoopRuntime, Termination> {
                 .completion_model(&facts.model),
         ),
     };
-    // The stamped output cap (issue #1001) reads the SAME facts that built
-    // the handle above, so the cap is keyed on the exact model serving the
-    // turn -- a profile switch lands handle + cap together, never apart.
+    // The stamped output cap (issue #1001) and the serving model name
+    // (ADR-0130 Decision 4's occupancy-denominator key, #1290) reads the
+    // SAME facts that built
+    // the handle above, so both are keyed on the exact model serving the
+    // turn -- a profile switch lands handle + cap + denominator together,
+    // never apart.
     Ok(LoopRuntime::live(
         handle,
         facts.protocol,
         output_cap::output_token_cap(&facts.model),
+        facts.model.clone(),
     ))
 }
 
@@ -232,8 +236,26 @@ mod tests {
         // and it refuses on facts this provider does not present.
         let runtime = turn_loop_for(provider).expect("the facts-less fork bridges, never refuses");
         // Issue #1001: the bridged face carries no model-keyed cap -- no
-        // facts, no stamp; the request keeps its assembled cap.
+        // facts, no stamp; the request keeps its assembled cap. #1290: no
+        // name either -- its occupancy readings stay hollow.
         assert_eq!(runtime.output_cap, None);
+        assert_eq!(runtime.model_name, None);
+    }
+
+    /// #1290: the live factory carries the serving model's NAME beside the
+    /// handle and the cap -- the occupancy denominator stamp keys on the
+    /// exact model that served the turn, the same never-drifts posture the
+    /// cap pin above holds.
+    #[test]
+    fn live_factory_carries_the_model_name_for_the_occupancy_stamp() {
+        let runtime = live_runtime(TurnModelFacts {
+            protocol: Protocol::Anthropic,
+            base_url: "https://api.anthropic.com".into(),
+            model: "glm-4.6".into(),
+            api_key: Some("sk-test".into()),
+        })
+        .expect("a fully-present profile builds the live runtime");
+        assert_eq!(runtime.model_name.as_deref(), Some("glm-4.6"));
     }
 
     /// Issue #1001's wiring half, pinned: the live factory stamps the
@@ -295,11 +317,12 @@ mod tests {
     /// the 2nd+ call, regardless of whether another test already
     /// initialized the client (tests run in parallel, so `before` may
     /// already be non-zero) -- the probe face's `EGRESS_AGENT` pin is the
-    /// precedent this mirrors. The `<= 2` bound tolerates one racing first
-    /// build landing between the snapshots: the #1001 live-cap pin is now
-    /// a concurrent Ok-path caller of `egress_client` (it constructs the
-    /// live runtime, which builds), where the other live tests refuse at
-    /// the key/scheme gates before any build.
+    /// precedent this mirrors. The `<= 3` bound tolerates racing first
+    /// builds landing between the snapshots: the #1001 live-cap pin and
+    /// the #1290 model-name pin are now concurrent Ok-path callers of
+    /// `egress_client` (each constructs the live runtime, which builds),
+    /// where the other live tests refuse at the key/scheme gates before
+    /// any build.
     #[test]
     fn egress_client_builds_only_once_across_calls() {
         let before = EGRESS_CLIENT_BUILDS.load(std::sync::atomic::Ordering::Relaxed);
@@ -310,7 +333,7 @@ mod tests {
         let after_third = EGRESS_CLIENT_BUILDS.load(std::sync::atomic::Ordering::Relaxed);
 
         assert!(
-            after_first - before <= 2,
+            after_first - before <= 3,
             "the first call builds the client at most once (got {} builds)",
             after_first - before
         );

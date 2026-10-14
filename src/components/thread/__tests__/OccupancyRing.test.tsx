@@ -22,14 +22,11 @@ vi.mock("../../../api", () => ({ conversation: vi.fn() }));
 // contract under test. TooltipProvider rides every render -- the app hangs
 // one provider at the shell (ADR-0050/0054) and Radix's Root throws
 // without it (the CopyButton/RoundProse precedent).
-function renderRing(
-  entries: readonly ThreadEntry[] | null,
-  contextLimit?: number | null,
-) {
+function renderRing(entries: readonly ThreadEntry[] | null) {
   return render(
     <IntlProvider locale="en" messages={{}} onError={() => {}}>
       <TooltipProvider>
-        <OccupancyRing entries={entries} contextLimit={contextLimit} />
+        <OccupancyRing entries={entries} />
       </TooltipProvider>
     </IntlProvider>,
   );
@@ -69,10 +66,7 @@ describe("OccupancyRing three states (ADR-0130, issue #1272)", () => {
   });
 
   it("renders the hollow track without an arc when no denominator is known", async () => {
-    renderRing(
-      [turnEntry({ occupancy: { tokens: 9000, limit: null } })],
-      null,
-    );
+    renderRing([turnEntry({ occupancy: { tokens: 9000, limit: null } })]);
     const ring = screen.getByRole("button", { name: "Context occupancy" });
     const circles = ring.querySelectorAll("circle");
     // Track only -- no percentage arc (never a guessed denominator).
@@ -83,38 +77,31 @@ describe("OccupancyRing three states (ADR-0130, issue #1272)", () => {
     ).toBeInTheDocument();
   });
 
-  it("renders the percentage arc against the configured window (config denominator)", async () => {
-    renderRing(
-      [turnEntry({ occupancy: { tokens: 50_000, limit: null } })],
-      200_000,
-    );
+  it("renders the percentage arc against the snapshot's stamped window", async () => {
+    renderRing([turnEntry({ occupancy: { tokens: 50_000, limit: 200_000 } })]);
     const ring = screen.getByRole("button", { name: "Context occupancy" });
     const arc = ring.querySelectorAll("circle")[1];
     expect(arc).toBeDefined();
     expect(arc.getAttribute("stroke")).toBe("var(--primary)");
-    // 50K of 200K = 25% -- the single-line pill with both figures.
+    // 50K of 200K = 25% -- the single-line pill with both figures. The
+    // window rides the snapshot itself (a channel report or the backend's
+    // catalog stamp, #1290) -- the ring is a pure snapshot consumer.
     expect(
       (await hoverOpen()).getByText("25% · 50K / 200K of context used"),
     ).toBeInTheDocument();
   });
 
-  it("the reading's own window (ACP size) outranks the profile config", async () => {
-    renderRing(
-      [turnEntry({ occupancy: { tokens: 150_000, limit: 160_000 } })],
-      200_000,
-    );
-    // 150K of the snapshot's own 160K window, not of the config's 200K;
-    // floored like every K/M figure (93.75% reads 93.7, never rounds up).
+  it("the snapshot's own window is the denominator -- floored percentages", async () => {
+    renderRing([turnEntry({ occupancy: { tokens: 150_000, limit: 160_000 } })]);
+    // 150K of the snapshot's own 160K window; floored like every K/M
+    // figure (93.75% reads 93.7, never rounds up).
     expect(
       (await hoverOpen()).getByText("93.7% · 150K / 160K of context used"),
     ).toBeInTheDocument();
   });
 
   it("a non-positive snapshot window is the no-window shape, never a divide-by hazard", async () => {
-    renderRing(
-      [turnEntry({ occupancy: { tokens: 9000, limit: 0 } })],
-      null,
-    );
+    renderRing([turnEntry({ occupancy: { tokens: 9000, limit: 0 } })]);
     const ring = screen.getByRole("button", { name: "Context occupancy" });
     // Track only -- the glyph and the pill agree on hollow, never
     // "100% · ... / 0" under a windowless arc.
@@ -127,7 +114,6 @@ describe("OccupancyRing three states (ADR-0130, issue #1272)", () => {
   it("the arc takes the warning color above 70% and danger above 90%", () => {
     const warn = renderRing(
       [turnEntry({ occupancy: { tokens: 150_000, limit: 200_000 } })],
-      200_000,
     );
     expect(
       within(warn.container)
@@ -138,7 +124,6 @@ describe("OccupancyRing three states (ADR-0130, issue #1272)", () => {
     warn.unmount();
     const danger = renderRing(
       [turnEntry({ occupancy: { tokens: 190_000, limit: 200_000 } })],
-      200_000,
     );
     expect(
       within(danger.container)
@@ -161,23 +146,20 @@ describe("OccupancyRing three states (ADR-0130, issue #1272)", () => {
 
 describe("OccupancyRing pill shape and scope (ADR-0130, issue #1276)", () => {
   it("the pill carries the occupancy figure alone -- billing sums never enter it", async () => {
-    renderRing(
-      [
-        turnEntry({
-          occupancy: { tokens: 1_000, limit: 100_000 },
-          usage: {
-            total: {
-              input_tokens: 1_000,
-              cache_read_tokens: 400,
-              cache_write_tokens: 90,
-              output_tokens: 2_500,
-              reasoning_tokens: 12,
-            },
+    renderRing([
+      turnEntry({
+        occupancy: { tokens: 1_000, limit: 100_000 },
+        usage: {
+          total: {
+            input_tokens: 1_000,
+            cache_read_tokens: 400,
+            cache_write_tokens: 90,
+            output_tokens: 2_500,
+            reasoning_tokens: 12,
           },
-        }),
-      ],
-      null,
-    );
+        },
+      }),
+    ]);
     const pill = await hoverOpen();
     expect(pill.getByText("1% · 1K / 100K of context used")).toBeInTheDocument();
     // The session total and its technical fold retired from the popup:

@@ -135,12 +135,14 @@ fn text_reply_yields_text_outcome_and_init_model() {
     // ADR-0130 (issue #1274): the occupancy numerator lands end to end --
     // the scenario's assistant frame carries no usage, so the reading
     // rides the result-fallback arm (the Anthropic arm reads the input
-    // side alone), window None (Decision 4).
+    // side alone). The window arrives via the catalog stamp off the init
+    // model (Decision 4 as calibrated, #1290): claude-fake-4 rides the
+    // bare claude family row's 1M.
     assert_eq!(
         outcome.occupancy,
         Some(OccupancySnapshot {
             tokens: 1,
-            limit: None,
+            limit: Some(1_000_000),
         })
     );
 }

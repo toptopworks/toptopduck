@@ -96,8 +96,10 @@ fn catalog_output(model_name: &str) -> Option<u32> {
 /// would forward-capture them into the parent's retired-era ceiling
 /// (reproducing the original truncation bug for current flagships), so the
 /// hyphen boundary keeps dated variants and `-plus`/`-air`/`-flash`-style
-/// suffixes while dotted generations fall to the miss path.
-fn hits_family(normalized: &str, prefix: &str) -> bool {
+/// suffixes while dotted generations fall to the miss path. Shared with the
+/// context-window catalog (#1290) -- one family-boundary rule for both
+/// model-keyed catalogs.
+pub(crate) fn hits_family(normalized: &str, prefix: &str) -> bool {
     normalized.starts_with(prefix)
         && normalized
             .get(prefix.len()..)

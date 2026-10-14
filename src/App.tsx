@@ -24,7 +24,6 @@ import type { ComposerSessionFields } from "./session/useComposerState";
 import { COMPOSER_INPUT_ID, QuestionBar } from "./components/thread/QuestionBar";
 import { ComposerAuthModeChip } from "./components/thread/ComposerAuthModeChip";
 import { ComposerOccupancy } from "./components/thread/OccupancyRing";
-import { findActiveProfile } from "./lib/findActiveProfile";
 import { ComposerContextPanel } from "./components/thread/ComposerContextPanel";
 import { ComposerSkillChips } from "./components/thread/ComposerSkillChips";
 import {
@@ -398,13 +397,9 @@ export default function App() {
   // ADR-0130 (issue #1272): the composer occupancy ring -- the active
   // session's timeline is subscribed to the shared thread cache INSIDE the
   // ring's shell-side mount (App's body sits above the QueryClientProvider,
-  // so the useQuery cannot live here); the profile's configured window is
-  // the denominator the reading itself does not carry. null / absent on
-  // cold start: the ring renders nothing.
-  const activeContextLimit =
-    (appConfig != null
-      ? findActiveProfile(appConfig.provider)?.context_limit
-      : undefined) ?? null;
+  // so the useQuery cannot live here); the denominator rides the snapshot
+  // itself (#1290: a channel-reported window or the backend's catalog
+  // stamp). null / absent on cold start: the ring renders nothing.
   const composer = useComposerState(
     activeSessionId,
     activeSessionFields ?? IDLE_SESSION_FIELDS,
@@ -1282,10 +1277,7 @@ export default function App() {
                                 trailing cluster's head (before the runtime
                                 picker), not the leading controls -- keeps the
                                 reading adjacent to the send decision point. */}
-                            <ComposerOccupancy
-                              sessionId={activeSessionId}
-                              contextLimit={activeContextLimit}
-                            />
+                            <ComposerOccupancy sessionId={activeSessionId} />
                             {providerPicker ? (
                               <ComposerProviderPicker
                                 sessionId={activeSessionId}
