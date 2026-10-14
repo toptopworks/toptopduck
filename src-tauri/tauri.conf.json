@@ -7,8 +7,8 @@
   "build": {
     "frontendDist": "../dist",
     "devUrl": "http://localhost:1420",
-    "beforeDevCommand": "cargo build -p acp-bridge && npm run dev",
-    "beforeBuildCommand": "npm run build"
+    "beforeDevCommand": "cargo build -p acp-bridge && node scripts/stage-acp-bridge.mjs --debug && npm run dev",
+    "beforeBuildCommand": "cargo build -p acp-bridge --release && node scripts/stage-acp-bridge.mjs && npm run build"
   },
   "app": {
     "windows": [
@@ -36,6 +36,7 @@
   "bundle": {
     "active": true,
     "targets": "all",
+    "externalBin": ["binaries/toptopduck-acp-bridge"],
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
