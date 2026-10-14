@@ -19,7 +19,8 @@ pub mod app_config;
 pub mod approval;
 // Re-exported from the `bounded-line` workspace crate so every
 // `crate::bounded_line::` path stays put; the ACP bridge binary links the
-// same crate without linking this one (ADR-0085 zero-dependency bridge).
+// same crate without linking this one (ADR-0085: the bridge links no app
+// crate).
 pub(crate) use bounded_line::bounded_line;
 pub mod cancel;
 pub mod cli_tools;
