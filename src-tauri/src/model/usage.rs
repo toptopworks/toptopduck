@@ -153,10 +153,11 @@ pub struct OccupancySnapshot {
     /// happens once at the collection point). ACP: the occupancy snapshot's
     /// `used`.
     pub tokens: u64,
-    /// The denominator: the context window, when the channel reported one
-    /// (ACP `size`). The built-in channel carries `None` -- the window is a
-    /// config matter there (Decision 4: explicit `context_limit`, never
-    /// guessed).
+    /// The denominator: the context window, when one is known -- a window
+    /// the channel itself reported (ACP occupancy `size`) outranks the
+    /// catalog stamp the built-in / CLI collection points apply off the
+    /// serving model (#1290, Decision 4 as calibrated); unknown stays
+    /// `None`, the hollow ring.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub limit: Option<u64>,
 }

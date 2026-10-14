@@ -11,11 +11,12 @@ import type { OccupancySnapshot, ThreadEntry } from "../../types/thread";
 // cluster's head constant, ahead of the runtime picker (issue #1276) -- a
 // three-state reading whose every state maps an evidence shape, never a
 // guess:
-// - FULL ring: denominator known (the active profile's context_limit, or the
-//   ACP snapshot's own window) -- a percentage arc, warning above 70%,
-//   danger above 90%.
-// - HOLLOW ring: numerator only (a reading landed, no window) -- the track
-//   renders, no arc, no invented percentage.
+// - FULL ring: the snapshot carries a window (a channel-reported one, or
+//   the backend's catalog stamp off the serving model, #1290) -- a
+//   percentage arc, warning above 70%, danger above 90%.
+// - HOLLOW ring: numerator only (a reading landed, no window -- the model
+//   sat outside the context-window catalog) -- the track renders, no arc,
+//   no invented percentage.
 // - NOT RENDERED: no reading ever landed (the channel stayed fail-closed).
 // Hover opens the runtime picker's tooltip pill: a single line, the
 // occupancy figure alone -- the session total retired from it, the
@@ -35,10 +36,6 @@ export type OccupancyRingProps = {
   /** The timeline the reading derives from. Empty /
    * null (cold start, no active session) renders nothing. */
   entries: readonly ThreadEntry[] | null;
-  /** The active profile's configured context window (ADR-0130 Decision 4).
-   * Ignored when the reading itself carries a window (the ACP snapshot's
-   * size is the channel's own report). */
-  contextLimit?: number | null;
 };
 
 /** The latest occupancy reading in the timeline (the freshest measurement
@@ -54,18 +51,16 @@ function latestOccupancy(entries: readonly ThreadEntry[]): OccupancySnapshot | n
   return null;
 }
 
-export function OccupancyRing({ entries, contextLimit = null }: OccupancyRingProps) {
+export function OccupancyRing({ entries }: OccupancyRingProps) {
   const intl = useIntl();
   if (entries == null) return null;
   const occupancy = latestOccupancy(entries);
   // No reading ever reported: no ring at all (the not-rendered state).
   if (occupancy == null) return null;
-  // The denominator merge: the reading's own window (ACP) outranks the
-  // config; a non-positive window on EITHER side is the no-window shape,
-  // never a divide-by hazard.
-  const limit =
-    (occupancy.limit != null && occupancy.limit > 0 ? occupancy.limit : null) ??
-    (contextLimit != null && contextLimit > 0 ? contextLimit : null);
+  // The denominator rides the snapshot itself (a channel-reported window
+  // or the backend's catalog stamp, #1290); a non-positive window is the
+  // no-window shape, never a divide-by hazard.
+  const limit = occupancy.limit != null && occupancy.limit > 0 ? occupancy.limit : null;
   return (
     <Tooltip>
       <TooltipTrigger asChild>
@@ -118,19 +113,13 @@ const NO_SESSION_KEY = "__no_session__";
  * (not a hook in App) because the subscription must live INSIDE the
  * QueryClientProvider -- App's own body sits above it. The disabled form
  * (null id, cold start) matches no session's key and never fetches. */
-export function ComposerOccupancy({
-  sessionId,
-  contextLimit = null,
-}: {
-  sessionId: string | null;
-  contextLimit?: number | null;
-}) {
+export function ComposerOccupancy({ sessionId }: { sessionId: string | null }) {
   const { data } = useQuery({
     queryKey: sessionKeys.thread(sessionId ?? NO_SESSION_KEY),
     queryFn: () => conversation(sessionId ?? NO_SESSION_KEY),
     enabled: sessionId != null,
   });
-  return <OccupancyRing entries={data ?? null} contextLimit={contextLimit} />;
+  return <OccupancyRing entries={data ?? null} />;
 }
 
 /** The pure glyph: a 16px ring, arc only when the window is known. */

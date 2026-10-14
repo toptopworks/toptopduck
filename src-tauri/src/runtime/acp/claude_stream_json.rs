@@ -775,13 +775,18 @@ impl ClaudePump {
     /// (the total-side input, cache included -- full-resend semantics).
     /// The terminal frame's turn-total is the fallback when no frame
     /// reported; `None` when neither did (fail-closed, no zero reading) --
-    /// a hollow ring, never a fabricated zero.
+    /// a hollow ring, never a fabricated zero. ADR-0130 Decision 4
+    /// (#1290): the denominator
+    /// stamps here off the `SystemInit` frame's model -- a stream that
+    /// never reported one (or names an uncataloged id) stays hollow.
     fn occupancy(&self) -> Option<crate::model::OccupancySnapshot> {
         self.last_roundtrip_usage.or(self.result_usage).map(|last| {
-            crate::model::OccupancySnapshot::from_last_roundtrip(
+            let mut snapshot = crate::model::OccupancySnapshot::from_last_roundtrip(
                 last,
                 Some(crate::model::Protocol::Anthropic),
-            )
+            );
+            crate::provider::context_window::stamp(&mut snapshot, self.current_model.as_deref());
+            snapshot
         })
     }
 
@@ -1499,6 +1504,58 @@ mod tests {
             &mut |_| {},
         );
         assert!(pump.occupancy().is_none());
+    }
+
+    /// #1290 (Decision 4 as calibrated): the `SystemInit` frame's model is
+    /// the occupancy denominator's key -- a cataloged id stamps the window
+    /// onto the latched reading; an uncataloged id leaves it hollow (the
+    /// catalog miss's terminal state, never a guessed window).
+    #[test]
+    fn occupancy_stamps_the_window_off_the_init_model() {
+        fn frame(input: u64, output: u64) -> Value {
+            json!({
+                "type": "assistant",
+                "message": {
+                    "content": [{"type": "text", "text": "step"}],
+                    "usage": {"input_tokens": input, "output_tokens": output},
+                },
+            })
+        }
+        let mut pump = pump_with_bridge();
+        pump.fold(
+            ClaudeEvent::SystemInit {
+                model: Some("claude-sonnet-4-5".into()),
+            },
+            &mut |_| {},
+        );
+        for event in parse_events(&frame(150, 40)) {
+            pump.fold(event, &mut |_| {});
+        }
+        assert_eq!(
+            pump.occupancy(),
+            Some(crate::model::OccupancySnapshot {
+                tokens: 150,
+                limit: Some(200_000), // the catalog's claude-sonnet-4 row
+            })
+        );
+        // An uncataloged model never stamps: the hollow ring stands.
+        let mut pump = pump_with_bridge();
+        pump.fold(
+            ClaudeEvent::SystemInit {
+                model: Some("doubao-1.5-pro".into()),
+            },
+            &mut |_| {},
+        );
+        for event in parse_events(&frame(150, 40)) {
+            pump.fold(event, &mut |_| {});
+        }
+        assert_eq!(
+            pump.occupancy(),
+            Some(crate::model::OccupancySnapshot {
+                tokens: 150,
+                limit: None,
+            })
+        );
     }
 
     /// An error result frame maps the same shape (the driver decides the

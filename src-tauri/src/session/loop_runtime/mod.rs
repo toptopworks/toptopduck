@@ -94,6 +94,12 @@ pub(crate) struct LoopRuntime {
     /// its assembled cap (the window's model-blind default; tests script
     /// their own).
     output_cap: Option<u32>,
+    /// The live face's serving model name (issue #1290): the occupancy
+    /// reading's denominator key -- the settle stamp resolves the static
+    /// context-window catalog against the exact model that served the turn
+    /// (the same never-drifts-from-the-handle posture the output cap rides,
+    /// #1001). `None` on the bridged face: its readings stay hollow.
+    model_name: Option<String>,
 }
 
 impl LoopRuntime {
@@ -105,23 +111,28 @@ impl LoopRuntime {
             no_progress_cap: Some(DEFAULT_NO_PROGRESS_CAP),
             protocol: None,
             output_cap: None,
+            model_name: None,
         }
     }
 
-    /// The live construction -- the live factory's three inputs in one step
-    /// (the model handle, the wire-shape protocol the thought level
-    /// renders into, and the model-keyed output cap the drive stamps onto
-    /// the request), so no half-stamped live runtime exists between them
-    /// (issue #926; the cap rides the same step since #1001; the bridged /
-    /// mock faces keep [`LoopRuntime::new`]'s stamp-less shape).
+    /// The live construction -- the live factory's model-keyed facts in one
+    /// step (the model handle, the wire-shape protocol the thought level
+    /// renders into, the model-keyed output cap the drive stamps onto the
+    /// request, and the serving model name the settle's occupancy stamp
+    /// resolves the context-window catalog against, #1290), so no
+    /// half-stamped live runtime exists between them (issue #926; the cap
+    /// rides the same step since #1001; the bridged / mock faces keep
+    /// [`LoopRuntime::new`]'s stamp-less shape).
     pub(crate) fn live(
         model: ModelHandle,
         protocol: crate::model::Protocol,
         output_cap: u32,
+        model_name: String,
     ) -> Self {
         Self {
             protocol: Some(protocol),
             output_cap: Some(output_cap),
+            model_name: Some(model_name),
             ..Self::new(model)
         }
     }
@@ -450,7 +461,13 @@ impl LoopRuntime {
             // outlive the scope.
             drive_done.store(true, Ordering::SeqCst);
             if let Some(termination) = state.aborted.lock().expect("aborted lock poisoned").take() {
-                return finish(fold, &state, termination, fold_replaced);
+                return finish(
+                    fold,
+                    &state,
+                    termination,
+                    fold_replaced,
+                    self.model_name.as_deref(),
+                );
             }
             if state.turn_over(&cancel) {
                 // ADR-0115: the clock latches whether the cancel is the
@@ -461,6 +478,7 @@ impl LoopRuntime {
                     &state,
                     ProgressClock::cancel_landing(clock.as_ref()),
                     fold_replaced,
+                    self.model_name.as_deref(),
                 );
             }
             let termination = match exit {
@@ -493,7 +511,13 @@ impl LoopRuntime {
                     }
                 },
             };
-            finish(fold, &state, termination, fold_replaced)
+            finish(
+                fold,
+                &state,
+                termination,
+                fold_replaced,
+                self.model_name.as_deref(),
+            )
         })
     }
 }
@@ -918,6 +942,7 @@ fn finish(
     state: &Arc<SharedTurnState>,
     termination: Termination,
     fold_replaced: bool,
+    model_name: Option<&str>,
 ) -> LoopOutcome {
     let drained = fold.drain_residual(&state.main);
     let recorded_calls = state.main.recorded_calls.load(Ordering::SeqCst);
@@ -959,7 +984,15 @@ fn finish(
     // ADR-0130: the occupancy numerator rides alongside -- the LAST
     // round-trip's protocol-split reading, host-turn only (a sub-agent's
     // context is not this session's context).
-    let occupancy = fold.occupancy();
+    let mut occupancy = fold.occupancy();
+    // #1290 (Decision 4 as calibrated): the denominator stamp -- the static
+    // context-window catalog answers for the serving model, at the same
+    // settle the numerator froze, so the reading's two halves carry one
+    // moment. A miss leaves the hollow ring; a windowless fold (`None`
+    // model) never stamps.
+    if let Some(snapshot) = occupancy.as_mut() {
+        crate::provider::context_window::stamp(snapshot, model_name);
+    }
     LoopOutcome {
         termination,
         promotions: std::mem::take(

@@ -26,13 +26,6 @@ export interface ProviderProfile {
   // Model id to request (ADR-0007: default Sonnet-class, pinned; the user may
   // switch to a stronger or cheaper model).
   model: string;
-  // The model's context window, in tokens (ADR-0130 Decision 4, issue
-  // #1272): the occupancy ring's denominator. The only CONFIG denominator
-  // source, outranked by a reading that carries its own window (the ACP
-  // snapshot's `size`) -- never probed, never guessed. Absent = window
-  // unknown (hollow ring); absent for profiles stored before the field
-  // (serde default, zero migration).
-  context_limit?: number | null;
 }
 
 // Non-secret multi-profile provider config (ADR-0064/0098): a list of named

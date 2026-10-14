@@ -7,6 +7,7 @@
 //! windowed payload vocabulary below stays -- the window assembler
 //! (`crate::window`) builds it for both the built-in and ACP turn paths.
 
+pub(crate) mod context_window;
 pub mod fake;
 pub mod http;
 pub mod keychain;
