@@ -44,15 +44,24 @@ jobs:
       - name: Test (Vitest)
         run: npm test
 
+  # Three-OS matrix (ADR-0131): clippy runs on every leg as the check-profile
+  # --all-targets compile of the platform dependency graph — that compile is
+  # the multi-OS coverage. fmt and tests stay ubuntu-only: fmt results are
+  # platform-independent, and the suite has only ever run on Linux CI.
   rust:
-    name: Rust (fmt + clippy + test)
-    runs-on: ubuntu-latest
+    name: Rust (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
     steps:
       - uses: actions/checkout@v5
 
       # Tauri v2 compiles the webview layer on Linux even when bundling is off;
       # duckdb "bundled" also needs a C/C++ toolchain (build-essential).
       - name: Install Tauri Linux build dependencies
+        if: runner.os == 'Linux'
         run: |
           sudo apt-get update
           sudo apt-get install -y \
@@ -75,75 +84,16 @@ jobs:
       - uses: Swatinem/rust-cache@v2
 
       - name: rustfmt
+        if: runner.os == 'Linux'
         run: cargo fmt --all --check
 
       - name: clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
 
       - name: test
+        if: runner.os == 'Linux'
         run: cargo test --workspace
 
-  # ADR-0008's last gap: the desktop bundles have never been built outside a
-  # dev machine (Windows-only). Packaging verification runs on PRs and pushes
-  # to main only — a develop push is mid-chain and stays quality-gate-only,
-  # since every feature PR already exercised all three packaging legs.
-  build:
-    name: Build (${{ matrix.os }})
-    if: github.event_name == 'pull_request' || github.ref == 'refs/heads/main'
-    runs-on: ${{ matrix.os }}
-    strategy:
-      # Let sibling legs finish when one fails — the per-OS report is the
-      # whole point of the matrix.
-      fail-fast: false
-      matrix:
-        os: [windows-latest, macos-latest, ubuntu-latest]
-    steps:
-      - uses: actions/checkout@v5
-
-      - uses: actions/setup-node@v5
-        with:
-          node-version: '22'
-          cache: npm
-
-      - name: Install Tauri Linux build dependencies
-        if: matrix.os == 'ubuntu-latest'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            libwebkit2gtk-4.1-dev \
-            build-essential \
-            pkg-config \
-            libssl-dev \
-            libayatana-appindicator3-dev \
-            librsvg2-dev \
-            libxdo-dev \
-            libsoup-3.0-dev \
-            libdbus-1-dev
-
-      - uses: dtolnay/rust-toolchain@stable
-
-      # Same cache setup as the rust job (keys are per job + OS, so legs warm
-      # their own slice) — duckdb "bundled" compiles DuckDB from C++ source
-      # (~5-8 min cold per OS).
-      - uses: Swatinem/rust-cache@v2
-
-      - run: npm ci
-
-      # Quality gates are NOT repeated here: the frontend/rust jobs own them,
-      # and tauri's beforeBuildCommand (tsc --noEmit + vite build) already
-      # covers type-check + bundle for the packaged app.
-      - name: Build (tauri build)
-        run: npm run tauri -- build
-
-      - name: Upload bundle artifacts
-        uses: actions/upload-artifact@v7
-        with:
-          name: toptopduck-${{ matrix.os }}
-          path: |
-            target/release/bundle/msi/*.msi
-            target/release/bundle/nsis/*.exe
-            target/release/bundle/dmg/*.dmg
-            target/release/bundle/macos/*.app
-            target/release/bundle/deb/*.deb
-            target/release/bundle/appimage/*.AppImage
-          if-no-files-found: error
+  # Release face (ADR-0131): the bundle legs live in build.yml with a
+  # push-main-only trigger — this workflow carries the quality gates only
+  # (PR / push develop / push main all run the same face, no skipped jobs).
