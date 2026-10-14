@@ -1,0 +1,23 @@
+[workspace]
+resolver = "2"
+members = [
+    "src-tauri",
+    "crates/acp-bridge",
+    "crates/bounded-line",
+]
+
+# Profiles live at the workspace root: cargo ignores profile stanzas in
+# non-root member manifests, so the root owns them for every member.
+[profile.dev]
+incremental = true
+
+# Release binary optimization (issue #96): codegen-units=1 + lto trade build time
+# for smaller, better-optimized binaries; opt-level="s" favors size; strip drops
+# debug symbols. panic="abort" is intentionally NOT set here -- no panic boundary
+# is installed at the Tauri command layer, so abort would promote a single-command
+# panic to a full-process crash (DuckDB is FFI; deferred).
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = "s"
+strip = true

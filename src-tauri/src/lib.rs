@@ -17,7 +17,10 @@
 pub mod agents;
 pub mod app_config;
 pub mod approval;
-pub(crate) mod bounded_line;
+// Re-exported from the `bounded-line` workspace crate so every
+// `crate::bounded_line::` path stays put; the ACP bridge binary links the
+// same crate without linking this one (ADR-0085 zero-dependency bridge).
+pub(crate) use bounded_line::bounded_line;
 pub mod cancel;
 pub mod cli_tools;
 pub mod commands;
@@ -597,9 +600,10 @@ pub fn run() {
 }
 
 /// The bridge binary's file name expected beside the app exe in dev builds.
-/// Mirrors the `toptopduck-acp-bridge` [[bin]] in Cargo.toml; a drift rename
-/// on either side degrades to an honest missing-sibling skip (the turn keeps
-/// the existing failed-with-guidance path). The value is pinned by a unit
+/// Mirrors the `toptopduck-acp-bridge` [[bin]] of the `crates/acp-bridge`
+/// workspace member; a drift rename on either side degrades to an honest
+/// missing-sibling skip (the turn keeps the existing failed-with-guidance
+/// path). The value is pinned by a unit
 /// test so a unilateral rename fails loudly rather than silently repointing
 /// at another bin that builds into the same target dir.
 #[cfg(debug_assertions)]
@@ -647,8 +651,7 @@ fn inject_dev_bridge_bin() {
         Some(path) => std::env::set_var(session::ACP_BRIDGE_BIN_ENV, path),
         None => log::debug!(
             "no {DEV_BRIDGE_BIN_NAME} sibling beside {}; bridge var left unset \
-             (build it: cargo build --manifest-path src-tauri/Cargo.toml \
-             --bin {DEV_BRIDGE_BIN_NAME})",
+             (build it: cargo build -p acp-bridge)",
             exe.display()
         ),
     }
@@ -660,10 +663,10 @@ mod dev_bridge_tests {
 
     #[test]
     fn bin_name_pins_the_cargo_bin() {
-        // Cargo's [[bin]] name and the beforeDevCommand string cannot be
-        // referenced from Rust; this pin makes a unilateral rename of either
-        // side fail loudly instead of degrading every dev injection to the
-        // missing-sibling skip.
+        // The bridge crate's [[bin]] name and the beforeDevCommand string
+        // cannot be referenced from Rust; this pin makes a unilateral rename
+        // of either side fail loudly instead of degrading every dev injection
+        // to the missing-sibling skip.
         assert_eq!(DEV_BRIDGE_BIN_NAME, "toptopduck-acp-bridge");
     }
 

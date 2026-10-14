@@ -7,8 +7,8 @@ edition = "2021"
 # of headroom is kept deliberately (top-out risk recorded there). CI
 # runs stable (no toolchain pin), so the declaration is the only gate.
 rust-version = "1.86"
-# The crate declares multiple [[bin]] targets below (acp-fake-cli / mcp-fake-server
-# test fixtures + toptopduck-acp-bridge process), so a bare `cargo run` -- and
+# The crate declares multiple [[bin]] fixture targets below (acp-fake-cli /
+# mcp-fake-server and friends), so a bare `cargo run` -- and
 # `tauri dev`, which shells out to cargo for the main app binary -- cannot infer
 # which to launch. `default-run` pins the desktop app entry so both resolve
 # without `--bin`; the fixtures stay reachable via `cargo run --bin <name>` / the
@@ -100,24 +100,6 @@ path = "tests/fixtures/mcp_hang_server.rs"
 [[bin]]
 name = "mcp-paginated-server"
 path = "tests/fixtures/mcp_paginated_server.rs"
-
-# ACP bridge process (ADR-0085, issue #299 slice 9b): a thin stdio<->TCP proxy
-# the external CLI launches as its MCP server (per the McpServer::stdio_bridge
-# descriptor). Pure std -- no lib import, no serde, no JSON parsing: it forwards
-# the MCP newline-delimited framing byte-for-byte both ways after a one-line
-# `BRIDGE_AUTH <token>` handshake that lets the gateway reject unauthed
-# connects. The CLI injects port + token via env (TOPTOPDUCK_GATEWAY_PORT /
-# TOPTOPDUCK_GATEWAY_TOKEN); the gateway mints both per turn (ADR-0085
-# per-bridge lifecycle).
-#
-# Same-crate bin targets link the lib by Cargo default, but this one references
-# none of it, so the release `lto = true` + `strip = true` profile (below) drops
-# every lib symbol -- Tauri + DuckDB do not bloat the shipped bridge. The Tauri
-# bundler ships only `src/main.rs`, so this bin never reaches end users;
-# integration tests resolve it via `env!("CARGO_BIN_EXE_toptopduck-acp-bridge")`.
-[[bin]]
-name = "toptopduck-acp-bridge"
-path = "src/bin/acp_bridge.rs"
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
@@ -276,6 +258,10 @@ sys-locale = "0.3"
 # Codex CLI config parsing for the MCP import wizard (issue #390): reads the
 # `[mcp_servers.*]` tables from `~/.codex/config.toml`. MSRV 1.76 (<= 1.80).
 toml = "0.9"
+# Bounded single-line reader (workspace member `crates/bounded-line`): shared
+# by the gateway framing / MCP SSE / ACP stdout readers here and by the
+# zero-dependency ACP bridge binary (ADR-0085 pure-std constraint, #1295).
+bounded-line = { path = "../crates/bounded-line" }
 # Builtin runtime (ADR-0116, issue #917): the in-process loop borrows rig's
 # kernel only -- rig-core + rig-agent, direct deps, `default-features = false`
 # (drops the `derive` proc-macro), minor-gated "0.42" with the Cargo.lock
@@ -382,17 +368,3 @@ mockito = "1"
 rig-core = { version = "0.42", default-features = false, features = [
     "test-utils",
 ] }
-
-[profile.dev]
-incremental = true
-
-# Release binary optimization (issue #96): codegen-units=1 + lto trade build time
-# for smaller, better-optimized binaries; opt-level="s" favors size; strip drops
-# debug symbols. panic="abort" is intentionally NOT set here -- no panic boundary
-# is installed at the Tauri command layer, so abort would promote a single-command
-# panic to a full-process crash (DuckDB is FFI; deferred).
-[profile.release]
-codegen-units = 1
-lto = true
-opt-level = "s"
-strip = true

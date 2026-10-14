@@ -47,7 +47,7 @@ npm run tauri dev      # 启动桌面应用（开发模式）
 | `npm run build` | 类型检查 + 前端构建 |
 | `npm run tauri build` | 产出桌面安装包 |
 | `npm test` | 运行前端测试（Vitest） |
-| `cargo test` | 运行 Rust 测试（在 `src-tauri/` 下执行） |
+| `cargo test --workspace` | 运行 Rust 测试（仓库根执行，含 `crates/*` 成员） |
 
 ## 文档
 

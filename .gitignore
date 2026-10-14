@@ -3,7 +3,7 @@ node_modules/
 
 # Build output
 dist/
-src-tauri/target/
+/target/
 src-tauri/gen/
 
 # OS / editor

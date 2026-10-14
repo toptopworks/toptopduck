@@ -45,7 +45,10 @@ pub(crate) const SYSTEM_SUBTREE: &str = ".system";
 /// directory per skill, `SKILL.md` + any attachment assets. The build script
 /// declares the recursive rerun-if-changed so an edited or newly added asset
 /// rebuilds the binary.
-static BUILTIN_SKILL_ASSETS: Dir = include_dir!("src/skills/assets/builtin");
+// Manifest-anchored: include_dir! resolves relative paths against the
+// process cwd, which is the workspace root for a root-level cargo
+// invocation, not this package's src-tauri (#1295).
+static BUILTIN_SKILL_ASSETS: Dir = include_dir!("$CARGO_MANIFEST_DIR/src/skills/assets/builtin");
 
 /// One manifest entry: the code-side residue of a shipped skill (ADR-0121
 /// Decision 1). A companioned skill's `name` equals its companion CLI
