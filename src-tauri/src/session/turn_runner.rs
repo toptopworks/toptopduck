@@ -890,16 +890,15 @@ impl<O: FnMut(TurnPhase) + Send> TurnPhaseSink for GatewayPhaseTap<O> {
 /// with a panic. The var is read at run time (`env!`/`option_env!` are
 /// compile-time; the bridge binary lives in the sibling `crates/acp-bridge`
 /// workspace member, so its path is resolved from the shared target dir, not
-/// macro-minted). Injectors: dev builds resolve the `current_exe()` sibling
-/// in `.setup()` (debug-only; an explicit export wins); integration tests
-/// set it (serially, mirroring the 9a `ACP_FAKE_SCENARIO` env lock) from
-/// the wiring suite's `acp_bridge_bin` helper before driving a turn.
-/// Production Tauri sidecar bundling is a packaging-time decision (ADR-0085
-/// Consequences: the bridge bin production path) -- the bridge crate's
-/// binary does not enter the default Tauri bundle, so a shipped app cannot
-/// yet resolve this
-/// path; a follow-up ADR wires the sidecar. Centralizing the lookup here
-/// means the follow-up changes one site.
+/// macro-minted). Injectors: `.setup()` resolves the `current_exe()` sibling
+/// for dev and installed builds alike (ADR-0132; an explicit export wins);
+/// integration tests set it (serially, mirroring the 9a `ACP_FAKE_SCENARIO`
+/// env lock) from the wiring suite's `acp_bridge_bin` helper before driving
+/// a turn. Production ships the bridge as a bundle sidecar beside the main
+/// executable (ADR-0132), so a shipped app resolves that same sibling; a
+/// miss on an installed build means a broken install or a deleted sidecar.
+/// Centralizing the lookup here means the injection sources change one
+/// site.
 fn bridge_bin_path() -> Result<String, String> {
     match std::env::var(ACP_BRIDGE_BIN_ENV) {
         Ok(v) if !v.is_empty() => Ok(v),
@@ -911,8 +910,9 @@ fn bridge_bin_path() -> Result<String, String> {
             "{ACP_BRIDGE_BIN_ENV} is not set, so no ACP bridge binary is \
              available. Injection sources: tauri dev resolves the sibling \
              built by beforeDevCommand; integration tests inject it from \
-             the shared workspace target dir; production sidecar \
-             bundling is the ADR-0085 packaging-time follow-up. For a dev \
+             the shared workspace target dir; an installed app resolves the \
+             bundled sidecar (ADR-0132), so this failure there means a \
+             broken install or a deleted sidecar -- reinstall. For a dev \
              run bypassing the tauri CLI (e.g. cargo run), build the bridge \
              first: cargo build -p acp-bridge. A release-profile or \
              cross-target dev run also needs the sibling built for the \

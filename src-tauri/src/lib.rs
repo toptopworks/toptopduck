@@ -603,11 +603,14 @@ pub fn run() {
 /// The bridge binary's file name expected beside the app exe. Mirrors the
 /// `toptopduck-acp-bridge` [[bin]] of the `crates/acp-bridge` workspace
 /// member and the externalBin entry in the Tauri bundle config; a drift
-/// rename on any side degrades to an honest missing-sibling skip (the turn
-/// keeps the existing failed-with-guidance path). The constant is pinned
-/// by a unit test (and the externalBin entry is pinned against it) so a
-/// rename on this side fails loudly rather than silently repointing at
-/// another bin that builds into the same target dir.
+/// rename on any side fails loudly before injection runs (a `[[bin]]`
+/// rename at staging with a path-bearing ENOENT, an externalBin rename at
+/// tauri-build's existence check, a constant rename at the pin tests
+/// below). The honest missing-sibling skip only covers a sibling that was
+/// never built (a bare `cargo run`). The constant is pinned by a unit test
+/// (and the externalBin entry is pinned against it) so a rename on this
+/// side fails here rather than silently repointing at another bin that
+/// builds into the same target dir.
 const BRIDGE_BIN_NAME: &str = "toptopduck-acp-bridge";
 
 /// Resolve the bridge binary beside `exe_path` (issue #798). `Some` requires
@@ -664,10 +667,12 @@ mod bridge_bin_tests {
     #[test]
     fn bin_name_pins_the_cargo_bin() {
         // The bin name lives as literals cargo cannot expose to Rust (the
-        // bridge crate's [[bin]] declaration, the before*Command strings,
-        // the staging script); this pin freezes the one literal this crate
-        // controls so a rename of the constant fails here instead of
-        // degrading injection to the missing-sibling skip.
+        // bridge crate's [[bin]] declaration, the staging script); this pin
+        // freezes the one literal this crate controls so a rename of the
+        // constant fails here rather than silently repointing at another
+        // bin. The outside literals fail loudly on their own: a [[bin]]
+        // rename at staging (ENOENT), a staging-script drift at
+        // tauri-build's existence check.
         assert_eq!(BRIDGE_BIN_NAME, "toptopduck-acp-bridge");
     }
 

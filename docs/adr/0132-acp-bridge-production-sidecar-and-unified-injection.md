@@ -27,5 +27,5 @@ ADR-0085 将桥接 bin 的生产分发显式留作打包期决策——其 Consi
 - ADR-0085 未决项「桥接 bin 生产 sidecar bundle（打包阶段）」收官；其「release 不解析 sibling，生产注入属打包期」的表述由本 ADR 校准为统一 sibling 解析。
 - `tauri build` 新增前置：bridge 的 release cargo 构建（既有 dev 前提的 release 档，无新增工具链要求）；staging 产物目录为构建中间物，不入库。
 - tauri-build 在任何 cargo 编译期校验 `externalBin` 产物存在性：staging 相应前置到 `beforeDevCommand` 与 cargo 质量门入口（CI rust job、本地 `rust:*` 脚本，`--debug` 档仅满足存在性）；fresh checkout 上绕过这些入口的裸 cargo 首跑仍会因缺产物报错，报错的路径名即补救指引。
-- bin 名以字面量出现于四处：cargo `[[bin]]` 名、`BRIDGE_BIN_NAME` 常量、bundle `externalBin` 条目、staging 脚本。常量与 `externalBin` 条目由 unit test 互 pin；`[[bin]]` 名与脚本字面量无直接测试，分别由 sibling 缺失的诚实降级与打包器缺产物即构建失败兜底。
+- bin 名以字面量出现于四处：cargo `[[bin]]` 名、`BRIDGE_BIN_NAME` 常量、bundle `externalBin` 条目、staging 脚本。常量与 `externalBin` 条目由 unit test 互 pin；`[[bin]]` 名与脚本字面量无直接测试，漂移在构建期响亮失败——`[[bin]]` 改名令 staging 按旧字面量找不到构建产物（ENOENT），脚本字面量改名令 staged 名与 `externalBin` 期望名不匹配（tauri-build 存在性校验）；sibling 缺失的诚实降级仅覆盖从未构建 sibling 的裸 `cargo run`。
 - 「装包后外部 runtime turn 经 bridge 回连 gateway」属安装级验证，由发版流程的 bundle artifact 核验；实现侧以 staging 产物名与配置 pin 测试兜底。
