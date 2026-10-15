@@ -77,7 +77,7 @@ npm run tauri build    # 产出桌面安装包
 | `npm run build` | 类型检查 + 前端构建 |
 | `npm run tauri build` | 产出桌面安装包 |
 | `npm test` | 运行前端测试（Vitest） |
-| `cargo test --workspace` | 运行 Rust 测试（仓库根执行，含 `crates/*` 成员） |
+| `npm run rust:test` | 运行 Rust 测试（仓库根执行，含 `crates/*` 成员与 feature 门控的测试夹具） |
 
 ## 技术栈
 
@@ -88,7 +88,7 @@ npm run tauri build    # 产出桌面安装包
 | 前端 | React 19 + Vite + TypeScript |
 | 可视化 | Vega-Lite（JSON、schema 校验）+ Vega-Embed |
 | LLM 接入 | 双运行时：内置 BYOK agent 循环 + 外部 CLI agent（ACP）+ MCP 工具网关 |
-| 测试 | Vitest（前端）/ `cargo test`（Rust） |
+| 测试 | Vitest（前端）/ `npm run rust:test`（Rust） |
 
 ## 文档
 
