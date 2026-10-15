@@ -65,6 +65,16 @@ jobs:
       - name: Build (tauri build)
         run: npm run tauri -- build
 
+      # productName is "TOPTOP Duck" (space) for the surfaces users read —
+      # shortcut label, uninstall list. Bundle files drop the space so release
+      # asset names stay URL-clean: TOPTOP-Duck_<version>_<target>.<ext>.
+      # Files only: the macOS .app directory keeps its spaced name on purpose.
+      - name: Normalize bundle artifact names
+        shell: bash
+        run: |
+          find target/release/bundle -maxdepth 2 -type f -name '* *' \
+            -exec bash -c 'mv "$1" "${1// /-}"' _ {} \;
+
       - name: Upload bundle artifacts
         uses: actions/upload-artifact@v7
         with:
