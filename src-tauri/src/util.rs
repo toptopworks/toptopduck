@@ -3,7 +3,27 @@
 //! Started as the home for [`sha256_hex`] so the skills module and the session
 //! module share a single content-hash implementation (issue #364, ADR-0086).
 
+use std::process::Command;
+
 use sha2::{Digest, Sha256};
+
+/// Apply `CREATE_NO_WINDOW` (Windows) so a console child spawned from the
+/// release build does not flash a console window (issue #1305). The
+/// release build's `windows_subsystem = "windows"` leaves the parent
+/// without a console, so Windows would allocate a fresh one for every
+/// console child (CLI tools, MCP stdio servers, agent CLIs,
+/// `cmd /C mklink`); debug builds keep the console subsystem and inherit,
+/// which is why the flash is dev-invisible. One helper so every production
+/// spawn shares the flag (the `push_unique` discipline). No-op on other
+/// platforms.
+pub fn no_window(_command: &mut Command) {
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        // CREATE_NO_WINDOW process-creation flag.
+        _command.creation_flags(0x0800_0000);
+    }
+}
 
 /// SHA-256 of `bytes` as a lowercase hex string.
 ///
@@ -118,5 +138,21 @@ mod tests {
         push_capped_emit(&mut buf, "", &mut |delta| emitted.push(delta.to_string()));
         assert!(emitted.is_empty(), "an empty fragment emits no delta");
         assert_eq!(buf, "seed", "the buffer is untouched");
+    }
+
+    /// The Windows release-build console flash: the helper must keep spawns
+    /// working while latching `CREATE_NO_WINDOW`. A flag-readback assert
+    /// needs `CommandExt::get_creation_flags`, which is still unstable
+    /// (feature-gated as of the 1.98 stable toolchain; not callable without
+    /// nightly), so the check is a spawn smoke: a mis-typed flag value
+    /// surfaces as every Windows spawn failing.
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn no_window_keeps_windows_spawns_working() {
+        let mut command = Command::new("cmd");
+        command.args(["/C", "exit", "0"]);
+        no_window(&mut command);
+        let status = command.status().expect("spawn under CREATE_NO_WINDOW");
+        assert!(status.success(), "the child runs and exits 0");
     }
 }
