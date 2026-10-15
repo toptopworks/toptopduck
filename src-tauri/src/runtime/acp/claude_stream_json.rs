@@ -1,0 +1,2247 @@
+//! Claude-code native headless stream engine (ADR-0097, issue #561).
+//!
+//! Invoked by [`super::engine::AcpEngine::run`] when the adapter's
+//! [`StreamFormat`] is [`ClaudeStreamJson`]. Spawns
+//! `claude --print --output-format stream-json --input-format stream-json`
+//! (the stateless headless surface -- new process every turn, no `--resume`
+//! / `--session-id`, `--no-session-persistence` keeps upstream from writing
+//! a session file), injects the gateway bridge via `--mcp-config` +
+//! `--strict-mcp-config`, writes the flattened window text to stdin as ONE
+//! `user` message frame, then reads NDJSON frames from stdout and maps them
+//! to [`TurnPhase`] / [`TraceEntry`] / [`Termination`] -- the SAME
+//! [`LoopOutcome`] shape the ACP path, the codex path, and the built-in
+//! loop return. The open stdin additionally carries the windowed
+//! continuation channel (ADR-0128): after an `error_max_turns` result
+//! frame, one more user frame continues the SAME process.
+//!
+//! Frame vocabulary (claude stream-json): `system` (subtyped; `init` carries
+//! the current model -- unknown subtypes are session-hook frames and MUST be
+//! tolerated mid-stream, a measured property, not defensiveness), `assistant`
+//! (message content blocks: `text` + `tool_use`), `user` (`tool_result`
+//! blocks), `stream_event` (partial-message deltas, requested via
+//! `--include-partial-messages` -- the live prose stream; the trailing
+//! complete `assistant` frame deduplicates against them), `result`
+//! (terminal). Control-plane frames (`control_request` / `control_response`)
+//! belong to the probe surface but are tolerated here too.
+//!
+//! Tools: the native tool plane is blocked wholesale by the adapter's
+//! `--disallowedTools` deny list + headless auto-refusal (ADR-0097 Decision
+//! 3); the ONLY tool plane is the gateway bridge. A `tool_use` whose name
+//! carries an injected server's `mcp__<server>__` prefix is therefore
+//! gateway-routed: the driver lands an engine-side trace row under the bare
+//! name -- the row is the in-place-replacement anchor the settle merge pairs
+//! the gateway's authoritative record against (ADR-0085 single enforcement
+//! point; [`crate::session::outcome_merge::merge_outcomes`] replaces a paired
+//! echo with the gateway row -- per-name quota with built-ins included, or
+//! the `mcp_invoke` pool (issues #820 + #817)) -- but emits NOTHING live
+//! (issue #1242): the gateway serve's direct emission is the row's only
+//! live source. An unprefixed `tool_use` (a native tool that slipped past
+//! the deny list upstream) rides the engine trace like the codex path's
+//! native events, live pair included.
+//!
+//! [`StreamFormat`]: super::adapter::StreamFormat
+//! [`ClaudeStreamJson`]: super::adapter::StreamFormat::ClaudeStreamJson
+
+use std::path::Path;
+use std::process::ChildStdin;
+use std::sync::mpsc;
+use std::sync::Arc;
+use std::time::Duration;
+
+use serde_json::Value;
+
+use crate::approval::OperationKind;
+use crate::cancel::CancelToken;
+use crate::model::{TraceEntryView, TurnPhase};
+use crate::provider::tool_calling::ToolUse;
+use crate::runtime::acp::adapter::AdapterSpec;
+use crate::runtime::acp::turn_io::{build_model_flags, flatten_prompt};
+use crate::runtime::acp::wire::McpServer;
+use crate::session::loop_contract::{
+    derived_step_ceiling, truncate_trace_excerpt, LoopOutcome, LoopRound, Termination, TraceEntry,
+    MAX_WINDOW_RESUMES, TRACE_EXCERPT_MAX, WINDOW_CONVERGENCE_NUDGE,
+};
+use crate::session::progress::ProgressClock;
+use crate::session::turn_dispatch::classify_call;
+
+use super::engine::{RoundTracker, RowEnd, UNOBSERVED_EXCERPT};
+
+// ---------------------------------------------------------------------------
+// Frame parser (pure)
+// ---------------------------------------------------------------------------
+
+/// One parsed claude stream-json frame (ADR-0097 Decision 3). A raw NDJSON
+/// line can carry SEVERAL meaningful events (an `assistant` message with a
+/// text block + tool_use blocks), so the parser returns a list; frames the
+/// engine ignores (unknown `system` subtypes, `user` echoes, control-plane
+/// frames, anything unshaped) parse to the empty list -- tolerance, not
+/// failure.
+#[derive(Debug, PartialEq)]
+pub(crate) enum ClaudeEvent {
+    /// The turn's opening `system{init}` frame; carries the model the CLI
+    /// actually runs (honest rendering, ADR-0097 Decision 5).
+    SystemInit { model: Option<String> },
+    /// Assistant thinking-block content (issue #612): one merged event per
+    /// frame -- thinking rides the complete `assistant` frame whole
+    /// (`thinking_delta` stream events are tolerated, not mapped).
+    /// Accumulates into the current round's thinking stream, frozen at the
+    /// batch boundary or turn end.
+    ThinkingBlock { text: String },
+    /// Assistant text content -- accumulated across the turn.
+    AssistantText { text: String },
+    /// A tool invocation opened (`assistant` `tool_use` block).
+    ToolUse {
+        id: String,
+        name: String,
+        input: Value,
+    },
+    /// A tool invocation settled (`user` `tool_result` block).
+    ToolResult { id: String, success: bool },
+    /// A partial-message text delta (`stream_event`
+    /// `content_block_delta`/`text_delta`, requested via
+    /// `--include-partial-messages`): streams the round's prose the moment
+    /// it is generated (issue #561 spec). The complete `assistant` frame for
+    /// the same content trails its deltas; the pump's `streamed_prose`
+    /// guard deduplicates it.
+    StreamDelta { text: String },
+    /// The terminal frame. `subtype` is the CLI's own stop classification;
+    /// `is_error` marks a failed turn; `text` is the final message (empty
+    /// when the CLI gave none).
+    Result {
+        subtype: String,
+        is_error: bool,
+        text: String,
+    },
+    /// A usage report off a frame (ADR-0129, issue #1270): each `assistant`
+    /// frame carries its own round-trip's `message.usage` (collected per
+    /// frame, summed onto the turn), and the terminal `result` frame
+    /// carries the CLI's turn-total -- the FALLBACK when no assistant frame
+    /// reported (`terminal: true`, never added on top of assistant
+    /// evidence: the two would double-count).
+    Usage {
+        usage: crate::model::TokenUsage,
+        terminal: bool,
+    },
+}
+
+/// Parse one NDJSON line (already deserialized to [`Value`]) into zero or
+/// more [`ClaudeEvent`]s. Defensive: unknown shapes, missing fields, or type
+/// mismatches contribute nothing, never panic.
+pub(crate) fn parse_events(value: &Value) -> Vec<ClaudeEvent> {
+    let frame_type = value.get("type").and_then(|v| v.as_str()).unwrap_or("");
+    match frame_type {
+        "system" => {
+            // Only `init` carries turn data; every other subtype is a
+            // session-hook frame mixing with business frames on the same
+            // stream (measured on 2.1.222) -- tolerated by design.
+            if value.get("subtype").and_then(|v| v.as_str()) == Some("init") {
+                vec![ClaudeEvent::SystemInit {
+                    model: value
+                        .get("model")
+                        .and_then(|v| v.as_str())
+                        .map(str::to_string),
+                }]
+            } else {
+                Vec::new()
+            }
+        }
+        "assistant" => {
+            let mut events = parse_message_blocks(value, true);
+            if let Some(usage) = value
+                .get("message")
+                .and_then(|m| m.get("usage"))
+                .and_then(parse_claude_usage)
+            {
+                events.insert(
+                    0,
+                    ClaudeEvent::Usage {
+                        usage,
+                        terminal: false,
+                    },
+                );
+            }
+            events
+        }
+        "user" => parse_message_blocks(value, false),
+        "stream_event" => parse_stream_event(value),
+        "result" => {
+            let subtype = value
+                .get("subtype")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let is_error = value
+                .get("is_error")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            let text = value
+                .get("result")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let usage = value
+                .get("usage")
+                .and_then(parse_claude_usage)
+                .map(|usage| ClaudeEvent::Usage {
+                    usage,
+                    terminal: true,
+                });
+            match usage {
+                Some(usage) => vec![
+                    usage,
+                    ClaudeEvent::Result {
+                        subtype,
+                        is_error,
+                        text,
+                    },
+                ],
+                None => vec![ClaudeEvent::Result {
+                    subtype,
+                    is_error,
+                    text,
+                }],
+            }
+        }
+        // control_request / control_response / anything else: not turn data.
+        _ => Vec::new(),
+    }
+}
+
+/// Walk a `message.content` block array. On `assistant` frames, `thinking`
+/// blocks concatenate into one [`ClaudeEvent::ThinkingBlock`] and `text`
+/// blocks into one [`ClaudeEvent::AssistantText`], both ahead of the
+/// per-`tool_use` events (issue #612); on `user` frames, each `tool_result`
+/// block is its own event. Other block types (tool-result content echoes,
+/// ...) contribute nothing.
+fn parse_message_blocks(value: &Value, assistant: bool) -> Vec<ClaudeEvent> {
+    let Some(blocks) = value
+        .get("message")
+        .and_then(|m| m.get("content"))
+        .and_then(|c| c.as_array())
+    else {
+        return Vec::new();
+    };
+    let mut events = Vec::new();
+    let mut thinking = String::new();
+    let mut text = String::new();
+    for block in blocks {
+        let block_type = block.get("type").and_then(|v| v.as_str()).unwrap_or("");
+        match block_type {
+            "thinking" if assistant => {
+                if let Some(t) = block.get("thinking").and_then(|v| v.as_str()) {
+                    thinking.push_str(t);
+                }
+            }
+            "text" if assistant => {
+                if let Some(t) = block.get("text").and_then(|v| v.as_str()) {
+                    text.push_str(t);
+                }
+            }
+            "tool_use" if assistant => {
+                let id = block
+                    .get("id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let name = block
+                    .get("name")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let input = block.get("input").cloned().unwrap_or(Value::Null);
+                events.push(ClaudeEvent::ToolUse { id, name, input });
+            }
+            "tool_result" if !assistant => {
+                let id = block
+                    .get("tool_use_id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let is_error = block
+                    .get("is_error")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
+                events.push(ClaudeEvent::ToolResult {
+                    id,
+                    success: !is_error,
+                });
+            }
+            _ => {}
+        }
+    }
+    let mut prelude = Vec::new();
+    if !thinking.is_empty() {
+        prelude.push(ClaudeEvent::ThinkingBlock { text: thinking });
+    }
+    if !text.is_empty() {
+        prelude.push(ClaudeEvent::AssistantText { text });
+    }
+    prelude.extend(events);
+    prelude
+}
+
+/// Extract a `stream_event` partial-message delta: only
+/// `content_block_delta` events with a `text_delta` payload carry text;
+/// every other stream-event shape (content_block_start/stop, message
+/// deltas, ...) contributes nothing.
+fn parse_stream_event(value: &Value) -> Vec<ClaudeEvent> {
+    let event = value.get("event").and_then(|v| v.as_object());
+    let Some(event) = event else {
+        return Vec::new();
+    };
+    let is_text_delta = event.get("type").and_then(|v| v.as_str()) == Some("content_block_delta")
+        && event
+            .get("delta")
+            .and_then(|d| d.get("type"))
+            .and_then(|v| v.as_str())
+            == Some("text_delta");
+    if !is_text_delta {
+        return Vec::new();
+    }
+    let text = event
+        .get("delta")
+        .and_then(|d| d.get("text"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    if text.is_empty() {
+        Vec::new()
+    } else {
+        vec![ClaudeEvent::StreamDelta { text }]
+    }
+}
+
+/// Parse + normalize one claude stream-json usage object (ADR-0129
+/// Decision 1 -- the claude channel's collection point). The CLI repeats
+/// the Anthropic API's usage shape verbatim: cache read/write ride
+/// ALONGSIDE `input_tokens` (never inside it), so the total-side input is
+/// the three-way sum; the CLI does not split reasoning out of output, so
+/// the split stays empty (Decision 1's honest-absent rule). An absent or
+/// all-zero object is the fail-closed sentinel (`None`, Decision 3).
+fn parse_claude_usage(value: &Value) -> Option<crate::model::TokenUsage> {
+    let field = |name: &str| value.get(name).and_then(|v| v.as_u64()).unwrap_or(0);
+    let ordinary = field("input_tokens");
+    let read = field("cache_read_input_tokens");
+    let write = field("cache_creation_input_tokens");
+    let output = field("output_tokens");
+    if ordinary == 0 && read == 0 && write == 0 && output == 0 {
+        return None;
+    }
+    Some(crate::model::TokenUsage {
+        input_tokens: ordinary.saturating_add(read).saturating_add(write),
+        cache_read_tokens: read,
+        cache_write_tokens: write,
+        output_tokens: output,
+        reasoning_tokens: None,
+    })
+}
+
+// ---------------------------------------------------------------------------
+// MCP config builder (pure)
+// ---------------------------------------------------------------------------
+
+/// Build the `--mcp-config` / `--strict-mcp-config` argv segments that
+/// inject the gateway bridge into claude-code's session (ADR-0097 Decision
+/// 4). The config is an inline JSON document --
+/// `{"mcpServers": {"<name>": {"command", "args", "env"}}}` -- describing
+/// EXACTLY the bridge descriptors the turn input carries; `--strict-mcp-config`
+/// makes the session ignore every machine-level MCP configuration, so the
+/// gateway stays the only tool plane (user-configured MCP joins through the
+/// product's MCP surface, routed via the gateway). `--strict-mcp-config`
+/// rides UNCONDITIONALLY: with no bridge descriptor it still blocks the
+/// machine's own servers (an honest zero-tool turn beats a side-channel).
+pub(crate) fn build_mcp_config_flags(mcp_servers: &[McpServer]) -> Vec<String> {
+    let mut flags = Vec::new();
+    let mut servers = serde_json::Map::new();
+    for server in mcp_servers {
+        if let McpServer::Stdio {
+            name,
+            command,
+            args,
+            env,
+        } = server
+        {
+            // The ACP wire shape named by `wire::MODELED_SCHEMA` carries env
+            // as a `{name, value}` pair array (issue #851); claude-code's
+            // native `--mcp-config` format wants the map form, so rebuild it
+            // here.
+            let env_map: serde_json::Map<String, Value> = env
+                .iter()
+                .map(|var| (var.name.clone(), Value::String(var.value.clone())))
+                .collect();
+            servers.insert(
+                name.clone(),
+                serde_json::json!({
+                    "command": command,
+                    "args": args,
+                    "env": Value::Object(env_map),
+                }),
+            );
+        }
+    }
+    if !servers.is_empty() {
+        let doc = serde_json::json!({ "mcpServers": Value::Object(servers) });
+        flags.push("--mcp-config".to_string());
+        flags.push(doc.to_string());
+    }
+    flags.push("--strict-mcp-config".to_string());
+    flags
+}
+
+// ---------------------------------------------------------------------------
+// Driver
+// ---------------------------------------------------------------------------
+
+/// Drive one claude-code headless turn (ADR-0097). Spawns the CLI with the
+/// bridge injected via `--mcp-config` + `--strict-mcp-config`, writes the
+/// flattened prompt to stdin, reads NDJSON frames from stdout, and returns
+/// the SAME [`LoopOutcome`] shape as the ACP / codex paths. The caller owns
+/// the cancel token + execution caps; `on_phase` mirrors the other paths'
+/// phase emission.
+///
+/// `approval` + `sink` are accepted for signature parity with the ACP path
+/// but unused -- the native tool plane is blocked (ADR-0097 Decision 3) and
+/// gateway-routed calls pass the app's approval gate gateway-side.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn run_claude_stream_json(
+    adapter: &AdapterSpec,
+    cancel: Arc<CancelToken>,
+    step_cap: u32,
+    no_progress_cap: Option<Duration>,
+    input: &super::engine::AcpTurnInput,
+    binary: &Path,
+    _approval: &crate::approval::ApprovalState,
+    _sink: &dyn crate::approval::ApprovalSink,
+    mut on_phase: impl FnMut(TurnPhase),
+) -> LoopOutcome {
+    let guard = cancel.begin_turn();
+
+    // No-progress watchdog (same predicate as the other paths, ADR-0115):
+    // inbound frame lines re-arm the clock (touch below). The native tool
+    // plane is blocked wholesale (ADR-0097 Decision 3) and gateway-routed
+    // calls execute gateway-side, so the gateway's own freeze covers the
+    // only tool-execution waits this surface produces.
+    let clock = no_progress_cap
+        .map(|timeout| ProgressClock::arm_and_publish(guard.generation(), &cancel, timeout));
+
+    // Spawn claude --print with the bridge injected via --mcp-config +
+    // --strict-mcp-config and the ADR-0095 selections on argv (`--model`
+    // + `--effort`, ADR-0097 Decision 6).
+    let mcp_flags = build_mcp_config_flags(&input.mcp_servers);
+    let model_flags = build_model_flags(
+        adapter,
+        input.model.as_deref(),
+        input.thought_level.as_deref(),
+    );
+    let mut child = match super::process::spawn_turn(
+        binary,
+        adapter.argv,
+        &model_flags,
+        &mcp_flags,
+        &input.cwd,
+    ) {
+        Ok(c) => c,
+        Err(e) => {
+            return outcome(
+                Termination::Runtime(format!(
+                    "failed to spawn claude-code headless `{}`: {e}",
+                    adapter.id
+                )),
+                Vec::new(),
+                None,
+                None,
+                None,
+            )
+        }
+    };
+
+    // The turn's input face is the stream-json control plane (ADR-0128,
+    // live-measured on 2.1.259): the prompt rides stdin as a `user` message
+    // frame and stdin STAYS OPEN -- after an `error_max_turns` result frame
+    // the same process continues off one more user frame (the native
+    // continuation channel). The write rides the cancel-aware line writer
+    // (issues #808/#813): a CLI that stalls before draining stdin cannot
+    // wedge the turn before the pump loop's cancel check becomes reachable.
+    let stdin = child.stdin.take().expect("piped stdin");
+    let mut stdin = {
+        let prompt = flatten_prompt(&input.prompt_blocks);
+        match write_user_frame(stdin, &prompt, &cancel, &mut child) {
+            (super::process::StdinWriteOutcome::Done, stdin) => stdin,
+            (super::process::StdinWriteOutcome::Failed(e), _) => {
+                return outcome(
+                    Termination::Runtime(format!("stdin write failed: {e}")),
+                    Vec::new(),
+                    None,
+                    None,
+                    None,
+                )
+            }
+            (super::process::StdinWriteOutcome::Cancelled, _) => {
+                // ADR-0115: the pre-pump relabel -- a watchdog fire during the
+                // stdin drain is generation silence past the cap.
+                return outcome(
+                    ProgressClock::cancel_landing(clock.as_ref()),
+                    Vec::new(),
+                    None,
+                    None,
+                    None,
+                );
+            }
+        }
+    };
+
+    let stdout = child.stdout.take().expect("piped stdout");
+
+    // Reader thread (shared, line-capped -- issue #639).
+    let rx = super::process::spawn_line_reader(stdout);
+
+    // Signal Thinking once before the frame pump (one headless invocation =
+    // one turn = one thinking wait).
+    on_phase(TurnPhase::Thinking { attempt: 1 });
+
+    let mut pump = ClaudePump {
+        tracker: RoundTracker::new(),
+        step_cap,
+        current_model: None,
+        pending: Vec::new(),
+        gateway_prefixes: input
+            .mcp_servers
+            .iter()
+            .filter_map(|s| match s {
+                McpServer::Stdio { name, .. } => Some(format!("mcp__{name}__")),
+                McpServer::Other => None,
+            })
+            .collect(),
+        streamed_prose: false,
+        streamed_text: String::new(),
+        usage: crate::model::TokenUsage::default(),
+        result_usage: None,
+        last_roundtrip_usage: None,
+    };
+
+    let mut termination: Option<Termination>;
+    // Windowed auto-continuation (ADR-0128): the CLI's self-reported budget
+    // (`error_max_turns`) is the window boundary -- under the resume budget
+    // the turn continues the SAME process off one more user frame (the
+    // convergence nudge alone, so nothing of it persists), keeping the
+    // pump's rounds, the cancel token, and the watchdog clock on the
+    // turn's one trajectory. There is deliberately NO app-side counted cap:
+    // claude has no budget setting face, so the family is windowless and
+    // ceilingless until the CLI reports its own (the honest degrade the
+    // ADR records; the backstops on this external path are the no-progress
+    // watchdog and the user's cancel -- the built-in loop's identical-
+    // arguments detector is not wired to the external families' dispatch).
+    let mut window_resumes = 0u32;
+    let mut discards = super::process::DiscardLog::new();
+
+    loop {
+        // Cancel check (mirrors the other paths' loop-top check).
+        if cancel.is_requested() {
+            termination = Some(Termination::Cancelled);
+            break;
+        }
+
+        match rx.recv_timeout(super::process::PUMP_POLL_INTERVAL) {
+            Ok(line) => {
+                // Inbound stream activity (ADR-0115): re-arm the
+                // no-progress clock before anything else.
+                if let Some(clock) = clock.as_ref() {
+                    clock.touch();
+                }
+                let value: Value = match serde_json::from_str(&line) {
+                    Ok(v) => v,
+                    Err(_) => {
+                        // Top-level discard, answerable in logs (#886).
+                        super::process::note_discard(&mut discards, adapter.id.as_str(), &line);
+                        continue; // skip unparseable line
+                    }
+                };
+                let mut landed: Option<Termination> = None;
+                for event in parse_events(&value) {
+                    if let Some(term) = pump.fold(event, &mut on_phase) {
+                        landed = Some(term);
+                        break;
+                    }
+                }
+                // A window boundary: continue the same process when the
+                // resume budget allows -- the nudge is the next window's
+                // only input.
+                if matches!(landed, Some(Termination::StepCap(_)))
+                    && window_resumes < MAX_WINDOW_RESUMES
+                {
+                    if let Some(open) = stdin.take() {
+                        match write_user_frame(open, WINDOW_CONVERGENCE_NUDGE, &cancel, &mut child)
+                        {
+                            (super::process::StdinWriteOutcome::Done, handed_back) => {
+                                stdin = handed_back;
+                                pump.open_window();
+                                window_resumes += 1;
+                                continue;
+                            }
+                            (super::process::StdinWriteOutcome::Cancelled, _) => {
+                                termination = Some(ProgressClock::cancel_landing(clock.as_ref()));
+                                break;
+                            }
+                            (super::process::StdinWriteOutcome::Failed(_), _) => {
+                                termination = Some(Termination::Runtime(
+                                    "claude continuation frame write failed".into(),
+                                ));
+                                break;
+                            }
+                        }
+                    }
+                }
+                if let Some(term) = landed {
+                    termination = Some(term);
+                    break;
+                }
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => continue,
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                // stdout closed before a `result` frame. With accumulated
+                // text, treat it as the answer (honest degrade); without, an
+                // external-runtime failure.
+                termination = Some(
+                    pump.tracker
+                        .text_or_runtime("claude closed stdout without a result frame"),
+                );
+                break;
+            }
+        }
+    }
+
+    // The whole resume budget spent: the landing carries the derived total
+    // budget every windowed runtime renders (ADR-0128).
+    if let Some(Termination::StepCap(_)) = termination {
+        termination = Some(Termination::StepCap(derived_step_ceiling(step_cap)));
+    }
+
+    // Finalize any tool rows still open at turn end (honestly unobserved,
+    // each landing on the round it opened in), then close the trailing
+    // round's thought stream -- its ThinkingCompleted renders live; whether
+    // the settle keeps the trailing prose on the round depends on the
+    // termination (issues #612/#628).
+    pump.finalize_pending(&mut on_phase);
+    pump.tracker.freeze_trailing_thinking(&mut on_phase);
+
+    super::process::kill_and_reap(&mut child);
+
+    let term = termination.unwrap_or_else(|| {
+        pump.tracker
+            .text_or_runtime("claude turn ended without a result frame")
+    });
+
+    // ADR-0097 Decision 5: `system{init}` reports the model this turn
+    // actually ran -- the honest-rendering catalog (the probe channel owns
+    // the full directory; the turn never re-discovers).
+    // Read ahead of the partial moves below -- `current_model.map` and
+    // `settle_rounds` both consume out of the pump.
+    let usage = pump.settle_usage();
+    let occupancy = pump.occupancy();
+    let discovered = pump.current_model.map(|model| {
+        let mut d = crate::session::loop_contract::DiscoveredRuntime::empty();
+        d.current_model = Some(model);
+        // Issue #529 semantics: the wire carries no adapter identity.
+        d.adapter_id = Some(adapter.id.to_string());
+        d
+    });
+
+    // ADR-0115: a cancel landing after the clock latched is the watchdog's
+    // (generation silence past the cap), not a user cancel.
+    let term = match term {
+        Termination::Cancelled => ProgressClock::cancel_landing(clock.as_ref()),
+        other => other,
+    };
+    let rounds = pump.tracker.settle_rounds(&term);
+    outcome(term, rounds, discovered, usage, occupancy)
+}
+
+/// A `tool_use` awaiting its `tool_result` (live-phase bookkeeping). Carries
+/// the round it opened in -- a late completion (or the turn-end drain) lands
+/// the entry on that round, not whichever round is current.
+struct PendingClaudeCall {
+    round: usize,
+    tool_use_id: String,
+    /// The display name: the gateway prefix stripped when gateway-routed.
+    name: String,
+    operation_kind: OperationKind,
+    summary: String,
+    /// A gateway-routed echo (issue #1242): the gateway serve emits the
+    /// row's live phases itself, so every fold-side emission is suppressed
+    /// (the fold still lands -- the settle merge's anchor).
+    gateway: bool,
+}
+
+/// Write one stream-json `user` message frame to the child's stdin
+/// (ADR-0128): the input face the turn's prompt and every resumed window's
+/// convergence nudge ride. One NDJSON line; the writer hands the stdin back
+/// OPEN so the same process can receive the next frame.
+fn write_user_frame(
+    stdin: ChildStdin,
+    text: &str,
+    cancel: &CancelToken,
+    child: &mut std::process::Child,
+) -> (super::process::StdinWriteOutcome, Option<ChildStdin>) {
+    let frame = serde_json::json!({
+        "type": "user",
+        "message": {"role": "user", "content": [{"type": "text", "text": text}]}
+    });
+    // The json! shape is always serializable; the newline terminates the
+    // NDJSON line the reader expects.
+    let line = format!(
+        "{}\n",
+        serde_json::to_string(&frame).expect("the user frame serializes")
+    );
+    super::process::write_line_with_cancel(stdin, line, cancel, child)
+}
+
+/// Mutable state accumulated while pumping claude frames.
+struct ClaudePump {
+    /// The round bookkeeping: per-round thinking/prose/calls + the
+    /// terminal-text fallback (ADR-0103, issue #612).
+    tracker: RoundTracker,
+    /// The window cap the `error_max_turns` fold reports -- the WINDOW-TRIP
+    /// signal only (ADR-0128): the driver resumes under the budget and
+    /// lands the derived ceiling otherwise, so no app-side counting rides
+    /// this path.
+    step_cap: u32,
+    /// The `system{init}` reported model: honest rendering and the
+    /// occupancy denominator's catalog key (#1290).
+    current_model: Option<String>,
+    pending: Vec<PendingClaudeCall>,
+    /// The injected MCP servers' claude-side name prefixes
+    /// (`mcp__<server>__`); a matching prefix strips to the bare display
+    /// name the gateway records its row under (issue #817).
+    gateway_prefixes: Vec<String>,
+    /// Whether prose deltas streamed since the last complete `assistant`
+    /// frame. With `--include-partial-messages` the CLI emits both the
+    /// `stream_event` text deltas AND the trailing complete frame for one
+    /// message, and `push_prose` appends -- a delta-covered frame must not
+    /// re-append. The guard resets with the frame it skips (a later frame
+    /// arriving without deltas pushes as before) and at every window
+    /// boundary (issue #1228).
+    streamed_prose: bool,
+    /// The concatenation of the current message's text deltas, mirroring
+    /// [`Self::streamed_prose`]: the skip-side comparison for a
+    /// delta-covered frame. The CLI's own SSE assembly guarantees the
+    /// trailing frame repeats its deltas, so a mismatch is upstream drift
+    /// -- the dropped frame text stays answerable in logs (#886's
+    /// doctrine), the push semantics never change.
+    streamed_text: String,
+    /// The assistant frames' usage sum (ADR-0129, issue #1270): each frame
+    /// reports its own round-trip, collected per frame. `result_usage`
+    /// holds the terminal frame's turn-total fallback -- adopted only when
+    /// no assistant frame reported (double-adoption would double-count).
+    usage: crate::model::TokenUsage,
+    result_usage: Option<crate::model::TokenUsage>,
+    /// The LAST round-trip's normalized usage (ADR-0130, issue #1274): the
+    /// occupancy numerator's latch -- the same per-frame replace the
+    /// built-in fold applies. Each assistant frame replaces it (the
+    /// freshest context measurement); a cancel keeps the reading it
+    /// earned. `None` until the first report (fail-closed, no zero
+    /// reading).
+    last_roundtrip_usage: Option<crate::model::TokenUsage>,
+}
+
+impl ClaudePump {
+    /// Open the next continuation window (ADR-0128). Every window
+    /// boundary must reset the dedupe guard: a boundary can cut
+    /// mid-message (deltas streamed, the complete frame never came), and
+    /// a latched guard would swallow the next window's whole-block frame
+    /// off both tracks (issue #1228).
+    fn open_window(&mut self) {
+        self.streamed_prose = false;
+        self.streamed_text.clear();
+    }
+
+    /// The turn's usage (ADR-0129, issue #1270): the assistant frames'
+    /// round-trip sum, falling back to the terminal frame's turn-total
+    /// when no assistant frame reported -- and `None` when neither did
+    /// (fail-closed, Decision 3). An external CLI reports only its own
+    /// process aggregate, so attribution never splits (Decision 6).
+    fn settle_usage(&self) -> Option<crate::model::TurnUsage> {
+        let total = if self.usage.is_zero() {
+            self.result_usage?
+        } else {
+            self.usage
+        };
+        Some(crate::model::TurnUsage {
+            total,
+            subagents: Vec::new(),
+        })
+    }
+
+    /// The turn's occupancy numerator (ADR-0130, issue #1274): the LAST
+    /// round-trip's context size, the Anthropic arm of the protocol split
+    /// (the total-side input, cache included -- full-resend semantics).
+    /// The terminal frame's turn-total is the fallback when no frame
+    /// reported; `None` when neither did (fail-closed, no zero reading) --
+    /// a hollow ring, never a fabricated zero. ADR-0130 Decision 4
+    /// (#1290): the denominator
+    /// stamps here off the `SystemInit` frame's model -- a stream that
+    /// never reported one (or names an uncataloged id) stays hollow.
+    fn occupancy(&self) -> Option<crate::model::OccupancySnapshot> {
+        self.last_roundtrip_usage.or(self.result_usage).map(|last| {
+            let mut snapshot = crate::model::OccupancySnapshot::from_last_roundtrip(
+                last,
+                Some(crate::model::Protocol::Anthropic),
+            );
+            crate::provider::context_window::stamp(&mut snapshot, self.current_model.as_deref());
+            snapshot
+        })
+    }
+
+    /// Fold one parsed event. Returns `Some(termination)` when the event
+    /// ends the turn (the `result` frame).
+    fn fold(
+        &mut self,
+        event: ClaudeEvent,
+        on_phase: &mut impl FnMut(TurnPhase),
+    ) -> Option<Termination> {
+        match event {
+            ClaudeEvent::SystemInit { model } => {
+                self.current_model = model;
+                None
+            }
+            ClaudeEvent::ThinkingBlock { text } => {
+                self.tracker.push_thought(&text, on_phase);
+                None
+            }
+            // Complete prose and partial text deltas share the dual track
+            // (round slot + terminal fallback) and push_prose's append
+            // semantics -- with partial messages enabled the CLI emits both
+            // for one message, so the streamed flag deduplicates a complete
+            // frame that trails its deltas (issue #561).
+            ClaudeEvent::StreamDelta { text } => {
+                self.streamed_prose = true;
+                self.streamed_text.push_str(&text);
+                self.tracker.push_prose(&text, on_phase);
+                None
+            }
+            ClaudeEvent::AssistantText { text } => {
+                let streamed = std::mem::take(&mut self.streamed_prose);
+                let deltas = std::mem::take(&mut self.streamed_text);
+                if !streamed {
+                    self.tracker.push_prose(&text, on_phase);
+                } else if text != deltas {
+                    log::warn!(
+                        target: "toptopduck::acp",
+                        "claude delta-covered assistant frame differs from its \
+                         streamed deltas; frame text dropped: {text:?}, \
+                         streamed: {deltas:?}"
+                    );
+                }
+                None
+            }
+            ClaudeEvent::ToolUse { id, name, input } => {
+                // The batch boundary: the round's thinking freeze fires once,
+                // before this call's Started event (the prose already
+                // streamed as its TextDeltas, ADR-0126).
+                let round = self.tracker.call_round(on_phase);
+                // The bare display name: a matching gateway prefix strips
+                // (the merged trace's gateway rows carry the bare name; the
+                // live phases must read the same). A match also marks the
+                // call as a gateway-routed echo (issue #1242): the gateway
+                // serve emits its live phases itself, so the echo stays
+                // live-silent and only folds.
+                let gateway_bare = self
+                    .gateway_prefixes
+                    .iter()
+                    .find_map(|prefix| name.strip_prefix(prefix))
+                    .filter(|bare| !bare.is_empty());
+                let bare = gateway_bare.unwrap_or(name.as_str());
+                let (_, operation_kind, summary) = classify_call(&ToolUse {
+                    id: id.clone(),
+                    name: bare.to_string(),
+                    input,
+                });
+                let summary = truncate_trace_excerpt(&summary, TRACE_EXCERPT_MAX);
+                if gateway_bare.is_none() {
+                    on_phase(TurnPhase::ToolCallStarted {
+                        name: bare.to_string(),
+                        operation_kind,
+                        summary: summary.clone(),
+                    });
+                }
+                self.pending.push(PendingClaudeCall {
+                    round,
+                    tool_use_id: id,
+                    name: bare.to_string(),
+                    operation_kind,
+                    summary,
+                    gateway: gateway_bare.is_some(),
+                });
+                None
+            }
+            ClaudeEvent::ToolResult { id, success } => {
+                // A result with no matching open row (missed the start) is
+                // dropped -- the trace stays consistent with the starts seen.
+                if let Some(pos) = self.pending.iter().position(|p| p.tool_use_id == id) {
+                    let row = self.pending.remove(pos);
+                    let end = if success {
+                        RowEnd::Completed
+                    } else {
+                        RowEnd::Failed
+                    };
+                    self.finalize_row(row, end, on_phase);
+                }
+                None
+            }
+            ClaudeEvent::Usage { usage, terminal } => {
+                if terminal {
+                    self.result_usage = Some(usage);
+                } else {
+                    self.usage.add(&usage);
+                    // ADR-0130 (issue #1274): the frame's usage is also the
+                    // occupancy numerator's latch -- the freshest context
+                    // measurement wins, a cancel keeps the reading it
+                    // earned (the same already-reported rule the usage sum
+                    // applies).
+                    self.last_roundtrip_usage = Some(usage);
+                }
+                None
+            }
+            ClaudeEvent::Result {
+                subtype,
+                is_error,
+                text,
+            } => {
+                if !is_error {
+                    // Prefer the terminal frame's own text; fall back to the
+                    // terminal-text dual track (trailing prose, else the
+                    // accumulated stream text).
+                    let final_text = if text.is_empty() {
+                        self.tracker.terminal_text()
+                    } else {
+                        text
+                    };
+                    return Some(Termination::Text(final_text));
+                }
+                // The agent's own turn ceiling maps onto the execution-level
+                // StepCap (the ACP path's MaxTurnRequests precedent).
+                if subtype.contains("max_turns") {
+                    return Some(Termination::StepCap(self.step_cap));
+                }
+                let detail = if text.is_empty() { subtype } else { text };
+                Some(Termination::Runtime(format!(
+                    "claude turn failed: {detail}"
+                )))
+            }
+        }
+    }
+
+    /// Finalize one settled tool row: the phases and the trace row always
+    /// land -- the row is the settle merge's in-place-replacement anchor
+    /// (issue #817, ADR-0085).
+    fn finalize_row(
+        &mut self,
+        row: PendingClaudeCall,
+        end: RowEnd,
+        on_phase: &mut impl FnMut(TurnPhase),
+    ) {
+        let gateway = row.gateway;
+        // The claude wire carries no per-call result text on the tool_result
+        // frame; a failure still needs its bounded anchor (ADR-0078) -- the
+        // ACP pump's honest "failed" marker. A row the agent never reported
+        // on carries the unobserved marker instead (issue #630).
+        let entry = match end {
+            RowEnd::Completed => TraceEntry::succeeded(
+                row.tool_use_id,
+                row.name.clone(),
+                row.operation_kind,
+                row.summary.clone(),
+                String::new(),
+            ),
+            RowEnd::Failed => TraceEntry::failed(
+                row.tool_use_id,
+                row.name.clone(),
+                row.operation_kind,
+                row.summary.clone(),
+                "failed",
+            ),
+            RowEnd::Unobserved => TraceEntry::failed(
+                row.tool_use_id,
+                row.name.clone(),
+                row.operation_kind,
+                row.summary.clone(),
+                UNOBSERVED_EXCERPT,
+            ),
+        };
+        // The gateway echo's completion is silent too (issue #1242): the
+        // gateway serve emits the row's authoritative completed phase.
+        if !gateway {
+            on_phase(TurnPhase::ToolCallCompleted(TraceEntryView::from(&entry)));
+        }
+        // Gateway-routed rows land too (issue #817): the engine row is the
+        // in-place-replacement anchor the settle merge pairs the gateway's
+        // authoritative record against -- the paired row keeps only its
+        // position, every field comes from the gateway (ADR-0085).
+        self.tracker.land_call(row.round, entry);
+    }
+
+    /// Close every still-open row at turn end -- honestly: the turn ended
+    //  before the agent reported a final status (the ACP pump's unobserved
+    //  marker, issue #630).
+    fn finalize_pending(&mut self, on_phase: &mut impl FnMut(TurnPhase)) {
+        for row in std::mem::take(&mut self.pending) {
+            self.finalize_row(row, RowEnd::Unobserved, on_phase);
+        }
+    }
+}
+
+/// Build the [`LoopOutcome`] (same shape as the other engines).
+fn outcome(
+    termination: Termination,
+    rounds: Vec<LoopRound>,
+    discovered: Option<crate::session::loop_contract::DiscoveredRuntime>,
+    usage: Option<crate::model::TurnUsage>,
+    occupancy: Option<crate::model::OccupancySnapshot>,
+) -> LoopOutcome {
+    LoopOutcome {
+        termination,
+        // Promotions are gateway-side (ADR-0085); the stream engine owns
+        // only the frame-driving half.
+        promotions: Vec::new(),
+        // ADR-0103 (issue #612): rounds grouped at the assistant-frame
+        // tool-call batch. A turn with no events settles to an empty list
+        // (no ghost round); every open round lands its call rows (issue
+        // #817 anchors included), so no gateway-routed shell arrives
+        // call-less -- the wiring merge's empty-round pass only ever drops
+        // a round the pump itself left hollow.
+        trace: rounds,
+        usage,
+        discovered_runtime: discovered,
+        // ADR-0130 (issue #1274): the stream channel joins the occupancy
+        // channel -- the LAST round-trip's usage is the numerator (the
+        // built-in fold's Anthropic arm, the same per-frame replace), the
+        // terminal turn-total only as the fallback. The BILLING channel is
+        // untouched: usage stays the frames' sum (ADR-0129).
+        occupancy,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    // --- parse_events: system ------------------------------------------------
+
+    /// The opening `system{init}` frame carries the current model (ADR-0097
+    /// Decision 5 honest rendering).
+    #[test]
+    fn parse_system_init_carries_model() {
+        let v = json!({
+            "type": "system",
+            "subtype": "init",
+            "model": "claude-sonnet-4-20250514",
+            "cwd": "/tmp",
+            "tools": ["mcp__toptopduck-gateway__explore"]
+        });
+        assert_eq!(
+            parse_events(&v),
+            vec![ClaudeEvent::SystemInit {
+                model: Some("claude-sonnet-4-20250514".into())
+            }]
+        );
+    }
+
+    /// A `system{init}` without a model string still maps (the model is
+    /// optional data, never a parse failure).
+    #[test]
+    fn parse_system_init_without_model_is_none() {
+        let v = json!({"type": "system", "subtype": "init"});
+        assert_eq!(
+            parse_events(&v),
+            vec![ClaudeEvent::SystemInit { model: None }]
+        );
+    }
+
+    /// AC: unknown `system` subtypes are session-hook frames mixing with
+    /// business frames on the same stream (measured, not defensive) -- the
+    /// parser tolerates them by contributing nothing.
+    #[test]
+    fn parse_unknown_system_subtype_is_tolerated() {
+        for subtype in ["session_start", "hook_output", "compact_boundary"] {
+            let v = json!({"type": "system", "subtype": subtype, "payload": {"any": 1}});
+            assert!(parse_events(&v).is_empty(), "subtype `{subtype}` ignored");
+        }
+        // A system frame without any subtype at all.
+        assert!(parse_events(&json!({"type": "system"})).is_empty());
+    }
+
+    // --- parse_events: assistant ----------------------------------------------
+
+    /// An assistant text frame accumulates its text blocks.
+    #[test]
+    fn parse_assistant_text_block() {
+        let v = json!({
+            "type": "assistant",
+            "message": {
+                "role": "assistant",
+                "content": [
+                    {"type": "text", "text": "the answer is "},
+                    {"type": "text", "text": "42"}
+                ]
+            }
+        });
+        assert_eq!(
+            parse_events(&v),
+            vec![ClaudeEvent::AssistantText {
+                text: "the answer is 42".into()
+            }]
+        );
+    }
+
+    /// An assistant frame with a text block + tool_use blocks yields the
+    /// text FIRST, then one event per tool_use.
+    #[test]
+    fn parse_assistant_text_plus_tool_use() {
+        let v = json!({
+            "type": "assistant",
+            "message": {
+                "content": [
+                    {"type": "text", "text": "let me query"},
+                    {
+                        "type": "tool_use",
+                        "id": "toolu_1",
+                        "name": "mcp__toptopduck-gateway__explore",
+                        "input": {"sql": "SELECT 1"}
+                    }
+                ]
+            }
+        });
+        assert_eq!(
+            parse_events(&v),
+            vec![
+                ClaudeEvent::AssistantText {
+                    text: "let me query".into()
+                },
+                ClaudeEvent::ToolUse {
+                    id: "toolu_1".into(),
+                    name: "mcp__toptopduck-gateway__explore".into(),
+                    input: json!({"sql": "SELECT 1"}),
+                },
+            ]
+        );
+    }
+
+    /// An assistant frame's thinking block is captured as a
+    /// `ThinkingBlock` event (issue #612) -- the round's reasoning text,
+    /// emitted whole (thinking rides complete frames; `thinking_delta`
+    /// events are tolerated, not mapped).
+    #[test]
+    fn parse_assistant_thinking_block_captured() {
+        let v = json!({
+            "type": "assistant",
+            "message": {
+                "content": [
+                    {"type": "thinking", "thinking": "pondering the schema"}
+                ]
+            }
+        });
+        assert_eq!(
+            parse_events(&v),
+            vec![ClaudeEvent::ThinkingBlock {
+                text: "pondering the schema".into()
+            }]
+        );
+    }
+
+    /// A full assistant frame keeps its block order on the event list:
+    /// thinking first, then text, then the tool_use batch -- the order the
+    /// round's live phases rely on (the text streams its TextDelta, then
+    /// the batch seal freezes the thinking, then the batch's Started
+    /// events).
+    #[test]
+    fn parse_assistant_thinking_text_tool_use_order() {
+        let v = json!({
+            "type": "assistant",
+            "message": {
+                "content": [
+                    {"type": "thinking", "thinking": "reasoning"},
+                    {"type": "text", "text": "let me query"},
+                    {
+                        "type": "tool_use",
+                        "id": "toolu_1",
+                        "name": "mcp__toptopduck-gateway__explore",
+                        "input": {"sql": "SELECT 1"}
+                    }
+                ]
+            }
+        });
+        assert_eq!(
+            parse_events(&v),
+            vec![
+                ClaudeEvent::ThinkingBlock {
+                    text: "reasoning".into()
+                },
+                ClaudeEvent::AssistantText {
+                    text: "let me query".into()
+                },
+                ClaudeEvent::ToolUse {
+                    id: "toolu_1".into(),
+                    name: "mcp__toptopduck-gateway__explore".into(),
+                    input: json!({"sql": "SELECT 1"}),
+                },
+            ]
+        );
+    }
+
+    /// Thinking blocks only parse on assistant frames; a user frame
+    /// carrying one contributes nothing (defensive -- the wire never does).
+    #[test]
+    fn parse_user_frame_thinking_block_tolerated() {
+        let v = json!({
+            "type": "user",
+            "message": {
+                "content": [
+                    {"type": "thinking", "thinking": "not the model's"}
+                ]
+            }
+        });
+        assert_eq!(parse_events(&v), Vec::new());
+    }
+
+    /// A user frame's `tool_result` blocks map to settled tool invocations
+    /// (is_error inverts to success).
+    #[test]
+    fn parse_user_tool_result_blocks() {
+        let v = json!({
+            "type": "user",
+            "message": {
+                "content": [
+                    {"type": "tool_result", "tool_use_id": "toolu_1", "content": "1"},
+                    {"type": "tool_result", "tool_use_id": "toolu_2", "is_error": true,
+                     "content": "denied"}
+                ]
+            }
+        });
+        assert_eq!(
+            parse_events(&v),
+            vec![
+                ClaudeEvent::ToolResult {
+                    id: "toolu_1".into(),
+                    success: true
+                },
+                ClaudeEvent::ToolResult {
+                    id: "toolu_2".into(),
+                    success: false
+                },
+            ]
+        );
+    }
+
+    // --- parse_events: stream_event --------------------------------------------
+
+    /// A partial-message text delta maps to a StreamDelta (vocabulary
+    /// coverage; the turn argv requests them via
+    /// `--include-partial-messages`).
+    #[test]
+    fn parse_stream_event_text_delta() {
+        let v = json!({
+            "type": "stream_event",
+            "event": {
+                "type": "content_block_delta",
+                "index": 0,
+                "delta": {"type": "text_delta", "text": "partial"}
+            }
+        });
+        assert_eq!(
+            parse_events(&v),
+            vec![ClaudeEvent::StreamDelta {
+                text: "partial".into()
+            }]
+        );
+    }
+
+    /// Non-delta stream events contribute nothing.
+    #[test]
+    fn parse_stream_event_non_delta_is_tolerated() {
+        for event in [
+            json!({"type": "content_block_start", "index": 0}),
+            json!({"type": "message_delta", "delta": {"stop_reason": null}}),
+            json!({"type": "content_block_delta", "delta": {"type": "input_json_delta"}}),
+        ] {
+            let v = json!({"type": "stream_event", "event": event});
+            assert!(parse_events(&v).is_empty(), "{v} ignored");
+        }
+    }
+
+    // --- parse_events: result ---------------------------------------------------
+
+    /// A successful result frame carries the terminal text -- and, per
+    /// ADR-0129 (issue #1270), its `usage` object parses onto the
+    /// terminal-marked fallback event ahead of the Result event.
+    #[test]
+    fn parse_result_success() {
+        let v = json!({
+            "type": "result",
+            "subtype": "success",
+            "is_error": false,
+            "result": "the answer is 42",
+            "total_cost_usd": 0.01,
+            "usage": {"input_tokens": 10, "output_tokens": 5}
+        });
+        assert_eq!(
+            parse_events(&v),
+            vec![
+                ClaudeEvent::Usage {
+                    usage: crate::model::TokenUsage {
+                        input_tokens: 10,
+                        cache_read_tokens: 0,
+                        cache_write_tokens: 0,
+                        output_tokens: 5,
+                        reasoning_tokens: None,
+                    },
+                    terminal: true,
+                },
+                ClaudeEvent::Result {
+                    subtype: "success".into(),
+                    is_error: false,
+                    text: "the answer is 42".into()
+                }
+            ]
+        );
+    }
+
+    // --- usage collection (ADR-0129, issue #1270) -------------------------------
+
+    /// ADR-0129 Decision 1: the claude CLI repeats the Anthropic usage
+    /// shape -- cache read/write ride alongside input, so the normalized
+    /// total-side input is the three-way sum.
+    #[test]
+    fn assistant_frame_usage_normalizes_the_anthropic_shape() {
+        let v = json!({
+            "type": "assistant",
+            "message": {
+                "content": [{"type": "text", "text": "hi"}],
+                "usage": {
+                    "input_tokens": 100,
+                    "cache_read_input_tokens": 30,
+                    "cache_creation_input_tokens": 20,
+                    "output_tokens": 50,
+                },
+            },
+        });
+        let events = parse_events(&v);
+        let usage = events.first().expect("the usage event leads the blocks");
+        assert_eq!(
+            usage,
+            &ClaudeEvent::Usage {
+                usage: crate::model::TokenUsage {
+                    input_tokens: 150,
+                    cache_read_tokens: 30,
+                    cache_write_tokens: 20,
+                    output_tokens: 50,
+                    reasoning_tokens: None,
+                },
+                terminal: false,
+            }
+        );
+        // A frame with no usage object parses to blocks only.
+        let bare = json!({
+            "type": "assistant",
+            "message": {"content": [{"type": "text", "text": "hi"}]},
+        });
+        assert!(parse_events(&bare)
+            .iter()
+            .all(|e| !matches!(e, ClaudeEvent::Usage { .. })));
+    }
+
+    /// ADR-0129 Decision 2/3: assistant frames sum per round-trip; the
+    /// result frame's turn-total is the FALLBACK alone -- never added on
+    /// top (double-adoption would double-count); neither reporting fails
+    /// the turn closed.
+    #[test]
+    fn usage_sums_assistant_frames_and_adopts_the_result_only_as_fallback() {
+        fn frame(input: u64, output: u64) -> Value {
+            json!({
+                "type": "assistant",
+                "message": {
+                    "content": [{"type": "text", "text": "step"}],
+                    "usage": {"input_tokens": input, "output_tokens": output},
+                },
+            })
+        }
+        let result = json!({
+            "type": "result",
+            "subtype": "success",
+            "result": "done",
+            "usage": {"input_tokens": 999, "output_tokens": 999},
+        });
+        // Two assistant frames + the result: the sum wins, the fallback is
+        // never added on top.
+        let mut pump = pump_with_bridge();
+        for v in [frame(100, 40), frame(50, 10)] {
+            for event in parse_events(&v) {
+                pump.fold(event, &mut |_| {});
+            }
+        }
+        for event in parse_events(&result) {
+            pump.fold(event, &mut |_| {});
+        }
+        assert_eq!(
+            pump.settle_usage().map(|u| u.total),
+            Some(crate::model::TokenUsage {
+                input_tokens: 150,
+                cache_read_tokens: 0,
+                cache_write_tokens: 0,
+                output_tokens: 50,
+                reasoning_tokens: None,
+            })
+        );
+        // The result alone (no assistant frame reported): adopted.
+        let mut pump = pump_with_bridge();
+        for event in parse_events(&result) {
+            pump.fold(event, &mut |_| {});
+        }
+        assert_eq!(pump.settle_usage().map(|u| u.total.input_tokens), Some(999));
+        // Neither reported: fail-closed.
+        let mut pump = pump_with_bridge();
+        pump.fold(
+            ClaudeEvent::AssistantText {
+                text: "no usage anywhere".into(),
+            },
+            &mut |_| {},
+        );
+        assert!(pump.settle_usage().is_none());
+    }
+
+    /// ADR-0130 (issue #1274): the stream channel's occupancy numerator
+    /// latches the LAST round-trip's usage -- the built-in fold's Anthropic
+    /// arm (full-resend semantics: the total-side input IS the measured
+    /// context). The terminal frame's turn-total is the fallback only when
+    /// no assistant frame reported (the same source order the usage sum
+    /// applies); neither reported: fail-closed, no zero reading.
+    #[test]
+    fn occupancy_latches_the_last_round_trip_anthropic_arm() {
+        fn frame(input: u64, output: u64) -> Value {
+            json!({
+                "type": "assistant",
+                "message": {
+                    "content": [{"type": "text", "text": "step"}],
+                    "usage": {"input_tokens": input, "output_tokens": output},
+                },
+            })
+        }
+        let result = json!({
+            "type": "result",
+            "subtype": "success",
+            "result": "done",
+            "usage": {"input_tokens": 999, "output_tokens": 999},
+        });
+        // Two assistant frames + the result: the LAST frame's total-side
+        // input is the reading -- the result's turn-total never wins while
+        // a frame reported.
+        let mut pump = pump_with_bridge();
+        for v in [frame(100, 40), frame(50, 10)] {
+            for event in parse_events(&v) {
+                pump.fold(event, &mut |_| {});
+            }
+        }
+        for event in parse_events(&result) {
+            pump.fold(event, &mut |_| {});
+        }
+        assert_eq!(
+            pump.occupancy(),
+            Some(crate::model::OccupancySnapshot {
+                tokens: 50,
+                limit: None,
+            })
+        );
+        // The BILLING channel is untouched by the latch: the frames' sum
+        // stands, the result's turn-total stays out of it.
+        assert_eq!(
+            pump.settle_usage().map(|u| u.total),
+            Some(crate::model::TokenUsage {
+                input_tokens: 150,
+                cache_read_tokens: 0,
+                cache_write_tokens: 0,
+                output_tokens: 50,
+                reasoning_tokens: None,
+            })
+        );
+        // A turn cut before its result frame (a cancel mid-window) keeps
+        // the reading its frames earned -- the last frame latched, the
+        // sum intact.
+        let mut pump = pump_with_bridge();
+        for v in [frame(100, 40), frame(50, 10)] {
+            for event in parse_events(&v) {
+                pump.fold(event, &mut |_| {});
+            }
+        }
+        assert_eq!(
+            pump.occupancy(),
+            Some(crate::model::OccupancySnapshot {
+                tokens: 50,
+                limit: None,
+            })
+        );
+        assert_eq!(pump.settle_usage().map(|u| u.total.input_tokens), Some(150));
+        // The result alone (no assistant frame reported): adopted as the
+        // reading (the same fallback the usage sum applies).
+        let mut pump = pump_with_bridge();
+        for event in parse_events(&result) {
+            pump.fold(event, &mut |_| {});
+        }
+        assert_eq!(
+            pump.occupancy(),
+            Some(crate::model::OccupancySnapshot {
+                tokens: 999,
+                limit: None,
+            })
+        );
+        // Neither reported: fail-closed -- no reading, never a zero.
+        let mut pump = pump_with_bridge();
+        pump.fold(
+            ClaudeEvent::AssistantText {
+                text: "no usage anywhere".into(),
+            },
+            &mut |_| {},
+        );
+        assert!(pump.occupancy().is_none());
+    }
+
+    /// #1290 (Decision 4 as calibrated): the `SystemInit` frame's model is
+    /// the occupancy denominator's key -- a cataloged id stamps the window
+    /// onto the latched reading; an uncataloged id leaves it hollow (the
+    /// catalog miss's terminal state, never a guessed window).
+    #[test]
+    fn occupancy_stamps_the_window_off_the_init_model() {
+        fn frame(input: u64, output: u64) -> Value {
+            json!({
+                "type": "assistant",
+                "message": {
+                    "content": [{"type": "text", "text": "step"}],
+                    "usage": {"input_tokens": input, "output_tokens": output},
+                },
+            })
+        }
+        let mut pump = pump_with_bridge();
+        pump.fold(
+            ClaudeEvent::SystemInit {
+                model: Some("claude-sonnet-4-5".into()),
+            },
+            &mut |_| {},
+        );
+        for event in parse_events(&frame(150, 40)) {
+            pump.fold(event, &mut |_| {});
+        }
+        assert_eq!(
+            pump.occupancy(),
+            Some(crate::model::OccupancySnapshot {
+                tokens: 150,
+                limit: Some(200_000), // the catalog's claude-sonnet-4 row
+            })
+        );
+        // An uncataloged model never stamps: the hollow ring stands.
+        let mut pump = pump_with_bridge();
+        pump.fold(
+            ClaudeEvent::SystemInit {
+                model: Some("doubao-1.5-pro".into()),
+            },
+            &mut |_| {},
+        );
+        for event in parse_events(&frame(150, 40)) {
+            pump.fold(event, &mut |_| {});
+        }
+        assert_eq!(
+            pump.occupancy(),
+            Some(crate::model::OccupancySnapshot {
+                tokens: 150,
+                limit: None,
+            })
+        );
+    }
+
+    /// An error result frame maps the same shape (the driver decides the
+    /// termination semantics).
+    #[test]
+    fn parse_result_error() {
+        let v = json!({
+            "type": "result",
+            "subtype": "error_during_execution",
+            "is_error": true,
+            "result": "rate limited"
+        });
+        assert_eq!(
+            parse_events(&v),
+            vec![ClaudeEvent::Result {
+                subtype: "error_during_execution".into(),
+                is_error: true,
+                text: "rate limited".into()
+            }]
+        );
+    }
+
+    // --- parse_events: tolerance -------------------------------------------------
+
+    /// Control-plane frames + unshaped lines contribute nothing (they belong
+    /// to the probe surface / hook noise).
+    #[test]
+    fn parse_control_and_unknown_frames_are_tolerated() {
+        for v in [
+            json!({"type": "control_request", "request_id": "r1",
+                   "request": {"subtype": "can_use_tool"}}),
+            json!({"type": "control_response", "request_id": "r1",
+                   "response": {"subtype": "success"}}),
+            json!({"type": "session_meta", "id": "abc"}),
+            json!({"foo": "bar"}),
+            json!(null),
+        ] {
+            assert!(parse_events(&v).is_empty(), "{v} ignored");
+        }
+    }
+
+    // --- build_mcp_config_flags ----------------------------------------------------
+
+    fn bridge(name: &str) -> McpServer {
+        McpServer::stdio_bridge(
+            name,
+            "/abs/path/to/bridge",
+            Vec::new(),
+            std::collections::BTreeMap::from([
+                ("TOPTOPDUCK_GATEWAY_PORT".to_string(), "12345".to_string()),
+                ("TOPTOPDUCK_GATEWAY_TOKEN".to_string(), "abc".to_string()),
+            ]),
+        )
+    }
+
+    /// One bridge descriptor becomes `--mcp-config <json>` + the
+    /// unconditional `--strict-mcp-config`.
+    #[test]
+    fn mcp_config_flags_carry_inline_descriptor_and_strict() {
+        let flags = build_mcp_config_flags(&[bridge("toptopduck-gateway")]);
+        assert_eq!(flags.len(), 3);
+        assert_eq!(flags[0], "--mcp-config");
+        let doc: Value = serde_json::from_str(&flags[1]).expect("inline json");
+        let server = &doc["mcpServers"]["toptopduck-gateway"];
+        assert_eq!(server["command"], "/abs/path/to/bridge");
+        assert_eq!(server["env"]["TOPTOPDUCK_GATEWAY_PORT"], "12345");
+        assert_eq!(server["env"]["TOPTOPDUCK_GATEWAY_TOKEN"], "abc");
+        assert_eq!(server["args"], json!([]));
+        assert_eq!(flags[2], "--strict-mcp-config");
+    }
+
+    /// With no bridge descriptor, strict still rides (a zero-tool turn beats
+    /// a machine-MCP side channel).
+    #[test]
+    fn mcp_config_flags_strict_without_servers() {
+        assert_eq!(build_mcp_config_flags(&[]), vec!["--strict-mcp-config"]);
+    }
+
+    // --- pump fold ------------------------------------------------------------------
+
+    fn pump_with_bridge() -> ClaudePump {
+        ClaudePump {
+            tracker: RoundTracker::new(),
+            step_cap: 24,
+            current_model: None,
+            pending: Vec::new(),
+            gateway_prefixes: vec!["mcp__toptopduck-gateway__".to_string()],
+            streamed_prose: false,
+            streamed_text: String::new(),
+            usage: crate::model::TokenUsage::default(),
+            result_usage: None,
+            last_roundtrip_usage: None,
+        }
+    }
+
+    // --- pump fold: partial-message dedupe -------------------------------------
+
+    /// Issue #1242: a gateway-prefixed tool_use (the bridge's flattened
+    /// rename) folds into the rounds -- the settle merge's replacement
+    /// anchor -- but emits NOTHING live: the gateway serve's direct
+    /// emission is the row's only live source, so the echo never doubles it
+    /// mid-flight. A native (unprefixed) call keeps its live pair.
+    #[test]
+    fn gateway_prefixed_call_is_silent_live_native_keeps_its_pair() {
+        let mut pump = pump_with_bridge();
+        let mut phases = Vec::new();
+        pump.fold(
+            ClaudeEvent::ToolUse {
+                id: "tu_1".into(),
+                name: "mcp__toptopduck-gateway__explore".into(),
+                input: serde_json::json!({"sql": "SELECT 1"}),
+            },
+            &mut |p| phases.push(p),
+        );
+        pump.fold(
+            ClaudeEvent::ToolResult {
+                id: "tu_1".into(),
+                success: true,
+            },
+            &mut |p| phases.push(p),
+        );
+        assert!(
+            phases.is_empty(),
+            "the gateway echo emits no live phase: {phases:?}"
+        );
+        let rounds = pump
+            .tracker
+            .settle_rounds(&Termination::Text("done".into()));
+        assert_eq!(rounds.len(), 1);
+        assert_eq!(rounds[0].calls.len(), 1);
+        assert_eq!(rounds[0].calls[0].name, "explore");
+
+        // The native counterpart: no prefix, live pair intact.
+        let mut pump = pump_with_bridge();
+        let mut phases = Vec::new();
+        pump.fold(
+            ClaudeEvent::ToolUse {
+                id: "tu_2".into(),
+                name: "Bash".into(),
+                input: serde_json::json!({"command": "ls"}),
+            },
+            &mut |p| phases.push(p),
+        );
+        pump.fold(
+            ClaudeEvent::ToolResult {
+                id: "tu_2".into(),
+                success: true,
+            },
+            &mut |p| phases.push(p),
+        );
+        assert_eq!(phases.len(), 2, "the native call keeps its live pair");
+        assert!(matches!(
+            &phases[0],
+            TurnPhase::ToolCallStarted { name, .. } if name == "Bash"
+        ));
+        assert!(matches!(&phases[1], TurnPhase::ToolCallCompleted(_)));
+    }
+
+    /// Issue #1242, the drain half: a gateway-prefixed call the agent never
+    /// reports a result for drains unobserved at turn end with NO live
+    /// phase -- the gateway's own emission was the row's only live source,
+    /// so no duplicate row may appear at drain time.
+    #[test]
+    fn gateway_echo_pending_at_turn_end_drains_silent_live() {
+        let mut pump = pump_with_bridge();
+        let mut phases = Vec::new();
+        pump.fold(
+            ClaudeEvent::ToolUse {
+                id: "tu_3".into(),
+                name: "mcp__toptopduck-gateway__explore".into(),
+                input: serde_json::json!({"sql": "SELECT 1"}),
+            },
+            &mut |p| phases.push(p),
+        );
+        pump.finalize_pending(&mut |p| phases.push(p));
+        assert!(
+            phases.is_empty(),
+            "the gateway echo drains live-silent: {phases:?}"
+        );
+        let rounds = pump
+            .tracker
+            .settle_rounds(&Termination::Text("done".into()));
+        assert_eq!(rounds[0].calls.len(), 1);
+        assert_eq!(rounds[0].calls[0].name, "explore");
+        assert!(
+            !rounds[0].calls[0].success,
+            "the unobserved drain lands the honest failed marker"
+        );
+    }
+
+    /// With partial messages on, one message's deltas stream first and its
+    /// complete `assistant` frame trails: the frame must not re-append, so
+    /// the round and terminal tracks carry the text exactly once and the
+    /// delta stream is the chunks alone.
+    #[test]
+    fn streamed_deltas_dedupe_the_trailing_complete_frame() {
+        let mut pump = pump_with_bridge();
+        let mut phases = Vec::new();
+        for chunk in ["the ", "answer"] {
+            pump.fold(ClaudeEvent::StreamDelta { text: chunk.into() }, &mut |p| {
+                phases.push(p)
+            });
+        }
+        pump.fold(
+            ClaudeEvent::AssistantText {
+                text: "the answer".into(),
+            },
+            &mut |p| phases.push(p),
+        );
+        assert_eq!(pump.tracker.terminal_text(), "the answer");
+        let deltas: Vec<String> = phases
+            .into_iter()
+            .filter_map(|p| match p {
+                TurnPhase::TextDelta { delta } => Some(delta),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(deltas, vec!["the ".to_string(), "answer".to_string()]);
+    }
+
+    /// The dedupe guard resets with the frame it skips: a delta-streamed
+    /// message deduplicates, and the NEXT complete frame arriving without a
+    /// streamed run (the whole-block shape) still pushes.
+    #[test]
+    fn the_dedupe_guard_resets_with_each_complete_frame() {
+        let mut pump = pump_with_bridge();
+        let mut phases = Vec::new();
+        pump.fold(ClaudeEvent::StreamDelta { text: "a".into() }, &mut |p| {
+            phases.push(p)
+        });
+        pump.fold(ClaudeEvent::AssistantText { text: "a".into() }, &mut |p| {
+            phases.push(p)
+        });
+        pump.fold(ClaudeEvent::AssistantText { text: "b".into() }, &mut |p| {
+            phases.push(p)
+        });
+        assert_eq!(pump.tracker.terminal_text(), "ab");
+        let deltas: Vec<String> = phases
+            .into_iter()
+            .filter_map(|p| match p {
+                TurnPhase::TextDelta { delta } => Some(delta),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            deltas,
+            vec!["a".to_string(), "b".to_string()],
+            "each text lands as one delta: the streamed chunk and the later whole-block frame"
+        );
+    }
+
+    /// A delta-covered frame whose text differs from its streamed deltas
+    /// still skips -- the streamed text stands and the frame text drops
+    /// with a warn: the comparison is a diagnostic face, never a second
+    /// push path (issue #1228).
+    #[test]
+    fn a_mismatched_delta_covered_frame_still_skips() {
+        let mut pump = pump_with_bridge();
+        let mut phases = Vec::new();
+        pump.fold(ClaudeEvent::StreamDelta { text: "a".into() }, &mut |p| {
+            phases.push(p)
+        });
+        pump.fold(
+            ClaudeEvent::AssistantText {
+                text: "different".into(),
+            },
+            &mut |p| phases.push(p),
+        );
+        assert_eq!(pump.tracker.terminal_text(), "a");
+        let deltas: Vec<String> = phases
+            .into_iter()
+            .filter_map(|p| match p {
+                TurnPhase::TextDelta { delta } => Some(delta),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(deltas, vec!["a".to_string()]);
+    }
+
+    // --- pump fold: rounds (issue #612) ---------------------------------------
+
+    /// The end-of-turn pump sequence the run loop performs: drain open
+    /// rows, freeze the trailing round's thought stream (its
+    /// ThinkingCompleted renders live), settle the rounds under the turn's
+    /// termination.
+    fn settle(
+        mut pump: ClaudePump,
+        phases: &mut Vec<TurnPhase>,
+        termination: &Termination,
+    ) -> Vec<LoopRound> {
+        pump.finalize_pending(&mut |p| phases.push(p));
+        pump.tracker
+            .freeze_trailing_thinking(&mut |p| phases.push(p));
+        pump.tracker.settle_rounds(termination)
+    }
+
+    /// A full trajectory settles into per-round slots: the batch round
+    /// carries its frozen thinking, its prose, and its calls; the trailing
+    /// call-less prose rides the terminal text, not a round of its own.
+    #[test]
+    fn rounds_carry_prose_thinking_and_calls() {
+        let mut pump = pump_with_bridge();
+        let mut phases = Vec::new();
+        // Round 1: thinking + prose + one native call, then its result.
+        pump.fold(
+            ClaudeEvent::ThinkingBlock {
+                text: "reasoning".into(),
+            },
+            &mut |p| phases.push(p),
+        );
+        pump.fold(
+            ClaudeEvent::AssistantText {
+                text: "let me query".into(),
+            },
+            &mut |p| phases.push(p),
+        );
+        pump.fold(
+            ClaudeEvent::ToolUse {
+                id: "toolu_1".into(),
+                name: "Bash".into(),
+                input: json!({}),
+            },
+            &mut |p| phases.push(p),
+        );
+        pump.fold(
+            ClaudeEvent::ToolResult {
+                id: "toolu_1".into(),
+                success: true,
+            },
+            &mut |p| phases.push(p),
+        );
+        // Trailing round: prose only -- the terminal answer.
+        pump.fold(
+            ClaudeEvent::AssistantText {
+                text: "the answer is 42".into(),
+            },
+            &mut |p| phases.push(p),
+        );
+        assert_eq!(pump.tracker.terminal_text(), "the answer is 42");
+        let rounds = settle(
+            pump,
+            &mut phases,
+            &Termination::Text("the answer is 42".into()),
+        );
+        assert_eq!(rounds.len(), 1, "the trailing prose-only round drops");
+        assert_eq!(rounds[0].text.as_deref(), Some("let me query"));
+        let thinking = rounds[0].thinking.as_ref().expect("frozen thinking");
+        assert_eq!(thinking.text, "reasoning");
+        assert_eq!(rounds[0].calls.len(), 1);
+        assert_eq!(rounds[0].calls[0].name, "Bash");
+    }
+
+    /// The live channel's order for one round (ADR-0126): the TextDelta on
+    /// arrival, then the batch seal's ThinkingCompleted, then the batch's
+    /// ToolCallStarted -- the trailing call-less prose fires the round-2
+    /// Thinking wait pointer AND streams its own delta (the terminal
+    /// round's first live text).
+    #[test]
+    fn live_order_delta_thinking_freeze_then_call() {
+        let mut pump = pump_with_bridge();
+        let mut phases = Vec::new();
+        pump.fold(
+            ClaudeEvent::ThinkingBlock {
+                text: "first plan".into(),
+            },
+            &mut |p| phases.push(p),
+        );
+        pump.fold(
+            ClaudeEvent::AssistantText {
+                text: "let me query".into(),
+            },
+            &mut |p| phases.push(p),
+        );
+        pump.fold(
+            ClaudeEvent::ToolUse {
+                id: "toolu_1".into(),
+                name: "Bash".into(),
+                input: json!({}),
+            },
+            &mut |p| phases.push(p),
+        );
+        assert_eq!(phases.len(), 3);
+        match &phases[0] {
+            TurnPhase::TextDelta { delta } => assert_eq!(delta, "let me query"),
+            other => panic!("expected TextDelta, got {other:?}"),
+        }
+        match &phases[1] {
+            TurnPhase::ThinkingCompleted { text, .. } => assert_eq!(text, "first plan"),
+            other => panic!("expected ThinkingCompleted, got {other:?}"),
+        }
+        assert!(matches!(phases[2], TurnPhase::ToolCallStarted { .. }));
+
+        // The trailing prose opens round 2 -- the live round pointer fires
+        // -- and streams its delta live.
+        pump.fold(
+            ClaudeEvent::AssistantText {
+                text: "the answer".into(),
+            },
+            &mut |p| phases.push(p),
+        );
+        assert_eq!(phases.len(), 5);
+        match &phases[3] {
+            TurnPhase::Thinking { attempt } => assert_eq!(*attempt, 2),
+            other => panic!("expected the round-2 Thinking wait, got {other:?}"),
+        }
+        match &phases[4] {
+            TurnPhase::TextDelta { delta } => assert_eq!(delta, "the answer"),
+            other => panic!("expected the trailing delta, got {other:?}"),
+        }
+    }
+
+    /// The trailing call-less prose stretch IS the terminal text -- the
+    /// honest-degrade answer when no result frame ever arrives.
+    #[test]
+    fn trailing_prose_is_the_terminal_text() {
+        let mut pump = pump_with_bridge();
+        pump.fold(
+            ClaudeEvent::AssistantText {
+                text: "partial answer".into(),
+            },
+            &mut |_| {},
+        );
+        assert_eq!(pump.tracker.terminal_text(), "partial answer");
+    }
+
+    /// Mid-batch prose + trailing prose without a result frame: the answer
+    /// is the trailing stretch ONLY -- the earlier prose stays in its round
+    /// slot (the dual-track semantics; the flat pump would have
+    /// concatenated both).
+    #[test]
+    fn eof_after_batch_answers_with_trailing_stretch_only() {
+        let mut pump = pump_with_bridge();
+        let mut phases = Vec::new();
+        // Round 1: prose + a call, then its result.
+        pump.fold(
+            ClaudeEvent::AssistantText {
+                text: "checking".into(),
+            },
+            &mut |p| phases.push(p),
+        );
+        pump.fold(
+            ClaudeEvent::ToolUse {
+                id: "toolu_1".into(),
+                name: "Bash".into(),
+                input: json!({}),
+            },
+            &mut |p| phases.push(p),
+        );
+        pump.fold(
+            ClaudeEvent::ToolResult {
+                id: "toolu_1".into(),
+                success: true,
+            },
+            &mut |p| phases.push(p),
+        );
+        // Trailing round: the answer, never followed by a result frame.
+        pump.fold(
+            ClaudeEvent::AssistantText {
+                text: "final answer".into(),
+            },
+            &mut |p| phases.push(p),
+        );
+        assert_eq!(
+            pump.tracker.text_or_runtime("claude closed stdout"),
+            Termination::Text("final answer".into())
+        );
+        // The mid-batch prose fired live as its round's TextDelta.
+        assert!(phases
+            .iter()
+            .any(|p| matches!(p, TurnPhase::TextDelta { delta } if delta == "checking")));
+    }
+
+    /// A call left open at turn end lands on the round it opened in, not
+    /// whichever round is current when the drain runs.
+    #[test]
+    fn pending_call_lands_on_its_opening_round() {
+        let mut pump = pump_with_bridge();
+        let mut phases = Vec::new();
+        // Round 1: one call whose result frame never arrives.
+        pump.fold(
+            ClaudeEvent::ToolUse {
+                id: "toolu_open".into(),
+                name: "Bash".into(),
+                input: json!({}),
+            },
+            &mut |p| phases.push(p),
+        );
+        // Round 2 opens (round 1 observed a call): trailing prose only.
+        pump.fold(
+            ClaudeEvent::AssistantText {
+                text: "never mind".into(),
+            },
+            &mut |p| phases.push(p),
+        );
+        let rounds = settle(pump, &mut phases, &Termination::Text("never mind".into()));
+        assert_eq!(rounds.len(), 1);
+        assert_eq!(
+            rounds[0].calls.len(),
+            1,
+            "the open row drains into its round"
+        );
+        assert!(
+            !rounds[0].calls[0].success,
+            "a drained row must not present as success (issue #630)"
+        );
+    }
+
+    /// A gateway-routed tool_use + tool_result lands an engine trace row
+    /// (issue #817) and emits NOTHING live (issue #1242): the row is the
+    /// in-place-replacement anchor the settle merge pairs the gateway's
+    /// authoritative record against, so the gateway's values land inside the
+    /// round the call ran in -- no leading all-gateway round -- while the
+    /// live face belongs to the gateway serve's own emission.
+    #[test]
+    fn gateway_routed_tool_call_lands_row_silently() {
+        let mut pump = pump_with_bridge();
+        let mut phases = Vec::new();
+        let end = pump.fold(
+            ClaudeEvent::ToolUse {
+                id: "toolu_1".into(),
+                name: "mcp__toptopduck-gateway__explore".into(),
+                input: json!({"sql": "SELECT 1"}),
+            },
+            &mut |p| phases.push(p),
+        );
+        assert!(end.is_none());
+        let end = pump.fold(
+            ClaudeEvent::ToolResult {
+                id: "toolu_1".into(),
+                success: true,
+            },
+            &mut |p| phases.push(p),
+        );
+        assert!(end.is_none());
+        assert!(
+            phases.is_empty(),
+            "the gateway echo's live face is the gateway serve's emission: {phases:?}"
+        );
+        let rounds = pump
+            .tracker
+            .settle_rounds(&Termination::Text(String::new()));
+        assert_eq!(rounds.len(), 1);
+        // The engine row lands in the round (the merge's replacement
+        // anchor), under the BARE name the gateway records.
+        assert_eq!(rounds[0].calls.len(), 1, "the anchor row lands");
+        assert_eq!(rounds[0].calls[0].name, "explore");
+    }
+
+    /// A native (unprefixed) tool_use rides the engine trace (the codex
+    /// path's native-event precedent).
+    #[test]
+    fn native_tool_call_rides_engine_trace() {
+        let mut pump = pump_with_bridge();
+        let mut phases = Vec::new();
+        pump.fold(
+            ClaudeEvent::ToolUse {
+                id: "toolu_9".into(),
+                name: "Bash".into(),
+                input: json!({}),
+            },
+            &mut |p| phases.push(p),
+        );
+        pump.fold(
+            ClaudeEvent::ToolResult {
+                id: "toolu_9".into(),
+                success: false,
+            },
+            &mut |p| phases.push(p),
+        );
+        let rounds = settle(pump, &mut phases, &Termination::Text(String::new()));
+        assert_eq!(rounds.len(), 1);
+        assert_eq!(rounds[0].calls.len(), 1);
+        assert_eq!(rounds[0].calls[0].name, "Bash");
+        assert!(!rounds[0].calls[0].success);
+    }
+
+    /// A success result frame ends the turn with the frame's own text.
+    #[test]
+    fn result_success_terminates_with_text() {
+        let mut pump = pump_with_bridge();
+        let end = pump.fold(
+            ClaudeEvent::Result {
+                subtype: "success".into(),
+                is_error: false,
+                text: "final".into(),
+            },
+            &mut |_| {},
+        );
+        assert_eq!(end, Some(Termination::Text("final".into())));
+    }
+
+    /// A success result with an empty `result` field falls back to the
+    /// accumulated stream text.
+    #[test]
+    fn result_success_empty_text_falls_back_to_accumulated() {
+        let mut pump = pump_with_bridge();
+        pump.fold(
+            ClaudeEvent::AssistantText {
+                text: "streamed".into(),
+            },
+            &mut |_| {},
+        );
+        let end = pump.fold(
+            ClaudeEvent::Result {
+                subtype: "success".into(),
+                is_error: false,
+                text: String::new(),
+            },
+            &mut |_| {},
+        );
+        assert_eq!(end, Some(Termination::Text("streamed".into())));
+    }
+
+    /// An error result maps to a Runtime carrying the CLI's detail; the
+    /// max-turns subtype maps onto the execution-level StepCap (the ACP
+    /// MaxTurnRequests precedent).
+    #[test]
+    fn result_error_maps_runtime_and_max_turns_step_cap() {
+        let mut pump = pump_with_bridge();
+        let end = pump.fold(
+            ClaudeEvent::Result {
+                subtype: "error_during_execution".into(),
+                is_error: true,
+                text: "rate limited".into(),
+            },
+            &mut |_| {},
+        );
+        match end {
+            Some(Termination::Runtime(msg)) => {
+                assert!(msg.contains("rate limited"), "{msg}")
+            }
+            other => panic!("expected Runtime, got {other:?}"),
+        }
+        let end = pump.fold(
+            ClaudeEvent::Result {
+                subtype: "error_max_turns".into(),
+                is_error: true,
+                text: String::new(),
+            },
+            &mut |_| {},
+        );
+        assert_eq!(end, Some(Termination::StepCap(24)));
+    }
+
+    /// system{init} records the current model for the honest-rendering
+    /// catalog; later frames never overwrite the trace-facing state.
+    #[test]
+    fn system_init_records_current_model() {
+        let mut pump = pump_with_bridge();
+        pump.fold(
+            ClaudeEvent::SystemInit {
+                model: Some("claude-sonnet-4".into()),
+            },
+            &mut |_| {},
+        );
+        assert_eq!(pump.current_model.as_deref(), Some("claude-sonnet-4"));
+    }
+
+    /// Pending rows finalize honestly at turn end (issue #630): a row the
+    /// agent never reported on must not present as a bare success.
+    #[test]
+    fn pending_rows_finalize_at_turn_end() {
+        let mut pump = pump_with_bridge();
+        let mut phases = Vec::new();
+        pump.fold(
+            ClaudeEvent::ToolUse {
+                id: "toolu_open".into(),
+                name: "Bash".into(),
+                input: json!({}),
+            },
+            &mut |p| phases.push(p),
+        );
+        pump.finalize_pending(&mut |p| phases.push(p));
+        assert!(pump.pending.is_empty());
+        let rounds = settle(pump, &mut phases, &Termination::Text(String::new()));
+        assert_eq!(rounds.len(), 1);
+        assert_eq!(rounds[0].calls.len(), 1);
+        assert!(
+            !rounds[0].calls[0].success,
+            "a drained row must not present as success: {:?}",
+            rounds[0].calls[0]
+        );
+        assert_eq!(
+            rounds[0].calls[0].result_excerpt, UNOBSERVED_EXCERPT,
+            "a drained row carries the unobserved marker"
+        );
+    }
+}

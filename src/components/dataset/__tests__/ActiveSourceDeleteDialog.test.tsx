@@ -1,0 +1,205 @@
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { fireEvent, screen, waitFor } from "@testing-library/react";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import type { ReactElement } from "react";
+import { ActiveSourceDeleteDialog } from "../ActiveSourceDeleteDialog";
+import type { DatasetDescriptor } from "../../../types/dataset";
+import { mockDataset } from "./helpers";
+import { renderI18n } from "../../common/__tests__/helpers";
+
+// Runs offline: the dialog's impact list (issue #1063) is the only api
+// consumer in this component tree (partial mock, useWorkingSet.test pattern).
+vi.mock("../../../api", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../../../api")>();
+  return { ...actual, previewDeleteImpact: vi.fn() };
+});
+
+import { previewDeleteImpact } from "../../../api";
+
+// The impact list (issue #1063) is a useQuery consumer -- every render gets
+// a QueryClient ancestor (retry:false keeps a rejected preview single-shot).
+function renderDialog(ui: ReactElement) {
+  const client = new QueryClient({
+    defaultOptions: { queries: { retry: false } },
+  });
+  return renderI18n(<QueryClientProvider client={client}>{ui}</QueryClientProvider>);
+}
+
+describe("ActiveSourceDeleteDialog (issue #39)", () => {
+  // Every test here opens the dialog, which mounts the impact preview;
+  // seed the default so un-seeded renders read an empty closure instead of
+  // the query library's undefined-data error line (the error branch is
+  // owned by DeleteImpactList.test). clearAllMocks wipes the call record
+  // the shared module-mock spy accumulates across tests.
+  beforeEach(() => {
+    vi.mocked(previewDeleteImpact).mockResolvedValue([]);
+  });
+  afterEach(() => vi.clearAllMocks());
+
+  const target: DatasetDescriptor = {
+    ...mockDataset,
+    reference_name: "orders",
+    display_name: "orders",
+  };
+  // AC5: candidates are the FULL remaining set -- everyone but the removed one.
+  const candidates: DatasetDescriptor[] = [
+    { ...mockDataset, reference_name: "people", display_name: "people" },
+    { ...mockDataset, reference_name: "items", display_name: "items" },
+  ];
+
+  it("pre-selects the first candidate and confirms with it (AC2/AC5)", () => {
+    // AC5: every remaining source is a candidate. AC2: the first is pre-selected
+    // so a single Confirm carries (ref, continueWith) to the backend.
+    const onConfirm = vi.fn();
+    renderDialog(
+      <ActiveSourceDeleteDialog
+        sessionId="s1"
+        target={target}
+        candidates={candidates}
+        onConfirm={onConfirm}
+        onCancel={() => {}}
+      />,
+    );
+    // The target is named in the dialog title.
+    expect(screen.getByText(/删除当前数据集「orders」/)).toBeInTheDocument();
+    // AC5: full remaining set renders; the first is checked by default.
+    expect(screen.getByRole("radio", { name: "people" })).toBeChecked();
+    expect(screen.getByRole("radio", { name: "items" })).not.toBeChecked();
+
+    fireEvent.click(screen.getByRole("button", { name: "继续" }));
+    expect(onConfirm).toHaveBeenCalledWith("people");
+  });
+
+  it("lets the user re-pick before confirming (AC2)", () => {
+    // The focus moves to whichever source the user chooses, not always the
+    // first -- picking items then confirming carries items as the continuation.
+    const onConfirm = vi.fn();
+    renderDialog(
+      <ActiveSourceDeleteDialog
+        sessionId="s1"
+        target={target}
+        candidates={candidates}
+        onConfirm={onConfirm}
+        onCancel={() => {}}
+      />,
+    );
+    fireEvent.click(screen.getByRole("radio", { name: "items" }));
+    fireEvent.click(screen.getByRole("button", { name: "继续" }));
+    expect(onConfirm).toHaveBeenCalledWith("items");
+  });
+
+  it("cancel does not fire onConfirm (AC3)", () => {
+    const onConfirm = vi.fn();
+    const onCancel = vi.fn();
+    renderDialog(
+      <ActiveSourceDeleteDialog
+        sessionId="s1"
+        target={target}
+        candidates={candidates}
+        onConfirm={onConfirm}
+        onCancel={onCancel}
+      />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "取消" }));
+    expect(onCancel).toHaveBeenCalledOnce();
+    expect(onConfirm).not.toHaveBeenCalled();
+  });
+
+  it("Escape does not close the dialog (explicit guard, issue #105/#766)", () => {
+    // The AlertDialog primitive only blocks outside pointer interactions --
+    // an unguarded AlertDialog still closes on ESC (issue #766: once closed,
+    // pendingActiveDelete stayed mounted and the dialog could not be reopened).
+    // The explicit onEscapeKeyDown preventDefault on the content keeps the
+    // destructive confirm open: the user must take an explicit 取消 / 继续
+    // action, and neither callback fires.
+    const onConfirm = vi.fn();
+    const onCancel = vi.fn();
+    renderDialog(
+      <ActiveSourceDeleteDialog
+        sessionId="s1"
+        target={target}
+        candidates={candidates}
+        onConfirm={onConfirm}
+        onCancel={onCancel}
+      />,
+    );
+    fireEvent.keyDown(screen.getByRole("alertdialog"), { key: "Escape" });
+    expect(screen.getByRole("alertdialog")).toBeInTheDocument();
+    expect(onConfirm).not.toHaveBeenCalled();
+    expect(onCancel).not.toHaveBeenCalled();
+  });
+
+  it("overlay-click does not close the dialog or fire callbacks (AlertDialog, issue #111)", async () => {
+    // Radix AlertDialog prevents onPointerDownOutside / onInteractOutside, so a
+    // pointer-down on the overlay (outside the content) leaves the dialog open
+    // and fires neither callback -- the user must take an explicit 取消 / 继续
+    // action. Pins the overlay-dismiss path the prior ESC test did not cover.
+    const onConfirm = vi.fn();
+    const onCancel = vi.fn();
+    renderDialog(
+      <ActiveSourceDeleteDialog
+        sessionId="s1"
+        target={target}
+        candidates={candidates}
+        onConfirm={onConfirm}
+        onCancel={onCancel}
+      />,
+    );
+    // Radix attaches its pointerdown listener on a setTimeout(0) after mount;
+    // flush it before the pointer events so the outside-click is observed.
+    await new Promise((r) => setTimeout(r, 0));
+    fireEvent.pointerDown(document.body, { button: 0 });
+    fireEvent.pointerUp(document.body, { button: 0 });
+    fireEvent.click(document.body);
+    await new Promise((r) => setTimeout(r, 0));
+    // AlertDialog semantics: the destructive confirm stays put; no accidental
+    // confirm or cancel.
+    expect(screen.getByRole("alertdialog")).toBeInTheDocument();
+    expect(onConfirm).not.toHaveBeenCalled();
+    expect(onCancel).not.toHaveBeenCalled();
+  });
+
+  it("Action click fires onConfirm but keeps the dialog mounted (preventDefault retry, H-1)", () => {
+    // H-1 regression guard (issue #111): AlertDialogAction auto-closes on click,
+    // but the handler calls e.preventDefault() to defer close so the parent's
+    // async remove decides unmount. A failure leaves the dialog open for retry --
+    // verified by onConfirm firing AND the alertdialog still being in the DOM.
+    const onConfirm = vi.fn();
+    renderDialog(
+      <ActiveSourceDeleteDialog
+        sessionId="s1"
+        target={target}
+        candidates={candidates}
+        onConfirm={onConfirm}
+        onCancel={() => {}}
+      />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "继续" }));
+    expect(onConfirm).toHaveBeenCalledWith("people");
+    // preventDefault deferred the auto-close: the dialog is still mounted.
+    expect(screen.getByRole("alertdialog")).toBeInTheDocument();
+  });
+
+  it("previews the cascade impact inside the dialog (issue #1063)", async () => {
+    // The impact list rides the read-only preview command: the affected
+    // results render ahead of the continuation pick, and the confirm stays
+    // executable with the list shown (the preview never blocks the delete).
+    vi.mocked(previewDeleteImpact).mockResolvedValue([
+      { reference_name: "result_1", display_name: "销量汇总" },
+    ]);
+    renderDialog(
+      <ActiveSourceDeleteDialog
+        sessionId="s1"
+        target={target}
+        candidates={candidates}
+        onConfirm={vi.fn()}
+        onCancel={() => {}}
+      />,
+    );
+    await waitFor(() =>
+      expect(screen.getByText("受影响的结果")).toBeInTheDocument(),
+    );
+    expect(screen.getByText("销量汇总")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "继续" })).toBeEnabled();
+  });
+});

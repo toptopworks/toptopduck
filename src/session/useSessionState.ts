@@ -1,0 +1,492 @@
+import { useCallback, useMemo, useState } from "react";
+import { useIntl } from "react-intl";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { conversation, takePersistError } from "../api";
+import { toAppError } from "../lib/error-presentation";
+import { sessionKeys } from "./queryKeys";
+import { useIngestFlow } from "./useIngestFlow";
+import {
+  invalidateSessionData,
+  useWorkingSetData,
+  type UseWorkingSetSurfaces,
+} from "./useWorkingSet";
+import { useTurnFlow, type LiveTurn } from "./useTurnFlow";
+import { useArtifactAutoOpen } from "./useArtifactAutoOpen";
+import { useViewedResult } from "./useViewedResult";
+import { useWorkspaceCollapse } from "./useWorkspaceCollapse";
+import type { ApprovalEntry } from "./useApprovalEvents";
+import {
+  deriveWorkspaceContent,
+  type ViewedResult,
+  type WorkspaceContent,
+} from "./workspace";
+import type { AppError, SessionFlowKind } from "../types/error";
+import type { DatasetDescriptor, GuidanceRequest, SheetGuidance, StaleAnchor } from "../types/dataset";
+import type { SaveError, TurnPhase } from "../types/session";
+import type { ThreadEntry } from "../types/thread";
+
+// Per-session state + actions (ADR-0051). The shell (<App>) creates the
+// session id and renders <SessionPane key={sid} sessionId={sid} />; this hook
+// owns everything inside: server state (thread via TanStack Query; the
+// working-set descriptors via the useWorkingSet read slice) and client UI
+// state (viewedResult / loading / dialogs). The hook IS the ADR-0051
+// "per-tab component autonomy" -- a future multi-session shell renders one
+// SessionPane per open id and the keyed caches stay isolated by the
+// `['session', sid, ...]` prefix.
+//
+// ADR-0123: the working-set DOMAIN (its mutations, delete machine, pick
+// resolution, and preview) lives in the useWorkingSet seam, consumed by the
+// working-set tab directly. This hook stays the turn-flow orchestration --
+// it re-exposes the read slice's descriptors for the pane's own surfaces
+// (rail badges, Targets chip, error aggregation, hero empties) and hands the
+// ingest flow + the tab the mutation surfaces (error banner / busy union /
+// persist poll) that keep cross-domain reporting pane-level.
+
+// AppError / AppErrorKind / SessionFlowKind live in ../types/error (issue
+// #194). The verb prefix logic ("{verb} failed:" / "{verb} saved, but
+// refreshing ...") is module-internal to error-presentation (ADR-0069): every
+// reject + the post-mutation refresh reject below reach it through the
+// single kind-driven toAppError entry (refresh rejects pass { refreshFailed:
+// true }).
+
+// Module-level empty constant so `query.data ?? EMPTY` keeps a stable
+// reference across renders while the query is still loading (avoids cascading
+// re-renders in the useMemo/useCallback that consume `thread`).
+const EMPTY_THREAD: ThreadEntry[] = [];
+
+export interface UseSessionState {
+  // Server state (ADR-0051): backend is truth.
+  datasets: DatasetDescriptor[];
+  activeName: string | null;
+  thread: ThreadEntry[];
+  // Derived from the working set (runtime truth, ADR-0051). Shared with the
+  // rail's stale badges so the map is built once per session, not twice.
+  staleByReference: ReadonlyMap<string, StaleAnchor>;
+  /** Issue #763: the session queries' errors in a fixed order (working
+   *  set -> active -> thread); empty while all are healthy. The `data ??`
+   *  fallbacks keep the derivations rendering through a failure, so this
+   *  aggregate is the pane's only error signal -- it drives the session-level
+   *  disclosure banner. */
+  queryErrors: ReadonlyArray<Error>;
+  // Client UI state.
+  viewedResult: ViewedResult | null;
+  workspaceContent: WorkspaceContent;
+  /** ADR-0083 (issue #298): the workspace panel's fold. Cold-start collapsed;
+   *  the first result_N promotion auto-expands once, then it is manual. The
+   *  one-shot is session-scoped (issue #771): a remount onto an
+   *  already-materialized session does not re-arm it. */
+  workspaceCollapsed: boolean;
+  /** Derived union (turnLoading || mutationLoading): the pane-consumption
+   *  ADR-0040 execution-window gate -- either domain in flight disables. */
+  loading: boolean;
+  /** The turn domain alone (ask/cancel in flight): what the shell-level bar
+   *  keys off (Stop button + disabled input, ADR-0021). Dataset/ingest
+   *  mutations never flip it, so their in-flight window leaves the bar
+   *  untouched. */
+  turnLoading: boolean;
+  /** The in-flight turn's latest progress event (ADR-0059): Thinking with the
+   *  1-based step or the last tool-call event. null when no turn is running.
+   *  Client UI state only -- never enters TanStack Query / the thread cache
+   *  (ADR-0051 single truth: the thread holds completed TurnRecords; phase is
+   *  a transient hint). Drives the QuestionBar's compact label. */
+  phase: TurnPhase | null;
+  /** The in-flight turn's live trace (ADR-0078, issue #297): the rail renders
+   *  it as a progressive turn card (question + tool-call rows + approval
+   *  cards). null when no turn is running. Client UI state only; folds into
+   *  the optimistic TurnRecord.trace when the turn settles. */
+  liveTurn: LiveTurn | null;
+  /** The LLM round-trip wait window's start stamp (issue #1264): feeds the
+   *  rail status line's elapsed-seconds suffix. null outside a wait
+   *  window. */
+  waitStartedAt: number | null;
+  /** The turn clock (issue #1264 turn-clock ruling): the bar's phase label
+   *  derives its continuous elapsed-seconds figure from it, freezing while
+   *  an approval holds the turn. null when no turn is in flight. */
+  turnStartedAt: number | null;
+  turnPausedSince: number | null;
+  error: AppError | null;
+  /** The most recent per-turn save failure as a typed SaveError (issue #120),
+   *  rendered via the locale catalog in the session pane's persist-warning
+   *  banner. null after a clean save or once read. */
+  persistError: SaveError | null;
+  guidance: { request: GuidanceRequest; path: string } | null;
+  /** Issue #748: the guided-submit failure rendered inline inside the
+   *  GuidedLoadDialog (the workspace banner would sit behind the modal
+   *  scrim). null outside a failed guided submit; cleared on re-submit /
+   *  cancel / a freshly routed guidance. */
+  guidanceError: AppError | null;
+  /** Issue #748: files left unprocessed by a terminally halted batch
+   *  (cancel-halt / Error-halt), rendered as a workspace notice; null
+   *  otherwise and cleared at the start of the next ingest. */
+  haltedRemaining: number | null;
+  // Actions.
+  // Mirrors UseTurnFlow (async -> Promise<void>, honest + awaitable); the
+  // QuestionBar consumer accepts it via void-return covariance.
+  handleAsk: (question: string, invocations?: string[]) => Promise<void>;
+  handleCancel: () => Promise<void>;
+  handleIngest: (path: string) => void;
+  /** Multi-file ingest from the composer "+" file section (ADR-0083, issue
+   *  #351; #748 auto-resume). Sequential with park-on-guidance: a
+   *  NeedsGuidance parks the batch on the dialog and the Promise stays
+   *  pending until the guided Loaded resumes + drains the queue, or a cancel
+   *  / Error halts terminally; see useIngestFlow. Resolves true when every
+   *  file loaded (#500): the SessionPane's pending-payload consumption gates
+   *  the cold-start auto-ask on it. The bar's handleIngestFiles consumer
+   *  accepts it via void-return covariance. */
+  handleIngestMany: (paths: string[]) => Promise<boolean>;
+  handleGuidedSubmit: (sheetGuidance: SheetGuidance[]) => void;
+  handleGuidedCancel: () => void;
+  /** Preview-window pager feed for the GuidedLoadDialog (issue #750): rows
+   *  [offset, offset + limit) of the parked workbook's sheet, served from
+   *  the backend retention (zero re-parse per page). */
+  fetchGuidanceWindow: (sheetName: string, offset: number, limit: number) => Promise<string[][]>;
+  handleSelectResult: (referenceName: string) => void;
+  /** ADR-0124 Decision 3 (issue #1088): rail artifact-card row click --
+   *  moves viewedResult onto the file view and opens the workspace (the
+   *  handleSelectResult twin, keyed by the manifest entry's path). */
+  handleSelectFile: (path: string) => void;
+  /** Issue #1093: an in-stream fence chart click -- moves viewedResult onto
+   *  the viz view and opens the workspace (the handleSelectFile twin, keyed
+   *  by the fence's raw spec text). */
+  handleSelectViz: (spec: string) => void;
+  /** Issue #757: the history indicator's "back to latest" exit -- moves
+   *  viewedResult to the latest Materialized turn's primary (hero fallback
+   *  when the thread materialized none). The exit only renders while a result
+   *  is showing, so the workspace is already expanded: a plain passthrough,
+   *  no fold composition. */
+  handleJumpToLatest: () => void;
+  /** The session header's workspace fold toggle (ADR-0083, issue #298). */
+  handleToggleWorkspace: () => void;
+  clearError: () => void;
+  /** Issue #763: refetch every session query currently in error state (the
+   *  banner's Retry). Healthy queries keep their cached data untouched -- a
+   *  retry is a recovery action, not a global refresh. */
+  handleRetryQueries: () => void;
+  /** ADR-0123: the session-level mutation surfaces the working-set seam
+   *  reports into (the same sinks useIngestFlow takes as deps). The error
+   *  banner / busy union / persist poll stay pane-level so a working-set
+   *  mutation stays visible from both tabs (issue #1060). */
+  mutationSurfaces: UseWorkingSetSurfaces;
+}
+
+export function useSessionState(
+  sessionId: string,
+  /** This session's approval entries (the app-level useApprovalEvents slice,
+   *  ADR-0083 / issue #297): merged into the live trace by useTurnFlow so a
+   *  gated external call renders its in-flow card inside the turn. Undefined
+   *  (not a fresh []) by default so the hook's stable-empty fallback keeps
+   *  handleAsk's identity across renders. */
+  approvals?: ReadonlyArray<ApprovalEntry>,
+  /** Clears this session's approval entries once its turn settles (the
+   *  resolved cards fold into the optimistic thread record). */
+  onApprovalsSettled?: () => void,
+  /** ADR-0089 Decision 4: called once after the session's FIRST terminal turn
+   *  settles, so the shell can sync the auto-generated name into the sidebar
+   *  + open-session header. Fires only when the thread had zero turns before
+   *  this ask. Takes the sessionId so the shell can pass a useCallback-stable
+   *  handler (an inline per-session arrow would rebuild handleAskWithAutoName
+   *  on every App render -- ADR-0092's composer-fields report effect compares
+   *  the reported handleAsk by reference, so an unstable identity loops the
+   *  shell-level bar's fields registry). */
+  onFirstTurnSettled?: (sessionId: string) => void,
+): UseSessionState {
+  const queryClient = useQueryClient();
+  const intl = useIntl();
+
+  // --- Server state (TanStack Query, ADR-0051) -----------------------------
+  // The working-set descriptors come from the useWorkingSet read slice
+  // (ADR-0123: the sole wiring site for the workingSet / active queries --
+  // the seam's tab and this pane read share the same cache entries); the
+  // thread stays here with the turn domain.
+  const {
+    datasets,
+    activeName,
+    staleByReference,
+    queryErrors: workingSetErrors,
+    retryFailed: retryWorkingSetQueries,
+  } = useWorkingSetData(sessionId);
+
+  const threadQuery = useQuery({
+    queryKey: sessionKeys.thread(sessionId),
+    queryFn: () => conversation(sessionId),
+  });
+  const thread = threadQuery.data ?? EMPTY_THREAD;
+
+  // Issue #763: the queries' error states, coalesced in the same fixed order
+  // the fallbacks above drain them (working set -> active from the slice,
+  // thread here). The coalescing renders a failed fetch exactly like a fresh
+  // session (empty datasets / no active / empty thread), so this aggregate is
+  // what makes the failure observable; the destructured error/refetch pair
+  // feeds the retry below (refetch is a stable observer method, so the
+  // callback's identity only moves when an error appears or clears).
+  const { error: threadError, refetch: refetchThread } = threadQuery;
+  const queryErrors = useMemo(() => {
+    if (threadError === null) return workingSetErrors;
+    return [...workingSetErrors, threadError];
+  }, [workingSetErrors, threadError]);
+  const handleRetryQueries = useCallback(() => {
+    retryWorkingSetQueries();
+    if (threadError !== null) void refetchThread();
+  }, [retryWorkingSetQueries, threadError, refetchThread]);
+
+  // --- Client UI state -----------------------------------------------------
+  // viewedResult domain lives in useViewedResult (issue #229) -- see its header
+  // for the boundary. workspaceContent derivation stays here (fusion below).
+  const {
+    viewedResult,
+    selectResult,
+    selectFile,
+    selectViz,
+    markProduced,
+    clearForNewSource,
+    suppressInit,
+    jumpToLatest,
+  } = useViewedResult(thread);
+  // Workspace fold (ADR-0083, issue #298): cold-start collapsed, the first
+  // promotion auto-expands once, then purely manual. Session-ephemeral plain
+  // state -- never persisted, reset on every pane mount (new / resume); the
+  // one-shot consumption derives from the thread (issue #771), so a remount
+  // onto an already-materialized session stays spent.
+  const {
+    workspaceCollapsed,
+    expandWorkspace,
+    toggleWorkspace,
+    notePromotion,
+  } = useWorkspaceCollapse(thread);
+  // ADR-0124 Decision 3 (issue #1088): the artifact auto-open one-shot.
+  // Composed here (like markProducedWithExpand below) so each hook keeps
+  // owning exactly one state domain: this fusion watches the thread for a
+  // freshly delivered manifest and moves the view + fold through the two
+  // semantic methods above.
+  useArtifactAutoOpen(thread, selectFile, expandWorkspace);
+  // Two loading domains (kept apart so the shell bar keys off the turn domain
+  // only -- a dataset mutation's loading flag leaking into the shell bar made
+  // the Ask/Stop button flip for the mutation's whole in-flight window):
+  // turnLoading -- an ask/cancel is in flight (useTurnFlow); drives the bar's
+  //   Stop button + disabled input (ADR-0021 single in-flight).
+  // mutationLoading -- an ingest mutation is in flight (the working-set
+  //   mutations report into the same sink through their seam, ADR-0123); it
+  //   contributes to the buttons' disabled gate -- the derived `loading`
+  //   union drives it (ADR-0040 execution window: either domain in flight
+  //   disables).
+  const [turnLoading, setTurnLoading] = useState(false);
+  const [mutationLoading, setMutationLoading] = useState(false);
+  const loading = turnLoading || mutationLoading;
+  const [error, setError] = useState<AppError | null>(null);
+  const [persistError, setPersistError] = useState<SaveError | null>(null);
+
+  // --- Derived: workspace content ------------------------------------------
+  const workspaceContent = useMemo(
+    () => deriveWorkspaceContent(thread, viewedResult, staleByReference),
+    [thread, viewedResult, staleByReference],
+  );
+
+  // --- Helpers -------------------------------------------------------------
+  const pollPersistError = useCallback(async () => {
+    try {
+      setPersistError(await takePersistError(sessionId));
+    } catch {
+      // swallow -- persist-status polling must not surface its own failure.
+    }
+  }, [sessionId]);
+
+  /** Invalidate the session descriptors through the working-set seam's
+   *  cascade (ADR-0123: the fan-out's sole owner). A failure here surfaces
+   *  as a distinct "saved but refresh failed" error tagged with the
+   *  operation kind, never a silent no-op. */
+  const refreshServerState = useCallback(
+    async (kind: SessionFlowKind): Promise<void> => {
+      try {
+        await invalidateSessionData(queryClient, sessionId);
+      } catch (refreshErr) {
+        setError(toAppError(refreshErr, intl, kind, { refreshFailed: true }));
+      }
+    },
+    [queryClient, sessionId, intl, setError],
+  );
+
+  // --- Actions -------------------------------------------------------------
+
+  // Turn orchestration (handleAsk + handleCancel + phase) lives in useTurnFlow
+  // (issue #230) -- the turn domain's "thread stays un-invalidated" rule is
+  // distinct from the generic refreshServerState used by the ingest mutations.
+  // Driven through injected deps; this hook never reaches for
+  // the raw queryClient / viewed setters for turn work.
+  // A settled Materialized turn moves viewedResult (the useViewedResult seam)
+  // AND spends the workspace's auto-expand one-shot (ADR-0083, issue #298):
+  // the session's first result_N opens the panel with the produced dataset,
+  // later promotions never steal focus. Composed here (not inside either
+  // hook) so each hook keeps owning exactly one state domain.
+  // INVARIANT: markProduced must run unconditionally before notePromotion --
+  // notePromotion spends the one-shot whether or not viewedResult actually
+  // moved, so any future guard inside markProduced would desync the two
+  // ("one-shot spent but the workspace points nowhere"). useViewedResult's
+  // markProduced is unconditional by contract; keep it so.
+  const markProducedWithExpand = useCallback(
+    (referenceName: string) => {
+      markProduced(referenceName);
+      notePromotion();
+    },
+    [markProduced, notePromotion],
+  );
+  const { phase, liveTurn, waitStartedAt, turnStartedAt, turnPausedSince, handleAsk, handleCancel } =
+    useTurnFlow(sessionId, {
+      queryClient,
+      intl,
+      setTurnLoading,
+      setError,
+      pollPersistError,
+      viewed: { markProduced: markProducedWithExpand, suppressInit },
+      approvals,
+      onApprovalsSettled,
+    });
+
+  // ADR-0089 Decision 4: wrap handleAsk so the first terminal turn triggers a
+  // sidebar + header name sync. Reading the query cache directly (not the
+  // reactive `thread`) keeps handleAsk's identity stable across renders -- the
+  // original useTurnFlow handleAsk deliberately excludes thread from its deps.
+  // The optimistic Turn append happens INSIDE handleAsk on the success path
+  // only (the IPC-failure catch early-returns without appending), so checking
+  // the cache AFTER the await distinguishes success from failure. After the
+  // first turn, the name is never auto-changed again (the backend enforces
+  // this in record_turn); subsequent turns never fire onFirstTurnSettled.
+  const handleAskWithAutoName = useCallback(
+    async (question: string, invocations?: string[]) => {
+      const key = sessionKeys.thread(sessionId);
+      const hadTurns = (queryClient.getQueryData<ThreadEntry[]>(key) ?? []).some(
+        (e) => e.entry === "Turn",
+      );
+      await handleAsk(question, invocations);
+      // Fire only when this was the first turn AND it actually landed (the
+      // optimistic append happened inside handleAsk on success). On IPC failure
+      // handleAsk catches + returns without appending, so the cache is
+      // unchanged and the guard correctly suppresses the callback.
+      if (!hadTurns) {
+        const after = queryClient.getQueryData<ThreadEntry[]>(key) ?? [];
+        if (after.some((e) => e.entry === "Turn")) {
+          onFirstTurnSettled?.(sessionId);
+        }
+      }
+    },
+    [handleAsk, queryClient, sessionId, onFirstTurnSettled],
+  );
+
+  // Ingest orchestration (handleIngest + handleIngestMany + handleGuidedSubmit
+  // + handleGuidedCancel + guidance dialog state) lives in useIngestFlow
+  // (issue #231) -- the ingest domain goes through the GENERIC refreshServerState
+  // (the working-set seam's cascade) on a Loaded outcome (no optimistic thread
+  // append, so thread refresh is harmless), the inverse of useTurnFlow above
+  // which must leave thread un-invalidated. Driven through injected deps; this
+  // hook never reaches for the raw guidance setter or the viewed setter for
+  // ingest work. Pending-ingest consumption (#500) lives one level up in
+  // SessionPane, which sequences the files BEFORE the pending question.
+  const {
+    guidance,
+    guidanceError,
+    haltedRemaining,
+    handleIngest,
+    handleIngestMany,
+    handleGuidedSubmit,
+    handleGuidedCancel,
+    fetchGuidanceWindow,
+  } = useIngestFlow(
+    sessionId,
+    {
+      intl,
+      setMutationLoading,
+      setError,
+      refreshServerState,
+      pollPersistError,
+      viewed: { clearForNewSource },
+    },
+  );
+
+  // Rail result selection (preview card / result link, ADR-0083 issue #298):
+  // moves viewedResult (the move rule lives in useViewedResult) AND opens the
+  // workspace when folded -- the rail and the panel are dual views of the same
+  // dataset, so a rail selection must surface its panel half.
+  // INVARIANT: callers must pass a referenceName that exists in the thread --
+  // selectResult is unconditional, so a stale / foreign name would expand the
+  // panel onto an empty workspace. Both current callers (result-link +
+  // preview card) source the name from primary.dataset.reference_name, which
+  // is always in-thread; add a guard here if that ever changes.
+  const handleSelectResult = useCallback(
+    (referenceName: string) => {
+      selectResult(referenceName);
+      expandWorkspace();
+    },
+    [selectResult, expandWorkspace],
+  );
+
+  // The artifact twin (ADR-0124 Decision 3): a rail artifact-card row moves
+  // the view onto the file AND surfaces its panel half -- the same
+  // move-and-open composition, keyed by the manifest entry's path. The same
+  // invariant holds: callers source the path from the thread's manifest, so
+  // the selection always resolves.
+  const handleSelectFile = useCallback(
+    (path: string) => {
+      selectFile(path);
+      expandWorkspace();
+    },
+    [selectFile, expandWorkspace],
+  );
+
+  // The viz twin (issue #1093): an in-stream fence click moves the view onto
+  // the chart AND surfaces its panel half -- the same move-and-open
+  // composition. The spec text is self-contained, so the selection always
+  // resolves; the panel exits ride the shared displacements (rail click /
+  // markProduced / artifact auto-open), never a dedicated rule.
+  const handleSelectViz = useCallback(
+    (spec: string) => {
+      selectViz(spec);
+      expandWorkspace();
+    },
+    [selectViz, expandWorkspace],
+  );
+
+  const clearError = useCallback(() => setError(null), []);
+
+  // ADR-0123: the bundle the working-set tab's seam consumes as its
+  // reporting sinks. A plain object: nothing compares the bundle's
+  // identity (the seam destructures the methods and the tab is not
+  // memoized), and the methods inside are dispatch- or useCallback-stable.
+  const mutationSurfaces = { setError, setMutationLoading, pollPersistError };
+
+  return {
+    datasets,
+    activeName,
+    thread,
+    staleByReference,
+    queryErrors,
+    viewedResult,
+    workspaceContent,
+    workspaceCollapsed,
+    loading,
+    turnLoading,
+    phase,
+    liveTurn,
+    waitStartedAt,
+    turnStartedAt,
+    turnPausedSince,
+    error,
+    persistError,
+    guidance,
+    guidanceError,
+    haltedRemaining,
+    handleAsk: handleAskWithAutoName,
+    handleCancel,
+    handleIngest,
+    handleIngestMany,
+    handleGuidedSubmit,
+    handleGuidedCancel,
+    fetchGuidanceWindow,
+    handleSelectResult,
+    handleSelectFile,
+    handleSelectViz,
+    handleJumpToLatest: jumpToLatest,
+    handleToggleWorkspace: toggleWorkspace,
+    clearError,
+    handleRetryQueries,
+    mutationSurfaces,
+  };
+}

@@ -1,0 +1,3363 @@
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type { MockInstance } from "vitest";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { QueryClient } from "@tanstack/react-query";
+import type { DatasetDescriptor, RowPage } from "../types/dataset";
+import type { ResumeProgress, TurnProgress } from "../types/session";
+import type { ThreadEntry, TurnOutcome } from "../types/thread";
+
+// Black-box shell tests (issue #79 ACs). Drives the rendered three-column App
+// like a user and asserts VISIBLE DOM / structure signals -- never the Query
+// cache internals. Mirrors the App black-box pattern (mock api + stub the Tauri
+// bridge) so the shell renders offline.
+
+vi.mock("@tauri-apps/plugin-dialog", () => ({ open: vi.fn(), save: vi.fn() }));
+// The viz suites' posture: jsdom has no canvas, so every chart render in
+// this file draws through the mocked embed.
+vi.mock("vega-embed", () => ({ default: vi.fn() }));
+
+// ArtifactView's HTML branch rides convertFileSrc (the asset protocol); the
+// real transform reads window.__TAURI_INTERNALS__ (absent in jsdom), so a
+// pure stand-in keeps the iframe's src observable (issue #1088). Partial:
+// api.ts's invoke keeps the real binding via importOriginal spreads.
+vi.mock("@tauri-apps/api/core", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@tauri-apps/api/core")>();
+  return { ...actual, convertFileSrc: (p: string) => "asset://mock/" + p };
+});
+const dropEvent = vi.hoisted(() => ({
+  handler: null as
+  | null
+  | ((e: { payload: { type: string; paths: string[]; position?: { x: number; y: number } } }) => void),
+}));
+vi.mock("@tauri-apps/api/webviewWindow", () => ({
+  getCurrentWebviewWindow: () => ({
+    onDragDropEvent: (
+      cb: (e: { payload: { type: string; paths: string[]; position?: { x: number; y: number } } }) => void,
+    ) => {
+      dropEvent.handler = cb;
+      return Promise.resolve(() => {});
+    },
+  }),
+}));
+
+// WindowControls (custom titlebar, ADR-0074) is the sole remaining
+// consumer of getCurrentWindow. The shared stub keeps jsdom off the real
+// runtime (which reads window.__TAURI metadata and crashes the shell-level
+// boundary).
+import { buildTauriWindowMock } from "./setup/tauriWindowMock";
+import { stubRenderedComposerBar } from "./setup/barRectStub";
+
+vi.mock("@tauri-apps/api/window", () => buildTauriWindowMock().module);
+
+const state = vi.hoisted(() => ({
+  workingSet: [] as DatasetDescriptor[],
+  thread: [] as ThreadEntry[],
+}));
+
+// ADR-0059 turn-progress capture: the SessionPane mounts a long-lived listener
+// on mount. Capturing the callback here lets a test emit a turn-progress event
+// (Thinking / the tool-call stream, ADR-0078) and assert the QuestionBar
+// renders the discrete feedback, then assert it clears when the ask resolves.
+const turnProgressCb = vi.hoisted(() => ({
+  current: null as null | ((ev: TurnProgress) => void),
+}));
+
+// #83 R5: capture the resume-progress listener so a test can emit Source/Replay
+// events -- addressed to THIS session vs a stranger -- and assert the
+// multi-session filter (ADR-0056) discards the stranger before it can move the
+// opener's progress strip.
+const resumeProgressCb = vi.hoisted(() => ({
+  current: null as null | ((ev: ResumeProgress) => void),
+}));
+
+vi.mock("../api", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../api")>();
+  return {
+    ...actual,
+    // Issue #842: the startup re-adoption sweep fires on mount; an empty
+    // reply keeps it a no-op.
+    listLiveSessions: vi.fn(async () => []),
+    closeSession: vi.fn(async () => false),
+    closeSessionAndWaitRelease: vi.fn(async () => {}),
+    createSession: vi.fn(async () => ({ session_id: "sess-1", duck_path: "/sessions/sess-1/session.duck" })),
+    deleteSession: vi.fn(async () => {}),
+    listSessions: vi.fn(async () => []),
+    renameSession: vi.fn(async () => ""),
+    ingestFile: vi.fn(),
+    listWorkingSet: vi.fn(async () => state.workingSet),
+    activeDataset: vi.fn(async () => null),
+    // Default: never resolves — the pendingQuestion from openSession() fires
+    // handleAsk, but the turn stays in-flight without processing a result,
+    // avoiding state updates that could leak across the test cleanup boundary.
+    // Tests that need a result override via mockResolvedValueOnce.
+    askQuestion: vi.fn(() => new Promise(() => {})),
+    cancelQuery: vi.fn(async () => {}),
+    conversation: vi.fn(async () => state.thread),
+    // ADR-0059: capture the listener callback so a test can emit phases; the
+    // returned unlisten is a no-op (jsdom has no real Tauri event bus).
+    onTurnProgress: vi.fn(async (cb: (ev: TurnProgress) => void) => {
+      turnProgressCb.current = cb;
+      return () => {};
+    }),
+    // #83 R5: capture the resume-progress listener so a test can emit events
+    // addressed to a stranger vs this session (ADR-0056 multi-session filter).
+    openDuck: vi.fn(async () => {}),
+    onResumeProgress: vi.fn(async (cb: (ev: ResumeProgress) => void) => {
+      resumeProgressCb.current = cb;
+      return () => {};
+    }),
+    // The app-level approval channel (issue #297) mounts on App render; no
+    // Shell.test scenario drives approvals, so inert no-op listeners keep the
+    // real @tauri-apps/api/event listen (absent in jsdom) from firing.
+    onApprovalRequest: vi.fn(async () => () => {}),
+    onApprovalResolved: vi.fn(async () => () => {}),
+    onApprovalAbandoned: vi.fn(async () => () => {}),
+    respondToolApproval: vi.fn(async () => {}),
+    // The tray channel (issue #1140) mounts on App render; no Shell.test
+    // scenario drives tray events, so inert no-op listeners suffice.
+    onTrayOpenSession: vi.fn(async () => () => {}),
+    onTrayNewSession: vi.fn(async () => () => {}),
+    readRows: vi.fn(),
+    // The artifact surfaces' render-time facts (issue #1088): existence
+    // defaults to true (openable rows/cards), the text read to empty.
+    artifactExists: vi.fn(async () => true),
+    readArtifactText: vi.fn(async () => ""),
+    // listProviderProfiles feeds the per-profile has_key overlay consumed by
+    // the shell-level bar: the composer picker's badge + the ADR-0092
+    // submit-time honest gate (useProfileKeys). Default: the "default" profile
+    // (baseAppConfig's active profile) HAS a key, so tests that resolve
+    // app-config pass the gate and the centered bar's submit creates a
+    // session. The gate tests override this to has_key:false.
+    listProviderProfiles: vi.fn(async () => [
+      { profile_id: "default", has_key: true, keychain_fault: null },
+    ]),
+    // The composer auth-mode chip reads / writes the session's authorization
+    // posture (issue #352). Default per_call read + no-op write; the chip
+    // tests override per scenario.
+    getAuthorizationMode: vi.fn(async () => "per_call" as const),
+    setAuthorizationMode: vi.fn(async () => {}),
+    // The composer runtime picker reads / writes the session's runtime choice
+    // + the v1 adapter table (issue #353). Default built-in read + empty
+    // adapter list + no-op write/rescan; no Shell.test scenario drives a
+    // runtime switch, so the defaults keep the picker quiet.
+    getSessionRuntime: vi.fn(async () => ({ kind: "built_in" }) as const),
+    setSessionRuntime: vi.fn(async () => {}),
+    listAdapters: vi.fn(async () => [] as const),
+    rescanAdapters: vi.fn(async () => [] as const),
+    getAppConfig: vi.fn(async () => null),
+    setAppConfig: vi.fn(async (cfg: AppConfig) => cfg),
+    // The skill picker reads the registry (issue #365, ADR-0086); the
+    // staged invocations ride the ask itself (ADR-0119). Defaults: an empty
+    // registry keeps the picker quiet.
+    listSkills: vi.fn(async () => ({ skills: [], ignored: [] })),
+  };
+});
+
+import App from "../App";
+import { open } from "@tauri-apps/plugin-dialog";
+import embed from "vega-embed";
+import {
+  activeDataset,
+  askQuestion,
+  cancelQuery,
+  closeSession,
+  conversation,
+  createSession,
+  getAppConfig,
+  getAuthorizationMode,
+  getSessionRuntime,
+  ingestFile,
+  listAdapters,
+  listProviderProfiles,
+  listSessions,
+  listSkills,
+  listWorkingSet,
+  openDuck,
+  readRows,
+  rescanAdapters,
+  setAppConfig,
+  setAuthorizationMode,
+  setSessionRuntime,
+} from "../api";
+import type { AppConfig } from "../types/app-config";
+import type { McpServerConfig } from "../types/mcp";
+import { baseAppConfig as sharedBaseAppConfig, skillEntry } from "../test-fixtures";
+import { artifactTurn, recordedTurn, textual } from "../session/__tests__/fixtures";
+import { embedOk } from "../components/common/__tests__/helpers";
+import type { SessionRuntimeChoice } from "../types/runtime";
+import { log } from "../lib/log";
+
+// ADR-0092: the sidebar "+" navigates to the centered empty state (no longer
+// creates a session); a session is created by submitting from the shell-level
+// bar. This helper clicks "+" (cold start), types + submits on the centered
+// bar. Can be called multiple times: each call navigates to the empty state
+// first, then creates.
+async function openSession(): Promise<void> {
+  // Navigate to empty state (sidebar "+"). No-op on fresh render.
+  fireEvent.click(document.querySelector(".sidebar-new-button") as HTMLButtonElement);
+  // ADR-0092: submitting from the centered bar creates the session AND fires the
+  // question as the first turn. The helper REJECTS that creation turn so it
+  // settles immediately and the session is idle when we return: a resolved
+  // outcome would APPEND a turn (hiding the hero / last-turn card many tests
+  // assert) and a never-resolving one would leave the bar stuck on the stop
+  // button. handleAsk's catch sets loading=false and appends nothing on reject,
+  // so the thread stays exactly as `state.thread` provides. The reject surfaces
+  // a session error banner, which these black-box assertions ignore. The
+  // one-time rejection is queued ahead of any per-test mock so the creation turn
+  // — not the test's own turn — consumes it.
+  vi.mocked(askQuestion).mockRejectedValueOnce(
+    new Error("openSession: discard the creation turn"),
+  );
+  // The centered bar is always rendered — type and submit to create a session.
+  fireEvent.change(screen.getByLabelText("提问"), { target: { value: "test question" } });
+  fireEvent.click(screen.getByRole("button", { name: "提问" }));
+  await waitFor(() =>
+    expect(document.querySelector(".session-rail")).toBeInTheDocument(),
+  );
+  // Wait for the creation turn to settle (reject) so the bar returns to idle
+  // (submit button back) before the test drives its own interactions.
+  await waitFor(() =>
+    expect(screen.getByRole("button", { name: "提问" })).toBeInTheDocument(),
+  );
+}
+
+function src(name: string): DatasetDescriptor {
+  return {
+    reference_name: name,
+    display_name: name,
+    source_path: `/x/${name}.csv`,
+    columns: [
+      { name: "id", canonical_type: "BIGINT" },
+      { name: "label", canonical_type: "VARCHAR" },
+    ],
+    row_count: 1,
+    sample: [["1", "a"]],
+    fingerprint: "ff".repeat(32),
+    rectify: { kind: "NotApplicable" },
+    privacy: { send_samples: true, type_only_columns: [] },
+  };
+}
+
+function materializedTurn(referenceName: string): ThreadEntry {
+  return {
+    entry: "Turn",
+    data: {
+      question: `q:${referenceName}`,
+      outcome: {
+        kind: "Materialized",
+        data: {
+          promotions: [{ dataset: src(referenceName), sql: "SELECT 1" }],
+          viz: null,
+          body: null,
+          assumption: null,
+        },
+      },
+      trace: [], provenance: { skills: [] },
+    },
+  };
+}
+
+const ROW_PAGE: RowPage = {
+  columns: [
+    { name: "id", canonical_type: "BIGINT" },
+    { name: "label", canonical_type: "VARCHAR" },
+  ],
+  rows: [["1", "a"]],
+  total: 1,
+  offset: 0,
+  limit: 100,
+};
+
+describe("App three-column shell (issue #79 ACs)", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    state.workingSet = [];
+    state.thread = [];
+    vi.mocked(readRows).mockResolvedValue(ROW_PAGE);
+    // App resolves the "system" locale preference from navigator.language; pin
+    // it to zh-CN so the Thread rail's i18n'd chrome (ADR-0052) renders in
+    // Chinese alongside the still-hardcoded chrome of the other components these
+    // assertions rely on. getAppConfig stays null (first-launch, no app-config).
+    vi.stubGlobal("navigator", { language: "zh-CN" });
+  });
+
+  it("renders the three-column grid + thin top bar (R1: session bar / rail / workspace)", async () => {
+    render(<App />);
+    await openSession();
+    // Three columns + topbar + questionbar all render.
+    expect(document.querySelector(".session-sidebar")).toBeInTheDocument();
+    expect(document.querySelector(".session-rail")).toBeInTheDocument();
+    expect(document.querySelector(".session-workspace")).toBeInTheDocument();
+    expect(document.querySelector(".topbar")).toBeInTheDocument();
+    expect(document.querySelector(".shell-bar-slot")).toBeInTheDocument();
+  });
+
+  it("collapses the session sidebar via the top-bar toggle", async () => {
+    render(<App />);
+    await openSession();
+    const shell = document.querySelector(".shell");
+    const sidebar = document.querySelector(".session-sidebar");
+    expect(shell?.classList.contains("sidebar-collapsed")).toBe(false);
+    // Expanded sidebar stays in the Tab sequence (issue #287).
+    expect(sidebar?.hasAttribute("inert")).toBe(false);
+    fireEvent.click(screen.getByRole("button", { name: "收起会话栏" }));
+    expect(shell?.classList.contains("sidebar-collapsed")).toBe(true);
+    // Collapsed sidebar is inert: the subtree leaves the Tab sequence + a11y
+    // tree so keyboard / screen-reader focus cannot land on the opacity-0
+    // controls (ghost-focus fix, issue #287).
+    expect(sidebar?.hasAttribute("inert")).toBe(true);
+    // Toggling back expands + restores the Tab sequence.
+    fireEvent.click(screen.getByRole("button", { name: "展开会话栏" }));
+    expect(shell?.classList.contains("sidebar-collapsed")).toBe(false);
+    expect(sidebar?.hasAttribute("inert")).toBe(false);
+  });
+
+  it("shows the hero empty state when no result is viewed (ADR-0062 R2 hero)", async () => {
+    render(<App />);
+    await openSession();
+    // The hero's drop hint is visible in the default 结果 tab. The
+    // standalone pick button retired into the composer "+" file section
+    // (issue #351); the hero keeps the drag-and-drop shortcut copy.
+    expect(screen.getByText(/把数据文件拖到窗口/)).toBeInTheDocument();
+  });
+
+  it("derives result content after a Materialized ask (R2 result state)", async () => {
+    state.workingSet = [src("people")];
+    const outcome = {
+      kind: "Materialized",
+      data: {
+        promotions: [{ dataset: { ...src("result_1"), row_count: 1 }, sql: "SELECT 1" }],
+        viz: null,
+        body: null,
+        assumption: null,
+      },
+    } satisfies TurnOutcome;
+    vi.mocked(askQuestion).mockResolvedValue(outcome);
+    state.thread = [recordedTurn("总共几行", outcome)];
+    render(<App />);
+    await openSession();
+    fireEvent.change(screen.getByLabelText("提问"), { target: { value: "总共几行" } });
+    fireEvent.click(screen.getByRole("button", { name: "提问" }));
+    // The workspace ResultView heading appears (chart+table pane).
+    await waitFor(() =>
+      expect(screen.getByRole("heading", { name: /总共几行/ })).toBeInTheDocument(),
+    );
+  });
+
+  it("separates active from viewed: clicking a rail result moves viewed, not active (ADR-0051)", async () => {
+    // Two results in the thread; R5 init views the last (result_2). Clicking
+    // result_1 in the rail moves viewedResult to result_1 with no backend
+    // mutation -- active is server truth, untouched by the click.
+    const r1 = src("result_1");
+    const r2 = src("result_2");
+    state.workingSet = [r1, r2];
+    state.thread = [materializedTurn("result_1"), materializedTurn("result_2")];
+    render(<App />);
+    await openSession();
+    // R5 init: viewedResult <- last Materialized (result_2).
+    await waitFor(() =>
+      expect(screen.getByRole("heading", { name: /q:result_2/ })).toBeInTheDocument(),
+    );
+    // Baseline: openSession's creation turn already fired one (rejected) ask.
+    const asksBeforeClick = vi.mocked(askQuestion).mock.calls.length;
+    // Click result_1 in the rail (the Thread result-link button).
+    fireEvent.click(screen.getByRole("button", { name: /结果：result_1/ }));
+    // viewedResult moved to result_1; the workspace now shows result_1.
+    await waitFor(() =>
+      expect(screen.getByRole("heading", { name: /q:result_1/ })).toBeInTheDocument(),
+    );
+    // No NEW ask / mutation IPC fired by the click -- active is untouched.
+    expect(vi.mocked(askQuestion).mock.calls.length).toBe(asksBeforeClick);
+  });
+
+  it("appends optimistically, then the turn-end refresh converges onto the recorded row (ADR-0051, #1088)", async () => {
+    // The thread cache is the single truth: on a successful ask the new turn
+    // is appended via setQueryData first (the rail shows it immediately),
+    // then the turn-end refresh refetches the thread ONCE -- the recorded row
+    // carries settle-computed fields the append cannot know (ADR-0124's
+    // artifact manifest), and record_turn commits before the ask resolves,
+    // so the refetch lands a richer row, never a wipe.
+    state.workingSet = [src("people")];
+    const outcome = {
+      kind: "Materialized",
+      data: {
+        promotions: [{ dataset: { ...src("result_1"), row_count: 1 }, sql: "SELECT 1" }],
+        viz: null,
+        body: null,
+        assumption: null,
+      },
+    } satisfies TurnOutcome;
+    vi.mocked(askQuestion).mockResolvedValue(outcome);
+    // The recorded row the backend would have committed (mock parity).
+    state.thread = [recordedTurn("总共几行", outcome)];
+    render(<App />);
+    await openSession();
+    // The thread query (useSessionState) fires conversation() in a post-open
+    // effect; wait for it to fire before asserting the count, so a slow CI
+    // runner that mounts the textbox before scheduling the effect does not
+    // read 0 calls.
+    await waitFor(() => expect(conversation).toHaveBeenCalled());
+    expect(conversation).toHaveBeenCalledTimes(1); // the initial load
+    fireEvent.change(screen.getByLabelText("提问"), { target: { value: "总共几行" } });
+    fireEvent.click(screen.getByRole("button", { name: "提问" }));
+    // The new turn's question lands in the rail from the optimistic append.
+    // Scope to the rail: the textarea's value also renders as text content
+    // (unlike the former <Input>), so a global getByText would match both.
+    await waitFor(() =>
+      expect(within(document.querySelector(".session-rail")!).getByText("总共几行")).toBeInTheDocument(),
+    );
+    // The turn-end refresh: exactly one refetch, and it converges the append
+    // onto the recorded row -- the question stays on the rail after it.
+    await waitFor(() => expect(conversation).toHaveBeenCalledTimes(2));
+    await waitFor(() =>
+      expect(within(document.querySelector(".session-rail")!).getByText("总共几行")).toBeInTheDocument(),
+    );
+  });
+
+  it("keeps the workspace inert to a textual last turn; a rail click moves viewedResult (ADR-0114)", async () => {
+    // End-to-end chain: R5 resume lands viewedResult on the LAST Materialized
+    // (result_2). The last turn is a Clarify -- the rail is its read surface,
+    // and the workspace reacts not at all (still showing result_2, the exact
+    // "keep showing what was being viewed" AC). Clicking an EARLIER
+    // Materialized result in the rail moves ONLY viewedResult (no pin flag)
+    // -> the workspace shows result_1's table. This is the full
+    // handleSelectResult -> deriveWorkspaceContent path the pure-function
+    // unit test alone cannot cover.
+    const r1 = src("result_1");
+    const r2 = src("result_2");
+    state.workingSet = [r1, r2];
+    state.thread = [
+      materializedTurn("result_1"),
+      materializedTurn("result_2"),
+      {
+        entry: "Turn",
+        data: {
+          question: "哪个名字",
+          outcome: {
+            kind: "Textual",
+            data: { text_kind: "Clarify", body: "请说明哪个名字", assumption: null },
+          },
+          trace: [], provenance: { skills: [] },
+        },
+      },
+    ];
+    render(<App />);
+    await openSession();
+    // The rail renders the Clarify turn; the workspace still shows result_2
+    // (resume landing) -- the textual last turn changed nothing.
+    await waitFor(() => expect(document.querySelector(".turn-outcome.textual")).toBeInTheDocument());
+    expect(screen.getByRole("heading", { name: /q:result_2/ })).toBeInTheDocument();
+    // Click result_1 in the rail -> only viewedResult moves -> workspace shows result_1's table.
+    fireEvent.click(screen.getByRole("button", { name: /结果：result_1/ }));
+    await waitFor(() =>
+      expect(screen.getByRole("heading", { name: /q:result_1/ })).toBeInTheDocument(),
+    );
+  });
+
+  it("renders a failed turn's typed failure via the locale catalog (issue #125)", async () => {
+    // The rail's Failed card renders the failure by TurnFailure kind through
+    // the locale catalog (no backend Display string crosses IPC); the engine
+    // detail rides the collapsed TechnicalDetailsFold. ADR-0114: the
+    // workspace is inert to turn outcomes -- the rail is the read surface,
+    // so the workspace stays on the hero.
+    state.workingSet = [src("result_1")];
+    state.thread = [
+      {
+        entry: "Turn",
+        data: {
+          question: "坏查询",
+          outcome: {
+            kind: "Failed",
+            data: { kind: "Execute", data: { detail: "no_such_col" } },
+          },
+          trace: [], provenance: { skills: [] },
+        },
+      },
+    ];
+    render(<App />);
+    await openSession();
+    // The rail renders the Failed outcome card. Scope the message assertions
+    // to the card.
+    await waitFor(() =>
+      expect(document.querySelector(".turn-outcome.failed")).toBeInTheDocument(),
+    );
+    const card = document.querySelector(".turn-outcome.failed") as HTMLElement;
+    expect(within(card).getByText("执行失败")).toBeInTheDocument(); // error.turn.execution
+    expect(within(card).getByText("no_such_col")).toBeInTheDocument(); // fold detail
+    // The workspace shows no outcome card for the failed turn.
+    expect(document.querySelector(".workspace-hero")).toBeInTheDocument();
+  });
+
+  it("elevates working-set panels with shadow-sm (issue #222)", async () => {
+    // ADR-0067 (2) + issue #222: in-content cards share one elevation language
+    // with the floating dialog (shadow-lg) / popover (shadow-md) layer above
+    // them. The working-set master/detail panels carry the Tailwind shadow-sm
+    // utility -- no new --shadow-* token (ADR-0067 (2) rules one out). The
+    // rail turn-card (ADR-0047) stays flat (rail density should not lift) and
+    // the degrade-card stays shadow-none (its left border is the emphasis),
+    // so neither is pinned here. jsdom cannot paint a box-shadow, but it CAN
+    // assert the className, so a regression that drops shadow-sm while
+    // leaving the bg-card/border chrome stays caught (same pin shape as the
+    // SessionSidebar session-menu shadow-md tests).
+    state.workingSet = [src("result_1")];
+    render(<App />);
+    await openSession();
+    // Working set tab: both master/detail .panel sections carry shadow-sm.
+    fireEvent.click(screen.getByRole("tab", { name: /工作集/ }));
+    await waitFor(() => expect(document.querySelectorAll(".panel")).toHaveLength(2));
+    document.querySelectorAll(".panel").forEach((panel) => {
+      expect(panel.className.split(/\s+/)).toContain("shadow-sm");
+    });
+  });
+});
+
+describe("App multi-session shell (issue #81 ACs)", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    state.workingSet = [];
+    state.thread = [];
+    vi.mocked(readRows).mockResolvedValue(ROW_PAGE);
+    vi.stubGlobal("navigator", { language: "zh-CN" });
+  });
+
+  it("cold start shows the centered bar + greeting and does not createSession (ADR-0061/0092)", async () => {
+    // ADR-0092: no auto-resume, no auto-create. The centered bar + greeting
+    // show in the main area. createSession has not been called.
+    render(<App />);
+    expect(screen.getByText(/你想分析什么/)).toBeInTheDocument();
+    // The shell-level bar IS rendered (centered), so the textbox is present.
+    expect(screen.getByRole("textbox", { name: "提问" })).toBeInTheDocument();
+    expect(createSession).not.toHaveBeenCalled();
+  });
+
+  it("cold-start submit without a key opens Settings instead of creating (ADR-0092 D4 honest gate)", async () => {
+    // The centered bar stays typeable (never disabled); a built-in submit
+    // while the active profile has no key redirects to the Settings overlay
+    // instead of minting a session whose first turn would fail on the missing
+    // key (ADR-0019 honest guidance, the retired ColdStartHero's successor).
+    vi.mocked(getAppConfig).mockResolvedValue(
+      baseAppConfig({ sidebar_collapsed: false }),
+    );
+    vi.mocked(listProviderProfiles).mockResolvedValue([
+      { profile_id: "default", has_key: false, keychain_fault: null },
+    ]);
+    try {
+      render(<App />);
+      await waitFor(() => expect(screen.getByLabelText("提问")).toBeInTheDocument());
+      // Let app-config + the key overlay settle into the gate state before
+      // submitting (both consumers fetch listProviderProfiles).
+      await waitFor(() => expect(listProviderProfiles).toHaveBeenCalled());
+      await act(async () => {
+        await new Promise((r) => setTimeout(r, 0));
+      });
+      fireEvent.change(screen.getByLabelText("提问"), { target: { value: "test question" } });
+      fireEvent.click(screen.getByRole("button", { name: "提问" }));
+      // The settings overlay opens; no session is created and the centered bar
+      // persists (the submit navigated to settings, not out of cold start).
+      await waitFor(() =>
+        expect(document.querySelector(".settings-overlay")).toBeInTheDocument(),
+      );
+      expect(createSession).not.toHaveBeenCalled();
+      expect(screen.getByText(/你想分析什么/)).toBeInTheDocument();
+    } finally {
+      // The beforeEach only clearAllMocks (call history), so mock IMPLEMENTATIONS
+      // leak into later tests. Restore the factory defaults — a lingering
+      // has_key:false overlay would gate every later cold-start bar submit.
+      // (null is an App-level state, not an IPC return — cast per the real
+      // getAppConfig signature.)
+      vi.mocked(getAppConfig).mockResolvedValue(null as unknown as AppConfig);
+      vi.mocked(listProviderProfiles).mockResolvedValue([
+        { profile_id: "default", has_key: true, keychain_fault: null },
+      ]);
+    }
+  });
+
+  it("cold-start submit with zero profiles opens Settings on the API Access tab instead of creating (ADR-0098 D4, issue #570)", async () => {
+    // ADR-0098 Decision 1 made zero profiles representable, activating the
+    // honest gate's "no profile -> Settings" branch (ADR-0092 D4): a built-in
+    // submit with an empty profile set redirects to the Runtime section's
+    // API Access sub-tab instead of minting a session whose first turn would
+    // fail unconfigured. useProfileKeys skips the key fetch on an empty set,
+    // so the gate resolves without a key-overlay round-trip.
+    vi.mocked(getAppConfig).mockResolvedValue({
+      ...baseAppConfig({ sidebar_collapsed: false }),
+      provider: { profiles: [], active_profile: null },
+    });
+    try {
+      render(<App />);
+      await waitFor(() => expect(screen.getByLabelText("提问")).toBeInTheDocument());
+      fireEvent.change(screen.getByLabelText("提问"), { target: { value: "test question" } });
+      fireEvent.click(screen.getByRole("button", { name: "提问" }));
+      // The settings overlay opens on the runtime section's API Access
+      // sub-tab; no session is created and the centered bar persists.
+      await waitFor(() =>
+        expect(document.querySelector(".settings-overlay")).toBeInTheDocument(),
+      );
+      expect(createSession).not.toHaveBeenCalled();
+      expect(screen.getByRole("tab", { name: "API 接入配置" })).toHaveAttribute(
+        "aria-selected",
+        "true",
+      );
+      expect(screen.getByText(/你想分析什么/)).toBeInTheDocument();
+    } finally {
+      // The beforeEach only clearAllMocks (call history), so the mock
+      // IMPLEMENTATION must be restored (null is an App-level state, not an
+      // IPC return -- cast per the real getAppConfig signature).
+      vi.mocked(getAppConfig).mockResolvedValue(null as unknown as AppConfig);
+    }
+  });
+
+  it("cold-start submit with external runtime creates session + applies external via setSessionRuntime (#499 AC3)", async () => {
+    // The cold-start bar's runtime picker writes to pendingRuntime (no IPC).
+    // On submit, the handler bypasses the built-in key gate (external pick)
+    // and mints a session; mintAndRegister then applies the posture via
+    // setSessionRuntime. This verifies the full external cold-start path.
+    vi.mocked(getAppConfig).mockResolvedValue(
+      baseAppConfig({ sidebar_collapsed: false }),
+    );
+    vi.mocked(listAdapters).mockResolvedValue([
+      { id: "gemini-cli", display_name: "gemini-cli", detected: true, binary_path: "/usr/local/bin/gemini", stream_format: "acp" },
+    ]);
+    // The creation turn rejects so it settles immediately (openSession pattern).
+    vi.mocked(askQuestion).mockRejectedValueOnce(
+      new Error("discard the creation turn"),
+    );
+    try {
+      render(<App />);
+      await waitFor(() => expect(screen.getByLabelText("提问")).toBeInTheDocument());
+      // Wait for app-config to resolve so the picker trigger renders.
+      await waitFor(() =>
+        expect(screen.getByRole("button", { name: /运行时/ })).toBeInTheDocument(),
+      );
+      // Open the picker popover and select the external adapter from the
+      // level-2 CLI select.
+      fireEvent.click(screen.getByRole("button", { name: /运行时/ }));
+      const cliTrigger = await screen.findByRole("combobox", { name: "本机 CLI" });
+      fireEvent.pointerDown(cliTrigger, { button: 0, pointerType: "mouse" });
+      fireEvent.click(cliTrigger);
+      const cliOption = await screen.findByRole("option", { name: "gemini-cli" });
+      fireEvent.pointerUp(cliOption, { button: 0, pointerType: "mouse" });
+      fireEvent.click(cliOption);
+      // Type and submit from the centered bar.
+      fireEvent.change(screen.getByLabelText("提问"), { target: { value: "test question" } });
+      fireEvent.click(screen.getByRole("button", { name: "提问" }));
+      // createSession fires and setSessionRuntime applies the external choice.
+      await waitFor(() => expect(createSession).toHaveBeenCalledTimes(1));
+      await waitFor(() =>
+        expect(setSessionRuntime).toHaveBeenCalledWith("sess-1", {
+          kind: "external",
+          data: "gemini-cli",
+        }),
+      );
+    } finally {
+      // Restore factory defaults so later tests see pending app-config.
+      vi.mocked(getAppConfig).mockResolvedValue(null as unknown as AppConfig);
+      vi.mocked(listAdapters).mockResolvedValue([]);
+    }
+  });
+
+  it("cold-start picker opens on a detected default runtime; first submit mints on it without a frontend runtime write (issue #572)", async () => {
+    // default_runtime = external(detected): the cold-start picker starts with
+    // that CLI selected, and an unmodified first submit mints on it WITHOUT a
+    // frontend setSessionRuntime -- the backend's create_session resolution
+    // is the startup truth (ADR-0098 Decisions 2/3); the write only applies
+    // an explicit user pick.
+    vi.mocked(getAppConfig).mockResolvedValue({
+      ...baseAppConfig({ sidebar_collapsed: false }),
+      default_runtime: { kind: "external", data: "gemini-cli" },
+    });
+    vi.mocked(listAdapters).mockResolvedValue([
+      { id: "gemini-cli", display_name: "gemini-cli", detected: true, binary_path: "/usr/local/bin/gemini", stream_format: "acp" },
+    ]);
+    // The creation turn rejects so it settles immediately (openSession pattern).
+    vi.mocked(askQuestion).mockRejectedValueOnce(
+      new Error("discard the creation turn"),
+    );
+    try {
+      render(<App />);
+      await waitFor(() => expect(screen.getByLabelText("提问")).toBeInTheDocument());
+      // The trigger names the resolved default's adapter from the start --
+      // no picker interaction needed.
+      await waitFor(() =>
+        expect(
+          screen.getByRole("button", { name: "运行时：gemini-cli" }),
+        ).toBeInTheDocument(),
+      );
+      // Submit straight away: the external default bypasses the built-in key
+      // gate and mints a session.
+      fireEvent.change(screen.getByLabelText("提问"), { target: { value: "test question" } });
+      fireEvent.click(screen.getByRole("button", { name: "提问" }));
+      await waitFor(() => expect(createSession).toHaveBeenCalledTimes(1));
+      // Unmodified pending posture: no redundant runtime write.
+      expect(setSessionRuntime).not.toHaveBeenCalled();
+    } finally {
+      vi.mocked(getAppConfig).mockResolvedValue(null as unknown as AppConfig);
+      vi.mocked(listAdapters).mockResolvedValue([]);
+    }
+  });
+
+  it("an unmodified submit on a detected external default bypasses the key gate even with a keyless profile (issue #572)", async () => {
+    // The gate's keyless redirect fires only on the built-in KIND, and with
+    // an external default_runtime the UNMODIFIED posture is already external:
+    // has_key:false must not open Settings — the backend resolves the startup
+    // runtime itself, so the submit mints with no runtime write. This is the
+    // cell the factory's has_key:true default leaves unpinned: the gate is
+    // under real tension here and only here.
+    vi.mocked(getAppConfig).mockResolvedValue({
+      ...baseAppConfig({ sidebar_collapsed: false }),
+      default_runtime: { kind: "external", data: "gemini-cli" },
+    });
+    // No key — the gate would fire if the effective runtime were built-in.
+    vi.mocked(listProviderProfiles).mockResolvedValue([
+      { profile_id: "default", has_key: false, keychain_fault: null },
+    ]);
+    vi.mocked(listAdapters).mockResolvedValue([
+      { id: "gemini-cli", display_name: "gemini-cli", detected: true, binary_path: "/usr/local/bin/gemini", stream_format: "acp" },
+    ]);
+    vi.mocked(askQuestion).mockRejectedValueOnce(
+      new Error("discard the creation turn"),
+    );
+    try {
+      render(<App />);
+      await waitFor(() => expect(screen.getByLabelText("提问")).toBeInTheDocument());
+      // The trigger opens on the resolved external default...
+      await waitFor(() =>
+        expect(
+          screen.getByRole("button", { name: "运行时：gemini-cli" }),
+        ).toBeInTheDocument(),
+      );
+      // ...and the keyless overlay settles BEFORE the submit, so the gate
+      // state is real when the submit fires (useProfileKeys fetches it too).
+      await waitFor(() => expect(listProviderProfiles).toHaveBeenCalled());
+      await act(async () => {
+        await new Promise((r) => setTimeout(r, 0));
+      });
+      // Submit straight away: the external effective runtime keeps the gate
+      // shut — no Settings redirect, the session mints with no runtime write.
+      fireEvent.change(screen.getByLabelText("提问"), { target: { value: "test question" } });
+      fireEvent.click(screen.getByRole("button", { name: "提问" }));
+      await waitFor(() => expect(createSession).toHaveBeenCalledTimes(1));
+      // The queued one-time rejection must be consumed before the test ends:
+      // the once queue survives clearAllMocks, and a leaked reject would
+      // settle the NEXT test's first turn mid-flight (#501 leak shape). The
+      // ask call itself is the dequeue point, so wait for it directly — a
+      // "submit button back" wait can pass before the turn even starts.
+      await waitFor(() =>
+        expect(vi.mocked(askQuestion).mock.calls.length).toBe(1),
+      );
+      expect(document.querySelector(".settings-overlay")).not.toBeInTheDocument();
+      expect(setSessionRuntime).not.toHaveBeenCalled();
+    } finally {
+      vi.mocked(getAppConfig).mockResolvedValue(null as unknown as AppConfig);
+      vi.mocked(listProviderProfiles).mockResolvedValue([
+        { profile_id: "default", has_key: true, keychain_fault: null },
+      ]);
+      vi.mocked(listAdapters).mockResolvedValue([]);
+    }
+  });
+
+  it("an explicit built-in pick on an external default overwrites the startup resolution (issue #572)", async () => {
+    // The unset/explicit distinction survives the mint: with default_runtime
+    // = external(detected), picking Built-in on the cold-start picker and
+    // submitting applies the built-in choice via setSessionRuntime (the
+    // session would otherwise run the external default the backend resolved).
+    vi.mocked(getAppConfig).mockResolvedValue({
+      ...baseAppConfig({ sidebar_collapsed: false }),
+      default_runtime: { kind: "external", data: "gemini-cli" },
+    });
+    vi.mocked(listAdapters).mockResolvedValue([
+      { id: "gemini-cli", display_name: "gemini-cli", detected: true, binary_path: "/usr/local/bin/gemini", stream_format: "acp" },
+    ]);
+    vi.mocked(askQuestion).mockRejectedValueOnce(
+      new Error("discard the creation turn"),
+    );
+    try {
+      render(<App />);
+      await waitFor(() => expect(screen.getByLabelText("提问")).toBeInTheDocument());
+      // The trigger opens on the resolved external default...
+      await waitFor(() =>
+        expect(
+          screen.getByRole("button", { name: "运行时：gemini-cli" }),
+        ).toBeInTheDocument(),
+      );
+      // ...then the user explicitly reverts to built-in.
+      fireEvent.click(screen.getByRole("button", { name: "运行时：gemini-cli" }));
+      const builtinHeader = await screen.findByRole("button", { name: "API 接入配置" });
+      fireEvent.click(builtinHeader);
+      fireEvent.change(screen.getByLabelText("提问"), { target: { value: "test question" } });
+      fireEvent.click(screen.getByRole("button", { name: "提问" }));
+      await waitFor(() => expect(createSession).toHaveBeenCalledTimes(1));
+      // The explicit pick lands -- the startup resolution does not swallow it.
+      await waitFor(() =>
+        expect(setSessionRuntime).toHaveBeenCalledWith("sess-1", {
+          kind: "built_in",
+        }),
+      );
+    } finally {
+      vi.mocked(getAppConfig).mockResolvedValue(null as unknown as AppConfig);
+      vi.mocked(listAdapters).mockResolvedValue([]);
+    }
+  });
+
+  it("the consumed posture resets: a revisit to the cold-start bar re-seeds from the resolved default (issue #572)", async () => {
+    // ADR-0092 D4 / ADR-0098 D4: minting consumes the pending posture, so the
+    // explicit built-in pick from the previous visit must NOT survive — back
+    // on the cold-start bar the trigger re-reads the resolved external
+    // default, and an unmodified second submit writes no runtime (a stale
+    // pick would otherwise display, silently write built_in, and re-arm the
+    // key gate).
+    vi.mocked(getAppConfig).mockResolvedValue({
+      ...baseAppConfig({ sidebar_collapsed: false }),
+      default_runtime: { kind: "external", data: "gemini-cli" },
+    });
+    vi.mocked(listAdapters).mockResolvedValue([
+      { id: "gemini-cli", display_name: "gemini-cli", detected: true, binary_path: "/usr/local/bin/gemini", stream_format: "acp" },
+    ]);
+    // The creation turn rejects so it settles immediately (openSession
+    // pattern). Only visit 1's mint needs one: visit 2 mints the SAME session
+    // id (the mock always returns sess-1), so the keep-alive pane is reused
+    // and no second creation turn ever fires.
+    vi.mocked(askQuestion).mockRejectedValueOnce(
+      new Error("discard the creation turn"),
+    );
+    try {
+      render(<App />);
+      await waitFor(() => expect(screen.getByLabelText("提问")).toBeInTheDocument());
+      await waitFor(() =>
+        expect(
+          screen.getByRole("button", { name: "运行时：gemini-cli" }),
+        ).toBeInTheDocument(),
+      );
+      // Visit 1: explicitly pick built-in against the external default and
+      // mint — the pick lands as one setSessionRuntime write.
+      fireEvent.click(screen.getByRole("button", { name: "运行时：gemini-cli" }));
+      const builtinHeader = await screen.findByRole("button", { name: "API 接入配置" });
+      fireEvent.click(builtinHeader);
+      fireEvent.change(screen.getByLabelText("提问"), { target: { value: "first question" } });
+      fireEvent.click(screen.getByRole("button", { name: "提问" }));
+      await waitFor(() => expect(createSession).toHaveBeenCalledTimes(1));
+      await waitFor(() =>
+        expect(setSessionRuntime).toHaveBeenCalledWith("sess-1", {
+          kind: "built_in",
+        }),
+      );
+      // Let the mint settle: the posture reset lands in the mint's .then,
+      // before the bar returns to idle.
+      await waitFor(() =>
+        expect(screen.getByRole("button", { name: "提问" })).toBeInTheDocument(),
+      );
+      // Navigate back to the centered cold-start bar (sidebar "+").
+      fireEvent.click(document.querySelector(".sidebar-new-button") as HTMLButtonElement);
+      await waitFor(() => expect(screen.getByText(/你想分析什么/)).toBeInTheDocument());
+      // The trigger re-seeds from the resolved default — the consumed
+      // built-in pick is gone.
+      await waitFor(() =>
+        expect(
+          screen.getByRole("button", { name: "运行时：gemini-cli" }),
+        ).toBeInTheDocument(),
+      );
+      expect(
+        screen.queryByRole("button", { name: "运行时：Anthropic" }),
+      ).not.toBeInTheDocument();
+      // Visit 2: an unmodified submit mints again WITHOUT a runtime write —
+      // setSessionRuntime stays at the single visit-1 call.
+      fireEvent.change(screen.getByLabelText("提问"), { target: { value: "second question" } });
+      fireEvent.click(screen.getByRole("button", { name: "提问" }));
+      await waitFor(() => expect(createSession).toHaveBeenCalledTimes(2));
+      // Visit 2's runtime write decision happens inside its mint (before the
+      // register), so let the mint's promise chain flush before pinning the
+      // count — setSessionRuntime stays at the single visit-1 call.
+      await act(async () => {
+        await new Promise((r) => setTimeout(r, 0));
+      });
+      expect(setSessionRuntime).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.mocked(getAppConfig).mockResolvedValue(null as unknown as AppConfig);
+      vi.mocked(listAdapters).mockResolvedValue([]);
+    }
+  });
+
+  it("cold-start picker degrades to built-in when the default names an undetected CLI (issue #572)", async () => {
+    // default_runtime = external but the CLI is not detected: the resolution
+    // degrades per-start (ADR-0098 Decision 3), so the cold-start trigger
+    // shows the built-in readout (the active profile), not the missing CLI.
+    vi.mocked(getAppConfig).mockResolvedValue({
+      ...baseAppConfig({ sidebar_collapsed: false }),
+      default_runtime: { kind: "external", data: "gemini-cli" },
+    });
+    vi.mocked(listAdapters).mockResolvedValue([
+      { id: "gemini-cli", display_name: "gemini-cli", detected: false, binary_path: null, stream_format: "acp" },
+    ]);
+    try {
+      render(<App />);
+      await waitFor(() => expect(screen.getByLabelText("提问")).toBeInTheDocument());
+      await waitFor(() =>
+        expect(
+          screen.getByRole("button", { name: "运行时：Anthropic" }),
+        ).toBeInTheDocument(),
+      );
+      // The degraded external default is NOT the trigger readout.
+      expect(
+        screen.queryByRole("button", { name: "运行时：gemini-cli" }),
+      ).not.toBeInTheDocument();
+    } finally {
+      vi.mocked(getAppConfig).mockResolvedValue(null as unknown as AppConfig);
+      vi.mocked(listAdapters).mockResolvedValue([]);
+    }
+  });
+
+  it("cold-start bar renders the full composer control row — no degraded controls (ADR-0092 D6, #500)", async () => {
+    // The centered bar carries the same control row as the session bar:
+    // the "+" file button, the auth-mode chip, and the runtime picker. None
+    // of them disappear or degrade on cold start, and none of them mints a
+    // session by rendering. (The MCP trigger chip is retired, ADR-0106, and
+    // the Skills trigger chip retired with the mount popover, #962 -- both
+    // assertions flipped to absence.)
+    vi.mocked(getAppConfig).mockResolvedValue(
+      baseAppConfig({ sidebar_collapsed: false }),
+    );
+    try {
+      render(<App />);
+      await waitFor(() => expect(screen.getByLabelText("提问")).toBeInTheDocument());
+      const bar = document.querySelector(".question-bar") as HTMLElement;
+      expect(bar).not.toBeNull();
+      // Skills trigger chip (retired with the mount popover, #962); no MCP
+      // chip.
+      expect(
+        screen.queryByRole("button", { name: /技能/ }),
+      ).not.toBeInTheDocument();
+      expect(
+        screen.queryByRole("button", { name: /MCP/ }),
+      ).not.toBeInTheDocument();
+      // The "+" file button + the auth-mode chip.
+      expect(bar.contains(screen.getByRole("button", { name: "添加文件" }))).toBe(true);
+      expect(
+        bar.contains(await screen.findByRole("combobox", { name: /授权模式/ })),
+      ).toBe(true);
+      // The runtime picker trailing slot.
+      expect(
+        bar.contains(await screen.findByRole("button", { name: /运行时/ })),
+      ).toBe(true);
+      // Draft mode fires NO per-session IPC.
+      expect(getAuthorizationMode).not.toHaveBeenCalled();
+      expect(createSession).not.toHaveBeenCalled();
+    } finally {
+      vi.mocked(getAppConfig).mockResolvedValue(null as unknown as AppConfig);
+    }
+  });
+
+  it("cold-start draft selections all apply to the minted session on first submit (#500)", async () => {
+    // The draft-mode contract: a skill pick, a queued file, and an auth-mode
+    // switch made on the centered bar (no session) all land on the session
+    // the first submit mints — the staged skill rides the first ask as its
+    // user invocation (ADR-0119), the auth-mode write lands via
+    // mintAndRegister, and the file goes through the ingest pipeline BEFORE
+    // the first turn fires. (The MCP draft pick retired with the per-session
+    // mount chain, ADR-0106; config enablement replaced it.)
+    vi.mocked(getAppConfig).mockResolvedValue({
+      ...baseAppConfig({ sidebar_collapsed: false }),
+      cli_tools: { tools: [] },
+      mcp_servers: { servers: [mcpServer("srv")] },
+    });
+    vi.mocked(listSkills).mockResolvedValue({
+      skills: [skillEntry("charting")],
+      ignored: [],
+      root_error: null,
+    });
+    vi.mocked(ingestFile).mockResolvedValue({ kind: "Loaded", data: src("people") });
+    // The creation turn rejects so it settles immediately (openSession pattern).
+    vi.mocked(askQuestion).mockRejectedValueOnce(
+      new Error("discard the creation turn"),
+    );
+    vi.mocked(open).mockResolvedValue(["/x/a.csv"]);
+    try {
+      render(<App />);
+      await waitFor(() => expect(screen.getByLabelText("提问")).toBeInTheDocument());
+
+      // Skills draft: pick charting through the "/" picker (the "/" and "$"
+      // pickers are the only explicit activation channels; nothing fires
+      // before the mint).
+      fireEvent.change(screen.getByLabelText("提问"), { target: { value: "/", selectionStart: 1 } });
+      await screen.findByRole("option");
+      fireEvent.keyDown(screen.getByLabelText("提问"), { key: "Enter" });
+      await screen.findByText("charting");
+
+      // Files draft: the "+" pick queues into the pending list — the chip
+      // shows the queue; nothing ingests yet.
+      fireEvent.click(screen.getByRole("button", { name: "添加文件" }));
+      await waitFor(() =>
+        expect(screen.getByLabelText(/1 个文件已排队/)).toBeInTheDocument(),
+      );
+      expect(ingestFile).not.toHaveBeenCalled();
+
+      // Auth-mode draft: switch to no-confirmation (no IPC yet).
+      const authTrigger = screen.getByRole("combobox", { name: "授权模式：请求批准" });
+      fireEvent.pointerDown(authTrigger, { button: 0, pointerType: "mouse" });
+      fireEvent.click(authTrigger);
+      const option = await screen.findByRole("option", { name: /完全访问权限/ });
+      fireEvent.pointerUp(option, { button: 0, pointerType: "mouse" });
+      fireEvent.click(option);
+      await waitFor(() =>
+        expect(
+          screen.getByRole("combobox", { name: "授权模式：完全访问权限" }),
+        ).toBeInTheDocument(),
+      );
+      expect(setAuthorizationMode).not.toHaveBeenCalled();
+
+      // First submit mints the session and applies everything.
+      fireEvent.change(screen.getByLabelText("提问"), { target: { value: "q" } });
+      fireEvent.click(screen.getByRole("button", { name: "提问" }));
+      await waitFor(() => expect(createSession).toHaveBeenCalledTimes(1));
+      await waitFor(() =>
+        expect(setAuthorizationMode).toHaveBeenCalledWith("sess-1", "no_confirmation"),
+      );
+      await waitFor(() => expect(ingestFile).toHaveBeenCalledWith("sess-1", "/x/a.csv"));
+      // The staged skill rides the first ask as its user invocation
+      // (ADR-0119: submit-time materialization).
+      await waitFor(() =>
+        expect(askQuestion).toHaveBeenCalledWith("sess-1", "q", ["charting"]),
+      );
+      // The file landed BEFORE the first turn fired.
+      expect(vi.mocked(ingestFile).mock.invocationCallOrder[0]).toBeLessThan(
+        vi.mocked(askQuestion).mock.invocationCallOrder[0],
+      );
+    } finally {
+      vi.mocked(getAppConfig).mockResolvedValue(null as unknown as AppConfig);
+      vi.mocked(listSkills).mockResolvedValue({ skills: [], ignored: [], root_error: null });
+    }
+  });
+
+  it("keep-alive switch does not refetch an inactive session (ADR-0051)", async () => {
+    // Two sessions opened; each SessionPane fetches its thread once on mount.
+    // Switching active never remounts them (CSS hidden keep-alive), so the
+    // thread query is NOT re-issued -- conversation stays at one call per
+    // session.
+    vi.mocked(createSession)
+      .mockResolvedValueOnce({ session_id: "sess-1", duck_path: "/sessions/sess-1/session.duck" })
+      .mockResolvedValueOnce({ session_id: "sess-2", duck_path: "/sessions/sess-2/session.duck" });
+    render(<App />);
+    await openSession();
+    await openSession();
+    expect(createSession).toHaveBeenCalledTimes(2);
+    // Wait for both panes to fire their thread query -- conversation runs in
+    // the SessionPane mount effect (async), so asserting it synchronously
+    // right after createSession races the query fire (flake on slower CI).
+    await waitFor(() => expect(conversation).toHaveBeenCalledTimes(2));
+
+    // Switch back to the first session via its sidebar entry. Keep-alive: the
+    // inactive SessionPane was never unmounted, so no refetch.
+    const entries = document.querySelectorAll(".session-entry-main");
+    expect(entries.length).toBeGreaterThanOrEqual(2);
+    fireEvent.click(entries[0]);
+    expect(conversation).toHaveBeenCalledTimes(2); // unchanged -- no refetch
+  });
+
+  // ADR-0093 (issue #511): close + rename via sidebar context menu tests
+  // retired — management moved to .session-header (slice 2, #512).
+
+  // ADR-0061 drop-to-create (#81 A1), carrier moved to the ADR-0092 empty
+  // state (#501): a file dropped on the empty-state main area around the
+  // centered bar mints a session and the new SessionPane ingests the path via
+  // handleIngestMany (the only path that can surface an xlsx NeedsGuidance
+  // result). Asserts the createSession + ingestFile wiring at the shell
+  // boundary.
+  it("drop on the cold-start empty area mints a session and ingests the file (ADR-0061/0092, #81 A1, #501)", async () => {
+    vi.mocked(createSession).mockResolvedValueOnce({ session_id: "sess-drop", duck_path: "/sessions/sess-drop/session.duck" });
+    vi.mocked(ingestFile).mockResolvedValue({ kind: "Loaded", data: src("dropped") });
+    render(<App />);
+    // Cold start: the centered bar + greeting are showing, no session yet.
+    await waitFor(() => expect(dropEvent.handler).not.toBeNull());
+    // Simulate a webview drop of one data file in the window's top-left
+    // corner -- the empty-state area, clear of the centered bar.
+    dropEvent.handler!({ payload: { type: "drop", paths: ["/x/foo.csv"], position: { x: 5, y: 5 } } });
+    await waitFor(() => expect(createSession).toHaveBeenCalled());
+    // The minted session's SessionPane consumes the path via handleIngestMany.
+    await waitFor(() => expect(ingestFile).toHaveBeenCalledWith("sess-drop", "/x/foo.csv"));
+  });
+
+  // ADR-0092 Decision 2 (#501): the centered composer bar itself is inert to
+  // drops. The webview drop router hit-tests the drop position against the
+  // bar's rect; a drop ON the bar must not mint a session (accidental-drop
+  // guard), and the shell stays on the centered empty state.
+  it("drop ON the centered composer bar is inert on cold start (ADR-0092 Decision 2, #501)", async () => {
+    // No createSession return is staged on purpose: the contract is that the
+    // IPC is never called. A queued mockResolvedValueOnce a test never
+    // consumes survives clearAllMocks and would leak into a later test.
+    render(<App />);
+    await waitFor(() => expect(dropEvent.handler).not.toBeNull());
+    // jsdom has no layout; pin the rendered bar's geometry so the router's
+    // hit test reads a real rect (shared barRectStub).
+    stubRenderedComposerBar({ left: 100, top: 200, right: 820, bottom: 400 });
+    // Drop in the middle of the bar.
+    dropEvent.handler!({ payload: { type: "drop", paths: ["/x/foo.csv"], position: { x: 400, y: 300 } } });
+    // The guard runs synchronously ahead of dropFile; flush a microtask tick
+    // anyway so an accidental async path would land before the negative
+    // assertion.
+    await act(async () => {});
+    expect(createSession).not.toHaveBeenCalled();
+    // Still on the centered empty state (no mint -> activeSessionId null).
+    expect(document.querySelector(".shell")?.classList.contains("cold-start-mode")).toBe(true);
+    expect(document.querySelector(".shell-bar-slot")?.classList.contains("centered")).toBe(true);
+  });
+
+  // #501 AC: the drop-minted session appears in the sidebar list, and the bar
+  // slot glides centered -> bottom once activeSessionId flips.
+  it("a drop-minted session appears in the sidebar + the bar moves to the bottom (#501)", async () => {
+    vi.mocked(createSession).mockResolvedValueOnce({ session_id: "sess-drop", duck_path: "/sessions/sess-drop/session.duck" });
+    vi.mocked(ingestFile).mockResolvedValue({ kind: "Loaded", data: src("dropped") });
+    render(<App />);
+    await waitFor(() => expect(dropEvent.handler).not.toBeNull());
+    expect(document.querySelector(".session-list [aria-current='true']")).toBeNull();
+    // Drop in the empty-state area (top-left corner, clear of the bar).
+    dropEvent.handler!({ payload: { type: "drop", paths: ["/x/foo.csv"], position: { x: 5, y: 5 } } });
+    // The minted session joins the sidebar as the ACTIVE entry at once
+    // (sidebarModel renders open sessions absent from the persisted scan).
+    await waitFor(() => {
+      expect(document.querySelector(".session-list [aria-current='true']")).not.toBeNull();
+    });
+    // ...and the bar slot left the centered posture.
+    await waitFor(() => {
+      expect(document.querySelector(".shell-bar-slot")?.classList.contains("bottom")).toBe(true);
+    });
+  });
+});
+
+// A helper that holds an in-flight ask open so a test can observe the loading
+// window (phase feedback / cancel) then resolve it to let the turn finish.
+// The resolver is read through a ref so the returned `resolve` always invokes
+// the LATEST promise's resolver (not a stale copy captured before askQuestion
+// was called).
+function pendingAsk(): { resolve: (o: TurnOutcome) => void } {
+  const ref: { current: ((o: TurnOutcome) => void) | null } = { current: null };
+  vi.mocked(askQuestion).mockImplementation(
+    () =>
+      new Promise<TurnOutcome>((r) => {
+        ref.current = r;
+      }),
+  );
+  return { resolve: (o) => ref.current?.(o) };
+}
+
+describe("App turn-progress phase feedback (issue #82 / ADR-0059)", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    state.workingSet = [src("people")];
+    state.thread = [];
+    vi.mocked(readRows).mockResolvedValue(ROW_PAGE);
+    vi.stubGlobal("navigator", { language: "zh-CN" });
+  });
+
+  it("renders Thinking / tool-call phase labels during an in-flight ask", async () => {
+    vi.mocked(createSession).mockResolvedValue({ session_id: "sess-1", duck_path: "/sessions/sess-1/session.duck" });
+    const { resolve } = pendingAsk();
+    render(<App />);
+    await openSession();
+    fireEvent.change(screen.getByLabelText("提问"), { target: { value: "x" } });
+    fireEvent.click(screen.getByRole("button", { name: "提问" }));
+    // The ask is in flight: the stop button replaces submit.
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "停止" })).toBeInTheDocument(),
+    );
+    // Phase-label assertions scope to the QuestionBar: the rail's live turn
+    // card (issue #297) shows its own 思考中 hint from ask start, so a global
+    // text query would match two surfaces.
+    const bar = () => document.querySelector(".question-bar") as HTMLElement;
+
+    // Thinking{attempt: 1} -> bare verb "思考中…" (no "第 1 次" noise).
+    turnProgressCb.current!({
+      session_id: "sess-1",
+      phase: { Thinking: { attempt: 1 } },
+    });
+    await waitFor(() => expect(within(bar()).getByText("思考中…")).toBeInTheDocument());
+
+    // A tool-call event (ADR-0078 stream) -> the bar's compact "执行中…"; the
+    // per-call detail rides the rail's live trace card, not the bar.
+    turnProgressCb.current!({
+      session_id: "sess-1",
+      phase: {
+        ToolCallStarted: {
+          name: "materialize",
+          operation_kind: "write",
+          summary: "SELECT 1",
+        },
+      },
+    });
+    await waitFor(() => expect(within(bar()).getByText("执行中…")).toBeInTheDocument());
+
+    // Outcome lands -> phase clears (ADR-0059 handleAsk finally).
+    resolve({ kind: "Cancelled", data: null });
+    await waitFor(() =>
+      expect(within(bar()).queryByText(/执行中/)).not.toBeInTheDocument(),
+    );
+  });
+
+  it("ignores turn-progress events addressed to a different session (ADR-0056 filter)", async () => {
+    vi.mocked(createSession).mockResolvedValue({ session_id: "sess-1", duck_path: "/sessions/sess-1/session.duck" });
+    const { resolve } = pendingAsk();
+    render(<App />);
+    await openSession();
+    fireEvent.change(screen.getByLabelText("提问"), { target: { value: "x" } });
+    fireEvent.click(screen.getByRole("button", { name: "提问" }));
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "停止" })).toBeInTheDocument(),
+    );
+    const bar = () => document.querySelector(".question-bar") as HTMLElement;
+    // A phase for a DIFFERENT session is filtered out -- the bar carries no
+    // indicator (the rail's live card shows its own ask-start 思考中 hint, so
+    // the filter contract is asserted on the bar surface).
+    turnProgressCb.current!({
+      session_id: "other-session",
+      phase: { Thinking: { attempt: 1 } },
+    });
+    await waitFor(() =>
+      expect(within(bar()).queryByText(/思考中/)).not.toBeInTheDocument(),
+    );
+    // The same phase for THIS session lights up.
+    turnProgressCb.current!({
+      session_id: "sess-1",
+      phase: { Thinking: { attempt: 1 } },
+    });
+    await waitFor(() => expect(within(bar()).getByText("思考中…")).toBeInTheDocument());
+    resolve({ kind: "Cancelled", data: null });
+  });
+});
+
+describe("App single in-flight + cancel (issue #82 / ADR-0021/0028)", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    state.workingSet = [src("people")];
+    state.thread = [];
+    vi.mocked(readRows).mockResolvedValue(ROW_PAGE);
+    vi.stubGlobal("navigator", { language: "zh-CN" });
+  });
+
+  it("disables the input and offers stop while a turn runs (single in-flight, ADR-0021)", async () => {
+    const { resolve } = pendingAsk();
+    render(<App />);
+    await openSession();
+    const input = screen.getByLabelText("提问");
+    fireEvent.change(input, { target: { value: "x" } });
+    fireEvent.click(screen.getByRole("button", { name: "提问" }));
+    // While the turn runs: input disabled, stop shown, submit gone.
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "停止" })).toBeInTheDocument(),
+    );
+    expect(input).toBeDisabled();
+    expect(screen.queryByRole("button", { name: "提问" })).not.toBeInTheDocument();
+    resolve({ kind: "Cancelled", data: null });
+  });
+
+  it("stop fires cancelQuery on the session (ADR-0021)", async () => {
+    vi.mocked(createSession).mockResolvedValue({ session_id: "sess-1", duck_path: "/sessions/sess-1/session.duck" });
+    const { resolve } = pendingAsk();
+    render(<App />);
+    await openSession();
+    fireEvent.change(screen.getByLabelText("提问"), { target: { value: "x" } });
+    fireEvent.click(screen.getByRole("button", { name: "提问" }));
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "停止" })).toBeInTheDocument(),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "停止" }));
+    await waitFor(() => expect(cancelQuery).toHaveBeenCalledWith("sess-1"));
+    resolve({ kind: "Cancelled", data: null });
+  });
+});
+
+// A malformed turn (unknown outcome kind) for the ADR-0058 boundary tests:
+// hardened with trace/provenance so the render crash reaches the exhaustive
+// outcome switch, not the earlier provenance-badge / trace reads that would
+// otherwise throw first.
+function bogusTurn(question = "x"): ThreadEntry {
+  return {
+    entry: "Turn",
+    data: { question, outcome: { kind: "Bogus" }, trace: [], provenance: { skills: [] } },
+  } as unknown as ThreadEntry;
+}
+
+describe("App error boundary partitioning (issue #82 / ADR-0058)", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    state.workingSet = [src("people")];
+    state.thread = [];
+    // Reset conversation to the factory default (state.thread) so a prior
+    // test's mockImplementation override does not leak across tests --
+    // clearAllMocks only clears call history, not implementations.
+    vi.mocked(conversation).mockImplementation(async () => state.thread);
+    vi.mocked(readRows).mockResolvedValue(ROW_PAGE);
+    vi.stubGlobal("navigator", { language: "zh-CN" });
+    // React logs the intentional render throw; keep test output clean.
+    vi.spyOn(console, "error").mockImplementation(() => {});
+  });
+
+  it("shows a degrade card when Thread render throws (ADR-0058 partition fallback)", async () => {
+    // A malformed outcome kind hits Thread's exhaustive `default: never` throw
+    // (a genuine render crash). An L2 partition ErrorBoundary catches it and
+    // renders the degrade card with the honest error detail. The session-level
+    // boundary (wrapping each <SessionPane>) is the reliable catcher in the
+    // test environment; the granular thread boundary is the architecturally
+    // correct inner catcher and catches first-render throws.
+    state.thread = [
+      bogusTurn(),
+    ];
+    render(<App />);
+    await openSession();
+    // A degrade card is visible once the thread query resolves and Thread
+    // throws on the malformed outcome.
+    await waitFor(() =>
+      expect(document.querySelector(".degrade-card")).toBeInTheDocument(),
+    );
+    const card = document.querySelector(".degrade-card")!;
+    // The error message rides the expandable details (ADR-0058 honest detail).
+    expect(card.textContent).toMatch(/Bogus/);
+    // The shell skeleton (top bar + session sidebar) survives -- the crash
+    // did not escape to L3.
+    expect(document.querySelector(".topbar")).toBeInTheDocument();
+    expect(document.querySelector(".session-sidebar")).toBeInTheDocument();
+  });
+
+  it("retry on a degrade card clears it after the data is fixed (key bump + invalidate)", async () => {
+    // Thread starts malformed -> crash -> degrade card. After the retry's
+    // onReset invalidates + error-clear remounts, the refetch returns a clean
+    // thread and the pane renders the turn instead of the degrade card.
+    let threadData: ThreadEntry[] = [
+      bogusTurn(),
+    ];
+    vi.mocked(conversation).mockImplementation(async () => threadData);
+    render(<App />);
+    await openSession();
+    await waitFor(() =>
+      expect(document.querySelector(".degrade-card")).toBeInTheDocument(),
+    );
+    // Fix the data source, then retry.
+    threadData = [
+      { entry: "Turn", data: { question: "你好", outcome: { kind: "Cancelled", data: null }, trace: [], provenance: { skills: [] } } },
+    ];
+    fireEvent.click(screen.getByRole("button", { name: "重试" }));
+    await waitFor(() => expect(screen.getByText("你好")).toBeInTheDocument());
+    expect(document.querySelector(".degrade-card")).not.toBeInTheDocument();
+  });
+
+  it("retry resets the session cache slice (ADR-0058 resetQueries contract)", async () => {
+    // Locks the ADR-0058 decision that retry RESETS (not invalidates) the
+    // session query cache: invalidate would leave stale data for the remounted
+    // children to re-render and re-throw against, and a bare remove would not
+    // refetch the still-mounted observers (the region boundary never unmounts
+    // useSessionState, so the remount would re-render the parent's stale JSX
+    // snapshot and re-throw). A regression to invalidate (or a no-op) would
+    // still pass the existing retry test above (the mock returns fresh data
+    // either way), so this spy is the distinguishing guard.
+    const removeSpy = vi.spyOn(QueryClient.prototype, "resetQueries");
+    let threadData: ThreadEntry[] = [
+      bogusTurn(),
+    ];
+    vi.mocked(conversation).mockImplementation(async () => threadData);
+    render(<App />);
+    await openSession();
+    await waitFor(() =>
+      expect(document.querySelector(".degrade-card")).toBeInTheDocument(),
+    );
+    // Fix the data, then retry.
+    threadData = [
+      { entry: "Turn", data: { question: "你好", outcome: { kind: "Cancelled", data: null }, trace: [], provenance: { skills: [] } } },
+    ];
+    const conversationCallsBefore = vi.mocked(conversation).mock.calls.length;
+    removeSpy.mockClear(); // isolate retry's own removeQueries call
+    fireEvent.click(screen.getByRole("button", { name: "重试" }));
+    // The remounted pane reads the refetched (clean) data.
+    await waitFor(() => expect(screen.getByText("你好")).toBeInTheDocument());
+    // ADR-0058: retry called resetQueries (the cache data was dropped AND the
+    // active observers refetched), which drove the fresh conversation() call.
+    expect(removeSpy).toHaveBeenCalled();
+    expect(vi.mocked(conversation).mock.calls.length).toBeGreaterThan(
+      conversationCallsBefore,
+    );
+  });
+
+  it("one session crashing does not affect another open session (ADR-0058 session isolation)", async () => {
+    // Two sessions: sess-1 has a crashing (malformed) thread, sess-2 is clean.
+    // The L2 session-body boundary in sess-1 catches its crash; sess-2 is a
+    // sibling pane and stays fully functional.
+    vi.mocked(createSession)
+      .mockResolvedValueOnce({ session_id: "sess-1", duck_path: "/sessions/sess-1/session.duck" })
+      .mockResolvedValueOnce({ session_id: "sess-2", duck_path: "/sessions/sess-2/session.duck" });
+    vi.mocked(conversation).mockImplementation(async (sid) => {
+      if (sid === "sess-1") {
+        return [
+          bogusTurn("bad"),
+        ];
+      }
+      return [];
+    });
+    render(<App />);
+    // Open sess-1 (the crashing session).
+    await openSession();
+    // sess-1 shows a degrade card (thread partition caught the crash).
+    await waitFor(() =>
+      expect(document.querySelector(".degrade-card")).toBeInTheDocument(),
+    );
+    // Open sess-2 (a second session via the bar-submit path).
+    await openSession();
+    expect(createSession).toHaveBeenCalledTimes(2);
+    // sess-2 is now active and shows NO degrade card -- it is unaffected. Only
+    // sess-1's keep-alive pane carries the single crash card. (Asserted by class
+    // count, not role="alert": the openSession helper rejects each creation turn,
+    // leaving a benign per-session ErrorBanner — also role="alert" — that is a
+    // test artifact, not a crash; querySelector counts hidden keep-alive panes.)
+    expect(document.querySelectorAll(".degrade-card")).toHaveLength(1);
+    expect(screen.getByRole("textbox", { name: "提问" })).toBeInTheDocument();
+  });
+});
+
+describe("App resume + close-in-flight seams (issue #83)", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    state.workingSet = [];
+    state.thread = [];
+    vi.mocked(readRows).mockResolvedValue(ROW_PAGE);
+    // Defaults: each test overrides the IPC it needs. Reset implementations
+    // so a prior test's mockImplementation (e.g. closeSession never-resolve)
+    // does not leak across describe boundaries.
+    vi.mocked(listSessions).mockResolvedValue([]);
+    vi.mocked(activeDataset).mockResolvedValue(null);
+    vi.mocked(listWorkingSet).mockResolvedValue([]);
+    vi.mocked(conversation).mockResolvedValue([]);
+    vi.mocked(closeSession).mockResolvedValue(false);
+    vi.mocked(openDuck).mockResolvedValue(undefined);
+    vi.stubGlobal("navigator", { language: "zh-CN" });
+  });
+
+  it("resume lands viewedResult on the last Materialized and shows the stale disclosure (ADR-0062 R5 / 0047)", async () => {
+    // A persisted session with two Materialized turns; result_2 is the last ->
+    // R5 points viewedResult at it on resume. result_2's source was replaced
+    // after materialization, so the workspace shows the old table + the
+    // stage-stale disclosure banner (ADR-0047 honest wording).
+    vi.mocked(listSessions).mockResolvedValue([
+      {
+        duck_path: "/x/persisted.duck",
+        display_name: "季报",
+        last_modified_at: Date.now(),
+        source_summary: { first_source_name: "people", source_count: 1, turn_count: 2 },
+        format_version: 1,
+        pinned: false,
+        archived: false,
+      },
+    ]);
+    const r1 = src("result_1");
+    const r2: DatasetDescriptor = {
+      ...src("result_2"),
+      stale: { reference_name: "result_2", display_name: "result_2", reason: "Replaced" },
+    };
+    vi.mocked(createSession).mockResolvedValue({ session_id: "sess-resume", duck_path: "/sessions/sess-resume/session.duck" });
+    vi.mocked(openDuck).mockResolvedValue(undefined);
+    vi.mocked(listWorkingSet).mockResolvedValue([r1, r2]);
+    vi.mocked(activeDataset).mockResolvedValue(r2);
+    vi.mocked(conversation).mockResolvedValue([
+      materializedTurn("result_1"),
+      materializedTurn("result_2"),
+    ]);
+
+    render(<App />);
+    await waitFor(() => expect(screen.getByText("季报")).toBeInTheDocument());
+    fireEvent.click(screen.getByText("季报"));
+    // R5: viewedResult lands on the LAST Materialized (result_2), not result_1.
+    await waitFor(() =>
+      expect(screen.getByRole("heading", { name: /q:result_2/ })).toBeInTheDocument(),
+    );
+    // ADR-0047 stage-stale: the workspace shows the old table + disclosure.
+    expect(screen.getByText(/此结果已失效/)).toBeInTheDocument();
+  });
+
+  it("filters resume-progress events by sessionId (ADR-0056 / #76, #83 R5)", async () => {
+    vi.mocked(listSessions).mockResolvedValue([
+      {
+        duck_path: "/x/persisted.duck",
+        display_name: "季报",
+        last_modified_at: Date.now(),
+        source_summary: { first_source_name: "people", source_count: 1, turn_count: 1 },
+        format_version: 1,
+        pinned: false,
+        archived: false,
+      },
+    ]);
+    // Hold openDuck pending so resumeStatus stays visible for assertions.
+    let resolveOpenDuck: () => void = () => {};
+    vi.mocked(openDuck).mockImplementation(
+      () => new Promise<void>((r) => { resolveOpenDuck = r; }),
+    );
+    vi.mocked(createSession).mockResolvedValue({ session_id: "sess-resume", duck_path: "/sessions/sess-resume/session.duck" });
+
+    render(<App />);
+    await waitFor(() => expect(screen.getByText("季报")).toBeInTheDocument());
+    fireEvent.click(screen.getByText("季报"));
+    // openDuck is called AFTER `targetSid = sid`, so once it fires the filter
+    // is armed.
+    await waitFor(() =>
+      expect(openDuck).toHaveBeenCalledWith("sess-resume", "/x/persisted.duck"),
+    );
+
+    // Event for a DIFFERENT session: filtered -> status stays "正在打开…".
+    resumeProgressCb.current!({
+      session_id: "other-sid",
+      event: { Source: { index: 1, total: 2, reference_name: "X" } },
+    });
+    expect(screen.queryByText(/校验源/)).not.toBeInTheDocument();
+
+    // Event for THIS session: status updates to source.
+    resumeProgressCb.current!({
+      session_id: "sess-resume",
+      event: { Source: { index: 1, total: 2, reference_name: "people" } },
+    });
+    await waitFor(() => expect(screen.getByText(/校验源/)).toBeInTheDocument());
+
+    // ADR-0067 (issue #182): the strip migrated from a bespoke <p> tint to a
+    // shadcn Alert default variant, with role="status" + aria-live="polite"
+    // OVERRIDING the Alert's role="alert" assertive default (alert.tsx sets
+    // role before spreading props, so the caller override wins). A regression
+    // that drops either attribute lets a screen reader interrupt the user on
+    // every resume tick. Pin the override so the a11y contract is guarded.
+    const resumeAlert = document.querySelector(".resume-progress") as HTMLElement;
+    expect(resumeAlert).not.toBeNull();
+    expect(resumeAlert.getAttribute("role")).toBe("status");
+    expect(resumeAlert.getAttribute("aria-live")).toBe("polite");
+    expect(resumeAlert.getAttribute("data-slot")).toBe("alert");
+
+    // Layout regression guard: the strip must render as an absolutely-
+    // positioned overlay INSIDE .main-area, NOT as an in-flow child of the
+    // .shell grid. An in-flow grid row shifted the whole main area down on
+    // mount and back up on unmount, so the visible session header bounced on
+    // every open/resume (the title position flicker). Pin the overlay parent
+    // so a revert to the grid-flow placement fails here.
+    expect(resumeAlert.parentElement?.classList.contains("main-area")).toBe(true);
+    expect(resumeAlert.parentElement?.classList.contains("shell")).toBe(false);
+    // The status text must ride a col-start-2 slot (AlertTitle): the Alert
+    // base grid reserves col 1 (width 0) for an icon, and a bare text child
+    // wraps one character per line there, turning the strip into a tall box.
+    expect(
+      resumeAlert.querySelector("[data-slot=alert-title]")?.textContent,
+    ).toMatch(/校验源/);
+
+    // Cleanup: let openDuck resolve and AWAIT openPersisted finishing (invalidate
+    // + registerOpen + setResumeStatus(null) + finally unlisten) so no orphan
+    // resume-progress listener leaks into the next test.
+    resolveOpenDuck();
+    await waitFor(() =>
+      expect(screen.queryByText(/正在打开/)).not.toBeInTheDocument(),
+    );
+  });
+
+  // ADR-0093 (issue #511): close-in-flight + close-reject tests retired —
+  // the sidebar context menu trigger moved to .session-header (slice 2, #512).
+});
+
+// ADR-0093 (issue #511): the "App delete wait-release variant" describe block
+// (3 tests, all triggered via .session-entry-menu) is retired — management
+// moved to .session-header (slice 2, #512).
+
+// A minimal valid AppConfig for the #84 persistence tests (the shell prefs are
+// the only field under test; the rest are just-shape defaults). The helper fills
+// `sidebar_grouping: "flat"` (the serde default) so callers stay focused on the
+// collapse prefs they actually exercise (#251 added the grouping field).
+function baseAppConfig(
+  shell: Pick<AppConfig["shell"], "sidebar_collapsed">,
+): AppConfig {
+  return sharedBaseAppConfig({
+    format_version: 1,
+    shell: { ...shell, sidebar_grouping: "flat" },
+  });
+}
+
+// A minimal configured MCP server (issue #301 wire shape) so a composer "+"
+// test can flip the registry non-empty and leave the degraded mode.
+function mcpServer(id: string): McpServerConfig {
+  return {
+    id,
+    display_name: id,
+    transport: { type: "stdio", command: "/bin/srv", args: [] },
+    env: {},
+    keychain_env_keys: [],
+    keychain_header_keys: [],
+    timeout_ms: null,
+    enabled: true,
+  };
+}
+
+describe("App artifact presentation (issue #1088, ADR-0124 Decision 3/4)", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    state.workingSet = [];
+    state.thread = [];
+    vi.mocked(listSessions).mockResolvedValue([]);
+    vi.mocked(activeDataset).mockResolvedValue(null);
+    vi.mocked(listWorkingSet).mockResolvedValue([]);
+    // mockImplementation so state.thread mutations within a test flow
+    // through to the rendered Thread (the live-flow test seeds the recorded
+    // row after the mount's initial load).
+    vi.mocked(conversation).mockImplementation(async () => state.thread);
+    // Re-establish the createSession default: clearAllMocks clears calls,
+    // not implementations, and an earlier suite's persistent clobber (a
+    // different duck_path) would route the html/pdf scope check off the
+    // artifacts dir and degrade the iframe to the fallback face.
+    vi.mocked(createSession).mockResolvedValue({
+      session_id: "sess-1",
+      duck_path: "/sessions/sess-1/session.duck",
+    });
+    vi.stubGlobal("navigator", { language: "zh-CN" });
+  });
+
+  it("renders the rail card on a resumed manifest; a row click selects the file onto the stage", async () => {
+    // The composition chain the issue is about, driven end to end: the
+    // recorded turn already carries the settle-computed manifest (ADR-0124
+    // Decision 2), TurnCard's render gate mounts the ArtifactCard, the
+    // exists-checked row is clickable, handleSelectFile moves viewedResult
+    // onto the file view AND expands the workspace, and the in-scope HTML
+    // renders the sandboxed iframe stage.
+    state.workingSet = [src("people")];
+    state.thread = [artifactTurn(["/sessions/sess-1/artifacts/page.html"])];
+    render(<App />);
+    await openSession();
+    const row = await screen.findByRole("button", { name: /page\.html/ });
+    expect(screen.getByText(/交付文件/)).toBeInTheDocument();
+    // Resume posture (#771 mirror): no Materialized turn means nothing
+    // auto-opens -- the one-shot spends silently on the init scan and the
+    // workspace stays folded until the user picks a row.
+    expect(document.querySelector(".session-pane")?.classList.contains("workspace-collapsed")).toBe(true);
+    fireEvent.click(row);
+    await waitFor(() =>
+      expect(document.querySelector(".session-pane")?.classList.contains("workspace-collapsed")).toBe(false),
+    );
+    const frame = document.querySelector("[data-testid=\"artifact-frame\"]");
+    expect(frame?.getAttribute("src")).toContain("page.html");
+    expect(frame?.getAttribute("sandbox")).toBe("allow-scripts");
+    // The dual-view mirror: the clicked row carries the active marker.
+    expect(row).toHaveAttribute("aria-current", "true");
+  });
+
+  it("resets the loading indicator when switching artifacts (the per-path remount, issue #1201)", async () => {
+    // The frame's isLoaded state lives in ArtifactView, but its reset is
+    // owned upstream: SessionPane keys the view by content.path (#1199's
+    // openFailed scoping), so a rail switch remounts the stage and the
+    // second document loads under its own indicator. The switch is
+    // deliberately same-kind (html to html): a kind change remounts the
+    // shell on its own, so only the same-kind switch discriminates the
+    // key -- without it the view reconciles in place and the switched-to
+    // document renders with no indicator while still fetching.
+    state.workingSet = [src("people")];
+    state.thread = [
+      artifactTurn(["/sessions/sess-1/artifacts/page.html", "/sessions/sess-1/artifacts/report.html"]),
+    ];
+    render(<App />);
+    await openSession();
+    fireEvent.click(await screen.findByRole("button", { name: /page\.html/ }));
+    const first = await waitFor(() => {
+      const node = document.querySelector("[data-testid=\"artifact-frame\"]");
+      expect(node).not.toBeNull();
+      return node as HTMLElement;
+    });
+    // jsdom never fires the frame's load: the manual event stands in for
+    // the WebView's first paint and retires the first document's indicator.
+    expect(screen.getByRole("status", { name: /正在加载|Loading/ })).toBeInTheDocument();
+    fireEvent.load(first);
+    expect(screen.queryByRole("status", { name: /正在加载|Loading/ })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: /report\.html/ }));
+    const second = await waitFor(() => {
+      const node = document.querySelector("[data-testid=\"artifact-frame\"]");
+      expect(node).not.toBeNull();
+      return node as HTMLElement;
+    });
+    // The remount is the contract under test: a fresh frame node carries
+    // the second document, and its indicator is up again from mount.
+    expect(second).not.toBe(first);
+    expect(second.getAttribute("src")).toContain("report.html");
+    expect(screen.getByRole("status", { name: /正在加载|Loading/ })).toBeInTheDocument();
+  });
+
+  it("auto-opens the primary when the turn-end refetch lands a manifest (live flow)", async () => {
+    state.workingSet = [src("people")];
+    const outcome = {
+      kind: "Textual",
+      data: { text_kind: "Agent", body: "report written", assumption: null },
+    } satisfies TurnOutcome;
+    // Persisting impl: the creation turn (openSession's one-time rejection)
+    // consumes its queue slot first, this turn resolves textual.
+    vi.mocked(askQuestion).mockResolvedValue(outcome);
+    // The refetch must land AFTER the optimistic append's commit: the real
+    // IPC round-trip separates the two thread writes into two renders, but
+    // an instantly-resolving mock batches them into one -- the auto-open's
+    // init scan would first see the manifest and spend silently. Gate the
+    // second conversation call (the turn-end refetch) on a manual release.
+    let releaseRefetch: (() => void) | null = null;
+    let conversationCalls = 0;
+    vi.mocked(conversation).mockImplementation(async () => {
+      conversationCalls += 1;
+      if (conversationCalls > 1) {
+        await new Promise<void>((resolve) => {
+          releaseRefetch = resolve;
+        });
+      }
+      return state.thread;
+    });
+    render(<App />);
+    await openSession();
+    // The mount's initial conversation load saw the empty thread; the
+    // optimistic append carries no manifest (settle-computed fields are
+    // backend-only), so the workspace is still folded here.
+    expect(document.querySelector(".session-pane")?.classList.contains("workspace-collapsed")).toBe(true);
+    // The recorded row the turn-end refetch returns (mock parity): the
+    // same outcome plus the manifest.
+    state.thread = [artifactTurn(["/sessions/sess-1/artifacts/report.pdf"], outcome)];
+    fireEvent.change(screen.getByLabelText("提问"), { target: { value: "写个报告" } });
+    fireEvent.click(screen.getByRole("button", { name: "提问" }));
+    // The optimistic append commits first -- the rail shows the question
+    // from the append, before any refetched data exists.
+    const rail = document.querySelector<HTMLElement>(".session-rail")!;
+    await waitFor(() => expect(within(rail).getByText("写个报告")).toBeInTheDocument());
+    // Release the refetch: the turn-end refresh refetches the thread, the
+    // manifest lands, and
+    expect(releaseRefetch).not.toBeNull();
+    releaseRefetch!();
+    // The manifest lands; the auto-open one-shot fires (no Materialized -> the artifact owns
+    // the stage): the workspace expands and the primary renders in-page (pdf
+    // -> the unsandboxed viewer frame, issue #1199).
+    await waitFor(() =>
+      expect(document.querySelector(".session-pane")?.classList.contains("workspace-collapsed")).toBe(false),
+    );
+    const frame = await waitFor(() => {
+      const node = document.querySelector("[data-testid=\"artifact-frame\"]");
+      expect(node).not.toBeNull();
+      return node as HTMLElement;
+    });
+    // The viewer rides the asset protocol, deliberately unsandboxed.
+    expect(frame).not.toHaveAttribute("sandbox");
+    expect(frame.getAttribute("src")).toContain("report.pdf");
+    // The header carries the name as the stage chrome.
+    expect(document.querySelector("[data-testid=\"artifact-header\"]")).toHaveTextContent("report.pdf");
+  });
+});
+
+describe("App viz stage presentation (issue #1093, ADR-0120 calibration)", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    state.workingSet = [];
+    state.thread = [];
+    vi.mocked(listSessions).mockResolvedValue([]);
+    vi.mocked(activeDataset).mockResolvedValue(null);
+    vi.mocked(listWorkingSet).mockResolvedValue([]);
+    vi.mocked(conversation).mockImplementation(async () => state.thread);
+    vi.mocked(createSession).mockResolvedValue({
+      session_id: "sess-1",
+      duck_path: "/sessions/sess-1/session.duck",
+    });
+    vi.mocked(embed).mockResolvedValue(embedOk());
+    vi.stubGlobal("navigator", { language: "zh-CN" });
+  });
+
+  it("stages a settled fence body onto the workspace on click (the stream->stage link)", async () => {
+    // The composition chain pinned end to end (the #1088 file-face twin):
+    // the settled fence renders clickable through the context link,
+    // handleSelectViz moves viewedResult onto the viz view AND expands the
+    // workspace, the stage renders the export-bearing frame, and the
+    // clicked fence lights the aria-current mirror.
+    const body = "```vega-lite\n{\"mark\": \"bar\"}\n```";
+    state.workingSet = [src("people")];
+    state.thread = [textual(body)];
+    render(<App />);
+    await openSession();
+    const fence = await screen.findByRole("button", { name: "在结果页查看图表" });
+    // Resume posture mirror (#771): no Materialized turn auto-opens, so the
+    // workspace stays folded until the fence is clicked.
+    expect(document.querySelector(".session-pane")?.classList.contains("workspace-collapsed")).toBe(true);
+    fireEvent.click(fence);
+    await waitFor(() =>
+      expect(document.querySelector(".session-pane")?.classList.contains("workspace-collapsed")).toBe(false),
+    );
+    // The stage's third face: the export anchor on the viz view.
+    expect(screen.getByRole("button", { name: "下载图表" })).toBeInTheDocument();
+    // The in-stream selection mirror on the clicked fence.
+    expect(fence).toHaveAttribute("aria-current", "true");
+  });
+});
+
+describe("App shell window collapse + drag-drop bisection (issue #84)", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    state.workingSet = [];
+    state.thread = [];
+    vi.mocked(readRows).mockResolvedValue(ROW_PAGE);
+    vi.mocked(listSessions).mockResolvedValue([]);
+    vi.mocked(activeDataset).mockResolvedValue(null);
+    vi.mocked(listWorkingSet).mockResolvedValue([]);
+    // mockImplementation (not mockResolvedValue) so state.thread mutations
+    // within a test flow through to the rendered Thread (the truncation test
+    // sets a long-question turn after beforeEach runs).
+    vi.mocked(conversation).mockImplementation(async () => state.thread);
+    vi.stubGlobal("navigator", { language: "zh-CN" });
+  });
+
+  it("starts a session with the workspace collapsed (ADR-0083 cold start, issue #298)", async () => {
+    // The workspace panel defaults to COLLAPSED -- a fresh session (and every
+    // pane mount: new / resume / app start) begins folded; the header toggle
+    // is the manual open path.
+    render(<App />);
+    await openSession();
+    const pane = document.querySelector(".session-pane");
+    expect(pane?.classList.contains("workspace-collapsed")).toBe(true);
+    expect(screen.getByRole("button", { name: "展开工作区" })).toBeInTheDocument();
+  });
+
+  it("centers the thread content in a reading column when the workspace is folded (issue #833)", async () => {
+    // The rail is the full-width scroll container in the folded state; the
+    // thread content centers inside it via the .rail-reading-column wrapper
+    // (capped by --reading-column-cap). jsdom has no layout engine, so the
+    // pin is class-compositional: the pane carries the fold class, and the
+    // wrapper is the rail's direct child. BOTH residency halves are pinned:
+    // openSession rejects the creation turn, so the rail renders its empty
+    // hint, and after a materialized turn populates the thread the question
+    // itself must resolve inside the wrapper too -- a future edit that
+    // scopes only one of the two into the reading column goes red here.
+    // The wrapper is also the rail's only child, so a rail-level sibling
+    // cannot silently opt out of the reading column.
+    render(<App />);
+    await openSession();
+    expect(document.querySelector(".session-pane")?.classList.contains("workspace-collapsed")).toBe(true);
+    const wrapper = document.querySelector<HTMLElement>(".session-rail > .rail-reading-column");
+    expect(wrapper).toBeInTheDocument();
+    expect(within(wrapper!).getByText("尚无对话。在下方提问或加载数据开始。")).toBeInTheDocument();
+    // Materialized turn (the suite's ADR-0083 idiom): auto-expands the
+    // workspace, which does not matter here -- the wrapper is unconditional.
+    const outcome833 = {
+      kind: "Materialized",
+      data: {
+        promotions: [{ dataset: { ...src("result_1"), row_count: 1 }, sql: "SELECT 1" }],
+        viz: null,
+        body: null,
+        assumption: null,
+      },
+    } satisfies TurnOutcome;
+    vi.mocked(askQuestion).mockResolvedValueOnce(outcome833);
+    state.thread = [recordedTurn("第一问", outcome833)];
+    fireEvent.change(screen.getByLabelText("提问"), { target: { value: "第一问" } });
+    fireEvent.click(screen.getByRole("button", { name: "提问" }));
+    // 2 asks total: the creation turn (rejected) + this one.
+    await waitFor(() => expect(askQuestion).toHaveBeenCalledTimes(2));
+    await within(wrapper!).findByText("第一问");
+    const rail = document.querySelector(".session-rail")!;
+    expect(Array.from(rail.children)).toHaveLength(1);
+  });
+
+  it("forwards wheel over the bar strip to the active pane's rail (issue #834)", async () => {
+    // ADR-0092 lifted the QuestionBar to the shell level, outside the rail's
+    // scroll container: a wheel over the bar has no scrollable ancestor and
+    // dies (delta 0 live-verified; the caret rests there exactly while
+    // reading the latest content, which reads as "cannot scroll further").
+    // The slot forwards deltaY to the ACTIVE pane's rail -- scrollBy clamps
+    // at the edges natively (edge wheel is a no-op -- platform behavior,
+    // not pinned here; jsdom cannot scroll), and the rail's own wheel path
+    // never enters the slot handler (flex-sibling subtrees).
+    // jsdom has no layout engine, so the pin stubs scrollBy on the live rail
+    // elements and asserts the forwarded (0, deltaY) pairs, not a scrollTop
+    // change.
+    vi.mocked(createSession)
+      .mockResolvedValueOnce({ session_id: "sess-1", duck_path: "/sessions/sess-1/session.duck" })
+      .mockResolvedValueOnce({ session_id: "sess-2", duck_path: "/sessions/sess-2/session.duck" });
+    render(<App />);
+    // Cold start: no pane layer exists yet (pinned), so the forward is a
+    // structural no-op -- the centered bar has nothing to scroll.
+    expect(document.querySelectorAll(".session-rail")).toHaveLength(0);
+    fireEvent.wheel(document.querySelector<HTMLElement>(".shell-bar-slot")!, { deltaY: 100 });
+    await openSession();
+    // A second session via the bar-submit path: sess-1 keeps its keep-alive
+    // layer (hidden), sess-2 becomes active -- the forward must track
+    // .active, not pane order.
+    await openSession();
+    const layers = document.querySelectorAll(".session-pane-layer");
+    expect(layers).toHaveLength(2);
+    expect(layers[1].classList.contains("active")).toBe(true);
+    const hiddenScrollBy = vi.fn();
+    const activeScrollBy = vi.fn();
+    layers[0].querySelector<HTMLElement>(".session-rail")!.scrollBy = hiddenScrollBy;
+    layers[1].querySelector<HTMLElement>(".session-rail")!.scrollBy = activeScrollBy;
+    const slot = document.querySelector<HTMLElement>(".shell-bar-slot")!;
+    // Both directions forward.
+    fireEvent.wheel(slot, { deltaY: 240 });
+    fireEvent.wheel(slot, { deltaY: -120 });
+    expect(activeScrollBy).toHaveBeenNthCalledWith(1, 0, 240);
+    expect(activeScrollBy).toHaveBeenNthCalledWith(2, 0, -120);
+    expect(hiddenScrollBy).not.toHaveBeenCalled();
+    // Zoom gestures stay with the browser -- no forward.
+    fireEvent.wheel(slot, { deltaY: 60, ctrlKey: true });
+    expect(activeScrollBy).toHaveBeenCalledTimes(2);
+    // Line-mode deltas normalize to pixels (3 lines x 16px) so the bar
+    // never crawls against the rail's native path.
+    fireEvent.wheel(slot, { deltaY: 3, deltaMode: 1 });
+    expect(activeScrollBy).toHaveBeenNthCalledWith(3, 0, 48);
+    // A rail-originated wheel never routes through the slot handler.
+    fireEvent.wheel(layers[1].querySelector<HTMLElement>(".session-rail")!, { deltaY: 300 });
+    expect(activeScrollBy).toHaveBeenCalledTimes(3);
+    // A wheel on a scrollable inside the bar scrolls that element natively;
+    // the forward must not double-scroll the rail behind it. The jsdom
+    // textarea does not overflow, so the same wheel still forwards -- only
+    // the overflow stub flips it to scroll-itself-only.
+    const input = screen.getByLabelText("提问");
+    fireEvent.wheel(input, { deltaY: 90 });
+    expect(activeScrollBy).toHaveBeenNthCalledWith(4, 0, 90);
+    input.style.overflowY = "auto";
+    Object.defineProperty(input, "scrollHeight", { value: 300 });
+    Object.defineProperty(input, "clientHeight", { value: 100 });
+    // scrollTop sits at 0 -- the textarea can still consume the tick, so
+    // the guard holds and the rail does not scroll behind.
+    fireEvent.wheel(input, { deltaY: 240 });
+    expect(activeScrollBy).toHaveBeenCalledTimes(4);
+    // At the bottom edge the textarea cannot consume; with no scrollable
+    // ancestor the delta has nowhere native to go, so it chains to the
+    // rail -- the manual form of native scroll chaining.
+    Object.defineProperty(input, "scrollTop", { value: 200, configurable: true });
+    fireEvent.wheel(input, { deltaY: 240 });
+    expect(activeScrollBy).toHaveBeenNthCalledWith(5, 0, 240);
+    // The top edge mirrors it for the negative direction.
+    Object.defineProperty(input, "scrollTop", { value: 0, configurable: true });
+    fireEvent.wheel(input, { deltaY: -80 });
+    expect(activeScrollBy).toHaveBeenNthCalledWith(6, 0, -80);
+    // Active-vs-order disambiguation: re-activate the first session via its
+    // sidebar entry (keep-alive keeps both layers mounted; no refetch), and
+    // the forward must move to layers[0]'s rail -- a last-or-index lookup
+    // would hit the hidden pane's rail instead.
+    fireEvent.click(document.querySelectorAll(".session-entry-main")[0]);
+    expect(layers[0].classList.contains("active")).toBe(true);
+    fireEvent.wheel(slot, { deltaY: 150 });
+    expect(hiddenScrollBy).toHaveBeenNthCalledWith(1, 0, 150);
+    expect(activeScrollBy).toHaveBeenCalledTimes(6);
+  });
+
+  it("opens / closes the workspace via the header toggle (manual fold)", async () => {
+    render(<App />);
+    await openSession();
+    fireEvent.click(screen.getByRole("button", { name: "展开工作区" }));
+    expect(document.querySelector(".session-pane")?.classList.contains("workspace-collapsed")).toBe(false);
+    // The toggle flips to its close label once open.
+    fireEvent.click(screen.getByRole("button", { name: "收起工作区" }));
+    expect(document.querySelector(".session-pane")?.classList.contains("workspace-collapsed")).toBe(true);
+  });
+
+  it("shields the strip behind the bar and keeps the scrollbar band open (issue #836)", async () => {
+    // Two halves of the overlay's interaction model, pinned at the DOM
+    // level (jsdom has no hit-testing): (a) an opaque backdrop rides the
+    // track's conversation column so scrolling content never peeks around
+    // the floating card -- it must be the track's FIRST child. That slot
+    // is convention; the layering itself comes from the bar card's
+    // position:relative, which paints above in-flow siblings regardless
+    // of DOM order; (b) it exists only in the bottom posture -- every
+    // backdrop rule is bottom-scoped, so rendering it in cold start would
+    // be dead markup. The styles reserve the rail's scrollbar band
+    // (measured scrollbar width plus the 1px column border) at the
+    // column's right edge (visible + draggable via the slot's
+    // pointer-events:none) -- CSS-only, unpinnable here.
+    render(<App />);
+    expect(document.querySelector(".shell-bar-backdrop")).toBeNull();
+    await openSession();
+    const backdrop = document.querySelector(".shell-bar-backdrop")!;
+    expect(backdrop).toBeInTheDocument();
+    expect(backdrop.getAttribute("aria-hidden")).toBe("true");
+    expect(document.querySelector(".shell-bar-track")!.firstElementChild).toBe(backdrop);
+  });
+
+  it("publishes the bar's live height as --shell-bar-h on the main area (issue #836)", () => {
+    // The bar overlays the main area, so the rail's bottom padding must
+    // follow the bar's live height (a growing draft, the picker opening)
+    // to keep the thread's tail readable above it. App wires a
+    // ResizeObserver on the slot that publishes the border-box height as
+    // --shell-bar-h on .main-area; styles.css turns it into the rail's
+    // padding-bottom. jsdom's global stub (test-setup) never fires, so
+    // this spy class replaces it for the render and hands the test the
+    // live callback.
+    type ObserverSpy = {
+      cb: ResizeObserverCallback;
+      targets: Element[];
+      disconnected: boolean;
+    };
+    const instances: ObserverSpy[] = [];
+    vi.stubGlobal(
+      "ResizeObserver",
+      class {
+        cb: ResizeObserverCallback;
+        targets: Element[] = [];
+        disconnected = false;
+        constructor(cb: ResizeObserverCallback) {
+          this.cb = cb;
+          instances.push(this);
+        }
+
+        observe(target: Element) {
+          this.targets.push(target);
+        }
+
+        unobserve() {}
+        disconnect() {
+          this.disconnected = true;
+        }
+      },
+    );
+    const { unmount } = render(<App />);
+    // The observed element is the slot itself: the card, its margins,
+    // and the centered greeting all contribute to its height. Other
+    // observers exist (useRailResize), so filter by target.
+    const slot = document.querySelector<HTMLElement>(".shell-bar-slot")!;
+    const observers = instances.filter((i) => i.targets.includes(slot));
+    expect(observers).toHaveLength(1);
+    const area = document.querySelector<HTMLElement>(".main-area")!;
+    // borderBoxSize is the primary read (the border-box height is what
+    // the rail must clear); contentRect.height is the legacy fallback.
+    act(() => {
+      observers[0].cb(
+        [{ target: slot, borderBoxSize: [{ blockSize: 157 }] } as unknown as ResizeObserverEntry],
+        observers[0] as unknown as ResizeObserver,
+      );
+    });
+    expect(area.style.getPropertyValue("--shell-bar-h")).toBe("157px");
+    act(() => {
+      observers[0].cb(
+        [{ target: slot, contentRect: { height: 121 } } as unknown as ResizeObserverEntry],
+        observers[0] as unknown as ResizeObserver,
+      );
+    });
+    expect(area.style.getPropertyValue("--shell-bar-h")).toBe("121px");
+    // A hidden slot (settings-mode's display:none) reports height 0 --
+    // the publish must keep the last real height instead of collapsing
+    // the rail's bound.
+    act(() => {
+      observers[0].cb(
+        [{ target: slot, borderBoxSize: [{ blockSize: 0 }] } as unknown as ResizeObserverEntry],
+        observers[0] as unknown as ResizeObserver,
+      );
+    });
+    expect(area.style.getPropertyValue("--shell-bar-h")).toBe("121px");
+    // The same effect also measures the platform scrollbar width once
+    // (hidden scrollable probe) and publishes it as --rail-sb-w -- the
+    // backdrop's notch width so the strip covers everything except the
+    // scrollbar itself. jsdom has no layout, so the probe reads 0.
+    expect(area.style.getPropertyValue("--rail-sb-w")).toBe("0px");
+    unmount();
+    expect(observers[0].disconnected).toBe(true);
+  });
+
+  it("the first Materialized promotion auto-expands the workspace ONCE (ADR-0083)", async () => {
+    render(<App />);
+    await openSession();
+    // Queue the test's own turns AFTER openSession so the creation turn consumes
+    // the helper's one-time rejection, not these Materialized outcomes (which
+    // would otherwise auto-expand the workspace during openSession).
+    const outcome1 = {
+      kind: "Materialized",
+      data: {
+        promotions: [{ dataset: { ...src("result_1"), row_count: 1 }, sql: "SELECT 1" }],
+        viz: null,
+        body: null,
+        assumption: null,
+      },
+    } satisfies TurnOutcome;
+    const outcome2 = {
+      kind: "Materialized",
+      data: {
+        promotions: [{ dataset: { ...src("result_2"), row_count: 1 }, sql: "SELECT 2" }],
+        viz: null,
+        body: null,
+        assumption: null,
+      },
+    } satisfies TurnOutcome;
+    vi.mocked(askQuestion).mockResolvedValueOnce(outcome1).mockResolvedValueOnce(outcome2);
+    // The recorded rows the turn-end refreshes return (mock parity, #1088).
+    state.thread = [recordedTurn("第一问", outcome1), recordedTurn("第二问", outcome2)];
+    expect(document.querySelector(".session-pane")?.classList.contains("workspace-collapsed")).toBe(true);
+    // First promotion -> the panel opens with the produced dataset.
+    fireEvent.change(screen.getByLabelText("提问"), { target: { value: "第一问" } });
+    fireEvent.click(screen.getByRole("button", { name: "提问" }));
+    await waitFor(() =>
+      expect(document.querySelector(".session-pane")?.classList.contains("workspace-collapsed")).toBe(false),
+    );
+    // The user folds it back; the one-shot is spent.
+    fireEvent.click(screen.getByRole("button", { name: "收起工作区" }));
+    expect(document.querySelector(".session-pane")?.classList.contains("workspace-collapsed")).toBe(true);
+    // A SECOND promotion must not steal focus -- the fold stays.
+    fireEvent.change(screen.getByLabelText("提问"), { target: { value: "第二问" } });
+    fireEvent.click(screen.getByRole("button", { name: "提问" }));
+    // 3 asks total: the creation turn (rejected) + the two user turns.
+    await waitFor(() => expect(askQuestion).toHaveBeenCalledTimes(3));
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: /结果：result_2/ })).toBeInTheDocument(),
+    );
+    expect(document.querySelector(".session-pane")?.classList.contains("workspace-collapsed")).toBe(true);
+  });
+
+  it("on resume onto a materialized session, a new promotion never auto-expands (one-shot is session-scoped, issue #771)", async () => {
+    // Resume lands viewedResult on the prior Materialized primary via the R5
+    // init effect in useViewedResult -- NOT via markProduced. Issue #771
+    // scopes the auto-expand one-shot to the session: a mount onto a thread
+    // that already materialized a result treats the guidance as consumed, so
+    // the fold remains for the user to open -- the first NEW promotion after
+    // resume must not steal it (the view itself still follows the result;
+    // markProduced is untouched by the fold).
+    state.thread = [materializedTurn("result_1")];
+    render(<App />);
+    await openSession();
+    // Queue the turn AFTER openSession so the creation turn consumes the
+    // one-time rejection of the helper, not this Materialized outcome.
+    const outcome771 = {
+      kind: "Materialized",
+      data: {
+        promotions: [{ dataset: { ...src("result_2"), row_count: 1 }, sql: "SELECT 2" }],
+        viz: null,
+        body: null,
+        assumption: null,
+      },
+    } satisfies TurnOutcome;
+    vi.mocked(askQuestion).mockResolvedValueOnce(outcome771);
+    // The recorded row the turn-end refresh returns (mock parity, #1088) --
+    // appended AFTER the R5 landing assertions above ran against the resumed
+    // thread, so the refetch sees both rows like the backend would.
+    // Resume cold-start: folded, with the R5 landing visible on the rail
+    // (result_1 is the viewed result) -- the landing moved no fold.
+    expect(document.querySelector(".session-pane")?.classList.contains("workspace-collapsed")).toBe(true);
+    expect(await screen.findByRole("button", { name: /result_1 的预览/ })).toHaveAttribute(
+      "aria-current",
+      "true",
+    );
+    // The recorded row the turn-end refresh returns (mock parity, #1088),
+    // appended AFTER the R5 landing assertions above -- the first NEW
+    // promotion after resume: the view follows result_2 but the panel
+    // stays folded (this session already showed results).
+    state.thread = [...state.thread, recordedTurn("新问", outcome771)];
+    fireEvent.change(screen.getByLabelText("提问"), { target: { value: "新问" } });
+    fireEvent.click(screen.getByRole("button", { name: "提问" }));
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: /结果：result_2/ })).toBeInTheDocument(),
+    );
+    expect(await screen.findByRole("button", { name: /result_2 的预览/ })).toHaveAttribute(
+      "aria-current",
+      "true",
+    );
+    expect(document.querySelector(".session-pane")?.classList.contains("workspace-collapsed")).toBe(true);
+  });
+
+  it("a rail preview-card click opens the workspace on the same dataset (dual view, issue #298)", async () => {
+    // The rail preview card and the workspace panel are dual views of the
+    // same dataset: clicking the card selects its result AND unfolds the
+    // workspace onto it (cold start is collapsed).
+    state.thread = [materializedTurn("result_1")];
+    render(<App />);
+    await openSession();
+    expect(document.querySelector(".session-pane")?.classList.contains("workspace-collapsed")).toBe(true);
+    fireEvent.click(await screen.findByRole("button", { name: /result_1 的预览/ }));
+    // The fold opens and the workspace shows result_1's table (the viewed
+    // selection landed -- the card reads back as active).
+    expect(document.querySelector(".session-pane")?.classList.contains("workspace-collapsed")).toBe(false);
+    await waitFor(() =>
+      expect(screen.getByRole("heading", { name: /q:result_1/ })).toBeInTheDocument(),
+    );
+    expect(screen.getByRole("button", { name: /result_1 的预览/ })).toHaveAttribute(
+      "aria-current",
+      "true",
+    );
+  });
+
+  it("switching the viewed dataset with the panel already open (dual view, issue #298)", async () => {
+    // Dual-view linkage is not only "collapsed -> click -> open": with the
+    // panel already open, clicking another card swaps viewedResult and the
+    // active marker follows. expandWorkspace is a no-op when already open;
+    // selectResult carries the switch.
+    state.thread = [materializedTurn("result_1"), materializedTurn("result_2")];
+    render(<App />);
+    await openSession();
+    // Open the workspace onto result_1.
+    fireEvent.click(await screen.findByRole("button", { name: /result_1 的预览/ }));
+    await waitFor(() =>
+      expect(screen.getByRole("heading", { name: /q:result_1/ })).toBeInTheDocument(),
+    );
+    expect(screen.getByRole("button", { name: /result_1 的预览/ })).toHaveAttribute(
+      "aria-current",
+      "true",
+    );
+    // Click result_2's card: the workspace swaps + the active marker moves.
+    fireEvent.click(screen.getByRole("button", { name: /result_2 的预览/ }));
+    await waitFor(() =>
+      expect(screen.getByRole("heading", { name: /q:result_2/ })).toBeInTheDocument(),
+    );
+    expect(screen.getByRole("button", { name: /result_2 的预览/ })).toHaveAttribute(
+      "aria-current",
+      "true",
+    );
+    // result_1's card drops the active marker (aria-current absent).
+    expect(screen.getByRole("button", { name: /result_1 的预览/ })).not.toHaveAttribute(
+      "aria-current",
+    );
+  });
+
+  it("a rail result-link click also unfolds the workspace (issue #298)", async () => {
+    state.thread = [materializedTurn("result_1")];
+    render(<App />);
+    await openSession();
+    expect(document.querySelector(".session-pane")?.classList.contains("workspace-collapsed")).toBe(true);
+    fireEvent.click(await screen.findByRole("button", { name: /结果：result_1/ }));
+    expect(document.querySelector(".session-pane")?.classList.contains("workspace-collapsed")).toBe(false);
+  });
+
+  it("restores persisted collapse prefs from app-config on mount (ADR-0038/0054)", async () => {
+    // A user who left the sidebar collapsed reopens to sidebar collapsed -- the
+    // pref rides app-config (ADR-0038), restored once on the first resolve.
+    vi.mocked(getAppConfig).mockResolvedValue(
+      baseAppConfig({ sidebar_collapsed: true }),
+    );
+    render(<App />);
+    await waitFor(() => {
+      const shell = document.querySelector(".shell");
+      expect(shell?.classList.contains("sidebar-collapsed")).toBe(true);
+    });
+  });
+
+  it("persists a sidebar collapse toggle into app-config (ADR-0038)", async () => {
+    // Toggling a collapse level commits the new shell prefs to app-config so
+    // the choice survives a restart (the toggle is not a transient UI flip).
+    vi.mocked(getAppConfig).mockResolvedValue(
+      baseAppConfig({ sidebar_collapsed: false }),
+    );
+    render(<App />);
+    // Wait for getAppConfig to resolve AND the mount effect's .then to set
+    // appConfigRef.current (commitShellPrefs is a no-op until the ref lands).
+    await waitFor(() => expect(getAppConfig).toHaveBeenCalled());
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 0));
+    });
+    fireEvent.click(screen.getByRole("button", { name: "收起会话栏" }));
+    // setAppConfig receives a config whose shell reflects the toggle.
+    await waitFor(() =>
+      expect(setAppConfig).toHaveBeenCalledWith(
+        // Nested objectContaining: the commit also carries sidebar_grouping
+        // (#251), which this collapse-only test stays agnostic to.
+        expect.objectContaining({
+          shell: expect.objectContaining({ sidebar_collapsed: true }),
+        }),
+      ),
+    );
+  });
+
+  it("collapses the settings overlay left nav via the top-bar toggle (issue #285)", async () => {
+    // The settings overlay's left nav collapses from the SAME topbar slot as
+    // the workspace session-sidebar toggle (settings-mode swaps in the settings
+    // kind). Unlike the workspace collapse prefs this is a TEMP state -- it
+    // never rides app-config, so this test asserts only the className flip, not
+    // a setAppConfig commit.
+    vi.mocked(getAppConfig).mockResolvedValue(
+      baseAppConfig({ sidebar_collapsed: false }),
+    );
+    render(<App />);
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "设置" })).toBeInTheDocument(),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "设置" }));
+    // Settings open: the topbar toggle now folds the settings nav. Default is
+    // expanded, so the button offers the collapse action.
+    const shell = document.querySelector(".shell");
+    expect(shell?.classList.contains("settings-nav-collapsed")).toBe(false);
+    fireEvent.click(screen.getByRole("button", { name: "折叠设置导航" }));
+    expect(shell?.classList.contains("settings-nav-collapsed")).toBe(true);
+    // Toggle back expands.
+    fireEvent.click(screen.getByRole("button", { name: "展开设置导航" }));
+    expect(shell?.classList.contains("settings-nav-collapsed")).toBe(false);
+  });
+
+  it("resets the settings nav to expanded on each open (temp state, issue #285)", async () => {
+    // The collapse is per-open temp state (not persisted): closing + reopening
+    // settings always starts expanded, even if the user folded the nav on the
+    // prior visit. openSettings resets the flag on every entry, so a folded nav
+    // does not leak across a close/reopen. ESC closes the overlay (the folded
+    // nav hides its own back button, so the window-level Escape listener is the
+    // reachable close path in the collapsed state).
+    vi.mocked(getAppConfig).mockResolvedValue(
+      baseAppConfig({ sidebar_collapsed: false }),
+    );
+    render(<App />);
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "设置" })).toBeInTheDocument(),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "设置" }));
+    fireEvent.click(screen.getByRole("button", { name: "折叠设置导航" }));
+    expect(
+      document.querySelector(".shell")?.classList.contains("settings-nav-collapsed"),
+    ).toBe(true);
+    // Close via ESC, then reopen -- the nav is expanded again (no persisted
+    // collapse to recall).
+    fireEvent.keyDown(window, { key: "Escape" });
+    fireEvent.click(screen.getByRole("button", { name: "设置" }));
+    expect(
+      document.querySelector(".shell")?.classList.contains("settings-nav-collapsed"),
+    ).toBe(false);
+  });
+
+  it("drops a file onto an active session as an added source (ADR-0062 R3)", async () => {
+    // The bisection's ACTIVE-session branch: with a session open, a drop adds
+    // the file to that session's working set (ADR-0022 source event) -- it does
+    // NOT mint a new session. createSession is called once (for openSession),
+    // never again for the drop.
+    vi.mocked(createSession).mockResolvedValueOnce({ session_id: "sess-1", duck_path: "/sessions/sess-1/session.duck" });
+    vi.mocked(ingestFile).mockResolvedValue({ kind: "Loaded", data: src("dropped") });
+    render(<App />);
+    await openSession();
+    // Simulate a webview drop while sess-1 is active. The position rides the
+    // payload as Tauri always sends it (#501); the active-session route
+    // ignores it (the bar-inert guard is cold-start only).
+    dropEvent.handler!({ payload: { type: "drop", paths: ["/x/new.csv"], position: { x: 5, y: 5 } } });
+    await waitFor(() =>
+      expect(ingestFile).toHaveBeenCalledWith("sess-1", "/x/new.csv"),
+    );
+    // The drop did NOT mint a new session (only the openSession create fired).
+    expect(createSession).toHaveBeenCalledTimes(1);
+  });
+
+  it("renders the verbatim question in full inside the user bubble (ADR-0103, #609)", async () => {
+    // ADR-0103 retires the ADR-0054 truncation posture: the chat projection
+    // wraps the question in full (pre-wrap) inside the right-aligned bubble --
+    // no tail-ellipsis span, no hover-recovery Tooltip. jsdom has no layout,
+    // so the contract is asserted at the class level: the question carries
+    // the pre-wrap utility and no truncate, the full text is the element's
+    // own content, and hovering opens no recovery tooltip.
+    const longQuestion = "前".repeat(120);
+    state.thread = [
+      {
+        entry: "Turn",
+        data: { question: longQuestion, outcome: { kind: "Cancelled", data: null }, trace: [], provenance: { skills: [] } },
+      },
+    ];
+    render(<App />);
+    await openSession();
+    // The thread loads async (conversation IPC); wait for the turn card to
+    // render before asserting the wrap contract on its question span.
+    const q = await waitFor(() => {
+      const el = document.querySelector(".turn-question");
+      expect(el).not.toBeNull();
+      return el as HTMLElement;
+    });
+    const classes = q.className.split(/\s+/);
+    expect(classes).toContain("whitespace-pre-wrap");
+    expect(classes).not.toContain("truncate");
+    expect(q.textContent).toBe(longQuestion);
+    // No truncation-recovery tooltip mounts for the question: the old
+    // TruncatingTooltip wrapper opened one on hover (jsdom reports 0-width,
+    // so the overflow gate always let it through); the bubble posture opens
+    // none. A real-timer beat lets a would-be Radix open surface.
+    fireEvent.pointerMove(q);
+    await new Promise((r) => setTimeout(r, 50));
+    expect(screen.queryByRole("tooltip")).not.toBeInTheDocument();
+  });
+});
+
+describe("App session soft-cap hint (ADR-0046/0050, issue #108)", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    state.workingSet = [];
+    state.thread = [];
+    vi.mocked(readRows).mockResolvedValue(ROW_PAGE);
+    vi.stubGlobal("navigator", { language: "zh-CN" });
+  });
+
+  it("renders the soft-cap hint as a warning status Alert once open sessions hit the cap", async () => {
+    // ADR-0046: too many open sessions risk memory pressure. The hint migrated
+    // from a bespoke .topbar-softcap span to a warning Alert (ADR-0050);
+    // role="status" is polite. Opening >= SOFT_CAP_OPEN_SESSIONS (8) sessions
+    // lights it. within(topbar) scopes the role query: each open SessionPane's
+    // QuestionBar also carries a role="status" phase-indicator, so a global
+    // getByRole would match many; the soft-cap Alert is the only status inside
+    // the topbar.
+    let n = 0;
+    vi.mocked(createSession).mockImplementation(async () => ({ session_id: `sess-${++n}`, duck_path: `/sessions/sess-${n}/session.duck` }));
+    render(<App />);
+    for (let i = 0; i < 8; i++) {
+      // ADR-0092: each openSession() clicks "+" (cold start), then types +
+      // submits on the centered bar to create a session.
+      await openSession();
+    }
+    expect(createSession).toHaveBeenCalledTimes(8);
+    const topbar = document.querySelector(".topbar") as HTMLElement;
+    const alert = within(topbar).getByRole("status");
+    expect(alert.getAttribute("data-slot")).toBe("alert");
+    expect(alert).toHaveTextContent(/打开的会话较多/);
+  });
+});
+
+describe("App topbar header actions + sidebar settings footer (issue #182 / #282)", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    state.workingSet = [];
+    state.thread = [];
+    vi.mocked(readRows).mockResolvedValue(ROW_PAGE);
+    // clearAllMocks only clears call history, not implementations set by prior
+    // describes.
+    // The C1 guard test below needs appConfig=null (the cold-start default) so
+    // the sidebar footer -- the settings entry since issue #282 -- stays
+    // ABSENT (its render-when-ready replaces the retired topbar gear's
+    // settingsDisabled gate). getAppConfig's real signature is
+    // Promise<AppConfig> (null is an App-level state, not an IPC return), so
+    // hold the mock pending -- the mount effect's .then never fires and
+    // appConfig stays at its useState(null) initial.
+    vi.mocked(getAppConfig).mockImplementation(
+      () => new Promise<AppConfig>(() => {}),
+    );
+    vi.stubGlobal("navigator", { language: "zh-CN" });
+  });
+
+  it("keeps the settings entry absent until appConfig resolves (C1 render-when-ready)", async () => {
+    // C1: opening settings while appConfig is null white-screens the shell
+    // (.settings-mode hides the shell but SettingsView does not render, no
+    // ESC exit). The sidebar footer's render-when-ready keeps the state
+    // unreachable -- the sidebar itself mounts (cold start) but carries no
+    // gear while the config stays pending (the beforeEach holds getAppConfig
+    // pending).
+    render(<App />);
+    await waitFor(() =>
+      expect(document.querySelector(".session-sidebar")).toBeInTheDocument(),
+    );
+    expect(screen.queryByRole("button", { name: "设置" })).toBeNull();
+    expect(document.querySelector(".session-sidebar .sidebar-footer")).toBeNull();
+  });
+
+  it("mounts the sidebar settings gear once appConfig resolves", async () => {
+    vi.mocked(getAppConfig).mockResolvedValue(
+      baseAppConfig({ sidebar_collapsed: false }),
+    );
+    render(<App />);
+    // The settings gear lands at the sidebar bottom once app-config resolves
+    // (the connection row + status dot were retired with ConnectionStatus).
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "设置" })).toBeInTheDocument(),
+    );
+    expect(
+      document.querySelector(".session-sidebar .sidebar-footer"),
+    ).not.toBeNull();
+  });
+});
+
+describe("App Ctrl/⌘+K session-search modal (ADR-0072, issue #252)", () => {
+  // Two persisted sessions feed the modal: alpha (fresher) + beta. The default
+  // listSessions mock returns []; these tests override per-render.
+  function twoSessions() {
+    return [
+      {
+        duck_path: "/x/alpha.duck",
+        display_name: "alpha session",
+        last_modified_at: 2000,
+        source_summary: { first_source_name: "alpha_src", source_count: 1, turn_count: 3 },
+        format_version: 2,
+        pinned: false,
+        archived: false,
+      },
+      {
+        duck_path: "/x/beta.duck",
+        display_name: "beta session",
+        last_modified_at: 1000,
+        source_summary: { first_source_name: "beta_src", source_count: 1, turn_count: 7 },
+        format_version: 2,
+        pinned: false,
+        archived: false,
+      },
+    ];
+  }
+
+  it("does not render the search modal on cold start", () => {
+    render(<App />);
+    expect(screen.queryByRole("dialog")).toBeNull();
+  });
+
+  it("Ctrl+K opens the search modal (Win/Linux) + lists persisted sessions", async () => {
+    vi.mocked(listSessions).mockResolvedValue(twoSessions());
+    render(<App />);
+    // Wait for the cold-start list_sessions fetch to land so the modal sees the
+    // sessions on open.
+    await waitFor(() => expect(listSessions).toHaveBeenCalled());
+    // jsdom does NOT bubble DOM keydown to window-level listeners, so dispatch
+    // on window directly (wrapped in act for the state toggle).
+    await act(async () => {
+      window.dispatchEvent(new KeyboardEvent("keydown", { key: "k", ctrlKey: true }));
+    });
+    const dialog = await screen.findByRole("dialog");
+    expect(dialog).toBeInTheDocument();
+    // Both persisted sessions render as options (alpha fresher -> first).
+    const options = within(dialog).getAllByRole("option");
+    expect(options).toHaveLength(2);
+    expect(options[0]).toHaveTextContent("alpha session");
+  });
+
+  it("⌘+K opens the search modal (macOS metaKey)", async () => {
+    vi.mocked(listSessions).mockResolvedValue(twoSessions());
+    render(<App />);
+    await waitFor(() => expect(listSessions).toHaveBeenCalled());
+    await act(async () => {
+      window.dispatchEvent(new KeyboardEvent("keydown", { key: "k", metaKey: true }));
+    });
+    expect(await screen.findByRole("dialog")).toBeInTheDocument();
+  });
+
+  it("clicking the sidebar search button opens the same modal (issue #250 button)", async () => {
+    vi.mocked(listSessions).mockResolvedValue(twoSessions());
+    render(<App />);
+    await waitFor(() => expect(listSessions).toHaveBeenCalled());
+    fireEvent.click(document.querySelector(".sidebar-search-button") as HTMLButtonElement);
+    expect(await screen.findByRole("dialog")).toBeInTheDocument();
+  });
+
+  it("typing filters the result list (case-insensitive on name + source)", async () => {
+    vi.mocked(listSessions).mockResolvedValue(twoSessions());
+    render(<App />);
+    await waitFor(() => expect(listSessions).toHaveBeenCalled());
+    await act(async () => {
+      window.dispatchEvent(new KeyboardEvent("keydown", { key: "k", ctrlKey: true }));
+    });
+    const dialog = await screen.findByRole("dialog");
+    const input = within(dialog).getByRole("combobox");
+    // "ALPHA_SRC" hits alpha via its first_source_name.
+    fireEvent.change(input, { target: { value: "ALPHA_SRC" } });
+    expect(within(dialog).getAllByRole("option").map((o) => o.textContent)).toEqual([
+      expect.stringContaining("alpha session"),
+    ]);
+  });
+
+  it("Enter on the highlighted option opens the persisted session", async () => {
+    vi.mocked(listSessions).mockResolvedValue(twoSessions());
+    render(<App />);
+    await waitFor(() => expect(listSessions).toHaveBeenCalled());
+    await act(async () => {
+      window.dispatchEvent(new KeyboardEvent("keydown", { key: "k", ctrlKey: true }));
+    });
+    const dialog = await screen.findByRole("dialog");
+    const input = within(dialog).getByRole("combobox");
+    // Default selection is alpha (fresher); Enter resumes it via openPersisted
+    // -> openDuck(sid, path). The IPC hop is async, so waitFor for the call to
+    // land. openDuck takes the freshly-minted sid + the path; only the path
+    // matters for this assertion (the sid is an internal correlation id).
+    fireEvent.keyDown(input, { key: "Enter" });
+    await waitFor(() =>
+      expect(openDuck).toHaveBeenCalledWith(expect.any(String), "/x/alpha.duck"),
+    );
+  });
+
+  it("ESC closes the modal (Radix Dialog onOpenChange→false)", async () => {
+    vi.mocked(listSessions).mockResolvedValue(twoSessions());
+    render(<App />);
+    await waitFor(() => expect(listSessions).toHaveBeenCalled());
+    await act(async () => {
+      window.dispatchEvent(new KeyboardEvent("keydown", { key: "k", ctrlKey: true }));
+    });
+    const dialog = await screen.findByRole("dialog");
+    fireEvent.keyDown(dialog, { key: "Escape" });
+    await waitFor(() =>
+      expect(screen.queryByRole("dialog")).toBeNull(),
+    );
+  });
+
+  it("Ctrl/⌘+K does not reopen the modal while the shell is busy (resume in flight)", async () => {
+    vi.mocked(listSessions).mockResolvedValue(twoSessions());
+    // openDuck never resolves -> resumeStatus sticks at "opening" -> busy=true,
+    // which the App-level busyRef gate reads to drop the second Ctrl/⌘+K. This
+    // is the keyboard-side mirror of the sidebar search button's disabled-when-
+    // busy contract (SessionSidebar.shell.test.tsx); the two gates are独立.
+    vi.mocked(openDuck).mockReturnValue(new Promise(() => {}));
+    render(<App />);
+    await waitFor(() => expect(listSessions).toHaveBeenCalled());
+    // First Ctrl+K opens (busy still false); Enter on the default option kicks
+    // openPersisted -> openDuck (now pending) -> busy flips true.
+    await act(async () => {
+      window.dispatchEvent(new KeyboardEvent("keydown", { key: "k", ctrlKey: true }));
+    });
+    const dialog = await screen.findByRole("dialog");
+    fireEvent.keyDown(within(dialog).getByRole("combobox"), { key: "Enter" });
+    // Wait for the dialog to close (choose -> onOpenChange(false)) AND busy to
+    // flip (resumeStatus moved to "opening" by the pending openDuck; busyRef
+    // syncs via useEffect on the next commit).
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    // Now busy: a second Ctrl+K must NOT reopen the modal.
+    await act(async () => {
+      window.dispatchEvent(new KeyboardEvent("keydown", { key: "k", ctrlKey: true }));
+    });
+    expect(screen.queryByRole("dialog")).toBeNull();
+  });
+
+  it("Ctrl/⌘+K toggles the modal closed when it is already open (not busy)", async () => {
+    vi.mocked(listSessions).mockResolvedValue(twoSessions());
+    render(<App />);
+    await waitFor(() => expect(listSessions).toHaveBeenCalled());
+    // First Ctrl+K opens.
+    await act(async () => {
+      window.dispatchEvent(new KeyboardEvent("keydown", { key: "k", ctrlKey: true }));
+    });
+    expect(await screen.findByRole("dialog")).toBeInTheDocument();
+    // Second Ctrl+K (shell not busy) toggles it closed -- matches the Linear /
+    // Raycast / VS Code ⌘K convention.
+    await act(async () => {
+      window.dispatchEvent(new KeyboardEvent("keydown", { key: "k", ctrlKey: true }));
+    });
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+  });
+});
+
+describe("Composer control row (ADR-0083, issues #350/#351)", () => {
+  // The QuestionBar row evolves into the composer control row: three slots
+  // ([+] session-context panel / approval mode / runtime) + the flex-1
+  // question input. Issue #351 lights the add slot (panel shell + file
+  // section + degraded mode + badge); approval mode stays an empty
+  // placeholder until #302 lights it up; the runtime slot is occupied by the
+  // existing provider/model picker (ADR-0071) until the runtime chip evolves.
+  beforeEach(() => {
+    vi.clearAllMocks();
+    state.workingSet = [];
+    state.thread = [];
+    vi.mocked(readRows).mockResolvedValue(ROW_PAGE);
+    // clearAllMocks only clears call history, not implementations set by prior
+    // describes -- hold getAppConfig pending so appConfig stays at its
+    // useState(null) initial and the picker bundle stays absent (per-test
+    // overrides resolve it).
+    vi.mocked(getAppConfig).mockImplementation(() => new Promise<AppConfig>(() => {}));
+    // Same trap for the session-scoped mocks the pane rides: the resume /
+    // delete / error-boundary / soft-cap describes swap implementations that
+    // survive clearAllMocks, and this describe's ingest / badge assertions
+    // depend on the exact sessionId + clean reads. Pin the factory behavior
+    // back (mirrors the error-boundary describe's conversation reset).
+    vi.mocked(createSession).mockResolvedValue({ session_id: "sess-1", duck_path: "/sessions/sess-1/session.duck" });
+    vi.mocked(conversation).mockImplementation(async () => state.thread);
+    vi.mocked(listWorkingSet).mockImplementation(async () => state.workingSet);
+    vi.mocked(activeDataset).mockImplementation(async () => null);
+    // Same pin for the auth-mode chip IPC pair (issue #352): the resume
+    // describe's overrides survive clearAllMocks.
+    vi.mocked(getAuthorizationMode).mockResolvedValue("per_call");
+    vi.mocked(setAuthorizationMode).mockResolvedValue(undefined);
+    // Same pin for the runtime picker IPC quartet (issue #353).
+    vi.mocked(getSessionRuntime).mockResolvedValue({ kind: "built_in" });
+    vi.mocked(setSessionRuntime).mockResolvedValue(undefined);
+    vi.mocked(listAdapters).mockResolvedValue([]);
+    vi.mocked(rescanAdapters).mockResolvedValue([]);
+    // The dialog starts cancelled; the ingest tests override per test.
+    vi.mocked(open).mockResolvedValue(null);
+    vi.mocked(ingestFile).mockResolvedValue({ kind: "Loaded", data: src("people") });
+    vi.stubGlobal("navigator", { language: "zh-CN" });
+  });
+
+  it("renders the three composer controls inside the question-bar toolbar", async () => {
+    render(<App />);
+    await openSession();
+    const bar = document.querySelector(".question-bar");
+    expect(bar).toBeInTheDocument();
+    // The unified container holds the trigger (+), auth-mode Select, and the
+    // textarea -- all inside .question-bar (ADR-0083 composer row restructured
+    // into a single container).
+    const trigger = screen.getByRole("button", { name: "添加文件" });
+    const chip = await screen.findByRole("combobox", { name: "授权模式：请求批准" });
+    expect(bar?.contains(trigger)).toBe(true);
+    expect(bar?.contains(chip)).toBe(true);
+    // The textarea sits above the toolbar row in DOM order.
+    const input = screen.getByRole("textbox", { name: "提问" });
+    const FOLLOWING = Node.DOCUMENT_POSITION_FOLLOWING;
+    expect(
+      input.compareDocumentPosition(trigger as HTMLElement) & FOLLOWING,
+    ).toBeTruthy();
+    expect(
+      (trigger as HTMLElement).compareDocumentPosition(chip as HTMLElement) & FOLLOWING,
+    ).toBeTruthy();
+  });
+
+  it("the context-panel trigger and auth-mode chip live inside the question-bar", async () => {
+    render(<App />);
+    await openSession();
+    const bar = document.querySelector(".question-bar");
+    // Issue #351: with app-config still pending (no configured MCP, no skill
+    // system) the trigger is the degraded pure add-files button.
+    const trigger = screen.getByRole("button", { name: "添加文件" });
+    expect(bar?.contains(trigger)).toBe(true);
+    // Issue #352: the Select reads the session's posture (per_call default)
+    // and renders INSIDE the question-bar, not as a loose sibling.
+    const authTrigger = await screen.findByRole("combobox", { name: "授权模式：请求批准" });
+    expect(bar?.contains(authTrigger)).toBe(true);
+  });
+
+  it("switches the auth-mode Select to no-confirmation with the warning color (ADR-0080)", async () => {
+    render(<App />);
+    await openSession();
+    const authTrigger = await screen.findByRole("combobox", { name: "授权模式：请求批准" });
+
+    fireEvent.pointerDown(authTrigger, { button: 0, pointerType: "mouse" });
+    fireEvent.click(authTrigger);
+
+    const option = await screen.findByRole("option", { name: /完全访问权限/ });
+    fireEvent.pointerUp(option, { button: 0, pointerType: "mouse" });
+    fireEvent.click(option);
+
+    await waitFor(() =>
+      expect(setAuthorizationMode).toHaveBeenCalledWith("sess-1", "no_confirmation"),
+    );
+    // The flipped trigger reads 完全访问权限 and rides the --warning token
+    // (border / fill / text all consume it).
+    const flipped = await screen.findByRole("combobox", { name: "授权模式：完全访问权限" });
+    expect(flipped.className).toContain("border-warning/40");
+    expect(flipped.className).toContain("bg-warning/10");
+    expect(flipped.className).toContain("text-warning");
+  });
+
+  it("resume renders the backend's actual posture for the NEW sid (ADR-0080 reset)", async () => {
+    // The backend resets the posture on a successful resume (open_duck ->
+    // reset_approval); the frontend contract is that the resumed session's
+    // chip re-reads it for the NEW sid and renders the landed value -- NOT a
+    // hardcoded default. Pin a non-default read (no_confirmation) so a
+    // regression that ignores the backend would fail (the beforeEach default
+    // is per_call, which a hardcoded-default Select would also render).
+    vi.mocked(listSessions).mockResolvedValue([
+      {
+        duck_path: "/x/persisted.duck",
+        display_name: "季报",
+        last_modified_at: Date.now(),
+        source_summary: { first_source_name: "people", source_count: 1, turn_count: 1 },
+        format_version: 1,
+        pinned: false,
+        archived: false,
+      },
+    ]);
+    vi.mocked(createSession).mockResolvedValue({ session_id: "sess-resume", duck_path: "/sessions/sess-resume/session.duck" });
+    vi.mocked(openDuck).mockResolvedValue(undefined);
+    vi.mocked(getAuthorizationMode).mockResolvedValue("no_confirmation");
+
+    render(<App />);
+    await waitFor(() => expect(screen.getByText("季报")).toBeInTheDocument());
+    fireEvent.click(screen.getByText("季报"));
+
+    await waitFor(() =>
+      expect(getAuthorizationMode).toHaveBeenCalledWith("sess-resume"),
+    );
+    // The Select renders the backend's actual answer for the NEW sid, not a
+    // hardcoded per_call default.
+    expect(
+      await screen.findByRole("combobox", { name: "授权模式：完全访问权限" }),
+    ).toBeInTheDocument();
+  });
+
+  // ADR-0093 (issue #511): "close drops the auth-mode cache slice" test
+  // retired — triggered via .session-entry-menu; management moved to
+  // .session-header (slice 2, #512).
+
+  it("degraded [+] opens the multi-select dialog and ingests every picked file", async () => {
+    vi.mocked(open).mockResolvedValue(["/a.csv", "/b.csv"]);
+    vi.mocked(ingestFile).mockResolvedValue({ kind: "Loaded", data: src("people") });
+    render(<App />);
+    await openSession();
+
+    fireEvent.click(screen.getByRole("button", { name: "添加文件" }));
+
+    // The batch rides the existing ingest pipeline, one call per file, in
+    // pick order (handleIngestMany, issue #351).
+    await waitFor(() => expect(ingestFile).toHaveBeenCalledWith("sess-1", "/a.csv"));
+    await waitFor(() => expect(ingestFile).toHaveBeenCalledWith("sess-1", "/b.csv"));
+  });
+
+  it("no trigger chips render with configured MCP servers (ADR-0106, #962)", async () => {
+    // ADR-0106: the composer MCP mount chip is retired (config-level
+    // enablement replaced per-session mounting). #962: the Skills trigger
+    // chip retired with the mount popover. With servers configured neither
+    // trigger chip exists anywhere in the bar.
+    vi.mocked(getAppConfig).mockResolvedValue({
+      ...baseAppConfig({ sidebar_collapsed: false }),
+      cli_tools: { tools: [] },
+      mcp_servers: { servers: [mcpServer("srv")] },
+    });
+    render(<App />);
+    await openSession();
+
+    expect(screen.queryByRole("button", { name: /技能/ })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /MCP/ })).not.toBeInTheDocument();
+  });
+
+  it("hosts the provider/model picker inside the question-bar once app-config resolves", async () => {
+    vi.mocked(getAppConfig).mockResolvedValue(
+      baseAppConfig({ sidebar_collapsed: false }),
+    );
+    render(<App />);
+    await openSession();
+    // The picker trigger (ADR-0071 + issue #353) lands inside the question-bar
+    // toolbar -- not as a loose sibling. Its accessible name carries the active
+    // runtime (built-in -> the active provider's preset name).
+    const trigger = await screen.findByRole("button", { name: "运行时：Anthropic" });
+    const bar = document.querySelector(".question-bar") as HTMLElement;
+    expect(bar.contains(trigger)).toBe(true);
+  });
+
+  it("does not render the provider/model picker while app-config is pending", async () => {
+    // beforeEach holds getAppConfig pending so appConfig stays at its
+    // useState(null) initial -- App does not pass the picker bundle, so the
+    // picker trigger is absent until app-config resolves.
+    render(<App />);
+    await openSession();
+    expect(screen.queryByRole("button", { name: /运行时/ })).not.toBeInTheDocument();
+  });
+});
+
+describe("App composer refactor follow-ups (issue #504)", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    state.workingSet = [];
+    state.thread = [];
+    vi.mocked(readRows).mockResolvedValue(ROW_PAGE);
+    vi.stubGlobal("navigator", { language: "zh-CN" });
+  });
+
+  it("pending question is consumed and not re-fired on re-render (#504)", async () => {
+    // ADR-0092: a cold-start submit creates a session carrying pendingQuestion.
+    // SessionPane fires it via handleAsk, then calls onQuestionConsumed so
+    // OpenSession.pendingQuestion is cleared. After consumption, any re-render
+    // (React reconciliation, keep-alive switch, or error-boundary retry) sees
+    // pendingQuestion=null and skips the consumption effect.
+    const { rerender } = render(<App />);
+    await openSession();
+    // The creation turn fired exactly once (the openSession rejection).
+    expect(vi.mocked(askQuestion)).toHaveBeenCalledTimes(1);
+    // Settle async: onQuestionConsumed fires after the turn starts.
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 100));
+    });
+    // Still exactly one call — no spurious re-fire from effect re-runs.
+    expect(vi.mocked(askQuestion)).toHaveBeenCalledTimes(1);
+    // Force a full re-render of the App tree. If clearPendingQuestion worked,
+    // the session's pendingQuestion is null and the consumption effect does
+    // not re-fire.
+    rerender(<App />);
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 0));
+    });
+    expect(vi.mocked(askQuestion)).toHaveBeenCalledTimes(1);
+  });
+
+  it("honest gate triggers on keychain_fault (not just missing key, ADR-0092 D4 / issue #275, #504)", async () => {
+    // The submit-time gate fires not only when has_key is false but also when
+    // the keychain read itself faulted (locked / service down). The gate's
+    // condition is `!activeHasKey || activeKeychainFault !== null`; a profile
+    // with has_key:true + a keychain_fault must still redirect to Settings
+    // instead of minting a session whose first turn would fail on the broken
+    // keychain read path.
+    vi.mocked(getAppConfig).mockResolvedValue(
+      baseAppConfig({ sidebar_collapsed: false }),
+    );
+    vi.mocked(listProviderProfiles).mockResolvedValue([
+      { profile_id: "default", has_key: true, keychain_fault: "OS keychain locked" },
+    ]);
+    try {
+      render(<App />);
+      await waitFor(() => expect(screen.getByLabelText("提问")).toBeInTheDocument());
+      await waitFor(() => expect(listProviderProfiles).toHaveBeenCalled());
+      await act(async () => {
+        await new Promise((r) => setTimeout(r, 0));
+      });
+      fireEvent.change(screen.getByLabelText("提问"), { target: { value: "test question" } });
+      fireEvent.click(screen.getByRole("button", { name: "提问" }));
+      // The gate fires: settings overlay opens, no session created.
+      await waitFor(() =>
+        expect(document.querySelector(".settings-overlay")).toBeInTheDocument(),
+      );
+      expect(createSession).not.toHaveBeenCalled();
+    } finally {
+      vi.mocked(getAppConfig).mockResolvedValue(null as unknown as AppConfig);
+      vi.mocked(listProviderProfiles).mockResolvedValue([
+        { profile_id: "default", has_key: true, keychain_fault: null },
+      ]);
+    }
+  });
+
+  it("external runtime bypasses the built-in key gate (#499 / #504)", async () => {
+    // The gate only fires for the built-in runtime kind. An external runtime
+    // pick (ACP adapter) bypasses the key gate entirely: even with has_key
+    // false + no keychain fault, the submit mints a session and applies the
+    // external choice via setSessionRuntime. This is the black-box contract
+    // the gate's `pendingRuntime.kind === "built_in"` condition guards.
+    vi.mocked(getAppConfig).mockResolvedValue(
+      baseAppConfig({ sidebar_collapsed: false }),
+    );
+    // No key — the gate would fire for built_in.
+    vi.mocked(listProviderProfiles).mockResolvedValue([
+      { profile_id: "default", has_key: false, keychain_fault: null },
+    ]);
+    vi.mocked(listAdapters).mockResolvedValue([
+      { id: "gemini-cli", display_name: "gemini-cli", detected: true, binary_path: "/usr/local/bin/gemini", stream_format: "acp" },
+    ]);
+    vi.mocked(askQuestion).mockRejectedValueOnce(
+      new Error("discard the creation turn"),
+    );
+    try {
+      render(<App />);
+      await waitFor(() => expect(screen.getByLabelText("提问")).toBeInTheDocument());
+      await waitFor(() =>
+        expect(screen.getByRole("button", { name: /运行时/ })).toBeInTheDocument(),
+      );
+      // Pick the external adapter from the level-2 CLI select.
+      fireEvent.click(screen.getByRole("button", { name: /运行时/ }));
+      const cliTrigger = await screen.findByRole("combobox", { name: "本机 CLI" });
+      fireEvent.pointerDown(cliTrigger, { button: 0, pointerType: "mouse" });
+      fireEvent.click(cliTrigger);
+      const cliOption = await screen.findByRole("option", { name: "gemini-cli" });
+      fireEvent.pointerUp(cliOption, { button: 0, pointerType: "mouse" });
+      fireEvent.click(cliOption);
+      // Type and submit — the gate is bypassed (external kind).
+      fireEvent.change(screen.getByLabelText("提问"), { target: { value: "test question" } });
+      fireEvent.click(screen.getByRole("button", { name: "提问" }));
+      // createSession fires despite has_key:false (external runtime bypass).
+      await waitFor(() => expect(createSession).toHaveBeenCalledTimes(1));
+      await waitFor(() =>
+        expect(setSessionRuntime).toHaveBeenCalledWith("sess-1", {
+          kind: "external",
+          data: "gemini-cli",
+        }),
+      );
+    } finally {
+      vi.mocked(getAppConfig).mockResolvedValue(null as unknown as AppConfig);
+      vi.mocked(listProviderProfiles).mockResolvedValue([
+        { profile_id: "default", has_key: true, keychain_fault: null },
+      ]);
+      vi.mocked(listAdapters).mockResolvedValue([]);
+    }
+  });
+
+  it("cold-start greeting is a label for the textarea (no heading skip, #504 a11y)", async () => {
+    // The cold-start greeting is a <label htmlFor="question-bar-input">, not an
+    // <h2>, so screen-reader heading navigation does not skip from the page
+    // root to h2. The textarea's accessible name still comes from aria-label
+    // (consistent across cold-start and session modes); the visible <label>
+    // adds click-to-focus association.
+    render(<App />);
+    // No h1 or h2 greeting — the cold-start text is a <label>, not a heading.
+    expect(document.querySelector("h1")).not.toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: /你想分析什么/ })).not.toBeInTheDocument();
+    // The greeting renders as a visible <label> associated with the textarea.
+    expect(screen.getByLabelText("提问")).toBeInTheDocument();
+    expect(screen.getByText(/你想分析什么/)).toBeInTheDocument();
+  });
+});
+
+describe("Composer skill picker pre-activation (ADR-0112, issue #716)", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.stubGlobal("navigator", { language: "zh-CN" });
+    vi.mocked(getAppConfig).mockResolvedValue({
+      ...baseAppConfig({ sidebar_collapsed: false }),
+      cli_tools: { tools: [] },
+    });
+    vi.mocked(listSkills).mockResolvedValue({
+      skills: [skillEntry("charting")],
+      ignored: [],
+      root_error: null,
+    });
+    // Every turn rejects so each ask settles immediately (openSession pattern).
+    vi.mocked(askQuestion).mockRejectedValue(new Error("discard turns"));
+  });
+
+  it("staged picks ride the ask as the turn's invocations, cold start AND in-session", async () => {
+    render(<App />);
+    const bar = await screen.findByLabelText("提问");
+
+    // Cold start: the trigger char opens the picker; Enter picks charting.
+    // The pick lands the chip -- nothing fires yet (ADR-0119: staging, not
+    // invocation).
+    fireEvent.change(bar, { target: { value: "/", selectionStart: 1 } });
+    await screen.findByRole("option");
+    fireEvent.keyDown(bar, { key: "Enter" });
+    // The landed chip renders as an inline token in the input area (its
+    // name is the marker; withdrawal rides Backspace at the draft start).
+    await screen.findByText("charting");
+
+    // Submit: the staged name rides the first ask as its user invocation.
+    fireEvent.change(bar, { target: { value: "q" } });
+    fireEvent.click(screen.getByRole("button", { name: "提问" }));
+    await waitFor(() =>
+      expect(askQuestion).toHaveBeenCalledWith("sess-1", "q", ["charting"]),
+    );
+
+    // In-session: after the first turn settles (the submit button returns
+    // from the 停止 face; the draft itself was cleared by the ask), a second
+    // picker pick lands a view chip; the next submit carries it the same way.
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "提问" })).toBeInTheDocument(),
+    );
+    fireEvent.change(bar, { target: { value: "/", selectionStart: 1 } });
+    await screen.findByRole("option");
+    fireEvent.keyDown(bar, { key: "Enter" });
+    // The landed chip renders as an inline token in the input area (its
+    // name is the marker; withdrawal rides Backspace at the draft start).
+    await screen.findByText("charting");
+    fireEvent.change(bar, { target: { value: "q2" } });
+    fireEvent.click(screen.getByRole("button", { name: "提问" }));
+    await waitFor(() =>
+      expect(askQuestion).toHaveBeenCalledWith("sess-1", "q2", ["charting"]),
+    );
+  });
+
+  it("submit clears the in-session staging; the next ask carries no stale pick (review I4, #991)", async () => {
+    // Mint bare (no cold-start pick), then pick IN SESSION: the view-side
+    // staging is the surface the submit boundary must clear -- the cold
+    // start's own reset is pinned separately below.
+    render(<App />);
+    const bar = await screen.findByLabelText("提问");
+    fireEvent.change(bar, { target: { value: "mint" } });
+    fireEvent.click(screen.getByRole("button", { name: "提问" }));
+    await waitFor(() =>
+      expect(askQuestion).toHaveBeenCalledWith("sess-1", "mint", []),
+    );
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "提问" })).toBeInTheDocument(),
+    );
+    // In-session pick: the chip lands on the view's staging.
+    fireEvent.change(bar, { target: { value: "/", selectionStart: 1 } });
+    await screen.findByRole("option");
+    fireEvent.keyDown(bar, { key: "Enter" });
+    await screen.findByText("charting");
+    fireEvent.change(bar, { target: { value: "q" } });
+    fireEvent.click(screen.getByRole("button", { name: "提问" }));
+    await waitFor(() =>
+      expect(askQuestion).toHaveBeenCalledWith("sess-1", "q", ["charting"]),
+    );
+    // The settle returns the submit face. NO re-pick: the view's staging was
+    // cleared at the submit boundary, so the next ask must carry an empty
+    // staging array -- a stale charting silently riding every later turn is
+    // exactly the regression this pins (vitest matches call arguments
+    // exactly, so a non-empty third argument fails the assertion).
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "提问" })).toBeInTheDocument(),
+    );
+    fireEvent.change(bar, { target: { value: "q2" } });
+    fireEvent.click(screen.getByRole("button", { name: "提问" }));
+    await waitFor(() => expect(askQuestion).toHaveBeenCalledWith("sess-1", "q2", []));
+  });
+
+  it("cold-start pick lands a chip; Backspace withdraws it before submit", async () => {
+    render(<App />);
+    const bar = await screen.findByLabelText("提问");
+    fireEvent.change(bar, { target: { value: "/", selectionStart: 1 } });
+    await screen.findByRole("option");
+    fireEvent.keyDown(bar, { key: "Enter" });
+    // The landed chip renders as an inline token in the input area; nothing
+    // fires before the minting submit.
+    await screen.findByText("charting");
+    // Backspace at the draft start withdraws the chip -- the staging list is
+    // the only surface.
+    fireEvent.keyDown(bar, { key: "Backspace" });
+    await waitFor(() =>
+      expect(screen.queryByText("charting")).not.toBeInTheDocument(),
+    );
+  });
+
+  it("consumed cold-start intents reset after the mint (no ghost chips on return)", async () => {
+    // The mint's .then clears the cold-activation list with the other draft
+    // facets: a pick consumed by the first submit must not re-render as a
+    // ghost chip when the shell falls back to the cold-start bar (close the
+    // only session through the header menu) -- nor re-apply on a later mint.
+    render(<App />);
+    const bar = await screen.findByLabelText("提问");
+    fireEvent.change(bar, { target: { value: "/", selectionStart: 1 } });
+    await screen.findByRole("option");
+    fireEvent.keyDown(bar, { key: "Enter" });
+    await screen.findByText("charting");
+    fireEvent.change(bar, { target: { value: "q" } });
+    fireEvent.click(screen.getByRole("button", { name: "提问" }));
+    // The staged pick rides the ask (ADR-0119 submit-time materialization).
+    await waitFor(() =>
+      expect(askQuestion).toHaveBeenCalledWith("sess-1", "q", ["charting"]),
+    );
+    // The turn settles, then the header menu's close drops the only pane --
+    // the shell falls back to the cold-start bar.
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "提问" })).toBeInTheDocument(),
+    );
+    fireEvent.pointerDown(screen.getByRole("button", { name: "会话操作" }));
+    fireEvent.click(await screen.findByText("关闭"));
+    await waitFor(() =>
+      expect(
+        screen.queryByRole("button", { name: "会话操作" }),
+      ).not.toBeInTheDocument(),
+    );
+    expect(screen.queryByText("charting")).not.toBeInTheDocument();
+  });
+
+  it("a settled in-session submit clears the bar draft (no resurface on the next turn)", async () => {
+    render(<App />);
+    const bar = await screen.findByLabelText("提问");
+    // Cold-start mint: the question rides the pendingQuestion channel, so
+    // the minted session's bar starts empty (the creation turn rejects via
+    // the queued one-shot and the session settles idle).
+    fireEvent.change(bar, { target: { value: "first" } });
+    fireEvent.click(screen.getByRole("button", { name: "提问" }));
+    await waitFor(() => expect(askQuestion).toHaveBeenCalledWith("sess-1", "first", []));
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "提问" })).toBeInTheDocument(),
+    );
+    // Type the second question IN the session, submit, and the draft clears
+    // at the ask instead of resurfacing when the next turn starts.
+    vi.mocked(askQuestion).mockRejectedValueOnce(
+      new Error("discard turns"),
+    );
+    fireEvent.change(screen.getByLabelText("提问"), { target: { value: "second" } });
+    fireEvent.click(screen.getByRole("button", { name: "提问" }));
+    await waitFor(() => expect(askQuestion).toHaveBeenCalledWith("sess-1", "second", []));
+    expect(screen.getByLabelText("提问")).toHaveValue("");
+  });
+
+  it("a failed cold-start creation keeps the draft (the question must not be lost)", async () => {
+    vi.mocked(createSession).mockRejectedValueOnce(new Error("mint failed"));
+    render(<App />);
+    fireEvent.change(await screen.findByLabelText("提问"), { target: { value: "keep me" } });
+    fireEvent.click(screen.getByRole("button", { name: "提问" }));
+    await waitFor(() => expect(createSession).toHaveBeenCalledTimes(1));
+    // The mint failed: the cold-start bar keeps the question for a retry.
+    expect(screen.getByLabelText("提问")).toHaveValue("keep me");
+  });
+
+  it("a minted cold-start submit clears the cold-start draft (empty bar on the return to cold start)", async () => {
+    render(<App />);
+    const bar = await screen.findByLabelText("提问");
+    fireEvent.change(bar, { target: { value: "only question" } });
+    fireEvent.click(screen.getByRole("button", { name: "提问" }));
+    await waitFor(() => expect(askQuestion).toHaveBeenCalledWith("sess-1", "only question", []));
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "提问" })).toBeInTheDocument(),
+    );
+    // Close the only session: the shell falls back to the cold-start bar,
+    // whose draft must not resurrect the consumed question.
+    fireEvent.pointerDown(screen.getByRole("button", { name: "会话操作" }));
+    fireEvent.click(await screen.findByText("关闭"));
+    await waitFor(() =>
+      expect(
+        screen.queryByRole("button", { name: "会话操作" }),
+      ).not.toBeInTheDocument(),
+    );
+    expect(screen.getByLabelText("提问")).toHaveValue("");
+  });
+
+  it("in-session pick lands a view chip; Backspace withdraws it before submit", async () => {
+    render(<App />);
+    const bar = await screen.findByLabelText("提问");
+    // Open the session with a first question (the turn rejects and settles).
+    fireEvent.change(bar, { target: { value: "q" } });
+    fireEvent.click(screen.getByRole("button", { name: "提问" }));
+    await waitFor(() =>
+      expect(askQuestion).toHaveBeenCalledWith("sess-1", "q", []),
+    );
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "提问" })).toBeInTheDocument(),
+    );
+    // A second picker pick lands the in-session chip (the viewInvocations
+    // list is the whole intent -- this surface has no mount facet).
+    fireEvent.change(bar, { target: { value: "/", selectionStart: 1 } });
+    await screen.findByRole("option");
+    fireEvent.keyDown(bar, { key: "Enter" });
+    await screen.findByText("charting");
+    // Backspace at caret 0 (the draft is empty; the panel is closed)
+    // withdraws the session-scope intent...
+    fireEvent.keyDown(bar, { key: "Backspace" });
+    await waitFor(() =>
+      expect(screen.queryByText("charting")).not.toBeInTheDocument(),
+    );
+    // ...so the next submit fires the ask with an empty staging array (the
+    // Rust fold treats it the same as an absent field).
+    fireEvent.change(bar, { target: { value: "q2" } });
+    fireEvent.click(screen.getByRole("button", { name: "提问" }));
+    await waitFor(() => expect(askQuestion).toHaveBeenCalledWith("sess-1", "q2", []));
+  });
+
+  it("session-scope intents never leak into another session and restore on switch-back (issue #718)", async () => {
+    vi.mocked(createSession)
+      .mockResolvedValueOnce({ session_id: "sess-1", duck_path: "/sessions/sess-1/session.duck" })
+      .mockResolvedValueOnce({ session_id: "sess-2", duck_path: "/sessions/sess-2/session.duck" });
+    render(<App />);
+    await openSession(); // sess-1
+    const bar = screen.getByLabelText("提问");
+    // An unsubmitted pick lands sess-1's view chip.
+    fireEvent.change(bar, { target: { value: "/", selectionStart: 1 } });
+    await screen.findByRole("option");
+    fireEvent.keyDown(bar, { key: "Enter" });
+    await screen.findByText("charting");
+    // Open sess-2 (the helper navigates to the empty state, then submits):
+    // sess-1's unsubmitted intent is invisible in sess-2's input area --
+    // the derived read yields [] for a non-matching sid.
+    await openSession(); // sess-2
+    expect(screen.queryByText("charting")).not.toBeInTheDocument();
+    // Switching back to sess-1 restores its unsubmitted intent: the intents
+    // are scoped to their session, not destroyed by the switch.
+    const entries = document.querySelectorAll(".session-entry-main");
+    fireEvent.click(entries[0]);
+    await screen.findByText("charting");
+  });
+
+  it("duplicate picks dedupe; Backspace withdraws the most recent pick only (LIFO)", async () => {
+    vi.mocked(listSkills).mockResolvedValue({
+      skills: [skillEntry("charting"), skillEntry("data-cleaning")],
+      ignored: [],
+      root_error: null,
+    });
+    render(<App />);
+    const bar = await screen.findByLabelText("提问");
+    // Pick charting, then charting AGAIN: the intent set dedupes -- the
+    // duplicate is a no-op (one chip, one intent).
+    fireEvent.change(bar, { target: { value: "/", selectionStart: 1 } });
+    await screen.findAllByRole("option");
+    fireEvent.keyDown(bar, { key: "Enter" });
+    await screen.findByText("charting");
+    fireEvent.change(bar, { target: { value: "/", selectionStart: 1 } });
+    await screen.findAllByRole("option");
+    fireEvent.keyDown(bar, { key: "Enter" });
+    expect(screen.getAllByText("charting")).toHaveLength(1);
+    // A different name joins: two chips, two intents.
+    fireEvent.change(bar, { target: { value: "/", selectionStart: 1 } });
+    await screen.findAllByRole("option");
+    fireEvent.keyDown(bar, { key: "ArrowDown" });
+    fireEvent.keyDown(bar, { key: "Enter" });
+    await screen.findByText("data-cleaning");
+    // Backspace withdraws the MOST RECENT pick only (data-cleaning); the
+    // charting chip stays.
+    fireEvent.keyDown(bar, { key: "Backspace" });
+    await waitFor(() =>
+      expect(screen.queryByText("data-cleaning")).not.toBeInTheDocument(),
+    );
+    expect(screen.getByText("charting")).toBeInTheDocument();
+  });
+});
+
+// An unmapped wire shape: a choice kind choiceToTurnRuntime does not map, so
+// both the live marker update and the success tail's stamp throw by design
+// (#725 loud failure). The cast is deliberate -- SessionRuntimeChoice is the
+// contract, the wire is the wild; #825 reproduces exactly the throw the fire
+// path's defensive catch must log.
+const UNMAPPED_RUNTIME_CHOICE = {
+  kind: "genuinely_unmapped",
+} as unknown as SessionRuntimeChoice;
+
+// Any resolved outcome reaches the success tail's stamp -- the throw site
+// runs while the optimistic entry is being built, before any outcome.kind
+// branch, so the kind here is incidental; it only has to resolve where the
+// beforeEach default rejects.
+const STAMP_OUTCOME: TurnOutcome = {
+  kind: "Materialized",
+  data: {
+    promotions: [{ dataset: src("r1"), sql: "SELECT 1" }],
+    viz: null,
+    body: null,
+    assumption: null,
+  },
+};
+
+describe("shell submit fire-path defensive log (#825)", () => {
+  // The composer fire path (the shell bar's submit delegating to the active
+  // session's handleAsk) is the third turn-fire surface besides SessionPane's
+  // pendingQuestion replay and ask-again sinks. handleAsk settles its designed
+  // failures internally; an UNEXPECTED throw -- the unmapped runtime stamp
+  // (#725's designed loud failure) -- must surface through the fire path's
+  // defensive log.error, never as a silent unhandled rejection on
+  // the main interaction path (#825).
+  let logError: MockInstance;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.stubGlobal("navigator", { language: "zh-CN" });
+    logError = vi.spyOn(log, "error");
+    // clearAllMocks only clears call history, not implementations set by
+    // prior describes -- pin the session-scoped reads the pane + picker ride
+    // back to their factory behavior (mirrors the composer control row
+    // describe).
+    state.thread = [];
+    state.workingSet = [];
+    vi.mocked(readRows).mockResolvedValue(ROW_PAGE);
+    vi.mocked(getAppConfig).mockResolvedValue(baseAppConfig({ sidebar_collapsed: false }));
+    vi.mocked(createSession).mockResolvedValue({ session_id: "sess-1", duck_path: "/sessions/sess-1/session.duck" });
+    vi.mocked(conversation).mockImplementation(async () => state.thread);
+    vi.mocked(listWorkingSet).mockImplementation(async () => state.workingSet);
+    vi.mocked(activeDataset).mockImplementation(async () => null);
+    vi.mocked(getAuthorizationMode).mockResolvedValue("per_call");
+    vi.mocked(setAuthorizationMode).mockResolvedValue(undefined);
+    vi.mocked(getSessionRuntime).mockResolvedValue({ kind: "built_in" });
+    vi.mocked(setSessionRuntime).mockResolvedValue(undefined);
+    vi.mocked(listAdapters).mockResolvedValue([]);
+    vi.mocked(rescanAdapters).mockResolvedValue([]);
+    vi.mocked(listSkills).mockResolvedValue({ skills: [skillEntry("charting")], ignored: [], root_error: null });
+    // Every turn rejects so the creation turn settles immediately (the
+    // openSession pattern); the stamp tests override the test's own ask.
+    vi.mocked(askQuestion).mockRejectedValue(new Error("discard turns"));
+  });
+
+  afterEach(() => {
+    // clearAllMocks clears a spy's history but never restores it -- restore
+    // it here so the spy detaches from log.error and a second spyOn of the
+    // same method never chains onto this one.
+    logError.mockRestore();
+  });
+
+  it("logs the stamp throw from the direct fire (no staged activations)", async () => {
+    vi.mocked(getSessionRuntime).mockResolvedValue(UNMAPPED_RUNTIME_CHOICE);
+    vi.mocked(askQuestion).mockResolvedValue(STAMP_OUTCOME);
+    render(<App />);
+    await openSession();
+    fireEvent.change(screen.getByLabelText("提问"), { target: { value: "q" } });
+    fireEvent.click(screen.getByRole("button", { name: "提问" }));
+    await waitFor(() =>
+      expect(logError).toHaveBeenCalledWith(
+        "App",
+        "shell submit handleAsk threw unexpectedly",
+        expect.objectContaining({
+          message: expect.stringContaining("unhandled runtime choice"),
+        }),
+      ),
+    );
+  });
+
+  it("logs the stamp throw from the staged-invocation fire (ADR-0119 branch)", async () => {
+    vi.mocked(getSessionRuntime).mockResolvedValue(UNMAPPED_RUNTIME_CHOICE);
+    vi.mocked(askQuestion).mockResolvedValue(STAMP_OUTCOME);
+    render(<App />);
+    await openSession();
+    // Stage an invocation the way a picker pick does (the ADR-0119
+    // in-session pattern): the staging rides the ask itself, so the fire
+    // carries it -- the same fire site the defensive log must cover.
+    const bar = screen.getByLabelText("提问");
+    fireEvent.change(bar, { target: { value: "/", selectionStart: 1 } });
+    await screen.findByRole("option");
+    fireEvent.keyDown(bar, { key: "Enter" });
+    await screen.findByText("charting");
+    fireEvent.change(bar, { target: { value: "q2" } });
+    fireEvent.click(screen.getByRole("button", { name: "提问" }));
+    await waitFor(() =>
+      expect(askQuestion).toHaveBeenCalledWith("sess-1", "q2", ["charting"]),
+    );
+    await waitFor(() =>
+      expect(logError).toHaveBeenCalledWith(
+        "App",
+        "shell submit handleAsk threw unexpectedly",
+        expect.objectContaining({
+          message: expect.stringContaining("unhandled runtime choice"),
+        }),
+      ),
+    );
+  });
+
+  it("the composer ring rides the trailing send cluster's head, ahead of the runtime picker (ADR-0130)", async () => {
+    // The window rides the snapshot itself (#1290: a channel report or the
+    // backend's catalog stamp) -- the ring is a pure snapshot consumer, so
+    // a window-bearing reading draws the arc with no config in play.
+    const turn = recordedTurn("总共几行", {
+      kind: "Textual",
+      data: { text_kind: "Agent", body: "答", assumption: null },
+    });
+    // Inline-narrowed to the Turn arm: recordedTurn's ThreadEntry union
+    // does not carry the TurnRecord shape TS needs for the occupancy
+    // field without the guard.
+    if (turn.entry !== "Turn") throw new Error("fixture shape");
+    state.thread = [
+      { entry: "Turn", data: { ...turn.data, occupancy: { tokens: 50_000, limit: 200_000 } } },
+    ];
+    render(<App />);
+    await waitFor(() => expect(screen.getByLabelText("提问")).toBeInTheDocument());
+    await openSession();
+    await waitFor(() => expect(conversation).toHaveBeenCalled());
+    const ring = await screen.findByRole("button", { name: "上下文占用" });
+    expect(ring.querySelectorAll("circle")).toHaveLength(2);
+    // ADR-0130 (issue #1276): the ring rides the trailing send cluster's
+    // head -- ahead of the runtime picker in DOM order.
+    const picker = screen.getByRole("button", { name: /运行时：/ });
+    const FOLLOWING = Node.DOCUMENT_POSITION_FOLLOWING;
+    expect(
+      ring.compareDocumentPosition(picker) & FOLLOWING,
+    ).toBeTruthy();
+  });
+});

@@ -1,5 +1,7 @@
 # Local trust boundary: zero author data-egress (invariant), no persistent at-rest user data, API key confined to Rust core
 
+> 本 ADR 不变量 1「用户源数据的唯一外发出口 = 用户配置的 LLM endpoint」**被 ADR-0076 / 0080 修订**——app 主动联网扩为 LLM 调用路径与用户启用的 MCP 工具（逐次审批），外部运行时进程自身联网归第三方；「对作者零数据外发」（无分析 / 无遥测）、不变量 2 本地落盘边界、不变量 3 key 进程隔离**保留**。见 ADR-0080。
+
 ## Decision
 
 在 ADR-0006（云端外发边界）与 ADR-0012（纯内存会话）之外，补三条**本地信任边界**不变量：

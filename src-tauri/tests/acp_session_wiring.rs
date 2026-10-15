@@ -1,0 +1,1137 @@
+//! Session external-runtime wiring integration (issue #299 slice 9c).
+//!
+//! Drives the full Session -> AcpEngine -> fake-CLI -> bridge -> gateway ->
+//! tools::dispatch chain in CI. The fake-CLI's `gateway_tool_call` scenario
+//! spawns the real bridge binary (its path injected via the `session/new` MCP
+//! descriptor); the bridge connects back to the per-turn gateway, which serves
+//! the MCP subset and routes `tools/call` (explore, or a registered CLI tool
+//! via `cli_gateway_tool_call` -- issue #673) through `tools::dispatch` or the
+//! shared spawn engine against the session's live resources. Real CLI E2E is
+//! manual (the #299 AC, not in CI); #300 covers the other ACP CLIs against the
+//! same engine. The trace-merge dedup is unit-tested at the merge function;
+//! these tests pin the WIRING -- the scoped-thread serve, the bridge
+//! spawn/connect, and the parallel engine drive rejoin without deadlock.
+mod common;
+
+use std::collections::BTreeMap;
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::Ordering;
+use std::sync::{Arc, Mutex, MutexGuard};
+
+use toptopduck_lib::approval::OperationKind;
+use toptopduck_lib::cli_tools::config::{
+    CliParamDelivery, CliToolConfig, CliToolParam, CliToolSource,
+};
+use toptopduck_lib::mcp::config::{McpServerConfig, McpServerId, McpTransport};
+use toptopduck_lib::model::{SkillLifecycleActor, SkillProvenance, TurnPhase};
+use toptopduck_lib::persistence::recipe::{RecipeEntry, RuntimeKind};
+use toptopduck_lib::runtime::acp::adapter::{AdapterId, AdapterSpec};
+use toptopduck_lib::skills::{resolve_prompt_fragments, SkillPromptFragment};
+use toptopduck_lib::util::sha256_hex;
+use toptopduck_lib::{
+    ApprovalRequestBody, ApprovalResponse, ApprovalSink, ApprovalState, Session, TurnFailure,
+    TurnInputs, TurnOutcome,
+};
+
+/// The fake-CLI adapter: the fixture binary (named `acp-fake-cli`) driven with
+/// no argv prefix -- it reads its scenario from `ACP_FAKE_SCENARIO`. A bespoke
+/// adapter (not `gemini_cli()`) so the PATH scan resolves the fixture, not any
+/// real gemini-cli install on the dev box.
+fn fake_cli_adapter() -> AdapterSpec {
+    AdapterSpec {
+        id: AdapterId::new("fake-cli"),
+        display_name: "fake-cli",
+        binary_names: &["acp-fake-cli"],
+        argv: &[],
+        stream_format: toptopduck_lib::runtime::acp::adapter::StreamFormat::Acp,
+        probe_argv: None,
+        model_arg: None,
+        effort: None,
+    }
+}
+
+/// Process-wide lock: the global env (`PATH`, `ACP_FAKE_SCENARIO`,
+/// `TOPTOPDUCK_ACP_BRIDGE_BIN`) is set under this mutex so the two tests in
+/// this binary do not race. Cargo runs test binaries sequentially, so this
+/// never contends with `acp_engine.rs`'s own lock; it only serializes the
+/// tests within this file. Mirrors the 9a env-lock pattern.
+/// Poison recovery is safe: this mutex only serializes env/scenario
+/// access across tests, it guards no cross-test invariant.
+static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+/// Prepend `dir` to `PATH` so the adapter PATH scan resolves the fixture
+/// binary. Returns the prior `PATH` for restoration.
+fn prepend_path(dir: &std::path::Path) -> std::ffi::OsString {
+    let old = std::env::var_os("PATH").unwrap_or_default();
+    let mut entries: Vec<PathBuf> = std::env::split_paths(&old).collect();
+    entries.insert(0, dir.to_path_buf());
+    let joined = std::env::join_paths(entries).expect("PATH joins");
+    std::env::set_var("PATH", &joined);
+    old
+}
+
+/// The `toptopduck-acp-bridge` binary, resolved from the shared workspace
+/// target dir. `CARGO_BIN_EXE_*` only exists for same-package bins; the
+/// bridge lives in the sibling `crates/acp-bridge` member, so the path is
+/// computed instead. `cargo test --workspace` (CI) builds every member's
+/// binaries before any suite runs; a member-only invocation from `src-tauri`
+/// skips the bridge build, so a missing file fails here with the build
+/// command instead of an opaque spawn error. Debug profile, matching every
+/// suite in this tree. Local to this suite: `tests/common` is compiled into
+/// every suite that declares `mod common;`, and the others never spawn the
+/// bridge -- a shared helper would trip their dead-code lint.
+fn acp_bridge_bin() -> PathBuf {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("target")
+        .join("debug")
+        .join(format!(
+            "toptopduck-acp-bridge{}",
+            std::env::consts::EXE_SUFFIX
+        ));
+    assert!(
+        path.is_file(),
+        "bridge binary missing at {}; build it first: cargo build -p acp-bridge",
+        path.display()
+    );
+    path
+}
+
+/// Lock the global env, point it at the fixture (scenario + bridge binary +
+/// PATH), and build a Session wired to the fake-CLI adapter. Returns the
+/// session + the prior `PATH` + the env-lock guard (held across the turn so a
+/// sibling test cannot reset the global env mid-drive).
+fn external_session(scenario: &str) -> (Session, std::ffi::OsString, MutexGuard<'static, ()>) {
+    let guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let fake_cli = PathBuf::from(env!("CARGO_BIN_EXE_acp-fake-cli"));
+    let old_path = prepend_path(fake_cli.parent().expect("fixture has a parent dir"));
+    std::env::set_var("ACP_FAKE_SCENARIO", scenario);
+    std::env::set_var("TOPTOPDUCK_ACP_BRIDGE_BIN", acp_bridge_bin());
+    // Pre-warm the two fixture images (issue #897 review): a first spawn on
+    // a cold Windows box pays tens of seconds of image load per binary, and
+    // the arming-order pin's fire must land AFTER the CLI stores its
+    // engine-done flag -- which rides the CLI's first complete scenario,
+    // and the CLI spawns the bridge synchronously mid-scenario, so a cold
+    // bridge delays that store just as much. The CLI is a bare spawn whose
+    // stdin closes at once (it exits on the EOF before any scenario runs,
+    // so no bridge of its own spawns); the bridge exits immediately on its
+    // missing env pair. The arming pin's own test layers a full warm turn
+    // on top -- the protocol half of the chain needs it (mutant-verified).
+    let mut warm_cli = std::process::Command::new(&fake_cli)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("prewarm: fake CLI spawns");
+    drop(warm_cli.stdin.take());
+    let _ = warm_cli.wait().expect("prewarm: fake CLI exits");
+    let mut warm_bridge = std::process::Command::new(acp_bridge_bin())
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .expect("prewarm: bridge spawns");
+    let _ = warm_bridge.wait().expect("prewarm: bridge exits");
+    let mut session = Session::new().expect("session");
+    session.set_external_runtime(Some(fake_cli_adapter()));
+    (session, old_path, guard)
+}
+
+/// The vanilla external path: a no-tool turn completes `Textual` through the
+/// ACP pump. The bridge still spawns + connects (the descriptor always rides
+/// `session/new`), but no `tools/call` fires -- this pins the engine + serve
+/// rejoin for a turn that leaves the gateway idle, the baseline the
+/// gateway-call test layers a dispatch on top of.
+#[test]
+fn external_text_reply_turn_completes() {
+    let (mut session, old_path, _guard) = external_session("text_reply");
+    let outcome = session.ask("what is the answer?");
+    std::env::set_var("PATH", old_path);
+    match outcome {
+        TurnOutcome::Textual { body, .. } => {
+            assert!(
+                body.contains("42"),
+                "agent text round-tripped through the pump: got {body:?}"
+            );
+        }
+        other => panic!("text_reply must complete Textual, got {other:?}"),
+    }
+}
+
+/// Issue #897: the bridge path's arming order pin -- the external-turn
+/// counterpart of the built-in pin in mcp_mount_blackbox.rs. The bridge
+/// branch's `arm_cancel_teardown` ahead of `connect_all` could silently
+/// regress; with a hung MCP server the whole CLI -> bridge -> serve chain
+/// parks on the server's own budget while the session lock is held. One
+/// never-responding stdio server under a long budget, a token fire 5s in
+/// (after the pre-warmed CLI stores its engine-done flag), and the external
+/// turn must return well under the budget.
+#[test]
+fn a_connect_phase_token_fire_bounds_the_external_turn_with_a_hung_server() {
+    use std::time::{Duration, Instant};
+
+    let (mut session, old_path, _guard) = external_session("text_reply");
+    // One full no-MCP turn first (issue #897 review): the 5s fire must land
+    // AFTER the CLI stores its engine-done flag, and that store rides the
+    // CLI's first complete scenario -- spawn, handshake, and the bridge the
+    // CLI spawns mid-scenario -- whose first pass on a cold box costs tens
+    // of seconds. The harness's bare image prewarm does not close the
+    // window (mutant-verified: the protocol half stays cold); this warm
+    // turn makes the pinned turn the chain's second full pass, where the
+    // store lands inside a couple of seconds -- inside the 5s fire.
+    let _ = session.ask("warm");
+    let hang = McpServerConfig {
+        id: McpServerId("wiring-hang".into()),
+        display_name: "HungMCP".into(),
+        transport: McpTransport::stdio(env!("CARGO_BIN_EXE_mcp-hang-server"), Vec::new()),
+        env: BTreeMap::new(),
+        keychain_env_keys: Vec::new(),
+        keychain_header_keys: Vec::new(),
+        // A long budget: only the CANCEL path can unblock this test in time.
+        // Cold-fixture spawn latency is paid by the harness pre-warm before
+        // the turn starts, so this budget measures the cancel contract, not
+        // box temperature.
+        timeout_ms: Some(120_000),
+        enabled: true,
+    };
+    // The fire lands AFTER the fast-finishing CLI has stored its engine-done
+    // flag -- the window where a stand-down signal tied to the engine half
+    // (instead of the turn's own unwind) would have retired the watcher
+    // over a turn that has not unwound yet. The delay is a heuristic, not a
+    // synchronization: the harness image pre-warm plus the warm turn below
+    // are what keep the store (measured 0.8-5s warm, tens of seconds cold)
+    // inside the 5s on this box, and a cold box without them defeats any
+    // fixed delay (mutant-verified: the same fire at 800ms greens the
+    // stand-down revert even with the image pre-warm in place).
+    let firer = Arc::clone(&session.cancel_token());
+    std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(5000));
+        firer.request();
+    });
+
+    let approval = ApprovalState::new();
+    let sink = NullSink;
+    let keychain = common::keychain();
+    let started = Instant::now();
+    let outcome = session.ask_with_phase(
+        "run one turn",
+        &approval,
+        &sink,
+        |_| {},
+        &TurnInputs {
+            mcp_servers: &[hang],
+            keychain: &keychain,
+            skills: &[],
+            skills_root: std::path::Path::new(""),
+            live_config: None,
+            user_invocations: &[],
+            disabled_skills: &[],
+            cli_tools: &[],
+            delegations: &[],
+        },
+    );
+    std::env::set_var("PATH", old_path);
+    // The ELAPSED bound is the pin: an arm-after-connect posture (or a
+    // stand-down tied to the engine half) parks the connect for the full
+    // 120s budget. The outcome's variant is NOT pinned -- a turn whose CLI
+    // is cancelled before it spawns the bridge surfaces the 30s bridge
+    // accept deadline as a Failed form, a race the pre-warm makes unlikely
+    // but cannot remove, and not the cancel contract either way.
+    assert!(
+        started.elapsed() < Duration::from_secs(45),
+        "the token fire unblocks the parked connect well under the 120s budget, got {outcome:?}"
+    );
+}
+
+/// The full chain: the fake-CLI's `gateway_tool_call` scenario drives one MCP
+/// `tools/call` (explore) through the spawned bridge -> the per-turn gateway
+/// -> `tools::dispatch`, then emits a terminal agent message. The turn must
+/// complete `Textual` -- proving the bridge spawns + connects, the gateway
+/// serves the MCP subset, dispatch runs against the live session resources,
+/// and the scoped-thread serve rejoins the parallel engine drive without
+/// deadlock.
+#[test]
+fn external_gateway_tool_call_drives_dispatch() {
+    let (mut session, old_path, _guard) = external_session("gateway_tool_call");
+    let outcome = session.ask("run one gateway tool call");
+    std::env::set_var("PATH", old_path);
+    match outcome {
+        TurnOutcome::Textual { body, .. } => {
+            assert!(
+                body.contains("done via gateway"),
+                "agent message round-tripped through the pump: got {body:?}"
+            );
+        }
+        other => panic!("gateway_tool_call must complete Textual, got {other:?}"),
+    }
+}
+
+/// Issue #1222: the CLI reports its gateway-routed call under its own
+/// flattened rename (`<server>_<tool>`) while the gateway's authoritative
+/// record carries the bare name. The engine's fold normalizes the echo row,
+/// so the settle merge pairs it with the gateway record: ONE persisted row
+/// carrying the gateway's name + SQL summary -- not a degraded renamed row
+/// plus a duplicated authoritative segment (the real-machine symptom).
+#[test]
+fn external_gateway_renamed_call_settles_to_one_authoritative_row() {
+    let (mut session, old_path, _guard) = external_session("gateway_rename");
+    // Collect the turn's live phases (issue #1242): the tap shares ONE
+    // channel between the engine thread and the gateway serve, and this
+    // callback is the only vantage point that sees the composition -- a
+    // broken tap wiring or a leaky echo stays invisible to the settle
+    // assertions below.
+    let phases: Arc<Mutex<Vec<TurnPhase>>> = Arc::new(Mutex::new(Vec::new()));
+    let phase_sink = Arc::clone(&phases);
+    struct NoopSink;
+    impl ApprovalSink for NoopSink {
+        fn emit_request(&self, _: &ApprovalRequestBody) {}
+        fn emit_resolved(&self, _: &ApprovalRequestBody, _: ApprovalResponse) {}
+    }
+    let approval = ApprovalState::new();
+    let keychain = common::keychain();
+    let inputs = TurnInputs::empty(&keychain);
+    let outcome = session.ask_with_phase(
+        "run one renamed gateway tool call",
+        &approval,
+        &NoopSink,
+        move |p| phase_sink.lock().unwrap().push(p),
+        &inputs,
+    );
+    std::env::set_var("PATH", old_path);
+    match outcome {
+        TurnOutcome::Textual { body, .. } => {
+            assert!(
+                body.contains("done via gateway"),
+                "agent message round-tripped through the pump: got {body:?}"
+            );
+        }
+        other => panic!("gateway_rename must complete Textual, got {other:?}"),
+    }
+    let recipe = session.build_recipe();
+    let last_turn = recipe
+        .history
+        .iter()
+        .rev()
+        .find_map(|e| match e {
+            RecipeEntry::Turn(t) => Some(t),
+            _ => None,
+        })
+        .expect("at least one turn in the recipe");
+    let rows: Vec<_> = last_turn
+        .trace
+        .iter()
+        .flat_map(|r| r.calls.iter())
+        .collect();
+    assert_eq!(
+        rows.len(),
+        1,
+        "one gateway call -> exactly one settled trace row: {rows:?}"
+    );
+    assert_eq!(rows[0].name, "explore", "the gateway's bare name wins");
+    assert_eq!(
+        rows[0].summary, "SELECT 1 AS x",
+        "the gateway's argument summary wins"
+    );
+    assert_eq!(
+        rows[0].operation_kind,
+        OperationKind::Read,
+        "the gateway's authoritative badge wins"
+    );
+    assert!(rows[0].success);
+
+    // The live half (issue #1242): exactly one Started + one Completed over
+    // the shared tap -- the gateway serve's authoritative pair, with the
+    // renamed echo silent at its fold layer. A broken tap wiring (no phases
+    // at all) or a leaky echo (a second Started) both fail here while the
+    // settle assertions above stay green.
+    let phases = phases.lock().unwrap();
+    let starts: Vec<_> = phases
+        .iter()
+        .filter_map(|p| match p {
+            TurnPhase::ToolCallStarted {
+                name,
+                operation_kind,
+                summary,
+            } => Some((name.clone(), *operation_kind, summary.clone())),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        starts.len(),
+        1,
+        "one gateway call -> exactly one live Started: {starts:?}"
+    );
+    assert_eq!(
+        starts[0].0, "explore",
+        "the gateway's bare name on the live rail"
+    );
+    assert_eq!(
+        starts[0].2, "SELECT 1 AS x",
+        "the gateway's argument summary on the live rail"
+    );
+    assert_eq!(starts[0].1, OperationKind::Read);
+    let completeds: Vec<_> = phases
+        .iter()
+        .filter_map(|p| match p {
+            TurnPhase::ToolCallCompleted(view) => Some(view.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        completeds.len(),
+        1,
+        "one gateway call -> exactly one live Completed: {completeds:?}"
+    );
+    assert_eq!(completeds[0].name, "explore");
+    assert!(completeds[0].success);
+}
+
+/// Issue #673 (ADR-0108 Decision 6): a registered CLI tool is advertised on
+/// the bridge's `tools/list` (asserted fixture-side) and a bridge-originated
+/// call routes through the per-turn gateway into the same approval gate +
+/// spawn engine a built-in-initiated call uses -- the single tool plane. The
+/// answering sink allows the card once, pinning that the bridge-originated
+/// call really does gate (CLI registrations classify as external tools,
+/// ADR-0108 Decision 8) rather than bypassing the card.
+#[test]
+fn external_cli_tool_call_routes_through_the_gateway() {
+    let (mut session, old_path, _guard) = external_session("cli_gateway_tool_call");
+    // The registration: the cli-fake-tool fixture under the exact name the
+    // fixture's scenario addresses.
+    let tool = CliToolConfig {
+        name: "cli-fixture-echo".into(),
+        description: "echo fixture".into(),
+        executable: env!("CARGO_BIN_EXE_cli-fake-tool").into(),
+        argv_template: Vec::new(),
+        params: vec![CliToolParam {
+            name: "args".into(),
+            description: "tail args".into(),
+            delivery: CliParamDelivery::Argv,
+            varargs: true,
+        }],
+        env: Default::default(),
+        enabled: true,
+        source: CliToolSource::User,
+        baseline: None,
+    };
+    let keychain = common::keychain();
+    let inputs = TurnInputs {
+        mcp_servers: &[],
+        keychain: &keychain,
+        skills: &[],
+        skills_root: std::path::Path::new(""),
+        live_config: None,
+        user_invocations: &[],
+        disabled_skills: &[],
+        cli_tools: std::slice::from_ref(&tool),
+        delegations: &[],
+    };
+    // An approval sink that answers allow-once from inside emit_request: the
+    // gate installs the pending slot before calling the sink and holds no
+    // locks across it, so respond() here is the same store-then-notify the
+    // IPC command does.
+    struct AnsweringSink<'a> {
+        state: &'a ApprovalState,
+        cards: std::sync::atomic::AtomicUsize,
+    }
+    impl ApprovalSink for AnsweringSink<'_> {
+        fn emit_request(&self, body: &ApprovalRequestBody) {
+            self.cards.fetch_add(1, Ordering::SeqCst);
+            let id: uuid::Uuid = body.request_id.parse().expect("uuid");
+            self.state
+                .respond(id, ApprovalResponse::AllowOnce)
+                .expect("respond");
+        }
+        fn emit_resolved(&self, _: &ApprovalRequestBody, _: ApprovalResponse) {}
+    }
+    let approval = ApprovalState::new();
+    let sink = AnsweringSink {
+        state: &approval,
+        cards: std::sync::atomic::AtomicUsize::new(0),
+    };
+    let outcome = session.ask_with_phase("run the cli tool", &approval, &sink, |_| {}, &inputs);
+    std::env::set_var("PATH", old_path);
+    assert_eq!(
+        sink.cards.load(Ordering::SeqCst),
+        1,
+        "the bridge-originated CLI call surfaced exactly one approval card"
+    );
+    match outcome {
+        TurnOutcome::Textual { body, .. } => {
+            assert!(
+                body.contains("done via cli gateway"),
+                "agent message round-tripped through the pump: got {body:?}"
+            );
+        }
+        other => panic!("cli_gateway_tool_call must complete Textual, got {other:?}"),
+    }
+    // One bridge call -> one persisted row: the fixture emits the ACP
+    // notification (`gw_cli_1`) for the same call the gateway served (`id=3`),
+    // and the merge de-duplicates them at the wiring level -- a wiring
+    // regression in the merge's echo accounting would persist two
+    // rows for one call and fail this count.
+    let recipe = session.build_recipe();
+    let last_turn = recipe
+        .history
+        .iter()
+        .rev()
+        .find_map(|e| match e {
+            RecipeEntry::Turn(t) => Some(t),
+            _ => None,
+        })
+        .expect("at least one turn in the recipe");
+    let cli_rows: Vec<_> = last_turn
+        .trace
+        .iter()
+        .flat_map(|r| r.calls.iter())
+        .filter(|c| c.name == "cli-fixture-echo")
+        .collect();
+    assert_eq!(
+        cli_rows.len(),
+        1,
+        "one bridge-originated CLI call persists exactly one trace row"
+    );
+    assert!(
+        cli_rows[0].success,
+        "the gateway's served row is the winner"
+    );
+}
+
+/// Issue #646: an MCP request frame from the bridge that exceeds the
+/// gateway's per-line byte cap fails the serve (the connection tears down, no
+/// id-matched response ever exists). The turn lands on the serve-error path
+/// with the framing cause riding the failure detail -- never a `Cancelled`
+/// hang waiting on a response the gateway refused to write.
+///
+/// Issue #856 AC1: the handshake's discovered catalog still snapshots onto
+/// the session on this serve-failure exit (ADR-0095 -- the snapshot precedes
+/// the outcome mapping, so the session-level catalog reflects this turn's
+/// handshake even though the turn failed). The promotion-drop half of #856
+/// has its own discriminating face in
+/// `external_serve_failure_drops_collected_promotions` (this scenario's only
+/// tools/call IS the over-long frame -- nothing was ever dispatched).
+#[test]
+fn external_overlong_gateway_request_fails_the_turn() {
+    let (mut session, old_path, _guard) = external_session("gateway_overlong_call");
+    let outcome = session.ask("run one over-long gateway tool call");
+    std::env::set_var("PATH", old_path);
+    match outcome {
+        TurnOutcome::Failed(TurnFailure::Runtime { detail }) => {
+            assert!(
+                detail.contains("gateway serve failed"),
+                "the failure names its face: {detail}"
+            );
+            assert!(
+                detail.contains("frame line exceeded"),
+                "the framing cause rides the detail: {detail}"
+            );
+        }
+        other => panic!("gateway_overlong_call must land Failed(Runtime), got {other:?}"),
+    }
+    let discovered = session
+        .last_discovered_runtime()
+        .expect("the serve-failure exit snapshots the discovered catalog");
+    assert_eq!(
+        discovered.adapter_id.as_deref(),
+        Some("fake-cli"),
+        "the snapshot carries this turn's handshake discovery"
+    );
+}
+
+/// Issue #856 AC2 (chosen shape, pinned here with a discriminating face):
+/// when the gateway serve dies AFTER a successful materialize dispatch --
+/// `result_1` already written into the working set, the promotion already
+/// collected -- the turn still lands `Failed(Runtime)` and the collected
+/// promotion is dropped. A `Failed` outcome has no promotion slot (the
+/// serve-error arm in `run_external_turn` drops them by decision, and its
+/// comment carries the rationale), and widening `TurnFailure` for one exit
+/// path was rejected as out of proportion; the working-set write itself
+/// stands (asserted below), unreported by the turn outcome. A future change
+/// that merges the serve-failure promotions back would map this turn onto
+/// `Materialized` and redden the match below.
+#[test]
+fn external_serve_failure_drops_collected_promotions() {
+    let (mut session, old_path, _guard) = external_session("gateway_materialize_then_overlong");
+    let outcome = session.ask("promote one result, then break the gateway");
+    std::env::set_var("PATH", old_path);
+    match outcome {
+        TurnOutcome::Failed(TurnFailure::Runtime { detail }) => {
+            assert!(
+                detail.contains("gateway serve failed"),
+                "the failure names its face: {detail}"
+            );
+            assert!(
+                detail.contains("frame line exceeded"),
+                "the framing cause rides the detail: {detail}"
+            );
+        }
+        other => panic!(
+            "a serve failure after a promotion must stay Failed(Runtime) with the promotion dropped, got {other:?}"
+        ),
+    }
+    assert!(
+        session.get("result_1").is_some(),
+        "the promotion's working-set write stands the serve failure"
+    );
+}
+
+// --- helpers for skill-injection tests (issue #368) -------------------------
+
+/// A no-op approval sink (the turn runs ungated). Mirrors the NullSink in
+/// skill_injection_blackbox.rs -- the real one is private to the session module.
+struct NullSink;
+impl ApprovalSink for NullSink {
+    fn emit_request(&self, _body: &ApprovalRequestBody) {}
+    fn emit_resolved(&self, _body: &ApprovalRequestBody, _response: ApprovalResponse) {}
+}
+
+/// Write one skill directory with a spec-valid SKILL.md (frontmatter + body).
+fn put_skill(root: &Path, name: &str, description: &str, body: &str) {
+    let dir = root.join(name);
+    fs::create_dir_all(&dir).unwrap();
+    let content = format!("---\nname: {name}\ndescription: {description}\n---\n{body}");
+    fs::write(dir.join("SKILL.md"), content).unwrap();
+}
+
+/// Issue #989 review I2: the external face's mid-turn invocation binding
+/// had no observation point -- rebinding the external
+/// `SkillInvocationCtx::from_session` to a detached local vec survived
+/// this entire file (every provenance assertion is satisfied by the
+/// submit-time user invocations seeded in the real vec), and the external
+/// read-surface mount had no positive pin either (emptying `start_invoked`
+/// left this file green while reddening the built-in face's read-gate
+/// pins). One turn closes both halves: the CLI's `tools/list` pins the
+/// turn-start read mount (`read_skill_file` appears with a non-empty
+/// discovery snapshot -- the fixture asserts it at the source), and the
+/// CLI's mid-turn `invoke_skill` pins the binding. The record-count assertion is
+/// the discriminant: provenance alone cannot see the mid-turn agent record
+/// (the fold collapses same-name records), so the raw invocation records
+/// are counted by actor.
+#[test]
+fn external_mid_turn_invoke_lands_on_the_turn() {
+    let skills_root = tempfile::tempdir().unwrap();
+    let skills_root = skills_root.path().to_path_buf();
+    put_skill(&skills_root, "sql-coach", "Coach SQL.", "Coach the SQL.\n");
+    let (mut session, old_path, _guard) = external_session("invoke_skill_mid_turn");
+    session.set_discovery_snapshot(vec!["sql-coach".to_string()]);
+    let sql_coach_bytes = fs::read(skills_root.join("sql-coach").join("SKILL.md")).unwrap();
+    let sql_coach_hash = sha256_hex(&sql_coach_bytes);
+
+    let approval = ApprovalState::new();
+    let sink = NullSink;
+    let keychain = common::keychain();
+    // The user invocation seeds the turn's records (the read mount rides
+    // the discovery snapshot the fixture asserts) and leaves the
+    // discriminating gap:
+    // a detached-vec rebinding keeps this record (seeded in the real vec
+    // before the turn starts) and drops only the agent's.
+    let user_invocations =
+        session.materialize_user_invocations(&["sql-coach".to_string()], &skills_root, &[]);
+    let outcome = session.ask_with_phase(
+        "invoke the skill",
+        &approval,
+        &sink,
+        |_| {},
+        &TurnInputs {
+            mcp_servers: &[],
+            keychain: &keychain,
+            skills: &[],
+            skills_root: &skills_root,
+            live_config: None,
+            user_invocations: &user_invocations,
+            disabled_skills: &[],
+            cli_tools: &[],
+            delegations: &[],
+        },
+    );
+    std::env::set_var("PATH", old_path);
+    assert!(
+        matches!(outcome, TurnOutcome::Textual { .. }),
+        "got {outcome:?}"
+    );
+
+    let recipe = session.build_recipe();
+    let last_turn = recipe
+        .history
+        .iter()
+        .rev()
+        .find_map(|e| match e {
+            RecipeEntry::Turn(t) => Some(t),
+            _ => None,
+        })
+        .expect("at least one turn in the recipe");
+    // Two records through ONE channel: the user's submit-time
+    // materialization, then the agent's mid-turn invoke_skill the gateway
+    // served. The count and the actor assertions fail together under a
+    // detached binding (the agent record lands nowhere observable).
+    assert_eq!(last_turn.invocations.len(), 2, "both actors' records land");
+    assert_eq!(last_turn.invocations[0].actor, SkillLifecycleActor::User);
+    assert_eq!(last_turn.invocations[1].name, "sql-coach");
+    assert_eq!(last_turn.invocations[1].actor, SkillLifecycleActor::Agent);
+    assert_eq!(last_turn.invocations[1].content_hash, sql_coach_hash);
+}
+
+/// Issue #368 AC #2: an external-runtime turn with a mounted skill records
+/// `{name, content_hash}` in TurnProvenance.skills. The ask_with_phase facade
+/// passes the turn's accumulating invocation records to record_turn, which
+/// derives the provenance from them; this test pins the external branch so a
+/// future change cannot silently drop the skill provenance on the ACP path.
+///
+/// ADR-0110 (issues #700/#702), calibrated by ADR-0119 (issue #983): since
+/// the ACP assembly renders the metadata index, the external turn records
+/// the invocation records' name set -- the same rule the built-in turn
+/// follows (the disclosure-parity lineage). The invocation deliberately
+/// covers only one of the two snapshot skills, so recording the full
+/// snapshot -- the retired pre-#983 shape -- reddens this test with an
+/// extra pdf-tools entry.
+#[test]
+fn external_turn_records_invocation_set_provenance() {
+    let skills_root = tempfile::tempdir().unwrap();
+    let skills_root = skills_root.path().to_path_buf();
+    let body = "Name the statistical method you use.\n";
+    put_skill(
+        &skills_root,
+        "sql-coach",
+        "Coach honest SQL reporting.",
+        body,
+    );
+    put_skill(
+        &skills_root,
+        "pdf-tools",
+        "Extract tables before querying.",
+        "Extract the tables first.\n",
+    );
+    let sql_coach_bytes = fs::read(skills_root.join("sql-coach").join("SKILL.md")).unwrap();
+    let sql_coach_hash = sha256_hex(&sql_coach_bytes);
+
+    let (mut session, old_path, _guard) = external_session("text_reply");
+    session.set_discovery_snapshot(vec!["sql-coach".to_string(), "pdf-tools".to_string()]);
+    let snapshot = session.discovery_snapshot();
+    let fragments: Vec<SkillPromptFragment> = resolve_prompt_fragments(&skills_root, &snapshot);
+    assert_eq!(fragments.len(), 2);
+
+    let approval = ApprovalState::new();
+    let sink = NullSink;
+    let keychain = common::keychain();
+    // Only one of the two snapshot skills is invoked -- the convergence's
+    // discriminating case (see the doc comment).
+    let user_invocations =
+        session.materialize_user_invocations(&["sql-coach".to_string()], &skills_root, &[]);
+    let outcome = session.ask_with_phase(
+        "what is the answer?",
+        &approval,
+        &sink,
+        |_| {},
+        &TurnInputs {
+            mcp_servers: &[],
+            keychain: &keychain,
+            skills: &fragments,
+            skills_root: &skills_root,
+            live_config: None,
+            user_invocations: &user_invocations,
+            disabled_skills: &[],
+            cli_tools: &[],
+            delegations: &[],
+        },
+    );
+    std::env::set_var("PATH", old_path);
+    assert!(
+        matches!(outcome, TurnOutcome::Textual { .. }),
+        "got {outcome:?}"
+    );
+
+    let recipe = session.build_recipe();
+    let last_turn = recipe
+        .history
+        .iter()
+        .rev()
+        .find_map(|e| match e {
+            RecipeEntry::Turn(t) => Some(t),
+            _ => None,
+        })
+        .expect("at least one turn in the recipe");
+    assert_eq!(
+        last_turn.provenance.skills,
+        vec![SkillProvenance {
+            name: "sql-coach".into(),
+            content_hash: sql_coach_hash,
+        }],
+        "the external turn records the INVOCATION set, not the full snapshot"
+    );
+    assert_eq!(last_turn.invocations.len(), 1);
+    assert_eq!(last_turn.invocations[0].name, "sql-coach");
+    // ADR-0101: the turn-top snapshot must record the turn's real runtime --
+    // the pre-#588 `TurnAudit::builtin` hardcoded BuiltIn here, mislabeling
+    // every live external turn. The external turn names its driving adapter's
+    // stable id on the persisted pair.
+    assert_eq!(
+        last_turn.provenance.runtime,
+        Some(RuntimeKind::External),
+        "a live external turn records the external runtime, never a hardcoded BuiltIn"
+    );
+    assert_eq!(
+        last_turn.provenance.adapter_id.as_deref(),
+        Some("fake-cli"),
+        "the live snapshot names the driving adapter's stable id"
+    );
+}
+
+/// Issue #702 (calibrated by ADR-0119): a resumed session whose discovery
+/// snapshot carries skills but whose history records no invocations drives
+/// an external turn with EMPTY skill provenance -- discoverability alone
+/// never shapes a turn. Pins the resume AC end-to-end: the snapshot
+/// restores (so the empty invocation set is meaningful, not "nothing
+/// resumed"), and the turn's provenance carries no skill whose body was
+/// never expanded.
+#[test]
+fn resumed_external_turn_without_invocations_records_empty_provenance() {
+    let skills_root = tempfile::tempdir().unwrap();
+    let skills_root = skills_root.path().to_path_buf();
+    put_skill(
+        &skills_root,
+        "sql-coach",
+        "Coach honest SQL reporting.",
+        "Name the statistical method you use.\n",
+    );
+    put_skill(
+        &skills_root,
+        "pdf-tools",
+        "Extract tables before querying.",
+        "Extract the tables first.\n",
+    );
+
+    let duck_dir = tempfile::tempdir().unwrap();
+    let duck_path = duck_dir.path().join("resume.duck");
+    let (mut session, old_path, _guard) = external_session("text_reply");
+    session
+        .bind_duck(duck_path.clone(), "resume".into())
+        .expect("bind");
+    drop(session);
+
+    let mut resumed = Session::open_duck(
+        &duck_path,
+        Arc::new(toptopduck_lib::CancelToken::new()),
+        Box::new(toptopduck_lib::UnwiredProvider),
+        Default::default(),
+        |_| {},
+        |_| toptopduck_lib::SourceResolution::Abort,
+        |_| toptopduck_lib::ActiveResolution::Abort,
+    )
+    .expect("resume");
+    resumed.set_discovery_snapshot(vec!["sql-coach".to_string(), "pdf-tools".to_string()]);
+    assert!(
+        resumed.invoked_skills().is_empty(),
+        "a history with no invocation records folds an empty invoked set"
+    );
+
+    resumed.set_external_runtime(Some(fake_cli_adapter()));
+    let fragments: Vec<SkillPromptFragment> =
+        resolve_prompt_fragments(&skills_root, &resumed.discovery_snapshot());
+    assert_eq!(fragments.len(), 2);
+    let outcome = resumed.ask_with_phase(
+        "what is the answer?",
+        &ApprovalState::new(),
+        &NullSink,
+        |_| {},
+        &TurnInputs {
+            mcp_servers: &[],
+            keychain: &common::keychain(),
+            skills: &fragments,
+            skills_root: &skills_root,
+            live_config: None,
+            user_invocations: &[],
+            disabled_skills: &[],
+            cli_tools: &[],
+            delegations: &[],
+        },
+    );
+    // Restore PATH while still holding the env lock (the `_guard` binding
+    // drops at scope end), matching every sibling test -- an explicit drop
+    // here would open an unlocked env-write window between the two.
+    std::env::set_var("PATH", old_path);
+    assert!(
+        matches!(outcome, TurnOutcome::Textual { .. }),
+        "got {outcome:?}"
+    );
+
+    let recipe = resumed.build_recipe();
+    let last_turn = recipe
+        .history
+        .iter()
+        .rev()
+        .find_map(|e| match e {
+            RecipeEntry::Turn(t) => Some(t),
+            _ => None,
+        })
+        .expect("at least one turn in the recipe");
+    assert!(
+        last_turn.provenance.skills.is_empty(),
+        "a resumed external turn with no invocations records no skill bodies"
+    );
+    assert!(
+        last_turn.invocations.is_empty(),
+        "the turn carries no invocation records"
+    );
+}
+
+/// Issue #702 (PR #709 review): the `activated` wire-through into the ACP
+/// assembly is otherwise unpinned end-to-end -- the provenance tests assert
+/// `build_recipe()` output, which is computed before the assembly call, and
+/// the unit tests construct the argument directly. This test drives the
+/// `prompt_echo` fixture scenario, which echoes the received `session/prompt`
+/// blocks back as the agent message (the ACP counterpart of the built-in
+/// face's provider-side prompt capture), and pins the disclosure mix the CLI
+/// actually received: the mounted-only skill as an index entry, the activated
+/// skill's framed verbatim body -- and the mounted-only skill's body nowhere
+/// (a full-text or wrong-list regression at the call site leaks it here).
+#[test]
+fn external_turn_prompt_carries_disclosure_not_full_text() {
+    let skills_root = tempfile::tempdir().unwrap();
+    let skills_root = skills_root.path().to_path_buf();
+    put_skill(
+        &skills_root,
+        "sql-coach",
+        "Coach honest SQL reporting.",
+        "Name the statistical method you use.\n",
+    );
+    put_skill(
+        &skills_root,
+        "pdf-tools",
+        "Extract tables before querying.",
+        "Extract the tables first.\n",
+    );
+
+    let (mut session, old_path, _guard) = external_session("prompt_echo");
+    session.set_discovery_snapshot(vec!["sql-coach".to_string(), "pdf-tools".to_string()]);
+    let snapshot = session.discovery_snapshot();
+    let fragments: Vec<SkillPromptFragment> = resolve_prompt_fragments(&skills_root, &snapshot);
+    assert_eq!(fragments.len(), 2);
+
+    // The user invokes one of the two snapshot skills.
+    let user_invocations =
+        session.materialize_user_invocations(&["sql-coach".to_string()], &skills_root, &[]);
+    let keychain = common::keychain();
+    let outcome = session.ask_with_phase(
+        "what is the answer?",
+        &ApprovalState::new(),
+        &NullSink,
+        |_| {},
+        &TurnInputs {
+            mcp_servers: &[],
+            keychain: &keychain,
+            skills: &fragments,
+            skills_root: &skills_root,
+            live_config: None,
+            user_invocations: &user_invocations,
+            disabled_skills: &[],
+            cli_tools: &[],
+            delegations: &[],
+        },
+    );
+    std::env::set_var("PATH", old_path);
+    match outcome {
+        TurnOutcome::Textual { body, .. } => {
+            // The disclosure block is the wholesale index -- every snapshot
+            // skill carries its row, invoked or not (ADR-0119 Decision 3).
+            assert!(
+                body.contains("【可用技能】"),
+                "index section rides the prompt"
+            );
+            assert!(
+                body.contains("- `pdf-tools` — Extract tables before querying.\n"),
+                "the uninvoked snapshot skill is indexed"
+            );
+            assert!(
+                body.contains("- `sql-coach` — Coach honest SQL reporting.\n"),
+                "the invoked snapshot skill keeps its index row too"
+            );
+            // The invoked skill's body rides the TURN INPUT (the asking
+            // block, framed + verbatim, ahead of the question) -- never the
+            // standing disclosure (ADR-0119 Decision 8 calibrated: the
+            // outbound block carries the index only).
+            assert!(
+                body.contains(
+                    "【技能调用】技能 `sql-coach`：\nName the statistical method you use.\n"
+                ),
+                "the invocation body rides the turn input, framed + verbatim"
+            );
+            // No body frame section anywhere (the retired shape).
+            assert!(
+                !body.contains("【激活技能】"),
+                "the persistent body frame is retired"
+            );
+            // The uninvoked skill's body never rides anywhere.
+            assert!(
+                !body.contains("Extract the tables first."),
+                "the uninvoked skill's body must not ride the prompt"
+            );
+        }
+        other => panic!("prompt_echo must complete Textual, got {other:?}"),
+    }
+}
+
+/// Issue #530: a pre-handshake ACP failure ("no discovery") must NOT wipe
+/// the previous turn's catalog -- the None-skip at `run_external_turn`'s
+/// snapshot is the only thing standing between the selector's cold-start
+/// cache and a silent clear. Drive a discovering turn on the fake CLI, then
+/// a turn whose adapter points at a nonexistent binary (spawn fails before
+/// the handshake, so the engine reports `None`), and assert the Session's
+/// cached catalog (and the recipe-header source) still holds the first
+/// turn's discovery.
+#[test]
+fn external_prehandshake_failure_preserves_cached_discovery() {
+    let (mut session, old_path, _guard) = external_session("text_reply");
+    let first = session.ask("what is the answer?");
+    assert!(
+        matches!(first, TurnOutcome::Textual { .. }),
+        "got {first:?}"
+    );
+    let catalog = session
+        .last_discovered_runtime()
+        .expect("a post-handshake turn reports a catalog");
+
+    // Second turn: same session, an adapter whose binary does not exist --
+    // the engine exits pre-handshake with `discovered_runtime: None`.
+    session.set_external_runtime(Some(AdapterSpec {
+        id: AdapterId::new("missing-cli"),
+        display_name: "missing-cli",
+        binary_names: &["definitely-not-on-path-530"],
+        argv: &[],
+        stream_format: toptopduck_lib::runtime::acp::adapter::StreamFormat::Acp,
+        probe_argv: None,
+        model_arg: None,
+        effort: None,
+    }));
+    let second = session.ask("this one cannot even spawn");
+    std::env::set_var("PATH", old_path);
+    // Issue #852: the engine-before-it-starts failure is a Runtime failure
+    // naming its face, not the neutral Execute bucket.
+    match second {
+        TurnOutcome::Failed(TurnFailure::Runtime { detail }) => {
+            assert!(
+                detail.contains("not found on PATH"),
+                "the missing-binary turn names its face: {detail}"
+            );
+        }
+        other => panic!("the missing-binary turn must fail as Runtime, got {other:?}"),
+    }
+
+    // The no-discovery turn preserved both the session-side snapshot and the
+    // recipe-header cache (one storage, issue #530).
+    assert_eq!(
+        session.last_discovered_runtime().as_ref(),
+        Some(&catalog),
+        "a pre-handshake failure must retain the previous catalog"
+    );
+    let config = session.runtime_facts();
+    assert_eq!(
+        config.cached_discovered.as_ref(),
+        Some(&catalog),
+        "the recipe-header cache must survive the no-discovery turn"
+    );
+}
+
+/// Issue #889 (review I4): the ACP-branch cancel-teardown wiring, end to
+/// end at the session layer. The scenario's gateway tool call targets a
+/// hung external MCP server (`FAKE_HANG_ON_CALL`, a 60 s budget -- only the
+/// cancel path can unstick it), the call parks inside the dispatch freeze,
+/// a token fire 500 ms in arms the session's teardown watcher, the
+/// transports die, the parked read returns, the bridge chain unblocks, and
+/// `ask` settles a BOUNDED terminal turn instead of wedging until the
+/// per-call budget. Without the arming at the ACP branch this turn holds
+/// the session lock for the full 60 s and the bound below fails.
+///
+/// The outcome shape follows the race the cancel lands in: with the unblock
+/// arriving promptly the CLI settles its prompt normally (an `EndTurn`), and
+/// content emitted AFTER the cancel is not folded into the prose (#628
+/// semantics -- the scenario's agent message lands post-cancel, so the
+/// terminal body is the empty pre-cancel prose); a slower settle rides the
+/// engine's cancel-grace path into `Cancelled`. Both are the bounded
+/// unwinding this wiring exists to guarantee; what must NOT happen is the
+/// turn resting on the parked read.
+#[test]
+fn external_cancel_unblocks_a_turn_parked_on_a_hung_mcp_call() {
+    use std::time::{Duration, Instant};
+
+    let (mut session, old_path, _guard) = external_session("gateway_mcp_call");
+    // Route the scenario's gateway tools/call at the hung server: display
+    // "HungMCP" slugifies to `hungmcp`, so the handle the fixture addresses
+    // is `mcp__hungmcp__echo`.
+    std::env::set_var("ACP_FAKE_GATEWAY_TOOL", "mcp__hungmcp__echo");
+    let mut env = BTreeMap::new();
+    env.insert("FAKE_HANG_ON_CALL".to_string(), "1".to_string());
+    let hang = McpServerConfig {
+        id: McpServerId("hung-wiring".into()),
+        display_name: "HungMCP".into(),
+        transport: McpTransport::stdio(env!("CARGO_BIN_EXE_mcp-fake-server"), Vec::new()),
+        env,
+        keychain_env_keys: Vec::new(),
+        keychain_header_keys: Vec::new(),
+        timeout_ms: Some(60_000),
+        enabled: true,
+    };
+    let keychain = common::keychain();
+    let inputs = TurnInputs {
+        mcp_servers: &[hang],
+        keychain: &keychain,
+        skills: &[],
+        skills_root: Path::new(""),
+        live_config: None,
+        user_invocations: &[],
+        disabled_skills: &[],
+        cli_tools: &[],
+        delegations: &[],
+    };
+    // An external MCP call gates (ADR-0108 classify) -- answer the card so
+    // the turn reaches the MCP park instead of resting on the approval.
+    struct AllowSink<'a> {
+        state: &'a ApprovalState,
+    }
+    impl ApprovalSink for AllowSink<'_> {
+        fn emit_request(&self, body: &ApprovalRequestBody) {
+            let id: uuid::Uuid = body.request_id.parse().expect("uuid");
+            self.state
+                .respond(id, ApprovalResponse::AllowOnce)
+                .expect("respond");
+        }
+        fn emit_resolved(&self, _: &ApprovalRequestBody, _: ApprovalResponse) {}
+    }
+    let approval = ApprovalState::new();
+    let sink = AllowSink { state: &approval };
+    // Fire the app token shortly in: begin_turn (inside ask) has long
+    // cleared by then, so the fire survives to the watcher.
+    let token = session.cancel_token();
+    std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(500));
+        token.request();
+    });
+    let started = Instant::now();
+    let outcome = session.ask_with_phase(
+        "call the hung gateway tool",
+        &approval,
+        &sink,
+        |_| {},
+        &inputs,
+    );
+    std::env::set_var("PATH", old_path);
+    std::env::remove_var("ACP_FAKE_GATEWAY_TOOL");
+    assert!(
+        started.elapsed() < Duration::from_secs(30),
+        "cancel ends the frozen MCP wait bounded, well under the 60s budget"
+    );
+    match outcome {
+        TurnOutcome::Cancelled(_) => {}
+        TurnOutcome::Textual { body, .. } => {
+            assert!(
+                !body.contains("done via gateway"),
+                "content emitted after the cancel must not fold into the \
+                 terminal prose (#628 semantics): {body:?}"
+            );
+        }
+        other => panic!(
+            "a token fire on a parked MCP call settles a terminal turn, \
+             got {other:?}"
+        ),
+    }
+}

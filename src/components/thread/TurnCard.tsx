@@ -1,0 +1,696 @@
+// TurnCard + TraceRoundBlock + TurnBody + AssumptionNote form the turn's chat
+// projection (ADR-0103, issue #609): a right-aligned user bubble (UserBubble,
+// question in full + asked_at + copy) over a left assistant stream -- header
+// annotations (active chip, skill drift), the round-grouped trace tucked
+// behind the turn-level process fold (issue #1282: per-round thinking folds +
+// connective prose + per-round step folds inside, one collapsed head),
+// the outcome body, and a closing meta row (reply copy + settled_at + the
+// outcome glyph for Materialized/Textual; Failed/Cancelled integrate their
+// glyph into the outcome card head, issue #720). App annotations all live on
+// the assistant side; the bubble carries only user output and conversation
+// facts. The head and the round skeleton ride the swap-stable
+// TurnExchangeFrame / RoundBody -- the modules the live exchange mounts too,
+// so the settle swap cannot move a member.
+
+import { useState, type ReactNode } from "react";
+import { FormattedMessage, useIntl } from "react-intl";
+import { cn } from "@/lib/utils";
+import { Button } from "../ui/button";
+import { DelegationTraceDialog } from "./DelegationTraceDialog";
+import { TraceRowList } from "./TraceRow";
+import { ArtifactCard } from "./ArtifactCard";
+import { ResultPreviewCard } from "./ResultPreviewCard";
+import { CopyButton } from "./CopyButton";
+import { FoldToggle } from "./FoldToggle";
+import { RoundProse } from "./RoundProse";
+import { RoundBody } from "./RoundBody";
+import { TurnProcessFold } from "./TurnProcessFold";
+import { TurnExchangeFrame } from "./TurnExchangeFrame";
+import { UsageFooter } from "./UsageFooter";
+import { StaleChip } from "./StaleChip";
+import {
+  HOVER_REVEAL_CLASS,
+  outcomeVisual,
+  selectDriftedSkills,
+  userInvocationNames,
+  type DatasetLabel,
+} from "./turn-visual";
+import type { StaleAnchor } from "../../types/dataset";
+import type { SkillEntry } from "../../types/skills";
+import type {
+  SubagentUsage,
+  ThinkingTrace,
+  TraceEntry,
+  TraceRound,
+  TurnRecord,
+} from "../../types/thread";
+import { formatTurnFailure, turnFailureDetail } from "../../lib/error-presentation";
+import { TechnicalDetailsFold } from "../common/TechnicalDetailsFold";
+import { formatTurnStamp } from "./turnStamp";
+
+interface TurnCardProps {
+  record: TurnRecord;
+  selectedResult: string | null;
+  onSelectResult: (referenceName: string) => void;
+  /** ADR-0124 (issue #1088): the artifact file on the workspace stage
+   *  (the artifact card's active mirror), or null. */
+  selectedFile?: string | null;
+  /** ADR-0124 (issue #1088): selects a manifest entry's file onto the
+   *  stage. Optional: absent handlers render the card read-only. */
+  onSelectFile?: (path: string) => void;
+  /** Issue #1093: promotes an in-stream fence chart's body onto the
+   *  workspace stage. Optional (the read-only precedent above): the
+   *  delegation dialog and the md artifact renderer never receive it, so
+   *  their fences stay static. */
+  onSelectViz?: (spec: string) => void;
+  /** Issue #1093: the staged spec text -- the in-stream selection mirror
+   *  (aria-current + ring) lights every fence whose body matches it. */
+  selectedVizSpec?: string | null;
+  staleAnchor: StaleAnchor | undefined;
+  /** Whether a matching source event follows this turn, i.e. the stale chip can
+   * actually perform its jump (ADR-0047). False on the resume / stale-map
+   * inconsistency edge case, which disables the chip instead of a silent no-op. */
+  hasJumpTarget: boolean;
+  /** Jump-to-source handler, bound to the pre-resolved target index. undefined
+   * when hasJumpTarget is false (the chip is disabled, so no handler is wired). */
+  onStaleChipJump: (() => void) | undefined;
+  mentionedDataset: DatasetLabel | null;
+  /** The thinking blocks whose fold mounts already expanded -- the live ->
+   *  settled continuity (issue #620): the thread injects the live turn's
+   *  open folds (keyed by the thinking block reference, which the settle
+   *  projection carries onto the trace's own round) into the entry appended
+   *  at the settle swap, so a fold the user opened while the turn ran stays
+   *  open across the swap. Undefined (or an empty set) is the default
+   *  collapsed posture. */
+  thinkingInitiallyExpanded?: ReadonlySet<ThinkingTrace>;
+  /** The registry index for skill drift detection (issue #381). undefined when
+   *  the caller does not wire the registry: drift detection is skipped (honest
+   *  degrade -- the timeline stays readable). */
+  skillIndex: ReadonlyMap<string, SkillEntry> | undefined;
+  /** Issue #758: fires this turn's question again as a fresh turn -- the
+   *  Failed/Cancelled continuation (ADR-0028 Why 2: these turns stay visible
+   *  AND continuable). undefined when the caller does not wire a retry: the
+   *  outcome cards keep their read-only shape (honest degrade). */
+  onRetryTurn: ((question: string) => void) | undefined;
+  /** Issue #758: the session busy gate (the composer's mirror) -- a turn or
+   *  mutation in flight; the retry button renders disabled until it clears. */
+  busy: boolean;
+  /** Issue #1005: the failed outcome card's technical-details fold mounts
+   *  already open -- the "latest settled turn is Failed" state, the same
+   *  predicate the sidebar dot derives from. Undefined (the default) keeps
+   *  the collapsed posture: every historical failure card, and every other
+   *  fold caller. Only the Failed branch consumes it. */
+  defaultOpenDetail?: boolean;
+}
+
+// One turn rendered as a chat exchange (ADR-0103): the user bubble (verbatim
+// question, full text) over the assistant stream. The four outcome kinds stay
+// distinguishable by text as well as by glyph/color (ADR-0028); the outcome
+// glyph rides the stream's closing meta row on Materialized/Textual and the
+// failure card head on Failed/Cancelled (issue #720). A stale Materialized turn ghosts
+// the whole exchange (opacity-50) and gains a clickable causal chip
+// (ADR-0041/0047). ADR-0103's attribution list names `stale`: the CHIP is
+// that app annotation and renders on the assistant side (inside the body);
+// the whole-exchange ghost + the question strike are the outcome-state
+// marking ADR-0041/0047 established -- ADR-0103 retires neither, and the
+// strike rides the question because the question's answer is what died.
+// Failed/Cancelled weaken the ASSISTANT side only (opacity-60 -- the failure
+// is the assistant's, the user's question never dims) but stay visible --
+// never collapsed away (ADR-0028 Why 2). The verbatim question and the chip's
+// dataset display name are layer-4 content (ADR-0039/0037) and pass through
+// untranslated.
+export function TurnCard({
+  record,
+  selectedResult,
+  onSelectResult,
+  selectedFile = null,
+  onSelectFile,
+  onSelectViz,
+  selectedVizSpec,
+  staleAnchor,
+  hasJumpTarget,
+  onStaleChipJump,
+  mentionedDataset,
+  thinkingInitiallyExpanded,
+  skillIndex,
+  onRetryTurn,
+  busy,
+  defaultOpenDetail,
+}: TurnCardProps) {
+  const intl = useIntl();
+  const isStale = !!staleAnchor;
+  // The outcome mark, computed once at the card level: the process fold's
+  // head word (issue #1282) and the meta row's glyph read the same
+  // vocabulary, so every outcome kind's mark serves both -- the head always
+  // speaks it, the meta row only mounts the glyph where one renders.
+  const outcome = outcomeVisual(intl, record.outcome, isStale);
+  const drifted = selectDriftedSkills(record, skillIndex);
+  // ADR-0028 Why 2 + ADR-0103 attribution: Failed/Cancelled weaken the stream
+  // only. Stale only lands on Materialized turns, so the two dims never stack.
+  const weakened = record.outcome.kind === "Failed" || record.outcome.kind === "Cancelled";
+  // Issue #720: Failed/Cancelled render their glyph at the outcome card head
+  // (TurnBody), so the closing meta row carries no glyph for them; the row
+  // renders only while it carries content (the glyph for the other outcomes,
+  // or the settle stamp).
+  const glyphInMeta = !weakened;
+  // ADR-0129 (issue #1270; the pill form is issue #1278's Decision 5
+  // recalibration): a usage-bearing turn always mounts the usage pill --
+  // always-visible display, not a hover fact.
+  const showsMetaRow =
+    glyphInMeta || record.settled_at !== undefined || record.usage !== undefined;
+  // The reply copy (ADR-0103 closing meta) exists only when the turn's answer
+  // IS text: a Textual turn's body. A Materialized turn carries prose (#847)
+  // but it is read in the rail, not copied (a deliberate exclusion);
+  // Failed/Cancelled carry markers -- nothing textual to copy.
+  const replyText = record.outcome.kind === "Textual" ? record.outcome.data.body : null;
+  // Pair each delegation row with ITS subtotal (ADR-0129 Decision 6), at
+  // TURN scope: the table collects one entry per evidence-bearing run in
+  // completion order, so the ordinal walks the trace's calls in order --
+  // across rounds, not per round (a same-spec re-delegation in a later
+  // round must reach the SECOND entry, not re-read the first). A
+  // delegation row that never ran (a refusal -- no sub-trace) consumes no
+  // ordinal; a run that failed closed (sub-trace present, no table entry)
+  // still does and shifts later same-name rows -- distinguishing it needs
+  // a Rust-side anchor, out of scope here. Recomputed per render (pure;
+  // the table is settle-frozen).
+  const subtotalByEntry = new Map<TraceEntry, SubagentUsage>();
+  {
+    const subagents = record.usage?.subagents;
+    const cursor = new Map<string, number>();
+    for (const round of record.trace) {
+      for (const entry of round.calls) {
+        if (entry.sub_rounds === undefined) continue;
+        const idx = cursor.get(entry.name) ?? 0;
+        cursor.set(entry.name, idx + 1);
+        const match = subagents?.filter((s) => s.name === entry.name)[idx];
+        if (match) subtotalByEntry.set(entry, match);
+      }
+    }
+  }
+  return (
+    <TurnExchangeFrame
+      question={record.question}
+      askedAt={record.asked_at}
+      invokedSkills={userInvocationNames(record)}
+      isStale={isStale}
+      runtime={record.provenance.runtime}
+      mentionedDataset={mentionedDataset}
+      drifted={drifted}
+      weakened={weakened}
+    >
+      <TurnProcessFold
+        trace={record.trace}
+        label={outcome.label}
+        askedAt={record.asked_at}
+        settledAt={record.settled_at}
+      >
+        {record.trace.map((round, i) => (
+          // The trace is append-only within a turn and never reordered, so the
+          // index is a stable key (the same YAGNI call the thread makes).
+          <TraceRoundBlock
+            key={i}
+            round={round}
+            thinkingInitiallyExpanded={thinkingInitiallyExpanded}
+            onSelectViz={onSelectViz}
+            selectedVizSpec={selectedVizSpec}
+            subtotalByEntry={subtotalByEntry}
+          />
+        ))}
+      </TurnProcessFold>
+      <TurnBody
+        record={record}
+        selectedResult={selectedResult}
+        onSelectResult={onSelectResult}
+        onSelectViz={onSelectViz}
+        selectedVizSpec={selectedVizSpec}
+        staleAnchor={staleAnchor}
+        hasJumpTarget={hasJumpTarget}
+        onStaleChipJump={onStaleChipJump}
+        onRetryTurn={onRetryTurn}
+        busy={busy}
+        defaultOpenDetail={defaultOpenDetail}
+      />
+      {/* ADR-0124 (issue #1088): the turn's delivered-files card, the
+            ResultPreviewCard's sibling at the same end-of-stream rhythm. It
+            renders for EVERY outcome kind -- the manifest is turn-level and
+            settle-frozen, not a Materialized byproduct -- so it hangs on the
+            stream, never inside TurnBody's per-outcome branches. */}
+      {record.artifacts !== undefined && record.artifacts.length > 0 && (
+        <ArtifactCard
+          artifacts={record.artifacts}
+          activePath={selectedFile}
+          stale={isStale}
+          onSelectFile={onSelectFile}
+        />
+      )}
+      {/* Closing meta row (ADR-0103): the outcome glyph ends the exchange --
+            state, always visible -- for Materialized/Textual (issue #720 moves
+            the Failed/Cancelled glyph to the failure card head). The settle
+            facts (reply copy + stamp, honest degrade: no settled_at recorded ->
+            no time element) are hover-revealed alongside it (HOVER_REVEAL_CLASS
+            rides the assistant-stream group). */}
+      {showsMetaRow && (
+        // A <div>: the row is a control cluster (the outcome glyph, the
+        // usage pill's dialog trigger, copy), not prose -- the flex layout
+        // owns it, so it never becomes a <p>.
+        <div className="turn-meta m-0 mt-0.5 flex items-center gap-1.5 text-xs text-muted-foreground">
+          {/* The glyph rides the card-level mark (see above); Failed/Cancelled
+                never mount it here -- their glyph derives in TurnBody's card
+                head, and the process fold's head word carries the vocabulary. */}
+          {glyphInMeta && <OutcomeGlyph visual={outcome} />}
+          {/* ADR-0129 Decision 5 (issue #1270; pill form #1278): the
+              always-visible usage pill -- outside the hover-reveal span by
+              decision (usage is primary reading surface, not a hover
+              fact). */}
+          {record.usage !== undefined && <UsageFooter usage={record.usage.total} />}
+          <span className={cn("meta-reveal flex items-center gap-1.5", HOVER_REVEAL_CLASS)}>
+            {replyText !== null && (
+              <CopyButton
+                text={replyText}
+                label={intl.formatMessage({
+                  id: "thread.copy.reply",
+                  defaultMessage: "Copy reply",
+                })}
+              />
+            )}
+            {record.settled_at !== undefined && (
+              <time dateTime={new Date(record.settled_at).toISOString()}>
+                {formatTurnStamp(record.settled_at, intl)}
+              </time>
+            )}
+          </span>
+        </div>
+      )}
+    </TurnExchangeFrame>
+  );
+}
+
+// The outcome glyph span (ADR-0047/0050): Lucide icon + accessible label +
+// text-* tone, shared by the closing meta row (Materialized/Textual) and the
+// failure card head (Failed/Cancelled, issue #720) so the glyph renders
+// identically wherever it lands.
+function OutcomeGlyph({ visual }: { visual: ReturnType<typeof outcomeVisual> }) {
+  const { Icon, label, tone } = visual;
+  return (
+    <span
+      className={cn(
+        "outcome-icon inline-flex items-center justify-center w-4 h-4 shrink-0",
+        tone,
+      )}
+      role="img"
+      aria-label={label}
+    >
+      <Icon aria-hidden="true" className="w-4 h-4" />
+    </span>
+  );
+}
+
+// One round of the round-grouped trace (ADR-0103, calibrating ADR-0078): the
+// skeleton (thinking fold + connective prose) rides RoundBody -- the module
+// the live round block mounts too, so the settle swap does not move them;
+// `thinkingInitiallyExpanded` seeds the fold with the live turn's open
+// posture at the settle swap (issue #620). This adapter owns the round's
+// step fold (default collapsed, ADR-0078 long-rail posture). Fold state is
+// session-ephemeral UI state; the trace data persists on the TurnRecord /
+// recipe.
+function TraceRoundBlock({
+  round,
+  thinkingInitiallyExpanded,
+  onSelectViz,
+  selectedVizSpec,
+  subtotalByEntry,
+}: {
+  round: TraceRound;
+  thinkingInitiallyExpanded: ReadonlySet<ThinkingTrace> | undefined;
+  onSelectViz?: (spec: string) => void;
+  selectedVizSpec?: string | null;
+  /** ADR-0129 Decision 6 (issue #1270): the turn-scoped entry-to-subtotal
+   *  pairing computed once in the card (see TurnCard) -- a delegation row
+   *  annotates its dialog with ITS run's subtotal, never a same-name
+   *  sibling's (external-runtime turns carry none). */
+  subtotalByEntry: ReadonlyMap<TraceEntry, SubagentUsage>;
+}) {
+  const [stepsExpanded, setStepsExpanded] = useState(false);
+  const { thinking, text, calls } = round;
+  return (
+    <RoundBody
+      thinking={thinking}
+      text={text}
+      initialThinkingExpanded={
+        thinking !== undefined && (thinkingInitiallyExpanded?.has(thinking) ?? false)
+      }
+      onSelectViz={onSelectViz}
+      selectedVizSpec={selectedVizSpec}
+    >
+      {calls.length > 0 && (
+        // The round's step fold: the call count reads "Trace · N calls" so a
+        // rail scan shows which rounds made multiple calls without expanding.
+        <>
+          <FoldToggle
+            hookClass="trace-toggle"
+            expanded={stepsExpanded}
+            onToggle={() => setStepsExpanded((v) => !v)}
+          >
+            <FormattedMessage
+              id="thread.trace.toggle"
+              defaultMessage="Trace · {count} {count, plural, one {call} other {calls}}"
+              values={{ count: calls.length }}
+            />
+          </FoldToggle>
+          {/* renderSubTrace (issue #934): a settled delegation entry carries its
+              nested sub-trace; the affordance opens the modal viewer. */}
+          {stepsExpanded && (
+            <TraceRowList
+              entries={calls}
+              renderSubTrace={(entry) => (
+                <DelegationTraceDialog entry={entry} subtotal={subtotalByEntry.get(entry)} />
+              )}
+            />
+          )}
+        </>
+      )}
+    </RoundBody>
+  );
+}
+
+// The provider's optional assumption note (ADR-0009/0018), rendered as a
+// correctable side note on both Materialized and Textual turns. The assumption
+// text is layer-3 LLM content (ADR-0052) and passes through the {text}
+// placeholder untranslated; only the "Assumption:" prefix is chrome. Extracted
+// so the rendering isn't duplicated across the two outcomes that carry it.
+// mt-0.5 mirrors the prose root's offset so the note keeps the same gap
+// below whatever precedes it -- the RoundProse block on Textual (issue
+// #827) or on a Materialized turn carrying a body (#847), and the inline
+// link/chip row inside the Materialized <p> when no body rode the turn;
+// the offset is new with #827 on both faces (the note previously carried
+// no margin).
+function AssumptionNote({ assumption }: { assumption: string | null }) {
+  const intl = useIntl();
+  if (!assumption) return null;
+  return (
+    <span className="assumption mt-0.5 block text-xs italic text-muted-foreground">
+      {intl.formatMessage(
+        { id: "result.assumption", defaultMessage: "Assumption: {text}" },
+        { text: assumption },
+      )}
+    </span>
+  );
+}
+
+interface TurnBodyProps {
+  record: TurnRecord;
+  selectedResult: string | null;
+  onSelectResult: (referenceName: string) => void;
+  onSelectViz?: (spec: string) => void;
+  selectedVizSpec?: string | null;
+  staleAnchor: StaleAnchor | undefined;
+  hasJumpTarget: boolean;
+  onStaleChipJump: (() => void) | undefined;
+  onRetryTurn: ((question: string) => void) | undefined;
+  busy: boolean;
+  /** Issue #1005: the Failed branch hands this to the technical-details
+   *  fold's defaultOpen -- see TurnCardProps. */
+  defaultOpenDetail?: boolean;
+}
+
+// The shared shell of the Failed/Cancelled outcome cards (issue #720): one
+// constant so the two kinds stay isomorphic -- Failed tints it destructive,
+// Cancelled mutes it; only the tint utilities and the head content differ.
+// The card still hugs its content (the assistant stream is items-start),
+// but max-w-full caps the hug at the stream width: as a non-stretched
+// flex item its min-content (its longest unbreakable run) stretches it past the
+// column and the rail's overflow-x crop makes the spill unreachable
+// (issue #862, the #860 cap's non-table twin).
+const OUTCOME_CARD_CLASS = "mt-1 max-w-full rounded-md border px-2.5 py-2 text-xs leading-snug";
+
+function TurnBody({
+  record,
+  selectedResult,
+  onSelectResult,
+  onSelectViz,
+  selectedVizSpec,
+  staleAnchor,
+  hasJumpTarget,
+  onStaleChipJump,
+  onRetryTurn,
+  busy,
+  defaultOpenDetail,
+}: TurnBodyProps) {
+  const intl = useIntl();
+  // Issue #758: the Failed/Cancelled continuation action, shared by the two
+  // outcome cards (isomorphic, like their shell). A function, not a hoisted
+  // element, per the file's derive-here convention (the meta-row glyph's
+  // twin): Materialized/Textual renders never evaluate the retry JSX --
+  // including its formatMessage -- for branches that cannot use it. Fires
+  // the turn's verbatim question as a fresh turn; disabled while one runs.
+  // Absent when the caller wires no handler -- the cards keep their
+  // read-only shape.
+  const renderRetry = () =>
+    onRetryTurn && (
+      <Button
+        variant="outline"
+        size="sm"
+        className="mt-1.5"
+        disabled={busy}
+        onClick={() => onRetryTurn(record.question)}
+        aria-label={intl.formatMessage({
+          id: "thread.outcome.retryLabel",
+          defaultMessage: "Retry this question",
+        })}
+      >
+        <FormattedMessage id="common.retry" defaultMessage="Retry" />
+      </Button>
+    );
+  switch (record.outcome.kind) {
+    case "Materialized": {
+      const { promotions, body, assumption } = record.outcome.data;
+      // ADR-0084: the chain tail is the primary result (the answer the question
+      // produced); earlier promotions are intermediate results, rendered as a
+      // muted "derived from" line so the lineage stays visible without
+      // competing with the primary link.
+      const primary = promotions[promotions.length - 1];
+      const antecedents = promotions.slice(0, -1);
+      if (!primary) return null;
+      const active = primary.dataset.reference_name === selectedResult;
+      return (
+        <>
+          {/* max-w-full + break-words: the link row rides the stream as a
+              non-stretched flex item (the #860 prose twin's branch-mate),
+              and a long unbroken dataset name in the antecedents line or
+              the result link stretches its min-content past the column --
+              the rail's overflow-x crop eats it (issue #872). break-words
+              sits here once and inherits into both riders; the button
+              below carries its own cap so the break can engage inside it. */}
+          <p className="turn-outcome mt-1 max-w-full break-words text-xs leading-snug">
+            {antecedents.length > 0 && (
+              <span className="antecedents block mb-0.5 text-muted-foreground">
+                <FormattedMessage
+                  id="thread.antecedents"
+                  defaultMessage="Derived from {names}"
+                  values={{
+                    names: intl.formatList(
+                      antecedents.map((p) => p.dataset.reference_name),
+                      { type: "conjunction" },
+                    ),
+                  }}
+                />
+              </span>
+            )}
+            {/* result-link is a real <button> (clickable, focusable) stripped
+                of native chrome by appearance-none + bg-transparent -- the
+                ADR-0067 bareButtonReset pair without border-0, since the
+                rebuild below re-establishes the 1px transparent border the
+                active-state swap paints. Never [all:unset] here: Tailwind v4
+                emits that arbitrary property after the named utilities in
+                the same layer, so it silently clobbers display/max-width
+                back (engine-verified in the #872 review). `active`/`stale`
+                are hook classes (semantic + test selectors) -- their visual
+                lands on the same element via the conditional utilities
+                below. max-w-full is the element-level cap: break-words
+                inherited from the paragraph only joins the laid-out line,
+                not the intrinsic-size math, so the inline-block needs its
+                own clamp to stop a long dataset name from outrunning the
+                column (issue #872). */}
+            <button
+              type="button"
+              className={cn(
+                "result-link appearance-none bg-transparent cursor-pointer inline-block max-w-full text-primary",
+                "px-1.5 py-0.5 rounded-md border border-transparent",
+                "hover:bg-accent",
+                active && "active font-semibold border-primary",
+                staleAnchor && "stale text-muted-foreground border-dashed",
+              )}
+              aria-current={active ? "true" : undefined}
+              onClick={() => onSelectResult(primary.dataset.reference_name)}
+            >
+              <FormattedMessage
+                id="result.title"
+                defaultMessage="Result: {name}"
+                values={{ name: primary.dataset.reference_name }}
+              />
+            </button>
+            {staleAnchor && (
+              <StaleChip
+                reason={staleAnchor.reason}
+                hasJumpTarget={hasJumpTarget}
+                onJump={onStaleChipJump}
+              />
+            )}
+          </p>
+          {/* #847: the terminal text is the turn's prose answer, rendered
+              through the same RoundProse markdown pipeline as a Textual body
+              (issue #827) -- it previously rode the assumption side-note slot
+              and displayed as raw markdown. The prose sits between the result
+              link row and the preview card, mirroring the Textual branch's
+              caption-row -> prose -> note rhythm. */}
+          {body && (
+            <RoundProse text={body} onSelectViz={onSelectViz} selectedVizSpec={selectedVizSpec} />
+          )}
+          <AssumptionNote assumption={assumption} />
+          {/* ADR-0083 (issue #298): the primary result's inline preview card --
+              the windowed sample (first rows, ADR-0026) for a rail-scan glance
+              at the answer. Clicking it selects the result (the caller opens
+              the workspace); the active state mirrors the viewed selection
+              back (dual-view linkage). Antecedent promotions carry no card --
+              the chain tail is the answer. */}
+          <ResultPreviewCard
+            dataset={primary.dataset}
+            active={active}
+            stale={!!staleAnchor}
+            onSelect={() => onSelectResult(primary.dataset.reference_name)}
+          />
+        </>
+      );
+    }
+    case "Textual": {
+      const { text_kind, body, assumption } = record.outcome.data;
+      // The Agent kind (the tool-calling contract's terminal text, ADR-0077)
+      // renders as a plain answer -- the body IS the reply, so no kind badge.
+      // The legacy Clarify / Refuse kinds keep their action-signaling badge.
+      // Exhaustiveness guard: a future TextKind member must add a branch
+      // here -- the outer switch's never-check cannot see the nested union,
+      // and a ternary fallthrough would silently render a new kind badgeless.
+      let badge: ReactNode = null;
+      switch (text_kind) {
+        case "Clarify":
+          badge = <FormattedMessage id="thread.outcome.clarify" defaultMessage="Needs clarification" />;
+          break;
+        case "Refuse":
+          badge = <FormattedMessage id="thread.outcome.refused" defaultMessage="Cannot fulfill" />;
+          break;
+        case "Agent":
+          break;
+        default: {
+          const unhandled: never = text_kind;
+          throw new Error(`unhandled textual kind: ${JSON.stringify(unhandled)}`);
+        }
+      }
+      // The reply renders through the shared RoundProse markdown pipeline
+      // (issue #827): the terminal answer is the longest markdown carrier,
+      // and every kind -- Agent, Clarify, Refuse -- rides the same path with
+      // no fork. <div>, not <p>: the prose renders block-level markdown
+      // (headings, code fences, tables) that cannot legally nest in a <p>
+      // (the Failed card's precedent). The container carries no tier or
+      // spacing of its own: the badge row keeps the caption tier, RoundProse
+      // brings the conversation tier, and the rows pace themselves -- the
+      // prose root's mt-0.5 and the note's mt-0.5 (container space-y-* would
+      // be inert here: Tailwind v4's space-y emits zero-specificity
+      // :where(& > :not(:last-child)) margins, which lose to the badge's and
+      // the prose root's m-0 on non-last rows while the note rides the
+      // selector's last-child exemption -- only a future non-last child
+      // without its own m-0 would take the space-y margin).
+      return (
+        // max-w-full: the outcome rides the stream as a non-stretched flex
+        // item, so a wide markdown table's min-content stretches it past
+        // the card (issue #860). The cap must sit HERE -- the prose root's
+        // own clamp cannot reach this layer (its containing block is this
+        // container), the #826 trace-round precedent's textual twin.
+        <div className={cn("turn-outcome textual mt-1 max-w-full", text_kind.toLowerCase())}>
+          {badge && (
+            // The kind badge is chrome, not discourse: it stands on its own
+            // caption row ahead of the prose, keeping the caption tier
+            // instead of riding the conversation tier.
+            <p className="textual-kind m-0 text-xs text-muted-foreground">{badge}</p>
+          )}
+          <RoundProse text={body} onSelectViz={onSelectViz} selectedVizSpec={selectedVizSpec} />
+          <AssumptionNote assumption={assumption} />
+        </div>
+      );
+    }
+    case "Failed": {
+      // Outcome C (issue #125): render by TurnFailure kind via the locale
+      // catalog (no backend Display string crosses IPC). Execute / Runtime /
+      // Resource / InvalidConfig carry a technical detail under the collapsed
+      // fold. Issue #720: one
+      // destructive tint card -- the outcome glyph at the card head with the
+      // reason on the same line, the fold inside the card below them -- taking
+      // the tinted bg + border treatment the shadcn Alert destructive variant
+      // consumes (border-destructive/40 bg-destructive/10, DESIGN.md Alerts).
+      const failure = record.outcome.data;
+      const detail = turnFailureDetail(failure);
+      return (
+        // <div>, not <p>: a <p> cannot legally contain the <details> fold.
+        <div
+          className={cn(
+            OUTCOME_CARD_CLASS,
+            "turn-outcome failed border-destructive/40 bg-destructive/10",
+          )}
+        >
+          <div className="flex items-center gap-1.5">
+            {/* Stale never lands here (Materialized only), so the visual is
+                derived with stale=false. */}
+            <OutcomeGlyph visual={outcomeVisual(intl, record.outcome, false)} />
+            {/* min-w-0 + break-words: the span is a flex item of the head
+                row, so min-width:auto floors its shrink at the longest
+                unbreakable run and break-words alone never joins the
+                intrinsic-size math -- the locale reason must wrap inside
+                the capped card, not stretch past it (issue #862). */}
+            <span className="failed-reason text-destructive min-w-0 break-words">
+              {formatTurnFailure(failure, intl)}
+            </span>
+          </div>
+          <TechnicalDetailsFold detail={detail} defaultOpen={defaultOpenDetail} />
+          {renderRetry()}
+        </div>
+      );
+    }
+    case "Cancelled": {
+      // Outcome D, same card shape as Failed but muted (issue #720): the
+      // glyph + outcome label carry the whole body -- no failure-detail
+      // text, no fold -- so the card reads as the weakened-grey sibling of
+      // the Failed card. #883: the
+      // label (and glyph, via outcomeVisual) splits on the cancel reason --
+      // a watchdog kill reads as the no-progress timeout, a manual stop as
+      // cancelled; the single visual keeps the visible text and the glyph's
+      // aria-label from drifting.
+      const visual = outcomeVisual(intl, record.outcome, false);
+      return (
+        <div
+          className={cn(
+            OUTCOME_CARD_CLASS,
+            "turn-outcome cancelled bg-muted text-muted-foreground",
+          )}
+        >
+          <div className="flex items-center gap-1.5">
+            <OutcomeGlyph visual={visual} />
+            {/* Same wrap affordance as the Failed reason span (#862): the
+                label is a flex item whose min-width:auto floors its shrink
+                at the longest unbreakable run -- the watchdog copy runs
+                longer than the old cancel label, so it must
+                break inside the capped card, not stretch past it. */}
+            <span className="cancelled-reason min-w-0 break-words">{visual.label}</span>
+          </div>
+          {renderRetry()}
+        </div>
+      );
+    }
+    default: {
+      // Exhaustiveness guard: a future TurnOutcome variant must add a case here,
+      // mirroring Rust's compile-time match exhaustiveness. `types/thread.ts` is the
+      // hand-maintained mirror, so the TS compiler won't catch a missing branch
+      // without this `never` check.
+      const unhandled: never = record.outcome;
+      throw new Error(`unhandled turn outcome: ${JSON.stringify(unhandled)}`);
+    }
+  }
+}

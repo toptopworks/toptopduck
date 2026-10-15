@@ -19,9 +19,9 @@ jobs:
     name: Frontend (lint + typecheck + build + vitest)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
           node-version: '22'
           cache: npm
@@ -31,6 +31,12 @@ jobs:
       - name: Lint (ESLint)
         run: npm run lint -- --max-warnings 0
 
+      # i18n catalog guard (ADR-0052, issue #78): @formatjs/cli extract recovers
+      # the source message-id set; the check script asserts source == en-US == zh-CN
+      # key sets so a new <FormattedMessage> can never ship without both translations.
+      - name: i18n catalog alignment
+        run: npm run i18n:check
+
       # `npm run build` = tsc --noEmit && vite build — covers type-checking + bundle.
       - name: Type-check & build
         run: npm run build
@@ -38,18 +44,24 @@ jobs:
       - name: Test (Vitest)
         run: npm test
 
+  # Three-OS matrix (ADR-0131): clippy runs on every leg as the check-profile
+  # --all-targets compile of the platform dependency graph — that compile is
+  # the multi-OS coverage. fmt and tests stay ubuntu-only: fmt results are
+  # platform-independent, and the suite has only ever run on Linux CI.
   rust:
-    name: Rust (fmt + clippy + test)
-    runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: src-tauri
+    name: Rust (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       # Tauri v2 compiles the webview layer on Linux even when bundling is off;
       # duckdb "bundled" also needs a C/C++ toolchain (build-essential).
       - name: Install Tauri Linux build dependencies
+        if: runner.os == 'Linux'
         run: |
           sudo apt-get update
           sudo apt-get install -y \
@@ -70,14 +82,30 @@ jobs:
       # Caches cargo registry + target — critical: duckdb "bundled" compiles
       # DuckDB from C++ source (~5-8 min cold); this drops warm runs to ~2 min.
       - uses: Swatinem/rust-cache@v2
+
+      # tauri-build validates bundle.externalBin entries on every cargo
+      # compile of src-tauri, so the sidecar name must be staged before
+      # clippy/test can build the app crate. --debug content is fine here:
+      # only existence matters to the build script, and build.yml restages
+      # the release binary via beforeBuildCommand at bundle time.
+      - uses: actions/setup-node@v5
         with:
-          workspaces: src-tauri
+          node-version: '22'
+
+      - name: Stage ACP bridge sidecar name
+        run: cargo build -p acp-bridge && node scripts/stage-acp-bridge.mjs --debug
 
       - name: rustfmt
-        run: cargo fmt --check
+        if: runner.os == 'Linux'
+        run: cargo fmt --all --check
 
       - name: clippy
-        run: cargo clippy --all-targets -- -D warnings
+        run: cargo clippy --workspace --all-targets -- -D warnings
 
       - name: test
-        run: cargo test
+        if: runner.os == 'Linux'
+        run: cargo test --workspace
+
+  # Release face (ADR-0131): the bundle legs live in build.yml with a
+  # push-main-only trigger — this workflow carries the quality gates only
+  # (PR / push develop / push main all run the same face, no skipped jobs).

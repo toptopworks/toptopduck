@@ -1,0 +1,74 @@
+import type {
+  DatasetDescriptor,
+  DatasetPrivacy,
+  GuidanceReason,
+  GuidanceSheet,
+  StaleReason,
+} from "../../../types/dataset";
+import type { DatasetSamplePage } from "../DatasetDetail";
+import { src } from "../../../session/__tests__/fixtures";
+
+// Shared dataset-domain test fixtures (ADR-0011 defaults). The zh-CN
+// IntlProvider wrapper used by the dataset component tests lives in the common
+// test helpers (../../common/__tests__/helpers) and is imported per test file.
+// The base descriptor shape derives from the ONE shared builder (the session
+// fixtures' src(), whose cross-directory consumers it already documents) --
+// only the UI-test-relevant surface (two named columns, a 5-row count, richer
+// sample) rides as overrides, so the two hand-rolled minimal-but-real shapes
+// cannot drift apart (ADR-0123 test convergence).
+
+// Compact two-state constructors for readable guidance fixtures (#751): the
+// NeedsGuidance / AutoTidied union literals inline verbosely, and a
+// hand-written literal that drifts from the wire shape is exactly the
+// mismatch the constructors rule out at compile time.
+export function needsGuidance(reason: GuidanceReason): GuidanceSheet["state"] {
+  return { kind: "NeedsGuidance", data: { reason } };
+}
+
+export function autoTidied(headerRow: number): GuidanceSheet["state"] {
+  return { kind: "AutoTidied", data: { header_row: headerRow } };
+}
+
+export const mockDataset: DatasetDescriptor = {
+  ...src("people"),
+  row_count: 5,
+  fingerprint: "abc123def4560000000000000000000000000000000000000000000000000999",
+  columns: [
+    { name: "id", canonical_type: "BIGINT" },
+    { name: "name", canonical_type: "VARCHAR" },
+  ],
+  sample: [
+    ["1", "Alice"],
+    ["2", "Bob"],
+  ],
+};
+
+// The ADR-0011 default: samples on, no type-only columns.
+export const defaultPrivacy: DatasetPrivacy = { send_samples: true, type_only_columns: [] };
+
+// The live preview page fixture (issue #1061): its row values ride nowhere in
+// mockDataset.sample, so a hit proves the preview renders the PROP page, not
+// the retired frozen arm.
+export const mockSamplePage: DatasetSamplePage = {
+  columns: [
+    { name: "id", canonical_type: "BIGINT" },
+    { name: "name", canonical_type: "VARCHAR" },
+  ],
+  rows: [
+    ["1", "Zoe"],
+    ["2", "Yan"],
+  ],
+};
+
+// A stale-state descriptor fixture (issue #40, ADR-0013): the anchor rides
+// the descriptor; the reason selects the shared causal verb wording.
+export function staleDataset(reason: StaleReason): DatasetDescriptor {
+  return {
+    ...mockDataset,
+    stale: {
+      reference_name: mockDataset.reference_name,
+      display_name: mockDataset.display_name,
+      reason,
+    },
+  };
+}

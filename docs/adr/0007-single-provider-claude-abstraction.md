@@ -1,5 +1,7 @@
 # LLM provider: single provider (Claude) behind an abstraction
 
+> 本 ADR 的「v1 锁定单一提供商 Claude」「不为多提供商预先实现」决策**被 ADR-0076 / 0081 取代**为双运行时架构（内置 BYOK Rust 循环 + 外部 CLI agent）；本 ADR「背后留薄抽象层（Provider 接口），加提供商是配置而非重写」结论**保留**——Provider 层降为内置运行时接入层，多协议已由 ADR-0064 兑现。见 ADR-0076。
+
 ## Decision
 
 v1 锁定**单一提供商 Claude**（SQL 与结构化输出能力一线），背后留**薄抽象层（Provider 接口）**——未来加提供商是"配置"而非"重写"。**不**为多提供商预先实现（YAGNI）。
@@ -26,3 +28,4 @@ BYOK 已定（ADR-0006）。需决定单家 vs 多家、选哪家。
 - **v1 默认 Sonnet 级（钉版本，如 `claude-sonnet-4-6`）**：SQL + 结构化输出一线、成本可控；用户可切顶级（Fable/Opus）/Haiku。选型须满足结构化输出可靠（耦合 ADR-0009 + ADR-0016）。
 - 加提供商是未来扩展点，不阻塞 v1。
 - 薄抽象的 v1 形态已落地（ADR-0019）：单一 Anthropic 协议 + 可配 `baseURL`；Bedrock/Vertex 异构签名为 v2 扩展点。
+- **被 ADR-0064 校准**：薄抽象（`Provider` trait 协议无关）结论兑现——新增 `openai` 协议适配器为第二个实现；「单一 Claude 质量命脉」收窄结论推翻为「多协议、语义质量仍靠模型」。见 ADR-0064。

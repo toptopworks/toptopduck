@@ -1,0 +1,659 @@
+import { useEffect, useState } from "react";
+import { FormattedMessage, useIntl } from "react-intl";
+import { Pencil, Plus, RefreshCw, RotateCcw, Terminal, Trash2 } from "lucide-react";
+
+import type { AppConfig } from "../../types/app-config";
+import type { BuiltinScanEntry, CliToolConfig } from "../../types/cli-tool";
+import {
+  removeCliTool,
+  rescanBuiltinCliTools,
+  restoreBuiltinCliTool,
+  upsertCliTool,
+} from "../../api";
+import { log } from "../../lib/log";
+import { cn } from "../../lib/utils";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "../ui/alert-dialog";
+import { Switch } from "../ui/switch";
+import {
+  HeaderActionButton,
+  NameBadge,
+  RowActionButton,
+  PaneHeader,
+  SettingsCard,
+} from "./settings-chrome";
+import { blankCliTool } from "../../types/cli-tool";
+import { CliToolForm } from "./CliToolForm";
+import { useRegistryPane } from "./useRegistryPane";
+import { useWriteGeneration } from "./useWriteGeneration";
+
+// The pane's navigation name: the list header and the create/edit form share
+// it -- the form keeps the name for section context, without the list-only
+// action buttons.
+const NAV_TITLE = (
+  <FormattedMessage id="settings.nav.cliTools" defaultMessage="CLI Tools" />
+);
+
+// The searchable injection this pane passes the registry pane: a constant,
+// because the filter face rides unused (no search box renders). Hoisted so
+// the injection's identity is stable across renders (issue #1126).
+const SEARCHABLE = () => "";
+
+// Registered CLI tools settings pane (issue #671, ADR-0108): the second
+// external tool source. Structured like the MCP pane -- "list" shows every
+// registered tool with a per-row enable toggle + Edit/Delete, "form" shows
+// the add/edit form -- minus the probe / import surfaces (v1 CLI has
+// neither: registration never blocks on the executable resolving, and there
+// is no external config to import). Every write goes through the backend
+// read-modify-write commands, which already persisted and return the
+// updated FULL app-config (ADR-0109 Decision 9) -- so each write syncs
+// shell state ONLY (the setDefaultRuntime state-only-sync precedent), never
+// a second disk write over a snapshot that read nothing.
+
+/** The gated row actions (the delete and the restore both overwrite user
+ * state irreversibly, so both route through the shared confirmation
+ * dialog before their IPC lands). */
+type ConfirmTarget = { kind: "delete" | "restore"; name: string };
+
+export function CliSection({
+  appConfig,
+  onCliToolsChanged,
+}: {
+  appConfig: AppConfig;
+  onCliToolsChanged: (cfg: AppConfig) => void;
+}) {
+  const intl = useIntl();
+  const [formTarget, setFormTarget] = useState<{
+    tool: CliToolConfig;
+    isEdit: boolean;
+  } | null>(null);
+  const [confirmTarget, setConfirmTarget] = useState<ConfirmTarget | null>(null);
+
+  const tools = appConfig.cli_tools.tools;
+  const [scan, setScan] = useState<BuiltinScanEntry[] | null>(null);
+  const [scanning, setScanning] = useState(false);
+  // The registration-list mirror of the builtin panel's conflict rows
+  // (issue #683): a user row whose name a shipped definition owns gets the
+  // same annotation, derived from the same snapshot. Null scan (mount
+  // rescan failed) shows no badges -- there is no panel to mirror either.
+  const conflictingNames = new Set(
+    (scan?.filter((entry) => entry.state === "conflict") ?? []).map(
+      (entry) => entry.name,
+    ),
+  );
+
+  // The pane machine (issue #1123): the error face, the never-rejects write
+  // wrapper, and the two busy lanes. This pane has no search box, so the
+  // filter face rides unused (the searchable injection stays a constant).
+  const {
+    error,
+    clearError,
+    runCommit,
+    togglingKey,
+    toggle,
+    confirmBusy,
+    runConfirm,
+  } = useRegistryPane(tools, SEARCHABLE);
+  // The write-generation guard (issue #683): advances with every APPLIED
+  // user write. A rescan response that arrives after a user write landed
+  // reads a stale config snapshot (the backend read it before the write),
+  // so applying it would silently roll the user's change back.
+  const { applyUserWrite, current, syncIfCurrent } = useWriteGeneration(
+    onCliToolsChanged,
+  );
+
+  /** Opening the pane refreshes the detection snapshot (issue #675): one
+   * read-modify-write IPC returns the full config + snapshot together. A
+   * mount failure leaves no visible UI state -- it lands one log.warn so a
+   * persistently failing scan is diagnosable, and the explicit Rescan
+   * button still surfaces errors through the shared error lane. */
+  useEffect(() => {
+    let cancelled = false;
+    const gen = current();
+    rescanBuiltinCliTools()
+      .then((result) => {
+        if (cancelled) return;
+        setScan(result.scan);
+        syncIfCurrent(gen, result.config);
+      })
+      .catch((e) => {
+        // Silent in the UI on mount; the manual rescan surfaces errors.
+        log.warn("CliSection", "builtin CLI mount rescan failed", e);
+      });
+    return () => {
+      cancelled = true;
+    };
+    // `onCliToolsChanged` is a stable pass-through from the settings view
+    // (the same mount-once contract as the other settings panes).
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  /** The manual rescan (issue #675): refresh the detection snapshot and
+   * sync the registry view from the returned full config; also the
+   * conflict catch-up point after the user disposes of a clashing entry.
+   * Guarded like the mount rescan: a user write landing while this scan is
+   * in flight skips the (stale) config sync; the snapshot still applies. */
+  async function handleRescan() {
+    setScanning(true);
+    clearError();
+    const gen = current();
+    await runCommit(async () => {
+      const result = await rescanBuiltinCliTools();
+      setScan(result.scan);
+      syncIfCurrent(gen, result.config);
+      return null;
+    });
+    setScanning(false);
+  }
+
+  /** The row-level enable toggle (ADR-0106 single axis): one-field upsert
+   *  over the same command the form uses. The returned full config syncs
+   *  shell state wholesale -- the registry order is the backend's truth. */
+  async function handleToggleEnabled(tool: CliToolConfig, enabled: boolean) {
+    await toggle(tool.name, async () => {
+      const next = await upsertCliTool({ ...tool, enabled });
+      applyUserWrite(next);
+      return null;
+    });
+  }
+
+  /** Called by the form after ITS upsert lands: the command already
+   *  persisted and returned the updated full config -- sync state and
+   *  return to the list (no second write). */
+  function handleFormSaved(next: AppConfig) {
+    applyUserWrite(next);
+    setFormTarget(null);
+  }
+
+  /** The shared confirmation lane for the gated row actions (issue #676
+   * folded the restore in beside the delete): the command already
+   * persisted and returned the updated full config -- sync and close. */
+  async function handleConfirm() {
+    if (!confirmTarget) return;
+    const kind = confirmTarget.kind;
+    const name = confirmTarget.name;
+    await runConfirm(async () => {
+      const next =
+        kind === "delete"
+          ? await removeCliTool(name)
+          : await restoreBuiltinCliTool(name);
+      applyUserWrite(next);
+      return null;
+    });
+    setConfirmTarget(null);
+  }
+
+  // --- Form view ----------------------------------------------------------
+  if (formTarget) {
+    return (
+      <div>
+        {/* The navigation name stays above the form (the section context);
+            the list header's action buttons do not -- they are list-only. */}
+        <PaneHeader title={NAV_TITLE} />
+        <CliToolForm
+          key={formTarget.tool.name || "new"}
+          initialTool={formTarget.tool}
+          isEdit={formTarget.isEdit}
+          onSaved={handleFormSaved}
+          onCancel={() => setFormTarget(null)}
+        />
+      </div>
+    );
+  }
+
+  // --- List view ----------------------------------------------------------
+  return (
+    <div>
+      <PaneHeader
+        title={NAV_TITLE}
+        description={(
+          <FormattedMessage
+            id="settings.cli.description"
+            defaultMessage="Add command-line tools the agent can run. You confirm each run before it starts."
+          />
+        )}
+        action={(
+          <div className="flex items-center gap-1.5">
+            <HeaderActionButton
+              label={intl.formatMessage({
+                id: "settings.new",
+                defaultMessage: "New",
+              })}
+              icon={Plus}
+              onClick={() =>
+                setFormTarget({ tool: blankCliTool(), isEdit: false })}
+            />
+            <HeaderActionButton
+              label={scanning
+                ? intl.formatMessage({
+                    id: "settings.cli.rescanning",
+                    defaultMessage: "Scanning…",
+                  })
+                : intl.formatMessage({
+                    id: "common.rescan",
+                    defaultMessage: "Rescan",
+                  })}
+              icon={RefreshCw}
+              spinning={scanning}
+              disabled={scanning}
+              onClick={() => void handleRescan()}
+            />
+          </div>
+        )}
+      />
+
+      {tools.length > 0 && (
+        <p className="mb-2 text-sm">
+          <FormattedMessage
+            id="settings.cli.configuredCount"
+            defaultMessage="Registered CLI tools <muted>{count}</muted>"
+            values={{
+              count: tools.length,
+              muted: (chunks) => (
+                <span className="text-muted-foreground">{chunks}</span>
+              ),
+            }}
+          />
+        </p>
+      )}
+
+      <SettingsCard data-testid="cli-tool-list">
+        {tools.length === 0 ? (
+          <div className="text-muted-foreground px-4 py-8 text-center text-sm">
+            <FormattedMessage
+              id="settings.cli.empty"
+              defaultMessage="No CLI tools yet. Click New to add one."
+            />
+          </div>
+        ) : (
+          tools.map((tool) => (
+            <CliToolRow
+              key={tool.name}
+              tool={tool}
+              toggling={togglingKey === tool.name}
+              holdsBuiltinName={
+                tool.source === "user" && conflictingNames.has(tool.name)
+              }
+              onToggleEnabled={(next) => void handleToggleEnabled(tool, next)}
+              onEdit={() => setFormTarget({ tool, isEdit: true })}
+              // A builtin entry is undeletable (ADR-0109 Decision 2): its
+              // delete button renders disabled -- disabling is the single
+              // shutdown axis. The restore shows only on an EDITED builtin
+              // row, taking the row-end slot in place of the delete.
+              onDelete={
+                tool.source === "builtin"
+                  ? undefined
+                  : () => setConfirmTarget({ kind: "delete", name: tool.name })
+              }
+              onRestore={
+                tool.source === "builtin" && tool.baseline === "edited"
+                  ? () => setConfirmTarget({ kind: "restore", name: tool.name })
+                  : undefined
+              }
+            />
+          ))
+        )}
+      </SettingsCard>
+
+      {scan && (
+        <div className="mt-6" data-testid="builtin-cli-panel">
+          <p className="text-sm font-medium">
+            <FormattedMessage
+              id="settings.cli.builtin.title"
+              defaultMessage="Built-in tools"
+            />
+          </p>
+          <p className="text-muted-foreground mt-1 text-xs">
+            <FormattedMessage
+              id="settings.cli.builtin.description"
+              defaultMessage="Curated tools that ship with the app and register automatically when installed on this machine. Install one, then rescan to use it."
+            />
+          </p>
+          <SettingsCard data-testid="builtin-cli-scan" className="mt-2">
+            {scan.map((entry) => (
+              <BuiltinRow key={entry.name} entry={entry} />
+            ))}
+          </SettingsCard>
+        </div>
+      )}
+
+      {error && (
+        <p className="settings-error mt-3 text-destructive text-sm">{error}</p>
+      )}
+
+      {confirmTarget && (
+        <AlertDialog
+          defaultOpen
+          onOpenChange={(open) => {
+            if (!open && !confirmBusy) setConfirmTarget(null);
+          }}
+        >
+          <AlertDialogContent>
+            <AlertDialogHeader>
+              <AlertDialogTitle>
+                {confirmTarget.kind === "delete" ? (
+                  <FormattedMessage
+                    id="settings.cli.confirmDeleteTitle"
+                    defaultMessage="Delete CLI tool {name}?"
+                    values={{ name: confirmTarget.name }}
+                  />
+                ) : (
+                  <FormattedMessage
+                    id="settings.cli.confirmRestoreTitle"
+                    defaultMessage="Restore built-in definition for {name}?"
+                    values={{ name: confirmTarget.name }}
+                  />
+                )}
+              </AlertDialogTitle>
+              <AlertDialogDescription>
+                {confirmTarget.kind === "delete" ? (
+                  <FormattedMessage
+                    id="settings.cli.confirmDeleteBody"
+                    defaultMessage="This permanently removes the registration {name}. This cannot be undone."
+                    values={{ name: confirmTarget.name }}
+                  />
+                ) : (
+                  <FormattedMessage
+                    id="settings.cli.confirmRestoreBody"
+                    defaultMessage="This discards your edits to {name} and returns it to the definition shipped with the app. This cannot be undone."
+                    values={{ name: confirmTarget.name }}
+                  />
+                )}
+              </AlertDialogDescription>
+            </AlertDialogHeader>
+            <AlertDialogFooter>
+              <AlertDialogCancel disabled={confirmBusy}>
+                <FormattedMessage
+                  id="common.cancel"
+                  defaultMessage="Cancel"
+                />
+              </AlertDialogCancel>
+              <AlertDialogAction
+                className={cn(
+                  confirmTarget.kind === "delete" &&
+                  "bg-destructive text-white hover:bg-destructive/90",
+                )}
+                disabled={confirmBusy}
+                onClick={(e) => {
+                  // Prevent Radix AlertDialog auto-close so the busy state
+                  // can render while the IPC runs (the MCP pane's pattern).
+                  e.preventDefault();
+                  void handleConfirm();
+                }}
+              >
+                {confirmBusy ? (
+                  confirmTarget.kind === "delete" ? (
+                    <FormattedMessage
+                      id="settings.deleting"
+                      defaultMessage="Deleting…"
+                    />
+                  ) : (
+                    <FormattedMessage
+                      id="settings.cli.restoring"
+                      defaultMessage="Restoring…"
+                    />
+                  )
+                ) : confirmTarget.kind === "delete" ? (
+                  <FormattedMessage
+                    id="common.delete"
+                    defaultMessage="Delete"
+                  />
+                ) : (
+                  <FormattedMessage
+                    id="common.restore"
+                    defaultMessage="Restore"
+                  />
+                )}
+              </AlertDialogAction>
+            </AlertDialogFooter>
+          </AlertDialogContent>
+        </AlertDialog>
+      )}
+    </div>
+  );
+}
+
+/** One shipped definition's detection row (issue #675): name + description
+ * with the three-state badge; a conflict row swaps the description for the
+ * disposition hint (rename or remove the user entry, then rescan). */
+function BuiltinRow({ entry }: { entry: BuiltinScanEntry }) {
+  return (
+    <div
+      data-testid={`builtin-cli-row-${entry.name}`}
+      className="hover:bg-accent flex items-center gap-3 px-4 py-3"
+    >
+      <div className="min-w-0 flex-1">
+        <div className="flex items-center gap-2">
+          <span className="text-sm font-medium truncate">{entry.name}</span>
+          {entry.state === "detected" && (
+            <span className="text-muted-foreground truncate font-mono text-xs">
+              {entry.executable}
+            </span>
+          )}
+        </div>
+        {entry.state === "conflict" ? (
+          <p className="text-destructive mt-1 text-xs">
+            <FormattedMessage
+              id="settings.cli.builtin.conflictHint"
+              defaultMessage="Your registration owns this name. Remove it, then rescan."
+            />
+          </p>
+        ) : (
+          <div className="text-muted-foreground mt-1 truncate text-xs">
+            {entry.description}
+          </div>
+        )}
+      </div>
+      {/* The DESIGN.md badge token: typography.badge (12px/500) on
+       * rounded.md with 2px 8px padding; the secondary coloring, with
+       * destructive text only for the conflict state. */}
+      <span
+        className={cn(
+          "bg-muted shrink-0 rounded-md px-2 py-0.5 text-xs font-medium leading-none",
+          entry.state === "detected" && "text-muted-foreground",
+          entry.state === "dormant" && "text-muted-foreground/60",
+          entry.state === "conflict" && "text-destructive",
+        )}
+      >
+        {/* One literal FormattedMessage per state: the extractor needs a
+         * static id + defaultMessage (the same rule the delivery labels
+         * follow). */}
+        {entry.state === "detected" && (
+          <FormattedMessage
+            id="settings.cli.builtin.state.detected"
+            defaultMessage="Installed"
+          />
+        )}
+        {entry.state === "dormant" && (
+          <FormattedMessage
+            id="settings.cli.builtin.state.dormant"
+            defaultMessage="Not detected"
+          />
+        )}
+        {entry.state === "conflict" && (
+          <FormattedMessage
+            id="settings.cli.builtin.state.conflict"
+            defaultMessage="Name conflict"
+          />
+        )}
+      </span>
+    </div>
+  );
+}
+
+function CliToolRow({
+  tool,
+  toggling,
+  holdsBuiltinName,
+  onToggleEnabled,
+  onEdit,
+  onDelete,
+  onRestore,
+}: {
+  tool: CliToolConfig;
+  /** The row's enable-toggle write is in flight: the switch and the row's
+   *  action buttons gate so an edit form cannot save a stale `enabled` over
+   *  the in-flight write (the MCP row's toggling contract). */
+  toggling: boolean;
+  /** True on a USER row whose name a shipped builtin definition owns (the
+   *  builtin panel's conflict row mirrored onto the registration list,
+   *  issue #683): the annotation marks why no builtin entry registered. */
+  holdsBuiltinName: boolean;
+  onToggleEnabled: (enabled: boolean) => void;
+  onEdit: () => void;
+  /** Undefined on builtin rows: the entry is undeletable (ADR-0109
+   *  Decision 2) -- disabling is the single shutdown axis; the delete
+   *  button then renders disabled, keeping the row's action slot aligned. */
+  onDelete?: () => void;
+  /** Present only on an EDITED builtin row: the explicit restore action
+   *  (ADR-0109 Decision 2) -- the only way back onto the baseline. */
+  onRestore?: () => void;
+}) {
+  const intl = useIntl();
+  return (
+    <div
+      data-testid={`cli-tool-row-${tool.name}`}
+      className="hover:bg-accent flex items-center gap-3 px-4 py-3"
+    >
+      <Terminal
+        className={cn(
+          "size-4 shrink-0",
+          tool.enabled ? "text-muted-foreground" : "text-muted-foreground/40",
+        )}
+        aria-hidden
+      />
+      <div className="min-w-0 flex-1">
+        <div className="flex items-center gap-2">
+          <span
+            className={cn(
+              "text-sm font-medium truncate",
+              // A disabled tool is dormant (ADR-0106): the quieted name
+              // keeps the row's state legible at a glance.
+              !tool.enabled && "text-muted-foreground",
+            )}
+          >
+            {tool.name}
+          </span>
+          {tool.source === "builtin" && (
+            <NameBadge>
+              <FormattedMessage
+                id="common.builtin"
+                defaultMessage="Built-in"
+              />
+            </NameBadge>
+          )}
+          {holdsBuiltinName && (
+            <NameBadge>
+              <FormattedMessage
+                id="settings.cli.conflictBadge"
+                defaultMessage="Holds built-in name"
+              />
+            </NameBadge>
+          )}
+          {!tool.enabled && (
+            <NameBadge>
+              <FormattedMessage
+                id="common.disabled"
+                defaultMessage="Disabled"
+              />
+            </NameBadge>
+          )}
+        </div>
+        <div className="text-muted-foreground mt-1 truncate text-xs">
+          {tool.executable}
+          {" · "}
+          <FormattedMessage
+            id="settings.cli.paramCount"
+            defaultMessage="{count} parameters"
+            values={{ count: tool.params.length }}
+          />
+        </div>
+      </div>
+
+      <div className="flex shrink-0 items-center gap-0.5">
+        {/* The enable toggle (ADR-0106): the row's machine-level state,
+         * before the action buttons (the agent row's bare Switch -- the
+         * native switch semantics carry the state, no tooltip wrapper). */}
+        <Switch
+          className="mr-1.5"
+          checked={tool.enabled}
+          disabled={toggling}
+          onCheckedChange={onToggleEnabled}
+          aria-label={intl.formatMessage(
+            {
+              id: "settings.cli.enableToggleLabel",
+              defaultMessage: "Toggle tool {name}",
+            },
+            { name: tool.name },
+          )}
+        />
+
+        <RowActionButton
+          disabled={toggling}
+          label={intl.formatMessage(
+            {
+              id: "settings.cli.editLabel",
+              defaultMessage: "Edit tool {name}",
+            },
+            { name: tool.name },
+          )}
+          icon={Pencil}
+          onClick={onEdit}
+        />
+
+        {/* The row-end slot is exactly ONE action wide in every state --
+            restore on an EDITED builtin (it takes the delete's place), else
+            the delete (disabled on builtin, ADR-0109 Decision 2) -- so the
+            switch / edit columns never shift across rows. */}
+        {onRestore ? (
+          <RowActionButton
+            disabled={toggling}
+            label={intl.formatMessage(
+              {
+                id: "settings.cli.restoreLabel",
+                defaultMessage: "Restore built-in definition for tool {name}",
+              },
+              { name: tool.name },
+            )}
+            icon={RotateCcw}
+            onClick={onRestore}
+          />
+        ) : (
+          <RowActionButton
+            destructive
+            disabled={toggling || !onDelete}
+            label={intl.formatMessage(
+              {
+                id: "settings.cli.deleteLabel",
+                defaultMessage: "Delete tool {name}",
+              },
+              { name: tool.name },
+            )}
+            icon={Trash2}
+            onClick={onDelete}
+            // The shutdown guidance at the same touchpoint as the skills
+            // rows (#1015): the reachable off-action is the row's
+            // enablement toggle (ADR-0106).
+            tooltip={
+              tool.source === "builtin"
+                ? intl.formatMessage({
+                    id: "settings.cli.deleteDisabledHint",
+                    defaultMessage:
+                      "Built-in tools cannot be deleted; disable the tool instead",
+                  })
+                : undefined
+            }
+          />
+        )}
+      </div>
+    </div>
+  );
+}

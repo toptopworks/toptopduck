@@ -1,0 +1,1657 @@
+//! The gateway's aggregator over connected external MCP servers (ADR-0076,
+//! issue #301 slice C-gw).
+//!
+//! The gateway advertises ONE merged tool surface to the bridge / built-in
+//! LLM: the built-in DuckDB tools stay direct-listed, while the external
+//! servers' tools surface through the fixed meta-tool trio
+//! (`mcp_list_servers` / `mcp_search_tools` / `mcp_invoke`, ADR-0105) instead
+//! of a flattened per-tool advertisement. A tool call addressed by its
+//! `mcp__<server_slug>__<tool>` handle is parsed here and routed to the
+//! matching [`TransportClient`] (the `mcp__<slug>__` prefix is stripped --
+//! the server only ever sees its own native tool name). The handle is the
+//! single identity across search cards, invoke addressing, approval, and
+//! trace, so same-name tools across servers stay distinct and the trace
+//! filter (`mcp__` prefix) stays reliable.
+//!
+//! Turn-local (issue #301 Q2): the gateway constructs one `McpAggregator` per
+//! turn via [`McpAggregator::connect_all`] and drops it at turn end, tearing
+//! down every transport (killing stdio children, stopping SSE reader threads).
+//! A failed connect (transport fault, spawn fault, tools/list error) logs +
+//! skips that server rather than failing the turn -- a misconfigured server
+//! must not brick the gateway. The search catalog holds only the connected
+//! servers; the failed attempts stay visible through `mcp_list_servers`
+//! (ADR-0105 Decision 3: no placeholder entries in the catalog).
+
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
+use std::thread;
+use std::time::Duration;
+
+use serde_json::Value;
+
+use crate::cancel::CancelToken;
+use crate::mcp::client::{
+    connect_transport_with_kill, ClientError, ConnectKill, KillSlot, SecretEnv, TransportClient,
+    TransportKill,
+};
+use crate::mcp::config::{McpServerConfig, McpServerId};
+use crate::mcp::meta_tools;
+use crate::mcp::secrets::{get_mcp_header_secret, get_mcp_secret};
+use crate::mcp::McpClient;
+use crate::provider::keychain::KeychainStore;
+
+/// The gateway's default per-call timeout (issue #889): the connect phase
+/// (initialize handshake + tools/list) shares ONE budget per server, and
+/// each `tools/call` gets its own, unless [`McpServerConfig::timeout_ms`]
+/// overrides either. Same order as the whole-turn wall clock ADR-0115
+/// retired -- under the freeze semantics this bounds ONE phase or call, not
+/// the turn: a call that outlives its budget is killed and the server is
+/// unavailable for the rest of the turn (a minutes-long single call does
+/// NOT fit under the default cap).
+pub(crate) const DEFAULT_MCP_TIMEOUT_MS: u32 = 120_000;
+
+/// How often the cancel-teardown watcher polls the token (issue #889). Same
+/// order as the cancel watcher's 25 ms loop (the UI cancel round-trip).
+const CANCEL_TEARDOWN_POLL: Duration = Duration::from_millis(25);
+
+/// How long the deadline side waits after the kill for the worker's read to
+/// unwind before leaking the worker (issue #889 review). The kill unwinds a
+/// single-process stdio child immediately, an SSE reader within one reader
+/// wake (at most the client's `SSE_READ_TIMEOUT`), and an HTTP read at its
+/// 30 s per-read bound -- but shapes the kill cannot reach (a wrapper stdio
+/// shim whose grandchild inherits the stdout pipe, an SSE slow-drip under
+/// the wake interval) would otherwise park the worker forever, and waiting
+/// for it would re-wedge the turn on the join, the exact state this
+/// deadline exists to close. Leaking the worker (and the client it owns)
+/// trades one thread for a bounded turn.
+const KILL_JOIN_GRACE: Duration = Duration::from_secs(5);
+
+/// The prefix marking a gateway-aggregated external tool name. The bridge /
+/// built-in LLM sees `mcp__<server_slug>__<tool>`; the gateway parses the
+/// prefix to route, then forwards the bare `<tool>` to the server. Pinned here
+/// so the trace filter (ADR-0085) + classify + parse all agree on the token.
+/// pub(crate): the gateway's spill arm (issue #1218) strips it so the
+/// spill stem names `<slug>__<tool>`, not the wire handle.
+pub(crate) const NAMESPACED_PREFIX: &str = "mcp__";
+
+/// The separator between the server slug and the server-native tool name
+/// within a namespaced name (`mcp__<slug>__<tool>`).
+const NAMESPACED_SEP: &str = "__";
+
+/// One connected external server + its (already-listed) tool entries kept in
+/// their server-native shape. The stored entries stay the raw server shape:
+/// a handle is composed only when a search card is built, and routing strips
+/// the prefix rather than re-deriving it. `display_name` rides alongside so
+/// search cards + the server manifest name the server the way the user
+/// configured it (the slug alone loses case + separators).
+struct AggregatedServer {
+    slug: String,
+    display_name: String,
+    /// Present between calls. A route TAKES it into the deadline worker and
+    /// restores it on return (issue #889 review): a kill-resistant server
+    /// shape leaves the worker -- and the client with it -- leaked past the
+    /// grace, which is exactly what keeps the calling thread from joining
+    /// it forever; the server then latches `dead` for the turn's remaining
+    /// calls.
+    client: Option<TransportClient>,
+    tools: Vec<Value>,
+    /// The per-call deadline resolved from the config (issue #889); every
+    /// `tools/call` routed to this server runs under it.
+    timeout: Duration,
+    /// The transport's kill handle (issue #889): fired on deadline expiry
+    /// (disconnecting the server for the rest of the turn) or cancel
+    /// teardown (via the aggregator's shared registry).
+    kill: TransportKill,
+    /// Latched when the transport died (issue #889; wording calibrated by
+    /// #897): deadline expiry, cancel teardown, or the server dying on its
+    /// own -- `route` treats `ServerClosed` / `Framing(BrokenPipe)` as the
+    /// death shape regardless of who ended it, and the expiry arm latches
+    /// outright. Subsequent calls fail fast instead of re-parking for the
+    /// full deadline. Never cleared in place -- the reset is the per-turn
+    /// aggregator itself (a fresh entry starts `dead: false`); there is no
+    /// cross-turn health memory.
+    dead: bool,
+}
+
+impl AggregatedServer {
+    /// The single construction site (issue #892): `kill` always derives from
+    /// the live client's handle, so the kill/client pair cannot drift
+    /// between the aggregator's connect path and the test fixtures.
+    fn new(
+        slug: String,
+        display_name: String,
+        client: TransportClient,
+        tools: Vec<Value>,
+        timeout: Duration,
+    ) -> Self {
+        let kill = client.kill_handle();
+        Self {
+            slug,
+            display_name,
+            client: Some(client),
+            tools,
+            timeout,
+            kill,
+            dead: false,
+        }
+    }
+}
+
+/// One attempted connect this turn, retained for `mcp_list_servers`
+/// (ADR-0105 Decision 1): the manifest shows enabled servers that FAILED to
+/// connect too (with the reason), while the search catalog carries only the
+/// connected ones. Built by the single [`McpAggregator::record_outcome`]
+/// helper from the finished [`ConnectResult`]: the flat fields DERIVE from
+/// it, so the two surfaces cannot drift, and the tool list moves out with
+/// the result instead of riding a dead copy in the turn's records (the only
+/// reader, `server_listing`, reads `tool_count`).
+struct ConnectRecord {
+    display_name: String,
+    connected: bool,
+    tool_count: usize,
+    error: Option<String>,
+}
+
+/// The two legal shapes of one connect attempt (issue #661): the flat
+/// `slug: Option` + `tool_count` + `error: Option` triple allowed 14 illegal
+/// combinations; the enum makes a misshapen outcome unrepresentable.
+/// `Connected` carries the live tool count + the projected tool list (a
+/// failure has no tools -- the empty-Vec placeholder the flat shape needed
+/// is gone); `Failed` carries the skip reason. The manifest-facing record
+/// reads only these fields (the allocated slug stays on [`AggregatedServer`],
+/// the sole consumer of routing keys).
+enum ConnectOutcome {
+    Connected {
+        tool_count: usize,
+        tools: Vec<McpToolInfo>,
+    },
+    Failed {
+        error: String,
+    },
+}
+
+/// One configured server's per-turn connect outcome (issue #301 slice D).
+/// [`McpAggregator::connect_all`] returns one per server; the turn paths
+/// discard the slice (the per-session status IPC is retired, ADR-0106), so
+/// the outcomes pin the aggregator's integration tests + any future
+/// diagnostics. `connected: false` covers every skip path (transport connect
+/// fault, spawn fault, tools/list fault) with the reason in `error`;
+/// `connected: true` carries the live tool count the gateway advertised that
+/// turn.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ConnectResult {
+    /// The server's stable id (matches [`McpServerConfig::id`]). The id is
+    /// the join key back to app-config, so the display label is not carried
+    /// here.
+    pub id: McpServerId,
+    /// Whether the server connected + its tools were listed. `false` for every
+    /// skip path (the aggregator logs the detail; this is the boolean the UI
+    /// badges).
+    pub connected: bool,
+    /// The number of usable tools the server advertised -- entries without a
+    /// name are malformed, never reach the catalog, and are not counted
+    /// (0 when not connected).
+    pub tool_count: usize,
+    /// The tool list the server advertised at connect (empty when not
+    /// connected), projected to [`McpToolInfo`].
+    pub tools: Vec<McpToolInfo>,
+    /// The skip reason when `connected: false` (`None` on success).
+    pub error: Option<String>,
+}
+
+/// One tool entry a connected server advertised, projected to just the fields
+/// the UI needs (issue #387). The full `{name, description, inputSchema}` entry
+/// stays in [`AggregatedServer::tools`] for gateway routing; this is the lean
+/// view for `probe_mcp_server` + the aggregator's connect outcomes.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct McpToolInfo {
+    /// The server-native tool name (no `mcp__<slug>__` prefix -- the raw name
+    /// the server reported at `tools/list`).
+    pub name: String,
+    /// The human-readable description the server reported (`""` when the server
+    /// omitted it).
+    pub description: String,
+}
+
+/// Project a raw `tools/list` entry's `{name, description}` into
+/// [`McpToolInfo`]. Missing `name` skips the entry (malformed); missing
+/// `description` degrades to empty string (the server may legitimately omit it).
+pub fn extract_tool_info(tools: &[Value]) -> Vec<McpToolInfo> {
+    tools
+        .iter()
+        .filter_map(|t| {
+            let name = t.get("name")?.as_str()?.to_string();
+            let description = t
+                .get("description")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string();
+            Some(McpToolInfo { name, description })
+        })
+        .collect()
+}
+
+/// The merged view over every connected external MCP server (ADR-0076). Owns
+/// the transport clients; `Drop` tears down each one (kills the child for
+/// stdio, stops the reader thread for SSE, no-op for HTTP).
+pub struct McpAggregator {
+    servers: Vec<AggregatedServer>,
+    /// Every attempted connect this turn (successes + failures), feeding
+    /// `mcp_list_servers` (ADR-0105 Decision 1). The search catalog reads
+    /// [`Self::servers`] instead -- only connected servers enter it.
+    connect_records: Vec<ConnectRecord>,
+    /// The per-session tool-output directory path (ADR-0087 Decision 3). Injected
+    /// as `TOPTOPDUCK_TOOL_OUTPUT_DIR` into each stdio server's child env at
+    /// spawn. `None` in tests (no file output expected).
+    tool_output_dir: Option<String>,
+    /// The kill slot of every connect attempt this turn, shared with the
+    /// cancel-teardown watcher (issue #889 + #892): the slot is
+    /// pre-registered BEFORE the handshake, so a token fire terminates the
+    /// connect in flight (the parked initialize read) as well as every
+    /// completed transport -- reads parked inside the dispatch freeze or the
+    /// connect phase return and the turn's scope can end. Entries for
+    /// finished connects are harmless (`ConnectKill::expire` on a published
+    /// slot kills the same handle the client owns; `TransportKill::kill` is
+    /// idempotent).
+    kill_slots: Arc<Mutex<Vec<KillSlot>>>,
+    /// The token `arm_cancel_teardown` was called with (issue #892): lets
+    /// `connect_all` check the fire between attempts instead of spawning a
+    /// child whose connect would only be killed one budget later. `None`
+    /// until armed -- the pre-#892 arm-after-connect posture stays
+    /// behavior-free when the watcher is never armed ahead of the connects.
+    cancel: Option<Arc<CancelToken>>,
+    /// Whether the cancel-teardown watcher thread actually spawned (issue
+    /// #899). A spawn failure (thread-resource exhaustion, rare) only warns
+    /// through the log facade -- invisible to test binaries that initialize
+    /// no logger -- and silently degrades the turn to budget-bounded waits
+    /// (exactly the stuck-session shape the cancel chain exists to prevent),
+    /// so the spawn result also lands here where a test can read it.
+    watcher_spawned: bool,
+}
+
+impl McpAggregator {
+    /// An empty aggregator (no servers connected). The gateway uses this when
+    /// the user has configured no servers, or as the starting point before
+    /// [`Self::connect_one`] calls. `tool_output_dir` is `None` -- use
+    /// [`Self::with_tool_output`] for the production path.
+    pub fn empty() -> Self {
+        Self {
+            servers: vec![],
+            connect_records: vec![],
+            tool_output_dir: None,
+            kill_slots: Arc::new(Mutex::new(Vec::new())),
+            cancel: None,
+            watcher_spawned: false,
+        }
+    }
+
+    /// Construct an empty aggregator with the session's tool-output directory
+    /// set (ADR-0087 Decision 3). Each stdio server spawned via
+    /// [`Self::connect_one`] / [`Self::connect_all`] receives the path as
+    /// `TOPTOPDUCK_TOOL_OUTPUT_DIR` in its child env.
+    pub fn with_tool_output(tool_output_dir: String) -> Self {
+        Self {
+            servers: vec![],
+            connect_records: vec![],
+            tool_output_dir: Some(tool_output_dir),
+            kill_slots: Arc::new(Mutex::new(Vec::new())),
+            cancel: None,
+            watcher_spawned: false,
+        }
+    }
+
+    /// Connect + initialize one server (any transport), list its tools, and
+    /// add it under a unique slug derived from its display name (issue #301
+    /// slice D + issue #389 SSE/HTTP). A failure (connect fault, tools/list
+    /// fault, per-call deadline expiry -- issue #889) logs + skips the
+    /// server -- the turn is not failed by a misconfigured server -- and the
+    /// returned [`ConnectResult`] carries `connected: false` + the reason.
+    /// The whole connect phase runs under the server's deadline; on expiry
+    /// the transport is terminated through its kill handle so the parked
+    /// handshake read returns (an idle-read park on stdio/SSE -- the HTTP
+    /// kill is a no-op, that half unwinds by its per-read bound and this
+    /// deadline instead).
+    pub fn connect_one(
+        &mut self,
+        config: &McpServerConfig,
+        secrets: &[SecretEnv],
+        header_secrets: &[SecretEnv],
+    ) -> ConnectResult {
+        let timeout = effective_timeout(config);
+        let kill_slot: KillSlot = Arc::new(ConnectKill::default());
+        // Pre-register the slot BEFORE the handshake (issue #892): the
+        // cancel-teardown watcher expires it on a token fire mid-connect, so
+        // the parked initialize read is killed instead of waiting out this
+        // server's budget while the watcher sits on a registry that would
+        // only hold handles for COMPLETED connects.
+        //
+        // The poisoned-mutex expect has no panic producer today (the lock's
+        // holders never panic while holding it), but IF one ever appears the
+        // caller dies on a bare stderr write: release windows-subsystem
+        // builds drop stderr, leaving zero trace -- the turn thread dies
+        // mid-connect before any budget park exists (issue #899 note). The
+        // budget-degradation shape is the watcher-death consequence -- same
+        // note at the watcher's expiry pass below.
+        self.kill_slots
+            .lock()
+            .expect("kill registry poisoned")
+            .push(Arc::clone(&kill_slot));
+        let slot_for_kill = Arc::clone(&kill_slot);
+        let tool_output_dir = self.tool_output_dir.clone();
+        // The deadline covers connect + initialize + tools/list as one phase:
+        // a stdio child that spawns but never responds parks exactly here
+        // (issue #889). `expire` races the worker's `publish` -- whichever
+        // lands second performs the kill, so a spawn that outlasts the
+        // budget still self-terminates the moment its handle exists (a 0 ms
+        // budget surfaces as this gateway fault, the config contract). The
+        // worker captures owned copies (the deadline runner parks it on a
+        // detached thread, which demands `'static`).
+        let config_for_worker = config.clone();
+        let secrets_for_worker = secrets.to_vec();
+        let header_secrets_for_worker = header_secrets.to_vec();
+        let outcome = run_with_deadline(
+            timeout,
+            move || slot_for_kill.expire(),
+            move || {
+                let mut client = connect_transport_with_kill(
+                    &config_for_worker,
+                    &secrets_for_worker,
+                    &header_secrets_for_worker,
+                    tool_output_dir.as_deref(),
+                    &kill_slot,
+                )?;
+                let tools = client.list_tools(&config_for_worker.display_name)?;
+                Ok::<(TransportClient, Vec<Value>), ClientError>((client, tools))
+            },
+        );
+        let (client, tools) = match outcome {
+            Some(Ok(pair)) => pair,
+            Some(Err(e)) => {
+                log::warn!(
+                    target: "toptopduck::mcp",
+                    "MCP server {} connect failed, skipping: {e}",
+                    config.id
+                );
+                return self.record_outcome(
+                    &config.display_name,
+                    &config.id,
+                    ConnectOutcome::Failed {
+                        error: e.to_string(),
+                    },
+                );
+            }
+            None => {
+                let error = ClientError::Timeout {
+                    server: config.display_name.clone(),
+                    call: "connect (initialize/tools/list)".into(),
+                    timeout_ms: timeout.as_millis() as u64,
+                };
+                log::warn!(
+                    target: "toptopduck::mcp",
+                    "MCP server {} connect timed out after {}ms; killing and skipping: {error}",
+                    config.id,
+                    timeout.as_millis()
+                );
+                return self.record_outcome(
+                    &config.display_name,
+                    &config.id,
+                    ConnectOutcome::Failed {
+                        error: error.to_string(),
+                    },
+                );
+            }
+        };
+        let tool_infos = extract_tool_info(&tools);
+        // Count the USABLE tools: malformed entries (no name) never reach
+        // the catalog, so a raw advertised count would disagree with what
+        // `mcp_search_tools` can ever return (issue #663 review) -- a server
+        // whose entries are all malformed lists as connected with 0 tools,
+        // not N phantom ones.
+        let tool_count = tool_infos.len();
+        let base = slugify(&config.display_name, &config.id);
+        let slug = self.unique_slug(&base);
+        self.servers.push(AggregatedServer::new(
+            slug,
+            config.display_name.clone(),
+            client,
+            tools,
+            timeout,
+        ));
+        self.record_outcome(
+            &config.display_name,
+            &config.id,
+            ConnectOutcome::Connected {
+                tool_count,
+                tools: tool_infos,
+            },
+        )
+    }
+
+    /// Record one connect attempt in BOTH durable surfaces -- the
+    /// `mcp_list_servers` manifest record and the per-server
+    /// [`ConnectResult`] -- from the single typed outcome (issue #661).
+    /// The `connect_one` branches previously pushed a record AND returned a
+    /// result built in parallel, two construction sites that could drift;
+    /// this is now the one place either shape is built. The tool list MOVES
+    /// into the returned result (the record's only reader wants the count),
+    /// and the record's flat fields derive from the finished result.
+    fn record_outcome(
+        &mut self,
+        display_name: &str,
+        id: &McpServerId,
+        outcome: ConnectOutcome,
+    ) -> ConnectResult {
+        let result = match outcome {
+            ConnectOutcome::Connected { tool_count, tools } => ConnectResult {
+                id: id.clone(),
+                connected: true,
+                tool_count,
+                tools,
+                error: None,
+            },
+            ConnectOutcome::Failed { error } => ConnectResult {
+                id: id.clone(),
+                connected: false,
+                tool_count: 0,
+                tools: Vec::new(),
+                error: Some(error),
+            },
+        };
+        self.connect_records.push(ConnectRecord {
+            display_name: display_name.to_string(),
+            connected: result.connected,
+            tool_count: result.tool_count,
+            error: result.error.clone(),
+        });
+        result
+    }
+
+    /// Spawn + initialize every configured server (issue #301 slice C-gw) and
+    /// return each one's [`ConnectResult`] (slice D). Each server's secret env
+    /// values are read from the keychain at spawn ([`get_mcp_secret`],
+    /// ADR-0029 -- the value never crosses IPC) and passed to
+    /// [`Self::connect_one`] alongside the config's non-secret
+    /// [`env`](McpServerConfig::env). A server that fails to connect is logged
+    /// and skipped via [`Self::connect_one`] -- a misconfigured server does
+    /// not brick the turn -- and surfaces as `connected: false` in the
+    /// returned slice. A token fire between attempts (issue #892, active
+    /// only when armed ahead of the connects) skips the remaining servers
+    /// outright -- no spawn, no keychain read -- each still surfacing as
+    /// `connected: false` with the skip reason. ADR-0106 defense-in-depth:
+    /// entries with
+    /// `enabled: false` are skipped here outright -- the semantic axis is
+    /// [`LiveProviderConfig::enabled_mcp_servers`](crate::provider::LiveProviderConfig::enabled_mcp_servers),
+    /// but this guard holds the dormancy line (no connect, no spawn, no
+    /// keychain read) for any caller that hands over an unfiltered registry
+    /// snapshot.
+    pub fn connect_all(
+        &mut self,
+        servers: &[McpServerConfig],
+        keychain: &KeychainStore,
+    ) -> Vec<ConnectResult> {
+        servers
+            .iter()
+            .filter(|server| {
+                if server.enabled {
+                    true
+                } else {
+                    log::warn!(
+                        target: "toptopduck::mcp",
+                        "MCP server {} disabled at the config level (ADR-0106); skipping",
+                        server.id
+                    );
+                    false
+                }
+            })
+            .map(|server| {
+                // The between-attempts gap check (issue #892): once the
+                // token has fired, spawning the next child would only park
+                // for that server's budget (the one-shot watcher already
+                // returned after expiring the in-flight slots). Skip
+                // outright -- the skipped attempt still reports an outcome
+                // for the manifest.
+                if self
+                    .cancel
+                    .as_ref()
+                    .is_some_and(|cancel| cancel.is_requested())
+                {
+                    // Every sibling skip path logs (disabled at config
+                    // level, connect fault, phase timeout); the cancelled
+                    // skip must too -- it is the only trace the dying turn
+                    // leaves (the session paths discard the returned slice,
+                    // and no agent lists servers against a dying turn's
+                    // aggregator).
+                    log::warn!(
+                        target: "toptopduck::mcp",
+                        "MCP server {} skipped: the turn's cancel fired before \
+                         its connect attempt",
+                        server.id
+                    );
+                    return self.record_outcome(
+                        &server.display_name,
+                        &server.id,
+                        ConnectOutcome::Failed {
+                            error: "skipped: the turn's cancel fired before this \
+                                    server's connect attempt"
+                                .into(),
+                        },
+                    );
+                }
+                let secrets = collect_secrets(keychain, server);
+                let header_secrets = collect_header_secrets(keychain, server);
+                self.connect_one(server, &secrets, &header_secrets)
+            })
+            .collect()
+    }
+
+    /// The meta-tool trio's definitions for this turn's tool surface
+    /// (ADR-0105 Decision 1/6). Empty when NO enabled server was attempted
+    /// this turn (a zero-enabled turn attaches no trio and pays no standing
+    /// cost). The mount condition is the ATTEMPTED set, not the connected
+    /// set: a turn where every enabled server failed to connect still mounts
+    /// the trio so `mcp_list_servers` can surface the failure reasons
+    /// (Decision 1's manifest) -- the search catalog itself stays empty.
+    pub fn meta_tool_definitions(&self) -> Vec<crate::provider::tool_calling::ToolDefinition> {
+        if self.connect_records.is_empty() {
+            return Vec::new();
+        }
+        meta_tools::meta_tool_definitions()
+    }
+
+    /// Query the catalog for `mcp_search_tools` (ADR-0105 Decision 3). The
+    /// catalog holds only servers that connected this turn, iterated in
+    /// registry order with each server's tools in its advertised order --
+    /// that iteration IS the stable sort (no relevance scoring). A card's
+    /// `tool` field is the handle `mcp__<slug>__<tool>` composed here, so the
+    /// card's field is byte-wise the `mcp_invoke` addressing argument. Results
+    /// cap at [`SEARCH_TOP_K`](meta_tools::SEARCH_TOP_K); `total_matched`
+    /// carries the pre-cap count so the agent knows to narrow the query.
+    ///
+    /// An empty catalog (nothing connected) additionally carries the note so
+    /// a single search distinguishes "no server connected" from "connected
+    /// but no match" without a second hop (issue #661). A server connected
+    /// with zero usable tools stays note-free: the catalog is technically
+    /// live, and the manifest already reports the server honestly as
+    /// connected with tool_count 0.
+    pub fn search_catalog(&self, query: &str) -> Value {
+        let mut cards = Vec::new();
+        let mut total_matched = 0usize;
+        for server in &self.servers {
+            for entry in &server.tools {
+                // A malformed entry (no non-empty string `name`) has no
+                // addressable handle: its would-be card would read
+                // `mcp__<slug>__`, which `parse_namespaced` rejects, so the
+                // card could never be invoked. Skip it (as `extract_tool_info`
+                // does) so every card the surface emits is callable.
+                let native = match entry.get("name").and_then(Value::as_str) {
+                    Some(n) if !n.is_empty() => n,
+                    _ => continue,
+                };
+                let description = entry
+                    .get("description")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default();
+                if !meta_tools::matches_query(query, &server.display_name, native, description) {
+                    continue;
+                }
+                total_matched += 1;
+                if cards.len() < meta_tools::SEARCH_TOP_K {
+                    let handle = namespaced_name(&server.slug, native);
+                    let input_schema = entry
+                        .get("inputSchema")
+                        .cloned()
+                        .unwrap_or_else(|| Value::Object(serde_json::Map::new()));
+                    cards.push(meta_tools::search_card(
+                        &server.display_name,
+                        description,
+                        &input_schema,
+                        handle,
+                    ));
+                }
+            }
+        }
+        let mut result = serde_json::json!({ "tools": cards, "total_matched": total_matched });
+        if self.servers.is_empty() {
+            // The empty-catalog note (see the method doc): the only
+            // shape difference between "nothing connected" and "no match".
+            result["note"] = serde_json::json!(meta_tools::EMPTY_CATALOG_NOTE);
+        }
+        result
+    }
+
+    /// The `mcp_list_servers` manifest (ADR-0105 Decision 1): every attempted
+    /// connect this turn with its outcome, so an enabled-but-failed server is
+    /// visible (with the reason) even though it never entered the catalog.
+    /// The agent sees display names + outcomes only -- the slug is internal
+    /// routing detail the agent never needs (the handle on a search card
+    /// already encodes it).
+    pub fn server_listing(&self) -> Value {
+        let servers: Vec<Value> = self
+            .connect_records
+            .iter()
+            .map(|r| {
+                serde_json::json!({
+                    "server": r.display_name,
+                    "connected": r.connected,
+                    "tool_count": r.tool_count,
+                    "error": r.error,
+                })
+            })
+            .collect();
+        serde_json::json!({ "servers": servers })
+    }
+
+    /// Resolve an `mcp_invoke` call input into `(handle, arguments)` BEFORE
+    /// the enforcement points (ADR-0105 Decision 4). `Ok` means the input was
+    /// well-formed AND the handle is namespaced AND its slug matches a
+    /// connected server -- the dispatch site then flows the call through the
+    /// regular external path under the backend identity (classify -> gate ->
+    /// route -> trace all consume the handle). `Err` carries the failure for
+    /// the call's error result: it surfaces as a failed tool result with no
+    /// gate suspension and no trace entry -- the same semantics as a call
+    /// that never reached a tool.
+    pub fn resolve_invoke(&self, input: &Value) -> Result<(String, Value), String> {
+        let (handle, arguments) = meta_tools::parse_invoke_input(input)?;
+        match parse_namespaced(&handle) {
+            None => Err(meta_tools::not_a_handle_failure(&handle)),
+            Some((slug, _)) => {
+                if self.servers.iter().any(|s| s.slug == slug) {
+                    Ok((handle, arguments))
+                } else {
+                    Err(meta_tools::unknown_server_failure(&handle, &slug))
+                }
+            }
+        }
+    }
+
+    /// Test-only: an aggregator whose catalog holds one connected server
+    /// with the given tool entries and no live transport (the client points
+    /// at a port the OS just reclaimed, so routing fails with a connection
+    /// error -- the failure shape the dispatch-composition pins exercise).
+    /// The catalog / resolve paths never touch the client. Records no
+    /// connect attempt, so `meta_tool_definitions` stays empty (mounting is
+    /// pinned through the real `connect_all` paths instead).
+    #[cfg(test)]
+    pub(crate) fn catalog_server_for_test(display_name: &str, tools: Vec<Value>) -> Self {
+        let id = McpServerId("test-catalog-srv".into());
+        let port = {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind ephemeral port");
+            listener.local_addr().expect("local addr").port()
+            // The listener drops here: nothing answers on the port, and the
+            // OS is extremely unlikely to rehand it out mid-test.
+        };
+        let client = crate::mcp::client::HttpClient::unreachable_for_test(&format!(
+            "http://127.0.0.1:{port}"
+        ));
+        let mut agg = Self::empty();
+        agg.servers.push(AggregatedServer::new(
+            slugify(display_name, &id),
+            display_name.to_string(),
+            TransportClient::Http(client),
+            tools,
+            Duration::from_millis(DEFAULT_MCP_TIMEOUT_MS as u64),
+        ));
+        agg
+    }
+
+    /// Route a `tools/call` whose name is `mcp__<slug>__<tool>` to the matching
+    /// server, stripping the prefix so the server sees its native tool name.
+    /// Returns the server's tools/call result for the gateway to relay. The
+    /// call runs under the server's per-call deadline (issue #889): on
+    /// expiry the transport is killed, the server is marked dead for the
+    /// rest of the turn (subsequent calls fail fast), and the error carries
+    /// the server + tool attribution.
+    pub fn route(&mut self, namespaced: &str, arguments: &Value) -> Result<Value, RouteError> {
+        let (slug, tool) = parse_namespaced(namespaced)
+            .ok_or_else(|| RouteError::NotNamespaced(namespaced.to_string()))?;
+        let server = self
+            .servers
+            .iter_mut()
+            .find(|s| s.slug == slug)
+            .ok_or(RouteError::UnknownServer(slug))?;
+        if server.dead {
+            // A prior call's deadline already terminated this transport
+            // (issue #889); re-parking would re-wait the full budget.
+            return Err(RouteError::Client(ClientError::ServerClosed));
+        }
+        let timeout = server.timeout;
+        let kill = server.kill.clone();
+        // The worker OWNS the client for the call's duration (issue #889
+        // review): a kill-resistant server shape leaves the worker parked
+        // past the grace, and the client leaks with it -- which is what
+        // keeps this thread from joining that worker forever. `None` here is
+        // the leaked-worker aftermath (route is the only taker and restores
+        // or latches on every other path), so it degrades to the same
+        // fast-fail shape as `dead`.
+        let Some(client) = server.client.take() else {
+            return Err(RouteError::Client(ClientError::ServerClosed));
+        };
+        let arguments = arguments.clone();
+        let outcome = run_with_deadline(
+            timeout,
+            move || kill.kill(),
+            move || {
+                let mut client = client;
+                let result = client.call(&tool, &arguments);
+                (client, result)
+            },
+        );
+        match outcome {
+            Some((client, result)) => {
+                server.client = Some(client);
+                // A `ServerClosed` (EOF / disconnected channel) means the
+                // transport is gone regardless of WHO ended it -- deadline,
+                // cancel teardown, or the server dying on its own -- and a
+                // `Framing(BrokenPipe)` is the SAME death on a platform
+                // whose pipe write fails before the read can EOF (Linux
+                // EPIPE vs the Windows buffered write + EOF read). Latch
+                // `dead` on either so the turn's remaining calls fail fast
+                // instead of re-parking against a corpse (and so the
+                // error shape normalizes to ServerClosed from the NEXT
+                // call on, instead of leaking the platform's raw framing
+                // error to the agent).
+                let transport_gone = matches!(result, Err(ClientError::ServerClosed))
+                    || matches!(
+                        &result,
+                        Err(ClientError::Framing(e)) if e.kind() == std::io::ErrorKind::BrokenPipe
+                    );
+                if transport_gone {
+                    server.dead = true;
+                }
+                result.map_err(RouteError::Client)
+            }
+            None => {
+                // The deadline expired: the transport is dead OR leaked with
+                // an unwound-proof worker (the client slot stays `None`
+                // either way -- a leaked worker owns it).
+                server.dead = true;
+                // Cold-branch attribution (issue #892): the error path is
+                // the expiry arm's only consumer of these names, so the
+                // clones moved here off the hot path (the tool re-derives
+                // from the handle this route already validated).
+                let display_name = server.display_name.clone();
+                let tool_for_error = parse_namespaced(namespaced)
+                    .expect("route validated the handle before dispatching")
+                    .1;
+                log::warn!(
+                    target: "toptopduck::mcp",
+                    "MCP server {} tools/call `{}` timed out after {}ms; \
+                     unavailable for the rest of the turn",
+                    display_name,
+                    tool_for_error,
+                    timeout.as_millis()
+                );
+                Err(RouteError::Client(ClientError::Timeout {
+                    server: display_name,
+                    call: tool_for_error,
+                    timeout_ms: timeout.as_millis() as u64,
+                }))
+            }
+        }
+    }
+
+    /// Arm the turn's cancel-aware teardown (issue #889; connect phase added
+    /// by #892). The spawned watcher polls the shared token; when it fires
+    /// (user stop or a watchdog kill -- under ADR-0115 both are a token
+    /// fire) while the turn is still live, every registry slot is expired --
+    /// a completed transport's kill fires, an in-flight connect's parked
+    /// handshake read is killed (stdio/SSE idle-read parks; the HTTP kill
+    /// is a no-op -- that transport unwinds by its read bound and the phase
+    /// budget instead) -- so blocking reads parked inside the
+    /// dispatch freeze OR the connect phase return, the engine's
+    /// `thread::scope` can end, and the session lock is released. Arming
+    /// BEFORE `connect_all` additionally activates the between-attempts gap
+    /// check there. `turn_done` is the watcher's stand-down signal: a turn
+    /// that finished normally owns its teardown through the aggregator's
+    /// `Drop`, so the watcher exits without killing. Production callers
+    /// pass a [`TurnDoneFlag`]'s shared flag (the RAII form, which stores
+    /// on drop through any unwind); the parameter stays the bare
+    /// `Arc<AtomicBool>` so tests can arm synthetic stand-down states (an
+    /// already-stood-down flag) the owning RAII type cannot express.
+    ///
+    /// The watcher is one-shot by design: on a token fire it expires the
+    /// registry snapshot and exits. Known window (issue #899): a sibling
+    /// whose between-attempts gap check passed just before the fire and
+    /// whose kill-slot publish lands after the expiry pass parks with no
+    /// watcher left to kill it and degrades to that server's own budget
+    /// (default 120s; the session-lock floor). The window is typically
+    /// milliseconds wide (it spans the keychain reads between the gap
+    /// check and the publish), covers at most one server per fire, and
+    /// the budget floor is the design guarantee -- accepted over a
+    /// watcher that keeps polling through stand-down (ADR-0115).
+    pub fn arm_cancel_teardown(&mut self, cancel: Arc<CancelToken>, turn_done: Arc<AtomicBool>) {
+        self.cancel = Some(Arc::clone(&cancel));
+        // Consume any stale request before the connects (issue #892
+        // review): arming runs before the turn's `begin_turn` (which would
+        // clear the flag anyway), and the gap check below must not act on a
+        // flag this coming turn never owned -- a stop clicked while idle is
+        // documented as a no-op, so the next turn must not skip its entire
+        // MCP fleet over it.
+        cancel.clear_stale_request();
+        let kill_slots = Arc::clone(&self.kill_slots);
+        let spawned = thread::Builder::new()
+            .name("mcp-cancel-teardown".into())
+            .spawn(move || loop {
+                // Stand-down check first (issue #892 fold): a finished turn
+                // owns its teardown through the aggregator's `Drop` -- the
+                // two turn_done reads collapse into this one early return.
+                if turn_done.load(Ordering::SeqCst) {
+                    return;
+                }
+                if cancel.is_requested() {
+                    // One lock-and-snapshot: the count and the expiry pass
+                    // share it. Through the log facade (issue #892 review):
+                    // raw stderr is dropped in release builds (the windows
+                    // subsystem has no console), and cancel-teardown events
+                    // are exactly the diagnostics a stuck-session report
+                    // needs.
+                    //
+                    // If this expect ever panics (no producer today), the
+                    // watcher dies on bare stderr -- zero trace in release
+                    // windows-subsystem builds -- and the turn silently
+                    // degrades to budget-bounded waits (issue #899 note;
+                    // same note at the registry push in connect_one). The
+                    // expiry pass also runs ConnectKill's own slot-mutex
+                    // expects (publish/expire in client.rs) under this
+                    // registry guard: a producer there dies mid-pass (some
+                    // slots killed, later ones parked for their budgets)
+                    // and poisons this registry, cascading a panic into
+                    // the next connect_one push.
+                    let slots = kill_slots.lock().expect("kill registry poisoned");
+                    log::warn!(
+                        target: "toptopduck::mcp",
+                        "cancel fired mid-turn; expiring {} MCP kill slots \
+                         (in-flight connects and completed transports)",
+                        slots.len()
+                    );
+                    for slot in slots.iter() {
+                        slot.expire();
+                    }
+                    return;
+                }
+                thread::sleep(CANCEL_TEARDOWN_POLL);
+            });
+        if let Err(e) = spawned {
+            log::warn!(
+                target: "toptopduck::mcp",
+                "failed to spawn the MCP cancel-teardown watcher; cancel will not \
+                 unblock a frozen MCP wait this turn: {e}"
+            );
+        } else {
+            // The observation surface for the same failure (issue #899):
+            // the warn above is invisible without a logger; this records the
+            // spawn result on the aggregator itself.
+            self.watcher_spawned = true;
+        }
+    }
+
+    /// Resolve a display-name slug collision by appending `_2`, `_3`, ... With
+    /// per-turn construction + uuid-stable ids, a collision means two servers
+    /// share a display-name slug; the second gets the suffix so both stay
+    /// routable. The first occurrence keeps the bare slug.
+    fn unique_slug(&self, base: &str) -> String {
+        if !self.servers.iter().any(|s| s.slug == base) {
+            return base.to_string();
+        }
+        let mut n = 2;
+        loop {
+            let candidate = format!("{base}_{n}");
+            if !self.servers.iter().any(|s| s.slug == candidate) {
+                return candidate;
+            }
+            n += 1;
+        }
+    }
+}
+
+impl Default for McpAggregator {
+    fn default() -> Self {
+        Self::empty()
+    }
+}
+
+/// The RAII stand-down flag for one turn's cancel-teardown watcher (issue
+/// #889 review): stores the flag on drop, so a turn that unwinds ANY way --
+/// normal return, early return, panic unwind -- stands its watcher down,
+/// mirroring the repo's closing-flag precedent (ADR-0055). Without it, a
+/// panicking turn skips the manual store and its watcher keeps polling at
+/// [`CANCEL_TEARDOWN_POLL`] until some future turn's token fire.
+pub struct TurnDoneFlag(Arc<AtomicBool>);
+
+impl TurnDoneFlag {
+    /// A live turn's flag (`false` until drop).
+    pub fn new() -> Self {
+        Self(Arc::new(AtomicBool::new(false)))
+    }
+
+    /// The shared flag form [`McpAggregator::arm_cancel_teardown`] polls.
+    pub fn flag(&self) -> Arc<AtomicBool> {
+        Arc::clone(&self.0)
+    }
+}
+
+impl Default for TurnDoneFlag {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Drop for TurnDoneFlag {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::SeqCst);
+    }
+}
+
+/// Resolve a server's per-call deadline (issue #889):
+/// [`McpServerConfig::timeout_ms`] overrides the gateway default; `None`
+/// (or a config written before the field existed) falls back to
+/// [`DEFAULT_MCP_TIMEOUT_MS`]. The value is NOT validated here -- a 0
+/// surfaces as an immediate gateway fault at call time (a 0 ms budget
+/// expires at once), while a huge value simply removes the cap; neither is
+/// a config reject.
+fn effective_timeout(config: &McpServerConfig) -> Duration {
+    Duration::from_millis(config.timeout_ms.unwrap_or(DEFAULT_MCP_TIMEOUT_MS) as u64)
+}
+
+/// Park `f` on a detached worker thread and enforce `timeout` from this
+/// thread (issue #889). The transports are synchronous blocking reads with
+/// no per-call deadline of their own; this wrapper races the call against
+/// `recv_timeout`. On expiry `kill` terminates the transport, which USUALLY
+/// makes the worker's blocking read return -- but a kill-resistant server
+/// shape (a wrapper stdio shim whose grandchild inherits the stdout pipe, an
+/// SSE slow-drip under the reader's wake interval) can outlive the kill, and
+/// waiting for such a worker would block this thread forever. So after the
+/// kill the wrapper waits [`KILL_JOIN_GRACE`] for the worker to unwind and
+/// then deliberately LEAKS it: the worker owns the call's resources (a
+/// `'static` capture -- a `TransportClient` on the route path), so a leaked
+/// worker costs one thread + one transport, while the caller still gets its
+/// expiry `None` and the turn stays bounded. A worker panic is caught on the
+/// worker and resumed on this thread (the scoped predecessor's propagation
+/// semantics, preserved).
+fn run_with_deadline<T: Send + 'static>(
+    timeout: Duration,
+    kill: impl FnOnce(),
+    f: impl FnOnce() -> T + Send + 'static,
+) -> Option<T> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    thread::spawn(move || {
+        let _ = tx.send(std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)));
+    });
+    match rx.recv_timeout(timeout) {
+        Ok(Ok(value)) => Some(value),
+        Ok(Err(payload)) => {
+            kill();
+            std::panic::resume_unwind(payload);
+        }
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+            kill();
+            // Bounded unwind wait: a kill that lands returns the worker well
+            // inside the grace (a stdio EOF is immediate, the SSE reader
+            // wakes at most every `SSE_READ_TIMEOUT`); one that cannot land
+            // leaves it parked, and leaking it beats re-wedging the turn.
+            match rx.recv_timeout(KILL_JOIN_GRACE) {
+                // The call's result landed after expiry: discarded -- an
+                // in-flight response is invalidated by the kill
+                // (deadline-abort convention, see `route`).
+                Ok(_) => None,
+                Err(_) => {
+                    log::warn!(
+                        target: "toptopduck::mcp",
+                        "deadline kill failed to unwind the MCP call worker within \
+                         {KILL_JOIN_GRACE:?}; leaking the worker and its transport \
+                         (a server shape defeated the kill)"
+                    );
+                    None
+                }
+            }
+        }
+        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+            // The worker dropped its sender without sending (a panic before
+            // the catch_unwind send): unreachable in practice; the kill for
+            // symmetry keeps a transport from outliving the unwinding turn.
+            kill();
+            None
+        }
+    }
+}
+
+/// Read every secret env value for one server from the keychain (ADR-0029). A
+/// missing entry contributes nothing; a keychain read error for one env key is
+/// logged + skipped so a single OS keychain fault does not brick the whole
+/// server (the server may still operate without that secret, and bricking it
+/// would let an OS keychain glitch take down the whole tool table).
+pub(crate) fn collect_secrets(
+    keychain: &KeychainStore,
+    server: &McpServerConfig,
+) -> Vec<SecretEnv> {
+    server
+        .keychain_env_keys
+        .iter()
+        .filter_map(
+            |env_key| match get_mcp_secret(keychain, &server.id, env_key) {
+                Ok(Some(value)) => Some((env_key.clone(), value)),
+                Ok(None) => None,
+                Err(e) => {
+                    log::warn!(
+                        target: "toptopduck::mcp",
+                        "MCP server {} keychain read for {} failed, skipping secret: {e}",
+                        server.id,
+                        env_key
+                    );
+                    None
+                }
+            },
+        )
+        .collect()
+}
+
+/// Read every secret request-header value for one server from the keychain
+/// (issue #901) -- the header-face counterpart of [`collect_secrets`], with
+/// the same per-entry fault isolation (a missing entry contributes nothing;
+/// one OS keychain fault skips that header, not the server).
+pub(crate) fn collect_header_secrets(
+    keychain: &KeychainStore,
+    server: &McpServerConfig,
+) -> Vec<SecretEnv> {
+    server
+        .keychain_header_keys
+        .iter()
+        .filter_map(
+            |name| match get_mcp_header_secret(keychain, &server.id, name) {
+                Ok(Some(value)) => Some((name.clone(), value)),
+                Ok(None) => None,
+                Err(e) => {
+                    log::warn!(
+                        target: "toptopduck::mcp",
+                        "MCP server {} keychain read for header {} failed, skipping: {e}",
+                        server.id,
+                        name
+                    );
+                    None
+                }
+            },
+        )
+        .collect()
+}
+
+/// Build the server slug for a configured server (ADR-0076). ASCII
+/// alphanumerics are lowercased; whitespace / `_` / `-` collapse to a single
+/// `_` separator; other characters (including non-ASCII in a CJK display name)
+/// are dropped. A result that trims empty (an all-non-ASCII or empty display
+/// name) falls back to `server-<id8>` (the id's first 8 chars -- a uuid v4
+/// simple form at mint time, plenty unique within a turn).
+pub fn slugify(display_name: &str, id: &McpServerId) -> String {
+    let raw: String = display_name
+        .chars()
+        .filter_map(|c| {
+            if c.is_ascii_alphanumeric() {
+                Some(c.to_ascii_lowercase())
+            } else if c.is_whitespace() || c == '_' || c == '-' {
+                Some('_')
+            } else {
+                None
+            }
+        })
+        .collect();
+    let slug: String = raw
+        .split('_')
+        .filter(|s| !s.is_empty())
+        .collect::<Vec<_>>()
+        .join("_");
+    if slug.is_empty() {
+        let id8: String = id.as_str().chars().take(8).collect();
+        format!("server-{id8}")
+    } else if slug == crate::approval::ToolKey::BUILTIN_SERVER {
+        // Reserved-name guard (issue #312): a display name that normalizes to
+        // "builtin" would flow into `ToolKey::external("builtin", ...)` →
+        // `is_builtin()` → `classify` returns `Allow`, bypassing the approval
+        // gate. Append `_reserved` so the slug never collides with the
+        // built-in server namespace. This is distinct from `unique_slug`'s
+        // `_2` suffix, whose semantics is collision de-duplication.
+        format!("{slug}_reserved")
+    } else {
+        slug
+    }
+}
+
+/// Compose the gateway handle for one server-native tool:
+/// `mcp__<server_slug>__<tool>`. This is a HANDLE, not an advertised name
+/// (ADR-0105): the search card's `tool` field and `mcp_invoke`'s addressing
+/// argument both carry this string verbatim, and routing parses it back
+/// apart.
+pub fn namespaced_name(slug: &str, tool: &str) -> String {
+    format!("{NAMESPACED_PREFIX}{slug}{NAMESPACED_SEP}{tool}")
+}
+
+/// Split a namespaced name into its non-empty `(slug, tool)` parts WITHOUT
+/// allocating -- `None` for any name that is not a well-formed handle. Both
+/// [`parse_namespaced`] and [`is_namespaced`] route through here so the shape
+/// rule lives once.
+fn namespaced_parts(name: &str) -> Option<(&str, &str)> {
+    let rest = name.strip_prefix(NAMESPACED_PREFIX)?;
+    let (slug, tool) = rest.split_once(NAMESPACED_SEP)?;
+    (!slug.is_empty() && !tool.is_empty()).then_some((slug, tool))
+}
+
+/// Parse a gateway-advertised name back into `(server_slug, server-native
+/// tool)`. Returns `None` if the name is not a namespaced MCP tool (the
+/// built-in tools, or a stray name) -- the gateway treats those as built-in
+/// dispatch candidates.
+pub fn parse_namespaced(name: &str) -> Option<(String, String)> {
+    namespaced_parts(name).map(|(slug, tool)| (slug.to_string(), tool.to_string()))
+}
+
+/// Non-allocating shape test for a namespaced MCP handle -- the guard /
+/// routing discriminator at the dispatch sites. [`parse_namespaced`]
+/// allocates the split pair; a site that only needs the shape (the pre-gate
+/// refusal guard, the route-by-name discriminator) pays no allocation for it.
+pub fn is_namespaced(name: &str) -> bool {
+    namespaced_parts(name).is_some()
+}
+
+/// Extract the first text block from a standard MCP `tools/call` envelope
+/// (ADR-0076, issue #301). Both runtimes reduce the envelope to a flat string
+/// via this helper, but in different roles whose asymmetry is deliberate:
+/// - The gateway uses it for the turn **trace excerpt** only; the full
+///   envelope is relayed to the model VERBATIM (structured content blocks
+///   preserved -- see `external_call_outcome` in `runtime::gateway::server`).
+/// - The built-in agent loop uses it for the **model-facing
+///   `ToolResult.content` itself**, which is a flat `String` on that path, so
+///   a multi-block or non-text result reduces to its first text block.
+///
+/// A non-text or empty result falls back to a placeholder rather than
+/// serializing the whole envelope (the model would otherwise have to parse
+/// JSON out of a flat string; the trace excerpt would re-introduce the
+/// double-encoding the gateway's verbatim relay avoids).
+pub fn first_text_block(envelope: &Value) -> String {
+    envelope
+        .get("content")
+        .and_then(Value::as_array)
+        .and_then(|blocks| {
+            blocks.iter().find_map(|b| {
+                if b.get("type").and_then(Value::as_str) == Some("text") {
+                    b.get("text").and_then(Value::as_str).map(str::to_string)
+                } else {
+                    None
+                }
+            })
+        })
+        .unwrap_or_else(|| "<non-text MCP result>".to_string())
+}
+
+/// A routing failure: the name was not namespaced, the slug did not match a
+/// connected server, or the server's call returned an error.
+#[derive(Debug, thiserror::Error)]
+pub enum RouteError {
+    #[error("not a namespaced mcp__<slug>__<tool> name: {0}")]
+    NotNamespaced(String),
+    #[error("no enabled MCP server with slug `{0}`")]
+    UnknownServer(String),
+    #[error("server call failed: {0}")]
+    Client(#[from] ClientError),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    // --- effective_timeout (issue #889) ---------------------------------------
+
+    fn timeout_config(timeout_ms: Option<u32>) -> McpServerConfig {
+        use crate::mcp::config::McpTransport;
+        McpServerConfig {
+            id: McpServerId("t".into()),
+            display_name: "T".into(),
+            transport: McpTransport::stdio("unused", Vec::new()),
+            env: Default::default(),
+            keychain_env_keys: Vec::new(),
+            keychain_header_keys: Vec::new(),
+            timeout_ms,
+            enabled: true,
+        }
+    }
+
+    /// `None` (unset / pre-field legacy config) falls back to the gateway
+    /// default; `Some` overrides verbatim -- a 0 surfaces as an immediate
+    /// gateway fault at call time (a 0 ms budget expires at once) and a
+    /// huge value simply removes the cap; neither is a config reject, so
+    /// 0 resolves to a 0 ms budget unparsed.
+    #[test]
+    fn effective_timeout_none_defaults_some_overrides_verbatim() {
+        assert_eq!(
+            effective_timeout(&timeout_config(None)),
+            Duration::from_millis(DEFAULT_MCP_TIMEOUT_MS as u64),
+            "None -> the 120s gateway default"
+        );
+        assert_eq!(
+            effective_timeout(&timeout_config(Some(500))),
+            Duration::from_millis(500),
+            "Some overrides verbatim"
+        );
+        assert_eq!(
+            effective_timeout(&timeout_config(Some(0))),
+            Duration::from_millis(0),
+            "0 passes through as the gateway-fault budget (no config-layer reject)"
+        );
+    }
+
+    /// Issue #889 review: the stand-down flag is RAII -- the watcher's exit
+    /// must not depend on a manual store a panicking turn skips. Dropping
+    /// the flag (however the turn unwinds) sets the shared bit the watcher
+    /// polls.
+    #[test]
+    fn turn_done_flag_stands_down_on_drop() {
+        let flag_holder = TurnDoneFlag::new();
+        let watched = flag_holder.flag();
+        assert!(
+            !watched.load(Ordering::SeqCst),
+            "the flag starts live (false)"
+        );
+        drop(flag_holder);
+        assert!(
+            watched.load(Ordering::SeqCst),
+            "drop stands the watcher down whatever way the turn unwound"
+        );
+    }
+
+    /// Issue #899: the watcher spawn result is recorded on the aggregator.
+    /// The spawn-failure arm only warns through the log facade, and test
+    /// binaries do not initialize a logger -- a degraded turn (no watcher;
+    /// waits bounded only by budgets) would leave zero trace. The failure
+    /// itself is not injectible in a unit test (thread-resource
+    /// exhaustion), so this pins the field as the observation surface and
+    /// the success arm's recording; the stood-down flag makes the spawned
+    /// watcher exit at once, keeping the test leak-free.
+    #[test]
+    fn arm_cancel_teardown_records_the_watcher_spawn_result() {
+        let mut agg = McpAggregator::empty();
+        assert!(!agg.watcher_spawned, "an unarmed aggregator has no watcher");
+        let flag_holder = TurnDoneFlag::new();
+        let watched = flag_holder.flag();
+        drop(flag_holder);
+        agg.arm_cancel_teardown(Arc::new(CancelToken::new()), watched);
+        assert!(
+            agg.watcher_spawned,
+            "a successful spawn records the watcher as spawned"
+        );
+    }
+
+    // --- slugify -------------------------------------------------------------
+
+    #[test]
+    fn slugify_lowercases_ascii_alphanumerics() {
+        let id = McpServerId("a1b2c3d4e5f6".into());
+        assert_eq!(slugify("GitHub", &id), "github");
+        assert_eq!(slugify("My MCP Server", &id), "my_mcp_server");
+    }
+
+    #[test]
+    fn slugify_collapses_separators() {
+        // Whitespace / _ / - all collapse to a single _; runs merge into one.
+        let id = McpServerId("id".into());
+        assert_eq!(slugify("a  b--c", &id), "a_b_c");
+        assert_eq!(slugify("-leading", &id), "leading");
+        assert_eq!(slugify("trailing_", &id), "trailing");
+    }
+
+    #[test]
+    fn slugify_drops_non_ascii_then_falls_back_to_server_id8() {
+        // A CJK-only display name drops every char -> empty -> server-<id8>.
+        let id = McpServerId("a1b2c3d4e5f6g7h8".into());
+        assert_eq!(slugify("数据源", &id), "server-a1b2c3d4");
+        assert_eq!(slugify("", &id), "server-a1b2c3d4");
+    }
+
+    #[test]
+    fn slugify_keeps_ascii_in_a_mixed_name() {
+        let id = McpServerId("id".into());
+        assert_eq!(slugify("GitHub 数据源", &id), "github");
+    }
+
+    #[test]
+    fn slugify_appends_reserved_suffix_for_builtin_collision() {
+        // Issue #312: a display name that normalizes to "builtin" must not
+        // produce the reserved slug — it would bypass the approval gate via
+        // `ToolKey::external("builtin", ...)`. Append `_reserved`. The guard
+        // catches any input whose alphanumeric chars form "builtin"
+        // (case-insensitive) — e.g. "Built.in", "Built,in" also drop to
+        // "builtin" because non-alphanumeric-separator chars are discarded.
+        // A separator-bearing variant like "built-in" becomes "built_in".
+        let id = McpServerId("a1b2c3d4".into());
+        assert_eq!(slugify("Builtin", &id), "builtin_reserved");
+        assert_eq!(slugify("builtin", &id), "builtin_reserved");
+        assert_eq!(slugify("BUILTIN", &id), "builtin_reserved");
+        assert_eq!(slugify("builtIn", &id), "builtin_reserved");
+        assert_eq!(slugify("Built.in", &id), "builtin_reserved");
+    }
+
+    #[test]
+    fn slugify_strips_underscores_from_reserved_spoof_sentinel() {
+        // Issue #312: RESERVED_SPOOF_SERVER ("_builtin_spoof_") has leading /
+        // trailing underscores that slugify's split('_') + filter(!empty)
+        // strips. No real display name can produce a slug that collides with
+        // the sentinel, so routing always fails gracefully on a spoofed call.
+        let id = McpServerId("a1b2c3d4".into());
+        assert_eq!(
+            slugify(crate::approval::ToolKey::RESERVED_SPOOF_SERVER, &id),
+            "builtin_spoof"
+        );
+    }
+
+    // --- namespaced name round-trip -----------------------------------------
+
+    #[test]
+    fn namespaced_name_round_trips_via_parse() {
+        let name = namespaced_name("github", "search");
+        assert_eq!(name, "mcp__github__search");
+        assert_eq!(
+            parse_namespaced(&name),
+            Some(("github".into(), "search".into()))
+        );
+    }
+
+    #[test]
+    fn parse_returns_none_for_bare_names() {
+        // Built-in tools + stray names are not namespaced -- the gateway treats
+        // them as built-in dispatch candidates.
+        assert_eq!(parse_namespaced("explore"), None);
+        assert_eq!(parse_namespaced("materialize"), None);
+        assert_eq!(parse_namespaced(""), None);
+    }
+
+    #[test]
+    fn parse_returns_none_for_empty_slug_or_tool() {
+        assert_eq!(parse_namespaced("mcp___search"), None);
+        assert_eq!(parse_namespaced("mcp__github__"), None);
+    }
+
+    #[test]
+    fn namespaced_separator_only_splits_once_at_first_double_underscore() {
+        // A server-native tool name that itself contains `__` must survive:
+        // splitn(2) keeps the tail verbatim so the server sees its real name.
+        let name = namespaced_name("github", "repo__search");
+        assert_eq!(name, "mcp__github__repo__search");
+        assert_eq!(
+            parse_namespaced(&name),
+            Some(("github".into(), "repo__search".into()))
+        );
+    }
+
+    // --- first_text_block ----------------------------------------------------
+
+    /// `first_text_block` reads the first `type: text` block from an MCP
+    /// tools/call envelope (ADR-0076, issue #301): a single text block wins,
+    /// a leading non-text block is skipped to the first text block, and a
+    /// non-text / empty result falls back to a placeholder (never a JSON dump
+    /// of the envelope). Shared by the gateway (trace excerpt) and the
+    /// built-in agent loop (flat model-facing content).
+    #[test]
+    fn first_text_block_reads_first_text_and_falls_back() {
+        // Single text block -> that text.
+        let single = json!({
+            "content": [{"type": "text", "text": "5"}],
+            "isError": false,
+        });
+        assert_eq!(first_text_block(&single), "5");
+
+        // Multiple blocks -> first text block wins (a leading image is
+        // skipped; later text blocks are ignored).
+        let multi = json!({
+            "content": [
+                {"type": "image", "data": "..."},
+                {"type": "text", "text": "first text"},
+                {"type": "text", "text": "second text"},
+            ],
+            "isError": false,
+        });
+        assert_eq!(first_text_block(&multi), "first text");
+
+        // No text block -> placeholder, NOT a JSON dump of the envelope.
+        let nontext = json!({
+            "content": [{"type": "image", "data": "..."}],
+            "isError": false,
+        });
+        assert_eq!(first_text_block(&nontext), "<non-text MCP result>");
+
+        // Empty content array -> placeholder.
+        let empty = json!({"content": [], "isError": false});
+        assert_eq!(first_text_block(&empty), "<non-text MCP result>");
+    }
+
+    // --- aggregator surface shape -------------------------------------------
+
+    /// ADR-0105 Decision 6: a turn whose effective external set is empty
+    /// mounts no trio -- the tool surface stays the built-in four only.
+    #[test]
+    fn empty_aggregator_attaches_no_trio() {
+        let agg = McpAggregator::empty();
+        assert!(agg.meta_tool_definitions().is_empty());
+        assert_eq!(agg.server_listing()["servers"].as_array().unwrap().len(), 0);
+        assert_eq!(agg.search_catalog("")["total_matched"], 0);
+    }
+
+    #[test]
+    fn aggregator_default_is_empty() {
+        let agg = McpAggregator::default();
+        assert!(agg.servers.is_empty());
+        assert!(agg.meta_tool_definitions().is_empty());
+    }
+
+    /// ADR-0105 Decision 3: the catalog serves at most `SEARCH_TOP_K` cards
+    /// while `total_matched` carries the pre-truncation count -- a 12-tool
+    /// catalog serves 10 cards and reports 12 matched, so the caller can
+    /// tell matches were dropped and narrow the query.
+    #[test]
+    fn search_catalog_caps_cards_at_search_top_k() {
+        let tools: Vec<Value> = (0..12)
+            .map(|i| {
+                json!({
+                    "name": format!("tool_{i}"),
+                    "description": "a tool",
+                    "inputSchema": {"type": "object"},
+                })
+            })
+            .collect();
+        let agg = McpAggregator::catalog_server_for_test("TopK", tools);
+        let out = agg.search_catalog("");
+        assert_eq!(
+            out["tools"].as_array().unwrap().len(),
+            meta_tools::SEARCH_TOP_K,
+            "served cards cap at SEARCH_TOP_K"
+        );
+        assert_eq!(out["total_matched"], 12, "total counts pre-truncation");
+    }
+
+    /// A malformed entry (no non-empty string `name`) cannot be addressed --
+    /// its would-be handle `mcp__<slug>__` never parses -- so it never
+    /// becomes a card and never counts toward `total_matched`. Every card
+    /// the surface emits must be callable through `mcp_invoke`.
+    #[test]
+    fn search_catalog_skips_entries_without_a_usable_name() {
+        let tools = vec![
+            json!({"name": "echo", "description": "echo", "inputSchema": {"type": "object"}}),
+            json!({"description": "no name at all"}),
+            json!({"name": ""}),
+        ];
+        let agg = McpAggregator::catalog_server_for_test("SkipMalformed", tools);
+        let out = agg.search_catalog("");
+        assert_eq!(out["total_matched"], 1, "only the well-formed entry counts");
+        let cards = out["tools"].as_array().unwrap();
+        assert_eq!(cards.len(), 1);
+        assert_eq!(cards[0]["tool"], "mcp__skipmalformed__echo");
+    }
+
+    /// Issue #661: the catalog note rides ONLY the empty turn -- an empty
+    /// catalog (no server connected) carries the note pointing at
+    /// `mcp_list_servers`, while a no-match search over a live catalog and a
+    /// live-but-zero-tools catalog both stay note-free.
+    #[test]
+    fn search_catalog_note_rides_only_the_empty_catalog() {
+        // Empty catalog: nothing connected -> the note rides the result.
+        let empty = McpAggregator::empty();
+        let out = empty.search_catalog("");
+        assert_eq!(out["total_matched"], 0);
+        assert_eq!(
+            out["note"].as_str().unwrap(),
+            meta_tools::EMPTY_CATALOG_NOTE,
+            "empty catalog self-explains via the note"
+        );
+
+        // Live catalog, no match: same tools/total_matched shape, NO note --
+        // the agent knows servers exist and the query simply missed.
+        let live = McpAggregator::catalog_server_for_test(
+            "Live",
+            vec![json!({"name": "echo", "description": "echo", "inputSchema": {"type": "object"}})],
+        );
+        let out = live.search_catalog("zzz-no-such-tool");
+        assert_eq!(out["total_matched"], 0);
+        assert_eq!(out["tools"].as_array().unwrap().len(), 0);
+        assert!(
+            out.get("note").is_none(),
+            "a no-match search over a live catalog carries no note"
+        );
+
+        // A server connected with zero usable tools stays note-free: the
+        // catalog is technically live, and the manifest already reports the
+        // server honestly as connected with tool_count 0.
+        let zero =
+            McpAggregator::catalog_server_for_test("Zero", vec![json!({"description": "no name"})]);
+        let out = zero.search_catalog("");
+        assert_eq!(out["total_matched"], 0);
+        assert!(
+            out.get("note").is_none(),
+            "a live-but-zero-tools catalog carries no note"
+        );
+    }
+
+    /// A missing `inputSchema` on a catalog entry degrades to an empty
+    /// object on the card (issue #661) -- the complement of the
+    /// verbatim-schema pins (the gateway + integration tests pin a
+    /// non-trivial schema surviving untouched; this pins the degraded
+    /// shape, so neither can be mistaken for the other).
+    #[test]
+    fn search_card_degrades_a_missing_schema_to_an_empty_object() {
+        let agg = McpAggregator::catalog_server_for_test(
+            "Deg",
+            vec![json!({"name": "echo", "description": "echo"})],
+        );
+        let out = agg.search_catalog("");
+        assert_eq!(
+            out["tools"][0]["inputSchema"],
+            json!({}),
+            "a schema-less entry degrades to an empty object, not null/missing"
+        );
+    }
+
+    /// The manifest record and the returned `ConnectResult` are built from
+    /// ONE typed outcome (issue #661): a failed connect surfaces the same
+    /// reason in both surfaces, and the manifest's connected/tool_count
+    /// agree with the result. (The success side is pinned end-to-end over a
+    /// live fake server in `mcp_gateway_integration`.)
+    #[test]
+    fn connect_outcomes_mirror_between_manifest_and_connect_result() {
+        let mut failed = McpAggregator::empty();
+        let config = McpServerConfig {
+            id: McpServerId("bad".into()),
+            display_name: "Bad".into(),
+            transport: crate::mcp::config::McpTransport::stdio(
+                "/no/such/toptopduck-binary",
+                Vec::new(),
+            ),
+            env: std::collections::BTreeMap::new(),
+            keychain_env_keys: Vec::new(),
+            keychain_header_keys: Vec::new(),
+            timeout_ms: None,
+            enabled: true,
+        };
+        let result = failed.connect_one(&config, &[], &[]);
+        assert!(!result.connected, "spawn failure skips the server");
+        let reason = result.error.clone().expect("failure reason");
+        let entry = &failed.server_listing()["servers"][0];
+        assert_eq!(entry["server"], "Bad");
+        assert_eq!(entry["connected"], false);
+        assert_eq!(entry["tool_count"], 0);
+        assert_eq!(
+            entry["error"].as_str().unwrap(),
+            reason,
+            "manifest + ConnectResult carry the SAME reason from one outcome"
+        );
+    }
+
+    // --- route error branches (no spawn; empty aggregator) ------------------
+
+    #[test]
+    fn route_rejects_a_non_namespaced_name() {
+        // A built-in tool name (or any bare name) is not the gateway's job to
+        // route here -- the gateway dispatches it as a built-in before ever
+        // calling route(). route() surfaces the shape mismatch so a programming
+        // error (calling route() on a bare name) fails loudly, not silently.
+        let mut agg = McpAggregator::empty();
+        let err = agg.route("explore", &json!({})).expect_err("bare name");
+        assert!(
+            matches!(err, RouteError::NotNamespaced(_)),
+            "bare name -> NotNamespaced, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn route_rejects_a_namespaced_shape_with_no_matching_slug() {
+        // A well-formed namespaced name but a slug no connected server owns --
+        // the gateway surfaces this as a tool-level error (ADR-0077) rather
+        // than silently dropping the call.
+        let mut agg = McpAggregator::empty();
+        let err = agg
+            .route("mcp__ghost__echo", &json!({}))
+            .expect_err("unknown slug");
+        assert!(
+            matches!(err, RouteError::UnknownServer(ref s) if s == "ghost"),
+            "unknown slug -> UnknownServer(\"ghost\"), got {err:?}"
+        );
+    }
+
+    // --- extract_tool_info (issue #387) -------------------------------------
+
+    #[test]
+    fn extract_tool_info_projects_name_and_description() {
+        let tools = vec![
+            json!({"name": "search", "description": "Search the web"}),
+            json!({"name": "fetch", "description": "Fetch a URL"}),
+        ];
+        let infos = extract_tool_info(&tools);
+        assert_eq!(infos.len(), 2);
+        assert_eq!(infos[0].name, "search");
+        assert_eq!(infos[0].description, "Search the web");
+        assert_eq!(infos[1].name, "fetch");
+        assert_eq!(infos[1].description, "Fetch a URL");
+    }
+
+    #[test]
+    fn extract_tool_info_degrades_missing_description_to_empty() {
+        // A server may legitimately omit description; it degrades to "".
+        let tools = vec![json!({"name": "ping"})];
+        let infos = extract_tool_info(&tools);
+        assert_eq!(infos.len(), 1);
+        assert_eq!(infos[0].name, "ping");
+        assert_eq!(infos[0].description, "");
+    }
+
+    #[test]
+    fn extract_tool_info_skips_entries_missing_name() {
+        // A malformed entry without a string name is skipped, not paniced.
+        let tools = vec![
+            json!({"description": "no name here"}),
+            json!({"name": 42, "description": "non-string name"}),
+            json!({"name": "valid", "description": "ok"}),
+        ];
+        let infos = extract_tool_info(&tools);
+        assert_eq!(infos.len(), 1);
+        assert_eq!(infos[0].name, "valid");
+    }
+
+    #[test]
+    fn extract_tool_info_empty_input_returns_empty() {
+        let infos: Vec<McpToolInfo> = extract_tool_info(&[]);
+        assert!(infos.is_empty());
+    }
+}

@@ -1,0 +1,1068 @@
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import type { QueryClient } from "@tanstack/react-query";
+import type { IntlShape } from "react-intl";
+import { askQuestion, cancelQuery, getSessionRuntime, onTurnProgress } from "../api";
+import { toAppError } from "../lib/error-presentation";
+import { log } from "../lib/log";
+import { sessionKeys } from "./queryKeys";
+import { invalidateSessionData } from "./useWorkingSet";
+import type { ApprovalEntry } from "./useApprovalEvents";
+import type { UseViewedResult } from "./useViewedResult";
+import type { AppError } from "../types/error";
+import type { ApprovalResponse, FileAttachment, OperationKind } from "../types/approval";
+import type { TurnPhase } from "../types/session";
+import type { SessionRuntimeChoice } from "../types/runtime";
+import type {
+  ThreadEntry,
+  ThinkingTrace,
+  TraceEntry,
+  TraceRound,
+  TurnOutcome,
+  TurnRuntime,
+} from "../types/thread";
+
+// The turn-orchestration domain (issue #230), extracted from useSessionState
+// (slice 2 of the three-slice deepening). This hook owns the turn-progress
+// event lifecycle + the in-flight turn's LIVE TRACE (ADR-0078, issue #297) +
+// handleAsk + handleCancel. The parent drives it through injected deps and
+// never reaches for the raw queryClient / viewed setters from here.
+//
+// Boundary is TURN ORCHESTRATION, not the generic post-mutation refresh.
+// handleAsk's turn-end refresh goes through the seam's single cascade entry
+// (invalidateSessionData) AFTER the optimistic thread append -- the refetch
+// converges the append onto the recorded row (richer: the settle-computed
+// artifact manifest, body, invocation hashes; issue #1088). The turn calls
+// the entry DIRECTLY rather than through the parent's refreshServerState
+// dep: the refresh must fire inside handleAsk's finally-guarded tail (the
+// busy-gate clear), not after the parent's await returns.
+
+// Module-level empty constants keep the optional deps' defaults referentially
+// stable across renders (the useMemo over live state must not recompute on an
+// every-render fresh []).
+const NO_APPROVALS: ApprovalEntry[] = [];
+const NO_ROUNDS: LiveRound[] = [];
+
+/** One in-flight tool call as the turn-progress stream reports it: started
+ *  (running spinner) then completed (success/failure + excerpt). The completed
+ *  fields mirror the TraceEntry wire shape (the ToolCallCompleted payload), so
+ *  a settled turn's optimistic record carries exactly what the backend
+ *  recorded. */
+export interface LiveCall {
+  /** Stable render key: arrival order (`call-0`, `call-1`, ...). */
+  key: string;
+  /** The 1-based round (provider round-trip) the call belongs to -- the
+   *  Thinking event's attempt at the moment the call arrived. Drives the
+   *  settled fold's round grouping (issue #608, ADR-0103). */
+  step: number;
+  name: string;
+  operationKind: OperationKind;
+  summary: string;
+  running: boolean;
+  /** null until the completion event lands (a running dispatch). */
+  success: boolean | null;
+  resultExcerpt: string;
+  /** The delegation entry's nested sub-rounds (issue #934), delivered by the
+   *  completion event; undefined for an ordinary call. */
+  subRounds?: TraceRound[];
+}
+
+/** One row of the in-flight turn's live trace: a tool call MERGED with its
+ *  approval card when the call went through the gateway gate (ADR-0083) --
+ *  one row per call across both event channels, so an external tool renders
+ *  pending card -> resolved badge + running spinner -> success/failure on a
+ *  single line. Rows with `approval` render the card chrome; rows without are
+ *  plain built-in call rows. */
+export interface LiveTraceRow {
+  /** Stable render key: the approval requestId for gated calls (the card's
+   *  identity survives the started/completed merge), else the call key. */
+  key: string;
+  /** The 1-based round (provider round-trip) the call belongs to; carried
+   *  through the merge so the settled fold can group rows into rounds. */
+  step: number;
+  name: string;
+  /** The external MCP server for gated calls; null for built-in calls. */
+  server: string | null;
+  operationKind: OperationKind;
+  summary: string;
+  /** The approval card's state when this call went through the gate:
+   *  `response` null while PENDING (three live buttons), the user's answer
+   *  once resolved (badge), or `"abandoned"` when the external caller
+   *  dropped the call with no answer (issue #1267 -- abandoned badge). null
+   *  for ungated built-in calls. The fileAttachments snapshot (issue #672)
+   *  rides the pending card; the card is its only surface (the settled
+   *  trace keeps the argv summary). */
+  approval: {
+    requestId: string;
+    response: ApprovalResponse | "abandoned" | null;
+    fileAttachments?: FileAttachment[];
+    /** The delegating sub-agent's name (issue #934): the card renders it as
+     *  "sub-agent X wants to call Y". undefined for a main-loop call. */
+    originAgent?: string;
+  } | null;
+  running: boolean;
+  success: boolean | null;
+  resultExcerpt: string;
+  /** The delegation entry's nested sub-rounds (issue #934), carried through
+   *  the merge so the settled row renders the view affordance. */
+  subRounds?: TraceRound[];
+}
+
+/** One live round's row: a `LiveTraceRow` with the round membership stripped
+ *  -- the round array's position IS the round (index = round number - 1), so
+ *  no second step fact can drift from the grouping that placed the row. */
+export type LiveRoundRow = Omit<LiveTraceRow, "step">;
+
+/** One live round as the single grouping source derives it (issue #620): the
+ *  round's thinking block + connective prose (the per-round slots) plus the
+ *  round's merged rows. The array index IS the 1-based round number minus
+ *  one -- no parallel slot arrays, no cross-collection alignment. The shape
+ *  mirrors TraceRound with live rows (running / gate-pending) in place of
+ *  settled calls, so the settle projection is a pure per-row mapping. */
+export interface LiveRound {
+  thinking?: ThinkingTrace;
+  /** The round's connective prose: undefined until the round's first
+   *  TextDelta lands, then defined and append-only for the round's
+   *  remaining life (ADR-0126) -- the trailing status gate reads undefined
+   *  as "no prose yet", and a defined text only counts as streaming while
+   *  the round has no rows (a round that has observed a call has sealed
+   *  its prose, issue #1234). */
+  text?: string;
+  rows: LiveRoundRow[];
+}
+
+/** The in-flight turn the rail renders as a chat exchange (ADR-0078/0103,
+ *  issues #297/#610): the asking question + the round-grouped live trace.
+ *  Client UI state only (ADR-0051/0059) -- never enters the thread cache; the
+ *  settled turn folds the rounds into its optimistic TurnRecord.trace. */
+export interface LiveTurn {
+  question: string;
+  /** The client's submit stamp (the live bubble's `asked_at`, ADR-0103 live
+   *  isomorphism, issue #610): read at handleAsk, carried so the bubble
+   *  mounts its timestamp before any progress event lands. The same value
+   *  rides the optimistic TurnRecord until the backend's own stamps land:
+   *  the turn-end refresh, a reopened mount, or another domain's invalidation
+   *  (ingest, skill changes) all converge the append onto the recorded row
+   *  (ADR-0051 / issue #1088). */
+  askedAt: number;
+  /** The skill names staged at submit (ADR-0119: the turn's user
+   *  invocations, client-known before the IPC returns). The live bubble's
+   *  badge renders from them; the settled card reads the recorded
+   *  `TurnRecord.invocations` instead. */
+  invocationNames: string[];
+  /** The 1-based step of the latest Thinking event (round-trip count,
+   *  ADR-0081); null until the first event arrives -- every reader treats
+   *  null as round 1 (the shared `?? 1`). */
+  step: number | null;
+  /** The round-grouped live trace -- the SINGLE derivation (issue #620): the
+   *  exchange renders it directly and the settle projection consumes it, so
+   *  the grouping exists once instead of twice with a shared-by-comment
+   *  invariant. */
+  rounds: LiveRound[];
+  /** The ask-time runtime choice mapped onto the thread's attribution
+   *  (issue #818): the live exchange renders the per-turn marker from it,
+   *  the same value the optimistic append stamps -- one source, so the
+   *  settle swap re-hosts an identical marker. Absent until the read
+   *  resolves (the initial live commit precedes it) and on failure -- no
+   *  marker, matching the append's omitted runtime. */
+  runtime?: TurnRuntime;
+}
+
+/** Whether the live turn sits in an LLM round-trip wait -- the trailing
+ *  status line's gate and the wait-elapsed stamp's arm (issue #1264): true
+ *  while nothing else on the tail carries the CURRENT round's liveness.
+ *  While a call dispatches (or waits at the gate) its row carries the
+ *  motion, and while #1163 streams the current round's prose -- prose that
+ *  can still grow, a call-less tail -- the visible text + caret carry it by
+ *  themselves (a tail beside rows has its prose sealed; both arms below
+ *  exclude that window) -- a status still claiming 思考中 over visibly
+ *  streaming text is a doubled, misleading signal. The prose arm requires
+ *  the tail to BE the current round -- a Thinking that opens the next round
+ *  bumps only the step, leaving the tail at the previous round's sealed
+ *  prose where a caret is not the new round's motion -- so the wait names
+ *  every LLM round-trip wait (ask start, the inter-round wait, the new
+ *  round's pre-prose thinking, the sealed-tail wait beside settled rows),
+ *  with the step surfaced past the first round-trip ("step N", ADR-0081).
+ *  One predicate for the rail's status gate and the hook's stamp, so the
+ *  two can never drift. */
+export function isRoundTripWait(turn: Pick<LiveTurn, "rounds" | "step">): boolean {
+  const rowInProgress = turn.rounds.some((round) =>
+    round.rows.some((row) => row.running || row.success === null),
+  );
+  const tailIndex = turn.rounds.length - 1;
+  const tail = turn.rounds[tailIndex];
+  const proseStreaming =
+    tailIndex === (turn.step ?? 1) - 1 &&
+    tail !== undefined &&
+    tail.text !== undefined &&
+    tail.rows.length === 0;
+  return !rowInProgress && !proseStreaming;
+}
+
+/** Merge the two live channels into one ordered row list (pure -- unit-tested
+ *  without the hook). Calls keep dispatch order; each call absorbs the
+ *  matching approval entry (same tool name + summary: both channels source
+ *  the summary from the gateway's classify step, so the strings agree).
+ *  Unmatched approvals (still pending -- the call hasn't passed the gate yet,
+ *  or a gate-cancelled call that never dispatched) trail the list: they ARE
+ *  the most recent events. A trailing row's round is the current step (the
+ *  best-known round until the call starts, issue #610); a merged row carries
+ *  its call's own round. */
+export function mergeLiveTrace(
+  calls: LiveCall[],
+  approvals: ReadonlyArray<ApprovalEntry>,
+  currentStep: number | null,
+): LiveTraceRow[] {
+  const rows: LiveTraceRow[] = [];
+  const merged = new Set<string>();
+  for (const call of calls) {
+    const match = approvals.find(
+      (a) => !merged.has(a.requestId) && a.tool === call.name && a.summary === call.summary,
+    );
+    if (match) {
+      merged.add(match.requestId);
+      rows.push({
+        key: match.requestId,
+        step: call.step,
+        name: call.name,
+        server: match.server,
+        operationKind: call.operationKind,
+        summary: call.summary,
+        approval: {
+          requestId: match.requestId,
+          response: liveApprovalResponse(match.status),
+          fileAttachments: match.fileAttachments,
+          originAgent: match.originAgent,
+        },
+        running: call.running,
+        success: call.success,
+        resultExcerpt: call.resultExcerpt,
+        subRounds: call.subRounds,
+      });
+    } else {
+      rows.push({
+        key: call.key,
+        step: call.step,
+        name: call.name,
+        server: null,
+        operationKind: call.operationKind,
+        summary: call.summary,
+        approval: null,
+        running: call.running,
+        success: call.success,
+        resultExcerpt: call.resultExcerpt,
+        subRounds: call.subRounds,
+      });
+    }
+  }
+  for (const a of approvals) {
+    if (merged.has(a.requestId)) continue;
+    rows.push({
+      key: a.requestId,
+      // An unmatched approval row never dispatches (pending, or
+      // gate-cancelled), so its success stays null and the settled fold
+      // drops it. The live round grouping still reads its step (#610):
+      // stamp the current round -- the row belongs to the round whose gate
+      // is holding the turn -- so the card trails inside the right block.
+      step: currentStep ?? 1,
+      name: a.tool,
+      server: a.server,
+      operationKind: a.operationKind,
+      summary: a.summary,
+      approval: {
+        requestId: a.requestId,
+        response: liveApprovalResponse(a.status),
+        fileAttachments: a.fileAttachments,
+        originAgent: a.originAgent,
+      },
+      running: false,
+      success: null,
+      resultExcerpt: "",
+    });
+  }
+  return rows;
+}
+
+/** Map an approval entry's status onto the live row's `response` field
+ *  (issue #1267): the resolved answer rides through, an abandonment maps to
+ *  the `"abandoned"` terminal marker, everything else (pending) is null. */
+function liveApprovalResponse(
+  status: ApprovalEntry["status"],
+): ApprovalResponse | "abandoned" | null {
+  if (status.kind === "resolved") return status.response;
+  if (status.kind === "abandoned") return "abandoned";
+  return null;
+}
+
+/** The SINGLE round grouping (issue #620): merge the two live channels, then
+ *  fold the merged rows + the per-round slots into one rounds array whose
+ *  index IS the round number minus one. Rows may lead the slot arrays (a
+ *  call can dispatch in round 3 before round 2 emits its prose), so the
+ *  array spans the furthest reach of any source; untouched slots stay
+ *  undefined. Pure -- unit-tested without the hook. */
+export function buildLiveRounds(
+  live: Pick<LiveState, "calls" | "step" | "roundTexts" | "roundThinkings">,
+  approvals: ReadonlyArray<ApprovalEntry>,
+): LiveRound[] {
+  const rows = mergeLiveTrace(live.calls, approvals, live.step);
+  const lastStep = Math.max(
+    rows.reduce((m, r) => Math.max(m, r.step), 0),
+    live.roundTexts.length,
+    live.roundThinkings.length,
+  );
+  return Array.from({ length: lastStep }, (_, i) => ({
+    thinking: live.roundThinkings[i] ?? undefined,
+    text: live.roundTexts[i] ?? undefined,
+    // The step is deliberately NOT carried onto the row: once grouped, the
+    // array position is the round, and a stray step on the row would be a
+    // second, unvalidated round fact.
+    rows: rows
+      .filter((r) => r.step === i + 1)
+      .map((r) => ({
+        key: r.key,
+        name: r.name,
+        server: r.server,
+        operationKind: r.operationKind,
+        summary: r.summary,
+        approval: r.approval,
+        running: r.running,
+        success: r.success,
+        resultExcerpt: r.resultExcerpt,
+        subRounds: r.subRounds,
+      })),
+  }));
+}
+
+/** A live row whose completion event has landed (`success` no longer null):
+ *  the settled projection's input shape. */
+export type SettledLiveRow = LiveRoundRow & { success: boolean };
+
+/** The type guard the two settled consumers share: a row still at
+ *  `success === null` (a gate-cancelled call, resolved-deny with no
+ *  dispatch) has NO backend trace entry. */
+export function isSettledRow(row: LiveRoundRow): row is SettledLiveRow {
+  return row.success !== null;
+}
+
+/** Project one settled live row onto its trace-entry shape (issue #297's
+ *  optimistic parity): the live rail's settled row and the optimistic
+ *  projection consume the SAME mapping, so the hand-synced field list
+ *  lives here once -- a new optional field carried by one arm can never be
+ *  silently severed from the other (PR #946 review: subRounds was). */
+export function traceEntryFromRow(row: SettledLiveRow): TraceEntry {
+  return {
+    name: row.name,
+    operation_kind: row.operationKind,
+    summary: row.summary,
+    success: row.success,
+    result_excerpt: row.resultExcerpt,
+    sub_rounds: row.subRounds,
+  };
+}
+
+/** Whether the outcome settles by terminal text (Textual / Materialized) --
+ *  the settle-mirror fork's predicate (ADR-0126): these outcomes replay the
+ *  trailing prose as their answer (a Materialized may carry a null `body`
+ *  when the terminal text was whitespace-only -- the clear keys on the
+ *  termination, not the body field), while a non-body outcome (Cancelled /
+ *  Failed) has nowhere else to put the partial prose. */
+function outcomeCarriesBody(outcome: TurnOutcome | undefined): boolean {
+  return outcome?.kind === "Textual" || outcome?.kind === "Materialized";
+}
+
+/** Project the live rounds onto the round-grouped `TraceRound[]` for the
+ *  optimistic thread append (issue #297; round-grouped by #608, ADR-0103;
+ *  thinking folded by #610; single-source projection by #620): completed
+ *  calls only -- a row still at success===null (a gate-cancelled call,
+ *  resolved-deny with no dispatch) has NO backend trace entry, so including
+ *  it would diverge from the refetch. Order-preserving by construction (the
+ *  live rounds array is already step-ordered). The ADR-0126 settle mirror
+ *  forks on the ask-resolved `outcome`: a body-bearing outcome (Textual /
+ *  Materialized) clears the trailing call-less round's prose -- it rides
+ *  the outcome -- while any other outcome (or the ask-reject undefined)
+ *  keeps the partial prose (the #628 diagnosis settle), so the turn-end
+ *  refresh converges with no second change. The row mapping is identity
+ *  with the ToolCallCompleted payload, so the optimistic trace equals the
+ *  backend's recorded rounds. */
+export function liveRoundsToTrace(
+  rounds: ReadonlyArray<LiveRound>,
+  outcome?: TurnOutcome,
+): TraceRound[] {
+  const trace: TraceRound[] = [];
+  for (const [i, round] of rounds.entries()) {
+    const calls: TraceEntry[] = [];
+    for (const row of round.rows) {
+      if (!isSettledRow(row)) continue;
+      calls.push(traceEntryFromRow(row));
+    }
+    // ADR-0126 settle mirror: a body-bearing outcome clears the trailing
+    // call-less round's prose -- it rides the outcome, not the trace, the
+    // same clear the backend settle applies -- and the emptied round drops
+    // with it. Any other outcome keeps the partial prose (the #628
+    // diagnosis settle the backend records), so the turn-end refresh
+    // converges with no second change. A round with prose or thinking but
+    // no completed calls still records (a cancel mid-batch).
+    const text =
+      i === rounds.length - 1 && round.rows.length === 0 && outcomeCarriesBody(outcome)
+        ? undefined
+        : round.text;
+    if (calls.length === 0 && text === undefined && round.thinking === undefined) {
+      continue;
+    }
+    const settled: TraceRound = { calls };
+    if (text !== undefined) settled.text = text;
+    if (round.thinking !== undefined) settled.thinking = round.thinking;
+    trace.push(settled);
+  }
+  return trace;
+}
+
+// Map the composer's runtime choice onto the thread's runtime attribution
+// (issue #725): the choice read at submit time mirrors the turn-top snapshot
+// the backend's ask will consume (a switch lands between turns, never
+// mid-turn), so the optimistic append stamps it where record_turn would.
+// The payloads differ only on the external half -- the choice's bare adapter
+// string vs the attribution's adapter-id object (see TurnRuntime); built-in
+// is identity.
+export function choiceToTurnRuntime(choice: SessionRuntimeChoice): TurnRuntime {
+  switch (choice.kind) {
+    case "external":
+      return { kind: "external", data: { adapter_id: choice.data } };
+    case "built_in":
+      return { kind: "built_in" };
+    default: {
+      // This stamps provenance, it is not a degrade-default: an unmapped
+      // choice kind must fail loudly here rather than silently mint
+      // built-in attribution.
+      const unhandled: never = choice;
+      throw new Error(`unhandled runtime choice: ${JSON.stringify(unhandled)}`);
+    }
+  }
+}
+
+export interface UseTurnFlowDeps {
+  queryClient: QueryClient;
+  intl: IntlShape;
+  setTurnLoading: (loading: boolean) => void;
+  setError: (error: AppError | null) => void;
+  pollPersistError: () => Promise<void>;
+  /** The two viewed methods a turn touches (issue #229). markProduced on a
+   *  Materialized outcome (auto-select: the view follows the produced
+   *  result); suppressInit after the optimistic append (any outcome, R5
+   *  moot). The hook never touches raw viewed state -- only these two
+   *  semantic methods. */
+  viewed: Pick<UseViewedResult, "markProduced" | "suppressInit">;
+  /** This session's approval entries (the app-level useApprovalEvents slice,
+   *  ADR-0083). Merged into the live trace rows so a gated external call
+   *  renders its card inside the turn. Optional for call sites that don't
+   *  exercise approvals (tests); defaults to empty (no cards). */
+  approvals?: ReadonlyArray<ApprovalEntry>;
+  /** Called once per settled turn (every ask end, incl. failure / cancel):
+   *  the app-level approval hook clears this session's cards, folded into the
+   *  optimistic record by then. Optional; defaults to a no-op. */
+  onApprovalsSettled?: () => void;
+}
+
+export interface UseTurnFlow {
+  /** The in-flight turn's latest progress event (ADR-0059): Thinking with the
+   *  1-based step, or the last tool-call event. null when no turn is running.
+   *  Client UI state only -- drives the QuestionBar's compact phase label. */
+  phase: TurnPhase | null;
+  /** The in-flight turn's live trace (ADR-0078, issue #297; chat form #610):
+   *  the rail renders it as a chat exchange -- the user bubble at submit plus
+   *  the streaming assistant side (round prose / thinking folds / rows +
+   *  approval cards). null when no turn is running. Built from the
+   *  turn-progress tool-call events merged with the session's approval
+   *  entries; folds into the optimistic TurnRecord.trace when the turn
+   *  settles. */
+  liveTurn: LiveTurn | null;
+  /** The LLM round-trip wait window's start stamp (issue #1264): non-null
+   *  while the live turn sits in isRoundTripWait -- the rail's trailing
+   *  status line derives its elapsed-seconds suffix from it (the bar reads
+   *  the turn clock below instead). null outside a wait window. */
+  waitStartedAt: number | null;
+  /** The turn clock's start (issue #1264 turn-clock ruling): the ask's
+   *  submit stamp while a turn is in flight, null otherwise -- the
+   *  QuestionBar's continuous elapsed figure derives from it, across every
+   *  phase of the turn (a slow gap can't hide behind a phase boundary). */
+  turnStartedAt: number | null;
+  /** The turn clock's pause origin: the earliest PENDING approval's
+   *  arrival stamp -- the displayed figure freezes there while the user
+   *  decides; on release it jumps to the turn's true wall age (the hold is
+   *  hidden while it lasts, never subtracted). null while no approval is
+   *  pending. */
+  turnPausedSince: number | null;
+  // Declared Promise<void> (not void) so the contract reflects the async
+  // implementation: callers can await/.catch to chain post-ask work. Fire-
+  // and-forget callers (QuestionBar onSubmit/onCancel) still accept it via
+  // TypeScript's void-return covariance.
+  handleAsk: (question: string, invocations?: string[]) => Promise<void>;
+  handleCancel: () => Promise<void>;
+}
+
+/** The in-flight turn's raw progress state: the turn-progress channel alone
+ *  (approval cards merge in at the liveTurn derivation). Internal to the
+ *  hook module -- the pure helpers take only the grouping inputs (see
+ *  buildLiveRounds' Pick), so this shape stays free to evolve with the
+ *  event stream. */
+interface LiveState {
+  question: string;
+  askedAt: number;
+  /** The submit-time staging (see LiveTurn.invocationNames). Survives phase
+   *  evolution (applyPhase spreads the previous state). */
+  invocationNames: string[];
+  step: number | null;
+  calls: LiveCall[];
+  /** Per-round connective prose (index = step-1, null when none), from the
+   *  TextDelta stream (ADR-0126; fragments appended in arrival order). */
+  roundTexts: Array<string | null>;
+  /** Per-round thinking blocks (index = step-1, null when none), from the
+   *  ThinkingCompleted events (issues #608/#610). */
+  roundThinkings: Array<ThinkingTrace | null>;
+  /** The ask-time runtime choice mapped onto the thread's attribution
+   *  (issue #818): stamped onto the live state when the submit-time read
+   *  resolves, so the live exchange renders the same marker the optimistic
+   *  append stamps. Absent until the read lands and on its failure -- the
+   *  same honest degrade as the append's omitted runtime. Survives phase
+   *  evolution (applyPhase spreads the previous state). */
+  runtime?: TurnRuntime;
+}
+
+/** Mint a call row keyed by arrival order (the trace is append-only within
+ *  a turn, so the sequence is a stable key). Shared by the two paths that
+ *  append a row (a started call, a gate-denied completion with no start). */
+function callRow(
+  seq: number,
+  step: number,
+  name: string,
+  operationKind: OperationKind,
+  summary: string,
+  running: boolean,
+  success: boolean | null,
+  resultExcerpt: string,
+  subRounds?: TraceRound[],
+): LiveCall {
+  return {
+    key: `call-${seq}`,
+    step,
+    name,
+    operationKind,
+    summary,
+    running,
+    subRounds,
+    success,
+    resultExcerpt,
+  };
+}
+
+/** The index of the LAST running call matching (name, summary) -- the
+ *  completion event's target. Last-wins pairs a completion with its own
+ *  started row when the same tool + summary repeats across steps; -1 when no
+ *  running match exists (a gate-denied call completes without ever starting).
+ *  Manual scan: the ES2022 lib predates findLastIndex. */
+function lastRunningMatchIdx(calls: LiveCall[], name: string, summary: string): number {
+  for (let i = calls.length - 1; i >= 0; i--) {
+    const c = calls[i];
+    if (c.running && c.name === name && c.summary === summary) return i;
+  }
+  return -1;
+}
+
+/** One progress event applied to the live state (pure). null passes through
+ *  -- a late event past the ask's finally finds no live turn and drops. */
+function applyPhase(live: LiveState | null, phase: TurnPhase): LiveState | null {
+  if (live === null) return null;
+  if ("Thinking" in phase) {
+    // The LLM round-trip wait: surface the 1-based step.
+    return { ...live, step: phase.Thinking.attempt };
+  }
+  if ("TextDelta" in phase) {
+    // ADR-0126: one streamed prose fragment, APPENDED to the current
+    // round's text (the Thinking event that opened it has already arrived,
+    // the same ordering premise ThinkingCompleted relies on).
+    const step = live.step ?? 1;
+    const roundTexts = appendRoundText(live.roundTexts, step, phase.TextDelta.delta);
+    return { ...live, roundTexts };
+  }
+  if ("ThinkingCompleted" in phase) {
+    // ADR-0103 (issues #608/#610): the round's thinking block completed,
+    // attached to the CURRENT round (the Thinking event that opened it has
+    // already arrived, same ordering premise as TextDelta). Kept per round
+    // on the live state -- the live thinking fold renders from it and the
+    // settle projection reuses it via the rounds; a runtime without a
+    // thinking data source never fires the event (honest degrade).
+    const step = live.step ?? 1;
+    return {
+      ...live,
+      roundThinkings: withRoundSlot(live.roundThinkings, step, phase.ThinkingCompleted),
+    };
+  }
+  if ("ToolCallStarted" in phase) {
+    const { name, operation_kind, summary } = phase.ToolCallStarted;
+    const step = live.step ?? 1;
+    return {
+      ...live,
+      calls: [
+        ...live.calls,
+        callRow(live.calls.length, step, name, operation_kind, summary, true, null, ""),
+      ],
+    };
+  }
+  // ToolCallCompleted: the trace entry as it lands. Completes the matching
+  // running row; a gate-denied call (no started event) appends a completed
+  // row directly.
+  const entry = phase.ToolCallCompleted;
+  const idx = lastRunningMatchIdx(live.calls, entry.name, entry.summary);
+  if (idx >= 0) {
+    return {
+      ...live,
+      calls: live.calls.map((c, i) =>
+        i === idx
+          ? {
+              ...c,
+              running: false,
+              success: entry.success,
+              resultExcerpt: entry.result_excerpt,
+              // The delegation entry's nested sub-trace rides the completion
+              // event (issue #934); undefined for an ordinary call.
+              subRounds: entry.sub_rounds,
+            }
+          : c,
+      ),
+    };
+  }
+  const step = live.step ?? 1;
+  return {
+    ...live,
+    calls: [
+      ...live.calls,
+      callRow(
+        live.calls.length,
+        step,
+        entry.name,
+        entry.operation_kind,
+        entry.summary,
+        false,
+        entry.success,
+        entry.result_excerpt,
+        entry.sub_rounds,
+      ),
+    ],
+  };
+}
+
+/** Extend a per-round slot array to `step` and set its value, padding the
+ *  untouched rounds with null (a round that emitted none). Generic over the
+ *  slot payload (the thinking block is the set-semantics payload; prose
+ *  appends via `appendRoundText`). Pure. */
+function withRoundSlot<T>(
+  slots: ReadonlyArray<T | null>,
+  step: number,
+  value: T,
+): Array<T | null> {
+  const next = slots.slice();
+  while (next.length < step - 1) next.push(null);
+  next[step - 1] = value;
+  return next;
+}
+
+/** The TextDelta arm of the per-round slots: APPEND one fragment to the
+ *  current round's text. `withRoundSlot` is the set semantics a completed
+ *  thinking block wants; prose grows by accumulation (ADR-0126). */
+function appendRoundText(
+  slots: ReadonlyArray<string | null>,
+  step: number,
+  delta: string,
+): Array<string | null> {
+  return withRoundSlot(slots, step, (slots[step - 1] ?? "") + delta);
+}
+
+export function useTurnFlow(sessionId: string, deps: UseTurnFlowDeps): UseTurnFlow {
+  const {
+    queryClient,
+    intl,
+    setTurnLoading,
+    setError,
+    pollPersistError,
+    viewed,
+    approvals = NO_APPROVALS,
+    onApprovalsSettled,
+  } = deps;
+  // Pull the two stable viewed methods out of the injected `viewed` object so
+  // the handleAsk dep array stays identity-stable: the parent rebuilds the
+  // `viewed` object every render, but the methods inside are useCallback-stable
+  // (issue #229), so destructuring here lets handleAsk keep its prior identity
+  // across renders instead of rebuilding on every parent render.
+  const { markProduced, suppressInit } = viewed;
+  const [phase, setPhase] = useState<TurnPhase | null>(null);
+  // The in-flight turn's question + Thinking step + tool-call rows. null = no
+  // turn running. The approval cards merge in at the liveTurn derivation below
+  // (single source of truth: this state owns ONLY the turn-progress channel).
+  const [live, setLive] = useState<LiveState | null>(null);
+  // Synchronous mirrors of `live` + the merged rows. The event listener and
+  // handleAsk update the refs FIRST, then schedule the same value as render
+  // state, so the async ask tail reads the settled rows WITHOUT waiting for
+  // the render flush: the backend emits the final event before returning the
+  // outcome, but the two ride different channels (Tauri event vs command
+  // reply) and can land in the same task -- and the thread is never refetched
+  // post-turn (ADR-0051), so the optimistic trace must capture the final
+  // event even when its state update has not rendered yet.
+  const liveRef = useRef<LiveState | null>(null);
+  const roundsRef = useRef<LiveRound[]>(NO_ROUNDS);
+  // The approvals prop mirrored for the same synchronous-read reason (the
+  // merge inside commitLive reads it; the prop itself drives the memo).
+  const approvalsRef = useRef(approvals);
+  useEffect(() => {
+    approvalsRef.current = approvals;
+  }, [approvals]);
+
+  // Advance the live state: refs first (the synchronous truth the ask tail
+  // reads), then the render state. The rounds mirror merges the approvals
+  // channel in and performs the single round grouping, so both event streams
+  // fold into one round list at the moment each event lands (the render-time
+  // memo recomputes the same value). useCallback-stable (it closes over refs
+  // + a setter + module constants only), so the listener effect mounts once
+  // and handleAsk keeps its identity across renders.
+  const [waitStartedAt, setWaitStartedAt] = useState<number | null>(null);
+  // The wait stamp's synchronous mirror (the same refs-first idiom as the
+  // live mirrors above).
+  const waitStartedAtRef = useRef<number | null>(null);
+  const commitLive = useCallback((next: LiveState | null) => {
+    liveRef.current = next;
+    roundsRef.current = next === null ? NO_ROUNDS : buildLiveRounds(next, approvalsRef.current);
+    // The wait stamp rides the same commits the live state takes (issue
+    // #1264): a commit whose rounds sit in the round-trip wait opens the
+    // window once -- the falsy guard keeps the opening stamp across the
+    // window's later commits -- and any other commit closes it: a live arm
+    // engaged (row dispatching / tail streaming), or the ask finally's
+    // null (a successor turn opens its own window, never inherits this
+    // one's). Render sites derive the elapsed-seconds suffix from the
+    // stamp -- derive-from-stamp, so a hidden keep-alive page's throttled
+    // ticker heals to the true elapsed time on visibility.
+    const waiting =
+      next !== null && isRoundTripWait({ rounds: roundsRef.current, step: next.step });
+    if (waiting && waitStartedAtRef.current === null) {
+      waitStartedAtRef.current = Date.now();
+    } else if (!waiting && waitStartedAtRef.current !== null) {
+      waitStartedAtRef.current = null;
+    }
+    setWaitStartedAt(waitStartedAtRef.current);
+    setLive(next);
+  }, []);
+
+  // ADR-0059 C-4: a LONG-LIVED turn-progress listener -- mount listen once,
+  // unmount unlisten. Reused across ALL turns (NOT a per-turn listen, which
+  // would amplify a subscribe-before-ask race + cost one IPC per turn). The
+  // global Tauri broadcast is filtered to this pane's sessionId so a sibling
+  // pane's events never leak in. On unmount (close tab, ADR-0055) the cleanup
+  // unlistens + the state is destroyed; any orphan event from the in-flight
+  // turn has no listener and is harmlessly dropped.
+  useEffect(() => {
+    let active = true;
+    let unlisten: (() => void) | null = null;
+    void onTurnProgress((ev) => {
+      if (!active || ev.session_id !== sessionId) return;
+      setPhase(ev.phase);
+      // applyPhase passes null through: a late event past the ask's finally
+      // finds no live turn and drops.
+      commitLive(applyPhase(liveRef.current, ev.phase));
+    }).then((un) => {
+      // If the effect already cleaned up before listen resolved, unlisten
+      // immediately so the orphan callback cannot fire setters post-unmount.
+      if (!active) {
+        un();
+        return;
+      }
+      unlisten = un;
+    });
+    return () => {
+      active = false;
+      unlisten?.();
+    };
+  }, [sessionId, commitLive]);
+
+  // The round-grouped live trace (tool-call rows + approval cards merged,
+  // grouped once -- issue #620's single source). Recomputed on either
+  // channel's change; null when no turn runs. The derivation is the only
+  // place the two event channels meet, so the render tree reads one round
+  // list (the rail never reconciles channels itself).
+  const liveTurn = useMemo<LiveTurn | null>(() => {
+    if (live === null) return null;
+    return {
+      question: live.question,
+      askedAt: live.askedAt,
+      invocationNames: live.invocationNames,
+      step: live.step,
+      rounds: buildLiveRounds(live, approvals),
+      runtime: live.runtime,
+    };
+  }, [live, approvals]);
+
+  // Ask one question (PRD #1): run one turn -> one ADR-0028 outcome. On
+  // success the new turn is optimistically appended to the thread cache
+  // (ADR-0051) -- question + outcome + the live trace rows the events
+  // delivered (issue #297: the optimistic record matches the backend's
+  // recorded TurnRecord.trace entry-for-entry); a Materialized outcome
+  // additionally moves viewedResult (auto-selects), and EVERY settled
+  // outcome runs the turn-end refresh -- the seam's full cascade,
+  // thread included (issue #1088: the refetch converges the append onto
+  // the recorded row).
+  const handleAsk = useCallback(
+    async (question: string, invocations?: string[]) => {
+      // Belt-and-suspenders (issue #758): the one-turn rule enforced at the
+      // handler too, QuestionBar's submit guard being the visual twin. A
+      // synthetic dispatch (fireEvent / automation) clicks through a disabled
+      // button, so every fire path (composer, pendingQuestion, ask-again)
+      // shares this early return instead of double-firing into the strictly
+      // single-turn state. liveRef reads without a re-render, so the guard
+      // costs handleAsk nothing in identity stability.
+      if (liveRef.current !== null) return;
+      setTurnLoading(true);
+      setError(null);
+      // ADR-0103 (issue #608): the ask timestamp, read at submit so the
+      // optimistic record carries the user's ask time (the backend stamps its
+      // own reading at record time; it lands with the turn-end refresh, a
+      // reopened mount, or any other domain's invalidation -- all converge
+      // the append onto the recorded row, ADR-0051 / issue #1088).
+      const askedAt = Date.now();
+      // The staged invocations (ADR-0119 Decision 1): the turn's user
+      // invocation names, pinned at submit -- the live bubble's badge renders
+      // from them and the optimistic record stamps the same set.
+      const stagedInvocations = invocations ?? [];
+      // The live turn card mounts with the question; events grow its trace.
+      commitLive({
+        question,
+        askedAt,
+        invocationNames: stagedInvocations,
+        step: null,
+        calls: [],
+        roundTexts: [],
+        roundThinkings: [],
+      });
+      // Issue #725: the ask-time runtime choice, fired BEFORE the ask
+      // dispatch -- synchronously at submit, no await in between, so it
+      // mirrors the turn-top snapshot the backend's ask will consume (see
+      // choiceToTurnRuntime). A switch CAN still land in the read-to-dispatch
+      // gap (set_session_runtime is lock-light and never blocks on a turn):
+      // the backend would then run the new runtime while this stamp holds
+      // the old one -- a one-turn marker lag that heals on reopen, accepted
+      // over the settle-time read whose window is the turn's whole duration.
+      // A failed read degrades honestly (undefined -> no runtime -> no marker
+      // until reopen) with the diagnostic preserved in the log (ADR-0029 --
+      // otherwise a "marker missing" report could not distinguish a failed
+      // read from a stamp that never happened); the ask itself never depends
+      // on it.
+      const runtimeRead = getSessionRuntime(sessionId).catch((e: unknown) => {
+        log.warn("useTurnFlow", "runtime choice read failed; turn appended without runtime stamp", e);
+        return undefined;
+      });
+      // Issue #818: the live marker rides the same read the optimistic
+      // stamp consumes -- when the choice lands, the live turn carries it
+      // (the read resolves in milliseconds; the bubble mounts first, the
+      // marker appears with the next commit). The update skips when the
+      // read failed, when no live turn is running, or when the live turn
+      // is a LATER one (an ask-failure re-ask inside the read window -- the
+      // askedAt match keys the guard to THIS turn, so a late read can
+      // never stamp a successor's live card): the live marker simply never
+      // shows, the same silent degrade as the append's omitted runtime.
+      // One exception is read-past-settle: a read landing only after a
+      // very fast settle skips here (no live turn) yet still stamps the
+      // append below, so the settled card adds the marker at the swap --
+      // #620's no-insert claim covers the paths where the live side had
+      // it. An unmapped choice throws here AND again at the stamp below --
+      // this site degrades only the cosmetic marker with a log line
+      // (ADR-0029); the stamp's loud failure is the designed one.
+      void runtimeRead
+        .then((choice) => {
+          if (choice === undefined || liveRef.current?.askedAt !== askedAt) return;
+          commitLive({ ...liveRef.current, runtime: choiceToTurnRuntime(choice) });
+        })
+        .catch((e: unknown) => {
+          log.warn("useTurnFlow", "live runtime marker update skipped", e);
+        });
+      let outcome;
+      // The settled trace, snapshotted in the finally BEFORE the live state
+      // folds away (the optimistic append below reads it on the success
+      // path; the failure path early-returns without appending). The
+      // finally ALWAYS assigns it, so the definite-assignment needs no
+      // initializer (which no-useless-assignment would flag as dead).
+      let settledTrace: TraceRound[];
+      try {
+        // The staging rides the ask even when empty; the absent-equals-empty
+        // rule's authority lives on the askQuestion signature doc (#992).
+        outcome = await askQuestion(sessionId, question, stagedInvocations);
+      } catch (e) {
+        setError(toAppError(e, intl, "ask"));
+        setTurnLoading(false);
+        void pollPersistError();
+        return;
+      } finally {
+        // ADR-0059: clear the phase on every ask end (incl. Cancelled outcome /
+        // IPC failure) -- the in-flight turn is done. Loading stays on through
+        // the post-outcome invalidation below; phase is a turn-lifecycle hint,
+        // not a UI-busy flag. The live card folds here too: roundsRef holds
+        // the synchronously-mirrored settled rounds (captured above, so the
+        // final event's row survives even when its render is still pending),
+        // and the app-level approval hook clears this session's folded cards.
+        settledTrace = liveRoundsToTrace(roundsRef.current, outcome);
+        setPhase(null);
+        commitLive(null);
+        onApprovalsSettled?.();
+      }
+      // The ask-time choice lands here (the turn's own duration dwarfs the
+      // IPC round-trip, so the read is long resolved).
+      // The success tail, finally-wrapped: ANY unexpected throw inside this
+      // tail try (choiceToTurnRuntime on an unmapped runtime stamp) still
+      // reopens the busy gate -- every fire path's defensive catch logs it
+      // (the pendingQuestion catch in pendingPayload.ts, SessionPane's
+      // ask-again catch, the shell submit's fire log, #825), but without this
+      // clear the session would
+      // sit permanently disabled with the log line as the only trace. The
+      // designed failure paths (askQuestion rejection, refresh failure)
+      // settle internally above and the gate reopens on them too.
+      try {
+        const runtimeChoice = await runtimeRead;
+        // Optimistic thread append (ADR-0051): the outcome object is the same
+        // shape the backend recorded; the trace is the event stream's settled
+        // rows (completed calls only); the runtime attribution is the ask-time
+        // choice stamp (issue #725). Only the content_hashes and the backend's
+        // own timestamps differ from the recorded row. The thread is
+        // staleTime-Infinity, and only the turn-end refresh below touches it
+        // (after this append lands), so between the append and that refresh
+        // this optimistic form is what the rail reads. The turn-end refresh
+        // (issue #1088) and any other domain's invalidation (ingest, skill
+        // changes) replace the append with the recorded row -- expected
+        // convergence onto a richer row, never a wipe.
+        const newEntry: ThreadEntry = {
+          entry: "Turn",
+          // Issue #381: the optimistic entry's provenance carries no
+          // content_hashes -- the frontend cannot know the assembly-time
+          // hashes (the backend records them in record_turn). Issue #725: the
+          // runtime half IS stamped, from the ask-time choice read above; an
+          // unknown choice omits it (the unrecorded-turn degradation -- no
+          // marker, rendered after reopen).
+          data: {
+            question,
+            outcome,
+            trace: settledTrace,
+            provenance: {
+              skills: [],
+              ...(runtimeChoice && { runtime: choiceToTurnRuntime(runtimeChoice) }),
+            },
+            // ADR-0119: the staged names ARE the submit truth, so the
+            // optimistic record stamps User-actor invocation records now.
+            // The body / content_hash are the backend's materialization
+            // (unknown client-side) and stay empty until the recorded row
+            // lands with the turn-end refresh below, a reopen, or another
+            // domain's invalidation -- the same optimistic degrade as
+            // provenance.skills above. The badge reads names only, so the
+            // visible surface is exact.
+            ...((stagedInvocations.length > 0
+              ? {
+                  invocations: stagedInvocations.map((name) => ({
+                    name,
+                    body: "",
+                    actor: "User" as const,
+                    content_hash: "",
+                  })),
+                }
+              : {})),
+            asked_at: askedAt,
+            settled_at: Date.now(),
+          },
+        };
+        queryClient.setQueryData<ThreadEntry[]>(sessionKeys.thread(sessionId), (old) =>
+          old ? [...old, newEntry] : [newEntry],
+        );
+        suppressInit(); // the user has acted; the R5 init is moot.
+        if (outcome.kind === "Materialized") {
+          // ADR-0084: the just-produced primary is the promotion chain's tail --
+          // the result the answer references. Auto-selects it (ADR-0062 R2
+          // "new-turn produce -> selected", calibrated by ADR-0114); the view
+          // rule is encapsulated in useViewedResult (issue #229).
+          const { promotions } = outcome.data;
+          const referenceName = promotions[promotions.length - 1]?.dataset.reference_name;
+          if (referenceName !== undefined) {
+            markProduced(referenceName);
+          }
+        }
+        // Turn-end refresh (ADR-0124, issue #1088): EVERY settled outcome runs
+        // the full cascade, thread included. The optimistic append above cannot
+        // know the settle-computed fields the backend records -- the artifact
+        // manifest (ADR-0124 Decision 2), the terminal body, the invocation
+        // content hashes -- and record_turn commits before `ask` resolves, so
+        // the refetch lands the authoritative row over the append (richer, never
+        // a wipe; the ADR-0051-era "extra refetch" rationale retired with the
+        // artifact channel, calibrated on ADR-0123 Decision 3). The try/catch
+        // guard surfaces a refresh failure as a tagged error instead of skipping
+        // the busy-gate clear below (would lock QuestionBar forever); mirrors
+        // refreshServerState's "saved but refresh failed" contract.
+        try {
+          await invalidateSessionData(queryClient, sessionId);
+        } catch (invalidateErr) {
+          // invalidateErr because this try wraps the turn-end refresh;
+          // the refreshFailed option stays -- it selects toAppError's
+          // user-facing "saved but refreshing..." prefix (ADR-0069), not the impl.
+          setError(toAppError(invalidateErr, intl, "ask", { refreshFailed: true }));
+        }
+        // ADR-0095: refresh the model config on EVERY outcome kind -- an
+        // external-runtime turn's LoopOutcome.discovered_runtime lands on the
+        // handle cache regardless of how the turn terminated, and the selector
+        // must re-read it (dedupe is inherent: the backend cache is
+        // single-slot). Fire-and-forget like pollPersistError.
+        void queryClient.invalidateQueries({
+          queryKey: sessionKeys.modelConfig(sessionId),
+        });
+      } finally {
+        setTurnLoading(false);
+        void pollPersistError();
+      }
+    },
+    [
+      sessionId,
+      queryClient,
+      pollPersistError,
+      intl,
+      setTurnLoading,
+      setError,
+      markProduced,
+      suppressInit,
+      onApprovalsSettled,
+      commitLive,
+    ],
+  );
+
+  // Cancel is the abort of ask -- a turn-domain semantic, so it lives here
+  // alongside handleAsk, not with the ingest/dataset mutations.
+  const handleCancel = useCallback(async () => {
+    try {
+      await cancelQuery(sessionId);
+    } catch (e) {
+      // Cancel owns only the error surface, not phase/loading. Those clear via
+      // handleAsk's lifecycle once the in-flight ask settles: a successful cancel
+      // lands a Cancelled outcome -> handleAsk's finally clears phase + its tail
+      // clears loading. A cancel REJECT means the turn may still be running, so
+      // leaving loading=true is the honest state, not a stuck bug.
+      setError(toAppError(e, intl, "ask"));
+    }
+  }, [sessionId, intl, setError]);
+
+  // The turn clock (issue #1264 turn-clock ruling): derived, never stored --
+  // the ask stamp rides the live state, and the pause origin is the first
+  // PENDING approval in arrival order (the rail renders cards in the order
+  // the gateway raised them, so the first pending is the earliest hold).
+  // The QuestionBar displays the elapsed-with-user-pauses figure; the rail's
+  // wait-window stamp above stays the per-window figure.
+  const turnStartedAt = live?.askedAt ?? null;
+  const turnPausedSince =
+    approvals.find((a) => a.status.kind === "pending")?.receivedAt ?? null;
+
+  return {
+    phase,
+    liveTurn,
+    waitStartedAt,
+    turnStartedAt,
+    turnPausedSince,
+    handleAsk,
+    handleCancel,
+  };
+}

@@ -1,0 +1,594 @@
+---
+version: alpha
+name: toptopduck
+description: A local-first AI data analysis workbench for desktop (Tauri + React). Teal (#0d9488) is the sole brand accent on a dual-mode canvas — clean white in light mode, a dark surface (#0f1410) in dark mode with a subtle green undertone. Compact 6px base radius and 4px spacing signal developer-tool ergonomics. The system font stack carries all UI text; the system monospace stack renders SQL, data, and code. The structural signature is a three-column shell (session sidebar + conversation rail + workspace) with independently collapsible panels. No decorative gradients — depth comes from surface brightness steps, hairline borders, and a 3-tier functional shadow scale (shadow-sm for in-content cards, shadow-md for popovers, shadow-lg for dialogs).
+
+colors:
+  # --- Brand (mode-invariant) ---
+  primary: "#0d9488"
+  primary-foreground: "#ffffff"
+
+  # --- Light surfaces ---
+  canvas: "#ffffff"
+  ink: "#1a1a1a"
+  card: "#ffffff"
+  popover: "#ffffff"
+  secondary: "#f1f5f4"
+  secondary-foreground: "#1a1a1a"
+  muted: "#f0f0f3"
+  muted-foreground: "#6b7280"
+  accent: "#e6f4f1"
+  accent-foreground: "#0d9488"
+  destructive: "#b00020"
+  destructive-foreground: "#ffffff"
+  warning: "#b45309"
+  info: "#1d4ed8"
+  border: "#e3e3e8"
+
+  # --- Dark surfaces ---
+  canvas-dark: "#0f1410"
+  ink-dark: "#e8eae8"
+  card-dark: "#181b18"
+  popover-dark: "#181b18"
+  secondary-dark: "#232723"
+  secondary-foreground-dark: "#e8eae8"
+  muted-dark: "#232723"
+  muted-foreground-dark: "#9ca3af"
+  accent-dark: "#143833"
+  accent-foreground-dark: "#5eead4"
+  destructive-dark: "#ef4444"
+  warning-dark: "#f59e0b"
+  info-dark: "#60a5fa"
+  border-dark: "#2a2f2a"
+
+typography:
+  display:
+    fontFamily: "system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif"
+    fontSize: 22px
+    fontWeight: 600
+    lineHeight: 1.3
+    letterSpacing: -0.3px
+  headline-lg:
+    fontFamily: "system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif"
+    fontSize: 20px
+    fontWeight: 600
+    lineHeight: 1.3
+    letterSpacing: -0.2px
+  headline-md:
+    fontFamily: "system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif"
+    fontSize: 18px
+    fontWeight: 600
+    lineHeight: 1.4
+    letterSpacing: 0
+  headline-sm:
+    fontFamily: "system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif"
+    fontSize: 16px
+    fontWeight: 600
+    lineHeight: 1.4
+    letterSpacing: 0
+  body-md:
+    fontFamily: "system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif"
+    fontSize: 14px
+    fontWeight: 400
+    lineHeight: 1.5
+    letterSpacing: 0
+  body-sm:
+    fontFamily: "system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif"
+    fontSize: 13px
+    fontWeight: 400
+    lineHeight: 1.4
+    letterSpacing: 0
+  caption:
+    fontFamily: "system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif"
+    fontSize: 12px
+    fontWeight: 400
+    lineHeight: 1.4
+    letterSpacing: 0
+  label-caps:
+    fontFamily: "system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif"
+    fontSize: 12px
+    fontWeight: 600
+    lineHeight: 1.4
+    letterSpacing: 0.05em
+  code:
+    fontFamily: "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New', monospace"
+    fontSize: 13px
+    fontWeight: 400
+    lineHeight: 1.5
+    letterSpacing: 0
+  button:
+    fontFamily: "system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif"
+    fontSize: 14px
+    fontWeight: 500
+    lineHeight: 1.0
+    letterSpacing: 0
+  badge:
+    fontFamily: "system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif"
+    fontSize: 12px
+    fontWeight: 500
+    lineHeight: 1.0
+    letterSpacing: 0
+  nav-link:
+    fontFamily: "system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif"
+    fontSize: 14px
+    fontWeight: 500
+    lineHeight: 1.4
+    letterSpacing: 0
+
+rounded:
+  none: 0px
+  xs: 4px
+  sm: 4px
+  md: 6px
+  lg: 8px
+  xl: 10px
+  pill: 9999px
+
+spacing:
+  xxs: 4px
+  xs: 8px
+  sm: 12px
+  base: 16px
+  md: 20px
+  lg: 24px
+  xl: 32px
+  xxl: 48px
+  section: 64px
+
+components:
+  # --- App shell (light) ---
+  app-shell:
+    backgroundColor: "{colors.canvas}"
+    textColor: "{colors.ink}"
+  topbar:
+    backgroundColor: "{colors.canvas}"
+    textColor: "{colors.ink}"
+    height: 40px
+  sidebar:
+    backgroundColor: "{colors.canvas}"
+    textColor: "{colors.ink}"
+    typography: "{typography.nav-link}"
+    width: 280px
+
+  # --- App shell (dark) ---
+  app-shell-dark:
+    backgroundColor: "{colors.canvas-dark}"
+    textColor: "{colors.ink-dark}"
+  topbar-dark:
+    backgroundColor: "{colors.canvas-dark}"
+    textColor: "{colors.ink-dark}"
+    height: 40px
+  sidebar-dark:
+    backgroundColor: "{colors.canvas-dark}"
+    textColor: "{colors.ink-dark}"
+    typography: "{typography.nav-link}"
+    width: 280px
+
+  # --- Conversation rail + workspace ---
+  conversation-rail:
+    backgroundColor: "{colors.card}"
+    textColor: "{colors.ink}"
+    typography: "{typography.body-sm}"
+    width: 460px
+  conversation-rail-dark:
+    backgroundColor: "{colors.card-dark}"
+    textColor: "{colors.ink-dark}"
+
+  # --- Chat exchange (ADR-0103; full recipe under Components > Conversation
+  # Surfaces) ---
+  chat-exchange:
+    user-bubble:
+      backgroundColor: "{colors.secondary}"
+      textColor: "{colors.secondary-foreground}"
+      typography: "{typography.body-md}"
+      rounded: "{rounded.lg}"
+      maxWidth: 85%
+    round-prose:
+      textColor: "{colors.ink}"
+      typography: "{typography.body-md}"
+    thinking-fold:
+      textColor: "{colors.muted-foreground}"
+      typography: "{typography.caption}"
+      expandedBlock:
+        backgroundColor: "{colors.muted}"
+        rounded: "{rounded.md}"
+
+  # --- Cards ---
+  card:
+    backgroundColor: "{colors.card}"
+    textColor: "{colors.ink}"
+    typography: "{typography.body-md}"
+    rounded: "{rounded.xl}"
+    padding: 24px
+  card-dark:
+    backgroundColor: "{colors.card-dark}"
+    textColor: "{colors.ink-dark}"
+
+  # --- Popover / Dialog ---
+  popover:
+    backgroundColor: "{colors.popover}"
+    textColor: "{colors.ink}"
+    typography: "{typography.body-md}"
+    rounded: "{rounded.md}"
+    padding: 16px
+  popover-dark:
+    backgroundColor: "{colors.popover-dark}"
+    textColor: "{colors.ink-dark}"
+
+  # --- Buttons ---
+  button-primary:
+    backgroundColor: "{colors.primary}"
+    textColor: "{colors.primary-foreground}"
+    typography: "{typography.button}"
+    rounded: "{rounded.md}"
+    padding: 8px 16px
+    height: 36px
+  button-secondary:
+    backgroundColor: "{colors.secondary}"
+    textColor: "{colors.secondary-foreground}"
+    typography: "{typography.button}"
+    rounded: "{rounded.md}"
+    padding: 8px 16px
+    height: 36px
+  button-secondary-dark:
+    backgroundColor: "{colors.secondary-dark}"
+    textColor: "{colors.secondary-foreground-dark}"
+  button-outline:
+    backgroundColor: transparent
+    textColor: "{colors.ink}"
+    typography: "{typography.button}"
+    rounded: "{rounded.md}"
+    padding: 7px 15px
+    height: 36px
+  button-outline-dark:
+    backgroundColor: transparent
+    textColor: "{colors.ink-dark}"
+
+  # --- Inputs ---
+  text-input:
+    backgroundColor: transparent
+    textColor: "{colors.ink}"
+    typography: "{typography.body-md}"
+    rounded: "{rounded.md}"
+    padding: 8px 12px
+    height: 36px
+  text-input-dark:
+    backgroundColor: transparent
+    textColor: "{colors.ink-dark}"
+
+  # --- Badges ---
+  badge-primary:
+    backgroundColor: "{colors.primary}"
+    textColor: "{colors.primary-foreground}"
+    typography: "{typography.badge}"
+    rounded: "{rounded.md}"
+    padding: 2px 8px
+  badge-secondary:
+    backgroundColor: "{colors.muted}"
+    textColor: "{colors.muted-foreground}"
+    typography: "{typography.badge}"
+    rounded: "{rounded.md}"
+    padding: 2px 8px
+  badge-secondary-dark:
+    backgroundColor: "{colors.muted-dark}"
+    textColor: "{colors.muted-foreground-dark}"
+  badge-accent:
+    backgroundColor: "{colors.accent}"
+    textColor: "{colors.accent-foreground}"
+    typography: "{typography.badge}"
+    rounded: "{rounded.md}"
+    padding: 2px 8px
+  badge-accent-dark:
+    backgroundColor: "{colors.accent-dark}"
+    textColor: "{colors.accent-foreground-dark}"
+
+  # --- Alerts ---
+  alert-destructive:
+    backgroundColor: "{colors.destructive}"
+    textColor: "{colors.destructive-foreground}"
+    typography: "{typography.body-sm}"
+    rounded: "{rounded.lg}"
+    padding: 12px 16px
+  alert-destructive-dark:
+    backgroundColor: "{colors.destructive-dark}"
+    textColor: "{colors.destructive-foreground}"
+
+  # --- Indicators ---
+  warning-indicator:
+    backgroundColor: "{colors.warning}"
+    rounded: "{rounded.pill}"
+    size: 8px
+  warning-indicator-dark:
+    backgroundColor: "{colors.warning-dark}"
+    rounded: "{rounded.pill}"
+    size: 8px
+
+  # --- Dividers ---
+  hairline-divider:
+    backgroundColor: "{colors.border}"
+    height: 1px
+  hairline-divider-dark:
+    backgroundColor: "{colors.border-dark}"
+    height: 1px
+
+  # --- Code ---
+  code-inline:
+    backgroundColor: "{colors.muted}"
+    textColor: "{colors.ink}"
+    typography: "{typography.code}"
+    rounded: "{rounded.xs}"
+    padding: 2px 6px
+  code-inline-dark:
+    backgroundColor: "{colors.muted-dark}"
+    textColor: "{colors.ink-dark}"
+  code-block:
+    backgroundColor: "{colors.muted}"
+    textColor: "{colors.ink}"
+    typography: "{typography.code}"
+    rounded: "{rounded.md}"
+  code-block-dark:
+    backgroundColor: "{colors.muted-dark}"
+    textColor: "{colors.ink-dark}"
+---
+
+## Overview
+
+TOPTOPDuck is a local-first AI data analysis workbench — not a marketing site. The UI serves long analytical sessions where users upload datasets, ask natural-language questions, review SQL execution traces, and inspect results tables and charts. Every design decision optimizes for **sustained focus and data legibility**, not visual impact.
+
+The visual identity is a **calm, precise instrument**. Teal (`{colors.primary}` — #0d9488) is the sole brand accent — reserved for primary actions, active states, and focus rings. It never appears decoratively. The canvas is pure white in light mode and a dark surface (`{colors.canvas-dark}` — #0f1410) in dark mode. This dark canvas carries a subtle green undertone (G channel highest in RGB 15, 20, 16) that is visually harmonious with the teal brand color.
+
+Type runs the **system font stack** (`system-ui, -apple-system, "Segoe UI", Roboto, sans-serif`) across every UI role. SQL, data values, and code switch to the **system monospace stack** (`ui-monospace, SFMono-Regular, Menlo, ...`). The hierarchy is compact: the largest display token is 22px (cold-start hero only); the workhorse body size is 14px.
+
+The structural signature is a **three-column shell**: session sidebar (280px) + conversation rail (460px) + workspace (flexible). Each column collapses independently — the shell animates panel width to zero rather than snapping. This is the product's spatial identity.
+
+**Key Characteristics:**
+- Single brand accent: `{colors.primary}` (teal #0d9488) for primary CTAs, active states, focus rings.
+- Dual-mode equality: light and dark are both first-class; neither is the "default."
+- Dark canvas (`{colors.canvas-dark}` — #0f1410) carries a green undertone visually harmonious with teal.
+- Compact workbench density: 6px base radius, 36px button height, 40px topbar, 14px body text.
+- Three-column collapsible shell as the structural signature.
+- Brightness-step elevation: depth from surface luminance differences + a 3-tier functional shadow scale.
+- Hairline-only borders (1px) for all visual separation.
+- System font stack across every text role; system monospace on every code/SQL/data surface.
+- Data-first surfaces: result tables, SQL traces, and charts are primary content — not cards or hero sections.
+
+## Colors
+
+### Brand
+- **Teal** (`{colors.primary}` — #0d9488): The sole brand accent. Primary CTAs, active-session indicators, focus rings, and the active-dataset highlight. This color does not flip between modes — it is the one constant.
+- **Teal Foreground** (`{colors.primary-foreground}` — #ffffff): White text on teal surfaces.
+
+### Light Mode Surfaces
+- **Canvas** (`{colors.canvas}` — #ffffff): The page floor. Pure white.
+- **Card** (`{colors.card}` — #ffffff): Content card surface. Same white as canvas — cards elevate via hairline borders, not background contrast.
+- **Popover** (`{colors.popover}` — #ffffff): Dialog and dropdown surface. Same white.
+- **Secondary** (`{colors.secondary}` — #f1f5f4): Secondary button background. Faint green-gray tint.
+- **Muted** (`{colors.muted}` — #f0f0f3): Badge backgrounds, code-inline backgrounds, subdued zones.
+- **Border** (`{colors.border}` — #e3e3e8): The single hairline color for all 1px dividers, card outlines, and input borders.
+
+### Light Mode Text
+- **Ink** (`{colors.ink}` — #1a1a1a): Display, body, card text. Near-black (not pure #000 — softer for long sessions).
+- **Muted Foreground** (`{colors.muted-foreground}` — #6b7280): Captions, metadata, disabled text, placeholder text.
+- **Accent Foreground** (`{colors.accent-foreground}` — #0d9488): Text on accent-tinted backgrounds — same teal as primary.
+- **Secondary Foreground** (`{colors.secondary-foreground}` — #1a1a1a): Text on secondary surfaces.
+
+### Light Mode Accents
+- **Accent** (`{colors.accent}` — #e6f4f1): Light teal tint for active/highlighted states (active-source indicator, selected session entry).
+- **Destructive** (`{colors.destructive}` — #b00020): Error alerts, delete confirmations.
+- **Warning** (`{colors.warning}` — #b45309): Stale-result indicators, viz-degradation warnings. Used as indicator dots and alert tints — never as solid fills.
+- **Info** (`{colors.info}` — #1d4ed8): Informational disclosure tints (the privacy outgoing-payload summary). Same tint discipline as warning — never as solid fills. Block informational disclosures (the settings privacy banner, the ADR-0057 hints) ride the Alert default surface; `--info` is the inline tint role.
+
+### Dark Mode Surfaces
+- **Canvas Dark** (`{colors.canvas-dark}` — #0f1410): The dark page floor. RGB 15, 20, 16 — the G channel is highest, giving the surface a subtle green undertone that is visually harmonious with the teal brand.
+- **Card Dark** (`{colors.card-dark}` — #181b18): Content card surface. One brightness step above canvas.
+- **Popover Dark** (`{colors.popover-dark}` — #181b18): Dialog surface. Same as card.
+- **Secondary Dark** (`{colors.secondary-dark}` — #232723): Secondary button background in dark mode.
+- **Muted Dark** (`{colors.muted-dark}` — #232723): Badge backgrounds, subdued zones. Same value as secondary-dark.
+- **Border Dark** (`{colors.border-dark}` — #2a2f2a): Hairline color in dark mode. Greenish gray.
+
+### Dark Mode Text
+- **Ink Dark** (`{colors.ink-dark}` — #e8eae8): Primary text in dark mode. Soft off-white (not pure #ffffff — reduces eye strain).
+- **Muted Foreground Dark** (`{colors.muted-foreground-dark}` — #9ca3af): Captions, metadata.
+- **Accent Foreground Dark** (`{colors.accent-foreground-dark}` — #5eead4): Text on dark accent tints. Brighter teal than the brand color — lifts visibility on dark surfaces.
+
+### Dark Mode Accents
+- **Accent Dark** (`{colors.accent-dark}` — #143833): Dark teal tint for active/highlighted states.
+- **Destructive Dark** (`{colors.destructive-dark}` — #ef4444): Error alerts in dark mode. Brighter red than light mode for visibility on dark canvas.
+- **Warning Dark** (`{colors.warning-dark}` — #f59e0b): Warning indicators in dark mode. Brighter amber than light mode.
+- **Info Dark** (`{colors.info-dark}` — #60a5fa): Info tints in dark mode. Brighter blue than light mode.
+
+### Mode Mapping Principle
+Light and dark tokens share semantic names but carry different hex values. The mapping is 1:1 — `{colors.canvas}` in light mode becomes `{colors.canvas-dark}` in dark mode. The `primary` and `primary-foreground` tokens are mode-invariant. Focus rings always use `{colors.primary}` (teal) in both modes. In production, the same CSS variable (`--background`, `--card`, etc.) carries different values under the `.dark` class — the DESIGN.md `-dark` suffix is a documentation convention, not a separate variable name.
+
+## Typography
+
+### Font Family
+The **system font stack** (`system-ui, -apple-system, "Segoe UI", Roboto, sans-serif`) carries every UI role — display, body, navigation, captions, and button labels. This gives a native feel on each platform: San Francisco on macOS, Segoe UI on Windows, Roboto on Linux.
+
+The **system monospace stack** (`ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace`) renders every code surface: SQL queries, data values in trace output, file paths, and identifiers.
+
+### Hierarchy
+
+| Token | Size | Weight | Tracking | Tailwind | Use |
+|---|---|---|---|---|---|
+| `{typography.display}` | 22px | 600 | -0.3px | `text-[1.4rem]` | Cold-start hero title only |
+| `{typography.headline-lg}` | 20px | 600 | -0.2px | `text-xl` | Settings section headers |
+| `{typography.headline-md}` | 18px | 600 | 0 | `text-lg` | Dialog titles, card titles |
+| `{typography.headline-sm}` | 16px | 600 | 0 | `text-base` | Subsection labels, sidebar group headers |
+| `{typography.body-md}` | 14px | 400 | 0 | `text-sm` | Default body, nav, table cells — the workhorse size |
+| `{typography.body-sm}` | 13px | 400 | 0 | `text-[0.82rem]` | Technical details, tight metadata |
+| `{typography.caption}` | 12px | 400 | 0 | `text-xs` | Metadata, timestamps, sublines |
+| `{typography.label-caps}` | 12px | 600 | 0.05em | `text-xs` uppercase | Badges, section labels — render uppercase via CSS `text-transform: uppercase` |
+| `{typography.code}` | 13px | 400 | 0 | `font-mono text-[13px]` | SQL, data values, file paths — system monospace |
+| `{typography.button}` | 14px | 500 | 0 | `text-sm font-medium` | Button labels |
+| `{typography.badge}` | 12px | 500 | 0 | `text-xs font-medium` | Badge labels — medium weight, no uppercase |
+| `{typography.nav-link}` | 14px | 500 | 0 | `text-sm` | Sidebar entries, session list items |
+
+### Principles
+- **Compact hierarchy.** The largest token is 22px — this is a workbench, not a landing page. The workhorse body size is 14px (`text-sm`), not 16px — compact density for sustained data analysis sessions.
+- **Weight discipline.** Display/headlines at 600, body at 400, buttons/nav at 500. Never use weight 700.
+- **Negative tracking on display only.** `{typography.display}` and `{typography.headline-lg}` carry negative letter-spacing for tighter reading. Body and below have zero tracking.
+- **Monospace on every code surface.** SQL, data values, trace output, file paths, and result identifiers always render in the system monospace stack — never in the sans stack.
+- **Uppercase labels.** `{typography.label-caps}` defines the typographic properties (weight, tracking, size); apply CSS `text-transform: uppercase` at the element level. (Note: badge variants use `{typography.badge}` — medium weight, no uppercase — for a softer workbench feel; `{typography.label-caps}` is reserved for explicit section labels.)
+- **Tailwind mapping.** The Tailwind column shows the nearest utility class. Ad-hoc values like `text-[0.82rem]` and `text-[0.85rem]` are visual-polish variants within the `{typography.body-sm}` range; `text-[13px]` is the `{typography.code}` token's exact-size idiom.
+
+## Layout
+
+### Spacing System
+- **Base unit:** 4px.
+- **Tokens:** `{spacing.xxs}` 4px · `{spacing.xs}` 8px · `{spacing.sm}` 12px · `{spacing.base}` 16px · `{spacing.md}` 20px · `{spacing.lg}` 24px · `{spacing.xl}` 32px · `{spacing.xxl}` 48px · `{spacing.section}` 64px.
+- **Component padding:** 8–16px typical (inputs, buttons, cards). Generous internal padding on cards (16px) to keep data tables breathable.
+- **Section rhythm:** 64px between major UI bands. Tighter than marketing-site rhythms (80–96px) because screen real estate is premium in a desktop workbench.
+
+### Three-Column Shell
+The structural signature. Three independently collapsible columns:
+
+1. **Session sidebar** (280px): Session list grouped by recency. Collapses to 0 width (animated).
+2. **Conversation rail** (460px): Thread of turns (questions + outcomes + source lifecycle events). Collapses to 0 width.
+3. **Workspace** (flexible): Result tables, charts, dataset detail, privacy controls. Default collapsed in cold-start; expands when a turn produces results.
+
+When the workspace folds, the conversation column promotes to primary surface — the rail scroll container spans the pane's full width (scrollbar pinned to the window edge; both flanks are rail surface and wheel-scroll), while the thread content caps to a centered reading column of `800px` minus the rail's gutter (`--rail-gutter` per side). The rail reserves its scrollbar gutter on both inline edges (`scrollbar-gutter: stable both-edges`), so the reading column's axis matches the bar card's whether or not the scrollbar is showing, and the scrollbar's appearance costs no reflow (issue #839); engines without the property — outside the shipped WebView2 target — silently keep the pre-#839 axis drift and reflow instead. The rail's horizontal padding relaxes by up to the measured scrollbar width (10px cap), pulling the reading column's edges to within a few pixels of the bar card's. The shell-level question bar overlays the scroll container's lower strip as a floating layer (ADR-0092): the rail runs the pane's full height so its scrollbar reaches the window's bottom edge, and the thread tail scrolls behind the bar. An opaque backdrop spans the conversation column up to the rail's scrollbar — its width measured once at startup, so overflow into the rail's padding stays covered too — keeping the scrollbar visible and, via a pointer-events passthrough on the strip, draggable, while a dynamic bottom padding sized from the bar's measured height keeps the last element readable at max scroll (issue #836). The bar forwards its wheel to the rail too — the whole bottom strip scrolls the conversation (issue #834).
+
+### Grid
+- Shell: `grid-template-columns: var(--sidebar-width, 280px) 1fr` (sidebar + main block).
+- Session pane: 4-track conversation grid — `0fr minmax(0, var(--rail-width)) 1fr 0fr` (spacer / conversation rail / workspace / spacer); the workspace-folded form `0fr minmax(0, 100%) 0fr 0fr` gives the conversation track the full width, with the reading measure capped by the `.rail-reading-column` content wrapper. The shell-level question bar mirrors the same tracks so the bar sits under the conversation column; in the folded form the bar card rides the reading column's axis rather than its exact width (the card follows `min(--reading-column-cap, track - 2 * gutter)`): below the cap under classic scrollbars it runs a few pixels wider per side than the thread column, and at the cap the two meet flush (ADR-0092, issue #839).
+- Settings overlay: `grid-template-columns: var(--sidebar-width, 280px) 1fr` (nav + content) — matches the sidebar width so the left boundary stays fixed when switching views.
+
+### Whitespace Philosophy
+Desktop workbench density — tighter than a web app, looser than an IDE. The canvas creates depth through surface brightness steps, so whitespace can stay compact without feeling crowded. 16px between cards; 8px between elements within a card.
+
+## Elevation & Depth
+
+The system uses **brightness-step elevation** — surfaces step up in luminance to create depth — supplemented by a **3-tier functional shadow scale** for floating layers and in-content card lift (issue #222, ADR-0067 (2)). Decorative shadows are forbidden; every shadow usage maps to one of three functional tiers.
+
+### Shadow Tiers
+
+| Tier | Utility | Use |
+|---|---|---|
+| In-content | `shadow-sm` | Cards, textual-card outcomes, working-set panels — lifts content above the canvas |
+| Floating popover | `shadow-md` | Menus, dropdowns, select content, session-entry menu |
+| Floating dialog | `shadow-lg` | Modals, alert dialogs, switch thumb |
+
+These ride the Tailwind shadow scale directly (no custom `--shadow-*` token per ADR-0067 "no new elevation tokens"). The shadow serves the same depth purpose as brightness steps — it is functional, not decorative.
+
+### Surface Levels
+
+| Level | Light Treatment | Dark Treatment | Use |
+|---|---|---|---|
+| Canvas | `{colors.canvas}` (#ffffff) | `{colors.canvas-dark}` (#0f1410) | Page floor, topbar, sidebar |
+| Card | `{colors.card}` (#ffffff) | `{colors.card-dark}` (#181b18) | Conversation rail, result tables, cards |
+| Popover | `{colors.popover}` (#ffffff) | `{colors.popover-dark}` (#181b18) | Dialogs, dropdown menus |
+| Hairline | 1px `{colors.border}` (#e3e3e8) | 1px `{colors.border-dark}` (#2a2f2a) | All visual separation |
+
+### Depth Principles
+- **Hairlines carry primary separation.** Every card, divider, and input border is a 1px hairline. There are no 2px borders.
+- **Shadows lift floating layers and in-content cards.** The 3-tier scale (`shadow-sm` / `shadow-md` / `shadow-lg`) provides functional depth — in-content cards lift above the canvas, popovers float above content, dialogs float above all. No decorative shadow usage.
+- **Light mode relies on hairline contrast + shadow-sm.** Cards share the same white as the canvas — the 1px `{colors.border}` plus `shadow-sm` defines the visual edge.
+- **Dark mode uses brightness steps.** Canvas (#0f1410) → Card (#181b18) is a subtle but perceptible luminance step. The green undertone in both values is visually consistent with the teal brand.
+- **Focus rings use teal.** `{colors.primary}` at 2px outline-offset. Not a shadow — a color ring.
+
+## Shapes
+
+### Border Radius Scale
+
+| Token | Value | Use |
+|---|---|---|
+| `{rounded.none}` | 0px | Reserved |
+| `{rounded.xs}` | 4px | Inline code chips, small tags |
+| `{rounded.sm}` | 4px | Inline code chips, small tags |
+| `{rounded.md}` | 6px | Badges, buttons, form inputs, text fields, popovers — the canonical radius |
+| `{rounded.lg}` | 8px | Conversation rail, dialogs |
+| `{rounded.xl}` | 10px | Cards (shadcn default) |
+| `{rounded.pill}` | 9999px | Status indicators, warning dots |
+
+Compact developer-ergonomic radii. The 6px base (vs shadcn's 10px default) signals "workbench tool" rather than "consumer app." Cards at 8px sit one step above buttons — enough to read as a container without softening the precise aesthetic.
+
+### Derivation
+All radius values derive from a single `{rounded.md}` token (6px): `xs/sm = md - 2px`, `lg = md + 2px`, `xl = md + 4px`. This mirrors the production CSS (`--radius-sm: calc(var(--radius) - 2px)` etc.).
+
+## Components
+
+### App Shell
+
+**`app-shell` / `app-shell-dark`** — The window background. Background `{colors.canvas}` / `{colors.canvas-dark}`, text `{colors.ink}` / `{colors.ink-dark}`. In production this maps to the Tailwind `bg-background text-foreground` utilities.
+
+**`topbar` / `topbar-dark`** — Thin 40px strip spanning the full viewport width. Same background as the shell. Houses the sidebar toggle, session name, and window controls. Height is deliberately compact — this is chrome, not content. Header-chrome icon buttons sharing the topbar ghost style (sidebar toggle, back/forward nav, workspace toggle, session-actions menu trigger) carry a 28px hit area (`h-7 w-7`) with a 14px glyph (`h-3.5 w-3.5`) — the WCAG 2.5.8 24px minimum plus margin. The window controls are a separate titlebar family (Windows-style 32px × 44px hit) and are not bound by this note.
+
+**`sidebar` / `sidebar-dark`** — Session sidebar at a 280px default width (user-resizable). Same background as the shell. Uses `{typography.nav-link}` for session entries. Collapsible to 0 width with a 180ms grid-template-columns animation.
+
+### Conversation Surfaces
+
+**`conversation-rail` / `conversation-rail-dark`** — The thread rail at a 460px default width (user-resizable). Background `{colors.card}` / `{colors.card-dark}` (one brightness step above canvas). Houses turn cards and source lifecycle markers. Uses `{typography.body-sm}` as default text size.
+
+**`chat-exchange`** — One turn rendered as a chat exchange (ADR-0103), live and settled in the same form: the in-flight streaming exchange and the settled card share every piece of chrome, so the settle swap moves nothing. The user side is the **user bubble** — right-aligned, `{colors.secondary}` surface + `{colors.secondary-foreground}` text, type `{typography.body-md}`, rounded `{rounded.lg}` with the top-right corner stepped to `{rounded.sm}` (the bubble points at the user's side), max-width 85% of the rail, padding 8px × 12px, full-text wrap; the ask stamp and the copy affordance ride a hover-revealed `{typography.caption}` `{colors.muted-foreground}` meta row under the bubble. The assistant side is a left-aligned stream of, in reading order: the runtime attribution marker (a muted `{typography.caption}` `{colors.muted-foreground}` line with a terminal glyph naming the external adapter, per turn — built-in and unrecorded turns stay silent, so an unmarked stretch reads as the default runtime, issue #818 — same slot live and settled, so the settle swap moves nothing); the agent-activation head (the turn's agent-initiated skill activations as bare tone-colored lifecycle glyphs, issues #722/#727 — same slot live and settled, so the settle swap moves nothing); the stream header (the active-dataset chip — `badge-primary` — plus skill-drift notes, `{typography.caption}` `{colors.muted-foreground}`); per-round blocks — a thinking fold (chevron toggle + honest duration label in `{typography.caption}` `{colors.muted-foreground}`; the expanded block is a `{colors.muted}`-surfaced, `{rounded.md}` 8px-padded, height-capped scroll box), connective prose (`{typography.body-md}` `{colors.ink}`) rendered as markdown (issue #746) — body line-height floats a step above the body-md token at 1.75 (`leading-[1.75]`, issue #828), since CJK discourse reads cramped at the token's 1.5 once answers run long; blocks sit on a 16px rhythm owned outright by the prose root's `space-y-4` — the mapped blocks that sit directly under the root carry no margins of their own, since any `m-0` would outrank the selector and flatten the rhythm back to flush blocks; while a round streams, a block caret trails its last block (the " ▋" glyph set through the streamdown caret token `--streamdown-caret`, suppressed while the last block is an unclosed fence, issue #1128), and the streaming prose's words cascade in — the streamdown animate pass wraps each newly arrived word in a 150ms opacity fade (word separation, the library's stagger defaults; issue #1137), skipping code blocks and the chart fence (inline code chips do cascade), with `prefers-reduced-motion` cutting the cascade off (the library ships no such handling of its own); headings compress to a compact ladder instead of full-size document headings (h1 at 17px stepping down 1px per level, h4 and below at body size gaining weight only; weight caps at 600), bullet/numbered lists, left-ruled blockquotes, GFM pipe tables in a hairline-bordered horizontal-scroll container, inline code as `code-inline` chips, fenced code as `code-block` surfaces, embedded HTML shown as raw tag text (never rendered), images degraded to their alt text with the URL beside it (the CSP blocks remote fetches), and http(s) links opened in the OS default browser — an opener failure surfaces a caption-sized live note beside the link — while every other scheme degrades to plain text with its surviving target — and the round's call rows on a 1px `{colors.border}` left rail (tool name + operation badge + a truncated monospace summary); then the outcome body — on Textual turns it renders through the same markdown pipeline as the connective prose (issue #827), with the Clarify/Refuse kind badge standing on its own `{typography.caption}` row ahead of the prose (the Agent kind carries no badge — its body is the reply); on Materialized turns the terminal text rides the same pipeline (issue #847) between the result link row and the inline preview card, in the same link-row, prose, note rhythm the Textual face uses; on either face the assumption note trails the prose when the turn carries one (a reserved slot — no live agent source emits one, so it renders only on turns persisted before #847) — and the closing meta row (the always-visible usage pill when the turn carries usage — a muted `{rounded.pill}` pill naming the turn's derived total (input + output) as a fixed-scale K/M absolute number, opening a popover whose bucket rows read muted labels against tabular-nums foreground figures (input with its cache-read split and hit rate, cache write, output, reasoning), ADR-0129/0130; the delegation dialog's header carries the sub-agent's subtotal — hover-revealed reply copy + settle stamp, plus the outcome glyph on Materialized/Textual turns; Failed/Cancelled turns instead close on one content-width tinted outcome card — `border-destructive/40` + `bg-destructive/10` with the glyph + reason on the card head and the technical-details fold inside for Failed, the same shape over `{colors.muted}` for Cancelled). Live rounds stream their rows unfurled on the shared rail chrome; the settled card tucks its whole process face — the per-round thinking folds, connective prose, and call rows — behind one collapsed turn-level process fold head (the outcome word + the turn's frozen wall-clock duration, `{typography.caption}` `{colors.muted-foreground}`; no head when the trace carries nothing at all), so the settled card reads question → one process head → answer, while expanding mounts the incumbent per-round blocks verbatim (the long-rail posture, ADR-0078, issue #1282).
+
+### Cards & Containers
+
+**`card` / `card-dark`** — Generic content card. Background `{colors.card}`, text `{colors.ink}`, rounded `{rounded.xl}` (10px, shadcn default), padding 24px (`py-6 px-6`), 1px `{colors.border}` hairline, `shadow-sm` lift. Used for turn cards, result containers, settings sections.
+
+**`popover` / `popover-dark`** — Dialog, dropdown, and popover surface. Background `{colors.popover}`, rounded `{rounded.md}`, padding 16px (`p-4`, the component default; compact detail faces tighten to `p-3`, the usage pill's popover). Same surface as card.
+
+### Buttons
+
+**`button-primary`** — The teal CTA. Background `{colors.primary}`, text `{colors.primary-foreground}`, type `{typography.button}` (14px / 500), padding 8px × 16px, height 36px, rounded `{rounded.md}` (6px). Used for submit, confirm, and primary action in each view.
+
+**`button-secondary` / `button-secondary-dark`** — Secondary surface button. Background `{colors.secondary}` / `{colors.secondary-dark}`, text matches ink. Same shape as primary.
+
+**`button-outline` / `button-outline-dark`** — Transparent with 1px `{colors.border}` hairline. Text `{colors.ink}` / `{colors.ink-dark}`. Used for cancel, secondary actions.
+
+### Inputs
+
+**`text-input` / `text-input-dark`** — Transparent background, 1px `{colors.border}` hairline, text `{colors.ink}` / `{colors.ink-dark}`, type `{typography.body-md}`, rounded `{rounded.md}` (6px), padding 8px × 12px, height 36px. Focus state replaces the border with a 2px `{colors.primary}` ring. The shadcn Input/Textarea copy-in carries a mobile-first `text-base md:text-sm` responsive override (16px below the `md` breakpoint, then 14px) — a vestigial Safari auto-zoom prevention idiom from the shadcn default; Tauri desktop ignores the mobile breakpoint.
+
+### Badges
+
+**`badge-primary`** — Teal pill. Background `{colors.primary}`, text white, type `{typography.badge}` (12px / 500, no uppercase), rounded `{rounded.md}` (6px), padding 2px × 8px. Used for the active-dataset chip.
+
+**`badge-secondary` / `badge-secondary-dark`** — Muted pill. Background `{colors.muted}`, text `{colors.muted-foreground}`. Used for session count, metadata tags.
+
+**`badge-accent` / `badge-accent-dark`** — Teal-tinted pill. Background `{colors.accent}`, text `{colors.accent-foreground}`. Used for highlighted/active states in lists.
+
+### Alerts
+
+**`alert-destructive` / `alert-destructive-dark`** — Error alert. Background `{colors.destructive}` / `{colors.destructive-dark}`, text white, type `{typography.body-sm}`, rounded `{rounded.lg}`, padding 12px × 16px. In practice, shadcn Alert variants use tinted backgrounds (`bg-destructive/10`) with default text color — the solid tokens here define the semantic color reference.
+
+**Warning alerts** use tinted backgrounds (`bg-warning/10`) with `{colors.warning}` / `{colors.warning-dark}` indicator dots (see below), not solid amber fills.
+
+### Indicators
+
+**`warning-indicator` / `warning-indicator-dark`** — Small status dot. Background `{colors.warning}` / `{colors.warning-dark}`, rounded `{rounded.pill}`, size 8px. Marks stale results, degraded visualizations, and cautionary disclosures.
+
+### Dividers
+
+**`hairline-divider` / `hairline-divider-dark`** — 1px horizontal or vertical separator. Background `{colors.border}` / `{colors.border-dark}`, height 1px. The universal separator — between cards, between rail sections, between table rows.
+
+### Code
+
+**`code-inline` / `code-inline-dark`** — Inline code chip. Background `{colors.muted}` / `{colors.muted-dark}`, text `{colors.ink}` / `{colors.ink-dark}`, type `{typography.code}` (system monospace 13px), rounded `{rounded.xs}` (4px), padding 2px × 6px. Used for SQL snippets, table names (`result_1`), and column references in prose.
+
+**`code-block` / `code-block-dark`** — Fenced code block inside round prose (issue #746). Surface `{colors.muted}` / `{colors.muted-dark}` (theme-adaptive — never a constant dark fill), text `{colors.ink}` / `{colors.ink-dark}`, type `{typography.code}` (system monospace 13px), rounded `{rounded.md}` (6px). A header row carries the fence language as a `{typography.caption}` `{colors.muted-foreground}` label plus the shared hover-revealed copy affordance. No syntax highlighting and no long-block folding in v1.
+
+## Do's and Don'ts
+
+### Do
+- Reserve `{colors.primary}` (teal) for primary CTAs, active states, and focus rings. One accent, used scarcely.
+- Use brightness-step surfaces + functional shadow tiers for depth. In-content cards carry `shadow-sm`; floating popovers carry `shadow-md`; dialogs carry `shadow-lg`.
+- Render every SQL snippet, data value, and file path in the system monospace stack via `{typography.code}`.
+- Keep button height at 36px, topbar at 40px, and header icon-button hit areas at 28px — a 14px glyph on the topbar chrome family (see `topbar`), a 16px glyph on settings-pane header buttons — compact workbench density.
+- Use 1px hairlines (`{colors.border}` / `{colors.border-dark}`) for all visual separation.
+- Support both light and dark modes as equals. Neither is the "default."
+- Apply `{typography.label-caps}` with CSS `text-transform: uppercase` for badges and section labels.
+- Collapse shell panels with animated grid-template-columns transitions (180ms ease), not display:none.
+- Gate all motion behind `prefers-reduced-motion: reduce`. The global cutoff block in `app.css` cuts every animation family to instant: the streamdown word cascade, the dialog enter/exit utilities, the loading spinners and the status pulse, and the shell fold transitions. Spinners and status pulses keep their glyphs under reduce — the static shape still reads as loading/state; only the motion stops. Shell folds cut to instant rather than selectively keeping color/opacity micro-fades, because the fold chain is orchestration-coupled (delayed fades park on the fold finishing) and a partial cut would desync it. New motion stays inside this block's coverage: the wildcard selectors (`*`, `::before`/`::after`, `::marker`) cut anything animated on an element or a pseudo-element automatically — bare `*` does not match pseudo-elements, which is why `::marker` is named explicitly.
+
+### Don't
+- Don't introduce a secondary brand color. Teal is the only chromatic accent.
+- Don't use decorative drop shadows. The 3-tier functional shadow scale (`shadow-sm` / `shadow-md` / `shadow-lg`) is the only shadow usage — no ad-hoc shadow values, no custom shadow tokens.
+- Don't use font weight 700. Display caps at 600; body stays at 400.
+- Don't animate layout-bound properties (width, height, top, left). Animate `grid-template-columns` and `opacity` for panel transitions.
+- Don't ship motion that escapes the reduced-motion cutoff, and don't build state signals that depend on animation timing — under reduce every animation and transition is instant, so a paused spinner or a snapped fold must still read as its terminal state.
+- Don't use `{colors.warning}` as a solid fill for alert backgrounds. Use tinted backgrounds (`bg-warning/10`) with warning indicator dots.
+- Don't use pure `#000000` for dark canvas. `{colors.canvas-dark}` (#0f1410) carries a green undertone that distinguishes the dark palette from neutral gray-black.
+- Don't use pure `#ffffff` for dark-mode text. `{colors.ink-dark}` (#e8eae8) is softer for long sessions.
+- Don't create new radius values. All corners derive from the 6px `{rounded.md}` token.
+- Don't place large areas of white body text on teal `{colors.primary}` (#0d9488). The contrast ratio is 3.74:1 — passes WCAG AA Large (3:1, suitable for button labels and short badges at 14px/500) but not AA normal text (4.5:1). For body text on teal surfaces, use `{colors.ink-dark}` on a darker teal tint instead.

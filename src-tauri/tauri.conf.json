@@ -1,22 +1,57 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "toptopduck",
+  "productName": "TOPTOPDuck",
+  "mainBinaryName": "TOPTOPDuck",
   "version": "0.1.0",
   "identifier": "dev.toptopduck.app",
   "build": {
     "frontendDist": "../dist",
     "devUrl": "http://localhost:1420",
-    "beforeDevCommand": "npm run dev",
-    "beforeBuildCommand": "npm run build"
+    "beforeDevCommand": "cargo build -p acp-bridge && node scripts/stage-acp-bridge.mjs --debug && npm run dev",
+    "beforeBuildCommand": "cargo build -p acp-bridge --release && node scripts/stage-acp-bridge.mjs && npm run build"
   },
   "app": {
     "windows": [
-      { "label": "main", "title": "toptopduck", "width": 1024, "height": 768 }
+      {
+        "label": "main",
+        "create": false,
+        "title": "TOPTOPDuck",
+        "width": 1200,
+        "height": 800,
+        "minWidth": 840,
+        "minHeight": 360,
+        "center": true,
+        "visible": false,
+        "decorations": false
+      }
     ],
-    "security": { "csp": null }
+    "security": {
+      "csp": "default-src 'self'; connect-src 'self' ipc: http://ipc.localhost; img-src 'self' data: blob: asset: http://asset.localhost; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline' 'unsafe-eval'; font-src 'self' data:; object-src 'none'; base-uri 'self'; form-action 'self'; frame-src asset: http://asset.localhost",
+      "assetProtocol": {
+        "enable": true,
+        "scope": []
+      }
+    }
   },
   "bundle": {
-    "active": false,
-    "targets": "all"
+    "active": true,
+    "targets": "all",
+    "externalBin": ["binaries/toptopduck-acp-bridge"],
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ],
+    "publisher": "toptopworks",
+    "category": "DeveloperTool",
+    "shortDescription": "Local-first AI data analysis desktop tool",
+    "longDescription": "Local-first AI data analysis desktop tool. Analyze CSV, Excel and Parquet files locally with DuckDB; no data leaves your machine.",
+    "copyright": "Copyright © 2026 toptopworks. All rights reserved.",
+    "macOS": {
+      "minimumSystemVersion": "10.15",
+      "signingIdentity": "-"
+    }
   }
 }

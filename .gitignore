@@ -3,11 +3,16 @@ node_modules/
 
 # Build output
 dist/
-src-tauri/target/
+/target/
 src-tauri/gen/
+src-tauri/binaries/
 
 # OS / editor
 .DS_Store
 Thumbs.db
 .vscode/
 .idea/
+
+# Tool reports (issue #96)
+jscpd-report/
+*.stackdump

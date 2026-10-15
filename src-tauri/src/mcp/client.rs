@@ -1,0 +1,2767 @@
+//! MCP transport clients -- the gateway's per-turn JSON-RPC clients for ONE
+//! user-configured external MCP server (ADR-0076, issue #301 slice C1 +
+//! issue #389 SSE/HTTP transports).
+//!
+//! The gateway aggregates an enabled server's tools into its advertised table
+//! (slice C-gw) and routes `tools/call` to the matching server. This module
+//! owns the connection: establish the transport (stdio / SSE / HTTP), perform
+//! the MCP initialize handshake, and drive `tools/list` + `tools/call`.
+//!
+//! Three transport clients share the same MCP JSON-RPC conversation shape but
+//! differ in how request/response bytes are carried:
+//! - [`StdioClient`]: newline-delimited JSON-RPC over a spawned child's
+//!   stdin/stdout (the MCP stdio transport).
+//! - [`HttpClient`]: each JSON-RPC request is POSTed to a URL; the response
+//!   body is either a single JSON value or an SSE stream (MCP streamable HTTP
+//!   transport, issue #389).
+//! - [`SseClient`]: a long-lived GET opens an SSE stream (responses arrive
+//!   here); JSON-RPC requests are POSTed to a server-advertised endpoint URL
+//!   (legacy MCP SSE transport, issue #389). A background reader thread
+//!   forwards SSE events via an mpsc channel.
+//!
+//! The shared MCP protocol logic (`initialize` / `list_tools` / `call`) lives
+//! in the [`McpClient`] trait as default methods; each transport implements
+//! only the 3 transport-specific wire methods (`request` /
+//! `send_notification` / `next_id`). [`FramedClient`] is the newline-framed
+//! implementation used by the stdio transport + the `Cursor`-mocked unit
+//! tests (issue #413).
+//!
+//! [`connect_transport`] dispatches by transport type; the gateway /
+//! aggregator holds a [`TransportClient`] enum per connected server.
+//!
+//! Turn-local (issue #301 Q2): the gateway constructs one client per
+//! configured server at turn start and drops it at turn end -- no
+//! cross-turn state, no session-level handle. Per-call timeouts are NOT
+//! enforced per-read here: the transports carry no per-call deadline of
+//! their own (a stdio read ends only at the child's stdout EOF, an SSE
+//! channel recv ends only when the reader exits -- within one
+//! [`SSE_READ_TIMEOUT`] wake of the stop flag while parked in an idle
+//! read -- and an HTTP read ends
+//! at its [`HTTP_READ_TIMEOUT`] per-read bound), so the deadline lives one
+//! layer up -- the aggregator parks the blocking call on a worker thread
+//! and enforces
+//! [`McpServerConfig::timeout_ms`](crate::mcp::config::McpServerConfig::timeout_ms)
+//! / the gateway default via `recv_timeout`, terminating the transport
+//! through [`TransportKill`] on expiry (issue #889). The transports stay
+//! pure synchronous: `McpClient`'s wire methods never poll clocks or
+//! cancel tokens.
+
+use std::collections::{BTreeMap, HashSet};
+use std::io::{BufRead, BufReader, Write};
+use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc;
+use std::sync::{Arc, Mutex};
+use std::thread;
+use std::time::Duration;
+
+use serde_json::{json, Value};
+
+use crate::bounded_line::{read_line_bounded, LineRead, LINE_MAX_BYTES};
+use crate::mcp::config::{McpServerConfig, McpTransport};
+use crate::mcp::MCP_PROTOCOL_VERSION;
+use crate::runtime::gateway::framing;
+
+/// SSE reader-thread read timeout. Bounds the join latency in `SseClient::drop`
+/// (the reader wakes at most every this interval to re-check the stop flag).
+const SSE_READ_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// HTTP per-read timeout (issue #392). Ensures a hung HTTP server's
+/// `spawn_blocking` task eventually terminates after the probe deadline
+/// fires — `spawn_blocking` tasks are not cancelled, so without this the
+/// thread + TCP connection would linger indefinitely.
+const HTTP_READ_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Bounded channel capacity for SSE reader → consumer message forwarding.
+/// Backpressures a flooding server so the reader blocks on send rather than
+/// accumulating unbounded messages in memory.
+const SSE_CHANNEL_BOUND: usize = 64;
+
+/// The `tools/list` pagination guardrails (issue #900). A server may split
+/// its tool list across pages joined by `nextCursor`; a server that never
+/// stops paging (or keeps producing tools) would burn the entire connect
+/// budget and surface as a generic timeout, or accumulate an unbounded
+/// catalog, so the traversal is bounded: at most [`TOOLS_LIST_PAGE_CAP`]
+/// pages, and no further page is fetched once the folded count reaches
+/// [`TOOLS_LIST_TOOL_CAP`] while a cursor remains. Same order of magnitude
+/// as other gateways' caps.
+const TOOLS_LIST_PAGE_CAP: usize = 32;
+const TOOLS_LIST_TOOL_CAP: usize = 2048;
+
+/// One keychain-backed env value the gateway injects at spawn. The gateway
+/// resolves these from the OS keychain via
+/// [`crate::mcp::secrets::get_mcp_secret`] (ADR-0029) BEFORE constructing the
+/// client, then passes the resolved `(env_key, value)` pairs in. The client
+/// never touches the keychain -- it is pure transport, testable without one.
+pub type SecretEnv = (String, String);
+
+/// A cross-thread kill handle for one transport (issue #889). Cloned from
+/// the owning client; [`TransportKill::kill`] makes that transport's
+/// blocking read return so a parked caller unblocks:
+/// - stdio: terminate the child -> its stdout EOFs -> `read_message`
+///   reports `ServerClosed`;
+/// - SSE: set the reader-thread stop flag -> the reader exits -> the
+///   response channel closes -> `recv` reports `ServerClosed`;
+/// - HTTP: no-op -- that transport is already bounded per-read
+///   ([`HTTP_READ_TIMEOUT`], issue #392).
+#[derive(Clone)]
+pub enum TransportKill {
+    /// Terminate the spawned stdio child. Shared with the client's `Drop`
+    /// (kill + reap stay single-owner through the mutex).
+    StdioChild(Arc<Mutex<Child>>),
+    /// Signal the SSE reader thread to stop. While parked in an idle read
+    /// the reader notices the flag on its next wake -- at most one
+    /// `SSE_READ_TIMEOUT` away. The kill-resistant shapes exceed that
+    /// bound (absorbed by the caller's grace, not by the stop): a
+    /// slow-drip stream that keeps the reader inside `read_sse_event`, and
+    /// a reader blocked in a full-channel send.
+    SseStop(Arc<AtomicBool>),
+    /// Nothing to terminate (HTTP is per-read bounded).
+    Http,
+}
+
+impl TransportKill {
+    /// Make the transport's blocking read return. Idempotent: killing an
+    /// already-dead child or re-setting a stop flag is a harmless no-op, so
+    /// deadline expiry and cancel teardown may both fire it.
+    pub fn kill(&self) {
+        match self {
+            Self::StdioChild(child) => match child.lock() {
+                Ok(mut child) => {
+                    // Log the failure (issue #889 review): this kill is what
+                    // the deadline/cancel unwind rides on, so a failed kill
+                    // must be diagnosable in the field, not silent.
+                    if let Err(e) = child.kill() {
+                        log::warn!(
+                            target: "toptopduck::mcp",
+                            "stdio transport kill failed: {e}"
+                        );
+                    }
+                }
+                Err(_) => {
+                    log::warn!(
+                        target: "toptopduck::mcp",
+                        "stdio transport kill skipped: the child lock is poisoned"
+                    );
+                }
+            },
+            Self::SseStop(stop) => stop.store(true, Ordering::SeqCst),
+            Self::Http => {}
+        }
+    }
+}
+
+/// The shared deadline-vs-spawn rendezvous for one connect (issue #889).
+/// The transport `publish`es its [`TransportKill`] the moment the killable
+/// resource exists; the deadline side `expire`s on
+/// timeout. The two directions race:
+/// expiry may land before spawn finishes (the handle is not published yet),
+/// so publish re-checks the expired flag and self-terminates -- otherwise
+/// the worker would park on the handshake read after the deadline with
+/// nobody left to kill it, and the caller's scope join would never return.
+#[derive(Default)]
+pub struct ConnectKill {
+    handle: Mutex<Option<TransportKill>>,
+    expired: AtomicBool,
+}
+
+impl ConnectKill {
+    /// The transport side: publish the kill handle; if the deadline already
+    /// expired during the spawn, kill immediately. Single-shot per connect
+    /// in practice -- a second publish would silently overwrite the slot,
+    /// dropping the first handle without killing it (no current caller
+    /// publishes twice).
+    pub(crate) fn publish(&self, kill: TransportKill) {
+        *self.handle.lock().expect("kill slot poisoned") = Some(kill.clone());
+        if self.expired.load(Ordering::SeqCst) {
+            kill.kill();
+        }
+    }
+
+    /// The deadline side: mark the connect expired and kill whatever is
+    /// published (a later [`Self::publish`] honors the flag).
+    pub(crate) fn expire(&self) {
+        self.expired.store(true, Ordering::SeqCst);
+        if let Some(kill) = self.handle.lock().expect("kill slot poisoned").as_ref() {
+            kill.kill();
+        }
+    }
+}
+
+/// The shared handle form passed into a `_with_kill` connect.
+pub type KillSlot = Arc<ConnectKill>;
+
+/// An unfilled [`KillSlot`] -- the no-kill default for the plain `connect`
+/// signatures (the probe path runs under its own deadline, issue #392).
+fn empty_kill_slot() -> KillSlot {
+    Arc::new(ConnectKill::default())
+}
+
+// ---------------------------------------------------------------------------
+// McpClient trait (issue #413)
+// ---------------------------------------------------------------------------
+
+/// The MCP JSON-RPC conversation contract shared by all three transports
+/// (issue #413). The 3 required methods carry the transport-specific wire
+/// logic; the 3 default methods implement the shared MCP protocol
+/// (`initialize` / `list_tools` / `call`) purely in terms of the required
+/// methods, so adding a new transport needs no protocol-level duplication.
+///
+/// Required methods:
+/// - [`request`](McpClient::request): send one JSON-RPC request and await its
+///   matched response (by `id`).
+/// - [`send_notification`](McpClient::send_notification): send a JSON-RPC
+///   notification (no `id`, no response expected). Each transport carries the
+///   bytes differently (stdio frame / HTTP POST / SSE POST).
+/// - [`next_id`](McpClient::next_id): allocate a monotonic JSON-RPC request
+///   id. Transport-local so each client owns its counter.
+pub trait McpClient {
+    /// Send one JSON-RPC request and await its response (matched by `id`).
+    /// Server-emitted notifications (no `id`) and responses for other ids are
+    /// skipped -- an MCP server may emit progress / log notifications between
+    /// requests, and they are not paired with any client request.
+    fn request(&mut self, req: Value) -> Result<Value, ClientError>;
+
+    /// Send a JSON-RPC notification (no `id`, no response awaited). The
+    /// `initialize` handshake uses this for the `notifications/initialized`
+    /// ack; each transport sends it over its own wire.
+    fn send_notification(&mut self, notif: Value) -> Result<(), ClientError>;
+
+    /// Allocate the next monotonic JSON-RPC request id.
+    fn next_id(&mut self) -> i64;
+
+    /// Perform the MCP initialize handshake: send `initialize`, await its
+    /// response, then send the `notifications/initialized` ack. Returns the
+    /// server's `InitializeResult` so the caller can log the negotiated
+    /// `protocolVersion` / `serverInfo`.
+    fn initialize(&mut self) -> Result<Value, ClientError> {
+        let id = self.next_id();
+        let req = json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": MCP_PROTOCOL_VERSION,
+                "capabilities": {},
+                "clientInfo": {
+                    "name": "toptopduck-gateway",
+                    "version": env!("CARGO_PKG_VERSION"),
+                },
+            }
+        });
+        let result = self.request(req)?;
+        // The initialized notification completes the handshake; MCP
+        // notifications are unacknowledged, so no response is awaited.
+        let notif = json!({"jsonrpc": "2.0", "method": "notifications/initialized"});
+        self.send_notification(notif)?;
+        Ok(result)
+    }
+
+    /// List the server's tools, following `nextCursor` pagination (issue
+    /// #900). `server` is the configured display name, carried for log /
+    /// error attribution the same way the #889 `Timeout` variant carries it.
+    /// Returns the raw `tools` array entries (each is the server's own
+    /// `{name, description, inputSchema}` shape); the gateway namespaces them
+    /// (`mcp__<server_slug>__<tool>`) at aggregation time.
+    ///
+    /// The traversal folds every page into one list, deduplicating by tool
+    /// name (first sight wins -- `query_catalog`'s catalog-fold precedent,
+    /// issue #543) and bounded by the pagination guardrails: a server still
+    /// paging at the page cap, or at the tool cap with a cursor outstanding,
+    /// fails with [`ClientError::PageCap`] / [`ClientError::ToolCap`] so the
+    /// connect paths record an explicit failure -- naming the tripped
+    /// dimension -- instead of mounting a silently partial catalog.
+    /// The whole traversal runs inside the caller's one connect-phase
+    /// deadline (the #892 shared budget).
+    fn list_tools(&mut self, server: &str) -> Result<Vec<Value>, ClientError> {
+        let mut tools: Vec<Value> = Vec::new();
+        let mut seen: HashSet<String> = HashSet::new();
+        let mut cursor: Option<String> = None;
+        for page in 1..=TOOLS_LIST_PAGE_CAP {
+            let params = match &cursor {
+                Some(c) => json!({"cursor": c}),
+                None => json!({}),
+            };
+            let id = self.next_id();
+            let req = json!({"jsonrpc": "2.0", "id": id, "method": "tools/list", "params": params});
+            let result = self.request(req)?;
+            for tool in result
+                .get("tools")
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default()
+            {
+                match tool.get("name").and_then(Value::as_str) {
+                    Some(name) if seen.insert(name.to_string()) => tools.push(tool),
+                    Some(name) => log::debug!(
+                        target: "toptopduck::mcp",
+                        "MCP server `{server}` re-listed tool `{name}` on tools/list \
+                         page {page}; keeping the first-seen entry"
+                    ),
+                    // A nameless entry cannot be dedup-keyed; it rides
+                    // through and is filtered by `extract_tool_info`
+                    // downstream (issue #663).
+                    None => tools.push(tool),
+                }
+            }
+            let next = match result.get("nextCursor") {
+                // Absent or null: the traversal is complete.
+                None | Some(Value::Null) => return Ok(tools),
+                Some(Value::String(c)) => c.clone(),
+                // A non-string cursor is a protocol violation and a
+                // silent-truncation hazard if read as absent (issue #900) --
+                // fail the traversal instead.
+                Some(_) => {
+                    return Err(ClientError::Framing(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "tools/list nextCursor must be a string",
+                    )))
+                }
+            };
+            // The tool cap: an endless-page server that also floods tools
+            // trips here without paying for the next request. The check is
+            // post-fold, so the count routinely crosses the cap; the error
+            // carries the true folded count. Exactly at the cap with NO
+            // cursor is a complete catalog (accepted -- the cap guards
+            // unbounded traversal, not a complete response).
+            if tools.len() >= TOOLS_LIST_TOOL_CAP {
+                return Err(ClientError::ToolCap {
+                    server: server.to_string(),
+                    pages: page,
+                    tools: tools.len(),
+                });
+            }
+            log::debug!(
+                target: "toptopduck::mcp",
+                "MCP server `{server}` tools/list page {page}: {} tools so far, cursor \
+                 present -- continuing",
+                tools.len()
+            );
+            cursor = Some(next);
+        }
+        // The loop spent its page budget with a cursor still outstanding --
+        // the page cap: fail the connect, mount no partial catalog.
+        Err(ClientError::PageCap {
+            server: server.to_string(),
+            tools: tools.len(),
+        })
+    }
+
+    /// Call one tool. `name` is the server-native name (the gateway already
+    /// stripped the `mcp__<server_slug>__` prefix before routing here).
+    /// Returns the `tools/call` result for the gateway to relay to the bridge
+    /// verbatim (content + isError).
+    fn call(&mut self, name: &str, arguments: &Value) -> Result<Value, ClientError> {
+        let id = self.next_id();
+        let req = json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "method": "tools/call",
+            "params": {"name": name, "arguments": arguments}
+        });
+        self.request(req)
+    }
+}
+
+/// A newline-framed JSON-RPC client over generic read/write halves
+/// (ADR-0076, issue #301 C1). Generic over R/W so the core handshake +
+/// request/response pairing is testable with `Cursor` mocks (no subprocess);
+/// the production [`StdioClient`] wraps a spawned child's stdin/stdout.
+///
+/// Implements [`McpClient`] — the 3 required methods drive the newline
+/// framing, and the shared protocol methods (`initialize` / `list_tools` /
+/// `call`) are inherited from the trait (issue #413).
+pub struct FramedClient<R, W> {
+    reader: R,
+    writer: W,
+    next_id: i64,
+}
+
+impl<R, W> FramedClient<R, W> {
+    /// Wrap an already-connected read/write pair. The caller performs the
+    /// transport-specific bring-up (spawn, TCP connect, ...); this type drives
+    /// the MCP JSON-RPC conversation.
+    pub fn new(reader: R, writer: W) -> Self {
+        Self {
+            reader,
+            writer,
+            next_id: 1,
+        }
+    }
+}
+
+impl<R: BufRead, W: Write> McpClient for FramedClient<R, W> {
+    fn request(&mut self, req: Value) -> Result<Value, ClientError> {
+        let id = req.get("id").cloned();
+        framing::write_message(&mut self.writer, &req).map_err(ClientError::Framing)?;
+        loop {
+            let msg = framing::read_message(&mut self.reader)
+                .map_err(ClientError::Framing)?
+                .ok_or(ClientError::ServerClosed)?;
+            // Match only id-bearing responses; a notification (no id) or a
+            // response for another id is skipped (issue #413).
+            if msg.get("id") != id.as_ref() || id.is_none() {
+                continue;
+            }
+            return check_rpc_response(&msg);
+        }
+    }
+
+    fn send_notification(&mut self, notif: Value) -> Result<(), ClientError> {
+        framing::write_message(&mut self.writer, &notif).map_err(ClientError::Framing)
+    }
+
+    fn next_id(&mut self) -> i64 {
+        let id = self.next_id;
+        self.next_id += 1;
+        id
+    }
+}
+
+// ---------------------------------------------------------------------------
+// SSE event parsing (shared by HttpClient + SseClient, issue #389)
+// ---------------------------------------------------------------------------
+
+/// One parsed SSE event from a `text/event-stream` response (issue #389).
+/// `event` is the `event:` field value (e.g., `"endpoint"`, `"message"` or
+/// `None` when omitted — the SSE default is `"message"`). `data` is the
+/// concatenation of all `data:` lines (joined with `\n` per the SSE spec).
+struct SseEvent {
+    event: Option<String>,
+    data: String,
+}
+
+/// Read one SSE event from a buffered reader, with both caps from
+/// [`LINE_MAX_BYTES`] (issue #647):
+/// - line level: lines longer than the cap are dropped by
+///   [`read_line_bounded`];
+/// - event level: the summed bytes of one event's `data:` parts -- the "\n"
+///   join byte included, so zero-length parts cannot slip past -- are
+///   bounded (a stream that never sends the terminating blank line cannot
+///   grow the accumulation past one capped line's worth).
+///
+/// A cap breach voids the WHOLE in-progress event: the accumulated fields are
+/// cleared, the surviving lines are skipped until the blank line that
+/// terminates the broken event (event-boundary resync), and a warn is logged
+/// -- dropping only the offending line would stitch the remaining fields into
+/// a partial franken-event the consumer cannot parse. The stream then
+/// continues with the next event.
+///
+/// An event is terminated by a blank line; lines starting with `:` are
+/// comments (skipped). `event:` and `data:` fields are accumulated; other
+/// fields (`id:`, `retry:`) are ignored. Returns `Ok(None)` at clean EOF
+/// (stream closed). Multiple `data:` lines within one event are joined with
+/// `\n` per the SSE spec.
+fn read_sse_event<R: BufRead>(reader: &mut R) -> std::io::Result<Option<SseEvent>> {
+    read_sse_event_bounded(reader, LINE_MAX_BYTES)
+}
+
+/// The per-event parsing state of [`read_sse_event_bounded`]: the fields
+/// accumulated for the event being built, or `Voided` after a cap breach (an
+/// over-long line or an over-budget `data:` accumulation) drops the whole
+/// in-progress event. Voiding is a single whole-value assignment -- the
+/// "resyncing implies an empty accumulator" invariant is carried by the
+/// type's representation, not by each breach site remembering a
+/// four-statement clearing sequence; the field methods are only reachable
+/// while `Building` (the resync pre-block guards that, and each method
+/// asserts it) (issue #666).
+enum EventAccumulator {
+    Building {
+        event_type: Option<String>,
+        data_parts: Vec<String>,
+        data_bytes: usize,
+    },
+    Voided,
+}
+
+impl EventAccumulator {
+    fn building() -> Self {
+        EventAccumulator::Building {
+            event_type: None,
+            data_parts: Vec::new(),
+            data_bytes: 0,
+        }
+    }
+
+    /// Set the `event:` field type (the last `event:` line wins, per the SSE
+    /// spec). A voided event's lines never reach field parsing -- the resync
+    /// pre-block in [`read_sse_event_bounded`] skips them -- so the `Voided`
+    /// arm is unreachable and a no-op.
+    fn set_event_type(&mut self, event_type: String) {
+        debug_assert!(matches!(self, EventAccumulator::Building { .. }));
+        let EventAccumulator::Building {
+            event_type: slot, ..
+        } = self
+        else {
+            return; // Unreachable behind the resync pre-block.
+        };
+        *slot = Some(event_type);
+    }
+
+    /// Accumulate one `data:` field line under the per-event budget (`max`,
+    /// the same cap source as the line level): `true` while the event still
+    /// fits, `false` once the accumulated cost breaches the budget (the event
+    /// must be voided). Like [`Self::set_event_type`], only called while
+    /// `Building`; a `false` return leaves the accumulator untouched.
+    fn push_data(&mut self, data: &str, max: usize) -> bool {
+        debug_assert!(matches!(self, EventAccumulator::Building { .. }));
+        let EventAccumulator::Building {
+            data_parts,
+            data_bytes,
+            ..
+        } = self
+        else {
+            return false; // Unreachable behind the resync pre-block.
+        };
+        // The +1 is the "\n" the join in `finish` inserts between parts:
+        // counting it keeps zero-length parts (each costing one budget
+        // byte) from growing `data_parts` without bound, and bounds the
+        // joined string's length.
+        if *data_bytes + data.len() + 1 > max {
+            return false;
+        }
+        *data_bytes += data.len() + 1;
+        data_parts.push(data.to_string());
+        true
+    }
+
+    /// Extract the completed event -- the single construction point shared by
+    /// the blank-line boundary and the EOF arm. `None` when nothing was
+    /// accumulated (a leading blank line, or a clean close) or when a voided
+    /// event never reached its boundary; the accumulator is left building a
+    /// fresh event either way.
+    fn finish(&mut self) -> Option<SseEvent> {
+        match std::mem::replace(self, EventAccumulator::building()) {
+            EventAccumulator::Building {
+                event_type,
+                data_parts,
+                ..
+            } => {
+                if data_parts.is_empty() && event_type.is_none() {
+                    None
+                } else {
+                    Some(SseEvent {
+                        event: event_type,
+                        data: data_parts.join("\n"),
+                    })
+                }
+            }
+            EventAccumulator::Voided => None,
+        }
+    }
+}
+
+/// The cap-parameterized core of [`read_sse_event`]. The `max` parameter
+/// exists for the unit tests (small caps keep fixtures tiny -- the same
+/// convention as [`read_line_bounded`]); every production caller passes
+/// [`LINE_MAX_BYTES`].
+fn read_sse_event_bounded<R: BufRead>(
+    reader: &mut R,
+    max: usize,
+) -> std::io::Result<Option<SseEvent>> {
+    let mut acc = EventAccumulator::building();
+
+    loop {
+        let line = match read_line_bounded(reader, max)? {
+            LineRead::Eof => {
+                // EOF: return any buffered event, else None (clean close).
+                // A voided event that never reached its boundary is dropped.
+                return Ok(acc.finish());
+            }
+            LineRead::Overlong => {
+                log::warn!(
+                    target: "toptopduck::mcp",
+                    "SSE event dropped: line exceeds {max} bytes; resyncing at the next event boundary"
+                );
+                acc = EventAccumulator::Voided;
+                continue;
+            }
+            LineRead::Line(line) => line,
+        };
+
+        let trimmed = line.trim_end_matches(['\r', '\n']);
+
+        // Resync pre-block -- the single skip point for a voided event's
+        // surviving lines: every line up to and including the blank-line
+        // boundary is dropped, and the field parser below never sees any of
+        // them. The boundary switches back to building the next event.
+        if matches!(acc, EventAccumulator::Voided) {
+            if trimmed.is_empty() {
+                acc = EventAccumulator::building();
+            }
+            continue;
+        }
+
+        if trimmed.is_empty() {
+            // Blank line = event boundary. Leading blank lines (before any
+            // field) are skipped so a keepalive gap does not produce an empty
+            // event.
+            if let Some(event) = acc.finish() {
+                return Ok(Some(event));
+            }
+            continue;
+        }
+
+        if trimmed.starts_with(':') {
+            continue; // SSE comment (keepalive)
+        } else if let Some(rest) = trimmed.strip_prefix("event:") {
+            acc.set_event_type(rest.trim().to_string());
+        } else if let Some(rest) = trimmed.strip_prefix("data:") {
+            // Per the SSE spec, a single leading space after the colon is
+            // stripped; everything else (including additional spaces) is
+            // retained as data.
+            let data = rest.strip_prefix(' ').unwrap_or(rest);
+            if !acc.push_data(data, max) {
+                log::warn!(
+                    target: "toptopduck::mcp",
+                    "SSE event dropped: accumulated data exceeds {max} bytes; resyncing at the next event boundary"
+                );
+                acc = EventAccumulator::Voided;
+                continue;
+            }
+        }
+        // id:, retry:, and unknown fields are silently ignored.
+    }
+}
+
+/// The failure attribution for malformed JSON in an SSE event's data,
+/// shared by the two payload consumers (the streamable-HTTP response path
+/// and the legacy reader thread): `Framing(InvalidData)` carrying the
+/// payload length and the serde error, matching the stdio path's
+/// framing::read_message contract. One source keeps the two attributions
+/// from drifting (issue #666; previously a verbatim copy at each site).
+fn malformed_sse_event(data_len: usize, e: serde_json::Error) -> ClientError {
+    ClientError::Framing(std::io::Error::new(
+        std::io::ErrorKind::InvalidData,
+        format!("malformed JSON in SSE event ({data_len} bytes): {e}"),
+    ))
+}
+
+/// Production wrapper: a [`FramedClient`] backed by a spawned stdio MCP
+/// server's stdin/stdout. Owns the child; `Drop` kills it (per-turn lifecycle,
+/// issue #301 Q2).
+///
+/// Only the stdio transport is constructed here; SSE / HTTP transports have
+/// their own client types ([`SseClient`], [`HttpClient`]). The dispatcher
+/// [`connect_transport`] routes by transport variant; a non-stdio config
+/// handed straight to `connect_with_kill` still fails loudly in
+/// `stdio_command`'s `UnsupportedTransport` guard rather than silently
+/// spawning a bogus child.
+pub struct StdioClient {
+    inner: FramedClient<BufReader<ChildStdout>, ChildStdin>,
+    /// Shared so the deadline / cancel-kill paths can terminate the child
+    /// while a blocking read holds the rest of the client (issue #889).
+    child: Arc<Mutex<Child>>,
+}
+
+impl StdioClient {
+    /// Spawn the configured stdio server, perform the MCP initialize
+    /// handshake, and return the connected client. `secrets` are the
+    /// keychain-resolved `(env_key, value)` pairs (from
+    /// [`McpServerConfig::keychain_env_keys`]); they are injected into the
+    /// child env alongside [`McpServerConfig::env`] (the non-secret values).
+    /// The child handle is published to the [`KillSlot`] the moment it is
+    /// spawned, so a deadline hit during the initialize handshake (whose
+    /// blocking read has no native timeout) can terminate it (issue #889).
+    pub fn connect_with_kill(
+        config: &McpServerConfig,
+        secrets: &[SecretEnv],
+        tool_output_dir: Option<&str>,
+        kill_slot: &KillSlot,
+    ) -> Result<Self, ClientError> {
+        let mut child = stdio_command(config, secrets, tool_output_dir)?.spawn()?;
+        let stdin = child.stdin.take().ok_or(ClientError::NoChildStdin)?;
+        let stdout = child.stdout.take().ok_or(ClientError::NoChildStdout)?;
+        let child = Arc::new(Mutex::new(child));
+        kill_slot.publish(TransportKill::StdioChild(Arc::clone(&child)));
+        let mut client = StdioClient {
+            inner: FramedClient::new(BufReader::new(stdout), stdin),
+            child,
+        };
+        client.initialize()?;
+        Ok(client)
+    }
+
+    /// The cross-thread kill handle (issue #889).
+    pub fn kill_handle(&self) -> TransportKill {
+        TransportKill::StdioChild(Arc::clone(&self.child))
+    }
+}
+
+impl McpClient for StdioClient {
+    fn request(&mut self, req: Value) -> Result<Value, ClientError> {
+        self.inner.request(req)
+    }
+
+    fn send_notification(&mut self, notif: Value) -> Result<(), ClientError> {
+        self.inner.send_notification(notif)
+    }
+
+    fn next_id(&mut self) -> i64 {
+        self.inner.next_id()
+    }
+}
+
+impl Drop for StdioClient {
+    fn drop(&mut self) {
+        // The turn is over; kill the server rather than wait for a graceful
+        // exit. Flushing stdin first signals EOF to a well-behaved server; the
+        // kill + wait that follow guarantee release even if it ignores EOF.
+        // The lock only contends while a deadline / cancel kill is mid-flight
+        // (both return without holding it, issue #889).
+        let _ = self.inner.writer.flush();
+        match self.child.lock() {
+            Ok(mut child) => {
+                if let Err(e) = child.kill() {
+                    log::warn!(
+                        target: "toptopduck::mcp",
+                        "stdio child kill at drop failed: {e}"
+                    );
+                }
+                let _ = child.wait();
+            }
+            Err(_) => {
+                log::warn!(
+                    target: "toptopduck::mcp",
+                    "stdio child kill at drop skipped: the child lock is poisoned"
+                );
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Probe helpers (issue #392)
+// ---------------------------------------------------------------------------
+
+/// The env var name the gateway injects so an external MCP tool knows where to
+/// write its output files (ADR-0087 Decision 3). The directory is a per-session
+/// subdirectory under the session temp dir; its path is passed verbatim. Only
+/// injected for stdio servers (local subprocesses); remote transports (SSE /
+/// HTTP) cannot write to a local filesystem path.
+pub const TOOL_OUTPUT_ENV: &str = "TOPTOPDUCK_TOOL_OUTPUT_DIR";
+
+/// Build the [`Command`] for a stdio MCP server from the config (shared by
+/// [`StdioClient::connect_with_kill`] and [`spawn_stdio_child`]). Extracts the command +
+/// args from the transport, injects env + keychain secrets, and configures
+/// piped stdin/stdout. Keeping this in one place prevents the two spawn paths
+/// (aggregator's per-turn connect vs the probe's timeout-bounded connect)
+/// from diverging on env/secret handling.
+///
+/// `tool_output_dir` injects [`TOOL_OUTPUT_ENV`] into the child env when
+/// `Some`. The per-turn aggregator passes the session's tool-output directory;
+/// the probe path (`spawn_stdio_child`) passes `None` (connectivity test, no
+/// file output expected).
+fn stdio_command(
+    config: &McpServerConfig,
+    secrets: &[SecretEnv],
+    tool_output_dir: Option<&str>,
+) -> Result<Command, ClientError> {
+    let (command, args) = match &config.transport {
+        McpTransport::Stdio { command, args } => (command.clone(), args.clone()),
+        McpTransport::Sse { .. } | McpTransport::Http { .. } => {
+            return Err(ClientError::UnsupportedTransport(transport_label(
+                &config.transport,
+            )));
+        }
+    };
+    let mut cmd = Command::new(&command);
+    cmd.args(&args)
+        .envs(config.env.iter().map(|(k, v)| (k.as_str(), v.as_str())))
+        .envs(secrets.iter().map(|(k, v)| (k.as_str(), v.as_str())))
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit());
+    if let Some(dir) = tool_output_dir {
+        if config.env.contains_key(TOOL_OUTPUT_ENV)
+            || secrets.iter().any(|(k, _)| k == TOOL_OUTPUT_ENV)
+        {
+            log::warn!(
+                target: "toptopduck::mcp",
+                "MCP server {}: user-configured {TOOL_OUTPUT_ENV} overridden by \
+                 session tool-output dir (ADR-0087 gateway is path authority)",
+                config.id
+            );
+        }
+        cmd.env(TOOL_OUTPUT_ENV, dir);
+    }
+    Ok(cmd)
+}
+
+/// Spawn the configured stdio server child process WITHOUT driving the MCP
+/// handshake (issue #392). Returns the raw [`Child`] so the caller owns the
+/// lifecycle — specifically, the async `probe_mcp_server` command retains the
+/// Child handle outside its `spawn_blocking` closure so a timeout can kill
+/// the process. The caller passes the child's stdin/stdout to
+/// [`stdio_handshake`] inside a blocking task.
+///
+/// This is split from [`StdioClient::connect_with_kill`] (which couples
+/// spawn + initialize in one call) because `spawn_blocking` tasks are NOT
+/// cancellable — if the handshake hangs inside the task, the only way to
+/// guarantee the child is killed is to keep the Child handle outside.
+pub fn spawn_stdio_child(
+    config: &McpServerConfig,
+    secrets: &[SecretEnv],
+) -> Result<std::process::Child, ClientError> {
+    Ok(stdio_command(config, secrets, None)?.spawn()?)
+}
+
+/// Drive the MCP initialize + tools/list handshake on already-spawned stdio
+/// handles (issue #392). Returns the raw tool list on success. Used by the
+/// probe command which owns the Child externally (for timeout kill); this
+/// function performs only the blocking I/O, not process management.
+pub fn stdio_handshake(
+    stdin: std::process::ChildStdin,
+    stdout: std::process::ChildStdout,
+    server: &str,
+) -> Result<Vec<Value>, ClientError> {
+    let mut client = FramedClient::new(BufReader::new(stdout), stdin);
+    client.initialize()?;
+    client.list_tools(server)
+}
+
+// ---------------------------------------------------------------------------
+// HTTP transport client (streamable HTTP, issue #389)
+// ---------------------------------------------------------------------------
+
+/// A streamable-HTTP MCP client: each JSON-RPC request is POSTed to `url`,
+/// and the response body is either a single JSON value (`application/json`)
+/// or an SSE stream (`text/event-stream`) carrying the response (issue #389).
+///
+/// Stateless per call — the server may respond with JSON or SSE; the client
+/// handles both transparently. No persistent connection between calls (unlike
+/// [`SseClient`]); `Drop` has no side effects.
+pub struct HttpClient {
+    url: String,
+    /// Request headers attached to every POST (issue #901) -- the transport's
+    /// configured non-secret values merged with the keychain-resolved secret
+    /// values at dispatch time.
+    headers: BTreeMap<String, String>,
+    agent: ureq::Agent,
+    next_id: i64,
+}
+
+impl HttpClient {
+    /// Connect to the HTTP endpoint and perform the MCP initialize handshake.
+    pub fn connect(url: &str, headers: &BTreeMap<String, String>) -> Result<Self, ClientError> {
+        Self::connect_with_kill(url, headers, &empty_kill_slot())
+    }
+
+    /// [`Self::connect`] with a [`KillSlot`] (issue #889). HTTP is bounded
+    /// per-read ([`HTTP_READ_TIMEOUT`]), so the slot holds the no-op handle
+    /// purely for kill-shape uniformity across transports.
+    ///
+    /// The agent never follows redirects (issue #901 guardrail): a 3xx
+    /// returns `Ok` under `redirects(0)` and surfaces as an explicit
+    /// connection error via [`check_no_redirect`] on the response status --
+    /// ureq's redirect hops only strip `authorization`/`cookie`, so following
+    /// one would forward any custom credential header to an arbitrary origin
+    /// (the #244 egress-agent precedent).
+    pub fn connect_with_kill(
+        url: &str,
+        headers: &BTreeMap<String, String>,
+        kill_slot: &KillSlot,
+    ) -> Result<Self, ClientError> {
+        let agent = ureq::AgentBuilder::new()
+            .timeout_read(HTTP_READ_TIMEOUT)
+            .redirects(0)
+            .build();
+        kill_slot.publish(TransportKill::Http);
+        let mut client = Self {
+            url: url.to_string(),
+            headers: headers.clone(),
+            agent,
+            next_id: 1,
+        };
+        client.initialize()?;
+        Ok(client)
+    }
+
+    /// The cross-thread kill handle (issue #889) -- the no-op variant.
+    pub fn kill_handle(&self) -> TransportKill {
+        TransportKill::Http
+    }
+
+    /// Build the POST request with [`Self::headers`] attached (issue #901).
+    fn post(&self) -> ureq::Request {
+        apply_headers(self.agent.post(&self.url), &self.headers)
+    }
+
+    /// Test-only: a client at a URL nothing listens on. The aggregator's
+    /// catalog / resolve paths never touch the transport; routing against
+    /// this client fails with a connection error -- exactly the failure
+    /// shape the dispatch-composition pins exercise.
+    #[cfg(test)]
+    pub(crate) fn unreachable_for_test(url: &str) -> Self {
+        Self {
+            url: url.to_string(),
+            headers: BTreeMap::new(),
+            agent: ureq::AgentBuilder::new().build(),
+            next_id: 1,
+        }
+    }
+}
+
+impl McpClient for HttpClient {
+    /// POST one JSON-RPC request and await its response. The server may
+    /// respond with `application/json` (single JSON-RPC envelope) or
+    /// `text/event-stream` (SSE carrying the envelope). Both are handled;
+    /// the response is matched by JSON-RPC `id`.
+    fn request(&mut self, req: Value) -> Result<Value, ClientError> {
+        let id = req.get("id").cloned();
+        let response = self
+            .post()
+            .send_json(req)
+            .map_err(|e| ClientError::Http(e.to_string()))?;
+        check_no_redirect(&response)?;
+
+        let content_type = response.header("Content-Type").unwrap_or("");
+        if content_type.contains("text/event-stream") {
+            // Streamable-HTTP SSE response: read events and find the matching
+            // JSON-RPC response by id (notifications without id are skipped).
+            let mut reader = BufReader::new(response.into_reader());
+            loop {
+                match read_sse_event(&mut reader).map_err(ClientError::Framing)? {
+                    Some(event) => match serde_json::from_str::<Value>(&event.data) {
+                        Ok(msg) => {
+                            if msg.get("id") == id.as_ref() && id.is_some() {
+                                return check_rpc_response(&msg);
+                            }
+                        }
+                        Err(e) => {
+                            return Err(malformed_sse_event(event.data.len(), e));
+                        }
+                    },
+                    None => return Err(ClientError::ServerClosed),
+                }
+            }
+        } else {
+            // Plain JSON response.
+            let body: Value = response
+                .into_json()
+                .map_err(|e| ClientError::Http(e.to_string()))?;
+            check_rpc_response(&body)
+        }
+    }
+
+    fn send_notification(&mut self, notif: Value) -> Result<(), ClientError> {
+        post_notification(self.post(), notif)
+    }
+
+    fn next_id(&mut self) -> i64 {
+        let id = self.next_id;
+        self.next_id += 1;
+        id
+    }
+}
+
+// ---------------------------------------------------------------------------
+// SSE transport client (legacy SSE, issue #389)
+// ---------------------------------------------------------------------------
+
+/// A legacy-SSE MCP client (issue #389). The client opens a GET to the SSE
+/// URL; the server responds with `text/event-stream` and sends an `endpoint`
+/// event carrying the POST URL for JSON-RPC requests. Subsequent requests are
+/// POSTed to that endpoint; responses arrive as `message` events on the SSE
+/// stream.
+///
+/// A background thread ([`sse_reader_loop`]) continuously reads SSE events
+/// and forwards JSON-RPC messages via an [`mpsc`] channel. The main thread
+/// POSTs requests and receives responses from the channel, matching by id.
+/// The agent's `timeout_read` (2 s) lets the reader periodically check the
+/// stop flag so [`Drop`] can join the thread cleanly.
+pub struct SseClient {
+    /// Receives JSON-RPC messages forwarded by the reader thread. `Err`
+    /// carries a reader-side failure (malformed message event, issue #647)
+    /// propagated to the waiting request.
+    response_rx: mpsc::Receiver<Result<Value, ClientError>>,
+    /// The POST endpoint URL (from the server's initial `endpoint` event).
+    post_url: String,
+    /// Request headers attached to the SSE GET stream and every POST
+    /// (issue #901) -- the transport's configured non-secret values merged
+    /// with the keychain-resolved secret values at dispatch time.
+    headers: BTreeMap<String, String>,
+    /// HTTP agent for POST requests (the GET agent's stream is owned by the
+    /// reader thread).
+    agent: ureq::Agent,
+    /// Stop flag shared with the reader thread.
+    stop: Arc<AtomicBool>,
+    /// The reader thread handle. `Drop` releases `response_rx` before
+    /// joining this thread (issue #667): a reader blocked in `send` on a
+    /// full channel only exits when the receiver's destruction fails that
+    /// send.
+    reader_thread: Option<thread::JoinHandle<()>>,
+    next_id: i64,
+}
+
+impl SseClient {
+    /// Open the SSE stream, read the endpoint event, spawn the reader thread,
+    /// and perform the MCP initialize handshake. A caller handing a non-empty
+    /// header map is by definition header-authenticated (the same-origin
+    /// guardrail applies); the dispatch path derives the flag from the
+    /// CONFIGURED face instead (see [`Self::connect_with_kill`]).
+    pub fn connect(url: &str, headers: &BTreeMap<String, String>) -> Result<Self, ClientError> {
+        Self::connect_with_kill(url, headers, !headers.is_empty(), &empty_kill_slot())
+    }
+
+    /// [`Self::connect`] with a [`KillSlot`] (issue #889). The stop flag is
+    /// published the moment it exists -- it is the ONLY thing that breaks a
+    /// deadline or cancel during the initialize handshake: the handshake
+    /// parks on an unbounded channel `recv` (the agent's `timeout_read`
+    /// bounds the reader's socket reads, not the channel), so without the
+    /// slot a spawn that outlives its budget would park with nobody left to
+    /// kill it.
+    ///
+    /// The agent never follows redirects (issue #901 guardrail; see
+    /// [`HttpClient::connect_with_kill`]). When `auth_configured` is set --
+    /// ANY header configured on the server, secret-named or not -- the
+    /// endpoint event's POST URL must share the SSE URL's origin
+    /// ([`enforce_same_origin`]): the POST target comes from the server's
+    /// own event, so without the guard a compromised server could aim the
+    /// authenticated POST (and its headers) at any host it chooses.
+    ///
+    /// `auth_configured` INVARIANT (issue #904): the caller derives it from
+    /// the CONFIGURED faces via [`sse_auth_configured`] (the transport's
+    /// `headers` map and `keychain_header_keys` list), never from the merged
+    /// runtime map -- a declared secret whose keychain value is missing
+    /// still trips the guard. A future caller hand-rolling the bool must
+    /// route through the named derivation, not pass `false` alongside
+    /// credentials.
+    pub fn connect_with_kill(
+        url: &str,
+        headers: &BTreeMap<String, String>,
+        auth_configured: bool,
+        kill_slot: &KillSlot,
+    ) -> Result<Self, ClientError> {
+        // The GET agent carries a read timeout so the reader thread can
+        // periodically check the stop flag (the stream is otherwise blocking
+        // forever between events).
+        let agent = ureq::AgentBuilder::new()
+            .timeout_read(SSE_READ_TIMEOUT)
+            .redirects(0)
+            .build();
+
+        let get = apply_headers(agent.get(url).set("Accept", "text/event-stream"), headers);
+        let response = get.call().map_err(|e| ClientError::Http(e.to_string()))?;
+        check_no_redirect(&response)?;
+
+        let content_type = response.header("Content-Type").unwrap_or("");
+        if !content_type.contains("text/event-stream") {
+            return Err(ClientError::Http(format!(
+                "SSE endpoint returned non-event-stream content-type: {content_type}"
+            )));
+        }
+
+        let mut reader = BufReader::new(response.into_reader());
+
+        // The first event MUST be `event: endpoint` carrying the POST URL
+        // (the MCP legacy SSE transport contract). Rejecting anything else
+        // prevents a misbehaving server's message payload from being used as
+        // the POST target.
+        let first_event = read_sse_event(&mut reader)
+            .map_err(ClientError::Framing)?
+            .ok_or(ClientError::ServerClosed)?;
+        if first_event.event.as_deref() != Some("endpoint") {
+            return Err(ClientError::Framing(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!(
+                    "expected `event: endpoint` first, got {:?}",
+                    first_event.event
+                ),
+            )));
+        }
+        // Resolve the POST URL relative to the SSE URL (the server may send
+        // a relative path like `/message`). Reject non-http(s) schemes to
+        // prevent SSRF via a compromised server's endpoint event.
+        let post_url = resolve_post_url(url, &first_event.data)?;
+        // Header-authenticated servers additionally require the POST URL to
+        // share the SSE stream's origin (issue #901 guardrail two).
+        if auth_configured {
+            enforce_same_origin(url, &post_url)?;
+        }
+
+        // Spawn the background reader for subsequent events. A bounded
+        // sync_channel backpressures a flooding server.
+        let (tx, rx) = mpsc::sync_channel(SSE_CHANNEL_BOUND);
+        let stop = Arc::new(AtomicBool::new(false));
+        // Publish the stop flag the moment it exists (issue #889): the
+        // deadline / cancel-kill paths terminate a parked `recv` by setting
+        // it -- the reader thread then exits, dropping the sender, and the
+        // channel disconnects.
+        kill_slot.publish(TransportKill::SseStop(Arc::clone(&stop)));
+        let stop_clone = stop.clone();
+        let handle = thread::spawn(move || {
+            sse_reader_loop(reader, tx, stop_clone);
+        });
+
+        let mut client = Self {
+            response_rx: rx,
+            post_url,
+            headers: headers.clone(),
+            agent,
+            stop,
+            reader_thread: Some(handle),
+            next_id: 1,
+        };
+
+        client.initialize()?;
+        Ok(client)
+    }
+
+    /// The cross-thread kill handle (issue #889).
+    pub fn kill_handle(&self) -> TransportKill {
+        TransportKill::SseStop(Arc::clone(&self.stop))
+    }
+
+    /// Build the POST request with [`Self::headers`] attached (issue #901).
+    fn post(&self) -> ureq::Request {
+        apply_headers(self.agent.post(&self.post_url), &self.headers)
+    }
+}
+
+impl McpClient for SseClient {
+    /// POST one JSON-RPC request and await the matching response from the SSE
+    /// stream (forwarded by the reader thread via the channel). Notifications
+    /// (no `id`) and responses for other ids are skipped.
+    fn request(&mut self, req: Value) -> Result<Value, ClientError> {
+        let id = req.get("id").cloned();
+        let response = self
+            .post()
+            .send_json(req)
+            .map_err(|e| ClientError::Http(e.to_string()))?;
+        check_no_redirect(&response)?;
+        // The POST response is typically 202 Accepted; the actual JSON-RPC
+        // response arrives on the SSE stream.
+        loop {
+            let msg = match self.response_rx.recv() {
+                Ok(Ok(msg)) => msg,
+                // A reader-side failure (malformed message event, issue #647)
+                // fails the waiting request fast instead of hanging until the
+                // turn watchdog cancels it.
+                Ok(Err(err)) => return Err(err),
+                Err(_) => return Err(ClientError::ServerClosed),
+            };
+            if msg.get("id") != id.as_ref() || id.is_none() {
+                continue;
+            }
+            return check_rpc_response(&msg);
+        }
+    }
+
+    fn send_notification(&mut self, notif: Value) -> Result<(), ClientError> {
+        post_notification(self.post(), notif)
+    }
+
+    fn next_id(&mut self) -> i64 {
+        let id = self.next_id;
+        self.next_id += 1;
+        id
+    }
+}
+
+impl Drop for SseClient {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::SeqCst);
+        // Release the receiver BEFORE joining. Two reader exit paths meet
+        // here: a reader blocked in `send` on a full channel never re-checks
+        // the stop flag, so only the receiver's destruction fails that send
+        // with `SendError` (field destruction would happen only after
+        // `drop()` returns -- i.e. after a join that never returns, issue
+        // #667); a reader between reads sees the stop flag at its next
+        // read-timeout wakeup (at most SSE_READ_TIMEOUT). The plain
+        // assignment is the move-a-field-out idiom for Drop: it destroys
+        // the old receiver immediately; the placeholder is a disconnected
+        // channel nobody reads after this point.
+        self.response_rx = mpsc::channel().1;
+        if let Some(handle) = self.reader_thread.take() {
+            // If the thread panicked, log the payload — panics cannot
+            // propagate from Drop, but the diagnostic should not be
+            // silently lost.
+            if let Err(payload) = handle.join() {
+                log::error!(
+                    target: "toptopduck::mcp",
+                    "SSE reader thread panicked during drop: {payload:?}"
+                );
+            }
+        }
+    }
+}
+
+/// The SSE reader thread loop: continuously reads SSE events and forwards
+/// JSON-RPC messages ([`SseEvent`] with `event: message` or default) through
+/// the channel. Exits when `stop` is set, the stream closes / errors, or a
+/// malformed message event propagates its failure to the waiting request and
+/// stops the reader (issue #647). Read timeouts (from the agent's
+/// `timeout_read`) are treated as a wakeup to re-check the stop flag — the
+/// TCP connection stays open between timeouts.
+fn sse_reader_loop<R: BufRead + Send>(
+    mut reader: R,
+    tx: mpsc::SyncSender<Result<Value, ClientError>>,
+    stop: Arc<AtomicBool>,
+) {
+    while !stop.load(Ordering::SeqCst) {
+        match read_sse_event(&mut reader) {
+            Ok(Some(event)) => {
+                // Only forward `message` events (the default event type when
+                // `event:` is omitted). The initial `endpoint` event was
+                // consumed in `connect` before the thread started.
+                let is_message = event
+                    .event
+                    .as_deref()
+                    .map(|e| e == "message")
+                    .unwrap_or(true);
+                if is_message {
+                    match serde_json::from_str::<Value>(&event.data) {
+                        Ok(msg) => {
+                            if msg.is_object() && tx.send(Ok(msg)).is_err() {
+                                break; // Channel closed (client dropped).
+                            }
+                        }
+                        Err(e) => {
+                            // Malformed JSON in a message event: the waiting
+                            // request's response is unrecoverable. Propagate
+                            // the failure (the streamable-HTTP path's
+                            // `Framing(InvalidData)` attribution) instead of
+                            // warn-and-continue, which left the request
+                            // hanging until the turn watchdog cancelled it.
+                            // Best-effort send: a closed channel just means
+                            // the client already dropped.
+                            let err = malformed_sse_event(event.data.len(), e);
+                            log::warn!(
+                                target: "toptopduck::mcp",
+                                "SSE reader: {err}; stopping reader thread"
+                            );
+                            let _ = tx.send(Err(err));
+                            break;
+                        }
+                    }
+                }
+            }
+            Ok(None) => break, // EOF (stream closed).
+            Err(ref e)
+                if matches!(
+                    e.kind(),
+                    std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock
+                ) =>
+            {
+                continue; // Read timeout → re-check stop flag.
+            }
+            Err(e) => {
+                // Unrecoverable stream error (TCP RST, broken pipe, etc.):
+                // log so the operator can distinguish this from a clean close.
+                log::warn!(
+                    target: "toptopduck::mcp",
+                    "SSE reader: stream error, shutting down reader thread: {e}"
+                );
+                break;
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Transport dispatch (issue #389)
+// ---------------------------------------------------------------------------
+
+/// Check a JSON-RPC response envelope: return the `result` field on success,
+/// [`ClientError::ServerError`] when the server returned an `error` field, or
+/// [`ClientError::Framing`] when the envelope has neither (a protocol
+/// violation). Shared by all [`McpClient`] implementations (issue #413).
+fn check_rpc_response(msg: &Value) -> Result<Value, ClientError> {
+    if let Some(err) = msg.get("error") {
+        return Err(ClientError::ServerError(err.clone()));
+    }
+    match msg.get("result") {
+        Some(v) => Ok(v.clone()),
+        None => Err(ClientError::Framing(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "JSON-RPC response has neither `result` nor `error`",
+        ))),
+    }
+}
+
+/// POST a JSON-RPC notification (no `id`, no response awaited) over an HTTP
+/// transport. The response body is intentionally discarded — MCP
+/// notifications are fire-and-forget; the server typically returns 202.
+/// Statuses >= 400 surface as `ClientError::Http` via `ureq`'s error
+/// channel; a 3xx returns `Ok` under `redirects(0)` and is refused by
+/// [`check_no_redirect`] (issue #901).
+fn post_notification(request: ureq::Request, notif: Value) -> Result<(), ClientError> {
+    let response = request
+        .send_json(notif)
+        .map_err(|e| ClientError::Http(e.to_string()))?;
+    // A notification's 3xx is still an explicit redirect refusal (issue
+    // #901), not a silent drop -- the handshake ack must not quietly vanish.
+    check_no_redirect(&response)
+}
+
+/// Attach `headers` to a request (issue #901): the one injection loop shared
+/// by both remote transports' POST builders and the SSE GET open.
+fn apply_headers(mut request: ureq::Request, headers: &BTreeMap<String, String>) -> ureq::Request {
+    for (name, value) in headers {
+        request = request.set(name, value);
+    }
+    request
+}
+
+/// Guard the no-redirect agents' SUCCESS path (issue #901): ureq 2 with
+/// `redirects(0)` returns a 3xx as `Ok(response)` (only statuses >= 400
+/// surface as `Err::Status` -- verified against ureq 2.12's `do_call`), so
+/// the redirect refusal is checked on the response status itself. Following
+/// would forward custom credential headers to an arbitrary origin (the #244
+/// egress-agent lesson), so the refusal must name the redirect explicitly.
+fn check_no_redirect(response: &ureq::Response) -> Result<(), ClientError> {
+    let code = response.status();
+    if (300..400).contains(&code) {
+        let location = response
+            .header("Location")
+            .unwrap_or("<no Location header>");
+        return Err(ClientError::Http(format!(
+            "HTTP {code} redirect to {location} refused: redirects are not followed"
+        )));
+    }
+    Ok(())
+}
+
+/// Whether an SSE connect counts as header-authenticated for the same-origin
+/// guardrail -- the one named derivation every caller must share (issue #904;
+/// the guardrail itself is issue #901 guardrail two). Inputs are the CONFIGURED
+/// faces (`transport.headers` + `keychain_header_keys`), NOT the merged
+/// runtime map: a declared secret name whose keychain value is missing still
+/// counts (the credential rides the POST the moment the value appears), so
+/// deriving from the merged map would silently disarm the guard. The test
+/// handshake entry [`SseClient::connect`] deliberately uses its own
+/// merged-nonempty rule (self-contained + documented there); every production
+/// caller goes through [`connect_transport_with_kill`], which routes here.
+pub(crate) fn sse_auth_configured(
+    configured_headers: &BTreeMap<String, String>,
+    declared_keys: &[String],
+) -> bool {
+    !configured_headers.is_empty() || !declared_keys.is_empty()
+}
+
+/// The SSE same-origin guardrail (issue #901): when a server carries
+/// authenticated headers, the endpoint event's POST URL must share the SSE
+/// stream URL's origin (scheme + host + port). The POST target comes from
+/// the server's own event, so a compromised server could otherwise aim the
+/// authenticated POST at any host it chooses. The error names both origins.
+fn enforce_same_origin(sse_url: &str, post_url: &str) -> Result<(), ClientError> {
+    let parse = |raw: &str| {
+        url::Url::parse(raw).map_err(|e| ClientError::Http(format!("invalid url: {e}")))
+    };
+    let sse = parse(sse_url)?;
+    let post = parse(post_url)?;
+    if sse.origin() == post.origin() {
+        return Ok(());
+    }
+    Err(ClientError::Http(format!(
+        "SSE endpoint event advertised a cross-origin POST url {}; refusing: this server \
+         sends authenticated headers and the POST target must share the SSE origin {}",
+        post.origin().ascii_serialization(),
+        sse.origin().ascii_serialization(),
+    )))
+}
+
+/// Resolve the SSE endpoint event's POST URL relative to the SSE stream URL,
+/// rejecting non-http(s) schemes (SSRF guard). The
+/// server may send an absolute URL or a relative path like `/message`.
+fn resolve_post_url(sse_url: &str, raw: &str) -> Result<String, ClientError> {
+    let base =
+        url::Url::parse(sse_url).map_err(|e| ClientError::Http(format!("invalid SSE url: {e}")))?;
+    let resolved = base
+        .join(raw)
+        .map_err(|e| ClientError::Http(format!("invalid endpoint url: {e}")))?;
+    match resolved.scheme() {
+        "http" | "https" => Ok(resolved.to_string()),
+        other => Err(ClientError::Http(format!(
+            "endpoint url must be http or https, got: {other}"
+        ))),
+    }
+}
+
+/// The connected MCP client for one server, specialized by transport. The
+/// aggregator holds one [`TransportClient`] per connected server; the
+/// [`McpClient`] trait methods (`list_tools` / `call` / ...) dispatch to the
+/// concrete transport client.
+pub enum TransportClient {
+    Stdio(StdioClient),
+    Sse(SseClient),
+    Http(HttpClient),
+}
+
+impl TransportClient {
+    /// The cross-thread kill handle for the concrete transport (issue #889).
+    pub fn kill_handle(&self) -> TransportKill {
+        match self {
+            Self::Stdio(c) => c.kill_handle(),
+            Self::Sse(c) => c.kill_handle(),
+            Self::Http(c) => c.kill_handle(),
+        }
+    }
+}
+
+impl McpClient for TransportClient {
+    fn request(&mut self, req: Value) -> Result<Value, ClientError> {
+        match self {
+            Self::Stdio(c) => c.request(req),
+            Self::Sse(c) => c.request(req),
+            Self::Http(c) => c.request(req),
+        }
+    }
+
+    fn send_notification(&mut self, notif: Value) -> Result<(), ClientError> {
+        match self {
+            Self::Stdio(c) => c.send_notification(notif),
+            Self::Sse(c) => c.send_notification(notif),
+            Self::Http(c) => c.send_notification(notif),
+        }
+    }
+
+    fn next_id(&mut self) -> i64 {
+        match self {
+            Self::Stdio(c) => c.next_id(),
+            Self::Sse(c) => c.next_id(),
+            Self::Http(c) => c.next_id(),
+        }
+    }
+}
+
+/// Connect to a configured MCP server, dispatching to the transport-specific
+/// client (issue #389). Each transport's `connect` performs the MCP initialize
+/// handshake and returns a ready-to-use [`TransportClient`]. No kill slot --
+/// the probe path that uses this runs under its own deadline (issue #392);
+/// the aggregator deadline path uses [`connect_transport_with_kill`].
+pub fn connect_transport(
+    config: &McpServerConfig,
+    secrets: &[SecretEnv],
+    header_secrets: &[SecretEnv],
+    tool_output_dir: Option<&str>,
+) -> Result<TransportClient, ClientError> {
+    connect_transport_with_kill(
+        config,
+        secrets,
+        header_secrets,
+        tool_output_dir,
+        &empty_kill_slot(),
+    )
+}
+
+/// [`connect_transport`] with a [`KillSlot`] the caller reads on deadline
+/// expiry (issue #889): each transport publishes its [`TransportKill`] as
+/// soon as the killable resource exists, covering the initialize-handshake
+/// park (a stdio child that spawns but never responds).
+///
+/// `header_secrets` are the keychain-resolved `(header_name, value)` pairs
+/// (issue #901), merged over the transport's configured non-secret `headers`
+/// here -- the one composition point, so both remote transports receive the
+/// complete header set and neither client type knows the keychain exists.
+pub fn connect_transport_with_kill(
+    config: &McpServerConfig,
+    secrets: &[SecretEnv],
+    header_secrets: &[SecretEnv],
+    tool_output_dir: Option<&str>,
+    kill_slot: &KillSlot,
+) -> Result<TransportClient, ClientError> {
+    match &config.transport {
+        McpTransport::Stdio { .. } => {
+            StdioClient::connect_with_kill(config, secrets, tool_output_dir, kill_slot)
+                .map(TransportClient::Stdio)
+        }
+        McpTransport::Sse { url, headers } => {
+            let auth_configured = sse_auth_configured(headers, &config.keychain_header_keys);
+            SseClient::connect_with_kill(
+                url,
+                &merged_headers(headers, header_secrets),
+                auth_configured,
+                kill_slot,
+            )
+            .map(TransportClient::Sse)
+        }
+        McpTransport::Http { url, headers } => {
+            HttpClient::connect_with_kill(url, &merged_headers(headers, header_secrets), kill_slot)
+                .map(TransportClient::Http)
+        }
+    }
+}
+
+/// Merge a transport's configured non-secret headers with its keychain
+/// resolved secret values (issue #901). A secret name cannot legally sit in
+/// the configured map (the read-time scan refuses it), so the two sources
+/// never collide in practice; `extend` is simply the order-insensitive
+/// composition.
+fn merged_headers(
+    configured: &BTreeMap<String, String>,
+    secrets: &[SecretEnv],
+) -> BTreeMap<String, String> {
+    let mut merged = configured.clone();
+    merged.extend(secrets.iter().cloned());
+    merged
+}
+
+/// The short label for an unsupported transport in an error message
+/// (`"stdio"` / `"sse"` / `"http"`).
+fn transport_label(t: &McpTransport) -> String {
+    match t {
+        McpTransport::Stdio { .. } => "stdio",
+        McpTransport::Sse { .. } => "sse",
+        McpTransport::Http { .. } => "http",
+    }
+    .to_string()
+}
+
+/// A client-side failure: a bad transport, a spawn fault, a wire error, or a
+/// server-reported JSON-RPC error. The gateway maps these to a tool-level
+/// error the agent self-corrects from (ADR-0077) plus a trace entry.
+#[derive(Debug, thiserror::Error)]
+pub enum ClientError {
+    #[error("unsupported transport: {0}")]
+    UnsupportedTransport(String),
+    #[error("failed to spawn MCP server: {0}")]
+    Spawn(#[from] std::io::Error),
+    // No `#[from]`: would conflict with `Spawn`'s `#[from] std::io::Error`.
+    #[error("framing error on the server transport: {0}")]
+    Framing(std::io::Error),
+    #[error("spawned child has no stdin (piped was requested)")]
+    NoChildStdin,
+    #[error("spawned child has no stdout (piped was requested)")]
+    NoChildStdout,
+    #[error("server closed the connection before responding")]
+    ServerClosed,
+    #[error("server returned a JSON-RPC error: {0}")]
+    ServerError(Value),
+    #[error("HTTP transport error: {0}")]
+    Http(String),
+    /// The per-call deadline expired (issue #889): `server` names the
+    /// configured server, `call` the protocol step that hung
+    /// (`connect (initialize/tools/list)` for the connect phase -- one
+    /// shared budget, issue #892 -- or the `tools/call` tool name), and
+    /// `timeout_ms` the effective budget (per-server override or gateway
+    /// default). The transport was terminated -- subsequent calls to this
+    /// server fail fast for the rest of the turn.
+    #[error("MCP server `{server}` {call} timed out after {timeout_ms}ms; the server is unavailable for the rest of the turn")]
+    Timeout {
+        server: String,
+        call: String,
+        timeout_ms: u64,
+    },
+    /// The `tools/list` traversal tripped the page cap (issue #900): the
+    /// server still returned a `nextCursor` after the page budget was spent.
+    /// `tools` is what the traversal had folded when it tripped. The connect
+    /// paths record the message as the server's failure reason -- the
+    /// gateway mounts no silently-partial catalog.
+    #[error("MCP server `{server}` tools/list still returned a cursor after {} pages (the page cap, {} tools folded); the server is not mounted -- no partial catalog", TOOLS_LIST_PAGE_CAP, tools)]
+    PageCap { server: String, tools: usize },
+    /// The `tools/list` traversal tripped the tool cap (issue #900): the
+    /// traversal had folded `tools` entries -- at or past the cap -- with a
+    /// cursor still outstanding, and refused to pay for the next page.
+    /// `pages` is where the traversal stood. The connect paths record the
+    /// message as the server's failure reason -- the gateway mounts no
+    /// silently-partial catalog.
+    #[error("MCP server `{server}` tools/list folded {tools} tools (the tool cap is {}), on page {pages}, still paging; the server is not mounted -- no partial catalog", TOOLS_LIST_TOOL_CAP)]
+    ToolCap {
+        server: String,
+        pages: usize,
+        tools: usize,
+    },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+    use std::io::Cursor;
+
+    /// Frame `msgs` as newline-delimited JSON (the wire form a server writes),
+    /// returning bytes for a `Cursor` reader mock.
+    fn wire(msgs: &[Value]) -> Vec<u8> {
+        let mut buf = Vec::new();
+        for m in msgs {
+            framing::write_message(&mut buf, m).expect("write frame");
+        }
+        buf
+    }
+
+    /// `initialize` sends id=1, awaits the id=1 response, then emits the
+    /// `notifications/initialized` ack. The negotiated InitializeResult is
+    /// returned verbatim.
+    #[test]
+    fn initialize_pairs_response_by_id_and_emits_initialized_notification() {
+        let init_result = json!({
+            "protocolVersion": "2024-11-05",
+            "capabilities": {},
+            "serverInfo": {"name": "fake-mcp", "version": "0.1"}
+        });
+        let server = wire(&[json!({"jsonrpc": "2.0", "id": 1, "result": init_result.clone()})]);
+        let mut client = FramedClient::new(Cursor::new(server), Cursor::new(Vec::new()));
+        let result = client.initialize().expect("handshake ok");
+        assert_eq!(result, init_result);
+        // The writer collected the initialize request + the initialized
+        // notification (in that order).
+        let mut r = Cursor::new(client.writer.get_ref().clone());
+        let m1 = framing::read_message(&mut r).unwrap().unwrap();
+        let m2 = framing::read_message(&mut r).unwrap().unwrap();
+        assert_eq!(m1["method"], "initialize");
+        assert_eq!(m1["params"]["protocolVersion"], MCP_PROTOCOL_VERSION);
+        assert_eq!(m2["method"], "notifications/initialized");
+    }
+
+    /// `list_tools` returns the server's `tools` array, verbatim. Missing
+    /// `tools` degrades to empty (a server advertising no tools is valid).
+    #[test]
+    fn list_tools_returns_the_tools_array() {
+        let tools = json!([
+            {"name": "search", "description": "search docs"},
+            {"name": "fetch", "description": "fetch a url"}
+        ]);
+        let server = wire(&[json!({"jsonrpc": "2.0", "id": 1, "result": {"tools": tools}})]);
+        let mut client = FramedClient::new(Cursor::new(server), Cursor::new(Vec::new()));
+        let listed = client.list_tools("fake-mcp").expect("list ok");
+        assert_eq!(listed.len(), 2);
+        assert_eq!(listed[0]["name"], "search");
+        assert_eq!(listed[1]["name"], "fetch");
+    }
+
+    #[test]
+    fn list_tools_empty_when_result_has_no_tools_key() {
+        let server = wire(&[json!({"jsonrpc": "2.0", "id": 1, "result": {}})]);
+        let mut client = FramedClient::new(Cursor::new(server), Cursor::new(Vec::new()));
+        let listed = client.list_tools("fake-mcp").expect("list ok");
+        assert!(listed.is_empty(), "missing tools key -> empty, not error");
+    }
+
+    // --- tools/list pagination (issue #900) -----------------------------------
+
+    /// Issue #900: a `tools/list` response carrying `nextCursor` is followed
+    /// -- the continuation request echoes the cursor in `params`, and the
+    /// pages fold into one list in advertised order. A page with no cursor
+    /// ends the traversal.
+    #[test]
+    fn list_tools_follows_next_cursor_pages() {
+        let server = wire(&[
+            json!({"jsonrpc": "2.0", "id": 1, "result": {
+                "tools": [
+                    {"name": "echo", "description": "page 1"},
+                    {"name": "add", "description": "page 1"}
+                ],
+                "nextCursor": "page-2"
+            }}),
+            json!({"jsonrpc": "2.0", "id": 2, "result": {
+                "tools": [{"name": "fetch_page2", "description": "page 2"}]
+            }}),
+        ]);
+        let mut client = FramedClient::new(Cursor::new(server), Cursor::new(Vec::new()));
+        let listed = client.list_tools("fake-mcp").expect("list ok");
+        let names: Vec<&str> = listed
+            .iter()
+            .map(|t| t["name"].as_str().expect("name"))
+            .collect();
+        assert_eq!(names, vec!["echo", "add", "fetch_page2"]);
+        // The continuation request carried the cursor the previous page
+        // handed back; the first request carried none.
+        let mut r = Cursor::new(client.writer.get_ref().clone());
+        let req1 = framing::read_message(&mut r).unwrap().unwrap();
+        let req2 = framing::read_message(&mut r).unwrap().unwrap();
+        assert!(
+            req1["params"]["cursor"].is_null(),
+            "first request carries no cursor: {req1}"
+        );
+        assert_eq!(req2["params"]["cursor"], "page-2");
+    }
+
+    /// Issue #900: a server that never stops paging (every page returns a
+    /// fresh `nextCursor`) trips the page cap -- an explicit error naming
+    /// the server, the tripped dimension, and where the traversal stood,
+    /// never a silently partial catalog (the #889 attribution shape).
+    #[test]
+    fn list_tools_page_cap_trips_on_an_endingless_cursor() {
+        let pages: Vec<Value> = (1..=TOOLS_LIST_PAGE_CAP)
+            .map(|i| {
+                json!({
+                    "jsonrpc": "2.0", "id": i, "result": {
+                        "tools": [{"name": format!("tool_{i}")}],
+                        "nextCursor": format!("page-{i}")
+                    }
+                })
+            })
+            .collect();
+        let server = wire(&pages);
+        let mut client = FramedClient::new(Cursor::new(server), Cursor::new(Vec::new()));
+        let err = client.list_tools("cap-fake").expect_err("page cap");
+        let display = err.to_string();
+        match err {
+            ClientError::PageCap { server, tools } => {
+                assert_eq!(server, "cap-fake");
+                assert_eq!(tools, TOOLS_LIST_PAGE_CAP);
+            }
+            other => panic!("expected PageCap, got {other:?}"),
+        }
+        assert!(display.contains("cap-fake"), "names the server: {display}");
+        assert!(
+            display.contains("page cap"),
+            "names the tripped dimension: {display}"
+        );
+    }
+
+    /// Issue #900: the tool cap -- a server whose accumulated entries reach
+    /// the cap while STILL paging trips its own dimension, without paying
+    /// for the next request. The at-cap complete-catalog companion below
+    /// pins the boundary's other half.
+    #[test]
+    fn list_tools_tool_cap_trips_when_still_paging() {
+        let tools: Vec<Value> = (0..TOOLS_LIST_TOOL_CAP)
+            .map(|i| json!({"name": format!("tool_{i}")}))
+            .collect();
+        let server = wire(&[json!({
+            "jsonrpc": "2.0", "id": 1, "result": {
+                "tools": tools,
+                "nextCursor": "page-2"
+            }
+        })]);
+        let mut client = FramedClient::new(Cursor::new(server), Cursor::new(Vec::new()));
+        let err = client.list_tools("cap-fake").expect_err("tool cap");
+        let display = err.to_string();
+        match err {
+            ClientError::ToolCap {
+                server,
+                pages,
+                tools,
+            } => {
+                assert_eq!(server, "cap-fake");
+                assert_eq!(pages, 1, "trips on the page that reached the cap");
+                assert_eq!(tools, TOOLS_LIST_TOOL_CAP, "carries the true folded count");
+            }
+            other => panic!("expected ToolCap, got {other:?}"),
+        }
+        assert!(
+            display.contains("tool cap"),
+            "names the tripped dimension: {display}"
+        );
+    }
+
+    /// The overshoot half: the cap check is post-fold, so one page can push
+    /// the count past the cap -- the error must carry the real total, not
+    /// the constant (a constant-at-the-cap report would read 2048 here).
+    #[test]
+    fn list_tools_tool_cap_carries_the_overshot_count() {
+        let tools: Vec<Value> = (0..TOOLS_LIST_TOOL_CAP + 100)
+            .map(|i| json!({"name": format!("tool_{i}")}))
+            .collect();
+        let server = wire(&[json!({
+            "jsonrpc": "2.0", "id": 1, "result": {
+                "tools": tools,
+                "nextCursor": "page-2"
+            }
+        })]);
+        let mut client = FramedClient::new(Cursor::new(server), Cursor::new(Vec::new()));
+        let err = client.list_tools("cap-fake").expect_err("tool cap");
+        match err {
+            ClientError::ToolCap { tools, .. } => {
+                assert_eq!(tools, TOOLS_LIST_TOOL_CAP + 100, "the overshot total");
+            }
+            other => panic!("expected ToolCap, got {other:?}"),
+        }
+    }
+
+    /// The at-boundary half (the #666 at-budget pattern): exactly
+    /// `TOOLS_LIST_TOOL_CAP` entries in a complete page -- no continuation
+    /// -- is accepted, not tripped. The cap guards unbounded traversal; a
+    /// complete single response is already bounded by the frame cap.
+    #[test]
+    fn list_tools_accepts_a_cap_sized_complete_catalog() {
+        let tools: Vec<Value> = (0..TOOLS_LIST_TOOL_CAP)
+            .map(|i| json!({"name": format!("tool_{i}")}))
+            .collect();
+        let server = wire(&[json!({"jsonrpc": "2.0", "id": 1, "result": {"tools": tools}})]);
+        let mut client = FramedClient::new(Cursor::new(server), Cursor::new(Vec::new()));
+        let listed = client
+            .list_tools("cap-fake")
+            .expect("a complete at-cap catalog is accepted");
+        assert_eq!(listed.len(), TOOLS_LIST_TOOL_CAP);
+    }
+
+    /// The page-budget at-boundary half (the #666 at-budget pattern,
+    /// mirroring the tool-cap companion above): 32 pages each carrying one
+    /// tool, with page 32 cursorless -- completing exactly ON the last
+    /// allowed page returns the full catalog; only needing a 33rd page
+    /// trips the cap.
+    #[test]
+    fn list_tools_accepts_a_cap_sized_page_run_completing_on_the_last_page() {
+        let pages: Vec<Value> = (1..=TOOLS_LIST_PAGE_CAP)
+            .map(|i| {
+                let mut result = json!({"tools": [{"name": format!("tool_{i}")}]});
+                if i < TOOLS_LIST_PAGE_CAP {
+                    result["nextCursor"] = json!(format!("page-{i}"));
+                }
+                json!({"jsonrpc": "2.0", "id": i, "result": result})
+            })
+            .collect();
+        let server = wire(&pages);
+        let mut client = FramedClient::new(Cursor::new(server), Cursor::new(Vec::new()));
+        let listed = client
+            .list_tools("cap-fake")
+            .expect("completing on the page budget's last page is accepted");
+        assert_eq!(listed.len(), TOOLS_LIST_PAGE_CAP);
+    }
+
+    /// Issue #900 AC: an empty first page that continues to an empty second
+    /// page is a valid zero-tool catalog, not a failure.
+    #[test]
+    fn list_tools_empty_pages_are_a_valid_zero_tool_catalog() {
+        let server = wire(&[
+            json!({"jsonrpc": "2.0", "id": 1, "result": {"tools": [], "nextCursor": "p2"}}),
+            json!({"jsonrpc": "2.0", "id": 2, "result": {"tools": []}}),
+        ]);
+        let mut client = FramedClient::new(Cursor::new(server), Cursor::new(Vec::new()));
+        let listed = client.list_tools("fake-mcp").expect("zero-tool catalog ok");
+        assert!(listed.is_empty());
+    }
+
+    /// Issue #900: a server re-listing a tool name on a later page must not
+    /// shadow its first-seen entry -- cross-page dedup keeps the page-1
+    /// entry (`query_catalog`'s catalog-fold precedent, issue #543).
+    #[test]
+    fn list_tools_cross_page_duplicate_keeps_first_sight() {
+        let server = wire(&[
+            json!({"jsonrpc": "2.0", "id": 1, "result": {
+                "tools": [
+                    {"name": "dup", "description": "first sight"},
+                    {"name": "keep", "description": "page 1"}
+                ],
+                "nextCursor": "p2"
+            }}),
+            json!({"jsonrpc": "2.0", "id": 2, "result": {
+                "tools": [{"name": "dup", "description": "later shadow"}]
+            }}),
+        ]);
+        let mut client = FramedClient::new(Cursor::new(server), Cursor::new(Vec::new()));
+        let listed = client.list_tools("fake-mcp").expect("list ok");
+        assert_eq!(listed.len(), 2, "the re-listed name folds to one entry");
+        let dup = listed
+            .iter()
+            .find(|t| t["name"] == "dup")
+            .expect("the dup entry");
+        assert_eq!(dup["description"], "first sight");
+    }
+
+    /// Issue #900: `nextCursor` must be a string (or absent/null). A
+    /// non-string cursor is a protocol violation AND a silent-truncation
+    /// hazard -- treating it as absent would recreate the bug class this
+    /// traversal exists to close -- so it surfaces as a framing error.
+    #[test]
+    fn list_tools_non_string_next_cursor_is_a_framing_error() {
+        let server = wire(&[json!({
+            "jsonrpc": "2.0", "id": 1,
+            "result": {"tools": [], "nextCursor": 7}
+        })]);
+        let mut client = FramedClient::new(Cursor::new(server), Cursor::new(Vec::new()));
+        let err = client
+            .list_tools("fake-mcp")
+            .expect_err("non-string cursor");
+        assert!(
+            matches!(
+                err,
+                ClientError::Framing(ref e) if e.kind() == std::io::ErrorKind::InvalidData
+            ),
+            "non-string cursor -> Framing(InvalidData), got {err:?}"
+        );
+    }
+
+    /// Nameless entries cannot be dedup-keyed; they ride through verbatim
+    /// and are filtered downstream by `extract_tool_info` (issue #663 -- a
+    /// malformed entry never reaches the catalog, so the usable count stays
+    /// honest).
+    #[test]
+    fn list_tools_nameless_entries_ride_through_without_dedup() {
+        let server = wire(&[
+            json!({"jsonrpc": "2.0", "id": 1, "result": {
+                "tools": [{"description": "no name"}, {"description": "no name either"}],
+                "nextCursor": "p2"
+            }}),
+            json!({"jsonrpc": "2.0", "id": 2, "result": {"tools": []}}),
+        ]);
+        let mut client = FramedClient::new(Cursor::new(server), Cursor::new(Vec::new()));
+        let listed = client.list_tools("fake-mcp").expect("list ok");
+        assert_eq!(listed.len(), 2);
+    }
+
+    /// `call` relays the server's tools/call result (content + isError).
+    #[test]
+    fn call_returns_the_tools_call_result() {
+        let result = json!({
+            "content": [{"type": "text", "text": "42"}],
+            "isError": false
+        });
+        let server = wire(&[json!({"jsonrpc": "2.0", "id": 1, "result": result.clone()})]);
+        let mut client = FramedClient::new(Cursor::new(server), Cursor::new(Vec::new()));
+        let back = client
+            .call("search", &json!({"query": "duckdb"}))
+            .expect("call ok");
+        assert_eq!(back, result);
+        // The request carried the server-native name + arguments verbatim.
+        let mut r = Cursor::new(client.writer.get_ref().clone());
+        let req = framing::read_message(&mut r).unwrap().unwrap();
+        assert_eq!(req["method"], "tools/call");
+        assert_eq!(req["params"]["name"], "search");
+        assert_eq!(req["params"]["arguments"]["query"], "duckdb");
+    }
+
+    /// A JSON-RPC error response surfaces as `ServerError`; the gateway turns
+    /// it into a tool-level error the agent self-corrects from (ADR-0077).
+    #[test]
+    fn error_response_surfaces_as_server_error() {
+        let server = wire(&[json!({
+            "jsonrpc": "2.0", "id": 1,
+            "error": {"code": -32602, "message": "unknown tool"}
+        })]);
+        let mut client = FramedClient::new(Cursor::new(server), Cursor::new(Vec::new()));
+        let err = client
+            .call("bogus", &json!({}))
+            .expect_err("error response");
+        assert!(
+            matches!(err, ClientError::ServerError(_)),
+            "error response -> ServerError, got {err:?}"
+        );
+    }
+
+    /// A clean EOF (server closed) before the response surfaces as ServerClosed
+    /// so the gateway can distinguish "server died" from a transient fault.
+    #[test]
+    fn eof_before_response_surfaces_as_server_closed() {
+        let server = wire(&[]); // no frames at all
+        let mut client = FramedClient::new(Cursor::new(server), Cursor::new(Vec::new()));
+        let err = client.list_tools("fake-mcp").expect_err("eof");
+        assert!(
+            matches!(err, ClientError::ServerClosed),
+            "EOF -> ServerClosed, got {err:?}"
+        );
+    }
+
+    /// Issue #646: a pending request whose response frame exceeds the byte
+    /// cap surfaces as an explicit `Framing` error, not a silent hang: the
+    /// over-long frame never yields the matched id, and a gateway-served MCP
+    /// call is a frozen segment under ADR-0115 -- the no-progress clock never
+    /// fires mid-wait -- so the error return is the only exit. The error
+    /// display names the face (server transport) and the framing cause (the
+    /// cap).
+    #[test]
+    fn overlong_response_frame_fails_request_as_framing_error() {
+        // One over-long line: bigger than the cap, newline-terminated so the
+        // bounded reader settles on `Overlong` (not a final unterminated
+        // line).
+        let mut server = "x".repeat(LINE_MAX_BYTES + 1).into_bytes();
+        server.push(b'\n');
+        let mut client = FramedClient::new(Cursor::new(server), Cursor::new(Vec::new()));
+        let err = client
+            .list_tools("fake-mcp")
+            .expect_err("over-long response");
+        assert!(
+            matches!(
+                err,
+                ClientError::Framing(ref e) if e.kind() == std::io::ErrorKind::InvalidData
+            ),
+            "over-long response -> Framing(InvalidData), got {err:?}"
+        );
+        let display = err.to_string();
+        assert!(
+            display.contains("framing error"),
+            "the error names the transport face: {display}"
+        );
+        assert!(
+            display.contains(&LINE_MAX_BYTES.to_string()),
+            "the framing cause names the cap: {display}"
+        );
+    }
+
+    /// Server-emitted notifications (no id) between the request and its
+    /// response are skipped -- the client keeps reading until the matched id.
+    #[test]
+    fn notifications_between_request_and_response_are_skipped() {
+        let server = wire(&[
+            json!({"jsonrpc": "2.0", "method": "notifications/progress", "params": {"progress": 50}}),
+            json!({"jsonrpc": "2.0", "id": 1, "result": {"tools": []}}),
+        ]);
+        let mut client = FramedClient::new(Cursor::new(server), Cursor::new(Vec::new()));
+        let listed = client
+            .list_tools("fake-mcp")
+            .expect("list ok past notification");
+        assert!(listed.is_empty());
+    }
+
+    /// A response for a different id (an interleaved reply to a prior request)
+    /// is skipped; the client waits for its own id.
+    #[test]
+    fn response_with_other_id_is_skipped_until_match() {
+        let server = wire(&[
+            json!({"jsonrpc": "2.0", "id": 999, "result": {"tools": [{"name": "wrong"}]}}),
+            json!({"jsonrpc": "2.0", "id": 1, "result": {"tools": [{"name": "right"}]}}),
+        ]);
+        let mut client = FramedClient::new(Cursor::new(server), Cursor::new(Vec::new()));
+        let listed = client.list_tools("fake-mcp").expect("list ok");
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0]["name"], "right");
+    }
+
+    /// Request ids are monotonic across calls -- the second request gets id=2,
+    /// so its response must carry id=2 to match.
+    #[test]
+    fn ids_are_monotonic_across_requests() {
+        let server = wire(&[
+            json!({"jsonrpc": "2.0", "id": 1, "result": {"tools": []}}),
+            json!({"jsonrpc": "2.0", "id": 2, "result": {"content": [], "isError": false}}),
+        ]);
+        let mut client = FramedClient::new(Cursor::new(server), Cursor::new(Vec::new()));
+        client.list_tools("fake-mcp").expect("first call (id=1)");
+        client.call("x", &json!({})).expect("second call (id=2)");
+    }
+
+    // --- ConnectKill rendezvous (issue #889) ----------------------------------
+
+    /// The publish-after-expire ordering: `expire` may land before the
+    /// transport has published its kill handle (a spawn that outlasts the
+    /// budget), and the re-check inside `publish` is what kills the LATE
+    /// handle -- without it the worker parks on the handshake read after
+    /// the deadline with nobody left to kill it. The stop-flag variant
+    /// makes the kill observable without a process: a `publish` that
+    /// merely stores the handle leaves the flag unset and fails this pin.
+    #[test]
+    fn connect_kill_publish_after_expire_self_terminates_the_handle() {
+        let slot = ConnectKill::default();
+        slot.expire();
+        let stop = Arc::new(AtomicBool::new(false));
+        slot.publish(TransportKill::SseStop(Arc::clone(&stop)));
+        assert!(
+            stop.load(Ordering::SeqCst),
+            "publish after expire must kill the late handle, not just store it"
+        );
+    }
+
+    /// The forward ordering for contrast: publishing BEFORE expiry stores
+    /// the handle without firing it (the transport is healthy); the later
+    /// `expire` performs the kill itself.
+    #[test]
+    fn connect_kill_expire_after_publish_fires_the_stored_handle() {
+        let slot = ConnectKill::default();
+        let stop = Arc::new(AtomicBool::new(false));
+        slot.publish(TransportKill::SseStop(Arc::clone(&stop)));
+        assert!(
+            !stop.load(Ordering::SeqCst),
+            "a healthy connect's publish does not fire its own kill"
+        );
+        slot.expire();
+        assert!(
+            stop.load(Ordering::SeqCst),
+            "expire kills whatever is published"
+        );
+    }
+
+    // --- SSE event parsing (issue #389) --------------------------------------
+
+    /// `read_sse_event` parses one event terminated by a blank line. The
+    /// `event:` and `data:` fields are captured; comments and unknown fields
+    /// are skipped.
+    #[test]
+    fn read_sse_event_parses_event_and_data_fields() {
+        let wire = b"event: endpoint\ndata: http://localhost:3001/message\n\n";
+        let mut reader = Cursor::new(wire.to_vec());
+        let event = read_sse_event(&mut reader)
+            .expect("read")
+            .expect("an event");
+        assert_eq!(event.event.as_deref(), Some("endpoint"));
+        assert_eq!(event.data, "http://localhost:3001/message");
+    }
+
+    /// Multiple `data:` lines within one event are joined with `\n` (the SSE
+    /// spec contract). A single leading space after `data:` is stripped.
+    #[test]
+    fn read_sse_event_joins_multi_line_data() {
+        let wire = b"data: line1\ndata: line2\ndata:  extra space\n\n";
+        let mut reader = Cursor::new(wire.to_vec());
+        let event = read_sse_event(&mut reader)
+            .expect("read")
+            .expect("an event");
+        assert_eq!(event.data, "line1\nline2\n extra space");
+    }
+
+    /// An event with no `event:` field defaults to `None` (the SSE default
+    /// event type is `"message"`, which the reader loop treats as a message).
+    #[test]
+    fn read_sse_event_defaults_event_to_none_when_absent() {
+        let wire = b"data: {\"jsonrpc\":\"2.0\",\"id\":1}\n\n";
+        let mut reader = Cursor::new(wire.to_vec());
+        let event = read_sse_event(&mut reader)
+            .expect("read")
+            .expect("an event");
+        assert!(event.event.is_none());
+        assert_eq!(event.data, "{\"jsonrpc\":\"2.0\",\"id\":1}");
+    }
+
+    /// Comments (lines starting with `:`) and blank lines between events are
+    /// skipped so keepalive gaps do not produce spurious empty events.
+    #[test]
+    fn read_sse_event_skips_comments_and_keepalive_blanks() {
+        let wire = b": keepalive\n\nevent: message\ndata: hello\n\n";
+        let mut reader = Cursor::new(wire.to_vec());
+        let event = read_sse_event(&mut reader)
+            .expect("read")
+            .expect("an event");
+        assert_eq!(event.event.as_deref(), Some("message"));
+        assert_eq!(event.data, "hello");
+    }
+
+    /// A clean EOF (stream closed) at the start returns `Ok(None)` so the
+    /// caller can distinguish "stream ended" from "partial event".
+    #[test]
+    fn read_sse_event_returns_none_at_clean_eof() {
+        let mut reader = Cursor::new(Vec::new());
+        let event = read_sse_event(&mut reader).expect("read on empty");
+        assert!(event.is_none(), "EOF -> None, not error");
+    }
+
+    /// Two consecutive events: the first read returns event 1, the second
+    /// returns event 2, and the third returns `None` (EOF).
+    #[test]
+    fn read_sse_event_reads_two_consecutive_events_then_eof() {
+        let wire = b"event: endpoint\ndata: url1\n\nevent: message\ndata: msg1\n\n";
+        let mut reader = Cursor::new(wire.to_vec());
+        let e1 = read_sse_event(&mut reader)
+            .expect("read 1")
+            .expect("event 1");
+        assert_eq!(e1.event.as_deref(), Some("endpoint"));
+        assert_eq!(e1.data, "url1");
+        let e2 = read_sse_event(&mut reader)
+            .expect("read 2")
+            .expect("event 2");
+        assert_eq!(e2.event.as_deref(), Some("message"));
+        assert_eq!(e2.data, "msg1");
+        let e3 = read_sse_event(&mut reader).expect("read 3");
+        assert!(e3.is_none(), "third read -> EOF");
+    }
+
+    /// Issue #647: a line longer than the cap voids the WHOLE in-progress
+    /// event -- not just the offending line -- and the reader resyncs at the
+    /// next blank-line boundary. Dropping only the line would stitch the
+    /// surviving fields into a partial franken-event the consumer cannot
+    /// parse; the next full event after the boundary parses normally.
+    /// Issue #665: the survivor lines include an `event: message` and a
+    /// comment -- the skip guard sits BEFORE field parsing, so a regression
+    /// moving it below the `event:` arm still compiles and leaks the type
+    /// into the next event, where the stitched data becomes malformed JSON
+    /// and kills the whole transport (issue #647's escalation, one notch
+    /// worse). The survivor's type is `message` on purpose: only a leaked
+    /// message-typed event is consumed, so its stitched data actually
+    /// reaches the parser and fails.
+    #[test]
+    fn read_sse_event_overlong_line_voids_event_and_resyncs_at_boundary() {
+        // First `data:` line is 30 bytes (over the 16-byte cap); the short
+        // survivors (`data: tail`, `event: message`, `: comment`) are skipped
+        // during the resync, not stitched or leaked into the next event.
+        let wire = format!(
+            "data: {}\ndata: tail\nevent: message\n: comment\n\ndata: {{\"ok\":1}}\n\n",
+            "a".repeat(24)
+        );
+        let mut reader = Cursor::new(wire.into_bytes());
+        let event = read_sse_event_bounded(&mut reader, 16)
+            .expect("read")
+            .expect("the event after the voided one");
+        assert!(
+            event.event.is_none(),
+            "the `event:` survivor must not leak into the next event"
+        );
+        assert_eq!(event.data, "{\"ok\":1}");
+        // The stream continues past the drop: the next read is clean EOF.
+        let next = read_sse_event_bounded(&mut reader, 16).expect("read 2");
+        assert!(next.is_none(), "stream continues to clean EOF");
+    }
+
+    /// Issue #665: a second over-long line while STILL resyncing (two
+    /// oversized lines in the same voided event -- the shape of an unbounded
+    /// server) re-enters the void path idempotently: a second breach while
+    /// `Voided` re-assigns the variant, dropping what was already being
+    /// dropped. A regression that switched back to `Building` early (or
+    /// returned the half-dropped event) would stitch the survivors into the
+    /// next event.
+    #[test]
+    fn read_sse_event_second_overlong_during_resync_stays_resyncing() {
+        // Two 30-byte lines (over the 16-byte cap) inside one voided event,
+        // each followed by a short survivor of a different field kind (11
+        // and 10 bytes, well under the cap); the healthy event after the
+        // boundary parses normally.
+        let wire = format!(
+            "data: {}\nevent: sv-a\ndata: {}\ndata: sv-b\n\ndata: ok\n\n",
+            "a".repeat(24),
+            "b".repeat(24)
+        );
+        let mut reader = Cursor::new(wire.into_bytes());
+        let event = read_sse_event_bounded(&mut reader, 16)
+            .expect("read")
+            .expect("the healthy event after the double-voided one");
+        assert!(
+            event.event.is_none(),
+            "the `event:` survivor must not leak after the re-void"
+        );
+        assert_eq!(
+            event.data, "ok",
+            "the `data:` survivors must not be stitched into the healthy event"
+        );
+    }
+
+    /// The voided event's already-accumulated fields are cleared too: an
+    /// `event:` line seen before the over-long line must not leak into the
+    /// next event's type.
+    #[test]
+    fn read_sse_event_overlong_line_clears_accumulated_fields() {
+        let wire = format!("event: ping\ndata: {}\n\ndata: x\n\n", "a".repeat(24));
+        let mut reader = Cursor::new(wire.into_bytes());
+        let event = read_sse_event_bounded(&mut reader, 16)
+            .expect("read")
+            .expect("event after the voided one");
+        assert!(
+            event.event.is_none(),
+            "no field leaks from the voided event"
+        );
+        assert_eq!(event.data, "x");
+    }
+
+    /// Issue #647: the per-event `data:` accumulation budget (same source as
+    /// the line cap) voids an event whose parts sum past it even when every
+    /// individual line fits the line cap; the next event arrives normally.
+    #[test]
+    fn read_sse_event_data_budget_voids_oversized_event() {
+        // Each line is 13 bytes (under the 16-byte line cap) but the three
+        // parts, join bytes included, sum to 24 budget bytes (over the
+        // budget; the breach lands on the third part).
+        let wire = "data: 1234567\ndata: 1234567\ndata: 1234567\n\ndata: ok\n\n";
+        let mut reader = Cursor::new(wire.as_bytes().to_vec());
+        let event = read_sse_event_bounded(&mut reader, 16)
+            .expect("read")
+            .expect("the event after the voided one");
+        assert_eq!(event.data, "ok");
+    }
+
+    /// Issue #666: the budget's at-boundary half -- an event whose `data:`
+    /// parts cost EXACTLY the budget is accepted, not voided (the breach
+    /// comparison is strict). Every other budget fixture breaches well past
+    /// the cap, so a regression of `>` to `>=` leaves them green and only
+    /// this pin goes red.
+    #[test]
+    fn read_sse_event_accepts_data_at_exactly_the_budget() {
+        // Two 13-byte lines (7-byte payloads + the 6-byte "data: " prefix),
+        // under the 16-byte line cap; the parts' budget cost is
+        // (7+1) + (7+1) = 16 = max exactly -- at the budget, not over it.
+        let wire = "data: 1234567\ndata: 1234567\n\n";
+        let mut reader = Cursor::new(wire.as_bytes().to_vec());
+        let event = read_sse_event_bounded(&mut reader, 16)
+            .expect("read")
+            .expect("the at-budget event is accepted, not voided");
+        assert_eq!(event.data, "1234567\n1234567");
+    }
+
+    /// Zero-length `data:` parts each cost one budget byte -- the `+1` in
+    /// `push_data`'s accounting, which counts the "\n" the join inserts
+    /// between parts. Dropping it would let a server spamming bare `data:`
+    /// lines grow `data_parts` (and the joined string) without ever touching
+    /// the budget -- the unbounded-memory shape the caps exist for; this
+    /// fixture is the one that goes red if the `+1` is dropped.
+    #[test]
+    fn read_sse_event_voids_zero_length_data_spam() {
+        // Eight bare `data:` lines (5 bytes each, under the 6-byte line cap)
+        // under a 6-byte budget: the parts cost (0+1) each, so the seventh
+        // breaches (7 > 6) and the event is voided -- None at the boundary,
+        // and None again at the EOF right after it.
+        let wire = "data:\ndata:\ndata:\ndata:\ndata:\ndata:\ndata:\ndata:\n\n";
+        let mut reader = Cursor::new(wire.as_bytes().to_vec());
+        let event = read_sse_event_bounded(&mut reader, 6).expect("read");
+        assert!(
+            event.is_none(),
+            "the zero-length-parts event is voided, not joined into newline spam"
+        );
+    }
+
+    /// EOF while still resyncing (the broken event never reached its blank
+    /// boundary) drops the voided event: nothing half-parsed is returned.
+    #[test]
+    fn read_sse_event_eof_while_resyncing_returns_none() {
+        let wire = format!("data: {}\ndata: tail", "a".repeat(24));
+        let mut reader = Cursor::new(wire.into_bytes());
+        let event = read_sse_event_bounded(&mut reader, 16).expect("read");
+        assert!(
+            event.is_none(),
+            "EOF mid-resync -> None, not a partial event"
+        );
+    }
+
+    /// Issue #665: the EOF arm's non-resync half -- fields already
+    /// accumulated, no terminating blank line, then EOF -- returns the
+    /// pending event rather than discarding it. A regression to an
+    /// unconditional `None` would silently drop the stream's last
+    /// unterminated event (every other fixture ends in a blank line, so this
+    /// half had zero coverage).
+    #[test]
+    fn read_sse_event_returns_pending_event_at_eof_without_blank_line() {
+        let wire = b"data: last";
+        let mut reader = Cursor::new(wire.to_vec());
+        let event = read_sse_event_bounded(&mut reader, 16)
+            .expect("read")
+            .expect("the unterminated final event is returned, not dropped");
+        assert_eq!(event.data, "last");
+    }
+
+    /// Issue #647: a malformed `message` event propagates to the waiting
+    /// consumer as a `Framing(InvalidData)` failure (the streamable-HTTP
+    /// path's attribution) instead of warn-and-continue, which left the
+    /// pending request hanging until the turn watchdog cancelled it. After
+    /// propagating, the reader exits (drops the sender), so a later `recv()`
+    /// reports the channel closed. Issue #665: the loop runs on a real
+    /// thread and the test asserts its join result -- a reader that PANICKED
+    /// on the malformed event would also drop the sender and pass the
+    /// closed-channel assertion, so only the join distinguishes the clean
+    /// `break` exit. The wire carries one more healthy event AFTER the
+    /// malformed one: the error forward is a stop, so a deleted `break`
+    /// would forward that event and fail the closed-channel assertion --
+    /// the exit cannot ride on the EOF that follows.
+    #[test]
+    fn sse_reader_loop_propagates_malformed_message_and_exits() {
+        let (tx, rx) = mpsc::sync_channel(SSE_CHANNEL_BOUND);
+        let wire =
+            b"data: {\"id\":1,\"ok\":true}\n\ndata: not-json\n\ndata: {\"id\":2,\"ok\":true}\n\n";
+        // Finite input: the loop runs to its exit on its own thread (no stop
+        // needed); the join result pins the exit as clean, not a panic.
+        let reader_thread = thread::spawn(move || {
+            sse_reader_loop(
+                Cursor::new(wire.to_vec()),
+                tx,
+                Arc::new(AtomicBool::new(false)),
+            );
+        });
+        let first = rx.recv().expect("healthy message forwarded");
+        assert_eq!(first.expect("Ok"), json!({"id": 1, "ok": true}));
+        let second = rx.recv().expect("malformed event forwarded as Err");
+        match second {
+            Err(ClientError::Framing(ref e)) => assert!(
+                e.kind() == std::io::ErrorKind::InvalidData,
+                "malformed -> Framing(InvalidData), got {e:?}"
+            ),
+            other => panic!("expected Err(Framing), got {other:?}"),
+        }
+        assert!(rx.recv().is_err(), "reader exits after propagating");
+        reader_thread
+            .join()
+            .expect("reader exits via break after propagating, not a panic");
+    }
+
+    /// Issue #647, consumer side: a malformed `message` event fails the
+    /// WAITING request in `SseClient::request` -- the full chain (reader
+    /// loop → channel → the `Ok(Err(err))` arm), not just the send side
+    /// pinned above. The POST endpoint is a one-shot `TcpListener` answering
+    /// `202 Accepted` (the transport contract: the response arrives on the
+    /// SSE stream, not in the POST's own body); the first forwarded message
+    /// carries a foreign id, so the request is still waiting when the reader
+    /// propagates the framing failure. A regression of the consumption arm
+    /// to log-and-continue would leave this test hanging exactly like
+    /// production hung pre-#647.
+    #[test]
+    fn sse_client_request_fails_fast_on_propagated_malformed_event() {
+        use std::io::Read;
+        use std::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind ephemeral");
+        let port = listener.local_addr().expect("local addr").port();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept POST");
+            // Read timeout: a stuck client fails this thread instead of
+            // hanging the test (the ACP-chain e2e lesson).
+            stream
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .expect("set read timeout");
+            let mut buf = Vec::new();
+            let mut chunk = [0u8; 1024];
+            // Drain the full request (headers + Content-Length body) before
+            // answering: closing with unread receive-buffer bytes makes
+            // Windows send an RST that fails the client's status-line read
+            // (os error 10053, a flake).
+            loop {
+                match stream.read(&mut chunk) {
+                    Ok(0) | Err(_) => break, // Client closed or stalled.
+                    Ok(n) => {
+                        buf.extend_from_slice(&chunk[..n]);
+                        let text = String::from_utf8_lossy(&buf);
+                        if let Some(headers_end) = text.find("\r\n\r\n") {
+                            let content_length: usize = text[..headers_end]
+                                .lines()
+                                .filter_map(|l| l.split_once(':'))
+                                .find(|(k, _)| k.trim().eq_ignore_ascii_case("content-length"))
+                                .and_then(|(_, v)| v.trim().parse().ok())
+                                .unwrap_or(0);
+                            if buf.len() >= headers_end + 4 + content_length {
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+            stream
+                .write_all(b"HTTP/1.1 202 Accepted\r\nContent-Length: 0\r\n\r\n")
+                .expect("write 202");
+        });
+
+        // The healthy message carries a foreign id (skipped by the waiting
+        // request); the malformed event then reaches it as Err.
+        let wire = b"data: {\"id\":99,\"ok\":true}\n\ndata: not-json\n\n";
+        let (tx, rx) = mpsc::sync_channel(SSE_CHANNEL_BOUND);
+        let stop = Arc::new(AtomicBool::new(false));
+        let stop_for_reader = stop.clone();
+        let reader_thread = thread::spawn(move || {
+            sse_reader_loop(Cursor::new(wire.to_vec()), tx, stop_for_reader);
+        });
+
+        let mut client = sse_client_with_parts(
+            rx,
+            format!("http://127.0.0.1:{port}/message"),
+            stop,
+            Some(reader_thread),
+        );
+
+        let err = client
+            .request(json!({"jsonrpc": "2.0", "id": 1, "method": "ping"}))
+            .expect_err("the malformed event fails the waiting request");
+        match err {
+            ClientError::Framing(ref e) => {
+                assert_eq!(
+                    e.kind(),
+                    std::io::ErrorKind::InvalidData,
+                    "malformed -> Framing(InvalidData), got {e:?}"
+                );
+                assert!(
+                    e.to_string().contains("malformed JSON in SSE event"),
+                    "the propagated wording, got {e}"
+                );
+            }
+            other => panic!("expected Err(Framing), got {other:?}"),
+        }
+        server.join().expect("server thread");
+    }
+
+    /// Build an `SseClient` around hand-made reader plumbing (in-module
+    /// construction, no HTTP handshake): shared by the tests that drive the
+    /// channel / reader-thread lifecycle directly.
+    fn sse_client_with_parts(
+        response_rx: mpsc::Receiver<Result<Value, ClientError>>,
+        post_url: String,
+        stop: Arc<AtomicBool>,
+        reader_thread: Option<thread::JoinHandle<()>>,
+    ) -> SseClient {
+        SseClient {
+            response_rx,
+            post_url,
+            headers: BTreeMap::new(),
+            agent: ureq::AgentBuilder::new()
+                .timeout_read(SSE_READ_TIMEOUT)
+                .build(),
+            stop,
+            reader_thread,
+            next_id: 1,
+        }
+    }
+
+    /// Shared scaffolding for the two drop pins (issues #667 / #665): fill
+    /// the channel to its bound, spawn the reader thread around a
+    /// caller-built reader, wait until the reader has entered its loop, then
+    /// assert that dropping the client (on its own thread) returns within
+    /// the timeout -- a `Drop` that hangs on the join fails the test
+    /// instead of hanging it. The reader constructor is the pins' only
+    /// substantive difference; it receives the read counter its struct
+    /// increments, keeping the entry wait deterministic (issue #666).
+    fn assert_drop_returns_when_reader_blocks<R>(
+        make_reader: impl FnOnce(Arc<std::sync::atomic::AtomicUsize>) -> R + Send + 'static,
+    ) where
+        R: BufRead + Send + 'static,
+    {
+        let (tx, rx) = mpsc::sync_channel(SSE_CHANNEL_BOUND);
+        // Fill the channel to its bound first: with no consumer, the
+        // reader's forward blocks (deterministic hang shape).
+        for _ in 0..SSE_CHANNEL_BOUND {
+            tx.send(Ok(json!({"id": 1, "ok": true}))).expect("fill");
+        }
+        let stop = Arc::new(AtomicBool::new(false));
+        let stop_for_reader = stop.clone();
+        let reads = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let reads_for_reader = reads.clone();
+        let reader_thread = thread::spawn(move || {
+            sse_reader_loop(make_reader(reads_for_reader), tx, stop_for_reader);
+        });
+        // Wait until the reader has actually entered its loop: one inner
+        // read proves the stop check passed while stop was still false, and
+        // from there the reader has no exit path before the blocked send.
+        let mut started = false;
+        for _ in 0..500 {
+            if reads.load(Ordering::SeqCst) > 0 {
+                started = true;
+                break;
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert!(started, "reader never reached its first read");
+
+        let client = sse_client_with_parts(
+            rx,
+            "http://127.0.0.1:1/message".to_string(),
+            stop,
+            Some(reader_thread),
+        );
+
+        let (done_tx, done_rx) = mpsc::channel();
+        thread::spawn(move || {
+            drop(client);
+            let _ = done_tx.send(());
+        });
+        done_rx
+            .recv_timeout(Duration::from_secs(10))
+            .expect("Drop returned within the timeout (no join hang)");
+    }
+
+    /// Issue #667: `Drop` joins the reader thread, but a reader blocked in
+    /// `send` on a full channel never re-checks the stop flag, and the
+    /// receiver's destruction happens only after `drop()` returns -- after
+    /// the join that never returns. The channel is filled to its bound
+    /// BEFORE the reader starts, so the reader's first forward blocks
+    /// deterministically; a pre-fix `Drop` hangs on the join and the 10 s
+    /// timeout fails the test instead of hanging it. The post-fix order
+    /// (release the receiver, then join) fails the blocked `send` with
+    /// `SendError` and the reader exits via its channel-closed break.
+    #[test]
+    fn sse_client_drop_returns_when_reader_blocks_on_full_channel() {
+        // An endless stream of one valid message event per read: the
+        // flooding-server shape that keeps the reader trying to forward.
+        // The read count lets the test WAIT for the reader to enter its
+        // loop instead of sleeping a fixed interval (a sleep can pass
+        // vacuously if the thread has not been scheduled yet).
+        struct FloodReader {
+            reads: Arc<std::sync::atomic::AtomicUsize>,
+        }
+        impl std::io::Read for FloodReader {
+            fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+                self.reads.fetch_add(1, Ordering::SeqCst);
+                let event = b"data: {\"id\":1,\"ok\":true}\n\n";
+                let n = event.len().min(buf.len());
+                buf[..n].copy_from_slice(&event[..n]);
+                Ok(n)
+            }
+        }
+
+        assert_drop_returns_when_reader_blocks(|reads| BufReader::new(FloodReader { reads }));
+    }
+
+    /// Issue #665: the reader's SECOND blocking send point -- the malformed
+    /// event's error forward (`tx.send(Err(...))` in the reader loop) -- must
+    /// also be released by `Drop`'s receiver release (the #667 fix). Same
+    /// shape as the Ok-path pin above: the channel is filled to its bound
+    /// BEFORE the reader starts, so the error forward blocks deterministically
+    /// (no consumer ever drains); the counted first read proves the reader
+    /// entered its loop while stop was still false -- from there it has no
+    /// exit path before the blocked send.
+    #[test]
+    fn sse_client_drop_returns_when_malformed_error_forward_blocks_on_full_channel() {
+        // One malformed message event on the first read, EOF after: the
+        // reader parses it, serde fails, and the error forward blocks.
+        struct MalformedReader {
+            reads: Arc<std::sync::atomic::AtomicUsize>,
+            first: bool,
+        }
+        impl std::io::Read for MalformedReader {
+            fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+                self.reads.fetch_add(1, Ordering::SeqCst);
+                if self.first {
+                    self.first = false;
+                    let event = b"data: not-json\n\n";
+                    let n = event.len().min(buf.len());
+                    buf[..n].copy_from_slice(&event[..n]);
+                    Ok(n)
+                } else {
+                    Ok(0)
+                }
+            }
+        }
+
+        assert_drop_returns_when_reader_blocks(|reads| {
+            BufReader::new(MalformedReader { reads, first: true })
+        });
+    }
+
+    /// `check_rpc_response` returns the `result` field on success and maps an
+    /// `error` field to `ClientError::ServerError`.
+    #[test]
+    fn check_rpc_response_returns_result_on_success() {
+        let msg = json!({"jsonrpc": "2.0", "id": 1, "result": {"tools": []}});
+        let result = check_rpc_response(&msg).expect("ok");
+        assert_eq!(result, json!({"tools": []}));
+    }
+
+    #[test]
+    fn check_rpc_response_maps_error_field_to_server_error() {
+        let msg = json!({"jsonrpc": "2.0", "id": 1, "error": {"code": -1, "message": "bad"}});
+        let err = check_rpc_response(&msg).expect_err("error field");
+        assert!(
+            matches!(err, ClientError::ServerError(_)),
+            "error -> ServerError, got {err:?}"
+        );
+    }
+
+    /// A response with neither `result` nor `error` (JSON-RPC protocol
+    /// violation) is rejected as a framing error, not silently mapped to Null.
+    #[test]
+    fn check_rpc_response_rejects_envelope_without_result_or_error() {
+        let msg = json!({"jsonrpc": "2.0", "id": 1});
+        let err = check_rpc_response(&msg).expect_err("malformed response");
+        assert!(
+            matches!(err, ClientError::Framing(_)),
+            "neither result nor error -> Framing, got {err:?}"
+        );
+    }
+
+    // --- same-origin + header merge (issue #901) -------------------------------
+
+    /// Same origin (scheme + host + port) passes the guard.
+    #[test]
+    fn enforce_same_origin_accepts_matching_origin() {
+        enforce_same_origin("http://localhost:3001/sse", "http://localhost:3001/message")
+            .expect("same origin accepted");
+        // The default-port elision shape: an https url with an explicit 443
+        // is origin-identical to the bare host form.
+        enforce_same_origin("https://example.test/sse", "https://example.test:443/m")
+            .expect("explicit default port is the same origin");
+    }
+
+    /// A different host is refused and the error names BOTH origins.
+    #[test]
+    fn enforce_same_origin_refuses_a_different_host_naming_both() {
+        let err = enforce_same_origin(
+            "http://localhost:3001/sse",
+            "http://attacker.test:8080/message",
+        )
+        .expect_err("cross-origin refused");
+        let msg = err.to_string();
+        assert!(msg.contains("cross-origin"), "names the refusal: {msg}");
+        assert!(
+            msg.contains("http://localhost:3001") && msg.contains("http://attacker.test:8080"),
+            "names both origins: {msg}"
+        );
+    }
+
+    /// A different PORT on the same host is a different origin.
+    #[test]
+    fn enforce_same_origin_refuses_a_different_port() {
+        let err = enforce_same_origin("http://localhost:3001/sse", "http://localhost:8080/message")
+            .expect_err("port difference refused");
+        assert!(
+            err.to_string().contains("cross-origin"),
+            "port is part of the origin"
+        );
+    }
+
+    /// A different SCHEME (https vs http) on the same host+port is a
+    /// different origin.
+    #[test]
+    fn enforce_same_origin_refuses_a_scheme_change() {
+        let err = enforce_same_origin("http://localhost:3001/sse", "https://localhost:3001/m")
+            .expect_err("scheme difference refused");
+        assert!(
+            err.to_string().contains("cross-origin"),
+            "scheme is part of the origin"
+        );
+    }
+
+    /// The named derivation every SSE caller shares (issue #904): an empty
+    /// configured map with a NON-empty declared keychain list still counts
+    /// as authenticated -- a declared secret whose keychain value is missing
+    /// would ride the POST the moment the value appears, so the guard must
+    /// not wait for the merged map to fill.
+    #[test]
+    fn sse_auth_configured_counts_declared_keys_without_configured_headers() {
+        let declared = vec!["X-Test-Token".to_string()];
+        assert!(
+            sse_auth_configured(&BTreeMap::new(), &declared),
+            "declared keychain header keys count even with empty configured headers"
+        );
+        assert!(
+            !sse_auth_configured(&BTreeMap::new(), &[]),
+            "no configured headers + no declarations -> not authenticated"
+        );
+        let mut configured = BTreeMap::new();
+        configured.insert("X-Plain".to_string(), "v".to_string());
+        assert!(
+            sse_auth_configured(&configured, &[]),
+            "a configured non-secret header still counts (any header arms the guard)"
+        );
+    }
+
+    /// The dispatch merge: configured non-secret headers + keychain-resolved
+    /// secrets compose into one map (secret values win on a name collision,
+    /// which the read-time scan makes impossible in practice -- the extend is
+    /// just the order-insensitive composition).
+    #[test]
+    fn merged_headers_combines_configured_and_secret_values() {
+        let mut configured = BTreeMap::new();
+        configured.insert("X-Client".to_string(), "toptopduck".to_string());
+        let secrets = vec![
+            ("X-Test-Token".to_string(), "secret-value".to_string()),
+            ("X-Other".to_string(), "other".to_string()),
+        ];
+        let merged = merged_headers(&configured, &secrets);
+        assert_eq!(merged.len(), 3);
+        assert_eq!(merged["X-Client"], "toptopduck");
+        assert_eq!(merged["X-Test-Token"], "secret-value");
+        assert_eq!(merged["X-Other"], "other");
+    }
+
+    // --- resolve_post_url SSRF guard (issue #389) -----------------------------
+
+    /// A relative path like `/message` resolves against the SSE base URL.
+    #[test]
+    fn resolve_post_url_resolves_relative_path() {
+        let url = resolve_post_url("http://localhost:3001/sse", "/message").expect("relative");
+        assert_eq!(url, "http://localhost:3001/message");
+    }
+
+    /// An absolute http URL to a different host is accepted (the MCP SSE
+    /// transport contract allows the server to advertise any http(s) endpoint).
+    #[test]
+    fn resolve_post_url_accepts_absolute_http_url() {
+        let url = resolve_post_url("http://localhost:3001/sse", "http://other.host:8080/mcp")
+            .expect("absolute");
+        assert_eq!(url, "http://other.host:8080/mcp");
+    }
+
+    /// A `file://` scheme in the endpoint event is rejected (SSRF guard).
+    #[test]
+    fn resolve_post_url_rejects_file_scheme() {
+        let err = resolve_post_url("http://localhost:3001/sse", "file:///etc/passwd")
+            .expect_err("file:// rejected");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("must be http or https"),
+            "file:// rejected with scheme error, got: {msg}"
+        );
+    }
+
+    /// A `gopher://` scheme is rejected (SSRF guard — protocol smuggling).
+    #[test]
+    fn resolve_post_url_rejects_gopher_scheme() {
+        let err = resolve_post_url("http://localhost:3001/sse", "gopher://attacker/x")
+            .expect_err("gopher:// rejected");
+        assert!(
+            err.to_string().contains("must be http or https"),
+            "gopher:// rejected with scheme error"
+        );
+    }
+
+    /// A `data:` scheme is rejected (SSRF guard).
+    #[test]
+    fn resolve_post_url_rejects_data_scheme() {
+        let err = resolve_post_url("http://localhost:3001/sse", "data:text/plain,evil")
+            .expect_err("data: rejected");
+        assert!(
+            err.to_string().contains("must be http or https"),
+            "data: rejected with scheme error"
+        );
+    }
+}

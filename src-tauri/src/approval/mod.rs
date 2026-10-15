@@ -1,0 +1,1983 @@
+//! Tiered tool-approval gateway (ADR-0080, issue #294).
+//!
+//! The gateway is the single enforcement point for tool-call trust
+//! (ADR-0076). Every model-emitted tool call passes through [`classify`]
+//! before it reaches [`crate::tools::dispatch`]:
+//!
+//! 1. **Built-in read-only + materialize pass through** (ADR-0080 Decision 1):
+//!    explore / describe / sample are in-DB with no egress; materialize is
+//!    in-DB only. Zero approval friction. The gated builtin meta-tools
+//!    (ADR-0122 Decision 3) are the exception: `create_skill`'s mint
+//!    persists across sessions and its body is a future prompt-injection
+//!    source, so it gates like an external write.
+//! 2. **External MCP tools default to per-call confirmation** (ADR-0080
+//!    Decision 3): the gateway suspends that turn's call and waits for the
+//!    user's answer via the in-flow approval card (ADR-0083). The wait blocks
+//!    ONLY that turn -- every session owns its own [`ApprovalState`] on its
+//!    [`crate::session_store::SessionHandle`], so a pending approval in one
+//!    session never blocks another (ADR-0080 "仅阻断该轮次").
+//! 3. **"Always allow"** escalates a single `server::tool` to session-level
+//!    trust (ADR-0080 Decision 3) -- same tool, different params share trust;
+//!    param-pattern granularity is deliberately out of scope (v1).
+//! 4. **Authorization mode** is a session-level posture (ADR-0080 Decision 4):
+//!    the default [`AuthMode::PerCall`] confirms each external call;
+//!    [`AuthMode::NoConfirmation`] auto-passes every external call. Both the
+//!    mode and the trust set are session-level, reset to default on resume,
+//!    and never enter the recipe / app-config (ADR-0080 -- trust state is a
+//!    machine/session-level safety state, not a portable workspace
+//!    description).
+//!
+//! State lives on the [`SessionHandle`], NOT inside the `Session` mutex: a
+//! turn runs under `spawn_blocking` while holding the session lock, so the
+//! `respond_tool_approval` command (which arrives on a different IPC call)
+//! must reach the approval state without acquiring the lock the waiting turn
+//! holds. The handle is the natural boundary -- it already carries the cancel
+//! token / closing flag / resume flag as interior-mutable per-session state.
+//!
+//! ACP `session/request_permission` (ADR-0081) is decided by a single
+//! [`classify`] call against an `auth_mode()` + `trust_list()` snapshot: an
+//! option the policy permits is selected, everything else is a reject the
+//! agent self-corrects from (ADR-0077). No interactive suspension rides ACP
+//! -- the card events the engine emits are best-effort notices of a raised +
+//! auto-decided permission; interactive confirmation is the app's own
+//! in-flow card.
+
+use std::collections::HashSet;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Condvar, Mutex};
+use std::time::Duration;
+
+use serde::{Deserialize, Serialize};
+
+use crate::cancel::CancelToken;
+use crate::SessionId;
+
+pub mod policy;
+
+pub use policy::{classify, Classification};
+
+// ---------------------------------------------------------------------------
+// Identifiers + posture
+// ---------------------------------------------------------------------------
+
+/// The trust granularity (ADR-0080): `server::tool`. Built-in tools live
+/// under a reserved `builtin` server so they are trivially distinguishable
+/// from external MCP tools (whose server is the user-configured MCP server
+/// name, ADR-0076).
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct ToolKey {
+    pub server: String,
+    pub tool: String,
+}
+
+impl ToolKey {
+    /// Reserved server name for the four built-in DuckDB tools
+    /// (ADR-0076/0080). Tools under this server always pass the gate.
+    pub const BUILTIN_SERVER: &'static str = "builtin";
+
+    /// Fallback server name for a model-spoofed `mcp__builtin__*` tool name
+    /// (issue #312). A malicious model can emit a reserved server name to try
+    /// to bypass approval; the agent loop routes such a name here so
+    /// [`classify`] returns [`Classification::NeedsApproval`] (the card
+    /// surfaces) and subsequent routing fails gracefully (no real server
+    /// matches this sentinel). This must never equal [`Self::BUILTIN_SERVER`].
+    pub const RESERVED_SPOOF_SERVER: &'static str = "_builtin_spoof_";
+
+    /// Reserved server name for registered CLI tools (ADR-0108 Decision 7,
+    /// issue #671). The trust key is the registration name (the `tool` half),
+    /// so "always allow" is per registered tool. Deliberately UPPERCASE:
+    /// MCP server slugs are produced by `slugify`, whose alphabet is
+    /// lowercase-only -- no MCP server can ever produce this exact name, so
+    /// an MCP trust entry can never collide with a CLI tool's.
+    pub const CLI_SERVER: &'static str = "CLI";
+
+    /// A built-in tool key (explore / materialize / describe / sample).
+    pub fn builtin(tool: impl Into<String>) -> Self {
+        Self {
+            server: Self::BUILTIN_SERVER.to_string(),
+            tool: tool.into(),
+        }
+    }
+
+    /// Fallible external-tool constructor for production call sites (issue
+    /// #312). Returns [`Err(ReservedServerName)`] when `server` is exactly
+    /// [`Self::BUILTIN_SERVER`] — the reserved name that would make
+    /// [`Self::is_builtin`] return `true` and short-circuit [`classify`] to
+    /// [`Classification::Allow`], silently bypassing the approval gate. The
+    /// check is a precise `==` match; no trim / lowercase normalization
+    /// (the constructor guards a reserved name, not input hygiene).
+    ///
+    /// Production callers should branch on the `Err`: the agent loop falls
+    /// back to [`Self::RESERVED_SPOOF_SERVER`] (untrusted model input — never
+    /// panic); the ACP engine uses `expect` (adapter ids are controlled
+    /// literals).
+    pub fn try_external(
+        server: impl Into<String>,
+        tool: impl Into<String>,
+    ) -> Result<Self, ReservedServerName> {
+        let server = server.into();
+        if server == Self::BUILTIN_SERVER {
+            return Err(ReservedServerName(server));
+        }
+        Ok(Self {
+            server,
+            tool: tool.into(),
+        })
+    }
+
+    /// An external MCP tool key — unchecked convenience constructor (issue
+    /// #312). Panics in debug if `server` is the reserved
+    /// [`Self::BUILTIN_SERVER`]. For untrusted / dynamic server names,
+    /// production code must use [`Self::try_external`] instead. The only
+    /// non-test production use is with a compile-time constant guaranteed to
+    /// differ from `BUILTIN_SERVER` (e.g. [`Self::RESERVED_SPOOF_SERVER`] in
+    /// the dispatch-core spoof fallback). `server` is the user-configured MCP
+    /// server name (ADR-0076); `tool` is the tool name that server advertises.
+    pub fn external(server: impl Into<String>, tool: impl Into<String>) -> Self {
+        let server = server.into();
+        debug_assert!(
+            server != Self::BUILTIN_SERVER,
+            "ToolKey::external called with reserved builtin server name; \
+             use try_external in production code"
+        );
+        Self {
+            server,
+            tool: tool.into(),
+        }
+    }
+
+    /// Whether this key names a built-in tool (always passes the gate,
+    /// ADR-0080 Decision 1).
+    pub fn is_builtin(&self) -> bool {
+        self.server == Self::BUILTIN_SERVER
+    }
+}
+
+/// Error returned by [`ToolKey::try_external`] when the server name is the
+/// reserved [`ToolKey::BUILTIN_SERVER`] (issue #312). Carries the offending
+/// name so `Display` / logs are readable.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("server name `{0}` is reserved for built-in tools")]
+pub struct ReservedServerName(pub String);
+
+/// Session-level authorization posture (ADR-0080 Decision 4). The default is
+/// [`AuthMode::PerCall`]; [`AuthMode::NoConfirmation`] is an explicit,
+/// session-scoped, resume-resetting posture that auto-passes every external
+/// tool call.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum AuthMode {
+    /// Default: every external tool call is confirmed individually unless it
+    /// is in the session trust set ("always allow").
+    #[default]
+    PerCall,
+    /// Explicit no-confirmation posture: all external tool calls auto-pass.
+    /// Resume resets to [`AuthMode::PerCall`]; the UI marks it with a warning
+    /// color (ADR-0083).
+    NoConfirmation,
+}
+
+/// Operation category for the approval-card badge (ADR-0083 read / write /
+/// execute / network). Presentation-only -- the gateway does not branch on
+/// it. The external-tool bridge classifies each call; the gateway just
+/// carries the label through to the event so the frontend renders the right
+/// badge without re-inferring.
+///
+/// The serde form is a `.duck` persistence contract (issue #316): persisted
+/// recipe traces reuse this enum (`RecipeTraceEntry.operation_kind`,
+/// ADR-0078), so the `rename_all = "snake_case"` variant spellings (`read` /
+/// `write` / `execute` / `network`) are part of the recipe wire format,
+/// frozen by the backward-compatibility constraint. Renaming a variant or
+/// reworking the case convention breaks historical `.duck` readability;
+/// appending a variant is append-only-safe (no historical file carries it).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum OperationKind {
+    #[default]
+    Read,
+    Write,
+    Execute,
+    Network,
+}
+
+// ---------------------------------------------------------------------------
+// Wire payloads + sink
+// ---------------------------------------------------------------------------
+
+/// The user's answer to an approval request (ADR-0083 three-button card).
+/// Wire form crosses IPC both as a command argument
+/// (`respond_tool_approval`) and inside the resolved event payload.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ApprovalResponse {
+    /// Allow this single call; do not persist trust.
+    AllowOnce,
+    /// Allow this call AND escalate the `server::tool` to the session trust
+    /// set (ADR-0080 Decision 3). Subsequent calls to the same tool pass the
+    /// gate without surfacing the card.
+    AlwaysAllow,
+    /// Refuse this call. The turn receives a tool-level denial the agent can
+    /// self-correct from (ADR-0077).
+    Deny,
+}
+
+/// The body of an approval request -- the parts the gateway produces. The
+/// session id + request id are stamped on emission: the session id is closed
+/// over by the sink (built at the command boundary like the `on_phase`
+/// callback), and the request id is minted per gate call.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ApprovalRequestBody {
+    pub request_id: String,
+    pub server: String,
+    pub tool: String,
+    pub operation_kind: OperationKind,
+    /// Short agent-readable parameter summary for the card body (ADR-0083).
+    /// Two summary families feed this field, with different content rules:
+    ///
+    /// - Bridge-authored summaries (ACP adapters) are compact descriptions
+    ///   ("GET https://example.com/x" / "write ~/file"), never the full
+    ///   call arguments -- those may be large or sensitive.
+    /// - External-call argument previews (issue #661) deliberately carry
+    ///   the call's arguments as truncated compact JSON: the point of the
+    ///   card is that the approver sees what the external server is about
+    ///   to receive, so masking would reintroduce the blind sign-off the
+    ///   preview exists to prevent. The audience is the approver's own
+    ///   panes and the local session file -- the surfaces the approved
+    ///   call's trace excerpt already reaches.
+    ///
+    /// **Sanitization contract (issue #312):** for bridge-authored
+    /// summaries the bridge is the PRIMARY cleansing layer and MUST NOT
+    /// carry raw credentials, API keys, bearer tokens, `file:///` PII, or
+    /// query-string credentials. The gateway applies a length cap
+    /// ([`truncate_summary`] / [`SUMMARY_MAX_CHARS`]) as a SECONDARY
+    /// defense -- it bounds the broadcast surface, it does not sanitize
+    /// content.
+    pub summary: String,
+    /// File-delivery values for the card's expand-on-demand view (issue
+    /// #672): each entry carries the parameter name and its content as
+    /// captured at approval time. Empty for calls without file-delivered
+    /// parameters -- the field omits from the wire rather than riding along
+    /// as `[]` on every card.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub file_attachments: Vec<FileAttachment>,
+    /// The call's originator annotation (issue #934): the delegating
+    /// sub-agent's name, `None` for a main-loop / external-runtime call.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub origin_agent: Option<String>,
+}
+
+/// Hard cap on each file attachment's content in `char`s (issue #672). The
+/// attachments ride the same global `app.emit` broadcast as the summary
+/// (ADR-0056 multi-pane), so each content is bounded the same way -- 4 KiB
+/// covers a realistic interpreter-script value while keeping one payload
+/// from flooding every pane.
+pub const FILE_ATTACHMENT_MAX_CHARS: usize = 4 * 1024;
+
+/// Hard cap on [`ApprovalRequestBody::summary`] length in `char`s (issue
+/// #312). The summary is globally broadcast via `app.emit` (ADR-0056 multi-
+/// pane), so a cap bounds the cross-pane leak surface. 512 chars is ample for
+/// a human-readable card body while preventing an unbounded bridge payload
+/// from flooding every pane.
+pub const SUMMARY_MAX_CHARS: usize = 512;
+
+/// Truncate `summary` to at most `max_chars` `char`s, appending `"..."` when
+/// the input was cut (issue #312). The result length is always `<= max_chars`:
+/// a cut string occupies `max_chars - 3` chars of headroom plus the 3-char
+/// ellipsis. When `max_chars < 3` the function degrades to a plain truncate
+/// (no ellipsis). Truncation is at `char` boundaries (UTF-8 safe), not
+/// grapheme-cluster boundaries (good enough for a card-body preview).
+/// Note: the trace side truncates with the single ellipsis character
+/// (`util::truncate_chars_with_ellipsis`, which also backs the persisted
+/// trace cap) while this broadcast-side helper appends ASCII dots -- a
+/// recorded surface difference (issue #826 review); both mark every cut
+/// visibly, and converging the glyphs changes user-visible rendering.
+pub fn truncate_summary(summary: &str, max_chars: usize) -> String {
+    // Early-exit overflow check: scan at most `max_chars + 1` chars rather
+    // than the full input — the summary may be an unbounded bridge payload
+    // (issue #312).
+    if summary.chars().take(max_chars.saturating_add(1)).count() <= max_chars {
+        return summary.to_string();
+    }
+    if max_chars < 3 {
+        return summary.chars().take(max_chars).collect();
+    }
+    let mut result: String = summary.chars().take(max_chars - 3).collect();
+    result.push_str("...");
+    result
+}
+
+/// Full `approval-request` event payload (ADR-0083, addressed by session id).
+/// Mirrored on the frontend as `ApprovalRequestPayload`.
+#[derive(Debug, Clone, Serialize)]
+pub struct ApprovalRequestPayload {
+    pub session_id: SessionId,
+    pub request_id: String,
+    pub server: String,
+    pub tool: String,
+    pub operation_kind: OperationKind,
+    pub summary: String,
+    /// File-delivery values for the card's expand-on-demand view (issue
+    /// #672); omitted when empty (calls without file-delivered parameters).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub file_attachments: Vec<FileAttachment>,
+    /// The call's originator annotation (issue #934): the delegating
+    /// sub-agent's name; omitted for a main-loop / external-runtime call.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub origin_agent: Option<String>,
+}
+
+/// Full `approval-resolved` event payload -- the frontend uses this to flip a
+/// pending card to its resolved state in place (ADR-0083).
+#[derive(Debug, Clone, Serialize)]
+pub struct ApprovalResolvedPayload {
+    pub session_id: SessionId,
+    pub request_id: String,
+    pub response: ApprovalResponse,
+}
+
+/// Full `approval-abandoned` event payload (issue #1267) -- the frontend
+/// flips the pending card to its abandoned terminal state in place: the
+/// external caller dropped the call, so no answer exists to report. Carries
+/// the same addressing pair as `ApprovalResolvedPayload`.
+#[derive(Debug, Clone, Serialize)]
+pub struct ApprovalAbandonedPayload {
+    pub session_id: SessionId,
+    pub request_id: String,
+}
+
+/// Emit side-channel for approval events (ADR-0083). Implemented at the
+/// command boundary with a Tauri `AppHandle` + the session id; the gate calls
+/// it to surface the card and to announce the resolution. The trait keeps the
+/// gateway decoupled from Tauri -- tests supply a recording sink. `Send +
+/// Sync` so the agent loop (#295) can thread a sink across the
+/// `spawn_blocking` boundary without changing the trait's API surface.
+pub trait ApprovalSink: Send + Sync {
+    /// Surface a new pending approval (emits `approval-request`).
+    fn emit_request(&self, body: &ApprovalRequestBody);
+    /// Announce that a pending request was answered (emits `approval-resolved`).
+    fn emit_resolved(&self, body: &ApprovalRequestBody, response: ApprovalResponse);
+    /// Announce that a pending request was abandoned (emits
+    /// `approval-abandoned`, issue #1267): the external caller dropped the
+    /// call with no answer -- nobody refused anything, so this is a distinct
+    /// terminal state from `emit_resolved`'s denial. Default no-op: only
+    /// broadcasting sinks surface it.
+    fn emit_abandoned(&self, _body: &ApprovalRequestBody) {}
+}
+
+// ---------------------------------------------------------------------------
+// Gate outcome
+// ---------------------------------------------------------------------------
+
+/// The decision the gate returns to the agent loop (ADR-0080).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GateOutcome {
+    /// The call proceeds -- the agent loop runs [`crate::tools::dispatch`] (or
+    /// the external bridge forwards the call).
+    Allow,
+    /// The user refused the call (via the approval card's deny button). The
+    /// agent loop surfaces a tool-level denial the model can self-correct from
+    /// (ADR-0077) -- it is NOT a transport error and does NOT fail the turn.
+    Denied,
+}
+
+/// The turn was cancelled (or the session closed) while the call was pending.
+/// The agent loop maps this to the turn's `Cancelled` outcome (ADR-0077).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GateCancelled;
+
+/// One expandable audit payload for the approval card (issue #672,
+/// ADR-0109 Decision 8): the approver can expand the value on the card.
+/// Three payload kinds ride this shape -- file-delivery values (issue
+/// #672), the skill markdown body (`skills::create`), and the full
+/// pre-truncation argv rendering when the summary's cap cut it (issue
+/// #1195). Captured at approval time -- for file-delivery values, the
+/// temp file is deleted when the call ends, so the payload snapshot is
+/// the only durable view.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct FileAttachment {
+    pub param: String,
+    pub content: String,
+}
+
+/// The gateway-facing request summary: what the agent loop hands the gate.
+#[derive(Debug, Clone)]
+pub struct ApprovalRequest {
+    pub key: ToolKey,
+    pub operation_kind: OperationKind,
+    pub summary: String,
+    /// File-delivery values for the card's expand-on-demand view; empty for
+    /// every call shape without file-delivered parameters (built-ins, MCP).
+    pub file_attachments: Vec<FileAttachment>,
+    /// The call's originator annotation (ADR-0117 Decision 4 -- the approval
+    /// popup names the originator; issue #934):
+    /// the delegating sub-agent's name when the call rides a sub-agent's
+    /// tool face, `None` for every main-loop / external-runtime call. The
+    /// card renders it ("sub-agent X wants to call Y") so the approver
+    /// knows WHO is asking, not just what.
+    pub origin_agent: Option<String>,
+    /// The caller-side call identifier for abandon detection (issue #1267):
+    /// the gateway serve's JSON-RPC id for bridge-originated calls, `None`
+    /// for every built-in / in-flow shape (no external echo exists to match
+    /// against). Rides the pending slot so the fold layer can align a
+    /// terminal gateway echo with the parked gate before abandoning it.
+    pub call_id: Option<String>,
+}
+
+// ---------------------------------------------------------------------------
+// Per-session state
+// ---------------------------------------------------------------------------
+
+/// One in-flight approval. Only one can exist per session at a time: a turn
+/// runs under the per-session single-flight gate (ADR-0021), so tool calls are
+/// serial within a session and the next call cannot enter the gate until the
+/// previous one returns.
+struct Pending {
+    request_id: uuid::Uuid,
+    /// The parked call's caller-side id (issue #1267): read by
+    /// [`ApprovalState::parked_call_id`] so the fold layer can align a
+    /// terminal gateway echo with this gate before abandoning it.
+    call_id: Option<String>,
+    response: Option<ApprovalResponse>,
+    /// The pre-truncation file attachments (issue #1009): the broadcast copy
+    /// caps each content at [`FILE_ATTACHMENT_MAX_CHARS`] as a budget (the
+    /// ADR-0056 cross-pane surface), while this slot keeps the uncut
+    /// originals alive for the pending window so [`Self::pending_attachments`]
+    /// can serve the card's full view. Dropped with the slot when the gate
+    /// takes it (respond / cancel / close).
+    file_attachments: Vec<FileAttachment>,
+}
+
+/// Authorization policy fields guarded by a single mutex so [`ApprovalState::reset`]
+/// is atomic relative to concurrent readers (ADR-0080). `auth_mode` + `trust` are
+/// always read/written together — splitting them across two mutexes let a reader
+/// observe a half-reset state (new mode + stale trust).
+struct Policy {
+    auth_mode: AuthMode,
+    trust: HashSet<ToolKey>,
+}
+
+/// Per-session approval state (ADR-0080). Lives on the [`SessionHandle`] as an
+/// `Arc<ApprovalState>` so the turn (holding the `Session` mutex) and the
+/// `respond_tool_approval` command (which must NOT take that mutex) share it
+/// directly.
+pub struct ApprovalState {
+    /// Authorization policy (mode + trust) behind one lock so `reset` is
+    /// atomic (ADR-0080). `pending` + `cv` stay on separate locks — the gate
+    /// holds `pending` across a condvar wait and must not deadlock against
+    /// policy reads/writes.
+    policy: Mutex<Policy>,
+    pending: Mutex<Option<Pending>>,
+    /// Paired with [`Self::pending`]: the gate waits on it; `respond` +
+    /// [`Self::interrupt_pending`] notify it.
+    cv: Condvar,
+    /// Latched by [`Self::interrupt_pending`] so a cancel that arrives before
+    /// the gate enters the wait is not lost (the gate checks this on entry).
+    interrupted: AtomicBool,
+    /// Latched by [`Self::abandon_pending`] (issue #1267): the external
+    /// caller dropped the `tools/call` (its terminal gateway echo aligned
+    /// with the parked call's id). Same latching discipline as
+    /// `interrupted` -- cleared on gate entry so a stale abandonment from a
+    /// prior gate cannot leak into this one's wait.
+    abandoned: AtomicBool,
+}
+
+impl Default for ApprovalState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Maximum wall time the gate waits between cancel re-checks. The response
+/// arrives from a human clicking the approval card, so 200ms polling latency
+/// is invisible; the interval is a safety net for a missed
+/// `interrupt_pending` wake, not the primary wake path (the condvar notify).
+const GATE_CANCEL_POLL_INTERVAL: Duration = Duration::from_millis(200);
+
+impl ApprovalState {
+    pub fn new() -> Self {
+        Self {
+            policy: Mutex::new(Policy {
+                auth_mode: AuthMode::default(),
+                trust: HashSet::new(),
+            }),
+            pending: Mutex::new(None),
+            cv: Condvar::new(),
+            interrupted: AtomicBool::new(false),
+            abandoned: AtomicBool::new(false),
+        }
+    }
+
+    /// Read the current authorization mode (ADR-0080 Decision 4).
+    pub fn auth_mode(&self) -> AuthMode {
+        self.policy.lock().expect("policy lock poisoned").auth_mode
+    }
+
+    /// Set the authorization mode (ADR-0080 Decision 4). Session-level,
+    /// resume-reset (see [`Self::reset`]).
+    pub fn set_auth_mode(&self, mode: AuthMode) {
+        self.policy.lock().expect("policy lock poisoned").auth_mode = mode;
+    }
+
+    /// A snapshot of the session trust set ("always allow", ADR-0080 Decision 3).
+    pub fn trust_list(&self) -> Vec<ToolKey> {
+        self.policy
+            .lock()
+            .expect("policy lock poisoned")
+            .trust
+            .iter()
+            .cloned()
+            .collect()
+    }
+
+    /// Revoke a single tool's session-level trust (ADR-0080 Decision 3).
+    pub fn revoke(&self, key: &ToolKey) {
+        self.policy
+            .lock()
+            .expect("policy lock poisoned")
+            .trust
+            .remove(key);
+    }
+
+    /// Reset to the default posture (ADR-0080: resume 归零). Clears the trust
+    /// set, returns the mode to [`AuthMode::PerCall`], and wakes any in-flight
+    /// pending approval so its gate returns [`GateCancelled`] and clears its
+    /// own slot (the slot is owned by the gate, not this fn). Called on a
+    /// successful resume by `open_duck` -- trust state is session-level and
+    /// must not survive a resume (it is not in the recipe, ADR-0080).
+    ///
+    /// Both fields are written under a single `policy` lock so a concurrent
+    /// reader never observes a half-reset state (new mode + stale trust).
+    pub fn reset(&self) {
+        let mut g = self.policy.lock().expect("policy lock poisoned");
+        g.auth_mode = AuthMode::default();
+        g.trust.clear();
+        drop(g);
+        // Drop any pending approval: the waiting turn (if any -- resume runs
+        // with no turn in flight in practice) wakes to a cancelled state.
+        self.interrupt_pending();
+    }
+
+    /// Wake any waiting gate (cancel / close / resume). Idempotent: a no-op if
+    /// no gate is waiting. The gate re-checks `CancelToken::is_requested` on
+    /// wake and returns [`GateCancelled`]. Latching covers a cancel that
+    /// lands before the gate enters the wait.
+    pub fn interrupt_pending(&self) {
+        self.interrupted.store(true, Ordering::SeqCst);
+        self.cv.notify_all();
+    }
+
+    /// Wake any waiting gate as abandoned (issue #1267): the external caller
+    /// dropped the `tools/call` (its terminal gateway echo aligned with the
+    /// parked call's id). Idempotent: a no-op if no gate is waiting. The gate
+    /// settles the card via [`ApprovalSink::emit_abandoned`] and returns the
+    /// same cancelled exit `interrupt_pending` produces, so the serve's
+    /// existing error-reply handling covers both.
+    pub fn abandon_pending(&self) {
+        self.abandoned.store(true, Ordering::SeqCst);
+        self.cv.notify_all();
+    }
+
+    /// The parked gate's caller-side call id (issue #1267): `Some` only while
+    /// a gate is suspended on a bridge-originated call (one carrying a call
+    /// id). The fold layer aligns a terminal gateway echo against this before
+    /// calling [`Self::abandon_pending`] -- no match, no abandonment (a
+    /// same-turn sibling call's echo must not end this gate).
+    pub fn parked_call_id(&self) -> Option<String> {
+        self.pending
+            .lock()
+            .expect("pending lock poisoned")
+            .as_ref()
+            .and_then(|p| p.call_id.clone())
+    }
+
+    /// Drive a tool call through the policy gate (ADR-0080).
+    ///
+    /// - Built-in / trusted / no-confirmation calls return
+    ///   [`GateOutcome::Allow`] immediately and never touch
+    ///   [`ApprovalSink::emit_request`].
+    /// - External PerCall untrusted calls suspend this turn (emit the card,
+    ///   wait on the condvar) until `respond` answers or the cancel token
+    ///   fires.
+    ///
+    /// `sink` is built at the command boundary with the `AppHandle` + session
+    /// id (mirrors the `on_phase` injection in `Session::ask_with_phase`); the
+    /// gate calls it only -- never holds a reference across the wait beyond
+    /// the call stack.
+    pub fn gate(
+        &self,
+        request: ApprovalRequest,
+        sink: &dyn ApprovalSink,
+        cancel: &CancelToken,
+    ) -> Result<GateOutcome, GateCancelled> {
+        // Pure classify first -- the common case (built-in pass-through,
+        // trusted, or no-confirmation) takes no lock on `pending` and never
+        // reaches the sink. ADR-0080 AC: built-in read-only + materialize
+        // pass with zero approval. Both policy fields are read under one lock
+        // so a concurrent `reset` cannot split the snapshot.
+        let (mode, trust) = {
+            let g = self.policy.lock().expect("policy lock poisoned");
+            (g.auth_mode, g.trust.clone())
+        };
+        match classify(&request.key, mode, &trust) {
+            Classification::Allow => return Ok(GateOutcome::Allow),
+            Classification::NeedsApproval => {}
+        }
+
+        let request_id = uuid::Uuid::new_v4();
+        let body = ApprovalRequestBody {
+            request_id: request_id.to_string(),
+            server: request.key.server.clone(),
+            tool: request.key.tool.clone(),
+            operation_kind: request.operation_kind,
+            summary: truncate_summary(&request.summary, SUMMARY_MAX_CHARS),
+            origin_agent: request.origin_agent.clone(),
+            // The expand-on-demand contents ride the same broadcast as the
+            // summary, so each is capped the same way (issue #672) -- the
+            // truncation is visible via the ellipsis, never a silent cut.
+            file_attachments: request
+                .file_attachments
+                .iter()
+                .map(|a| FileAttachment {
+                    param: a.param.clone(),
+                    content: truncate_summary(&a.content, FILE_ATTACHMENT_MAX_CHARS),
+                })
+                .collect(),
+        };
+
+        // Clear any stale interrupt latch from a prior cancel BEFORE installing
+        // the pending slot. Once the slot is live, any interrupt_pending() that
+        // arrives is THIS gate's own cancel signal and must NOT be wiped; the
+        // prior order (clear after install) could erase a legit interrupt that
+        // landed between install and clear (a window future reset call sites
+        // outside the session_lock serializer would reopen).
+        self.interrupted.store(false, Ordering::SeqCst);
+        // Same discipline for the abandonment latch (issue #1267): a stale
+        // abandonment from a prior gate must not leak into this one's wait.
+        self.abandoned.store(false, Ordering::SeqCst);
+        // Install the pending slot, THEN emit. A respond() that races ahead of
+        // the wait still finds the slot (matched by request_id) and stores its
+        // answer durably in the mutex -- the gate's subsequent wait sees it
+        // and breaks without blocking. No lost wake-up.
+        {
+            let mut g = self.pending.lock().expect("pending lock poisoned");
+            // Serial tool calls within a session (ADR-0021 single-flight) mean
+            // at most one in-flight approval; a stale slot here is a bug. Clear
+            // it defensively so the new request is observable, then install.
+            *g = Some(Pending {
+                request_id,
+                // The parked call's id rides the slot (issue #1267) for the
+                // fold layer's echo alignment -- `parked_call_id` reads it.
+                // Degenerate empty ids (the gateway normalizes a missing
+                // JSON-RPC id to "") park unalignable, same None tier as
+                // the built-in line.
+                call_id: request.call_id.filter(|id| !id.is_empty()),
+                response: None,
+                // The uncut originals move into the slot; the broadcast body
+                // above already holds its own capped copies (issue #1009).
+                file_attachments: request.file_attachments,
+            });
+        }
+        sink.emit_request(&body);
+
+        // Wait for a response or a cancel. The cancel token is the turn's
+        // shared token; fire_cancel() (cancel + close) calls
+        // interrupt_pending() to wake this immediately. The poll interval is a
+        // safety net, not the primary wake.
+        let response = {
+            let mut g = self.pending.lock().expect("pending lock poisoned");
+            loop {
+                if let Some(p) = g.as_ref() {
+                    if let Some(resp) = p.response {
+                        break Some(resp);
+                    }
+                }
+                if self.interrupted.load(Ordering::SeqCst)
+                    || self.abandoned.load(Ordering::SeqCst)
+                    || cancel.is_requested()
+                {
+                    break None;
+                }
+                let (g2, _) = self
+                    .cv
+                    .wait_timeout(g, GATE_CANCEL_POLL_INTERVAL)
+                    .expect("pending lock poisoned");
+                g = g2;
+            }
+        };
+
+        // Read out + clear the slot under one lock so a late respond() after a
+        // cancel sees no pending (and surfaces a typed error to the stale IPC
+        // call instead of mutating a dead request).
+        let resolved_response = {
+            let mut g = self.pending.lock().expect("pending lock poisoned");
+            let p = g.take();
+            // Notify any watcher (defensive -- the only waiter was this gate).
+            self.cv.notify_all();
+            p.and_then(|p| p.response)
+        };
+
+        match (response, resolved_response) {
+            // A response landed -- either the wait loop saw it (Some) OR it was
+            // stored between the loop's cancel-break and the slot take
+            // (None, Some). In both cases the user's answer is durable in the
+            // mutex; honor it: apply_response emits the resolved event with the
+            // ACTUAL answer and escalates trust on AlwaysAllow. The prior
+            // `(None, _)` arm forced a synthetic Deny that contradicted a
+            // respond() which had already returned Ok, and silently dropped the
+            // AlwaysAllow trust escalation.
+            (Some(resp), _) | (None, Some(resp)) => {
+                self.apply_response(&request.key, resp, &body, sink)
+            }
+            (None, None) => {
+                if self.abandoned.load(Ordering::SeqCst) {
+                    // Abandoned (issue #1267): the external caller dropped the
+                    // `tools/call` with no answer. The card settles to the
+                    // abandoned terminal state -- NOT a denial: nobody refused
+                    // anything, and no self-correctable denial exists to feed
+                    // because the caller is gone. The gate returns the same
+                    // cancelled exit the serve already maps to its JSON-RPC
+                    // error reply, so the turn-level outcome is untouched.
+                    sink.emit_abandoned(&body);
+                    return Err(GateCancelled);
+                }
+                // Cancelled / closed with no landed answer. The card resolves
+                // to a denial so the frontend does not leave a stale pending
+                // entry; the agent loop sees `Cancelled` (not the card's
+                // denial) because the turn-level outcome is driven by the Err
+                // branch.
+                sink.emit_resolved(&body, ApprovalResponse::Deny);
+                Err(GateCancelled)
+            }
+        }
+    }
+
+    /// Map the user's answer to a gate outcome and apply trust escalation
+    /// (ADR-0080 Decision 3).
+    fn apply_response(
+        &self,
+        key: &ToolKey,
+        response: ApprovalResponse,
+        body: &ApprovalRequestBody,
+        sink: &dyn ApprovalSink,
+    ) -> Result<GateOutcome, GateCancelled> {
+        sink.emit_resolved(body, response);
+        match response {
+            ApprovalResponse::AllowOnce => Ok(GateOutcome::Allow),
+            ApprovalResponse::AlwaysAllow => {
+                // Escalate to session-level trust (ADR-0080 Decision 3). Same
+                // tool, different params share trust; param-pattern
+                // granularity is out of scope (v1).
+                self.policy
+                    .lock()
+                    .expect("policy lock poisoned")
+                    .trust
+                    .insert(key.clone());
+                Ok(GateOutcome::Allow)
+            }
+            ApprovalResponse::Deny => Ok(GateOutcome::Denied),
+        }
+    }
+
+    /// Answer the in-flight approval (ADR-0083). Called by the
+    /// `respond_tool_approval` command. Returns `Err` if no pending request
+    /// matches `request_id` -- the frontend's IPC call surfaces a typed error
+    /// (a stale response after cancel, or a duplicate answer).
+    pub fn respond(
+        &self,
+        request_id: uuid::Uuid,
+        response: ApprovalResponse,
+    ) -> Result<(), RespondError> {
+        let mut g = self.pending.lock().expect("pending lock poisoned");
+        let Some(p) = g.as_mut() else {
+            return Err(RespondError::NoPending);
+        };
+        if p.request_id != request_id {
+            return Err(RespondError::UnknownRequest);
+        }
+        // Idempotent guard: a second answer to the same request (a double-fire
+        // race in the UI) is rejected rather than silently overwriting a
+        // consumed response.
+        if p.response.is_some() {
+            return Err(RespondError::AlreadyAnswered);
+        }
+        p.response = Some(response);
+        self.cv.notify_all();
+        Ok(())
+    }
+
+    /// Serve the pre-truncation file attachments for the still-pending
+    /// request (issue #1009): the card's expand view pulls the full contents
+    /// through the `get_approval_attachments` command while the turn is
+    /// suspended on the gate -- the broadcast's capped copy is a budget, not
+    /// the content boundary (ADR-0109 Decision 8). The full snapshot lives
+    /// exactly as long as the slot: once the gate takes it (respond / cancel
+    /// / close) this rejects, and the frontend falls back to the capped
+    /// broadcast copy. Read-only -- the gate releases `pending` while parked
+    /// inside `cv.wait_timeout`, so this cannot deadlock the wait (it may
+    /// briefly contend between the gate's poll iterations).
+    pub fn pending_attachments(
+        &self,
+        request_id: uuid::Uuid,
+    ) -> Result<Vec<FileAttachment>, RespondError> {
+        let g = self.pending.lock().expect("pending lock poisoned");
+        let Some(p) = g.as_ref() else {
+            return Err(RespondError::NoPending);
+        };
+        if p.request_id != request_id {
+            return Err(RespondError::UnknownRequest);
+        }
+        Ok(p.file_attachments.clone())
+    }
+
+    /// Whether a tool key is currently in the session trust set (test surface
+    /// for the "always allow" AC).
+    #[cfg(test)]
+    pub fn is_trusted(&self, key: &ToolKey) -> bool {
+        self.policy
+            .lock()
+            .expect("policy lock poisoned")
+            .trust
+            .contains(key)
+    }
+
+    /// Seed a tool key into the trust set directly (test-only shortcut so
+    /// tests do not reach into the private `policy` mutex).
+    #[cfg(test)]
+    pub fn seed_trust(&self, key: &ToolKey) {
+        self.policy
+            .lock()
+            .expect("policy lock poisoned")
+            .trust
+            .insert(key.clone());
+    }
+}
+
+/// Why a `respond_tool_approval` call or a `pending_attachments` read did
+/// not land (issues #294, #1009). The read path never produces
+/// `AlreadyAnswered` -- a taken slot reads as `NoPending`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RespondError {
+    /// No approval is pending on this session.
+    NoPending,
+    /// The request id does not match the pending one (stale / duplicate).
+    UnknownRequest,
+    /// The pending request was already answered.
+    AlreadyAnswered,
+}
+
+/// Convenience alias for callers that hold the state behind an `Arc` (the
+/// `SessionHandle` shape). The gate runs against `&ApprovalState` either way.
+pub type SharedApprovalState = Arc<ApprovalState>;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Recording sink for tests: thread-safe (the gate may run on a spawned
+    /// thread while the test thread reads the recordings). `cv` wakes
+    /// `poll_for_request` on push so the test does not rely on wall-clock
+    /// sleep polling.
+    #[derive(Default)]
+    struct RecordingSink {
+        requests: Mutex<Vec<ApprovalRequestBody>>,
+        resolved: Mutex<Vec<(ApprovalRequestBody, ApprovalResponse)>>,
+        abandoned: Mutex<Vec<ApprovalRequestBody>>,
+        cv: Condvar,
+    }
+
+    impl ApprovalSink for RecordingSink {
+        fn emit_request(&self, body: &ApprovalRequestBody) {
+            let mut g = self.requests.lock().unwrap();
+            g.push(body.clone());
+            self.cv.notify_all();
+        }
+        fn emit_resolved(&self, body: &ApprovalRequestBody, response: ApprovalResponse) {
+            self.resolved.lock().unwrap().push((body.clone(), response));
+        }
+        fn emit_abandoned(&self, body: &ApprovalRequestBody) {
+            self.abandoned.lock().unwrap().push(body.clone());
+        }
+    }
+
+    impl RecordingSink {
+        fn last_request(&self) -> Option<ApprovalRequestBody> {
+            self.requests.lock().unwrap().last().cloned()
+        }
+        fn request_count(&self) -> usize {
+            self.requests.lock().unwrap().len()
+        }
+        fn abandoned_count(&self) -> usize {
+            self.abandoned.lock().unwrap().len()
+        }
+    }
+
+    // --- wire format -------------------------------------------------------
+
+    /// The `.duck` persistence contract (issue #316, ADR-0078): persisted
+    /// recipe traces reuse `OperationKind`, so the `rename_all =
+    /// "snake_case"` variant spellings are frozen wire format. Migration
+    /// fixtures lock only `write` indirectly; this pins all four so a
+    /// `rename_all` rework or per-variant rename cannot slip through.
+    #[test]
+    fn operation_kind_serializes_to_frozen_snake_case_wire_form() {
+        assert_eq!(
+            serde_json::to_string(&OperationKind::Read).unwrap(),
+            "\"read\""
+        );
+        assert_eq!(
+            serde_json::to_string(&OperationKind::Write).unwrap(),
+            "\"write\""
+        );
+        assert_eq!(
+            serde_json::to_string(&OperationKind::Execute).unwrap(),
+            "\"execute\""
+        );
+        assert_eq!(
+            serde_json::to_string(&OperationKind::Network).unwrap(),
+            "\"network\""
+        );
+    }
+
+    // --- gate lifecycle ----------------------------------------------------
+
+    #[test]
+    fn gate_passes_trusted_external_without_emitting() {
+        let state = ApprovalState::new();
+        let key = ToolKey::external("acme", "fetch");
+        // Seed trust directly to test the gate short-circuit.
+        state.seed_trust(&key);
+        let cancel = CancelToken::new();
+        let sink = RecordingSink::default();
+        let req = ApprovalRequest {
+            key,
+            operation_kind: OperationKind::Network,
+            summary: "GET /x".into(),
+            file_attachments: Vec::new(),
+            origin_agent: None,
+            call_id: None,
+        };
+        let outcome = state.gate(req, &sink, &cancel).expect("trusted allowed");
+        assert_eq!(outcome, GateOutcome::Allow);
+        assert_eq!(sink.request_count(), 0);
+    }
+
+    /// The originator annotation rides the gate to the card (issue #934): a
+    /// sub-agent-originated call's request body carries its delegating
+    /// sub-agent's name (so the card reads "sub-agent X wants to call Y"),
+    /// a main-loop call omits the field entirely (serde skip, not null).
+    #[test]
+    fn gate_carries_the_origin_agent_annotation_onto_the_card() {
+        let state = Arc::new(ApprovalState::new());
+        let cancel = Arc::new(CancelToken::new());
+        let sink = Arc::new(RecordingSink::default());
+
+        let state_c = Arc::clone(&state);
+        let sink_c = Arc::clone(&sink);
+        let cancel_c = Arc::clone(&cancel);
+        let handle = std::thread::spawn(move || {
+            let req = ApprovalRequest {
+                key: ToolKey::external("acme", "fetch"),
+                operation_kind: OperationKind::Network,
+                summary: "GET /x".into(),
+                file_attachments: Vec::new(),
+                origin_agent: Some("analyst".into()),
+                call_id: None,
+            };
+            state_c.gate(req, &*sink_c as &dyn ApprovalSink, &cancel_c)
+        });
+        let request_id = poll_for_request(&sink, Duration::from_secs(2)).expect("request emitted");
+        let body = sink.last_request().expect("body recorded");
+        assert_eq!(
+            body.origin_agent.as_deref(),
+            Some("analyst"),
+            "the delegating sub-agent's name rides the card"
+        );
+        // The wire form carries the annotation under its serde-skip name --
+        // present for an originated call, absent for a plain one.
+        let json = serde_json::to_string(&body).unwrap();
+        assert!(json.contains("\"origin_agent\":\"analyst\""), "{json}");
+        let plain = ApprovalRequestBody {
+            request_id: "r".into(),
+            server: "acme".into(),
+            tool: "fetch".into(),
+            operation_kind: OperationKind::Network,
+            summary: "GET /x".into(),
+            file_attachments: Vec::new(),
+            origin_agent: None,
+        };
+        assert!(!serde_json::to_string(&plain)
+            .unwrap()
+            .contains("origin_agent"));
+        state
+            .respond(request_id, ApprovalResponse::AllowOnce)
+            .expect("respond ok");
+        assert_eq!(
+            handle.join().expect("gate thread").expect("allow"),
+            GateOutcome::Allow
+        );
+    }
+
+    #[test]
+    fn gate_suspends_external_until_allow_once() {
+        // The gate blocks the calling thread; run it on a worker and answer
+        // from the test thread once the request is observable.
+        let state = Arc::new(ApprovalState::new());
+        let cancel = Arc::new(CancelToken::new());
+        let sink = Arc::new(RecordingSink::default());
+        let key = ToolKey::external("acme", "fetch");
+
+        let state_c = Arc::clone(&state);
+        let sink_c = Arc::clone(&sink);
+        let cancel_c = Arc::clone(&cancel);
+        let key_c = key.clone();
+        let handle = std::thread::spawn(move || {
+            let req = ApprovalRequest {
+                key: key_c,
+                operation_kind: OperationKind::Network,
+                summary: "GET /x".into(),
+                file_attachments: Vec::new(),
+                origin_agent: None,
+                call_id: None,
+            };
+            (
+                state_c.gate(req, &*sink_c as &dyn ApprovalSink, &cancel_c),
+                sink_c,
+            )
+        });
+
+        // Wait for the card to surface, then answer AllowOnce.
+        let request_id = poll_for_request(&sink, Duration::from_secs(2)).expect("request emitted");
+        state
+            .respond(request_id, ApprovalResponse::AllowOnce)
+            .expect("respond ok");
+
+        let (outcome, sink) = handle.join().expect("gate thread");
+        assert_eq!(outcome.expect("allow"), GateOutcome::Allow);
+        assert!(
+            !state.is_trusted(&key),
+            "AllowOnce must NOT escalate to session trust"
+        );
+        // Resolution event fired for the frontend.
+        let resolved = sink.resolved.lock().unwrap();
+        assert_eq!(resolved.len(), 1, "resolved event emitted once");
+        assert_eq!(resolved[0].1, ApprovalResponse::AllowOnce);
+    }
+
+    #[test]
+    fn gate_caps_and_passes_through_file_attachments() {
+        // Issue #672: the expand-on-demand contents ride the same broadcast
+        // as the summary, so the gate caps each content at the attachment
+        // cap with the visible ellipsis -- never an unbounded payload on the
+        // wire -- and passes the (param, content) pairs through untouched
+        // otherwise.
+        let state = Arc::new(ApprovalState::new());
+        let cancel = Arc::new(CancelToken::new());
+        let sink = Arc::new(RecordingSink::default());
+
+        let state_c = Arc::clone(&state);
+        let sink_c = Arc::clone(&sink);
+        let cancel_c = Arc::clone(&cancel);
+        let handle = std::thread::spawn(move || {
+            let req = ApprovalRequest {
+                key: ToolKey::external(ToolKey::CLI_SERVER, "code-runner"),
+                operation_kind: OperationKind::Execute,
+                summary: "run".into(),
+                file_attachments: vec![
+                    FileAttachment {
+                        param: "code".into(),
+                        content: "x".repeat(FILE_ATTACHMENT_MAX_CHARS + 100),
+                    },
+                    FileAttachment {
+                        param: "notes".into(),
+                        content: "short".into(),
+                    },
+                ],
+                origin_agent: None,
+                call_id: None,
+            };
+            (
+                state_c.gate(req, &*sink_c as &dyn ApprovalSink, &cancel_c),
+                sink_c,
+            )
+        });
+
+        let request_id = poll_for_request(&sink, Duration::from_secs(2)).expect("request emitted");
+        state
+            .respond(request_id, ApprovalResponse::AllowOnce)
+            .expect("respond ok");
+        handle.join().expect("gate thread").0.expect("allow");
+
+        let body = sink.last_request().expect("card body recorded");
+        assert_eq!(body.file_attachments.len(), 2);
+        assert_eq!(body.file_attachments[0].param, "code");
+        assert_eq!(
+            body.file_attachments[0].content.chars().count(),
+            FILE_ATTACHMENT_MAX_CHARS,
+            "an over-cap content truncates to exactly the cap"
+        );
+        assert!(
+            body.file_attachments[0].content.ends_with("..."),
+            "the cut is visible (the ellipsis), never silent"
+        );
+        assert_eq!(body.file_attachments[1].content, "short");
+    }
+
+    /// Issue #1009: the pre-truncation snapshot outlives the broadcast cap.
+    /// While the turn is suspended on the gate, `pending_attachments` serves
+    /// the uncut originals (the broadcast stays capped, #672); once the gate
+    /// takes the slot (respond / cancel) the snapshot is gone with it.
+    #[test]
+    fn pending_attachments_serve_the_uncut_snapshot_for_the_pending_window_only() {
+        let state = Arc::new(ApprovalState::new());
+        let cancel = Arc::new(CancelToken::new());
+        let sink = Arc::new(RecordingSink::default());
+
+        let state_c = Arc::clone(&state);
+        let sink_c = Arc::clone(&sink);
+        let cancel_c = Arc::clone(&cancel);
+        let handle = std::thread::spawn(move || {
+            let req = ApprovalRequest {
+                key: ToolKey::external(ToolKey::CLI_SERVER, "code-runner"),
+                operation_kind: OperationKind::Execute,
+                summary: "run".into(),
+                file_attachments: vec![
+                    FileAttachment {
+                        param: "code".into(),
+                        content: "x".repeat(FILE_ATTACHMENT_MAX_CHARS + 100),
+                    },
+                    FileAttachment {
+                        param: "notes".into(),
+                        content: "short".into(),
+                    },
+                ],
+                origin_agent: None,
+                call_id: None,
+            };
+            (
+                state_c.gate(req, &*sink_c as &dyn ApprovalSink, &cancel_c),
+                sink_c,
+            )
+        });
+
+        let request_id = poll_for_request(&sink, Duration::from_secs(2)).expect("request emitted");
+        // Suspended window: the broadcast copy is capped, the pending-window
+        // copy is the full pre-truncation original.
+        let attachments = state
+            .pending_attachments(request_id)
+            .expect("full snapshot served while pending");
+        assert_eq!(attachments.len(), 2);
+        assert_eq!(attachments[0].param, "code");
+        assert_eq!(
+            attachments[0].content.chars().count(),
+            FILE_ATTACHMENT_MAX_CHARS + 100,
+            "the pending-window snapshot is the pre-truncation original"
+        );
+        assert_eq!(attachments[1].content, "short");
+        let body = sink.last_request().expect("card body recorded");
+        assert_eq!(
+            body.file_attachments[0].content.chars().count(),
+            FILE_ATTACHMENT_MAX_CHARS,
+            "the broadcast copy stays capped (the #672 pin, other side of the seam)"
+        );
+        // A different id while one request is pending: unknown request, not a
+        // silent serve of whichever slot happens to be live.
+        assert!(matches!(
+            state.pending_attachments(uuid::Uuid::new_v4()),
+            Err(RespondError::UnknownRequest)
+        ));
+        state
+            .respond(request_id, ApprovalResponse::Deny)
+            .expect("respond ok");
+        handle.join().expect("gate thread").0.expect("deny");
+        // The slot is taken with the gate's return: the snapshot is gone.
+        assert!(matches!(
+            state.pending_attachments(request_id),
+            Err(RespondError::NoPending)
+        ));
+    }
+
+    #[test]
+    fn pending_attachments_reject_with_nothing_in_flight() {
+        let state = ApprovalState::new();
+        assert!(matches!(
+            state.pending_attachments(uuid::Uuid::new_v4()),
+            Err(RespondError::NoPending)
+        ));
+    }
+
+    /// The cancelled release path (the AC's other half): a cancel-driven
+    /// gate return takes the slot exactly like a respond, so the full-view
+    /// command rejects after cancellation too -- the pending window and the
+    /// slot share one lifecycle.
+    #[test]
+    fn pending_attachments_reject_after_a_cancelled_gate() {
+        let state = Arc::new(ApprovalState::new());
+        let cancel = Arc::new(CancelToken::new());
+        let sink = Arc::new(RecordingSink::default());
+
+        let state_c = Arc::clone(&state);
+        let sink_c = Arc::clone(&sink);
+        let cancel_c = Arc::clone(&cancel);
+        let handle = std::thread::spawn(move || {
+            let req = ApprovalRequest {
+                key: ToolKey::external(ToolKey::CLI_SERVER, "code-runner"),
+                operation_kind: OperationKind::Execute,
+                summary: "run".into(),
+                file_attachments: Vec::new(),
+                origin_agent: None,
+                call_id: None,
+            };
+            state_c.gate(req, &*sink_c as &dyn ApprovalSink, &cancel_c)
+        });
+
+        let request_id = poll_for_request(&sink, Duration::from_secs(2)).expect("request emitted");
+        // Mirrors fire_cancel: the token plus the interrupt wake.
+        cancel.request();
+        state.interrupt_pending();
+        assert_eq!(
+            handle.join().expect("gate thread").unwrap_err(),
+            GateCancelled
+        );
+        assert!(matches!(
+            state.pending_attachments(request_id),
+            Err(RespondError::NoPending)
+        ));
+    }
+
+    /// The abandonment release path (issue #1267): `abandon_pending` wakes
+    /// the parked gate with the same cancelled exit the cancel path uses,
+    /// but the card settles via `emit_abandoned` -- nobody answered, so no
+    /// denial exists to report -- and the slot is taken so the pending
+    /// window closes like every other release.
+    #[test]
+    fn gate_abandonment_wakes_and_settles_the_card_without_a_denial() {
+        let state = Arc::new(ApprovalState::new());
+        let cancel = Arc::new(CancelToken::new());
+        let sink = Arc::new(RecordingSink::default());
+
+        let state_c = Arc::clone(&state);
+        let sink_c = Arc::clone(&sink);
+        let cancel_c = Arc::clone(&cancel);
+        let handle = std::thread::spawn(move || {
+            let req = ApprovalRequest {
+                key: ToolKey::external("acme", "fetch"),
+                operation_kind: OperationKind::Network,
+                summary: "GET /x".into(),
+                file_attachments: Vec::new(),
+                origin_agent: None,
+                call_id: Some("rpc-42".into()),
+            };
+            state_c.gate(req, &*sink_c as &dyn ApprovalSink, &cancel_c)
+        });
+
+        let request_id = poll_for_request(&sink, Duration::from_secs(2)).expect("request emitted");
+        assert_eq!(
+            state.parked_call_id(),
+            Some("rpc-42".into()),
+            "the parked call's id is observable for echo alignment"
+        );
+        state.abandon_pending();
+        assert_eq!(
+            handle.join().expect("gate thread").unwrap_err(),
+            GateCancelled,
+            "abandonment shares the cancelled exit the serve maps to its error reply"
+        );
+        assert_eq!(sink.abandoned_count(), 1, "the card settles as abandoned");
+        assert!(
+            sink.resolved.lock().unwrap().is_empty(),
+            "no denial exists to report -- nobody answered"
+        );
+        assert!(matches!(
+            state.pending_attachments(request_id),
+            Err(RespondError::NoPending)
+        ));
+    }
+
+    /// A durable answer beats an abandonment racing it (issue #1267): the
+    /// respond() that lands first is honored exactly like the existing
+    /// cancel race -- the abandonment only settles a card nobody answered.
+    #[test]
+    fn gate_abandonment_racing_a_landed_answer_honors_the_answer() {
+        let state = Arc::new(ApprovalState::new());
+        let cancel = Arc::new(CancelToken::new());
+        let sink = Arc::new(RecordingSink::default());
+
+        let state_c = Arc::clone(&state);
+        let sink_c = Arc::clone(&sink);
+        let cancel_c = Arc::clone(&cancel);
+        let handle = std::thread::spawn(move || {
+            let req = ApprovalRequest {
+                key: ToolKey::external("acme", "fetch"),
+                operation_kind: OperationKind::Network,
+                summary: "GET /x".into(),
+                file_attachments: Vec::new(),
+                origin_agent: None,
+                call_id: Some("rpc-43".into()),
+            };
+            state_c.gate(req, &*sink_c as &dyn ApprovalSink, &cancel_c)
+        });
+
+        let request_id = poll_for_request(&sink, Duration::from_secs(2)).expect("request emitted");
+        state
+            .respond(request_id, ApprovalResponse::AllowOnce)
+            .expect("respond ok");
+        state.abandon_pending();
+        assert_eq!(
+            handle.join().expect("gate thread").expect("answer honored"),
+            GateOutcome::Allow
+        );
+        assert_eq!(sink.abandoned_count(), 0);
+        assert_eq!(sink.resolved.lock().unwrap().len(), 1);
+    }
+
+    /// A gate with no call id parks unalignable (issue #1267):
+    /// `parked_call_id` stays `None`, so the fold layer's echo alignment can
+    /// never fire on it -- the "no match, no abandonment" rule starts here.
+    /// The plain abandonment still settles (the latch is not id-gated); the
+    /// id gate lives in the caller, which only abandons on an aligned echo.
+    #[test]
+    fn gate_without_a_call_id_parks_unalignable() {
+        let state = Arc::new(ApprovalState::new());
+        let cancel = Arc::new(CancelToken::new());
+        let sink = Arc::new(RecordingSink::default());
+
+        let state_c = Arc::clone(&state);
+        let sink_c = Arc::clone(&sink);
+        let cancel_c = Arc::clone(&cancel);
+        let handle = std::thread::spawn(move || {
+            let req = ApprovalRequest {
+                key: ToolKey::external("acme", "fetch"),
+                operation_kind: OperationKind::Network,
+                summary: "GET /x".into(),
+                file_attachments: Vec::new(),
+                origin_agent: None,
+                call_id: None,
+            };
+            state_c.gate(req, &*sink_c as &dyn ApprovalSink, &cancel_c)
+        });
+
+        poll_for_request(&sink, Duration::from_secs(2)).expect("request emitted");
+        assert_eq!(state.parked_call_id(), None);
+        state.abandon_pending();
+        assert_eq!(
+            handle.join().expect("gate thread").unwrap_err(),
+            GateCancelled
+        );
+    }
+
+    /// A degenerate empty call id parks unalignable too (issue #1267): the
+    /// gateway normalizes a missing JSON-RPC id to "", and an id that never
+    /// identifies anything must not occupy the alignable tier -- the gate
+    /// entry filters it to None before the slot installs.
+    #[test]
+    fn gate_with_an_empty_call_id_parks_unalignable() {
+        let state = Arc::new(ApprovalState::new());
+        let cancel = Arc::new(CancelToken::new());
+        let sink = Arc::new(RecordingSink::default());
+
+        let state_c = Arc::clone(&state);
+        let sink_c = Arc::clone(&sink);
+        let cancel_c = Arc::clone(&cancel);
+        let handle = std::thread::spawn(move || {
+            let req = ApprovalRequest {
+                key: ToolKey::external("acme", "fetch"),
+                operation_kind: OperationKind::Network,
+                summary: "GET /x".into(),
+                file_attachments: Vec::new(),
+                origin_agent: None,
+                call_id: Some(String::new()),
+            };
+            state_c.gate(req, &*sink_c as &dyn ApprovalSink, &cancel_c)
+        });
+
+        poll_for_request(&sink, Duration::from_secs(2)).expect("request emitted");
+        assert_eq!(
+            state.parked_call_id(),
+            None,
+            "the degenerate empty id is filtered to the unalignable tier"
+        );
+        state.abandon_pending();
+        assert_eq!(
+            handle.join().expect("gate thread").unwrap_err(),
+            GateCancelled
+        );
+    }
+
+    #[test]
+    fn gate_always_allow_escalates_trust() {
+        let state = Arc::new(ApprovalState::new());
+        let cancel = Arc::new(CancelToken::new());
+        let sink = Arc::new(RecordingSink::default());
+        let key = ToolKey::external("acme", "fetch");
+
+        let state_c = Arc::clone(&state);
+        let sink_c = Arc::clone(&sink);
+        let key_c = key.clone();
+        let cancel_c = Arc::clone(&cancel);
+        let handle = std::thread::spawn(move || {
+            let req = ApprovalRequest {
+                key: key_c,
+                operation_kind: OperationKind::Network,
+                summary: "GET /x".into(),
+                file_attachments: Vec::new(),
+                origin_agent: None,
+                call_id: None,
+            };
+            state_c.gate(req, &*sink_c as &dyn ApprovalSink, &cancel_c)
+        });
+
+        let request_id = poll_for_request(&sink, Duration::from_secs(2)).expect("request emitted");
+        state
+            .respond(request_id, ApprovalResponse::AlwaysAllow)
+            .expect("respond ok");
+        let outcome = handle.join().expect("gate thread").expect("allow");
+        assert_eq!(outcome, GateOutcome::Allow);
+        assert!(
+            state.is_trusted(&key),
+            "AlwaysAllow must escalate the tool to session trust"
+        );
+
+        // A second call to the SAME tool now passes with zero approval.
+        let cancel2 = CancelToken::new();
+        let sink2 = RecordingSink::default();
+        let req = ApprovalRequest {
+            key,
+            operation_kind: OperationKind::Network,
+            summary: "GET /y".into(),
+            file_attachments: Vec::new(),
+            origin_agent: None,
+            call_id: None,
+        };
+        let outcome2 = state.gate(req, &sink2, &cancel2).expect("trusted now");
+        assert_eq!(outcome2, GateOutcome::Allow);
+        assert_eq!(sink2.request_count(), 0, "no card on the trusted retry");
+    }
+
+    #[test]
+    fn gate_deny_returns_denied_outcome() {
+        let state = Arc::new(ApprovalState::new());
+        let cancel = Arc::new(CancelToken::new());
+        let sink = Arc::new(RecordingSink::default());
+
+        let state_c = Arc::clone(&state);
+        let sink_c = Arc::clone(&sink);
+        let cancel_c = Arc::clone(&cancel);
+        let handle = std::thread::spawn(move || {
+            let req = ApprovalRequest {
+                key: ToolKey::external("acme", "fetch"),
+                operation_kind: OperationKind::Network,
+                summary: "GET /x".into(),
+                file_attachments: Vec::new(),
+                origin_agent: None,
+                call_id: None,
+            };
+            state_c.gate(req, &*sink_c as &dyn ApprovalSink, &cancel_c)
+        });
+
+        let request_id = poll_for_request(&sink, Duration::from_secs(2)).expect("request emitted");
+        state
+            .respond(request_id, ApprovalResponse::Deny)
+            .expect("deny ok");
+        let outcome = handle
+            .join()
+            .expect("gate thread")
+            .expect("denied, not cancelled");
+        assert_eq!(outcome, GateOutcome::Denied);
+    }
+
+    #[test]
+    fn gate_cancel_returns_cancelled_and_clears_pending() {
+        let state = Arc::new(ApprovalState::new());
+        let cancel = Arc::new(CancelToken::new());
+        let sink = Arc::new(RecordingSink::default());
+
+        let state_c = Arc::clone(&state);
+        let sink_c = Arc::clone(&sink);
+        let cancel_c = Arc::clone(&cancel);
+        let handle = std::thread::spawn(move || {
+            let req = ApprovalRequest {
+                key: ToolKey::external("acme", "fetch"),
+                operation_kind: OperationKind::Network,
+                summary: "GET /x".into(),
+                file_attachments: Vec::new(),
+                origin_agent: None,
+                call_id: None,
+            };
+            state_c.gate(req, &*sink_c as &dyn ApprovalSink, &cancel_c)
+        });
+
+        // Wait for the card, then fire cancel + interrupt (mirrors fire_cancel).
+        poll_for_request(&sink, Duration::from_secs(2)).expect("request emitted");
+        cancel.request();
+        state.interrupt_pending();
+
+        let err = handle.join().expect("gate thread").unwrap_err();
+        assert_eq!(err, GateCancelled);
+
+        // A late respond now finds no pending -> typed error (not a silent
+        // mutation of a dead request).
+        let stale_id = uuid::Uuid::new_v4();
+        assert_eq!(
+            state.respond(stale_id, ApprovalResponse::AllowOnce),
+            Err(RespondError::NoPending)
+        );
+    }
+
+    #[test]
+    fn gate_cancel_before_wait_is_not_lost() {
+        // interrupt_pending() lands BEFORE the gate enters the wait. The
+        // latched flag must surface as Cancelled, not hang. Also covers a
+        // pre-set cancel token (the gate checks is_requested on entry to the
+        // wait loop).
+        let state = Arc::new(ApprovalState::new());
+        let cancel = Arc::new(CancelToken::new());
+        cancel.request();
+        state.interrupt_pending();
+
+        let state_c = Arc::clone(&state);
+        let cancel_c = Arc::clone(&cancel);
+        let sink_arc: Arc<dyn ApprovalSink + Send + Sync> = Arc::new(RecordingSink::default());
+        let sink_arc_c = Arc::clone(&sink_arc);
+        let handle = std::thread::spawn(move || {
+            let req = ApprovalRequest {
+                key: ToolKey::external("acme", "fetch"),
+                operation_kind: OperationKind::Network,
+                summary: "GET /x".into(),
+                file_attachments: Vec::new(),
+                origin_agent: None,
+                call_id: None,
+            };
+            state_c.gate(req, &*sink_arc_c, &cancel_c)
+        });
+        let err = handle.join().expect("gate thread").unwrap_err();
+        assert_eq!(err, GateCancelled);
+    }
+
+    #[test]
+    fn respond_rejects_unknown_and_duplicate() {
+        let state = Arc::new(ApprovalState::new());
+        let cancel = Arc::new(CancelToken::new());
+        let sink = Arc::new(RecordingSink::default());
+
+        let state_c = Arc::clone(&state);
+        let sink_c = Arc::clone(&sink);
+        let cancel_c = Arc::clone(&cancel);
+        let handle = std::thread::spawn(move || {
+            let req = ApprovalRequest {
+                key: ToolKey::external("acme", "fetch"),
+                operation_kind: OperationKind::Network,
+                summary: "GET /x".into(),
+                file_attachments: Vec::new(),
+                origin_agent: None,
+                call_id: None,
+            };
+            state_c.gate(req, &*sink_c as &dyn ApprovalSink, &cancel_c)
+        });
+
+        let request_id = poll_for_request(&sink, Duration::from_secs(2)).expect("request emitted");
+        // Wrong id -> UnknownRequest.
+        assert_eq!(
+            state.respond(uuid::Uuid::new_v4(), ApprovalResponse::AllowOnce),
+            Err(RespondError::UnknownRequest)
+        );
+        // Correct id, first answer ok.
+        state
+            .respond(request_id, ApprovalResponse::AllowOnce)
+            .expect("first answer");
+        let _ = handle.join().expect("gate thread");
+
+        // No pending after the gate returned -> NoPending.
+        assert_eq!(
+            state.respond(request_id, ApprovalResponse::Deny),
+            Err(RespondError::NoPending)
+        );
+    }
+
+    // --- resume reset ------------------------------------------------------
+
+    #[test]
+    fn reset_clears_trust_and_mode() {
+        let state = ApprovalState::new();
+        let key = ToolKey::external("acme", "fetch");
+        state.seed_trust(&key);
+        state.set_auth_mode(AuthMode::NoConfirmation);
+        assert_eq!(state.auth_mode(), AuthMode::NoConfirmation);
+
+        state.reset();
+
+        assert_eq!(state.auth_mode(), AuthMode::PerCall, "resume resets mode");
+        assert!(
+            !state.is_trusted(&key),
+            "resume clears the trust set (ADR-0080)"
+        );
+    }
+
+    // --- per-session isolation --------------------------------------------
+
+    #[test]
+    fn pending_approval_in_one_session_does_not_block_another() {
+        // Two independent states (the SessionHandle shape): a pending gate on
+        // one leaves the other fully mutable. This is the structural guarantee
+        // behind ADR-0080's per-turn blocking -- the turn's mutex is per
+        // session, and so is the approval state.
+        let a = Arc::new(ApprovalState::new());
+        let b = Arc::new(ApprovalState::new());
+        let cancel = Arc::new(CancelToken::new());
+        let sink = Arc::new(RecordingSink::default());
+
+        let a_c = Arc::clone(&a);
+        let sink_c = Arc::clone(&sink);
+        let cancel_c = Arc::clone(&cancel);
+        let handle = std::thread::spawn(move || {
+            let req = ApprovalRequest {
+                key: ToolKey::external("acme", "fetch"),
+                operation_kind: OperationKind::Network,
+                summary: "GET /x".into(),
+                file_attachments: Vec::new(),
+                origin_agent: None,
+                call_id: None,
+            };
+            a_c.gate(req, &*sink_c as &dyn ApprovalSink, &cancel_c)
+        });
+
+        poll_for_request(&sink, Duration::from_secs(2)).expect("a emitted");
+
+        // Session b is freely mutable while a is suspended.
+        b.set_auth_mode(AuthMode::NoConfirmation);
+        let b_req = ApprovalRequest {
+            key: ToolKey::external("other", "fetch"),
+            operation_kind: OperationKind::Network,
+            summary: "GET /y".into(),
+            file_attachments: Vec::new(),
+            origin_agent: None,
+            call_id: None,
+        };
+        let b_cancel = CancelToken::new();
+        let b_sink = RecordingSink::default();
+        let b_outcome = b
+            .gate(b_req, &b_sink, &b_cancel)
+            .expect("no-confirm passes");
+        assert_eq!(b_outcome, GateOutcome::Allow);
+        assert_eq!(b_sink.request_count(), 0, "b does not surface a card");
+
+        // Drain a so the worker thread exits.
+        if let Some(body) = sink.last_request() {
+            let id = uuid::Uuid::parse_str(&body.request_id).unwrap();
+            let _ = a.respond(id, ApprovalResponse::Deny);
+        }
+        let _ = handle.join();
+    }
+
+    // --- race + resume-wake ------------------------------------------------
+
+    #[test]
+    fn gate_honors_landed_response_over_cancel() {
+        // A respond() that returns Ok must be honored: the resolved event
+        // carries the user's ACTUAL answer, never a synthetic Deny. Covers
+        // both the (Some, _) arm (respond wins the wait loop) and the
+        // (None, Some) arm (cancel broke the loop but respond stored before
+        // the take); both must emit the user's answer. The prior `(None, _)`
+        // arm emitted Deny on the race, contradicting the Ok respond.
+        let state = Arc::new(ApprovalState::new());
+        let cancel = Arc::new(CancelToken::new());
+        let sink = Arc::new(RecordingSink::default());
+
+        let state_c = Arc::clone(&state);
+        let sink_c = Arc::clone(&sink);
+        let cancel_c = Arc::clone(&cancel);
+        let handle = std::thread::spawn(move || {
+            let req = ApprovalRequest {
+                key: ToolKey::external("acme", "fetch"),
+                operation_kind: OperationKind::Network,
+                summary: "GET /x".into(),
+                file_attachments: Vec::new(),
+                origin_agent: None,
+                call_id: None,
+            };
+            state_c.gate(req, &*sink_c as &dyn ApprovalSink, &cancel_c)
+        });
+
+        let request_id = poll_for_request(&sink, Duration::from_secs(2)).expect("request emitted");
+        // Respond FIRST (lands the answer durably), then fire the cancel wake.
+        // Whether the gate's loop sees the response before or after the
+        // interrupt, the resolved event must reflect AllowOnce.
+        state
+            .respond(request_id, ApprovalResponse::AllowOnce)
+            .expect("respond ok");
+        cancel.request();
+        state.interrupt_pending();
+
+        let outcome = handle.join().expect("gate thread");
+        assert_eq!(outcome.expect("user allowed"), GateOutcome::Allow);
+        let resolved = sink.resolved.lock().unwrap();
+        assert_eq!(resolved.len(), 1, "resolved emitted exactly once");
+        assert_eq!(
+            resolved[0].1,
+            ApprovalResponse::AllowOnce,
+            "user's actual answer wins over cancel"
+        );
+    }
+
+    #[test]
+    fn reset_wakes_waiting_gate_to_cancelled() {
+        // reset() (the resume reset) must wake a gate blocked on the condvar
+        // so the suspended turn returns GateCancelled -- not hang until the
+        // 200ms cancel-poll. reset wakes via interrupt_pending ONLY (it does
+        // NOT request the cancel token); this pins the resume-cancels-in-
+        // flight-approval guarantee (ADR-0080).
+        let state = Arc::new(ApprovalState::new());
+        let cancel = Arc::new(CancelToken::new());
+        let sink = Arc::new(RecordingSink::default());
+
+        let state_c = Arc::clone(&state);
+        let sink_c = Arc::clone(&sink);
+        let cancel_c = Arc::clone(&cancel);
+        let handle = std::thread::spawn(move || {
+            let req = ApprovalRequest {
+                key: ToolKey::external("acme", "fetch"),
+                operation_kind: OperationKind::Network,
+                summary: "GET /x".into(),
+                file_attachments: Vec::new(),
+                origin_agent: None,
+                call_id: None,
+            };
+            state_c.gate(req, &*sink_c as &dyn ApprovalSink, &cancel_c)
+        });
+
+        poll_for_request(&sink, Duration::from_secs(2)).expect("request emitted");
+        // reset clears trust/mode AND fires interrupt_pending (no cancel-token
+        // request) -- the wake under test.
+        state.reset();
+
+        let err = handle.join().expect("gate thread").unwrap_err();
+        assert_eq!(err, GateCancelled);
+        assert!(
+            !cancel.is_requested(),
+            "reset wakes via interrupt_pending, not the cancel token"
+        );
+        // The cancel-path branch emits a synthetic Deny resolved event so the
+        // frontend flips stale pending cards (ADR-0083 "no stale pending").
+        let resolved = sink.resolved.lock().unwrap();
+        assert_eq!(resolved.len(), 1, "cancel path emits a synthetic Deny");
+        assert_eq!(
+            resolved[0].1,
+            ApprovalResponse::Deny,
+            "the synthetic resolved event is a Deny"
+        );
+    }
+
+    // --- helper ------------------------------------------------------------
+
+    /// Wait on the recording sink's condvar until a request body is
+    /// observable, returning its parsed request id. Bounded by `timeout` so
+    /// a logic bug fails the test instead of hanging CI. Uses `wait_timeout`
+    /// instead of wall-clock sleep polling so the test wakes immediately on
+    /// push and never flakes under CI load.
+    fn poll_for_request(sink: &Arc<RecordingSink>, timeout: Duration) -> Option<uuid::Uuid> {
+        let deadline = std::time::Instant::now() + timeout;
+        let mut g = sink.requests.lock().unwrap();
+        loop {
+            if let Some(body) = g.last() {
+                return uuid::Uuid::parse_str(&body.request_id).ok();
+            }
+            let now = std::time::Instant::now();
+            if now >= deadline {
+                return None;
+            }
+            let (g2, _) = sink.cv.wait_timeout(g, deadline - now).unwrap();
+            g = g2;
+        }
+    }
+
+    // --- try_external / reserved server name (issue #312) -------------------
+
+    #[test]
+    fn try_external_rejects_builtin_server_name() {
+        let err = ToolKey::try_external("builtin", "any").unwrap_err();
+        assert_eq!(err, ReservedServerName("builtin".into()));
+        assert_eq!(
+            err.to_string(),
+            "server name `builtin` is reserved for built-in tools"
+        );
+    }
+
+    #[test]
+    fn try_external_accepts_non_reserved_server_name() {
+        let key = ToolKey::try_external("acme", "fetch").unwrap();
+        assert_eq!(key.server, "acme");
+        assert_eq!(key.tool, "fetch");
+        assert!(!key.is_builtin());
+    }
+
+    #[test]
+    fn try_external_precise_match_no_normalization() {
+        // Trim / case variants are NOT normalized — only the exact reserved
+        // name is rejected.
+        assert!(ToolKey::try_external("Builtin", "x").is_ok());
+        assert!(ToolKey::try_external(" builtin ", "x").is_ok());
+        assert!(ToolKey::try_external("BUILTIN", "x").is_ok());
+        assert!(ToolKey::try_external("builtin", "x").is_err());
+    }
+
+    #[test]
+    #[cfg(debug_assertions)]
+    #[should_panic(expected = "reserved builtin server name")]
+    fn external_panics_in_debug_for_reserved_name() {
+        let _ = ToolKey::external("builtin", "any");
+    }
+
+    #[test]
+    fn external_accepts_non_reserved_in_debug() {
+        let key = ToolKey::external("acme", "fetch");
+        assert_eq!(key.server, "acme");
+    }
+
+    #[test]
+    fn reserved_spoof_server_differs_from_builtin() {
+        // The fallback sentinel must never equal the reserved name, else the
+        // spoof would bypass approval instead of surfacing a card.
+        assert_ne!(ToolKey::RESERVED_SPOOF_SERVER, ToolKey::BUILTIN_SERVER);
+    }
+
+    // --- truncate_summary (issue #312) --------------------------------------
+
+    #[test]
+    fn truncate_summary_returns_input_unchanged_when_within_limit() {
+        assert_eq!(truncate_summary("short", 512), "short");
+        assert_eq!(truncate_summary("exactly 10", 10), "exactly 10");
+        assert_eq!(truncate_summary("", 512), "");
+    }
+
+    #[test]
+    fn truncate_summary_appends_ellipsis_when_cut() {
+        let input = "a".repeat(600);
+        let result = truncate_summary(&input, 512);
+        assert!(result.chars().count() <= 512);
+        assert!(result.ends_with("..."));
+        // Head is `max_chars - 3` 'a's, then "...".
+        let head: String = result.chars().take(509).collect();
+        assert_eq!(head, "a".repeat(509));
+    }
+
+    #[test]
+    fn truncate_summary_total_length_never_exceeds_max() {
+        for &max in &[3usize, 5, 10, 50, 512] {
+            let input = "x".repeat(1000);
+            let result = truncate_summary(&input, max);
+            assert!(
+                result.chars().count() <= max,
+                "result {} chars > max {}",
+                result.chars().count(),
+                max
+            );
+        }
+    }
+
+    #[test]
+    fn truncate_summary_degrades_to_plain_cut_when_max_below_3() {
+        assert_eq!(truncate_summary("abcdef", 2), "ab");
+        assert_eq!(truncate_summary("abcdef", 0), "");
+        assert_eq!(truncate_summary("abcdef", 1), "a");
+    }
+
+    #[test]
+    fn truncate_summary_is_char_boundary_safe() {
+        // Multi-byte UTF-8: 'é' is 2 bytes, '中' is 3 bytes. Truncation at
+        // char boundaries must never split a code point.
+        let input = "中".repeat(100);
+        let result = truncate_summary(&input, 10);
+        assert!(result.chars().count() <= 10);
+        assert!(result.ends_with("..."));
+        // No panic / no replacement chars.
+        assert!(result.chars().all(|c| c == '中' || c == '.'));
+    }
+
+    #[test]
+    fn gate_truncates_summary_before_broadcast() {
+        // The gate must cap summary to SUMMARY_MAX_CHARS before emitting, so
+        // the broadcast never carries an unbounded bridge payload (issue #312).
+        let state = Arc::new(ApprovalState::new());
+        let cancel = Arc::new(CancelToken::new());
+        let sink = Arc::new(RecordingSink::default());
+
+        let state_c = Arc::clone(&state);
+        let sink_c = Arc::clone(&sink);
+        let cancel_c = Arc::clone(&cancel);
+        let handle = std::thread::spawn(move || {
+            let req = ApprovalRequest {
+                key: ToolKey::external("acme", "fetch"),
+                operation_kind: OperationKind::Network,
+                summary: "S".repeat(1000),
+                file_attachments: Vec::new(),
+                origin_agent: None,
+                call_id: None,
+            };
+            state_c.gate(req, &*sink_c as &dyn ApprovalSink, &cancel_c)
+        });
+
+        let _ = poll_for_request(&sink, Duration::from_secs(2)).expect("request emitted");
+        cancel.request();
+        state.interrupt_pending();
+        let _ = handle.join();
+
+        let body = sink.last_request().expect("request recorded");
+        assert!(
+            body.summary.chars().count() <= SUMMARY_MAX_CHARS,
+            "broadcast summary {} > {}",
+            body.summary.chars().count(),
+            SUMMARY_MAX_CHARS
+        );
+        assert!(body.summary.ends_with("..."));
+    }
+
+    // --- Policy atomicity (review H1) -------------------------------------
+
+    /// Hammer test: a concurrent `reset()` must never let a reader observe a
+    /// half-reset policy snapshot (`PerCall` mode + stale trust). The merged
+    /// `Mutex<Policy>` guarantees this structurally; this test catches a
+    /// regression if someone splits the mutex back into two. Race tests are
+    /// inherently non-deterministic, but hundreds of iterations across
+    /// multiple threads give high regression hit-rate.
+    #[test]
+    fn reset_is_atomic_relative_to_concurrent_reads() {
+        let state = Arc::new(ApprovalState::new());
+
+        // Reader thread: repeatedly take a policy snapshot via the same lock
+        // path `gate()` uses. The only invalid state is `PerCall` (the
+        // post-reset default) with `trust` still containing `key` -- that
+        // would mean `reset` cleared the mode but not the trust (half-reset).
+        // `NoConfirmation` + empty trust is valid (writer between set_mode
+        // and seed_trust); `NoConfirmation` + trust is the pre-reset steady
+        // state.
+        let state_r = Arc::clone(&state);
+        let reader = std::thread::spawn(move || {
+            let key = ToolKey::external("acme", "fetch");
+            for _ in 0..500 {
+                let (mode, has_trust) = {
+                    let g = state_r.policy.lock().expect("policy lock poisoned");
+                    (g.auth_mode, g.trust.contains(&key))
+                };
+                if mode == AuthMode::PerCall {
+                    assert!(
+                        !has_trust,
+                        "half-reset: PerCall mode but trust not yet cleared"
+                    );
+                }
+            }
+        });
+
+        // Writer thread: cycle set -> reset repeatedly.
+        let state_w = Arc::clone(&state);
+        let writer = std::thread::spawn(move || {
+            let key = ToolKey::external("acme", "fetch");
+            for _ in 0..500 {
+                state_w.set_auth_mode(AuthMode::NoConfirmation);
+                state_w.seed_trust(&key);
+                state_w.reset();
+            }
+        });
+
+        writer.join().expect("writer");
+        reader.join().expect("reader");
+    }
+}

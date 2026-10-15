@@ -3,27 +3,368 @@ name = "toptopduck"
 version = "0.1.0"
 description = "Local-first AI data analysis desktop tool"
 edition = "2021"
-rust-version = "1.77"
+# MSRV 1.86 (ADR-0116): rig's edition-2024 crates floor at 1.85, and one step
+# of headroom is kept deliberately (top-out risk recorded there). CI
+# runs stable (no toolchain pin), so the declaration is the only gate.
+rust-version = "1.86"
+# The crate declares multiple [[bin]] fixture targets below (acp-fake-cli /
+# mcp-fake-server and friends), so a bare `cargo run` -- and
+# `tauri dev`, which shells out to cargo for the main app binary -- cannot infer
+# which to launch. `default-run` pins the desktop app entry so both resolve
+# without `--bin`; the fixtures stay reachable via `cargo run --bin <name>` / the
+# CARGO_BIN_EXE_* test macro.
+default-run = "toptopduck"
 
 [lib]
 name = "toptopduck_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
+# ACP fake CLI fixture (issue #299, ADR-0081 test seam C): a minimal binary that
+# speaks the ACP v1 stdio JSON-RPC subset so the adapter engine can be exercised
+# end-to-end in CI without the real gemini-cli install + login. Lives under
+# `tests/fixtures/` (a subdir, so cargo does NOT auto-discover it as an
+# integration-test target); declared here as a `[[bin]]` so integration tests
+# resolve its path via `env!("CARGO_BIN_EXE_acp-fake-cli")`. Built with the
+# normal `cargo build` / `cargo test` -- it links the lib for the shared ACP
+# wire types (single source of truth). The Tauri bundler only ships `main.rs`,
+# so this fixture never reaches end users.
+[[bin]]
+name = "acp-fake-cli"
+path = "tests/fixtures/acp_fake_cli.rs"
+
+# Codex fake CLI fixture (ADR-0094, issue #523): a minimal binary that emulates
+# `codex exec --json` NDJSON output so the JSON event stream engine can be
+# exercised end-to-end in CI without the real codex install. Lives under
+# `tests/fixtures/` (subdir, no auto-discovery); pure serde_json (no lib import)
+# so the fixture stays self-contained. Integration tests resolve its path via
+# `env!("CARGO_BIN_EXE_codex-fake-cli")`. The Tauri bundler ships only `main.rs`,
+# so this fixture never reaches end users.
+[[bin]]
+name = "codex-fake-cli"
+path = "tests/fixtures/codex_fake_cli.rs"
+
+# Codex app-server fake fixture (ADR-0096, issue #535): a minimal binary that
+# emulates the `codex app-server` JSON-RPC-over-stdio protocol (no `jsonrpc`
+# field) so the diagnostic probe's `model/list` catalog read can be exercised
+# end-to-end in CI without the real codex install. Lives under `tests/fixtures/`
+# (subdir, no auto-discovery); pure serde_json (no lib import) so the fixture
+# stays self-contained. Integration tests resolve its path via
+# `env!("CARGO_BIN_EXE_codex-app-server-fake")`. The Tauri bundler ships only
+# `main.rs`, so this fixture never reaches end users.
+[[bin]]
+name = "codex-app-server-fake"
+path = "tests/fixtures/codex_app_server_fake.rs"
+
+# Claude-code fake CLI fixture (ADR-0097, issue #561): a minimal binary that
+# emulates BOTH claude-code surfaces the product drives, in one binary like the
+# real CLI -- the TURN surface (`--print --output-format stream-json` frames)
+# and the PROBE surface (the same argv + `--input-format stream-json`
+# control-plane initialize). Lives under `tests/fixtures/` (subdir, no
+# auto-discovery); pure serde_json (no lib import) so the fixture stays
+# self-contained. Integration tests resolve its path via
+# `env!("CARGO_BIN_EXE_claude-fake-cli")`. The Tauri bundler ships only
+# `main.rs`, so this fixture never reaches end users.
+[[bin]]
+name = "claude-fake-cli"
+path = "tests/fixtures/claude_fake_cli.rs"
+
+# MCP fake server fixture (issue #301 slice C-gw): a minimal stdio MCP server
+# the gateway aggregation / routing integration tests spawn via
+# `env!("CARGO_BIN_EXE_mcp-fake-server")`. Speaks the MCP stdio newline-delimited
+# JSON-RPC subset the gateway's StdioClient drives (initialize / tools/list /
+# tools/call). Lives under `tests/fixtures/` (subdir, no auto-discovery); pure
+# serde_json (no lib import) so the fixture stays self-contained. Built with the
+# normal `cargo test`; the Tauri bundler ships only `main.rs`, so this fixture
+# never reaches end users.
+[[bin]]
+name = "mcp-fake-server"
+path = "tests/fixtures/mcp_fake_server.rs"
+
+# MCP hang server fixture (issue #392): a stdio process that spawns
+# successfully but never responds to JSON-RPC requests. The probe timeout
+# integration test spawns it, verifies the deadline fires, and confirms the
+# child is killed. Pure std — reads stdin to keep the pipe open, writes
+# nothing. The Tauri bundler ships only `main.rs`, so this never reaches end
+# users.
+[[bin]]
+name = "mcp-hang-server"
+path = "tests/fixtures/mcp_hang_server.rs"
+
+# MCP paginated fake server fixture (issue #900): a stdio MCP server whose
+# `tools/list` answer spans two pages joined by `nextCursor` -- the gateway +
+# probe integration tests pin that `list_tools` folds every page into the
+# catalog (pre-#900 the second page was silently dropped). Lives under
+# `tests/fixtures/` (subdir, no auto-discovery); pure serde_json (no lib
+# import) so the fixture stays self-contained. The Tauri bundler ships only
+# `main.rs`, so this fixture never reaches end users.
+[[bin]]
+name = "mcp-paginated-server"
+path = "tests/fixtures/mcp_paginated_server.rs"
+
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-tauri = { version = "2", features = [] }
+# `tray-icon` enables the system tray residency surface (ADR-0125, issue
+# #1140): TrayIconBuilder + the menu swap the rebuild path drives. The icon
+# itself reuses the default window icon (bundled by tauri-build), so no
+# separate tray asset ships.
+tauri = { version = "2", features = ["protocol-asset", "tray-icon"] }
 tauri-plugin-dialog = "2"
+# Platform detection (ADR-0074, issue #262): plugin-os over `navigator.userAgent`
+# (webview UA drift) and `cfg!(target_os)` (command + async + wiring), consistent
+# with the four existing Tauri plugins. Registered unconditionally (same as
+# dialog / log); the desktop-only plugins stay under cfg(not(mobile)) below.
+tauri-plugin-os = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-duckdb = { version = "1", features = ["bundled"] }
+# `parquet` statically compiles the DuckDB parquet extension into the binary so
+# `read_parquet` works offline (ADR-0014: extensions bundled, never autodownloaded).
+# CSV/JSON readers ship in DuckDB core; parquet needs this bundled extension.
+duckdb = { version = "1", features = ["bundled", "parquet"] }
 sha2 = "0.10"
 anyhow = "1"
 tempfile = "3"
+# `regex` backs the turn-artifact reply-text scan's three pattern families
+# (ADR-0124): markdown link targets, quoted/backtick-wrapped paths, and
+# whitelist-constrained bare paths. Already in the tree transitively; used
+# directly here so the scan does not hand-roll a tokenizer.
+regex = "1"
+# `calamine` reads .xlsx cell cached values (formulas resolved to their cached
+# result, never recomputed -- ADR-0015) fully offline. duckdb-rs's vendored
+# DuckDB amalgamation cannot statically link the `excel` loadable extension
+# (manifest ships only core_functions/json/parquet), so xlsx bytes go
+# calamine -> per-sheet temp CSV -> read_csv_auto copy-in, keeping DuckDB as the
+# single type-inference source of truth (ADR-0032). See ADR-0014/0015/0043.
+calamine = { version = "0.30", features = ["dates"] }
+# Per-sheet temp CSV writer: correct escaping for commas/quotes/newlines in cells.
+csv = "1"
+# Real LLM transport (issue #29, ADR-0007/0019/0029): blocking HTTP client for
+# the Anthropic Messages API, called from the sync `Provider::generate` path on
+# a blocking thread. Chosen over reqwest (async) because the provider trait is
+# synchronous and runs under `spawn_blocking` -- no async runtime needed, and
+# ureq is far lighter. The `json` feature adds serde integration; TLS (rustls,
+# default) is pure-Rust and cross-platform with no native deps. This is the ONLY
+# network egress surface in the app -- the webview has no HTTP plugin and the
+# CSP blocks its external connect (ADR-0029 invariant 1).
+ureq = { version = "2", features = ["json"] }
+# URL parsing for the provider base_url scheme check (issue #244). `url::Url::parse`
+# rejects malformed / scheme-less base_urls and exposes the scheme so the provider
+# can admit only `http`/`https`, ruling out `file:` and other exfiltration vectors
+# before any request is built. A transitive dep of ureq; declared explicitly so the
+# provider's call sites are intentional, not accidental.
+url = "2"
+# OS keychain access (ADR-0029 invariant 3): the decrypted API key lives only
+# in the Rust core process. The frontend never holds it ("is it set?" returns a
+# bool); Rust fetches it per turn and attaches it to the LLM call. The platform
+# features are load-bearing: v3 gates every real store behind one, and without
+# any it silently falls back to the in-memory mock whose entries live only
+# inside each `Entry::new` handle -- a key "write" then lands in a dropped
+# entry and every later read sees `NoEntry`, so Set key never persisted (the
+# bug this line fixed). Windows gets the Credential Manager, macOS the Keychain,
+# Linux the Secret Service (issue #730): sync-secret-service is the desktop
+# standard -- persistent across reboots, unlike the keyutils linux-native
+# feature whose keys die with the login session; the async zbus flavor would
+# drag an async stack in for no gain. The dbus-secret-service dep itself is
+# target-gated to Linux, so Windows/macOS builds never see it. CI runners have
+# no Secret Service daemon: the test suites pin keyring's default credential
+# builder to the in-memory mock there (see provider::keychain's
+# pin_mock_keyring), and an absent daemon on a real desktop must surface as a
+# keychain fault, never a fake success (issue #243 honest degrade). crypto-rust
+# turns on the DH-encrypted Secret Service session (a pure-Rust AES/HKDF
+# stack, no new system dependency; keyring forwards it to dbus-secret-service)
+# so the key never crosses the session bus in plain text -- without it the
+# session falls back to Plain transport. Build-time note: the dbus crate
+# links system libdbus through pkg-config, so bare-container builds need
+# libdbus-1-dev (the GitHub ubuntu runners ship it).
+keyring = { version = "3", features = ["windows-native", "apple-native", "sync-secret-service", "crypto-rust"] }
+# `log` facade for diagnostic warnings (silent type-inference degradation on
+# Excel error/undecodable-date cells, rollback failures). calamine already
+# pulls `log` in transitively; declaring it explicitly makes the call sites
+# intentional. The sink is tauri-plugin-log (issue #98): registered on the
+# lib.rs Builder chain, it routes these warnings to stdout + app_log_dir so
+# degradation is observable. The Builder runs only under the Tauri shell, so
+# under pure `cargo test` the `log` facade has no sink and these warnings are
+# dropped (add an env_logger dev-dep + init if test diagnostics are ever
+# needed).
+log = "0.4"
+# Compile-time embedding of the builtin-skill asset tree (ADR-0121 Decision
+# 1): the SKILL.md + scripts/references file set under
+# `src/skills/assets/builtin/` ships inside the binary (single-file
+# distribution keeps its deployment property), while the prose lives as real
+# files with readable diffs instead of escaped string literals. build.rs
+# declares the recursive rerun-if-changed so asset edits rebuild.
+include_dir = "0.7"
+# Unified log sink for both the Rust `log` facade and the frontend
+# `@tauri-apps/plugin-log` bindings (issue #98, ADR-0029 invariant 2 /
+# ADR-0038). Registered on the lib.rs Builder chain so the existing
+# log::warn! calls (app-config path fallback, create_dir_all failure, ingest
+# type-inference degradation) land in stdout + app_log_dir. The frontend
+# plugin-log IPCs into the same sink -- one file, one format
+# (DATE[TARGET][LEVEL] MESSAGE), both ends. Compatible with the `log`
+# facade, so existing log::warn! call sites need zero changes -- the sink is
+# transparent.
+tauri-plugin-log = "2"
+# tokio is already a transitive dep through Tauri; declared explicitly so the
+# probe command can use `tokio::time::timeout` to bound the MCP probe cycle
+# (issue #392). Only the `time` feature is needed — the runtime itself is
+# managed by Tauri's async_runtime. Zero additional code is shipped: the
+# tokio shared object is already linked.
+# `rt` + `sync` (ADR-0116, issue #917): the loop runtime drives the upstream agent loop
+# on a dedicated per-turn current-thread runtime and parks/wakes through
+# `tokio::sync::Notify`; `macros` backs the runner's `select!` race floor.
+tokio = { version = "1", features = ["time", "rt", "sync", "macros"] }
+# `sqlparser` parses provider SQL to extract the FROM/JOIN reference-name set
+# for the stale-cascade provenance graph (issue #40, ADR-0013/0025/0040): each
+# materialized result_N records which working-set members its SQL named, so a
+# source delete can transitively mark dependents stale. A failed parse falls
+# back to "depends on every current member", so the cascade stays sound (it
+# never under-invalidates -- "宁可多失效不漏失效", issue #40). default-features
+# off: only the parser is needed, no backend.
+sqlparser = { version = "0.52", default-features = false }
+# YAML frontmatter of Agent Skills `SKILL.md` files (issue #362, ADR-0086):
+# parse into a generic mapping + re-render on update, so spec fields the app
+# does not surface (allowed-tools, any third-party key) survive an edit
+# verbatim. Mapping preserves insertion order, keeping the field order the
+# file had. The crate is archived upstream but remains the de-facto YAML-serde
+# bridge and satisfies the MSRV (1.64 <= 1.80).
+serde_yaml = "0.9"
+# Backend-generated session ids (ADR-0056): create_session mints a UUID v4 so
+# the id <-> resource binding is atomic (no "id issued, resource unbuilt"
+# window). v4 only -- no serde need; the id crosses IPC as a plain string.
+uuid = { version = "1", features = ["v4"] }
+# Typed session-scoped command errors (issue #73, review M8): the four failure
+# modes the store / reject guards used to collapse into a bare `Err(String)`
+# are now a typed `SessionError` (InvalidId / NotFound / Resuming / InFlight /
+# Engine). thiserror supplies the `Display` impl the command boundary maps to
+# the IPC error string; serde is derived so the enum is IPC-capable if a future
+# command returns it directly (the frontend still sees a string today).
+thiserror = "2"
+# Reveal a path in the OS file manager (issue #362): the settings Skills
+# section's "open source location" for linked skills reveals the link target.
+# The opener plugin's default permission set includes reveal-item-in-dir (the
+# only surface this app uses); registered on the lib.rs Builder chain like the
+# other unconditional plugins.
+tauri-plugin-opener = "2"
+# OS locale read (ADR-0052, issue #78): when the locale preference is "system",
+# the Rust core resolves the OS locale itself (the frontend never pushes locale
+# over IPC). sys-locale reads the user's preferred UI language on every desktop
+# platform -- GetUserPreferredUILanguages on Windows, CFLocaleCopyPreferredLanguages
+# on macOS, and the LANGUAGE/LC_* env on Linux -- the same display-language
+# signal the webview's navigator.language reflects, so the two resolve "system"
+# identically in steady state. The narrow drift window (a live OS-language
+# switch lagging the webview's cached copy) is recorded in ADR-0052 Decision 7.
+sys-locale = "0.3"
+# Codex CLI config parsing for the MCP import wizard (issue #390): reads the
+# `[mcp_servers.*]` tables from `~/.codex/config.toml`. MSRV 1.76 (<= 1.80).
+toml = "0.9"
+# Bounded single-line reader (workspace member `crates/bounded-line`): shared
+# by the gateway framing / MCP SSE / ACP stdout readers here and by the
+# zero-dependency ACP bridge binary (ADR-0085 pure-std constraint, #1295).
+bounded-line = { path = "../crates/bounded-line" }
+# Builtin runtime (ADR-0116, issue #917): the in-process loop borrows rig's
+# kernel only -- rig-core + rig-agent, direct deps, `default-features = false`
+# (drops the `derive` proc-macro), minor-gated "0.42" with the Cargo.lock
+# exact pin as the revert floor. The app registers NONE of the crate's
+# framework surfaces (hooks/memory/ToolContext/model selection all stay
+# inert; every tool call routes the app gateway, ADR-0105) -- borrow the
+# kernel, not the framework.
+rig-core = { version = "0.42", default-features = false, features = ["rustls"] }
+rig-agent = { version = "0.42", default-features = false }
+# The live turn path (ADR-0116 Decision 6, issue #918): the app constructs
+# the reqwest client injected into rig's client builder -- redirects pinned
+# off at the client (`Policy::none`), so a cross-host 3xx lands as an
+# honest transient instead of following the `Location` with the credential
+# still on board. Same 0.13 line rig-core rides (already in the lock via
+# rig); `default-features = false` suppresses reqwest's default native-tls
+# so the only TLS backend is rig-core's `rustls` feature above -- the same
+# pure-Rust TLS posture ureq carries. The explicit feature set restores the
+# wire posture the egress client had before the retired loop layer's removal
+# (its defaults-on reqwest used to contribute these through the feature
+# union): OS-configured proxy resolution (GUI-launched desktop apps rarely
+# carry proxy env vars), HTTP/2, and charset decoding. The egress client
+# this builds is process-shared (issue #926), so the proxy snapshot
+# freezes at the first successful build -- a mid-session proxy change
+# waits for process restart, the same posture the probe face's egress
+# singleton accepts.
+reqwest = { version = "0.13", default-features = false, features = ["http2", "system-proxy", "charset"] }
+# Upstream rig emits its SSE/retry diagnostics through `tracing`; the app's
+# log sink is the `log` facade (tauri-plugin-log, issue #98). Declaring
+# tracing with the `log` feature turns on tracing's log bridge via feature
+# unification, so upstream logs land in stdout + app_log_dir instead of a
+# silent diagnostic blind spot (an ADR-0116 consequence: the rig crates log
+# through tracing).
+tracing = { version = "0.1", features = ["log"] }
+# The loop runtime consumes rig's streaming surface as a plain
+# `Pin<Box<dyn Stream>>` (rig-core's `StreamingResult`); `futures` is already
+# a transitive dep of rig-core, and declaring it explicitly gives the
+# consumer's `StreamExt` an intentional home (the `select!`-based cancel race
+# in the driver also rides tokio's own macros -- no futures executor).
+futures = "0.3"
+http = "1"
+
+# Desktop-only Tauri plugins (issue #100, ADR-0008 cross-platform). Gated to
+# non-mobile targets to mirror lib.rs `#[cfg(desktop)]` -- these plugins have
+# no meaning (or no support) on Android/iOS. single-instance prevents a second
+# process from owning its own SessionStore (ADR-0056) and racing on the
+# app-config atomic write (ADR-0038); window-state persists the main window's
+# position/size/maximized across launches.
+# CLI fake-tool fixture (issue #671, ADR-0108): a minimal non-interactive
+# binary the cli_tools executor's unit tests spawn in place of a real
+# registered tool (the acp-fake-cli precedent). See the fixture source for
+# the flag protocol.
+[[bin]]
+name = "cli-fake-tool"
+path = "tests/fixtures/cli_fake_tool.rs"
+
+[target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
+tauri-plugin-single-instance = "2"
+tauri-plugin-window-state = "2"
+
+# CLI tool executor platform support (issue #671, ADR-0108 Decision 5):
+# Windows terminates a tool's process tree via a kill-on-close job object;
+# Unix puts the child in its own process group and killpg's it on cancel.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_Networking_WinSock",
+    "Win32_Security",
+    "Win32_System_JobObjects",
+    "Win32_System_Threading",
+] }
+
+# Exclusive-handle fixture for the blocked-delete test (issue #1022):
+# `CreateFileW` with zero sharing is the one open-time sharing-violation
+# blocker std's POSIX-semantics subtree delete cannot open around (a
+# read-only attribute is the other defeat class std never clears).
+[target.'cfg(windows)'.dev-dependencies]
+windows-sys = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Storage_FileSystem",
+] }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
 
 [dev-dependencies]
 tempfile = "3"
-
-[profile.dev]
-incremental = true
+# Generates .xlsx fixtures (incl. formula cells with cached values) for the
+# black-box ingest seam -- no binary fixtures committed (mirrors the parquet
+# fixture helper).
+rust_xlsxwriter = "0.92"
+# HTTP mock for the provider-path tests (issue #29): the preflight probes and
+# the upstream-streamer wire suites run against a local mockito server instead
+# of the network -- the turn orchestrator's offline test base stays on
+# FakeProvider; this tests the HTTP + auth paths deterministically, no real
+# key, no real endpoint.
+mockito = "1"
+# rig's offline mock model (ADR-0116, issue #917): `MockCompletionModel` /
+# `MockStreamEvent` script the loop runtime's behavior-contract pins with no
+# network, no key -- the same role the scripted `FakeProvider`
+# (provider::fake) plays for the session pipeline's offline suites.
+# dev-only feature: the production build keeps
+# `default-features = false`.
+rig-core = { version = "0.42", default-features = false, features = [
+    "test-utils",
+] }

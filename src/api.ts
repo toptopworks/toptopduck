@@ -1,14 +1,1059 @@
 import { invoke } from "@tauri-apps/api/core";
-import type { DatasetDescriptor, LoadOutcome } from "./types";
+import { listen } from "@tauri-apps/api/event";
+import type { UnlistenFn } from "@tauri-apps/api/event";
+import type { AgentEntry, AgentListing, AgentUpdate } from "./types/agents";
+import type { AppConfig, DefaultRuntime, ModelPosture } from "./types/app-config";
+import type { BuiltinScanResult, CliToolConfig } from "./types/cli-tool";
+import type {
+  DatasetDescriptor,
+  DatasetPrivacy,
+  DeleteImpactEntry,
+  LoadOutcome,
+  RowPage,
+  SheetGuidance,
+} from "./types/dataset";
+import type {
+  DiscoveryResult,
+  ImportSource,
+  McpProbeResult,
+  McpServerConfig,
+} from "./types/mcp";
+import type {
+  ImportItem,
+  ImportMode,
+  ImportOutcome,
+  SkillListing,
+  SkillSource,
+} from "./types/skills";
+import type {
+  ResumeProgress,
+  SaveError,
+  SessionMetadata,
+  TurnProgress,
+} from "./types/session";
+import type {
+  ProfileKeyStatus,
+  ProfileTestOutcome,
+  ProviderConfig,
+  ProviderConfigView,
+  Protocol,
+} from "./types/provider";
+import type { ThreadEntry, TurnOutcome } from "./types/thread";
+import type {
+  ApprovalAbandonedPayload,
+  ApprovalRequestPayload,
+  ApprovalResolvedPayload,
+  ApprovalResponse,
+  AuthMode,
+  FileAttachment,
+  ToolKey,
+} from "./types/approval";
+import type {
+  AdapterCatalogs,
+  AdapterEntry,
+  ProbeOk,
+  SessionModelConfig,
+  SessionRuntimeChoice,
+} from "./types/runtime";
 
-export async function ingestFile(path: string): Promise<LoadOutcome> {
-  return invoke<LoadOutcome>("ingest_file", { path });
+// Multi-session addressing (ADR-0056): every session-scoped function takes
+// `sessionId` as its first parameter -- the backend looks up the target
+// session by id. Session-AGNOSTIC functions (api key / provider config / app
+// config / sessions dir) take no sessionId. The frontend tracks the ids
+// itself (createSession mints one); this single-session shell holds one until
+// the multi-tab UI lands in a later PRD.
+
+/** The wire reply from `create_session` (ADR-0089): the runtime session id +
+ *  the bound `session.duck` path. Every session is persisted from creation. */
+export interface CreateSessionReply {
+  session_id: string;
+  duck_path: string;
 }
 
-export async function listWorkingSet(): Promise<DatasetDescriptor[]> {
-  return invoke<DatasetDescriptor[]>("list_working_set");
+// Create a new session (ADR-0056/0089): the backend builds an independent
+// in-memory DuckDB instance + per-session cancel token, binds them to a
+// backend-generated id (UUID), AND immediately persists by creating a
+// per-session directory + initial session.duck. This is the `+ tab` action.
+export async function createSession(): Promise<CreateSessionReply> {
+  return invoke<CreateSessionReply>("create_session");
 }
 
-export async function activeDataset(): Promise<DatasetDescriptor | null> {
-  return invoke<DatasetDescriptor | null>("active_dataset");
+// Close a session (ADR-0055): fire cancel + mark closing + remove from the
+// store. Returns immediately; an in-flight ask's post-check discards its turn.
+// After this, calls targeting the id reject as unknown session.
+// Returns true when ADR-0089 Decision 6 cleaned up the per-session directory
+// (empty timeline); false for a normal close where the session stays on disk.
+export async function closeSession(sessionId: string): Promise<boolean> {
+  return invoke<boolean>("close_session", { sessionId });
+}
+
+/** One row from `list_live_sessions` (issue #842): a live backend session the
+ * reloaded frontend can re-adopt. The consumer rule is close-when
+ * `in_flight` is true OR `duck_path` is null -- a null path is never
+ * adoptable whatever the flag says. `duck_path` / `session_name` are null for
+ * an unbound session or when any holder occupied the session lock at sweep
+ * time (an in-flight turn, a transient command, a poisoned lock). */
+export interface LiveSessionEntry {
+  session_id: string;
+  duck_path: string | null;
+  session_name: string | null;
+  in_flight: boolean;
+}
+
+// Enumerate the store's live sessions (issue #842): the frontend's startup
+// re-adoption sweep after a webview reload wiped its open-session set while
+// the backend sessions (and their canonical single-writer keys) stayed alive.
+// Empty on a normal cold start -- no reload happened, nothing to re-adopt.
+export async function listLiveSessions(): Promise<LiveSessionEntry[]> {
+  return invoke<LiveSessionEntry[]>("list_live_sessions");
+}
+
+// Close a session AND wait for the canonical single-writer key to be released
+// (ADR-0063). The delete path's variant: blocks (<=120s, aligned to ADR-0021
+// REQUEST_TIMEOUT) until the in-flight ask's Arc clone drops and Session::Drop
+// runs, so delete_session's try_acquire gate sees the key free. Resolves at
+// once when no ask is in flight. The plain closeSession (above) stays
+// fire-and-forget -- this is the delete-only wait variant.
+export async function closeSessionAndWaitRelease(
+  sessionId: string,
+): Promise<void> {
+  await invoke<void>("close_session_and_wait_release", { sessionId });
+}
+
+export async function ingestFile(sessionId: string, path: string): Promise<LoadOutcome> {
+  return invoke<LoadOutcome>("ingest_file", { sessionId, path });
+}
+
+// Re-ingest an Excel workbook with the user's guided rectify choices
+// (ADR-0015/0042), after a NeedsGuidance outcome.
+export async function ingestFileGuided(
+  sessionId: string,
+  path: string,
+  guidance: SheetGuidance[],
+): Promise<LoadOutcome> {
+  return invoke<LoadOutcome>("ingest_file_guided", { sessionId, path, guidance });
+}
+
+// Fetch one preview window for a sheet parked on the guided-load dialog
+// (issue #750): rows [offset, offset + limit) rendered as strings, served
+// from the parse the NeedsGuidance outcome retained server-side -- zero
+// workbook re-parse per page. Rejects when the (path, sheet) pair no longer
+// matches the retained guidance (committed / discarded / superseded).
+export async function guidanceWindow(
+  sessionId: string,
+  path: string,
+  sheetName: string,
+  offset: number,
+  limit: number,
+): Promise<string[][]> {
+  return invoke<string[][]>("guidance_window", {
+    sessionId,
+    path,
+    sheetName,
+    offset,
+    limit,
+  });
+}
+
+// Drop the session's retained guided-load parse (issue #750): the dialog's
+// cancel path. Commit already drops it server-side; this covers cancel. The
+// caller fires it best-effort (a reject means nothing leaks -- the retention
+// is session-ephemeral).
+export async function discardGuidedRetention(sessionId: string): Promise<void> {
+  await invoke<void>("discard_guided_retention", { sessionId });
+}
+
+export async function listWorkingSet(sessionId: string): Promise<DatasetDescriptor[]> {
+  return invoke<DatasetDescriptor[]>("list_working_set", { sessionId });
+}
+
+export async function activeDataset(sessionId: string): Promise<DatasetDescriptor | null> {
+  return invoke<DatasetDescriptor | null>("active_dataset", { sessionId });
+}
+
+// Rename a dataset's display label (ADR-0037, issue #8): display-only -- the
+// reference name is untouched, so SQL / recipe / active references stay valid.
+// Rejects an unknown reference or a label already shown by another dataset; the
+// backend rejects with the typed `SessionError::RenameDataset` (issue #121).
+export async function renameDataset(
+  sessionId: string,
+  referenceName: string,
+  newDisplay: string,
+): Promise<DatasetDescriptor> {
+  return invoke<DatasetDescriptor>("rename_dataset", { sessionId, referenceName, newDisplay });
+}
+
+// Re-upload onto an existing dataset's reference name (ADR-0042, issue #11): a
+// fresh snapshot takes over the name; the old one is discarded. Distinct from
+// ingestFile (add) -- the reference name to take over is explicit.
+export async function replaceSource(
+  sessionId: string,
+  referenceName: string,
+  path: string,
+): Promise<LoadOutcome> {
+  return invoke<LoadOutcome>("replace_source", { sessionId, referenceName, path });
+}
+
+// Remove a source dataset from the working set (issue #38/#39, ADR-0040).
+export async function removeSource(sessionId: string, referenceName: string): Promise<void> {
+  await invoke<void>("remove_source", { sessionId, referenceName });
+}
+
+// Delete the ACTIVE source and repoint focus at an explicit continuation
+// source (issue #39, ADR-0035 -- no silent focus jump).
+export async function removeActiveSource(
+  sessionId: string,
+  referenceName: string,
+  continueWith: string,
+): Promise<void> {
+  await invoke<void>("remove_active_source", { sessionId, referenceName, continueWith });
+}
+
+// Preview the delete impact of one source (issue #1063): the live results a
+// removal would mark stale, resolved to display labels in ascending result
+// order. Read-only and lenient (an unknown reference yields an empty list),
+// so the confirm dialogs render it while the delete itself never depends on
+// it.
+export async function previewDeleteImpact(
+  sessionId: string,
+  referenceName: string,
+): Promise<DeleteImpactEntry[]> {
+  return invoke<DeleteImpactEntry[]>("preview_delete_impact", { sessionId, referenceName });
+}
+
+// Set a dataset's privacy controls (ADR-0011, issue #9 slice 5).
+export async function setDatasetPrivacy(
+  sessionId: string,
+  referenceName: string,
+  privacy: DatasetPrivacy,
+): Promise<DatasetDescriptor> {
+  return invoke<DatasetDescriptor>("set_dataset_privacy", { sessionId, referenceName, privacy });
+}
+
+// Ask one question (PRD #1) against the named session: run one turn and return
+// its ADR-0028 outcome (result / textual / failed / cancelled). The staged
+// skill names (ADR-0112 picker channel, calibrated by ADR-0119) are
+// materialized at submit as the turn's user invocations. Empty and absent are
+// equivalent -- the Rust command entry normalizes both through one Option
+// fold, the single rule; callers pass the array unconditionally (issue #992).
+export async function askQuestion(
+  sessionId: string,
+  question: string,
+  skillInvocations: string[],
+): Promise<TurnOutcome> {
+  return invoke<TurnOutcome>("ask", { sessionId, question, skillInvocations });
+}
+
+// Cancel the named session's in-flight turn (ADR-0021, issue #28). Fires THAT
+// session's cancel token (per-session, ADR-0056).
+export async function cancelQuery(sessionId: string): Promise<void> {
+  await invoke<void>("cancel", { sessionId });
+}
+
+// Read the named session's conversation thread (ADR-0028/0039/0040).
+export async function conversation(sessionId: string): Promise<ThreadEntry[]> {
+  return invoke<ThreadEntry[]>("conversation", { sessionId });
+}
+
+// Read one page of a dataset's rows from the named session (ADR-0024).
+export async function readRows(
+  sessionId: string,
+  referenceName: string,
+  offset: number,
+  limit: number,
+): Promise<RowPage> {
+  return invoke<RowPage>("read_rows", { sessionId, referenceName, offset, limit });
+}
+
+// Read every row of a dataset from the named session as TSV text (header row
+// leading, tab/CR/LF sanitized) -- the full-result clipboard payload, not
+// clamped by the display page cap and never stitched from pages (issue #769).
+// `confirmed` clears the full-pull confirm gate (issue #779): a result over
+// the backend threshold refuses with RowReadError::TooLarge until re-sent
+// with true; a cancel observed mid-scan rejects with RowReadError::Cancelled.
+export async function readRowsTsv(
+  sessionId: string,
+  referenceName: string,
+  confirmed: boolean,
+): Promise<string> {
+  return invoke<string>("read_rows_tsv", { sessionId, referenceName, confirmed });
+}
+
+// Export every row of a dataset as UTF-8 CSV (BOM + header row) to a
+// user-chosen path. The native save dialog runs before this call, so a cancel
+// never reaches the backend (issue #769). `confirmed` clears the full-pull
+// confirm gate (issue #779) -- same TooLarge / Cancelled contract as
+// readRowsTsv.
+export async function exportRowsCsv(
+  sessionId: string,
+  referenceName: string,
+  path: string,
+  confirmed: boolean,
+): Promise<void> {
+  return invoke<void>("export_rows_csv", { sessionId, referenceName, path, confirmed });
+}
+
+// Write one export payload (the chart PNG / SVG, issue #1093) to the path the
+// native save dialog returned. Same contract as exportRowsCsv: the picker runs
+// before this call, so a cancel never reaches the backend. Bytes ride IPC as a
+// JSON number array (invoke's default body) -- chart payloads are tens of KB,
+// far under any frame concern.
+export async function writeExportFile(path: string, bytes: Uint8Array): Promise<void> {
+  await invoke<void>("write_export_file", { path, bytes: Array.from(bytes) });
+}
+
+// --- LLM provider key + config (issue #29, ADR-0007/0019/0029) -------------
+//
+// Session-AGNOSTIC (ADR-0056): no sessionId. The API key crosses IPC exactly
+// once (here, into Rust), is stored in the OS keychain, and thereafter the
+// frontend learns only a boolean. The webview holds no key and makes no HTTP
+// egress -- all LLM calls are placed by the Rust core (ADR-0029).
+
+export async function setApiKey(key: string): Promise<void> {
+  await invoke<void>("set_api_key", { key });
+}
+
+export async function clearApiKey(): Promise<void> {
+  await invoke<void>("clear_api_key");
+}
+
+export async function getProviderConfig(): Promise<ProviderConfigView> {
+  return invoke<ProviderConfigView>("get_provider_config");
+}
+
+export async function setProviderConfig(config: ProviderConfig): Promise<ProviderConfigView> {
+  return invoke<ProviderConfigView>("set_provider_config", { config });
+}
+
+// Per-profile key management (issue #153, ADR-0064/0029). The Profiles UI edits
+// keys for ANY profile, not just the active one. Each profile's key lives in its
+// own keychain slot `key-<profile_id>`; the frontend learns only booleans,
+// never the key (ADR-0029 invariant 3). The active-profile STATUS rides
+// getProviderConfig (above) -- its keychain_fault drives the header indicator.
+
+// One entry per profile currently in app-config: the profile id plus whether its
+// keychain slot holds a key. Profile RECORDS stay single-sourced from
+// app-config; this overlays only the key status. Read-only -- cannot refuse.
+export async function listProviderProfiles(): Promise<ProfileKeyStatus[]> {
+  return invoke<ProfileKeyStatus[]>("list_provider_profiles");
+}
+
+// Store the key for the named profile (ADR-0029 one-shot transfer; the key
+// never returns across IPC). Returns the NEW has_key so the UI updates its
+// overlay without a re-fetch. `profileId` is the opaque profile id; it need not
+// match a saved profile yet (a freshly-minted id before Save is a valid target).
+export async function setProfileKey(profileId: string, key: string): Promise<boolean> {
+  return invoke<boolean>("set_profile_key", { profileId, key });
+}
+
+// Remove the key for the named profile (idempotent). Returns the NEW has_key
+// (false on success). A keychain error rejects with StoreCommandError so the UI
+// can tell the user the key did not come out (ADR-0029 trust root).
+export async function clearProfileKey(profileId: string): Promise<boolean> {
+  return invoke<boolean>("clear_profile_key", { profileId });
+}
+
+// Run a connection preflight against the named profile (issue #236, ADR-0070).
+// The backend reads the profile's stored key from the OS keychain by profileId
+// (ADR-0029 -- the key never crosses IPC) and probes the caller-supplied
+// endpoint (the edit form's CURRENT protocol/base_url/model values, so a user
+// who edits base_url and re-tests does not have to save first -- ADR-0070 Why
+// 3). Returns the six-state ProfileTestOutcome classification; the listed
+// models feed the model dropdown (NOT persisted -- ADR-0038).
+export async function testProfile(
+  profileId: string,
+  protocol: Protocol,
+  baseUrl: string,
+  model: string,
+  // One-shot add-mode override (issue #735, ADR-0070 calibration): the draft
+  // key the add form buffers before the profile (and its keychain entry)
+  // exists. Passed explicitly as null when absent so Rust's Option<String>
+  // sees None regardless of how Tauri treats a missing field.
+  key?: string,
+): Promise<ProfileTestOutcome> {
+  return invoke<ProfileTestOutcome>("test_profile", {
+    profileId,
+    protocol,
+    baseUrl,
+    model,
+    key: key ?? null,
+  });
+}
+
+// --- Cross-session persistence (issue #48, ADR-0034/0036) -----------------
+
+// Open a .duck and resume the named session WITHIN THE SAME session_id
+// (ADR-0056: open reuses the id; it does NOT create a new session). Runs off
+// the UI thread; a `resume-progress` event fires per source / replayed turn.
+export async function openDuck(sessionId: string, path: string): Promise<void> {
+  await invoke<void>("open_duck", { sessionId, path });
+}
+
+// Subscribe to resume-progress events (ADR-0034/0059 visible progress, issue
+// #76). Each event carries the addressing sessionId so a multi-session frontend
+// filters the global broadcast; a single-session shell reads `.event` directly.
+export async function onResumeProgress(
+  cb: (ev: ResumeProgress) => void,
+): Promise<UnlistenFn> {
+  return listen<ResumeProgress>("resume-progress", (e) => cb(e.payload));
+}
+
+// Subscribe to turn-progress events (ADR-0059 discrete feedback, calibrated
+// to the tool-call event stream by ADR-0078, issue #297). Each event carries
+// the addressing sessionId + a TurnPhase event: Thinking (with the 1-based
+// step) or the ToolCallStarted / ToolCallCompleted pair around each dispatch.
+// The events never enter the TurnOutcome contract; they are observer
+// feedback only.
+export async function onTurnProgress(
+  cb: (ev: TurnProgress) => void,
+): Promise<UnlistenFn> {
+  return listen<TurnProgress>("turn-progress", (e) => cb(e.payload));
+}
+
+// List every persisted .duck session's metadata for the cold-start sidebar
+// (ADR-0060/0061, issue #76). The backend scans the managed sessions directory
+// (ADR-0089) and derives each entry from its recipe + mtime; unreadable paths
+// are skipped. duck_path is the .duck path -- pass it back to openDuck to
+// resume. `includeArchived` (ADR-0127) appends the archived rows (mtime desc)
+// after the pinned block + unarchived mtime-desc block -- the archived view's
+// fetch; the default response excludes them so tray / search never see them.
+export async function listSessions(
+  opts?: { includeArchived?: boolean },
+): Promise<SessionMetadata[]> {
+  return invoke<SessionMetadata[]>("list_sessions", {
+    includeArchived: opts?.includeArchived ?? false,
+  });
+}
+
+// Pin or unpin a persisted session (ADR-0127, issue #1174). Organization
+// state lives in the sessions-root sidecar keyed by the session-directory
+// uuid -- the .duck is never rewritten. Unknown paths are idempotent no-ops
+// backend-side; pinning an archived session is a no-op (mutual exclusion).
+// `path` is the .duck file path (SessionMetadata.duck_path).
+export async function setSessionPinned(path: string, pinned: boolean): Promise<void> {
+  await invoke<void>("set_session_pinned", { path, pinned });
+}
+
+// Archive or restore a persisted session (ADR-0127, issue #1174). Archiving
+// removes the session from `pinned` and adds it to `archived` in the SAME
+// atomic sidecar write, so an archived-but-pinned intermediate is never
+// observable. Same path-guard + idempotence posture as setSessionPinned.
+export async function setSessionArchived(
+  path: string,
+  archived: boolean,
+): Promise<void> {
+  await invoke<void>("set_session_archived", { path, archived });
+}
+
+// Delete a persisted .duck file (ADR-0060, issue #81). The frontend closes the
+// session first when it is open, then calls this. The backend removes the
+// per-session directory; a missing file is idempotent success.
+// `path` is the .duck file path (the SessionMetadata.duck_path from listSessions).
+export async function deleteSession(path: string): Promise<void> {
+  await invoke<void>("delete_session", { path });
+}
+
+// Rename the OPEN session bound to `sessionId` (ADR-0060, issue #81). Sets the
+// recipe header name and rewrites the bound .duck; the bound path is untouched.
+// For a never-saved session the name is held in memory until save-as.
+export async function renameSession(
+  sessionId: string,
+  newName: string,
+): Promise<string> {
+  return invoke<string>("rename_session", { sessionId, newName });
+}
+
+// Read the OPEN session's current display name (ADR-0089 Decision 4). After the
+// first terminal turn auto-names the session, the frontend calls this to sync
+// the sidebar entry + session header with the backend's auto-generated name.
+export async function getSessionName(sessionId: string): Promise<string> {
+  return invoke<string>("get_session_name", { sessionId });
+}
+
+// Rename a CLOSED .duck recipe's session_name in place (ADR-0060, issue #81).
+// `path` is the .duck file path (SessionMetadata.duck_path). The backend reads
+// the recipe, rewrites the header, atomic-saves -- no DuckDB instance is built.
+// Refuses a path currently held open (rename those via renameSession by id).
+export async function renamePersistedSession(
+  path: string,
+  newName: string,
+): Promise<void> {
+  await invoke<void>("rename_persisted_session", { path, newName });
+}
+
+// Read + clear the named session's most recent per-turn persistence failure
+// (ADR-0034/0035 honest signal). Returns the typed SaveError (issue #120) so
+// the banner renders the failure kind via the locale catalog instead of
+// matching a backend Display string; null after a clean save.
+export async function takePersistError(sessionId: string): Promise<SaveError | null> {
+  return invoke<SaveError | null>("take_persist_error", { sessionId });
+}
+
+// --- App-level config (issue #53, ADR-0038) --------------------------------
+//
+// Session-AGNOSTIC (ADR-0056): no sessionId.
+
+export async function getAppConfig(): Promise<AppConfig> {
+  return invoke<AppConfig>("get_app_config");
+}
+
+export async function setAppConfig(config: AppConfig): Promise<AppConfig> {
+  return invoke<AppConfig>("set_app_config", { config });
+}
+
+// --- Managed sessions directory (issue #452, ADR-0089 Decision 2) ----------
+//
+// Session-AGNOSTIC (ADR-0056): no sessionId. The dedicated IPC validates the
+// path (exists + writable) + persists to app-config + updates the in-memory
+// SessionsRoot live, returning the updated AppConfig. Unlike set_app_config,
+// this carries the SessionsRoot side-effect (no restart needed).
+
+// Set the managed sessions directory. Validates + persists + updates the live
+// root. Returns the updated AppConfig so the frontend syncs state without a
+// re-fetch. The sidebar (list_sessions) re-scans the new directory on the
+// caller's next refresh.
+export async function setSessionsDir(path: string | null): Promise<AppConfig> {
+  return invoke<AppConfig>("set_sessions_dir", { path });
+}
+
+// Set the default runtime new sessions start on (ADR-0098 Decision 2, issue
+// #569; a resume continues the session's own last runtime since ADR-0102 --
+// the default stays the fallback for a pre-#589 recipe without the field).
+// Returns the updated AppConfig so the caller syncs state without a re-fetch.
+// An external id must name a `listAdapters` adapter (unknown ids reject --
+// UnknownAdapter); the adapter does NOT need to be detected: the preference
+// persists and startup resolution degrades per-start (ADR-0098 Decision 3).
+export async function setDefaultRuntime(runtime: DefaultRuntime): Promise<AppConfig> {
+  return invoke<AppConfig>("set_default_runtime", { runtime });
+}
+
+// --- Startup model posture backfill (ADR-0100, issue #581) ------------------
+//
+// Session-AGNOSTIC (ADR-0056): keyed by adapter id, not sessionId. The
+// composer bar reads the backfill entry via getLastModelPosture and clears
+// it via clearLastModelPosture.
+
+// Read one adapter's backfill posture: the model + thought-level a NEW session
+// on that adapter starts with (selected + injected). Never refuses -- no entry
+// (never chosen) and a cleared entry both read as the empty posture
+// (null/null), i.e. an unselected "default (recommended)" start.
+export async function getLastModelPosture(adapterId: string): Promise<ModelPosture> {
+  return invoke<ModelPosture>("get_last_model_posture", { adapterId });
+}
+
+// Clear one adapter's backfill posture (ADR-0100 Decision 3): the posture
+// cascade's "default (recommended)" row -- the next new session on that
+// adapter starts unselected again, so the backfill never makes an explicit
+// clear pointless. The id must name a `listAdapters` adapter (the same
+// table-membership contract as setDefaultRuntime; detection not required).
+// Returns the updated AppConfig so the caller syncs state without a re-fetch.
+export async function clearLastModelPosture(adapterId: string): Promise<AppConfig> {
+  return invoke<AppConfig>("clear_last_model_posture", { adapterId });
+}
+
+// Read the current sessions directory's resolved path string. Used for the
+// settings display + revealItemInDir target + the directory-picker defaultPath.
+export async function getSessionsDir(): Promise<string> {
+  return invoke<string>("get_sessions_dir");
+}
+
+// --- User-configured external MCP servers (ADR-0076, issue #301) ---------
+//
+// CRUD over a user's external MCP servers (app-config) + per-secret keychain
+// storage. The server config + its NON-SECRET env values live in app-config
+// (getAppConfig carries the registry as `mcp_servers`); a SECRET env value
+// lives in the OS keychain under mcp-<id>-<env_key> and crosses IPC exactly
+// once here (into Rust), never back out (ADR-0029 invariant 3). The settings UI
+// that drives these lands in #302.
+
+// Upsert one MCP server. Send an empty `id` for a new server (Rust mints a uuid
+// v4); send the existing id to edit. Rust fills `display_name` from the id when
+// empty. Returns the finalized config (with the stable id) so the UI can address
+// the server in subsequent secret calls.
+export async function upsertMcpServer(server: McpServerConfig): Promise<McpServerConfig> {
+  return invoke<McpServerConfig>("upsert_mcp_server", { server });
+}
+
+// --- Registered CLI tools (issue #671, ADR-0108/0109) -----------------------
+
+// Upsert one CLI tool registration. The backend validates (kebab-case name,
+// reserved-name collisions, argv-template/param-table consistency) then
+// read-modify-writes the app-config registry. Returns the updated FULL
+// app-config (ADR-0109 Decision 9 -- the frontend syncs its snapshot from
+// the return value, no re-fetch).
+export async function upsertCliTool(tool: CliToolConfig): Promise<AppConfig> {
+  return invoke<AppConfig>("upsert_cli_tool", { tool });
+}
+
+// Remove one CLI tool registration by name (idempotent; a builtin entry is
+// refused -- disabling is the single shutdown axis). Returns the updated
+// full app-config.
+export async function removeCliTool(name: string): Promise<AppConfig> {
+  return invoke<AppConfig>("remove_cli_tool", { name });
+}
+
+// Restore one builtin CLI registration to the shipped definition (issue
+// #676, ADR-0109 Decision 2): the tracked fields return to the baseline and
+// the entry follows it again; the executable and enable state stay. Returns
+// the updated full app-config.
+export async function restoreBuiltinCliTool(name: string): Promise<AppConfig> {
+  return invoke<AppConfig>("restore_builtin_cli_tool", { name });
+}
+
+// The manual rescan (issue #675): detect the shipped builtin definitions'
+// executables on PATH and auto-register the hits (also the conflict
+// catch-up point after the user disposes of a name-clashing entry).
+// Returns the updated full config plus the detection snapshot.
+export async function rescanBuiltinCliTools(): Promise<BuiltinScanResult> {
+  return invoke<BuiltinScanResult>("rescan_builtin_cli_tools");
+}
+
+// Store one MCP server secret in the OS keychain under mcp-<id>-<env_key>
+// (ADR-0029 one-shot transfer; the value never returns across IPC).
+export async function setMcpServerSecret(
+  id: string,
+  envKey: string,
+  value: string,
+): Promise<void> {
+  await invoke<void>("set_mcp_server_secret", { id, envKey, value });
+}
+
+// Remove one MCP server secret (idempotent). A keychain error rejects so the UI
+// can tell the user the secret did not come out (ADR-0029 trust root).
+export async function clearMcpServerSecret(id: string, envKey: string): Promise<void> {
+  await invoke<void>("clear_mcp_server_secret", { id, envKey });
+}
+
+// Store one MCP server request-header secret in the OS keychain under
+// `mcp-<id>-header-<name>` (issue #901; the header- infix keeps the account
+// distinct from the same-named env key's). Same one-shot ADR-0029 contract.
+export async function setMcpServerHeaderSecret(
+  id: string,
+  headerName: string,
+  value: string,
+): Promise<void> {
+  await invoke<void>("set_mcp_server_header_secret", { id, headerName, value });
+}
+
+// Remove one MCP server request-header secret (idempotent; issue #901).
+export async function clearMcpServerHeaderSecret(
+  id: string,
+  headerName: string,
+): Promise<void> {
+  await invoke<void>("clear_mcp_server_header_secret", { id, headerName });
+}
+
+// Probe one MCP server's connectivity (issue #387). Global (not session-
+// scoped): the settings page calls this to test a server independently of any
+// agent turn. The backend spawns the server, initializes, lists tools, then
+// tears down. v1 supports stdio only; other transports return connected:false
+// with an unsupported-transport error.
+export async function probeMcpServer(server: McpServerConfig): Promise<McpProbeResult> {
+  return invoke<McpProbeResult>("probe_mcp_server", { server });
+}
+
+// Discover MCP servers from an external tool's config (issue #390). The backend
+// reads the source's local config file (Claude Desktop / Codex), parses server
+// definitions, and returns a DiscoveryResult (servers + config file path) for
+// the import checklist. Returns empty servers when the config file is not found
+// (NOT an error).
+export async function discoverMcpServers(
+  source: ImportSource,
+): Promise<DiscoveryResult> {
+  return invoke<DiscoveryResult>("discover_mcp_servers", { source });
+}
+
+// --- Skills registry (issue #362, ADR-0086) --------------------------------
+//
+// CRUD over the Agent Skills registry under <app_data_dir>/skills.
+// Session-AGNOSTIC: the registry is process-global (one root shared by every
+// session). The directory scan IS the registry (no sidecar, no app-config
+// entry). Rejects are the typed SkillError (adjacently tagged like every other
+// typed IPC error) so the settings page renders each refusal through the locale
+// catalog (ADR-0052). The composer "+" panel reads the registry through the
+// same IPC (issue #365); the per-session mount model lives in the block below
+// (issue #363).
+
+// List every spec-valid skill in the registry PLUS the directories the scan
+// skipped (acquired derived by the loader). Directories that fail the spec
+// are surfaced in `ignored` with the English technical reason so the settings
+// UI can show WHY a directory disappeared; the spec-valid `skills` list keeps
+// its sorted semantics. A never-created registry lists empty (both fields
+// `[]`). Read-only -- never refuses.
+export async function listSkills(): Promise<SkillListing> {
+  return invoke<SkillListing>("list_skills");
+}
+
+// Flip one skill's machine-level enablement (issue #961, ADR-0118 Decision
+// 2): the app-config disabled-name set is the single axis. Disabled =
+// dormant (out of the new-session seed; the directory stays). Returns the
+// updated FULL app-config (the frontend-sync contract).
+export async function setSkillEnabled(
+  name: string,
+  enabled: boolean,
+): Promise<AppConfig> {
+  return invoke<AppConfig>("set_skill_enabled", { name, enabled });
+}
+
+// The skills registry root as an absolute path (<app_data_dir>/skills), for
+// the detail dialog's SKILL.md path bar (issue #1033): a `local` row's bar
+// shows `<root>/<name>/SKILL.md`. Always non-null when it resolves -- the
+// root is resolved at setup (the get_agents_dir posture); a rejection never
+// turns into a null resolve, the pane carries it as the failed phase
+// (issue #1039).
+export async function getSkillsDir(): Promise<string> {
+  return invoke<string>("get_skills_dir");
+}
+
+// Delete a skill. A local skill's directory is removed with all its contents;
+// a linked skill's LINK is removed without touching the external source.
+export async function deleteSkill(name: string): Promise<void> {
+  await invoke<void>("delete_skill", { name });
+}
+
+// --- Agent definitions (issue #932, ADR-0117) --------------------------------
+//
+// Session-AGNOSTIC: the registry is process-global (one root shared by every
+// session), the same posture as the skills registry.
+
+// List every spec-valid agent definition PLUS the files the scan skipped.
+// The listing merges the machine-level enablement set + the builtin
+// materialization mark + the backtick skill-mark partition, so each entry
+// carries its source posture, enabled state, and the two warning surfaces.
+// A never-created registry lists empty. Read-only -- never refuses.
+export async function listAgents(): Promise<AgentListing> {
+  return invoke<AgentListing>("list_agents");
+}
+
+// The registry root as an absolute path (<app_data_dir>/agents), for the
+// settings pane's reveal-in-folder affordance. Always non-null -- the root
+// is resolved at setup (the sessions_dir posture).
+export async function getAgentsDir(): Promise<string> {
+  return invoke<string>("get_agents_dir");
+}
+
+// Mint a new user agent definition: <root>/<name>.md with the given
+// declaration (description + preamble). The name must be kebab-case (<= 64),
+// free, and outside the reserved tool-name set. A fresh mint lands enabled
+// (the explicit create is explicit intent). Returns the entry read back from
+// disk.
+export async function createAgent(
+  name: string,
+  description: string,
+  preamble: string,
+): Promise<AgentEntry> {
+  return invoke<AgentEntry>("create_agent", { name, description, preamble });
+}
+
+// Rewrite one user/builtin definition atomically. `name` addresses the
+// current file; `update.name` is the identity to write -- a different value
+// renames the file. Refuses a linked definition (read-only), a materialized
+// builtin rename, a taken rename target, and a reserved name. Present
+// community `tools` / `model` axes survive the edit verbatim.
+export async function updateAgent(name: string, update: AgentUpdate): Promise<AgentEntry> {
+  return invoke<AgentEntry>("update_agent", { name, update });
+}
+
+// Delete one definition file. A user file is removed; a linked definition's
+// LINK is removed; a materialized builtin is refused. Returns the updated
+// FULL app-config (the ADR-0109 Decision 9 sync contract -- the stale
+// enablement entry drops server-side).
+export async function deleteAgent(name: string): Promise<AppConfig> {
+  return invoke<AppConfig>("delete_agent", { name });
+}
+
+// Set one definition's machine-level enablement (the single axis): enabled =
+// listed into the built-in runtime's every-turn tool face (#933); disabled =
+// hidden. Returns the updated FULL app-config.
+export async function setAgentEnabled(name: string, enabled: boolean): Promise<AppConfig> {
+  return invoke<AppConfig>("set_agent_enabled", { name, enabled });
+}
+
+// --- Skill import (issue #367, ADR-0086) -------------------------------------
+//
+// The import dialog discovers external agent skill libraries (Claude Code
+// ~/.claude/skills, Codex CLI ~/.codex/skills + user-added custom paths) and
+// imports each selected skill as a link (acquired: linked) or a copy
+// (acquired: local). Session-AGNOSTIC + read-only discovery; the import
+// command re-validates + re-checks the registry at commit time.
+
+// Discover external skill sources for the import dialog (issue #367). The
+// backend resolves the standard agent libraries off the home dir + appends
+// each `customPaths` entry (absolute OS paths the dialog collected via the
+// directory picker). A source that does not exist is dropped silently (the
+// "show only if it exists" rule). Each surviving source's skills are
+// classified importable / already_exists / invalid against the CURRENT
+// registry name set. Read-only -- never refuses.
+export async function listSkillSources(customPaths: string[]): Promise<SkillSource[]> {
+  return invoke<SkillSource[]>("list_skill_sources", { customPaths });
+}
+
+// Import a batch of skills into the registry (issue #367). Each item is an
+// absolute source directory; `mode` is shared across the batch (the dialog's
+// bottom dropdown). The result parallels the input so a per-item failure never
+// aborts the rest -- the caller folds each `failed` through fmtError. Each
+// item is re-validated + name-re-checked at commit time.
+export async function importSkills(
+  items: ImportItem[],
+  mode: ImportMode,
+): Promise<ImportOutcome[]> {
+  return invoke<ImportOutcome[]>("import_skills", { items, mode });
+}
+
+// --- Tiered tool approval (ADR-0080, issue #294) -------------------------
+//
+// The IPC contract for the in-flow approval card (ADR-0083) + the
+// session-level authorization-mode / trust controls. The frontend rendering
+// (pending/resolved trace entries, three-button card, unanswered badge) lands
+// in #297 / #298; the auth-mode selector UI lands in #302. These functions
+// own the wire surface only.
+
+// Answer the session's in-flight approval request (ADR-0083 three-button
+// card). `requestId` is the one carried by the `approval-request` event; the
+// response escalates to session trust on `always_allow` (resume resets it).
+// A respond that lands after the turn was cancelled, or a duplicate answer,
+// rejects -- the frontend reconciles via `onApprovalResolved` rather than
+// branching on the error.
+export async function respondToolApproval(
+  sessionId: string,
+  requestId: string,
+  response: ApprovalResponse,
+): Promise<void> {
+  await invoke<void>("respond_tool_approval", { sessionId, requestId, response });
+}
+
+// Fetch the full (pre-truncation) file-delivery values for the session's
+// in-flight approval request (issue #1009, ADR-0109 Decision 8): the
+// `approval-request` broadcast caps each attachment (a budget, not a content
+// boundary); this command serves the uncut originals while the turn is
+// suspended on the gate. Rejects once the request is answered or cancelled
+// -- callers fall back to the capped broadcast snapshot.
+export async function getApprovalAttachments(
+  sessionId: string,
+  requestId: string,
+): Promise<FileAttachment[]> {
+  return invoke<FileAttachment[]>("get_approval_attachments", { sessionId, requestId });
+}
+
+// Read the session's authorization posture (ADR-0080 Decision 4): `per_call`
+// (default) or `no_confirmation`. Session-level; resumes as `per_call`.
+export async function getAuthorizationMode(sessionId: string): Promise<AuthMode> {
+  return invoke<AuthMode>("get_authorization_mode", { sessionId });
+}
+
+// Switch the session's authorization posture (ADR-0080 Decision 4). Only
+// `per_call` <-> `no_confirmation` is accepted; both resume to `per_call`.
+export async function setAuthorizationMode(
+  sessionId: string,
+  mode: AuthMode,
+): Promise<void> {
+  await invoke<void>("set_authorization_mode", { sessionId, mode });
+}
+
+// Snapshot the session's "always allow" trust set (ADR-0080 Decision 3),
+// keyed by `server::tool`. Resumes empty.
+export async function listSessionTrust(sessionId: string): Promise<ToolKey[]> {
+  return invoke<ToolKey[]>("list_session_trust", { sessionId });
+}
+
+// Revoke one tool's session-level trust (ADR-0080 Decision 3). The next call
+// to that tool re-enters per-call confirmation.
+export async function revokeSessionTrust(
+  sessionId: string,
+  server: string,
+  tool: string,
+): Promise<void> {
+  await invoke<void>("revoke_session_trust", { sessionId, server, tool });
+}
+
+// Subscribe to approval-request events (ADR-0083). Each event carries the
+// addressing sessionId so a multi-session frontend filters the global
+// broadcast to the one pane that owns the suspended turn (ADR-0056).
+export async function onApprovalRequest(
+  cb: (ev: ApprovalRequestPayload) => void,
+): Promise<UnlistenFn> {
+  return listen<ApprovalRequestPayload>("approval-request", (e) => cb(e.payload));
+}
+
+// Subscribe to approval-resolved events (ADR-0083). The frontend flips the
+// pending card to its resolved state in place; a cancel/close resolves to
+// `deny` so no stale pending entry lingers.
+export async function onApprovalResolved(
+  cb: (ev: ApprovalResolvedPayload) => void,
+): Promise<UnlistenFn> {
+  return listen<ApprovalResolvedPayload>("approval-resolved", (e) => cb(e.payload));
+}
+
+// Subscribe to approval-abandoned events (issue #1267). The external caller
+// dropped the call with no answer; the frontend flips the pending card to
+// its abandoned terminal state in place.
+export async function onApprovalAbandoned(
+  cb: (ev: ApprovalAbandonedPayload) => void,
+): Promise<UnlistenFn> {
+  return listen<ApprovalAbandonedPayload>("approval-abandoned", (e) => cb(e.payload));
+}
+
+// --- Runtime selector (issue #353, ADR-0076/0081/0083) ---------------------
+//
+// Session-AGNOSTIC adapter table (list / rescan) + per-session runtime choice
+// (get / set). The composer runtime picker reads the table + the choice and
+// writes a switch back; the next turn dispatches on the selection at the turn
+// boundary (built-in BYOK loop vs external ACP engine).
+
+// List every v1 adapter with its live PATH-scan detection state. The picker
+// renders this verbatim -- adding a CLI upstream grows the list with zero
+// frontend change. Read-only; never refuses.
+export async function listAdapters(): Promise<AdapterEntry[]> {
+  return invoke<AdapterEntry[]>("list_adapters");
+}
+
+// Re-run the adapter PATH scan on demand (the picker's ↻ entry). Same
+// projection as listAdapters -- detection is uncached -- but its own command
+// so a user-driven re-detect is an explicit wire action.
+export async function rescanAdapters(): Promise<AdapterEntry[]> {
+  return invoke<AdapterEntry[]>("rescan_adapters");
+}
+
+// Run the adapter diagnostic probe (ADR-0096, issues #534/#535): one-shot
+// spawn of the detected CLI in protocol mode + per-format catalog query (ACP
+// initialize/session/new handshake, or codex app-server `model/list`) +
+// process terminated. Display-only in this slice (no cache); the rejection
+// is the structured ProbeError (kind-dispatched by the UI). Long-running
+// (CLI cold start can take tens of seconds; backend wall clock 45s) --
+// callers own the in-flight UI state.
+export async function probeAdapter(adapterId: string): Promise<ProbeOk> {
+  return invoke<ProbeOk>("probe_adapter", { adapterId });
+}
+
+// Read the adapter catalog cache (ADR-0096 D5/D6, issue #536): every
+// adapter's last explicitly-tested catalog + timestamp, from the app-data
+// sidecar. Lock-light server-side (a plain file read, no session lock), so
+// it is safe during an in-flight turn. Honest-degrade server-side too -- a
+// missing or corrupt file reads as an empty map; the command never rejects.
+export async function getAdapterCatalogs(): Promise<AdapterCatalogs> {
+  return invoke<AdapterCatalogs>("get_adapter_catalogs");
+}
+
+// Read the session's runtime choice. Returns `built_in` for a fresh session
+// (the honest default, ADR-0081); a resumed session returns the restored
+// last runtime (ADR-0102 segment continuation) -- degraded to the built-in
+// start when the recorded adapter is not detected, or the resolved default
+// when the recipe predates the field. Lock-light server-side -- safe to
+// call while a turn is in flight.
+export async function getSessionRuntime(
+  sessionId: string,
+): Promise<SessionRuntimeChoice> {
+  return invoke<SessionRuntimeChoice>("get_session_runtime", { sessionId });
+}
+
+// Set the session's runtime choice. Takes effect at the next turn boundary
+// (the in-flight turn, if any, finishes on the runtime it started on). The
+// switch opens a new segment, so the server also re-seeds the posture slot
+// from the target adapter's backfill entry -- external := that entry (absent
+// = unselected), built-in := cleared (ADR-0102 Decision 3); callers
+// refetch the model config to pick the seeded pair up. An
+// unknown adapter id rejects -- the picker only offers `listAdapters` ids, so
+// a reject is a stale / buggy client; the chip resyncs off the reject.
+export async function setSessionRuntime(
+  sessionId: string,
+  runtime: SessionRuntimeChoice,
+): Promise<void> {
+  await invoke<void>("set_session_runtime", { sessionId, runtime });
+}
+
+// Read the session's external-runtime model config (ADR-0095, issue #527): the
+// model + thought-level selections and the cached discovery catalog. Lock-light
+// server-side -- safe to call while a turn is in flight.
+export async function getSessionModelConfig(
+  sessionId: string,
+): Promise<SessionModelConfig> {
+  return invoke<SessionModelConfig>("get_session_model_config", { sessionId });
+}
+
+// The persist-now verdict a successful set command carries back (issue
+// #529): read in-process in the same critical section as the set, so the
+// selection's own persist outcome cannot be mis-attributed or swallowed by
+// the shared banner channel. `persist_error` = the typed SaveError of a
+// failed write; `persist_suspended` = true when the write was withheld on a
+// pending ADR-0035 conflict (externally modified .duck). Both null/false =
+// the write landed (or the session is unbound, nothing to persist).
+export interface SetPosturePersistOutcome {
+  persist_error: SaveError | null;
+  persist_suspended: boolean;
+}
+
+// Set the session's model + thought-level selections for the next
+// external-runtime turn (ADR-0095). The wire IS the complete posture
+// (issue #603): every field is an explicit intent value -- `null` clears
+// (the CLI's own default) and an untouched field arrives as its current
+// value -- so the backend never derives off its held slot. The object
+// crosses as ONE argument with keys verbatim -- no translation (issue
+// #606); the wire shape is pinned Rust-side. Takes effect at the next
+// turn boundary; rejected while resuming or while a turn is in flight.
+export async function setSessionPosture(
+  sessionId: string,
+  posture: ModelPosture,
+): Promise<SetPosturePersistOutcome> {
+  return invoke<SetPosturePersistOutcome>("set_session_posture", {
+    sessionId,
+    posture,
+  });
+}
+
+// Whether a manifest entry's file still exists (ADR-0124 Decision 2, issue
+// #1087): existence is a render-time fact -- a deleted / moved file degrades
+// the artifact surfaces to not-openable, and the manifest is never rewritten.
+// Plain boolean: a missing file is an answer, not an error.
+export async function artifactExists(path: string): Promise<boolean> {
+  return invoke<boolean>("artifact_exists", { path });
+}
+
+// One markdown artifact's text for inline rendering (ADR-0124 Decision 4,
+// issue #1087): extension-pinned server-side (md only) and size-capped (a
+// bounded inline report, not an arbitrary file read) -- a refusal crosses as
+// a rejection the render degrades on.
+export async function readArtifactText(path: string): Promise<string> {
+  return invoke<string>("read_artifact_text", { path });
+}
+
+// --- System tray (issue #1140, ADR-0125) --------------------------------------
+//
+// Session-AGNOSTIC: no sessionId. The backend emits these when the user acts
+// on the resident tray menu; the window reveal itself is handled on the Rust
+// side at click time (the webview may be mid-load), so the frontend only
+// carries the session-level consequence.
+
+// The `tray://open-session` payload: the `.duck` path alone (the stable
+// session identity, ADR-0089). The display name for the open action is
+// resolved from the persisted-session list -- same source, no duplicate wire
+// field.
+export interface TrayOpenSession {
+  duck_path: string;
+}
+
+// Subscribe to tray menu "open session" clicks (ADR-0125 Decision 5). The
+// sidebar-parity rule (Decision 5): the action is exactly what a sidebar
+// click on the same session does -- an already-open session is only
+// activated (idempotent), a closed one resumes through the same openDuck
+// path.
+export async function onTrayOpenSession(
+  cb: (ev: TrayOpenSession) => void,
+): Promise<UnlistenFn> {
+  return listen<TrayOpenSession>("tray://open-session", (e) => cb(e.payload));
+}
+
+// Subscribe to tray menu "new session" clicks (ADR-0125 Decision 5). No
+// payload: the action is the sidebar "+" (ADR-0092 empty-state navigation) --
+// zero new session semantics originate on the tray side.
+export async function onTrayNewSession(cb: () => void): Promise<UnlistenFn> {
+  return listen("tray://new-session", () => cb());
+}
+
+// The tray-ready handshake (issue #1142): tell the backend the two tray
+// listeners above are registered. Session actions clicked before this
+// point (cold start, or a webview reload before re-registration) were
+// buffered on the Rust side and replay on this call; the steady path
+// never invokes it -- one shot per page load.
+export async function trayReady(): Promise<void> {
+  return invoke("tray_ready");
 }

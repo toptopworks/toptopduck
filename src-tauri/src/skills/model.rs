@@ -1,0 +1,571 @@
+//! The skill wire model + Agent Skills spec validation (issue #362, ADR-0086).
+//!
+//! A skill is an [Agent Skills](https://agentskills.io/specification) directory:
+//! `<root>/<name>/SKILL.md` (YAML frontmatter + Markdown body). Identity IS the
+//! spec `name` -- kebab-case, at most 64 chars, equal to the directory name
+//! (ADR-0086 Decision 2); the app never mints a separate id. `acquired` is
+//! DERIVED by the loader from the directory's filesystem nature (symlink /
+//! junction -> `linked`, real directory -> `local`); it is never stored in
+//! frontmatter.
+
+use std::path::PathBuf;
+
+/// The skills registry root, managed as Tauri state (issue #362). Resolved once
+/// at setup to `<app_data_dir>/skills` (with the same temp-dir fallback the
+/// app-config path uses, ADR-0038 style); every skills command addresses the
+/// registry through it. The directory is minted lazily on first create -- a
+/// never-created registry lists empty.
+pub struct SkillsRoot(pub PathBuf);
+
+/// How a skill entered the registry (loader-derived, never frontmatter -- issue
+/// #303 spec). Drives the settings pane's posture: `local` skills live in
+/// the registry; `linked` skills are read-only, opened at their link
+/// target.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Acquired {
+    /// The skill directory is a symlink / junction to an external source. The
+    /// app never writes through it (that would mutate the external library);
+    /// delete removes the LINK only, never the target.
+    Linked,
+    /// A real directory -- authored in-app (`create_skill`) or copied in by a
+    /// future import slice. Fully editable.
+    Local,
+    /// A builtin skill (issue #677; readonly posture since ADR-0121): an
+    /// app-authored skill materialized into the registry's reserved
+    /// `.system/` subtree -- a CLI companion (ADR-0109) or a knowledge-only
+    /// skill (ADR-0120 Decision 7). Keyed on LOCATION (the reserved-subtree
+    /// scan), not on any side table: whatever spec-valid directory lives
+    /// under `.system/` IS a builtin row. Read-only and undeletable (the
+    /// subtree is an app cache that re-aligns on the next scan); a
+    /// same-named local directory shadows it (ADR-0121 Decision 5).
+    Builtin,
+}
+
+/// One registry skill as it crosses IPC (issue #362). The declaration face
+/// (ADR-0086 Decision 1): the prompt fragment (`body`). `link_target` is the
+/// resolved symlink / junction target for `linked` skills (the "open source
+/// location" anchor), the reserved-subtree directory for `builtin` rows
+/// (the reveal / fork anchor, ADR-0121), and `null` for `local`. Option
+/// fields mirror the Rust
+/// `Option<String>` + bare serde convention (None serializes as JSON null,
+/// same shape as `AppConfig.last_dir`), so they are `| null` on the wire,
+/// not optional.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct SkillEntry {
+    /// The spec `name` -- identity, kebab-case, equal to the directory name.
+    pub name: String,
+    /// The spec `description` (required by the spec, <= 1024 chars).
+    pub description: String,
+    /// Loader-derived link/real-directory posture.
+    pub acquired: Acquired,
+    /// The spec `license` field, when present.
+    pub license: Option<String>,
+    /// The spec `compatibility` field, when present.
+    pub compatibility: Option<String>,
+    /// The Markdown body after the frontmatter -- the prompt fragment injected
+    /// on mount (a later #303 slice; carried here so the settings drawer edits
+    /// it verbatim).
+    pub body: String,
+    /// The resolved link target for `linked` skills; the reserved-subtree
+    /// directory (the reveal / fork anchor) for `builtin` rows; `null` for
+    /// `local`.
+    pub link_target: Option<String>,
+    /// The enablement axis read (issue #961, ADR-0118 Decision 2): enabled =
+    /// in the session seed's reach + rendered normally in the settings pane;
+    /// disabled = dormant (grayed row, directory kept). The registry scan
+    /// constructs rows config-blind at `true` (the default-on polarity); the
+    /// listing command overlays the config's disabled-name set before the
+    /// rows cross IPC.
+    pub enabled: bool,
+    /// SHA-256 hex of the WHOLE `SKILL.md` bytes (frontmatter + body) at the
+    /// registry scan (ADR-0086, issue #381). The drift anchor the frontend
+    /// compares each turn's `SkillProvenance.content_hash` against to surface
+    /// a "modified" drift badge when a skill changed after a recorded turn. Computed once at
+    /// load via [`crate::util::sha256_hex`] -- the same helper the assembly
+    /// path uses (issue #364), so an unedited skill yields the identical hash
+    /// both places and the drift signal is exact, not approximate.
+    pub content_hash: String,
+    /// A local or linked row whose name sits in the builtin manifest
+    /// (ADR-0121 Decision 5): the row SHADOWS a builtin skill (when the
+    /// builtin is materialized, listing, invocation, and auto-include all
+    /// resolve to this row), and the frontend
+    /// renders the "covers built-in" badge -- the standing reminder that
+    /// the app-side curation is invisible to this fork until it is deleted.
+    /// Always `false` for builtin rows themselves.
+    pub covers_builtin: bool,
+}
+
+/// One spec-invalid skill directory the registry scan skipped, with the
+/// English technical reason (issue #373). The settings UI surfaces these so a
+/// user who copied in a broken directory -- frontmatter `name` / directory
+/// mismatch, missing `SKILL.md`, blank body -- sees WHY it disappeared
+/// instead of debugging from a silent warn line. `dir` is the directory's
+/// `file_name` (the same shape as `SkillEntry::name` for spec-valid skills);
+/// `reason` is the English technical detail rendered verbatim (ADR-0052
+/// layer 4 -- user-facing wording lives in the locale catalog as the section
+/// title / intro, but the reason itself is the dynamic backend detail).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct SkippedSkill {
+    /// The directory name under the skills root (its `file_name`, not the
+    /// full OS path -- the UI lists names, parallel to `SkillEntry::name`).
+    pub dir: String,
+    /// The English technical reason the directory failed spec validation,
+    /// rendered verbatim. This is the [`SkillError`] Display string, so the
+    /// value carries the variant prefix (e.g. `"invalid skill: frontmatter
+    /// name \`X\` does not match its directory name \`Y\`"`, `"invalid skill:
+    /// cannot read \`<root>/<dir>/SKILL.md\`: <io error>"` -- a read failure
+    /// carries the full OS path, parallel to [`SkillEntry::link_target`]).
+    /// Display is the IPC contract for THIS surface; see [`SkillError`] for
+    /// the full set of paths Display text crosses.
+    pub reason: String,
+}
+
+/// The result of a registry scan (issue #373 / #375): the spec-valid skills
+/// plus the directories skipped for spec violations, and -- when the root
+/// itself could not be read -- the English technical reason. The `skills` list
+/// keeps its sorted semantics (by name); `ignored` is sorted by directory name
+/// for a stable listing. `ignored` may be empty; it never contains a directory
+/// that also appears in `skills` (a directory either loads or it does not).
+/// `root_error` is `None` for the common case (root readable or never created);
+/// when `Some`, both `skills` and `ignored` are empty (the scan could not
+/// iterate the root).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct SkillListing {
+    /// Spec-valid skills, sorted by name -- the existing list semantics.
+    pub skills: Vec<SkillEntry>,
+    /// Directories the scan skipped, each with the English technical reason.
+    /// Sorted by directory name for a deterministic listing.
+    pub ignored: Vec<SkippedSkill>,
+    /// The English technical reason the skills root itself could not be read
+    /// (issue #375): a permission denial, lock contention, or other IO failure
+    /// distinct from `NotFound` (a never-created registry is a valid empty
+    /// state, surfaced as `None`). When present the settings UI renders this
+    /// verbatim so the user can distinguish a locked-out root from a clean
+    /// registry.
+    pub root_error: Option<String>,
+}
+
+/// Typed reject for the skills commands (issue #362). Adjacently tagged
+/// (`#[serde(tag = "kind", content = "data")]`) like every other typed IPC
+/// error; the kind set is DISJOINT from SessionError / SaveError /
+/// StoreCommandError so the frontend's fmtError dispatch stays unambiguous
+/// (ADR-0069 invariant). The data strings carry the English technical detail
+/// for the fold; user-facing wording lives in the locale catalog (ADR-0052).
+/// `Display` text crosses IPC in two places, both rendering English detail
+/// verbatim: primarily [`SkippedSkill::reason`] (the diagnostic fold for
+/// spec-invalid directories the scan skipped, issue #373), and the
+/// [`SkillError::FsFailure`] `data` string, whose `#[error]` Display folds
+/// the inner io error's message (issue #362). The plain
+/// typed-reject path serializes each variant's inner payload string as serde
+/// `data` -- that payload is the raw detail, NOT the Display string, so a
+/// `kind`-dispatch consumer never reads Display.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "kind", content = "data")]
+pub enum SkillError {
+    /// The given name violates the Agent Skills name rule (kebab-case, <= 64
+    /// chars). Carries the reason detail.
+    #[error("invalid skill name: {0}")]
+    InvalidName(String),
+    /// A SKILL.md failed spec validation (missing/blank description, blank
+    /// body, malformed frontmatter) or the target is not a skill directory.
+    /// Carries the reason detail.
+    #[error("invalid skill: {0}")]
+    InvalidSkill(String),
+    /// No registry skill exists under the given name. Carries the name.
+    #[error("no such skill: {0}")]
+    NoSuchSkill(String),
+    /// A create targeted a name an existing directory already occupies.
+    /// Carries the name.
+    #[error("skill name already taken: {0}")]
+    NameTaken(String),
+    /// A create / import targeted a name in the builtin skills'
+    /// reserved set (issue #677, ADR-0109 Decision 7): the static full-set
+    /// membership, independent of detection or materialization. Distinct
+    /// from [`Self::NameTaken`] so the refusal reads as "reserved", not
+    /// "taken by another skill of yours". Carries the name.
+    #[error("skill name is reserved for a built-in skill: {0}")]
+    ReservedSkillName(String),
+    /// A mutating call targeted a builtin skill (readonly posture,
+    /// ADR-0121): the reserved-subtree files are an app cache that
+    /// re-aligns on the next scan, so edits cannot stick -- the editable
+    /// variant is a filesystem copy of the subtree (the fork channel).
+    /// Carries the name. With the form channel retired (issue #1033) no
+    /// in-repo writer produces this variant -- the wire kind, the frontend
+    /// dispatch, and the locale entry stay because ADR-0122 Decision 5
+    /// reserves a future model-face update channel whose builtin refusals
+    /// would reuse exactly this face.
+    #[error("built-in skill is read-only: {0}")]
+    BuiltinReadOnly(String),
+    /// A delete targeted a MATERIALIZED builtin skill (issue #677): builtin
+    /// skills are undeletable (they re-materialize on the next scan anyway);
+    /// the shutdown axis is the enablement axis -- disable the skill, or
+    /// for a CLI companion its CLI entry.
+    /// Carries the name.
+    #[error("built-in skill cannot be deleted: {0}")]
+    BuiltinUndeletable(String),
+    /// A mutating call targeted a `linked` skill (the app never writes through
+    /// an external link). Carries the name. With the form channel retired
+    /// (issue #1033) no in-repo writer produces this variant -- the wire
+    /// kind, the frontend dispatch, and the locale entry stay because
+    /// ADR-0122 Decision 5 reserves a future model-face update channel
+    /// whose read-only refusals would reuse exactly this face.
+    #[error("skill is linked (read-only): {0}")]
+    ReadOnly(String),
+    /// An underlying filesystem failure (create / read / write / rename /
+    /// remove). Carries the English technical detail for the fold.
+    #[error("{0}")]
+    FsFailure(String),
+}
+
+/// Agent Skills spec ceiling for `name` (<= 64 chars).
+pub const SKILL_NAME_MAX: usize = 64;
+/// Agent Skills spec ceiling for `description` (<= 1024 chars).
+pub const SKILL_DESCRIPTION_MAX: usize = 1024;
+
+/// The Agent Skills name rule: non-empty, kebab-case (lowercase ASCII
+/// alphanumerics separated by single hyphens -- no leading / trailing / double
+/// hyphen), at most [`SKILL_NAME_MAX`] chars. Identity equals directory name
+/// (ADR-0086 Decision 2), so this doubles as the directory-name rule.
+pub fn is_valid_skill_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.chars().count() <= SKILL_NAME_MAX
+        && name.split('-').all(|segment| {
+            !segment.is_empty()
+                && segment
+                    .chars()
+                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit())
+        })
+}
+
+/// Validate a skill name, refusing with the reason detail on failure.
+pub fn validate_skill_name(name: &str) -> Result<(), SkillError> {
+    if is_valid_skill_name(name) {
+        return Ok(());
+    }
+    Err(SkillError::InvalidName(format!(
+        "`{name}` must be kebab-case (lowercase a-z / 0-9 separated by single \
+         hyphens) and at most {SKILL_NAME_MAX} chars"
+    )))
+}
+
+/// Validate a description: required, non-blank, at most
+/// [`SKILL_DESCRIPTION_MAX`] chars (Agent Skills spec).
+pub fn validate_description(description: &str) -> Result<(), SkillError> {
+    if description.trim().is_empty() {
+        return Err(SkillError::InvalidSkill(
+            "description is required and must not be blank".into(),
+        ));
+    }
+    if description.chars().count() > SKILL_DESCRIPTION_MAX {
+        return Err(SkillError::InvalidSkill(format!(
+            "description exceeds the spec ceiling of {SKILL_DESCRIPTION_MAX} chars"
+        )));
+    }
+    Ok(())
+}
+
+/// Validate a Markdown body: required non-blank (a skill without a prompt
+/// fragment has nothing to inject on mount).
+pub fn validate_body(body: &str) -> Result<(), SkillError> {
+    if body.trim().is_empty() {
+        return Err(SkillError::InvalidSkill(
+            "the Markdown body must not be blank".into(),
+        ));
+    }
+    Ok(())
+}
+
+// --- Skill import (issue #367, ADR-0086) ------------------------------------
+//
+// The import dialog discovers Agent Skills spec directories under external
+// agent libraries (Claude Code `~/.claude/skills`, Codex CLI `~/.codex/skills`,
+// + user-added custom paths) and imports each selected skill into the registry
+// either as a link (symlink / Windows junction -> `acquired: linked`, read-
+// only) or a copy (recursive directory copy -> `acquired: local`, editable).
+// Discovery is a pure projection the command layer drives with resolved
+// candidate paths; import re-validates + re-checks the registry at commit time
+// so a source that changed between discovery and commit never overwrites a
+// name that landed in the interim.
+
+/// One candidate source the command layer hands to discovery (issue #367).
+/// Built from the standard agent skill libraries + any user-added custom
+/// paths. NOT a wire type -- it lives only between the command (which resolves
+/// paths off `app.path().home_dir()`) and the pure discovery function. A
+/// candidate whose `path` does not exist on disk is dropped by discovery (the
+/// "show only if it exists" rule, ADR-0086 D10).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SkillSourceCandidate {
+    /// Stable id for dedupe + the frontend's expand/collapse state. Standard
+    /// sources carry fixed ids; a custom source's id is its path string.
+    pub id: String,
+    /// Display label (source name).
+    pub label: String,
+    /// Candidate directory path (need not exist).
+    pub path: PathBuf,
+}
+
+/// One discovered skill source -- a directory that EXISTS on disk and might
+/// hold Agent Skills spec directories (issue #367). The dialog renders the
+/// list of these (collapsed) + drills into the skills of an expanded one.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct SkillSource {
+    /// Stable id (mirrors the candidate's); the dialog keys expand/collapse
+    /// state off it.
+    pub id: String,
+    /// Display label.
+    pub label: String,
+    /// Absolute OS path of the source directory.
+    pub path: String,
+    /// Skill directories found under this source, with import readiness. May
+    /// be empty (the source exists but holds no spec-shaped children).
+    pub skills: Vec<DiscoveredSkill>,
+}
+
+/// One skill directory under a discovered source, with its import readiness
+/// (issue #367). The dialog renders one checkbox row per entry: `importable`
+/// is checked-able; `already_exists` carries a badge and is excluded from the
+/// selectable set (the registry is never overwritten); `invalid` is disabled
+/// with a tooltip carrying the English technical reason (the locale catalog
+/// owns the section / hint wording, NOT the per-row reason -- ADR-0052 layer
+/// 4, same split as [`SkippedSkill::reason`]).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct DiscoveredSkill {
+    /// The spec name (= the directory's `file_name`); identity, kebab-case.
+    pub name: String,
+    /// The spec description, when the frontmatter parsed far enough to read
+    /// one. Present for `importable` / `already_exists`; may be `None` for a
+    /// partial `invalid` parse.
+    pub description: Option<String>,
+    /// Absolute OS path of the skill's source directory (the symlink / copy
+    /// source; the only anchor that survives a source change between
+    /// discovery and commit).
+    pub source_dir: String,
+    /// Import readiness classification.
+    pub status: DiscoveredSkillStatus,
+    /// English technical reason for `invalid`; `None` otherwise. Verbatim
+    /// [`SkillError`] Display (parallel to [`SkippedSkill::reason`]).
+    pub reason: Option<String>,
+}
+
+/// Import readiness classification (issue #367). Mirrors the Rust enum as a
+/// bare snake_case variant string (the `#[serde(rename_all = "snake_case")]`
+/// convention).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DiscoveredSkillStatus {
+    /// Spec-valid source directory whose name is free in the registry -- the
+    /// checkbox is enabled.
+    Importable,
+    /// A skill with this name is already in the registry -- excluded from
+    /// import (the registry is never overwritten), shown with an "already
+    /// exists" badge.
+    AlreadyExists,
+    /// The source directory failed spec validation -- checkbox disabled with
+    /// a tooltip carrying the reason.
+    Invalid,
+}
+
+/// Import mode for a batch (issue #367). The dialog's bottom dropdown selects
+/// one mode for every selected skill. `link` is the default (the AC: linked
+/// skills enter the registry as `acquired: linked`); `copy` is the fallback
+/// when the platform / target refuses a link.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ImportMode {
+    /// Create a symlink (Unix) / directory junction (Windows) onto the
+    /// external source. The skill enters the registry as `acquired: linked`
+    /// (read-only; delete removes the link only).
+    Link,
+    /// Recursively copy the source directory. The skill enters the registry
+    /// as `acquired: local` (editable; delete removes the copy).
+    Copy,
+}
+
+/// One item in an import batch (issue #367): the absolute source directory of
+/// a skill to import. The wire payload is the path ALONE -- the backend re-
+/// validates the source + re-checks the registry at import time (a source may
+/// have changed between discovery and commit), so no name / status is cached
+/// on the wire.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ImportItem {
+    /// Absolute OS path of the skill's source directory.
+    pub source_dir: String,
+}
+
+/// The per-item outcome of an import batch (issue #367). Adjacently tagged
+/// (`{kind, data}`) so the frontend can fold each failure through `fmtError`
+/// while the successes invalidate the skills query. `Failed` nests the typed
+/// [`SkillError`] (already adjacently tagged) as its `data` -- the frontend
+/// reaches the reject detail through `outcome.data`.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "kind", content = "data")]
+pub enum ImportOutcome {
+    /// The skill was linked / copied into the registry; carries the entry read
+    /// back from disk.
+    #[serde(rename = "imported")]
+    Imported(SkillEntry),
+    /// The import refused (spec-invalid at commit time, name-taken race, fs
+    /// failure, link refused); carries the typed reject.
+    #[serde(rename = "failed")]
+    Failed(SkillError),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn name_rule_accepts_spec_shapes() {
+        assert!(is_valid_skill_name("a"));
+        assert!(is_valid_skill_name("pdf-tools"));
+        assert!(is_valid_skill_name("data-analysis-2"));
+        assert!(is_valid_skill_name("0num-first"));
+        // Exactly at the 64-char ceiling.
+        let max = "a".repeat(SKILL_NAME_MAX);
+        assert!(is_valid_skill_name(&max));
+    }
+
+    #[test]
+    fn name_rule_rejects_non_kebab_or_oversized() {
+        for bad in [
+            "",           // empty
+            " ",          // blank
+            "PDF",        // uppercase
+            "pdf_tools",  // underscore
+            "pdf tools",  // space
+            "-pdf",       // leading hyphen
+            "pdf-",       // trailing hyphen
+            "pdf--tools", // double hyphen
+            "pdf.tools",  // dot
+            "技能",       // non-ASCII
+        ] {
+            assert!(!is_valid_skill_name(bad), "`{bad}` should be rejected");
+        }
+        let too_long = "a".repeat(SKILL_NAME_MAX + 1);
+        assert!(!is_valid_skill_name(&too_long));
+    }
+
+    #[test]
+    fn validate_skill_names_the_reason() {
+        let err = validate_skill_name("Bad Name").unwrap_err();
+        assert_eq!(
+            err,
+            SkillError::InvalidName(
+                "`Bad Name` must be kebab-case (lowercase a-z / 0-9 separated \
+                 by single hyphens) and at most 64 chars"
+                    .into()
+            )
+        );
+        assert!(validate_skill_name("good-name").is_ok());
+    }
+
+    #[test]
+    fn description_validation_enforces_spec() {
+        assert!(matches!(
+            validate_description("   "),
+            Err(SkillError::InvalidSkill(_))
+        ));
+        let too_long = "d".repeat(SKILL_DESCRIPTION_MAX + 1);
+        assert!(matches!(
+            validate_description(&too_long),
+            Err(SkillError::InvalidSkill(_))
+        ));
+        assert!(validate_description("Analyzes PDF files.").is_ok());
+    }
+
+    #[test]
+    fn body_validation_rejects_blank() {
+        assert!(matches!(
+            validate_body("  \n\t "),
+            Err(SkillError::InvalidSkill(_))
+        ));
+        assert!(validate_body("Use this skill when …").is_ok());
+    }
+
+    #[test]
+    fn error_kinds_serialize_adjacently_tagged() {
+        // The IPC shape the frontend guards on: { kind, data } -- the same
+        // adjacent tagging as every other typed error.
+        let json = serde_json::to_value(SkillError::NoSuchSkill("pdf-tools".into())).unwrap();
+        assert_eq!(json["kind"], "NoSuchSkill");
+        assert_eq!(json["data"], "pdf-tools");
+    }
+
+    #[test]
+    fn entry_wire_shape_round_trips() {
+        let entry = SkillEntry {
+            name: "pdf-tools".into(),
+            description: "Work with PDF files.".into(),
+            acquired: Acquired::Linked,
+            license: Some("MIT".into()),
+            compatibility: None,
+            body: "Body text.\n".into(),
+            link_target: Some("/home/u/.claude/skills/pdf-tools".into()),
+            enabled: true,
+            content_hash: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".into(),
+            covers_builtin: false,
+        };
+        let json = serde_json::to_string(&entry).unwrap();
+        let back: SkillEntry = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, entry);
+        // Option None rides as JSON null, Vec as [] (the project convention --
+        // no skip_serializing_if anywhere in the wire model).
+        let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert!(value["compatibility"].is_null());
+        assert!(value["license"].is_string());
+    }
+
+    #[test]
+    fn import_outcome_round_trips_both_arms() {
+        // Imported arm: { kind: "imported", data: <SkillEntry> }.
+        let entry = SkillEntry {
+            name: "pdf-tools".into(),
+            description: "Work with PDF files.".into(),
+            acquired: Acquired::Linked,
+            license: None,
+            compatibility: None,
+            body: "Body.\n".into(),
+            link_target: Some("/home/u/.claude/skills/pdf-tools".into()),
+            enabled: true,
+            content_hash: "abc".into(),
+            covers_builtin: false,
+        };
+        let imported = ImportOutcome::Imported(entry.clone());
+        let json = serde_json::to_value(&imported).unwrap();
+        assert_eq!(json["kind"], "imported");
+        assert_eq!(json["data"]["name"], "pdf-tools");
+        // Failed arm: { kind: "failed", data: <SkillError {kind, data}> } --
+        // the typed reject nests inside `data`, so a frontend narrowing on
+        // `outcome.kind` reaches the reject detail through `outcome.data`.
+        let failed = ImportOutcome::Failed(SkillError::NameTaken("taken".into()));
+        let json = serde_json::to_value(&failed).unwrap();
+        assert_eq!(json["kind"], "failed");
+        assert_eq!(json["data"]["kind"], "NameTaken");
+        assert_eq!(json["data"]["data"], "taken");
+    }
+
+    #[test]
+    fn import_mode_and_status_serialize_snake_case() {
+        assert_eq!(
+            serde_json::to_value(ImportMode::Link).unwrap(),
+            serde_json::Value::String("link".into())
+        );
+        assert_eq!(
+            serde_json::to_value(ImportMode::Copy).unwrap(),
+            serde_json::Value::String("copy".into())
+        );
+        assert_eq!(
+            serde_json::to_value(DiscoveredSkillStatus::AlreadyExists).unwrap(),
+            serde_json::Value::String("already_exists".into())
+        );
+        assert_eq!(
+            serde_json::to_value(DiscoveredSkillStatus::Importable).unwrap(),
+            serde_json::Value::String("importable".into())
+        );
+        assert_eq!(
+            serde_json::to_value(DiscoveredSkillStatus::Invalid).unwrap(),
+            serde_json::Value::String("invalid".into())
+        );
+    }
+}

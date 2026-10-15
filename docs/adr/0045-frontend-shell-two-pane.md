@@ -1,0 +1,54 @@
+# 前端 shell：两栏（thread rail + tabbed workspace），工作集为 workspace tab、非常驻栏
+
+> 部分被 [ADR-0083](./0083-conversation-stream-workspace-panel.md) 取代：Decision「左 = thread rail：承载轮次卡片（逐字提问截断 + outcome 图标 + active chip）」卡片形态演进为对话流轮次卡片（提问 + 可折叠执行轨迹 + 答复 + 结果预览卡），内联预览仅承载窗口化采样；rail / workspace 分离、「工作集不做常驻第三栏」「中间结果不内联进 thread（否决 notebook 式）」保留。详见 ADR-0083。
+
+## Decision
+
+前端 shell 从当前单列 1100px dev 默认（`App.tsx`）改为**两栏**：
+
+- **左 = thread rail**：承载**轮次卡片**（逐字提问截断 + outcome 图标 + 「作用于 X」active chip + assumption 一行）与**源生命周期事件标记条**（非轮次，ADR-0040）。
+- **右 = workspace**：大块舞台，用 tabs 切换「结果 / Schema / 工作集」。当前或重选的中间结果在「结果」tab 全尺寸渲染（表 + Vega-Lite + assumption 旁注 + 退化披露，ADR-0016/0033/0010）。
+- **底 = QuestionBar**（跨全宽），带「作用于 result_N（隐式）」active 指示器，可下拉显式点名覆盖（CONTEXT.md「用户可显式点名覆盖」）。
+
+**工作集不做常驻第三栏**——它是 workspace 里的一个 tab。「当前表」的可见性靠 rail 卡片 active chip + QuestionBar 指示器两处轻量呈现。**中间结果不内联进 thread**（否决 notebook 式）。参照系：Chat 风格 codex agent（如 ChatGPT）的「对话 rail + canvas」双栏。
+
+## Context
+
+ADR-0008（Tauri）与 0016（React + Vega-Lite）定了框架与渲染管线，但**前端 shell 的空间结构从未被决策**——当前 `App.tsx` 的单列 `max-width:1100px` 居中是脚手架默认值，不是有意识的 ADR。多个已落 ADR 的 UI 落点都依赖 shell 形态：ADR-0010 隐式链式、ADR-0028 重开历史结果、ADR-0039 逐字提问标签、ADR-0040 源事件与轮次并列、ADR-0033 退化披露——它们都需要稳定的「时间线 vs 查看器」分离才能落地。
+
+## Why
+
+1. **对话流是主轴，不是表**——CONTEXT.md 定义「当前表」为"用户通常无需感知其存在"，ADR-0010 让链式引用对用户不可见。导航主轴是轮次序列，否决「以工作集为左导航树」的 DB 工具壳。
+2. **中间结果需要全尺寸空间**——物化的 Dataset（ADR-0024）渲染为宽表 + Vega-Lite 图（0016/0033）；内联进 thread（notebook 式）会让含图轮次撑极高，几轮后把提问栏与"当前在做什么"推出视口。
+3. **重开历史结果是一等动作**——ADR-0028「无结果轮次 outcome 契约」+ `handleSelectResult` 已实现"点历史轮次→重演到 ResultView"。两栏把 thread=时间线索引、workspace=查看器分离，正是这个交互的形态化。notebook 式把它降级为"滚动"，DB 壳把它降级为"底部日志"。
+4. **工作集是低频操作**——rename（0037）/ replace（0025/0042）/ privacy（0011）偶发，不为偶发操作永久占一栏视口（KISS）；「当前表」既"通常隐式"，给最左常驻栏反而把它抬成主角，与领域相悖。
+5. **rail 卡片用逐字提问截断**（ADR-0039）而非 LLM 摘要——即便 Codex 风格用摘要；这是领域硬约束对参照系的必要偏离。
+
+## Considered options
+
+- **Notebook 内联（a）**：轮次纵轴、结果内联。图表撑爆 thread、重开历史退化为滚动。**否决**。
+- **DB 工具壳（c）**：工作集左栏为主导航 + 主舞台 + thread 折叠。与「当前表」通常无需感知相悖、把表抬成主角。**否决**。
+- **三栏（ii，工作集常驻最左）**：rename/replace/privacy 零跳转，但为低频操作永久占视口、违背 active 隐式语义、比参照系更重。**否决**；active 速览用 QuestionBar 下拉吸收。
+- **参照 Codex CLI 单列 TUI**：等同 a。**否决**。
+- **QuestionBar 下拉持久锁定 active**：前端锁定与后端 active（0051 服务端真相）双真相。**否决**。
+- **QuestionBar 下拉快捷点名**：与提问内点名重复，v1 YAGNI。**否决**。
+
+## Consequences
+
+- **前端 shell 重构**：`App.tsx` 由单列改为 two-pane grid（rail + workspace），workspace 内 tabs；`styles.css` 的 `.layout` 280px/1fr 双栏与新 shell 不兼容，须重写。
+- **工作集管理降级为 tab**：`WorkingSetList` / `DatasetDetail` 从常驻面板移入 workspace tab；rename/replace/privacy 多一次点击。
+- **「当前表」可见性**：靠 rail 卡片 active chip + QuestionBar 指示器两处呈现，不靠常驻栏；QuestionBar 下拉给轻量工作集速览。
+- **轮次卡片标签**：逐字提问有界截断（ADR-0039），禁用 LLM 摘要——即便视觉上 Codex 用摘要。
+- **thread rail 双物种**：轮次卡片（4 种 outcome 图标，ADR-0028）+ 源事件标记条（非轮次、无 outcome，ADR-0040）。
+- **未决（留后续 ADR）**：视觉系统（字体/色彩/明暗/密度）；多会话切换 UI（ADR-0027，tabs vs sidebar vs 多窗口）；workspace tab 在会话切换时的重置策略。
+- **被 ADR-0046 闭合**：「多会话切换 UI（tabs vs sidebar vs 多窗口）」open item 定为**单窗 + 顶栏 tabs**；关 tab = 落 recipe + 卸载（非销毁）。见 ADR-0046。
+- **被 ADR-0047 细化**：thread rail 的视觉语言（单行逐字卡片 / 四类 outcome 编码 / 源事件标记条 + stale 因果染色）在 0047 详定。本 ADR 只定 shell 结构，rail 内部视觉见 0047。
+- **被 ADR-0048 限定交互**：澄清文本载荷（B 轮）与 `assumption` 可纠偏旁注的**交互**（应答/纠偏走下一条自然语言轮次、不开新原语）在 0048 定；其渲染位置仍归本 ADR shell + 0047 rail。见 ADR-0048。
+- **被 ADR-0049 改写前提**：「`styles.css` 的 `.layout` 须重写」升级为「`styles.css` 被 Tailwind utilities + shadcn 组件**取代**」——前端样式栈定为 shadcn/ui v4 + Tailwind v4 + Lucide。见 ADR-0049。
+- **被 ADR-0054 填边界遗漏**：本 ADR 只定两栏 shell **结构**（rail + workspace），未定义桌面窗口可变尺寸下的行为（rail 宽度策略 / 折叠 / 最小尺寸 / 缩放退化）；窗口尺寸策略（rail 固定宽 + 可折叠 + Tauri `minWidth` 兜底）与尾部 ellipsis 截断（连带闭合 0047 / 0050 截断 open item）在 ADR-0054 定。见 ADR-0054。
+- **被 ADR-0057 延伸**：workspace「结果」tab 的渲染落点定案——行服务端分页 + 列原生全量 + 数值类型右对齐，不引入虚拟化 / 跳页 / column cap。见 ADR-0057。
+- **被 ADR-0060 改写（导航载体）**：shell 经 0060 由两栏（本 ADR）扩为三栏（+ 左会话栏取代 0046 顶栏 tabs）。见 ADR-0060。
+- **QuestionBar 指示器改写（原「可下拉显式点名覆盖」→「只读显示 active + 点名走提问内」）**：指示器只读显示当前 active（ADR-0051 服务端真相）的显示名（ADR-0037）；取消下拉——显式点名走提问内（CONTEXT.md 本意，LLM 解析那一轮），轮内生效、非持久锁定。
+- **被 ADR-0062 精确化（QuestionBar 跨度）**：本 ADR「底 = QuestionBar（跨全宽）」在 0060 三栏化后读不通——定为「只跨 rail + workspace，会话栏独立通底」。见 ADR-0062 R1。
+- **被 ADR-0062 精确化（结果 tab 布局顺序）**：本 ADR「表 + Vega-Lite + assumption + 退化披露」枚举定为**布局顺序**「assumption → 图 → 表」（反转枚举、采 NL 分析心智），退化披露替换图位、分页 sticky pane 底。见 ADR-0062 R4。
+- **被 ADR-0092 校准**：本 ADR「底 = QuestionBar」从 `SessionPane` 内上提到 shell 级——bar 不再是 per-session 组件，而是 shell 级单实例（`activeSessionId === null` 时居中、非 `null` 时在底部）。`SessionPane` 失去 QuestionBar，收窄为 thread rail + workspace 渲染器。见 ADR-0092。

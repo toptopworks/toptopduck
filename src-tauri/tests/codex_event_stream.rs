@@ -1,0 +1,872 @@
+//! Codex event stream engine integration tests (ADR-0094, issue #523; renamed
+//! from `json_event_stream` by ADR-0097 Decision 2).
+//!
+//! Drives the real [`AcpEngine`] (via the `CodexEventStream` dispatch arm)
+//! against the codex fake-CLI fixture (`codex-fake-cli`, declared as a
+//! `[[bin]]`) across every observable pump branch: clean text reply, tool-call
+//! trajectory, turn failure, step-cap overflow, crash (EOF without text), and
+//! stdout close with accumulated text. The fake CLI emits NDJSON events; the
+//! engine's `codex_event_stream::run_codex_event_stream` reads them and maps
+//! to the SAME [`LoopOutcome`] shape the ACP path returns.
+//!
+//! Real-CLI E2E verification (the exact codex `exec --json` wire format) is
+//! tracked by #342.
+
+use std::path::PathBuf;
+use std::sync::Arc;
+
+use toptopduck_lib::approval::{ApprovalResponse, ApprovalSink, ApprovalState, OperationKind};
+use toptopduck_lib::cancel::CancelToken;
+use toptopduck_lib::model::{OccupancySnapshot, TurnPhase};
+use toptopduck_lib::runtime::acp::adapter::codex;
+use toptopduck_lib::runtime::acp::engine::{AcpEngine, AcpTurnInput};
+use toptopduck_lib::runtime::acp::wire::{ContentBlock, McpServer};
+use toptopduck_lib::session::loop_contract::{LoopOutcome, Termination, TraceEntry};
+use toptopduck_lib::session::outcome_merge::{merge_outcomes, GatewayOutcome};
+
+/// Resolve the codex fake-CLI binary path.
+fn fake_cli() -> PathBuf {
+    PathBuf::from(env!("CARGO_BIN_EXE_codex-fake-cli"))
+}
+
+/// A minimal turn input: one text block + a placeholder bridge descriptor
+/// (the fixture ignores both).
+fn input() -> AcpTurnInput {
+    AcpTurnInput {
+        model: None,
+        thought_level: None,
+        cwd: std::env::temp_dir().to_string_lossy().to_string(),
+        mcp_servers: vec![McpServer::stdio_bridge(
+            "toptopduck-gateway",
+            "/placeholder/bridge",
+            Vec::new(),
+            std::collections::BTreeMap::new(),
+        )],
+        prompt_blocks: vec![ContentBlock::text("what is the answer?")],
+    }
+}
+
+/// A practically collision-free temp path (pid + nanosecond salt) for the
+/// fixture's argv trace (the harness runs tests in parallel).
+fn unique_trace_path() -> PathBuf {
+    std::env::temp_dir().join(format!(
+        "codex-fake-trace-{}.log",
+        std::process::id() as u64
+            ^ (std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .subsec_nanos() as u64)
+    ))
+}
+
+/// Process-wide lock so the global `CODEX_FAKE_SCENARIO` env var is not raced
+/// by concurrent tests.
+/// Poison recovery is safe: this mutex only serializes env/scenario
+/// access across tests, it guards no cross-test invariant.
+static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Drive one scenario through the JSON event stream engine, returning the
+/// outcome, the phase stream, and the turn's elapsed time (measured AFTER the
+/// scenario lock is held -- the harness runs tests in parallel, and the
+/// lock-queue wait is not the engine's latency; the step-cap pin relies on
+/// this). Uses a short no-progress cap (5s) so a stuck scenario fails fast.
+fn run(scenario: &str, step_cap: u32) -> (LoopOutcome, Vec<TurnPhase>, std::time::Duration) {
+    run_with_cap(scenario, step_cap, std::time::Duration::from_secs(5))
+}
+
+/// [`run`] with a caller-chosen no-progress cap (the freeze-window tests
+/// drive caps the scenario's gaps must outlast).
+fn run_with_cap(
+    scenario: &str,
+    step_cap: u32,
+    cap: std::time::Duration,
+) -> (LoopOutcome, Vec<TurnPhase>, std::time::Duration) {
+    let cancel = Arc::new(CancelToken::new());
+    let eng = AcpEngine::new(codex(), cancel).with_caps(step_cap, Some(cap));
+    let approval = ApprovalState::new();
+    let mut phases = Vec::new();
+    let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let start = std::time::Instant::now();
+    std::env::set_var("CODEX_FAKE_SCENARIO", scenario);
+    let outcome = eng.run(&input(), &fake_cli(), &approval, &NoopSink, |p| {
+        phases.push(p)
+    });
+    (outcome, phases, start.elapsed())
+}
+
+/// A no-op approval sink (unused by the JSON event stream path but required by
+/// the engine's signature).
+struct NoopSink;
+impl ApprovalSink for NoopSink {
+    fn emit_request(&self, _: &toptopduck_lib::approval::ApprovalRequestBody) {}
+    fn emit_resolved(
+        &self,
+        _: &toptopduck_lib::approval::ApprovalRequestBody,
+        _: ApprovalResponse,
+    ) {
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Scenarios
+// ---------------------------------------------------------------------------
+
+/// A clean text reply: agent_message + turn.completed -> Text with the streamed
+/// text. The turn's reasoning item folds into a thinking-only trailing round
+/// (issue #807): the prose rides the terminal text, the thinking stays on the
+/// round with its duration pinned to 0, and the turn-end freeze fires the
+/// live ThinkingCompleted phase.
+#[test]
+fn text_reply_folds_reasoning_into_a_thinking_round() {
+    let (outcome, phases, _) = run("text_reply", 24);
+    match outcome.termination {
+        Termination::Text(t) => assert_eq!(t, "the answer is 42"),
+        other => panic!("expected Text, got {other:?}"),
+    }
+    assert_eq!(outcome.trace.len(), 1, "the reasoning opens one round");
+    let round = &outcome.trace[0];
+    assert!(round.calls.is_empty(), "no tool calls");
+    assert_eq!(round.text, None, "the prose rides the terminal text");
+    let thinking = round.thinking.as_ref().expect("the reasoning folds");
+    assert_eq!(thinking.text, "thinking...");
+    assert_eq!(thinking.duration_ms, 0, "no fabricated window");
+    assert!(
+        phases
+            .iter()
+            .any(|p| matches!(p, TurnPhase::Thinking { attempt: 1 })),
+        "a Thinking phase fires before the event pump"
+    );
+    assert!(
+        phases.iter().any(
+            |p| matches!(p, TurnPhase::ThinkingCompleted { duration_ms, text }
+                if *duration_ms == 0 && text == "thinking...")
+        ),
+        "the turn-end freeze fires the live ThinkingCompleted"
+    );
+}
+
+/// ADR-0129 (issue #1270): the terminal `turn.completed` usage (the
+/// live-measured 0.154 shape -- `exec --json` emits no
+/// `token_count.updated`) settles as the turn's usage end to end.
+#[test]
+fn usage_turn_settles_the_terminal_usage() {
+    let (outcome, _, _) = run("usage_turn", 24);
+    assert!(matches!(outcome.termination, Termination::Text(_)));
+    let usage = outcome
+        .usage
+        .as_ref()
+        .expect("the terminal evidence settles");
+    assert_eq!(
+        usage.total.input_tokens, 20552,
+        "taken verbatim (cache inside)"
+    );
+    assert_eq!(usage.total.cache_read_tokens, 3840);
+    assert_eq!(usage.total.cache_write_tokens, 12);
+    assert_eq!(usage.total.output_tokens, 5);
+    assert_eq!(
+        usage.total.reasoning_tokens, None,
+        "a zero split folds away to unsplit"
+    );
+    assert!(
+        usage.subagents.is_empty(),
+        "external attribution never splits"
+    );
+    // ADR-0130 (issue #1274): the same terminal window also latches the
+    // turn's occupancy numerator end to end -- the OpenAI arm's derived
+    // total (input + output), window None (a config matter, Decision 4).
+    assert_eq!(
+        outcome.occupancy,
+        Some(OccupancySnapshot {
+            tokens: 20557,
+            limit: None,
+        })
+    );
+}
+
+/// A tool-call trajectory: one command_execution (emitted as the measured
+/// item.started / item.completed pair — the streaming variant must not double
+/// the row) + agent_message + completed. The trace carries one successful
+/// entry; the phase stream has the Started / Completed pair.
+#[test]
+fn tool_call_yields_trace_with_one_successful_entry() {
+    let (outcome, phases, _) = run("tool_call", 24);
+    match outcome.termination {
+        Termination::Text(t) => assert_eq!(t, "found 3 rows"),
+        other => panic!("expected Text, got {other:?}"),
+    }
+    assert_eq!(outcome.trace.len(), 1, "one batch round wrapping the call");
+    assert_eq!(
+        outcome.trace[0].calls.len(),
+        1,
+        "the item.started streaming variant never doubles the row"
+    );
+    let entry = &outcome.trace[0].calls[0];
+    assert!(entry.success, "the call completed");
+    assert_eq!(entry.name, "explore SELECT 1");
+    assert!(phases.iter().any(
+        |p| matches!(p, TurnPhase::ToolCallStarted { name, .. } if name == "explore SELECT 1")
+    ));
+    assert!(phases
+        .iter()
+        .any(|p| matches!(p, TurnPhase::ToolCallCompleted(e) if e.success)));
+}
+
+/// The execution freeze window (ADR-0115): a native codex command whose run
+/// outlasts the cap must NOT kill the turn -- the `item.started` window
+/// freezes the clock, the completion echo releases it, and the reply lands.
+/// This is the mis-kill shape ADR-0115 exists to eliminate, on the surface
+/// whose commands are silent between the envelope pair.
+#[test]
+fn slow_exec_survives_past_the_cap() {
+    let (outcome, _, _) = run_with_cap("slow_exec", 24, std::time::Duration::from_millis(200));
+    match &outcome.termination {
+        Termination::Text(t) => assert_eq!(t, "found 3 rows"),
+        other => panic!("the frozen execution must survive past the cap, got {other:?}"),
+    }
+    assert_eq!(outcome.trace.len(), 1, "one batch round wrapping the call");
+    assert_eq!(
+        outcome.trace[0].calls.len(),
+        1,
+        "the started/completed pair still lands exactly one row"
+    );
+}
+
+/// A failed command (non-zero exit) lands a failed trace row with the exit
+/// code as the failure anchor — the end-to-end companion of the unit pins
+/// (issue #804).
+#[test]
+fn failed_command_lands_failed_trace_row() {
+    let (outcome, _, _) = run("tool_call_failure", 24);
+    match outcome.termination {
+        Termination::Text(t) => assert_eq!(t, "the command failed"),
+        other => panic!("expected Text, got {other:?}"),
+    }
+    assert_eq!(outcome.trace.len(), 1, "one batch round wrapping the call");
+    let entry = &outcome.trace[0].calls[0];
+    assert!(!entry.success, "the non-zero exit fails the row");
+    assert_eq!(entry.result_excerpt, "command exited with code 1");
+}
+
+/// Gateway-served MCP tool calls land one trace row per call on the round
+/// (issue #816), their name the wire's `tool` verbatim — the identity the
+/// gateway's dispatch row carries for every class but external dispatches,
+/// which it records under the resolved handle — so the settle-time merge
+/// (`merge_outcomes`) replaces the echo in place with the gateway's
+/// authoritative row whenever the gateway can account for the call:
+/// per-name quota (built-ins included) or the `mcp_invoke` pool (issues
+/// #820 + #817). Live, the two name classes split (issue #1242): a BARE
+/// name is a gateway echo and stays silent (the gateway serve emits the
+/// row's phases itself); a namespaced native call keeps its phase pair.
+#[test]
+fn mcp_tool_call_bare_echo_is_silent_native_keeps_its_pair() {
+    let (outcome, phases, _) = run("mcp_tool_call", 24);
+    match outcome.termination {
+        Termination::Text(t) => assert_eq!(t, "converted 2 rows"),
+        other => panic!("expected Text, got {other:?}"),
+    }
+    assert_eq!(outcome.trace.len(), 1, "both calls share one batch round");
+    let calls = &outcome.trace[0].calls;
+    assert_eq!(calls.len(), 2, "one row per gateway call");
+    // A registered-CLI-shaped bare name: the Execute badge (the gateway's
+    // CLI-arm classification), the wire argument JSON as the digest.
+    assert_eq!(calls[0].name, "convert");
+    assert_eq!(calls[0].tool_use_id, "item_1");
+    assert!(calls[0].success);
+    assert_eq!(calls[0].operation_kind, OperationKind::Execute);
+    assert_eq!(calls[0].summary, r#"{"input":"a.csv"}"#);
+    // A namespaced external name keeps the Network badge (the gateway's
+    // external-arm classification).
+    assert_eq!(calls[1].name, "mcp__duckdb__query_snapshot");
+    assert_eq!(calls[1].operation_kind, OperationKind::Network);
+    // Live: the bare (gateway echo) call emits NOTHING; the namespaced
+    // native call keeps its pair (issue #1242).
+    assert!(
+        !phases.iter().any(|p| matches!(p,
+            TurnPhase::ToolCallStarted { name, .. } if name == "convert")),
+        "the gateway echo is silent live"
+    );
+    assert!(phases.iter().any(
+        |p| matches!(p, TurnPhase::ToolCallStarted { name, operation_kind: OperationKind::Network, .. }
+            if name == "mcp__duckdb__query_snapshot")
+    ));
+    assert_eq!(
+        phases
+            .iter()
+            .filter(|p| matches!(p, TurnPhase::ToolCallCompleted(e) if e.success))
+            .count(),
+        1,
+        "only the native call's live row completes"
+    );
+}
+
+/// Issue #817's end-to-end pin for the codex path (retiring #820's tail H):
+/// the fake CLI drives a full turn with thinking + prose + three
+/// gateway-served `mcp_tool_call`s across two batch rounds (a CLI
+/// registration, a direct-send namespaced call, and an `mcp_invoke` meta
+/// dispatch); the engine rows are the anchors, and the settle merge
+/// replaces them IN PLACE with the gateway's authoritative rows — the
+/// settled trace keeps each round's thinking -> prose -> calls order, no
+/// leading all-gateway round exists, exactly one row survives per
+/// dispatch (the invoke echo pairs the pool's next live row), and the one
+/// unechoed gateway row trails as the flat residual.
+#[test]
+fn mcp_tool_call_rounds_settle_in_place_after_the_merge() {
+    let (outcome, _, _) = run("mcp_tool_call_rounds", 24);
+    match &outcome.termination {
+        Termination::Text(t) => assert_eq!(t, "the answer is 42"),
+        other => panic!("expected Text, got {other:?}"),
+    }
+    // The gateway's authoritative rows: one per dispatch — the same names
+    // the engine echoed for the registration and the direct-send
+    // namespaced call, the resolved handle for the `mcp_invoke` dispatch,
+    // plus one unechoed builtin row for the residual.
+    let gateway_row = |id: &str, name: &str| TraceEntry {
+        tool_use_id: id.into(),
+        name: name.into(),
+        operation_kind: OperationKind::Execute,
+        summary: format!("{name} gateway summary"),
+        success: true,
+        output_truncated: false,
+        result_excerpt: String::new(),
+        sub_trace: None,
+    };
+    let gateway = GatewayOutcome {
+        trace: vec![
+            gateway_row("gw_1", "convert"),
+            gateway_row("gw_2", "mcp__duckdb__query_snapshot"),
+            gateway_row("gw_3", "mcp__duckdb__snapshot_extra"),
+            gateway_row("gw_4", "explore"),
+        ],
+        promotions: Vec::new(),
+    };
+    let merged = merge_outcomes(gateway, outcome);
+    assert_eq!(
+        merged.trace.len(),
+        3,
+        "two engine rounds + the trailing residual: {:#?}",
+        merged.trace
+    );
+    let r1 = &merged.trace[0];
+    assert_eq!(
+        r1.thinking.as_ref().expect("round thinking survives").text,
+        "plan the calls"
+    );
+    assert_eq!(r1.text.as_deref(), Some("checking the table"));
+    assert_eq!(r1.calls.len(), 1, "one row per dispatch");
+    assert_eq!(
+        r1.calls[0].tool_use_id, "gw_1",
+        "the gateway row replaces the echo at its slot"
+    );
+    assert_eq!(r1.calls[0].summary, "convert gateway summary");
+    let r2 = &merged.trace[1];
+    assert_eq!(r2.text.as_deref(), Some("verifying the count"));
+    assert_eq!(r2.calls.len(), 2, "one row per dispatch");
+    assert_eq!(r2.calls[0].tool_use_id, "gw_2");
+    assert_eq!(
+        r2.calls[1].tool_use_id, "gw_3",
+        "the invoke echo pairs the pool's next live row (skipping the \
+         index the direct echo consumed)"
+    );
+    let residual = &merged.trace[2];
+    assert!(
+        residual.thinking.is_none() && residual.text.is_none(),
+        "the residual round is flat"
+    );
+    assert_eq!(residual.calls.len(), 1);
+    assert_eq!(residual.calls[0].tool_use_id, "gw_4");
+    assert_eq!(residual.calls[0].name, "explore");
+}
+
+/// A failed gateway call (status "failed" + error.message) lands a failed
+/// row anchored on the wire's error message (issue #816) — the failure
+/// anchor the cross-turn retrospection surface renders. The bare name is a
+/// gateway echo, so the failure row lands silent (issue #1242).
+#[test]
+fn failed_mcp_tool_call_lands_failed_row_with_error_anchor() {
+    let (outcome, phases, _) = run("mcp_tool_call_failed", 24);
+    match outcome.termination {
+        Termination::Text(t) => assert_eq!(t, "the call failed"),
+        other => panic!("expected Text, got {other:?}"),
+    }
+    let calls = &outcome.trace[0].calls;
+    assert_eq!(calls.len(), 1);
+    assert!(!calls[0].success);
+    assert_eq!(calls[0].result_excerpt, "converter crashed");
+    assert!(
+        !phases
+            .iter()
+            .any(|p| matches!(p, TurnPhase::ToolCallCompleted(_))),
+        "the failed gateway echo lands its row without a live phase (issue #1242)"
+    );
+}
+
+/// A multi-round trajectory (issue #613): each batch round settles with its
+/// own prose + call, the trailing prose rides the terminal text, and the live
+/// channel fires each round's TextDelta BEFORE its batch's ToolCallStarted
+/// plus the round-2 Thinking pointer -- the trailing answer streams its own
+/// delta (ADR-0126). No thinking data source exists on this path, so no
+/// ThinkingCompleted phase ever fires.
+#[test]
+fn round_prose_settles_per_round_with_live_variants() {
+    let (outcome, phases, _) = run("round_prose", 24);
+    match outcome.termination {
+        Termination::Text(t) => assert_eq!(t, "the answer is 42"),
+        other => panic!("expected Text, got {other:?}"),
+    }
+    assert_eq!(outcome.trace.len(), 2, "two batch rounds settle");
+    assert_eq!(outcome.trace[0].text.as_deref(), Some("checking the table"));
+    assert_eq!(outcome.trace[0].calls.len(), 1);
+    assert_eq!(
+        outcome.trace[1].text.as_deref(),
+        Some("verifying the count")
+    );
+    assert_eq!(outcome.trace[1].calls.len(), 1);
+    assert!(
+        outcome.trace.iter().all(|r| r.thinking.is_none()),
+        "no thinking data source -- honest degrade"
+    );
+    // Each round's TextDelta precedes its batch's ToolCallStarted (the
+    // live order the frontend's round grouping relies on).
+    let round1_text = phases
+        .iter()
+        .position(|p| matches!(p, TurnPhase::TextDelta { delta } if delta == "checking the table"))
+        .expect("round-1 TextDelta fired");
+    let round1_call = phases
+        .iter()
+        .position(
+            |p| matches!(p, TurnPhase::ToolCallStarted { name, .. } if name == "explore SELECT 1"),
+        )
+        .expect("round-1 ToolCallStarted fired");
+    assert!(round1_text < round1_call);
+    let round2_text = phases
+        .iter()
+        .position(|p| matches!(p, TurnPhase::TextDelta { delta } if delta == "verifying the count"))
+        .expect("round-2 TextDelta fired");
+    let round2_call = phases
+        .iter()
+        .position(
+            |p| matches!(p, TurnPhase::ToolCallStarted { name, .. } if name == "explore SELECT COUNT(*)"),
+        )
+        .expect("round-2 ToolCallStarted fired");
+    assert!(round2_text < round2_call);
+    let round2_pointer = phases
+        .iter()
+        .position(|p| matches!(p, TurnPhase::Thinking { attempt: 2 }))
+        .expect("the round-2 wait pointer fired");
+    assert!(
+        round2_pointer < round2_text,
+        "the round pointer fires at the round's opening, before its TextDelta"
+    );
+    assert!(
+        phases
+            .iter()
+            .any(|p| matches!(p, TurnPhase::TextDelta { delta } if delta == "the answer is 42")),
+        "the trailing prose streams live as its delta (the settle keeps it off the round: it rides the terminal text)"
+    );
+    assert!(
+        !phases
+            .iter()
+            .any(|p| matches!(p, TurnPhase::ThinkingCompleted { .. })),
+        "no thinking data source -- no ThinkingCompleted"
+    );
+}
+
+/// A turn.failed event maps to Runtime with the error message.
+#[test]
+fn turn_failed_maps_to_runtime() {
+    let (outcome, _, _) = run("turn_failed", 24);
+    match &outcome.termination {
+        Termination::Runtime(msg) => {
+            assert!(msg.contains("rate limited"), "carries the error: {msg}");
+        }
+        other => panic!("expected Runtime, got {other:?}"),
+    }
+}
+
+/// A runaway trajectory (more command_execution events than the step cap) trips
+/// the engine's step cap -> StepCap termination.
+/// ADR-0128: the CLI's own `model_max_turns` self-stop (a turn-limit
+/// `turn.failed`) tops out EVERY window -- the engine spends the whole
+/// resume budget (1 + 3 spawns) and lands the DERIVED ceiling, the same
+/// product the built-in loop renders (96 = 24 x 4), never the single cap.
+#[test]
+fn turn_limit_exhaustion_lands_the_derived_ceiling() {
+    let (outcome, _, _) = run("turn_limit_exhausted", 24);
+    match outcome.termination {
+        Termination::StepCap(n) => assert_eq!(n, 96),
+        other => panic!("expected StepCap, got {other:?}"),
+    }
+}
+
+/// ADR-0128 continuation: the engine resumes the SAME conversation via
+/// `codex exec resume <thread_id>` (the nudge as the resumed window's
+/// prompt). The two processes' rounds settle as ONE trajectory, and the
+/// resume spawn carries the same injected window budget.
+#[test]
+fn turn_limit_resumes_via_exec_resume() {
+    // Direct `eng.run` under this test's own ENV_LOCK hold (the `run`
+    // helper locks it again -- the non-reentrant mutex would deadlock; the
+    // argv-trace tests' convention).
+    let cancel = Arc::new(CancelToken::new());
+    let eng =
+        AcpEngine::new(codex(), cancel).with_caps(24, Some(std::time::Duration::from_secs(5)));
+    let approval = ApprovalState::new();
+    let trace = unique_trace_path();
+    let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    std::env::set_var("CODEX_FAKE_SCENARIO", "turn_limit_continue");
+    std::env::set_var("CODEX_FAKE_TRACE_FILE", &trace);
+    let outcome = eng.run(&input(), &fake_cli(), &approval, &NoopSink, |_| {});
+    std::env::remove_var("CODEX_FAKE_TRACE_FILE");
+    let argv = std::fs::read_to_string(&trace).unwrap_or_default();
+    let _ = std::fs::remove_file(&trace);
+
+    match outcome.termination {
+        Termination::Text(t) => assert_eq!(t, "the answer is 42"),
+        other => panic!("expected Text, got {other:?}"),
+    }
+    // Window one's call round and window two's call round both settle (the
+    // one tracker carried across the two processes); each window's trailing
+    // prose rides the terminal text.
+    assert_eq!(outcome.trace.len(), 2, "{:?}", outcome.trace);
+    assert_eq!(outcome.trace[0].calls.len(), 1);
+    assert_eq!(outcome.trace[1].calls.len(), 1);
+    // Two spawns: the window-one exec and the resume. The resume addresses
+    // the thread the `thread.started` capture latched and carries the same
+    // window budget; the nudge rides as the PROMPT positional.
+    let lines: Vec<&str> = argv
+        .lines()
+        .filter(|l| l.starts_with("CODEX_FAKE_ARGV="))
+        .collect();
+    assert_eq!(lines.len(), 2, "one exec spawn + one resume spawn: {argv}");
+    assert!(
+        lines.iter().all(|l| l.contains("-c model_max_turns=24")),
+        "every window's spawn carries the budget; got: {argv}"
+    );
+    assert!(
+        lines[1].contains(" resume 01aa-fixture-thread-id "),
+        "the resume spawn addresses the captured thread id; got: {}",
+        lines[1]
+    );
+    assert!(
+        lines[1].contains("step budget for this window"),
+        "the convergence nudge rides the resume spawn as the prompt; got: {}",
+        lines[1]
+    );
+    assert!(
+        !lines[0].contains(" resume "),
+        "the window-one spawn is a plain exec; got: {}",
+        lines[0]
+    );
+}
+
+/// Stdout closes mid-turn after emitting partial agent text but no terminal
+/// event. The pump's Disconnected fallback treats accumulated text as the
+/// answer (codex may close stdout after the final message without an explicit
+/// turn.completed), so the outcome is Text — not Runtime.
+#[test]
+fn crash_with_partial_text_treats_as_success() {
+    let (outcome, _, _) = run("crash", 24);
+    match outcome.termination {
+        Termination::Text(t) => assert_eq!(t, "about to crash"),
+        other => panic!("expected Text (Disconnected fallback), got {other:?}"),
+    }
+    // The promoted text rode the terminal -- no round double-carries it
+    // (issue #628's Text settle stays consistent with the fallback).
+    assert!(outcome.trace.is_empty(), "{:?}", outcome.trace);
+}
+
+/// Stdout closes with accumulated agent text but no explicit turn.completed.
+/// The pump's Disconnected fallback treats accumulated text as success (codex
+/// may close stdout after the final message without an explicit terminal event).
+#[test]
+fn disconnected_with_text_treats_as_success() {
+    let (outcome, _, _) = run("disconnected_with_text", 24);
+    match outcome.termination {
+        Termination::Text(t) => assert_eq!(t, "partial reply"),
+        other => panic!("expected Text, got {other:?}"),
+    }
+    // The promoted text rode the terminal -- no round double-carries it
+    // (issue #628's Text settle stays consistent with the fallback).
+    assert!(outcome.trace.is_empty(), "{:?}", outcome.trace);
+}
+
+/// A single line past the 4-MiB line cap is dropped by the shared reader
+/// and the connection stays up: the events after it still arrive and the
+/// turn completes with their text (issue #639's stream-path cap pin).
+#[test]
+fn overlong_line_is_dropped_and_reading_continues() {
+    let (outcome, _, _) = run("line_cap_overlong", 24);
+    match outcome.termination {
+        Termination::Text(t) => assert_eq!(t, "still alive"),
+        other => panic!("expected Text despite the overlong line, got {other:?}"),
+    }
+}
+
+/// Stdout closes with no events and no text -> Runtime (no recovery possible).
+#[test]
+fn empty_stdout_lands_as_runtime() {
+    let (outcome, _, _) = run("empty_stdout", 24);
+    match outcome.termination {
+        Termination::Runtime(msg) => {
+            assert!(msg.contains("without a terminal event"), "got: {msg}");
+        }
+        other => panic!("expected Runtime, got {other:?}"),
+    }
+}
+
+/// Issue #628: a user cancel mid-answer keeps the partial prose on the tail
+/// round -- the Cancelled termination carries no text for the prose to ride,
+/// so the trace is its only home.
+#[test]
+fn user_cancel_mid_prose_keeps_partial_prose_in_trace() {
+    let cancel = Arc::new(CancelToken::new());
+    // No no-progress cap: the user-cancel path alone (the acp_engine.rs
+    // `user_cancel_aborts_the_whole_turn` peer's rationale); the fixture's
+    // 30s hold fails loudly if the cancel misses.
+    let eng = AcpEngine::new(codex(), Arc::clone(&cancel)).with_caps(24, None);
+    let approval = ApprovalState::new();
+    let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    std::env::set_var("CODEX_FAKE_SCENARIO", "cancel_with_prose");
+    // Deterministic ordering instead of a wall-clock bet (the
+    // claude_stream_json.rs peer's rationale): the scenario emits a
+    // command execution and the text event in one flush, so once the
+    // call's ToolCallStarted phase fires the prose is already in the pipe
+    // behind it. The cancel thread latches on that phase, waits out one
+    // recv cycle (the pump polls at 50ms), and only then requests -- the
+    // cancel cannot overtake the prose fold. The latch also subsumes the
+    // spawn-after-env rule: phases only flow once the turn is live, and
+    // begin_turn has already cleared any stale `requested`. The fixture's
+    // 30s hold fails loudly if the latch never fires.
+    let phases: Arc<std::sync::Mutex<Vec<TurnPhase>>> = Arc::default();
+    let latch = Arc::clone(&phases);
+    let cancel_for_thread = Arc::clone(&cancel);
+    std::thread::spawn(move || {
+        while !latch
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|p| matches!(p, TurnPhase::ToolCallStarted { .. }))
+        {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        std::thread::sleep(std::time::Duration::from_millis(150));
+        cancel_for_thread.request();
+    });
+    let start = std::time::Instant::now();
+    let outcome = eng.run(&input(), &fake_cli(), &approval, &NoopSink, |p| {
+        phases.lock().unwrap().push(p);
+    });
+    assert!(
+        matches!(outcome.termination, Termination::Cancelled),
+        "user cancel -> Cancelled: {:?}",
+        outcome.termination
+    );
+    // Round 1 carries the settled call row (the completed command carries
+    // exit_code 0, so it lands successful); the call-less tail round
+    // keeps the prose the cancel interrupted.
+    assert_eq!(outcome.trace.len(), 2, "{:?}", outcome.trace);
+    assert_eq!(outcome.trace[0].calls.len(), 1, "{:?}", outcome.trace);
+    assert_eq!(
+        outcome.trace[1].text.as_deref(),
+        Some("partial answer"),
+        "the streamed-so-far prose survives the cancel"
+    );
+    // Same window pin as the claude_stream_json.rs peers: catch a
+    // slow-but-correct resolution, not the outright miss.
+    let elapsed = start.elapsed();
+    assert!(
+        elapsed < std::time::Duration::from_secs(3),
+        "took {elapsed:?} -- a slow cancel resolution; the fixture sleeps 30s"
+    );
+}
+
+/// Issue #808: a CLI that never drains stdin wedges the unbounded
+/// `write_all` of an oversized prompt (past the ~64-KiB OS pipe buffer)
+/// before the pump loop's cancel check is reachable. The cancel-aware
+/// writer must settle the turn as Cancelled instead of hanging forever.
+#[test]
+fn cancel_during_blocked_stdin_write_settles_the_turn() {
+    let cancel = Arc::new(CancelToken::new());
+    // No no-progress cap: the user cancel alone must break the blocked write (the
+    // `user_cancel_mid_prose_keeps_partial_prose_in_trace` peer's rationale);
+    // the fixture's 30s hold fails loudly if the cancel cannot.
+    let eng = AcpEngine::new(codex(), Arc::clone(&cancel)).with_caps(24, None);
+    let approval = ApprovalState::new();
+    let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    std::env::set_var("CODEX_FAKE_SCENARIO", "no_stdin_hold");
+    // 1 MiB of text: past the OS pipe buffer, so the engine's write blocks
+    // in the pipe once the fixture stops reading.
+    let mut big = input();
+    big.prompt_blocks = vec![ContentBlock::text("x".repeat(1 << 20))];
+    // The scenario reads no stdin and emits no events, so there is no phase
+    // to latch on; the delay only needs to cover spawn + the first pipe
+    // fill (the claude_stream_json.rs `user_cancel_aborts_the_whole_turn`
+    // peer's 200ms rationale, widened for the bigger write).
+    let cancel_for_thread = Arc::clone(&cancel);
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        cancel_for_thread.request();
+    });
+    let start = std::time::Instant::now();
+    let outcome = eng.run(&big, &fake_cli(), &approval, &NoopSink, |_| {});
+    assert!(
+        matches!(outcome.termination, Termination::Cancelled),
+        "blocked write + cancel -> Cancelled: {:?}",
+        outcome.termination
+    );
+    // Same window pin as the cancel peers: catch a slow-but-correct
+    // resolution (cancel poll + kill + reap), not the outright miss.
+    let elapsed = start.elapsed();
+    assert!(
+        elapsed < std::time::Duration::from_secs(3),
+        "took {elapsed:?} -- the cancel never broke the blocked write"
+    );
+}
+
+/// ADR-0115: a watchdog firing while the oversized prompt write is still
+/// blocked in the pipe (the fixture reads no stdin, so the drain leg's
+/// Cancelled arm is the one that resolves the turn) must land NoProgress
+/// carrying the armed cap, not a bare user Cancelled -- the codex drain
+/// arm's pre-pump relabel, the claude_stream_json.rs peer's semantics on
+/// the codex path (issue #894).
+#[test]
+fn no_progress_watchdog_fires_during_blocked_stdin_write() {
+    let cancel = Arc::new(CancelToken::new());
+    let eng =
+        AcpEngine::new(codex(), cancel).with_caps(24, Some(std::time::Duration::from_millis(300)));
+    let approval = ApprovalState::new();
+    let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    std::env::set_var("CODEX_FAKE_SCENARIO", "no_stdin_hold");
+    // 1 MiB of text: past the OS pipe buffer, so the engine's write blocks
+    // in the pipe once the fixture stops reading (the #808 cancel peer's
+    // shape -- only the cancel source differs: the watchdog, not a user).
+    let mut big = input();
+    big.prompt_blocks = vec![ContentBlock::text("x".repeat(1 << 20))];
+    let start = std::time::Instant::now();
+    let outcome = eng.run(&big, &fake_cli(), &approval, &NoopSink, |_| {});
+    match outcome.termination {
+        Termination::NoProgress(detail) => {
+            assert_eq!(
+                detail.cap,
+                std::time::Duration::from_millis(300),
+                "the armed cap rides the payload"
+            );
+            assert!(
+                detail.silence >= detail.cap,
+                "the measured silence covers the cap: {detail:?}"
+            );
+        }
+        other => panic!("watchdog during the blocked write -> NoProgress, got {other:?}"),
+    }
+    // Same window pin as the #808 cancel peer: the watchdog fires at ~300ms
+    // and the cancel poll + kill + reap must resolve well inside it.
+    let elapsed = start.elapsed();
+    assert!(
+        elapsed < std::time::Duration::from_secs(3),
+        "took {elapsed:?} -- a slow drain-leg watchdog resolution"
+    );
+}
+
+/// A CLI that dies before draining stdin breaks the oversized prompt write
+/// mid-pipe: the turn settles as a Runtime carrying the stdin write
+/// failure -- the pre-#808-fix behavior's main path, now pinned (the
+/// claude_stream_json.rs peer's rationale).
+#[test]
+fn cli_death_during_stdin_write_settles_runtime() {
+    let cancel = Arc::new(CancelToken::new());
+    let eng = AcpEngine::new(codex(), Arc::clone(&cancel)).with_caps(24, None);
+    let approval = ApprovalState::new();
+    let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    std::env::set_var("CODEX_FAKE_SCENARIO", "die_before_stdin");
+    // 1 MiB of text: past the OS pipe buffer, so the engine's write is
+    // still in the pipe when the fixture exits -- either the write is
+    // already blocked, or it fails on the broken pipe outright; both land
+    // on the same Failed arm.
+    let mut big = input();
+    big.prompt_blocks = vec![ContentBlock::text("x".repeat(1 << 20))];
+    let start = std::time::Instant::now();
+    let outcome = eng.run(&big, &fake_cli(), &approval, &NoopSink, |_| {});
+    match &outcome.termination {
+        Termination::Runtime(msg) => assert!(
+            msg.contains("stdin write failed"),
+            "expected the stdin write failure to ride the Runtime: {msg}"
+        ),
+        other => panic!("blocked write + CLI death -> Runtime: {other:?}"),
+    }
+    // The child's own death breaks the pipe: no cancel thread, no 30s hold
+    // on this path.
+    let elapsed = start.elapsed();
+    assert!(
+        elapsed < std::time::Duration::from_secs(3),
+        "took {elapsed:?} -- the CLI death did not break the blocked write"
+    );
+}
+
+/// ADR-0095: a selected model + thought level ride the spawn argv as
+/// `--model <id>` + `-c model_reasoning_effort=<level>` (asserted via the
+/// fixture's argv trace -- the spawn shape, not just the pure flag builder).
+#[test]
+fn selected_model_and_effort_ride_the_spawn_argv() {
+    let cancel = Arc::new(CancelToken::new());
+    let eng =
+        AcpEngine::new(codex(), cancel).with_caps(24, Some(std::time::Duration::from_secs(5)));
+    let approval = ApprovalState::new();
+    let mut input = input();
+    input.model = Some("gpt-5.1".into());
+    input.thought_level = Some("high".into());
+    // The fixture traces its argv to this file (stdout carries the NDJSON
+    // event stream the engine owns).
+    let trace = unique_trace_path();
+    let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    std::env::set_var("CODEX_FAKE_SCENARIO", "text_reply");
+    std::env::set_var("CODEX_FAKE_TRACE_FILE", &trace);
+    let outcome = eng.run(&input, &fake_cli(), &approval, &NoopSink, |_| {});
+    std::env::remove_var("CODEX_FAKE_TRACE_FILE");
+    assert!(matches!(outcome.termination, Termination::Text(_)));
+    let argv = std::fs::read_to_string(&trace).unwrap_or_default();
+    let _ = std::fs::remove_file(&trace);
+    assert!(
+        argv.contains("CODEX_FAKE_ARGV=exec --json --skip-git-repo-check --sandbox read-only -c model_reasoning_summary=detailed --model gpt-5.1 -c model_reasoning_effort=high"),
+        "model + effort must ride the spawn argv in the documented order; got: {argv}"
+    );
+    // ADR-0128: the CLI's own turn budget rides the config surface (the
+    // app-side count-and-kill is retired; the window boundary is the
+    // CLI's `model_max_turns` self-stop).
+    assert!(
+        argv.contains("-c model_max_turns=24"),
+        "the window budget must ride the spawn argv; got: {argv}"
+    );
+    // Issue #800 (review follow-up): the gateway approval exemption rides
+    // the REAL spawn argv — the pure-builder pin alone would miss a
+    // config_flags wiring regression.
+    assert!(
+        argv.contains("-c mcp_servers.toptopduck-gateway.default_tools_approval_mode=\"approve\""),
+        "the gateway tool-approval exemption must ride the spawn argv; got: {argv}"
+    );
+}
+
+/// Issue #811: the reasoning-summary switch rides the argv PREFIX, not the
+/// selection-driven flags -- it is a display-surface override (feeding #807's
+/// reasoning->thinking fold) orthogonal to the thought level, so it must be
+/// present even when no model / thought level is selected.
+#[test]
+fn summary_switch_rides_spawn_argv_without_selections() {
+    let cancel = Arc::new(CancelToken::new());
+    let eng =
+        AcpEngine::new(codex(), cancel).with_caps(24, Some(std::time::Duration::from_secs(5)));
+    let approval = ApprovalState::new();
+    // input() defaults carry no model / thought-level selection.
+    let trace = unique_trace_path();
+    let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    std::env::set_var("CODEX_FAKE_SCENARIO", "text_reply");
+    std::env::set_var("CODEX_FAKE_TRACE_FILE", &trace);
+    let outcome = eng.run(&input(), &fake_cli(), &approval, &NoopSink, |_| {});
+    std::env::remove_var("CODEX_FAKE_TRACE_FILE");
+    assert!(matches!(outcome.termination, Termination::Text(_)));
+    let argv = std::fs::read_to_string(&trace).unwrap_or_default();
+    let _ = std::fs::remove_file(&trace);
+    assert!(
+        argv.contains("CODEX_FAKE_ARGV=exec --json --skip-git-repo-check --sandbox read-only -c model_reasoning_summary=detailed"),
+        "the summary switch must ride the spawn argv with no selections; got: {argv}"
+    );
+}

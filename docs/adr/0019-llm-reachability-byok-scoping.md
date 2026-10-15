@@ -1,5 +1,7 @@
 # LLM reachability & v1 user scoping: BYOK over Anthropic protocol with configurable baseURL
 
+> 本 ADR 的「v1 收窄为已具备 Claude 可达接入的用户」「否决多 provider 留作 v2」结论**被 ADR-0064 推翻**——v2 正式开放多协议（anthropic + openai）多 profile；本 ADR「诚实披露载荷外发」「Anthropic 协议 + 可配 baseURL 的接入形态」结论**保留**。见 ADR-0064。
+
 ## Decision
 
 v1 把目标用户**诚实收窄**为"已具备 Claude 可达接入"的用户——主要通过 **Anthropic 原生协议**接入（Anthropic 直连 key，或经用户自有、兼容 Anthropic 协议的中转网关）。接入形态固定为 **Anthropic 原生协议（`x-api-key` 鉴权）+ 可配 `baseURL`**；**不**在 v1 实现 Bedrock（AWS sigv4）/ Vertex（GCP OAuth）的异构签名（直接用 Bedrock/Vertex 原生签名的企业 v1 需自套 Anthropic 兼容层，或待 v2）。网络接入要求作为**诚实准入门槛**在首次引导与产品定位中明示；**不为大陆纯小白用户做接入兜底**（留作 v2 扩展点）。
@@ -28,3 +30,4 @@ ADR-0006/0007 锁 BYOK + 直连 Claude，0006 自陈"SQL 生成质量是产品�
 - **校准 ADR-0007**：薄抽象的 v1 形态 = 单一 Anthropic 协议 + 可配 baseURL；Bedrock/Vertex 异构签名为 v2 扩展点，不阻塞 v1。
 - **校准 ADR-0011**：诚实披露面扩——须明示"网络接入要求"与"若用自有中转，载荷经过该中转、其留存/训练政策由用户自负、不受 App 控制"。
 - v2 触达大陆小白需在"多 provider"或"合规中转"上另开 ADR。
+- **被 ADR-0098 校准**：准入门槛从「BYOK 可达」单路扩为双路（配置 BYOK 或安装本机 CLI），诚实准入与引导哲学不变、两路并列。见 ADR-0098。

@@ -1,34 +1,714 @@
-//! toptopduck -- local-first AI data analysis desktop tool.
+//! TOPTOPDuck -- local-first AI data analysis desktop tool.
 //!
 //! Slice 1 (issue #5): CSV ingest end-to-end tracer bullet. The ingest pipeline
 //! (ingest / session / workingset) is driven as a black box by
 //! tests/ingest_blackbox.rs -- the PRD's main seam.
+//!
+//! Query loop (PRD #1, ADR-0077/0081): ask -> outcome. The session facade
+//! (session::Session::ask) drives the native agent loop
+//! (session::loop_runtime) over the provider abstraction (provider::Provider,
+//! ADR-0007): tool-calling round-trips (explore / materialize / describe /
+//! sample) dispatched on the session DuckDB, tool-level errors routed back to
+//! the model for self-correction, and one ADR-0028 outcome (result / textual
+//! / failed / cancelled) at the end. tests/query_blackbox.rs drives it
+//! through a scripted FakeProvider at the ask -> outcome seam -- offline and
+//! deterministic.
 
+pub mod agents;
+pub mod app_config;
+pub mod approval;
+// Re-exported from the `bounded-line` workspace crate so every
+// `crate::bounded_line::` path stays put; the ACP bridge binary links the
+// same crate without linking this one (ADR-0085: the bridge links no app
+// crate).
+pub(crate) use bounded_line::bounded_line;
+pub mod cancel;
+pub mod cli_tools;
 pub mod commands;
+pub mod fs_acl;
+pub mod guardrail;
 pub mod ingest;
+pub mod mcp;
 pub mod model;
+pub mod persistence;
+pub mod provenance;
+pub mod provider;
+pub mod runtime;
+pub mod sandbox_sql;
 pub mod session;
+pub mod session_store;
+pub mod skills;
+pub mod tools;
+// cfg(desktop) mirrors the tauri `tray-icon` feature's own desktop gate --
+// mobile builds neither compile the tray surface nor register it.
+#[cfg(desktop)]
+pub mod tray;
+pub mod util;
+pub mod window;
 pub mod workingset;
 
-pub use model::{ColumnSchema, DatasetDescriptor, LoadError, LoadOutcome};
-pub use session::Session;
+pub use app_config::{
+    AppConfig, EngineDefaults, ExportDefaults, PrivacyDefaults, Theme, Tunables,
+    APP_CONFIG_FORMAT_VERSION,
+};
+pub use approval::{
+    classify, ApprovalRequest, ApprovalRequestBody, ApprovalRequestPayload,
+    ApprovalResolvedPayload, ApprovalResponse, ApprovalSink, ApprovalState, AuthMode,
+    Classification, GateCancelled, GateOutcome, OperationKind, RespondError, ToolKey,
+};
+pub use cancel::CancelToken;
+pub use commands::StoreCommandError;
+pub use model::{
+    CancelledReason, ChartKind, ColumnSchema, DatasetDescriptor, DatasetPrivacy, DeleteImpactEntry,
+    ExportIoStep, ExportRowsError, GuidanceReason, GuidanceRequest, GuidanceSheet,
+    GuidanceSheetState, LoadError, LoadOutcome, ProfileId, ProfileKeyStatus, ProfileTestOutcome,
+    Protocol, ProviderConfig, ProviderConfigView, ProviderProfile, RectifyProvenance,
+    RemoveSourceError, RenameError, RowPage, RowReadError, SheetGuidance, SheetRectify,
+    SkillProvenance, SourceLifecycleEvent, SourceLifecycleKind, StaleAnchor, StaleReason, TextKind,
+    ThinkingTrace, ThreadEntry, TraceEntryView, TraceRound, TurnFailure, TurnOutcome, TurnPhase,
+    TurnProgress, TurnProvenance, TurnRecord, TurnRuntime, VizSpec, DEFAULT_PROFILE_ID,
+    DEFAULT_PROVIDER_BASE_URL, DEFAULT_PROVIDER_MODEL,
+};
+pub use persistence::{
+    DuckPath, LoadError as DuckLoadError, MigrationError, RecipeError, SaveError, SessionMetadata,
+    SessionsRoot, SourceSummary,
+};
+pub use provider::fake::FakeProvider;
+pub use provider::keychain::{KeychainStore, ProviderConfigSource, StaticConfig};
+pub use provider::live_config::LiveProviderConfig;
+pub use provider::prompt::ResponseLocale;
+pub use provider::{LiveProvider, Provider, ProviderError, UnwiredProvider};
+pub use session::{
+    is_resuming, ActiveAbandoned, ActiveResolution, PendingConflict, RenameSessionError,
+    ResumeError, ResumeEvent, ResumeProgress, Session, SourceIssue, SourceResolution, TurnInputs,
+};
+pub use session_store::{
+    ClosingFlag, LiveSessionSnapshot, SessionError, SessionHandle, SessionId, SessionStore,
+    UNKNOWN_SESSION,
+};
+pub use skills::{
+    Acquired, DiscoveredSkill, DiscoveredSkillStatus, ImportItem, ImportMode, ImportOutcome,
+    SkillEntry, SkillError, SkillListing, SkillSource, SkillSourceCandidate, SkillsRoot,
+    SkippedSkill,
+};
 
-use std::sync::{Arc, Mutex};
+use std::path::PathBuf;
+use std::sync::Arc;
+use tauri::Manager;
 
-/// Boots the Tauri shell. The shared Session is created once and managed behind
-/// an Arc<Mutex>; ingest runs on a blocking thread so the UI never freezes (AC8).
+/// Boots the Tauri shell. A single [`SessionStore`] (ADR-0056) is created once
+/// and managed as Tauri state; it holds the `Map<SessionId, Arc<SessionHandle>>`
+/// the session-scoped commands address. The store starts EMPTY -- the frontend
+/// mints each session via `create_session` (the `+ tab` action) and passes the
+/// returned id as the first parameter to every session-scoped command. Each
+/// session owns an independent in-memory DuckDB instance (ADR-0012/0027), its
+/// own per-session cancel token (ADR-0021), and its own `Mutex<Session>` (the
+/// single-flight gate); the store lock is held only for the brief lookup, so a
+/// long turn never blocks another session's `close_session` / `create_session`
+/// (ADR-0056 concurrency model). The live provider carrier ([`LiveProvider`])
+/// is wired per session at `create_session` -- it reads the API key from the OS
+/// keychain per turn and the endpoint config (`{base_url, model}`) from the
+/// app-config file (ADR-0038 / issue #53), via a single [`LiveProviderConfig`]
+/// held as Tauri state. The app starts usable once a key is stored; before that
+/// every turn refuses honestly as not-wired.
+///
+/// `setup` resolves the app-config path under the OS app-data directory
+/// (ADR-0038) before constructing the provider: the path is needed to build the
+/// [`LiveProviderConfig`] the provider reads endpoint config through. A failure
+/// to resolve / create the directory falls back to an ephemeral temp path -- the
+/// app still boots, app-config just honest-degrades to defaults (no persistence
+/// across launches) rather than crashing.
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    let session = Session::new().expect("failed to create session");
-    tauri::Builder::default()
+    let mut app_builder = tauri::Builder::default();
+
+    // Multi-instance guard (issue #100). single-instance MUST be the first
+    // registered plugin: when a second instance launches, this callback runs
+    // in the FIRST instance and focuses its main window instead of letting a
+    // second process start. Without it each instance owns an independent
+    // SessionStore (ADR-0056) and the two race on the app-config atomic write
+    // (ADR-0038). cfg(desktop) mirrors the Cargo.toml target guard -- mobile
+    // builds neither pull the plugin nor register it.
+    //
+    // The reveal routes through tray::show_main (ADR-0125, issue #1140):
+    // the window may be HIDDEN (resident behind the tray), where the old
+    // set_focus + unminimize left the second launch visually unresponsive.
+    #[cfg(desktop)]
+    {
+        app_builder = app_builder.plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+            tray::show_main(app);
+        }));
+    }
+
+    // Window geometry persistence across launches (issue #268). The plugin is
+    // the SINGLE source of truth for window geometry: SIZE + POSITION +
+    // MAXIMIZED. ADR-0038's app-config `WindowGeometry` field + the
+    // frontend restore/persist effects are retired by #268 -- they raced this
+    // plugin's restore on launch, causing the window to jump from the OS-
+    // default spot to the restored spot once the frontend IPC resolved.
+    //
+    // `visible: false` in tauri.conf.json holds the window back until
+    // `restore_state` (the plugin's on-window-ready hook, synchronous inside
+    // the setup-side build) applies the persisted geometry; the app-owned
+    // show() right after that build then reveals it at the restored spot.
+    // Visibility is NOT a persisted dimension: the VISIBLE flag's write-back
+    // captured the live window at exit, so quitting while hidden-to-tray
+    // (ADR-0125) saved `visible: false` and gated the next boot's show --
+    // a 2s invisible launch until the old safety net rescued it. Boot always
+    // shows the main window, so there is no state to restore.
+    //
+    // DECORATIONS + FULLSCREEN stay off the flags: this app never toggles
+    // them. No denylist (the template's quick-pane denylist is an NSPanel
+    // is_maximized crash workaround that does not apply -- no floating panel).
+    #[cfg(desktop)]
+    {
+        app_builder = app_builder.plugin(
+            tauri_plugin_window_state::Builder::new()
+                .with_state_flags(
+                    tauri_plugin_window_state::StateFlags::SIZE
+                        | tauri_plugin_window_state::StateFlags::POSITION
+                        | tauri_plugin_window_state::StateFlags::MAXIMIZED,
+                )
+                .build(),
+        );
+    }
+
+    let app = app_builder
         .plugin(tauri_plugin_dialog::init())
-        .manage(Arc::new(Mutex::new(session)))
+        // Platform detection (ADR-0074, issue #262): plugin-os injects the
+        // compile-time OS as a webview global the frontend reads synchronously
+        // via `platform()`. Registered unconditionally like dialog/log -- the
+        // plugin works on every target; the desktop-only plugins (single-
+        // instance, window-state) stay under #[cfg(desktop)] above. The
+        // `locale()` / `hostname()` IPC commands are authorized via `os:default`
+        // in capabilities/default.json.
+        .plugin(tauri_plugin_os::init())
+        // Reveal paths in the OS file manager (issue #362): the settings
+        // Skills section's "open source location" reveals a linked skill's
+        // source directory. Registered unconditionally like dialog / os / log
+        // -- the reveal surface works on every desktop target. The default
+        // capability authorizes reveal-item-in-dir only.
+        .plugin(tauri_plugin_opener::init())
+        // Multi-target log sink (issue #98, ADR-0029 invariant 2). Routes the
+        // `log` facade to two destinations so the existing log::warn! calls
+        // (app-config path fallback, create_dir_all failure, ingest
+        // type-inference degradation) are observable, not silent:
+        //   - Stdout: the launching terminal (cargo tauri dev DX; a no-op
+        //     when a bundled app has no console -- the file target still
+        //     captures everything).
+        //   - LogDir: persistent file in app_log_dir (the Tauri-recommended
+        //     log directory, e.g. %LOCALAPPDATA%/<identifier>/logs on Windows,
+        //     ~/Library/Logs on macOS). Unconditional on all platforms -- this
+        //     app needs the file everywhere, unlike templates that gate LogDir
+        //     to one OS and rely on stdout+Webview elsewhere.
+        // A Webview target (Rust logs mirrored into the devtools console) is
+        // intentionally omitted: it requires the frontend to call
+        // @tauri-apps/plugin-log attachConsole(), and would duplicate the dev
+        // mirror in src/lib/log.ts. Add it as a deliberate follow-up if
+        // devtools visibility for Rust logs is ever needed.
+        // Registered on the Builder -- not in setup -- because Tauri v2 only
+        // allows plugin registration before build (App has no plugin()
+        // method at runtime), and app_data_dir requires an App handle the
+        // Builder chain lacks (app_log_dir is auto-created by the plugin).
+        // The sink is compatible with the `log` facade, so existing call sites
+        // need zero changes. LevelFilter dev=Debug / release=Info; max_file_size
+        // caps growth at ~5MB with the default RotationStrategy::KeepOne (the
+        // prior file is removed on overflow, so only the latest ~5MB window
+        // survives -- a richer rotation strategy is deferred per issue #98).
+        // The frontend @tauri-apps/plugin-log IPCs into the same sink (one
+        // file, one format: DATE[TARGET][LEVEL] MESSAGE, both ends).
+        .plugin(
+            tauri_plugin_log::Builder::new()
+                .targets(vec![
+                    tauri_plugin_log::Target::new(tauri_plugin_log::TargetKind::Stdout),
+                    tauri_plugin_log::Target::new(tauri_plugin_log::TargetKind::LogDir {
+                        file_name: None,
+                    }),
+                ])
+                .level(if cfg!(debug_assertions) {
+                    log::LevelFilter::Debug
+                } else {
+                    log::LevelFilter::Info
+                })
+                .max_file_size(5_000_000)
+                .build(),
+        )
+        .setup(move |app| {
+            // Bridge injection (issue #798, ADR-0085 orchestrator half):
+            // first thing in setup so the env var exists before any IPC that
+            // could start an external-runtime turn. Dev and installed builds
+            // share one sibling-resolution path (ADR-0132).
+            inject_bridge_bin();
+
+            // ADR-0038: app-config lives in the OS app-data dir (e.g.
+            // %APPDATA%/<identifier>/config.json), NOT in the working directory
+            // and NOT alongside any `.duck`. Fall back to a temp path if the OS
+            // app-data dir cannot be resolved (the app still boots; prefs reset
+            // each launch instead of persisting).
+            let app_config_path = match app.path().app_data_dir() {
+                Ok(dir) => dir.join("config.json"),
+                Err(e) => {
+                    log::warn!(
+                        "failed to resolve app-data dir; app-config falls back to a temp path: {e}"
+                    );
+                    std::env::temp_dir().join("toptopduck-config.json")
+                }
+            };
+            // The atomic write renames a temp file inside the parent dir, so the
+            // parent must exist. create_dir_all is idempotent; a failure is
+            // non-fatal (the write later honest-errors, app-config degrades),
+            // but without this log the failure is invisible -- every subsequent
+            // write_at also fails, prefs never persist across launches, and the
+            // user sees "my config resets every restart" with no diagnostic.
+            if let Some(parent) = app_config_path.parent() {
+                if let Err(e) = std::fs::create_dir_all(parent) {
+                    log::warn!(
+                        "failed to create app-config dir {}: {e}; prefs will not persist",
+                        parent.display()
+                    );
+                }
+            }
+
+            // Skills registry root (issue #362, ADR-0086): the single registry
+            // lives under the OS app-data dir (`<app_data_dir>/skills`), with
+            // the same honest temp-dir fallback the app-config path uses --
+            // the app still boots, the registry just resets to empty each
+            // launch instead of persisting. The directory itself is minted
+            // lazily on first create; a never-created registry lists empty.
+            let skills_root = match app.path().app_data_dir() {
+                Ok(dir) => dir.join("skills"),
+                Err(e) => {
+                    log::warn!(
+                        "failed to resolve app-data dir; skills registry falls back to a temp path: {e}"
+                    );
+                    std::env::temp_dir().join("toptopduck-skills")
+                }
+            };
+
+            // Agent-definitions registry root (issue #932, ADR-0117): the
+            // same app-data-dir resolution + honest temp-dir fallback as the
+            // skills root; minted lazily on first create.
+            let agents_root = match app.path().app_data_dir() {
+                Ok(dir) => dir.join("agents"),
+                Err(e) => {
+                    log::warn!(
+                        "failed to resolve app-data dir; agents registry falls back to a temp path: {e}"
+                    );
+                    std::env::temp_dir().join("toptopduck-agents")
+                }
+            };
+
+            let keychain = KeychainStore::new();
+            let live = LiveProviderConfig::new(keychain, app_config_path);
+            // First-paint boot seed (issue #814, ADR-0113): one direct
+            // honest-degrade load serves both live.load() consumers in
+            // setup -- the sessions_dir resolution below and the seed
+            // script share it (startup_register reads app-config through
+            // its own path).
+            let boot_cfg = live.load();
+
+            // Main window creation (issue #814, ADR-0113): `create: false`
+            // in tauri.conf.json leaves `windows[0]` a declarative template;
+            // setup builds it here so the seed injection script -- the only
+            // carrier of the persisted theme/locale between the app-config
+            // read and the webview's first paint -- delivers them past the
+            // flash. Window params stay in tauri.conf.json (single source
+            // of truth); the label lookup (not index) survives future
+            // window additions, and a build failure propagates -- the same
+            // boot-failure mode the framework's own config-window creation
+            // had. Created early so everything later in setup sees the main
+            // window (the boot show below), as does the
+            // single-instance focus path registered before setup.
+            let main_window_cfg = app
+                .config()
+                .app
+                .windows
+                .iter()
+                .find(|w| w.label == "main")
+                .ok_or("main window config missing from tauri.conf.json")?;
+            let main_window_builder =
+                tauri::WebviewWindowBuilder::from_config(app.handle(), main_window_cfg)?
+                    .initialization_script(app_config::boot_seed::boot_seed_script(&boot_cfg));
+            // Tray-ready handshake state (issue #1142): managed BEFORE
+            // this window build (so the page-load hook below never
+            // observes a missing state) and before tray::init (so menu
+            // clicks from the very first moment find it). Desktop-only,
+            // like the tray surface; a mobile build has no tray dispatch
+            // at all (the module is compiled out).
+            #[cfg(desktop)]
+            app.manage(tray::TrayReadiness::default());
+            // A page (re)load tears the webview's tray listeners down;
+            // Started is the earliest backend-visible signal of that, so
+            // readiness drops here and the next tray_ready re-arms the
+            // buffer. The lookup is the structural invariant noted above
+            // (managed before this build). The cfg gate mirrors the
+            // managed type (the closure references it).
+            #[cfg(desktop)]
+            let main_window_builder = main_window_builder.on_page_load(|window, payload| {
+                if matches!(payload.event(), tauri::webview::PageLoadEvent::Started) {
+                    window.state::<tray::TrayReadiness>().page_load_started();
+                }
+            });
+            let main_window = main_window_builder.build()?;
+            // Boot show: `restore_state` ran synchronously inside build(), so
+            // the persisted geometry is already applied -- reveal at the
+            // restored spot. A show() failure is logged, not swallowed: an
+            // invisible boot must stay diagnosable.
+            if let Err(e) = main_window.show() {
+                log::error!("main window show() failed at boot: {e}");
+            }
+            // A failed focus steal is a cosmetic loss (the window is already
+            // visible), not a lost boot -- best-effort, unlike show above.
+            let _ = main_window.set_focus();
+            // ADR-0089 + issue #452: managed sessions directory. Default root
+            // is `<Documents>/TOPTOPDuck/sessions/` (platform-conventions
+            // Documents, not hidden app-data). When app-config carries a
+            // `sessions_dir` override, honor it with honest-degrade — a missing
+            // / non-directory path logs a warning and falls back to the default
+            // WITHOUT clearing the config (the path might be temporarily
+            // unavailable, e.g. an unmounted external drive).
+            let sessions_root = {
+                match boot_cfg.sessions_dir.as_ref().map(|s| s.trim()).filter(|s| !s.is_empty()) {
+                    Some(p) => {
+                        let path = PathBuf::from(p);
+                        if path.is_dir() {
+                            path
+                        } else {
+                            log::warn!(
+                                "configured sessions_dir does not exist or is not a directory: {}; \
+                                 falling back to the default (config retained for next launch)",
+                                path.display()
+                            );
+                            persistence::default_sessions_root(app.handle())
+                        }
+                    }
+                    None => persistence::default_sessions_root(app.handle()),
+                }
+            };
+            // ADR-0056: the multi-session store is the single managed state for
+            // session-scoped commands. It starts empty; the frontend creates
+            // sessions on demand. LiveProviderConfig is shared -- the per-session
+            // provider reads key + endpoint through it.
+            app.manage(Arc::new(SessionStore::new()));
+            // The builtin-CLI startup window (issue #675, ADR-0109 Decision 9):
+            // detect the shipped definitions' executables on PATH (existence
+            // only, never a spawn) and silently auto-register the hits BEFORE
+            // the frontend loads its first config snapshot (setup completes
+            // before any webview IPC -- the structural timing guarantee).
+            // The same window materializes the builtin skills (issue #677)
+            // into the skills registry -- companions off CLI detections,
+            // knowledge-only ones unconditionally (ADR-0120 Decision 7).
+            // Failures log and degrade: the settings-page rescan retries.
+            if let Err(detail) = cli_tools::builtin::startup_register(&live, None, &skills_root) {
+                log::warn!(
+                    "builtin CLI startup registration failed (the settings-page \
+                     rescan retries on demand): {detail}"
+                );
+            }
+            // The builtin agent-definitions window rides the same startup
+            // slot (issue #932, ADR-0117 Decision 3): `general-purpose`
+            // materializes into the registry before the frontend loads its
+            // first listing. Failures log and degrade (the next startup
+            // retries).
+            if let Err(detail) = live.materialize_builtin_agents(&agents_root) {
+                log::warn!(
+                    "builtin agent-definition materialization failed (the next \
+                     startup retries): {detail}"
+                );
+            }
+            app.manage(live);
+            app.manage(SessionsRoot::new(sessions_root));
+            app.manage(SkillsRoot(skills_root));
+            app.manage(agents::AgentsRoot(agents_root));
+            // The adapter catalog cache sidecar (ADR-0096 D5, issue #536):
+            // `adapter-catalogs.json` under the OS app-data dir, with the
+            // same honest temp-dir fallback. The probe click is the only
+            // write point; reads honest-degrade to empty on a corrupt file.
+            let catalog_store = match app.path().app_data_dir() {
+                Ok(dir) => runtime::acp::catalog_store::AdapterCatalogStore::new(dir.join(
+                    runtime::acp::catalog_store::CATALOGS_FILE_NAME,
+                )),
+                Err(e) => {
+                    log::warn!(
+                        "failed to resolve app-data dir; adapter catalog cache falls back to a temp path: {e}"
+                    );
+                    runtime::acp::catalog_store::AdapterCatalogStore::new(
+                        std::env::temp_dir().join("toptopduck-adapter-catalogs.json"),
+                    )
+                }
+            };
+            app.manage(catalog_store);
+
+            // System tray residency (ADR-0125, issue #1140). The tray is the
+            // resident surface while the main window is hidden: closing the
+            // window hides it instead of killing the process, because a
+            // running turn's execution lives in backend threads + external
+            // CLIs and its approval surface lives in the webview -- a real
+            // destroy would strand the turn. Registered AFTER SessionsRoot
+            // is managed so the first menu rebuild can already read
+            // it. init returns whether the tray is live, and the close
+            // handler below keys off that through tray::close_hides (pinned
+            // in tray's tests): an unavailable tray (no icon resource, or
+            // Linux without a StatusNotifierItem host) keeps close = real
+            // exit, so the stranded "window hidden, no tray, no exit path"
+            // state is unreachable by construction (ADR-0125 Decision 2).
+            // cfg(desktop) mirrors the module gate -- on mobile no handler
+            // registers and close stays the default real exit, which is the
+            // same D2 posture.
+            #[cfg(desktop)]
+            {
+                let tray_available = tray::init(app.handle());
+                if let Some(main_window) = app.get_webview_window("main") {
+                    let window_for_close = main_window.clone();
+                    main_window.on_window_event(move |event| {
+                        if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                            if !tray::close_hides(tray_available) {
+                                // Degradation path (ADR-0125 Decision 2): no
+                                // resident surface, so the default real close
+                                // runs and the process exits.
+                                return;
+                            }
+                            // Hide, don't destroy: the resident form (ADR-0125
+                            // Decision 1). The hide runs first and the
+                            // taskbar skip only after it succeeds, so a
+                            // failed hide cannot strand a visible window
+                            // with no taskbar entry; show_main restores it
+                            // symmetrically.
+                            api.prevent_close();
+                            match window_for_close.hide() {
+                                Ok(()) => {
+                                    #[cfg(target_os = "windows")]
+                                    let _ = window_for_close.set_skip_taskbar(true);
+                                }
+                                Err(e) => log::warn!(
+                                    "tray close-to-hide failed (close cancelled, \
+                                     window stays visible): {e}"
+                                ),
+                            }
+                        }
+                    });
+                }
+            }
+
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
+            commands::create_session,
+            commands::close_session,
+            commands::close_session_and_wait_release,
+            commands::list_live_sessions,
             commands::ingest_file,
+            commands::ingest_file_guided,
+            commands::guidance_window,
+            commands::discard_guided_retention,
             commands::list_working_set,
             commands::active_dataset,
             commands::get_dataset,
+            commands::rename_dataset,
+            commands::replace_source,
+            commands::remove_source,
+            commands::remove_active_source,
+            commands::preview_delete_impact,
+            commands::set_dataset_privacy,
+            commands::ask,
+            commands::cancel,
+            commands::conversation,
+            commands::artifact_exists,
+            commands::read_artifact_text,
+            commands::read_rows,
+            commands::read_rows_tsv,
+            commands::export_rows_csv,
+            commands::write_export_file,
+            commands::set_api_key,
+            commands::clear_api_key,
+            commands::get_provider_config,
+            commands::set_provider_config,
+            commands::list_provider_profiles,
+            commands::set_profile_key,
+            commands::clear_profile_key,
+            commands::test_profile,
+            commands::get_app_config,
+            commands::set_app_config,
+            commands::upsert_mcp_server,
+            commands::upsert_cli_tool,
+            commands::remove_cli_tool,
+            commands::restore_builtin_cli_tool,
+            commands::rescan_builtin_cli_tools,
+            commands::set_mcp_server_secret,
+            commands::clear_mcp_server_secret,
+            commands::set_mcp_server_header_secret,
+            commands::clear_mcp_server_header_secret,
+            commands::probe_mcp_server,
+            commands::discover_mcp_servers,
+            commands::list_sessions,
+            commands::delete_session,
+            commands::set_session_pinned,
+            commands::set_session_archived,
+            commands::rename_session,
+            commands::get_session_name,
+            commands::rename_persisted_session,
+            commands::set_sessions_dir,
+            commands::get_sessions_dir,
+            commands::set_default_runtime,
+            commands::open_duck,
+            commands::take_persist_error,
+            commands::take_pending_conflict,
+            commands::respond_tool_approval,
+            commands::get_approval_attachments,
+            commands::get_authorization_mode,
+            commands::set_authorization_mode,
+            commands::list_session_trust,
+            commands::revoke_session_trust,
+            commands::list_adapters,
+            commands::rescan_adapters,
+            commands::probe_adapter,
+            commands::get_adapter_catalogs,
+            commands::get_session_runtime,
+            commands::set_session_runtime,
+            commands::get_session_model_config,
+            commands::set_session_posture,
+            commands::get_last_model_posture,
+            commands::clear_last_model_posture,
+            commands::list_skills,
+            commands::delete_skill,
+            commands::set_skill_enabled,
+            commands::get_skills_dir,
+            commands::list_agents,
+            commands::get_agents_dir,
+            commands::create_agent,
+            commands::update_agent,
+            commands::delete_agent,
+            commands::set_agent_enabled,
+            commands::list_skill_sources,
+            commands::import_skills,
+            // Desktop-only with the tray surface (issue #1142 handshake).
+            #[cfg(desktop)]
+            commands::tray_ready,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application");
+
+    app.run(|_app, _event| {
+        // Dock icon click must reopen the hidden resident window (issue
+        // #1143). The Reopen variant only exists on macOS, so other
+        // platforms compile an empty callback and behave exactly as the
+        // callback-less Builder::run did.
+        #[cfg(target_os = "macos")]
+        if let tauri::RunEvent::Reopen { .. } = _event {
+            tray::show_main(_app);
+        }
+    });
+}
+
+/// The bridge binary's file name expected beside the app exe. Mirrors the
+/// `toptopduck-acp-bridge` [[bin]] of the `crates/acp-bridge` workspace
+/// member and the externalBin entry in the Tauri bundle config; a drift
+/// rename on any side fails loudly before injection runs (a `[[bin]]`
+/// rename at staging with a path-bearing ENOENT, an externalBin rename at
+/// tauri-build's existence check, a constant rename at the pin tests
+/// below). The honest missing-sibling skip only covers a sibling that was
+/// never built (a bare `cargo run`). The constant is pinned by a unit test
+/// (and the externalBin entry is pinned against it) so a rename on this
+/// side fails here rather than silently repointing at another bin that
+/// builds into the same target dir.
+const BRIDGE_BIN_NAME: &str = "toptopduck-acp-bridge";
+
+/// Resolve the bridge binary beside `exe_path` (issue #798). `Some` requires
+/// the sibling file to exist: in dev, `tauri dev` runs the app from
+/// `target/debug/`, where `beforeDevCommand` has already built the bridge
+/// bin, and a bare `cargo run` skips it (cargo only builds `default-run`)
+/// and yields `None`; installed, the bundle's externalBin sidecar lands
+/// beside the main executable (ADR-0132), resolving through this same
+/// path. A missing sibling leaves the turn's existing honest failure in
+/// place.
+fn resolve_bridge_bin(exe_path: &std::path::Path) -> Option<PathBuf> {
+    let sibling = exe_path
+        .parent()?
+        .join(format!("{BRIDGE_BIN_NAME}{}", std::env::consts::EXE_SUFFIX));
+    sibling.is_file().then_some(sibling)
+}
+
+/// Inject [`session::ACP_BRIDGE_BIN_ENV`] from the sibling beside the app
+/// exe (issue #798): the orchestrator half of ADR-0085's "the caller
+/// injects" contract. `setup` runs before any webview IPC, so the var is in
+/// place before the only reader -- an external-runtime turn, which requires
+/// IPC to start -- could observe it. An existing non-empty value wins (e.g.
+/// a manual shell export); an explicitly empty export is treated as unset,
+/// matching the reader's empty-is-missing rule. `current_exe()` failure logs
+/// and skips (the turn then fails through the existing missing-var path
+/// with its build guidance). One path for dev and installed builds alike
+/// (ADR-0132): the bundled sidecar beside the installed exe resolves
+/// exactly like the cargo sibling beside a dev exe.
+fn inject_bridge_bin() {
+    if std::env::var_os(session::ACP_BRIDGE_BIN_ENV).is_some_and(|v| !v.is_empty()) {
+        return;
+    }
+    let exe = match std::env::current_exe() {
+        Ok(exe) => exe,
+        Err(e) => {
+            log::warn!("failed to resolve current exe; skipping bridge injection: {e}");
+            return;
+        }
+    };
+    match resolve_bridge_bin(&exe) {
+        Some(path) => std::env::set_var(session::ACP_BRIDGE_BIN_ENV, path),
+        None => log::debug!(
+            "no {BRIDGE_BIN_NAME} sibling beside {}; bridge var left unset \
+             (build it: cargo build -p acp-bridge)",
+            exe.display()
+        ),
+    }
+}
+
+#[cfg(test)]
+mod bridge_bin_tests {
+    use super::*;
+
+    #[test]
+    fn bin_name_pins_the_cargo_bin() {
+        // The bin name lives as literals cargo cannot expose to Rust (the
+        // bridge crate's [[bin]] declaration, the staging script); this pin
+        // freezes the one literal this crate controls so a rename of the
+        // constant fails here rather than silently repointing at another
+        // bin. The outside literals fail loudly on their own: a [[bin]]
+        // rename at staging (ENOENT), a staging-script drift at
+        // tauri-build's existence check.
+        assert_eq!(BRIDGE_BIN_NAME, "toptopduck-acp-bridge");
+    }
+
+    #[test]
+    fn external_bin_entry_pins_the_bundle_sidecar_name() {
+        // The Tauri bundle config's externalBin entry is invisible to the
+        // type system; this pin makes a unilateral rename of the bin or the
+        // config entry fail loudly instead of shipping bundles whose
+        // sidecar no longer matches the sibling this crate resolves.
+        let conf = include_str!("../tauri.conf.json");
+        let expected = format!("\"binaries/{BRIDGE_BIN_NAME}\"");
+        assert!(conf.contains(&expected));
+    }
+
+    #[test]
+    fn resolves_existing_bridge_beside_exe() {
+        let dir = tempfile::tempdir().unwrap();
+        let bridge = dir
+            .path()
+            .join(format!("{BRIDGE_BIN_NAME}{}", std::env::consts::EXE_SUFFIX));
+        std::fs::write(&bridge, b"").unwrap();
+
+        let exe = dir
+            .path()
+            .join(format!("app{}", std::env::consts::EXE_SUFFIX));
+
+        assert_eq!(resolve_bridge_bin(&exe), Some(bridge));
+    }
+
+    #[test]
+    fn returns_none_when_bridge_sibling_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let exe = dir
+            .path()
+            .join(format!("app{}", std::env::consts::EXE_SUFFIX));
+
+        assert_eq!(resolve_bridge_bin(&exe), None);
+    }
 }

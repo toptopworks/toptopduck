@@ -1,0 +1,388 @@
+import { describe, expect, it, vi } from "vitest";
+import { fireEvent, screen } from "@testing-library/react";
+import { Pencil, Plus, RefreshCw, Trash2, X, Zap } from "lucide-react";
+
+import {
+  DialogHeaderButton,
+  FieldHint,
+  FoldHead,
+  HeaderActionButton,
+  PaneBackLink,
+  PaneHeader,
+  RowActionButton,
+  RowRemoveButton,
+  SourceFold,
+} from "../settings-chrome";
+import { renderSettings } from "./helpers";
+
+// The pane-chrome action primitives (issue #958): HeaderActionButton /
+// RowActionButton / FoldHead are presentational shells -- these tests pin the
+// contracts the call sites rely on: one label feeding both the accessible
+// name and the tooltip (no descriptor double-writes), the in-flight spin
+// posture, and the controlled fold with its hint / action slots.
+
+async function hoverOpenTooltip(trigger: HTMLElement) {
+  fireEvent.pointerEnter(trigger, { pointerType: "mouse" });
+  fireEvent.pointerMove(trigger, { pointerType: "mouse" });
+  return screen.findByRole("tooltip");
+}
+
+describe("HeaderActionButton", () => {
+  it("derives the accessible name and the tooltip from one label", async () => {
+    const onClick = vi.fn();
+    renderSettings(
+      <HeaderActionButton label="New agent" icon={Plus} onClick={onClick} />,
+    );
+    const button = screen.getByRole("button", { name: "New agent" });
+    fireEvent.click(button);
+    expect(onClick).toHaveBeenCalledTimes(1);
+    // The tooltip mirrors the same string -- the descriptor single-writes at
+    // the call site instead of the aria + tooltip double-write.
+    const tooltip = await hoverOpenTooltip(button);
+    expect(tooltip.textContent).toBe("New agent");
+  });
+
+  it("keeps the in-flight posture: disabled button, spinning icon", () => {
+    renderSettings(
+      <HeaderActionButton label="Scanning…" icon={RefreshCw} disabled spinning />,
+    );
+    const button = screen.getByRole("button", { name: "Scanning…" });
+    expect(button).toBeDisabled();
+    expect(button.querySelector("svg")).toHaveClass("animate-spin");
+  });
+});
+
+describe("DialogHeaderButton", () => {
+  it("derives the accessible name from the label and fires onClick", () => {
+    const onClick = vi.fn();
+    renderSettings(
+      <DialogHeaderButton
+        label="Refresh sources"
+        icon={RefreshCw}
+        onClick={onClick}
+      />,
+    );
+    const button = screen.getByRole("button", { name: "Refresh sources" });
+    fireEvent.click(button);
+    expect(onClick).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps the in-flight posture: disabled passthrough, spinning icon", () => {
+    renderSettings(
+      <DialogHeaderButton label="Close" icon={X} disabled spinning />,
+    );
+    const button = screen.getByRole("button", { name: "Close" });
+    expect(button).toBeDisabled();
+    expect(button.querySelector("svg")).toHaveClass("animate-spin");
+  });
+});
+
+describe("PaneHeader", () => {
+  it("renders the section posture by default and the form posture on request", () => {
+    const { unmount } = renderSettings(<PaneHeader title="Section title" />);
+    const sectionHeading = screen.getByRole("heading", { name: "Section title" });
+    // The section posture is headline-lg; the form posture headline-md with
+    // the tighter mb-3 rhythm folded into the size resolution.
+    expect(sectionHeading).toHaveClass(
+      "text-xl",
+      "font-semibold",
+      "tracking-[-0.2px]",
+    );
+    expect(sectionHeading.closest("[data-slot=\"pane-header\"]")).toHaveClass("mb-6");
+    unmount();
+
+    renderSettings(<PaneHeader size="form" title="Form title" />);
+    const formHeading = screen.getByRole("heading", { name: "Form title" });
+    expect(formHeading).toHaveClass("text-lg", "font-semibold");
+    expect(formHeading.closest("[data-slot=\"pane-header\"]")).toHaveClass("mb-3");
+  });
+});
+
+describe("RowActionButton", () => {
+  it("renders the in-row ghost posture with the foreground hover", () => {
+    const onClick = vi.fn();
+    renderSettings(
+      <RowActionButton
+        label="Edit tool pandoc"
+        icon={Pencil}
+        onClick={onClick}
+      />,
+    );
+    const button = screen.getByRole("button", { name: "Edit tool pandoc" });
+    expect(button).toHaveClass("text-muted-foreground", "hover:text-foreground");
+    fireEvent.click(button);
+    expect(onClick).toHaveBeenCalledTimes(1);
+  });
+
+  it("hovers destructive, disables, and swaps in the spinner in flight", () => {
+    renderSettings(
+      <RowActionButton
+        label="Test server demo"
+        icon={Zap}
+        destructive
+        spinning
+        disabled
+      />,
+    );
+    const button = screen.getByRole("button", { name: "Test server demo" });
+    expect(button).toHaveClass("hover:text-destructive");
+    expect(button).toBeDisabled();
+    // The disabled posture keeps hit-testing so the not-allowed cursor can
+    // show (jsdom cannot exercise pointer events; the classes are the pin).
+    expect(button).toHaveClass(
+      "disabled:pointer-events-auto",
+      "disabled:cursor-not-allowed",
+    );
+    // In flight the icon is a rotating Loader2, not the resting Zap.
+    expect(button.querySelector("svg")).toHaveClass("animate-spin");
+    expect(button.querySelector("svg")).toHaveClass("lucide-loader-circle");
+  });
+
+  it("stays bare without a tooltip and takes the hoverable-inert form with one", async () => {
+    // No tooltip: a disabled action keeps the native attribute and renders
+    // bare -- no Tooltip wrapper ever mounts over it.
+    const { unmount } = renderSettings(
+      <RowActionButton label="Test server demo" icon={Zap} disabled />,
+    );
+    const bare = screen.getByRole("button", { name: "Test server demo" });
+    expect(bare).toBeDisabled();
+    expect(bare).not.toHaveAttribute("aria-disabled");
+    fireEvent.pointerEnter(bare, { pointerType: "mouse" });
+    fireEvent.pointerMove(bare, { pointerType: "mouse" });
+    expect(screen.queryByRole("tooltip")).toBeNull();
+    unmount();
+
+    // With a tooltip (#1015): a natively disabled button fires no pointer
+    // events, so the disabled-and-explained action switches to aria-disabled
+    // -- hoverable, focusable, click-inert through the absent handler -- and
+    // the hover opens the guidance.
+    renderSettings(
+      <RowActionButton
+        label="Delete skill pandoc"
+        icon={Trash2}
+        disabled
+        tooltip="System skills cannot be deleted; disable the skill instead"
+      />,
+    );
+    const inert = screen.getByRole("button", { name: "Delete skill pandoc" });
+    expect(inert).not.toBeDisabled();
+    expect(inert).toHaveAttribute("aria-disabled", "true");
+    const tooltip = await hoverOpenTooltip(inert);
+    expect(tooltip.textContent).toBe(
+      "System skills cannot be deleted; disable the skill instead",
+    );
+  });
+});
+
+describe("RowRemoveButton", () => {
+  it("renders the editor row-remove posture", () => {
+    const onClick = vi.fn();
+    renderSettings(
+      <RowRemoveButton
+        label="Remove parameter (row 1)"
+        icon={Trash2}
+        onClick={onClick}
+      />,
+    );
+    const button = screen.getByRole("button", {
+      name: "Remove parameter (row 1)",
+    });
+    expect(button).toHaveClass("hover:text-destructive", "size-7");
+    expect(button.querySelector("svg")).toHaveClass("size-3.5");
+    fireEvent.click(button);
+    expect(onClick).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("FoldHead", () => {
+  it("expands from the collapsed head, keeping the hint beside it", () => {
+    const onExpandedChange = vi.fn();
+    renderSettings(
+      <FoldHead
+        title="Environment variables"
+        hint={<span>hint</span>}
+        expanded={false}
+        onExpandedChange={onExpandedChange}
+      >
+        <p>row editor</p>
+      </FoldHead>,
+    );
+    const head = screen.getByRole("button", { name: "Environment variables" });
+    expect(head).toHaveAttribute("aria-expanded", "false");
+    // Beside a hint the head stays content-width.
+    expect(head).not.toHaveClass("w-full");
+    // The fold keeps the field rows unmounted while collapsed.
+    expect(screen.queryByText("row editor")).toBeNull();
+    expect(screen.getByText("hint")).toBeInTheDocument();
+    fireEvent.click(head);
+    expect(onExpandedChange).toHaveBeenCalledWith(true);
+  });
+
+  it("collapses from the expanded head and carries the action", () => {
+    const onExpandedChange = vi.fn();
+    renderSettings(
+      <FoldHead
+        title="Environment variables"
+        hint={<span>hint</span>}
+        expanded
+        onExpandedChange={onExpandedChange}
+        action={<button type="button">Add variable</button>}
+      >
+        <p>row editor</p>
+      </FoldHead>,
+    );
+    const head = screen.getByRole("button", { name: "Environment variables" });
+    expect(head).toHaveAttribute("aria-expanded", "true");
+    expect(screen.getByText("row editor")).toBeInTheDocument();
+    // The hint stays beside the title in the expanded state too.
+    expect(screen.getByText("hint")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Add variable" }));
+    fireEvent.click(head);
+    expect(onExpandedChange).toHaveBeenCalledWith(false);
+  });
+
+  it("fills the collapsed row when no hint rides beside", () => {
+    renderSettings(
+      <FoldHead
+        title="Environment variables"
+        expanded={false}
+        onExpandedChange={() => {}}
+      >
+        <p>row editor</p>
+      </FoldHead>,
+    );
+    const head = screen.getByRole("button", { name: "Environment variables" });
+    expect(head).toHaveClass("w-full");
+  });
+});
+
+describe("FieldHint", () => {
+  it("renders the trigger with its accessible name and the muted body", async () => {
+    renderSettings(
+      <FieldHint label="Import mode explanation">Body copy</FieldHint>,
+    );
+    const trigger = screen.getByRole("button", {
+      name: "Import mode explanation",
+    });
+    const tooltip = await hoverOpenTooltip(trigger);
+    expect(tooltip.textContent).toBe("Body copy");
+  });
+
+  it("renders a titled body with the title in the surface foreground", async () => {
+    renderSettings(
+      <FieldHint label="Import mode explanation" title="Import mode">
+        Body copy
+      </FieldHint>,
+    );
+    const trigger = screen.getByRole("button", {
+      name: "Import mode explanation",
+    });
+    const tooltip = await hoverOpenTooltip(trigger);
+    expect(tooltip.textContent).toContain("Import mode");
+    expect(tooltip.textContent).toContain("Body copy");
+    const title = screen.getByText("Import mode");
+    expect(title.tagName).toBe("P");
+    expect(title).toHaveClass("text-popover-foreground", "font-medium");
+  });
+});
+
+describe("SourceFold", () => {
+  it("keeps the verb in the toggle's accessible name beside the checkbox", () => {
+    renderSettings(
+      <SourceFold
+        label="Claude Desktop"
+        path="/home/user/.claude/mcp.json"
+        count={3}
+        expanded={false}
+        onToggleExpand={() => {}}
+        selectAll={{ checked: false, onToggleAll: () => {} }}
+      >
+        <p>server checkboxes</p>
+      </SourceFold>,
+    );
+    // The expand/collapse verb rides the aria-label so the path / badge text
+    // never leaks into the accessible name.
+    const toggle = screen.getByRole("button", { name: "Expand Claude Desktop" });
+    expect(toggle).toHaveAttribute("aria-expanded", "false");
+    // The select-all checkbox is a sibling control named by the source label,
+    // not nested in the toggle.
+    const checkbox = screen.getByRole("checkbox", { name: "Claude Desktop" });
+    expect(checkbox).not.toBeDisabled();
+    // The truncated path keeps a hover title (the MCP-side posture the
+    // unification adopted).
+    const pathSpan = screen.getByText("/home/user/.claude/mcp.json");
+    expect(pathSpan).toHaveAttribute("title", "/home/user/.claude/mcp.json");
+    // Collapsed keeps the panel unmounted.
+    expect(screen.queryByText("server checkboxes")).toBeNull();
+  });
+
+  it("announces collapse and mounts the children panel while expanded", () => {
+    renderSettings(
+      <SourceFold
+        label="Claude Desktop"
+        count={3}
+        expanded
+        onToggleExpand={() => {}}
+        selectAll={{ checked: false, onToggleAll: () => {} }}
+      >
+        <p>server checkboxes</p>
+      </SourceFold>,
+    );
+    const toggle = screen.getByRole("button", {
+      name: "Collapse Claude Desktop",
+    });
+    expect(toggle).toHaveAttribute("aria-expanded", "true");
+    expect(screen.getByText("server checkboxes")).toBeInTheDocument();
+  });
+
+  it("passes the checkbox state through and reports both toggles", () => {
+    const onToggleAll = vi.fn();
+    const onToggleExpand = vi.fn();
+    renderSettings(
+      <SourceFold
+        label="Codex"
+        count={0}
+        expanded={false}
+        onToggleExpand={onToggleExpand}
+        selectAll={{ checked: true, disabled: true, onToggleAll }}
+      >
+        <p>rows</p>
+      </SourceFold>,
+    );
+    const checkbox = screen.getByRole("checkbox", { name: "Codex" });
+    expect(checkbox).toBeDisabled();
+    expect(checkbox).toBeChecked();
+    fireEvent.click(screen.getByRole("button", { name: "Expand Codex" }));
+    expect(onToggleExpand).toHaveBeenCalledTimes(1);
+    fireEvent.click(checkbox);
+    expect(onToggleAll).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("PaneBackLink", () => {
+  it("renders the shared ArrowLeft posture over the label slot", () => {
+    const onClick = vi.fn();
+    renderSettings(
+      <PaneBackLink onClick={onClick}>Back to MCP list</PaneBackLink>,
+    );
+    const link = screen.getByRole("button", { name: "Back to MCP list" });
+    // The exact posture the form panes hand-rendered, now from one export.
+    expect(link).toHaveClass(
+      "text-muted-foreground",
+      "hover:text-foreground",
+      "mb-4",
+      "flex",
+      "items-center",
+      "gap-1.5",
+      "text-sm",
+    );
+    expect(link.querySelector("svg")).toHaveClass("lucide-arrow-left");
+    fireEvent.click(link);
+    expect(onClick).toHaveBeenCalledTimes(1);
+  });
+
+  it("passes the disabled state through", () => {
+    renderSettings(<PaneBackLink onClick={() => {}} disabled>Back</PaneBackLink>);
+    expect(screen.getByRole("button", { name: "Back" })).toBeDisabled();
+  });
+});

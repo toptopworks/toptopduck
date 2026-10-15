@@ -1,0 +1,1007 @@
+import { act, renderHook, waitFor } from "@testing-library/react";
+import { StrictMode, type ComponentType, type ReactNode } from "react";
+import { catalogIntl } from "../../components/common/__tests__/helpers";
+import { QueryClient } from "@tanstack/react-query";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+
+// Issue #195: useShellSessions owns the runtime OPEN set + every mutating
+// action. These tests pin the contracts hardest to assert through the App
+// black-box (Shell.test.tsx): registerOpen + activate, onWebviewDrop routing
+// (cold-start vs active), clearPendingIngest, and closeOpen's synchronous
+// unmount + background closeSession. The deps (intl, queryClient,
+// refreshSessions, setShellError) are injected, so the hook is exercised in
+// isolation from <App>. The api mock stubs the Tauri invoke wrappers; the
+// reject path runs the real toAppError + fmtError (imported from
+// lib/error-presentation, outside the api mock).
+
+// The drop-listener effect registers onDragDropEvent on mount (busy=false) and
+// tears it down when busy flips true (issue #204 busy-gate). The hoisted slot
+// captures the registered callback + clears it on unlisten so a test can assert
+// listener (un)registration and fire a synthetic drop payload. Other tests
+// exercise routing via onWebviewDrop directly and ignore the slot.
+type DragDropEvent = {
+  payload: { type: string; paths: string[]; position?: { x: number; y: number } };
+};
+const dropListener = vi.hoisted(() => ({
+  current: null as ((event: DragDropEvent) => void) | null,
+}));
+vi.mock("@tauri-apps/api/webviewWindow", () => ({
+  getCurrentWebviewWindow: () => ({
+    onDragDropEvent: (cb: (event: DragDropEvent) => void) => {
+      dropListener.current = cb;
+      return Promise.resolve(() => {
+        dropListener.current = null;
+      });
+    },
+  }),
+}));
+vi.mock("../../api", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../../api")>();
+  return {
+    ...actual,
+    // Issue #842: the startup re-adoption sweep fires on mount; an empty
+    // reply keeps it a no-op.
+    listLiveSessions: vi.fn(async () => []),
+    createSession: vi.fn(),
+    closeSession: vi.fn(async () => false),
+    // deletePersisted's wait-release + pure-file delete (the drop test parks
+    // busy on a pending wait; the default resolves immediately).
+    closeSessionAndWaitRelease: vi.fn(async () => {}),
+    deleteSession: vi.fn(async () => {}),
+    // The open-branch rename lands the backend-trimmed name; the landing
+    // test overrides per case.
+    renameSession: vi.fn(async () => ""),
+    onResumeProgress: vi.fn(async () => () => {}),
+    openDuck: vi.fn(async () => {}),
+    // ADR-0092 cold-start posture application (runtime + auth mode + skill
+    // mounts + MCP enables, all before registerOpen). Default no-ops; the
+    // posture tests assert calls.
+    setSessionRuntime: vi.fn(async () => {}),
+    // The clean #529 persist verdict; fault-verdict tests override per case.
+    setSessionPosture: vi.fn(async () => ({
+      persist_error: null,
+      persist_suspended: false,
+    })),
+    setAuthorizationMode: vi.fn(async () => {}),
+    // ADR-0112 pre-activation materialization (mint-chain activation loop +
+    // the in-session materializer). Default no-op; the materialization tests
+    // assert calls.
+  };
+});
+
+// The hook logs closeOpen / onResumeProgress outcomes through the structured
+// sink; mock it so the closeOpen kind-triage and the resume defensive catches
+// are assertable (issue #203).
+vi.mock("../../lib/log", () => ({
+  log: {
+    trace: vi.fn(),
+    debug: vi.fn(),
+    info: vi.fn(),
+    warn: vi.fn(),
+    error: vi.fn(),
+  },
+}));
+
+import {
+  closeSession,
+  closeSessionAndWaitRelease,
+  createSession,
+  listLiveSessions,
+  openDuck,
+  onResumeProgress,
+  renameSession,
+  setAuthorizationMode,
+  setSessionPosture,
+  setSessionRuntime,
+} from "../../api";
+import { log } from "../../lib/log";
+import { mountComposerBarStub } from "../../__tests__/setup/barRectStub";
+import { useShellSessions } from "../useShellSessions";
+import type { PendingComposerPosture } from "../useShellSessions";
+import { AUTH_MODE_DEFAULT } from "../../types/approval";
+
+const intl = catalogIntl("en-US");
+
+// The backend-default composer posture. Passing it to the cold-start mint
+// paths exercises the no-op posture branch (no runtime / auth-mode IPC):
+// runtime null = the user never picked (the backend's own startup
+// resolution already applies, issue #572). A future posture field inherits
+// its default here, while the explicit-pick contrast tests below stay
+// inline so a new field forces a per-site review.
+const DEFAULT_POSTURE: PendingComposerPosture = {
+  runtime: null,
+  modelPosture: null,
+  authMode: AUTH_MODE_DEFAULT,
+};
+
+/** Build a CreateSessionReply for mock returns (ADR-0089). */
+function reply(sid: string) {
+  return { session_id: sid, duck_path: `/sessions/${sid}/session.duck` };
+}
+
+// The #501 drop tests pin the composer bar's geometry via the shared
+// barRectStub (jsdom has no layout); jsdom's devicePixelRatio is 1, so CSS
+// px == the physical drop positions the tests fire.
+const BAR_RECT = { left: 100, top: 200, right: 400, bottom: 300 };
+
+/** Render the hook. An optional wrapper (e.g. StrictMode, passed directly --
+ *  an arrow-function host around it does NOT trigger the double-invoke)
+ *  exercises mount-lifecycle postures the default bare render cannot reach. */
+function renderSessions(wrapper?: ComponentType<{ children: ReactNode }>) {
+  const queryClient = new QueryClient({
+    defaultOptions: { queries: { retry: false } },
+  });
+  const refreshSessions = vi.fn();
+  const setShellError = vi.fn();
+  const helpers = renderHook(
+    () => useShellSessions({ intl, queryClient, refreshSessions, setShellError }),
+    wrapper ? { wrapper } : undefined,
+  );
+  return { ...helpers, refreshSessions, setShellError, queryClient };
+}
+
+describe("useShellSessions", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    // RTL auto-cleanup unmounts the prior hook (clearing the slot via the
+    // listener's unlisten), but reset defensively so a test starts from null.
+    dropListener.current = null;
+    // Drop any prior test's `.question-bar` hit-test stub (#501).
+    document.body.innerHTML = "";
+  });
+
+  it("starts cold: empty open set, null active id, not busy", () => {
+    const { result } = renderSessions();
+    expect(result.current.openSessions).toEqual([]);
+    expect(result.current.activeSessionId).toBeNull();
+    expect(result.current.busy).toBe(false);
+    expect(result.current.resumeStatus).toEqual({ kind: "idle" });
+  });
+
+  it("createSessionWithQuestion mints + registers + activates, carrying pendingQuestion", async () => {
+    vi.mocked(createSession).mockResolvedValue(reply("s1"));
+    const { result } = renderSessions();
+    let created = false;
+    await act(async () => {
+      created = await result.current.createSessionWithQuestion("how many rows?", [], DEFAULT_POSTURE, []);
+    });
+    expect(created).toBe(true);
+    expect(createSession).toHaveBeenCalledTimes(1);
+    expect(result.current.openSessions).toHaveLength(1);
+    expect(result.current.openSessions[0]).toMatchObject({
+      sid: "s1",
+      name: "",
+      path: "/sessions/s1/session.duck",
+      pendingIngestPaths: [],
+      pendingQuestion: "how many rows?",
+    });
+    expect(result.current.activeSessionId).toBe("s1");
+  });
+
+  it("createSessionWithQuestion applies a non-default posture BEFORE registering (ADR-0092 Decision 6)", async () => {
+    // Ordering is the contract: the pane mounts (and fires a pendingQuestion)
+    // only after registerOpen, so the posture writes must land BEFORE the
+    // entry joins the open set for the first turn to run under them. Capture
+    // the open-set size at the moment the runtime write lands.
+    vi.mocked(createSession).mockResolvedValue(reply("s1"));
+    const { result } = renderSessions();
+    let sessionsWhenRuntimeApplied = -1;
+    vi.mocked(setSessionRuntime).mockImplementationOnce(async () => {
+      sessionsWhenRuntimeApplied = result.current.openSessions.length;
+    });
+    await act(async () => {
+      await result.current.createSessionWithQuestion("q", [], {
+        runtime: { kind: "external", data: "gemini" },
+        modelPosture: null,
+        authMode: "no_confirmation",
+      }, []);
+    });
+    expect(setSessionRuntime).toHaveBeenCalledWith("s1", { kind: "external", data: "gemini" });
+    expect(setAuthorizationMode).toHaveBeenCalledWith("s1", "no_confirmation");
+    expect(sessionsWhenRuntimeApplied).toBe(0);
+    expect(result.current.openSessions).toHaveLength(1);
+  });
+
+  it("createSessionWithQuestion skips posture IPC for the backend defaults", async () => {
+    vi.mocked(createSession).mockResolvedValue(reply("s1"));
+    const { result } = renderSessions();
+    await act(async () => {
+      await result.current.createSessionWithQuestion("q", [], DEFAULT_POSTURE, []);
+    });
+    expect(setSessionRuntime).not.toHaveBeenCalled();
+    expect(setSessionPosture).not.toHaveBeenCalled();
+    expect(setAuthorizationMode).not.toHaveBeenCalled();
+  });
+
+  it("createSessionWithQuestion writes an explicit model posture AFTER the runtime write (ADR-0100)", async () => {
+    // The backend namespaces the backfill entry by the session's runtime, so
+    // the model / thought-level writes must land AFTER setSessionRuntime --
+    // order is a correctness precondition, not an implementation detail.
+    vi.mocked(createSession).mockResolvedValue(reply("s1"));
+    const { result } = renderSessions();
+    await act(async () => {
+      await result.current.createSessionWithQuestion("q", [], {
+        runtime: { kind: "external", data: "qwen-code" },
+        modelPosture: { model: "fake-sonnet", thought_level: "high" },
+        authMode: AUTH_MODE_DEFAULT,
+      },
+      [],
+      );
+    });
+    expect(setSessionPosture).toHaveBeenCalledWith("s1", { model: "fake-sonnet", thought_level: "high" });
+    expect(
+      vi.mocked(setSessionRuntime).mock.invocationCallOrder[0],
+    ).toBeLessThan(vi.mocked(setSessionPosture).mock.invocationCallOrder[0]);
+    expect(result.current.openSessions).toHaveLength(1);
+  });
+
+  it("createSessionWithQuestion writes null posture fields as explicit clears", async () => {
+    // A non-null pair is EXPLICIT: null fields are real clears the user made
+    // on the bar, not "skip this dimension" -- the full pair rides one wire
+    // submit with the null intact.
+    vi.mocked(createSession).mockResolvedValue(reply("s1"));
+    const { result } = renderSessions();
+    await act(async () => {
+      await result.current.createSessionWithQuestion("q", [], {
+        runtime: { kind: "external", data: "qwen-code" },
+        modelPosture: { model: "fake-sonnet", thought_level: null },
+        authMode: AUTH_MODE_DEFAULT,
+      },
+      [],
+      );
+    });
+    expect(setSessionPosture).toHaveBeenCalledWith("s1", { model: "fake-sonnet", thought_level: null });
+  });
+
+  it("createSessionWithQuestion surfaces a persist fault returned by a successful posture set (#529)", async () => {
+    // The set IPC resolves, but the persist verdict carries a typed write
+    // failure: the verdict rides the resolved value (never a reject), so the
+    // mint path must surface it like the picker's fault lines -- a silent
+    // drop leaves the selection in memory only and a resume reverts it.
+    vi.mocked(createSession).mockResolvedValue(reply("s1"));
+    vi.mocked(setSessionPosture).mockResolvedValueOnce({
+      persist_error: { kind: "Io", data: "disk full" },
+      persist_suspended: false,
+    });
+    const { result, setShellError } = renderSessions();
+    let created = false;
+    await act(async () => {
+      created = await result.current.createSessionWithQuestion("q", [], {
+        runtime: { kind: "external", data: "qwen-code" },
+        modelPosture: { model: "fake-sonnet", thought_level: "high" },
+        authMode: AUTH_MODE_DEFAULT,
+      },
+      [],
+      );
+    });
+    expect(created).toBe(true);
+    expect(setShellError).toHaveBeenCalledTimes(1);
+    expect(setShellError.mock.calls[0][0].message).toMatch(/Selection not saved/);
+    // The full pair rode the one wire submit despite the persist fault.
+    expect(setSessionPosture).toHaveBeenCalledTimes(1);
+    expect(result.current.openSessions).toHaveLength(1);
+  });
+
+  it("createSessionWithQuestion writes an explicit built-in pick while null stays unwritten (issue #572)", async () => {
+    // The unset marker is null, NOT the built-in value: with an external
+    // default_runtime the backend already started the session externally, so
+    // null skips the write -- while an EXPLICIT built-in pick must overwrite
+    // that start (value equality against a constant cannot tell the two
+    // apart, unlike authMode whose default is a true constant).
+    vi.mocked(createSession).mockResolvedValue(reply("s1"));
+    const { result } = renderSessions();
+    await act(async () => {
+      await result.current.createSessionWithQuestion("q", [], {
+        runtime: { kind: "built_in" },
+        modelPosture: null,
+        authMode: AUTH_MODE_DEFAULT,
+      },
+      [],
+      );
+    });
+    expect(setSessionRuntime).toHaveBeenCalledWith("s1", { kind: "built_in" });
+    expect(result.current.openSessions).toHaveLength(1);
+  });
+
+  it("createSessionWithQuestion carries the staged invocations as pendingSkillInvocations (#500, ADR-0119)", async () => {
+    // Draft-mode skill picks are the FIRST ask's user invocations now: they
+    // ride the pending channel next to pendingQuestion -- no per-session
+    // skill writes exist (the mount / activate IPC retired with ADR-0119).
+    vi.mocked(createSession).mockResolvedValue(reply("s1"));
+    const { result } = renderSessions();
+    await act(async () => {
+      await result.current.createSessionWithQuestion(
+        "q",
+        ["data-cleaning", "charting"],
+        DEFAULT_POSTURE,
+        [],
+      );
+    });
+    expect(result.current.openSessions[0]).toMatchObject({
+      pendingQuestion: "q",
+      pendingSkillInvocations: ["data-cleaning", "charting"],
+    });
+  });
+
+  it("createSessionWithQuestion returns false + surfaces setShellError when createSession rejects", async () => {
+    vi.mocked(createSession).mockRejectedValue(new Error("backend gone"));
+    const { result, setShellError } = renderSessions();
+    let created = true;
+    await act(async () => {
+      created = await result.current.createSessionWithQuestion("q", [], DEFAULT_POSTURE, []);
+    });
+    expect(created).toBe(false);
+    expect(setShellError).toHaveBeenCalled();
+    expect(result.current.openSessions).toEqual([]);
+  });
+
+  it("createSessionWithQuestion carries the pending file list as pendingIngestPaths (#500)", async () => {
+    // The cold-start "+" picks accumulate at shell level; the first submit
+    // hands the whole list to the minted session, where the pane ingests it
+    // before firing the question.
+    vi.mocked(createSession).mockResolvedValue(reply("s1"));
+    const { result } = renderSessions();
+    let created = false;
+    await act(async () => {
+      created = await result.current.createSessionWithQuestion("q", [], DEFAULT_POSTURE,
+        ["/x/a.csv", "/x/b.parquet"],
+      );
+    });
+    expect(created).toBe(true);
+    expect(result.current.openSessions[0]).toMatchObject({
+      sid: "s1",
+      pendingIngestPaths: ["/x/a.csv", "/x/b.parquet"],
+      pendingQuestion: "q",
+    });
+    expect(result.current.activeSessionId).toBe("s1");
+  });
+
+  it("onWebviewDrop on cold start (activeSessionId null) mints via dropFile with the path as a one-element pendingIngestPaths (#81 A1)", async () => {
+    vi.mocked(createSession).mockResolvedValue(reply("drop-sid"));
+    const { result } = renderSessions();
+    expect(result.current.activeSessionId).toBeNull();
+    act(() => {
+      result.current.onWebviewDrop("/x/foo.csv");
+    });
+    await waitFor(() => expect(createSession).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(result.current.activeSessionId).toBe("drop-sid"));
+    expect(result.current.openSessions[0].pendingIngestPaths).toEqual(["/x/foo.csv"]);
+  });
+
+  it("onWebviewDrop on an active session routes to its pendingIngestPaths (no new mint, #81)", async () => {
+    vi.mocked(createSession).mockResolvedValueOnce(reply("s1"));
+    const { result } = renderSessions();
+    await act(async () => {
+      await result.current.createSessionWithQuestion("q", [], DEFAULT_POSTURE, []);
+    });
+    const mintsBefore = vi.mocked(createSession).mock.calls.length;
+    // Drop while s1 is active -> the file lands on s1's ingest pipe, no new mint.
+    act(() => {
+      result.current.onWebviewDrop("/x/new.csv");
+    });
+    expect(vi.mocked(createSession).mock.calls.length).toBe(mintsBefore);
+    expect(result.current.openSessions[0].pendingIngestPaths).toEqual(["/x/new.csv"]);
+  });
+
+  it("clearPendingIngest drops the consumed path so a remount cannot re-ingest (#81 A1)", async () => {
+    vi.mocked(createSession).mockResolvedValueOnce(reply("s1"));
+    const { result } = renderSessions();
+    await act(async () => {
+      await result.current.createSessionWithQuestion("q", [], DEFAULT_POSTURE, []);
+    });
+    act(() => {
+      result.current.onWebviewDrop("/x/new.csv");
+    });
+    expect(result.current.openSessions[0].pendingIngestPaths).toEqual(["/x/new.csv"]);
+    act(() => {
+      result.current.clearPendingIngest("s1");
+    });
+    expect(result.current.openSessions[0].pendingIngestPaths).toEqual([]);
+  });
+
+  it("closeOpen unmounts synchronously + fires closeSession in the background (ADR-0055)", async () => {
+    vi.mocked(createSession).mockResolvedValueOnce(reply("s1"));
+    const { result } = renderSessions();
+    await act(async () => {
+      await result.current.createSessionWithQuestion("q", [], DEFAULT_POSTURE, []);
+    });
+    await act(async () => {
+      await result.current.closeOpen("s1");
+    });
+    expect(closeSession).toHaveBeenCalledWith("s1");
+    expect(result.current.openSessions).toEqual([]);
+    expect(result.current.activeSessionId).toBeNull();
+  });
+
+  it("closeOpen refreshes sidebar when closeSession reports cleanup (ADR-0089 D6)", async () => {
+    vi.mocked(createSession).mockResolvedValueOnce(reply("s1"));
+    vi.mocked(closeSession).mockResolvedValueOnce(true);
+    const { result, refreshSessions } = renderSessions();
+    await act(async () => {
+      await result.current.createSessionWithQuestion("q", [], DEFAULT_POSTURE, []);
+    });
+    await act(async () => {
+      await result.current.closeOpen("s1");
+    });
+    expect(closeSession).toHaveBeenCalledWith("s1");
+    expect(refreshSessions).toHaveBeenCalled();
+  });
+
+  it("closeOpen skips refresh when closeSession reports no cleanup (ADR-0089 D6)", async () => {
+    vi.mocked(createSession).mockResolvedValueOnce(reply("s1"));
+    // Default mock returns false; explicit for clarity.
+    vi.mocked(closeSession).mockResolvedValueOnce(false);
+    const { result, refreshSessions } = renderSessions();
+    await act(async () => {
+      await result.current.createSessionWithQuestion("q", [], DEFAULT_POSTURE, []);
+    });
+    refreshSessions.mockClear();
+    await act(async () => {
+      await result.current.closeOpen("s1");
+    });
+    expect(closeSession).toHaveBeenCalledWith("s1");
+    expect(refreshSessions).not.toHaveBeenCalled();
+  });
+
+  it("closeOpen survives a closeSession reject without throwing (ADR-0055 .catch seam)", async () => {
+    // closeOpen returns closeSession().catch(...) -- a reject MUST be swallowed
+    // (not surface as an unhandled rejection). The session is already unmounted.
+    vi.mocked(createSession).mockResolvedValueOnce(reply("s1"));
+    vi.mocked(closeSession).mockRejectedValueOnce(new Error("backend gone"));
+    const { result } = renderSessions();
+    await act(async () => {
+      await result.current.createSessionWithQuestion("q", [], DEFAULT_POSTURE, []);
+    });
+    await act(async () => {
+      await result.current.closeOpen("s1");
+    });
+    expect(closeSession).toHaveBeenCalledWith("s1");
+    expect(result.current.openSessions).toEqual([]);
+  });
+
+  // --- Issue #203: silent-failure chain in the session hooks ----------------
+
+  it("closeOpen logs debug (not error) on a NotFound reject -- the idempotent path (#203)", async () => {
+    // NotFound is the expected outcome when the session already dropped (a
+    // double-close, or a close racing a delete's wait-release): debug-level, and
+    // NOT an error, so the idempotent path stays quiet in devtools.
+    vi.mocked(createSession).mockResolvedValueOnce(reply("s1"));
+    vi.mocked(closeSession).mockRejectedValueOnce({ kind: "NotFound" });
+    const { result } = renderSessions();
+    await act(async () => {
+      await result.current.createSessionWithQuestion("q", [], DEFAULT_POSTURE, []);
+    });
+    await act(async () => {
+      await result.current.closeOpen("s1");
+    });
+    expect(log.debug).toHaveBeenCalledWith(
+      "closeSession",
+      expect.any(String),
+      "s1",
+    );
+    expect(log.error).not.toHaveBeenCalled();
+  });
+
+  it("closeOpen logs error with sid + kind on a non-NotFound reject (panic / lock leak, #203)", async () => {
+    // A non-NotFound reject (panic, lock poison, canonical single-writer leak)
+    // must surface at error level with the sid + raw kind so the cause of a
+    // later deletePersisted try_acquire gate miss stays diagnosable.
+    vi.mocked(createSession).mockResolvedValueOnce(reply("s1"));
+    vi.mocked(closeSession).mockRejectedValueOnce({
+      kind: "Engine",
+      data: "lock poison",
+    });
+    const { result } = renderSessions();
+    await act(async () => {
+      await result.current.createSessionWithQuestion("q", [], DEFAULT_POSTURE, []);
+    });
+    await act(async () => {
+      await result.current.closeOpen("s1");
+    });
+    expect(log.error).toHaveBeenCalledWith(
+      "closeSession",
+      expect.any(String),
+      "s1",
+      "Engine",
+      expect.any(String),
+      "lock poison",
+    );
+    expect(log.debug).not.toHaveBeenCalled();
+  });
+
+  it("openPersisted survives a throw inside the onResumeProgress listener (defensive try/catch, #203)", async () => {
+    // Capture the listener Tauri would invoke, then fire a malformed event whose
+    // body access throws (null event -> "Source" in null raises a TypeError).
+    // The defensive catch MUST swallow it -- no throw escapes and log.error
+    // records it -- or the shell soft-locks with busy stuck true (#203 AC3).
+    let resumeCb: ((ev: unknown) => void) | null = null;
+    vi.mocked(onResumeProgress).mockImplementationOnce(async (cb) => {
+      resumeCb = cb as unknown as (ev: unknown) => void;
+      return () => {};
+    });
+    vi.mocked(createSession).mockResolvedValueOnce(reply("r1"));
+    vi.mocked(openDuck).mockResolvedValueOnce();
+    const { result } = renderSessions();
+    await act(async () => {
+      await result.current.openPersisted("/x/a.duck", "a");
+    });
+    // Happy path completed: session registered, resume cleared (no soft-lock).
+    expect(result.current.activeSessionId).toBe("r1");
+    expect(result.current.resumeStatus).toEqual({ kind: "idle" });
+    // Fire the malformed event: the catch swallows the throw (no escape).
+    expect(resumeCb).not.toBeNull();
+    await act(async () => {
+      expect(() => resumeCb!({ session_id: "r1", event: null })).not.toThrow();
+    });
+    expect(log.error).toHaveBeenCalledWith(
+      "onResumeProgress",
+      expect.any(String),
+      expect.anything(),
+    );
+  });
+
+  it("openPersisted on an already-open path only activates -- no second runtime instance", async () => {
+    // Sidebar parity for the tray open-session click (ADR-0125 Decision 5):
+    // the already-open idempotency lives HERE, in openPersisted's own
+    // open-or-activate branch (useTrayEvents routes straight through), so a
+    // click on an open session must switch to it without minting or
+    // resuming anything new.
+    vi.mocked(createSession).mockResolvedValueOnce(reply("p1"));
+    vi.mocked(openDuck).mockResolvedValueOnce();
+    vi.mocked(createSession).mockResolvedValueOnce(reply("p2"));
+    vi.mocked(openDuck).mockResolvedValueOnce();
+    const { result } = renderSessions();
+    await act(async () => {
+      await result.current.openPersisted("/x/a.duck", "a");
+      await result.current.openPersisted("/x/b.duck", "b");
+    });
+    expect(result.current.activeSessionId).toBe("p2");
+
+    const mintsBefore = vi.mocked(createSession).mock.calls.length;
+    const resumesBefore = vi.mocked(openDuck).mock.calls.length;
+    await act(async () => {
+      await result.current.openPersisted("/x/a.duck", "a");
+    });
+
+    expect(result.current.activeSessionId).toBe("p1");
+    expect(vi.mocked(createSession).mock.calls.length).toBe(mintsBefore);
+    expect(vi.mocked(openDuck).mock.calls.length).toBe(resumesBefore);
+  });
+
+  // --- Issue #204: hook-level coverage gaps --------------------------------
+  // These pin the concurrency + branch contracts a regression would silently
+  // break (no black-box signal): the busy-gated drop listener, the in-flight
+  // double-drop guard, and the multi-session active-id fallback. The
+  // renameEntry branches moved to useSessionFileOps.test.ts (#1155).
+
+  it("suppresses a webview drop while busy and routes it once busy clears (#204)", async () => {
+    // The drop-listener effect early-returns while busy, so a drop during a
+    // persistence wait cannot mint a session; the effect re-binds on clear so a
+    // later drop routes normally. Drive both halves through the bound Tauri
+    // listener (the real event seam) and assert on the observable mint, not on
+    // listener bookkeeping.
+    let releaseWait: () => void = () => {};
+    vi.mocked(closeSessionAndWaitRelease).mockImplementationOnce(
+      () => new Promise<void>((resolve) => { releaseWait = resolve; }),
+    );
+    vi.mocked(createSession).mockResolvedValue(reply("drop-sid"));
+    const { result } = renderSessions();
+    // Enter busy: deletePersisted holds persistenceBusy true while the
+    // wait-release promise is pending (cold start -> activeSessionId null ->
+    // a routed drop mints).
+    act(() => {
+      void result.current.deletePersisted("/x/a.duck", "s1");
+    });
+    await waitFor(() => expect(result.current.busy).toBe(true));
+    // While busy the listener is unbound, so a drop payload has nowhere to
+    // route -- the cold-start mint never fires (the suppress half).
+    await waitFor(() => expect(dropListener.current).toBeNull());
+    expect(createSession).not.toHaveBeenCalled();
+    // Resolve the wait -> busy clears -> the effect re-binds the listener.
+    await act(async () => {
+      releaseWait();
+    });
+    await waitFor(() => expect(result.current.busy).toBe(false));
+    // The re-bound listener now routes a drop to dropFile -> createSession
+    // (the re-bind half): fire the payload through the bound seam.
+    await waitFor(() => expect(dropListener.current).not.toBeNull());
+    await act(async () => {
+      dropListener.current!({ payload: { type: "drop", paths: ["/x/a.csv"] } });
+    });
+    await waitFor(() => expect(createSession).toHaveBeenCalledTimes(1));
+    expect(result.current.activeSessionId).toBe("drop-sid");
+  });
+
+  it("ignores a second drop while createSession is in flight and re-arms after it resolves (#204)", async () => {
+    // A second cold-start drop while the first createSession is still in flight
+    // is ignored (no second mint); the guard re-arms once the first mint
+    // resolves, so a later drop mints again.
+    let resolveCreate: (val: { session_id: string; duck_path: string }) => void = () => {};
+    vi.mocked(createSession).mockImplementation(
+      () => new Promise((resolve) => { resolveCreate = resolve; }),
+    );
+    const { result } = renderSessions();
+    // First drop: createSession pending, droppingRef held true.
+    act(() => {
+      void result.current.dropFile("/a");
+    });
+    // Second drop while the first is in flight: guarded, no second mint.
+    act(() => {
+      void result.current.dropFile("/b");
+    });
+    await waitFor(() => expect(createSession).toHaveBeenCalledTimes(1));
+    // Resolve the first mint: droppingRef releases in the finally block.
+    await act(async () => {
+      resolveCreate(reply("s1"));
+    });
+    await waitFor(() => expect(result.current.activeSessionId).toBe("s1"));
+    // The guard has re-armed: a subsequent drop mints again.
+    vi.mocked(createSession).mockResolvedValueOnce(reply("s2"));
+    await act(async () => {
+      await result.current.dropFile("/c");
+    });
+    expect(createSession).toHaveBeenCalledTimes(2);
+    expect(result.current.openSessions).toHaveLength(2);
+  });
+
+  it("closeOpen falls back to the FIRST remaining session when the active one closes (multi-session, #204)", async () => {
+    // Closing the ACTIVE session falls back to the first remaining entry
+    // (next[0]?.sid) -- NOT null and NOT the last entry. The single-session
+    // closeOpen test above only covers the -> null path; three sessions pin the
+    // first-entry semantics so a regression to next[last] is caught (ADR-0060).
+    vi.mocked(createSession)
+      .mockResolvedValueOnce(reply("s1"))
+      .mockResolvedValueOnce(reply("s2"))
+      .mockResolvedValueOnce(reply("s3"));
+    const { result } = renderSessions();
+    await act(async () => {
+      await result.current.createSessionWithQuestion("q", [], DEFAULT_POSTURE, []);
+    });
+    await act(async () => {
+      await result.current.createSessionWithQuestion("q", [], DEFAULT_POSTURE, []);
+    });
+    await act(async () => {
+      await result.current.createSessionWithQuestion("q", [], DEFAULT_POSTURE, []);
+    });
+    expect(result.current.activeSessionId).toBe("s3");
+    await act(async () => {
+      await result.current.closeOpen("s3");
+    });
+    expect(result.current.openSessions).toHaveLength(2);
+    expect(result.current.activeSessionId).toBe("s1");
+  });
+
+  // --- Issue #205: type-invariant tightening -------------------------------
+  // These pin the domain decision + the merged-state invariant the refactor
+  // introduced, on paths the earlier black-box-style tests do not exercise.
+
+  it("onWebviewDrop routes a drop onto an active PERSISTED session -- path + pendingIngestPaths coexist (#205)", async () => {
+    // Domain decision (issue #205): a drop onto an ALREADY-active session
+    // routes to that session's ingest even when the session is resumed /
+    // .duck-bound (path !== null). `path` and `pendingIngestPaths` are
+    // independent -- the resumed + pending-drop combination is legal, not a
+    // type error. This pins the decision so a future "tighten OpenSession into
+    // a discriminated union" refactor cannot silently break the active-session
+    // drop route (#81 A1).
+    vi.mocked(createSession).mockResolvedValueOnce(reply("p1"));
+    vi.mocked(openDuck).mockResolvedValueOnce();
+    const { result } = renderSessions();
+    await act(async () => {
+      await result.current.openPersisted("/x/a.duck", "a");
+    });
+    expect(result.current.activeSessionId).toBe("p1");
+    expect(result.current.openSessions[0]).toMatchObject({
+      sid: "p1",
+      path: "/x/a.duck",
+      pendingIngestPaths: [],
+    });
+    const mintsBefore = vi.mocked(createSession).mock.calls.length;
+    // Drop while the persisted p1 is active -> routes to p1's ingest pipe, no
+    // new mint, and pendingIngestPaths now coexists with a bound path.
+    act(() => {
+      result.current.onWebviewDrop("/x/drop.csv");
+    });
+    expect(vi.mocked(createSession).mock.calls.length).toBe(mintsBefore);
+    expect(result.current.openSessions[0]).toMatchObject({
+      sid: "p1",
+      path: "/x/a.duck",
+      pendingIngestPaths: ["/x/drop.csv"],
+    });
+  });
+
+  it("closeOpen on a NON-active session leaves the active id unchanged (merged-state invariant, #205)", async () => {
+    // The merged { sessions, activeId } state enforces activeId ∈ sessions at
+    // the single `apply` chokepoint. Closing a session that is NOT the active
+    // one must keep the active id exactly as-is (not flip, not dangle, not fall
+    // back). This is the path the active-close fallback test above does NOT
+    // cover, and the most likely regression vector for the unmountOpen
+    // refactor's reconciliation.
+    vi.mocked(createSession)
+      .mockResolvedValueOnce(reply("s1"))
+      .mockResolvedValueOnce(reply("s2"));
+    const { result } = renderSessions();
+    await act(async () => {
+      await result.current.createSessionWithQuestion("q", [], DEFAULT_POSTURE, []);
+    });
+    await act(async () => {
+      await result.current.createSessionWithQuestion("q", [], DEFAULT_POSTURE, []);
+    });
+    expect(result.current.activeSessionId).toBe("s2");
+    // Close the NON-active s1 -> active id stays on s2.
+    await act(async () => {
+      await result.current.closeOpen("s1");
+    });
+    expect(closeSession).toHaveBeenCalledWith("s1");
+    expect(result.current.openSessions).toHaveLength(1);
+    expect(result.current.openSessions[0].sid).toBe("s2");
+    expect(result.current.activeSessionId).toBe("s2");
+  });
+
+  it("activateSession switches on a valid sid and no-ops on a stale sid (reconciler invariant, #205)", async () => {
+    // activateSession is the only public standalone active-id mutator, and the
+    // sole route onto the reconciler's stale-id branch (next.activeId !== null
+    // && !sessions.some(...)). A valid sid switches; a stale sid (a sidebar
+    // click racing a close, or a sid never in the set) is a no-op that keeps
+    // the current active id rather than silently jumping to sessions[0]. This
+    // pins the merged-state contract the refactor introduced.
+    vi.mocked(createSession).mockResolvedValueOnce(reply("s1")).mockResolvedValueOnce(reply("s2"));
+    const { result } = renderSessions();
+    await act(async () => {
+      await result.current.createSessionWithQuestion("q", [], DEFAULT_POSTURE, []);
+    });
+    await act(async () => {
+      await result.current.createSessionWithQuestion("q", [], DEFAULT_POSTURE, []);
+    });
+    expect(result.current.activeSessionId).toBe("s2");
+    // Valid sid -> switch.
+    act(() => {
+      result.current.activateSession("s1");
+    });
+    expect(result.current.activeSessionId).toBe("s1");
+    // Stale sid -> no-op; active id stays on s1 (not "ghost", not sessions[0]).
+    act(() => {
+      result.current.activateSession("ghost");
+    });
+    expect(result.current.activeSessionId).toBe("s1");
+    // Invariant holds: activeId ∈ sessions.
+    expect(
+      result.current.openSessions.some((s) => s.sid === result.current.activeSessionId),
+    ).toBe(true);
+  });
+
+  it("renameEntry open branch lands the backend name on the open entry (#1155)", async () => {
+    // The species' injected patchOpenName lands the name in the host's
+    // open-set state -- the mock-boundary species tests cannot see this
+    // write, so the real mapSessions shape is pinned here.
+    vi.mocked(createSession).mockResolvedValueOnce(reply("s1"));
+    vi.mocked(renameSession).mockResolvedValueOnce("Landed");
+    const { result } = renderSessions();
+    await act(async () => {
+      await result.current.createSessionWithQuestion("q", [], DEFAULT_POSTURE, []);
+    });
+    expect(result.current.openSessions[0].name).toBe("");
+
+    await act(async () => {
+      await result.current.renameEntry("s1", "/sessions/s1/session.duck", "new");
+    });
+
+    expect(result.current.openSessions[0].name).toBe("Landed");
+  });
+
+  // --- Issue #501: cold-start empty-state drop zone -------------------------
+  // ADR-0092 Decision 2: on cold start the empty-state main area around the
+  // centered bar keeps the ADR-0061 drop-to-create, but the bar itself is
+  // inert -- a drop ON the composer must not mint a session by accident.
+  // Active-session drops route to the session's ingest regardless of where
+  // the drop landed (AC #4: the per-session path is unchanged).
+
+  it("onWebviewDrop on cold start ignores a drop landing on the composer bar (#501)", async () => {
+    mountComposerBarStub(BAR_RECT);
+    vi.mocked(createSession).mockResolvedValue(reply("drop-sid"));
+    const { result } = renderSessions();
+    expect(result.current.activeSessionId).toBeNull();
+    act(() => {
+      result.current.onWebviewDrop("/x/foo.csv", { x: 250, y: 250 });
+    });
+    // The guard runs synchronously before dropFile; no mint fires and the
+    // shell stays on the centered empty state.
+    expect(createSession).not.toHaveBeenCalled();
+    expect(result.current.openSessions).toEqual([]);
+    expect(result.current.activeSessionId).toBeNull();
+  });
+
+  it("onWebviewDrop on cold start mints when the drop lands outside the composer bar (#501)", async () => {
+    mountComposerBarStub(BAR_RECT);
+    vi.mocked(createSession).mockResolvedValue(reply("drop-sid"));
+    const { result } = renderSessions();
+    act(() => {
+      // Clear of the bar rect -> the ADR-0061 drop-to-create path.
+      result.current.onWebviewDrop("/x/foo.csv", { x: 20, y: 20 });
+    });
+    await waitFor(() => expect(createSession).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(result.current.activeSessionId).toBe("drop-sid"));
+    expect(result.current.openSessions[0].pendingIngestPaths).toEqual(["/x/foo.csv"]);
+  });
+
+  it("onWebviewDrop routes an active-session drop even when it lands over the bar (#501)", async () => {
+    mountComposerBarStub(BAR_RECT);
+    vi.mocked(createSession).mockResolvedValueOnce(reply("s1"));
+    const { result } = renderSessions();
+    await act(async () => {
+      await result.current.createSessionWithQuestion("q", [], DEFAULT_POSTURE, []);
+    });
+    const mintsBefore = vi.mocked(createSession).mock.calls.length;
+    act(() => {
+      // Same position the cold-start guard swallows -- with a session active
+      // it routes to that session's ingest (the guard is cold-start only).
+      result.current.onWebviewDrop("/x/new.csv", { x: 250, y: 250 });
+    });
+    expect(vi.mocked(createSession).mock.calls.length).toBe(mintsBefore);
+    expect(result.current.openSessions[0].pendingIngestPaths).toEqual(["/x/new.csv"]);
+  });
+
+  it("the drop listener threads the payload position through the bar guard (#501)", async () => {
+    // Drive the real Tauri event seam (not onWebviewDrop directly): the
+    // listener must hand the drop position to the router so the guard can
+    // hit-test it.
+    mountComposerBarStub(BAR_RECT);
+    vi.mocked(createSession).mockResolvedValue(reply("drop-sid"));
+    const { result } = renderSessions();
+    await waitFor(() => expect(dropListener.current).not.toBeNull());
+    // Over the bar: inert.
+    act(() => {
+      dropListener.current!({
+        payload: { type: "drop", paths: ["/x/a.csv"], position: { x: 250, y: 250 } },
+      });
+    });
+    expect(createSession).not.toHaveBeenCalled();
+    // Off the bar: mints.
+    act(() => {
+      dropListener.current!({
+        payload: { type: "drop", paths: ["/x/a.csv"], position: { x: 20, y: 20 } },
+      });
+    });
+    await waitFor(() => expect(createSession).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(result.current.activeSessionId).toBe("drop-sid"));
+  });
+});
+
+describe("useShellSessions startup re-adoption sweep (issue #842)", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    dropListener.current = null;
+    document.body.innerHTML = "";
+  });
+
+  it("re-adopts idle live sessions and activates the first", async () => {
+    vi.mocked(listLiveSessions).mockResolvedValue([
+      {
+        session_id: "a",
+        duck_path: "/sessions/a/session.duck",
+        session_name: "分析",
+        in_flight: false,
+      },
+      {
+        session_id: "b",
+        duck_path: "/sessions/b/session.duck",
+        session_name: null,
+        in_flight: false,
+      },
+    ]);
+    const { result, setShellError } = renderSessions();
+    await waitFor(() => expect(result.current.openSessions).toHaveLength(2));
+    // Adopted rows carry the backend's facts and none of the mint-time
+    // pending payloads (the reload already consumed or never had them).
+    expect(result.current.openSessions[0]).toMatchObject({
+      sid: "a",
+      name: "分析",
+      path: "/sessions/a/session.duck",
+      pendingIngestPaths: [],
+      pendingQuestion: null,
+    });
+    expect(result.current.openSessions[1]).toMatchObject({ sid: "b", name: "" });
+    // Triage Q1: the FIRST adoptable row wins the activation -- not the last
+    // one registerOpen happened to land.
+    expect(result.current.activeSessionId).toBe("a");
+    expect(closeSession).not.toHaveBeenCalled();
+    expect(setShellError).not.toHaveBeenCalled();
+  });
+
+  it("closes in-flight + unbound rows instead of adopting (triage Q2)", async () => {
+    vi.mocked(listLiveSessions).mockResolvedValue([
+      {
+        session_id: "x",
+        duck_path: "/sessions/x/session.duck",
+        session_name: null,
+        in_flight: true,
+      },
+      { session_id: "y", duck_path: null, session_name: null, in_flight: false },
+      {
+        session_id: "z",
+        duck_path: "/sessions/z/session.duck",
+        session_name: "活的",
+        in_flight: false,
+      },
+    ]);
+    const { result } = renderSessions();
+    await waitFor(() => expect(closeSession).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(result.current.openSessions).toHaveLength(1));
+    // The in-flight turn's session and the lock-degraded unbound row are
+    // closed best-effort (turn cancelled, .duck stays on disk); only the
+    // adoptable row enters the open set.
+    expect(closeSession).toHaveBeenCalledWith("x");
+    expect(closeSession).toHaveBeenCalledWith("y");
+    expect(result.current.openSessions[0]).toMatchObject({ sid: "z" });
+    expect(result.current.activeSessionId).toBe("z");
+  });
+
+  it("is a no-op on a cold start (empty enumeration)", async () => {
+    // Explicitly re-pin the empty reply: clearAllMocks does NOT clear a
+    // prior test's mockResolvedValue, so the default alone would be a leak
+    // hazard -- and the explicit [] documents the cold-start contract.
+    vi.mocked(listLiveSessions).mockResolvedValue([]);
+    const { result } = renderSessions();
+    // Nothing observable to wait for: the empty sweep resolves without
+    // touching state. Flush the microtask queue, then assert.
+    await act(async () => {});
+    expect(listLiveSessions).toHaveBeenCalledTimes(1);
+    expect(result.current.openSessions).toEqual([]);
+    expect(result.current.activeSessionId).toBeNull();
+    expect(closeSession).not.toHaveBeenCalled();
+  });
+
+  it("only logs when the enumeration rejects", async () => {
+    vi.mocked(listLiveSessions).mockRejectedValue(new Error("invoke unavailable"));
+    const { result, setShellError } = renderSessions();
+    await act(async () => {});
+    // Best-effort by design: a failed sweep never surfaces as a shell error
+    // (the reloaded shell lands on the empty state, as before the sweep).
+    expect(result.current.openSessions).toEqual([]);
+    expect(setShellError).not.toHaveBeenCalled();
+  });
+
+  it("splits orphan-close rejects by kind: NotFound logs debug, others warn", async () => {
+    // The sweep's fire-and-forget close mirrors closeOpen's triage: NotFound
+    // (the snapshot raced a detach -- the row is already closed) is the
+    // expected idempotent path at debug level; a genuine failure stays a
+    // warn so it remains observable. Neither surfaces a shell error.
+    vi.mocked(listLiveSessions).mockResolvedValue([
+      { session_id: "x", duck_path: "/sessions/x/session.duck", session_name: null, in_flight: true },
+      { session_id: "y", duck_path: null, session_name: null, in_flight: true },
+    ]);
+    vi.mocked(closeSession)
+      .mockRejectedValueOnce({ kind: "NotFound" })
+      .mockRejectedValueOnce(new Error("close ipc failed"));
+    const { result, setShellError } = renderSessions();
+    await act(async () => {});
+    expect(closeSession).toHaveBeenCalledTimes(2);
+    expect(log.debug).toHaveBeenCalledWith(
+      "useShellSessions",
+      "orphan close: session already gone",
+      "x",
+    );
+    expect(log.warn).toHaveBeenCalledWith(
+      "useShellSessions",
+      "orphan close failed",
+      expect.anything(),
+    );
+    expect(result.current.openSessions).toEqual([]);
+    expect(setShellError).not.toHaveBeenCalled();
+  });
+
+  it("sweeps exactly once under StrictMode and re-arms on a real remount", async () => {
+    // The app entry mounts under React.StrictMode (src/main.tsx), so every
+    // dev reload double-invokes the mount effect; sweptRef must hold the
+    // one-shot line (listLiveSessions exactly once). A REAL unmount-remount
+    // is the issue's own escape hatch -- the next reload's sweep -- so a
+    // fresh mount re-arms and enumerates again.
+    vi.mocked(listLiveSessions).mockResolvedValue([]);
+    const first = renderSessions(StrictMode);
+    await act(async () => {});
+    expect(listLiveSessions).toHaveBeenCalledTimes(1);
+    first.unmount();
+    renderSessions(StrictMode);
+    await act(async () => {});
+    expect(listLiveSessions).toHaveBeenCalledTimes(2);
+  });
+});

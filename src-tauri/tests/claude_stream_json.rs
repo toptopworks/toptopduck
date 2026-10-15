@@ -1,0 +1,837 @@
+//! Claude-code headless stream engine integration tests (ADR-0097, issue #561).
+//!
+//! Drives the real [`AcpEngine`] (via the `ClaudeStreamJson` dispatch arm)
+//! against the claude fake-CLI fixture (`claude-fake-cli`, declared as a
+//! `[[bin]]`) across every observable pump branch: clean text reply,
+//! partial-message streamed replies and the tool-interleaved streaming
+//! shape (issue #1228), headless thinking-block rounds (issue #612), a
+//! gateway-routed tool trajectory (the prose round + the landed anchor row,
+//! live-silent per issue #1242), a
+//! native tool slipping past the deny list (engine trace row), hook-frame
+//! tolerance, result-frame errors, the max-turns cap mapping, crash /
+//! empty-stdout fallbacks, step-cap overflow, and the spawn argv injection
+//! shape (model / effort / MCP config / deny list / session-persistence
+//! opt-out). The fake CLI emits NDJSON frames; the engine's
+//! `claude_stream_json::run_claude_stream_json` reads them and maps to the
+//! SAME [`LoopOutcome`] shape the other paths return.
+//!
+//! Real-CLI E2E verification (the exact claude-code 2.1.222 wire) is an
+//! ADR-0097 unresolved item (manual, needs an install + login).
+
+use std::path::PathBuf;
+use std::sync::Arc;
+
+use toptopduck_lib::approval::{ApprovalResponse, ApprovalSink, ApprovalState};
+use toptopduck_lib::cancel::CancelToken;
+use toptopduck_lib::model::{OccupancySnapshot, TurnPhase};
+use toptopduck_lib::runtime::acp::adapter::claude_code;
+use toptopduck_lib::runtime::acp::engine::{AcpEngine, AcpTurnInput};
+use toptopduck_lib::runtime::acp::wire::{ContentBlock, McpServer};
+use toptopduck_lib::session::loop_contract::{LoopOutcome, Termination};
+
+/// Resolve the claude fake-CLI binary path.
+fn fake_cli() -> PathBuf {
+    PathBuf::from(env!("CARGO_BIN_EXE_claude-fake-cli"))
+}
+
+/// A minimal turn input: one text block + the gateway bridge descriptor
+/// (the fixture ignores both; the driver builds the `--mcp-config` argv
+/// from the descriptor).
+fn input() -> AcpTurnInput {
+    AcpTurnInput {
+        model: None,
+        thought_level: None,
+        cwd: std::env::temp_dir().to_string_lossy().to_string(),
+        mcp_servers: vec![McpServer::stdio_bridge(
+            "toptopduck-gateway",
+            "/placeholder/bridge",
+            Vec::new(),
+            std::collections::BTreeMap::new(),
+        )],
+        prompt_blocks: vec![ContentBlock::text("what is the answer?")],
+    }
+}
+
+/// Process-wide lock so the global `CLAUDE_FAKE_SCENARIO` env var is not
+/// raced by concurrent tests.
+/// Poison recovery is safe: this mutex only serializes env/scenario
+/// access across tests, it guards no cross-test invariant.
+static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Drive one scenario through the claude stream engine, returning the
+/// outcome, the phase stream, and the turn's elapsed time (measured AFTER the
+/// scenario lock is held -- the harness runs tests in parallel, and the
+/// lock-queue wait is not the engine's latency; the step-cap pin relies on
+/// this). Uses a short no-progress cap (5s) so a stuck scenario fails fast.
+fn run(scenario: &str, step_cap: u32) -> (LoopOutcome, Vec<TurnPhase>, std::time::Duration) {
+    run_with_cap(scenario, step_cap, std::time::Duration::from_secs(5))
+}
+
+/// [`run`] with a caller-chosen no-progress cap (the freeze-window tests
+/// drive caps the scenario's frame gaps must stay inside).
+fn run_with_cap(
+    scenario: &str,
+    step_cap: u32,
+    cap: std::time::Duration,
+) -> (LoopOutcome, Vec<TurnPhase>, std::time::Duration) {
+    let cancel = Arc::new(CancelToken::new());
+    let eng = AcpEngine::new(claude_code(), cancel).with_caps(step_cap, Some(cap));
+    let approval = ApprovalState::new();
+    let mut phases = Vec::new();
+    let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let start = std::time::Instant::now();
+    std::env::set_var("CLAUDE_FAKE_SCENARIO", scenario);
+    let outcome = eng.run(&input(), &fake_cli(), &approval, &NoopSink, |p| {
+        phases.push(p)
+    });
+    (outcome, phases, start.elapsed())
+}
+
+/// A no-op approval sink (unused by the claude path but required by the
+/// engine's signature).
+struct NoopSink;
+impl ApprovalSink for NoopSink {
+    fn emit_request(&self, _: &toptopduck_lib::approval::ApprovalRequestBody) {}
+    fn emit_resolved(
+        &self,
+        _: &toptopduck_lib::approval::ApprovalRequestBody,
+        _: ApprovalResponse,
+    ) {
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Scenarios
+// ---------------------------------------------------------------------------
+
+/// A clean text reply: system{init} + assistant text + result success ->
+/// Text with the result frame's text; no tool calls -> empty trace. The
+/// `system{init}` model rides the outcome's discovered catalog (the
+/// honest-rendering current model, ADR-0097 Decision 5).
+#[test]
+fn text_reply_yields_text_outcome_and_init_model() {
+    let (outcome, phases, _) = run("text_reply", 24);
+    match &outcome.termination {
+        Termination::Text(t) => assert_eq!(t, "the answer is 42"),
+        other => panic!("expected Text, got {other:?}"),
+    }
+    assert!(outcome.trace.is_empty(), "no tool calls -> empty trace");
+    assert!(
+        phases
+            .iter()
+            .any(|p| matches!(p, TurnPhase::Thinking { attempt: 1 })),
+        "a Thinking phase fires before the frame pump"
+    );
+    let discovered = outcome
+        .discovered_runtime
+        .as_ref()
+        .expect("system{init} reports the current model");
+    assert_eq!(discovered.current_model.as_deref(), Some("claude-fake-4"));
+    assert_eq!(discovered.adapter_id.as_deref(), Some("claude-code"));
+    assert!(
+        discovered.models.is_empty(),
+        "the turn path reports ONLY the current model, never a catalog"
+    );
+    // ADR-0130 (issue #1274): the occupancy numerator lands end to end --
+    // the scenario's assistant frame carries no usage, so the reading
+    // rides the result-fallback arm (the Anthropic arm reads the input
+    // side alone). The window arrives via the catalog stamp off the init
+    // model (Decision 4 as calibrated, #1290): claude-fake-4 rides the
+    // bare claude family row's 1M.
+    assert_eq!(
+        outcome.occupancy,
+        Some(OccupancySnapshot {
+            tokens: 1,
+            limit: Some(1_000_000),
+        })
+    );
+}
+
+/// Partial-message deltas (`--include-partial-messages`, issue #1228): the
+/// prose streams chunk by chunk while the message generates, and the
+/// trailing complete `assistant` frame for the same content deduplicates --
+/// the delta stream carries the chunks alone and the turn still resolves to
+/// the answer text.
+#[test]
+fn streamed_reply_deltas_stream_once_without_duplication() {
+    let (outcome, phases, _) = run("streamed_reply", 24);
+    match &outcome.termination {
+        Termination::Text(t) => assert_eq!(t, "the answer is 42"),
+        other => panic!("expected Text, got {other:?}"),
+    }
+    let deltas: Vec<&str> = phases
+        .iter()
+        .filter_map(|p| match p {
+            TurnPhase::TextDelta { delta } => Some(delta.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(deltas, vec!["the answer ", "is 42"]);
+}
+
+/// Partial-message deltas around a tool batch (issue #1228): the streamed
+/// preamble's trailing frame carries the same text PLUS the tool_use
+/// blocks (the dedupe skips only the text, never the call), and the
+/// closing message arrives whole-block with no deltas of its own -- the
+/// delta stream is the two streamed chunks plus that closing frame, the
+/// trace keeps the gateway row, and the turn resolves to the final text.
+#[test]
+fn streamed_tool_call_keeps_the_tool_row_and_lands_text_once() {
+    let (outcome, phases, _) = run("streamed_tool_call", 24);
+    match &outcome.termination {
+        Termination::Text(t) => assert_eq!(t, "found 3 rows"),
+        other => panic!("expected Text, got {other:?}"),
+    }
+    assert_eq!(outcome.trace.len(), 1, "{:?}", outcome.trace);
+    assert_eq!(outcome.trace[0].calls.len(), 1);
+    assert_eq!(outcome.trace[0].calls[0].name, "explore");
+    let deltas: Vec<&str> = phases
+        .iter()
+        .filter_map(|p| match p {
+            TurnPhase::TextDelta { delta } => Some(delta.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        deltas,
+        vec!["checking the ", "table", "found 3 rows"],
+        "streamed preamble chunks + the whole-block closing frame, each exactly once"
+    );
+}
+
+/// A gateway-routed tool call: the round keeps its prose with the engine
+/// row landed under the bare name (issue #817) -- the row is the anchor the
+/// settle merge replaces with the gateway's authoritative record in place,
+/// so no leading all-gateway round exists after the merge -- and the echo
+/// emits NOTHING live (issue #1242: the gateway serve's direct emission is
+/// the row's only live source).
+#[test]
+fn gateway_tool_call_lands_silently_keeps_prose_round() {
+    let (outcome, phases, _) = run("tool_call", 24);
+    match &outcome.termination {
+        Termination::Text(t) => assert_eq!(t, "found 3 rows"),
+        other => panic!("expected Text, got {other:?}"),
+    }
+    // The round keeps its prose (ADR-0103, issue #612) AND lands the engine
+    // row under the bare name -- the in-place-replacement anchor (issue
+    // #817; the merge swaps in the gateway's values at this slot).
+    assert_eq!(
+        outcome.trace.len(),
+        1,
+        "the prose round survives: {:?}",
+        outcome.trace
+    );
+    assert_eq!(outcome.trace[0].text.as_deref(), Some("querying"));
+    assert_eq!(outcome.trace[0].calls.len(), 1, "the anchor row lands");
+    assert_eq!(outcome.trace[0].calls[0].name, "explore");
+    assert!(
+        !phases
+            .iter()
+            .any(|p| matches!(p, TurnPhase::ToolCallStarted { name, .. } if name == "explore")),
+        "the gateway echo is silent live: {phases:?}"
+    );
+    assert!(!phases
+        .iter()
+        .any(|p| matches!(p, TurnPhase::ToolCallCompleted(_))));
+}
+
+/// The survival half of ADR-0115: a generation segment that keeps producing
+/// past the cap must NOT kill the turn -- every inbound frame re-arms the
+/// clock, and the reply lands. Without the pump's touch seam the watchdog
+/// fires mid-stream (a 400ms cap against a 100ms drip = four touches from
+/// death).
+#[test]
+fn slow_drip_survives_past_the_cap() {
+    let (outcome, _, _) = run_with_cap("slow_drip", 24, std::time::Duration::from_millis(400));
+    match &outcome.termination {
+        Termination::Text(t) => assert_eq!(t, "dripped to the end"),
+        other => panic!("steady stream activity must survive the cap, got {other:?}"),
+    }
+}
+
+/// Headless thinking blocks riding the assistant frames, end-to-end (issue
+/// #612): round 1's thinking freezes at the batch seal; the trailing
+/// round keeps its thinking through the REAL run loop's trailing freeze and
+/// settle (the unit tests mirror that tail with a hand-written helper).
+/// Pins the wired chain: two rounds carry their frozen thinking, the live
+/// stream sees both ThinkingCompleted events, the round-2 wait pointer, and
+/// both rounds' prose as TextDeltas -- round 1's connective text and the
+/// trailing answer streaming live (ADR-0126), the settle keeping the
+/// trailing stretch off the round (it rides the terminal text).
+#[test]
+fn thinking_blocks_ride_rounds_end_to_end() {
+    let (outcome, phases, _) = run("thinking_rounds", 24);
+    match &outcome.termination {
+        Termination::Text(t) => assert_eq!(t, "the answer is 42"),
+        other => panic!("expected Text, got {other:?}"),
+    }
+    assert_eq!(outcome.trace.len(), 2, "two rounds: {:#?}", outcome.trace);
+    let r1 = &outcome.trace[0];
+    assert_eq!(
+        r1.thinking.as_ref().map(|t| t.text.as_str()),
+        Some("plan the query"),
+        "round 1's thinking froze at the batch seal"
+    );
+    assert_eq!(r1.text.as_deref(), Some("querying"));
+    assert_eq!(
+        r1.calls.len(),
+        1,
+        "the gateway call's anchor row lands in its round (issue #817)"
+    );
+    assert_eq!(r1.calls[0].name, "explore");
+    let r2 = &outcome.trace[1];
+    assert_eq!(
+        r2.thinking.as_ref().map(|t| t.text.as_str()),
+        Some("verify the rows"),
+        "the trailing round's thinking froze at turn end"
+    );
+    assert_eq!(r2.text, None, "the trailing prose rode the terminal text");
+    // The live stream: both thinking completions fire (the second only via
+    // the run loop's trailing freeze), the round-2 wait pointer fires, and
+    // both rounds' prose streams as its delta.
+    let thinking_done: Vec<&str> = phases
+        .iter()
+        .filter_map(|p| match p {
+            TurnPhase::ThinkingCompleted { text, .. } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(thinking_done, ["plan the query", "verify the rows"]);
+    assert!(phases
+        .iter()
+        .any(|p| matches!(p, TurnPhase::Thinking { attempt: 2 })));
+    let prose_deltas: Vec<&str> = phases
+        .iter()
+        .filter_map(|p| match p {
+            TurnPhase::TextDelta { delta } => Some(delta.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        prose_deltas,
+        vec!["querying", "the answer is 42"],
+        "both rounds' prose streams live: {phases:?}"
+    );
+}
+
+/// A native tool that slipped past the deny list upstream rides the engine
+/// trace with the headless auto-refusal's failure (ADR-0097 Decision 3's
+/// backstop surface -- the trace shows the refusal honestly).
+#[test]
+fn native_tool_rides_engine_trace_as_failure() {
+    let (outcome, _, _) = run("native_tool_denied", 24);
+    match &outcome.termination {
+        Termination::Text(t) => assert_eq!(t, "done without native tools"),
+        other => panic!("expected Text, got {other:?}"),
+    }
+    assert_eq!(
+        outcome.trace.len(),
+        1,
+        "one round wrapping the flat trajectory"
+    );
+    let entry = &outcome.trace[0].calls[0];
+    assert_eq!(entry.name, "Bash");
+    assert!(!entry.success, "headless auto-refusal fails the call");
+    assert!(
+        !entry.result_excerpt.is_empty(),
+        "a failed entry keeps its ADR-0078 anchor"
+    );
+}
+
+/// AC: unknown `system` subtype frames mix with business frames on the
+/// same stream (measured) -- the turn still resolves end-to-end.
+#[test]
+fn hook_frames_are_tolerated_end_to_end() {
+    let (outcome, _, _) = run("hook_frames", 24);
+    match &outcome.termination {
+        Termination::Text(t) => assert_eq!(t, "hooked but fine"),
+        other => panic!("expected Text despite hook frames, got {other:?}"),
+    }
+}
+
+/// Non-JSON lines between valid frames (a startup banner, an update
+/// warning) hit the pump's line-level skip branch (`from_str` failure ->
+/// continue), never a parse failure: the outcome stays a clean Text. Real
+/// CLI stdout carries such noise (banners, warnings) -- a regression here
+/// would kill whole turns.
+#[test]
+fn garbage_lines_are_skipped_not_fatal() {
+    let (outcome, _, _) = run("garbage_lines", 24);
+    match &outcome.termination {
+        Termination::Text(t) => {
+            assert_eq!(t, "the answer is 42");
+            assert!(!t.contains("update available"), "no noise leaks: {t}");
+        }
+        other => panic!("expected Text despite garbage lines, got {other:?}"),
+    }
+}
+
+/// A single line past the 4-MiB line cap is dropped by the shared reader
+/// and the connection stays up: the frames on the lines after it still
+/// arrive and the turn completes with their text (issue #639's
+/// stream-path cap pin).
+#[test]
+fn overlong_line_is_dropped_and_reading_continues() {
+    let (outcome, _, _) = run("line_cap_overlong", 24);
+    match &outcome.termination {
+        Termination::Text(t) => assert_eq!(t, "still alive"),
+        other => panic!("expected Text despite the overlong line, got {other:?}"),
+    }
+}
+
+/// An error result frame maps to Runtime carrying the CLI's detail.
+#[test]
+fn result_error_maps_to_runtime() {
+    let (outcome, _, _) = run("result_error", 24);
+    match &outcome.termination {
+        Termination::Runtime(msg) => {
+            assert!(msg.contains("rate limited"), "carries the detail: {msg}");
+        }
+        other => panic!("expected Runtime, got {other:?}"),
+    }
+}
+
+/// ADR-0128: the CLI's self-reported budget (`error_max_turns`) tops out
+/// EVERY window -- the engine spends the whole resume budget (1 + 3
+/// windows) and lands the DERIVED ceiling, the same product the built-in
+/// loop renders (96 = 24 x 4), never the single cap.
+#[test]
+fn max_turns_exhaustion_lands_the_derived_ceiling() {
+    let (outcome, _, _) = run("max_turns", 24);
+    match outcome.termination {
+        Termination::StepCap(n) => assert_eq!(n, 96),
+        other => panic!("expected StepCap, got {other:?}"),
+    }
+}
+
+/// ADR-0128 continuation: the SAME process answers the engine's nudge user
+/// frame -- window one tops out mid-batch, window two lands the terminal
+/// text. One process, one settle: the window-one call round survives and
+/// the nudge leaves no trace of its own. Window one's prose streams as
+/// partial-message deltas whose complete frame never arrives (the orphan
+/// run, issue #1228): the delta assertion below pins the window-boundary
+/// guard reset -- a latched guard would swallow window two's whole-block
+/// frame while the result-frame termination assertion above it stays
+/// green. The fixture traces each user
+/// frame's text (PR #1227 review, Important 2): the continuation frame
+/// must carry the nudge alone -- an empty or repeated-context frame passes
+/// every other assertion and only fails here.
+#[test]
+fn max_turns_continues_the_same_process() {
+    let cancel = Arc::new(CancelToken::new());
+    let eng = AcpEngine::new(claude_code(), cancel)
+        .with_caps(24, Some(std::time::Duration::from_secs(5)));
+    let approval = ApprovalState::new();
+    let mut phases = Vec::new();
+    // The fixture traces received user frames to this file (stdout carries
+    // the frame stream the engine owns).
+    let trace = std::env::temp_dir().join(format!(
+        "claude-fake-trace-{}.log",
+        std::process::id() as u64
+            ^ (std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .subsec_nanos() as u64)
+    ));
+    let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    std::env::set_var("CLAUDE_FAKE_SCENARIO", "max_turns_continue");
+    std::env::set_var("CLAUDE_FAKE_TRACE_FILE", &trace);
+    let outcome = eng.run(&input(), &fake_cli(), &approval, &NoopSink, |p| {
+        phases.push(p)
+    });
+    std::env::remove_var("CLAUDE_FAKE_TRACE_FILE");
+    match outcome.termination {
+        Termination::Text(t) => assert_eq!(t, "window two answer"),
+        other => panic!("expected Text, got {other:?}"),
+    }
+    // Window one's gateway call carries across the boundary (the round
+    // list is the one tracker's); window two's trailing prose rides the
+    // terminal text, so exactly one call-bearing round settles.
+    assert_eq!(outcome.trace.len(), 1, "{:?}", outcome.trace);
+    assert_eq!(outcome.trace[0].calls.len(), 1);
+    assert_eq!(outcome.trace[0].calls[0].name, "explore");
+    // The orphan delta run pins the window-boundary guard reset (issue
+    // #1228): window one's prose streamed with no complete frame, so a
+    // latched guard would swallow window two's whole-block frame -- the
+    // delta stream loses the third chunk while the termination assertion
+    // above stays green (the result frame wins the terminal text). Exactly
+    // the two streamed chunks plus window two's whole-block frame.
+    let deltas: Vec<&str> = phases
+        .iter()
+        .filter_map(|p| match p {
+            TurnPhase::TextDelta { delta } => Some(delta.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        deltas,
+        vec!["checking the ", "table", "window two answer"],
+        "two streamed chunks, then window two's whole-block frame"
+    );
+    // The convergence nudge never surfaces: no phase, no trace row, no
+    // terminal-text contamination carries its wording.
+    let nudge_fragment = "step budget for this window";
+    assert!(
+        !phases
+            .iter()
+            .any(|p| format!("{p:?}").contains(nudge_fragment)),
+        "the nudge must not leak into the live phases"
+    );
+    assert!(
+        !format!("{:?}", outcome.trace).contains(nudge_fragment),
+        "the nudge must not leak into the trace"
+    );
+    // Delivered content: the continuation frame's text is the nudge ALONE,
+    // not empty and not a repeat of the turn's prompt.
+    let argv = std::fs::read_to_string(&trace).unwrap_or_default();
+    let _ = std::fs::remove_file(&trace);
+    let frames: Vec<&str> = argv
+        .lines()
+        .filter(|l| l.starts_with("CLAUDE_FAKE_PROMPT["))
+        .collect();
+    assert_eq!(frames.len(), 2, "one process, two user frames: {frames:?}");
+    assert!(
+        !frames[0].contains(nudge_fragment),
+        "frame one carries the turn's real prompt: {}",
+        frames[0]
+    );
+    assert!(
+        frames[1].contains(nudge_fragment),
+        "frame two's whole text is the convergence nudge: {}",
+        frames[1]
+    );
+}
+
+/// Stdout closes mid-turn after assistant text but no result frame: the
+/// pump's EOF fallback treats the accumulated text as the answer.
+#[test]
+fn crash_with_text_treats_as_success() {
+    let (outcome, _, _) = run("crash_with_text", 24);
+    match outcome.termination {
+        Termination::Text(t) => assert_eq!(t, "about to crash"),
+        other => panic!("expected Text (EOF fallback), got {other:?}"),
+    }
+    // The promoted text rode the terminal -- no round double-carries it
+    // (issue #628's Text settle stays consistent with the fallback).
+    assert!(outcome.trace.is_empty(), "{:?}", outcome.trace);
+}
+
+/// Stdout closes with no frames and no text -> Runtime.
+#[test]
+fn empty_stdout_lands_as_runtime() {
+    let (outcome, _, _) = run("empty_stdout", 24);
+    match outcome.termination {
+        Termination::Runtime(msg) => {
+            assert!(msg.contains("without a result frame"), "got: {msg}");
+        }
+        other => panic!("expected Runtime, got {other:?}"),
+    }
+}
+
+/// A stuck agent (system{init}, then stdout held open in silence = a
+/// generation segment silent past the cap, ADR-0115) under a short cap: the
+/// no-progress watchdog fires the shared token, the pump's loop-top cancel
+/// check resolves the turn, and the latched reason lands NoProgress instead
+/// of a bare Cancelled (the acp_engine.rs
+/// `no_progress_watchdog_fires_on_a_stuck_agent` peer).
+#[test]
+fn no_progress_watchdog_fires_on_a_silent_turn() {
+    let cancel = Arc::new(CancelToken::new());
+    let eng = AcpEngine::new(claude_code(), cancel)
+        .with_caps(24, Some(std::time::Duration::from_millis(300)));
+    let approval = ApprovalState::new();
+    let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    std::env::set_var("CLAUDE_FAKE_SCENARIO", "turn_silent");
+    let start = std::time::Instant::now();
+    let outcome = eng.run(&input(), &fake_cli(), &approval, &NoopSink, |_| {});
+    match outcome.termination {
+        Termination::NoProgress(detail) => {
+            assert_eq!(
+                detail.cap,
+                std::time::Duration::from_millis(300),
+                "the armed cap rides the payload"
+            );
+            assert!(
+                detail.silence >= detail.cap,
+                "the measured silence covers the cap: {detail:?}"
+            );
+        }
+        other => panic!("watchdog on a stuck agent -> NoProgress, got {other:?}"),
+    }
+    // The watchdog resolves in ~300ms. A no-fire regression is caught by
+    // the Cancelled assert itself (the run then rides the fixture's 30s
+    // sleep to an EOF runtime failure); the window pin catches a slow-but-correct
+    // resolution (a poll-interval blowup, a kill-and-reap hang) before it
+    // stalls the suite (the acp_engine.rs timing-pin precedent).
+    let elapsed = start.elapsed();
+    assert!(
+        elapsed < std::time::Duration::from_secs(3),
+        "took {elapsed:?} -- the watchdog did not fire; the fixture sleeps 30s"
+    );
+}
+
+/// A cross-thread user cancel mid-turn (the stop button's path): the pump's
+/// loop-top cancel check resolves the whole turn as Cancelled, no hang (the
+/// acp_engine.rs `user_cancel_aborts_the_whole_turn` peer).
+#[test]
+fn user_cancel_aborts_the_whole_turn() {
+    let cancel = Arc::new(CancelToken::new());
+    // No no-progress cap: the watchdog must stay out of the way so the test
+    // observes the user-cancel path alone.
+    let eng = AcpEngine::new(claude_code(), Arc::clone(&cancel)).with_caps(24, None);
+    let approval = ApprovalState::new();
+    let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    std::env::set_var("CLAUDE_FAKE_SCENARIO", "turn_silent");
+    // Fire cancel shortly after run starts (the fixture holds stdout open
+    // until cancel arrives). Spawned AFTER the env set (under the lock) --
+    // begin_turn (inside run) clears any stale `requested` at turn start,
+    // so a cancel fired while blocked on the lock would be wiped before the
+    // turn observes it. The 200ms delay covers spawn + the stdin write.
+    let cancel_for_thread = Arc::clone(&cancel);
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        cancel_for_thread.request();
+    });
+    let start = std::time::Instant::now();
+    let outcome = eng.run(&input(), &fake_cli(), &approval, &NoopSink, |_| {});
+    assert!(
+        matches!(outcome.termination, Termination::Cancelled),
+        "user cancel -> Cancelled: {:?}",
+        outcome.termination
+    );
+    // The cancel resolves in ~200ms (the spawn delay); a missed cancel is
+    // caught by the Cancelled assert (the run then rides the fixture's 30s
+    // hold to an EOF runtime failure). Same window-pin rationale as the watchdog
+    // test: catch a slow-but-correct resolution, not the outright miss.
+    let elapsed = start.elapsed();
+    assert!(
+        elapsed < std::time::Duration::from_secs(3),
+        "took {elapsed:?} -- the cancel was not observed; the fixture sleeps 30s"
+    );
+}
+
+/// Issue #808: a CLI that never drains stdin wedges the unbounded
+/// `write_all` of an oversized prompt (past the ~64-KiB OS pipe buffer)
+/// before the pump loop's cancel check is reachable. The cancel-aware
+/// writer must settle the turn as Cancelled instead of hanging forever (the
+/// codex_event_stream.rs peer's rationale).
+#[test]
+fn cancel_during_blocked_stdin_write_settles_the_turn() {
+    let cancel = Arc::new(CancelToken::new());
+    // No no-progress cap: the user cancel alone must break the blocked write; the
+    // fixture's 30s hold fails loudly if the cancel cannot.
+    let eng = AcpEngine::new(claude_code(), Arc::clone(&cancel)).with_caps(24, None);
+    let approval = ApprovalState::new();
+    let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    std::env::set_var("CLAUDE_FAKE_SCENARIO", "no_stdin_hold");
+    // 1 MiB of text: past the OS pipe buffer, so the engine's write blocks
+    // in the pipe once the fixture stops reading.
+    let mut big = input();
+    big.prompt_blocks = vec![ContentBlock::text("x".repeat(1 << 20))];
+    // The scenario reads no stdin and emits no events, so there is no phase
+    // to latch on; the delay only needs to cover spawn + the first pipe
+    // fill (`user_cancel_aborts_the_whole_turn` peer's 200ms rationale,
+    // widened for the bigger write). Spawned AFTER the env set (under the
+    // lock) -- begin_turn clears any stale `requested` at turn start.
+    let cancel_for_thread = Arc::clone(&cancel);
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        cancel_for_thread.request();
+    });
+    let start = std::time::Instant::now();
+    let outcome = eng.run(&big, &fake_cli(), &approval, &NoopSink, |_| {});
+    assert!(
+        matches!(outcome.termination, Termination::Cancelled),
+        "blocked write + cancel -> Cancelled: {:?}",
+        outcome.termination
+    );
+    // Same window pin as the cancel peers: catch a slow-but-correct
+    // resolution (cancel poll + kill + reap), not the outright miss.
+    let elapsed = start.elapsed();
+    assert!(
+        elapsed < std::time::Duration::from_secs(3),
+        "took {elapsed:?} -- the cancel never broke the blocked write"
+    );
+}
+
+/// A CLI that dies before draining stdin breaks the oversized prompt write
+/// mid-pipe: the turn settles as a Runtime carrying the stdin write
+/// failure -- the pre-#808-fix behavior's main path, now pinned (the
+/// codex_event_stream.rs peer's rationale).
+#[test]
+fn cli_death_during_stdin_write_settles_runtime() {
+    let cancel = Arc::new(CancelToken::new());
+    let eng = AcpEngine::new(claude_code(), Arc::clone(&cancel)).with_caps(24, None);
+    let approval = ApprovalState::new();
+    let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    std::env::set_var("CLAUDE_FAKE_SCENARIO", "die_before_stdin");
+    // 1 MiB of text: past the OS pipe buffer, so the engine's write is
+    // still in the pipe when the fixture exits -- either the write is
+    // already blocked, or it fails on the broken pipe outright; both land
+    // on the same Failed arm.
+    let mut big = input();
+    big.prompt_blocks = vec![ContentBlock::text("x".repeat(1 << 20))];
+    let start = std::time::Instant::now();
+    let outcome = eng.run(&big, &fake_cli(), &approval, &NoopSink, |_| {});
+    match &outcome.termination {
+        Termination::Runtime(msg) => assert!(
+            msg.contains("stdin write failed"),
+            "expected the stdin write failure to ride the Runtime: {msg}"
+        ),
+        other => panic!("blocked write + CLI death -> Runtime: {other:?}"),
+    }
+    // The child's own death breaks the pipe: no cancel thread, no 30s hold
+    // on this path.
+    let elapsed = start.elapsed();
+    assert!(
+        elapsed < std::time::Duration::from_secs(3),
+        "took {elapsed:?} -- the CLI death did not break the blocked write"
+    );
+}
+
+/// Issue #628: a user cancel mid-answer keeps the partial prose on the tail
+/// round -- the Cancelled termination carries no text for the prose to ride,
+/// so the trace is its only home.
+#[test]
+fn user_cancel_mid_prose_keeps_partial_prose_in_trace() {
+    let cancel = Arc::new(CancelToken::new());
+    // No no-progress cap: the user-cancel path alone (the
+    // `user_cancel_aborts_the_whole_turn` peer's rationale).
+    let eng = AcpEngine::new(claude_code(), Arc::clone(&cancel)).with_caps(24, None);
+    let approval = ApprovalState::new();
+    let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    std::env::set_var("CLAUDE_FAKE_SCENARIO", "cancel_with_prose");
+    // Deterministic ordering instead of a wall-clock bet: the scenario
+    // emits a native call frame and the prose frame in one flush, so once
+    // the call's ToolCallStarted phase fires the prose is already in the
+    // pipe behind it. The cancel thread latches on that phase, waits out
+    // one recv cycle (the pump polls at 50ms), and only then requests --
+    // the cancel cannot overtake the prose fold. The latch also subsumes
+    // the spawn-after-env rule: phases only flow once the turn is live,
+    // and begin_turn has already cleared any stale `requested`.
+    let phases: Arc<std::sync::Mutex<Vec<TurnPhase>>> = Arc::default();
+    let latch = Arc::clone(&phases);
+    let cancel_for_thread = Arc::clone(&cancel);
+    std::thread::spawn(move || {
+        while !latch
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|p| matches!(p, TurnPhase::ToolCallStarted { .. }))
+        {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        std::thread::sleep(std::time::Duration::from_millis(150));
+        cancel_for_thread.request();
+    });
+    let start = std::time::Instant::now();
+    let outcome = eng.run(&input(), &fake_cli(), &approval, &NoopSink, |p| {
+        phases.lock().unwrap().push(p);
+    });
+    assert!(
+        matches!(outcome.termination, Termination::Cancelled),
+        "user cancel -> Cancelled: {:?}",
+        outcome.termination
+    );
+    // Round 1 carries the drained call row (honestly unobserved -- the
+    // result frame never came); the call-less tail round keeps the prose
+    // the cancel interrupted.
+    assert_eq!(outcome.trace.len(), 2, "{:?}", outcome.trace);
+    assert_eq!(outcome.trace[0].calls.len(), 1, "{:?}", outcome.trace);
+    assert!(
+        !outcome.trace[0].calls[0].success,
+        "a drained row must not present as success: {:?}",
+        outcome.trace[0].calls[0]
+    );
+    assert_eq!(
+        outcome.trace[1].text.as_deref(),
+        Some("partial answer"),
+        "the streamed-so-far prose survives the cancel"
+    );
+    // Same window pin as the peer: catch a slow-but-correct resolution,
+    // not the outright miss (the Cancelled assert catches that).
+    let elapsed = start.elapsed();
+    assert!(
+        elapsed < std::time::Duration::from_secs(3),
+        "took {elapsed:?} -- a slow cancel resolution; the fixture sleeps 30s"
+    );
+}
+
+/// AC (argv shape): a selected model + thought level ride the spawn argv
+/// as `--model <id>` + `--effort <level>` (the argv-shaped effort
+/// injection, ADR-0097 Decision 6); the bridge rides `--mcp-config <json>`
+/// + `--strict-mcp-config`; the stateless + denial flags are present and
+///   `--resume` / `--session-id` are NOT (ADR-0097 Decision 1/3).
+#[test]
+fn spawn_argv_carries_selections_mcp_config_and_stateless_flags() {
+    let cancel = Arc::new(CancelToken::new());
+    let eng = AcpEngine::new(claude_code(), cancel)
+        .with_caps(24, Some(std::time::Duration::from_secs(5)));
+    let approval = ApprovalState::new();
+    let mut input = input();
+    input.model = Some("claude-fake-picked".into());
+    input.thought_level = Some("high".into());
+    // The fixture traces its argv to this file (stdout carries the frame
+    // stream the engine owns).
+    let trace = std::env::temp_dir().join(format!(
+        "claude-fake-trace-{}.log",
+        std::process::id() as u64
+            ^ (std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .subsec_nanos() as u64)
+    ));
+    let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    std::env::set_var("CLAUDE_FAKE_SCENARIO", "text_reply");
+    std::env::set_var("CLAUDE_FAKE_TRACE_FILE", &trace);
+    let outcome = eng.run(&input, &fake_cli(), &approval, &NoopSink, |_| {});
+    std::env::remove_var("CLAUDE_FAKE_TRACE_FILE");
+    assert!(matches!(outcome.termination, Termination::Text(_)));
+    let argv = std::fs::read_to_string(&trace).unwrap_or_default();
+    let _ = std::fs::remove_file(&trace);
+
+    // Stateless headless head: the pinned turn argv prefix. ADR-0128: the
+    // input face is stream-json (`--input-format stream-json`) -- the
+    // user-frame prompt and the same-process continuation ride it. The
+    // partial-message flag turns on `stream_event` text deltas (live
+    // streaming prose).
+    assert!(
+        argv.contains("CLAUDE_FAKE_ARGV=--print --output-format stream-json --input-format stream-json --include-partial-messages --verbose --no-session-persistence"),
+        "the stateless headless argv prefix rides verbatim; got: {argv}"
+    );
+    // AC: no upstream session addressing.
+    assert!(!argv.contains("--resume"), "no --resume: {argv}");
+    assert!(!argv.contains("--session-id"), "no --session-id: {argv}");
+    // AC: the native-tool deny list.
+    assert!(
+        argv.contains("--disallowedTools Task,Bash,Glob,Grep,Read,Edit,Write,NotebookEdit,WebFetch,WebSearch,TodoWrite,BashOutput,KillShell,SlashCommand"),
+        "the native-tool deny list rides the argv; got: {argv}"
+    );
+    // AC (issue #800): the gateway-only allow list — without it headless
+    // `--print` auto-rejects every `mcp__toptopduck-gateway__*` call.
+    assert!(
+        argv.contains("--allowedTools mcp__toptopduck-gateway"),
+        "the gateway MCP allow list rides the argv; got: {argv}"
+    );
+    // ADR-0095/0097 selections: `--model` then `--effort`.
+    assert!(
+        argv.contains("--model claude-fake-picked --effort high"),
+        "model + effort ride the argv in the documented order; got: {argv}"
+    );
+    // Issue #811 (review follow-up): the codex-only reasoning-summary
+    // override must not leak onto the claude spawn via the shared flag
+    // builder.
+    assert!(
+        !argv.contains("model_reasoning_summary"),
+        "codex-only override leaked onto the claude spawn: {argv}"
+    );
+    // AC: MCP injection -- inline gateway descriptor + strict.
+    assert!(
+        argv.contains("--mcp-config {\"mcpServers\":{\"toptopduck-gateway\":{"),
+        "the inline gateway descriptor rides --mcp-config; got: {argv}"
+    );
+    assert!(
+        argv.contains("--strict-mcp-config"),
+        "strict MCP shields the machine's own servers; got: {argv}"
+    );
+}

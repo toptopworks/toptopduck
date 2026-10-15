@@ -1,0 +1,196 @@
+/* Style-stack foundation (ADR-0049/0050, issue #77).
+ *
+ * Tailwind CSS v4, CSS-first: theme lives here in `@theme`, NOT in a
+ * tailwind.config.js. Loaded by Vite via `@tailwindcss/vite` (no PostCSS).
+ * The shadcn/ui v4 token model: a paired light/dark token set on :root/.dark,
+ * mapped into Tailwind color utilities through `@theme inline` so `bg-primary`
+ * / `text-foreground` etc. resolve to the live CSS var (and thus flip with the
+ * .dark class set by useTheme). The Vega theme bridge reads these same vars at
+ * runtime via getComputedStyle, so the chart palette is derived from one truth.
+ *
+ * Teal `#0d9488` is --primary (ADR-0050, carried from the A-round color in
+ * ADR-0047). Compact workbench density: --radius is set once here (6px vs
+ * shadcn's 10px default); precise spacing values are visual iteration, not
+ * architecture (ADR-0050 leaves them open), and land with the component
+ * migration slices.
+ */
+@import "tailwindcss";
+/* Streamdown's own stylesheet (issue #1137): the word-cascade keyframes and
+ * the [data-sd-animate] rules the animate plugin's spans depend on. It must
+ * inline ahead of this file's own rules -- the reduced-motion cutoff at the
+ * bottom overrides the cascade at equal specificity, so the cutoff wins
+ * only because it comes later in the same sheet. */
+@import "streamdown/styles.css";
+/* tw-animate-css (ADR-0049, issue #105): the animation utility layer shadcn
+ * copy-in components reference (data-[state=open]:animate-in / fade-in / zoom-in
+ * etc. for Dialog/AlertDialog enter+exit). Tailwind v4 successor to
+ * tailwindcss-animate; loaded before the token block so it composes with the
+ * @theme utilities below. */
+@import "tw-animate-css";
+
+/* Dark mode is class-based (ADR-0050: <html>.dark). The default `dark:`
+ * variant keys off prefers-color-scheme; useTheme resolves the OS preference
+ * itself and toggles .dark, so override the variant to match the class. */
+@custom-variant dark (&:where(.dark, .dark *));
+
+/* Issue #1128: streamdown builds some runtime classes in its dist bundle
+ * (the root spacing/caret classes merged into the RoundProse root), which
+ * source scanning cannot see -- pull the bundle into the scanner. */
+@source "../node_modules/streamdown/dist/*.js";
+
+/* --- shadcn token set, light (ADR-0050) ---------------------------------- */
+:root {
+  --radius: 0.375rem; /* compact (6px); shadcn default is 0.625rem */
+
+  --background: #ffffff;
+  --foreground: #1a1a1a;
+  --card: #ffffff;
+  --card-foreground: #1a1a1a;
+  --popover: #ffffff;
+  --popover-foreground: #1a1a1a;
+  /* teal primary (ADR-0050). */
+  --primary: #0d9488;
+  --primary-foreground: #ffffff;
+  --secondary: #f1f5f4;
+  --secondary-foreground: #1a1a1a;
+  --muted: #f0f0f3;
+  --muted-foreground: #6b7280;
+  /* teal-tinted accent survives from the v0 active-source highlight. */
+  --accent: #e6f4f1;
+  --accent-foreground: #0d9488;
+  --destructive: #b00020;
+  --destructive-foreground: #ffffff;
+  /* warning amber (ADR-0050, issue #108): the cautionary disclosure semantic
+     (a stale result, a viz that failed to render). Promoted from the bespoke
+     .viz-disclosure / .stale-disclosure tints the legacy styles.css owned, so
+     the shadcn Alert warning variant consumes a token, not a hardcoded hex. */
+  --warning: #b45309;
+  /* info blue (ADR-0050 token model, issue #864): the informational-tint
+     semantic (the privacy summary's outgoing-payload tint; block
+     informational disclosures ride the Alert default surface, not this
+     token).
+     Promoted from the hardcoded Tailwind blue scale the summary used to
+     ride, which had no dark variant -- the token flips like --warning
+     (the #108 warning promotion precedent) so the tint reads in both
+     modes. */
+  --info: #1d4ed8;
+  --border: #e3e3e8;
+  --input: #e3e3e8;
+  --ring: #0d9488;
+}
+
+/* --- shadcn token set, dark (ADR-0050) ----------------------------------- */
+.dark {
+  --background: #0f1410;
+  --foreground: #e8eae8;
+  --card: #181b18;
+  --card-foreground: #e8eae8;
+  --popover: #181b18;
+  --popover-foreground: #e8eae8;
+  /* teal primary stays -- the brand color does not flip with mode. */
+  --primary: #0d9488;
+  --primary-foreground: #ffffff;
+  --secondary: #232723;
+  --secondary-foreground: #e8eae8;
+  --muted: #232723;
+  --muted-foreground: #9ca3af;
+  --accent: #143833;
+  --accent-foreground: #5eead4;
+  --destructive: #ef4444;
+  --destructive-foreground: #ffffff;
+  /* warning amber flips lighter in dark mode for readable text on the tint. */
+  --warning: #f59e0b;
+  /* info blue flips lighter in dark mode for readable text on the tint. */
+  --info: #60a5fa;
+  --border: #2a2f2a;
+  --input: #2a2f2a;
+  --ring: #0d9488;
+}
+
+/* Map the shadcn tokens into Tailwind v4 color utilities. `inline` makes each
+ * utility reference the var directly, so a .dark token override recolors every
+ * utility at runtime without rebuilding the theme. */
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-destructive-foreground: var(--destructive-foreground);
+  --color-warning: var(--warning);
+  --color-info: var(--info);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+
+  /* Radius scale derived from the single compact --radius token. */
+  --radius-xs: calc(var(--radius) - 2px);
+  --radius-sm: calc(var(--radius) - 2px);
+  --radius-md: var(--radius);
+  --radius-lg: calc(var(--radius) + 2px);
+  --radius-xl: calc(var(--radius) + 4px);
+}
+
+/* Base element styling: the document rides on the token system, so the v0
+ * scaffold and future shadcn components share one background/foreground and a
+ * default border color. The legacy component rules in styles.css layer on top. */
+@layer base {
+  * {
+    border-color: var(--border);
+  }
+  body {
+    margin: 0;
+    background-color: var(--background);
+    color: var(--foreground);
+    font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  }
+  /* Buttons inherit the document font stack. The native <button> UA style
+     carries its own font, so the bare reset buttons in SessionSidebar
+     (appearance-none bg-transparent border-0, replacing [all:unset] -- see
+     SessionSidebar.tsx) would otherwise drift off the body font. Base-layer
+     reset; utilities still override freely (ADR-0067). */
+  button {
+    font: inherit;
+  }
+}
+
+/* Global reduced-motion cutoff (issue #1139, extends #1137). Four animation
+ * families live in src/: the streamdown word cascade (issue #1137), the
+ * tw-animate-css dialog enter/exit utilities (ADR-0049, issue #105), the
+ * async-load spinners plus one status pulse (issue #1128), and the shell
+ * fold system in styles.css -- 280ms grid-template-columns folds with
+ * delayed opacity/bottom fades riding them. The fold chain is
+ * orchestration-coupled (a delayed fade parks on the fold finishing), so
+ * cutting only the positional transitions would desync its follow-ups;
+ * every animation and transition cuts to instant instead. Longhands with
+ * !important outrank every shorthand in the imported sheets (streamdown,
+ * tw-animate-css, Tailwind utilities, styles.css). The bare `*` matches
+ * elements only, so ::marker is named alongside it -- the streamdown
+ * cascade fades its list markers in on the pseudo-element itself
+ * (issue #1137). animation-iteration-count: 1 parks the infinite
+ * spinner/pulse on their initial frame -- the
+ * glyphs keep rendering as static loading/state indicators; only the
+ * motion stops. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  ::before,
+  ::after,
+  ::marker {
+    animation-duration: 0.01ms !important;
+    animation-delay: 0s !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0s !important;
+    transition-delay: 0s !important;
+  }
+}
+

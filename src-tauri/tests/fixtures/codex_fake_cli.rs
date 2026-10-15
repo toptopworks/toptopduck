@@ -1,0 +1,470 @@
+//! Codex fake CLI fixture (ADR-0094 test seam, issue #523).
+//!
+//! A minimal binary that emulates `codex exec --json` NDJSON output so the JSON
+//! event stream engine (`toptopduck_lib::runtime::acp::codex_event_stream`) can
+//! be exercised end-to-end in CI without the real codex install. Declared as a
+//! `[[bin]]` in `Cargo.toml`; integration tests resolve its path via
+//! `env!("CARGO_BIN_EXE_codex-fake-cli")` and pick the scripted behavior via the
+//! `CODEX_FAKE_SCENARIO` env var.
+//!
+//! The engine spawns `codex exec --json …`, writes the flattened prompt to stdin,
+//! then reads NDJSON events from stdout. This fixture mirrors that contract:
+//! read stdin until EOF, then emit the scripted NDJSON event stream. Pure
+//! serde_json — no lib import — so the fixture stays self-contained.
+//!
+//! The emitted shapes are the measured codex 0.147.0 wire format (issue
+//! #804) — the `mcp_tool_call` item shape is protocol-pinned instead (codex
+//! 0.153.1, issue #816) — dot-typed turn events plus `item.started` /
+//! `item.completed` envelopes.
+
+use std::io::{Read, Write};
+
+/// An `item.completed` envelope wrapping an `agent_message` item.
+fn agent_message(id: &str, text: &str) -> serde_json::Value {
+    serde_json::json!({
+        "type": "item.completed",
+        "item": {"id": id, "type": "agent_message", "text": text}
+    })
+}
+
+/// An `item.completed` envelope wrapping a successful (exit 0)
+/// `command_execution` item.
+fn command_execution(id: &str, command: &str) -> serde_json::Value {
+    serde_json::json!({
+        "type": "item.completed",
+        "item": {
+            "id": id,
+            "type": "command_execution",
+            "command": command,
+            "aggregated_output": "",
+            "exit_code": 0,
+            "status": "completed"
+        }
+    })
+}
+
+/// An `item.completed` envelope wrapping an `mcp_tool_call` item: a
+/// gateway-served tool call on the codex line (issue #816). The field shape
+/// is the codex 0.153.1 protocol definition (`McpToolCallItem` in
+/// codex-rs/protocol + the TS SDK items): `id` / `server` / `tool` /
+/// `arguments` / `status` (`completed` | `failed`) / optional
+/// `error.message`. Pinned from the protocol source, not a capture — the
+/// real-CLI capture is pending.
+fn mcp_tool_call(
+    id: &str,
+    tool: &str,
+    arguments: serde_json::Value,
+    status: &str,
+    error: Option<&str>,
+) -> serde_json::Value {
+    let mut item = serde_json::json!({
+        "id": id,
+        "type": "mcp_tool_call",
+        "server": "toptopduck-gateway",
+        "tool": tool,
+        "arguments": arguments,
+        "status": status,
+    });
+    if let Some(error) = error {
+        item["error"] = serde_json::json!({"message": error});
+    }
+    item
+}
+
+/// Append the spawn-argv trace line to the file named by
+/// `CODEX_FAKE_TRACE_FILE` (when set). The integration test passes a temp
+/// file so it can assert on the engine's argv injection (stdout carries the
+/// event stream the engine owns; stderr inherits to the CI console where no
+/// test can read it). A no-op when the var is absent, so ad-hoc manual runs
+/// keep working.
+fn trace_argv(argv: &[String]) {
+    use std::io::Write;
+    let Some(path) = std::env::var_os("CODEX_FAKE_TRACE_FILE") else {
+        return;
+    };
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+    {
+        let _ = writeln!(f, "CODEX_FAKE_ARGV={}", argv.join(" "));
+    }
+}
+
+fn main() {
+    let scenario = std::env::var("CODEX_FAKE_SCENARIO").unwrap_or_else(|_| "text_reply".into());
+
+    // ADR-0095: trace the spawn argv so the integration test can assert the
+    // engine's model / thought-level injection. ADR-0128: a `resume` element
+    // marks a continuation-window spawn (`codex exec resume <thread_id>`),
+    // the turn-limit scenarios' second shape.
+    let argv: Vec<String> = std::env::args().skip(1).collect();
+    let is_resume = argv.iter().any(|a| a == "resume");
+    trace_argv(&argv);
+
+    // Issue #808: a CLI that stalls BEFORE draining stdin (e.g. wedged in
+    // its own MCP init): never read, never emit -- the engine's oversized
+    // prompt write blocks in the OS pipe, so the turn can only resolve via
+    // cancel. The 30s hold fails loudly if the cancel cannot break the
+    // blocked write.
+    if scenario == "no_stdin_hold" {
+        std::thread::sleep(std::time::Duration::from_secs(30));
+        return;
+    }
+
+    // The mid-write death leg of the #808 write: a CLI that exits before
+    // draining stdin (e.g. a startup config rejection) breaks the oversized
+    // prompt write on the pipe, which settles the turn as a Runtime stdin
+    // write failure.
+    if scenario == "die_before_stdin" {
+        std::process::exit(1);
+    }
+
+    // Drain stdin (the flattened prompt) to EOF — codex reads the prompt from
+    // stdin when no positional arg is given.
+    let mut stdin = std::io::stdin();
+    let mut buf = Vec::new();
+    let _ = stdin.read_to_end(&mut buf);
+
+    let mut out = std::io::stdout();
+    match scenario.as_str() {
+        // The faithful measured sequence (issue #804's capture, minus the
+        // command): thread.started stays an ignored shape, the reasoning
+        // item folds into the round's thinking (issue #807), the
+        // agent_message text rides the terminal.
+        "text_reply" => {
+            emit(
+                &mut out,
+                &serde_json::json!({"type": "thread.started", "thread_id": "<uuid>"}),
+            );
+            emit(&mut out, &serde_json::json!({"type": "turn.started"}));
+            emit(
+                &mut out,
+                &serde_json::json!({
+                    "type": "item.completed",
+                    "item": {"id": "item_0", "type": "reasoning", "text": "thinking..."}
+                }),
+            );
+            emit(&mut out, &agent_message("item_1", "the answer is 42"));
+            emit(
+                &mut out,
+                &serde_json::json!({"type": "turn.completed", "usage": {"input_tokens": 0, "output_tokens": 0}}),
+            );
+        }
+        // ADR-0129 (issue #1270): the terminal usage rides `turn.completed`
+        // (live-measured on 0.154) -- non-zero evidence the end-to-end test
+        // settles as the turn's usage.
+        "usage_turn" => {
+            emit(&mut out, &serde_json::json!({"type": "turn.started"}));
+            emit(&mut out, &agent_message("item_0", "the answer is 42"));
+            emit(
+                &mut out,
+                &serde_json::json!({"type": "turn.completed", "usage": {
+                    "input_tokens": 20552,
+                    "cached_input_tokens": 3840,
+                    "cache_write_input_tokens": 12,
+                    "output_tokens": 5,
+                    "reasoning_output_tokens": 0
+                }}),
+            );
+        }
+        // The command arrives as the measured item.started / item.completed
+        // pair: the streaming variant must not double the trace row.
+        "tool_call" => {
+            emit(
+                &mut out,
+                &serde_json::json!({
+                    "type": "item.started",
+                    "item": {
+                        "id": "item_1",
+                        "type": "command_execution",
+                        "command": "explore SELECT 1",
+                        "aggregated_output": "",
+                        "exit_code": null,
+                        "status": "in_progress"
+                    }
+                }),
+            );
+            emit(&mut out, &command_execution("item_1", "explore SELECT 1"));
+            emit(&mut out, &agent_message("item_2", "found 3 rows"));
+            emit(&mut out, &serde_json::json!({"type": "turn.completed"}));
+        }
+        // The no-progress freeze window (ADR-0115): an execution item whose
+        // run outlasts the cap must NOT kill the turn -- the started/
+        // completed envelope pair freezes the clock across the command. With
+        // the freeze deleted, the watchdog fires mid-execution and the turn
+        // lands NoProgress instead of the reply.
+        "slow_exec" => {
+            emit(&mut out, &serde_json::json!({"type": "turn.started"}));
+            emit(
+                &mut out,
+                &serde_json::json!({
+                    "type": "item.started",
+                    "item": {
+                        "id": "item_1",
+                        "type": "command_execution",
+                        "command": "explore SELECT 1",
+                        "aggregated_output": "",
+                        "exit_code": null,
+                        "status": "in_progress"
+                    }
+                }),
+            );
+            // Outlast the test's 200ms cap: the freeze must hold.
+            std::thread::sleep(std::time::Duration::from_millis(600));
+            emit(&mut out, &command_execution("item_1", "explore SELECT 1"));
+            emit(&mut out, &agent_message("item_2", "found 3 rows"));
+            emit(&mut out, &serde_json::json!({"type": "turn.completed"}));
+        }
+        "turn_failed" => {
+            emit(
+                &mut out,
+                &serde_json::json!({"type": "turn.failed", "error": "rate limited"}),
+            );
+        }
+        // ADR-0128 window boundary: the CLI's own `model_max_turns` budget
+        // self-stops (the turn-limit failure, the measured object-shaped
+        // error). Window one carries a tool batch before the limit; the
+        // RESUME spawn (argv carries `resume`) -- the engine's continuation
+        // window -- finishes the thread. Rounds must carry across the two
+        // processes (the same tracker, one settle).
+        "turn_limit_continue" => {
+            if is_resume {
+                emit(&mut out, &thread_started());
+                emit(&mut out, &agent_message("item_r1", "resumed and finishing"));
+                emit(&mut out, &command_execution("item_r2", "explore SELECT 2"));
+                emit(&mut out, &agent_message("item_r3", "the answer is 42"));
+                emit(&mut out, &serde_json::json!({"type": "turn.completed"}));
+            } else {
+                emit(&mut out, &thread_started());
+                emit(&mut out, &agent_message("item_1", "checking the table"));
+                emit(&mut out, &command_execution("item_2", "explore SELECT 1"));
+                emit(&mut out, &turn_limit_failed());
+            }
+        }
+        // Every window (the initial spawn and each resume) hits the limit:
+        // the engine exhausts its resume budget (1 + 3 windows) and lands
+        // the derived ceiling.
+        "turn_limit_exhausted" => {
+            emit(&mut out, &thread_started());
+            emit(&mut out, &turn_limit_failed());
+        }
+        // Gateway-served MCP tool calls (issue #816): two completed
+        // `mcp_tool_call` items — a registered-CLI-shaped bare name and a
+        // namespaced external name — then the answer. Each must render live
+        // (a phase pair per call) and land one trace row on the round.
+        "mcp_tool_call" => {
+            emit(
+                &mut out,
+                &serde_json::json!({
+                    "type": "item.completed",
+                    "item": mcp_tool_call(
+                        "item_1",
+                        "convert",
+                        serde_json::json!({"input": "a.csv"}),
+                        "completed",
+                        None
+                    )
+                }),
+            );
+            emit(
+                &mut out,
+                &serde_json::json!({
+                    "type": "item.completed",
+                    "item": mcp_tool_call(
+                        "item_2",
+                        "mcp__duckdb__query_snapshot",
+                        serde_json::json!({"sql": "SELECT 1"}),
+                        "completed",
+                        None
+                    )
+                }),
+            );
+            emit(&mut out, &agent_message("item_3", "converted 2 rows"));
+            emit(&mut out, &serde_json::json!({"type": "turn.completed"}));
+        }
+        // A failed gateway call (status "failed" + error.message): the row
+        // lands failed with the wire's error message as the anchor (issue
+        // #816).
+        "mcp_tool_call_failed" => {
+            emit(
+                &mut out,
+                &serde_json::json!({
+                    "type": "item.completed",
+                    "item": mcp_tool_call(
+                        "item_1",
+                        "convert",
+                        serde_json::json!({"input": "b.csv"}),
+                        "failed",
+                        Some("converter crashed")
+                    )
+                }),
+            );
+            emit(&mut out, &agent_message("item_2", "the call failed"));
+            emit(&mut out, &serde_json::json!({"type": "turn.completed"}));
+        }
+        // A failed command (non-zero exit) plus the answer text: the row
+        // lands failed with the exit code as the failure anchor (issue #804).
+        "tool_call_failure" => {
+            emit(
+                &mut out,
+                &serde_json::json!({
+                    "type": "item.completed",
+                    "item": {
+                        "id": "item_1",
+                        "type": "command_execution",
+                        "command": "false",
+                        "aggregated_output": "",
+                        "exit_code": 1,
+                        "status": "completed"
+                    }
+                }),
+            );
+            emit(&mut out, &agent_message("item_2", "the command failed"));
+            emit(&mut out, &serde_json::json!({"type": "turn.completed"}));
+        }
+        "round_prose" => {
+            // Two batch rounds, each with its own prose, then the trailing
+            // answer stretch (issue #613's per-round grouping scenario).
+            emit(&mut out, &agent_message("item_1", "checking the table"));
+            emit(&mut out, &command_execution("item_2", "explore SELECT 1"));
+            emit(&mut out, &agent_message("item_3", "verifying the count"));
+            emit(
+                &mut out,
+                &command_execution("item_4", "explore SELECT COUNT(*)"),
+            );
+            emit(&mut out, &agent_message("item_5", "the answer is 42"));
+            emit(&mut out, &serde_json::json!({"type": "turn.completed"}));
+        }
+        // Gateway-served MCP calls interleaved with thinking + prose across
+        // two batch rounds (issue #817): the settle merge's in-place
+        // replacement keeps each round's thinking -> prose -> calls order —
+        // the end-to-end pin for the codex path (the engine rows are the
+        // anchors the gateway's authoritative rows replace). Three dispatch
+        // shapes: a CLI registration, a direct-send namespaced call, and an
+        // `mcp_invoke` meta dispatch whose gateway row records the resolved
+        // handle.
+        "mcp_tool_call_rounds" => {
+            emit(
+                &mut out,
+                &serde_json::json!({
+                    "type": "item.completed",
+                    "item": {"id": "item_0", "type": "reasoning", "text": "plan the calls"}
+                }),
+            );
+            emit(&mut out, &agent_message("item_1", "checking the table"));
+            emit(
+                &mut out,
+                &serde_json::json!({
+                    "type": "item.completed",
+                    "item": mcp_tool_call(
+                        "item_2",
+                        "convert",
+                        serde_json::json!({"input": "a.csv"}),
+                        "completed",
+                        None
+                    )
+                }),
+            );
+            emit(&mut out, &agent_message("item_3", "verifying the count"));
+            emit(
+                &mut out,
+                &serde_json::json!({
+                    "type": "item.completed",
+                    "item": mcp_tool_call(
+                        "item_4",
+                        "mcp__duckdb__query_snapshot",
+                        serde_json::json!({"sql": "SELECT 1"}),
+                        "completed",
+                        None
+                    )
+                }),
+            );
+            emit(
+                &mut out,
+                &serde_json::json!({
+                    "type": "item.completed",
+                    "item": mcp_tool_call(
+                        "item_5",
+                        "mcp_invoke",
+                        serde_json::json!({"tool": "mcp__duckdb__snapshot_extra"}),
+                        "completed",
+                        None
+                    )
+                }),
+            );
+            emit(&mut out, &agent_message("item_6", "the answer is 42"));
+            emit(&mut out, &serde_json::json!({"type": "turn.completed"}));
+        }
+        "line_cap_overlong" => {
+            // A single line past the 4-MiB line cap (issue #639's cap
+            // reaching the stream path): the shared reader drops it and
+            // the connection stays up -- the events after it still
+            // arrive. The over-long line is raw non-JSON garbage (dropped
+            // before any parse, so no envelope is needed).
+            let _ = writeln!(out, "{}", "g".repeat(5 * 1024 * 1024));
+            emit(&mut out, &agent_message("item_1", "still alive"));
+            emit(&mut out, &serde_json::json!({"type": "turn.completed"}));
+        }
+        "crash" => {
+            emit(&mut out, &agent_message("item_1", "about to crash"));
+            let _ = out.flush();
+            std::process::exit(0);
+        }
+        "disconnected_with_text" => {
+            // Emit agent text then close stdout without a terminal event.
+            emit(&mut out, &agent_message("item_1", "partial reply"));
+            let _ = out.flush();
+            // Exit normally — stdout closes, the pump sees Disconnected with
+            // accumulated text -> treats as success.
+        }
+        "empty_stdout" => {
+            // Close stdout immediately — no events, no text. The pump sees
+            // Disconnected with no text -> Runtime.
+        }
+        "cancel_with_prose" => {
+            // A command execution, then agent text, then hold stdout open
+            // (no terminal event) so the pump's loop-top cancel check ends
+            // the turn mid-answer (issue #628's cancel-mid-prose shape).
+            // The call's ToolCallStarted phase is the cancel test's latch:
+            // once it fires, the text event (emitted in the same flush,
+            // behind the call) is already in the pipe, so a cancel that
+            // waits out one recv cycle lands strictly after the prose
+            // folds.
+            emit(&mut out, &command_execution("item_1", "explore SELECT 1"));
+            emit(&mut out, &agent_message("item_2", "partial answer"));
+            let _ = out.flush();
+            std::thread::sleep(std::time::Duration::from_secs(30));
+        }
+        other => {
+            emit(
+                &mut out,
+                &agent_message("item_1", &format!("unknown scenario: {other}")),
+            );
+            emit(&mut out, &serde_json::json!({"type": "turn.completed"}));
+        }
+    }
+    let _ = out.flush();
+}
+
+/// Write one NDJSON line + flush.
+fn emit(out: &mut std::io::Stdout, value: &serde_json::Value) {
+    if let Ok(s) = serde_json::to_string(value) {
+        let _ = writeln!(out, "{s}");
+        let _ = out.flush();
+    }
+}
+
+/// The conversation-open event carrying the thread id -- the `exec resume`
+/// handle (ADR-0128; live-measured on 0.154: `thread.started` precedes the
+/// turn events, and a resumed process echoes the SAME id).
+fn thread_started() -> serde_json::Value {
+    serde_json::json!({"type": "thread.started", "thread_id": "01aa-fixture-thread-id"})
+}
+
+/// The `model_max_turns` self-stop (the ADR-0128 window boundary): a
+/// `turn.failed` whose error names the turn limit, the object-shaped wire
+/// the real CLI emits (live-measured on 0.154).
+fn turn_limit_failed() -> serde_json::Value {
+    serde_json::json!({"type": "turn.failed", "error": {"message": "Turn limit reached"}})
+}

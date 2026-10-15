@@ -1,0 +1,173 @@
+// The in-flight turn's chat exchange (ADR-0103 live isomorphism, issue #610):
+// rendered at the thread's tail while a turn runs -- the user bubble mounts
+// the moment the user submits (asked_at is the client's submit stamp; the
+// question is final at submit, so the copy affordance is honest), over a
+// streaming assistant side: the runtime attribution marker (issue #818),
+// then the header's dataset chip (issue #620), then per-round thinking
+// folds + connective prose + tool rows (approval cards in
+// flow, ADR-0083 -- the card chrome lives in LiveRow, semantics unchanged
+// from the retired progressive card).
+//
+// The rounds arrive pre-grouped from the state layer's single derivation
+// (issue #620) -- this component renders them directly and never regroups.
+// The head and the round skeleton ride the swap-stable TurnExchangeFrame /
+// RoundBody -- the modules the settled TurnCard mounts too, so the settle
+// swap cannot move a member. Settle swaps this block for the settled
+// TurnCard: liveRoundsToTrace folds the same rounds into the optimistic
+// TurnRecord.trace; the running status row yields to the outcome body +
+// closing meta row, and the streamed rows fold behind the per-round step fold
+// (the settled default posture, ADR-0078). A thinking fold the user opened
+// while live mounts already open on the settled side via the
+// onThinkingExpandedChange report (issue #620).
+
+import { FormattedMessage } from "react-intl";
+import { useCallback } from "react";
+import { Loader2 } from "lucide-react";
+import { LiveRow } from "./TraceView";
+import { TraceList } from "./TraceList";
+import { RoundBody } from "./RoundBody";
+import type { RoundProseMode } from "./RoundProse";
+import { TurnExchangeFrame } from "./TurnExchangeFrame";
+import { isRoundTripWait } from "../../session/useTurnFlow";
+import type { LiveRound, LiveTurn } from "../../session/useTurnFlow";
+import { WaitElapsedSuffix } from "./WaitElapsedSuffix";
+import type { ApprovalResponse, FileAttachment } from "../../types/approval";
+import type { ThinkingTrace } from "../../types/thread";
+import type { DatasetLabel } from "./turn-visual";
+
+// One live round: the skeleton rides RoundBody (see its header for the swap
+// contract); this adapter owns the round's tool rows -- streaming UNFOLDED,
+// where the settled posture folds them (ADR-0078): streaming calls must be
+// visible as they land.
+function LiveRoundBlock({
+  round,
+  proseMode,
+  onRespondApproval,
+  onLoadApprovalAttachments,
+  onThinkingExpandedChange,
+}: {
+  round: LiveRound;
+  /** The caret is the round-is-alive signal (RoundProse's streaming
+   *  contract), and the only alive prose is the tail's while it has no
+   *  rows: the rounds array is append-only, so every earlier round's text
+   *  is final, and a row-bearing tail is sealed too (prose after a call
+   *  opens the next round, issue #1236) -- all of them render static
+   *  (caret off, cascade off, their fences decode) while the trailing
+   *  status names the wait. */
+  proseMode: RoundProseMode;
+  onRespondApproval: (requestId: string, response: ApprovalResponse) => void;
+  onLoadApprovalAttachments?: (requestId: string) => Promise<FileAttachment[]>;
+  onThinkingExpandedChange: (thinking: ThinkingTrace, expanded: boolean) => void;
+}) {
+  const { thinking, text, rows } = round;
+  // useCallback so the fold's report effect does not re-fire on an unrelated
+  // parent re-render (the identity must only change with the thinking block);
+  // the report passes the reference (the settle seed's key).
+  const reportThinkingExpanded = useCallback(
+    (expanded: boolean) => thinking !== undefined && onThinkingExpandedChange(thinking, expanded),
+    [thinking, onThinkingExpandedChange],
+  );
+  return (
+    <RoundBody
+      thinking={thinking}
+      text={text}
+      proseMode={proseMode}
+      onThinkingExpandedChange={reportThinkingExpanded}
+    >
+      {rows.length > 0 && (
+        <TraceList>
+          {rows.map((row) => (
+            <LiveRow
+              key={row.key}
+              row={row}
+              onRespond={onRespondApproval}
+              onLoadAttachments={onLoadApprovalAttachments}
+            />
+          ))}
+        </TraceList>
+      )}
+    </RoundBody>
+  );
+}
+
+export function LiveTurnExchange({
+  liveTurn,
+  waitStartedAt = null,
+  mentionedDataset,
+  onRespondApproval,
+  onLoadApprovalAttachments,
+  onThinkingExpandedChange,
+}: {
+  liveTurn: LiveTurn;
+  /** The LLM round-trip wait stamp (issue #1264): while non-null the
+   *  trailing status line carries the elapsed-seconds suffix -- the same
+   *  stamp the QuestionBar phase label reads. Optional so call sites /
+   *  tests that do not exercise the wait window omit it (no suffix). */
+  waitStartedAt?: number | null;
+  /** The dataset the question explicitly names (the same findMentionedDataset
+   *  read the settled header performs, computed by the thread) -- rendered
+   *  here so the settle swap does not insert the chip (issue #620). null
+   *  when the question names none. */
+  mentionedDataset: DatasetLabel | null;
+  onRespondApproval: (requestId: string, response: ApprovalResponse) => void;
+  /** Pulls the full (uncapped) file values for a pending approval card
+   * (issue #1009); optional -- absent loaders keep the capped broadcast
+   * snapshot. Threaded to each round's LiveRow. */
+  onLoadApprovalAttachments?: (requestId: string) => Promise<FileAttachment[]>;
+  /** Reports each thinking-fold toggle with the block's reference (the key
+   *  the settle seed matches on -- the projection carries the same
+   *  reference onto the settled round). */
+  onThinkingExpandedChange: (thinking: ThinkingTrace, expanded: boolean) => void;
+}) {
+  // The trailing status names the LLM round-trip wait and carries the
+  // elapsed-seconds suffix (issue #1264). Its gate is the shared predicate
+  // -- one round-trip-wait definition feeds the status line here and the
+  // wait stamp the QuestionBar label reads (see isRoundTripWait for the
+  // honest-liveness reasoning: which arms carry the motion, and why the
+  // prose arm requires the tail to BE the current round).
+  const tailIndex = liveTurn.rounds.length - 1;
+  return (
+    <TurnExchangeFrame
+      question={liveTurn.question}
+      askedAt={liveTurn.askedAt}
+      invokedSkills={liveTurn.invocationNames}
+      runtime={liveTurn.runtime}
+      mentionedDataset={mentionedDataset}
+      live
+    >
+      {liveTurn.rounds.map((round, i) => (
+        // The rounds array is append-only within a turn (round i is round
+        // i+1), so the index is a stable key. The mode judgment is the same
+        // seal discriminant the round-trip-wait predicate reads: a
+        // row-bearing tail is sealed prose -- static, the status names the
+        // wait (issue #1236).
+        <LiveRoundBlock
+          key={i + 1}
+          round={round}
+          proseMode={i === tailIndex && round.rows.length === 0 ? "streaming" : "static"}
+          onRespondApproval={onRespondApproval}
+          onLoadApprovalAttachments={onLoadApprovalAttachments}
+          onThinkingExpandedChange={onThinkingExpandedChange}
+        />
+      ))}
+      {isRoundTripWait(liveTurn) && (
+        <p
+          className="live-thinking m-0 mt-0.5 flex items-center gap-1 text-xs text-muted-foreground"
+          role="status"
+        >
+          <Loader2 aria-hidden="true" className="w-3.5 h-3.5 shrink-0 animate-spin" />
+          {liveTurn.step !== null && liveTurn.step > 1 ? (
+            <FormattedMessage
+              id="thread.live.thinkingStep"
+              defaultMessage="Thinking (step {step})…"
+              values={{ step: liveTurn.step }}
+            />
+          ) : (
+            <FormattedMessage id="common.thinking" defaultMessage="Thinking…" />
+          )}
+          <WaitElapsedSuffix startedAt={waitStartedAt} />
+        </p>
+      )}
+    </TurnExchangeFrame>
+  );
+}

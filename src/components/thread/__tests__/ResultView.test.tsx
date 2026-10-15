@@ -1,0 +1,1157 @@
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import { fireEvent, screen, waitFor, within } from "@testing-library/react";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { renderI18n as renderI18nBase, withIntl, embedOk } from "../../common/__tests__/helpers";
+import { COLUMN_DISCLOSURE_THRESHOLD, ResultView, ROW_DISCLOSURE_THRESHOLD } from "../ResultView";
+import { catalogFor } from "../../../i18n";
+import { readRows, exportRowsCsv } from "../../../api";
+import { save as saveDialog } from "@tauri-apps/plugin-dialog";
+import embed from "vega-embed";
+
+// ResultView's header rides ResultActions' Radix tooltips, which need the
+// app-wide TooltipProvider ancestor (mounted in App.tsx -- the shared
+// withIntl already provides it); its paged read now rides the useRowPage
+// seam, which needs the QueryClientProvider ancestor. This renderI18n
+// shadows the shared helper with a provider-wrapping render so every call
+// site keeps its shape. A fresh client per render keeps the seam's
+// Infinity-cached pages from bleeding across tests; retry:false keeps a
+// mock reject single-shot (the seam's own retry:false would hold even
+// without it -- the module pins that).
+function renderI18n(ui: React.ReactElement) {
+  const queryClient = new QueryClient({
+    defaultOptions: { queries: { retry: false } },
+  });
+  return renderI18nBase(<QueryClientProvider client={queryClient}>{ui}</QueryClientProvider>);
+}
+
+// ResultView paginates via readRows; stub it so the tests script the page
+// payloads without the Tauri bridge. The ResultActions pair (issue #769) rides
+// the same module, so its two full-pull surfaces are stubbed too -- the rest of
+// the module passes through unchanged.
+vi.mock("../../../api", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../../../api")>();
+  return {
+    ...actual,
+    readRows: vi.fn(),
+    readRowsTsv: vi.fn(),
+    exportRowsCsv: vi.fn(),
+  };
+});
+// The export action opens the native save dialog before the IPC call; stubbed
+// so the tests script the chosen-path and cancel branches.
+vi.mock("@tauri-apps/plugin-dialog", () => ({ save: vi.fn() }));
+// Vega-Embed needs a real canvas; jsdom has none, so the render itself is
+// mocked. ResultView still drives the real decodeViz + the embed call/catch
+// branches -- the mock lets each test script a successful embed or a rejected
+// one to exercise the degradation path (ADR-0033).
+vi.mock("vega-embed", () => ({ default: vi.fn() }));
+
+// Columns just over the column threshold -- the smallest fixture that trips
+// the many-columns disclosure (shared by the col-only and both-hit tests).
+const MANY_COLUMNS = Array.from({ length: COLUMN_DISCLOSURE_THRESHOLD + 1 }, (_, i) => ({
+  name: `c${i}`,
+  canonical_type: "VARCHAR",
+}));
+
+describe("ResultView", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("renders rows, total, and the assumption note from readRows", async () => {
+    // AC: the materialized result is shown as a table + row count; the
+    // assumption note (ADR-0009) renders as a correctable side note.
+    vi.mocked(readRows).mockResolvedValue({
+      columns: [{ name: "n", canonical_type: "BIGINT" }],
+      rows: [["5"]],
+      total: 1,
+      offset: 0,
+      limit: 100,
+    });
+    renderI18n(<ResultView sessionId="sess-1" referenceName="result_1" question="q:result_1" assumption="把 id 当作主键" viz={null} />);
+    await waitFor(() => expect(readRows).toHaveBeenCalledWith("sess-1", "result_1", 0, 100));
+    // The page lands via the query observer (a notifyManager macrotask), so
+    // data assertions wait for the render with findBy*, never the fetch call.
+    expect(await screen.findByText(/行数：1/)).toBeInTheDocument();
+    expect(screen.getByText("n")).toBeInTheDocument(); // column header
+    expect(screen.getByText("5")).toBeInTheDocument(); // cell value
+    expect(screen.getByText(/假设：把 id 当作主键/)).toBeInTheDocument();
+    // Issue #768 "neither" combo: no threshold crossed -> no info banner.
+    expect(screen.queryByRole("note")).not.toBeInTheDocument();
+  });
+
+  it("titles the result with the producing question verbatim (issue #772)", async () => {
+    // The question replaces the machine reference name as the pane's title;
+    // the "Result: " prefix retires (the tab already names the pane). The full
+    // text stays in the DOM inside the heading, so the table's accessible name
+    // (aria-labelledby -> this heading) carries the whole question even while
+    // the truncate utility clips it visually.
+    const QUESTION = "按部门统计平均薪资，并列出前五";
+    vi.mocked(readRows).mockResolvedValue({
+      columns: [{ name: "n", canonical_type: "BIGINT" }],
+      rows: [["5"]],
+      total: 1,
+      offset: 0,
+      limit: 100,
+    });
+    renderI18n(
+      <ResultView sessionId="sess-1" referenceName="result_1" question={QUESTION} assumption={null} viz={null} />,
+    );
+    const heading = screen.getByRole("heading", { name: QUESTION });
+    const table = screen.getByRole("table");
+    expect(table.getAttribute("aria-labelledby")).toBe(heading.id);
+    // prefix retired on the normal path
+    expect(screen.queryByText(/结果：/)).not.toBeInTheDocument();
+    // Truncation posture (jsdom cannot compute layout, so pin the classes per
+    // this file's utility-pin convention): the span is block + truncate.
+    const titleText = within(heading).getByText(QUESTION);
+    expect(titleText).toHaveClass("block", "truncate");
+    // Issue #864: the pane title carries headline-sm (16px/600) explicitly --
+    // the workspace-body 14px baseline inherits into a bare h2, which would
+    // flatten the result title to body size with zero hierarchy.
+    expect(heading).toHaveClass("text-base", "font-semibold");
+    // Hover recovery (ADR-0050): the truncated trigger opens the tooltip with
+    // the full question (jsdom reports 0 width, so the overflow gate passes).
+    fireEvent.pointerMove(titleText);
+    await waitFor(() => {
+      const tooltip = screen.getByRole("tooltip");
+      expect(tooltip.textContent).toContain(QUESTION);
+      // The recovery keeps the question's line structure (the rail bubble's
+      // whitespace-pre-wrap posture, ADR-0103), not space-joined lines.
+      expect(tooltip).toHaveClass("whitespace-pre-wrap");
+    });
+  });
+
+  it("falls back to the reference-name title when the question is empty (issue #772)", async () => {
+    // The question is required at the derivation layer and the composer
+    // rejects blank submits, so an empty string is the only degenerate form
+    // (an ask caller bypassing the editor's trim guard); the title degrades
+    // to the reference name via the existing catalog key -- never an empty
+    // heading.
+    vi.mocked(readRows).mockResolvedValue({
+      columns: [{ name: "n", canonical_type: "BIGINT" }],
+      rows: [["5"]],
+      total: 1,
+      offset: 0,
+      limit: 100,
+    });
+    renderI18n(<ResultView sessionId="sess-1" referenceName="result_1" question="" assumption={null} viz={null} />);
+    await waitFor(() => expect(readRows).toHaveBeenCalled());
+    expect(screen.getByRole("heading", { name: "结果：result_1" })).toBeInTheDocument();
+  });
+
+  it("paginates forward and discloses a total larger than the page", async () => {
+    // ADR-0024/0030: a bounded page is shown with the honest total, so a
+    // truncated view never looks complete; the next-page button fetches onward.
+    vi.mocked(readRows).mockResolvedValue({
+      columns: [{ name: "id", canonical_type: "BIGINT" }],
+      rows: [["1"], ["2"]],
+      total: 5,
+      offset: 0,
+      limit: 2,
+    });
+    renderI18n(<ResultView sessionId="sess-1" referenceName="result_1" question="q:result_1" assumption={null} viz={null} pageSize={2} />);
+    await waitFor(() => expect(readRows).toHaveBeenCalledWith("sess-1", "result_1", 0, 2));
+    expect(await screen.findByText(/共 5 行/)).toBeInTheDocument(); // total disclosed
+    fireEvent.click(screen.getByRole("button", { name: /下一页/ }));
+    await waitFor(() => expect(readRows).toHaveBeenCalledWith("sess-1", "result_1", 2, 2));
+  });
+
+  it("renders the empty-state row and a zero total for a 0-row result", async () => {
+    // ADR-0030: a 0-row result is a valid materialized result, shown with the
+    // honest total (0) and the empty-state row -- never special-cased away.
+    vi.mocked(readRows).mockResolvedValue({
+      columns: [{ name: "id", canonical_type: "BIGINT" }],
+      rows: [],
+      total: 0,
+      offset: 0,
+      limit: 100,
+    });
+    renderI18n(<ResultView sessionId="sess-1" referenceName="result_1" question="q:result_1" assumption={null} viz={null} />);
+    await waitFor(() => expect(readRows).toHaveBeenCalledWith("sess-1", "result_1", 0, 100));
+    expect(await screen.findByText(/行数：0/)).toBeInTheDocument();
+    expect(screen.getByText(/（无数据行）/)).toBeInTheDocument();
+  });
+
+  it("renders a NULL cell as muted whitespace, never the literal \"NULL\" (ADR-0057)", async () => {
+    // ADR-0057: the server CASTs NULL to "" so a NULL cell renders as a muted
+    // empty cell (td.cell-null), never the literal string "NULL". Pins the NULL
+    // branch ResultView touches -- a regression would leak the literal or drop
+    // the cell class that drives the muted background.
+    vi.mocked(readRows).mockResolvedValue({
+      columns: [
+        { name: "id", canonical_type: "BIGINT" },
+        { name: "opt", canonical_type: "VARCHAR" },
+      ],
+      rows: [["1", ""]],
+      total: 1,
+      offset: 0,
+      limit: 100,
+    });
+    const { container } = renderI18n(
+      <ResultView sessionId="sess-1" referenceName="result_1" question="q:result_1" assumption={null} viz={null} />,
+    );
+    await waitFor(() => expect(readRows).toHaveBeenCalled());
+    // The empty-string cell carries the cell-null hook (kept for selector
+    // stability) AND the bg-muted utility (ADR-0067, issue #173: the muted bg
+    // retired from styles.css onto the cell). Pin the utility so a regression
+    // that drops bg-muted but leaves the hook stays caught; the populated cell
+    // carries neither. The cells render when the page lands (findBy posture
+    // for the same macrotask reason as the text assertions).
+    await waitFor(() => expect(container.querySelectorAll("td.cell-null")).toHaveLength(1));
+    expect(container.querySelector("td.cell-null")?.className.split(/\s+/)).toContain("bg-muted");
+    // The literal "NULL" never appears in the rendered output.
+    expect(screen.queryByText("NULL")).not.toBeInTheDocument();
+    // The non-NULL cell value still renders.
+    expect(screen.getByText("1")).toBeInTheDocument();
+  });
+
+  it("applies the .num class + tabular-nums to a numeric column header + cell (ADR-0057, issue #222)", async () => {
+    // ADR-0057: numeric canonical-types right-align. ADR-0067 (issue #173):
+    // the right-align retired from styles.css onto the cells as a text-right
+    // utility (alongside the .num hook, kept for selector stability). Issue
+    // #222: numeric columns also carry tabular-nums (font-variant-numeric) so
+    // digits line up in a column under a proportional UI font. Pin the hook AND
+    // both utilities on the real <th>/<td> the primitive renders -- jsdom
+    // cannot lay out text-align / font-variant-numeric, but it CAN assert the
+    // className, so a regression that drops text-right / tabular-nums but
+    // leaves the hook stays caught.
+    vi.mocked(readRows).mockResolvedValue({
+      columns: [
+        { name: "id", canonical_type: "BIGINT" },
+        { name: "label", canonical_type: "VARCHAR" },
+      ],
+      rows: [["7", "x"]],
+      total: 1,
+      offset: 0,
+      limit: 100,
+    });
+    const { container } = renderI18n(
+      <ResultView sessionId="sess-1" referenceName="result_1" question="q:result_1" assumption={null} viz={null} />,
+    );
+    await waitFor(() => expect(readRows).toHaveBeenCalled());
+    // The BIGINT column carries .num + text-right + tabular-nums on both its
+    // header and its cell; the VARCHAR column carries neither. The cells
+    // render when the page lands (waitFor posture for the same macrotask
+    // reason as the findBy text assertions).
+    await waitFor(() => expect(container.querySelectorAll("th.num")).toHaveLength(1));
+    expect(container.querySelectorAll("td.num")).toHaveLength(1);
+    expect(container.querySelector("th.num")?.className.split(/\s+/)).toContain("text-right");
+    expect(container.querySelector("td.num")?.className.split(/\s+/)).toContain("text-right");
+    expect(container.querySelector("th.num")?.className.split(/\s+/)).toContain("tabular-nums");
+    expect(container.querySelector("td.num")?.className.split(/\s+/)).toContain("tabular-nums");
+    // A non-numeric column carries none of the numeric utilities. Guard
+    // existence first so the assertion cannot silently pass via ?. short-circuit
+    // if a future fixture drops the non-numeric column.
+    const nonNumericHead = container.querySelector("th:not(.num)");
+    expect(nonNumericHead).not.toBeNull();
+    expect(nonNumericHead?.className.split(/\s+/)).not.toContain("tabular-nums");
+  });
+
+  it("paginates backward via the previous button", async () => {
+    vi.mocked(readRows)
+      .mockResolvedValueOnce({
+        columns: [{ name: "id", canonical_type: "BIGINT" }],
+        rows: [["1"], ["2"]],
+        total: 5,
+        offset: 0,
+        limit: 2,
+      })
+      .mockResolvedValueOnce({
+        columns: [{ name: "id", canonical_type: "BIGINT" }],
+        rows: [["3"], ["4"]],
+        total: 5,
+        offset: 2,
+        limit: 2,
+      });
+    renderI18n(<ResultView sessionId="sess-1" referenceName="result_1" question="q:result_1" assumption={null} viz={null} pageSize={2} />);
+    await waitFor(() => expect(readRows).toHaveBeenCalledWith("sess-1", "result_1", 0, 2));
+    // The buttons stay disabled until the page-1 render lands (the observer
+    // notification macrotask), so wait for the data before clicking.
+    await waitFor(() => expect(screen.getByText("1")).toBeInTheDocument());
+    fireEvent.click(screen.getByRole("button", { name: /下一页/ }));
+    await waitFor(() => expect(readRows).toHaveBeenCalledWith("sess-1", "result_1", 2, 2));
+    await waitFor(() => expect(screen.getByText("3")).toBeInTheDocument());
+    fireEvent.click(screen.getByRole("button", { name: /上一页/ }));
+    // Page 0 is cached (the offset-keyed seam, issue #1079): turning back
+    // flips the render to the first page with NO third fetch.
+    await waitFor(() => expect(screen.getByText("1")).toBeInTheDocument());
+    expect(readRows).toHaveBeenCalledTimes(2);
+  });
+
+  // The seq race guard's component test retired with the manual state machine
+  // (issue #1079): late responses are isolated by the offset/reference axes of
+  // the query key, pinned at the useRowPage module layer instead of here.
+
+  it("keeps the last good page and a working pager when a page turn's read rejects", async () => {
+    // keepPreviousData holds the prior page only while the new key is
+    // pending -- a rejected turn drops the placeholder, and without the
+    // last-good fallback the view would render a false empty table, an
+    // all-zeros count, and both pager buttons dead. The fallback keeps the
+    // previous page on screen through the error, and Next on the errored
+    // window is the in-place retry (the offset already points there).
+    vi.mocked(readRows)
+      .mockResolvedValueOnce({
+        columns: [{ name: "n", canonical_type: "BIGINT" }],
+        rows: [["1"], ["2"]],
+        total: 5,
+        offset: 0,
+        limit: 2,
+      })
+      .mockRejectedValueOnce({ kind: "RowRead", data: { kind: "UnknownReference" } })
+      .mockResolvedValueOnce({
+        columns: [{ name: "n", canonical_type: "BIGINT" }],
+        rows: [["3"], ["4"]],
+        total: 5,
+        offset: 2,
+        limit: 2,
+      });
+    renderI18n(<ResultView sessionId="sess-1" referenceName="result_1" question="q:result_1" assumption={null} viz={null} pageSize={2} />);
+    await waitFor(() => expect(screen.getByText(/第 1–2 行（共 5 行）/)).toBeInTheDocument());
+    fireEvent.click(screen.getByRole("button", { name: /下一页/ }));
+    // The read banner lands with the previous page still on screen: real
+    // rows, real count, no false empty-state row.
+    await screen.findByRole("alert");
+    expect(screen.getByText("1")).toBeInTheDocument();
+    expect(screen.queryByText(/（无数据行）/)).not.toBeInTheDocument();
+    expect(screen.getByText(/第 1–2 行（共 5 行）/)).toBeInTheDocument();
+    // The pager stays usable: Next retries the failed window, Prev (window
+    // 0) stays out of bounds.
+    const next = screen.getByRole("button", { name: /下一页/ });
+    expect(next).toBeEnabled();
+    expect(screen.getByRole("button", { name: /上一页/ })).toBeDisabled();
+    fireEvent.click(next);
+    // The retry re-fetches the failed offset (not the next window), and its
+    // landing restores the normal flow.
+    await waitFor(() => expect(readRows).toHaveBeenLastCalledWith("sess-1", "result_1", 2, 2));
+    expect(readRows).toHaveBeenCalledTimes(3);
+    await waitFor(() => expect(screen.getByText(/第 3–4 行（共 5 行）/)).toBeInTheDocument());
+  });
+
+  it("resets the paging window on a result switch (fetches the new reference at offset 0)", async () => {
+    // The render-phase reset is the switch path's request-side logic (the
+    // response-side isolation lives at the module layer): without it the
+    // new reference is fetched at the prior result's stale offset. The
+    // rerender shares the harness client so the switch runs against the
+    // live cache, as in production (SessionPane does not key the mount).
+    vi.mocked(readRows).mockImplementation(async (_sid, ref, off) => {
+      if (ref === "result_3") {
+        throw { kind: "RowRead", data: { kind: "UnknownReference" } };
+      }
+      return {
+        columns: [{ name: "n", canonical_type: "BIGINT" }],
+        rows: [[String(off + 1)], [String(off + 2)]],
+        total: 5,
+        offset: off,
+        limit: 2,
+      };
+    });
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    // The rerender must repeat the render's exact tree (withIntl wrapping
+    // the provider body): a bare element would swap the tree shape and
+    // remount the view, whose fresh state reset would mask the reset logic
+    // under test.
+    const body = (ref: string) => (
+      <QueryClientProvider client={queryClient}>
+        <ResultView sessionId="sess-1" referenceName={ref} question={`q:${ref}`} assumption={null} viz={null} pageSize={2} />
+      </QueryClientProvider>
+    );
+    const { rerender } = renderI18nBase(body("result_1"));
+    await waitFor(() => expect(screen.getByText("1")).toBeInTheDocument());
+    fireEvent.click(screen.getByRole("button", { name: /下一页/ }));
+    await waitFor(() => expect(screen.getByText("3")).toBeInTheDocument());
+    // Switch: the new reference fetches from offset 0, never the stale
+    // offset 2.
+    rerender(withIntl(body("result_2")));
+    await waitFor(() => expect(readRows).toHaveBeenLastCalledWith("sess-1", "result_2", 0, 2));
+    await waitFor(() => expect(screen.getByText(/第 1–2 行（共 5 行）/)).toBeInTheDocument());
+    // Switch onto a rejecting result: the banner lands with the previous
+    // result's page kept on screen (the last-good fallback spans switches,
+    // like the retired machine's untouched state).
+    rerender(withIntl(body("result_3")));
+    await screen.findByRole("alert");
+    expect(screen.getByText(/第 1–2 行（共 5 行）/)).toBeInTheDocument();
+  });
+
+  describe("first-load flash (issue #773)", () => {
+    // Issue #773: two first-frame artifacts. (1) The loading state starts
+    // "not loading" while the mount effect unconditionally fetches, so the very
+    // first render hits the empty-table branch and flashes the empty-state row;
+    // the initial value is now "loading" (the fetch is unconditional, so the
+    // initial value is the fact). (2) The pagination count rendered "Rows 0–0
+    // (of 0)" from the pre-fetch initial state -- a fake value flashing in the
+    // count bar; the count's content now mounts only after the first load
+    // settles and keeps the previous page's values during pagination fetches
+    // (the buttons disable on loading anyway).
+    //
+    // jsdom limit, stated honestly: RTL's act flushes the mount effect
+    // synchronously, so the true first frame (before the effect) is not
+    // observable here -- the initial-value fix is verified by review/browser.
+    // What IS observable: the in-flight window (pending readRows) below.
+    const page = {
+      columns: [{ name: "id", canonical_type: "BIGINT" }],
+      rows: [["1"], ["2"]],
+      total: 5,
+      offset: 0,
+      limit: 2,
+    };
+
+    it("renders neither the empty-state row nor the count while the first page is in flight", async () => {
+      let resolveFirst: (p: Awaited<ReturnType<typeof readRows>>) => void = () => {};
+      vi.mocked(readRows).mockImplementation(
+        () => new Promise((resolve) => {
+          resolveFirst = resolve;
+        }),
+      );
+      renderI18n(
+        <ResultView sessionId="sess-1" referenceName="result_1" question="q:result_1" assumption={null} viz={null} pageSize={2} />,
+      );
+      // The fetch is in flight (effect ran, promise pending): no empty-state
+      // row and no count -- "Rows 0–0 (of 0)" from the initial state must
+      // never mount, so aria-live never announces the fake count.
+      expect(screen.queryByText(/（无数据行）/)).not.toBeInTheDocument();
+      expect(screen.queryByText(/第 \d+–\d+ 行（共 \d+ 行）/)).not.toBeInTheDocument();
+      resolveFirst(page);
+      await waitFor(() => expect(screen.getByText("1")).toBeInTheDocument());
+      // Settled: the count mounts with the real values.
+      expect(screen.getByText(/第 1–2 行（共 5 行）/)).toBeInTheDocument();
+    });
+
+    it("keeps the previous page's count while the next page is fetching", async () => {
+      vi.mocked(readRows)
+        .mockResolvedValueOnce(page)
+        .mockImplementationOnce(
+          () => new Promise(() => {}), // next page stays in flight
+        );
+      renderI18n(
+        <ResultView sessionId="sess-1" referenceName="result_1" question="q:result_1" assumption={null} viz={null} pageSize={2} />,
+      );
+      await waitFor(() => expect(screen.getByText(/第 1–2 行（共 5 行）/)).toBeInTheDocument());
+      fireEvent.click(screen.getByRole("button", { name: /下一页/ }));
+      await waitFor(() => expect(readRows).toHaveBeenCalledWith("sess-1", "result_1", 2, 2));
+      // In flight: the old count stays (no clear-flash -- keepPreviousData
+      // holds the prior page's render); the buttons are disabled for the
+      // same window, so the stale count is not actionable.
+      expect(await screen.findByText(/第 1–2 行（共 5 行）/)).toBeInTheDocument();
+      const next = screen.getByRole("button", { name: /下一页/ });
+      expect(next).toBeDisabled();
+    });
+
+    it("mounts the count with honest zero values after a 0-row result settles", async () => {
+      // A 0-row result is a valid result: after settling, the empty-state row
+      // shows and the count renders the true "0–0 (of 0)" -- only the
+      // pre-settle window is suppressed, never the honest settled state.
+      vi.mocked(readRows).mockResolvedValue({
+        columns: [{ name: "id", canonical_type: "BIGINT" }],
+        rows: [],
+        total: 0,
+        offset: 0,
+        limit: 100,
+      });
+      renderI18n(<ResultView sessionId="sess-1" referenceName="result_1" question="q:result_1" assumption={null} viz={null} />);
+      await waitFor(() => expect(screen.getByText(/（无数据行）/)).toBeInTheDocument());
+      expect(screen.getByText(/第 0–0 行（共 0 行）/)).toBeInTheDocument();
+    });
+
+    it("keeps the count rendered after a read error settles (error path, zero regression)", async () => {
+      // Settling is success OR failure (issue #773): an error
+      // keeps the current behavior -- the count renders (initial state's
+      // 0–0, as today) alongside the read-error banner, gaining no new
+      // behavior and losing none.
+      vi.mocked(readRows).mockRejectedValue(new Error("read boom"));
+      renderI18n(<ResultView sessionId="sess-1" referenceName="result_1" question="q:result_1" assumption={null} viz={null} />);
+      await waitFor(() => expect(screen.getByRole("alert")).toBeInTheDocument());
+      expect(screen.getByText(/第 0–0 行（共 0 行）/)).toBeInTheDocument();
+      // The error path also recovers the busy flag: with rows empty and not
+      // in flight, the empty-state row renders (shown === 0 && !inFlight).
+      expect(screen.getByText(/（无数据行）/)).toBeInTheDocument();
+    });
+
+    // The superseded-settle case retired with the manual state machine
+    // (issue #1079): the finally's seq guard is gone because a superseded
+    // response lands on its own key and the first-load gate tracks the
+    // CURRENT key only -- the isolation mechanism is pinned at the useRowPage
+    // module layer. The user-visible half (a pending first load keeps the
+    // count absent) is the first case above.
+  });
+
+  it("renders the large-result disclosure as a note Alert (ADR-0050/0057, issue #108)", async () => {
+    // ADR-0057: a result crossing the row threshold discloses honestly (not
+    // silent pagination). Migrated to a default info Alert (ADR-0050);
+    // role="note" is static reference, not announced. Issue #768 merged the
+    // row and column hints into ONE banner with per-threshold segments:
+    // columns stay small here, so the banner carries the row segment only.
+    vi.mocked(readRows).mockResolvedValue({
+      columns: [{ name: "id", canonical_type: "BIGINT" }],
+      rows: [["1"]],
+      total: ROW_DISCLOSURE_THRESHOLD + 1,
+      offset: 0,
+      limit: 100,
+    });
+    renderI18n(<ResultView sessionId="sess-1" referenceName="result_1" question="q:result_1" assumption={null} viz={null} />);
+    await waitFor(() => expect(readRows).toHaveBeenCalled());
+    const alert = await screen.findByRole("note");
+    expect(alert.getAttribute("data-slot")).toBe("alert");
+    expect(alert).toHaveTextContent(/此结果较大.*分页显示中/);
+    // The column segment is absent when its threshold is not crossed.
+    expect(alert).not.toHaveTextContent(/可横向滚动查看全部/);
+  });
+
+  it("renders the many-column disclosure as a note Alert (ADR-0050/0057, issue #108)", async () => {
+    // ADR-0057: columns render in full with horizontal scroll (no cap); this
+    // banner tells the user to scroll. Same default info Alert + role="note"
+    // as the large-result hint. Columns just over the threshold with a small
+    // total, so the merged banner (issue #768) carries the column segment
+    // only.
+    vi.mocked(readRows).mockResolvedValue({
+      columns: MANY_COLUMNS,
+      rows: [MANY_COLUMNS.map(() => "x")],
+      total: 1,
+      offset: 0,
+      limit: 100,
+    });
+    renderI18n(<ResultView sessionId="sess-1" referenceName="result_1" question="q:result_1" assumption={null} viz={null} />);
+    await waitFor(() => expect(readRows).toHaveBeenCalled());
+    const alert = await screen.findByRole("note");
+    expect(alert.getAttribute("data-slot")).toBe("alert");
+    expect(alert).toHaveTextContent(/可横向滚动查看全部/);
+    // The row segment is absent when its threshold is not crossed.
+    expect(alert).not.toHaveTextContent(/此结果较大/);
+  });
+
+  it("merges both disclosures into one note when both thresholds are crossed (issue #768)", async () => {
+    // Issue #768: the two info-class hints share a trigger scenario (result
+    // scale) and a semantic, so both landing at once is ONE banner with two
+    // segments, never two stacked banners. The length check makes the
+    // single-banner contract explicit; each segment keeps its own copy and
+    // its own threshold.
+    vi.mocked(readRows).mockResolvedValue({
+      columns: MANY_COLUMNS,
+      rows: [MANY_COLUMNS.map(() => "x")],
+      total: ROW_DISCLOSURE_THRESHOLD + 1,
+      offset: 0,
+      limit: 100,
+    });
+    renderI18n(<ResultView sessionId="sess-1" referenceName="result_1" question="q:result_1" assumption={null} viz={null} />);
+    await waitFor(() => expect(readRows).toHaveBeenCalled());
+    expect(await screen.findAllByRole("note")).toHaveLength(1);
+    const alert = screen.getByRole("note");
+    expect(alert).toHaveTextContent(/此结果较大.*分页显示中/);
+    expect(alert).toHaveTextContent(/可横向滚动查看全部/);
+    // The segments stay distinct <p> lines inside the banner (not run-on
+    // text) -- one paragraph per crossed threshold.
+    expect(alert.querySelectorAll("p")).toHaveLength(2);
+    // The intra-banner rhythm rides on the vertical-spacing utility (xxs,
+    // 4px) -- pinned so the segments cannot collapse into flush paragraphs.
+    const description = alert.querySelector("[data-slot=\"alert-description\"]");
+    expect(description?.className.split(/\s+/)).toContain("space-y-1");
+  });
+
+  it("renders no disclosure exactly at the thresholds (ADR-0057)", async () => {
+    // ADR-0057 thresholds are strict: a result AT either count is not large
+    // yet -- the disclosures start one past the threshold. The boundary
+    // fixture pins both comparisons against an inclusive flip (10,000 rows
+    // and 100 columns exactly stay silent).
+    vi.mocked(readRows).mockResolvedValue({
+      columns: MANY_COLUMNS.slice(0, COLUMN_DISCLOSURE_THRESHOLD),
+      rows: [["x"]],
+      total: ROW_DISCLOSURE_THRESHOLD,
+      offset: 0,
+      limit: 100,
+    });
+    renderI18n(<ResultView sessionId="sess-1" referenceName="result_1" question="q:result_1" assumption={null} viz={null} />);
+    await waitFor(() => expect(readRows).toHaveBeenCalled());
+    // Wait for the page to land before the negative assertion, or the note's
+    // absence could pass on the pre-settle render (a false green).
+    expect(await screen.findByText(/行数：10000/)).toBeInTheDocument();
+    expect(screen.queryByRole("note")).not.toBeInTheDocument();
+  });
+
+  it("gives warning banners more separation than the info banner (issue #768)", async () => {
+    // Issue #768 rhythm: warning-class callouts (stale disclosure, viz
+    // degradation, read-error banner) take the sm step (my-3, 12px) while
+    // the merged info banner keeps xs (my-2, 8px), so a multi-banner stack
+    // no longer reads as one uniform rhythm. The malformed viz makes the
+    // degradation disclosure replace the chart slot, so both warning
+    // surfaces co-occur with the info banner. jsdom cannot lay out, but it
+    // can read the className -- same idiom as the th.num utility pins above.
+    vi.mocked(readRows).mockResolvedValue({
+      columns: [{ name: "id", canonical_type: "BIGINT" }],
+      rows: [["1"]],
+      total: ROW_DISCLOSURE_THRESHOLD + 1,
+      offset: 0,
+      limit: 100,
+    });
+    renderI18n(
+      <ResultView
+        sessionId="sess-1"
+        referenceName="result_1"
+        question="q:result_1"
+        assumption={null}
+        viz={{ kind: "bar", spec: "not-valid-json" }}
+        staleAnchor={{ reference_name: "people", display_name: "员工表", reason: "Replaced" as const }}
+      />,
+    );
+    await waitFor(() => expect(readRows).toHaveBeenCalled());
+    // Both warning surfaces (stale + degraded) carry the sm step; the merged
+    // info banner renders with the page (findBy posture).
+    expect(await screen.findAllByRole("status")).toHaveLength(2);
+    for (const warning of screen.getAllByRole("status")) {
+      expect(warning.className.split(/\s+/)).toContain("my-3");
+    }
+    const info = await screen.findByRole("note");
+    expect(info.className.split(/\s+/)).toContain("my-2");
+  });
+
+  it("rides the read-error banner on the warning rhythm (issue #768)", async () => {
+    // The read-error ErrorBanner keeps the destructive default role="alert"
+    // and takes the warning margin only at this call site, via its className
+    // passthrough -- the other ErrorBanner callers are untouched.
+    vi.mocked(readRows).mockRejectedValue(new Error("read boom"));
+    renderI18n(<ResultView sessionId="sess-1" referenceName="result_1" question="q:result_1" assumption={null} viz={null} />);
+    const errorBanner = await waitFor(() => screen.getByRole("alert"));
+    expect(errorBanner.className.split(/\s+/)).toContain("my-3");
+  });
+
+  it("renders the stale-result disclosure as a warning status Alert (ADR-0050, issue #108)", async () => {
+    // ADR-0047 stage-stale: the result is no longer valid to build on (the
+    // invalidating source was replaced). Migrated to a warning Alert;
+    // role="status" is polite -- important, not an interrupting emergency. The
+    // verb splits via an ICU select on the anchor reason: Replaced -> 已更新.
+    vi.mocked(readRows).mockResolvedValue({
+      columns: [{ name: "id", canonical_type: "BIGINT" }],
+      rows: [["1"]],
+      total: 1,
+      offset: 0,
+      limit: 100,
+    });
+    renderI18n(
+      <ResultView
+        sessionId="sess-1"
+        referenceName="result_1"
+        question="q:result_1"
+        assumption={null}
+        viz={null}
+        staleAnchor={{ reference_name: "people", display_name: "员工表", reason: "Replaced" as const }}
+      />,
+    );
+    await waitFor(() => expect(readRows).toHaveBeenCalled());
+    const alert = screen.getByRole("status");
+    expect(alert.getAttribute("data-slot")).toBe("alert");
+    expect(alert).toHaveTextContent(/员工表/);
+    expect(alert).toHaveTextContent(/已更新/);
+  });
+
+  it("splits the stale verb by anchor reason: Deleted -> 已删除 (ADR-0041, issue #108)", async () => {
+    // The stale disclosure's ICU select has two branches: Replaced -> 已更新
+    // (new backing exists, re-ask recovers) and Deleted -> 已删除 (truly gone).
+    // The Replaced branch is covered above; this pins the Deleted / other branch
+    // so a regression that drops the other arm renders empty, and a future
+    // StaleReason kind still falls through honestly.
+    vi.mocked(readRows).mockResolvedValue({
+      columns: [{ name: "id", canonical_type: "BIGINT" }],
+      rows: [["1"]],
+      total: 1,
+      offset: 0,
+      limit: 100,
+    });
+    renderI18n(
+      <ResultView
+        sessionId="sess-1"
+        referenceName="result_1"
+        question="q:result_1"
+        assumption={null}
+        viz={null}
+        staleAnchor={{ reference_name: "people", display_name: "员工表", reason: "Deleted" as const }}
+      />,
+    );
+    await waitFor(() => expect(readRows).toHaveBeenCalled());
+    const alert = screen.getByRole("status");
+    expect(alert).toHaveTextContent(/已删除/);
+    expect(alert).not.toHaveTextContent(/已更新/);
+  });
+
+  describe("stale banner rerun (issue #758)", () => {
+    // The zh-CN accessible name of the rerun button, resolved from the catalog
+    // so the assertion tracks the wording instead of duplicating a literal
+    // (issue #139 convention). The aria-label carries the fuller name.
+    const RERUN_LABEL = catalogFor("zh-CN")["disclosure.result.staleRerunLabel"];
+    const page = {
+      columns: [{ name: "id", canonical_type: "BIGINT" }],
+      rows: [["1"]],
+      total: 1,
+      offset: 0,
+      limit: 100,
+    };
+    const staleAnchor = {
+      reference_name: "people",
+      display_name: "员工表",
+      reason: "Replaced" as const,
+    };
+
+    it("renders a rerun button that fires the bound handler", async () => {
+      // The stale disclosure's advice ("ask again to recompute") becomes an
+      // action: the button fires the caller-bound rerun (the producing
+      // question rides the derivation, never the button itself).
+      vi.mocked(readRows).mockResolvedValue(page);
+      const onRerun = vi.fn();
+      renderI18n(
+        <ResultView
+          sessionId="sess-1"
+          referenceName="result_1"
+          question="q:result_1"
+          assumption={null}
+          viz={null}
+          staleAnchor={staleAnchor}
+          onRerun={onRerun}
+        />,
+      );
+      await waitFor(() => expect(readRows).toHaveBeenCalled());
+      const alert = screen.getByRole("status");
+      fireEvent.click(within(alert).getByRole("button", { name: RERUN_LABEL }));
+      expect(onRerun).toHaveBeenCalledTimes(1);
+    });
+
+    it("disables the rerun button while a turn is in flight (busy gate)", async () => {
+      // rerunBusy mirrors the composer's loading gate: no second turn fires
+      // underneath a running one.
+      vi.mocked(readRows).mockResolvedValue(page);
+      renderI18n(
+        <ResultView
+          sessionId="sess-1"
+          referenceName="result_1"
+          question="q:result_1"
+          assumption={null}
+          viz={null}
+          staleAnchor={staleAnchor}
+          onRerun={() => {}}
+          rerunBusy
+        />,
+      );
+      await waitFor(() => expect(readRows).toHaveBeenCalled());
+      const alert = screen.getByRole("status");
+      expect(within(alert).getByRole("button", { name: RERUN_LABEL })).toBeDisabled();
+    });
+
+    it("renders no rerun button when the caller wires none", async () => {
+      // Honest degrade: a stale banner without a wired rerun keeps its text
+      // advice and never promises an action it cannot perform.
+      vi.mocked(readRows).mockResolvedValue(page);
+      renderI18n(
+        <ResultView
+          sessionId="sess-1"
+          referenceName="result_1"
+          question="q:result_1"
+          assumption={null}
+          viz={null}
+          staleAnchor={staleAnchor}
+        />,
+      );
+      await waitFor(() => expect(readRows).toHaveBeenCalled());
+      const alert = screen.getByRole("status");
+      expect(within(alert).queryByRole("button", { name: RERUN_LABEL })).not.toBeInTheDocument();
+    });
+  });
+});
+
+describe("ResultView viz (ADR-0016/0033, issue #26)", () => {
+  const page = {
+    columns: [{ name: "n", canonical_type: "BIGINT" }],
+    rows: [["5"]],
+    total: 1,
+    offset: 0,
+    limit: 100,
+  };
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.mocked(readRows).mockResolvedValue(page);
+  });
+
+  it("renders the chart above the table on success (ADR-0062 R4 layout)", async () => {
+    // AC1 + ADR-0062 R4: a provider viz renders AND the table stays visible
+    // below it (chart = answer, table = evidence); no degradation disclosure.
+    vi.mocked(embed).mockResolvedValue(embedOk());
+    const { container } = renderI18n(
+      <ResultView
+        sessionId="sess-1"
+        referenceName="result_1"
+        question="q:result_1"
+        assumption={null}
+        viz={{ kind: "bar", spec: JSON.stringify({ mark: "bar" }) }}
+      />,
+    );
+    await waitFor(() => expect(embed).toHaveBeenCalledTimes(1));
+    expect(container.querySelector(".viz-chart")).toBeInTheDocument();
+    // The table pagination is present below the chart (table is always shown).
+    expect(screen.getByRole("button", { name: /下一页/ })).toBeInTheDocument();
+    expect(screen.queryByText(/图表无法渲染/)).not.toBeInTheDocument();
+  });
+
+  it("degrades to the table with a disclosure when the spec is malformed JSON", async () => {
+    // AC2/AC6: a malformed viz degrades to the table + an honest disclosure
+    // (ADR-0033 -- silent degradation is a silent lie). Vega-Embed is never
+    // called: decodeViz rejects before rendering.
+    const { container } = renderI18n(
+      <ResultView
+        sessionId="sess-1"
+        referenceName="result_1"
+        question="q:result_1"
+        assumption={null}
+        viz={{ kind: "bar", spec: "not-valid-json" }}
+      />,
+    );
+    await waitFor(() => expect(readRows).toHaveBeenCalled());
+    expect(embed).not.toHaveBeenCalled();
+    expect(screen.getByText(/图表无法渲染，已显示表格/)).toBeInTheDocument();
+    expect(container.querySelector(".viz-chart")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /下一页/ })).toBeInTheDocument();
+  });
+
+  it("degrades to the table with a disclosure for a non-whitelisted mark", async () => {
+    // AC2/AC6: a spec that draws a chart v1 does not ship (a geoshape)
+    // degrades. Whitelist = bar/line/area/scatter/pie + the heatmap rect
+    // (ADR-0120 Decision 3) only.
+    renderI18n(
+      <ResultView
+        sessionId="sess-1"
+        referenceName="result_1"
+        question="q:result_1"
+        assumption={null}
+        viz={{ kind: "bar", spec: JSON.stringify({ mark: "geoshape" }) }}
+      />,
+    );
+    await waitFor(() => expect(readRows).toHaveBeenCalled());
+    expect(embed).not.toHaveBeenCalled();
+    expect(screen.getByText(/图表无法渲染，已显示表格/)).toBeInTheDocument();
+    expect(screen.getByText(/geoshape/)).toBeInTheDocument();
+  });
+
+  it("renders the heatmap rect spec as a chart (ADR-0120 Decision 3)", async () => {
+    // rect joined the frontend whitelist as the heatmap's mark. The wire kind
+    // stays a ChartKind member (the Rust enum does not grow a heatmap variant,
+    // ADR-0120 Decision 2), and decodeViz reads only the spec anyway.
+    vi.mocked(embed).mockResolvedValue(embedOk());
+    const { container } = renderI18n(
+      <ResultView
+        sessionId="sess-1"
+        referenceName="result_1"
+        question="q:result_1"
+        assumption={null}
+        viz={{ kind: "bar", spec: JSON.stringify({ mark: "rect" }) }}
+      />,
+    );
+    await waitFor(() => expect(embed).toHaveBeenCalledTimes(1));
+    expect(container.querySelector(".viz-chart")).toBeInTheDocument();
+    expect(screen.queryByText(/图表无法渲染/)).not.toBeInTheDocument();
+  });
+
+  it("degrades to the underlying table when Vega-Embed render fails", async () => {
+    // AC5: a spec that decodes but fails to render degrades to the table with a
+    // disclosure -- the underlying data is always shown, never lost.
+    vi.mocked(embed).mockRejectedValue(new Error("vega render boom"));
+    renderI18n(
+      <ResultView
+        sessionId="sess-1"
+        referenceName="result_1"
+        question="q:result_1"
+        assumption={null}
+        viz={{ kind: "bar", spec: JSON.stringify({ mark: "bar" }) }}
+      />,
+    );
+    await waitFor(() => expect(embed).toHaveBeenCalledTimes(1));
+    await waitFor(() =>
+      expect(screen.getByText(/图表无法渲染，已显示表格/)).toBeInTheDocument(),
+    );
+    expect(screen.getByRole("button", { name: /下一页/ })).toBeInTheDocument();
+  });
+
+  it("resets the render failure on a result switch (a same-spec new result gets a fresh try)", async () => {
+    // The gate's reset axis is [referenceName, decoded] (#1085): switching
+    // to a new result that carries the SAME viz object (same decode, same
+    // chart) still clears a landed render failure -- the new result gets
+    // its own try, not the previous one's verdict. Observable as a second
+    // embed attempt against the sticky-rejecting mock. The rerender repeats
+    // the render's exact tree (cf. the paging-reset test): a bare element
+    // would remount the view and reset on mount, masking the axis.
+    const viz = { kind: "bar" as const, spec: JSON.stringify({ mark: "bar" }) };
+    vi.mocked(embed).mockRejectedValue(new Error("vega render boom"));
+    const queryClient = new QueryClient({
+      defaultOptions: { queries: { retry: false } },
+    });
+    const body = (ref: string) => (
+      <QueryClientProvider client={queryClient}>
+        <ResultView
+          sessionId="sess-1"
+          referenceName={ref}
+          question={`q:${ref}`}
+          assumption={null}
+          viz={viz}
+        />
+      </QueryClientProvider>
+    );
+    const { rerender } = renderI18nBase(body("result_1"));
+    await waitFor(() => expect(embed).toHaveBeenCalledTimes(1));
+    await waitFor(() =>
+      expect(screen.getByText(/图表无法渲染，已显示表格/)).toBeInTheDocument(),
+    );
+    rerender(withIntl(body("result_2")));
+    // The fresh try re-embeds; the sticky rejection degrades again.
+    await waitFor(() => expect(embed).toHaveBeenCalledTimes(2));
+    await waitFor(() =>
+      expect(screen.getByText(/图表无法渲染，已显示表格/)).toBeInTheDocument(),
+    );
+  });
+
+  it("renders a plain table with no disclosure when viz is null", async () => {
+    // ADR-0033: a null viz is the default table turn -- NOT a degradation, so no
+    // disclosure shows and Vega-Embed is never called.
+    renderI18n(<ResultView sessionId="sess-1" referenceName="result_1" question="q:result_1" assumption={null} viz={null} />);
+    await waitFor(() => expect(readRows).toHaveBeenCalled());
+    expect(embed).not.toHaveBeenCalled();
+    expect(screen.queryByText(/图表无法渲染/)).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /下一页/ })).toBeInTheDocument();
+  });
+
+  it("finalizes the Vega view on unmount to free the chart resource", async () => {
+    // The render effect's cleanup calls finalize so an unmounted chart frees its
+    // Vega view (no canvas/view leak across unmounts). The render site does NOT
+    // key ResultView by reference name -- a result switch is a prop change, not
+    // a remount, and a session switch keeps panes alive (ADR-0060 CSS-hidden
+    // keep-alive) -- so this cleanup fires on true unmounts (pane close, the
+    // workspace tab switching away from result, the region-retry epoch bump
+    // that re-keys the workspace result region); leaving it unguarded would
+    // leak views silently.
+    const finalize = vi.fn();
+    vi.mocked(embed).mockResolvedValue(
+      { finalize } as unknown as Awaited<ReturnType<typeof embed>>,
+    );
+    const { unmount } = renderI18n(
+      <ResultView
+        sessionId="sess-1"
+        referenceName="result_1"
+        question="q:result_1"
+        assumption={null}
+        viz={{ kind: "bar", spec: JSON.stringify({ mark: "bar" }) }}
+      />,
+    );
+    await waitFor(() => expect(embed).toHaveBeenCalledTimes(1));
+    unmount();
+    // finalize fires either synchronously in cleanup (if embed already resolved)
+    // or on the resolved promise (if unmount raced it); waitFor covers both.
+    await waitFor(() => expect(finalize).toHaveBeenCalledTimes(1));
+  });
+
+  it("renders the degradation as a warning status Alert (ADR-0050, issue #108)", async () => {
+    // The viz-degradation disclosure migrated to a warning Alert; role="status"
+    // is polite -- the table still shows, so it reads as a caution, not an
+    // interrupting emergency. Pins the disclosure surfaces move to Alert.
+    renderI18n(
+      <ResultView
+        sessionId="sess-1"
+        referenceName="result_1"
+        question="q:result_1"
+        assumption={null}
+        viz={{ kind: "bar", spec: "not-valid-json" }}
+      />,
+    );
+    await waitFor(() => expect(readRows).toHaveBeenCalled());
+    const alert = screen.getByRole("status");
+    expect(alert.getAttribute("data-slot")).toBe("alert");
+    expect(alert).toHaveTextContent(/图表无法渲染，已显示表格/);
+  });
+
+  it("keeps the header's export/copy actions available on a stale result", async () => {
+    // AC (issue #769): a stale result's rows are real and the disclosure has
+    // done its duty -- both take-it-away actions stay reachable (no gating on
+    // the stale anchor).
+    vi.mocked(readRows).mockResolvedValue({
+      columns: [{ name: "n", canonical_type: "BIGINT" }],
+      rows: [["3"]],
+      total: 1,
+      offset: 0,
+      limit: 100,
+    });
+    renderI18n(
+      <ResultView
+        sessionId="sess-1"
+        referenceName="result_1"
+        question="q:result_1"
+        assumption={null}
+        viz={null}
+        staleAnchor={{ reference_name: "orders", display_name: "Orders", reason: "Deleted" as const }}
+      />,
+    );
+    await waitFor(() => expect(readRows).toHaveBeenCalled());
+    expect(screen.getByRole("button", { name: "导出 CSV" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "复制全部" })).toBeInTheDocument();
+  });
+
+  it("surfaces an export failure in the read-error banner", async () => {
+    // AC (issue #769): failures route through the existing error channel (the
+    // read-kind ErrorBanner), not silently -- the typed Export reject renders
+    // the export-domain message with the step / path / detail in the
+    // technical fold.
+    vi.mocked(readRows).mockResolvedValue({
+      columns: [{ name: "n", canonical_type: "BIGINT" }],
+      rows: [["3"]],
+      total: 1,
+      offset: 0,
+      limit: 100,
+    });
+    vi.mocked(saveDialog).mockResolvedValue("C:/out/x.csv");
+    vi.mocked(exportRowsCsv).mockRejectedValue({
+      kind: "Export",
+      data: { kind: "Io", data: { step: "Create", path: "C:/out/x.csv", detail: "denied" } },
+    });
+    renderI18n(
+      <ResultView sessionId="sess-1" referenceName="result_1" question="q:result_1" assumption={null} viz={null} />,
+    );
+    await waitFor(() => expect(readRows).toHaveBeenCalled());
+    fireEvent.click(screen.getByRole("button", { name: "导出 CSV" }));
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent(/导出文件写入失败/);
+    expect(alert).toHaveTextContent(/create C:\/out\/x\.csv: denied/);
+  });
+
+  it("a late action failure does not yank the paging window", async () => {
+    // The error write owns only the error slot: ResultActions holds the
+    // click-time onError closure across the pull's awaits, and its stale
+    // guard compares references only -- so paging within the same result
+    // during a long pull lets the failure through late. Restating the
+    // window at that moment would drag the view back to the pull's start
+    // offset; only the banner may land.
+    const page = (off: number) => ({
+      columns: [{ name: "n", canonical_type: "BIGINT" }] as { name: string; canonical_type: string }[],
+      rows: [[String(off + 1)], [String(off + 2)]],
+      total: 5,
+      offset: off,
+      limit: 2,
+    });
+    let rejectExport: (e: unknown) => void = () => {};
+    vi.mocked(readRows).mockImplementation(async (_sid, _ref, off) => page(off));
+    vi.mocked(exportRowsCsv).mockImplementation(
+      () =>
+        new Promise((_resolve, reject) => {
+          rejectExport = reject;
+        }),
+    );
+    vi.mocked(saveDialog).mockResolvedValue("C:/out/x.csv");
+    renderI18n(
+      <ResultView sessionId="sess-1" referenceName="result_1" question="q:result_1" assumption={null} viz={null} pageSize={2} />,
+    );
+    await waitFor(() => expect(screen.getByText("1")).toBeInTheDocument());
+    fireEvent.click(screen.getByRole("button", { name: "导出 CSV" }));
+    // The pull is in flight; the user pages forward and the page lands.
+    fireEvent.click(screen.getByRole("button", { name: /下一页/ }));
+    await waitFor(() => expect(screen.getByText(/第 3–4 行（共 5 行）/)).toBeInTheDocument());
+    // The export fails late: the banner lands, the window stays on page 2.
+    rejectExport({ kind: "Export", data: { kind: "Io", data: { step: "Create", path: "C:/out/x.csv", detail: "denied" } } });
+    await screen.findByRole("alert");
+    expect(screen.getByText(/第 3–4 行（共 5 行）/)).toBeInTheDocument();
+  });
+
+  it("the action error wins when the read rejects too", async () => {
+    // The priority rule (actionError over the sticky readError) is new law
+    // from the seam switch: with both live, the newest failure -- the
+    // action's -- must own the banner, or it is silently swallowed by the
+    // read reject parked under the window's key.
+    vi.mocked(readRows).mockRejectedValue({ kind: "RowRead", data: { kind: "UnknownReference" } });
+    vi.mocked(saveDialog).mockResolvedValue("C:/out/x.csv");
+    vi.mocked(exportRowsCsv).mockRejectedValue({
+      kind: "Export",
+      data: { kind: "Io", data: { step: "Create", path: "C:/out/x.csv", detail: "denied" } },
+    });
+    renderI18n(
+      <ResultView sessionId="sess-1" referenceName="result_1" question="q:result_1" assumption={null} viz={null} />,
+    );
+    // The read banner is up first; the export failure must replace it.
+    await screen.findByRole("alert");
+    fireEvent.click(screen.getByRole("button", { name: "导出 CSV" }));
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent(/导出文件写入失败/);
+  });
+
+  it("a window move clears the action error", async () => {
+    // Every window move clears the action slot, so a stale action failure
+    // never follows the user into the next window.
+    const page = (off: number) => ({
+      columns: [{ name: "n", canonical_type: "BIGINT" }] as { name: string; canonical_type: string }[],
+      rows: off === 0 ? [["1"], ["2"]] : [["3"], ["4"]],
+      total: 5,
+      offset: off,
+      limit: 2,
+    });
+    vi.mocked(readRows).mockImplementation(async (_sid, _ref, off) => page(off));
+    vi.mocked(saveDialog).mockResolvedValue("C:/out/x.csv");
+    vi.mocked(exportRowsCsv).mockRejectedValue({
+      kind: "Export",
+      data: { kind: "Io", data: { step: "Create", path: "C:/out/x.csv", detail: "denied" } },
+    });
+    renderI18n(
+      <ResultView sessionId="sess-1" referenceName="result_1" question="q:result_1" assumption={null} viz={null} pageSize={2} />,
+    );
+    await waitFor(() => expect(screen.getByText("1")).toBeInTheDocument());
+    fireEvent.click(screen.getByRole("button", { name: "导出 CSV" }));
+    await screen.findByRole("alert");
+    // The page turn clears the banner.
+    fireEvent.click(screen.getByRole("button", { name: /下一页/ }));
+    await waitFor(() => expect(screen.getByText("3")).toBeInTheDocument());
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  });
+
+  it("mounts the export anchor on a rendered chart (issue #1093)", async () => {
+    // The result card's chart rides the export-bearing frame: one embed, and
+    // the PNG/SVG pair walk THAT embedded view (a click never re-embeds).
+    vi.mocked(readRows).mockResolvedValue({
+      columns: [{ name: "n", canonical_type: "BIGINT" }],
+      rows: [["5"]],
+      total: 1,
+      offset: 0,
+      limit: 100,
+    });
+    vi.mocked(embed).mockResolvedValue(embedOk());
+    renderI18n(
+      <ResultView
+        sessionId="sess-1"
+        referenceName="result_1"
+        question="q:result_1"
+        assumption={null}
+        viz={{ kind: "bar", spec: JSON.stringify({ mark: "bar", data: { values: [{ a: 1 }] } }) }}
+      />,
+    );
+    await waitFor(() => expect(embed).toHaveBeenCalledTimes(1));
+    expect(
+      screen.getByRole("button", { name: "下载图表" }),
+    ).toBeInTheDocument();
+  });
+
+  it("keeps the export anchor off the degraded chart (issue #1093)", async () => {
+    // The render-failure arm on the result card: the swap-in disclosure
+    // replaces the chart slot entirely, so a failed chart has nothing to
+    // export.
+    vi.mocked(readRows).mockResolvedValue({
+      columns: [{ name: "n", canonical_type: "BIGINT" }],
+      rows: [["5"]],
+      total: 1,
+      offset: 0,
+      limit: 100,
+    });
+    vi.mocked(embed).mockRejectedValue(new Error("vega boom"));
+    renderI18n(
+      <ResultView
+        sessionId="sess-1"
+        referenceName="result_1"
+        question="q:result_1"
+        assumption={null}
+        viz={{ kind: "bar", spec: JSON.stringify({ mark: "bar", data: { values: [{ a: 1 }] } }) }}
+      />,
+    );
+    await waitFor(() =>
+      expect(screen.getByText(/图表无法渲染/)).toBeInTheDocument(),
+    );
+    expect(
+      screen.queryByRole("button", { name: "下载图表" }),
+    ).not.toBeInTheDocument();
+  });
+});

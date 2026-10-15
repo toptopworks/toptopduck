@@ -20,7 +20,7 @@ Two long-lived branches; everything else is short-lived and merges back.
 ## Naming
 
 - Tie every feature/bugfix to a GitHub issue: `feature/<issue#>-<slug>`, e.g. `feature/42-excel-rectify`. If there's genuinely no issue (pure refactor, docs), drop the number: `feature/adr-git-flow`.
-- `<version>` is semantic versioning with **no `v` prefix** (the version-tag prefix is empty): `release/0.2.0` → tag `0.2.0`.
+- `<version>` is semantic versioning; the tag carries a **`v` prefix** (the version-tag prefix is `v`) while branch names stay unprefixed: `release/0.2.0` → tag `v0.2.0`.
 
 ## Lifecycle (common commands)
 

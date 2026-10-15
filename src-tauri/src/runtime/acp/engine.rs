@@ -1,0 +1,2980 @@
+//! The generic ACP adapter engine (ADR-0081, issue #299).
+//!
+//! [`AcpEngine::run`] drives one agent turn against an external CLI over ACP v1
+//! (stdio JSON-RPC). It is the external-runtime counterpart to
+//! built-in runner ([`crate::session::loop_runtime`]): it takes a windowed turn
+//! input and returns the SAME [`LoopOutcome`] shape, so the wiring seam
+//! (`Session::ask_with_phase`, slice 9c) maps either runtime's outcome onto
+//! `TurnOutcome` identically.
+//!
+//! Per-turn sequence (ADR-0076 statelessness):
+//! 1. spawn the resolved CLI binary with [`AdapterSpec::argv`];
+//! 2. `initialize` (negotiate protocol version);
+//! 3. `session/new` -- inject the bridge MCP server descriptor (slice 9b fills
+//!    the real bridge; the descriptor is opaque data carried from the input);
+//! 4. `session/prompt` -- carry the full windowed context blocks; pump
+//!    `session/update` notifications into the execution trace (ADR-0078) + the
+//!    terminal agent text; service `session/request_permission` via the gateway
+//!    policy ([`crate::approval::classify`]);
+//! 5. the prompt response's [`StopReason`] terminates the turn and maps onto
+//!    [`Termination`].
+//!
+//! Execution-level safety net (ADR-0081 as redefined by ADR-0115): a step
+//! cap (tool-call count, default [`DEFAULT_STEP_CAP`]) + a NO-PROGRESS
+//! watchdog (default [`DEFAULT_NO_PROGRESS_CAP`]) fire `session/cancel`; a stuck
+//! agent that does not return within [`CANCEL_GRACE`] is killed (cancel =
+//! 整轮中止, ADR-0081). The watchdog times only the generation segment --
+//! inbound stream lines re-arm it, external-wait segments freeze it
+//! (`crate::session::progress`). Cancel is responsive via a stdout-reader
+//! thread + a recv-timeout pump (a blocking `read_line` would not notice
+//! cancel).
+//!
+//! Promotions are always empty here: a `materialize` promotion is created
+//! gateway-side (the bridge → the app's MCP gateway →
+//! [`crate::tools::dispatch`]) and observed there. The engine owns only the
+//! ACP-driving half of the turn.
+
+use std::collections::HashSet;
+use std::path::Path;
+use std::process::{Child, ChildStdin, ChildStdout};
+use std::sync::mpsc;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+
+use serde_json::Value;
+
+use crate::approval::{
+    classify, ApprovalResponse, ApprovalSink, Classification, OperationKind, ToolKey,
+};
+use crate::cancel::CancelToken;
+use crate::model::{ThinkingTrace, TraceEntryView, TurnPhase};
+use crate::runtime::acp::adapter::{
+    extract_discovered_runtime, AdapterSpec, StreamFormat, MODEL_CATEGORY, THOUGHT_LEVEL_CATEGORY,
+};
+use crate::runtime::acp::wire::{
+    self, CancelParams, ContentBlock, InitializeParams, McpServer, NewSessionParams, PromptParams,
+    Request, RequestId, RequestPermissionOutcome, RequestPermissionParams, RequestPermissionResult,
+    Response, SessionUpdate, SessionUpdateParams, StopReason, ToolCallContent, ToolCallStatus,
+};
+use crate::session::loop_contract::{
+    derived_step_ceiling, truncate_trace_excerpt, DiscoveredRuntime, LoopOutcome, LoopRound,
+    Termination, TraceEntry, DEFAULT_NO_PROGRESS_CAP, DEFAULT_STEP_CAP, MAX_WINDOW_RESUMES,
+    TRACE_EXCERPT_MAX, WINDOW_CONVERGENCE_NUDGE,
+};
+use crate::session::progress::ProgressClock;
+use crate::util::{push_capped, push_capped_emit};
+
+/// Grace period after the engine sends `session/cancel` for the agent to return
+/// the prompt response before the engine kills the process. Generous for a
+/// cooperative agent (it should respond near-instantly); bounded so a stuck
+/// agent cannot hang the turn past the watchdog.
+const CANCEL_GRACE: Duration = Duration::from_secs(5);
+
+/// The excerpt a row drained at turn end carries (issue #630): the turn
+/// ended before the agent reported a final status, and an empty excerpt
+/// under success=true would be indistinguishable from a real completion.
+pub(super) const UNOBSERVED_EXCERPT: &str = "turn ended before a final status";
+
+/// How a trace row ends: the wire-observed terminal statuses, or the
+/// turn-end fallback for a row whose agent never reported one (issue #630).
+/// Split from [`ToolCallStatus`] so the wire enum stays a pure wire shape
+/// while the row-finalization seam speaks in outcomes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum RowEnd {
+    /// The agent reported completion -- success row, empty excerpt.
+    Completed,
+    /// The agent reported failure -- the collected text is the anchor.
+    Failed,
+    /// The turn ended with the row still open -- not a success row; carries
+    /// [`UNOBSERVED_EXCERPT`].
+    Unobserved,
+}
+
+impl RowEnd {
+    /// Map the wire status onto the row ending: the terminal statuses map
+    /// to their endings, the non-terminal ones return `None` (the row
+    /// stays pending). Exhaustive (no wildcard): adding a wire variant
+    /// re-asks this question at compile time.
+    fn from_wire_status(status: ToolCallStatus) -> Option<Self> {
+        match status {
+            ToolCallStatus::Completed => Some(RowEnd::Completed),
+            ToolCallStatus::Failed => Some(RowEnd::Failed),
+            ToolCallStatus::Pending | ToolCallStatus::InProgress | ToolCallStatus::Unknown => None,
+        }
+    }
+}
+
+/// The abandon-detection fallback (issue #1267): a TERMINAL tool-call echo
+/// arriving while this session's approval gate is still parked means the
+/// external caller dropped the `tools/call` on its side (the healthy path's
+/// echo lands only after the gateway's response, which a parked gate has
+/// not written yet). Only an EXACT call-id match fires -- the parked slot's
+/// id is non-`None` only for bridge-originated calls, so a same-turn
+/// sibling's echo (or any built-in-line state) can never match; no match,
+/// no abandonment. A miss is NOT backstopped while the gate stays parked:
+/// the frontend's turn-settle sweep only runs once the turn thread returns,
+/// which a parked gate blocks -- so a live id mismatch would hang the turn
+/// until the user answers or cancels. The gateway already reports call.id
+/// as the tool_use id, so the two spaces are same-origin in practice.
+fn abandon_on_terminal_echo(approval: &crate::approval::ApprovalState, update: &SessionUpdate) {
+    let echo_call_id = match update {
+        SessionUpdate::ToolCall {
+            tool_call_id,
+            status,
+            ..
+        } if RowEnd::from_wire_status(*status).is_some() => tool_call_id.as_str(),
+        SessionUpdate::ToolCallUpdate {
+            tool_call_id,
+            status,
+            ..
+        } if status.is_some_and(|s| RowEnd::from_wire_status(s).is_some()) => tool_call_id.as_str(),
+        _ => return,
+    };
+    if approval.parked_call_id().as_deref() == Some(echo_call_id) {
+        approval.abandon_pending();
+    }
+}
+
+/// One ACP turn input. The wiring seam assembles `prompt_blocks` from the
+/// same window the built-in loop reads; `mcp_servers` is the bridge
+/// descriptor.
+#[derive(Debug, Clone)]
+pub struct AcpTurnInput {
+    /// The working directory passed to `session/new` (absolute).
+    pub cwd: String,
+    /// The MCP server descriptors injected at `session/new` (the bridge).
+    pub mcp_servers: Vec<McpServer>,
+    /// The session-level model choice to inject this turn (ADR-0095). `None`
+    /// = the CLI's own default. ACP path: one `session/set_config_option`
+    /// after the handshake, keyed by the catalog entry's config id (the
+    /// category constant is only a fallback) -- `NewSessionRequest` carries
+    /// no model field; the non-ACP paths ride argv behind
+    /// `AdapterSpec.model_arg`.
+    pub model: Option<String>,
+    /// The session-level thought-level choice to inject this turn (ADR-0095).
+    /// `None` = the CLI's own default. ACP path: one
+    /// `session/set_config_option` after the handshake, keyed like `model`;
+    /// CodexEventStream path: argv via the `-c` config surface;
+    /// ClaudeStreamJson path: argv via the flag surface
+    /// (`AdapterSpec.effort`, ADR-0097 Decision 6).
+    pub thought_level: Option<String>,
+    /// The full windowed context for this turn (the question + history), as
+    /// text content blocks. ADR-0076 statelessness: the whole context every
+    /// turn.
+    pub prompt_blocks: Vec<ContentBlock>,
+}
+
+/// The generic ACP adapter engine (ADR-0081). Holds the adapter spec (data),
+/// the shared cancel token, and the two execution-level caps. Built per turn;
+/// [`Self::run`] consumes it.
+pub struct AcpEngine {
+    adapter: AdapterSpec,
+    cancel: Arc<CancelToken>,
+    step_cap: u32,
+    no_progress_cap: Option<Duration>,
+}
+
+impl AcpEngine {
+    /// Build an engine with the ADR-0081 defaults (step cap 24, no-progress
+    /// cap 120s) -- the SAME defaults as the built-in loop, so the two runtimes
+    /// share one execution-level safety net.
+    pub fn new(adapter: AdapterSpec, cancel: Arc<CancelToken>) -> Self {
+        Self {
+            adapter,
+            cancel,
+            step_cap: DEFAULT_STEP_CAP,
+            no_progress_cap: Some(DEFAULT_NO_PROGRESS_CAP),
+        }
+    }
+
+    /// Override the default caps (test seam: the step-cap test drives the step
+    /// cap deterministically; the watchdog test drives a short cap).
+    pub fn with_caps(mut self, step_cap: u32, no_progress_cap: Option<Duration>) -> Self {
+        self.step_cap = step_cap;
+        self.no_progress_cap = no_progress_cap;
+        self
+    }
+
+    /// Drive one turn against the adapter's CLI. Dispatches on
+    /// [`StreamFormat`] (ADR-0094/0097): the ACP path drives the full
+    /// JSON-RPC turn; the codex event stream path delegates to
+    /// `codex_event_stream::run_codex_event_stream` (codex native
+    /// `exec --json`); the claude stream-json path delegates to
+    /// `claude_stream_json::run_claude_stream_json` (claude-code native
+    /// headless). `binary` is the resolved CLI path (`detect_adapter` in
+    /// production, the fake-fixture path in tests). Returns the SAME
+    /// [`LoopOutcome`] shape the built-in loop returns.
+    pub fn run(
+        &self,
+        input: &AcpTurnInput,
+        binary: &Path,
+        approval: &crate::approval::ApprovalState,
+        sink: &dyn ApprovalSink,
+        on_phase: impl FnMut(TurnPhase),
+    ) -> LoopOutcome {
+        match self.adapter.stream_format {
+            StreamFormat::Acp => self.run_acp(input, binary, approval, sink, on_phase),
+            StreamFormat::CodexEventStream => super::codex_event_stream::run_codex_event_stream(
+                &self.adapter,
+                Arc::clone(&self.cancel),
+                self.step_cap,
+                self.no_progress_cap,
+                input,
+                binary,
+                approval,
+                sink,
+                on_phase,
+            ),
+            StreamFormat::ClaudeStreamJson => super::claude_stream_json::run_claude_stream_json(
+                &self.adapter,
+                Arc::clone(&self.cancel),
+                self.step_cap,
+                self.no_progress_cap,
+                input,
+                binary,
+                approval,
+                sink,
+                on_phase,
+            ),
+        }
+    }
+
+    /// The ACP v1 driving path (ADR-0081). The per-format dispatch seam
+    /// routes `Acp` specs here.
+    fn run_acp(
+        &self,
+        input: &AcpTurnInput,
+        binary: &Path,
+        approval: &crate::approval::ApprovalState,
+        sink: &dyn ApprovalSink,
+        mut on_phase: impl FnMut(TurnPhase),
+    ) -> LoopOutcome {
+        let cancel = Arc::clone(&self.cancel);
+        let guard = cancel.begin_turn();
+        // No-progress watchdog (ADR-0115): the cap times ONLY the generation
+        // segment -- the pump's inbound lines re-arm it (touch), and the
+        // open tool-call windows freeze it. The handshake keeps timing (a
+        // CLI that cannot reach the prompt inside the cap is exactly the
+        // non-convergence the cap exists for); the pump notices a fired
+        // token via cancel.is_requested() and sends session/cancel.
+        let clock = self
+            .no_progress_cap
+            .map(|timeout| ProgressClock::arm_and_publish(guard.generation(), &cancel, timeout));
+        // Spawn the CLI. Any spawn failure lands as an external-runtime
+        // failure (the engine never panics into the host).
+        let mut child = match spawn(binary, &self.adapter) {
+            Ok(c) => c,
+            Err(detail) => {
+                return self.outcome(Termination::Runtime(detail), Vec::new(), None, None)
+            }
+        };
+        let stdout = child.inner.stdout.take().expect("piped stdout");
+        let stdin = child.inner.stdin.take().expect("piped stdin");
+        let mut io = AcpIo::new(stdin, stdout);
+
+        // Handshake: initialize -> session/new. A failure here is an
+        // external-runtime failure (the CLI is not an ACP agent / crashed).
+        let hs = match handshake(&mut io, &mut child, &self.cancel, input, &self.adapter) {
+            Ok(hs) => hs,
+            Err(term) => {
+                // ADR-0115: a cancel landing after the clock latched is the
+                // watchdog's (generation silence past the cap) -- the
+                // handshake keeps timing by design, so this window is
+                // exactly where the cap fires for a CLI that cannot reach
+                // the prompt.
+                let term = match term {
+                    Termination::Cancelled => ProgressClock::cancel_landing(clock.as_ref()),
+                    other => other,
+                };
+                let outcome = self.outcome(term, Vec::new(), None, None);
+                child.kill_and_wait();
+                return outcome;
+            }
+        };
+        let session_id = hs.session_id;
+        let discovered = Some(hs.discovered.clone());
+        // ADR-0095: inject the user's selections via `session/set_config_option`
+        // between the handshake and the prompt -- the model and the thought
+        // level each ride their own request when selected. The config id keys
+        // on the catalog entry's agent-chosen `id` (D4: the ACP schema
+        // standardizes the category tag, NOT the id), falling back to the
+        // standard category id when discovery saw no usable one. A CLI that
+        // rejects the setting fails the turn honestly (the user asked for a
+        // setting the CLI does not accept; clearing the selection restores
+        // the turn).
+        let selections: Vec<(&str, &String)> = [
+            input.model.as_ref().map(|m| {
+                (
+                    discovered_config_id(&hs.discovered.model_config_id, MODEL_CATEGORY),
+                    m,
+                )
+            }),
+            input.thought_level.as_ref().map(|l| {
+                (
+                    discovered_config_id(
+                        &hs.discovered.thought_level_config_id,
+                        THOUGHT_LEVEL_CATEGORY,
+                    ),
+                    l,
+                )
+            }),
+        ]
+        .into_iter()
+        .flatten()
+        .collect();
+        for (config_id, value) in selections {
+            let req = Request::new(
+                RequestId::Num(4),
+                "session/set_config_option",
+                SetConfigOptionParams {
+                    session_id: session_id.clone(),
+                    config_id: config_id.to_string(),
+                    value: value.clone(),
+                },
+            );
+            match io.request_roundtrip::<SetConfigOptionParams, Value>(
+                &mut child,
+                &self.cancel,
+                req,
+            ) {
+                Err(term) => {
+                    // ADR-0115: same pre-pump relabel as the handshake -- a
+                    // watchdog fire mid-roundtrip is generation silence
+                    // past the cap, not a user cancel.
+                    let term = match term {
+                        Termination::Cancelled => ProgressClock::cancel_landing(clock.as_ref()),
+                        other => other,
+                    };
+                    let outcome = self.outcome(term, Vec::new(), discovered, None);
+                    child.kill_and_wait();
+                    return outcome;
+                }
+                // An RPC error is a real rejection, not a transport gap --
+                // surface it (e.g. the CLI does not accept the id / value),
+                // naming both so the user knows which selection to clear.
+                Ok(resp) => {
+                    if let Some(e) = resp.error {
+                        let outcome = self.outcome(
+                            Termination::Runtime(format!(
+                                "session/set_config_option `{config_id}` = `{value}` error: {}",
+                                e.message
+                            )),
+                            Vec::new(),
+                            discovered,
+                            None,
+                        );
+                        child.kill_and_wait();
+                        return outcome;
+                    }
+                }
+            }
+        }
+
+        let mut pump = Pump {
+            tracker: RoundTracker::new(),
+            pending: Vec::new(),
+            cancel_sent_at: None,
+            clock: clock.clone(),
+            open_freeze: None,
+            occupancy: None,
+        };
+        // Windowed auto-continuation (ADR-0128): the agent's own turn budget
+        // (`MaxTurnRequests`) is the window boundary -- under the resume
+        // budget the engine re-sends `session/prompt` to the SAME session
+        // (the agent holds the full state; the convergence nudge is the
+        // resumed prompt alone, so nothing of it persists), keeping the
+        // pump's rounds, the cancel token, the watchdog clock, and the
+        // approval gate on the turn's one trajectory. The whole budget
+        // spent lands the derived ceiling below.
+        let mut window_resumes = 0u32;
+        let end = loop {
+            // Loop-top cancel check (mirrors the built-in loop's pre-step
+            // check).
+            if self.cancel.is_requested() {
+                break PromptEnd::Cancelled;
+            }
+            // ADR-0059: signal the "thinking" wait before the turn's first
+            // prompt -- the round 1 marker (attempt = 1); later rounds bump
+            // it via `open_round` as calls interleave with thought/prose,
+            // resumed windows included (their first generation chunk opens
+            // the next round).
+            if window_resumes == 0 {
+                on_phase(TurnPhase::Thinking { attempt: 1 });
+            }
+            let prompt_blocks = if window_resumes == 0 {
+                input.prompt_blocks.clone()
+            } else {
+                vec![ContentBlock::text(WINDOW_CONVERGENCE_NUDGE)]
+            };
+            let prompt = Request::new(
+                RequestId::Num(3),
+                "session/prompt",
+                PromptParams {
+                    session_id: session_id.clone(),
+                    prompt: prompt_blocks,
+                },
+            );
+            // Issue #813: the prompt is the whole windowed context (often past
+            // the OS pipe buffer), so the send rides the cancel-aware bounded
+            // writer -- a child that stalls before draining stdin cannot wedge
+            // the turn, and the handed-back stdin keeps the channel alive for
+            // the pump's mid-turn writes.
+            match io.write_json_with_cancel(&prompt, &self.cancel, &mut child) {
+                super::process::StdinWriteOutcome::Done => {}
+                // The dead-channel send keeps its pre-#813 message, now with the
+                // io detail riding along (the sibling drivers' #808 shape).
+                super::process::StdinWriteOutcome::Failed(e) => {
+                    break PromptEnd::Failed(format!(
+                        "session/prompt: broken pipe before send: {e}"
+                    ));
+                }
+                super::process::StdinWriteOutcome::Cancelled => {
+                    // ADR-0115: the pre-pump relabel -- a watchdog fire during
+                    // the stdin drain is generation silence past the cap.
+                    break PromptEnd::Cancelled;
+                }
+            }
+            // Fresh cancel grace per window: the sentinel tracks only the
+            // in-flight prompt.
+            pump.cancel_sent_at = None;
+            let end = io.pump_until_prompt_response(
+                &self.cancel,
+                &self.adapter,
+                &session_id,
+                &mut child,
+                &mut pump,
+                approval,
+                sink,
+                &mut on_phase,
+            );
+            match end {
+                PromptEnd::Stop(StopReason::MaxTurnRequests)
+                    if window_resumes < MAX_WINDOW_RESUMES =>
+                {
+                    window_resumes += 1;
+                    continue;
+                }
+                other => break other,
+            }
+        };
+        // Finalize any tool rows still open at turn end (issue #630), then
+        // close the trailing round's thought stream: its ThinkingCompleted
+        // fires (the fold renders live); the round's prose already streamed
+        // as TextDeltas (ADR-0126) -- whether the settle keeps it on the
+        // round depends on the termination (issues #611/#628).
+        pump.drain_unobserved(&mut on_phase);
+        pump.tracker.freeze_trailing_thinking(&mut on_phase);
+
+        let termination = match end {
+            PromptEnd::Stop(StopReason::EndTurn | StopReason::Refusal) => {
+                Termination::Text(pump.tracker.terminal_text())
+            }
+            PromptEnd::Stop(StopReason::Cancelled) => Termination::Cancelled,
+            // The agent's own turn ceiling windows the turn (ADR-0128): the
+            // whole resume budget is spent, so the landing carries the
+            // derived total budget every windowed runtime renders. The
+            // token ceiling is not a window -- it keeps the single cap.
+            PromptEnd::Stop(StopReason::MaxTurnRequests) => {
+                Termination::StepCap(derived_step_ceiling(self.step_cap))
+            }
+            PromptEnd::Stop(StopReason::MaxTokens) => Termination::StepCap(self.step_cap),
+            PromptEnd::Cancelled => Termination::Cancelled,
+            // Reader EOF / pipe break before a response: an external-runtime
+            // failure (the agent crashed or closed stdout).
+            PromptEnd::Eof => Termination::Runtime("ACP agent closed stdout mid-turn".into()),
+            // The agent answered with a parse failure / RPC error / empty
+            // result -- surface the real diagnostic, NOT "closed stdout".
+            PromptEnd::Failed(reason) => Termination::Runtime(reason),
+        };
+        // ADR-0115: a cancel landing after the clock latched is the
+        // watchdog's (generation silence past the cap), not a user cancel.
+        let termination = match termination {
+            Termination::Cancelled => ProgressClock::cancel_landing(clock.as_ref()),
+            other => other,
+        };
+        // ADR-0129 (issue #1270): the spec's usage_update carries only a
+        // context-occupancy snapshot, so the ACP turn lands no usage
+        // (fail-closed, Decision 3). ADR-0130: that same snapshot is the
+        // occupancy channel's primitive -- the pump's latch rides the
+        // outcome alongside.
+        let rounds = pump.tracker.settle_rounds(&termination);
+        let occupancy = pump.occupancy;
+        let outcome = self.outcome(termination, rounds, discovered, occupancy);
+        child.kill_and_wait();
+        outcome
+    }
+
+    fn outcome(
+        &self,
+        termination: Termination,
+        rounds: Vec<LoopRound>,
+        discovered: Option<DiscoveredRuntime>,
+        occupancy: Option<crate::model::OccupancySnapshot>,
+    ) -> LoopOutcome {
+        LoopOutcome {
+            termination,
+            // Always empty: a materialize promotion is gateway-side
+            // (bridge -> MCP gateway -> tools::dispatch), observed there.
+            // The ACP engine drives only the ACP half of the turn.
+            promotions: Vec::new(),
+            // ADR-0103 (issue #611): rounds grouped at the tool-call batch
+            // boundary, with per-round thinking + prose slots; the built-in
+            // loop's flat wrap no longer funnels through here.
+            trace: rounds,
+            // ADR-0129 (issue #1270): always None -- the ACP spec's
+            // usage_update is an occupancy snapshot, not metering.
+            usage: None,
+            // ADR-0095: the handshake's extracted catalog rides every
+            // post-handshake exit (None before / on handshake failure).
+            discovered_runtime: discovered,
+            // ADR-0130: the occupancy channel's settle (the pump's latch
+            // off `usage_update`; None when the agent never sent one --
+            // honest hollow, never fabricated).
+            occupancy,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Handshake: initialize + session/new
+// ---------------------------------------------------------------------------
+
+/// The handshake's session facts: the minted session id + the runtime config
+/// discovered from the `session/new` response's `config_options` (ADR-0095).
+/// Discovery is best-effort data -- a catalog with no model / thought_level
+/// entries yields the empty shape, never an error.
+pub(crate) struct HandshakeOutcome {
+    pub session_id: String,
+    pub discovered: DiscoveredRuntime,
+}
+
+/// One `session/set_config_option` request body (ADR-0095): sets the option
+/// with the given config id to `value` on the freshly minted session --
+/// field-for-field `wire::MODELED_SCHEMA`'s
+/// `SetSessionConfigOptionRequest` (`session_id` / `config_id` / `value` as
+/// the select value id; its optional `_meta` is deliberately not sent). The
+/// protocol-standard injection channel for BOTH the model and the thought
+/// level (`NewSessionRequest` carries no model field there). Sent
+/// after the handshake when the user selected either; the response result is
+/// ignored (the next turn's handshake re-discovers the truth) but an RPC
+/// error fails the turn honestly.
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SetConfigOptionParams {
+    session_id: String,
+    config_id: String,
+    value: String,
+}
+
+/// The config id to inject for a selection (ADR-0095 D4): the catalog entry's
+/// agent-chosen id when discovery saw the category, otherwise the standard
+/// category id -- a selection without a matching catalog entry is exactly the
+/// stale / manual-call case Decision 7 tolerates (the CLI deals with it at
+/// the request).
+fn discovered_config_id<'a>(catalog_id: &'a Option<String>, standard: &'static str) -> &'a str {
+    catalog_id.as_deref().unwrap_or(standard)
+}
+
+fn handshake(
+    io: &mut AcpIo,
+    child: &mut ChildHandle,
+    cancel: &CancelToken,
+    input: &AcpTurnInput,
+    adapter: &AdapterSpec,
+) -> Result<HandshakeOutcome, Termination> {
+    let init = io.request_roundtrip::<InitializeParams, wire::InitializeResult>(
+        child,
+        cancel,
+        Request::new(
+            RequestId::Num(1),
+            "initialize",
+            InitializeParams {
+                protocol_version: wire::PROTOCOL_VERSION,
+                client_info: wire::Implementation::client(),
+            },
+        ),
+    )?;
+    match (init.result, init.error) {
+        (Some(_), _) => {}
+        (None, Some(e)) => {
+            return Err(Termination::Runtime(format!(
+                "initialize error: {}",
+                e.message
+            )));
+        }
+        (None, None) => return Err(Termination::Runtime("initialize: empty response".into())),
+    }
+    let new_resp = io.request_roundtrip::<NewSessionParams, wire::NewSessionResult>(
+        child,
+        cancel,
+        Request::new(
+            RequestId::Num(2),
+            "session/new",
+            NewSessionParams {
+                cwd: input.cwd.clone(),
+                mcp_servers: input.mcp_servers.clone(),
+            },
+        ),
+    )?;
+    match (new_resp.result, new_resp.error) {
+        (Some(r), _) => {
+            // Issue #529: stamp the producing adapter onto the catalog so the
+            // frontend can detect a cache that predates a runtime switch (the
+            // config_options wire carries no adapter identity).
+            let mut discovered = extract_discovered_runtime(r.config_options.as_ref());
+            discovered.adapter_id = Some(adapter.id.to_string());
+            Ok(HandshakeOutcome {
+                session_id: r.session_id,
+                discovered,
+            })
+        }
+        (None, Some(e)) => Err(Termination::Runtime(format!(
+            "session/new error: {}",
+            e.message
+        ))),
+        (None, None) => Err(Termination::Runtime("session/new: empty response".into())),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Child process wrapper
+// ---------------------------------------------------------------------------
+
+/// The spawned CLI child + its stdio. [`Self::kill_and_wait`] delegates to
+/// [`super::process::kill_and_reap`] — the shared kill-reap logic used by both
+/// the ACP and JSON event stream engines (prevents drift, ADR-0094 review I-3).
+struct ChildHandle {
+    inner: Child,
+}
+
+impl ChildHandle {
+    fn kill_and_wait(&mut self) {
+        super::process::kill_and_reap(&mut self.inner);
+    }
+}
+
+fn spawn(binary: &Path, adapter: &AdapterSpec) -> Result<ChildHandle, String> {
+    super::process::spawn_piped(binary, adapter.argv, std::process::Stdio::inherit())
+        .map(|inner| ChildHandle { inner })
+        .map_err(|e| format!("failed to spawn ACP agent `{}`: {e}", adapter.id))
+}
+
+// ---------------------------------------------------------------------------
+// NDJSON stdio I/O
+// ---------------------------------------------------------------------------
+
+/// The turn engine's thin wrapper over the shared
+/// [`super::ndjson::NdjsonIo`]: cancel-driven (a round-trip aborts on the
+/// shared token; the no-progress watchdog fires it) and mapped onto
+/// [`Termination`]. The multiplexing prompt pump below keeps its own line
+/// loop -- it folds `session/update` and services `session/request_permission`
+/// -- and shares the reader channel via [`Self::recv_timeout`] and the writer
+/// via [`Self::write_json_with_cancel`].
+struct AcpIo {
+    inner: super::ndjson::NdjsonIo,
+}
+
+impl AcpIo {
+    fn new(stdin: ChildStdin, stdout: ChildStdout) -> Self {
+        Self {
+            inner: super::ndjson::NdjsonIo::new(stdin, stdout),
+        }
+    }
+
+    /// Serialize + write one message through the cancel-aware bounded writer
+    /// (issue #813): the `session/prompt` send and the pump's mid-turn
+    /// writes (`session/cancel`, permission responses) all ride it, so a
+    /// stalled child cannot wedge the turn before a cancel check becomes
+    /// reachable. The mid-pump callers keep ignoring the outcome (`let _`):
+    /// a killed child surfaces as EOF / cancel on the next recv.
+    fn write_json_with_cancel<T: serde::Serialize>(
+        &mut self,
+        msg: &T,
+        cancel: &CancelToken,
+        child: &mut ChildHandle,
+    ) -> super::process::StdinWriteOutcome {
+        self.inner
+            .write_json_with_cancel(msg, cancel, &mut child.inner)
+    }
+
+    /// One receive step for the prompt pump below.
+    fn recv_timeout(&self, timeout: std::time::Duration) -> Result<String, mpsc::RecvTimeoutError> {
+        self.inner.recv_timeout(timeout)
+    }
+
+    /// Send a request and pump incoming lines until its response arrives.
+    /// Stray lines are dropped by the shared loop (see
+    /// [`super::ndjson::NdjsonIo::request_roundtrip_cancel`]).
+    fn request_roundtrip<P: serde::Serialize, R: serde::de::DeserializeOwned>(
+        &mut self,
+        child: &mut ChildHandle,
+        cancel: &CancelToken,
+        req: Request<P>,
+    ) -> Result<Response<R>, Termination> {
+        let target = serde_json::to_value(&req.id).unwrap_or(Value::Null);
+        self.inner
+            .request_roundtrip_cancel(&req, &target, cancel, &mut child.inner)
+            .map_err(map_roundtrip_termination)
+    }
+
+    /// Pump incoming lines from the moment `session/prompt` is sent until its
+    /// response (id=3) arrives, an abort fires, or the agent EOFs. Folds
+    /// `session/update` into the [`Pump`] state and services
+    /// `session/request_permission`. Sends `session/cancel` once on cancel /
+    /// step-cap trip and continues draining (the agent should then return the
+    /// prompt response with [`StopReason::Cancelled`]); gives up after
+    /// [`CANCEL_GRACE`] and returns [`PromptEnd::Cancelled`].
+    #[allow(clippy::too_many_arguments)]
+    fn pump_until_prompt_response(
+        &mut self,
+        cancel: &CancelToken,
+        adapter: &AdapterSpec,
+        session_id: &str,
+        child: &mut ChildHandle,
+        pump: &mut Pump,
+        approval: &crate::approval::ApprovalState,
+        sink: &dyn ApprovalSink,
+        on_phase: &mut impl FnMut(TurnPhase),
+    ) -> PromptEnd {
+        let prompt_id_value = serde_json::to_value(RequestId::Num(3)).unwrap_or(Value::Null);
+        let mut discards = super::process::DiscardLog::new();
+        loop {
+            // Cancel: send session/cancel once, record when. (The retired
+            // app-side count trip is ADR-0128's doing: the window boundary
+            // is the agent's own `MaxTurnRequests`, so the pump never kills
+            // on a counted cap -- the resume loop owns the budget.)
+            let user_cancelled = cancel.is_requested();
+            if user_cancelled && pump.cancel_sent_at.is_none() {
+                let _ = self.write_json_with_cancel(
+                    &wire::Notification::new(
+                        "session/cancel",
+                        CancelParams {
+                            session_id: session_id.to_string(),
+                        },
+                    ),
+                    cancel,
+                    child,
+                );
+                pump.cancel_sent_at = Some(Instant::now());
+            }
+            // Grace elapsed after cancel with no response -> give up (the
+            // caller kills the child).
+            if let Some(sent_at) = pump.cancel_sent_at {
+                if sent_at.elapsed() > CANCEL_GRACE {
+                    return PromptEnd::Cancelled;
+                }
+            }
+            match self.recv_timeout(super::process::PUMP_POLL_INTERVAL) {
+                Ok(line) => {
+                    // Inbound stream activity (ADR-0115): re-arm the
+                    // no-progress clock before anything else.
+                    if let Some(clock) = pump.clock.as_ref() {
+                        clock.touch();
+                    }
+                    let v: Value = match serde_json::from_str(&line) {
+                        Ok(v) => v,
+                        Err(_) => {
+                            // Top-level discard, answerable in logs (#886).
+                            super::process::note_discard(&mut discards, adapter.id.as_str(), &line);
+                            continue;
+                        }
+                    };
+                    // Response to the prompt?
+                    if v.get("id") == Some(&prompt_id_value) && v.get("method").is_none() {
+                        let resp: Response<wire::PromptResult> = match serde_json::from_value(v) {
+                            Ok(r) => r,
+                            Err(e) => {
+                                return PromptEnd::Failed(format!("prompt response parse: {e}"))
+                            }
+                        };
+                        if let Some(err) = resp.error {
+                            return PromptEnd::Failed(format!("prompt error: {}", err.message));
+                        }
+                        match resp.result {
+                            Some(r) => return PromptEnd::Stop(r.stop_reason),
+                            None => {
+                                return PromptEnd::Failed("prompt response: empty result".into())
+                            }
+                        }
+                    }
+                    // Agent-initiated request (session/request_permission)?
+                    if let Some(method) = v.get("method").and_then(Value::as_str) {
+                        if v.get("id").is_some() && method == "session/request_permission" {
+                            let req_id = v["id"].clone();
+                            let params: RequestPermissionParams = match serde_json::from_value(
+                                v.get("params").cloned().unwrap_or(Value::Null),
+                            ) {
+                                Ok(p) => p,
+                                Err(_) => {
+                                    // Malformed permission request: refuse with -32602
+                                    // so the agent is not left waiting, and no phantom
+                                    // decision is recorded against empty ids.
+                                    let _ = self.write_json_with_cancel(
+                                        &Response::<Value> {
+                                            jsonrpc: "2.0".to_string(),
+                                            id: parse_id(&req_id),
+                                            result: None,
+                                            error: Some(wire::RpcError {
+                                                code: -32602,
+                                                message:
+                                                    "invalid params: session/request_permission"
+                                                        .into(),
+                                                data: None,
+                                            }),
+                                        },
+                                        cancel,
+                                        child,
+                                    );
+                                    continue;
+                                }
+                            };
+                            let outcome =
+                                decide_permission(adapter, &params, approval, sink, cancel);
+                            let _ = self.write_json_with_cancel(
+                                &Response::<RequestPermissionResult> {
+                                    jsonrpc: "2.0".to_string(),
+                                    id: parse_id(&req_id),
+                                    result: Some(RequestPermissionResult { outcome }),
+                                    error: None,
+                                },
+                                cancel,
+                                child,
+                            );
+                            continue;
+                        }
+                        if v.get("id").is_some() {
+                            // Unknown agent request -- respond method-not-found
+                            // so the agent is not left waiting.
+                            let _ = self.write_json_with_cancel(
+                                &Response::<Value> {
+                                    jsonrpc: "2.0".to_string(),
+                                    id: parse_id(&v["id"]),
+                                    result: None,
+                                    error: Some(wire::RpcError {
+                                        code: -32601,
+                                        message: "method not found".into(),
+                                        data: None,
+                                    }),
+                                },
+                                cancel,
+                                child,
+                            );
+                            continue;
+                        }
+                        // Notification -- route session/update; ignore others.
+                        if method == "session/update" {
+                            // After cancel, content updates are no longer
+                            // needed (issue #629): stop folding them so the
+                            // grace window cannot keep growing the
+                            // buffers. Only the prompt response (and the
+                            // permission handshake) still matters.
+                            if pump.cancel_sent_at.is_some() {
+                                continue;
+                            }
+                            match serde_json::from_value::<SessionUpdateParams>(
+                                v.get("params").cloned().unwrap_or(Value::Null),
+                            ) {
+                                Ok(params) => {
+                                    pump.fold_update(&params.update, on_phase);
+                                    // Issue #1267: after folding, probe the
+                                    // echo for an abandonment the gateway's
+                                    // parked gate needs to hear about.
+                                    abandon_on_terminal_echo(approval, &params.update);
+                                }
+                                // Dropped, not fatal (protocol robustness) --
+                                // but never silent: a shape miss here renders
+                                // a whole turn empty while tests stay green,
+                                // so the drop stays answerable in logs (the
+                                // ndjson reader's issue #543 precedent).
+                                Err(e) => {
+                                    let payload = v.to_string();
+                                    let head: String = payload.chars().take(240).collect();
+                                    log::warn!(
+                                        target: "toptopduck::acp",
+                                        "session/update parse failed, line dropped: {e}; payload head: {head}"
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+                Err(mpsc::RecvTimeoutError::Timeout) => continue,
+                Err(mpsc::RecvTimeoutError::Disconnected) => {
+                    return if pump.cancel_sent_at.is_some() {
+                        PromptEnd::Cancelled
+                    } else {
+                        PromptEnd::Eof
+                    };
+                }
+            }
+        }
+    }
+}
+
+/// Map the shared round-trip failure onto the turn's termination. The EOF
+/// detail is frozen by the integration tests' locale-free diagnostic fold.
+/// Exhaustive over the cancel-driven error type -- the deadline-driven abort
+/// kind is not representable here (issue #543).
+fn map_roundtrip_termination(
+    e: super::ndjson::RoundtripError<super::ndjson::Cancelled>,
+) -> Termination {
+    use super::ndjson::RoundtripError;
+    match e {
+        RoundtripError::Abort(_) => Termination::Cancelled,
+        RoundtripError::Serialize(detail) | RoundtripError::Write(detail) => {
+            Termination::Runtime(format!("write: {detail}"))
+        }
+        RoundtripError::Eof => Termination::Runtime("ACP agent closed stdout".into()),
+        RoundtripError::Parse(detail) => Termination::Runtime(format!("response parse: {detail}")),
+    }
+}
+
+fn parse_id(v: &Value) -> RequestId {
+    match v {
+        Value::Number(n) => n.as_u64().map(RequestId::Num).unwrap_or(RequestId::Null),
+        Value::String(s) => RequestId::Str(s.clone()),
+        _ => RequestId::Null,
+    }
+}
+
+/// Why the prompt pump ended.
+enum PromptEnd {
+    /// The agent returned a stop reason.
+    Stop(StopReason),
+    /// The engine cancelled (user / watchdog / step cap) and drained / EOF'd.
+    Cancelled,
+    /// The agent closed stdout before responding.
+    Eof,
+    /// The agent returned a response the engine could not treat as a stop
+    /// (parse failure / RPC `error` / empty result). Carries the diagnostic so
+    /// the turn's `Runtime` message names the real cause instead of
+    /// "closed stdout".
+    Failed(String),
+}
+
+// ---------------------------------------------------------------------------
+// Pump state -- fold session/update into the trace
+// ---------------------------------------------------------------------------
+
+/// The mutable per-turn state the pump accumulates. Mirrors the built-in
+/// core's round-grouped trace accumulation; promotions stay empty (gateway
+/// side, slice 9c) so only the rounds + terminal text live here.
+struct Pump {
+    /// The round bookkeeping + terminal-text fallback shared with the other
+    /// stream path (ADR-0103, issues #611/#612).
+    tracker: RoundTracker,
+    /// Tool calls that started but have not yet reached a terminal status.
+    pending: Vec<PendingToolCall>,
+    /// When `session/cancel` was sent, if it has been (grace tracking).
+    cancel_sent_at: Option<Instant>,
+    /// The turn's no-progress clock (ADR-0115): the agent's own tool
+    /// executions are freeze segments (an open `pending` window), invisible
+    /// to the gateway's freeze.
+    clock: Option<Arc<ProgressClock>>,
+    /// Held while `pending` is non-empty (the open tool-call window).
+    open_freeze: Option<crate::session::progress::FreezeGuard>,
+    /// The last occupancy snapshot seen on `usage_update` (ADR-0130): the
+    /// occupancy channel's pickup -- the freshest reading wins, settle takes
+    /// the last. Never touches the billing channel (Decision 3).
+    occupancy: Option<crate::model::OccupancySnapshot>,
+}
+
+/// One round's in-flight accumulation: the thought + prose streams the model
+/// emitted since the last tool-call batch, plus the batch's landed calls.
+/// Shared by the ACP-native engine (issue #611) and the claude stream-json
+/// path (issue #612) via [`RoundTracker`].
+#[derive(Default)]
+struct RoundAcc {
+    /// The round's frozen thinking block, set when its thought stream ends
+    /// (the batch's first tool call, or turn end).
+    thinking: Option<ThinkingTrace>,
+    /// The live thought accumulation, and when it started (the fold's
+    /// duration is measured to the stream's end).
+    thinking_buf: String,
+    thinking_since: Option<Instant>,
+    /// The round's connective prose accumulation (empty = the round carried
+    /// no prose).
+    text: String,
+    /// Whether the round has observed a tool call (landed or pending) -- the
+    /// seal that makes a following thought/prose chunk open the next round.
+    saw_call: bool,
+    calls: Vec<TraceEntry>,
+}
+
+/// The per-turn round bookkeeping both stream paths share (ADR-0103): the
+/// round list, the full-turn text accumulation, and the round lifecycle --
+/// opening, sealing, freezing, settling. The ACP-native engine groups its
+/// rounds at the session/update batch boundary (issue #611); the claude
+/// stream-json path at its assistant-frame batch (issue #612).
+pub(super) struct RoundTracker {
+    /// The per-round accumulation, oldest first. Round 1 opens at the prompt
+    /// (the pre-pump `Thinking { attempt: 1 }` covers it); a thought or
+    /// prose chunk arriving after a round that observed a call opens the
+    /// next one (the ADR-0103 round boundary = the tool-call batch split).
+    rounds: Vec<RoundAcc>,
+    /// The full agent-message accumulation across the turn -- the terminal
+    /// text's fallback when no prose stretch followed the last batch.
+    text: String,
+}
+
+impl RoundTracker {
+    pub(super) fn new() -> Self {
+        Self {
+            rounds: vec![RoundAcc::default()],
+            text: String::new(),
+        }
+    }
+
+    /// The round a thought/prose chunk belongs to: the current one, or a
+    /// freshly opened one. The boundary is the FIRST thought/prose after any
+    /// call of the current round (`saw_call`) -- not a batch edge, so a batch
+    /// with thought/prose interleaved between its calls splits into rounds.
+    /// Opening fires the new round's `Thinking` wait -- the live channel's
+    /// round pointer, mirroring the built-in loop's per round-trip marker.
+    fn open_round(&mut self, on_phase: &mut impl FnMut(TurnPhase)) -> &mut RoundAcc {
+        if self.rounds.last().is_some_and(|r| r.saw_call) {
+            self.rounds.push(RoundAcc::default());
+            on_phase(TurnPhase::Thinking {
+                attempt: self.rounds.len() as u32,
+            });
+        }
+        self.rounds.last_mut().expect("round 1 opens at the prompt")
+    }
+
+    /// A prose chunk grows BOTH tracks (issue #612): the full-turn
+    /// accumulation (the terminal-text fallback) and the current round's
+    /// prose slot. ADR-0126: the chunk also fires its `TextDelta` the
+    /// moment it arrives (after any round-opening `Thinking`, so
+    /// `live.step` is already known when the delta lands). The emission
+    /// rides the round track's cap (issue #1166): once the track latches
+    /// the truncation marker, the crossing chunk's delta is followed by
+    /// one final marker delta and later chunks emit nothing -- the live
+    /// round text stays byte-identical to the settle record.
+    pub(super) fn push_prose(&mut self, text: &str, on_phase: &mut impl FnMut(TurnPhase)) {
+        push_capped(&mut self.text, text);
+        let round = self.open_round(on_phase);
+        push_capped_emit(&mut round.text, text, &mut |delta| {
+            on_phase(TurnPhase::TextDelta {
+                delta: delta.to_string(),
+            });
+        });
+    }
+
+    /// A thought chunk grows the current round's thinking stream; the first
+    /// chunk starts the duration clock. The frozen duration therefore reads
+    /// first-thought-chunk -> freeze point (the batch's first call, or turn
+    /// end); on a headless whole-block frame both ends collapse onto the
+    /// same instant, so the duration lands at zero by construction.
+    pub(super) fn push_thought(&mut self, text: &str, on_phase: &mut impl FnMut(TurnPhase)) {
+        let round = self.open_round(on_phase);
+        if round.thinking_since.is_none() {
+            round.thinking_since = Some(Instant::now());
+        }
+        push_capped(&mut round.thinking_buf, text);
+    }
+
+    /// A reasoning chunk grows the current round's thinking stream WITHOUT
+    /// starting the duration clock: the codex path's completed whole-block
+    /// arrival carries no measurable window, so
+    /// [`freeze_trailing_thinking`]'s `unwrap_or(0)` lands the duration at
+    /// zero by construction (issue #807) -- pinned like the loop runtime's
+    /// `thinking_trace`. `push_thought` is wrong here: its clock would
+    /// measure a fabricated reasoning-arrival-to-freeze window.
+    pub(super) fn push_thought_pinned(&mut self, text: &str, on_phase: &mut impl FnMut(TurnPhase)) {
+        let round = self.open_round(on_phase);
+        push_capped(&mut round.thinking_buf, text);
+    }
+
+    /// The round a tool call belongs to (the current one) and its call
+    /// seal: the round's FIRST call freezes its thinking prelude (the
+    /// `ThinkingCompleted` event) before the batch's `ToolCallStarted`.
+    /// The prose prelude is gone -- the round's prose already streamed as
+    /// `TextDelta`s off `push_prose` (ADR-0126), so the batch seal is the
+    /// round's close, not its first text sighting.
+    pub(super) fn call_round(&mut self, on_phase: &mut impl FnMut(TurnPhase)) -> usize {
+        let idx = self.rounds.len() - 1;
+        if !self.rounds[idx].saw_call {
+            self.rounds[idx].saw_call = true;
+            self.freeze_trailing_thinking(on_phase);
+        }
+        idx
+    }
+
+    /// Land a settled tool row on the round it opened in.
+    pub(super) fn land_call(&mut self, round: usize, entry: TraceEntry) {
+        self.rounds[round].calls.push(entry);
+    }
+
+    /// Freeze the trailing round's thought stream into its thinking block +
+    /// emit the completion event. Idempotent: a second call finds an empty
+    /// buffer. Always the trailing round -- the batch seal's round IS the
+    /// trailing one, so the index parameter collapsed into `last_mut`
+    /// (issue #630). The completion fires (the fold renders live); the
+    /// round's prose already streamed as `TextDelta`s off `push_prose`
+    /// (ADR-0126), so whether the settle keeps it on the round depends on
+    /// the termination (issues #611/#628).
+    pub(super) fn freeze_trailing_thinking(&mut self, on_phase: &mut impl FnMut(TurnPhase)) {
+        let round = self.rounds.last_mut().expect("round 1 opens at the prompt");
+        if round.thinking_buf.is_empty() {
+            return;
+        }
+        let duration_ms = round
+            .thinking_since
+            .map(|t| t.elapsed().as_millis() as u64)
+            .unwrap_or(0);
+        let trace = ThinkingTrace {
+            duration_ms,
+            text: std::mem::take(&mut round.thinking_buf),
+        };
+        on_phase(TurnPhase::ThinkingCompleted {
+            duration_ms: trace.duration_ms,
+            text: trace.text.clone(),
+        });
+        round.thinking = Some(trace);
+    }
+
+    /// The terminal reply text: the trailing prose stretch (the call-less
+    /// last round's chunks) when the model sent one, else the full
+    /// accumulation -- the fallback semantics for models that put their
+    /// answer alongside the final batch. The fallback covers the WHOLE-turn
+    /// concatenation: on a call-ending last round the per-round prose slots
+    /// stay populated AND their text is re-restated here -- a deliberate
+    /// data-layer restatement (single-round shape is pinned by tests): the
+    /// trace renders each round's prose once in its round, the turn's answer
+    /// renders this text once, and `settle_rounds` clears the call-less last
+    /// round's slot so that stretch never renders twice.
+    pub(super) fn terminal_text(&self) -> String {
+        match self.rounds.last() {
+            Some(r) if !r.saw_call && !r.text.is_empty() => r.text.clone(),
+            _ => self.text.clone(),
+        }
+    }
+
+    /// The turn's closing shape when no terminal event settled it: the
+    /// terminal text becomes the answer (the honest degrade); without any,
+    /// an external-runtime failure carrying `message`. Shared by the EOF and
+    /// post-pump fallback exits of the stream paths.
+    pub(super) fn text_or_runtime(&self, message: &str) -> Termination {
+        let text = self.terminal_text();
+        if !text.is_empty() {
+            Termination::Text(text)
+        } else {
+            Termination::Runtime(message.to_string())
+        }
+    }
+
+    /// Project the accumulated rounds onto the loop's trace form. How the
+    /// trailing call-less round's prose settles depends on the termination:
+    /// a `Text` termination means the prose rode the terminal text, so it
+    /// is cleared (only a frozen thinking block keeps the round -- a bare
+    /// prose-only or empty tail drops, keeping the zero-call turn's trace
+    /// empty); any other termination carries no text, so the partial prose
+    /// stays on the round -- otherwise it would vanish from the trace, the
+    /// termination, and the live channel at once, exactly when partial
+    /// output is most valuable for diagnosis. Symmetric with the trailing
+    /// thinking block, which always survives: on a non-Text exit the tail
+    /// keeps both or neither (issue #628).
+    pub(super) fn settle_rounds(self, termination: &Termination) -> Vec<LoopRound> {
+        let mut rounds = self.rounds;
+        if let Some(last) = rounds.last_mut() {
+            if !last.saw_call {
+                if matches!(termination, Termination::Text(_)) {
+                    last.text.clear();
+                }
+                if last.text.is_empty() && last.thinking.is_none() {
+                    rounds.pop();
+                }
+            }
+        }
+        rounds
+            .into_iter()
+            .map(|r| LoopRound {
+                thinking: r.thinking,
+                text: if r.text.is_empty() {
+                    None
+                } else {
+                    Some(r.text)
+                },
+                calls: r.calls,
+            })
+            .collect()
+    }
+}
+
+/// A tool call that opened a trace row but has not finalized (Completed /
+/// Failed). Carries the index of the round it opened in -- a late completion
+/// (or the turn-end drain) lands the entry on that round, not whichever round
+/// happens to be current. `gateway` marks a gateway-routed echo (issue
+/// #1242): its live phases come from the gateway serve's direct emission, so
+/// every fold-side emission for the row is suppressed (the fold itself is
+/// untouched -- the settle merge still pairs on it).
+struct PendingToolCall {
+    round: usize,
+    tool_use_id: String,
+    name: String,
+    operation_kind: OperationKind,
+    summary: String,
+    content: Vec<ToolCallContent>,
+    gateway: bool,
+}
+
+impl Pump {
+    fn fold_update(&mut self, update: &SessionUpdate, on_phase: &mut impl FnMut(TurnPhase)) {
+        match update {
+            SessionUpdate::AgentMessageChunk { content, .. } => {
+                if let Some(text) = content.as_text() {
+                    self.tracker.push_prose(text, on_phase);
+                }
+            }
+            SessionUpdate::AgentThoughtChunk { content, .. } => {
+                if let Some(text) = content.as_text() {
+                    self.tracker.push_thought(text, on_phase);
+                }
+            }
+            SessionUpdate::ToolCall {
+                tool_call_id,
+                title,
+                status,
+                kind,
+                content,
+            } => {
+                // The round's FIRST call freezes its thinking (ThinkingCompleted)
+                // once, before this call's Started event (saw_call latches it).
+                let idx = self.tracker.call_round(on_phase);
+                // A gateway-renamed title is the gateway-routed echo (issue
+                // #1242): the gateway serve emits this row's authoritative
+                // phases itself, so the echo stays live-silent and only folds
+                // (the settle merge's in-place-replacement anchor) -- or,
+                // when the gateway deliberately recorded nothing
+                // (resolution refusal, a gate cancelled mid-suspension),
+                // the unpaired anchor the merge keeps as the turn's only
+                // record (issue #1244's accepted boundary).
+                let gateway = title
+                    .as_deref()
+                    .is_some_and(|t| strip_gateway_rename(t).is_some());
+                let (name, summary, operation_kind) =
+                    row_identity(title.as_deref(), tool_call_id, *kind);
+                if !gateway {
+                    on_phase(TurnPhase::ToolCallStarted {
+                        name: name.clone(),
+                        operation_kind,
+                        summary: summary.clone(),
+                    });
+                }
+                if let Some(end) = RowEnd::from_wire_status(*status) {
+                    self.finalize_row(
+                        idx,
+                        tool_call_id,
+                        &name,
+                        operation_kind,
+                        &summary,
+                        content,
+                        end,
+                        gateway,
+                        on_phase,
+                    );
+                } else {
+                    self.pending.push(PendingToolCall {
+                        round: idx,
+                        tool_use_id: tool_call_id.clone(),
+                        name,
+                        operation_kind,
+                        summary,
+                        content: content.clone(),
+                        gateway,
+                    });
+                    self.reconcile_pending_freeze();
+                }
+            }
+            SessionUpdate::ToolCallUpdate {
+                tool_call_id,
+                status,
+                title,
+                content,
+            } => {
+                let pos = self
+                    .pending
+                    .iter()
+                    .position(|p| &p.tool_use_id == tool_call_id);
+                if let Some(i) = pos {
+                    let mut row = self.pending.remove(i);
+                    if let Some(t) = title.as_deref() {
+                        // A late gateway rename marks the row as a gateway
+                        // echo regardless of whether the identity
+                        // re-derivation below runs (its pathological-start
+                        // guard): the gateway serve owns the row's live face
+                        // (issue #1242). A native-identity open that already
+                        // emitted its Started strands that live row -- the
+                        // rename cannot recall it -- accepted: real echoes
+                        // open titled, so this shape is defensive only.
+                        if strip_gateway_rename(t).is_some() {
+                            row.gateway = true;
+                        }
+                        if row.summary.is_empty() {
+                            // Reachable only under a pathological start (no
+                            // title AND an empty id -- either alone fills the
+                            // summary via `name_summary`); a late renamed
+                            // title takes the same identity triple as
+                            // `row_identity` (issue #1222): bare name/summary
+                            // plus the gateway ladder's badge.
+                            match strip_gateway_rename(t) {
+                                Some(bare) => {
+                                    let (name, summary) = bounded_name_summary(bare);
+                                    row.name = name;
+                                    row.summary = summary;
+                                    row.operation_kind = gateway_tool_badge(bare);
+                                }
+                                None => {
+                                    let (name, summary) = bounded_name_summary(t);
+                                    row.name = name;
+                                    row.summary = summary;
+                                }
+                            }
+                        }
+                    }
+                    if !content.is_empty() {
+                        row.content = content.clone();
+                    }
+                    if let Some(final_status) = *status {
+                        if let Some(end) = RowEnd::from_wire_status(final_status) {
+                            self.finalize_row(
+                                row.round,
+                                &row.tool_use_id,
+                                &row.name,
+                                row.operation_kind,
+                                &row.summary,
+                                &row.content,
+                                end,
+                                row.gateway,
+                                on_phase,
+                            );
+                            self.reconcile_pending_freeze();
+                            return;
+                        }
+                    }
+                    self.pending.insert(i, row);
+                    self.reconcile_pending_freeze();
+                }
+                // An update with no matching pending row (missed the start) is
+                // dropped -- the trace stays consistent with the starts seen.
+            }
+            SessionUpdate::UsageUpdate { used, size } => {
+                // ADR-0130: the update is a context-occupancy snapshot --
+                // the occupancy channel's only self-reported primitive, so
+                // it latches here for the composer ring (the freshest
+                // reading wins; settle takes the last). A zero `used` is
+                // the spec's absent-field degrade, not a reading -- nothing
+                // latches (no fabricated zero occupancy). The BILLING
+                // channel stays fail-closed on the ACP path (ADR-0129
+                // Decision 3: the snapshot has no input/output split, so it
+                // is not metering evidence and never lands on `usage`).
+                if *used > 0 {
+                    self.occupancy = Some(crate::model::OccupancySnapshot {
+                        tokens: *used,
+                        limit: (*size > 0).then_some(*size),
+                    });
+                }
+            }
+            SessionUpdate::Other => {}
+        }
+    }
+
+    /// Reconcile the freeze guard with `pending` (ADR-0115): an open
+    /// tool-call window (non-empty `pending`) holds a freeze -- the agent's
+    /// own tool execution is a wait on an external principal, invisible to
+    /// the gateway's dispatch-side freeze. Idempotent; call after every
+    /// `pending` mutation.
+    fn reconcile_pending_freeze(&mut self) {
+        match (self.open_freeze.is_some(), self.pending.is_empty()) {
+            (false, false) => {
+                self.open_freeze = self.clock.as_ref().map(|c| c.freeze());
+            }
+            (true, true) => self.open_freeze = None,
+            _ => {}
+        }
+    }
+
+    /// Close every still-open row at turn end with the honest unobserved
+    /// marker (issue #630), each landing on the round it opened in. The
+    /// take ends `pending`'s borrow so the loop can call back into
+    /// `finalize_row` -- the single TraceEntry construction.
+    fn drain_unobserved(&mut self, on_phase: &mut impl FnMut(TurnPhase)) {
+        let rows = std::mem::take(&mut self.pending);
+        // The take empties `pending`: the open tool-call window closes here.
+        self.reconcile_pending_freeze();
+        for row in rows {
+            self.finalize_row(
+                row.round,
+                &row.tool_use_id,
+                &row.name,
+                row.operation_kind,
+                &row.summary,
+                &row.content,
+                RowEnd::Unobserved,
+                row.gateway,
+                on_phase,
+            );
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn finalize_row(
+        &mut self,
+        round: usize,
+        tool_use_id: &str,
+        name: &str,
+        operation_kind: OperationKind,
+        summary: &str,
+        content: &[ToolCallContent],
+        end: RowEnd,
+        gateway: bool,
+        on_phase: &mut impl FnMut(TurnPhase),
+    ) {
+        let (success, result_excerpt) = match end {
+            RowEnd::Completed => (true, String::new()),
+            RowEnd::Failed => {
+                // Failure: keep the bounded text as the cross-turn failure
+                // anchor (ADR-0078). An empty failure excerpt would lose the
+                // anchor, so fall back to an honest "failed" marker.
+                let text = ToolCallContent::collect_text(content, TRACE_EXCERPT_MAX);
+                (
+                    false,
+                    if text.is_empty() {
+                        "failed".to_string()
+                    } else {
+                        text
+                    },
+                )
+            }
+            // Unobserved: the turn ended before the agent reported a final
+            // status (issue #630). Not a success row -- the fixed marker
+            // keeps it distinguishable from a real completion in the trace.
+            RowEnd::Unobserved => (false, UNOBSERVED_EXCERPT.to_string()),
+        };
+        let entry = if success {
+            TraceEntry::succeeded(
+                tool_use_id.to_string(),
+                name.to_string(),
+                operation_kind,
+                summary.to_string(),
+                result_excerpt,
+            )
+        } else {
+            TraceEntry::failed(
+                tool_use_id.to_string(),
+                name.to_string(),
+                operation_kind,
+                summary.to_string(),
+                result_excerpt,
+            )
+        };
+        // The gateway echo's completion is silent too (issue #1242): the
+        // gateway serve emits the row's authoritative completed phase.
+        if !gateway {
+            on_phase(TurnPhase::ToolCallCompleted(TraceEntryView::from(&entry)));
+        }
+        self.tracker.land_call(round, entry);
+    }
+}
+
+/// The bounded (name, summary) pair for a tool title: both ride the IPC
+/// event + the persisted recipe, so both carry the trace-excerpt cap (the
+/// name joins the summary's bounding in issue #629).
+fn bounded_name_summary(title: &str) -> (String, String) {
+    let bounded = truncate_trace_excerpt(title, TRACE_EXCERPT_MAX);
+    (bounded.clone(), bounded)
+}
+
+/// Derive a (name, summary) pair from a tool call's title + id. The title is
+/// the human-readable description; we use its bounded excerpt for both (the
+/// bridge's real tool name arrives MCP-side in slice 9b). Without a title the
+/// id stands in for both, bounded the same way (issue #629): the id rides the
+/// same IPC event + persisted recipe. This is the native-title arm of
+/// [`row_identity`] (issue #1222).
+fn name_summary(title: Option<&str>, id: &str) -> (String, String) {
+    match title.filter(|t| !t.is_empty()) {
+        Some(t) => bounded_name_summary(t),
+        None => bounded_name_summary(id),
+    }
+}
+
+/// Strip an external CLI's gateway-rename decoration from a tool-call title
+/// (issue #1222, the #299 follow-up). ACP agents report gateway-routed MCP
+/// tools under their own flattened rename -- the canonical app form
+/// `mcp__toptopduck-gateway__<tool>` or gemini-cli's `<server>_<tool>`
+/// flattening -- and the fold layer has no arguments to recover the name
+/// from, only that title. Returns the bare remainder (the built-in name, or
+/// the namespaced external handle -- the same key the gateway's authoritative
+/// trace rows pair by in the settle merge), or `None` for a native tool's
+/// title / a decoration with nothing under it.
+fn strip_gateway_rename(title: &str) -> Option<&str> {
+    let rest = title.strip_prefix(GATEWAY_TOOL_PREFIX).or_else(|| {
+        title
+            .strip_prefix(crate::session::GATEWAY_SERVER_NAME)
+            .and_then(|rest| rest.strip_prefix('_'))
+    })?;
+    (!rest.is_empty()).then_some(rest)
+}
+
+/// The trace badge for a gateway-served tool name (issue #1222): the
+/// built-in table's authoritative classification first, then the namespaced
+/// external handle's Network badge, else Execute. The Execute arm is an
+/// approximation -- a bare unknown name approximates the gateway's CLI arm
+/// as Execute because the registration table is not reachable from this
+/// layer (the gateway itself classifies bare unknown names Network). Shared
+/// by this engine's fold layer and the codex line's `mcp_tool_call_display`.
+pub(super) fn gateway_tool_badge(name: &str) -> OperationKind {
+    if let Some(spec) = crate::tools::definitions::builtin_metadata(name) {
+        spec.operation_kind
+    } else if crate::mcp::aggregator::is_namespaced(name) {
+        OperationKind::Network
+    } else {
+        OperationKind::Execute
+    }
+}
+
+/// Derive a tool-call row's identity (name, summary, badge) from the wire's
+/// title + id + kind. A gateway-routed call the CLI renamed (issue #1222)
+/// normalizes to the authoritative bare name: the name the gateway's own
+/// trace rows carry, so the settle merge's by-name pairing replaces this row
+/// in place instead of duplicating the segment. The badge comes from the
+/// gateway ladder's classification ([`gateway_tool_badge`]'s Execute
+/// approximation caveat applies) -- the CLI's `kind` for a renamed MCP tool
+/// is its own guess -- and with no arguments on this wire the summary degrades to
+/// the bare name (single source; the row never renders bare). A native
+/// tool's title keeps the pre-#1222 shape ([`name_summary`]): bounded title
+/// for both name and summary, the wire kind's badge (Read default).
+fn row_identity(
+    title: Option<&str>,
+    id: &str,
+    kind: Option<wire::ToolKind>,
+) -> (String, String, OperationKind) {
+    let title = title.filter(|t| !t.is_empty());
+    let Some(bare) = title.and_then(strip_gateway_rename) else {
+        let (name, summary) = name_summary(title, id);
+        let operation_kind = kind
+            .map(|k| k.to_operation_kind())
+            .unwrap_or(OperationKind::Read);
+        return (name, summary, operation_kind);
+    };
+    let (name, summary) = bounded_name_summary(bare);
+    (name, summary, gateway_tool_badge(bare))
+}
+
+// ---------------------------------------------------------------------------
+// Permission decision (ACP session/request_permission -> gateway policy)
+// ---------------------------------------------------------------------------
+
+/// The gateway tools' namespaced prefix as external CLIs surface them
+/// (`mcp__<GATEWAY_SERVER_NAME>__<tool>`). The claude-code half is measured
+/// (issue #800's real-machine denial); the ACP adapters' request_permission
+/// title shape is expected to match but is pending the post-merge
+/// real-machine AC — a miss degrades to the external fail-fast lane (warned
+/// in `decide_permission`), never an over-allow. Kept a literal (argv
+/// constants cannot concatenate) with a drift-guard test against
+/// [`crate::session::GATEWAY_SERVER_NAME`].
+const GATEWAY_TOOL_PREFIX: &str = "mcp__toptopduck-gateway__";
+
+/// Decide the response to an agent's `session/request_permission` (ADR-0081).
+/// Maps the tool call to a [`ToolKey`], asks the gateway policy
+/// ([`classify`]) whether it is auto-allowed, and selects an allow option if
+/// so (or a reject option on fail-fast, ADR-0077 -- the agent self-corrects
+/// from a rejection). On cancel, responds `Cancelled`.
+///
+/// Best-effort emits the in-flow approval card events (ADR-0083) so the
+/// frontend can surface that a permission was raised + auto-decided; a sink
+/// error must not change the decision.
+fn decide_permission(
+    adapter: &AdapterSpec,
+    params: &RequestPermissionParams,
+    approval: &crate::approval::ApprovalState,
+    sink: &dyn ApprovalSink,
+    cancel: &CancelToken,
+) -> RequestPermissionOutcome {
+    if cancel.is_requested() {
+        return RequestPermissionOutcome::Cancelled;
+    }
+    let tool_name = params
+        .tool_call
+        .title
+        .clone()
+        .filter(|t| !t.is_empty())
+        .unwrap_or_else(|| params.tool_call.tool_call_id.clone());
+    // Gateway-bridged tool names map back to the built-in lane (issue #800).
+    // The lane is server-scoped, not a tool enumeration: any name carrying
+    // the prefix classifies Allow on the CLI's permission handshake
+    // (`is_builtin` checks the server, never the tool) -- except the gated
+    // builtin meta-tools (ADR-0122 Decision 3): an untrusted `create_skill`
+    // classifies NeedsApproval, and this handshake has no park, so it joins
+    // the external tools' fail-fast family (a persistent write refused
+    // rather than passed; the full-text card stays a built-in-runtime
+    // surface). On today's bridge surface the Allow family is the four
+    // DuckDB tools (the primary case, the ADR-0080 Decision 1 zero-approval
+    // mirror) plus the CLI registrations / meta / skill tools the gateway
+    // also advertises under the same server name — those still meet the
+    // gateway's own gate at call time. The gateway enforces its gate at
+    // call time; the CLI's own tools keep the external lane below.
+    let key = match tool_name
+        .strip_prefix(GATEWAY_TOOL_PREFIX)
+        .map(ToolKey::builtin)
+    {
+        Some(key) => key,
+        None => {
+            // Never silent (the #543 precedent): a name that carries the
+            // gateway server name but missed the exact prefix is prefix
+            // drift or a CLI namespace variance — the #800 symptom
+            // returning. Fail-fast below is the safe direction; the warn
+            // keeps the degradation observable (the in-band reject is
+            // otherwise indistinguishable from a genuine foreign tool).
+            if tool_name.contains(crate::session::GATEWAY_SERVER_NAME) {
+                log::warn!(
+                    target: "toptopduck::acp",
+                    "gateway-shaped permission request '{}' missed the gateway \
+                     tool prefix; failing fast (prefix drift or CLI namespace \
+                     variance)",
+                    tool_name
+                );
+            }
+            // Issue #312: adapter ids are controlled literals (codex /
+            // gemini), never the reserved builtin name — `expect` is safe
+            // and keeps the type-level invariant visible. (`tool_name` is
+            // cloned so the pre-mapping name stays available for the card
+            // body below.)
+            ToolKey::try_external(adapter.id.as_str(), tool_name.clone())
+                .expect("ACP adapter id is not the reserved builtin name")
+        }
+    };
+    let mode = approval.auth_mode();
+    let trust: HashSet<ToolKey> = approval.trust_list().into_iter().collect();
+    let allowed = classify(&key, mode, &trust) == Classification::Allow;
+
+    // The card's tool/summary/badge display under the same gateway-rename
+    // normalization the fold layer's row identity applies (issue #1222), so
+    // the frontend's call-row merge predicate (`a.tool === call.name &&
+    // a.summary === call.summary`, useTurnFlow) keeps matching gateway calls
+    // and the card shows the same gateway classification the trace row
+    // carries (the CLI's kind for a renamed MCP tool is its own guess); the
+    // raw title above stays the policy input for `key`.
+    let display = strip_gateway_rename(&tool_name);
+    let display_name = display.unwrap_or(tool_name.as_str());
+    let operation_kind = match display {
+        Some(bare) => gateway_tool_badge(bare),
+        None => params
+            .tool_call
+            .kind
+            .map(|k| k.to_operation_kind())
+            .unwrap_or(OperationKind::Network),
+    };
+    let body = crate::approval::ApprovalRequestBody {
+        request_id: params.tool_call.tool_call_id.clone(),
+        server: key.server.clone(),
+        tool: display_name.to_string(),
+        operation_kind,
+        summary: crate::approval::truncate_summary(
+            display_name,
+            crate::approval::SUMMARY_MAX_CHARS,
+        ),
+        // ACP permission requests carry no file-delivery values (issue #672
+        // is the registered-CLI card's channel); the field rides empty.
+        file_attachments: Vec::new(),
+        // An external CLI's permission request has no sub-agent originator
+        // (delegation is built-in-only -- ADR-0117's v1 calibration scopes
+        // the delegation family to the built-in runtime; external bridge
+        // faces carry none).
+        origin_agent: None,
+    };
+    if allowed {
+        // The policy auto-allows; pick the first allow_* option.
+        sink.emit_request(&body);
+        let pick = params
+            .options
+            .iter()
+            .find(|o| matches!(o.kind, Some(k) if k.is_allow()));
+        let resp = match pick.map(|o| o.kind) {
+            Some(Some(wire::PermissionOptionKind::AllowAlways)) => ApprovalResponse::AlwaysAllow,
+            _ => ApprovalResponse::AllowOnce,
+        };
+        sink.emit_resolved(&body, resp);
+        match pick {
+            Some(o) => RequestPermissionOutcome::Selected {
+                option_id: o.id.clone(),
+            },
+            // Policy allows but the agent offered no allow option (malformed):
+            // refuse the call so the agent self-corrects.
+            None => RequestPermissionOutcome::Cancelled,
+        }
+    } else {
+        // Fail-fast: pick a reject option so the agent self-corrects
+        // (ADR-0077); else Cancelled (no reject available).
+        sink.emit_resolved(&body, ApprovalResponse::Deny);
+        match params
+            .options
+            .iter()
+            .find(|o| matches!(o.kind, Some(k) if !k.is_allow()))
+        {
+            Some(o) => RequestPermissionOutcome::Selected {
+                option_id: o.id.clone(),
+            },
+            None => RequestPermissionOutcome::Cancelled,
+        }
+    }
+}
+
+/// A test-only null sink (mirrors the built-in test facade): approvals against
+/// the built-in table classify Allow without ever emitting. Exposed so a
+/// future in-crate engine unit test can drive the pump without a recording
+/// sink.
+#[cfg(test)]
+pub(crate) struct NullAcpSink;
+
+#[cfg(test)]
+impl ApprovalSink for NullAcpSink {
+    fn emit_request(&self, _body: &crate::approval::ApprovalRequestBody) {}
+    fn emit_resolved(
+        &self,
+        _body: &crate::approval::ApprovalRequestBody,
+        _response: ApprovalResponse,
+    ) {
+    }
+}
+
+/// Test sink that records the last emitted request body (review M1).
+#[cfg(test)]
+struct RecordingAcpSink {
+    last_request: std::sync::Mutex<Option<crate::approval::ApprovalRequestBody>>,
+    abandoned: std::sync::atomic::AtomicUsize,
+}
+
+#[cfg(test)]
+impl RecordingAcpSink {
+    fn new() -> Self {
+        Self {
+            last_request: std::sync::Mutex::new(None),
+            abandoned: std::sync::atomic::AtomicUsize::new(0),
+        }
+    }
+}
+
+#[cfg(test)]
+impl ApprovalSink for RecordingAcpSink {
+    fn emit_request(&self, body: &crate::approval::ApprovalRequestBody) {
+        *self.last_request.lock().unwrap() = Some(body.clone());
+    }
+    fn emit_resolved(
+        &self,
+        _body: &crate::approval::ApprovalRequestBody,
+        _response: ApprovalResponse,
+    ) {
+    }
+    fn emit_abandoned(&self, _body: &crate::approval::ApprovalRequestBody) {
+        self.abandoned
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::runtime::acp::wire::PermissionOptionKind;
+    use crate::util::{ACCUM_MAX_BYTES, TRUNCATION_MARKER};
+
+    /// name_summary prefers a non-empty title and bounds it; falls back to the
+    /// id when the title is missing / empty.
+    #[test]
+    fn name_summary_prefers_title_and_falls_back_to_id() {
+        let (name, summary) = name_summary(Some("explore SELECT 1"), "tc_1");
+        assert_eq!(name, "explore SELECT 1");
+        assert_eq!(summary, "explore SELECT 1");
+
+        let (name, summary) = name_summary(Some(""), "tc_2");
+        assert_eq!(name, "tc_2");
+        assert_eq!(summary, "tc_2");
+
+        let (name, _) = name_summary(None, "tc_3");
+        assert_eq!(name, "tc_3");
+    }
+
+    /// A very long title is bounded to the trace-excerpt cap -- BOTH the
+    /// summary and the name (the name rides the IPC + persisted recipe, so
+    /// an unbounded title grows them too, issue #629).
+    #[test]
+    fn name_summary_bounds_a_long_title() {
+        let long = "x".repeat(TRACE_EXCERPT_MAX + 50);
+        let (name, summary) = name_summary(Some(&long), "tc");
+        assert!(summary.chars().count() <= TRACE_EXCERPT_MAX);
+        assert!(summary.ends_with('…'), "bounded summary ends with ellipsis");
+        assert!(name.chars().count() <= TRACE_EXCERPT_MAX);
+        assert!(name.ends_with('…'), "bounded name ends with ellipsis");
+        // The no-title fallback bounds the id the same way (issue #629): the
+        // id rides the same IPC event + persisted recipe.
+        let (name, summary) = name_summary(None, &long);
+        assert!(summary.chars().count() <= TRACE_EXCERPT_MAX);
+        assert!(
+            summary.ends_with('…'),
+            "bounded id fallback ends with ellipsis"
+        );
+        assert!(name.chars().count() <= TRACE_EXCERPT_MAX);
+        assert!(
+            name.ends_with('…'),
+            "bounded id fallback name ends with ellipsis"
+        );
+    }
+
+    /// Issue #1222: a CLI's flattened gateway rename (`<server>_<tool>`) and
+    /// the canonical namespaced form both normalize to the bare name the
+    /// gateway's trace rows pair by; the badge is the gateway's
+    /// classification (over the CLI's own kind), and the summary degrades to
+    /// the bare name (this wire carries no arguments).
+    #[test]
+    fn row_identity_normalizes_a_gateway_renamed_title() {
+        for renamed in [
+            "toptopduck-gateway_explore",
+            "mcp__toptopduck-gateway__explore",
+        ] {
+            let (name, summary, kind) =
+                row_identity(Some(renamed), "tc_1", Some(wire::ToolKind::Execute));
+            assert_eq!(name, "explore", "from {renamed}");
+            assert_eq!(summary, "explore", "the summary degrades to the name");
+            assert_eq!(
+                kind,
+                OperationKind::Read,
+                "the gateway classification wins over the CLI kind"
+            );
+        }
+    }
+
+    /// A namespaced external handle under the rename keeps its namespaced
+    /// remainder (the gateway records those rows under the same handle) and
+    /// takes the Network badge; a title that is only the server name, or the
+    /// decoration with nothing under it, stays untouched.
+    #[test]
+    fn row_identity_strips_only_a_true_gateway_rename() {
+        let (name, _, kind) = row_identity(
+            Some("toptopduck-gateway_mcp__duckdb__query_snapshot"),
+            "tc_1",
+            None,
+        );
+        assert_eq!(name, "mcp__duckdb__query_snapshot");
+        assert_eq!(kind, OperationKind::Network);
+
+        for native in ["toptopduck-gateway", "toptopduck-gateway_", "bash ls"] {
+            let (name, _, kind) = row_identity(Some(native), "tc_2", Some(wire::ToolKind::Edit));
+            assert_eq!(name, native, "a non-rename title stays verbatim");
+            assert_eq!(kind, OperationKind::Write, "the wire kind keeps deciding");
+        }
+    }
+
+    /// A bare fold-layer pump for the live-silence pins (issue #1242): no
+    /// clock, no open freeze -- the fold paths under test touch neither.
+    fn fold_pump() -> Pump {
+        Pump {
+            tracker: RoundTracker::new(),
+            pending: Vec::new(),
+            cancel_sent_at: None,
+            clock: None,
+            open_freeze: None,
+            occupancy: None,
+        }
+    }
+
+    /// Issue #1242: the fold layer routes a gateway-renamed call's echo into
+    /// the rounds (the settle merge's in-place-replacement anchor) but emits
+    /// NOTHING live -- the gateway serve's direct emission is the row's only
+    /// live source, so the echo never doubles it mid-flight.
+    /// ADR-0130: the pump latches the `usage_update` occupancy snapshot
+    /// (the freshest reading wins) into the occupancy channel -- while the
+    /// BILLING channel stays fail-closed on the ACP path (ADR-0129
+    /// Decision 3: the snapshot has no input/output split, so it is not
+    /// metering evidence). A zero `used` (the spec's absent-field degrade)
+    /// latches nothing and never clobbers a real reading.
+    #[test]
+    fn usage_update_latches_occupancy_and_never_usage() {
+        let mut pump = fold_pump();
+        pump.fold_update(
+            &SessionUpdate::UsageUpdate {
+                used: 1_500,
+                size: 200_000,
+            },
+            &mut |_| {},
+        );
+        assert_eq!(
+            pump.occupancy,
+            Some(crate::model::OccupancySnapshot {
+                tokens: 1_500,
+                limit: Some(200_000),
+            }),
+            "the snapshot latches with its window"
+        );
+        // The freshest reading wins.
+        pump.fold_update(
+            &SessionUpdate::UsageUpdate {
+                used: 3_000,
+                size: 200_000,
+            },
+            &mut |_| {},
+        );
+        assert_eq!(pump.occupancy.expect("still latched").tokens, 3_000);
+        // A zero-used frame is an absent-field degrade, not a reading: no
+        // clobber of the real latch.
+        pump.fold_update(
+            &SessionUpdate::UsageUpdate { used: 0, size: 0 },
+            &mut |_| {},
+        );
+        assert_eq!(
+            pump.occupancy.expect("the real reading survives").tokens,
+            3_000
+        );
+        // A window-less snapshot (size 0) latches numerator-only.
+        pump.fold_update(
+            &SessionUpdate::UsageUpdate {
+                used: 7_000,
+                size: 0,
+            },
+            &mut |_| {},
+        );
+        assert_eq!(
+            pump.occupancy,
+            Some(crate::model::OccupancySnapshot {
+                tokens: 7_000,
+                limit: None,
+            })
+        );
+        // A DECREASING replacement is still freshest-wins (context
+        // compaction makes the reading non-monotonic): the smaller later
+        // reading replaces, not a keep-max gate.
+        pump.fold_update(
+            &SessionUpdate::UsageUpdate {
+                used: 180_000,
+                size: 200_000,
+            },
+            &mut |_| {},
+        );
+        pump.fold_update(
+            &SessionUpdate::UsageUpdate {
+                used: 20_000,
+                size: 200_000,
+            },
+            &mut |_| {},
+        );
+        assert_eq!(
+            pump.occupancy,
+            Some(crate::model::OccupancySnapshot {
+                tokens: 20_000,
+                limit: Some(200_000),
+            }),
+            "the later smaller reading replaces, not a keep-max gate"
+        );
+    }
+
+    /// ADR-0130: an agent that never sends `usage_update` leaves the pump's
+    /// latch empty -- the honest hollow, never a fabricated reading.
+    #[test]
+    fn no_usage_update_leaves_occupancy_none() {
+        let mut pump = fold_pump();
+        pump.fold_update(
+            &SessionUpdate::AgentMessageChunk {
+                message_id: None,
+                content: ContentBlock::text("partial"),
+            },
+            &mut |_| {},
+        );
+        assert_eq!(pump.occupancy, None);
+    }
+
+    #[test]
+    fn fold_silences_a_gateway_renamed_call_live() {
+        let mut pump = fold_pump();
+        let mut phases = Vec::new();
+        pump.fold_update(
+            &SessionUpdate::ToolCall {
+                tool_call_id: "tc_1".into(),
+                title: Some("mcp__toptopduck-gateway__explore".into()),
+                status: wire::ToolCallStatus::Completed,
+                kind: Some(wire::ToolKind::Execute),
+                content: Vec::new(),
+            },
+            &mut |p| phases.push(p),
+        );
+        assert!(
+            phases.is_empty(),
+            "the gateway echo emits no live phase: {phases:?}"
+        );
+        // The fold itself is untouched: the row lands as the settle merge's
+        // anchor, normalized to the bare gateway name (issue #1222).
+        let rounds = pump.tracker.settle_rounds(&Termination::Cancelled);
+        assert_eq!(rounds.len(), 1);
+        assert_eq!(rounds[0].calls.len(), 1);
+        assert_eq!(rounds[0].calls[0].name, "explore");
+        assert!(rounds[0].calls[0].success);
+    }
+
+    /// Issue #1242, the pending-row half: a gateway echo that opens pending
+    /// (no terminal status on the open frame) and completes via the update
+    /// frame stays silent across BOTH frames -- the gateway's direct
+    /// emission owns the row's live face end to end.
+    #[test]
+    fn fold_silences_a_gateway_call_completed_by_update() {
+        let mut pump = fold_pump();
+        let mut phases = Vec::new();
+        pump.fold_update(
+            &SessionUpdate::ToolCall {
+                tool_call_id: "tc_1".into(),
+                title: Some("toptopduck-gateway_explore".into()),
+                status: wire::ToolCallStatus::Pending,
+                kind: Some(wire::ToolKind::Execute),
+                content: Vec::new(),
+            },
+            &mut |p| phases.push(p),
+        );
+        pump.fold_update(
+            &SessionUpdate::ToolCallUpdate {
+                tool_call_id: "tc_1".into(),
+                status: Some(wire::ToolCallStatus::Completed),
+                title: None,
+                content: Vec::new(),
+            },
+            &mut |p| phases.push(p),
+        );
+        assert!(
+            phases.is_empty(),
+            "neither the open nor the closing frame emits live: {phases:?}"
+        );
+        let rounds = pump.tracker.settle_rounds(&Termination::Cancelled);
+        assert_eq!(rounds[0].calls.len(), 1);
+        assert_eq!(rounds[0].calls[0].name, "explore");
+    }
+
+    /// The native-call counterpart (issue #1242): a title that is not a
+    /// gateway rename keeps its live Started / Completed pair -- the silence
+    /// is scoped to the gateway-routed echoes, never the CLI's own tools.
+    /// Park an approval gate on a background thread under the given call id
+    /// (issue #1267 tests): returns the shared state, the recording sink,
+    /// and the gate's join handle.
+    fn park_gated_call(
+        call_id: &str,
+    ) -> (
+        Arc<crate::approval::ApprovalState>,
+        Arc<RecordingAcpSink>,
+        std::thread::JoinHandle<
+            Result<crate::approval::GateOutcome, crate::approval::GateCancelled>,
+        >,
+    ) {
+        let call_id = call_id.to_string();
+        let approval = Arc::new(crate::approval::ApprovalState::new());
+        let sink = Arc::new(RecordingAcpSink::new());
+        let cancel = Arc::new(CancelToken::new());
+        let handle = {
+            let approval = Arc::clone(&approval);
+            let sink = Arc::clone(&sink);
+            let cancel = Arc::clone(&cancel);
+            std::thread::spawn(move || {
+                let req = crate::approval::ApprovalRequest {
+                    key: crate::approval::ToolKey::external("acme", "fetch"),
+                    operation_kind: crate::approval::OperationKind::Network,
+                    summary: "GET /x".into(),
+                    file_attachments: Vec::new(),
+                    origin_agent: None,
+                    call_id: Some(call_id),
+                };
+                approval.gate(req, &*sink, &cancel)
+            })
+        };
+        (approval, sink, handle)
+    }
+
+    /// Wait (bounded) until the helper's gate is parked (issue #1267 tests).
+    fn wait_until_parked(approval: &crate::approval::ApprovalState) {
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        while approval.parked_call_id().is_none() {
+            assert!(std::time::Instant::now() < deadline, "gate never parked");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    /// Issue #1267: a terminal echo whose call id matches the parked gate's
+    /// call id abandons the gate -- the card settles abandoned (no denial:
+    /// nobody answered) and the gate returns the cancelled exit the serve
+    /// already maps to its JSON-RPC error reply.
+    #[test]
+    fn terminal_echo_matching_the_parked_call_abandons_the_gate() {
+        let (approval, sink, gate) = park_gated_call("tc_1");
+        wait_until_parked(&approval);
+        abandon_on_terminal_echo(
+            &approval,
+            &SessionUpdate::ToolCall {
+                tool_call_id: "tc_1".into(),
+                title: Some("mcp__toptopduck-gateway__explore".into()),
+                status: wire::ToolCallStatus::Failed,
+                kind: Some(wire::ToolKind::Execute),
+                content: Vec::new(),
+            },
+        );
+        assert!(gate.join().expect("gate thread").is_err());
+        assert_eq!(
+            sink.abandoned.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "the card settles abandoned"
+        );
+    }
+
+    /// Issue #1267: no match, no abandonment -- a sibling call's terminal
+    /// echo (different id) and a non-terminal status on the matching id
+    /// both leave the gate parked; only the aligned TERMINAL echo ends it.
+    #[test]
+    fn unmatched_or_pending_echo_never_abandons_the_gate() {
+        let (approval, _sink, gate) = park_gated_call("tc_9");
+        wait_until_parked(&approval);
+        // A sibling's terminal echo: different call id.
+        abandon_on_terminal_echo(
+            &approval,
+            &SessionUpdate::ToolCall {
+                tool_call_id: "tc_other".into(),
+                title: Some("mcp__toptopduck-gateway__explore".into()),
+                status: wire::ToolCallStatus::Completed,
+                kind: Some(wire::ToolKind::Execute),
+                content: Vec::new(),
+            },
+        );
+        assert_eq!(
+            approval.parked_call_id(),
+            Some("tc_9".into()),
+            "a sibling's echo must not end this gate"
+        );
+        // The matching id at a NON-terminal status: still parked.
+        abandon_on_terminal_echo(
+            &approval,
+            &SessionUpdate::ToolCall {
+                tool_call_id: "tc_9".into(),
+                title: Some("mcp__toptopduck-gateway__explore".into()),
+                status: wire::ToolCallStatus::Pending,
+                kind: Some(wire::ToolKind::Execute),
+                content: Vec::new(),
+            },
+        );
+        assert_eq!(
+            approval.parked_call_id(),
+            Some("tc_9".into()),
+            "a pending status is not an abandonment signal"
+        );
+        // The aligned terminal echo via the update frame ends it.
+        abandon_on_terminal_echo(
+            &approval,
+            &SessionUpdate::ToolCallUpdate {
+                tool_call_id: "tc_9".into(),
+                status: Some(wire::ToolCallStatus::Completed),
+                title: None,
+                content: Vec::new(),
+            },
+        );
+        assert!(gate.join().expect("gate thread").is_err());
+    }
+
+    #[test]
+    fn fold_keeps_the_live_pair_for_a_native_call() {
+        let mut pump = fold_pump();
+        let mut phases = Vec::new();
+        pump.fold_update(
+            &SessionUpdate::ToolCall {
+                tool_call_id: "tc_2".into(),
+                title: Some("bash ls".into()),
+                status: wire::ToolCallStatus::Completed,
+                kind: Some(wire::ToolKind::Execute),
+                content: Vec::new(),
+            },
+            &mut |p| phases.push(p),
+        );
+        assert_eq!(phases.len(), 2, "the native call keeps its live pair");
+        assert!(matches!(
+            &phases[0],
+            TurnPhase::ToolCallStarted { name, .. } if name == "bash ls"
+        ));
+        assert!(matches!(&phases[1], TurnPhase::ToolCallCompleted(_)));
+        let rounds = pump.tracker.settle_rounds(&Termination::Cancelled);
+        assert_eq!(rounds[0].calls.len(), 1);
+    }
+
+    /// Issue #1242, the late-rename latch: a row that opened under a native
+    /// title (its Started already emitted) and is revealed as a gateway echo
+    /// only by the update frame's rename latches `gateway` -- the completed
+    /// stays silent. The already-emitted Started is stranded by design (the
+    /// update arm's comment): real echoes open titled, so the shape is
+    /// defensive only.
+    #[test]
+    fn fold_latches_a_late_gateway_rename_silencing_the_completed() {
+        let mut pump = fold_pump();
+        let mut phases = Vec::new();
+        pump.fold_update(
+            &SessionUpdate::ToolCall {
+                tool_call_id: "tc_3".into(),
+                title: Some("bash ls".into()),
+                status: wire::ToolCallStatus::Pending,
+                kind: Some(wire::ToolKind::Execute),
+                content: Vec::new(),
+            },
+            &mut |p| phases.push(p),
+        );
+        pump.fold_update(
+            &SessionUpdate::ToolCallUpdate {
+                tool_call_id: "tc_3".into(),
+                title: Some("toptopduck-gateway_explore".into()),
+                status: Some(wire::ToolCallStatus::Completed),
+                content: Vec::new(),
+            },
+            &mut |p| phases.push(p),
+        );
+        assert_eq!(
+            phases.len(),
+            1,
+            "the native Started stays, the latched completed is silent: {phases:?}"
+        );
+        assert!(matches!(&phases[0], TurnPhase::ToolCallStarted { name, .. } if name == "bash ls"));
+        // The fold itself is untouched: the row still lands as the anchor.
+        // Its identity stays native -- the re-derivation only runs on a
+        // pathological empty summary (its guard above), so the rename
+        // latches the echo flag without re-writing a non-empty identity.
+        let rounds = pump.tracker.settle_rounds(&Termination::Cancelled);
+        assert_eq!(rounds[0].calls.len(), 1);
+        assert_eq!(rounds[0].calls[0].name, "bash ls");
+    }
+
+    /// Issue #1242, the drain half: a gateway echo that never reports a
+    /// final status drains unobserved at turn end with NO live phase -- the
+    /// gateway's own emission was the row's only live source, so a duplicate
+    /// row must not appear at drain time either.
+    #[test]
+    fn fold_silences_a_gateway_call_drained_at_turn_end() {
+        let mut pump = fold_pump();
+        let mut phases = Vec::new();
+        pump.fold_update(
+            &SessionUpdate::ToolCall {
+                tool_call_id: "tc_4".into(),
+                title: Some("toptopduck-gateway_explore".into()),
+                status: wire::ToolCallStatus::Pending,
+                kind: Some(wire::ToolKind::Execute),
+                content: Vec::new(),
+            },
+            &mut |p| phases.push(p),
+        );
+        pump.drain_unobserved(&mut |p| phases.push(p));
+        assert!(
+            phases.is_empty(),
+            "the gateway echo drains live-silent: {phases:?}"
+        );
+        let rounds = pump.tracker.settle_rounds(&Termination::Cancelled);
+        assert_eq!(rounds[0].calls.len(), 1);
+        assert_eq!(rounds[0].calls[0].name, "explore");
+        assert!(
+            !rounds[0].calls[0].success,
+            "the unobserved drain lands the honest failed marker"
+        );
+    }
+
+    /// Issue #629: a prose track hitting the byte cap latches the visible
+    /// truncation marker and drops later chunks -- both the full-turn and
+    /// the per-round accumulation stay bounded, and the turn is not
+    /// disturbed.
+    #[test]
+    fn prose_accumulation_caps_with_a_visible_marker() {
+        let mut tracker = RoundTracker::new();
+        let mut on_phase = |_p: TurnPhase| {};
+        tracker.push_prose(&"x".repeat(ACCUM_MAX_BYTES), &mut on_phase);
+        tracker.push_prose("post-cap chunk", &mut on_phase);
+        assert_eq!(
+            tracker.text.len(),
+            ACCUM_MAX_BYTES + TRUNCATION_MARKER.len(),
+            "the full-turn track stops at the cap + marker"
+        );
+        assert!(tracker.text.ends_with(TRUNCATION_MARKER));
+        let round = &tracker.rounds[0];
+        assert_eq!(
+            round.text.len(),
+            ACCUM_MAX_BYTES + TRUNCATION_MARKER.len(),
+            "the round track stops at the cap + marker"
+        );
+        assert!(round.text.ends_with(TRUNCATION_MARKER));
+    }
+
+    /// Issue #629 review: the append lands before the check, so a chunk that
+    /// straddles the cap overshoots it by the chunk's remainder -- the
+    /// overshoot is bounded (a chunk rides a capped line), exactly one
+    /// marker latches, and later chunks drop.
+    #[test]
+    fn a_straddling_chunk_overshoots_the_cap_with_one_marker() {
+        let mut tracker = RoundTracker::new();
+        let mut on_phase = |_p: TurnPhase| {};
+        tracker.push_prose(&"x".repeat(ACCUM_MAX_BYTES - 10), &mut on_phase);
+        tracker.push_prose(&"文".repeat(8), &mut on_phase); // 24 bytes
+        tracker.push_prose("post-cap chunk", &mut on_phase);
+        // cap - 10 + 24 = cap + 14, then the marker; the third chunk drops.
+        assert_eq!(
+            tracker.text.len(),
+            ACCUM_MAX_BYTES + 14 + TRUNCATION_MARKER.len()
+        );
+        assert_eq!(tracker.text.matches("[truncated]").count(), 1);
+        assert!(tracker.text.ends_with(TRUNCATION_MARKER));
+    }
+
+    /// Issue #1166: the delta stream rides the round track's cap -- pre-cap
+    /// chunks stream one delta each, the straddling crossing chunk's delta
+    /// lands with one marker delta following, and later chunks emit nothing.
+    /// The live concatenation stays byte-identical to the settle record the
+    /// turn-end refresh swaps in (overshoot and marker included).
+    #[test]
+    fn delta_stream_caps_with_a_visible_marker() {
+        let mut tracker = RoundTracker::new();
+        let mut phases = Vec::new();
+        tracker.push_prose("working on it", &mut |p| phases.push(p)); // 13 bytes
+        tracker.push_prose(&"x".repeat(ACCUM_MAX_BYTES - 30), &mut |p| phases.push(p));
+        tracker.push_prose(&"文".repeat(8), &mut |p| phases.push(p)); // 24 bytes
+        tracker.push_prose("post-cap chunk", &mut |p| phases.push(p));
+        // 13 + (cap - 30) = cap - 17, then 24 more -> cap + 7 overshoot; the
+        // fourth chunk drops.
+        let deltas: Vec<&str> = phases
+            .iter()
+            .filter_map(|p| match p {
+                TurnPhase::TextDelta { delta } => Some(delta.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            deltas,
+            vec![
+                "working on it",
+                &"x".repeat(ACCUM_MAX_BYTES - 30),
+                &"文".repeat(8),
+                TRUNCATION_MARKER
+            ],
+            "chunks until the straddling crossing, one marker, then silence"
+        );
+        // The settle round text the turn-end refresh swaps in.
+        let rounds = tracker.settle_rounds(&Termination::Cancelled);
+        let live = deltas.concat();
+        assert_eq!(
+            rounds[0].text.as_deref(),
+            Some(live.as_str()),
+            "the live concatenation equals the settle round text"
+        );
+    }
+
+    /// Issue #1166: the cap rides the ROUND track, so a round that has
+    /// latched its marker must not silence the rounds after it -- the
+    /// whole-turn track (`self.text`, pushed first in `push_prose`) is
+    /// capped too by then, and gating on it would keep round two's deltas
+    /// dark while its fresh `RoundAcc` settled with text. Single-round
+    /// fixtures cannot tell the two reads apart; this pin can.
+    #[test]
+    fn a_capped_round_does_not_silence_the_next_round() {
+        let mut tracker = RoundTracker::new();
+        let mut on_phase = |_p: TurnPhase| {};
+        tracker.push_prose("preamble", &mut on_phase); // 8 bytes
+        tracker.push_prose(&"x".repeat(ACCUM_MAX_BYTES - 4), &mut on_phase);
+        // 8 + (cap - 4) = cap + 4: round one latches its marker (and so does
+        // the whole-turn track, which accumulated the same bytes).
+        let _ = tracker.call_round(&mut on_phase);
+        let mut phases = Vec::new();
+        tracker.push_prose("fresh round streams", &mut |p| phases.push(p));
+        tracker.push_prose("still under", &mut |p| phases.push(p));
+        let deltas: Vec<&str> = phases
+            .iter()
+            .filter_map(|p| match p {
+                TurnPhase::TextDelta { delta } => Some(delta.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            deltas,
+            vec!["fresh round streams", "still under"],
+            "round two streams on its own uncapped track"
+        );
+        // Each round's live concatenation equals its own settle text.
+        let rounds = tracker.settle_rounds(&Termination::Cancelled);
+        assert_eq!(rounds.len(), 2);
+        assert_eq!(
+            rounds[0].text.as_deref(),
+            Some(
+                format!(
+                    "preamble{}{}",
+                    "x".repeat(ACCUM_MAX_BYTES - 4),
+                    TRUNCATION_MARKER
+                )
+                .as_str()
+            ),
+            "round one keeps its capped text with the marker"
+        );
+        assert_eq!(
+            rounds[1].text.as_deref(),
+            Some(deltas.concat().as_str()),
+            "round two's live concatenation equals its settle round text"
+        );
+    }
+
+    /// Issue #629: the thinking buffer hits the same byte cap, and the
+    /// marker survives the freeze so the truncation stays visible in the
+    /// trace's thinking block.
+    #[test]
+    fn thought_accumulation_caps_with_a_visible_marker() {
+        let mut tracker = RoundTracker::new();
+        let mut on_phase = |_p: TurnPhase| {};
+        tracker.push_thought(&"x".repeat(ACCUM_MAX_BYTES), &mut on_phase);
+        tracker.push_thought("post-cap chunk", &mut on_phase);
+        let round = &tracker.rounds[0];
+        assert_eq!(
+            round.thinking_buf.len(),
+            ACCUM_MAX_BYTES + TRUNCATION_MARKER.len()
+        );
+        assert!(round.thinking_buf.ends_with(TRUNCATION_MARKER));
+        // The end-of-turn freeze + settle the run loop performs.
+        tracker.freeze_trailing_thinking(&mut on_phase);
+        let rounds = tracker.settle_rounds(&Termination::Cancelled);
+        let thinking = rounds[0].thinking.as_ref().expect("frozen thinking");
+        assert!(
+            thinking.text.ends_with(TRUNCATION_MARKER),
+            "the marker survives the freeze"
+        );
+    }
+
+    /// Issue #629 regression pin: accumulation below the cap is untouched --
+    /// no marker, no dropped chunk.
+    #[test]
+    fn sub_cap_accumulation_stays_verbatim() {
+        let mut tracker = RoundTracker::new();
+        let mut on_phase = |_p: TurnPhase| {};
+        tracker.push_prose("short", &mut on_phase);
+        tracker.push_thought("brief", &mut on_phase);
+        assert_eq!(tracker.text, "short");
+        assert_eq!(tracker.rounds[0].text, "short");
+        assert_eq!(tracker.rounds[0].thinking_buf, "brief");
+    }
+
+    /// Issue #807: the pinned thought chunk grows the buffer WITHOUT
+    /// starting the duration clock (`push_thought` starts it -- using that
+    /// for a completed whole-block reasoning arrival would measure a
+    /// fabricated reasoning-arrival-to-freeze window). The unset clock is
+    /// what lands the frozen duration at zero by construction.
+    #[test]
+    fn pinned_thought_never_starts_the_duration_clock() {
+        let mut tracker = RoundTracker::new();
+        let mut on_phase = |_p: TurnPhase| {};
+        tracker.push_thought_pinned("reasoning", &mut on_phase);
+        assert!(
+            tracker.rounds[0].thinking_since.is_none(),
+            "the pinned fold must keep thinking_since unset"
+        );
+        // The end-of-turn freeze + settle the run loop performs.
+        tracker.freeze_trailing_thinking(&mut on_phase);
+        let rounds = tracker.settle_rounds(&Termination::Cancelled);
+        let thinking = rounds[0].thinking.as_ref().expect("frozen thinking");
+        assert_eq!(thinking.text, "reasoning");
+        assert_eq!(
+            thinking.duration_ms, 0,
+            "zero by construction -- the unset clock, not a measured window"
+        );
+    }
+
+    /// Issue #628: a Text termination's trailing prose rode the terminal
+    /// text, so the settle clears it -- a prose-only tail drops (the pinned
+    /// shape the stream paths' EOF promotion also relies on).
+    #[test]
+    fn text_settle_drops_the_trailing_prose_round() {
+        let mut tracker = RoundTracker::new();
+        let mut on_phase = |_p: TurnPhase| {};
+        tracker.push_prose("working on it", &mut on_phase);
+        let _ = tracker.call_round(&mut on_phase);
+        tracker.push_prose("partial answer", &mut on_phase);
+        let rounds = tracker.settle_rounds(&Termination::Text("partial answer".into()));
+        assert_eq!(rounds.len(), 1, "the prose-only tail drops: {rounds:?}");
+        assert_eq!(rounds[0].text.as_deref(), Some("working on it"));
+    }
+
+    /// Issue #628: a non-Text termination carries no text, so the trailing
+    /// round keeps its partial prose -- symmetric with its thinking, which
+    /// the turn-end freeze always keeps. Holds for Cancelled, StepCap, and
+    /// Runtime alike (the policy matches only Text).
+    #[test]
+    fn non_text_settle_keeps_trailing_prose_and_thinking() {
+        for termination in [
+            Termination::Cancelled,
+            Termination::StepCap(24),
+            Termination::Runtime("agent closed stdout".into()),
+        ] {
+            let mut tracker = RoundTracker::new();
+            let mut on_phase = |_p: TurnPhase| {};
+            tracker.push_prose("working on it", &mut on_phase);
+            let _ = tracker.call_round(&mut on_phase);
+            tracker.push_thought("final thought", &mut on_phase);
+            tracker.push_prose("partial answer", &mut on_phase);
+            tracker.freeze_trailing_thinking(&mut on_phase);
+            let rounds = tracker.settle_rounds(&termination);
+            assert_eq!(rounds.len(), 2, "{termination:?}: the tail round survives");
+            assert_eq!(rounds[0].text.as_deref(), Some("working on it"));
+            assert_eq!(
+                rounds[1].text.as_deref(),
+                Some("partial answer"),
+                "{termination:?}: the partial prose stays on the tail"
+            );
+            assert_eq!(
+                rounds[1]
+                    .thinking
+                    .as_ref()
+                    .expect("frozen tail thinking")
+                    .text,
+                "final thought",
+                "{termination:?}: prose and thinking survive together"
+            );
+        }
+    }
+
+    /// Issue #628: an empty tail (no prose, no thinking, no calls) still
+    /// drops under a non-Text termination -- a zero-call cancelled turn
+    /// records no round.
+    #[test]
+    fn non_text_settle_still_drops_an_empty_tail() {
+        let rounds = RoundTracker::new().settle_rounds(&Termination::Cancelled);
+        assert!(rounds.is_empty(), "{rounds:?}");
+    }
+
+    /// decide_permission under no-confirmation selects an allow option.
+    #[test]
+    fn decide_permission_no_confirmation_selects_allow() {
+        use crate::approval::ApprovalState;
+        let adapter = crate::runtime::acp::adapter::gemini_cli();
+        let approval = ApprovalState::new();
+        approval.set_auth_mode(crate::approval::AuthMode::NoConfirmation);
+        let params = RequestPermissionParams {
+            session_id: "s".into(),
+            tool_call: wire::PermissionToolCall {
+                tool_call_id: "tc_1".into(),
+                title: Some("bash ls".into()),
+                kind: Some(wire::ToolKind::Execute),
+            },
+            options: vec![
+                wire::PermissionOption {
+                    id: "allow_once".into(),
+                    label: "Allow".into(),
+                    kind: Some(PermissionOptionKind::AllowOnce),
+                },
+                wire::PermissionOption {
+                    id: "reject".into(),
+                    label: "Reject".into(),
+                    kind: Some(PermissionOptionKind::RejectOnce),
+                },
+            ],
+        };
+        let outcome = decide_permission(
+            &adapter,
+            &params,
+            &approval,
+            &NullAcpSink,
+            &CancelToken::new(),
+        );
+        match outcome {
+            RequestPermissionOutcome::Selected { option_id } => {
+                assert_eq!(option_id, "allow_once");
+            }
+            other => panic!("expected Selected, got {other:?}"),
+        }
+    }
+
+    /// decide_permission under per-call + untrusted fail-fasts to a reject
+    /// option (the agent self-corrects, ADR-0077).
+    #[test]
+    fn decide_permission_per_call_untrusted_fail_fasts_to_reject() {
+        use crate::approval::ApprovalState;
+        let adapter = crate::runtime::acp::adapter::gemini_cli();
+        let approval = ApprovalState::new(); // PerCall, empty trust
+        let params = RequestPermissionParams {
+            session_id: "s".into(),
+            tool_call: wire::PermissionToolCall {
+                tool_call_id: "tc_1".into(),
+                title: Some("bash rm".into()),
+                kind: Some(wire::ToolKind::Execute),
+            },
+            options: vec![
+                wire::PermissionOption {
+                    id: "allow_once".into(),
+                    label: "Allow".into(),
+                    kind: Some(PermissionOptionKind::AllowOnce),
+                },
+                wire::PermissionOption {
+                    id: "reject".into(),
+                    label: "Reject".into(),
+                    kind: Some(PermissionOptionKind::RejectOnce),
+                },
+            ],
+        };
+        let outcome = decide_permission(
+            &adapter,
+            &params,
+            &approval,
+            &NullAcpSink,
+            &CancelToken::new(),
+        );
+        match outcome {
+            RequestPermissionOutcome::Selected { option_id } => {
+                assert_eq!(option_id, "reject", "fail-fast picks the reject option");
+            }
+            other => panic!("expected Selected reject, got {other:?}"),
+        }
+    }
+
+    /// Issue #800: a gateway-bridged tool name (`mcp__<gateway>__<tool>`)
+    /// maps back to the built-in lane, classifying Allow even under the
+    /// default PerCall posture. The lane is server-scoped, not a tool
+    /// enumeration — the four DuckDB tools are the primary case (the
+    /// CLI-side mirror of ADR-0080 Decision 1), and any non-builtin bridge
+    /// tool meeting the same mapping still answers to the gateway's own
+    /// gate at call time. The card body carries the same gateway-rename
+    /// normalization as the fold layer (issue #1222), so the frontend's
+    /// call-row merge predicate (`a.tool === call.name`) still matches.
+    #[test]
+    fn decide_permission_gateway_tool_allows_under_per_call() {
+        use crate::approval::ApprovalState;
+        let adapter = crate::runtime::acp::adapter::gemini_cli();
+        let approval = ApprovalState::new(); // PerCall, empty trust
+        let params = RequestPermissionParams {
+            session_id: "s".into(),
+            tool_call: wire::PermissionToolCall {
+                tool_call_id: "tc_1".into(),
+                title: Some("mcp__toptopduck-gateway__explore".into()),
+                // A misleading kind on purpose: the card's badge must take
+                // the gateway classification over the CLI's own guess
+                // (issue #1222), matching the trace row's badge.
+                kind: Some(wire::ToolKind::Execute),
+            },
+            options: vec![
+                wire::PermissionOption {
+                    id: "allow_once".into(),
+                    label: "Allow".into(),
+                    kind: Some(PermissionOptionKind::AllowOnce),
+                },
+                wire::PermissionOption {
+                    id: "reject".into(),
+                    label: "Reject".into(),
+                    kind: Some(PermissionOptionKind::RejectOnce),
+                },
+            ],
+        };
+        let sink = RecordingAcpSink::new();
+        let outcome = decide_permission(&adapter, &params, &approval, &sink, &CancelToken::new());
+        match outcome {
+            RequestPermissionOutcome::Selected { option_id } => {
+                assert_eq!(option_id, "allow_once", "gateway tools auto-allow");
+            }
+            other => panic!("expected Selected allow, got {other:?}"),
+        }
+        // The card carries the gateway-rename normalization (the same source
+        // as the `ToolCallStarted` phase event's `row_identity`, issue
+        // #1222); the stripped key stays the policy identity only.
+        let body = sink
+            .last_request
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("card emitted");
+        assert_eq!(body.tool, "explore");
+        assert_eq!(
+            body.operation_kind,
+            OperationKind::Read,
+            "the card badges with the gateway classification, not the CLI kind"
+        );
+        assert_eq!(
+            body.server, "builtin",
+            "the policy identity is the builtin lane"
+        );
+    }
+
+    /// ADR-0122 Decision 3 on the ACP lane: `create_skill` is a gated
+    /// builtin, and this handshake has no park -- an untrusted call joins
+    /// the external tools' fail-fast family instead of the prefix's Allow
+    /// pass. The refusal is the agent's to self-correct from; the gateway's
+    /// full-text informed-consent card stays a built-in-runtime surface.
+    #[test]
+    fn decide_permission_gated_builtin_fail_fasts_under_per_call() {
+        use crate::approval::ApprovalState;
+        let adapter = crate::runtime::acp::adapter::gemini_cli();
+        let approval = ApprovalState::new(); // PerCall, empty trust
+        let params = RequestPermissionParams {
+            session_id: "s".into(),
+            tool_call: wire::PermissionToolCall {
+                tool_call_id: "tc_1".into(),
+                title: Some("mcp__toptopduck-gateway__create_skill".into()),
+                kind: Some(wire::ToolKind::Other),
+            },
+            options: vec![
+                wire::PermissionOption {
+                    id: "allow_once".into(),
+                    label: "Allow".into(),
+                    kind: Some(PermissionOptionKind::AllowOnce),
+                },
+                wire::PermissionOption {
+                    id: "reject".into(),
+                    label: "Reject".into(),
+                    kind: Some(PermissionOptionKind::RejectOnce),
+                },
+            ],
+        };
+        let sink = RecordingAcpSink::new();
+        let outcome = decide_permission(&adapter, &params, &approval, &sink, &CancelToken::new());
+        match outcome {
+            RequestPermissionOutcome::Selected { option_id } => {
+                assert_eq!(
+                    option_id, "reject",
+                    "an untrusted gated builtin fail-fasts on the handshake"
+                );
+            }
+            other => panic!("expected Selected reject, got {other:?}"),
+        }
+    }
+
+    /// Only the gateway server's prefix maps to the built-in lane: a tool on
+    /// any other MCP server name stays fail-fast (ADR-0081 zero regression).
+    #[test]
+    fn decide_permission_foreign_mcp_tool_still_fail_fasts() {
+        use crate::approval::ApprovalState;
+        let adapter = crate::runtime::acp::adapter::gemini_cli();
+        let approval = ApprovalState::new(); // PerCall, empty trust
+        let params = RequestPermissionParams {
+            session_id: "s".into(),
+            tool_call: wire::PermissionToolCall {
+                tool_call_id: "tc_1".into(),
+                title: Some("mcp__some-other-server__explore".into()),
+                kind: Some(wire::ToolKind::Other),
+            },
+            options: vec![
+                wire::PermissionOption {
+                    id: "allow_once".into(),
+                    label: "Allow".into(),
+                    kind: Some(PermissionOptionKind::AllowOnce),
+                },
+                wire::PermissionOption {
+                    id: "reject".into(),
+                    label: "Reject".into(),
+                    kind: Some(PermissionOptionKind::RejectOnce),
+                },
+            ],
+        };
+        let outcome = decide_permission(
+            &adapter,
+            &params,
+            &approval,
+            &NullAcpSink,
+            &CancelToken::new(),
+        );
+        match outcome {
+            RequestPermissionOutcome::Selected { option_id } => {
+                assert_eq!(option_id, "reject", "foreign server names stay fail-fast");
+            }
+            other => panic!("expected Selected reject, got {other:?}"),
+        }
+    }
+
+    /// Issue #800 (review follow-up): a title that carries the gateway
+    /// server name but misses the exact prefix (a single hyphen for the
+    /// double underscore — the drift shape a CLI namespace variance would
+    /// produce) stays fail-fast, the safe direction, with the miss warned
+    /// rather than silent (see the warn in `decide_permission`).
+    #[test]
+    fn decide_permission_gateway_shaped_miss_stays_fail_fast() {
+        use crate::approval::ApprovalState;
+        let adapter = crate::runtime::acp::adapter::gemini_cli();
+        let approval = ApprovalState::new(); // PerCall, empty trust
+        let params = RequestPermissionParams {
+            session_id: "s".into(),
+            tool_call: wire::PermissionToolCall {
+                tool_call_id: "tc_1".into(),
+                title: Some("mcp__toptopduck-gateway-explore".into()),
+                kind: Some(wire::ToolKind::Other),
+            },
+            options: vec![
+                wire::PermissionOption {
+                    id: "allow_once".into(),
+                    label: "Allow".into(),
+                    kind: Some(PermissionOptionKind::AllowOnce),
+                },
+                wire::PermissionOption {
+                    id: "reject".into(),
+                    label: "Reject".into(),
+                    kind: Some(PermissionOptionKind::RejectOnce),
+                },
+            ],
+        };
+        let outcome = decide_permission(
+            &adapter,
+            &params,
+            &approval,
+            &NullAcpSink,
+            &CancelToken::new(),
+        );
+        match outcome {
+            RequestPermissionOutcome::Selected { option_id } => {
+                assert_eq!(option_id, "reject", "a near-miss prefix stays fail-fast");
+            }
+            other => panic!("expected Selected reject, got {other:?}"),
+        }
+    }
+
+    /// The prefix literal tracks the canonical gateway server name (the
+    /// bridge descriptor's name in session/mod.rs) — a rename there must fail
+    /// here instead of silently unmapping the gateway lane.
+    #[test]
+    fn gateway_tool_prefix_tracks_gateway_server_name() {
+        assert_eq!(
+            GATEWAY_TOOL_PREFIX,
+            format!("mcp__{}__", crate::session::GATEWAY_SERVER_NAME)
+        );
+    }
+
+    /// A cancel in flight short-circuits permission to Cancelled.
+    #[test]
+    fn decide_permission_cancel_short_circuits() {
+        let adapter = crate::runtime::acp::adapter::gemini_cli();
+        let approval = crate::approval::ApprovalState::new();
+        let cancel = CancelToken::new();
+        cancel.request();
+        let params = RequestPermissionParams {
+            session_id: "s".into(),
+            tool_call: wire::PermissionToolCall {
+                tool_call_id: "tc_1".into(),
+                title: None,
+                kind: None,
+            },
+            options: Vec::new(),
+        };
+        let outcome = decide_permission(&adapter, &params, &approval, &NullAcpSink, &cancel);
+        assert_eq!(outcome, RequestPermissionOutcome::Cancelled);
+    }
+
+    /// decide_permission truncates the summary before broadcasting so an
+    /// unbounded ACP title cannot flood every pane (review M1 — the gate-side
+    /// equivalent is `gate_truncates_summary_before_broadcast` in approval).
+    #[test]
+    fn decide_permission_truncates_summary_before_broadcast() {
+        use crate::approval::ApprovalState;
+        let adapter = crate::runtime::acp::adapter::gemini_cli();
+        let approval = ApprovalState::new();
+        approval.set_auth_mode(crate::approval::AuthMode::NoConfirmation);
+        let params = RequestPermissionParams {
+            session_id: "s".into(),
+            tool_call: wire::PermissionToolCall {
+                tool_call_id: "tc_1".into(),
+                title: Some("x".repeat(1000)),
+                kind: Some(wire::ToolKind::Execute),
+            },
+            options: vec![wire::PermissionOption {
+                id: "allow_once".into(),
+                label: "Allow".into(),
+                kind: Some(PermissionOptionKind::AllowOnce),
+            }],
+        };
+        let sink = RecordingAcpSink::new();
+        let outcome = decide_permission(&adapter, &params, &approval, &sink, &CancelToken::new());
+        assert!(matches!(outcome, RequestPermissionOutcome::Selected { .. }));
+        let body = sink.last_request.lock().unwrap();
+        let body = body.as_ref().expect("request was emitted");
+        assert!(
+            body.summary.chars().count() <= crate::approval::SUMMARY_MAX_CHARS,
+            "broadcast summary {} > {}",
+            body.summary.chars().count(),
+            crate::approval::SUMMARY_MAX_CHARS
+        );
+        assert!(body.summary.ends_with("..."));
+    }
+
+    /// ADR-0094 dispatch seam: an adapter whose `stream_format` is
+    /// `CodexEventStream` routes to the codex event stream driver (not the
+    /// ACP path). A nonexistent binary produces a Runtime spawn failure
+    /// naming the adapter, proving the dispatch fires through the module.
+    #[test]
+    fn codex_event_stream_dispatches_to_driver() {
+        let spec = AdapterSpec {
+            id: crate::runtime::acp::adapter::AdapterId::new("stub-test"),
+            display_name: "stub-test",
+            binary_names: &["nonexistent"],
+            argv: &["--json"],
+            stream_format: StreamFormat::CodexEventStream,
+            probe_argv: Some(&["probe"]),
+            model_arg: None,
+            effort: None,
+        };
+        let cancel = Arc::new(CancelToken::new());
+        let engine = AcpEngine::new(spec, cancel);
+        let input = AcpTurnInput {
+            cwd: std::env::temp_dir().to_string_lossy().to_string(),
+            mcp_servers: Vec::new(),
+            model: None,
+            thought_level: None,
+            prompt_blocks: Vec::new(),
+        };
+        let approval = crate::approval::ApprovalState::new();
+        let sink = RecordingAcpSink::new();
+        let outcome = engine.run(
+            &input,
+            std::path::Path::new("/nonexistent-binary-523"),
+            &approval,
+            &sink,
+            |_| {},
+        );
+        match &outcome.termination {
+            Termination::Runtime(msg) => {
+                assert!(
+                    msg.contains("stub-test"),
+                    "spawn failure names the adapter: {msg}"
+                );
+            }
+            other => panic!("expected Runtime from spawn failure, got {other:?}"),
+        }
+        assert!(
+            outcome.trace.is_empty(),
+            "a spawn failure dispatched nothing"
+        );
+    }
+
+    /// ADR-0097 dispatch seam: an adapter whose `stream_format` is
+    /// `ClaudeStreamJson` routes to the claude stream-json driver (not the
+    /// ACP path, not the codex parser). Same nonexistent-binary proof shape
+    /// as the codex arm above.
+    #[test]
+    fn claude_stream_json_dispatches_to_driver() {
+        let spec = AdapterSpec {
+            id: crate::runtime::acp::adapter::AdapterId::new("stub-claude"),
+            display_name: "stub-claude",
+            binary_names: &["nonexistent"],
+            argv: &["--print", "--output-format", "stream-json"],
+            stream_format: StreamFormat::ClaudeStreamJson,
+            probe_argv: Some(&["probe"]),
+            model_arg: None,
+            effort: None,
+        };
+        let cancel = Arc::new(CancelToken::new());
+        let engine = AcpEngine::new(spec, cancel);
+        let input = AcpTurnInput {
+            cwd: std::env::temp_dir().to_string_lossy().to_string(),
+            mcp_servers: Vec::new(),
+            model: None,
+            thought_level: None,
+            prompt_blocks: Vec::new(),
+        };
+        let approval = crate::approval::ApprovalState::new();
+        let sink = RecordingAcpSink::new();
+        let outcome = engine.run(
+            &input,
+            std::path::Path::new("/nonexistent-binary-561"),
+            &approval,
+            &sink,
+            |_| {},
+        );
+        match &outcome.termination {
+            Termination::Runtime(msg) => {
+                assert!(
+                    msg.contains("stub-claude"),
+                    "spawn failure names the adapter: {msg}"
+                );
+            }
+            other => panic!("expected Runtime from spawn failure, got {other:?}"),
+        }
+        assert!(
+            outcome.trace.is_empty(),
+            "a spawn failure dispatched nothing"
+        );
+    }
+}

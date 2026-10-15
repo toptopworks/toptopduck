@@ -28,3 +28,4 @@ text-to-SQL 必须让 LLM 看到 schema + 少量样本才能写出正确 SQL。�
 - 首选 SQL/结构化输出强的提供商（见 ADR-0007）。
 - 接入形态校准（ADR-0019）：App 经**用户配置的可达 endpoint**访问 Claude——默认 Anthropic 直连，可配 `baseURL` 指向自有中转；载荷只发给承载 Claude 的该 endpoint，不额外经第三方。Bedrock/Vertex 异构签名留 v2。
 - **被 ADR-0029 校准/延伸**：key 存储从「OS keychain、禁明文」延伸为「解密后仅存 Rust 核心进程、前端永不持有、HTTP 由 Rust 发起并附 key」；并确立「对作者零数据外发」为不变量（用户源数据唯一外发出口 = 本 ADR 定义的 LLM endpoint）。
+- **被 ADR-0064 延伸确认**：多协议（含 Ollama loopback 端点）下，外发载荷语义（schema + 样本 + 列名）不变——不因 endpoint 是 localhost 而放开样本窗口。见 ADR-0064。

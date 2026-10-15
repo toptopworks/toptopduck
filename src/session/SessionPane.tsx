@@ -1,0 +1,913 @@
+import { useCallback, useEffect, useId, useRef, useState, type KeyboardEvent } from "react";
+import { useIntl, FormattedMessage } from "react-intl";
+import { useQueryClient } from "@tanstack/react-query";
+import { fmtError, errorDetail } from "../lib/error-presentation";
+import { log } from "../lib/log";
+import { getApprovalAttachments } from "../api";
+import { WorkspaceToggle } from "../shell/WorkspaceToggle";
+import { SessionHeaderMenu } from "./SessionHeaderMenu";
+import { useRailFollow } from "./useRailFollow";
+import { useSessionState } from "./useSessionState";
+import { consumePendingPayload } from "./pendingPayload";
+import type { ComposerSessionFields } from "./useComposerState";
+import type { ApprovalEntry, UseApprovalEvents } from "./useApprovalEvents";
+import type { ApprovalResponse } from "../types/approval";
+import { ErrorBanner } from "../components/common/ErrorBanner";
+import { ErrorBoundary } from "../components/common/ErrorBoundary";
+import { GuidedLoadDialog } from "../components/dataset/GuidedLoadDialog";
+import { ArtifactView } from "../components/thread/ArtifactView";
+import { ResultView } from "../components/thread/ResultView";
+import { TechnicalDetailsFold } from "../components/common/TechnicalDetailsFold";
+import { Thread } from "../components/thread/Thread";
+import { Alert, AlertDescription, AlertTitle } from "../components/ui/alert";
+import { Badge } from "../components/ui/badge";
+import { Button } from "../components/ui/button";
+import { WorkspaceWorkingSet } from "../components/dataset/WorkspaceWorkingSet";
+import { cn } from "@/lib/utils";
+import type { ThreadEntry } from "../types/thread";
+import type { WorkspaceContent } from "./workspace";
+import { VizStageView } from "../components/viz/VizStageView";
+import { artifactKeys, sessionKeys } from "./queryKeys";
+import { useSkillsRegistry } from "../skills/registry";
+
+// The per-session pane (ADR-0051/0092). One `<SessionPane key={sid} sessionId={sid} />`
+// owns ALL of a session's server state (via useSessionState -> TanStack Query)
+// and client UI state (viewedResult / loading / dialogs).
+// The shell (<App>) places this as the right grid block (rail + workspace);
+// the session sidebar is a separate, full-height column (R1).
+//
+// ADR-0092: QuestionBar moved to the shell level. SessionPane no longer owns
+// the bar or its composer controls. It reports its bar-relevant fields
+// (loading / phase / handleAsk / handleCancel / handleIngestFiles) upward via
+// onComposerFields so the shell-level bar can read them for the active session.
+// Pending payloads from a cold-start submit (#500) are consumed on mount by
+// consumePendingPayload (pendingPayload.ts) -- the ordering contract and its
+// history live in that module header.
+
+interface SessionPaneProps {
+  sessionId: string;
+  /** ADR-0051 keep-alive: whether THIS pane's layer is the active/visible one
+   *  (App's session-pane-layer stack keeps open panes mounted but
+   *  display:none when inactive). The follow hook keys its posture-preserving
+   *  session-switch re-alignment on the false -> true transition and never
+   *  writes scroll geometry while hidden. */
+  isActive: boolean;
+  /** Pending data-file paths routed to this session's ingest (ADR-0061,
+   *  #81 A1; issue #205; #500). Set by a cold-start drop (one path, ingested
+   *  once on mount), a drop onto an already-active session (ingested when the
+   *  prop changes), or a cold-start "+" file list carried onto the minted
+   *  session by the first submit (#500). Empty once consumed or for sessions
+   *  opened by any other action. */
+  pendingIngestPaths: string[];
+  /** Shell callback after the pending ingest is kicked off, so OpenSession is
+   *  cleared and a remount cannot re-ingest (#81 A1). */
+  onIngestConsumed: () => void;
+  /** ADR-0092: a pending question from the shell-level cold-start bar. Set
+   *  when the user submits from the centered bar with no active session; the
+   *  shell creates a session carrying the question, and SessionPane fires it
+   *  via handleAsk once the pending ingest settles. null once consumed or for
+   *  sessions opened by any other action. */
+  pendingQuestion: string | null;
+  /** The skill names staged on the cold-start bar beside the pending
+   *  question (ADR-0119: the first ask's user invocations). Consumed in the
+   *  same one-shot effect; cleared by onQuestionConsumed. */
+  pendingSkillInvocations: string[];
+  /** ADR-0092: shell callback after the pending question is fired, so the
+   *  OpenSession entry is cleared and a remount cannot re-fire. */
+  onQuestionConsumed: () => void;
+  /** #500: hand a held-back pending question back into the bar draft. Fires
+   *  when the pending ingest batch halts (NeedsGuidance / Error): the
+   *  auto-ask is suppressed so the question is seeded into THIS session's
+   *  draft and stays visible + submittable once the guidance / error is
+   *  resolved — a failed ingest must never lose the question. */
+  onSeedDraft: (sessionId: string, value: string) => void;
+  /** Review Important 1 (#991): the ingest-abort branch's invocations
+   *  re-seed -- the staged names go back into the session's composer
+   *  staging, so a resubmit carries the pick + question pair whole. */
+  onSeedInvocations: (sessionId: string, names: string[]) => void;
+  /** ADR-0092: lifts this session's bar-relevant fields (loading / phase /
+   *  handleAsk / handleCancel / handleIngestFiles) to the shell-level bar.
+   *  Called via useEffect whenever the fields change. */
+  onComposerFields: (sessionId: string, fields: ComposerSessionFields) => void;
+  /** ADR-0092: drop this session's bar-fields entry on unmount (close / delete
+   *  / error-boundary replacement). A dedicated callback replaces the prior
+   *  sentinel-reference dispatch so the removal intent is explicit. */
+  onComposerFieldsUnmount: (sessionId: string) => void;
+  /** Display name for THIS session's header. The shell owns the open-session
+   *  set; each SessionPane receives its own name rather than reaching into
+   *  global active-session state (ADR-0060). */
+  sessionName: string;
+  /** ADR-0089 Decision 4: the shell syncs the auto-generated session name
+   *  (from the first terminal turn) into the sidebar + header. Called once
+   *  after the session's first turn settles with this pane's sessionId. The
+   *  sid-taking shape lets the shell pass a useCallback-stable handler -- an
+   *  inline per-session arrow would rebuild handleAskWithAutoName on every
+   *  App render, and the ADR-0092 composer-fields report compares handleAsk
+   *  by reference (an unstable identity loops the bar's fields registry). */
+  onFirstTurnSettled: (sessionId: string) => void;
+  /** The app-level approval channel (ADR-0083, issue #297): the pane reads
+   *  its own session's entries (merged into the live trace by useTurnFlow)
+   *  and binds the respond + settled-clear callbacks to its sessionId. */
+  approvalEvents: UseApprovalEvents;
+  /** ADR-0093 (issue #512): the bound `.duck` path for session-level
+   *  management actions (rename / delete). Always non-null since
+   *  ADR-0089: createSession binds immediately. */
+  duckPath: string;
+  /** ADR-0093 (issue #512): shell callback to rename this session's entry. */
+  onRename: (sessionId: string, duckPath: string, newName: string) => void;
+  /** ADR-0093 (issue #512): shell callback to close this session (fires
+   *  cancel + approval cleanup + draft drop). */
+  onClose: (sessionId: string) => void;
+  /** ADR-0093 (issue #512): shell callback to permanently delete this
+   *  session. Receives the .duck path + runtime sid. */
+  onDelete: (duckPath: string, sessionId: string) => void;
+  /** Shell-wide busy gate: disables the header menu trigger during
+   *  persistence / resume operations (ADR-0093, matching the sidebar's
+   *  disabled={busy} contract). */
+  disabled?: boolean;
+}
+
+// A frozen empty slice so a session with no approvals keeps a referentially
+// stable prop for useSessionState / useTurnFlow (no every-render fresh []).
+const NO_APPROVALS: ApprovalEntry[] = [];
+
+// The workspace tab order (ADR-0045): result first, working set second.
+// Module-level so the APG keyboard handler can index/wrap it (issue #760).
+const WORKSPACE_TABS = ["result", "workingSet"] as const;
+type WorkspaceTab = (typeof WORKSPACE_TABS)[number];
+
+export function SessionPane({ sessionId, isActive, pendingIngestPaths, onIngestConsumed, pendingQuestion, pendingSkillInvocations, onQuestionConsumed, onSeedDraft, onSeedInvocations, onComposerFields, onComposerFieldsUnmount, sessionName, onFirstTurnSettled, approvalEvents, duckPath, onRename, onClose, onDelete, disabled }: SessionPaneProps) {
+  // This session's slice of the app-level approval map + the two stable
+  // sessionId-bound callbacks (ADR-0056 addressing: the channel is global,
+  // the pane acts on its own session only). The respond / clearSession
+  // methods are destructured out first: they are useCallback-stable inside
+  // useApprovalEvents, while the hook's return object is rebuilt every
+  // render -- depending on the methods (not the object) keeps these two
+  // callbacks identity-stable across renders (the same pattern useTurnFlow
+  // uses for the viewed methods, issue #229).
+  const { approvalsBySession, respond, settleSession } = approvalEvents;
+  const sessionApprovals = approvalsBySession.get(sessionId) ?? NO_APPROVALS;
+  const handleRespondApproval = useCallback(
+    (requestId: string, response: ApprovalResponse) => respond(sessionId, requestId, response),
+    [respond, sessionId],
+  );
+  // Issue #1009: the card's expand view pulls the FULL pre-truncation file
+  // values through the pending-window command; the capped broadcast snapshot
+  // stays the fallback when it rejects (answered / cancelled / IPC failure).
+  const handleLoadApprovalAttachments = useCallback(
+    (requestId: string) => getApprovalAttachments(sessionId, requestId),
+    [sessionId],
+  );
+  const handleApprovalsSettled = useCallback(
+    // Issue #1267: the turn-settle sweep -- nothing pending outlives its
+    // turn, backstopping the backend's abandonment paths.
+    () => settleSession(sessionId),
+    [settleSession, sessionId],
+  );
+  const s = useSessionState(
+    sessionId,
+    sessionApprovals,
+    handleApprovalsSettled,
+    onFirstTurnSettled,
+  );
+  // Issue #829: the rail's stick-to-bottom posture. Signals only -- the
+  // settled count grows on appends, liveTurn's identity changes per streaming
+  // event and per approval-channel update (and its null -> live transition
+  // is the submit), and isActive's false -> true transition is the keep-alive
+  // session switch (ADR-0051). The extent changes that reach no signal here
+  // (the eased bar padding, the fold/unfold reflow) the hook observes itself
+  // (#843).
+  // isFollowing has no render consumer yet; the hook exposes it for tests /
+  // a future jump-to-latest affordance.
+  const { railRef } = useRailFollow({
+    active: isActive,
+    entryCount: s.thread.length,
+    liveTurn: s.liveTurn,
+  });
+  const intl = useIntl();
+  const persistDetail = s.persistError ? errorDetail(s.persistError) : null;
+  const queryClient = useQueryClient();
+
+  // ADR-0092: lift this session's bar-relevant fields to the shell-level bar.
+  // handleAsk / handleCancel / handleIngestFiles are useCallback-stable inside
+  // useSessionState; turnLoading / phase change during a turn; the pane's
+  // union `loading` (turn OR mutation, ADR-0040) stays pane-internal -- it
+  // must NOT reach the shell bar, or a dataset mutation's in-flight window
+  // flips the bar's Ask/Stop button (the reported flicker). workspaceCollapsed
+  // (bar-shaping, ADR-0083 fold) changes on the fold toggle + the one-shot
+  // first-Materialized expansion. The effect fires on those changes, keeping
+  // the shell's per-session composerFields registry fresh for the active
+  // session.
+  useEffect(() => {
+    onComposerFields(sessionId, {
+      loading: s.turnLoading,
+      phase: s.phase,
+      turnStartedAt: s.turnStartedAt,
+      turnPausedSince: s.turnPausedSince,
+      handleAsk: s.handleAsk,
+      handleCancel: s.handleCancel,
+      handleIngestFiles: s.handleIngestMany,
+      workspaceCollapsed: s.workspaceCollapsed,
+    });
+  }, [
+    sessionId,
+    s.turnLoading,
+    s.phase,
+    s.turnStartedAt,
+    s.turnPausedSince,
+    s.handleAsk,
+    s.handleCancel,
+    s.handleIngestMany,
+    s.workspaceCollapsed,
+    onComposerFields,
+  ]);
+
+  // ADR-0092: drop this session's bar-fields entry when the pane unmounts.
+  // If the pane is replaced by the session-level error boundary (a render crash)
+  // or removed on close/delete while a turn is mid-flight, the last-reported
+  // `loading: true` would otherwise linger in the shell's composer-fields map —
+  // the in-flight handleAsk's setTurnLoading(false) lands on an unmounted component
+  // (a no-op), so nothing else clears it, and the shell bar would show a stuck
+  // stop button for a session the user can no longer query. Unmount-only (empty
+  // deps): the reporting effect above owns every in-life update.
+  useEffect(() => {
+    return () => {
+      onComposerFieldsUnmount(sessionId);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- unmount-only: sessionId is constant (keyed component) + onComposerFieldsUnmount is useCallback-stable
+  }, []);
+
+  // ADR-0092 (#500): the pending payload consumption machine lives in pendingPayload.ts (consumePendingPayload).
+  const consumedPendingRef = useRef<string | null>(null);
+  useEffect(() => {
+    void consumePendingPayload({
+      sessionId,
+      paths: pendingIngestPaths,
+      question: pendingQuestion,
+      invocations: pendingSkillInvocations,
+      consumedRef: consumedPendingRef,
+      onIngestConsumed,
+      onQuestionConsumed,
+      onSeedDraft,
+      onSeedInvocations,
+      ingestMany: s.handleIngestMany,
+      ask: s.handleAsk,
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- one-shot per payload key: s.handleIngestMany / s.handleAsk are stable inside useSessionState, the consumed callbacks are useCallback-stable in useShellSessions
+  }, [pendingIngestPaths, pendingQuestion, pendingSkillInvocations, sessionId, onSeedDraft, onSeedInvocations]);
+
+  // Workspace tab (ADR-0045: 工作集 is a workspace tab, not a persistent
+  // column). 结果 = the derived chart+table stage; 工作集 = source management.
+  const [tab, setTab] = useState<WorkspaceTab>("result");
+
+  // Issue #760: the WAI-ARIA APG tabs contract for the workspace tab row.
+  // useId-scoped stable ids wire each tab's aria-controls to its own panel.
+  // Issue #1060: both panels stay mounted and the inactive one carries the
+  // `hidden` attribute, so the working set's detail pick and the result view
+  // state survive tab roundtrips -- #760's shared panel was the honest shape
+  // only while the branches were conditionally rendered. (RuntimeSection's
+  // always-mounted shape, but hiding via the attribute rather than its
+  // `hidden` class: the preflight's [hidden] rule keeps a future display
+  // utility from ever beating the hide.)
+  const tabBaseId = useId();
+  const resultTabId = `${tabBaseId}-result-tab`;
+  const workingSetTabId = `${tabBaseId}-working-set-tab`;
+  const resultPanelId = `${tabBaseId}-result-panel`;
+  const workingSetPanelId = `${tabBaseId}-working-set-panel`;
+
+  // APG keyboard activation (the same contract the settings RuntimeSection
+  // tablist implements): ArrowLeft/Right wrap around and activate on move
+  // (selection follows focus); Home/End jump to the first/last tab. Roving
+  // tabindex -- only the active tab holds tabIndex 0 -- is set in the JSX.
+  function handleTabKeyDown(e: KeyboardEvent<HTMLDivElement>) {
+    const idx = WORKSPACE_TABS.indexOf(tab);
+    let next: WorkspaceTab | null = null;
+    if (e.key === "ArrowRight") next = WORKSPACE_TABS[(idx + 1) % WORKSPACE_TABS.length];
+    else if (e.key === "ArrowLeft") next = WORKSPACE_TABS[(idx - 1 + WORKSPACE_TABS.length) % WORKSPACE_TABS.length];
+    else if (e.key === "Home") next = WORKSPACE_TABS[0];
+    else if (e.key === "End") next = WORKSPACE_TABS[WORKSPACE_TABS.length - 1];
+
+    if (next) {
+      e.preventDefault();
+      setTab(next);
+      // Focus rides the DOM id: the handler lives on the tablist, so the
+      // next tab is not guaranteed to be the event target.
+      document.getElementById(next === "result" ? resultTabId : workingSetTabId)?.focus();
+    }
+  }
+
+  // ADR-0058 L2 partition retry: each region's onReset RESETS its slice of the
+  // session query cache so the boundary's error-clear remount renders fresh
+  // data -- NOT the stale page that crashed it. invalidateQueries would leave
+  // the cache in place and let useQuery hand the remounted children the same
+  // throwing data via its stale-then-refetch render; removeQueries drops the
+  // cache but does not refetch the still-mounted observers (the region
+  // boundary never unmounts useSessionState, so nothing drives a re-read).
+  // resetQueries both drops the data and actively refetches.
+  // The epoch bump is the second half of the contract: the query observers
+  // live OUTSIDE the region boundary, so their change notifications (batched
+  // onto a macrotask by TanStack's notifyManager, the systemSetTimeoutZero
+  // default) land AFTER the boundary's synchronous error-clear re-render --
+  // which would mount the children back
+  // onto the parent's LAST JSX snapshot (still the stale array) and re-throw
+  // straight into the fallback, deadlocking the card. The bump pulls this
+  // component into the same React batch as the boundary's setState, and the
+  // batch re-renders top-down: useQuery's getSnapshot reads the reset query
+  // synchronously (status pending -> thread/[]/datasets empty), so the fresh
+  // boundary instance (key) mounts the children on the clean snapshot.
+  // Both region keys deliberately ride the one shared epoch: any retry
+  // remounts both regions (their local state resets with it, per ADR-0058's
+  // region-local posture); a per-region epoch is the narrowing lever if that
+  // cross-region loss ever matters. Do not remove the keys on green tests
+  // alone -- the notify macrotask fires between the test's act and its
+  // assertions, so jsdom cannot distinguish keyed from unkeyed (ADR-0058
+  // calibration).
+  const [regionRetryEpoch, setRegionRetryEpoch] = useState(0);
+  const resetSessionCache = () => {
+    void queryClient.resetQueries({ queryKey: sessionKeys.all(sessionId) });
+    setRegionRetryEpoch((e) => e + 1);
+  };
+
+  // The artifact face's retry (issue #1212): drop the file's two per-path
+  // cache entries so the remounted ArtifactView re-reads instead of
+  // re-throwing against the stale throwing payload. removeQueries (not
+  // resetQueries): the throwing text entry's observer rides the boundary's
+  // children, already unmounted at retry; the exists entry just re-checks
+  // (its rail-row observers sit outside and the fact is idempotent). The
+  // artifact keys are process-global (outside the session prefix), so
+  // resetSessionCache never touches them.
+  const resetArtifactCache = (path: string) => {
+    queryClient.removeQueries({ queryKey: artifactKeys.exists(path) });
+    queryClient.removeQueries({ queryKey: artifactKeys.text(path) });
+  };
+
+  // Issue #758: the ask-again sink -- the stale banner's rerun and the rail's
+  // Failed/Cancelled retry buttons all funnel here, firing the held question
+  // as a fresh turn. Direct fire, never through the composer draft; handleAsk
+  // catches its own failures internally (session error state), the `.catch`
+  // is the same defensive log the pendingQuestion path uses. handleAsk is
+  // destructured out first: it is useCallback-stable inside useSessionState
+  // while the `s` return object is rebuilt every render, so depending on the
+  // method (not the object) keeps handleAskAgain identity-stable (the same
+  // pattern the approval callbacks above use).
+  const { handleAsk } = s;
+  const handleAskAgain = useCallback(
+    (question: string) => {
+      // The composer's empty-input twin: ask-again consumes a raw persisted
+      // string (the only ask generator that does), so a blank question -- a
+      // legacy or hand-edited session file -- must not fire a hollow turn.
+      if (!question.trim()) return;
+      void handleAsk(question).catch((e) =>
+        log.error("SessionPane", "ask-again handleAsk threw unexpectedly", e),
+      );
+    },
+    [handleAsk],
+  );
+
+  // ADR-0124 Decision 3: the single stage's two faces -- the dataset name
+  // for the result-link / preview-card active mirror, the file path for the
+  // artifact-card row mirror. Exactly one is non-null at a time.
+  const viewedReference =
+    s.viewedResult?.kind === "dataset" ? s.viewedResult.referenceName : null;
+  const viewedFile = s.viewedResult?.kind === "file" ? s.viewedResult.path : null;
+  // Issue #1093: the stage's third face -- the staged fence body, the
+  // in-stream mirror's key. Exactly one of the three is non-null at a time.
+  const viewedVizSpec = s.viewedResult?.kind === "viz" ? s.viewedResult.spec : null;
+  // Non-stale dataset labels for the rail's conditional active chip (ADR-0047):
+  // a turn's question lights up a chip only when it explicitly names a dataset.
+  // Stale datasets are excluded -- they cannot be the target of a new question.
+  const datasetLabels = s.datasets.filter((d) => !d.stale);
+  // Skill registry keyed by spec name (ADR-0086, issue #366): the thread rail's
+  // Skill lifecycle markers look up their name here to flag a name the
+  // registry no longer carries (resume drift). The read rides the one
+  // registry seam -- the registry is process-global (not per-session), so
+  // every pane shares one IPC round-trip. A failed / loading read leaves the
+  // projection undefined, so the markers render the verb + name from the
+  // event alone (no drift warning) -- the timeline stays readable while the
+  // registry resolves.
+  const { skillIndex, error: skillRegistryError } = useSkillsRegistry();
+  // Observable honest-degrade: listSkills never rejects in practice, but a
+  // transport failure would otherwise leave the rail silently enriched-less
+  // with no signal. The settings SkillsSection surfaces its query
+  // errors in the UI; the rail trades UI surfacing for readability, so the
+  // log is the only trace (ADR-0029).
+  useEffect(() => {
+    if (skillRegistryError !== null) {
+      log.warn("SessionPane", "skill registry query failed", skillRegistryError);
+    }
+  }, [skillRegistryError]);
+  // Issue #763: a session query's fetch/refetch failure carries a visible
+  // banner (rendered below the header); this log is the durable trace, the
+  // same observable honest-degrade posture as the skill-registry warn above
+  // (ADR-0029). That one is log-only because the rail trades UI surfacing
+  // for readability; the session queries get the banner as well.
+  // queryErrors is a useSessionState memo, so the effect fires once per
+  // error-set change, not per render. The errors spread into individual
+  // extras: the sink's describe() takes the stack branch only for a bare
+  // Error, while an array extra stringifies to [{}] (message and stack are
+  // non-enumerable).
+  useEffect(() => {
+    if (s.queryErrors.length > 0) {
+      log.warn("SessionPane", "session query failed", ...s.queryErrors);
+    }
+  }, [s.queryErrors]);
+
+  return (
+    <div
+      className={cn(
+        "session-pane",
+        s.workspaceCollapsed && "workspace-collapsed",
+      )}
+    >
+      {/* Session header (row 1): session name + management menu + workspace
+          toggle. Moved here from the global topbar so session-scoped chrome
+          lives with the pane. ADR-0093 (issue #512): the `⋯` management menu
+          (Rename / Close / Delete) sits between the name and the
+          workspace toggle. The workspace toggle (ADR-0083, issue #298) stays at
+          the header's right edge: the panel defaults to collapsed and this is
+          its manual open/close path. */}
+      <div className="session-header" data-tauri-drag-region>
+        <span className="min-w-0 font-semibold text-base truncate" data-tauri-drag-region>
+          {sessionName ||
+            intl.formatMessage({ id: "session.defaultName", defaultMessage: "New session" })}
+        </span>
+        <SessionHeaderMenu
+          sessionName={sessionName}
+          duckPath={duckPath}
+          sessionId={sessionId}
+          onRename={onRename}
+          onClose={onClose}
+          onDelete={onDelete}
+          disabled={disabled}
+        />
+        <div className="flex-1" data-tauri-drag-region />
+        <WorkspaceToggle collapsed={s.workspaceCollapsed} onToggle={s.handleToggleWorkspace} />
+      </div>
+      {s.queryErrors.length > 0 && (
+        // Issue #763: the session-level data-channel error face, below the
+        // session header and spanning the conversation + workspace columns
+        // (the pane column's full width, inset to the header's rhythm). The
+        // three session queries coalesce through `data ??` empty fallbacks,
+        // so a failed fetch or refetch (reachable via an ADR-0058 region
+        // retry's resetQueries) used to render as a pristine empty session.
+        // This is a NON-BLOCKING disclosure: cached data keeps rendering,
+        // absent data keeps the empty-state derivations, the composer stays
+        // live; Retry refetches only the errored queries (useSessionState).
+        // Destructive variant keeps the Alert's assertive "alert" role
+        // default (alert-variants.ts).
+        <Alert variant="destructive" className="mx-3 my-2">
+          <AlertTitle>
+            <FormattedMessage
+              id="session.queries.errorTitle"
+              defaultMessage="Session data failed to load"
+            />
+          </AlertTitle>
+          <AlertDescription className="flex items-center justify-between gap-3">
+            <p className="m-0">
+              <FormattedMessage
+                id="session.queries.errorDescription"
+                defaultMessage="Some session data could not be loaded; what is shown may be incomplete."
+              />
+            </p>
+            <Button variant="outline" size="sm" onClick={s.handleRetryQueries}>
+              <FormattedMessage
+                id="common.retry"
+                defaultMessage="Retry"
+              />
+            </Button>
+          </AlertDescription>
+        </Alert>
+      )}
+      {/* ADR-0058 L2 partition boundaries: Thread rail and ResultView each get
+          their own ErrorBoundary so a render crash in one degrades only that
+          block (the shell-level QuestionBar -- a session-skeleton element,
+          ADR-0062 R1 -- is a sibling of the whole pane and always survives).
+          The session-level isolation boundary lives one level up in <App>
+          (wrapping each <SessionPane>) so a render crash elsewhere in the
+          pane degrades only THAT session.
+          KNOWN LIMITATION (React 19 + TanStack Query external store): in the
+          real App tree the per-session boundary is an ANCESTOR of these region
+          boundaries, so a Query-driven re-render throw inside Thread/ResultView
+          can be caught by the outer session boundary first (degrading the whole
+          pane) instead of the granular region boundary. First-render throws are
+          caught by the region boundary as expected; the cross-boundary case
+          surfaces only with external-store-driven updates and could not be
+          reproduced in isolation, so black-box tests assert "degrade card
+          visible + session isolated + retry" rather than "region boundary
+          catches precisely". See memory: react19-nested-errorboundary-outer-
+          catches. */}
+      {/* session-body: grid container for the conversation column + workspace
+          so both collapses animate via grid-template-columns (interpolatable).
+          ADR-0092: the QuestionBar no longer lives inside session-conversation
+          — it is a shell-level overlay above the pane host (issue #836), so
+          the session-body fills the pane's full height and the rail's tail
+          scrolls behind the bar (the rail's dynamic bottom padding keeps the
+          last element readable above it). */}
+      <div className="session-body">
+        <div className="session-conversation">
+          {/* --- Thread rail (ADR-0045/0047) ---------------------------------- */}
+          {/* Issue #829: the rail ref feeds useRailFollow's stick-to-bottom
+              machine; the section itself is unconditional within the pane, so
+              the hook's mount-time listener attach sees its whole life. */}
+          <section
+            ref={railRef}
+            className="session-rail"
+            aria-label={intl.formatMessage({ id: "session.rail.ariaLabel", defaultMessage: "Conversation timeline" })}
+          >
+            {/* Issue #833: the rail is the full-width scroll container while the
+                workspace is folded; this wrapper is the centered reading
+                column that caps the thread's measure (.rail-reading-column in
+                styles.css, capped at --reading-column-cap).
+                useRailFollow's range observer watches this node as the rail's
+                FIRST element child (its content-growth signal) -- keep it
+                first, or teach the hook a selector, when adding rail
+                children (e.g. the planned jump-to-latest affordance). */}
+            <div className="rail-reading-column">
+              <ErrorBoundary key={`thread-${regionRetryEpoch}`} name="thread" onReset={resetSessionCache}>
+                <Thread
+                  entries={s.thread}
+                  selectedResult={viewedReference}
+                  onSelectResult={s.handleSelectResult}
+                  selectedFile={viewedFile}
+                  onSelectFile={s.handleSelectFile}
+                  onSelectViz={s.handleSelectViz}
+                  selectedVizSpec={viewedVizSpec}
+                  staleByReference={s.staleByReference}
+                  datasetLabels={datasetLabels}
+                  skillIndex={skillIndex}
+                  // ADR-0078/0083 (issue #297): the in-flight turn's progressive
+                  // trace card (tool-call rows + approval cards) trails the
+                  // recorded thread while a turn runs.
+                  liveTurn={s.liveTurn}
+                  waitStartedAt={s.waitStartedAt}
+                  onRespondApproval={handleRespondApproval}
+                  onLoadApprovalAttachments={handleLoadApprovalAttachments}
+                  onRetryTurn={handleAskAgain}
+                  busy={s.loading}
+                />
+              </ErrorBoundary>
+              {s.thread.length === 0 && s.liveTurn === null && (
+              // ADR-0067 (issue #185): the .rail-empty visual rule (font-size +
+              // padding) + the .muted color rule retired onto utility; the class
+              // hooks had no selector / test dependents and are dropped. Gated on
+              // liveTurn too (issue #297): a brand-new session's FIRST in-flight
+              // turn already renders the live card -- the "no conversations yet"
+              // hint would contradict it.
+                <p className="text-[0.85rem] p-2 text-muted-foreground">
+                  <FormattedMessage
+                    id="session.rail.empty"
+                    defaultMessage="No conversations yet. Ask a question below or load data to begin."
+                  />
+                </p>
+              )}
+            </div>
+          </section>
+        </div>
+
+        {/* --- Workspace (ADR-0045/0062 R2) -------------------------------- */}
+        <section
+          className="session-workspace"
+          aria-label={intl.formatMessage({ id: "session.workspace.ariaLabel", defaultMessage: "Workspace" })}
+          inert={s.workspaceCollapsed}
+        >
+          {/* ADR-0067 (issue #173): the .workspace-tabs visual chrome (padding,
+            border-bottom, background) + the [role=tab] base + .active
+            primary-underline retired from styles.css onto this component as
+            utility + ADR-0050 token. The .workspace-tabs hook + bare "active"
+            class stay for selector / test stability; twMerge picks
+            border-b-primary over border-b-transparent when the tab is active. */}
+          <div
+            className="workspace-tabs flex items-center gap-2 px-4 py-1.5 border-b"
+            role="tablist"
+            onKeyDown={handleTabKeyDown}
+          >
+            <button
+              type="button"
+              role="tab"
+              id={resultTabId}
+              aria-selected={tab === "result"}
+              aria-controls={resultPanelId}
+              tabIndex={tab === "result" ? 0 : -1}
+              className={cn(
+                "px-3 py-1.5 cursor-pointer text-sm border-b-2 border-b-transparent text-muted-foreground",
+                tab === "result" && "active text-primary border-b-primary font-semibold",
+              )}
+              onClick={() => setTab("result")}
+            >
+              <FormattedMessage id="session.tab.result" defaultMessage="Results" />
+            </button>
+            <button
+              type="button"
+              role="tab"
+              id={workingSetTabId}
+              aria-selected={tab === "workingSet"}
+              aria-controls={workingSetPanelId}
+              tabIndex={tab === "workingSet" ? 0 : -1}
+              className={cn(
+                "px-3 py-1.5 cursor-pointer text-sm border-b-2 border-b-transparent text-muted-foreground",
+                tab === "workingSet" && "active text-primary border-b-primary font-semibold",
+              )}
+              onClick={() => setTab("workingSet")}
+            >
+              <FormattedMessage id="session.tab.workingSet" defaultMessage="Working set" />
+            </button>
+            {/* active (server truth, ADR-0051/0060) shown read-only here so the
+                user sees what the next question targets by default. Naming it
+                here, not in QuestionBar, keeps QuestionBar presentational. */}
+            {s.activeName && (
+              <Badge
+                variant="default"
+                className="active-chip"
+                title={intl.formatMessage({
+                  id: "session.activeChip.title",
+                  defaultMessage: "The next question targets this table by default",
+                })}
+              >
+                <FormattedMessage
+                  id="session.activeChip.label"
+                  defaultMessage="Targets {name}"
+                  values={{
+                    name:
+                    s.datasets.find((d) => d.reference_name === s.activeName)?.display_name ??
+                    s.activeName,
+                  }}
+                />
+              </Badge>
+            )}
+          </div>
+
+          {/* ADR-0067 (issue #173): the .workspace-body visual rule (padding)
+            retired from styles.css; the hook stays for selector / test
+            stability AND as the staged fold/expand fade anchor (the
+            transition + collapsed rules in styles.css). Issue #1060: the
+            banners stay OUTSIDE both panels -- they belong to the session,
+            not either tab -- and the keep-alive panels below stay always
+            mounted (contract at the tab-id comment above). overflow-y-auto
+            rides the panels so each tab keeps its own scroll offset instead
+            of clamping against the other tab's height on a shared container.
+            The panels carry text-sm themselves -- they are the workspace's
+            type roots (issue #864); the container keeps its own for the
+            banner strip above them. */}
+          <div className="workspace-body flex min-h-0 flex-1 flex-col p-4 text-sm">
+            {s.error && <ErrorBanner error={s.error} />}
+            {s.haltedRemaining !== null && (
+              // Issue #748: a terminally halted batch (user cancelled the
+              // guidance / Error route) surfaces the skipped-file count here.
+              // On an Error halt this shares the screen with the banner above;
+              // on a cancel halt it is the only signal that files were left
+              // unprocessed. Same disclosure pairing as the persist-warning
+              // (alert-variants.ts): cautionary content -> warning variant +
+              // role="status" (polite), not an assertive emergency.
+              <Alert variant="warning" role="status" className="mt-1.5">
+                <AlertDescription>
+                  <p className="m-0">
+                    <FormattedMessage
+                      id="ingest.batchHalted"
+                      defaultMessage="Import stopped — {count, plural, one {# file} other {# files}} not loaded."
+                      values={{ count: s.haltedRemaining }}
+                    />
+                  </p>
+                </AlertDescription>
+              </Alert>
+            )}
+            {s.persistError && (
+              // ADR-0067 (issue #172): the bespoke .persist-warning container
+              // (hardcoded amber #fff4e5 / #ffd9a0 / #8a5200) retired into a
+              // shadcn Alert warning variant, which consumes the --warning token.
+              // role="status" overrides the Alert's assertive "alert" default:
+              // the disk fell behind but the in-memory work is intact, so it
+              // reads as a polite caution, not an interrupting emergency.
+              <Alert variant="warning" role="status" className="mt-1.5">
+                <AlertDescription>
+                  <p className="m-0">
+                    <FormattedMessage
+                      id="error.persist.banner"
+                      defaultMessage="Auto-save failed: {reason} — your latest changes haven't been saved to the file; retry the save before closing the app."
+                      values={{ reason: fmtError(s.persistError, intl) }}
+                    />
+                  </p>
+                  <TechnicalDetailsFold detail={persistDetail} />
+                </AlertDescription>
+              </Alert>
+            )}
+
+            <div
+              id={resultPanelId}
+              role="tabpanel"
+              aria-labelledby={resultTabId}
+              hidden={tab !== "result"}
+              className="min-h-0 flex-1 overflow-y-auto text-sm"
+            >
+              <WorkspaceResult
+                key={`result-${regionRetryEpoch}`}
+                content={s.workspaceContent}
+                sessionId={sessionId}
+                duckPath={duckPath}
+                hasData={s.datasets.length > 0}
+                onResetRegion={resetSessionCache}
+                onResetArtifact={resetArtifactCache}
+                onJumpToLatest={s.handleJumpToLatest}
+                onRerun={handleAskAgain}
+                busy={s.loading}
+              />
+            </div>
+            <div
+              id={workingSetPanelId}
+              role="tabpanel"
+              aria-labelledby={workingSetTabId}
+              hidden={tab !== "workingSet"}
+              className="min-h-0 flex-1 overflow-y-auto text-sm"
+            >
+              {/* ADR-0123: the tab consumes the useWorkingSet seam itself;
+                  the pane passes only session addressing, the execution-window
+                  busy gate (the seam's mutations round-trip through the
+                  pane-level union), the empty card's ingest entry (issue #792:
+                  it rides the same pipeline as the composer's + entry), and
+                  the session-level mutation reporting surfaces. */}
+              <WorkspaceWorkingSet
+                sessionId={sessionId}
+                busy={s.loading}
+                onAddFiles={s.handleIngestMany}
+                surfaces={s.mutationSurfaces}
+              />
+            </div>
+          </div>
+        </section>
+
+      </div>
+
+      {/* --- Dialogs (guidance + active-source delete) ---------------------- */}
+      {s.guidance && (
+        // key={path} (#748): the batch auto-resume replaces the guidance with
+        // the NEXT parked file; the dialog's `choices` init runs at mount
+        // only, so the path key remounts it into clean choices instead of
+        // carrying the previous workbook's picks onto the new one.
+        <GuidedLoadDialog
+          key={s.guidance.path}
+          request={s.guidance.request}
+          loading={s.loading}
+          error={s.guidanceError}
+          onSubmit={s.handleGuidedSubmit}
+          onCancel={s.handleGuidedCancel}
+          onFetchWindow={s.fetchGuidanceWindow}
+        />
+      )}
+    </div>
+  );
+}
+
+// The "结果" tab content: derived from (viewedResult, thread) via
+// workspaceContent. Two states per ADR-0062 R2 (calibrated by ADR-0114):
+// a resolving viewed result, or the hero.
+function WorkspaceResult({
+  content,
+  sessionId,
+  duckPath,
+  hasData,
+  onResetRegion,
+  onResetArtifact,
+  onJumpToLatest,
+  onRerun,
+  busy,
+}: {
+  content: WorkspaceContent;
+  sessionId: string;
+  /** The session's bound .duck path -- anchors the HTML branch's
+   *  artifacts-dir scope check (ADR-0124 Decision 4). */
+  duckPath: string;
+  hasData: boolean;
+  /** ADR-0058 L2 result-partition retry: remove the session slice so a
+   *  remounted ResultView re-fetches fresh rows instead of re-throwing against
+   *  the stale page that crashed it. */
+  onResetRegion: () => void;
+  /** Issue #1212 artifact-partition retry: drop the viewed file's
+   *  exists/text cache entries so a remounted ArtifactView re-reads fresh. */
+  onResetArtifact: (path: string) => void;
+  /** Issue #757: the history indicator's "back to latest" exit (moves
+   *  viewedResult to the latest Materialized turn's primary). */
+  onJumpToLatest: () => void;
+  /** Issue #758: fires a question as a fresh turn -- the stale banner's
+   *  rerun binds the viewed result's producing question onto it. */
+  onRerun: (question: string) => void;
+  /** Issue #758: the session busy gate (the composer's mirror) -- a turn or
+   *  mutation in flight; the rerun button renders disabled until it clears. */
+  busy: boolean;
+}) {
+  switch (content.kind) {
+    case "hero":
+      // Hero empty state (ADR-0061). The standalone "pick a data file" button
+      // that lived here retired into the composer "+" panel's file section
+      // (ADR-0083, issue #351); window-level drag-and-drop stays the shortcut
+      // path, so the hero is now the drop hint + the ask-a-question pivot once
+      // a source is loaded (hasData).
+      // ADR-0067 (issue #173): the .workspace-hero visual rule (flex column,
+      // centered, gap, padding, text-align) retired from styles.css onto
+      // utility; the .workspace-hero hook stays for selector stability.
+      return (
+        <div className="workspace-hero flex flex-col items-center gap-4 p-8 text-center">
+          <p className="text-muted-foreground">
+            {hasData ? (
+              <FormattedMessage
+                id="session.hero.hasData"
+                defaultMessage="Data loaded. Ask a question below to start analyzing, or manage it in the Working set tab."
+              />
+            ) : (
+              <FormattedMessage
+                id="session.hero.empty"
+                defaultMessage="Drop a data file onto the window to start analyzing, or add one with the + button."
+              />
+            )}
+          </p>
+        </div>
+      );
+    case "result":
+      // The chart + table for the viewed Materialized result (ADR-0062 R4).
+      // ADR-0058 L2 result partition: a render crash inside ResultView (Vega's
+      // own try/catch stays internal per ADR-0033/0058 L0; this catches the
+      // rest) degrades only this block, not the Thread rail or QuestionBar.
+      return (
+        <>
+          {content.viewingHistory && (
+            // Issue #757: the workspace is showing a past result, not the
+            // latest Materialized primary -- a derived fact (ADR-0114), so the
+            // indicator rides the derivation and adds no state. Informational,
+            // not cautionary (the stale disclosure owns the warning surface),
+            // so the default info Alert + role="note" pairing (alert.tsx). The
+            // exit button shares the alert row; ResultView below is untouched.
+            <Alert role="note" className="mb-2">
+              <AlertDescription className="flex items-center justify-between gap-3">
+                <p className="m-0">
+                  <FormattedMessage
+                    id="session.historyResult.message"
+                    defaultMessage="Viewing a past result, not the latest one."
+                  />
+                </p>
+                <Button variant="outline" size="sm" onClick={onJumpToLatest}>
+                  <FormattedMessage
+                    id="session.historyResult.backToLatest"
+                    defaultMessage="Back to latest"
+                  />
+                </Button>
+              </AlertDescription>
+            </Alert>
+          )}
+          <ErrorBoundary name="result" onReset={onResetRegion}>
+            <ResultView
+              sessionId={sessionId}
+              referenceName={content.referenceName}
+              question={content.question}
+              assumption={content.assumption}
+              viz={content.viz}
+              staleAnchor={content.staleAnchor}
+              onRerun={() => onRerun(content.question)}
+              rerunBusy={busy}
+            />
+          </ErrorBoundary>
+        </>
+      );
+    case "file":
+      // ADR-0124 Decision 3/4 (issue #1088): the artifact stage -- one file
+      // at a time, rendered per the matrix (iframe shell / prose / face).
+      // No history banner: the manifest is settle-frozen, a file view never
+      // goes "stale" the way a past result does. The boundary scopes a render
+      // crash to this face (the thread rail and composer keep rendering,
+      // ADR-0058's face partition); its retry drops the file's exists/text
+      // cache entries so the remount re-reads fresh. The key rides the
+      // boundary -- NOT ArtifactView -- and carries the path identity twice
+      // over: a file-to-file switch remounts, so one file's open-failure note
+      // never rides another file's header (issue #1199), and the same remount
+      // resets a crash degrade (with the key on the child, the boundary's
+      // error state would survive the switch and pin file B to file A's
+      // fallback card).
+      return (
+        <ErrorBoundary
+          key={content.path}
+          name="artifact"
+          onReset={() => onResetArtifact(content.path)}
+        >
+          <ArtifactView
+            artifact={{ path: content.path, file_name: content.fileName }}
+            render={content.render}
+            duckPath={duckPath}
+          />
+        </ErrorBoundary>
+      );
+    case "viz":
+      // Issue #1093: the fence chart's own stage branch. The chart is the
+      // whole view (no stale/question/assumption facts exist for a fence --
+      // none are fabricated); the pane's scroll owns the height, and the
+      // export pair rides the frame. No boundary here on purpose: a decode
+      // failure degrades through the stage's own disclosure and a render
+      // throw is scoped by the chart slot's internal boundary, so an outer
+      // layer would be a defense for a throw that cannot escape.
+      return <VizStageView spec={content.spec} />;
+    default: {
+      const unhandled: never = content;
+      throw new Error(`unhandled workspace content: ${JSON.stringify(unhandled)}`);
+    }
+  }
+}
+
+// Re-exported for tests that want to assert on the thread type without reaching
+// into ../types directly.
+export type { ThreadEntry };

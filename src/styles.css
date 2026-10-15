@@ -1,41 +1,1008 @@
-:root {
-  font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
-  color-scheme: light dark;
-}
+/* Legacy v0 component layout. Colors ride the shadcn token system defined in
+ * app.css (ADR-0049/0050) via var(--…), so this scaffold flips with the .dark
+ * class set by useTheme. These rules are replaced component-by-component as the
+ * Chat-style shell lands in later slices. The disclosure banners (privacy /
+ * stale / viz-degradation / large-result / many-columns / session-count
+ * soft-cap) moved to shadcn Alert variants in issue #108; QuestionBar's
+ * input/buttons, FileDropzone's button, ErrorBanner, and the session-pane
+ * persist-warning moved to shadcn Input/Button/Alert variants in issue #172
+ * (ADR-0067); the Workspace tabs/body/hero, and the
+ * ResultView container + sticky pagination moved to Tailwind utility +
+ * ADR-0050 token in issue #173 (ADR-0067); the ErrorBoundary DegradeCard moved
+ * to shadcn Card + Button + TechnicalDetailsFold in issue #181 (ADR-0067); the
+ * App shell header actions, key-state badges, resume-progress strip, the
+ * cold-start hero CTA/title, and the dead header h1 margin rule moved to
+ * shadcn Button + Badge + Alert + Tailwind utility + ADR-0050 token (the
+ * header h1 rule was dead CSS -- no <h1> renders in the topbar -- and is
+ * simply removed) in issue #182 (ADR-0067); the PrivacyControls container
+ * spacing, the .privacy-samples switch row, the .privacy-cols last-column
+ * caller-scoped width/nowrap/center, the .disclosure-summary info blue tint,
+ * and the .privacy .muted typography moved to Tailwind utility + the Table
+ * primitive's last-cell className in issue #183 (ADR-0067); the cross-component
+ * .panel card chrome (SessionPane WorkspaceWorkingSet sections + Thread rail
+ * container), the DatasetDetail caller-scoped typography (.dataset-detail
+ * h2/small, .meta, .source, .schema td code word-wrap), and the WorkingSetList
+ * list/button/active-state/small rules moved to Tailwind utility + conditional
+ * className + a shared BUTTON_BASE constant in issue #184 (ADR-0067,
+ * since split into select/icon bases by #790); the
+ * remaining shared + scattered utility classes -- the global code font-family
+ * element rule, the cross-component .muted color token, the QuestionBar
+ * .phase-indicator status-line font-size/color/white-space, and the SessionPane
+ * .rail-empty empty-state font-size/padding -- moved to Tailwind utility
+ * (font-mono / text-muted-foreground / text-[0.82rem] / text-[0.85rem] / p-2 /
+ * whitespace-nowrap) on each owner element in issue #185 (ADR-0067), retiring
+ * the last visual rules outside the layout-only shells. */
 * { box-sizing: border-box; }
-body { margin: 0; background: #f7f7f8; color: #1a1a1a; }
-main { max-width: 1100px; margin: 0 auto; padding: 1.5rem; }
-header h1 { margin: 0 0 0.5rem; }
 
-.disclosure {
-  background: #eef6ff; border: 1px solid #b6d4ff; border-radius: 6px;
-  padding: 0.6rem 0.8rem; font-size: 0.9rem; line-height: 1.5;
+/* Viz (ADR-0016/0033): the chart container bounds a Vega-Embed render so a wide
+   spec scrolls instead of bursting the panel. The degraded-viz disclosure moved
+   to a warning Alert variant in issue #108 (ADR-0050). Vega-Embed 7 marks the
+   host `.vega-embed` inline-block, which shrink-to-fits to zero against a
+   container-sized chart (the chart measures the host) — width:100% gives the
+   container-width default a real measurement basis. */
+.viz-chart { margin: 0.5rem 0; width: 100%; max-width: 100%; overflow: auto; }
+/* Chart svgs clamp to the host width. Widthless and numeric-width
+   single/layered embeds go full-width (prepareEmbed normalizes them to
+   "container", #1245), so for those this is a guard rail rather than the
+   primary sizing: it keeps the async follow chain (ResizeObserver -> width
+   signal -> runAsync) from flashing a horizontal scrollbar during layout
+   transitions (workspace fold/unfold, window maximize/restore). Faceted and
+   concat layouts keep vega's default per-band width and never receive the
+   keyword, so for them this clamp is the sizing, in place of scrolling: a
+   chart that outdraws its host scales down proportionally. Paint-only: the
+   scenegraph (and the #1093 exports) are unaffected. */
+.viz-chart svg { max-width: 100%; height: auto; }
+
+/* Working-set tab grid (legacy .layout). ADR-0067 Decision 1: a 280px/1fr
+   two-column master-detail grid is layout semantics, not a utility long-string,
+   so the grid stays here; per-consumer margins live on the consumer
+   (SessionPane WorkspaceWorkingSet) as utility. Single consumer. The detail
+   track is minmax(0, 1fr) and the panels carry min-width: 0 -- a bare 1fr
+   track resolves its automatic minimum to the content's min-content, so a
+   wide dataset (a 40-column preview table) re-widens the column into
+   workspace-body overflow instead of scrolling inside the Table primitive's
+   overflow-x-auto container (ADR-0057). Same pin the narrow fallback below
+   carries. */
+.layout {
+  display: grid;
+  grid-template-columns: 280px minmax(0, 1fr);
+  gap: 1.25rem;
+}
+.layout > .panel { min-width: 0; }
+
+/* Narrow-workspace fallback (issue #791): .session-workspace is an
+   inline-size container (rule with .session-workspace below); when the
+   panel lands in the 320px track floor (issue #770) to 600px band, the
+   280px/1fr pair starves the detail column (280px list + 1.25rem gap), so
+   the grid stacks one column -- list first, detail below (DOM order).
+   minmax(0, 1fr) + the items' min-width: 0 pin the track and the panels
+   to the container's free space (a bare 1fr track and the items' auto
+   minimum would let a wide table re-widen the column into overflow; the
+   Table primitive's overflow-x-auto then scrolls the table itself,
+   ADR-0057). Container query rather than a media query: the panel width
+   comes from the shell grid + the draggable rail, not the viewport. The
+   fold/expand slide crosses 600px mid-flight; that transient reflow is
+   the already-handled class (fold: clipped by the workspace-collapsed
+   overflow rules below; expand: masked by the .workspace-body staged
+   fade-in below). */
+@container workspace (max-width: 600px) {
+  .layout { grid-template-columns: minmax(0, 1fr); }
 }
 
-.dropzone { display: flex; align-items: center; gap: 0.75rem; margin: 1rem 0; }
-.dropzone button {
-  padding: 0.5rem 1rem; font-size: 1rem; cursor: pointer;
-  border: 1px solid #0d9488; background: #0d9488; color: #fff; border-radius: 6px;
+/* Privacy controls (ADR-0011, issue #9): sample switch + per-column type-only.
+ * ADR-0067 (issue #183): the .privacy / .privacy h3 / .privacy-samples /
+ * .privacy-cols / .privacy-cols last-column / .disclosure-summary /
+ * .privacy .muted visual rules retired onto PrivacyControls.tsx as Tailwind
+ * utility + the Table primitive's last-cell className; the disclosure info
+ * tint first rode Tailwind's blue scale (bg-blue-50, nearest to the retired
+ * #f4f8ff; border-blue-200, one step darker than the nearest blue-100 for a
+ * visible edge, standing in for the retired #d6e4ff) and moved to the
+ * --info token (issue #864) so the tint resolves per theme instead of
+ * rendering a near-white block in dark mode. The class hooks
+ * (.privacy / .privacy-samples / .privacy-cols / .disclosure-summary) stay on
+ * the component for selector stability. ADR-0067 (issue #185): the global
+ * .muted color rule + the global code font-family element rule also retired
+ * (text-muted-foreground rides on each muted <p>/<span>/<li>/<small>/<td>;
+ * font-mono rides on each <code>) -- styles.css no longer carries either. */
+
+/* =========================================================================
+ * Chat-style three-column shell (ADR-0045/0060/0062, issue #79; evolved by
+ * ADR-0083, issue #298). Replaced the v0 single-column `main` scaffold. The
+ * session sidebar is col 1 (full height, independent -- R1: QuestionBar does
+ * NOT span over it); the right block holds the thin top bar + the session
+ * pane (in-rail QuestionBar + a workspace panel that defaults to collapsed,
+ * ADR-0083).
+ *
+ * ADR-0067 (issue #171): the shell-skeleton VISUAL rules -- .session-sidebar
+ * bg/border/padding, .sidebar-new-button, .sidebar-error, .session-empty,
+ * .session-group* typography, .session-entry* three-state bg/color/accent,
+ * .topbar bg/border-bottom, .sidebar-toggle, .topbar-session-
+ * name typography + truncation, and the whole .profile-switcher* block
+ * (trigger + hover, name, chevron opacity, menu popover + shadow, item three-
+ * state + aria-checked typography, error padding) -- were retired into
+ * SessionSidebar.tsx + App.tsx as Tailwind utility + ADR-0050 token +
+ * conditional className (the .profile-switcher* rules rode ProfileSwitcher.tsx,
+ * later deleted wholesale in issue #240 / ADR-0071; the .session-entry-menu
+ * hover + .session-menu popover chrome were retired in issue #511 / ADR-0093
+ * when the sidebar row became pure navigation). The GRID + FLEX LAYOUT
+ * shells below -- .shell (three-column grid + the sidebar-collapsed grid
+ * overlays), .session-sidebar (col 1 grid + flex column + overflow-y scroll),
+ * .session-list (flex:1 scroll container), and .topbar (row 1 grid + flex row
+ * + fixed height) -- remain as semantic layout-only CSS; cramming them into
+ * utility long-strings would obscure the three-column shell structure
+ * (ADR-0067 Decision 1). The semantic class hooks (.session-sidebar /
+ * .session-entry / .session-entry-main / .topbar /
+ * .sidebar-toggle / .topbar-session-name
+ * etc.) are kept on the components for selector / test stability.
+ * ========================================================================= */
+.shell {
+  height: 100vh;
+  display: grid;
+  position: relative;
+  grid-template-columns: var(--sidebar-width, 280px) 1fr;
+  grid-template-rows: auto auto 1fr;
+  overflow: hidden;
+  /* Shared 4-track conversation grid (ADR-0083/0090). Both .session-body and
+   * .shell-bar-track reference these so the bar sits exactly under the
+   * conversation column. Default: rail open. Collapsed: workspace folded,
+   * the conversation track takes the container's full width -- the rail is
+   * the scroll container, so its scrollbar hugs the window edge and the old
+   * empty flank tracks cease to exist as dead spacer areas (wheel over them
+   * scrolls now). The reading measure is capped not by the track but by the
+   * .rail-reading-column wrapper inside the rail plus the bar mirror below
+   * (--reading-column-cap).
+   *
+   * Workspace floor (issue #770): the workspace track's 320px min mirrors
+   * WORKSPACE_MIN_WIDTH in src/shell/layoutBounds.ts -- the grid-level
+   * guarantee that the expanded workspace never resolves below 320px (the
+   * rail track yields first via its minmax(0, ·) min). The minmax-bearing
+   * tracks (conversation/workspace) keep a matching minmax() structure in
+   * both lists and the bare-flex spacers pair fr↔fr, so the fold animation's
+   * grid-template-columns interpolation stays smooth (a bare 0fr in the
+   * collapsed list would pair a length min against auto and snap). The
+   * collapsed conversation track pairs its expanded px max against 100% --
+   * length vs percentage, both resolving against the same definite container
+   * width -- so the fold slide interpolates as smoothly as the retired
+   * px ↔ px pair did. */
+  --workspace-min-width: 320px;
+  --track-grid:
+    0fr minmax(0, var(--rail-width, 460px)) minmax(var(--workspace-min-width), 1fr) 0fr;
+  --track-grid-collapsed: 0fr minmax(0, 100%) minmax(0, 0fr) 0fr;
+  /* Collapsed reading column cap (issue #833): the retired centered fold
+   * track capped the RAIL box at 800px and the rail's horizontal gutter
+   * (--rail-gutter per side) ate into that budget; capping the content
+   * wrapper at 800px minus the same gutter keeps the grid-track-era text
+   * measure to within the retired era's 1px border (744px vs the old 743px
+   * -- the rail's border-right occupied 1px inside the capped track, which
+   * also left the old text 1px shy of the bar card). --rail-gutter is the
+   * single source for the bar's gutter inset and this cap; the rail's
+   * horizontal padding starts from it and relaxes by up to
+   * --rail-col-relax (see the .session-rail rule). Shared with the
+   * bar mirror so the two columns keep one source and one axis. */
+  --rail-gutter: 1.75rem;
+  --reading-column-cap: calc(800px - 2 * var(--rail-gutter));
+  /* Reading-column edge relax (issue #839): how far the rail's horizontal
+   * padding may shrink below --rail-gutter per side, pulling the reading
+   * column's edges toward the bar card's. Clamped to the measured
+   * scrollbar width when applied, so overlay environments relax nothing
+   * and keep column and card flush. */
+  --rail-col-relax: 10px;
+  /* Session header height (issue #782): single 40px source shared by
+   * .session-header (height/min-height) and .rail-resize-handle (top) so the
+   * drag line stops exactly at the header's bottom edge — ADR-0092 lifted
+   * the handle to .main-area with top:0, which let it span the header strip
+   * (drag line bleeding over the header + col-resize hit area stealing
+   * pointer events there). */
+  --session-header-height: 40px;
+  /* Codex-style collapse: animate the first column var(--sidebar-width) <-> 0
+   * so the main region slides instead of snapping. grid-template-columns
+   * interpolation needs the column to actually shrink, which in turn needs
+   * min-width:0 + overflow-x:hidden on .session-sidebar (default min-width:auto
+   * refuses to go below the content's intrinsic width). */
+  transition: grid-template-columns 280ms cubic-bezier(0.4, 0, 0.2, 1);
 }
-.dropzone button:disabled { opacity: 0.6; cursor: progress; }
+.shell.sidebar-collapsed { grid-template-columns: 0 1fr; }
+/* Disable grid-template-columns transition during sidebar drag so the column
+   tracks the pointer 1:1 instead of lagging behind a 280ms animation. */
+.shell.sidebar-dragging { transition: none; }
+/* display:none would snap both the column width and the sidebar's fade (display
+ * is not animatable), so this rides opacity instead -- the element stays in
+ * flow at width 0 while its content fades out in step with the grid transition.
+ * The collapsed <aside> also carries the HTML inert attribute (issue #287),
+ * which drops the subtree from the Tab sequence + blocks pointer events +
+ * hides it from the a11y tree (replacing the prior pointer-events:none). */
+.shell.sidebar-collapsed .session-sidebar { opacity: 0; }
+/* Draggable sidebar resize handle (ADR-0060 sidebar width). A thin strip
+ * straddling the col-1/col-2 boundary; absolutely positioned so it does not
+ * perturb the grid flow. The --sidebar-width variable (set inline on .shell by
+ * useSidebarResize) drives left placement. Hidden when the sidebar is collapsed
+ * (sidebar-collapsed) or the settings overlay is active (settings-mode hides
+ * the workspace subtree including this handle). touch-action:none prevents the
+ * browser from interpreting the drag as a pan/zoom. */
+.sidebar-resize-handle {
+  position: absolute;
+  top: 40px; /* below the topbar (height: 40px, grid-row: 1) */
+  bottom: 0;
+  left: var(--sidebar-width, 280px);
+  width: 6px;
+  margin-left: -3px; /* center the 6px hit area on the column boundary */
+  cursor: col-resize;
+  z-index: 12; /* above .session-pane-host (z-index: 11) so the full hit
+                 area stays interactive — without this the session content
+                 background covers the right half after switching to a session. */
+  touch-action: none;
+}
+/* Thin 2px visual line inside the 6px hit area. Fixed left:2px (not 50%)
+   to avoid sub-pixel rounding that thins the line on high-DPI displays. */
+.sidebar-resize-handle::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 2px;
+  width: 2px;
+  background-color: transparent;
+  transition: background-color 120ms ease;
+}
+.sidebar-resize-handle:hover::before,
+.shell.sidebar-dragging .sidebar-resize-handle::before {
+  background-color: var(--border);
+}
+/* Suppress the sidebar's border-r under the handle so hover/drag shows a
+   single 1px line instead of a doubled 2px. */
+.shell:has(.sidebar-resize-handle:hover) .session-sidebar,
+.shell.sidebar-dragging .session-sidebar {
+  border-right-color: transparent;
+}
+.shell.sidebar-collapsed .sidebar-resize-handle,
+.shell.settings-mode .sidebar-resize-handle {
+  display: none;
+}
 
-.error { color: #b00020; background: #fde7e9; padding: 0.5rem 0.8rem; border-radius: 6px; }
+/* --- Col 1: session sidebar (ADR-0060) -- layout-only thin layer -------- */
+.session-sidebar {
+  grid-column: 1;
+  grid-row: 2 / -1;
+  /* min-width:0 + overflow-x:hidden let the grid squash this column to 0 on
+   * collapse (default min-width:auto would refuse). overflow-y stays auto so
+   * the long header / load-error branch can still scroll vertically. */
+  min-width: 0;
+  overflow-x: hidden;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  transition: opacity 200ms ease;
+}
+/* The flex:1 scroll container of the grouped session list (part of the
+ * sidebar layout shell -- visual group/entry/typography rules retired). */
+.session-list { list-style: none; margin: 0; padding: 0; flex: 1; overflow-y: auto; }
 
-.layout { display: grid; grid-template-columns: 280px 1fr; gap: 1.25rem; margin-top: 1rem; }
-.panel { background: #fff; border: 1px solid #e3e3e8; border-radius: 8px; padding: 1rem; }
+/* --- Row 1: thin top bar (ADR-0060 ~40px) -- layout-only ------------------
+ * Codex-style (aligns dannysmith/tauri-template): the topbar spans the full
+ * shell width (grid-column 1 / -1) so the sidebar collapse toggle sits at the
+ * VIEWPORT's top-left, not the main region's top-left. The sidebar now starts
+ * at row 2 (under the topbar) instead of row 1 / -1; the toggle stays
+ * reachable in both states because the topbar never collapses. */
+.topbar {
+  grid-column: 1 / -1; grid-row: 1;
+  display: flex; align-items: center;
+  height: 40px; min-height: 40px;
+}
+/* --- Row 2: shell error banner (absent unless a shell error is set) ------
+ * Row 2 formerly also hosted the resume progress strip; that moved to an
+ * overlay inside .main-area (see the .main-area > .resume-progress rule in
+ * the main-area section below) so its mount/unmount no longer shifts the
+ * grid rows. The shell error banner keeps the in-flow row-2 placement. */
+.shell > .shell-error { grid-column: 2; grid-row: 2; margin: 0.4rem 1rem; }
 
-.working-set { list-style: none; margin: 0; padding: 0; }
-.working-set li { margin: 0.2rem 0; }
-.working-set button { all: unset; cursor: pointer; padding: 0.4rem 0.5rem; border-radius: 6px; display: block; width: 100%; }
-.working-set li.active button { background: #e6f4f1; font-weight: 600; }
-.working-set small { color: #777; font-weight: 400; }
+/* --- Settings in-app overlay view (ADR-0065, issue #151) -----------------
+ * When settings-mode is on the shell grid collapses to a titlebar row + a
+ * single content cell, and the SettingsView overlay covers the cell. Non-modal,
+ * no mask -- the overlay IS the current view. The session sidebar + keep-alive
+ * session panes stay MOUNTED but hidden (display:none): App state + any
+ * in-flight turn survive the round trip, restored unchanged on return (no
+ * refetch, no resume replay). The shell TITLEBAR is exempted from the hide:
+ * with decorations:false (ADR-0074) its window controls + drag region are
+ * shell-wide chrome that must stay reachable in every view. App unmounts only
+ * the topbar's workspace children (sidebar toggle / soft-cap / header actions)
+ * while settings are open, leaving a clean titlebar strip above the overlay.
+ *
+ * ADR-0067 (issue #170): the `.settings-*` / `.profiles-*` VISUAL rules
+ * retired into SettingsView.tsx + ProfilesSection.tsx as Tailwind utility +
+ * ADR-0050 token + conditional className. This section keeps ONLY the grid +
+ * flex LAYOUT shells below (overlay grid, nav/content grid
+ * positioning + flex flow, profiles-master-detail grid + its <=640px stacking
+ * media query -- issue #170 AC: responsive stacking stays); cramming them
+ * into utility long-strings would obscure the overlay / master-detail
+ * structure (ADR-0067 Decision 1). The semantic class hooks (.settings-overlay
+ * / .settings-nav / .settings-content / .settings-rail-top
+ * / .settings-nav-button / .sidebar-footer / .settings-footer
+ * / .profiles-master-detail / .profiles-list-item / .profiles-list-item-select
+ * etc.) stay on the components for selector / test stability (the
+ * .sidebar-footer / .settings-footer pair replaced the retired .connection-status
+ * / .connection-row hooks when ConnectionStatus was removed, issue #282; the
+ * .settings-rail-bottom hook retired with the inline markup it annotated).
+ * The retirement SCOPE is the decision of record in ADR-0067 +
+ * each component's ADR-0067 inline comment -- not re-listed here, since a
+ * hand-kept copy would drift on the next migration slice.
+ */
+.shell.settings-mode { grid-template-columns: 1fr; grid-template-rows: auto 1fr; }
+.shell.settings-mode > :not(.settings-overlay):not(.topbar) { display: none; }
+/* The overlay drops below the persistent titlebar (row 2) and rides the row
+ * height instead of 100vh (which would overflow past the 40px strip). */
+.shell.settings-mode .settings-overlay { grid-row: 2; height: 100%; }
+/* ADR-0075 (issue #281): the overlay is now a full-height rail + content grid.
+ * The retired single settings header + footer split into the rail's top (brand +
+ * back) / bottom (connection row + gear) and each pane's hero; the rail spans
+ * the full height and the content column scrolls. The rail column mirrors the
+ * shell's col-1 session sidebar width via the same --sidebar-width variable
+ * (ADR-0060), so the left-column boundary stays put when switching between the
+ * workspace and settings views. */
+.settings-overlay {
+  grid-column: 1; grid-row: 1;
+  display: grid;
+  grid-template-columns: var(--sidebar-width, 280px) 1fr;
+  grid-template-rows: 1fr;
+  height: 100vh;
+  overflow: hidden;
+  /* Codex-style collapse (issue #285), mirroring the .shell session-sidebar
+   * animation: the first column animates var(--sidebar-width) <-> 0 so the content column
+   * slides instead of snapping. grid-template-columns interpolation needs the
+   * column to actually shrink, which needs min-width:0 + overflow:hidden on
+   * .settings-nav (below). */
+  transition: grid-template-columns 280ms cubic-bezier(0.4, 0, 0.2, 1);
+}
+.settings-nav {
+  grid-column: 1; grid-row: 1;
+  display: flex; flex-direction: column;
+  /* min-width:0 lets the grid squash this column to 0 on collapse (default
+   * min-width:auto would refuse), mirroring .session-sidebar. overflow stays
+   * hidden so the nav's content fades via opacity instead of reflowing. */
+  min-width: 0;
+  overflow: hidden;
+  transition: opacity 200ms ease;
+}
+.settings-content {
+  grid-column: 2; grid-row: 1;
+  overflow-y: auto;
+}
+/* Settings overlay left-nav collapse (ADR-0054 shell-collapse family, issue
+ * #285). The overlay's own grid (var(--sidebar-width) 1fr above) animates col 1 to 0 + fades
+ * the nav, so col 2 (.settings-content at 1fr) fills the overlay. The
+ * transition lives on .settings-overlay + .settings-nav above (mirrors the
+ * .shell session-sidebar collapse). display:none would snap both the column
+ * width and the fade (display is not animatable), so this rides opacity
+ * instead -- the nav stays in flow at width 0 while its content fades out in
+ * step with the grid transition. The collapsed <nav> also carries the HTML
+ * inert attribute (issue #287), which drops the subtree from the Tab sequence
+ * + blocks pointer events + hides it from the a11y tree (replacing the prior
+ * pointer-events:none). The modifier sits on .shell so it scopes exactly like
+ * the workspace sidebar-collapsed classes (harmless outside
+ * settings-mode: the overlay mounts only while settings are open). */
+.shell.settings-nav-collapsed .settings-overlay { grid-template-columns: 0 1fr; }
+.shell.settings-nav-collapsed .settings-nav { opacity: 0; }
+/* Profiles master-detail (issue #153, ADR-0064/0065). Two columns on desktop,
+ * stacked on narrow widths. The <=640px stacking is a behavior-equivalence AC
+ * (issue #170) and stays here as layout, not on the component. */
+.profiles-master-detail {
+  display: grid;
+  grid-template-columns: minmax(220px, 280px) 1fr;
+  align-items: start;
+}
+@media (max-width: 640px) {
+  .profiles-master-detail { grid-template-columns: 1fr; }
+}
 
-.dataset-detail h2 { margin: 0 0 0.25rem; }
-.dataset-detail small { color: #777; font-weight: 400; }
-.meta { color: #555; margin: 0.25rem 0 0.75rem; }
-table { border-collapse: collapse; width: 100%; margin: 0.5rem 0 1rem; }
-th, td { border: 1px solid #e3e3e8; padding: 0.3rem 0.5rem; text-align: left; font-size: 0.9rem; }
-th { background: #f0f0f3; }
-code { font-family: ui-monospace, "Cascadia Code", Menlo, monospace; }
-.source { color: #777; font-size: 0.85rem; word-break: break-all; }
-.muted { color: #777; }
+/* --- Row 3 (cols 2+): main area (ADR-0092) --------------------------------
+ * ADR-0092: the main area replaces the old .session-pane-host grid cell. It
+ * holds the session-pane-host (flex:1, always full height) with the
+ * shell-level bar slot as an absolute overlay (issue #836): the rail scroll
+ * container extends to the window's bottom edge so its scrollbar reaches
+ * the app's bottom, and the thread tail scrolls out of view behind the
+ * bar -- the rail compensates with a bottom padding sized from the slot's
+ * measured height (--shell-bar-h, written by App.tsx's ResizeObserver).
+ *
+ * The session-pane-host is a positioning context for the keep-alive layer
+ * stack: every open session renders a .session-pane-layer absolutely filling
+ * it; non-active layers are display:none (mounted but not laid out --
+ * ADR-0051 keep-alive, no refetch on switch). In cold-start mode no layer
+ * is active, so the host renders as an invisible full-height block under
+ * the centered bar. */
+.main-area { grid-column: 2; grid-row: 3; display: flex; flex-direction: column; overflow: hidden; position: relative; z-index: 11; }
+.session-pane-host {
+  flex: 1;
+  min-height: 0;
+  position: relative;
+  overflow: hidden;
+}
+.session-pane-layer { position: absolute; inset: 0; }
+.session-pane-layer.hidden { display: none; }
+/* Resume progress strip (ADR-0034; absent unless a resume runs). An overlay
+ * inside .main-area instead of an in-flow shell-grid row: the former row-2
+ * placement shifted the whole main area down on mount and back up on unmount,
+ * so the visible session header bounced on every open / resume (the title
+ * position flicker). Absolutely positioned, the strip mounts and unmounts
+ * with ZERO layout shift; it covers the session-header strip while a resume
+ * runs, and the incoming session's header lands at the exact same position.
+ * z-index above the rail resize handle (10) so the status line reads clean.
+ * pointer-events:none -- the strip is a transient status line, never an
+ * interaction target, so it must not block the header controls underneath
+ * while it lingers. ADR-0067 (issue #182): the Alert chrome (border +
+ * rounded-lg + bg-card) rides the shadcn Alert default variant; this rule is
+ * layout-only. The .resume-progress class hook stays for selector stability. */
+.main-area > .resume-progress {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  z-index: 11;
+  pointer-events: none;
+}
+
+/* --- Shell-level bar slot (ADR-0092) -------------------------------------
+ * The QuestionBar lives at the shell level as a single instance. Two
+ * positions driven by activeSessionId: centered (cold start) or bottom
+ * (active session). The same DOM node persists across transitions — CSS
+ * handles the repositioning, no React unmount/remount. The slot is an
+ * absolute overlay on the main area (issue #836), so it shrink-wraps its
+ * content height and interpolates BETWEEN two anchor pairs instead of
+ * through flex-grow: centered sits at bottom:50% + translateY(50%) (the
+ * slot's box centers on the main area's midline), bottom at bottom:0 +
+ * translateY(0). Each property interpolates on the same curve, so the
+ * composed trajectory stays exactly linear — the same glide the old
+ * flex-grow pair produced, without resizing the pane host mid-flight (the
+ * rail keeps a constant height through the slide). The bottom anchor is
+ * layout-bound by necessity: translate percentages resolve against the
+ * element's own box, so only an inset anchor can pin the midline in pure
+ * CSS — and the flex-grow pair it replaces was layout-bound too.
+ *
+ * The strip paints an opaque backdrop but leaves the scrollbar a
+ * passthrough (issue #836): .shell-bar-backdrop fills the conversation
+ * column up to the rail's scrollbar (--rail-sb-w, measured once at
+ * startup), so scrolling content -- including content that overflows the
+ * reading column into the rail's padding -- never peeks around the
+ * floating card, while the scrollbar itself stays visible down to the
+ * window's bottom edge. The workspace column is NOT covered (issue #863
+ * retired the track's ::before card fill): over col 3 the strip is
+ * transparent and hit-inert, so the workspace column owns its bottom
+ * edge -- content, its scrollbar, and the sticky result pagination all
+ * reach the app's bottom edge, visible and clickable (wheel scrolls the
+ * workspace natively; the strip's forwarding never sees it). The slot
+ * itself is pointer-events:none in the bottom posture, so hits over the
+ * reserved band fall through to the rail's native scrollbar (draggable
+ * again); the card and the backdrop re-enable pointer-events, keeping the
+ * strip's wheel forwarding and blocking clicks on the content hidden
+ * behind them.
+ *
+ * Bottom width tracking (ADR-0090 calibration, ADR-0092): the
+ * .shell-bar-track mirrors the pane's 4-track .session-body grid so the bar
+ * sits exactly under the conversation column — rail width (--rail-width)
+ * when the workspace is open, the full-width conversation track when the
+ * active pane is workspace-collapsed (App mirrors the fold via .ws-collapsed,
+ * reported upward through the composer fields). The track's
+ * grid-template-columns transition matches the pane's so the bar follows the
+ * fold animation + rail drag.
+ *
+ * Centered: shrink-wrapped at the main area's midline, holding the greeting
+ * + bar. The track caps the bar at a readable width (no conversation column
+ * exists in cold start — session header / rail / workspace are all hidden). */
+.shell-bar-slot {
+  position: absolute;
+  left: 0;
+  right: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  transition: bottom 280ms cubic-bezier(0.4, 0, 0.2, 1),
+    transform 280ms cubic-bezier(0.4, 0, 0.2, 1);
+}
+.shell-bar-slot.centered {
+  bottom: 50%;
+  transform: translateY(50%);
+  gap: 1rem;
+  /* Issue #839: horizontal insets mirror the rail's gutter, so -- below
+     the track's cap -- the cold-start card sits the same distance from
+     the flanks as the bottom-state bar and comes out the same width.
+     The vertical rhythm stays 2rem. */
+  padding-block: 2rem;
+  padding-inline: var(--rail-gutter);
+}
+.shell-bar-slot.centered .shell-bar-track {
+  width: min(100%, 720px);
+}
+.shell-bar-slot.bottom {
+  bottom: 0;
+  transform: translateY(0);
+  /* pointer-events:none (see the section comment): the strip's boxes must
+   * not shield the rail's scrollbar column; the interactive surfaces below
+   * re-enable it. */
+  pointer-events: none;
+}
+/* Opaque backdrop over the conversation column (bottom posture only). App
+ * renders it as the track's first child -- convention, not the layering
+ * mechanism: the bar card is position:relative, and a positioned box paints
+ * above in-flow siblings regardless of DOM order. Stops at the rail's
+ * scrollbar -- --rail-sb-w is measured once at
+ * startup (App.tsx), the +1px is the rail's column border -- so the only
+ * uncovered band is the scrollbar itself, visible and, via the slot's
+ * pointer-events:none, draggable. Content that overflows the reading
+ * column paints across the rail's padding up to its clip edge; stopping a
+ * full gutter short (the earlier form) left that overflow peeking through
+ * the padding part of the notch. pointer-events:auto keeps wheel events
+ * bubbling to the slot's forwarder and blocks clicks on the thread
+ * content sliding behind. */
+.shell-bar-slot.bottom .shell-bar-backdrop {
+  grid-row: 1;
+  grid-column: 2;
+  margin-right: calc(var(--rail-sb-w, 0px) + 1px);
+  background: var(--background);
+  pointer-events: auto;
+}
+.shell-bar-slot.bottom .shell-bar-track {
+  width: 100%;
+  display: grid;
+  grid-template-columns: var(--track-grid);
+  transition: grid-template-columns 280ms cubic-bezier(0.4, 0, 0.2, 1);
+}
+/* Workspace folded (ADR-0083): mirror the pane's fold tracks so the bar's
+ * track spans the same full-width conversation column. Both selectors
+ * reference the shared custom properties on .shell so the two surfaces never
+ * drift. The bar card carries the reading-column inset unconditionally:
+ * width follows min(cap, track - 2 * gutter) with margin-inline: auto
+ * centering it, so the card rides the track's centerline -- the reading
+ * column's axis -- at every width. Under classic scrollbars the card runs
+ * (scrollbar width minus the rail's padding relax) wider per side than
+ * the column while the width formula is uncapped; overlay scrollbars
+ * reserve and relax nothing, and once the cap binds, card and column
+ * meet at 744px and sit flush. Below the cap the width consumes exactly
+ * the gutter inset per side (the auto margins resolve to zero; above
+ * the cap they split the leftover), so nothing jumps when the fold
+ * starts; keeping the width unscoped also makes the card ride the fold
+ * AND unfold slides without its own transition (a fold-scoped rule
+ * would drop the cap at unfold start and snap one frame on panes wider
+ * than the cap). */
+.shell-bar-slot.bottom.ws-collapsed .shell-bar-track {
+  grid-template-columns: var(--track-grid-collapsed);
+}
+.shell-bar-slot.bottom .question-bar {
+  grid-column: 2;
+  /* Explicit row: with the backdrop also placed in col 2, auto-placement
+   * would push the card to a second row and collapse row 1 to zero
+   * height. Both strip items share this row; the card sizes it. */
+  grid-row: 1;
+  min-width: 0;
+  /* Re-enable hits on the card itself (the slot is pointer-events:none). */
+  pointer-events: auto;
+  /* The old .session-questionbar padding, moved onto the bar inside the
+   * conversation-width track: --rail-gutter anchors the rail's horizontal
+   * padding (which relaxes below it under classic scrollbars), so the
+   * bar sits a gutter off the flanks while sharing the reading column's
+   * axis -- both center on the track. The side insets come from the
+   * centered width formula below, which degenerates to the gutter inset
+   * in the expanded state. */
+  margin-block: 0.5rem 1rem;
+  margin-inline: auto;
+  width: min(var(--reading-column-cap), calc(100% - 2 * var(--rail-gutter)));
+}
+/* Disable the track's grid transition during rail / sidebar drag so the bar
+ * width follows the pointer 1:1 instead of lagging (same rule the pane's
+ * .session-body uses). */
+.shell.rail-dragging .shell-bar-slot.bottom .shell-bar-track,
+.shell.sidebar-dragging .shell-bar-slot.bottom .shell-bar-track { transition: none; }
+
+/* --- Pane column: header + session-body (ADR-0083) --------------------------
+ * Flex column, three potential children: header (auto) + the optional
+ * session-query error banner (auto, #763, only while a session query is in
+ * error state) + session-body (flex: 1). A conditional banner slot is why
+ * this is a flex column rather than the original two-row grid: auto-placement
+ * would shift the body out of its positional 1fr row whenever the banner
+ * mounts. The session-body is the 4-track
+ * grid carrying the conversation column + the workspace. ADR-0092: the
+ * QuestionBar moved to the shell level — it overlays the pane host from
+ * .main-area (issue #836), so the pane keeps its full height behind the
+ * bar and the rail's bottom padding compensates (--shell-bar-h).
+ *
+ * ADR-0083 workspace fold (issue #298): the pane carries .workspace-collapsed
+ * while the panel is folded away (cold-start default, session-ephemeral) --
+ * the rail owns the released space (the rail-as-primary form). The rail's
+ * floors live in useRailResize (350 direct-drag / 280 compensated); the
+ * 320px minimum-usable-column floor is the workspace track's
+ * (--workspace-min-width, issue #770). */
+.session-pane {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+}
+/* Workspace folded (ADR-0083, issue #298): 4-track grid hands the container's
+ * full width to the conversation track when the workspace folds. Tracks:
+ * [spacer 0fr] [conversation minmax(0, 100%)] [workspace minmax(0, 0fr)]
+ * [spacer 0fr] -- the rail scroll container spans the pane's full width
+ * (scrollbar pinned to the window edge, wheel over the old empty flanks
+ * scrolls because that surface is rail now, not dead spacer grid area), and
+ * the .rail-reading-column wrapper inside the rail caps the reading measure.
+ * The workspace column shrinks minmax(min, 1fr) -> minmax(0, 0fr). Every
+ * track interpolates (minmax<->minmax length-vs-percentage on the
+ * conversation max, px-by-px on the workspace min, bare fr<->fr on the
+ * spacers) so no jitter. */
+.shell .session-pane.workspace-collapsed .session-body {
+  grid-template-columns: var(--track-grid-collapsed);
+}
+.shell .session-pane.workspace-collapsed .session-rail { border-right-color: transparent; }
+.shell .session-pane.workspace-collapsed .session-workspace {
+  opacity: 0;
+}
+/* Clip the workspace AND every descendant scroll container while folded.
+   The shrinking column reflows the rich content (tables / charts / wrapping
+   text), which summons transient scrollbars on every overflow:auto
+   descendant (.workspace-body's two tabpanel children first of all) --
+   opacity does not hide scrollbars, so they flicker during the fade.
+   Specificity (0,4,0) beats the utility overflow classes without
+   !important. The class applies the instant the fold begins, so the clip
+   precedes the first reflow frame. */
+.shell .session-pane.workspace-collapsed .session-workspace,
+.shell .session-pane.workspace-collapsed .session-workspace * {
+  overflow: hidden;
+}
+/* Expand direction: the workspace BODY waits for the grid slide (280ms) to
+   settle before fading in -- at intermediate widths the content wraps taller
+   than its final layout and the panels' scrollbars would flicker in with
+   the fade. The workspace card surface itself keeps the normal 200ms fade
+   so the panel still glides with the column (the sidebar fold parity); only
+   the inner body is staged. The collapsed rule overrides the delay so the
+   fold fades out immediately. */
+.workspace-body {
+  transition: opacity 150ms ease 280ms;
+}
+.shell .session-pane.workspace-collapsed .workspace-body {
+  opacity: 0;
+  transition: opacity 200ms ease;
+}
+/* Session header (row 1): the session name + the workspace toggle. Moved out
+   of the global topbar so session-scoped chrome
+   lives with the session pane; the topbar keeps only shell-wide controls
+   (sidebar toggle + header actions + window controls). Layout-only -- visual
+   chrome (height/padding/border) mirrors the topbar so the two bars read as
+   one continuous strip across the viewport. */
+.session-header {
+  display: flex; align-items: center; gap: 0.5rem;
+  height: var(--session-header-height); min-height: var(--session-header-height);
+  padding: 0 1rem;
+  border-bottom: 1px solid var(--border);
+  background: var(--background);
+}
+/* Grid row: conversation + workspace. Same grid-template-columns slide
+ * pattern as the shell sidebar -- the transition on grid-template-columns
+ * makes the column boundary slide smoothly (expanded rail track <-> the
+ * full-width fold track).
+ * background prevents white flash during the slide.
+ *
+ * --rail-width (set inline on .shell by useRailResize) drives the
+ * conversation column's max width so the user can drag-resize the
+ * conversation/workspace boundary, mirroring the sidebar resize pattern.
+ * position:relative anchors the absolutely-positioned .rail-resize-handle. */
+.session-body {
+  flex: 1;
+  position: relative;
+  display: grid;
+  grid-template-columns: var(--track-grid);
+  overflow: hidden;
+  min-height: 0;
+  background: var(--background);
+  transition: grid-template-columns 280ms cubic-bezier(0.4, 0, 0.2, 1);
+}
+/* Disable grid-template-columns transition during rail drag so the column
+   tracks the pointer 1:1 instead of lagging behind a 280ms animation. */
+.shell.rail-dragging .session-body,
+.shell.sidebar-dragging .session-body { transition: none; }
+/* Draggable rail resize handle (conversation/workspace boundary). A thin
+   strip straddling the conversation/workspace column boundary; absolutely
+   positioned within .main-area so its bottom spans the shell-level
+   QuestionBar (ADR-0092) while its top stops at the session header's bottom
+   edge (issue #782) -- the boundary is meaningless inside the full-width
+   header strip, so the line and its col-resize hit area stay out of it. The
+   handle's top and the header's height share --session-header-height. The
+   --rail-width variable (set
+   inline on .shell by useRailResize) drives left placement. Hidden when
+   cold-start, settings mode, or the workspace is folded
+   (.workspace-collapsed) -- the 4-track grid hands the conversation track
+   the full width and the boundary no longer maps to --rail-width.
+   touch-action:none prevents the
+   browser from interpreting the drag as a pan/zoom. */
+.rail-resize-handle {
+  position: absolute;
+  top: var(--session-header-height);
+  bottom: 0;
+  left: var(--rail-width, 460px);
+  width: 6px;
+  margin-left: -3px; /* center the 6px hit area on the column boundary */
+  cursor: col-resize;
+  z-index: 10;
+  touch-action: none;
+}
+/* Thin 2px visual line inside the 6px hit area. Fixed left:2px (not 50%)
+   to avoid sub-pixel rounding that thins the line on high-DPI displays. */
+.rail-resize-handle::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 2px;
+  width: 2px;
+  background-color: transparent;
+  transition: background-color 120ms ease;
+}
+.rail-resize-handle:hover::before,
+.shell.rail-dragging .rail-resize-handle::before {
+  background-color: var(--border);
+}
+/* Suppress the .session-rail permanent border-right under the handle so
+   hover/drag shows a single 1px line instead of a doubled 2px. */
+.main-area:has(.rail-resize-handle:hover) .session-rail,
+.shell.rail-dragging .session-rail {
+  border-right-color: transparent;
+}
+/* Hide the rail handle when there is no active session (cold start), in
+   settings mode, or when the active session's workspace is folded. */
+.shell.cold-start-mode .rail-resize-handle,
+.shell.settings-mode .rail-resize-handle,
+.main-area.workspace-collapsed .rail-resize-handle {
+  display: none;
+}
+/* Conversation column: the thread rail (ADR-0092: the QuestionBar moved to
+ * the shell level). Placed in grid-column 2 (track 2 of the 4-track grid).
+ * Internally still a flex column. */
+.session-conversation {
+  grid-column: 2;
+  /* Floor matches useRailResize COMPENSATED_MIN_WIDTH clamp (280px, the
+     sidebar-compensation floor). */
+  min-width: 280px;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.session-rail {
+  flex: 1;
+  min-height: 0;
+  overflow-x: hidden;
+  overflow-y: auto;
+  /* Issue #839: reserve the scrollbar gutter on BOTH inline edges so the
+     content box stays symmetric and the centered reading column holds the
+     track's centerline (the axis the bar card centers on) with or without
+     a scrollbar. `stable` keeps the reservation permanent, so the scrollbar
+     appearing costs no reflow -- the text measure and the column's axis
+     hold while the thread grows past the overflow threshold. The bar
+     card centers on the same centerline, so the two axes stay locked;
+     overlay scrollbars reserve nothing and the property is a no-op
+     there. */
+  scrollbar-gutter: stable both-edges;
+  border-right: 1px solid var(--border);
+  background: var(--background);
+  /* Issue #839: the horizontal padding relaxes up to the measured scrollbar
+     width (--rail-col-relax cap) below the gutter, so the reading column's
+     edges sit close to the bar card's -- under classic scrollbars the card
+     ends a few pixels wider per side while the widths are uncapped;
+     overlay scrollbars clamp the relax to zero, and above the cap the two
+     meet at 744px either way. The bar's own gutter inset is untouched. */
+  padding-block: 0.5rem;
+  padding-inline:
+    calc(var(--rail-gutter) - min(var(--rail-sb-w, 0px), var(--rail-col-relax)));
+  /* Issue #836: the bar overlays the strip at the rail's bottom, so the
+     scroll container's usable height must end ABOVE the overlay: the
+     dynamic bottom padding follows the slot's measured height (--shell-bar-h,
+     published by App.tsx's ResizeObserver on .main-area) plus the resting
+     0.5rem, keeping the last element fully readable above the bar at
+     maxScroll while the tail passes behind it. The calc rides this rule's
+     existing padding transition, so a height change eases the bound over
+     200ms rather than jumping. */
+  padding-bottom: calc(var(--shell-bar-h, 0px) + 0.5rem);
+  transition: opacity 200ms ease,
+    padding 200ms ease,
+    border-right-width 200ms ease,
+    border-right-color 200ms ease;
+}
+/* The Thread rail section does not carry a `.panel` hook -- the .session-rail
+   rule above supplies bg-card + 0.5rem padding directly. ADR-0067 (issue
+   #185): the scattered .rail-empty empty-state rule (font-size + padding)
+   retired onto the SessionPane rail-empty <p> as utility (text-[0.85rem] +
+   p-2); the class hook had no selector / test dependent and is dropped. */
+
+/* Reading column (issue #833): the direct child wrapper carrying the rail's
+   content. The rail itself is the full-width scroll container in the folded
+   state (scrollbar at the window edge); this wrapper centers the thread
+   content and caps it at --reading-column-cap so the text measure carries
+   over from the retired centered-track era (within the retired era's 1px
+   border). The centering is axis-true because the rail's scrollbar-gutter
+   reserves both edges symmetrically (issue #839): the column lands on the
+   track's centerline -- the bar card's axis -- whether or not the scrollbar
+   is showing, and the reservation is stable, so crossing the overflow
+   threshold costs no reflow. Inert in the expanded state -- the rail's 600px
+   drag ceiling keeps the expanded content (533px max with 15px-classic
+   scrollbars, padding relaxed) well under the 744px cap, so the unscoped
+   max-width never binds there -- and continuous through the fold
+   slide in both directions: min(cap, the rail's content width) rides the
+   track without its own transition (a fold-scoped cap would drop at unfold
+   start and snap one frame on panes wider than the cap). */
+.rail-reading-column {
+  margin-inline: auto;
+  max-width: var(--reading-column-cap);
+}
+
+.session-workspace {
+  grid-column: 3;
+  min-width: 0;
+  overflow: hidden auto;
+  display: flex; flex-direction: column;
+  /* Page-floor surface (issue #865): the workspace column rides the canvas
+     (--background), not card, so in-content card surfaces that sit directly on
+     it (the working-set panels) read as a layer above the floor
+     per the DESIGN.md surface levels -- dark mode gains the brightness step
+     (canvas #0f1410 -> card #181b18); light mode is same-white by design and
+     keeps the hairline + shadow-sm edge (the system's light-mode depth
+     method). Before #865 this was var(--card), which made the working-set
+     panel card-on-card: same token on same token, hairline as the only
+     separation. */
+  background: var(--background);
+  transition: opacity 200ms ease;
+  /* Inline-size container (issue #791): the .layout working-set grid (rule
+     at the top of this file) queries this column's width for the narrow
+     single-column fallback. Named so the query cannot silently re-target a
+     nearer container added later inside the pane. Containment side effects
+     are inert here: the column's width comes from the track, not content
+     (minmax(320px, 1fr) ignores intrinsic sizes), and the subtree is
+     already clipped by this rule's own overflow and self-contained by
+     its flex formatting context. */
+  container: workspace / inline-size;
+}
+/* ADR-0067 (issue #173): the workspace + textual-card VISUAL rules retired
+ * into SessionPane.tsx + App.tsx as Tailwind utility + ADR-0050 token. The
+ * rule-by-rule retirement lives on each component's ADR-0067 inline comment
+ * (not re-listed here -- a hand-kept copy drifts on the next slice, per the
+ * retire-scope convention above). The semantic class hooks (.workspace-tabs /
+ * .workspace-body / .workspace-hero) stay on the components for
+ * selector / test stability; the textual-card hooks retired with the card
+ * itself (ADR-0114). The bare "active" class on the tab button is kept
+ * as a state marker. The .active-chip rule below is layout-only (pushing the
+ * chip to the row's right edge) and stays here. */
+/* active-chip is now a Badge variant="default" (teal --primary, ADR-0050); this
+   class carries layout only -- pushing the chip to the row's right edge. The
+   variant owns color/bg/padding/radius so the chip rides the token system. */
+.active-chip {
+  margin-left: auto;
+}
+
+/* Phase indicator (ADR-0059 discrete phase feedback). Sits between the input
+   and the stop button while a turn is in flight; reads as a muted status line
+   so it never competes with the primary input affordance. ADR-0067 (issue
+   #185): the .phase-indicator visual rule (font-size + color + white-space)
+   retired onto the QuestionBar phase <span> as utility (text-[0.82rem] +
+   text-muted-foreground + whitespace-nowrap); the class hook had no selector /
+   test dependent (Shell.test.tsx queries role="status", not the class) and is
+   dropped. role="status" + aria-live stay on the element. */
+
+/* Degrade card (ADR-0058 L2/L3 fallback) visual rules retired in issue #181
+   (ADR-0067); see ErrorBoundary.tsx DegradeCard for the per-rule retiree
+   record. The .degrade-card class hook stays on the <Card> for selector /
+   test stability (ErrorBoundary.test.tsx queries .degrade-card). */
+
+/* --- Result rendering (ADR-0057/0062 R4) --------------------------------
+ * ADR-0067 (issue #173): the result-view + sticky-pagination VISUAL rules
+ * retired into ResultView.tsx as Tailwind utility + ADR-0050 token. The
+ * rule-by-rule retirement lives on ResultView's ADR-0067 inline comments (not
+ * re-listed here -- a hand-kept copy drifts on the next slice, per the
+ * retire-scope convention above). The semantic hooks (.result-view / .result /
+ * .num / .cell-null / .page-info) stay on the component for selector / test
+ * stability; the bare `sticky` class on the pagination div IS the Tailwind
+ * position utility (position: sticky), no longer a CSS-class hook. */
+
+/* =========================================================================
+ * Thread rail dual-species visual language (ADR-0047/0050, issue #80).
+ * ADR-0067 (issue #169): the `.thread` visual rules below were retired into
+ * src/components/Thread.tsx -- turn-card padding/radius, outcome-icon color
+ * encoding (data-outcome hue), turn-question truncation, active/stale chip
+ * layout, result-link color states, stale-ghost opacity + line-through,
+ * source-lifecycle three-way border-left + bg, jump-select highlight all land
+ * on the component as Tailwind utility + ADR-0050 token + conditional className.
+ * The four-outcome / stale-ghost / source-marker / jump-select SEMANTICS are
+ * unchanged (ADR-0047 visual-language conservation); only the style expression
+ * moved. The semantic class hooks (.thread / .turn-entry / .turn-card /
+ * .outcome-icon / .source-entry / .source-lifecycle / .result-link / .stale-chip
+ * etc.) are kept on the component for selector / test stability.
+ * ========================================================================= */
+
+/* Lifecycle marker run connector (issue #721, ADR-0047/0086 nodification;
+ * fold rows join the line by issue #737).
+ * Source markers render as bare glyph nodes (an invisible h-4 w-4
+ * box; the circle chrome -- 1px tone border + bg-background punch -- is
+ * retired, the kind tone rides the glyph color); consecutive source
+ * events form maximal runs (a turn ALWAYS breaks the run -- Thread.tsx
+ * computes the positions at render time via lifecycleRunMarks over the
+ * visual row projection; the skill species retired with ADR-0119). A run
+ * of >=2 connects adjacent nodes with a 2px segment; a lone event keeps its
+ * node bare. A collapsed fold row (a same-kind subsegment at/above the
+ * threshold) participates as its segment's SINGLE node with the same box
+ * geometry; its expanded combined member row holds no node and only
+ * CONDUCTS the line through (see the conduction rule below). The connector
+ * expression rides the marker <li>'s data-run="first|mid|last|single":
+ * first/mid draw DOWN from this node's bottom edge (clear of the glyph) to
+ * the next node's top edge (their arriving segment is the previous li's),
+ * last/single draw nothing. ADR-0047's rejected "draw the connector line"
+ * is scoped to stale-card <-> source-event lines (interleaved knotting);
+ * these adjacent same-column run segments are outside that rejection. The
+ * geometry is a contract with the component utilities
+ * (SourceMarker/LifecycleFold): node = h-4 w-4 (16px) at the
+ * row's left edge,
+ * row = py-0.5 (2px vertical padding) -- so the node's bottom edge sits
+ * 18px below the li top (2px padding + 16px box) and the next node's top
+ * edge sits 6px below this li's bottom (the receiving row's 4px run gap +
+ * its 2px top padding -- the margin rule below).
+ * Pseudo-element geometry stays here (the ADR-0067 retirement moved box
+ * visuals to utilities; ::before positioning keyed off a four-state data
+ * attribute is the layout-semantics exception, same reasoning as the resize
+ * handles above). */
+.source-entry,
+.lifecycle-fold-entry {
+  position: relative;
+}
+.source-entry[data-run="first"]::before,
+.source-entry[data-run="mid"]::before,
+.lifecycle-fold-entry[data-run="first"]::before,
+.lifecycle-fold-entry[data-run="mid"]::before {
+  content: "";
+  position: absolute;
+  top: 18px; /* this node's bottom edge: 2px row padding + 16px node */
+  bottom: -6px; /* the next node's top edge: its row's 4px run gap + 2px top padding */
+  left: 7px; /* node center x (8px) minus half the 2px line width */
+  width: 2px;
+  background-color: var(--border);
+}
+
+/* The run breathes (issue #721): a row that receives an arriving connector
+ * (mid/last) adds 4px of gap above itself, doubling the segment's visible
+ * portion (4px -> 8px) -- at the compact 20px pitch two 16px nodes leave
+ * only 4px for the line, which reads as barely there. Rows outside a run
+ * keep the tight pitch, so only linked pairs gain the air. */
+.source-entry[data-run="mid"],
+.source-entry[data-run="last"],
+.lifecycle-fold-entry[data-run="mid"],
+.lifecycle-fold-entry[data-run="last"] {
+  margin-top: 4px;
+}
+
+/* Connector conduction across an expanded fold's combined member row
+ * (issue #737): the fold head's own down-segment (the rule above) stops
+ * 6px past its <li>, but when the head sits mid-run (first/mid) the next
+ * node lies BELOW the combined row -- without a through-segment here the
+ * line would visually break across the expansion. The combined row
+ * carries data-run-continue and draws the full-height segment at the same
+ * left offset; it holds no node of its own (the fold row is the segment's
+ * single node), so it neither breathes (no margin-top) nor stamps a
+ * position. The names start at pl-[22px], clear of the 7px line. */
+.lifecycle-fold-members {
+  position: relative;
+}
+.lifecycle-fold-members[data-run-continue="true"]::before {
+  content: "";
+  position: absolute;
+  top: 0; /* the head's segment already covered the 6px gap above */
+  bottom: -6px; /* the next node's top edge, same as the node rule above */
+  left: 7px;
+  width: 2px;
+  background-color: var(--border);
+}
+
+/* Tooltip popper wrappers drop out of hit-testing for the working-set row
+   tooltips only: those contents are pure hint layers (pointer-events-none, no
+   interactive content), but Radix's positioning wrapper around them would
+   still catch the pointer and flip row :hover off for as long as the tooltip
+   is up. Scoped by the data-hit-transparent marker the row TooltipContents
+   carry (the wrapper's direct child), so every other tooltip keeps its
+   wrapper hit-testing -- menus / popovers keep their interactive wrappers,
+   and the settings surface's scrollable tooltip keeps its scrollbar.
+   ADR-0067 boundary: this is a global element rule, but the wrapper is a
+   Radix portal mounted outside the React tree, so no caller-scoped utility
+   can reach it -- the hit-testing seam is the one place a global rule is the
+   only form (it shapes hit-testing, not visuals). */
+[data-radix-popper-content-wrapper]:has(> [data-hit-transparent]) {
+  pointer-events: none;
+}

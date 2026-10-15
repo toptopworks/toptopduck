@@ -1,0 +1,374 @@
+import { describe, expect, it } from "vitest";
+
+import { catalogFor } from "../i18n";
+import { catalogIntl } from "../components/common/__tests__/helpers";
+import { errorDetail, fmtError } from "../lib/error-presentation";
+import type {
+  ResumeError,
+  SaveError,
+  SessionError,
+  StoreCommandError,
+} from "../types/session";
+
+// Real-catalog en-US intl from the shared i18n test seam (issue #1100):
+// fmtError resolves kind -> catalog wording through the actual catalog, and
+// assertions follow the catalog keys -- what is pinned is the kind ->
+// message-id mapping (a mistyped key fails to compile) plus the fallback
+// behavior, not a hand-copied wording mirror (the retired mirror stayed
+// silently green through the #1096/#1098 copy rewrites). Cases whose catalog
+// template interpolates ({name}, {label}, versions) keep literal expected
+// strings: what they pin is the substitution.
+const intl = catalogIntl("en-US");
+const en = catalogFor("en-US");
+
+// Wrap a ResumeError as the open_duck reject shape: SessionError::Resume
+// (issue #120). open_duck rejects with its ResumeError wrapped in
+// SessionError::Resume, so the frontend recurses Resume.data.
+function resume(err: ResumeError): SessionError {
+  return { kind: "Resume", data: err };
+}
+
+describe("fmtError — SessionError", () => {
+  it("renders each SessionError kind via the locale catalog, not a backend string", () => {
+    const cases: Array<[SessionError, string]> = [
+      [{ kind: "InvalidId" }, en["error.session.invalidId"]],
+      [{ kind: "NotFound" }, en["error.session.notFound"]],
+      [{ kind: "Resuming" }, en["error.session.resuming"]],
+      [{ kind: "InFlight" }, en["error.session.inFlight"]],
+      [{ kind: "Engine", data: "session lock poisoned" }, en["error.session.engine"]],
+    ];
+    for (const [err, expected] of cases) {
+      expect(fmtError(err, intl)).toBe(expected);
+    }
+  });
+
+  it("does not leak the Engine detail into the rendered message (ADR-0029)", () => {
+    expect(fmtError({ kind: "Engine", data: "sk-ant-secret" }, intl)).toBe(
+      en["error.session.engine"],
+    );
+  });
+});
+
+describe("fmtError — SessionError::Resume (open_duck reject)", () => {
+  it("renders each ResumeError kind via the locale catalog (issue #120)", () => {
+    // open_duck wraps its ResumeError in SessionError::Resume; fmtError
+    // recurses Resume.data.kind -> locale. Every kind is pinned to its id.
+    const cases: Array<[ResumeError, string]> = [
+      [{ kind: "Cancelled" }, en["error.resume.cancelled"]],
+      [{ kind: "Aborted" }, en["error.resume.aborted"]],
+      [{ kind: "AlreadyOpen", data: "/x/a.duck" }, en["error.duck.alreadyOpen"]],
+      [
+        { kind: "SourceMissing", data: { reference_name: "people", path: "/x", detail: "d" } },
+        "Couldn't find the dataset \"people\"",
+      ],
+      [
+        { kind: "Replay", data: { reference_name: "result_1", detail: "d" } },
+        "Failed to restore \"result_1\"",
+      ],
+      [
+        { kind: "ActiveMissing", data: "ghost" },
+        "The dataset \"ghost\" used by this session isn't loaded",
+      ],
+    ];
+    for (const [err, expected] of cases) {
+      expect(fmtError(resume(err), intl)).toBe(expected);
+    }
+  });
+
+  it("recurses ResumeError::Load into the nested DuckLoadError kind", () => {
+    // Load delegates to the nested .duck load error so the version-mismatch
+    // "please upgrade" hint (with interpolated versions) surfaces, not a
+    // generic "resume failed".
+    expect(
+      fmtError(
+        resume({ kind: "Load", data: { kind: "VersionMismatch", data: { found: 3, supported: 1 } } }),
+        intl,
+      ),
+    ).toBe(
+      "This file was created by a newer version of the app (file version 3; this app supports up to 1). Please update the app and open it again.",
+    );
+    expect(
+      fmtError(resume({ kind: "Load", data: { kind: "Io", data: "io-fail" } }), intl),
+    ).toBe(en["error.duck.loadIo"]);
+    expect(
+      fmtError(resume({ kind: "Load", data: { kind: "Parse", data: "parse-fail" } }), intl),
+    ).toBe(en["error.duck.loadParse"]);
+    expect(
+      fmtError(
+        resume({ kind: "Load", data: { kind: "Migration", data: { kind: "Field", data: "bad" } } }),
+        intl,
+      ),
+    ).toBe(en["error.duck.migration"]);
+  });
+
+  it("does not leak the SourceMissing detail into the rendered message (ADR-0029)", () => {
+    expect(
+      fmtError(
+        resume({
+          kind: "SourceMissing",
+          data: { reference_name: "p", path: "/secret", detail: "sk-ant-secret" },
+        }),
+        intl,
+      ),
+    ).toBe("Couldn't find the dataset \"p\"");
+  });
+});
+
+describe("fmtError — SessionError source-management kinds (issue #121)", () => {
+  it("renders RemoveSource kinds via the locale catalog", () => {
+    // remove_source / remove_active_source wrap RemoveSourceError in
+    // SessionError::RemoveSource. NotFound shares the merged notFound id with
+    // RenameError::NotFound and RowReadError::UnknownDataset.
+    const cases: Array<[SessionError, string]> = [
+      [
+        { kind: "RemoveSource", data: { kind: "NotFound", data: "people" } },
+        "No dataset found with reference name \"people\"",
+      ],
+      [
+        {
+          kind: "RemoveSource",
+          data: { kind: "IsActive", data: { reference_name: "people", display_name: "员工表" } },
+        },
+        "\"员工表\" is the dataset currently in use. Pick one of the remaining datasets to continue (or cancel)",
+      ],
+      [
+        { kind: "RemoveSource", data: { kind: "NotActive", data: "people" } },
+        "\"people\" is not the dataset currently in use; refresh the data list and retry",
+      ],
+      [
+        { kind: "RemoveSource", data: { kind: "InvalidContinueWith", data: "ghost" } },
+        "\"ghost\" is not among the remaining datasets; refresh the data list and pick again",
+      ],
+    ];
+    for (const [err, expected] of cases) {
+      expect(fmtError(err, intl)).toBe(expected);
+    }
+  });
+
+  it("renders RenameDataset kinds via the locale catalog", () => {
+    const cases: Array<[SessionError, string]> = [
+      [
+        { kind: "RenameDataset", data: { kind: "NotFound", data: "people" } },
+        "No dataset found with reference name \"people\"",
+      ],
+      [
+        { kind: "RenameDataset", data: { kind: "DisplayTaken", data: "员工表" } },
+        "Display label \"员工表\" is already used by another dataset; pick a different one",
+      ],
+      [{ kind: "RenameDataset", data: { kind: "InvalidLabel" } }, en["error.dataset.invalidLabel"]],
+    ];
+    for (const [err, expected] of cases) {
+      expect(fmtError(err, intl)).toBe(expected);
+    }
+  });
+
+  it("renders RenameSession and Turn kinds via the locale catalog", () => {
+    expect(fmtError({ kind: "RenameSession", data: { kind: "EmptyName" } }, intl)).toBe(
+      en["error.session.renameEmpty"],
+    );
+    expect(
+      fmtError({ kind: "Turn", data: { kind: "UnknownDataset", data: "result_1" } }, intl),
+    ).toBe("No dataset found with reference name \"result_1\"");
+    // Execute renders a generic message; the engine detail rides the fold.
+    expect(fmtError({ kind: "Turn", data: { kind: "Execute", data: "bad column" } }, intl)).toBe(
+      en["error.turn.execute"],
+    );
+  });
+
+  it("does not leak the Turn::Execute detail into the rendered message (ADR-0029)", () => {
+    expect(fmtError({ kind: "Turn", data: { kind: "Execute", data: "sk-ant-secret" } }, intl)).toBe(
+      en["error.turn.execute"],
+    );
+  });
+});
+
+describe("fmtError — SaveError", () => {
+  it("renders each SaveError kind via the locale catalog (issue #120)", () => {
+    // take_persist_error returns a typed SaveError; the banner renders the kind
+    // through the catalog. AlreadyOpen shares the merged error.duck.alreadyOpen
+    // id with ResumeError::AlreadyOpen.
+    const cases: Array<[SaveError, string]> = [
+      [{ kind: "Serialize", data: "ser-fail" }, en["error.save.serialize"]],
+      [{ kind: "Io", data: "io-fail" }, en["error.save.io"]],
+      [{ kind: "Rename", data: "rename-fail" }, en["error.save.rename"]],
+      [{ kind: "AlreadyOpen", data: "/x/a.duck" }, en["error.duck.alreadyOpen"]],
+    ];
+    for (const [err, expected] of cases) {
+      expect(fmtError(err, intl)).toBe(expected);
+    }
+  });
+
+  it("does not leak the Serialize/Io/Rename detail into the rendered message (ADR-0029)", () => {
+    expect(fmtError({ kind: "Serialize", data: "sk-ant-secret" }, intl)).toBe(
+      en["error.save.serialize"],
+    );
+    expect(fmtError({ kind: "Io", data: "sk-ant-secret" }, intl)).toBe(en["error.save.io"]);
+    expect(fmtError({ kind: "Rename", data: "sk-ant-secret" }, intl)).toBe(
+      en["error.save.rename"],
+    );
+  });
+});
+
+describe("fmtError — StoreCommandError", () => {
+  it("renders each StoreCommandError kind via the locale catalog (issue #130)", () => {
+    // The cold-store commands (delete / rename-persisted / keychain / provider
+    // + app config) reject with a typed StoreCommandError. BlankName reuses the
+    // renameEmpty id so the blank-name refusal matches rename_session's.
+    const cases: Array<[StoreCommandError, string]> = [
+      [{ kind: "OpenConflict" }, en["error.store.openConflict"]],
+      [
+        { kind: "BlankName", data: { kind: "EmptyName" } },
+        en["error.session.renameEmpty"],
+      ],
+      [{ kind: "IoFailure", data: "io-fail" }, en["error.store.ioFailure"]],
+      [{ kind: "KeychainFailure", data: "kc-fail" }, en["error.store.keychainFailure"]],
+      [{ kind: "ConfigWriteFailure", data: "cfg-fail" }, en["error.store.configWriteFailure"]],
+      [
+        { kind: "NoActiveProfile" },
+        en["error.store.noActiveProfile"],
+      ],
+      [{ kind: "UnknownAdapter", data: "no-such-cli" }, en["error.store.unknownAdapter"]],
+    ];
+    for (const [err, expected] of cases) {
+      expect(fmtError(err, intl)).toBe(expected);
+    }
+  });
+
+  it("does not leak the failure detail into the rendered message (ADR-0029)", () => {
+    expect(fmtError({ kind: "IoFailure", data: "sk-ant-secret" }, intl)).toBe(
+      en["error.store.ioFailure"],
+    );
+    expect(fmtError({ kind: "KeychainFailure", data: "sk-ant-secret" }, intl)).toBe(
+      en["error.store.keychainFailure"],
+    );
+    expect(fmtError({ kind: "ConfigWriteFailure", data: "sk-ant-secret" }, intl)).toBe(
+      en["error.store.configWriteFailure"],
+    );
+  });
+});
+
+describe("fmtError — fallback", () => {
+  it("falls back for non-typed rejects (JS Error / string / opaque object)", () => {
+    expect(fmtError(new Error("boom"), intl)).toBe("boom");
+    expect(fmtError("plain string reject", intl)).toBe("plain string reject");
+    expect(fmtError({ weird: "shape" }, intl)).toBe("{\"weird\":\"shape\"}");
+  });
+
+  it("does not treat an unrecognized kind as a typed error (defensive narrow)", () => {
+    // A malformed object with an unknown / non-string kind stringifies so the
+    // user still sees something, instead of rendering a missing-message id.
+    expect(fmtError({ kind: "Unknown" }, intl)).toBe("{\"kind\":\"Unknown\"}");
+    expect(fmtError({ kind: 42 }, intl)).toBe("{\"kind\":42}");
+  });
+
+  it("does not treat an Engine payload with non-string data as a SessionError (guard L1)", () => {
+    expect(fmtError({ kind: "Engine" }, intl)).toBe("{\"kind\":\"Engine\"}");
+    expect(fmtError({ kind: "Engine", data: 42 }, intl)).toBe("{\"kind\":\"Engine\",\"data\":42}");
+  });
+});
+
+describe("errorDetail", () => {
+  it("extracts SessionError::Engine.data as the technical detail", () => {
+    expect(errorDetail({ kind: "Engine", data: "session lock poisoned" })).toBe(
+      "session lock poisoned",
+    );
+  });
+
+  it("recurses SessionError::Resume into the nested ResumeError detail (issue #120)", () => {
+    expect(errorDetail(resume({ kind: "Load", data: { kind: "Io", data: "io-fail" } }))).toBe(
+      "io-fail",
+    );
+    // VersionMismatch is self-contained (versions in the message) -> no fold.
+    expect(
+      errorDetail(
+        resume({ kind: "Load", data: { kind: "VersionMismatch", data: { found: 3, supported: 1 } } }),
+      ),
+    ).toBeNull();
+    // Migration recurses into MigrationError (Field detail).
+    expect(
+      errorDetail(
+        resume({ kind: "Load", data: { kind: "Migration", data: { kind: "Field", data: "missing x" } } }),
+      ),
+    ).toBe("missing x");
+    // NoTransform composes a version-gap string on the frontend side.
+    expect(
+      errorDetail(
+        resume({
+          kind: "Load",
+          data: { kind: "Migration", data: { kind: "NoTransform", data: { from: 0, supported: 1 } } },
+        }),
+      ),
+    ).toBe("format_version=0 (supported: 1)");
+    expect(
+      errorDetail(
+        resume({
+          kind: "SourceMissing",
+          data: { reference_name: "p", path: "/x", detail: "traversal refused" },
+        }),
+      ),
+    ).toBe("traversal refused");
+    expect(errorDetail(resume({ kind: "AlreadyOpen", data: "/x/a.duck" }))).toBe("/x/a.duck");
+  });
+
+  it("returns null for self-contained ResumeError kinds (via SessionError::Resume)", () => {
+    expect(errorDetail(resume({ kind: "Cancelled" }))).toBeNull();
+    expect(errorDetail(resume({ kind: "Aborted" }))).toBeNull();
+    expect(errorDetail(resume({ kind: "ActiveMissing", data: "ghost" }))).toBeNull();
+  });
+
+  it("extracts SaveError detail for the fold (issue #120)", () => {
+    expect(errorDetail({ kind: "Serialize", data: "ser-fail" })).toBe("ser-fail");
+    expect(errorDetail({ kind: "Io", data: "io-fail" })).toBe("io-fail");
+    expect(errorDetail({ kind: "Rename", data: "rename-fail" })).toBe("rename-fail");
+    expect(errorDetail({ kind: "AlreadyOpen", data: "/x/a.duck" })).toBe("/x/a.duck");
+  });
+
+  it("extracts StoreCommandError failure detail for the fold (issue #130)", () => {
+    expect(errorDetail({ kind: "IoFailure", data: "io-fail" })).toBe("io-fail");
+    expect(errorDetail({ kind: "KeychainFailure", data: "kc-fail" })).toBe("kc-fail");
+    expect(errorDetail({ kind: "ConfigWriteFailure", data: "cfg-fail" })).toBe("cfg-fail");
+    expect(errorDetail({ kind: "UnknownAdapter", data: "no-such-cli" })).toBe("no-such-cli");
+  });
+
+  it("returns null for self-contained StoreCommandError kinds (issue #130)", () => {
+    expect(errorDetail({ kind: "OpenConflict" })).toBeNull();
+    expect(errorDetail({ kind: "BlankName", data: { kind: "EmptyName" } })).toBeNull();
+    expect(errorDetail({ kind: "NoActiveProfile" })).toBeNull();
+  });
+
+  it("extracts SessionError::Turn::Execute detail and nulls UnknownDataset (issue #121)", () => {
+    expect(errorDetail({ kind: "Turn", data: { kind: "Execute", data: "bad column" } })).toBe(
+      "bad column",
+    );
+    expect(
+      errorDetail({ kind: "Turn", data: { kind: "UnknownDataset", data: "result_1" } }),
+    ).toBeNull();
+  });
+
+  it("returns null for self-contained source-management SessionError kinds (issue #121)", () => {
+    expect(
+      errorDetail({ kind: "RemoveSource", data: { kind: "NotFound", data: "people" } }),
+    ).toBeNull();
+    expect(
+      errorDetail({ kind: "RenameDataset", data: { kind: "DisplayTaken", data: "x" } }),
+    ).toBeNull();
+    expect(errorDetail({ kind: "RenameSession", data: { kind: "EmptyName" } })).toBeNull();
+  });
+
+  it("returns null for non-Engine SessionError kinds", () => {
+    expect(errorDetail({ kind: "NotFound" })).toBeNull();
+    expect(errorDetail({ kind: "InvalidId" })).toBeNull();
+    expect(errorDetail({ kind: "InFlight" })).toBeNull();
+  });
+
+  it("returns null for non-typed rejects", () => {
+    expect(errorDetail(new Error("boom"))).toBeNull();
+    expect(errorDetail("plain string reject")).toBeNull();
+    expect(errorDetail({ weird: "shape" })).toBeNull();
+  });
+
+  it("returns null for an Engine payload with non-string data (guard L1)", () => {
+    expect(errorDetail({ kind: "Engine" })).toBeNull();
+    expect(errorDetail({ kind: "Engine", data: 42 })).toBeNull();
+  });
+});

@@ -1,0 +1,1624 @@
+import { act, renderHook, waitFor } from "@testing-library/react";
+import { QueryClient } from "@tanstack/react-query";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import { flatIntl } from "../../components/common/__tests__/helpers";
+import { sessionKeys } from "../queryKeys";
+import {
+  buildLiveRounds,
+  choiceToTurnRuntime,
+  liveRoundsToTrace,
+  mergeLiveTrace,
+  useTurnFlow,
+  type LiveCall,
+  type LiveRound,
+  type LiveTraceRow,
+} from "../useTurnFlow";
+import { materialized, textual } from "./fixtures";
+import type { ApprovalEntry } from "../useApprovalEvents";
+import type { ThreadEntry, TurnOutcome, TurnRecord } from "../../types/thread";
+import type { TurnProgress } from "../../types/session";
+import type { SessionRuntimeChoice } from "../../types/runtime";
+
+// Tests for useTurnFlow (issue #230, evolved by issue #297) -- pins the
+// behaviors extracted from useSessionState: the long-lived turn-progress
+// listener + event lifecycle (ADR-0059, calibrated to the tool-call event
+// stream by ADR-0078), the in-flight LIVE TRACE (Thinking step + started/
+// completed call rows merged with approval entries), the optimistic thread
+// append carrying the settled trace with selective invalidate (thread stays
+// un-invalidated, ADR-0051), and the viewed method call timing (markProduced
+// on Materialized, suppressInit on every outcome, issue #229). Drives the
+// hook through stub deps + a captured onTurnProgress callback so it runs
+// offline (jsdom has no Tauri event bus).
+
+// Capture the onTurnProgress callback so a test can emit Thinking / tool-call
+// events addressed to THIS session vs a stranger (the ADR-0056 multi-session
+// filter inside the listener).
+const turnProgressCb = vi.hoisted(() => ({
+  current: null as null | ((ev: TurnProgress) => void),
+}));
+
+vi.mock("../../api", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../../api")>();
+  return {
+    ...actual,
+    askQuestion: vi.fn(),
+    // Defaults to a FAILED read (the catch-path degradation: no runtime
+    // stamped) so the pre-existing asks stay runtime-less unless a test
+    // resolves a value. (The real API never resolves undefined -- a fresh
+    // session resolves built_in, the server-side degradation.)
+    getSessionRuntime: vi.fn(async () => undefined),
+    cancelQuery: vi.fn(async () => {}),
+    // Capture the listener callback so a test can emit phases; the returned
+    // unlisten is a no-op (jsdom has no real Tauri event bus).
+    onTurnProgress: vi.fn(async (cb: (ev: TurnProgress) => void) => {
+      turnProgressCb.current = cb;
+      return () => {};
+    }),
+  };
+});
+
+import { askQuestion, cancelQuery, getSessionRuntime } from "../../api";
+import { invalidateSessionData } from "../useWorkingSet";
+
+// The turn-end refresh routes through the seam's cascade entry (issue #1088
+// retired the #1080 working-set-only divergence): wrap the real
+// implementation in a mock fn so the coupling stays assertable while the
+// key-set tests below keep exercising the true fan-out (the queryClient spy
+// still sees the real invalidateQueries calls), and failure-injection can
+// still target this seam edge.
+vi.mock("../useWorkingSet", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../useWorkingSet")>();
+  return { ...actual, invalidateSessionData: vi.fn(actual.invalidateSessionData) };
+});
+
+const SID = "sess-1";
+const STRANGER = "sess-other";
+
+// Minimal-but-real outcome fixtures: reuse the shared thread fixtures and pull
+// the `.data.outcome` (askQuestion returns a TurnOutcome, not a ThreadEntry).
+// The fixtures always mint the Turn variant, so the cast to TurnRecord is safe
+// (ThreadEntry.data is a TurnRecord | SourceLifecycleEvent union).
+const materializedOutcome = (ref: string): TurnOutcome =>
+  (materialized(ref).data as TurnRecord).outcome;
+const textualOutcome = (body: string): TurnOutcome =>
+  (textual(body).data as TurnRecord).outcome;
+
+function setup() {
+  // gcTime left at default (not 0): a 0 gcTime would GC the query immediately
+  // after setQueryData (no observer mounts in a hook test), so getQueryData
+  // would read undefined and the optimistic-append assertion would flake.
+  const queryClient = new QueryClient({
+    defaultOptions: { queries: { retry: false } },
+  });
+  // Spy invalidateQueries so a test can assert which keys were invalidated. The
+  // spy passes through to the real method, but the queries have no observers /
+  // queryFn (only setQueryData was used), so invalidation marks stale without
+  // triggering a refetch.
+  const invalidateSpy = vi.spyOn(queryClient, "invalidateQueries");
+  const viewed = { markProduced: vi.fn(), suppressInit: vi.fn() };
+  const setTurnLoading = vi.fn();
+  const setError = vi.fn();
+  const pollPersistError = vi.fn(async () => {});
+  const intl = flatIntl();
+  const deps = {
+    queryClient,
+    intl,
+    setTurnLoading,
+    setError,
+    pollPersistError,
+    viewed,
+  };
+  return { queryClient, invalidateSpy, viewed, setTurnLoading, setError, pollPersistError, deps };
+}
+
+function emitProgress(sessionId: string, phase: TurnProgress["phase"]) {
+  act(() => turnProgressCb.current!({ session_id: sessionId, phase }));
+}
+
+describe("useTurnFlow", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    turnProgressCb.current = null;
+  });
+
+  describe("turn-progress listener + phase lifecycle (ADR-0059)", () => {
+    it("mounts a LONG-LIVED listener once (reused across turns, ADR-0059 C-4)", () => {
+      const { deps } = setup();
+      renderHook(() => useTurnFlow(SID, deps));
+      expect(turnProgressCb.current).not.toBeNull();
+    });
+
+    it("sets phase from a Thinking / tool-call event addressed to this session", async () => {
+      const { deps } = setup();
+      const { result } = renderHook(() => useTurnFlow(SID, deps));
+      await waitFor(() => expect(turnProgressCb.current).not.toBeNull());
+      emitProgress(SID, { Thinking: { attempt: 1 } });
+      expect(result.current.phase).toEqual({ Thinking: { attempt: 1 } });
+      // ADR-0078: the tool-call event stream replaces the retired Querying
+      // marker; the latest event rides `phase` for the QuestionBar label.
+      emitProgress(SID, {
+        ToolCallStarted: { name: "explore", operation_kind: "read", summary: "SELECT 1" },
+      });
+      expect(result.current.phase).toEqual({
+        ToolCallStarted: { name: "explore", operation_kind: "read", summary: "SELECT 1" },
+      });
+    });
+
+    it("filters out events addressed to ANOTHER session (ADR-0056 multi-session filter)", async () => {
+      const { deps } = setup();
+      const { result } = renderHook(() => useTurnFlow(SID, deps));
+      await waitFor(() => expect(turnProgressCb.current).not.toBeNull());
+      emitProgress(SID, { Thinking: { attempt: 1 } });
+      expect(result.current.phase).toEqual({ Thinking: { attempt: 1 } });
+      // A sibling pane's event must never leak in.
+      emitProgress(STRANGER, {
+        ToolCallStarted: { name: "explore", operation_kind: "read", summary: "SELECT 1" },
+      });
+      expect(result.current.phase).toEqual({ Thinking: { attempt: 1 } });
+    });
+
+    it("clears phase to null on every ask end (finally, incl. a Cancelled outcome)", async () => {
+      const { deps } = setup();
+      vi.mocked(askQuestion).mockResolvedValue({ kind: "Cancelled", data: null });
+      const { result } = renderHook(() => useTurnFlow(SID, deps));
+      await waitFor(() => expect(turnProgressCb.current).not.toBeNull());
+      emitProgress(SID, { Thinking: { attempt: 1 } });
+      expect(result.current.phase).toEqual({ Thinking: { attempt: 1 } });
+      await act(async () => {
+        await result.current.handleAsk("q");
+      });
+      expect(result.current.phase).toBeNull();
+    });
+
+    it("clears phase to null even when askQuestion rejects (IPC failure)", async () => {
+      const { deps, setError, queryClient } = setup();
+      vi.mocked(askQuestion).mockRejectedValue(new Error("ipc down"));
+      const { result } = renderHook(() => useTurnFlow(SID, deps));
+      await waitFor(() => expect(turnProgressCb.current).not.toBeNull());
+      emitProgress(SID, {
+        ToolCallStarted: { name: "explore", operation_kind: "read", summary: "SELECT 1" },
+      });
+      expect(result.current.phase).toEqual({
+        ToolCallStarted: { name: "explore", operation_kind: "read", summary: "SELECT 1" },
+      });
+      await act(async () => {
+        await result.current.handleAsk("q");
+      });
+      // The reject's finally clears the phase the mid-turn event set.
+      expect(result.current.phase).toBeNull();
+      // Error + loading teardown on the failure path: setError(null) clears the
+      // prior error at the ask start, then the reject sets a fresh AppError.
+      expect(setError).toHaveBeenLastCalledWith(expect.objectContaining({ kind: "ask" }));
+      // Issue #620: the failure path tears the exchange down too -- no live
+      // residue, and no optimistic record lands on the thread cache.
+      expect(result.current.liveTurn).toBeNull();
+      const thread = queryClient.getQueryData<ThreadEntry[]>(sessionKeys.thread(SID));
+      expect(thread ?? []).toHaveLength(0);
+    });
+  });
+
+  describe("live runtime attribution (issue #818)", () => {
+    it("carries the ask-time choice on the live turn once the read resolves", async () => {
+      const { deps } = setup();
+      vi.mocked(getSessionRuntime).mockResolvedValue({
+        kind: "external",
+        data: "claude-code",
+      });
+      vi.mocked(askQuestion).mockImplementation(
+        () => new Promise<TurnOutcome>(() => {}), // stays in flight
+      );
+      const { result } = renderHook(() => useTurnFlow(SID, deps));
+      await waitFor(() => expect(turnProgressCb.current).not.toBeNull());
+      act(() => {
+        void result.current.handleAsk("问");
+      });
+      // The initial live commit precedes the read (the bubble mounts at
+      // submit); the mapped choice arrives with it -- the same value the
+      // optimistic append stamps, one source for both marker sites.
+      await waitFor(() =>
+        expect(result.current.liveTurn?.runtime).toEqual({
+          kind: "external",
+          data: { adapter_id: "claude-code" },
+        }),
+      );
+      // Phase evolution spreads the previous state, so the attribution
+      // survives every subsequent progress event.
+      emitProgress(SID, { Thinking: { attempt: 1 } });
+      expect(result.current.liveTurn?.runtime).toEqual({
+        kind: "external",
+        data: { adapter_id: "claude-code" },
+      });
+    });
+
+    it("stays undefined when the read fails (no marker, matching the append)", async () => {
+      const { deps } = setup();
+      // The API resolves SessionRuntimeChoice; undefined only ever comes
+      // from the failure catch -- the read's own degrade path.
+      vi.mocked(getSessionRuntime).mockRejectedValue(new Error("ipc down"));
+      vi.mocked(askQuestion).mockImplementation(
+        () => new Promise<TurnOutcome>(() => {}),
+      );
+      const { result } = renderHook(() => useTurnFlow(SID, deps));
+      act(() => {
+        void result.current.handleAsk("问");
+      });
+      await act(async () => {}); // flush the read's resolution microtasks
+      expect(result.current.liveTurn?.runtime).toBeUndefined();
+    });
+  });
+
+  describe("in-flight live trace (ADR-0078, issue #297)", () => {
+    it("renders null before any ask and mounts the live card on ask start", async () => {
+      const { deps } = setup();
+      vi.mocked(askQuestion).mockImplementation(
+        () => new Promise<TurnOutcome>(() => {}), // stays in flight
+      );
+      const { result } = renderHook(() => useTurnFlow(SID, deps));
+      expect(result.current.liveTurn).toBeNull();
+      act(() => {
+        void result.current.handleAsk("多少行？");
+      });
+      // askedAt is the client's submit stamp (#610): the live bubble's
+      // asked_at source, present before any progress event lands.
+      expect(result.current.liveTurn).toMatchObject({
+        question: "多少行？",
+        step: null,
+        rounds: [],
+      });
+      expect(typeof result.current.liveTurn?.askedAt).toBe("number");
+    });
+
+    it("appends TextDelta fragments to the current round (ADR-0126)", async () => {
+      const { deps } = setup();
+      vi.mocked(askQuestion).mockImplementation(
+        () => new Promise<TurnOutcome>(() => {}),
+      );
+      const { result } = renderHook(() => useTurnFlow(SID, deps));
+      await waitFor(() => expect(turnProgressCb.current).not.toBeNull());
+      act(() => {
+        void result.current.handleAsk("q");
+      });
+      emitProgress(SID, { Thinking: { attempt: 1 } });
+      emitProgress(SID, { TextDelta: { delta: "先看一眼" } });
+      emitProgress(SID, { TextDelta: { delta: "数据。" } });
+      expect(result.current.liveTurn?.rounds).toEqual([{ text: "先看一眼数据。", rows: [] }]);
+      // A second round without prose pads nothing; a started call there
+      // lands on round 2.
+      emitProgress(SID, { Thinking: { attempt: 2 } });
+      emitProgress(SID, {
+        ToolCallStarted: { name: "explore", operation_kind: "read", summary: "SELECT 1" },
+      });
+      expect(result.current.liveTurn?.rounds[0]?.text).toBe("先看一眼数据。");
+      // Round membership is positional (the row carries no step): the call
+      // lands inside round 2's block, round 1 keeps no row.
+      expect(result.current.liveTurn?.rounds[0]?.rows).toEqual([]);
+      expect(result.current.liveTurn?.rounds[1]?.rows[0]?.key).toBe("call-0");
+    });
+
+    it("keeps the round's thinking on the live state (issues #608/#610)", async () => {
+      const { deps } = setup();
+      vi.mocked(askQuestion).mockImplementation(
+        () => new Promise<TurnOutcome>(() => {}),
+      );
+      const { result } = renderHook(() => useTurnFlow(SID, deps));
+      await waitFor(() => expect(turnProgressCb.current).not.toBeNull());
+      act(() => {
+        void result.current.handleAsk("q");
+      });
+      emitProgress(SID, { Thinking: { attempt: 1 } });
+      emitProgress(SID, {
+        ThinkingCompleted: { duration_ms: 900, text: "reasoning" },
+      });
+      // Observable as the latest phase; the round carries the block, no row.
+      expect(result.current.phase).toEqual({
+        ThinkingCompleted: { duration_ms: 900, text: "reasoning" },
+      });
+      // The thinking block rides the rounds (#610): the live fold renders
+      // from it, so it must not be dropped.
+      expect(result.current.liveTurn?.rounds).toEqual([
+        { thinking: { duration_ms: 900, text: "reasoning" }, rows: [] },
+      ]);
+      // A second round's thinking slots by round, padding the round that
+      // emitted none.
+      emitProgress(SID, { Thinking: { attempt: 2 } });
+      emitProgress(SID, { ThinkingCompleted: { duration_ms: 1200, text: "more" } });
+      expect(result.current.liveTurn?.rounds).toEqual([
+        { thinking: { duration_ms: 900, text: "reasoning" }, rows: [] },
+        { thinking: { duration_ms: 1200, text: "more" }, rows: [] },
+      ]);
+      // A repeated completion for the same round is last-wins (the slot is
+      // overwritten in place, the array does not grow).
+      emitProgress(SID, { ThinkingCompleted: { duration_ms: 1500, text: "revised" } });
+      expect(result.current.liveTurn?.rounds).toEqual([
+        { thinking: { duration_ms: 900, text: "reasoning" }, rows: [] },
+        { thinking: { duration_ms: 1500, text: "revised" }, rows: [] },
+      ]);
+    });
+
+    it("falls a ThinkingCompleted that precedes any Thinking back to round 1", async () => {
+      // Same ordering fallback the call-event handlers use (step ?? 1):
+      // structurally unreachable from the loop (Thinking opens the round),
+      // but the state layer stays total rather than dropping the block.
+      const { deps } = setup();
+      vi.mocked(askQuestion).mockImplementation(
+        () => new Promise<TurnOutcome>(() => {}),
+      );
+      const { result } = renderHook(() => useTurnFlow(SID, deps));
+      await waitFor(() => expect(turnProgressCb.current).not.toBeNull());
+      act(() => {
+        void result.current.handleAsk("q");
+      });
+      emitProgress(SID, { ThinkingCompleted: { duration_ms: 300, text: "early" } });
+      expect(result.current.liveTurn?.rounds).toEqual([
+        { thinking: { duration_ms: 300, text: "early" }, rows: [] },
+      ]);
+    });
+
+    it("grows rows from the tool-call event stream (started -> completed)", async () => {
+      const { deps } = setup();
+      vi.mocked(askQuestion).mockImplementation(
+        () => new Promise<TurnOutcome>(() => {}),
+      );
+      const { result } = renderHook(() => useTurnFlow(SID, deps));
+      await waitFor(() => expect(turnProgressCb.current).not.toBeNull());
+      act(() => {
+        void result.current.handleAsk("q");
+      });
+      emitProgress(SID, { Thinking: { attempt: 1 } });
+      emitProgress(SID, {
+        ToolCallStarted: { name: "explore", operation_kind: "read", summary: "SELECT 1" },
+      });
+      expect(result.current.liveTurn?.step).toBe(1);
+      expect(result.current.liveTurn?.rounds).toEqual([
+        {
+          rows: [
+            {
+              key: "call-0",
+              name: "explore",
+              server: null,
+              operationKind: "read",
+              summary: "SELECT 1",
+              approval: null,
+              running: true,
+              success: null,
+              resultExcerpt: "",
+            },
+          ],
+        },
+      ]);
+      emitProgress(SID, {
+        ToolCallCompleted: {
+          name: "explore",
+          operation_kind: "read",
+          summary: "SELECT 1",
+          success: true,
+          result_excerpt: "",
+        },
+      });
+      const row = result.current.liveTurn?.rounds[0]?.rows[0];
+      expect(row).toMatchObject({ running: false, success: true, key: "call-0" });
+    });
+
+    // The full live pipeline for a delegation row (PR #946 review Critical
+    // 1): the completion event's sub_rounds ride the phase handler into
+    // the grouped rounds through buildLiveRounds -- the one hop whose row
+    // literal once dropped the field. Driving the real hook puts the
+    // ingestion (applyPhase) and the grouping (buildLiveRounds) both under
+    // test; the pure projection onto the trace entry is the next test.
+    it("a completed delegation row carries its sub-rounds through the live pipeline", async () => {
+      const { deps } = setup();
+      vi.mocked(askQuestion).mockImplementation(
+        () => new Promise<TurnOutcome>(() => {}),
+      );
+      const { result } = renderHook(() => useTurnFlow(SID, deps));
+      await waitFor(() => expect(turnProgressCb.current).not.toBeNull());
+      act(() => {
+        void result.current.handleAsk("q");
+      });
+      emitProgress(SID, {
+        ToolCallStarted: { name: "analyst", operation_kind: "execute", summary: "clean the sheet" },
+      });
+      emitProgress(SID, {
+        ToolCallCompleted: {
+          name: "analyst",
+          operation_kind: "execute",
+          summary: "clean the sheet",
+          success: true,
+          result_excerpt: "",
+          sub_rounds: [{ text: "child prose", calls: [] }],
+        },
+      });
+      expect(result.current.liveTurn?.rounds[0]?.rows[0]).toMatchObject({
+        name: "analyst",
+        subRounds: [{ text: "child prose", calls: [] }],
+      });
+    });
+
+    it("appends a completed row for a gate-denied call (no started event)", async () => {
+      const { deps } = setup();
+      vi.mocked(askQuestion).mockImplementation(
+        () => new Promise<TurnOutcome>(() => {}),
+      );
+      const { result } = renderHook(() => useTurnFlow(SID, deps));
+      await waitFor(() => expect(turnProgressCb.current).not.toBeNull());
+      act(() => {
+        void result.current.handleAsk("q");
+      });
+      emitProgress(SID, {
+        ToolCallCompleted: {
+          name: "fetch",
+          operation_kind: "network",
+          summary: "GET /x",
+          success: false,
+          result_excerpt: "denied by approval gateway",
+        },
+      });
+      expect(result.current.liveTurn?.rounds[0]?.rows).toHaveLength(1);
+      expect(result.current.liveTurn?.rounds[0]?.rows[0]).toMatchObject({
+        name: "fetch",
+        success: false,
+        resultExcerpt: "denied by approval gateway",
+        running: false,
+      });
+    });
+
+    it("merges approval entries into the matching call row (one row per call)", async () => {
+      const approval: ApprovalEntry = {
+        requestId: "req-1",
+        server: "acme",
+        tool: "fetch",
+        operationKind: "network",
+        summary: "GET /x",
+        receivedAt: 1_000,
+        status: { kind: "resolved", response: "allow_once" },
+      };
+      const { deps } = setup();
+      vi.mocked(askQuestion).mockImplementation(
+        () => new Promise<TurnOutcome>(() => {}),
+      );
+      const { result } = renderHook(() =>
+        useTurnFlow(SID, { ...deps, approvals: [approval] }),
+      );
+      await waitFor(() => expect(turnProgressCb.current).not.toBeNull());
+      act(() => {
+        void result.current.handleAsk("q");
+      });
+      // Pending card row before any tool event (the gate suspends dispatch).
+      expect(result.current.liveTurn?.rounds).toEqual([
+        {
+          rows: [
+            expect.objectContaining({ key: "req-1", approval: { requestId: "req-1", response: "allow_once" }, success: null }),
+          ],
+        },
+      ]);
+      emitProgress(SID, {
+        ToolCallStarted: { name: "fetch", operation_kind: "network", summary: "GET /x" },
+      });
+      emitProgress(SID, {
+        ToolCallCompleted: {
+          name: "fetch",
+          operation_kind: "network",
+          summary: "GET /x",
+          success: true,
+          result_excerpt: "",
+        },
+      });
+      // ONE merged row: the card's identity + the call's outcome.
+      expect(result.current.liveTurn?.rounds[0]?.rows).toHaveLength(1);
+      expect(result.current.liveTurn?.rounds[0]?.rows[0]).toMatchObject({
+        key: "req-1",
+        server: "acme",
+        approval: { requestId: "req-1", response: "allow_once" },
+        success: true,
+      });
+    });
+
+    it("stamps a round-2 gate wait's pending card with round 2 (hook wiring, issue #610)", async () => {
+      // The hook passes live.step into the merge (not a constant): after
+      // round 1 completes its call and round 2's Thinking opens, a pending
+      // approval must trail at step 2 -- the live grouping renders its card
+      // inside round 2's block. A wiring regression to a constant null/1
+      // keeps every other test green while stranding the card in round 1.
+      const approval: ApprovalEntry = {
+        requestId: "req-1",
+        server: "acme",
+        tool: "fetch",
+        operationKind: "network",
+        summary: "GET /x",
+        receivedAt: 1_000,
+        status: { kind: "pending" },
+      };
+      const { deps } = setup();
+      vi.mocked(askQuestion).mockImplementation(
+        () => new Promise<TurnOutcome>(() => {}),
+      );
+      const { result } = renderHook(() =>
+        useTurnFlow(SID, { ...deps, approvals: [approval] }),
+      );
+      await waitFor(() => expect(turnProgressCb.current).not.toBeNull());
+      act(() => {
+        void result.current.handleAsk("q");
+      });
+      emitProgress(SID, { Thinking: { attempt: 1 } });
+      emitProgress(SID, {
+        ToolCallStarted: { name: "explore", operation_kind: "read", summary: "SELECT 1" },
+      });
+      emitProgress(SID, {
+        ToolCallCompleted: {
+          name: "explore",
+          operation_kind: "read",
+          summary: "SELECT 1",
+          success: true,
+          result_excerpt: "",
+        },
+      });
+      emitProgress(SID, { Thinking: { attempt: 2 } });
+      // Round 1's completed call, then the round-2 gate wait trailing in
+      // place -- each inside its own round's block.
+      expect(result.current.liveTurn?.rounds).toHaveLength(2);
+      expect(result.current.liveTurn?.rounds[0]?.rows[0]).toMatchObject({
+        key: "call-0",
+        success: true,
+      });
+      expect(result.current.liveTurn?.rounds[1]?.rows[0]).toMatchObject({
+        key: "req-1",
+        approval: { requestId: "req-1", response: null },
+        success: null,
+      });
+    });
+
+    it("clears the live card on ask end and calls onApprovalsSettled", async () => {
+      const { deps } = setup();
+      let resolveAsk!: (o: TurnOutcome) => void;
+      vi.mocked(askQuestion).mockImplementation(
+        () => new Promise<TurnOutcome>((res) => (resolveAsk = res)),
+      );
+      const onApprovalsSettled = vi.fn();
+      const { result } = renderHook(() =>
+        useTurnFlow(SID, { ...deps, onApprovalsSettled }),
+      );
+      await waitFor(() => expect(turnProgressCb.current).not.toBeNull());
+      let askDone!: Promise<void>;
+      act(() => {
+        askDone = result.current.handleAsk("q");
+      });
+      expect(result.current.liveTurn).not.toBeNull();
+      await act(async () => {
+        resolveAsk({ kind: "Cancelled", data: null });
+        await askDone;
+      });
+      expect(result.current.liveTurn).toBeNull();
+      expect(onApprovalsSettled).toHaveBeenCalledTimes(1);
+    });
+
+    it("folds the settled rows into the optimistic TurnRecord.trace", async () => {
+      const { queryClient, deps } = setup();
+      queryClient.setQueryData(sessionKeys.thread(SID), []);
+      const { result } = renderHook(() => useTurnFlow(SID, deps));
+      await waitFor(() => expect(turnProgressCb.current).not.toBeNull());
+      // The ask promise resolves on our signal so events can land mid-turn.
+      let resolveAsk!: (o: TurnOutcome) => void;
+      vi.mocked(askQuestion).mockImplementation(
+        () => new Promise<TurnOutcome>((res) => (resolveAsk = res)),
+      );
+      let askDone!: Promise<void>;
+      act(() => {
+        askDone = result.current.handleAsk("q");
+      });
+      emitProgress(SID, { Thinking: { attempt: 1 } });
+      emitProgress(SID, {
+        ThinkingCompleted: { duration_ms: 500, text: "hmm" },
+      });
+      emitProgress(SID, { TextDelta: { delta: "先看一眼数据。" } });
+      emitProgress(SID, {
+        ToolCallStarted: { name: "explore", operation_kind: "read", summary: "SELECT 1" },
+      });
+      emitProgress(SID, {
+        ToolCallCompleted: {
+          name: "explore",
+          operation_kind: "read",
+          summary: "SELECT 1",
+          success: false,
+          result_excerpt: "no such table",
+        },
+      });
+      await act(async () => {
+        resolveAsk({ kind: "Cancelled", data: null });
+        await askDone;
+      });
+      const thread = queryClient.getQueryData<ThreadEntry[]>(sessionKeys.thread(SID));
+      expect(thread).toHaveLength(1);
+      const entry = thread?.[0];
+      if (entry?.entry !== "Turn") throw new Error("expected a Turn entry");
+      // #610: the fold carries thinking + prose + calls onto the optimistic
+      // record's round, so the settled round renders exactly what the live
+      // exchange showed (the no-jump settle swap).
+      expect(entry.data.trace).toEqual([
+        {
+          thinking: { duration_ms: 500, text: "hmm" },
+          text: "先看一眼数据。",
+          calls: [
+            {
+              name: "explore",
+              operation_kind: "read",
+              summary: "SELECT 1",
+              success: false,
+              result_excerpt: "no such table",
+            },
+          ],
+        },
+      ]);
+      // The optimistic record carries client-clock timestamps (the ask
+      // read at submit, the settle at fold time) until a reopened mount
+      // lands the backend's stamps (no in-place refetch, ADR-0051).
+      expect(typeof entry.data.asked_at).toBe("number");
+      expect(typeof entry.data.settled_at).toBe("number");
+      expect(entry.data.asked_at).toBeLessThanOrEqual(entry.data.settled_at!);
+    });
+
+    it("drops the trailing prose round from the optimistic trace when the ask resolves a body-bearing outcome (ADR-0126)", async () => {
+      const { queryClient, deps } = setup();
+      queryClient.setQueryData(sessionKeys.thread(SID), []);
+      const { result } = renderHook(() => useTurnFlow(SID, deps));
+      await waitFor(() => expect(turnProgressCb.current).not.toBeNull());
+      // The ask promise resolves on our signal so events can land mid-turn.
+      let resolveAsk!: (o: TurnOutcome) => void;
+      vi.mocked(askQuestion).mockImplementation(
+        () => new Promise<TurnOutcome>((res) => (resolveAsk = res)),
+      );
+      let askDone!: Promise<void>;
+      act(() => {
+        askDone = result.current.handleAsk("q");
+      });
+      emitProgress(SID, { Thinking: { attempt: 1 } });
+      emitProgress(SID, { TextDelta: { delta: "部分答案" } });
+      await act(async () => {
+        resolveAsk({
+          kind: "Textual",
+          data: { text_kind: "Agent", body: "部分答案", assumption: null },
+        });
+        await askDone;
+      });
+      const thread = queryClient.getQueryData<ThreadEntry[]>(sessionKeys.thread(SID));
+      expect(thread).toHaveLength(1);
+      const entry = thread?.[0];
+      if (entry?.entry !== "Turn") throw new Error("expected a Turn entry");
+      // The settle mirror at the wiring seam: the trailing prose round
+      // drops from the optimistic trace (it rides the outcome's body, the
+      // same clear the backend settle applies), so the turn-end refresh
+      // lands no second change.
+      expect(entry.data.trace).toEqual([]);
+      expect(result.current.liveTurn).toBeNull();
+    });
+
+    it("stamps the optimistic record's User invocations and carries the staging on the live turn (review I3, #991)", async () => {
+      const { queryClient, deps } = setup();
+      queryClient.setQueryData(sessionKeys.thread(SID), []);
+      const { result } = renderHook(() => useTurnFlow(SID, deps));
+      await waitFor(() => expect(turnProgressCb.current).not.toBeNull());
+      let resolveAsk!: (o: TurnOutcome) => void;
+      vi.mocked(askQuestion).mockImplementation(
+        () => new Promise<TurnOutcome>((res) => (resolveAsk = res)),
+      );
+      let askDone!: Promise<void>;
+      act(() => {
+        askDone = result.current.handleAsk("q", ["sql-coach", "charting"]);
+      });
+      // The live exchange's badge face renders the client-known staging
+      // immediately (ADR-0119 Decision 5).
+      expect(result.current.liveTurn?.invocationNames).toEqual([
+        "sql-coach",
+        "charting",
+      ]);
+      await act(async () => {
+        resolveAsk({ kind: "Cancelled", data: null });
+        await askDone;
+      });
+      const thread = queryClient.getQueryData<ThreadEntry[]>(sessionKeys.thread(SID));
+      expect(thread).toHaveLength(1);
+      const entry = thread?.[0];
+      if (entry?.entry !== "Turn") throw new Error("expected a Turn entry");
+      // The optimistic record stamps the staged names as User-actor
+      // invocation records (the badge's settled face) -- the body and hash
+      // are the backend's materialization and stay empty until the
+      // recorded row lands (the same optimistic degrade as runtime).
+      expect(entry.data.invocations).toEqual([
+        { name: "sql-coach", body: "", actor: "User", content_hash: "" },
+        { name: "charting", body: "", actor: "User", content_hash: "" },
+      ]);
+      // The staging always rides the wire as the third argument (#992;
+      // non-empty here -- the bare-ask [] direction is pinned in the
+      // optimistic-append suite).
+      expect(askQuestion).toHaveBeenCalledWith("sess-1", "q", [
+        "sql-coach",
+        "charting",
+      ]);
+    });
+  });
+
+  describe("mergeLiveTrace + buildLiveRounds + liveRoundsToTrace (pure helpers)", () => {
+    const row = (over: Partial<LiveTraceRow> = {}): LiveTraceRow => ({
+      key: "call-0",
+      step: 1,
+      name: "explore",
+      server: null,
+      operationKind: "read",
+      summary: "SELECT 1",
+      approval: null,
+      running: false,
+      success: false,
+      resultExcerpt: "boom",
+      ...over,
+    });
+
+    it("choiceToTurnRuntime maps both choice forms onto the attribution shape (#725)", () => {
+      // built-in is identity; external lifts the bare adapter string into
+      // the attribution's adapter-id object (the only payload difference,
+      // per TurnRuntime).
+      expect(choiceToTurnRuntime({ kind: "built_in" })).toEqual({ kind: "built_in" });
+      expect(choiceToTurnRuntime({ kind: "external", data: "claude-code" })).toEqual({
+        kind: "external",
+        data: { adapter_id: "claude-code" },
+      });
+    });
+
+    const call = (over: Partial<LiveCall> = {}): LiveCall => ({
+      key: "call-0",
+      step: 1,
+      name: "explore",
+      operationKind: "read",
+      summary: "SELECT 1",
+      running: false,
+      success: true,
+      resultExcerpt: "",
+      ...over,
+    });
+    const approval = (over: Partial<ApprovalEntry> = {}): ApprovalEntry => ({
+      requestId: "req-1",
+      server: "acme",
+      tool: "fetch",
+      operationKind: "network",
+      summary: "GET /x",
+      receivedAt: 1_000,
+      status: { kind: "pending" },
+      ...over,
+    });
+    it("passes plain calls through as ungated rows", () => {
+      expect(mergeLiveTrace([call()], [], null)).toEqual([
+        expect.objectContaining({ key: "call-0", approval: null, success: true }),
+      ]);
+    });
+
+    it("trails unmatched approvals (still pending at the gate)", () => {
+      const rows = mergeLiveTrace([call()], [approval()], null);
+      expect(rows).toHaveLength(2);
+      expect(rows[1]).toMatchObject({
+        key: "req-1",
+        approval: { requestId: "req-1", response: null },
+        success: null,
+      });
+    });
+
+    it("maps an abandoned entry onto the row's abandoned marker (issue #1267)", () => {
+      // The dropped call's card renders its terminal state, not a pending
+      // card: the merge carries the abandonment through as the marker.
+      const rows = mergeLiveTrace([], [approval({ status: { kind: "abandoned" } })], 1);
+      expect(rows[0]?.approval).toMatchObject({ requestId: "req-1", response: "abandoned" });
+    });
+
+    it("carries the fileAttachments snapshot onto the approval card row (issue #672)", () => {
+      // The pending card is the snapshot's only surface: the approver
+      // expands it against a value whose temp file is deleted when the call
+      // ends, so the merge must not drop it on the way to the row.
+      const files = [{ param: "code", content: "print(1)" }];
+      const rows = mergeLiveTrace([], [approval({ fileAttachments: files })], 1);
+      expect(rows[0]?.approval).toMatchObject({
+        requestId: "req-1",
+        response: null,
+        fileAttachments: files,
+      });
+    });
+
+    it("stamps a trailing approval row with the current round (issue #610)", () => {
+      // The trailing card belongs to the round whose gate holds the turn:
+      // the live round grouping reads the step, so a round-2 gate wait must
+      // not strand the card in round 1's block.
+      const rows = mergeLiveTrace([], [approval()], 2);
+      expect(rows[0]?.step).toBe(2);
+      // No Thinking yet (step null): falls back to round 1, matching the
+      // event handlers' own fallback.
+      expect(mergeLiveTrace([], [approval()], null)[0]?.step).toBe(1);
+    });
+
+    it("merges by tool name + summary, consuming each approval once", () => {
+      const a = approval();
+      const rows = mergeLiveTrace(
+        [
+          call({ key: "call-0", name: "fetch", operationKind: "network", summary: "GET /x" }),
+          call({ key: "call-1", name: "fetch", operationKind: "network", summary: "GET /x" }),
+        ],
+        [a, approval({ requestId: "req-2" })],
+        1,
+      );
+      // Two calls + two approvals -> two merged rows (no trailing card).
+      expect(rows.map((r) => r.key)).toEqual(["req-1", "req-2"]);
+    });
+
+    it("liveRoundsToTrace keeps completed calls, drops unsettled rows, groups by round", () => {
+      const rounds: LiveRound[] = [
+        { rows: [row()] },
+        {
+          text: "先看一眼数据。",
+          rows: [
+            // gate-cancelled: no backend trace entry
+            row({ key: "req-1", step: 2, name: "fetch", server: "acme", operationKind: "network", summary: "GET /x", approval: { requestId: "req-1", response: "deny" }, success: null }),
+            row({ key: "call-2", step: 2, name: "materialize", operationKind: "write", summary: "SELECT 1", success: true, resultExcerpt: "" }),
+          ],
+        },
+      ];
+      // Round 2 emitted prose (the TextDelta stream); round 1 emitted none.
+      expect(liveRoundsToTrace(rounds)).toEqual([
+        {
+          calls: [
+            {
+              name: "explore",
+              operation_kind: "read",
+              summary: "SELECT 1",
+              success: false,
+              result_excerpt: "boom",
+            },
+          ],
+        },
+        {
+          text: "先看一眼数据。",
+          calls: [
+            {
+              name: "materialize",
+              operation_kind: "write",
+              summary: "SELECT 1",
+              success: true,
+              result_excerpt: "",
+            },
+          ],
+        },
+      ]);
+    });
+
+    // The delegation entry's nested sub-trace rides the optimistic turn
+    // flow (issue #934): a completed row's subRounds project onto the entry's
+    // sub_rounds verbatim, so the optimistic trace equals the backend's
+    // recorded rounds for a delegation turn, view affordance included.
+    it("liveRoundsToTrace carries a delegation row's sub-rounds onto the entry", () => {
+      const delegation: LiveTraceRow = {
+        key: "call-0",
+        step: 1,
+        name: "analyst",
+        server: null,
+        operationKind: "execute",
+        summary: "clean the sheet",
+        approval: null,
+        running: false,
+        success: true,
+        resultExcerpt: "",
+        subRounds: [
+          {
+            text: "Checking the sheet first.",
+            calls: [
+              {
+                name: "explore",
+                operation_kind: "read",
+                summary: "SELECT count(*) AS n FROM result_1",
+                success: true,
+                result_excerpt: "",
+              },
+            ],
+          },
+        ],
+      };
+      expect(liveRoundsToTrace([{ rows: [delegation] }])).toEqual([
+        {
+          calls: [
+            {
+              name: "analyst",
+              operation_kind: "execute",
+              summary: "clean the sheet",
+              success: true,
+              result_excerpt: "",
+              sub_rounds: [
+                {
+                  text: "Checking the sheet first.",
+                  calls: [
+                    {
+                      name: "explore",
+                      operation_kind: "read",
+                      summary: "SELECT count(*) AS n FROM result_1",
+                      success: true,
+                      result_excerpt: "",
+                    },
+                  ],
+                },
+              ],
+            },
+          ],
+        },
+      ]);
+    });
+
+    it("liveRoundsToTrace keeps a prose-only round (a cancel mid-batch)", () => {
+      // A round that emitted prose but completed no calls still records as a
+      // round carrying the text -- matching the backend, which opens the
+      // round when the tool-call reply arrives, not when a call completes.
+      expect(liveRoundsToTrace([{ text: "先看一眼数据。", rows: [] }])).toEqual([
+        { text: "先看一眼数据。", calls: [] },
+      ]);
+    });
+
+    it("liveRoundsToTrace drops the trailing prose on a body-bearing outcome (ADR-0126)", () => {
+      // The settle mirror: a Textual/Materialized outcome carries the
+      // terminal text itself, so the trailing call-less round's prose
+      // clears (and the emptied round drops) -- the same clear the backend
+      // settle applies, so the turn-end refresh converges with no change.
+      const rounds: LiveRound[] = [{ rows: [row()] }, { text: "部分答案", rows: [] }];
+      const outcome: TurnOutcome = {
+        kind: "Textual",
+        data: { text_kind: "Clarify", body: "部分答案", assumption: null },
+      };
+      expect(liveRoundsToTrace(rounds, outcome)).toEqual([
+        {
+          calls: [
+            {
+              name: "explore",
+              operation_kind: "read",
+              summary: "SELECT 1",
+              success: false,
+              result_excerpt: "boom",
+            },
+          ],
+        },
+      ]);
+    });
+
+    it("liveRoundsToTrace keeps the trailing partial prose on Cancelled (the #628 settle mirror)", () => {
+      // A non-body outcome keeps the trailing partial prose -- the diagnosis
+      // settle the backend records -- so the refresh lands the same round.
+      const rounds: LiveRound[] = [{ rows: [row()] }, { text: "半截答案", rows: [] }];
+      expect(liveRoundsToTrace(rounds, { kind: "Cancelled", data: null })).toEqual([
+        {
+          calls: [
+            {
+              name: "explore",
+              operation_kind: "read",
+              summary: "SELECT 1",
+              success: false,
+              result_excerpt: "boom",
+            },
+          ],
+        },
+        { text: "半截答案", calls: [] },
+      ]);
+    });
+
+    it("liveRoundsToTrace keeps a call-bearing trailing round's prose under a body-bearing outcome", () => {
+      // The fork clears only the call-LESS trailing round -- `rows.length
+      // === 0` is the client-side saw_call (no call event landed on the
+      // round). A trailing round that carried calls keeps its prose under a
+      // body-bearing outcome too: the backend re-states that text as the
+      // terminal answer (terminal_text's fallback) while the round keeps
+      // its own slot, so the optimistic trace must match.
+      const rounds: LiveRound[] = [
+        { rows: [row()], text: "answer alongside the batch" },
+      ];
+      const outcome: TurnOutcome = {
+        kind: "Textual",
+        data: { text_kind: "Agent", body: "answer alongside the batch", assumption: null },
+      };
+      expect(liveRoundsToTrace(rounds, outcome)).toEqual([
+        {
+          text: "answer alongside the batch",
+          calls: [
+            {
+              name: "explore",
+              operation_kind: "read",
+              summary: "SELECT 1",
+              success: false,
+              result_excerpt: "boom",
+            },
+          ],
+        },
+      ]);
+    });
+
+    it("buildLiveRounds turns padded null slots into absent members (a round that emitted none)", () => {
+      // withRoundSlot pads skipped rounds with null (round 1 emitted nothing
+      // when round 2's event lands first); the derivation converts the
+      // padding to absent members -- round 1's round carries neither prose
+      // nor thinking, not null placeholders.
+      const rounds = buildLiveRounds(
+        { step: 2, calls: [], roundTexts: [null, "第二轮散文。"], roundThinkings: [null, null] },
+        [],
+      );
+      expect(rounds).toHaveLength(2);
+      expect(rounds[0]?.text).toBeUndefined();
+      expect(rounds[0]?.thinking).toBeUndefined();
+      expect(rounds[0]?.rows).toEqual([]);
+      expect(rounds[1]?.text).toBe("第二轮散文。");
+    });
+
+    it("liveRoundsToTrace attaches per-round thinking to its round (issue #610)", () => {
+      // The live thinking fold survives the settle swap: the round's thinking
+      // block lands on the optimistic record's round, not dropped at fold
+      // time. Rounds without thinking stay thinking-free (honest degrade).
+      const thinking = { duration_ms: 900, text: "reasoning" };
+      const trace = liveRoundsToTrace([
+        { text: "先看一眼数据。", rows: [] },
+        { thinking, rows: [] },
+      ]);
+      expect(trace).toEqual([
+        { text: "先看一眼数据。", calls: [] },
+        { thinking: { duration_ms: 900, text: "reasoning" }, calls: [] },
+      ]);
+      // Identity, not just structure (issue #620): the settle seed keys on
+      // the thinking block's REFERENCE, so the projection must carry the
+      // same object -- a structurally-equal clone would break the seed while
+      // this toEqual above stays green.
+      expect(trace[1]?.thinking).toBe(thinking);
+    });
+
+    it("buildLiveRounds spans rows leading the slot arrays; the projection preserves the round order (issue #620)", () => {
+      // A call can land in round 3 while only round 1 emitted prose (the
+      // slot arrays lag the dispatch stream): the single derivation spans by
+      // step, and the settle projection walks the rounds in order -- the
+      // settled trace reads the same round sequence the exchange rendered,
+      // with the empty middle round dropped and no arrival-order artifacts.
+      const rounds = buildLiveRounds(
+        // The grouping inputs only (the derivation's Pick): no question /
+        // askedAt -- the turn identity is not the derivation's concern.
+        {
+          step: 3,
+          calls: [
+            call({
+              key: "call-2",
+              step: 3,
+              name: "materialize",
+              operationKind: "write",
+              summary: "SELECT 3",
+            }),
+          ],
+          roundTexts: ["先看一眼数据。"],
+          roundThinkings: [],
+        },
+        [],
+      );
+      expect(rounds.map((r) => [r.text, r.rows.map((row) => row.key)])).toEqual([
+        ["先看一眼数据。", []],
+        [undefined, []],
+        [undefined, ["call-2"]],
+      ]);
+      expect(liveRoundsToTrace(rounds)).toEqual([
+        { text: "先看一眼数据。", calls: [] },
+        {
+          calls: [
+            {
+              name: "materialize",
+              operation_kind: "write",
+              summary: "SELECT 3",
+              success: true,
+              result_excerpt: "",
+            },
+          ],
+        },
+      ]);
+    });
+  });
+
+  describe("optimistic thread append + selective invalidate (ADR-0051)", () => {
+    it("appends the new turn to the thread cache via setQueryData", async () => {
+      const { queryClient, deps } = setup();
+      queryClient.setQueryData(sessionKeys.thread(SID), []);
+      const { result } = renderHook(() => useTurnFlow(SID, deps));
+      vi.mocked(askQuestion).mockResolvedValue(textualOutcome("answer"));
+
+      await act(async () => {
+        await result.current.handleAsk("why?");
+      });
+
+      // A bare ask carries an empty staging array on the wire (#992):
+      // the hook-layer half of the absent-equals-empty contract.
+      expect(askQuestion).toHaveBeenCalledWith("sess-1", "why?", []);
+      const thread = queryClient.getQueryData<unknown[]>(sessionKeys.thread(SID));
+      expect(thread).toHaveLength(1);
+      expect(thread?.[0]).toMatchObject({
+        entry: "Turn",
+        data: { question: "why?", outcome: { kind: "Textual" } },
+      });
+    });
+
+    it("appends even when the thread cache has no prior entry (first ask, old===undefined)", async () => {
+      const { queryClient, deps } = setup();
+      // No setQueryData seed: the thread query has not resolved yet (first ask
+      // on a cold session), so setQueryData's updater receives undefined. The
+      // append must mint the initial [newEntry] array via the `old ? ... :`
+      // branch, not crash reading old.length.
+      const { result } = renderHook(() => useTurnFlow(SID, deps));
+      vi.mocked(askQuestion).mockResolvedValue(textualOutcome("answer"));
+
+      await act(async () => {
+        await result.current.handleAsk("q");
+      });
+
+      const thread = queryClient.getQueryData<unknown[]>(sessionKeys.thread(SID));
+      expect(thread).toHaveLength(1);
+      expect(thread?.[0]).toMatchObject({ entry: "Turn" });
+    });
+
+    it("stamps the ask-time external choice onto the optimistic record (#725)", async () => {
+      const { queryClient, deps } = setup();
+      queryClient.setQueryData(sessionKeys.thread(SID), []);
+      const { result } = renderHook(() => useTurnFlow(SID, deps));
+      vi.mocked(getSessionRuntime).mockResolvedValue({ kind: "external", data: "claude-code" });
+      vi.mocked(askQuestion).mockResolvedValue(textualOutcome("answer"));
+
+      await act(async () => {
+        await result.current.handleAsk("why?");
+      });
+
+      // The choice read precedes the ask dispatch: the stamped value mirrors
+      // the turn-top snapshot as of submit. set_session_runtime is
+      // lock-light (never blocks on a turn), so ordering the read this way
+      // keeps the only mismatch window to the read-to-dispatch gap -- a
+      // settle-time read would widen it to the turn's whole duration.
+      expect(getSessionRuntime).toHaveBeenCalledWith(SID);
+      // Single read, fired at ask: a settle-time re-read (the rejected
+      // compromise) would still pass the ordering pin above but not this
+      // count.
+      expect(getSessionRuntime).toHaveBeenCalledTimes(1);
+      expect(vi.mocked(getSessionRuntime).mock.invocationCallOrder[0]).toBeLessThan(
+        vi.mocked(askQuestion).mock.invocationCallOrder[0],
+      );
+
+      const thread = queryClient.getQueryData<ThreadEntry[]>(sessionKeys.thread(SID));
+      expect(thread?.[0]).toMatchObject({
+        entry: "Turn",
+        data: {
+          provenance: { runtime: { kind: "external", data: { adapter_id: "claude-code" } } },
+        },
+      });
+    });
+
+    it("stamps a built_in choice as the built-in runtime", async () => {
+      const { queryClient, deps } = setup();
+      queryClient.setQueryData(sessionKeys.thread(SID), []);
+      const { result } = renderHook(() => useTurnFlow(SID, deps));
+      vi.mocked(getSessionRuntime).mockResolvedValue({ kind: "built_in" });
+      vi.mocked(askQuestion).mockResolvedValue(textualOutcome("answer"));
+
+      await act(async () => {
+        await result.current.handleAsk("q");
+      });
+
+      const thread = queryClient.getQueryData<ThreadEntry[]>(sessionKeys.thread(SID));
+      expect(thread?.[0]).toMatchObject({
+        entry: "Turn",
+        data: { provenance: { runtime: { kind: "built_in" } } },
+      });
+    });
+
+    it("degrades honestly (no runtime stamped) when the choice read fails", async () => {
+      const { queryClient, deps } = setup();
+      queryClient.setQueryData(sessionKeys.thread(SID), []);
+      const { result } = renderHook(() => useTurnFlow(SID, deps));
+      vi.mocked(getSessionRuntime).mockRejectedValue(new Error("ipc down"));
+      vi.mocked(askQuestion).mockResolvedValue(textualOutcome("answer"));
+
+      await act(async () => {
+        await result.current.handleAsk("q");
+      });
+
+      // The ask still succeeds; only the attribution is absent -- the
+      // unrecorded-turn degradation, rendered markerless until reopened.
+      const thread = queryClient.getQueryData<ThreadEntry[]>(sessionKeys.thread(SID));
+      const first = thread?.[0];
+      expect(first?.entry).toBe("Turn");
+      if (first?.entry === "Turn") {
+        expect(first.data.provenance.runtime).toBeUndefined();
+      }
+    });
+
+    it("reopens the busy gate when the unmapped choice throws (#825)", async () => {
+      // The stamp's designed loud failure (#725) rejects handleAsk from
+      // inside the tail try; the fire paths' log-only catches (#825) rest
+      // on the tail finally clearing loading BEFORE the rejection escapes
+      // -- pin the reopen directly, the safety story no other test observes.
+      const { deps, setTurnLoading } = setup();
+      const { result } = renderHook(() => useTurnFlow(SID, deps));
+      // Once, not a plain override: clearAllMocks never restores a mock's
+      // implementation, so a lingering resolved value would poison every
+      // later test that rides the factory default (the read is single-shot
+      // per ask, so one Once covers it).
+      vi.mocked(getSessionRuntime).mockResolvedValueOnce(
+        { kind: "genuinely_unmapped" } as unknown as SessionRuntimeChoice,
+      );
+      vi.mocked(askQuestion).mockResolvedValue(textualOutcome("answer"));
+
+      let rejection: unknown;
+      await act(async () => {
+        rejection = await result.current.handleAsk("q").catch((e: unknown) => e);
+      });
+
+      expect((rejection as Error).message).toContain("unhandled runtime choice");
+      expect(setTurnLoading).toHaveBeenLastCalledWith(false);
+    });
+
+    it("invalidates workingSet + active on a Materialized outcome", async () => {
+      const { invalidateSpy, deps } = setup();
+      const { result } = renderHook(() => useTurnFlow(SID, deps));
+      vi.mocked(askQuestion).mockResolvedValue(materializedOutcome("result_1"));
+
+      await act(async () => {
+        await result.current.handleAsk("build it");
+      });
+
+      const invalidatedKeys = invalidateSpy.mock.calls.map(
+        (call) => (call[0] as { queryKey: unknown }).queryKey,
+      );
+      expect(invalidatedKeys).toContainEqual(sessionKeys.workingSet(SID));
+      expect(invalidatedKeys).toContainEqual(sessionKeys.active(SID));
+    });
+
+    it("routes the turn-end refresh through the seam's cascade entry (#1088)", async () => {
+      const { deps } = setup();
+      const { result } = renderHook(() => useTurnFlow(SID, deps));
+      vi.mocked(askQuestion).mockResolvedValue(materializedOutcome("result_1"));
+
+      await act(async () => {
+        await result.current.handleAsk("build it");
+      });
+
+      expect(invalidateSessionData).toHaveBeenCalledWith(deps.queryClient, SID);
+    });
+
+    it("refreshes the thread on EVERY settled outcome (the recorded row converges the append)", async () => {
+      // ADR-0124 (issue #1088): the recorded row carries settle-computed
+      // fields the optimistic append cannot know (the artifact manifest, the
+      // terminal body, invocation hashes), and record_turn commits before
+      // the ask resolves -- the refetch lands a richer row, never a wipe.
+      // A textual outcome matters most here: it is the artifact-carrying
+      // shape with no working-set change of its own.
+      const { invalidateSpy, deps } = setup();
+      const { result } = renderHook(() => useTurnFlow(SID, deps));
+      vi.mocked(askQuestion).mockResolvedValue(textualOutcome("answer"));
+
+      await act(async () => {
+        await result.current.handleAsk("build it");
+      });
+
+      const invalidatedKeys = invalidateSpy.mock.calls.map(
+        (call) => (call[0] as { queryKey: unknown }).queryKey,
+      );
+      expect(invalidatedKeys).toContainEqual(sessionKeys.thread(SID));
+      expect(invalidatedKeys).toContainEqual(sessionKeys.workingSet(SID));
+      expect(invalidatedKeys).toContainEqual(sessionKeys.active(SID));
+    });
+
+    it("invalidates the model config on a non-Materialized outcome too (Textual, ADR-0095)", async () => {
+      // Issue #1088: the turn-end cascade now runs on every settled outcome
+      // (the recorded row's settle-computed fields), so a textual turn
+      // refreshes workingSet/active/thread AND the model config -- an
+      // external-runtime turn's discovered catalog lands on the backend
+      // handle cache regardless of how the turn ended.
+      const { invalidateSpy, deps } = setup();
+      const { result } = renderHook(() => useTurnFlow(SID, deps));
+      vi.mocked(askQuestion).mockResolvedValue(textualOutcome("answer"));
+
+      await act(async () => {
+        await result.current.handleAsk("q");
+      });
+
+      expect(invalidateSpy).toHaveBeenCalledWith({
+        queryKey: sessionKeys.modelConfig(SID),
+      });
+    });
+
+    it("surfaces a refresh failure via setError without skipping setTurnLoading(false)", async () => {
+      const { queryClient, invalidateSpy, deps, setError, setTurnLoading } = setup();
+      const { result } = renderHook(() => useTurnFlow(SID, deps));
+      vi.mocked(askQuestion).mockResolvedValue(materializedOutcome("result_1"));
+      invalidateSpy.mockRejectedValueOnce(new Error("refresh failed"));
+
+      await act(async () => {
+        await result.current.handleAsk("build it");
+      });
+
+      // A refresh reject reaches setError (tagged ask) AND setTurnLoading(false)
+      // still runs -- QuestionBar is not left locked forever. setError(null)
+      // ran at the ask start (clear), then the refresh reject set the error.
+      expect(setError).toHaveBeenLastCalledWith(expect.objectContaining({ kind: "ask" }));
+      // The refreshFailed option selects the "saved, but refreshing" banner
+      // (ADR-0069). The stub intl returns "err" for every descriptor, so the
+      // observable seam here is the descriptor id, not the composed message
+      // (the wording itself is pinned in toAppError.test.ts).
+      expect(vi.mocked(deps.intl.formatMessage)).toHaveBeenLastCalledWith(
+        expect.objectContaining({ id: "error.flow.savedRefreshFailed" }),
+        expect.anything(),
+      );
+      expect(setTurnLoading).toHaveBeenLastCalledWith(false);
+      // Thread cache holds the optimistic append (a refresh failure skips
+      // the refetch, so the append stands).
+      const thread = queryClient.getQueryData<unknown[]>(sessionKeys.thread(SID));
+      expect(thread).toHaveLength(1);
+      expect(thread?.[0]).toMatchObject({ entry: "Turn" });
+    });
+  });
+
+  describe("viewed method timing (issue #229 -- auto-select + R5 suppress)", () => {
+    it("calls suppressInit after the optimistic append on every outcome", async () => {
+      const { viewed, deps } = setup();
+      const { result } = renderHook(() => useTurnFlow(SID, deps));
+      vi.mocked(askQuestion).mockResolvedValue(textualOutcome("answer"));
+
+      await act(async () => {
+        await result.current.handleAsk("q");
+      });
+
+      expect(viewed.suppressInit).toHaveBeenCalledTimes(1);
+    });
+
+    it("calls markProduced on a Materialized outcome (auto-select)", async () => {
+      const { viewed, deps } = setup();
+      const { result } = renderHook(() => useTurnFlow(SID, deps));
+      vi.mocked(askQuestion).mockResolvedValue(materializedOutcome("result_7"));
+
+      await act(async () => {
+        await result.current.handleAsk("build it");
+      });
+
+      expect(viewed.markProduced).toHaveBeenCalledTimes(1);
+      expect(viewed.markProduced).toHaveBeenCalledWith("result_7");
+    });
+
+    it("does NOT call markProduced on a non-Materialized outcome", async () => {
+      const { viewed, deps } = setup();
+      const { result } = renderHook(() => useTurnFlow(SID, deps));
+      vi.mocked(askQuestion).mockResolvedValue(textualOutcome("answer"));
+
+      await act(async () => {
+        await result.current.handleAsk("q");
+      });
+
+      expect(viewed.markProduced).not.toHaveBeenCalled();
+    });
+  });
+
+  describe("handleCancel", () => {
+    it("calls cancelQuery with the session id", async () => {
+      const { deps } = setup();
+      const { result } = renderHook(() => useTurnFlow(SID, deps));
+      await act(async () => {
+        await result.current.handleCancel();
+      });
+      expect(cancelQuery).toHaveBeenCalledWith(SID);
+    });
+
+    it("surfaces a cancel failure via setError (tagged ask)", async () => {
+      const { deps, setError } = setup();
+      vi.mocked(cancelQuery).mockRejectedValueOnce(new Error("cancel failed"));
+      const { result } = renderHook(() => useTurnFlow(SID, deps));
+      await act(async () => {
+        await result.current.handleCancel();
+      });
+      expect(setError).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  describe("wait stamp (issue #1264)", () => {
+    // The LLM round-trip wait window's start stamp. The Date.now spy keys
+    // each window's stamp so the persistence / fresh-window assertions are
+    // deterministic (a real clock can return the same millisecond twice in
+    // a fast run).
+    function stampNow(value: number) {
+      return vi.spyOn(Date, "now").mockReturnValue(value);
+    }
+    const staysInFlight = () => new Promise<TurnOutcome>(() => {});
+
+    it("opens at ask start (empty rounds already name the wait) and persists through a bare Thinking", async () => {
+      const { deps } = setup();
+      const nowSpy = stampNow(1_000);
+      vi.mocked(askQuestion).mockImplementation(staysInFlight);
+      const { result } = renderHook(() => useTurnFlow(SID, deps));
+      expect(result.current.waitStartedAt).toBeNull();
+      await waitFor(() => expect(turnProgressCb.current).not.toBeNull());
+      act(() => {
+        void result.current.handleAsk("问");
+      });
+      expect(result.current.waitStartedAt).toBe(1_000);
+      // The wait continues -- the window keeps its opening stamp.
+      emitProgress(SID, { Thinking: { attempt: 1 } });
+      expect(result.current.waitStartedAt).toBe(1_000);
+      // And it keeps it across the window's LATER commits too: the clock
+      // moves INSIDE the window, so a re-stamping regression (a fresh stamp
+      // per waiting commit) would read 3_000 here.
+      nowSpy.mockReturnValue(3_000);
+      emitProgress(SID, { Thinking: { attempt: 2 } });
+      expect(result.current.waitStartedAt).toBe(1_000);
+      nowSpy.mockRestore();
+    });
+
+    it("closes when a call dispatches (the running row carries the liveness)", async () => {
+      const { deps } = setup();
+      const nowSpy = stampNow(1_000);
+      vi.mocked(askQuestion).mockImplementation(staysInFlight);
+      const { result } = renderHook(() => useTurnFlow(SID, deps));
+      await waitFor(() => expect(turnProgressCb.current).not.toBeNull());
+      act(() => {
+        void result.current.handleAsk("问");
+      });
+      expect(result.current.waitStartedAt).toBe(1_000);
+      emitProgress(SID, {
+        ToolCallStarted: { name: "explore", operation_kind: "read", summary: "SELECT 1" },
+      });
+      expect(result.current.waitStartedAt).toBeNull();
+      nowSpy.mockRestore();
+    });
+
+    it("closes while the tail round streams prose (the caret carries the liveness)", async () => {
+      const { deps } = setup();
+      const nowSpy = stampNow(1_000);
+      vi.mocked(askQuestion).mockImplementation(staysInFlight);
+      const { result } = renderHook(() => useTurnFlow(SID, deps));
+      await waitFor(() => expect(turnProgressCb.current).not.toBeNull());
+      act(() => {
+        void result.current.handleAsk("问");
+      });
+      emitProgress(SID, { Thinking: { attempt: 1 } });
+      expect(result.current.waitStartedAt).toBe(1_000);
+      emitProgress(SID, { TextDelta: { delta: "答" } });
+      expect(result.current.waitStartedAt).toBeNull();
+      nowSpy.mockRestore();
+    });
+
+    it("opens a FRESH stamp for the next round-trip window (no cross-window carry)", async () => {
+      const { deps } = setup();
+      const nowSpy = stampNow(1_000);
+      vi.mocked(askQuestion).mockImplementation(staysInFlight);
+      const { result } = renderHook(() => useTurnFlow(SID, deps));
+      await waitFor(() => expect(turnProgressCb.current).not.toBeNull());
+      act(() => {
+        void result.current.handleAsk("问");
+      });
+      expect(result.current.waitStartedAt).toBe(1_000);
+      emitProgress(SID, {
+        ToolCallStarted: { name: "explore", operation_kind: "read", summary: "SELECT 1" },
+      });
+      expect(result.current.waitStartedAt).toBeNull();
+      // The dispatch completes: the sealed row waits on the next round-trip
+      // -- a NEW window, stamped from the clock at ITS opening.
+      nowSpy.mockReturnValue(9_000);
+      emitProgress(SID, {
+        ToolCallCompleted: {
+          name: "explore",
+          operation_kind: "read",
+          summary: "SELECT 1",
+          success: true,
+          result_excerpt: "",
+        },
+      });
+      expect(result.current.waitStartedAt).toBe(9_000);
+      emitProgress(SID, { Thinking: { attempt: 2 } });
+      expect(result.current.waitStartedAt).toBe(9_000);
+      nowSpy.mockRestore();
+    });
+
+    it("dies with the turn: a settled ask clears the stamp (cancel rides the same finally)", async () => {
+      const { deps } = setup();
+      const nowSpy = stampNow(1_000);
+      let resolveAsk!: (outcome: TurnOutcome) => void;
+      vi.mocked(askQuestion).mockImplementationOnce(
+        () =>
+          new Promise<TurnOutcome>((res) => {
+            resolveAsk = res;
+          }),
+      );
+      const { result } = renderHook(() => useTurnFlow(SID, deps));
+      await waitFor(() => expect(turnProgressCb.current).not.toBeNull());
+      let askPromise!: Promise<void>;
+      act(() => {
+        askPromise = result.current.handleAsk("问");
+      });
+      expect(result.current.waitStartedAt).toBe(1_000);
+      await act(async () => {
+        resolveAsk(textualOutcome("答案"));
+        await askPromise;
+      });
+      expect(result.current.waitStartedAt).toBeNull();
+      nowSpy.mockRestore();
+    });
+
+    it("dies with the turn: an ask that rejects (IPC failure) clears the stamp too", async () => {
+      const { deps } = setup();
+      const nowSpy = stampNow(1_000);
+      vi.mocked(askQuestion).mockRejectedValueOnce(new Error("ipc down"));
+      const { result } = renderHook(() => useTurnFlow(SID, deps));
+      await waitFor(() => expect(turnProgressCb.current).not.toBeNull());
+      let askPromise!: Promise<void>;
+      act(() => {
+        askPromise = result.current.handleAsk("问");
+      });
+      expect(result.current.waitStartedAt).toBe(1_000);
+      await act(async () => {
+        await askPromise;
+      });
+      expect(result.current.waitStartedAt).toBeNull();
+      nowSpy.mockRestore();
+    });
+  });
+
+  describe("turn clock (issue #1264 turn-clock ruling)", () => {
+    // The bar's continuous figure: the ask stamp while the turn is in
+    // flight, frozen at the earliest PENDING approval's arrival while the
+    // gate holds the user's turn. Derived, never stored.
+    it("starts at the ask stamp and dies with the turn", async () => {
+      const { deps } = setup();
+      const nowSpy = vi.spyOn(Date, "now").mockReturnValue(1_000);
+      let resolveAsk!: (outcome: TurnOutcome) => void;
+      vi.mocked(askQuestion).mockImplementationOnce(
+        () =>
+          new Promise<TurnOutcome>((res) => {
+            resolveAsk = res;
+          }),
+      );
+      const { result } = renderHook(() => useTurnFlow(SID, deps));
+      expect(result.current.turnStartedAt).toBeNull();
+      await waitFor(() => expect(turnProgressCb.current).not.toBeNull());
+      let askPromise!: Promise<void>;
+      act(() => {
+        askPromise = result.current.handleAsk("问");
+      });
+      expect(result.current.turnStartedAt).toBe(1_000);
+      expect(result.current.turnPausedSince).toBeNull();
+      await act(async () => {
+        resolveAsk(textualOutcome("答案"));
+        await askPromise;
+      });
+      expect(result.current.turnStartedAt).toBeNull();
+      nowSpy.mockRestore();
+    });
+
+    it("freezes at the earliest pending approval's arrival while the gate holds", () => {
+      const { deps } = setup();
+      vi.mocked(askQuestion).mockImplementation(
+        () => new Promise<TurnOutcome>(() => {}),
+      );
+      const entry = (receivedAt: number, kind: "pending" | "resolved") =>
+        ({
+          requestId: `req-${receivedAt}`,
+          server: "acme",
+          tool: "fetch",
+          operationKind: "network",
+          summary: "GET /x",
+          receivedAt,
+          status:
+            kind === "pending"
+              ? ({ kind: "pending" } as const)
+              : ({ kind: "resolved", response: "allow_once" } as const),
+        }) satisfies ApprovalEntry;
+      const { result, rerender } = renderHook(
+        ({ approvals }: { approvals: ApprovalEntry[] }) =>
+          useTurnFlow(SID, { ...deps, approvals }),
+        { initialProps: { approvals: [entry(5_000, "pending"), entry(9_000, "pending")] } },
+      );
+      act(() => {
+        void result.current.handleAsk("问");
+      });
+      // Arrival order is gateway order -- the FIRST pending is the earliest
+      // hold, and the figure freezes there.
+      expect(result.current.turnPausedSince).toBe(5_000);
+      // The first approval resolves: the clock resumes (null) only when no
+      // pending remains -- the later hold re-freezes the figure at ITS
+      // arrival.
+      rerender({ approvals: [entry(5_000, "resolved"), entry(9_000, "pending")] });
+      expect(result.current.turnPausedSince).toBe(9_000);
+      rerender({ approvals: [entry(5_000, "resolved"), entry(9_000, "resolved")] });
+      expect(result.current.turnPausedSince).toBeNull();
+    });
+  });
+});

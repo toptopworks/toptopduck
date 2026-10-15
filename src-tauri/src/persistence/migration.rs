@@ -1,0 +1,1658 @@
+//! Forward migration pipeline (ADR-0036 Decision 1): a `.duck` whose
+//! `format_version` is BELOW the current app version steps through per-version
+//! JSON transforms, each producing the next version's shape, until it reaches
+//! the current version. The pipeline composes -- adding a transform extends it
+//! without changes to the open path.
+//!
+//! (As of v2, ADR-0082 / issue #296.) The registry carries two transforms:
+//! - `v0_to_v1` -- the synthetic demonstrator exercising BOTH migration kinds
+//!   ADR-0036 names (v0 was never released): **add field with default** (a v0
+//!   `SourceRef` missing `display_name` is filled from its `reference_name`)
+//!   and **semantic remap** (a v0 `RecipeOutcome` discriminator `"outcome_kind"`
+//!   is renamed to v1's `"kind"`).
+//! - `v1_to_v2` -- the first real migration: adds the persisted execution trace
+//!   (ADR-0078) to each Materialized turn's display part as a synthetic
+//!   single-call `materialize` entry. The reconstructable part is unchanged
+//!   (each productive SQL IS one promotion entry, ADR-0082), so resume replay
+//!   semantics are identical before and after migration.
+//!
+//! The open path's honest refuse on a HIGHER version (ADR-0036) lives in
+//! [`crate::persistence::io`]; this module owns the LOWER-version path.
+//!
+//! Transforms operate on [`serde_json::Value`] -- before typed deserialize --
+//! because an older shape may not satisfy the current `Recipe` struct's
+//! required fields and must be reshaped first.
+
+use serde_json::Value;
+
+use crate::persistence::recipe::RECIPE_FORMAT_VERSION;
+
+/// Why a migration failed. `NoTransform` is an honest parse error: a version
+/// sits between the file's and the current app's with no registered step, so
+/// the chain is broken -- the file is externally owned input (ADR-0034), so
+/// the engine never best-effort guesses a shape. `Field` names the missing or
+/// ill-typed field a transform required.
+///
+/// (As of v2.) `NoTransform` is unreachable in production: v0 and v1 both have
+/// registered steps to current. It exists as the contract guard for when v3
+/// ships -- a forgotten `v2_to_v3` registration must surface as an honest
+/// error, not a silent mis-migrate.
+///
+/// Crosses IPC serde-structured (issue #120): `#[serde(tag = "kind", content =
+/// "data")]`, the adjacently-tagged shape the rest of the wire contract uses
+/// (the same as [`crate::session_store::SessionError`]). `Field(String)` needs
+/// the adjacent `content = "data"` slot -- an internally-tagged `#[serde(tag =
+/// "kind")]` cannot carry a bare-string newtype variant. The hand-written
+/// `Display` below stays Rust-log-only; it is NOT the IPC contract.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "kind", content = "data")]
+pub enum MigrationError {
+    /// The migration chain has a gap at `from` (no transform registered for
+    /// that source version). `supported` is the current app version.
+    NoTransform { from: u32, supported: u32 },
+    /// A transform expected a field that is missing or has the wrong type.
+    Field(String),
+}
+
+impl std::fmt::Display for MigrationError {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        match self {
+            Self::NoTransform { from, supported } => write!(
+                f,
+                "cannot migrate format_version={from} to current {supported}: \
+                 migration chain has no step for that version"
+            ),
+            Self::Field(d) => write!(f, "migration failed: {d}"),
+        }
+    }
+}
+impl std::error::Error for MigrationError {}
+
+/// Step `value` from `from_version` up to [`RECIPE_FORMAT_VERSION`], applying
+/// each per-version transform in order and stamping `format_version` after
+/// each step. Returns the v-current JSON shape, ready to deserialize into
+/// `Recipe`. A `from_version >= RECIPE_FORMAT_VERSION` is a no-op (the caller
+/// routes higher versions to honest-refuse before reaching here, but the
+/// guard keeps the function self-contained).
+pub fn migrate_to_current(value: Value, from_version: u32) -> Result<Value, MigrationError> {
+    let mut current = value;
+    let mut v = from_version;
+    while v < RECIPE_FORMAT_VERSION {
+        current = match v {
+            0 => transforms::v0_to_v1(current)?,
+            1 => transforms::v1_to_v2(current)?,
+            2 => transforms::v2_to_v3(current)?,
+            3 => transforms::v3_to_v4(current)?,
+            4 => transforms::v4_to_v5(current)?,
+            5 => transforms::v5_to_v6(current)?,
+            6 => transforms::v6_to_v7(current)?,
+            other => {
+                return Err(MigrationError::NoTransform {
+                    from: other,
+                    supported: RECIPE_FORMAT_VERSION,
+                });
+            }
+        };
+        v += 1;
+        // Stamp the stepped-to version. A non-object root cannot carry
+        // `format_version` and is a structural error, not a panic -- the
+        // `format_version` honest-parse guard in `read_duck` keeps the
+        // production path on an object root, but this is a pub API so it
+        // defends its own contract (ADR-0034 honest parse).
+        let obj = current.as_object_mut().ok_or_else(|| {
+            MigrationError::Field(
+                "recipe root is not an object; cannot stamp format_version".into(),
+            )
+        })?;
+        obj.insert("format_version".to_string(), Value::from(v));
+    }
+    Ok(current)
+}
+
+mod transforms {
+    use super::*;
+
+    /// v0 -> v1 demonstrator (ADR-0036). Two migration kinds in one transform:
+    ///
+    /// 1. **add field with default** -- fill any `sources[i]` missing
+    ///    `display_name` with its `reference_name`. v1 requires `display_name`
+    ///    on every source; a synthetic v0 source omits it (mimicking an old
+    ///    recording whose label matched the reference name).
+    /// 2. **semantic remap** -- rename each Turn entry's outcome
+    ///    discriminator key from v0's `"outcome_kind"` to v1's `"kind"`.
+    ///    Source-lifecycle entries have no `outcome` field and pass through.
+    ///
+    /// Stamps no version itself -- [`migrate_to_current`] stamps after each
+    /// step so the version always reflects the shape.
+    pub fn v0_to_v1(mut value: Value) -> Result<Value, MigrationError> {
+        // (1) add-field-with-default on sources.
+        if let Some(sources) = value.get_mut("sources").and_then(|s| s.as_array_mut()) {
+            for src in sources.iter_mut() {
+                let obj = src
+                    .as_object_mut()
+                    .ok_or_else(|| MigrationError::Field("source entry is not an object".into()))?;
+                if !obj.contains_key("display_name") {
+                    let reference_name = obj
+                        .get("reference_name")
+                        .and_then(|v| v.as_str())
+                        .ok_or_else(|| {
+                            MigrationError::Field(
+                                "source missing reference_name; cannot fill default display_name"
+                                    .into(),
+                            )
+                        })?;
+                    obj.insert("display_name".to_string(), Value::from(reference_name));
+                }
+            }
+        }
+
+        // (2) semantic-remap on the outcome discriminator across history. The
+        // per-entry remap lives in its own helper so this loop stays a flat map
+        // (early-return inside the helper beats a 5-deep if-let chain -- the
+        // >4-level nesting guideline from coding-style.md).
+        if let Some(history) = value.get_mut("history").and_then(|h| h.as_array_mut()) {
+            for entry in history.iter_mut() {
+                rename_outcome_kind_in_place(entry);
+            }
+        }
+
+        Ok(value)
+    }
+
+    /// Rename a Turn entry's legacy outcome discriminator `outcome_kind` ->
+    /// `kind` in place (ADR-0036 semantic remap). No-ops on entries whose
+    /// outcome is absent (Source-lifecycle entries carry no `outcome` field)
+    /// or whose outcome is not an object -- per-entry defensive so the caller
+    /// loop above stays a flat map instead of a 5-deep if-let chain.
+    fn rename_outcome_kind_in_place(entry: &mut Value) {
+        let Some(outcome) = entry.get_mut("data").and_then(|d| d.get_mut("outcome")) else {
+            return;
+        };
+        let Some(obj) = outcome.as_object_mut() else {
+            return;
+        };
+        if let Some(tag) = obj.remove("outcome_kind") {
+            // Non-overwriting: if a v0 entry already carries a `kind` key (a
+            // partial v1 write or a hand edit), keep the existing `kind` and
+            // drop the legacy `outcome_kind` value. v0 was never released so
+            // this is defensive only -- a later invalid `kind` surfaces as
+            // an honest deserialize error, so the legacy tag never silently
+            // wins.
+            obj.entry("kind").or_insert(tag);
+        }
+    }
+
+    /// v1 -> v2 (ADR-0082, issue #296): add the persisted execution trace
+    /// (ADR-0078) to each Turn entry's display part. A v1 Materialized turn ran
+    /// exactly one productive SQL under the single-SQL contract, so its
+    /// trajectory is one `materialize` call -- synthesized from the verbatim
+    /// SQL via the shared [`crate::persistence::recipe::synthetic_materialize_trace`] helper
+    /// -- the same one [`crate::session::Session::build_recipe`] uses for live
+    /// turns from before runtime tracking was wired (issue #319) -- so a
+    /// migrated v1 session shows the same one-step trajectory it produced
+    /// live. Every other turn (Textual /
+    /// Failed / Cancelled / Source event) carries no tool-call trajectory and
+    /// gets no trace field -- `#[serde(default)]` on [`RecipeTurn::trace`]
+    /// deserializes the absent field as empty.
+    ///
+    /// The reconstructable part (the Materialized outcome's SQL + result_N) is
+    /// unchanged: each productive SQL IS one promotion entry (ADR-0082), so
+    /// resume replay semantics are identical before and after migration. No
+    /// field is renamed or removed -- the transform only ADDS `trace`.
+    ///
+    /// Stamps no version itself -- [`migrate_to_current`] stamps after each
+    /// step so the version always reflects the shape.
+    pub(super) fn v1_to_v2(mut value: Value) -> Result<Value, MigrationError> {
+        if let Some(history) = value.get_mut("history").and_then(|h| h.as_array_mut()) {
+            for entry in history.iter_mut() {
+                add_synthetic_trace_in_place(entry);
+            }
+        }
+        Ok(value)
+    }
+
+    /// Add the synthetic single-call trace to one Turn entry's `data`, in place
+    /// (ADR-0082). No-op for Source entries (no `outcome`), for non-Materialized
+    /// outcomes (no tool trajectory), and for a Materialized outcome missing its
+    /// `sql` (a corrupt shape the typed deserialize will reject downstream --
+    /// the transform stays side-effect-free rather than guessing). Per-entry
+    /// defensive so the caller loop is a flat map.
+    fn add_synthetic_trace_in_place(entry: &mut Value) {
+        // A Turn entry's outcome lives at `data.outcome` (the adjacently-tagged
+        // RecipeEntry shape `{entry, data}`). Source entries have no outcome and
+        // a non-object `data` cannot carry one -- both skip.
+        let Some(data_obj) = entry.get_mut("data").and_then(|d| d.as_object_mut()) else {
+            return;
+        };
+        // Take the outcome node once; both the kind discriminator and the
+        // Materialized payload's `sql` live under it. A missing outcome is a
+        // Source entry (or a corrupt Turn) -- skip either way.
+        let Some(outcome) = data_obj.get("outcome") else {
+            return;
+        };
+        let Some(kind) = outcome.get("kind").and_then(Value::as_str) else {
+            return;
+        };
+        // Only Materialized turns ran a productive SQL -> get a synthetic trace.
+        if kind != "Materialized" {
+            return;
+        }
+        let Some(sql) = outcome
+            .get("data")
+            .and_then(|d| d.get("sql"))
+            .and_then(Value::as_str)
+        else {
+            // A Materialized outcome missing `sql` is corrupt; the typed
+            // deserialize rejects it downstream. Stay side-effect-free (no
+            // guess), but log the skip so a corrupt .duck is diagnosable
+            // rather than a silent no-trace.
+            log::warn!("v1->v2 migration: Materialized turn missing sql; no synthetic trace");
+            return;
+        };
+        let trace = crate::persistence::recipe::synthetic_materialize_trace(sql);
+        // Serialize the typed trace into the JSON the v2 RecipeTurn deserializes
+        // back from. Plain serializable struct -- a failure is a logic bug, not
+        // a parse fault; no-op rather than panic on external input. The
+        // debug_assert surfaces a future non-serializable field under test
+        // builds instead of silently dropping every migrated turn's trace.
+        let Ok(trace_value) = serde_json::to_value(&trace) else {
+            debug_assert!(false, "RecipeTraceEntry must serialize");
+            return;
+        };
+        data_obj.insert("trace".to_string(), trace_value);
+    }
+
+    /// v2 -> v3 (ADR-0084): make the result turn's promotion chain explicit. A
+    /// v2 Materialized turn carries a single flattened result (reference_name /
+    /// display_name / sql / stale at the outcome-data top level); v3 wraps
+    /// those into a one-element `promotions` list so a result turn carries an
+    /// ordered chain (each promotion with its own stale anchor). The turn-level
+    /// `assumption` stays at the outcome-data level. Every other turn (Textual
+    /// / Failed / Cancelled / Source event) is untouched. Lossless: the single
+    /// v2 result becomes the chain's sole (and primary) promotion, so resume
+    /// replay re-materializes the same result_N.
+    ///
+    /// Stamps no version itself -- [`migrate_to_current`] stamps after each
+    /// step so the version always reflects the shape.
+    pub(super) fn v2_to_v3(mut value: Value) -> Result<Value, MigrationError> {
+        if let Some(history) = value.get_mut("history").and_then(|h| h.as_array_mut()) {
+            for entry in history.iter_mut() {
+                wrap_materialized_promotions_in_place(entry);
+            }
+        }
+        Ok(value)
+    }
+
+    /// Wrap one v2 Materialized turn's flat result fields into a one-element
+    /// `promotions` list, in place (ADR-0084). No-op for Source entries (no
+    /// `outcome`) and for non-Materialized outcomes (no promotion). Defensive
+    /// on a malformed shape: a missing required field is left absent and
+    /// surfaces as an honest typed-deserialize error downstream rather than a
+    /// guess here. Per-entry so the caller loop is a flat map.
+    fn wrap_materialized_promotions_in_place(entry: &mut Value) {
+        // A Turn entry's outcome lives at `data.outcome` (the adjacently-tagged
+        // RecipeEntry shape `{entry, data}`). Source entries have no outcome.
+        let Some(outcome) = entry.get_mut("data").and_then(|d| d.get_mut("outcome")) else {
+            return;
+        };
+        let Some(kind) = outcome.get("kind").and_then(Value::as_str) else {
+            return;
+        };
+        if kind != "Materialized" {
+            return;
+        }
+        let Some(data) = outcome.get_mut("data").and_then(|d| d.as_object_mut()) else {
+            return;
+        };
+        // Lift the flat result fields out of the outcome data; whatever remains
+        // (assumption) stays at the turn level. A v2 Materialized turn that ran
+        // a productive result carries reference_name + display_name + sql;
+        // `stale` is optional (live turns omit it). Each present field rides
+        // into the single promotion; an absent required field deserializes to
+        // an honest error downstream.
+        let mut promotion = serde_json::Map::new();
+        for key in ["reference_name", "display_name", "sql", "stale"] {
+            if let Some(v) = data.remove(key) {
+                promotion.insert(key.to_string(), v);
+            }
+        }
+        data.insert(
+            "promotions".to_string(),
+            Value::Array(vec![Value::Object(promotion)]),
+        );
+    }
+
+    /// v3 -> v4 (ADR-0086, issue #363): sharpen turn provenance's skill list
+    /// from a bare-name string array to the typed `{name, content_hash}` shape.
+    /// A v3 turn's `provenance.skills` is `["sql-coach", ...]`; v4 wraps each
+    /// name into `{"name": <name>, "content_hash": ""}` -- empty hash = no
+    /// baseline (the migration cannot retroactively compute a hash for the
+    /// skill content at a past turn), so the stale-degrade check on resume
+    /// never false-positives on migrated turns. Every other field is
+    /// untouched. The new `RecipeEntry::Skill` variant needs no migration
+    /// work: a v3 recipe has no Skill entries (skill lifecycle lands with v4),
+    /// so the timeline is unchanged.
+    ///
+    /// For every real recipe this transform is a no-op: production recipes
+    /// never carried skill data under v3 (the field stayed empty until the
+    /// live path filled it in #364), so `provenance.skills` is either absent
+    /// or `[]` -- both pass through unchanged. The string-array shape only
+    /// ever existed as the v3 serde form; the migration is the contract guard
+    /// for the day a v3 recipe with non-empty skills surfaces (a test fixture
+    /// or a hand edit).
+    ///
+    /// Stamps no version itself -- [`migrate_to_current`] stamps after each
+    /// step so the version always reflects the shape.
+    pub(super) fn v3_to_v4(mut value: Value) -> Result<Value, MigrationError> {
+        if let Some(history) = value.get_mut("history").and_then(|h| h.as_array_mut()) {
+            for entry in history.iter_mut() {
+                rewrite_provenance_skills_in_place(entry);
+            }
+        }
+        Ok(value)
+    }
+
+    /// Rewrite one Turn entry's `provenance.skills` from the v3 bare-name
+    /// string array to the v4 typed object array, in place (ADR-0086). No-op
+    /// for Source entries (no `data.provenance`), and for turns whose
+    /// `provenance` or `provenance.skills` is absent / not the expected shape
+    /// (`#[serde(default)]` deserializes a missing field as empty, and a
+    /// malformed shape surfaces as an honest typed-deserialize error
+    /// downstream -- the transform stays side-effect-free rather than
+    /// guessing). Per-entry defensive so the caller loop stays a flat map.
+    fn rewrite_provenance_skills_in_place(entry: &mut Value) {
+        // A Turn entry's provenance lives at `data.provenance` (the
+        // adjacently-tagged RecipeEntry shape `{entry, data}`). Source / Skill
+        // entries have no provenance and skip.
+        let Some(provenance) = entry.get_mut("data").and_then(|d| d.get_mut("provenance")) else {
+            return;
+        };
+        let Some(skills) = provenance.get_mut("skills").and_then(Value::as_array_mut) else {
+            // Absent or not-an-array -> `#[serde(default)]` deserializes empty;
+            // leave the field alone and let the typed reader handle it.
+            return;
+        };
+        // A v3 entry's `skills[i]` is a bare string; wrap each into the v4
+        // object shape. A non-string element is corrupt and left as-is -- the
+        // typed deserialize rejects it downstream (honest parse, not a guess).
+        // A `log::warn!` mirrors v1_to_v2's diagnostic on unexpected shapes so
+        // the skip is forensically traceable, not silent.
+        for skill in skills.iter_mut() {
+            let Some(name) = skill.as_str() else {
+                log::warn!(
+                    "v3->v4 migration: provenance.skills entry is not a string; \
+                     leaving for typed deserialize"
+                );
+                continue;
+            };
+            let wrapped = serde_json::json!({
+                "name": name,
+                "content_hash": "",
+            });
+            *skill = wrapped;
+        }
+    }
+
+    /// v4 -> v5 (ADR-0103, issue #608): group each Turn entry's flat
+    /// `data.trace` array into a one-round `[{ calls: [...] }]` shape. A v4
+    /// trace recorded only call entries -- no connective prose, no thinking
+    /// -- so the wrapped round carries the calls verbatim and no optional
+    /// member; the turn's new `asked_at` / `settled_at` fields are left
+    /// absent (an old turn honest-degrades to "no timestamp" on resume,
+    /// never a synthetic one). A turn with no trace field keeps it absent
+    /// (`#[serde(default)]` deserializes empty). Lossless for the call
+    /// trajectory: every entry survives the wrap with its fields untouched.
+    ///
+    /// Stamps no version itself -- [`migrate_to_current`] stamps after each
+    /// step so the version always reflects the shape.
+    pub(super) fn v4_to_v5(mut value: Value) -> Result<Value, MigrationError> {
+        if let Some(history) = value.get_mut("history").and_then(|h| h.as_array_mut()) {
+            for entry in history.iter_mut() {
+                wrap_flat_trace_into_round_in_place(entry);
+            }
+        }
+        Ok(value)
+    }
+
+    /// Wrap one Turn entry's flat `data.trace` entry array into a one-round
+    /// shape, in place (ADR-0103). No-op for Source / Skill entries (no
+    /// `data.trace`) and for turns whose trace is absent / empty (`[]` stays
+    /// `[]` -- an empty round list, not a round with no calls) / not an array
+    /// (a corrupt shape surfaces as an honest typed-deserialize error
+    /// downstream; the transform stays side-effect-free rather than
+    /// guessing). Per-entry defensive so the caller loop stays a flat map.
+    fn wrap_flat_trace_into_round_in_place(entry: &mut Value) {
+        // A Turn entry's trace lives at `data.trace` (the adjacently-tagged
+        // RecipeEntry shape `{entry, data}`); Source / Skill entries have no
+        // trace and skip.
+        let Some(data_obj) = entry.get_mut("data").and_then(|d| d.as_object_mut()) else {
+            return;
+        };
+        let Some(trace) = data_obj.get_mut("trace").and_then(Value::as_array_mut) else {
+            return;
+        };
+        if trace.is_empty() {
+            return;
+        }
+        let calls = std::mem::take(trace);
+        *trace = vec![serde_json::json!({ "calls": calls })];
+    }
+
+    /// v5 -> v6 (ADR-0110, issue #698): the bump reserves the `Activate`
+    /// skill lifecycle variant + the event `actor` mark. The transform is an
+    /// identity for every PRODUCTION recipe -- a v5 file cannot carry an
+    /// `Activate` event, and the actor field deserializes as None when
+    /// absent (`serde(default)`), so a v5 shape IS a valid v6 shape and
+    /// there is nothing to rewrite. The step exists so the chain stamps
+    /// `format_version` = 6 (an old client reading a v6 file must hit the
+    /// higher-version honest-refuse path, ADR-0036).
+    pub(super) fn v5_to_v6(value: Value) -> Result<Value, MigrationError> {
+        Ok(value)
+    }
+
+    /// v6 -> v7 (ADR-0119 Decision 6, issue #983): the invocation-semantics
+    /// breakpoint. Three moves, all header-level -- skill lifecycle events
+    /// PASS THROUGH (the v7 struct still deserializes them; the legacy
+    /// channels keep writing through the coexistence period), the Mount/
+    /// Unmount fold MATERIALIZES as the explicit `discovery_snapshot` (the
+    /// nearest honest value for a pre-snapshot file: the session's visible
+    /// skill set), and the activated set RETIRES silently (its bodies never
+    /// entered persisted history -- there is nothing to migrate, and the
+    /// names stay visible through the snapshot). Turn entries are untouched:
+    /// `invocations` deserializes as empty (serde default) for every
+    /// pre-v7 turn -- the honest pre-invocation posture.
+    pub(super) fn v6_to_v7(value: Value) -> Result<Value, MigrationError> {
+        let mut value = value;
+        if value.get("discovery_snapshot").is_none() {
+            let snapshot = fold_mounted_events(&value)?;
+            let obj = value
+                .as_object_mut()
+                .ok_or_else(|| MigrationError::Field("recipe root is not an object".into()))?;
+            obj.insert("discovery_snapshot".to_string(), Value::from(snapshot));
+        }
+        Ok(value)
+    }
+}
+
+/// Fold the recipe history's Mount/Unmount skill events into the
+/// materialized discovery snapshot (the v6->v7 step's one computation;
+/// the same Mount-in / Unmount-out fold, computed over raw JSON). Malformed shapes are
+/// honest errors -- a history that is not an array, or a skill entry whose
+/// `data` is present but yields no string `name`, is a corrupt file, not a
+/// migration input. The one deliberate gap: an entry with no `data` key at
+/// all is skipped here (any kind), and a `Skill`-tagged entry so skipped
+/// still never opens -- the downstream `history` deserialization rejects
+/// it with its generic missing-field error rather than this fold's typed
+/// `Field` error.
+fn fold_mounted_events(value: &Value) -> Result<Vec<String>, MigrationError> {
+    let mut mounted: Vec<String> = Vec::new();
+    let Some(history) = value.get("history").and_then(Value::as_array) else {
+        return Err(MigrationError::Field("history is not an array".into()));
+    };
+    for entry in history {
+        let Some(data) = entry.get("data") else {
+            continue;
+        };
+        let kind = entry.get("entry").and_then(Value::as_str);
+        if kind != Some("Skill") {
+            continue;
+        }
+        let Some(name) = data.get("name").and_then(Value::as_str) else {
+            return Err(MigrationError::Field(
+                "skill event without a string name".into(),
+            ));
+        };
+        match data.get("kind").and_then(Value::as_str) {
+            Some("Mount") => crate::util::push_unique(&mut mounted, &name.to_string()),
+            Some("Unmount") => mounted.retain(|n| n != name),
+            _ => {}
+        }
+    }
+    Ok(mounted)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Build a synthetic v0 source missing `display_name`.
+    fn v0_source(reference_name: &str, fingerprint: &str) -> Value {
+        serde_json::json!({
+            "reference_name": reference_name,
+            "source_path": format!("/data/{reference_name}.csv"),
+            "fingerprint": fingerprint,
+        })
+    }
+
+    /// Build a synthetic v0 Turn entry whose outcome carries the legacy
+    /// `outcome_kind` discriminator.
+    fn v0_turn(question: &str, outcome_kind: &str, outcome_data: Value) -> Value {
+        serde_json::json!({
+            "entry": "Turn",
+            "data": {
+                "question": question,
+                "outcome": {
+                    "outcome_kind": outcome_kind,
+                    "data": outcome_data,
+                },
+            },
+        })
+    }
+
+    #[test]
+    fn v0_to_v1_fills_default_display_name_when_missing() {
+        // ADR-0036 "add field with default": a v0 source without display_name
+        // gets filled from its reference_name, so the v1 struct (which
+        // requires the field) deserializes cleanly afterward.
+        let v0 = serde_json::json!({
+            "format_version": 0,
+            "session_name": "v0 分析",
+            "sources": [v0_source("people", "fp-people")],
+            "history": [],
+            "active": null,
+        });
+        let v1 = transforms::v0_to_v1(v0).expect("migrate");
+        let src = &v1["sources"][0];
+        assert_eq!(
+            src["display_name"], "people",
+            "display_name filled from reference_name"
+        );
+        assert_eq!(src["reference_name"], "people", "reference_name preserved");
+    }
+
+    #[test]
+    fn v0_to_v1_keeps_existing_display_name_unchanged() {
+        // A real v0 source that already carried a display_name is left as-is
+        // -- the transform is a default-fill, never an overwrite.
+        let v0 = serde_json::json!({
+            "format_version": 0,
+            "session_name": "x",
+            "sources": [{
+                "reference_name": "people",
+                "display_name": "员工表",
+                "source_path": "/data/people.csv",
+                "fingerprint": "fp",
+            }],
+            "history": [],
+            "active": null,
+        });
+        let v1 = transforms::v0_to_v1(v0).expect("migrate");
+        assert_eq!(
+            v1["sources"][0]["display_name"], "员工表",
+            "existing label preserved"
+        );
+    }
+
+    #[test]
+    fn v0_to_v1_renames_outcome_kind_to_kind() {
+        // ADR-0036 "semantic remap": the v0 outcome discriminator key
+        // "outcome_kind" becomes v1's "kind", so the v1 RecipeOutcome
+        // (#[serde(tag = "kind")]) deserializes the same payload.
+        let v0 = serde_json::json!({
+            "format_version": 0,
+            "session_name": "x",
+            "sources": [],
+            "history": [v0_turn(
+                "多少人",
+                "Materialized",
+                serde_json::json!({
+                    "reference_name": "result_1",
+                    "display_name": "result_1",
+                    "sql": "SELECT COUNT(*) AS n FROM \"people\".data",
+                }),
+            )],
+            "active": "result_1",
+        });
+        let v1 = transforms::v0_to_v1(v0).expect("migrate");
+        let outcome = &v1["history"][0]["data"]["outcome"];
+        assert_eq!(
+            outcome["kind"], "Materialized",
+            "discriminator renamed to kind"
+        );
+        assert!(
+            outcome.get("outcome_kind").is_none(),
+            "legacy outcome_kind key removed"
+        );
+        assert_eq!(
+            outcome["data"]["sql"], "SELECT COUNT(*) AS n FROM \"people\".data",
+            "outcome payload preserved",
+        );
+    }
+
+    #[test]
+    fn v0_to_v1_passes_source_lifecycle_entries_through() {
+        // A Source-lifecycle entry has no outcome field; the remap loop must
+        // not choke on it (defensive: the data.outcome path is absent).
+        let v0 = serde_json::json!({
+            "format_version": 0,
+            "session_name": "x",
+            "sources": [],
+            "history": [{
+                "entry": "Source",
+                "data": {
+                    "kind": "Added",
+                    "reference_name": "people",
+                    "display_name": "people",
+                },
+            }],
+            "active": null,
+        });
+        let v1 = transforms::v0_to_v1(v0).expect("migrate");
+        assert_eq!(
+            v1["history"][0]["entry"], "Source",
+            "source entry preserved"
+        );
+    }
+
+    #[test]
+    fn migrate_to_current_stamps_version_after_stepping() {
+        // The pipeline stamps format_version after each step, so a v0 input
+        // comes out carrying v1's version -- whatever the source file had.
+        let v0 = serde_json::json!({
+            "format_version": 0,
+            "session_name": "x",
+            "sources": [v0_source("people", "fp")],
+            "history": [],
+            "active": null,
+        });
+        let v1 = migrate_to_current(v0, 0).expect("migrate");
+        assert_eq!(
+            v1["format_version"], RECIPE_FORMAT_VERSION,
+            "stamped to current after migration",
+        );
+    }
+
+    #[test]
+    fn migrate_to_current_is_a_noop_when_already_at_current() {
+        // from_version == current never enters the loop; the value returns
+        // unchanged (including its original format_version).
+        let v1 = serde_json::json!({
+            "format_version": RECIPE_FORMAT_VERSION,
+            "session_name": "x",
+            "sources": [],
+            "history": [],
+            "active": null,
+        });
+        let back = migrate_to_current(v1.clone(), RECIPE_FORMAT_VERSION).expect("migrate");
+        assert_eq!(back, v1, "no transform applied at current version");
+    }
+
+    #[test]
+    fn migrate_to_current_round_trips_through_recipe_deserialize() {
+        // End-to-end of the migration + typed deserialize: a synthetic v0
+        // fixture migrates to a shape the current Recipe struct accepts.
+        use crate::persistence::recipe::Recipe;
+        let v0 = serde_json::json!({
+            "format_version": 0,
+            "session_name": "v0 分析",
+            "sources": [v0_source("people", "fp-people")],
+            "history": [v0_turn(
+                "多少人",
+                "Materialized",
+                serde_json::json!({
+                    "reference_name": "result_1",
+                    "display_name": "result_1",
+                    "sql": "SELECT COUNT(*) AS n FROM \"people\".data",
+                }),
+            )],
+            "active": "result_1",
+        });
+        let v1 = migrate_to_current(v0, 0).expect("migrate");
+        let recipe: Recipe =
+            serde_json::from_value(v1).expect("migrated shape deserializes as v1 Recipe");
+        assert_eq!(recipe.format_version(), RECIPE_FORMAT_VERSION);
+        assert_eq!(recipe.sources[0].display_name, "people");
+        assert_eq!(recipe.sources[0].reference_name, "people");
+        assert!(matches!(
+            recipe.history[0],
+            crate::persistence::recipe::RecipeEntry::Turn(_)
+        ));
+    }
+
+    #[test]
+    fn v5_to_v6_is_a_noop_for_a_production_recipe() {
+        // ADR-0110 (issue #698): a v5 recipe carries only Mount / Unmount
+        // skill events (no `actor` key anywhere). The v5 -> v6 step rewrites
+        // NOTHING -- only the version stamp moves -- and the migrated shape
+        // deserializes as a v6 Recipe whose activated set folds empty (the
+        // honest post-resume posture, no degrade report).
+        let v5 = serde_json::json!({
+            "format_version": 5,
+            "session_name": "pre-activation",
+            "sources": [],
+            "history": [
+                { "entry": "Skill", "data": { "kind": "Mount", "name": "sql-coach" } },
+                { "entry": "Skill", "data": { "kind": "Unmount", "name": "sql-coach" } },
+            ],
+            "active": null,
+        });
+        let migrated = migrate_to_current(v5, 5).expect("migrate");
+        assert_eq!(migrated["format_version"], RECIPE_FORMAT_VERSION);
+        // The entries are untouched -- no actor injected, no shape rewrite.
+        assert_eq!(
+            migrated["history"][0]["data"],
+            serde_json::json!({ "kind": "Mount", "name": "sql-coach" }),
+        );
+        let recipe: crate::persistence::recipe::Recipe =
+            serde_json::from_value(migrated).expect("v6 shape parses");
+        assert_eq!(recipe.format_version(), RECIPE_FORMAT_VERSION);
+        assert!(
+            recipe.invoked_skills().is_empty(),
+            "no pre-v7 turn carries invocations",
+        );
+    }
+
+    #[test]
+    fn v6_to_v7_materializes_the_mount_fold_as_the_discovery_snapshot() {
+        // ADR-0119 (issue #983): the v6 -> v7 step passes the skill events
+        // through, materializes the Mount/Unmount fold as the explicit
+        // `discovery_snapshot`, and retires the activated set silently (its
+        // bodies never entered persisted history -- nothing to migrate; the
+        // names stay visible through the snapshot). Turn entries are
+        // untouched: `invocations` deserializes empty for every pre-v7 turn.
+        let v6 = serde_json::json!({
+            "format_version": 6,
+            "session_name": "coexistence",
+            "sources": [],
+            "history": [
+                { "entry": "Skill", "data": { "kind": "Mount", "name": "sql-coach" } },
+                { "entry": "Skill", "data": { "kind": "Mount", "name": "pdf-tools" } },
+                { "entry": "Skill", "data": { "kind": "Activate", "name": "sql-coach", "actor": "Agent" } },
+                { "entry": "Skill", "data": { "kind": "Unmount", "name": "pdf-tools" } },
+            ],
+            "active": null,
+        });
+        let migrated = migrate_to_current(v6, 6).expect("migrate");
+        assert_eq!(
+            migrated["discovery_snapshot"],
+            serde_json::json!(["sql-coach"]),
+            "the mount fold (Mount in / Unmount out) materializes as the snapshot; \
+             the Activate neither joins nor leaves it"
+        );
+        // The events pass through untouched -- the v7 struct still reads them
+        // (legacy channels keep writing through the coexistence period).
+        assert_eq!(migrated["history"].as_array().unwrap().len(), 4);
+        let recipe: crate::persistence::recipe::Recipe =
+            serde_json::from_value(migrated).expect("v7 shape parses");
+        assert_eq!(recipe.format_version(), RECIPE_FORMAT_VERSION);
+        assert_eq!(recipe.discovery_snapshot, vec!["sql-coach".to_string()]);
+        // The invoked set starts empty -- no pre-v7 turn carries invocations.
+        assert!(recipe.invoked_skills().is_empty());
+    }
+
+    #[test]
+    fn v6_to_v7_preserves_an_explicit_snapshot() {
+        // A defensive idempotence shape: a file that already carries a
+        // `discovery_snapshot` (a v7-native file mislabeled v6, or a re-run
+        // migration) keeps it -- the fold never overwrites an explicit value.
+        let v6 = serde_json::json!({
+            "format_version": 6,
+            "session_name": "explicit",
+            "sources": [],
+            "history": [
+                { "entry": "Skill", "data": { "kind": "Mount", "name": "sql-coach" } },
+            ],
+            "active": null,
+            "discovery_snapshot": ["pdf-tools"],
+        });
+        let migrated = migrate_to_current(v6, 6).expect("migrate");
+        assert_eq!(
+            migrated["discovery_snapshot"],
+            serde_json::json!(["pdf-tools"]),
+            "the explicit snapshot wins over the fold"
+        );
+    }
+
+    #[test]
+    fn v6_to_v7_rejects_a_non_array_history() {
+        // Honest error, never a guess: a corrupt root surfaces as the typed
+        // migration failure (ADR-0036).
+        let bad = serde_json::json!({
+            "format_version": 6,
+            "session_name": "corrupt",
+            "sources": [],
+            "history": { "not": "an array" },
+            "active": null,
+        });
+        let err = migrate_to_current(bad, 6).unwrap_err();
+        assert!(matches!(err, MigrationError::Field(_)));
+    }
+
+    #[test]
+    fn v0_to_v1_rejects_a_source_that_is_not_an_object() {
+        // ADR-0034 honest parse: a v0 source that is not an object (here a
+        // bare string) surfaces as `MigrationError::Field`, never a panic or
+        // silent pass-through. External input -- the engine never
+        // best-effort guesses a shape.
+        let v0 = serde_json::json!({
+            "format_version": 0,
+            "session_name": "x",
+            "sources": ["not-an-object"],
+            "history": [],
+            "active": null,
+        });
+        let err = transforms::v0_to_v1(v0).unwrap_err();
+        assert!(
+            matches!(&err, MigrationError::Field(msg) if msg.contains("not an object")),
+            "expected Field error naming the non-object source, got {err:?}",
+        );
+    }
+
+    #[test]
+    fn v0_to_v1_rejects_a_source_missing_reference_name() {
+        // ADR-0036 "add field with default": a v0 source missing both
+        // display_name AND reference_name cannot be filled -- the transform
+        // refuses with `MigrationError::Field` rather than synthesizing an
+        // empty label.
+        let v0 = serde_json::json!({
+            "format_version": 0,
+            "session_name": "x",
+            "sources": [{
+                "source_path": "/data/anon.csv",
+                "fingerprint": "fp",
+            }],
+            "history": [],
+            "active": null,
+        });
+        let err = transforms::v0_to_v1(v0).unwrap_err();
+        assert!(
+            matches!(&err, MigrationError::Field(msg) if msg.contains("reference_name")),
+            "expected Field error naming the missing reference_name, got {err:?}",
+        );
+    }
+
+    #[test]
+    fn migrate_to_current_refuses_a_non_object_root_instead_of_panicking() {
+        // The pipeline stamps `format_version` after each step; a non-object
+        // root (e.g. a bare array) cannot carry the field. The pub API
+        // returns a typed `MigrationError::Field` instead of indexing into
+        // the `Value` and panicking (ADR-0034 honest parse).
+        let arr = serde_json::json!([1, 2, 3]);
+        let err = migrate_to_current(arr, 0).unwrap_err();
+        // Lock the typed variant (issue #120): the pub-API contract is
+        // "returns Field". The Display wording is Rust-log-only; the
+        // transform-internal tests above still assert it.
+        assert!(
+            matches!(&err, MigrationError::Field(_)),
+            "expected Field error for the non-object root, got {err:?}",
+        );
+    }
+
+    // --- v1 -> v2 (ADR-0082, issue #296) --------------------------------------
+
+    /// Build a synthetic v1 Turn entry -- the post-v0->v1 shape: outcome uses
+    /// v1's `kind` discriminator, and the Materialized payload carries the full
+    /// reconstructable fields (reference_name + display_name + sql).
+    fn v1_materialized_turn(question: &str, reference_name: &str, sql: &str) -> Value {
+        serde_json::json!({
+            "entry": "Turn",
+            "data": {
+                "question": question,
+                "outcome": {
+                    "kind": "Materialized",
+                    "data": {
+                        "reference_name": reference_name,
+                        "display_name": reference_name,
+                        "sql": sql,
+                    },
+                },
+            },
+        })
+    }
+
+    /// Build a synthetic v1 Textual turn (no tool trajectory -> no trace after
+    /// migration).
+    fn v1_textual_turn(question: &str) -> Value {
+        serde_json::json!({
+            "entry": "Turn",
+            "data": {
+                "question": question,
+                "outcome": {
+                    "kind": "Textual",
+                    "data": {
+                        "text_kind": "Clarify",
+                        "body": "按姓还是名？",
+                        "assumption": null,
+                    },
+                },
+            },
+        })
+    }
+
+    #[test]
+    fn v1_to_v2_adds_a_synthetic_single_call_trace_to_materialized_turns() {
+        // ADR-0082 (issue #296): a v1 Materialized turn ran one productive SQL,
+        // so the migration synthesizes a single-call `materialize` trace whose
+        // summary is the verbatim SQL. The trace lands at `data.trace` -- the
+        // v2 display-part slot ADR-0078 adds.
+        let v1 = serde_json::json!({
+            "format_version": 1,
+            "session_name": "v1 分析",
+            "sources": [{
+                "reference_name": "people",
+                "display_name": "people",
+                "source_path": "/data/people.csv",
+                "fingerprint": "fp",
+            }],
+            "history": [v1_materialized_turn(
+                "多少人",
+                "result_1",
+                "SELECT COUNT(*) AS n FROM \"people\".data",
+            )],
+            "active": "people",
+        });
+        let v2 = transforms::v1_to_v2(v1).expect("migrate");
+        let trace = &v2["history"][0]["data"]["trace"];
+        assert_eq!(trace.as_array().map(|a| a.len()), Some(1), "one call");
+        let entry = &trace[0];
+        assert_eq!(entry["name"], "materialize");
+        assert_eq!(entry["operation_kind"], "write");
+        assert_eq!(entry["success"], true);
+        assert_eq!(
+            entry["summary"], "SELECT COUNT(*) AS n FROM \"people\".data",
+            "summary is the verbatim SQL",
+        );
+    }
+
+    #[test]
+    fn v1_to_v2_leaves_non_materialized_turns_without_a_trace() {
+        // ADR-0082: only Materialized turns ran a productive SQL. A Textual
+        // turn (and a Source event) carries no tool trajectory, so the
+        // migration adds no `trace` field -- `#[serde(default)]` deserializes
+        // the absent field as an empty trace.
+        let v1 = serde_json::json!({
+            "format_version": 1,
+            "session_name": "x",
+            "sources": [],
+            "history": [
+                v1_textual_turn("哪种名字"),
+                {
+                    "entry": "Source",
+                    "data": {
+                        "kind": "Added",
+                        "reference_name": "people",
+                        "display_name": "people",
+                    },
+                },
+            ],
+            "active": null,
+        });
+        let v2 = transforms::v1_to_v2(v1).expect("migrate");
+        assert!(
+            v2["history"][0]["data"].get("trace").is_none(),
+            "textual turn gets no trace",
+        );
+        assert!(
+            v2["history"][1]["data"].get("trace").is_none(),
+            "source event gets no trace",
+        );
+    }
+
+    #[test]
+    fn v1_to_v2_preserves_the_reconstructable_part_unchanged() {
+        // AC #2 (issue #296): the migration is lossless for the reconstructable
+        // part -- reference_name / display_name / sql / outcome kind are
+        // unchanged, so resume replay produces the same working set. Only the
+        // display-part `trace` is added.
+        let v1 = serde_json::json!({
+            "format_version": 1,
+            "session_name": "x",
+            "sources": [{
+                "reference_name": "people",
+                "display_name": "people",
+                "source_path": "/data/people.csv",
+                "fingerprint": "fp",
+            }],
+            "history": [v1_materialized_turn("q", "result_1", "SELECT 1")],
+            "active": "people",
+        });
+        let v2 = transforms::v1_to_v2(v1.clone()).expect("migrate");
+        let outcome = &v2["history"][0]["data"]["outcome"];
+        assert_eq!(outcome["kind"], "Materialized");
+        assert_eq!(outcome["data"]["reference_name"], "result_1");
+        assert_eq!(outcome["data"]["display_name"], "result_1");
+        assert_eq!(outcome["data"]["sql"], "SELECT 1");
+        // The reconstructable fields are byte-identical to the v1 input -- the
+        // transform only ADDS `trace`, never mutates the outcome.
+        assert_eq!(
+            v2["history"][0]["data"]["outcome"],
+            v1["history"][0]["data"]["outcome"],
+        );
+    }
+
+    #[test]
+    fn migrate_to_current_from_v1_round_trips_through_recipe_deserialize() {
+        // End-to-end: a synthetic v1 fixture migrates to v2 and deserializes
+        // as the current Recipe. The Materialized turn carries the synthesized
+        // trace (one materialize call); resume replay semantics are unchanged
+        // because the reconstructable fields are untouched.
+        use crate::persistence::recipe::Recipe;
+        let v1 = serde_json::json!({
+            "format_version": 1,
+            "session_name": "v1 分析",
+            "sources": [{
+                "reference_name": "people",
+                "display_name": "people",
+                "source_path": "/data/people.csv",
+                "fingerprint": "fp",
+            }],
+            "history": [v1_materialized_turn("多少人", "result_1", "SELECT 1")],
+            "active": "people",
+        });
+        let v2 = migrate_to_current(v1, 1).expect("migrate");
+        let recipe: Recipe =
+            serde_json::from_value(v2).expect("migrated shape deserializes as v2 Recipe");
+        assert_eq!(recipe.format_version(), RECIPE_FORMAT_VERSION);
+        use crate::persistence::recipe::RecipeEntry;
+        let turn = match &recipe.history[0] {
+            RecipeEntry::Turn(t) => t,
+            other => panic!("expected Turn, got {other:?}"),
+        };
+        assert_eq!(
+            turn.trace.len(),
+            1,
+            "synthesized trace survives deserialize"
+        );
+        assert_eq!(turn.trace[0].calls[0].name, "materialize");
+        // Replay chain is unchanged -- the promotion entry still carries the
+        // same SQL + reference, so resume re-materializes identically.
+        let chain = recipe.productive_chain();
+        assert_eq!(chain.len(), 1);
+        assert_eq!(chain[0].reference_name, "result_1");
+        assert_eq!(chain[0].sql, "SELECT 1");
+    }
+
+    /// Build a synthetic v1 Failed turn (issue #125 TurnFailure shape: adjacently
+    /// tagged, `Execute` variant carrying a technical detail). No tool trajectory
+    /// -> no trace after migration.
+    fn v1_failed_turn(question: &str, detail: &str) -> Value {
+        serde_json::json!({
+            "entry": "Turn",
+            "data": {
+                "question": question,
+                "outcome": {
+                    "kind": "Failed",
+                    "data": {
+                        "kind": "Execute",
+                        "data": {"detail": detail},
+                    },
+                },
+            },
+        })
+    }
+
+    /// Build a synthetic v1 Cancelled turn (ADR-0021/0028). Adjacently-tagged
+    /// unit variant carries no `data` slot; no tool trajectory -> no trace.
+    fn v1_cancelled_turn(question: &str) -> Value {
+        serde_json::json!({
+            "entry": "Turn",
+            "data": {
+                "question": question,
+                "outcome": {"kind": "Cancelled"},
+            },
+        })
+    }
+
+    #[test]
+    fn v1_to_v2_leaves_failed_and_cancelled_turns_without_a_trace() {
+        // ADR-0082: only Materialized turns ran a productive SQL. Failed and
+        // Cancelled outcomes carry no tool trajectory, so the migration adds no
+        // `trace` field -- the transform's `kind != "Materialized"` early-exit
+        // covers them. Pin both branches so a future widening (e.g. giving
+        // Failed an error trace) cannot silently change the migration's
+        // lossless contract.
+        let v1 = serde_json::json!({
+            "format_version": 1,
+            "session_name": "x",
+            "sources": [],
+            "history": [
+                v1_failed_turn("坏 SQL", "relation not found"),
+                v1_cancelled_turn("算了"),
+            ],
+            "active": null,
+        });
+        let v2 = transforms::v1_to_v2(v1).expect("migrate");
+        assert!(
+            v2["history"][0]["data"].get("trace").is_none(),
+            "failed turn gets no trace",
+        );
+        assert!(
+            v2["history"][1]["data"].get("trace").is_none(),
+            "cancelled turn gets no trace",
+        );
+    }
+
+    #[test]
+    fn v1_to_v2_adds_a_trace_to_a_stale_materialized_turn_too() {
+        // ADR-0082 + ADR-0041: a stale (cascade-invalidated, dead) Materialized
+        // turn still RAN one productive SQL under the v1 single-SQL contract
+        // before it was invalidated, and it remains in history for display
+        // (ADR-0041 point 2). The migration keys only on `kind ==
+        // "Materialized"` (not on `stale`), so a stale turn gains the same
+        // synthetic single-call trace a live one does -- the UI shows the
+        // trajectory the turn produced before invalidation. Pin this so the
+        // product decision (stale turns keep their trace) survives a future
+        // refactor that might gate on `stale`.
+        let v1 = serde_json::json!({
+            "format_version": 1,
+            "session_name": "x",
+            "sources": [{
+                "reference_name": "people",
+                "display_name": "people",
+                "source_path": "/data/people.csv",
+                "fingerprint": "fp",
+            }],
+            "history": [{
+                "entry": "Turn",
+                "data": {
+                    "question": "旧问题",
+                    "outcome": {
+                        "kind": "Materialized",
+                        "data": {
+                            "reference_name": "result_1",
+                            "display_name": "result_1",
+                            "sql": "SELECT 1",
+                            "stale": {
+                                "reference_name": "people",
+                                "display_name": "people",
+                                "reason": "Replaced",
+                            },
+                        },
+                    },
+                },
+            }],
+            "active": "people",
+        });
+        let v2 = transforms::v1_to_v2(v1).expect("migrate");
+        let trace = &v2["history"][0]["data"]["trace"];
+        assert_eq!(
+            trace.as_array().map(|a| a.len()),
+            Some(1),
+            "stale turn keeps its synthetic trace",
+        );
+        assert_eq!(trace[0]["name"], "materialize");
+        assert_eq!(trace[0]["summary"], "SELECT 1");
+        // The stale anchor survives untouched (lossless reconstructable part).
+        assert_eq!(
+            v2["history"][0]["data"]["outcome"]["data"]["stale"]["reason"],
+            "Replaced",
+        );
+    }
+
+    // --- v2 -> v3 (ADR-0084) --------------------------------------------------
+
+    /// Build a synthetic v2 Materialized turn: the v1 adjacently-tagged outcome
+    /// plus the v2 synthetic trace, with the reconstructable result fields
+    /// still FLAT at the outcome-data level (the pre-chain shape v3 wraps).
+    fn v2_materialized_turn(question: &str, reference_name: &str, sql: &str) -> Value {
+        serde_json::json!({
+            "entry": "Turn",
+            "data": {
+                "question": question,
+                "outcome": {
+                    "kind": "Materialized",
+                    "data": {
+                        "reference_name": reference_name,
+                        "display_name": reference_name,
+                        "sql": sql,
+                        "assumption": "把 id 当作主键",
+                    },
+                },
+                "trace": [{
+                    "name": "materialize",
+                    "operation_kind": "write",
+                    "success": true,
+                    "summary": sql,
+                    "result_excerpt": "",
+                }],
+            },
+        })
+    }
+
+    #[test]
+    fn v2_to_v3_wraps_flat_result_fields_into_a_one_element_promotion_chain() {
+        // ADR-0084: v2's flat result fields (reference_name / display_name /
+        // sql) move INTO a one-element `promotions` chain. The turn-level
+        // assumption stays at the outcome-data level and the v2 trace is
+        // untouched. Lossless: the single v2 result becomes the chain's sole
+        // (and primary) promotion.
+        let v2 = serde_json::json!({
+            "format_version": 2,
+            "session_name": "v2 分析",
+            "sources": [],
+            "history": [
+                v2_materialized_turn(
+                    "多少人",
+                    "result_1",
+                    "SELECT COUNT(*) AS n FROM \"people\".data",
+                ),
+                v1_textual_turn("哪种名字"),
+            ],
+            "active": null,
+        });
+        let v3 = transforms::v2_to_v3(v2.clone()).expect("migrate");
+        let data = &v3["history"][0]["data"]["outcome"]["data"];
+        let promotions = data["promotions"]
+            .as_array()
+            .expect("promotions array present");
+        assert_eq!(
+            promotions.len(),
+            1,
+            "the single v2 result wraps into one promotion"
+        );
+        assert_eq!(promotions[0]["reference_name"], "result_1");
+        assert_eq!(promotions[0]["display_name"], "result_1");
+        assert_eq!(
+            promotions[0]["sql"],
+            "SELECT COUNT(*) AS n FROM \"people\".data"
+        );
+        // The flat fields are LIFTED out of the outcome data, not duplicated.
+        assert!(data.get("reference_name").is_none());
+        assert!(data.get("display_name").is_none());
+        assert!(data.get("sql").is_none());
+        // The turn-level assumption stays at the outcome-data level.
+        assert_eq!(data["assumption"], "把 id 当作主键");
+        // The v2 trace survives the re-wrap untouched.
+        assert_eq!(v3["history"][0]["data"]["trace"][0]["name"], "materialize");
+        // A non-Materialized turn carries no promotion and is untouched.
+        assert_eq!(v3["history"][1], v2["history"][1], "textual turn unchanged");
+    }
+
+    #[test]
+    fn v2_to_v3_moves_a_stale_anchor_into_the_promotion() {
+        // ADR-0084 + ADR-0041: the stale anchor is per-result, so it rides
+        // into the promotion alongside its reference / sql -- the dead turn
+        // stays in history (point 2) and the v3 shape keeps the anchor where
+        // productive_chain's per-promotion filter reads it.
+        let v2 = serde_json::json!({
+            "format_version": 2,
+            "session_name": "x",
+            "sources": [],
+            "history": [{
+                "entry": "Turn",
+                "data": {
+                    "question": "旧问题",
+                    "outcome": {
+                        "kind": "Materialized",
+                        "data": {
+                            "reference_name": "result_1",
+                            "display_name": "result_1",
+                            "sql": "SELECT 1",
+                            "stale": {
+                                "reference_name": "people",
+                                "display_name": "people",
+                                "reason": "Replaced",
+                            },
+                        },
+                    },
+                },
+            }],
+            "active": null,
+        });
+        let v3 = transforms::v2_to_v3(v2).expect("migrate");
+        let data = &v3["history"][0]["data"]["outcome"]["data"];
+        assert_eq!(data["promotions"][0]["stale"]["reason"], "Replaced");
+        assert!(
+            data.get("stale").is_none(),
+            "the anchor is moved into the promotion, not duplicated",
+        );
+    }
+
+    #[test]
+    fn migrate_to_current_from_v2_round_trips_through_recipe_deserialize() {
+        // End-to-end: a synthetic v2 fixture migrates to the current version
+        // and deserializes as a v3 Recipe. The single v2 result becomes a
+        // one-element promotion chain; the replayable chain re-materializes
+        // the same result_N with the same SQL.
+        use crate::persistence::recipe::{Recipe, RecipeEntry};
+        let v2 = serde_json::json!({
+            "format_version": 2,
+            "session_name": "v2 分析",
+            "sources": [{
+                "reference_name": "people",
+                "display_name": "people",
+                "source_path": "/data/people.csv",
+                "fingerprint": "fp",
+            }],
+            "history": [v2_materialized_turn("多少人", "result_1", "SELECT 1")],
+            "active": "people",
+        });
+        let v3 = migrate_to_current(v2, 2).expect("migrate");
+        let recipe: Recipe =
+            serde_json::from_value(v3).expect("migrated shape deserializes as the current Recipe");
+        assert_eq!(recipe.format_version(), RECIPE_FORMAT_VERSION);
+        match &recipe.history[0] {
+            RecipeEntry::Turn(t) => assert_eq!(
+                t.trace.len(),
+                1,
+                "the v2 synthetic trace survives the v2->v3 step"
+            ),
+            other => panic!("expected Turn, got {other:?}"),
+        }
+        let chain = recipe.productive_chain();
+        assert_eq!(chain.len(), 1);
+        assert_eq!(chain[0].reference_name, "result_1");
+        assert_eq!(chain[0].sql, "SELECT 1");
+    }
+
+    // --- v3 -> v4 (ADR-0086, issue #363) --------------------------------------
+
+    /// Build a synthetic v3 Turn entry: the adjacently-tagged outcome with the
+    /// v3 promotions chain shape, plus a v3 provenance carrying a TYPED runtime
+    /// and a non-empty `skills` STRING ARRAY (the pre-v4 shape -- bare names,
+    /// no content_hash). This is the only shape the v3->v4 transform reshapes.
+    fn v3_turn_with_skills(question: &str, skills: &[&str]) -> Value {
+        serde_json::json!({
+            "entry": "Turn",
+            "data": {
+                "question": question,
+                "outcome": {
+                    "kind": "Textual",
+                    "data": {
+                        "text_kind": "Agent",
+                        "body": "ok",
+                        "assumption": null,
+                    },
+                },
+                "provenance": {
+                    "runtime": "BuiltIn",
+                    "skills": skills,
+                },
+            },
+        })
+    }
+
+    #[test]
+    fn v3_to_v4_rewrites_bare_skill_names_into_typed_objects_with_empty_hash() {
+        // ADR-0086: a v3 provenance.skills string array rewrites into the v4
+        // typed `{name, content_hash: ""}` object array. Each name survives;
+        // the content_hash is "" (no baseline -- never trips the stale-degrade
+        // check on resume).
+        let v3 = serde_json::json!({
+            "format_version": 3,
+            "session_name": "v3",
+            "sources": [],
+            "history": [v3_turn_with_skills("q", &["sql-coach", "chart-helper"])],
+            "active": null,
+        });
+        let v4 = transforms::v3_to_v4(v3).expect("migrate");
+        let skills = &v4["history"][0]["data"]["provenance"]["skills"];
+        let arr = skills.as_array().expect("skills still an array");
+        assert_eq!(arr.len(), 2, "no skills lost or gained");
+        assert_eq!(arr[0]["name"], "sql-coach");
+        assert_eq!(arr[0]["content_hash"], "");
+        assert_eq!(arr[1]["name"], "chart-helper");
+        assert_eq!(arr[1]["content_hash"], "");
+    }
+
+    #[test]
+    fn v3_to_v4_is_a_noop_when_provenance_skills_is_empty() {
+        // Every real v3 recipe carries an empty skills array (or omits the
+        // field entirely). Both shapes pass through unchanged -- the transform
+        // only reshapes the bare-name form.
+        let v3 = serde_json::json!({
+            "format_version": 3,
+            "session_name": "v3-empty",
+            "sources": [],
+            "history": [{
+                "entry": "Turn",
+                "data": {
+                    "question": "q",
+                    "outcome": {"kind": "Cancelled"},
+                    "provenance": {"runtime": "BuiltIn", "skills": []},
+                },
+            }],
+            "active": null,
+        });
+        let v4 = transforms::v3_to_v4(v3.clone()).expect("migrate");
+        assert_eq!(
+            v4["history"][0]["data"]["provenance"]["skills"],
+            serde_json::json!([]),
+            "empty skills array passes through unchanged",
+        );
+    }
+
+    #[test]
+    fn v3_to_v4_leaves_entries_without_provenance_untouched() {
+        // Source / Skill entries have no `data.provenance`; a Turn entry may
+        // omit it too (`#[serde(default)]`). All three skip the rewrite.
+        let v3 = serde_json::json!({
+            "format_version": 3,
+            "session_name": "v3-mixed",
+            "sources": [],
+            "history": [
+                {
+                    "entry": "Source",
+                    "data": {
+                        "kind": "Added",
+                        "reference_name": "people",
+                        "display_name": "people",
+                    },
+                },
+                {
+                    "entry": "Turn",
+                    "data": {
+                        "question": "q",
+                        "outcome": {"kind": "Cancelled"},
+                    },
+                },
+            ],
+            "active": null,
+        });
+        let v4 = transforms::v3_to_v4(v3.clone()).expect("migrate");
+        assert_eq!(v4["history"], v3["history"], "no field added or removed");
+    }
+
+    #[test]
+    fn migrate_to_current_from_v3_round_trips_through_recipe_deserialize() {
+        // End-to-end: a synthetic v3 fixture migrates to v4 and deserializes
+        // as the current Recipe. The skill array rewrites into typed objects
+        // with empty content_hash; a v3 recipe with no Skill entries folds to
+        // the empty mounted set.
+        use crate::persistence::recipe::{Recipe, RecipeEntry};
+        let v3 = serde_json::json!({
+            "format_version": 3,
+            "session_name": "v3 分析",
+            "sources": [{
+                "reference_name": "people",
+                "display_name": "people",
+                "source_path": "/data/people.csv",
+                "fingerprint": "fp",
+            }],
+            "history": [v3_turn_with_skills("多少人", &["sql-coach"])],
+            "active": "people",
+        });
+        let v4 = migrate_to_current(v3, 3).expect("migrate");
+        let recipe: Recipe =
+            serde_json::from_value(v4).expect("migrated shape deserializes as the current Recipe");
+        assert_eq!(recipe.format_version(), RECIPE_FORMAT_VERSION);
+        let turn = match &recipe.history[0] {
+            RecipeEntry::Turn(t) => t,
+            other => panic!("expected Turn, got {other:?}"),
+        };
+        assert_eq!(turn.provenance.skills.len(), 1);
+        assert_eq!(turn.provenance.skills[0].name, "sql-coach");
+        assert_eq!(
+            turn.provenance.skills[0].content_hash, "",
+            "migrated skills carry an empty hash (no baseline)",
+        );
+    }
+
+    #[test]
+    fn v3_to_v4_skips_non_string_elements_in_provenance_skills() {
+        // ADR-0086 / I-4: a corrupt v3 entry whose `provenance.skills` carries
+        // a non-string element (a hand edit or a buggy writer) skips the non-
+        // string element -- leaves it as-is for the typed deserialize to
+        // reject -- and wraps the well-formed strings. The transform never
+        // guesses a shape; the skip emits a `log::warn!` for forensic parity
+        // with v1_to_v2.
+        let v3 = serde_json::json!({
+            "format_version": 3,
+            "session_name": "v3-corrupt",
+            "sources": [],
+            "history": [{
+                "entry": "Turn",
+                "data": {
+                    "question": "q",
+                    "outcome": {"kind": "Cancelled"},
+                    "provenance": {
+                        "runtime": "BuiltIn",
+                        "skills": ["ok", 42, "also-ok"],
+                    },
+                },
+            }],
+            "active": null,
+        });
+        let v4 = transforms::v3_to_v4(v3).expect("migrate");
+        let skills = &v4["history"][0]["data"]["provenance"]["skills"];
+        let arr = skills.as_array().expect("skills still an array");
+        assert_eq!(arr.len(), 3, "no elements lost or gained");
+        assert_eq!(arr[0]["name"], "ok");
+        assert_eq!(arr[0]["content_hash"], "");
+        // The non-string element passes through untouched for the typed
+        // deserializer to reject (honest parse, not a migration-time guess).
+        assert_eq!(arr[1], 42, "non-string element left as-is");
+        assert_eq!(arr[2]["name"], "also-ok");
+        assert_eq!(arr[2]["content_hash"], "");
+    }
+
+    // --- v4 -> v5 (ADR-0103, issue #608) --------------------------------------
+
+    /// Build a synthetic v4 Turn entry: the adjacently-tagged outcome plus a
+    /// v4 FLAT trace (a bare array of call entries -- the pre-round shape).
+    fn v4_turn_with_flat_trace(question: &str, trace: Value) -> Value {
+        serde_json::json!({
+            "entry": "Turn",
+            "data": {
+                "question": question,
+                "outcome": {
+                    "kind": "Textual",
+                    "data": {"text_kind": "Agent", "body": "ok", "assumption": null},
+                },
+                "trace": trace,
+            },
+        })
+    }
+
+    #[test]
+    fn v4_to_v5_wraps_a_flat_trace_into_one_round() {
+        // ADR-0103: a v4 turn's flat call array wraps into a one-round
+        // `[{ calls: [...] }]` shape -- the calls survive verbatim, and no
+        // prose / thinking / timestamp is synthesized (a v4 file recorded
+        // none of them).
+        let v4 = serde_json::json!({
+            "format_version": 4,
+            "session_name": "v4",
+            "sources": [],
+            "history": [v4_turn_with_flat_trace(
+                "多少人",
+                serde_json::json!([
+                    {"name": "explore", "operation_kind": "read",
+                     "summary": "SELECT 1", "success": true, "result_excerpt": ""},
+                    {"name": "materialize", "operation_kind": "write",
+                     "summary": "SELECT COUNT(*) AS n", "success": true, "result_excerpt": ""}
+                ]),
+            )],
+            "active": null,
+        });
+        let v5 = transforms::v4_to_v5(v4).expect("migrate");
+        let trace = &v5["history"][0]["data"]["trace"];
+        let rounds = trace.as_array().expect("trace is an array of rounds");
+        assert_eq!(rounds.len(), 1, "the flat trace folds into ONE round");
+        let round = &rounds[0];
+        assert!(round.get("thinking").is_none(), "no thinking synthesized");
+        assert!(round.get("text").is_none(), "no prose synthesized");
+        let calls = round["calls"].as_array().expect("calls preserved");
+        assert_eq!(calls.len(), 2, "every call survives the wrap");
+        assert_eq!(calls[0]["name"], "explore");
+        assert_eq!(calls[1]["name"], "materialize");
+        // No turn timestamps are synthesized for migrated turns.
+        let data = &v5["history"][0]["data"];
+        assert!(data.get("asked_at").is_none(), "asked_at left absent");
+        assert!(data.get("settled_at").is_none(), "settled_at left absent");
+    }
+
+    #[test]
+    fn v4_to_v5_leaves_absent_and_empty_traces_untouched() {
+        // A turn with no trace field (a no-tool turn) keeps it absent; an
+        // empty `[]` stays empty (no empty round is synthesized). Source /
+        // Skill entries have no `data.trace` and pass through. A null trace
+        // is not an array -> the wrap skips it (defensive no-op, honest
+        // parse downstream).
+        let v4 = serde_json::json!({
+            "format_version": 4,
+            "session_name": "v4-mixed",
+            "sources": [],
+            "history": [
+                v4_turn_with_flat_trace("no tools", Value::Null),
+                v4_turn_with_flat_trace("empty", serde_json::json!([])),
+                {
+                    "entry": "Source",
+                    "data": {
+                        "kind": "Added",
+                        "reference_name": "people",
+                        "display_name": "people",
+                    },
+                },
+            ],
+            "active": null,
+        });
+        let v5 = transforms::v4_to_v5(v4).expect("migrate");
+        assert!(
+            v5["history"][0]["data"].get("trace").is_none()
+                || v5["history"][0]["data"]["trace"].is_null(),
+            "a null trace is not wrapped"
+        );
+        assert_eq!(
+            v5["history"][1]["data"]["trace"],
+            serde_json::json!([]),
+            "an empty trace stays empty -- no empty round"
+        );
+        assert_eq!(
+            v5["history"][2]["entry"], "Source",
+            "source entry untouched"
+        );
+    }
+
+    #[test]
+    fn migrate_to_current_from_v4_round_trips_through_recipe_deserialize() {
+        // End-to-end: a synthetic v4 fixture migrates to v5 and deserializes
+        // as the current Recipe. The flat trace reads back as one round with
+        // no prose / thinking / timestamps -- the honest-degrade shape the
+        // chat projection renders without them.
+        use crate::persistence::recipe::{Recipe, RecipeEntry};
+        let v4 = serde_json::json!({
+            "format_version": 4,
+            "session_name": "v4 分析",
+            "sources": [{
+                "reference_name": "people",
+                "display_name": "people",
+                "source_path": "/data/people.csv",
+                "fingerprint": "fp",
+            }],
+            "history": [v4_turn_with_flat_trace(
+                "多少人",
+                serde_json::json!([
+                    {"name": "materialize", "operation_kind": "write",
+                     "summary": "SELECT 1", "success": true, "result_excerpt": ""}
+                ]),
+            )],
+            "active": "people",
+        });
+        let v5 = migrate_to_current(v4, 4).expect("migrate");
+        let recipe: Recipe =
+            serde_json::from_value(v5).expect("migrated shape deserializes as the current Recipe");
+        assert_eq!(recipe.format_version(), RECIPE_FORMAT_VERSION);
+        let turn = match &recipe.history[0] {
+            RecipeEntry::Turn(t) => t,
+            other => panic!("expected Turn, got {other:?}"),
+        };
+        assert_eq!(turn.trace.len(), 1, "one round");
+        assert_eq!(turn.trace[0].thinking, None, "no thinking baseline");
+        assert_eq!(turn.trace[0].text, None, "no prose baseline");
+        assert_eq!(turn.trace[0].calls.len(), 1);
+        assert_eq!(turn.trace[0].calls[0].name, "materialize");
+        assert_eq!(turn.asked_at, None, "migrated turns carry no asked_at");
+        assert_eq!(turn.settled_at, None, "migrated turns carry no settled_at");
+    }
+}

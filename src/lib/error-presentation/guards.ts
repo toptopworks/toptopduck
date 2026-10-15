@@ -1,0 +1,383 @@
+// Type guards that narrow an unknown IPC reject to its typed shape (ADR-0069).
+// Pure narrowing -- no intl, no message rendering. Each guard is private to the
+// error-presentation module; the public surface is the format / app-error
+// functions in index.ts. Moved verbatim from api.ts (issue #225 slice 1); the
+// defensive L1 shape (verify a variant's `data` before promising it) is
+// preserved so fmtError / errorDetail never read an unverified field.
+
+import type {
+  DuckLoadError,
+  ExportRowsError,
+  MigrationError,
+  RemoveSourceError,
+  RenameError,
+  ResumeError,
+  SaveError,
+  SessionError,
+  StoreCommandError,
+  RowReadError,
+} from "../../types/session";
+import type { AgentError } from "../../types/agents";
+import type { SkillError } from "../../types/skills";
+
+// Narrow an unknown IPC reject to a SessionError (issue #119). A session-
+// scoped command rejects with the adjacently-tagged `{ kind, data? }` shape;
+// anything else (a raw string, a JS Error, an opaque object) is left to
+// fmtError's fallback path. The Engine variant additionally requires its
+// `data` to be a string: a malformed `{ kind: "Engine" }` (missing/non-string
+// data) is NOT treated as a SessionError, so the guard never narrows `e` to a
+// shape whose `data` it has not actually verified (review L1).
+export function isSessionError(e: unknown): e is SessionError {
+  if (typeof e !== "object" || e === null) return false;
+  const kind = (e as { kind?: unknown }).kind;
+  switch (kind) {
+    case "InvalidId":
+    case "NotFound":
+    case "Resuming":
+    case "InFlight":
+      return true;
+    case "Resume":
+      return isResumeError((e as { data?: unknown }).data);
+    case "RemoveSource":
+      return isRemoveSourceError((e as { data?: unknown }).data);
+    case "RenameDataset":
+      return isRenameError((e as { data?: unknown }).data);
+    case "RenameSession": {
+      const d = (e as { data?: unknown }).data;
+      return (
+        typeof d === "object" &&
+        d !== null &&
+        (d as { kind?: unknown }).kind === "EmptyName"
+      );
+    }
+    case "Turn":
+      return isRowReadError((e as { data?: unknown }).data);
+    case "Export":
+      return isExportRowsError((e as { data?: unknown }).data);
+    case "Engine":
+      return typeof (e as { data?: unknown }).data === "string";
+    default:
+      return false;
+  }
+}
+
+// Narrow an unknown value to a MigrationError (issue #120). Rides
+// DuckLoadError::Migration inside ResumeError::Load. Same L1 defensive shape
+// as isSessionError: a variant's `data` is verified before the guard promises
+// it, so fmtError / errorDetail never read an unverified field.
+export function isMigrationError(e: unknown): e is MigrationError {
+  if (typeof e !== "object" || e === null) return false;
+  const kind = (e as { kind?: unknown }).kind;
+  switch (kind) {
+    case "NoTransform": {
+      const d = (e as { data?: unknown }).data;
+      return (
+        typeof d === "object" &&
+        d !== null &&
+        typeof (d as { from?: unknown }).from === "number" &&
+        typeof (d as { supported?: unknown }).supported === "number"
+      );
+    }
+    case "Field":
+      return typeof (e as { data?: unknown }).data === "string";
+    default:
+      return false;
+  }
+}
+
+// Narrow an unknown value to a DuckLoadError -- the .duck load error
+// (persistence::io::LoadError), distinct from the ingest model::LoadError
+// (issue #120). Migration recurses into isMigrationError.
+export function isDuckLoadError(e: unknown): e is DuckLoadError {
+  if (typeof e !== "object" || e === null) return false;
+  const kind = (e as { kind?: unknown }).kind;
+  switch (kind) {
+    case "Io":
+    case "Parse":
+      return typeof (e as { data?: unknown }).data === "string";
+    case "VersionMismatch": {
+      const d = (e as { data?: unknown }).data;
+      return (
+        typeof d === "object" &&
+        d !== null &&
+        typeof (d as { found?: unknown }).found === "number" &&
+        typeof (d as { supported?: unknown }).supported === "number"
+      );
+    }
+    case "Migration":
+      return isMigrationError((e as { data?: unknown }).data);
+    default:
+      return false;
+  }
+}
+
+// Narrow an unknown IPC reject to a ResumeError (issue #120). The `open_duck`
+// command wraps its ResumeError in SessionError::Resume, so this guard is
+// reached via isSessionError's Resume branch. Load recurses into
+// isDuckLoadError; SourceMissing / Replay verify their struct fields;
+// AlreadyOpen / ActiveMissing carry a string under data; Cancelled / Aborted
+// are unit.
+export function isResumeError(e: unknown): e is ResumeError {
+  if (typeof e !== "object" || e === null) return false;
+  const kind = (e as { kind?: unknown }).kind;
+  switch (kind) {
+    case "Load":
+      return isDuckLoadError((e as { data?: unknown }).data);
+    case "SourceMissing": {
+      const d = (e as { data?: unknown }).data;
+      return (
+        typeof d === "object" &&
+        d !== null &&
+        typeof (d as { reference_name?: unknown }).reference_name === "string" &&
+        typeof (d as { path?: unknown }).path === "string" &&
+        typeof (d as { detail?: unknown }).detail === "string"
+      );
+    }
+    case "Replay": {
+      const d = (e as { data?: unknown }).data;
+      return (
+        typeof d === "object" &&
+        d !== null &&
+        typeof (d as { reference_name?: unknown }).reference_name === "string" &&
+        typeof (d as { detail?: unknown }).detail === "string"
+      );
+    }
+    case "ActiveMissing":
+    case "AlreadyOpen":
+      return typeof (e as { data?: unknown }).data === "string";
+    case "Cancelled":
+    case "Aborted":
+      return true;
+    default:
+      return false;
+  }
+}
+
+// Narrow an unknown value to a SaveError (issue #120). Returned by
+// take_persist_error as `SaveError | null` (a value, not a reject). Every
+// variant carries a string under data (the io/serde/rename detail, or the
+// AlreadyOpen canonical path).
+export function isSaveError(e: unknown): e is SaveError {
+  if (typeof e !== "object" || e === null) return false;
+  const kind = (e as { kind?: unknown }).kind;
+  switch (kind) {
+    case "Serialize":
+    case "Io":
+    case "Rename":
+    case "AlreadyOpen":
+      return typeof (e as { data?: unknown }).data === "string";
+    default:
+      return false;
+  }
+}
+
+// Narrow an unknown value to a StoreCommandError (issue #130). Rejects from the
+// cold-store commands (delete / rename-persisted / keychain / provider + app
+// config). Same L1 defensive shape as the other guards: a variant's data is
+// verified before the guard promises it. BlankName recurses RenameSessionError.
+export function isStoreCommandError(e: unknown): e is StoreCommandError {
+  if (typeof e !== "object" || e === null) return false;
+  const kind = (e as { kind?: unknown }).kind;
+  switch (kind) {
+    case "OpenConflict":
+      return true;
+    case "BlankName": {
+      const d = (e as { data?: unknown }).data;
+      return (
+        typeof d === "object" &&
+        d !== null &&
+        (d as { kind?: unknown }).kind === "EmptyName"
+      );
+    }
+    case "IoFailure":
+    case "KeychainFailure":
+    case "ConfigWriteFailure":
+    case "UnknownAdapter":
+    case "InvalidCliTool":
+      return typeof (e as { data?: unknown }).data === "string";
+    case "NoActiveProfile":
+      return true;
+    default:
+      return false;
+  }
+}
+
+// Narrow an unknown value to a RemoveSourceError (issue #121). Reached via
+// isSessionError's RemoveSource branch (remove_source / remove_active_source
+// rejects). IsActive carries a struct; the newtype variants carry a string.
+// Same L1 defensive shape as the other guards: a variant's data is verified
+// before the guard promises it.
+export function isRemoveSourceError(e: unknown): e is RemoveSourceError {
+  if (typeof e !== "object" || e === null) return false;
+  const kind = (e as { kind?: unknown }).kind;
+  switch (kind) {
+    case "NotFound":
+    case "NotActive":
+    case "InvalidContinueWith":
+      return typeof (e as { data?: unknown }).data === "string";
+    case "IsActive": {
+      const d = (e as { data?: unknown }).data;
+      return (
+        typeof d === "object" &&
+        d !== null &&
+        typeof (d as { reference_name?: unknown }).reference_name === "string" &&
+        typeof (d as { display_name?: unknown }).display_name === "string"
+      );
+    }
+    default:
+      return false;
+  }
+}
+
+// Narrow an unknown value to a RenameError (issue #121) -- the dataset display-
+// label rename error. Reached via isSessionError's RenameDataset branch.
+// NotFound / DisplayTaken carry a string; InvalidLabel is a unit variant.
+export function isRenameError(e: unknown): e is RenameError {
+  if (typeof e !== "object" || e === null) return false;
+  const kind = (e as { kind?: unknown }).kind;
+  switch (kind) {
+    case "NotFound":
+    case "DisplayTaken":
+      return typeof (e as { data?: unknown }).data === "string";
+    case "InvalidLabel":
+      return true;
+    default:
+      return false;
+  }
+}
+
+// Narrow an unknown value to a RowReadError (issue #121) -- the read_rows error.
+// Reached via isSessionError's Turn branch. UnknownDataset / Execute carry a
+// string under data (the reference name / the engine detail); TooLarge carries
+// the row count + threshold pair (issue #779); Cancelled is a unit variant.
+export function isRowReadError(e: unknown): e is RowReadError {
+  if (typeof e !== "object" || e === null) return false;
+  const kind = (e as { kind?: unknown }).kind;
+  switch (kind) {
+    case "UnknownDataset":
+    case "Execute":
+      return typeof (e as { data?: unknown }).data === "string";
+    case "TooLarge": {
+      const d = (e as { data?: unknown }).data;
+      return (
+        typeof d === "object" &&
+        d !== null &&
+        typeof (d as { row_count?: unknown }).row_count === "number" &&
+        typeof (d as { limit?: unknown }).limit === "number"
+      );
+    }
+    case "Cancelled":
+      return true;
+    default:
+      return false;
+  }
+}
+
+// Classify a full-pull IPC reject against the guardrails (issue #779): the
+// confirm gate's refusal (with the row count the prompt quotes), the mid-scan
+// cancel observation, or null when the reject is anything else (a real
+// failure -- the caller's error lane handles those). The TSV copy rides
+// SessionError::RowRead, whose serde wire kind is "Turn" (renamed in Rust,
+// issue #121) -- entering through isSessionError's narrowing is what matches
+// the renamed kind where it is defined instead of hand-matching a wire string
+// (the review catch: a hand-matched "RowRead" never occurs on the wire, so
+// the copy path's guardrails were dead code). The CSV export rides
+// SessionError::Export's RowRead half one level deeper.
+export function classifyFullPullRejection(
+  e: unknown,
+): { kind: "tooLarge"; rowCount: number } | { kind: "cancelled" } | null {
+  if (!isSessionError(e)) return null;
+  let inner: RowReadError | null = null;
+  if (e.kind === "Turn") {
+    inner = e.data;
+  } else if (e.kind === "Export" && e.data.kind === "RowRead") {
+    inner = e.data.data;
+  }
+  if (inner === null) return null;
+  if (inner.kind === "TooLarge") return { kind: "tooLarge", rowCount: inner.data.row_count };
+  if (inner.kind === "Cancelled") return { kind: "cancelled" };
+  return null;
+}
+
+// Narrow an unknown value to an ExportRowsError (issue #769) -- the
+// export_rows_csv error. Reached via isSessionError's Export branch. The
+// RowRead half recurses into the shared row-read shape; Io verifies the step /
+// path / detail triple before promising it.
+export function isExportRowsError(e: unknown): e is ExportRowsError {
+  if (typeof e !== "object" || e === null) return false;
+  const kind = (e as { kind?: unknown }).kind;
+  switch (kind) {
+    case "RowRead":
+      return isRowReadError((e as { data?: unknown }).data);
+    case "Io": {
+      const d = (e as { data?: unknown }).data;
+      if (typeof d !== "object" || d === null) return false;
+      const step = (d as { step?: unknown }).step;
+      return (
+        (step === "Create" || step === "Write" || step === "Flush" || step === "Rename") &&
+        typeof (d as { path?: unknown }).path === "string" &&
+        typeof (d as { detail?: unknown }).detail === "string"
+      );
+    }
+    default:
+      return false;
+  }
+}
+
+// Narrow an unknown IPC reject to a SkillError (issue #362). Rejects from the
+// skills registry commands (list never refuses; create / update / delete do).
+// Every variant carries a string under data (the English technical detail /
+// the offending name). Same L1 defensive shape as the other guards: a
+// variant's data is verified before the guard promises it. The kind set is
+// disjoint from SessionError / SaveError / StoreCommandError, so checking it
+// after those three in fmtError is unambiguous (ADR-0069 invariant).
+export function isSkillError(e: unknown): e is SkillError {
+  if (typeof e !== "object" || e === null) return false;
+  const kind = (e as { kind?: unknown }).kind;
+  switch (kind) {
+    case "InvalidName":
+    case "InvalidSkill":
+    case "NoSuchSkill":
+    case "NameTaken":
+    case "ReservedSkillName":
+    case "BuiltinReadOnly":
+    case "BuiltinUndeletable":
+    case "ReadOnly":
+    case "FsFailure":
+      return typeof (e as { data?: unknown }).data === "string";
+    default:
+      return false;
+  }
+}
+
+// Narrow an unknown IPC reject to an AgentError (issue #932). Rejects from
+// the agent-definitions registry commands (list never refuses; create /
+// update / delete / set_agent_enabled do). Every variant carries a string
+// under data (the English technical detail / the offending name). Same L1
+// defensive shape as the other guards. The kind set is disjoint from
+// SkillError and every other typed error lane -- the five shapes SkillError
+// also uses (invalid name / taken / undeletable / read-only / fs) carry an
+// Agent-prefixed wire name (InvalidAgentName / AgentNameTaken /
+// AgentBuiltinUndeletable / AgentReadOnly / AgentFsFailure), the agent-only
+// name-locked shape rides its own AgentBuiltinNameLocked kind (the skills
+// side retired its name-locked variant with ADR-0121 and now carries two
+// read-only forms), so fmtError's kind dispatch stays unambiguous even though
+// both lanes share the reject surface shape (ADR-0069 invariant).
+export function isAgentError(e: unknown): e is AgentError {
+  if (typeof e !== "object" || e === null) return false;
+  const kind = (e as { kind?: unknown }).kind;
+  switch (kind) {
+    case "InvalidAgentName":
+    case "InvalidAgent":
+    case "NoSuchAgent":
+    case "AgentNameTaken":
+    case "ReservedAgentName":
+    case "AgentBuiltinNameLocked":
+    case "AgentBuiltinUndeletable":
+    case "AgentReadOnly":
+    case "AgentFsFailure":
+      return typeof (e as { data?: unknown }).data === "string";
+    default:
+      return false;
+  }
+}

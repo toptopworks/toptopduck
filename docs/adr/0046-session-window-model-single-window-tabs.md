@@ -1,0 +1,45 @@
+# 多会话窗口模型：单窗口 + 顶栏会话 tabs（关 tab = 落 recipe + 卸载，非销毁）
+
+> 本 ADR 的「顶栏 tabs」导航决策**被 ADR-0060 取代**为左会话栏（三栏 shell）；关 tab 落 recipe / 软上限 / 重开 resume / 单 webview 低内存语义**保留**，仅载体从 tabs 迁到左会话栏。见 ADR-0060。
+
+## Decision
+
+多会话窗口模型——ADR-0027 line 5 / line 30 punt 的 UX 子决策——定为**单窗口 + 顶栏会话 tabs**：
+
+- **一个 Tauri webview**，顶栏承载会话 tabs（浏览器 / VS Code 心智）；每 tab = 一个会话的两栏 shell（ADR-0045）；切 tab = 换活跃会话的两栏内容。
+- **关 tab ≠ 销毁会话**：落 recipe（.duck 文件，ADR-0034 整文件重写）+ 卸载该会话内存 DuckDB 实例；重开 tab = resume（eager 重放 recipe，ADR-0034 / 0035）。守住 0034「会话为持久化单位」语义。
+- **tab 标签 = 会话名**（CONTEXT.md「可命名」）；未命名用默认名；新建会话 = 顶栏 `+`。
+- **软上限**（ADR-0027）：开第 N 个会话超阈值，顶栏出**非阻塞**内存压力提示（非硬限、不卡死「对比多数据集」）。
+
+否决会话侧栏（β）与多窗口（γ）。
+
+## Context
+
+ADR-0027 定了「多会话并行 + 每会话独立内存 DuckDB 实例 + 物理隔离」，但 line 5 / line 30 显式把「UI 形态（单窗口多 tab vs 多窗口）」punt 为 UX 子决策，仅留 lean「倾向单窗口多 tab（对非技术用户友好）」。ADR-0045 Consequences 把「多会话切换 UI（tabs vs sidebar vs 多窗口）」列为未决项。Tauri（ADR-0008）天然支持多窗口 / 多 webview，但选 Tauri 的核心理由之一是低内存（不为每窗口付一份 Chromium）。会话现为持久化单位（ADR-0034 取代 0027 的「纯内存 / 关即重置」框定）。本 ADR 收口 0027 punt 的 UX 子决策，并闭合 0045 该 open item。
+
+## Why
+
+1. **确认 0027 既有的 lean**——把 line 30「单窗口多 tab 对非技术用户友好」从 lean 升为决策，非推翻。
+2. **守 0045 两栏干净**——会话侧栏（β）加最左持久栏，把 shell 推回三栏，与两栏决策 +「active 通常无需感知」哲学双重冲突。
+3. **守 ADR-0008 低内存动因**——多窗口（γ）每会话一 webview，叠加每会话一 DuckDB 实例（0027）的内存翻倍，正面背叛选 Tauri 的低内存理由。
+4. **守 ADR-0001 非技术用户友好**——tab 是浏览器心智（用户天天用）；多窗口易迷失、三栏聊天壳偏 Slack / Discord 范式，都偏离「数据分析工作台」定位。
+5. **物理隔离使并排对比价值有限**——会话间不可共享 `result_N`（0027），多窗口并排也只能各看各的 + export → 重传，收益不抵内存代价。
+6. **关 tab = 持久化 + 卸载，呼应 0034**——会话是持久化单位，关 tab 不是销毁；resume 重放 recipe。与 0034 / 0035 的「可恢复 / 单写者」语义咬合。
+
+## Considered options
+
+- **β. 单窗 + 最左会话侧栏（聊天 app 会话列表心智）**：第三持久栏与两栏决策冲突、偏聊天范式。**否决**。
+- **γ. 多窗 + 每会话一 OS 窗口（文档编辑器心智）**：webview 翻倍背叛 0008 低内存动因 + 非技术用户迷失。**否决**。
+- **混合（α 默认 +「拖出会话成新窗口」高阶动作）**：给 power user 并排能力。合理但 v1 YAGNI——物理隔离下收益窄。**否决（v1）**，留 v2。
+
+## Consequences
+
+- **闭合 ADR-0045 open item**：0045 Consequences 中「多会话切换 UI（tabs vs sidebar vs 多窗口）」定为单窗 tabs；0045 待追加反向指针。
+- **延伸 ADR-0027**：line 5 / line 30 的 UX 子决策落地为单窗 tabs；line 30 的 lean 升为决策。0027 待追加反向指针。
+- **前端实现**：单 Tauri webview 内 React 状态持有多个会话；顶栏 tabs 组件；切 tab = 换活跃会话两栏内容；关 tab = 触发 recipe 落盘（0034 临时文件 + rename）+ 销毁该会话 DuckDB 实例。
+- **会话生命周期**：开 = 创建实例 + 载入 / resume recipe；关 tab = 落 recipe + 卸实例；重开 = resume。与 ADR-0035 文件级单写者 / 外部变更检测正交（0035 管同 .duck 多实例 / 外部编辑，本 ADR 管窗口内会话切换）。
+- **软上限 UX**：内存压力提示为顶栏非阻塞横幅 / badge，非硬限；阈值可调（0027）。
+- **被 ADR-0051 闭合**：「单 Tauri webview 内 React 状态持有多个会话」落地为 per-tab `<SessionPane key={sessionId}>` 组件自治 + queryKey 按 sessionId 分片 + 切 tab `hidden` 保活 + 关 tab `removeQueries`；active（LLM 作用于）与 Viewed Result（用户查看选择）显式分离。见 ADR-0051。
+- **被 ADR-0055 延伸**：本 ADR「关 tab = 落 recipe + 卸载（非销毁）」补全「in-flight turn 场景」——关一个正有 in-flight ask 的 tab = 隐含 cancel + 立即卸前端 + 后台丢弃 + recipe 不含 cancelled turn，不加确认。见 ADR-0055。
+- **被 ADR-0056 延伸（落地前提）**：本 ADR「单 Tauri webview 内 React 状态持有多个会话」的前端假设，其后端契约（所有会话作用域 IPC 加 sessionId 首位 + `create_session` / `close_session` + 会话间并发 / 会话内单飞行）在 ADR-0056 定。见 ADR-0056。
+- **未决（留后续）**：tab 拖拽重排、会话命名 UI 细节、「拖出成新窗口」高阶动作（v2）。

@@ -1,0 +1,220 @@
+import { describe, expect, it, vi } from "vitest";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import embed from "vega-embed";
+import { IntlProvider } from "react-intl";
+import type { ReactElement } from "react";
+
+import { DelegationTraceDialog } from "../DelegationTraceDialog";
+import { TraceRowList } from "../TraceRow";
+import type { TraceEntry, TraceRound } from "../../../types/thread";
+
+// A fence chart may ride the sub-agent's prose; jsdom cannot run vega-embed,
+// so its render is mocked (a resolved embed = the chart surface draws) --
+// the pin below is then meaningful, not vacuous.
+vi.mock("vega-embed", () => ({
+  default: vi.fn().mockResolvedValue({ finalize: vi.fn(), view: { resize: vi.fn() } }),
+}));
+
+// The delegation row's thin summary + modal viewer (issue #934; the modal
+// form was decided on the issue in triage): a delegation trace row stays one
+// line with a "Sub-trace" affordance; the dialog opens the sub-agent's
+// rounds -- thinking folds, connective prose, and the tool string rendered
+// by the same row list the settled trace uses.
+
+function renderWithProviders(ui: ReactElement) {
+  return render(
+    <IntlProvider locale="en" messages={{}} onError={() => {}}>
+      {ui}
+    </IntlProvider>,
+  );
+}
+
+// A delegation entry carrying one nested sub-round: prose + a succeeded and
+// a failed sub-call, the same shape the Rust slim projection persists.
+const SUB_ROUND: TraceRound = {
+  text: "Checking the sheet first.",
+  calls: [
+    {
+      name: "explore",
+      operation_kind: "read",
+      summary: "SELECT count(*) AS n FROM result_1",
+      success: true,
+      result_excerpt: "",
+    },
+    {
+      name: "materialize",
+      operation_kind: "write",
+      summary: "SELECT * FROM missing",
+      success: false,
+      result_excerpt: "no such table",
+    },
+  ],
+};
+
+const DELEGATION: TraceEntry = {
+  name: "analyst",
+  operation_kind: "execute",
+  summary: "clean the sheet",
+  success: true,
+  result_excerpt: "",
+  sub_rounds: [SUB_ROUND],
+};
+
+describe("DelegationTraceDialog", () => {
+  it("opens the modal on the affordance and renders the sub-rounds", () => {
+    renderWithProviders(<DelegationTraceDialog entry={DELEGATION} />);
+    // Closed by default: the sub-trace content is not in the document.
+    expect(screen.queryByText("Checking the sheet first.")).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: /sub-trace/i }));
+    // The title names the delegating sub-agent; the description carries the
+    // task head (the row's own summary).
+    expect(screen.getByText("Sub-agent trace · analyst")).toBeInTheDocument();
+    expect(screen.getByText("clean the sheet")).toBeInTheDocument();
+    // The sub-round's prose and its tool string render (the failed sub-call
+    // keeps its bounded excerpt -- the cross-turn failure anchor).
+    expect(screen.getByText("Checking the sheet first.")).toBeInTheDocument();
+    expect(screen.getByText("SELECT count(*) AS n FROM result_1")).toBeInTheDocument();
+    expect(screen.getByText("no such table")).toBeInTheDocument();
+  });
+});
+
+describe("TraceRowList delegation affordance (issue #934)", () => {
+  it("shows the injected sub-trace affordance only where the caller supplies it", () => {
+    const { container } = renderWithProviders(
+      <>
+        {/* The settled trace's composition (TurnCard): every row gets the
+            affordance; only the delegation entry's renders non-null. */}
+        <TraceRowList
+          entries={[DELEGATION]}
+          renderSubTrace={(entry) => <DelegationTraceDialog entry={entry} />}
+        />
+        <TraceRowList
+          entries={[
+            {
+              name: "explore",
+              operation_kind: "read",
+              summary: "SELECT 1",
+              success: true,
+              result_excerpt: "",
+            },
+          ]}
+          renderSubTrace={(entry) => <DelegationTraceDialog entry={entry} />}
+        />
+      </>,
+    );
+    const affordances = container.querySelectorAll(".subtrace-open");
+    expect(affordances).toHaveLength(1);
+  });
+
+  // The affordance's click isolation (PR #946 review): the whole summary
+  // line is the row fold's click target, so opening the modal must not
+  // also toggle the fold. The positive control first -- clicking the
+  // summary line grows the expand block, proving the fold path is live in
+  // this composition (otherwise the negative half would be vacuous).
+  it("opening the modal leaves the row's summary fold collapsed", () => {
+    const { container } = renderWithProviders(
+      <TraceRowList
+        entries={[DELEGATION]}
+        renderSubTrace={(entry) => <DelegationTraceDialog entry={entry} />}
+      />,
+    );
+    // The chevron toggle's click bubbles to the line's one toggle handler
+    // (TraceSummaryFold's contract); it stays addressable once the fold's
+    // block duplicates the summary text.
+    const toggles = container.querySelectorAll(".summary-fold-toggle");
+    expect(toggles).toHaveLength(1);
+    fireEvent.click(toggles[0]);
+    expect(container.querySelector(".summary-fold-block")).not.toBeNull();
+    fireEvent.click(toggles[0]);
+    expect(container.querySelector(".summary-fold-block")).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: /sub-trace/i }));
+    expect(screen.getByText("Sub-agent trace · analyst")).toBeInTheDocument();
+    // Opening the modal must not also toggle the row's summary fold.
+    expect(container.querySelector(".summary-fold-block")).toBeNull();
+  });
+});
+
+it("keeps a vega-lite fence in the sub-trace static (issue #1093 pin)", async () => {
+  // The delegation dialog mounts RoundProse bare -- never through Thread's
+  // stage link -- so its fences are static content: the chart itself draws,
+  // but no click affordance may exist.
+  const fenceRound: TraceRound = {
+    ...SUB_ROUND,
+    text: "```vega-lite\n{\"mark\": \"bar\"}\n```",
+  };
+  renderWithProviders(
+    <DelegationTraceDialog entry={{ ...DELEGATION, sub_rounds: [fenceRound] }} />,
+  );
+  fireEvent.click(screen.getByRole("button", { name: /sub-trace/i }));
+  await waitFor(() => expect(vi.mocked(embed)).toHaveBeenCalledTimes(1));
+  expect(
+    screen.queryByRole("button", { name: "View chart in the results pane" }),
+  ).not.toBeInTheDocument();
+});
+
+// The dialog's usage subtotal row (ADR-0129 Decision 6, issue #1270): a
+// built-in turn's delegation row carries the sub-agent's subtotal under
+// the task description; absent for external-runtime turns (their process
+// aggregate never splits).
+describe("DelegationTraceDialog usage subtotal (ADR-0129, issue #1270)", () => {
+  // The shared subtotal fixture: one delegation entry whose sub-agent
+  // carried input 40 + output 10 (no cache buckets).
+  function renderSubtotalTrace() {
+    renderWithProviders(
+      <TraceRowList
+        entries={[DELEGATION]}
+        renderSubTrace={(entry) => (
+          <DelegationTraceDialog
+            entry={entry}
+            subtotal={{
+              name: entry.name,
+              usage: {
+                input_tokens: 40,
+                cache_read_tokens: 0,
+                cache_write_tokens: 0,
+                output_tokens: 10,
+              },
+            }}
+          />
+        )}
+      />,
+    );
+  }
+
+  it("renders the sub-agent's subtotal when provided", async () => {
+    renderSubtotalTrace();
+    fireEvent.click(screen.getByRole("button", { name: /Sub-trace/ }));
+    await waitFor(() => expect(screen.getByRole("dialog")).toBeInTheDocument());
+    // The pill form (issue #1278): the subtotal reads as the derived
+    // total (input 40 + output 10); the buckets ride the pill's Popover.
+    const footer = document.querySelector(".usage-footer");
+    expect(footer?.textContent).toContain("Used 50");
+  });
+
+  it("opens the subtotal pill's bucket detail inside the dialog (the first Popover-in-Dialog wiring)", async () => {
+    renderSubtotalTrace();
+    fireEvent.click(screen.getByRole("button", { name: /Sub-trace/ }));
+    await waitFor(() => expect(screen.getByRole("dialog")).toBeInTheDocument());
+    fireEvent.click(screen.getByRole("button", { name: "Used 50" }));
+    // The detail portals to body, outside the dialog's tree, and Radix
+    // gives it the dialog role too -- the title picks the surface out
+    // where a second single-role query would be ambiguous. The
+    // zero-cache fixture keeps the rows to input and output.
+    const detail = screen.getByText("Turn usage").closest("[role=dialog]");
+    expect(detail).not.toBeNull();
+    expect(detail?.textContent).toContain("Input 40");
+    expect(detail?.textContent).toContain("Output 10");
+  });
+
+  it("renders no subtotal when the turn carried none", async () => {
+    renderWithProviders(
+      <TraceRowList
+        entries={[DELEGATION]}
+        renderSubTrace={(entry) => <DelegationTraceDialog entry={entry} />}
+      />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: /Sub-trace/ }));
+    await waitFor(() => expect(screen.getByRole("dialog")).toBeInTheDocument());
+    expect(screen.queryByText(/^Used /)).not.toBeInTheDocument();
+  });
+});
