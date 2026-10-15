@@ -355,7 +355,7 @@ describe("useSidebarResize", () => {
     expect(result.current.width).toBe(238);
   });
 
-  it("re-clamps the live width on window shrink without persisting it", () => {
+  it("re-clamps the live width on window shrink, then restores it on widen", () => {
     localStorage.setItem(STORAGE_KEY, "424");
     const { result, rerender } = renderHook(
       ({ getMaxWidth }: { getMaxWidth: () => number | undefined }) =>
@@ -371,11 +371,19 @@ describe("useSidebarResize", () => {
     });
     expect(result.current.width).toBe(240);
     // The stored preference keeps the pre-shrink value — a transient narrow
-    // window must not overwrite it (the restore path re-clamps per launch).
+    // window must not overwrite it.
     expect(localStorage.getItem(STORAGE_KEY)).toBe("424");
+
+    // Window widens again: the rendered width returns to the preference with
+    // no re-drag (issue #1303 preference/render split).
+    rerender({ getMaxWidth: () => 424 });
+    act(() => {
+      window.dispatchEvent(new Event("resize"));
+    });
+    expect(result.current.width).toBe(424);
   });
 
-  it("window widen does not grow the live width (one-way re-clamp)", () => {
+  it("window widen restores the preference but never grows beyond it", () => {
     // The initial ceiling must sit at or above the 280 default, or the
     // cold-start load clamp would mask the default-width assertion.
     const { result, rerender } = renderHook(
@@ -389,6 +397,8 @@ describe("useSidebarResize", () => {
     act(() => {
       window.dispatchEvent(new Event("resize"));
     });
+    // Widening recomputes the rendered width from the untouched 280
+    // preference — it restores, never grows the column.
     expect(result.current.width).toBe(SIDEBAR_DEFAULT_WIDTH);
   });
 
@@ -408,7 +418,7 @@ describe("useSidebarResize", () => {
     expect(result.current.width).toBe(238);
   });
 
-  it("does not persist a width that was only re-clamped by a mid-drag window shrink", () => {
+  it("persists the user's drag width even when a mid-drag window shrink re-rendered narrower", () => {
     const { result, rerender } = renderHook(
       ({ getMaxWidth }: { getMaxWidth: () => number | undefined }) =>
         useSidebarResize({ getMaxWidth }),
@@ -424,7 +434,8 @@ describe("useSidebarResize", () => {
     });
     expect(result.current.width).toBe(424);
 
-    // Window shrinks mid-drag, before the pointer is released.
+    // Window shrinks mid-drag, before the pointer is released: the rendered
+    // width drops to the ceiling, but the preference stays at the drag value.
     rerender({ getMaxWidth: () => 240 });
     act(() => {
       window.dispatchEvent(new Event("resize"));
@@ -434,11 +445,19 @@ describe("useSidebarResize", () => {
     act(() => {
       window.dispatchEvent(new PointerEvent("pointerup"));
     });
-    // The shrink was environmental, not a user width choice — nothing stored.
-    expect(localStorage.getItem(STORAGE_KEY)).toBeNull();
+    // The drag wrote the preference (424); the shrink only lowered the
+    // rendered width — the release persists the user's choice (#1303).
+    expect(localStorage.getItem(STORAGE_KEY)).toBe("424");
+
+    // Widening springs the rendered width back to that same preference.
+    rerender({ getMaxWidth: () => 424 });
+    act(() => {
+      window.dispatchEvent(new Event("resize"));
+    });
+    expect(result.current.width).toBe(424);
   });
 
-  it("persists again once the user drags after a mid-drag shrink", () => {
+  it("a move after a mid-drag shrink re-owns the width at the clamped ceiling", () => {
     const { result, rerender } = renderHook(
       ({ getMaxWidth }: { getMaxWidth: () => number | undefined }) =>
         useSidebarResize({ getMaxWidth }),
@@ -449,13 +468,19 @@ describe("useSidebarResize", () => {
         preventDefault: vi.fn(),
       } as unknown as React.PointerEvent);
     });
+    act(() => {
+      window.dispatchEvent(new PointerEvent("pointermove", { clientX: 424 }));
+    });
     rerender({ getMaxWidth: () => 240 });
     act(() => {
       window.dispatchEvent(new Event("resize"));
     });
+    expect(result.current.width).toBe(240);
 
-    // The user moves again — the width is theirs once more (clamped to the
-    // shrunken ceiling), so the release persists it.
+    // The user moves again — the move writes the clamped target (240) as
+    // the preference, so the release persists 240 and a later widen
+    // restores 240, not the pre-shrink 424 (a drag write is user-owned,
+    // issue #1303).
     act(() => {
       window.dispatchEvent(new PointerEvent("pointermove", { clientX: 300 }));
     });
@@ -463,5 +488,11 @@ describe("useSidebarResize", () => {
       window.dispatchEvent(new PointerEvent("pointerup"));
     });
     expect(localStorage.getItem(STORAGE_KEY)).toBe("240");
+
+    rerender({ getMaxWidth: () => 424 });
+    act(() => {
+      window.dispatchEvent(new Event("resize"));
+    });
+    expect(result.current.width).toBe(240);
   });
 });
