@@ -37,11 +37,8 @@ test-fixtures = []
 # end-to-end in CI without the real gemini-cli install + login. Lives under
 # `tests/fixtures/` (a subdir, so cargo does NOT auto-discover it as an
 # integration-test target); declared here as a `[[bin]]` so integration tests
-# resolve its path via `env!("CARGO_BIN_EXE_acp-fake-cli")`. Built only under
-# the `test-fixtures` feature (the `rust:test` script / CI carry it) -- it
-# links the lib for the shared ACP wire types (single source of truth). The
-# Tauri bundler ships every `[[bin]]` it builds, so the feature gate is what
-# keeps this fixture out of production installers.
+# resolve its path via `env!("CARGO_BIN_EXE_acp-fake-cli")`. It links the lib
+# for the shared ACP wire types (single source of truth).
 [[bin]]
 name = "acp-fake-cli"
 path = "tests/fixtures/acp_fake_cli.rs"
@@ -92,8 +89,7 @@ required-features = ["test-fixtures"]
 # JSON-RPC subset the gateway's StdioClient drives (initialize / tools/list /
 # tools/call). Lives under `tests/fixtures/` (subdir, no auto-discovery); pure
 # serde_json (no lib import) so the fixture stays self-contained. Built only
-# under `test-fixtures` (the `rust:test` script / CI); the gate keeps it out
-# of production installers.
+# under `test-fixtures`; the gate keeps it out of production installers.
 [[bin]]
 name = "mcp-fake-server"
 path = "tests/fixtures/mcp_fake_server.rs"
@@ -331,7 +327,7 @@ http = "1"
 # app-config atomic write (ADR-0038); window-state persists the main window's
 # position/size/maximized across launches.
 # CLI fake-tool fixture (issue #671, ADR-0108): a minimal non-interactive
-# binary the cli_tools executor's unit tests spawn in place of a real
+# binary the cli_tools executor's integration tests spawn in place of a real
 # registered tool (the acp-fake-cli precedent). See the fixture source for
 # the flag protocol.
 [[bin]]
