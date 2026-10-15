@@ -77,7 +77,7 @@ npm run tauri build    # Build the desktop installer
 | `npm run build` | Type check + frontend build |
 | `npm run tauri build` | Desktop installer |
 | `npm test` | Frontend tests (Vitest) |
-| `cargo test --workspace` | Rust tests (run from the repo root, includes `crates/*` members) |
+| `npm run rust:test` | Rust tests (repo root, includes `crates/*` members and the feature-gated test fixtures) |
 
 ## Tech stack
 
@@ -88,7 +88,7 @@ npm run tauri build    # Build the desktop installer
 | Frontend | React 19 + Vite + TypeScript |
 | Visualization | Vega-Lite (JSON, schema-validated) + Vega-Embed |
 | LLM access | Dual runtimes: built-in BYOK agent loop + external CLI agents (ACP) + MCP tool gateway |
-| Testing | Vitest (frontend) / `cargo test` (Rust) |
+| Testing | Vitest (frontend) / `npm run rust:test` (Rust) |
 
 ## Documentation
 

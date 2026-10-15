@@ -11,37 +11,53 @@ rust-version = "1.86"
 # mcp-fake-server and friends), so a bare `cargo run` -- and
 # `tauri dev`, which shells out to cargo for the main app binary -- cannot infer
 # which to launch. `default-run` pins the desktop app entry so both resolve
-# without `--bin`; the fixtures stay reachable via `cargo run --bin <name>` / the
-# CARGO_BIN_EXE_* test macro.
+# without `--bin`; the fixtures stay reachable via
+# `cargo run --features test-fixtures --bin <name>` / the CARGO_BIN_EXE_* test
+# macro (both faces behind the `test-fixtures` gate, see [features] below).
 default-run = "toptopduck"
 
 [lib]
 name = "toptopduck_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
+# Build gate for the `[[bin]]` test fixtures below: each fixture declares
+# `required-features = ["test-fixtures"]`, so plain `cargo build` -- and the
+# `tauri build` bundler face, which leaves the feature off -- skips them
+# entirely. This matters because the Tauri bundler ships every `[[bin]]` it
+# builds (multi-bin by design, no per-target exclusion), so the gate is what
+# keeps fixtures out of production installers. Test entries (the `rust:clippy`
+# / `rust:test` scripts and CI) pass the feature so the `env!("CARGO_BIN_EXE_*")`
+# paths resolve.
+[features]
+# Empty on purpose: pure build gate, no cfg branches anywhere.
+test-fixtures = []
+
 # ACP fake CLI fixture (issue #299, ADR-0081 test seam C): a minimal binary that
 # speaks the ACP v1 stdio JSON-RPC subset so the adapter engine can be exercised
 # end-to-end in CI without the real gemini-cli install + login. Lives under
 # `tests/fixtures/` (a subdir, so cargo does NOT auto-discover it as an
 # integration-test target); declared here as a `[[bin]]` so integration tests
-# resolve its path via `env!("CARGO_BIN_EXE_acp-fake-cli")`. Built with the
-# normal `cargo build` / `cargo test` -- it links the lib for the shared ACP
-# wire types (single source of truth). The Tauri bundler only ships `main.rs`,
-# so this fixture never reaches end users.
+# resolve its path via `env!("CARGO_BIN_EXE_acp-fake-cli")`. Built only under
+# the `test-fixtures` feature (the `rust:test` script / CI carry it) -- it
+# links the lib for the shared ACP wire types (single source of truth). The
+# Tauri bundler ships every `[[bin]]` it builds, so the feature gate is what
+# keeps this fixture out of production installers.
 [[bin]]
 name = "acp-fake-cli"
 path = "tests/fixtures/acp_fake_cli.rs"
+required-features = ["test-fixtures"]
 
 # Codex fake CLI fixture (ADR-0094, issue #523): a minimal binary that emulates
 # `codex exec --json` NDJSON output so the JSON event stream engine can be
 # exercised end-to-end in CI without the real codex install. Lives under
 # `tests/fixtures/` (subdir, no auto-discovery); pure serde_json (no lib import)
 # so the fixture stays self-contained. Integration tests resolve its path via
-# `env!("CARGO_BIN_EXE_codex-fake-cli")`. The Tauri bundler ships only `main.rs`,
-# so this fixture never reaches end users.
+# `env!("CARGO_BIN_EXE_codex-fake-cli")` when `test-fixtures` is on; the gate
+# keeps it out of production installers.
 [[bin]]
 name = "codex-fake-cli"
 path = "tests/fixtures/codex_fake_cli.rs"
+required-features = ["test-fixtures"]
 
 # Codex app-server fake fixture (ADR-0096, issue #535): a minimal binary that
 # emulates the `codex app-server` JSON-RPC-over-stdio protocol (no `jsonrpc`
@@ -49,11 +65,12 @@ path = "tests/fixtures/codex_fake_cli.rs"
 # end-to-end in CI without the real codex install. Lives under `tests/fixtures/`
 # (subdir, no auto-discovery); pure serde_json (no lib import) so the fixture
 # stays self-contained. Integration tests resolve its path via
-# `env!("CARGO_BIN_EXE_codex-app-server-fake")`. The Tauri bundler ships only
-# `main.rs`, so this fixture never reaches end users.
+# `env!("CARGO_BIN_EXE_codex-app-server-fake")` when `test-fixtures` is on;
+# the gate keeps it out of production installers.
 [[bin]]
 name = "codex-app-server-fake"
 path = "tests/fixtures/codex_app_server_fake.rs"
+required-features = ["test-fixtures"]
 
 # Claude-code fake CLI fixture (ADR-0097, issue #561): a minimal binary that
 # emulates BOTH claude-code surfaces the product drives, in one binary like the
@@ -62,44 +79,48 @@ path = "tests/fixtures/codex_app_server_fake.rs"
 # control-plane initialize). Lives under `tests/fixtures/` (subdir, no
 # auto-discovery); pure serde_json (no lib import) so the fixture stays
 # self-contained. Integration tests resolve its path via
-# `env!("CARGO_BIN_EXE_claude-fake-cli")`. The Tauri bundler ships only
-# `main.rs`, so this fixture never reaches end users.
+# `env!("CARGO_BIN_EXE_claude-fake-cli")` when `test-fixtures` is on; the
+# gate keeps it out of production installers.
 [[bin]]
 name = "claude-fake-cli"
 path = "tests/fixtures/claude_fake_cli.rs"
+required-features = ["test-fixtures"]
 
 # MCP fake server fixture (issue #301 slice C-gw): a minimal stdio MCP server
 # the gateway aggregation / routing integration tests spawn via
 # `env!("CARGO_BIN_EXE_mcp-fake-server")`. Speaks the MCP stdio newline-delimited
 # JSON-RPC subset the gateway's StdioClient drives (initialize / tools/list /
 # tools/call). Lives under `tests/fixtures/` (subdir, no auto-discovery); pure
-# serde_json (no lib import) so the fixture stays self-contained. Built with the
-# normal `cargo test`; the Tauri bundler ships only `main.rs`, so this fixture
-# never reaches end users.
+# serde_json (no lib import) so the fixture stays self-contained. Built only
+# under `test-fixtures` (the `rust:test` script / CI); the gate keeps it out
+# of production installers.
 [[bin]]
 name = "mcp-fake-server"
 path = "tests/fixtures/mcp_fake_server.rs"
+required-features = ["test-fixtures"]
 
 # MCP hang server fixture (issue #392): a stdio process that spawns
 # successfully but never responds to JSON-RPC requests. The probe timeout
 # integration test spawns it, verifies the deadline fires, and confirms the
 # child is killed. Pure std — reads stdin to keep the pipe open, writes
-# nothing. The Tauri bundler ships only `main.rs`, so this never reaches end
-# users.
+# nothing. Gated behind `test-fixtures`, so it never enters production
+# installers.
 [[bin]]
 name = "mcp-hang-server"
 path = "tests/fixtures/mcp_hang_server.rs"
+required-features = ["test-fixtures"]
 
 # MCP paginated fake server fixture (issue #900): a stdio MCP server whose
 # `tools/list` answer spans two pages joined by `nextCursor` -- the gateway +
 # probe integration tests pin that `list_tools` folds every page into the
 # catalog (pre-#900 the second page was silently dropped). Lives under
 # `tests/fixtures/` (subdir, no auto-discovery); pure serde_json (no lib
-# import) so the fixture stays self-contained. The Tauri bundler ships only
-# `main.rs`, so this fixture never reaches end users.
+# import) so the fixture stays self-contained. Gated behind `test-fixtures`,
+# so it never enters production installers.
 [[bin]]
 name = "mcp-paginated-server"
 path = "tests/fixtures/mcp_paginated_server.rs"
+required-features = ["test-fixtures"]
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
@@ -316,6 +337,7 @@ http = "1"
 [[bin]]
 name = "cli-fake-tool"
 path = "tests/fixtures/cli_fake_tool.rs"
+required-features = ["test-fixtures"]
 
 [target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
 tauri-plugin-single-instance = "2"
