@@ -428,7 +428,30 @@ describe("useRailResize", () => {
     expect(result.current.width).toBe(RAIL_DEFAULT_WIDTH);
   });
 
-  it("keeps an in-flight drag pinned to the shrunken ceiling without jumping past it", () => {
+  it("adjustWidth while the preference exceeds the ceiling writes the anti-correlated preference, not the ceiling", () => {
+    vi.stubGlobal("ResizeObserver", ResizeObserverStub);
+    let ceiling = 400;
+    const result = renderWithTarget(() => ceiling);
+    act(() => fireContainerChange?.());
+    // Cold start caps the rendered width at the 400 ceiling; the 460
+    // preference rides above it.
+    expect(result.current.width).toBe(400);
+
+    // The sidebar drags 20px wider — the compensation lowers the
+    // preference by exactly 20 (460 -> 440). Folding the environmental
+    // ceiling into the write (400) is the bug this pins: rendered stays
+    // at the ceiling either way, so only the later widen tells them apart.
+    act(() => {
+      result.current.adjustWidth(-20);
+    });
+    expect(result.current.width).toBe(400);
+
+    ceiling = 600;
+    act(() => fireContainerChange?.());
+    expect(result.current.width).toBe(440);
+  });
+
+  it("a move after a mid-drag shrink re-owns the width at the clamped ceiling", () => {
     vi.stubGlobal("ResizeObserver", ResizeObserverStub);
     let ceiling = 466;
     const result = renderWithTarget(() => ceiling);
@@ -447,14 +470,21 @@ describe("useRailResize", () => {
     ceiling = 280;
     act(() => fireContainerChange?.()); // mid-drag container shrink
     expect(result.current.width).toBe(280);
-    // Further moves stay pinned: the drag target recomputes from the
-    // pointerdown render width (280 after the shrink, since the anchor is
-    // the rendered width) and clamps to the current ceiling. The mid-drag
-    // re-anchor mechanism is gone with the preference/render split (#1303);
-    // the clamp math alone keeps the handle inside the rendered rail.
+    // Further moves re-own the width at the clamped ceiling: the anchor
+    // stays at its pointerdown value (460 — the mid-drag re-anchor is
+    // gone), so the drag floor follows the rendered width (280) to keep
+    // the clamp range valid; a plain 350 floor would invert the range
+    // (350 above the 280 ceiling) and write the 350 floor artifact into
+    // the preference instead.
     act(() => {
       window.dispatchEvent(new PointerEvent("pointermove", { clientX: 1000 }));
     });
+    expect(result.current.width).toBe(280);
+
+    // Widening springs to the re-owned 280 — not the pre-shrink 466 and
+    // not the 350 artifact an unfixed floor would have written (#1303).
+    ceiling = 600;
+    act(() => fireContainerChange?.());
     expect(result.current.width).toBe(280);
   });
 

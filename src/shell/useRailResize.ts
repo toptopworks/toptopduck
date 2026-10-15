@@ -64,8 +64,8 @@ function clampWidth(px: number, min: number, max: number): number {
 
 export function useRailResize(options?: {
   /** Dynamic width ceiling in px (issue #770: track-host width minus the
-   *  workspace floor), consulted on every pointermove and every
-   *  sidebar-compensation adjustment. Return undefined to fall back to the
+   *  workspace floor), consulted on every pointermove and by every
+   *  rendered-width re-derivation. Return undefined to fall back to the
    *  static MAX_WIDTH — e.g. jsdom, where clientWidth reads as 0. */
   getMaxWidth?: () => number | undefined;
   /** Element whose settled layout drives the rendered-width re-derivation
@@ -211,12 +211,21 @@ export function useRailResize(options?: {
     function onPointerMove(e: PointerEvent): void {
       if (!draggingRef.current) return;
       const delta = e.clientX - startXRef.current;
-      // Use min(MIN_WIDTH, startWidthRef) as the effective floor so that
-      // if sidebar compensation pushed the rail below MIN_WIDTH (to
-      // COMPENSATED_MIN_WIDTH=280), the first direct-drag move does not
-      // snap the rail back up to 350. When startWidthRef is at or above
-      // MIN_WIDTH the floor stays at MIN_WIDTH (normal case).
-      const effectiveMin = Math.min(MIN_WIDTH, startWidthRef.current);
+      // Use min(MIN_WIDTH, startWidthRef, renderedRef) as the effective
+      // floor. The startWidth term keeps a compensated rail (pushed below
+      // MIN_WIDTH to COMPENSATED_MIN_WIDTH=280) from snapping back up to
+      // 350 on the first direct-drag move. The rendered term keeps the
+      // range valid through a mid-drag environmental shrink: the anchor
+      // stays at its pointerdown value, so after the ceiling sinks below
+      // MIN_WIDTH a plain MIN_WIDTH floor inverts the range (floor above
+      // ceiling) and the move would write the floor artifact into the
+      // preference — following the rendered width makes the move write
+      // the ceiling instead, matching the sidebar's re-own semantics.
+      const effectiveMin = Math.min(
+        MIN_WIDTH,
+        startWidthRef.current,
+        renderedRef.current,
+      );
       const clamped = clampWidth(
         startWidthRef.current + delta,
         effectiveMin,
@@ -254,18 +263,18 @@ export function useRailResize(options?: {
   // lower COMPENSATED_MIN_WIDTH floor so the sidebar can push the rail past
   // its own direct-drag floor while keeping the workspace usable. This is a
   // preference write per the split's contract (#1303): the compensation is
-  // part of the user's sidebar-drag choice.
+  // part of the user's sidebar-drag choice. The write clamps the STATIC
+  // range only — clamping against the dynamic ceiling would fold the
+  // environmental ceiling into the preference whenever the preference
+  // already exceeds it, and the render derivation re-applies that ceiling
+  // anyway.
   const adjustWidth = useCallback(
     (delta: number) => {
       applyPreference(
-        clampWidth(
-          prefRef.current + delta,
-          COMPENSATED_MIN_WIDTH,
-          effectiveMax(),
-        ),
+        clampWidth(prefRef.current + delta, COMPENSATED_MIN_WIDTH, MAX_WIDTH),
       );
     },
-    [applyPreference, effectiveMax],
+    [applyPreference],
   );
 
   return { width: renderedWidth, isDragging, onResizeStart, adjustWidth };
