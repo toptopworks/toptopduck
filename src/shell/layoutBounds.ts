@@ -25,6 +25,19 @@ export function mergeCeiling(
   return dynamic === undefined ? staticMax : Math.min(staticMax, dynamic);
 }
 
+/** Rendered width derivation shared by both resize hooks (issue #1303):
+ *  min(preference, ceiling), floored defensively so an extreme ceiling can
+ *  never crush the column below its readability floor. Declared here rather
+ *  than in the hook modules so the derivation rule cannot drift between
+ *  them (same rationale as mergeCeiling). */
+export function clampRenderedWidth(
+  pref: number,
+  max: number,
+  floor: number,
+): number {
+  return Math.max(floor, Math.min(pref, max));
+}
+
 /** Sidebar width ceiling: the shell width minus the two other column floors.
  *
  * Deliberately floor-based (the rail's compensated floor) rather than the
