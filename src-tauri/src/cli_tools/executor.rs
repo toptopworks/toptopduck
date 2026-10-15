@@ -112,6 +112,7 @@ fn execute_capped(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     tree::prepare_command(&mut command);
+    crate::util::no_window(&mut command);
     let mut child = match command.spawn() {
         Ok(child) => child,
         // Probe semantics (ADR-0108 Decision 2): a missing/unresolvable

@@ -65,12 +65,13 @@ const KILL_REAP_POLL: Duration = Duration::from_millis(10);
 /// keeps the error wording (the turn path and the probe path name the
 /// failing adapter / CLI differently).
 pub(super) fn spawn_piped(binary: &Path, argv: &[&str], stderr: Stdio) -> std::io::Result<Child> {
-    Command::new(binary)
-        .args(argv)
+    let mut cmd = Command::new(binary);
+    cmd.args(argv)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(stderr)
-        .spawn()
+        .stderr(stderr);
+    crate::util::no_window(&mut cmd);
+    cmd.spawn()
 }
 
 /// The cwd-aware spawn shape the non-ACP TURN drivers share (codex native
@@ -100,6 +101,7 @@ pub(super) fn spawn_turn(
     if !cwd.is_empty() {
         cmd.current_dir(cwd);
     }
+    crate::util::no_window(&mut cmd);
     cmd.spawn()
 }
 

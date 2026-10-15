@@ -676,10 +676,10 @@ mod tests {
             // as `linked` via the reparse tag (a junction is NOT reported as
             // a symlink by `FileType::is_symlink`), and `delete_skill` removes
             // the junction itself without following it into the source.
-            std::process::Command::new("cmd")
-                .args(["/C", "mklink", "/J"])
-                .arg(link)
-                .arg(target)
+            let mut command = std::process::Command::new("cmd");
+            command.args(["/C", "mklink", "/J"]).arg(link).arg(target);
+            crate::util::no_window(&mut command);
+            command
                 .output()
                 .map(|o| o.status.success())
                 .unwrap_or(false)
