@@ -22,7 +22,7 @@ ADR-0076 定双运行时 + app 所有的 MCP 网关，留"桥接进程分发形�
 - **共享 listener + session 路由表（网关边界）**：多路复用需 `(session, turn)` 路由表，违 per-session 隔离（ADR-0027）+ KISS；且 handler 仍需 per-turn 借 session 资源，路由表只增复杂度。**否决**。
 - **app bin 子命令（`toptopduck --acp-bridge`）**：app bin 是 Tauri GUI 二进制，启动拉 GUI 运行时；CLI per-turn spawn 它的开销不可接受。**否决**。
 - **桥接独立 crate（workspace member）**：初判同 crate `[[bin]]` 不 `use` lib 已隔离（dead-strip）、独立 crate 增 workspace 复杂度无收益而**否决**；后被 #1295 推翻——共享 bounded-line reader 需要两侧单一类型身份（`#[path]` 双编译各产一份定义），拆分后隔离由包边界承载。
-- **Tauri sidecar bundle（`tauri.conf.json` `externalBin`）**：分发形态属打包阶段；`[[bin]]` 不自动进 Tauri 默认 bundle，sidecar 配置耦合 Tauri 打包 + `target_triple` 后缀，本 ADR 不覆盖打包分发。**否决**——打包阶段再议。
+- **Tauri sidecar bundle（`tauri.conf.json` `externalBin`）**：分发形态属打包阶段；sidecar 配置耦合 Tauri 打包 + `target_triple` 后缀，本 ADR 不覆盖打包分发。**否决**——打包阶段再议（由 ADR-0132 收官）。校准：原「`[[bin]]` 不自动进 Tauri 默认 bundle」的主张经三平台打包实证推翻——bundler 将 crate 声明的全部 `[[bin]]` 打进安装包（multi-bin 有意行为，无单件排除配置），测试夹具 `[[bin]]` 由 #1299 以 `required-features` 门控剔出生产打包面。
 - **length-prefixed framing**：要解析 + 重新封装，桥接不再是直通字节流 proxy。**否决**。
 - **私有 JSON-RPC 协议（桥接翻译 stdio MCP ↔ 私有）**：桥接要解析 + 翻译，违"纯传输"。**否决**——用 MCP 协议让桥接零翻译。
 - **双重 gate（同一工具集两层审批）**：若 ACP `request_permission` 与网关 `tools/call` 都 gate 同一工具集则冗余；实际两层面管不同工具集（agent 自带 vs 经网关），正交非冗余。**否决**冗余解读。

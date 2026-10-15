@@ -1,5 +1,5 @@
 // CLI fake-tool fixture (issue #671, ADR-0108): a minimal non-interactive
-// binary the executor's unit tests spawn in place of a real registered tool
+// binary the executor's integration tests spawn in place of a real registered tool
 // (the acp-fake-cli / mcp-fake-server precedent). Lives under tests/fixtures/
 // (a subdir, so cargo does NOT auto-discover it as an integration-test
 // target); declared as a [[bin]] in Cargo.toml so tests resolve its path via
