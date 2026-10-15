@@ -5,6 +5,7 @@ node_modules/
 dist/
 /target/
 src-tauri/gen/
+src-tauri/binaries/
 
 # OS / editor
 .DS_Store

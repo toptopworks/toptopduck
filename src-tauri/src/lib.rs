@@ -234,11 +234,11 @@ pub fn run() {
                 .build(),
         )
         .setup(move |app| {
-            // Dev bridge injection (issue #798, ADR-0085 orchestrator half):
+            // Bridge injection (issue #798, ADR-0085 orchestrator half):
             // first thing in setup so the env var exists before any IPC that
-            // could start an external-runtime turn. No-op in release builds.
-            #[cfg(debug_assertions)]
-            inject_dev_bridge_bin();
+            // could start an external-runtime turn. Dev and installed builds
+            // share one sibling-resolution path (ADR-0132).
+            inject_bridge_bin();
 
             // ADR-0038: app-config lives in the OS app-data dir (e.g.
             // %APPDATA%/<identifier>/config.json), NOT in the working directory
@@ -600,91 +600,106 @@ pub fn run() {
     });
 }
 
-/// The bridge binary's file name expected beside the app exe in dev builds.
-/// Mirrors the `toptopduck-acp-bridge` [[bin]] of the `crates/acp-bridge`
-/// workspace member; a drift rename on either side degrades to an honest
-/// missing-sibling skip (the turn keeps the existing failed-with-guidance
-/// path). The value is pinned by a unit
-/// test so a unilateral rename fails loudly rather than silently repointing
-/// at another bin that builds into the same target dir.
-#[cfg(debug_assertions)]
-const DEV_BRIDGE_BIN_NAME: &str = "toptopduck-acp-bridge";
+/// The bridge binary's file name expected beside the app exe. Mirrors the
+/// `toptopduck-acp-bridge` [[bin]] of the `crates/acp-bridge` workspace
+/// member and the externalBin entry in the Tauri bundle config; a drift
+/// rename on any side fails loudly before injection runs (a `[[bin]]`
+/// rename at staging with a path-bearing ENOENT, an externalBin rename at
+/// tauri-build's existence check, a constant rename at the pin tests
+/// below). The honest missing-sibling skip only covers a sibling that was
+/// never built (a bare `cargo run`). The constant is pinned by a unit test
+/// (and the externalBin entry is pinned against it) so a rename on this
+/// side fails here rather than silently repointing at another bin that
+/// builds into the same target dir.
+const BRIDGE_BIN_NAME: &str = "toptopduck-acp-bridge";
 
-/// Resolve the bridge binary beside `exe_path` (issue #798, debug builds
-/// only). `Some` requires the sibling file to exist: `tauri dev` runs the app
-/// from `target/debug/`, where `beforeDevCommand` has already built the
-/// bridge bin; a bare `cargo run` skips it (cargo only builds `default-run`)
-/// and yields `None`, leaving the turn's existing honest failure in place.
-#[cfg(debug_assertions)]
-fn resolve_dev_bridge(exe_path: &std::path::Path) -> Option<PathBuf> {
-    let sibling = exe_path.parent()?.join(format!(
-        "{DEV_BRIDGE_BIN_NAME}{}",
-        std::env::consts::EXE_SUFFIX
-    ));
+/// Resolve the bridge binary beside `exe_path` (issue #798). `Some` requires
+/// the sibling file to exist: in dev, `tauri dev` runs the app from
+/// `target/debug/`, where `beforeDevCommand` has already built the bridge
+/// bin, and a bare `cargo run` skips it (cargo only builds `default-run`)
+/// and yields `None`; installed, the bundle's externalBin sidecar lands
+/// beside the main executable (ADR-0132), resolving through this same
+/// path. A missing sibling leaves the turn's existing honest failure in
+/// place.
+fn resolve_bridge_bin(exe_path: &std::path::Path) -> Option<PathBuf> {
+    let sibling = exe_path
+        .parent()?
+        .join(format!("{BRIDGE_BIN_NAME}{}", std::env::consts::EXE_SUFFIX));
     sibling.is_file().then_some(sibling)
 }
 
-/// Inject [`session::ACP_BRIDGE_BIN_ENV`] from the dev-side sibling (issue
-/// #798): the orchestrator half of ADR-0085's "the caller injects" contract.
-/// `setup` runs before any webview IPC, so the var is in place before the
-/// only reader -- an external-runtime turn, which requires IPC to start --
-/// could observe it. An existing non-empty value wins (e.g. a manual shell
-/// export); an explicitly empty export is treated as unset, matching the
-/// reader's empty-is-missing rule. `current_exe()` failure logs and skips
-/// (the turn then
-/// fails through the existing missing-var path with its build guidance).
-/// Debug-only by design: release never picks up a wild sibling binary --
-/// ADR-0085's "expose the configuration error" stance keeps production
-/// injection a packaging-time decision.
-#[cfg(debug_assertions)]
-fn inject_dev_bridge_bin() {
+/// Inject [`session::ACP_BRIDGE_BIN_ENV`] from the sibling beside the app
+/// exe (issue #798): the orchestrator half of ADR-0085's "the caller
+/// injects" contract. `setup` runs before any webview IPC, so the var is in
+/// place before the only reader -- an external-runtime turn, which requires
+/// IPC to start -- could observe it. An existing non-empty value wins (e.g.
+/// a manual shell export); an explicitly empty export is treated as unset,
+/// matching the reader's empty-is-missing rule. `current_exe()` failure logs
+/// and skips (the turn then fails through the existing missing-var path
+/// with its build guidance). One path for dev and installed builds alike
+/// (ADR-0132): the bundled sidecar beside the installed exe resolves
+/// exactly like the cargo sibling beside a dev exe.
+fn inject_bridge_bin() {
     if std::env::var_os(session::ACP_BRIDGE_BIN_ENV).is_some_and(|v| !v.is_empty()) {
         return;
     }
     let exe = match std::env::current_exe() {
         Ok(exe) => exe,
         Err(e) => {
-            log::warn!("failed to resolve current exe; skipping dev bridge injection: {e}");
+            log::warn!("failed to resolve current exe; skipping bridge injection: {e}");
             return;
         }
     };
-    match resolve_dev_bridge(&exe) {
+    match resolve_bridge_bin(&exe) {
         Some(path) => std::env::set_var(session::ACP_BRIDGE_BIN_ENV, path),
         None => log::debug!(
-            "no {DEV_BRIDGE_BIN_NAME} sibling beside {}; bridge var left unset \
+            "no {BRIDGE_BIN_NAME} sibling beside {}; bridge var left unset \
              (build it: cargo build -p acp-bridge)",
             exe.display()
         ),
     }
 }
 
-#[cfg(all(test, debug_assertions))]
-mod dev_bridge_tests {
+#[cfg(test)]
+mod bridge_bin_tests {
     use super::*;
 
     #[test]
     fn bin_name_pins_the_cargo_bin() {
-        // The bridge crate's [[bin]] name and the beforeDevCommand string
-        // cannot be referenced from Rust; this pin makes a unilateral rename
-        // of either side fail loudly instead of degrading every dev injection
-        // to the missing-sibling skip.
-        assert_eq!(DEV_BRIDGE_BIN_NAME, "toptopduck-acp-bridge");
+        // The bin name lives as literals cargo cannot expose to Rust (the
+        // bridge crate's [[bin]] declaration, the staging script); this pin
+        // freezes the one literal this crate controls so a rename of the
+        // constant fails here rather than silently repointing at another
+        // bin. The outside literals fail loudly on their own: a [[bin]]
+        // rename at staging (ENOENT), a staging-script drift at
+        // tauri-build's existence check.
+        assert_eq!(BRIDGE_BIN_NAME, "toptopduck-acp-bridge");
+    }
+
+    #[test]
+    fn external_bin_entry_pins_the_bundle_sidecar_name() {
+        // The Tauri bundle config's externalBin entry is invisible to the
+        // type system; this pin makes a unilateral rename of the bin or the
+        // config entry fail loudly instead of shipping bundles whose
+        // sidecar no longer matches the sibling this crate resolves.
+        let conf = include_str!("../tauri.conf.json");
+        let expected = format!("\"binaries/{BRIDGE_BIN_NAME}\"");
+        assert!(conf.contains(&expected));
     }
 
     #[test]
     fn resolves_existing_bridge_beside_exe() {
         let dir = tempfile::tempdir().unwrap();
-        let bridge = dir.path().join(format!(
-            "{DEV_BRIDGE_BIN_NAME}{}",
-            std::env::consts::EXE_SUFFIX
-        ));
+        let bridge = dir
+            .path()
+            .join(format!("{BRIDGE_BIN_NAME}{}", std::env::consts::EXE_SUFFIX));
         std::fs::write(&bridge, b"").unwrap();
 
         let exe = dir
             .path()
             .join(format!("app{}", std::env::consts::EXE_SUFFIX));
 
-        assert_eq!(resolve_dev_bridge(&exe), Some(bridge));
+        assert_eq!(resolve_bridge_bin(&exe), Some(bridge));
     }
 
     #[test]
@@ -694,6 +709,6 @@ mod dev_bridge_tests {
             .path()
             .join(format!("app{}", std::env::consts::EXE_SUFFIX));
 
-        assert_eq!(resolve_dev_bridge(&exe), None);
+        assert_eq!(resolve_bridge_bin(&exe), None);
     }
 }

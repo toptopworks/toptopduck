@@ -1549,12 +1549,12 @@ fn clamp_settle(now: Option<u64>, asked: Option<u64>) -> Option<u64> {
 }
 
 /// The env var carrying the ACP bridge binary's absolute path (ADR-0085).
-/// Declared by the reader (turn orchestration) and shared with the dev-side
-/// injector in `lib.rs` (`inject_dev_bridge_bin`, debug-only) so the name
-/// cannot drift between inject and read. The integration-test injector lives
-/// in a separate crate and hardcodes the literal -- a rename caught by those
-/// tests failing loudly, the same drift guard `ENV_PORT` in `turn_runner`
-/// documents.
+/// Declared by the reader (turn orchestration) and shared with the
+/// `lib.rs` injector (`inject_bridge_bin`, the one dev/installed path per
+/// ADR-0132) so the name cannot drift between inject and read. The
+/// integration-test injector lives in a separate crate and hardcodes the
+/// literal -- a rename caught by those tests failing loudly, the same
+/// drift guard `ENV_PORT` in `turn_runner` documents.
 pub(crate) const ACP_BRIDGE_BIN_ENV: &str = "TOPTOPDUCK_ACP_BRIDGE_BIN";
 
 /// The MCP server name advertised in the bridge descriptor (the CLI sees this

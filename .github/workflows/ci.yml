@@ -83,6 +83,18 @@ jobs:
       # DuckDB from C++ source (~5-8 min cold); this drops warm runs to ~2 min.
       - uses: Swatinem/rust-cache@v2
 
+      # tauri-build validates bundle.externalBin entries on every cargo
+      # compile of src-tauri, so the sidecar name must be staged before
+      # clippy/test can build the app crate. --debug content is fine here:
+      # only existence matters to the build script, and build.yml restages
+      # the release binary via beforeBuildCommand at bundle time.
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '22'
+
+      - name: Stage ACP bridge sidecar name
+        run: cargo build -p acp-bridge && node scripts/stage-acp-bridge.mjs --debug
+
       - name: rustfmt
         if: runner.os == 'Linux'
         run: cargo fmt --all --check
