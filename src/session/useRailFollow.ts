@@ -287,8 +287,7 @@ export function useRailFollow({
     [],
   );
 
-  // The follow pill's exit (#1307): a programmatic re-arm from the paused
-  // posture. The ref write is the same mechanism the submit effect uses --
+  // The ref write is the same mechanism the submit effect uses --
   // the queued frame's gate reads it at fire time -- and the landed align
   // write re-enters the follow (the rAF callback publishes the mirror). The
   // hidden gate sits BEFORE the ref write: a stray call on an inactive

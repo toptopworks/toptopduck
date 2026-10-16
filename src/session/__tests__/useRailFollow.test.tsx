@@ -721,6 +721,12 @@ describe("useRailFollow", () => {
     expect(followingText()).toBe("false");
 
     rerender(<Host active={false} entryCount={3} liveTurn={makeLiveTurn()} />);
+    // The gate's posture half (#1307): a stray jump call on the hidden
+    // pane must not flip the paused posture -- the position and the mirror
+    // below both fail if the gate moves after the ref write.
+    act(() => {
+      getByTestId("jump").click();
+    });
     rig.geo.scrollHeight = 1200; // streamed while hidden
     rerender(<Host active={false} entryCount={4} liveTurn={makeLiveTurn()} />);
     flushFrame();
