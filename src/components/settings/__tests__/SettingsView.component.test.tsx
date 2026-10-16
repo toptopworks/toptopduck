@@ -649,7 +649,9 @@ describe("SettingsView (ADR-0075 per-control persistence + rail chrome)", () => 
     fireEvent.pointerDown(back);
     fireEvent.click(back);
     unmount();
-    expect(document.activeElement).not.toBe(opener);
+    // The commit's stated end state: the skipped restore leaves focus at
+    // body, not merely off the opener.
+    expect(document.activeElement).toBe(document.body);
     opener.remove();
   });
 

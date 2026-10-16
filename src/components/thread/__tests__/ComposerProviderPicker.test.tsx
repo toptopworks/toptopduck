@@ -313,7 +313,6 @@ describe("ComposerProviderPicker two-level popover (ADR-0099)", () => {
   it("a pointer-initiated close (outside pointerdown) drops the trigger refocus", async () => {
     renderPicker(pickerJsx());
     await openPopover();
-    const trigger = screen.getByRole("button", { name: BUILTIN_TRIGGER });
     // The outside pointerdown marks the gesture pointer-initiated; the
     // dismissal itself rides the deferred click (DismissableLayer defers a
     // button-0 pointerdown-outside to the follow-up click).
@@ -325,13 +324,37 @@ describe("ComposerProviderPicker two-level popover (ADR-0099)", () => {
       () => expect(screen.queryByText("API Access")).not.toBeInTheDocument(),
       { timeout: 3000 },
     );
-    expect(document.activeElement).not.toBe(trigger);
+    // The commit's stated end state: the skipped restore leaves focus at
+    // body, not merely off the trigger.
+    expect(document.activeElement).toBe(document.body);
+  });
+
+  it("a pointer-initiated in-content close drops the trigger refocus", async () => {
+    // The gate's own protection (issue #1309): an in-content click close is
+    // where Radix's default handler WOULD refocus the Tooltip-wrapped
+    // trigger -- the outside-pointerdown skip above does not apply -- and
+    // that refocus is the tooltip-strand path.
+    renderPicker(pickerJsx());
+    await openPopover();
+    const manage = screen.getByText("Manage runtimes");
+    fireEvent.pointerDown(manage);
+    fireEvent.click(manage);
+    await waitFor(
+      () => expect(screen.queryByText("API Access")).not.toBeInTheDocument(),
+      { timeout: 3000 },
+    );
+    expect(document.activeElement).toBe(document.body);
   });
 
   it("a keyboard close (ESC) keeps the trigger refocus", async () => {
     renderPicker(pickerJsx());
-    await openPopover();
+    // Open with a pointer (the realistic entry): the pointerdown marks the
+    // gesture pointer-initiated and the ESC keydown must clear it for the
+    // restore to survive -- the pointer-open/keyboard-close interleaving.
     const trigger = screen.getByRole("button", { name: BUILTIN_TRIGGER });
+    fireEvent.pointerDown(trigger);
+    fireEvent.click(trigger);
+    await screen.findByText("API Access");
     fireEvent.keyDown(document.body, { key: "Escape" });
     await waitFor(
       () => expect(screen.queryByText("API Access")).not.toBeInTheDocument(),

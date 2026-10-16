@@ -4,10 +4,10 @@ import { fireEvent, renderHook } from "@testing-library/react";
 import { usePointerCloseIntent } from "../usePointerCloseIntent";
 
 // The close-gesture classifier shared by the settings overlay, the posture
-// menu, and the runtime popover. The branch logic lives here; the
-// SettingsView and ComposerProviderPicker suites pin each consumer's
-// restore-gating (the posture trigger's own suite mocks the Radix dropdown
-// module, so its gate rides these pins plus the picker's).
+// menu, and the runtime popover. The branch logic lives here; each
+// consumer's restore-gating is pinned in its own suite (the posture
+// trigger's suite mocks the Radix dropdown module, firing the gate through
+// the mock's captured close-focus handler).
 describe("usePointerCloseIntent", () => {
   it("marks the last gesture: pointerdown sets, keydown clears, in either order", () => {
     const { result } = renderHook(() => usePointerCloseIntent());

@@ -4,8 +4,8 @@ import { useEffect, useRef } from "react";
 // dialog, a menu, the settings view): whichever input fired last wins. A
 // pointer-initiated close must not yank focus back to the opener when the
 // opener is a Radix Tooltip trigger -- the tooltip opens on any focus not
-// mid-pointerdown, so the restore strands it open with no hover (the
-// release-build gear report). Keyboard closes (ESC, Enter) keep the restore:
+// mid-pointerdown, so the restore strands it open with no hover (issue
+// #1309). Keyboard closes (ESC, Enter) keep the restore:
 // focus-return is the a11y contract there, and a focus-opened tooltip on a
 // keyboard user's opener is standard Tooltip semantics.
 //
