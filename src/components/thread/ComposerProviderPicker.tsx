@@ -5,6 +5,7 @@ import { Box } from "lucide-react";
 
 import { fmtError } from "../../lib/error-presentation";
 import { findActiveProfile } from "../../lib/findActiveProfile";
+import { usePointerCloseIntent } from "../../lib/usePointerCloseIntent";
 import {
   getAdapterCatalogs,
   getLastModelPosture,
@@ -131,6 +132,10 @@ export function ComposerProviderPicker({
 }: ComposerProviderPickerProps) {
   const intl = useIntl();
   const [open, setOpen] = useState(false);
+  // Popover closes restore focus to the trigger; when that restore was
+  // pointer-initiated it must be dropped -- the Tooltip wrapper would
+  // focus-open and strand (usePointerCloseIntent).
+  const pointerCloseRef = usePointerCloseIntent();
 
   // Per-profile has_key overlay (issue #154 / ADR-0029). Fetched on mount AND
   // on a profileKeyEpoch bump -- App bumps the epoch on settings-close so a
@@ -622,7 +627,13 @@ export function ComposerProviderPicker({
             <TooltipContent>{tooltipText}</TooltipContent>
           </Tooltip>
 
-          <PopoverContent align="start" className="w-80">
+          <PopoverContent
+            align="start"
+            className="w-80"
+            onCloseAutoFocus={(e) => {
+              if (pointerCloseRef.current) e.preventDefault();
+            }}
+          >
             <ComposerRuntimeMenu
               isExternal={isExternal}
               switching={switching}

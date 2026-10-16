@@ -17,6 +17,7 @@ import { fmtError } from "../../lib/error-presentation";
 import type { AppConfig } from "../../types/app-config";
 import { bareButtonReset } from "../../lib/buttonReset";
 import { cn } from "../../lib/utils";
+import { usePointerCloseIntent } from "../../lib/usePointerCloseIntent";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -396,16 +397,20 @@ export function SettingsView({
   }
 
   // Focus management (ADR-0065): on enter, remember the trigger + focus the
-  // overlay; on exit, restore focus to the trigger.
+  // overlay; on exit, restore focus to the trigger -- unless the exit gesture
+  // was pointer-initiated (usePointerCloseIntent: the gear opener is a Radix
+  // Tooltip trigger, whose focus-open would strand the tooltip with no hover).
+  const pointerCloseRef = usePointerCloseIntent();
   const containerRef = useRef<HTMLDivElement>(null);
   const triggerRef = useRef<HTMLElement | null>(null);
   useEffect(() => {
     triggerRef.current = (document.activeElement as HTMLElement | null) ?? null;
     containerRef.current?.focus();
     return () => {
-      triggerRef.current?.focus();
+      // eslint-disable-next-line react-hooks/exhaustive-deps -- the late read is the point: the closing gesture lands after this effect body ran, so the cleanup must see the ref's freshest value
+      if (!pointerCloseRef.current) triggerRef.current?.focus();
     };
-  }, []);
+  }, [pointerCloseRef]);
 
   // ESC exits via the same requestClose path. While a confirm dialog is open --
   // this view's discard confirm OR the Profiles pane's delete confirm -- the

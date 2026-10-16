@@ -616,6 +616,45 @@ describe("SettingsView (ADR-0075 per-control persistence + rail chrome)", () => 
     expect(onClose).toHaveBeenCalledWith(undefined);
   });
 
+  // Focus restore (ADR-0065) + its pointer close exception: the opener is a
+  // sidebar-gear stand-in focused before the overlay mounts, captured by the
+  // view as the restore target. The harness never unmounts on close (the shell
+  // owns that), so each test unmounts manually to fire the cleanup under test.
+  function focusOpener(): HTMLElement {
+    const opener = document.createElement("button");
+    document.body.appendChild(opener);
+    opener.focus();
+    return opener;
+  }
+
+  it("a keyboard close restores focus to the opener on unmount", async () => {
+    const opener = focusOpener();
+    const { container, unmount } = renderView();
+    await screen.findByRole("combobox", { name: "Theme" });
+    fireEvent.click(container.querySelector(".settings-back") as HTMLElement);
+    unmount();
+    expect(document.activeElement).toBe(opener);
+    opener.remove();
+  });
+
+  it("a pointer-initiated close skips the focus restore", async () => {
+    // Radix Tooltip opens on any focus not mid-pointerdown, so refocusing a
+    // tooltip-trigger opener after a mouse close strands its tooltip open
+    // with no hover. The pointerdown (which jsdom's synthetic clicks never
+    // fire) is what classifies the gesture as pointer-initiated.
+    const opener = focusOpener();
+    const { container, unmount } = renderView();
+    await screen.findByRole("combobox", { name: "Theme" });
+    const back = container.querySelector(".settings-back") as HTMLElement;
+    fireEvent.pointerDown(back);
+    fireEvent.click(back);
+    unmount();
+    // The commit's stated end state: the skipped restore leaves focus at
+    // body, not merely off the opener.
+    expect(document.activeElement).toBe(document.body);
+    opener.remove();
+  });
+
   // --- Skills pane: the New exit (issue #1033) ------------------------------
 
   it("New on the skills pane closes the overlay through the single close path, carrying the create intent", async () => {
