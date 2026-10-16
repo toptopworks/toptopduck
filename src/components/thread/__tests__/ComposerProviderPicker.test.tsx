@@ -306,6 +306,40 @@ describe("ComposerProviderPicker two-level popover (ADR-0099)", () => {
     expect(screen.queryByText("Open settings")).toBeNull();
   });
 
+  // Close-focus restore (usePointerCloseIntent): the trigger is a Radix
+  // Tooltip trigger, so a pointer-initiated close must drop the default
+  // refocus -- the tooltip would strand open with no hover. Keyboard closes
+  // keep the restore (the a11y return path).
+  it("a pointer-initiated close (outside pointerdown) drops the trigger refocus", async () => {
+    renderPicker(pickerJsx());
+    await openPopover();
+    const trigger = screen.getByRole("button", { name: BUILTIN_TRIGGER });
+    // The outside pointerdown marks the gesture pointer-initiated; the
+    // dismissal itself rides the deferred click (DismissableLayer defers a
+    // button-0 pointerdown-outside to the follow-up click).
+    fireEvent.pointerDown(document.body);
+    fireEvent.click(document.body);
+    // Radix defers the layer's pointerdown listener and the Presence unmount
+    // by timers; under loaded workers the default 1s waitFor headroom is tight.
+    await waitFor(
+      () => expect(screen.queryByText("API Access")).not.toBeInTheDocument(),
+      { timeout: 3000 },
+    );
+    expect(document.activeElement).not.toBe(trigger);
+  });
+
+  it("a keyboard close (ESC) keeps the trigger refocus", async () => {
+    renderPicker(pickerJsx());
+    await openPopover();
+    const trigger = screen.getByRole("button", { name: BUILTIN_TRIGGER });
+    fireEvent.keyDown(document.body, { key: "Escape" });
+    await waitFor(
+      () => expect(screen.queryByText("API Access")).not.toBeInTheDocument(),
+      { timeout: 3000 },
+    );
+    expect(document.activeElement).toBe(trigger);
+  });
+
   it("echoes the active profile in the level-2 profile select and lists every profile", async () => {
     renderPicker(pickerJsx());
     await openPopover();
