@@ -142,7 +142,7 @@ function Host({
   entryCount: number;
   liveTurn: LiveTurn | null;
 }) {
-  const { railRef, isFollowing } = useRailFollow({ active, entryCount, liveTurn });
+  const { railRef, isFollowing, scrollToBottom } = useRailFollow({ active, entryCount, liveTurn });
   return (
     <main>
       <section ref={railRef} data-testid="rail">
@@ -152,6 +152,9 @@ function Host({
         <div data-testid="content" />
       </section>
       <output data-testid="following">{String(isFollowing)}</output>
+      {/* The follow pill's click seam (#1307): the programmatic exit from the
+          paused posture. */}
+      <button type="button" data-testid="jump" onClick={scrollToBottom} />
     </main>
   );
 }
@@ -295,6 +298,47 @@ describe("useRailFollow", () => {
     });
     expect(followingText()).toBe("false");
     expect(rig.scrollTop()).toBe(100); // not pulled back to the bottom
+  });
+
+  // --- The follow pill's programmatic exit (#1307) -------------------------
+
+  it("scrollToBottom re-arms a paused rail and lands the bottom (the pill's click)", () => {
+    const { getByTestId } = render(<Host active={true} entryCount={3} liveTurn={null} />);
+    const rail = getByTestId("rail") as HTMLElement;
+    const rig = rigRail(rail);
+    flushFrame();
+
+    // Paused: the user read up the timeline.
+    rig.userScrollTo(400);
+    act(() => {
+      rail.dispatchEvent(new Event("scroll"));
+    });
+    expect(followingText()).toBe("false");
+
+    // The pill's click: the re-arm is the ref write the queued frame's gate
+    // reads; the landed write is the machine re-entering the follow.
+    act(() => {
+      getByTestId("jump").click();
+    });
+    flushFrame();
+    expect(rig.scrollTop()).toBe(700);
+    expect(followingText()).toBe("true");
+  });
+
+  it("scrollToBottom on a hidden pane writes no geometry (the gate holds)", () => {
+    const { getByTestId } = render(<Host active={false} entryCount={3} liveTurn={null} />);
+    const rail = getByTestId("rail") as HTMLElement;
+    const rig = rigRail(rail);
+    flushFrame();
+
+    // An inactive (display:none) layer has no pill to click; a stray call
+    // must not corrupt the preserved reading position.
+    act(() => {
+      getByTestId("jump").click();
+    });
+    flushFrame();
+    expect(rig.hookWrites()).toBe(0);
+    expect(rig.scrollTop()).toBe(0);
   });
 
   // --- Resume: back within the band ---------------------------------------
@@ -677,6 +721,12 @@ describe("useRailFollow", () => {
     expect(followingText()).toBe("false");
 
     rerender(<Host active={false} entryCount={3} liveTurn={makeLiveTurn()} />);
+    // The gate's posture half (#1307): a stray jump call on the hidden
+    // pane must not flip the paused posture -- the position and the mirror
+    // below both fail if the gate moves after the ref write.
+    act(() => {
+      getByTestId("jump").click();
+    });
     rig.geo.scrollHeight = 1200; // streamed while hidden
     rerender(<Host active={false} entryCount={4} liveTurn={makeLiveTurn()} />);
     flushFrame();

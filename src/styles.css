@@ -694,6 +694,33 @@
    tracks the pointer 1:1 instead of lagging behind a 280ms animation. */
 .shell.rail-dragging .session-body,
 .shell.sidebar-dragging .session-body { transition: none; }
+/* The follow pill (#1307): the paused posture's visible exit -- the rail's
+   stick-to-bottom machine pauses on a user scroll and stays silent after
+   that; this button is the one-click way back. An absolute grid item on the
+   session-body: it takes no track space (the scroll extent never swells for
+   it), but grid placement still applies -- column 2 is the conversation
+   column in BOTH track postures (the fold only reshapes the third), so one
+   rule carries the workspace fold, and the fully-placed grid column
+   (start AND end non-auto -- an auto end line leaves the area as the whole
+   container) makes the column the containing block. Centering rides the
+   CSS2 abspos route (inset-inline 0 + auto margins), NOT justify-self:
+   alignment properties do not apply to absolutely-positioned grid items.
+   The explicit width the auto margins need comes from the utilities
+   (size-8) -- NO width declaration here: this unlayered rule would override
+   the utilities layer and reshape the round button. Seated above the bar
+   card on the same --shell-bar-h the rail's bottom padding reads; z-index
+   5 -- above the rail's in-flow content, below the rail resize handle
+   (10). The bar slot itself is z-auto: should the two ever overlap (the
+   transient frames after a bar-height change, before --shell-bar-h lands),
+   the pill paints over it. */
+.rail-follow-pill {
+  position: absolute;
+  grid-column: 2 / 3;
+  inset-inline: 0;
+  margin-inline: auto;
+  bottom: calc(var(--shell-bar-h, 0px) + 0.5rem);
+  z-index: 5;
+}
 /* Draggable rail resize handle (conversation/workspace boundary). A thin
    strip straddling the conversation/workspace column boundary; absolutely
    positioned within .main-area so its bottom spans the shell-level

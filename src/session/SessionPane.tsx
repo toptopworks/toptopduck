@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useId, useRef, useState, type KeyboardEvent } from "react";
+import { ArrowDown } from "lucide-react";
 import { useIntl, FormattedMessage } from "react-intl";
 import { useQueryClient } from "@tanstack/react-query";
 import { fmtError, errorDetail } from "../lib/error-presentation";
@@ -177,9 +178,9 @@ export function SessionPane({ sessionId, isActive, pendingIngestPaths, onIngestC
   // session switch (ADR-0051). The extent changes that reach no signal here
   // (the eased bar padding, the fold/unfold reflow) the hook observes itself
   // (#843).
-  // isFollowing has no render consumer yet; the hook exposes it for tests /
-  // a future jump-to-latest affordance.
-  const { railRef } = useRailFollow({
+  // isFollowing is the follow pill's render gate; scrollToBottom is its
+  // click -- the landed write re-enters the follow (#1307).
+  const { railRef, isFollowing, scrollToBottom } = useRailFollow({
     active: isActive,
     entryCount: s.thread.length,
     liveTurn: s.liveTurn,
@@ -521,7 +522,8 @@ export function SessionPane({ sessionId, isActive, pendingIngestPaths, onIngestC
                 useRailFollow's range observer watches this node as the rail's
                 FIRST element child (its content-growth signal) -- keep it
                 first, or teach the hook a selector, when adding rail
-                children (e.g. the planned jump-to-latest affordance). */}
+                children (#1307's follow pill avoided this by seating on the
+                session-body, not the rail). */}
             <div className="rail-reading-column">
               <ErrorBoundary key={`thread-${regionRetryEpoch}`} name="thread" onReset={resetSessionCache}>
                 <Thread
@@ -734,6 +736,22 @@ export function SessionPane({ sessionId, isActive, pendingIngestPaths, onIngestC
           </div>
         </section>
 
+        {/* The follow pill (#1307): the paused posture's visible exit; an
+            absolute grid item on .session-body (styles.css owns the
+            placement). Icon only; the accessible name carries the label
+            (no tooltip). */}
+        {!isFollowing && (
+          <Button
+            type="button"
+            variant="outline"
+            size="icon"
+            className="rail-follow-pill size-8 cursor-pointer rounded-full shadow-md"
+            aria-label="Jump to latest"
+            onClick={scrollToBottom}
+          >
+            <ArrowDown className="size-4" aria-hidden />
+          </Button>
+        )}
       </div>
 
       {/* --- Dialogs (guidance + active-source delete) ---------------------- */}

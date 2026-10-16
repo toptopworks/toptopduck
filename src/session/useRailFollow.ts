@@ -104,6 +104,9 @@ export function useRailFollow({
    *  machine's pause/resume half is observable only through it (scroll-write
    *  counts cannot tell "paused" from "idle-following"). */
   isFollowing: boolean;
+  /** The follow pill's click (#1307): a programmatic re-arm from the paused
+   *  posture. Stable identity (useCallback). */
+  scrollToBottom: () => void;
 } {
   const railRef = useRef<HTMLElement | null>(null);
   // Following starts ON: the fresh pane's posture is "on the latest turn".
@@ -284,5 +287,18 @@ export function useRailFollow({
     [],
   );
 
-  return { railRef, isFollowing };
+  // The ref write is the same mechanism the submit effect uses --
+  // the queued frame's gate reads it at fire time -- and the landed align
+  // write re-enters the follow (the rAF callback publishes the mirror). The
+  // hidden gate sits BEFORE the ref write: a stray call on an inactive
+  // layer must not flip a paused pane into following -- the next activation
+  // would then align to the bottom and discard the reading position the
+  // keep-alive contract preserves.
+  const scrollToBottom = useCallback(() => {
+    if (!activeRef.current) return;
+    followingRef.current = true;
+    scheduleAlign();
+  }, [scheduleAlign]);
+
+  return { railRef, isFollowing, scrollToBottom };
 }

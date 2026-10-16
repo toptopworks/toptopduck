@@ -1,5 +1,5 @@
 import { describe, expect, it, vi, beforeEach } from "vitest";
-import { fireEvent, render, screen } from "@testing-library/react";
+import { act, fireEvent, render, screen } from "@testing-library/react";
 import { IntlProvider } from "react-intl";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 
@@ -294,5 +294,89 @@ describe("SessionPane artifact stage boundary", () => {
     ).toBeUndefined();
     expect(screen.queryByRole("alert")).not.toBeInTheDocument();
     expect(screen.getByTestId("artifact-stub")).toHaveTextContent("bad.md");
+  });
+});
+
+// The follow pill's pane face (#1307): the paused posture's visible exit.
+// The hook-level pins (useRailFollow suite) cover the machine's re-arm; here
+// the pill's render gate rides the real rail element -- jsdom has no layout,
+// so the pause is staged by stubbing the rail's geometry and dispatching the
+// scroll event by hand (the same rig the hook suite uses).
+describe("SessionPane follow pill", () => {
+  beforeEach(() => {
+    vi.mocked(useSessionState).mockImplementation(paneSessionState);
+    vi.mocked(listSkills).mockResolvedValue({ skills: [] } as never);
+  });
+
+  // The hook's align write lands inside a rAF callback; awaiting one frame
+  // flushes every queued align deterministically (the hook suite stubs the
+  // scheduler outright -- here the real jsdom timer is close enough, since
+  // only ordering matters).
+  async function flushAlign() {
+    await act(async () => {
+      await new Promise((resolve) => requestAnimationFrame(resolve));
+    });
+  }
+
+  function stageRailGeometry(rail: HTMLElement) {
+    // scrollHeight=1000, clientHeight=300 -> maxScroll=700 (bottom).
+    const geo = { scrollHeight: 1000, clientHeight: 300 };
+    Object.defineProperty(rail, "scrollHeight", {
+      configurable: true,
+      get: () => geo.scrollHeight,
+    });
+    Object.defineProperty(rail, "clientHeight", {
+      configurable: true,
+      get: () => geo.clientHeight,
+    });
+    let top = 0;
+    Object.defineProperty(rail, "scrollTop", {
+      configurable: true,
+      get: () => top,
+      set: (v: number) => {
+        top = v;
+      },
+    });
+    return {
+      userScrollTo: (v: number) => {
+        top = v;
+      },
+      scrollTop: (): number => top,
+    };
+  }
+
+  it("is absent while following and appears when the rail pauses", async () => {
+    renderPane();
+    const rail = document.querySelector(".session-rail") as HTMLElement;
+    const rig = stageRailGeometry(rail);
+    await flushAlign();
+
+    const pill = screen.queryByRole("button", { name: "Jump to latest" });
+    expect(pill).not.toBeInTheDocument();
+
+    // Wheel up past the band: the machine pauses, the pill is the exit.
+    rig.userScrollTo(100);
+    act(() => {
+      rail.dispatchEvent(new Event("scroll"));
+    });
+    expect(screen.getByRole("button", { name: "Jump to latest" })).toBeInTheDocument();
+  });
+
+  it("lands the bottom on click and the machine resumes (the pill leaves)", async () => {
+    renderPane();
+    const rail = document.querySelector(".session-rail") as HTMLElement;
+    const rig = stageRailGeometry(rail);
+    await flushAlign();
+
+    rig.userScrollTo(100);
+    act(() => {
+      rail.dispatchEvent(new Event("scroll"));
+    });
+    expect(screen.getByRole("button", { name: "Jump to latest" })).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Jump to latest" }));
+    await flushAlign();
+    expect(rig.scrollTop()).toBe(700);
+    expect(screen.queryByRole("button", { name: "Jump to latest" })).not.toBeInTheDocument();
   });
 });
