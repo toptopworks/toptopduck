@@ -1389,6 +1389,19 @@ describe("SessionSidebar row actions menu (ADR-0133, issue #1319)", () => {
     expect(screen.queryByRole("dialog")).toBeNull();
   });
 
+  it("Archive on an open row passes the sid so the shell closes it (ADR-0127 close-on-archive)", () => {
+    const onArchive = vi.fn();
+    const { container } = renderShell(
+      <SessionSidebar {...menuProps({ onArchive })} />,
+    );
+    fireEvent.click(
+      within(rowBy(container, "Open One")).getByRole("menuitem", {
+        name: "Archive",
+      }),
+    );
+    expect(onArchive).toHaveBeenCalledWith("/x/open.duck", true, "sess-1");
+  });
+
   it("Rename opens the dialog and submits with the row's path + open sid", async () => {
     const onRename = vi.fn();
     const { container } = renderShell(

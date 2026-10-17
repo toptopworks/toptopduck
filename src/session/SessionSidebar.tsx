@@ -89,8 +89,9 @@ function GroupTitle({ kind }: { kind: SidebarGroupKind }) {
 // lists every persisted .duck (ADR-0061 cold start) merged with the open
 // keep-alive sessions, Chat-style time-grouped and last-modified descending.
 // ADR-0093 (issue #511): each row is pure navigation (title + conditional
-// status dot). Management actions (rename / close / delete) moved to
-// .session-header (slice 2, #512).
+// status dot), management actions moved to .session-header (slice 2, #512);
+// ADR-0133 (issue #1319) returns the row-level actions to the row-end actions
+// menu, the header menu keeping the active-session anchor.
 
 // A frozen empty set so the optional prop's default keeps a stable identity
 // (no every-render fresh Set -> SidebarRow prop churn).
@@ -624,8 +625,6 @@ function GroupingToggle({
   );
 }
 
-// One trailing row action (ADR-0127, issue #1175): an icon-only button with a
-// Tooltip + matching aria-label (the one-read-two-slots posture, issue #960).
 // The archived-view visibility toggle (ADR-0127 Decision 7, issue #1175): an
 // icon-only aria-pressed button beside the grouping toggle. Same weak-visible
 // posture as GroupingToggle (opacity-60, brightens on hover/focus/pressed) so
@@ -673,9 +672,10 @@ function ArchivedToggle({
 
 // One sidebar row: navigation + inline metadata (ADR-0093, issue #511/#513).
 // The row carries the session title, a conditional status dot, and a compact
-// relative-time span. Management actions (rename / export / close / delete)
-// moved to .session-header (slice 2); the persistent sub-line (first source +
-// turn count) is retired in favor of a HoverCard (slice 3, this change).
+// relative-time span. Management actions lived in .session-header from
+// ADR-0093 (slice 2) until ADR-0133 returned them to the row-end actions
+// menu; the persistent sub-line (first source + turn count) is retired in
+// favor of a HoverCard (slice 3, this change).
 // ADR-0127 (issue #1175): the row is a main activate BUTTON plus a trailing
 // SIBLING slot -- buttons cannot nest, so the whole-row button split. ADR-0133
 // (issue #1319) retired the inline action buttons for a single row-end `⋯`
@@ -1157,9 +1157,10 @@ export function DeleteSessionDialog({
 // (ADR-0050: standard surface uses shadcn primitives). aria-describedby={undefined}
 // opts out of a Description (the visible Label already names the field), which
 // also silences Radix's missing-description warning.
-// Exported for component-level testing (issue #111); rendered only by
-// SessionHeaderMenu in production, but the onOpenChange-to-onCancel bridge + blank
-// guard are verified in isolation.
+// Exported for component-level testing (issue #111); the dialog is rendered
+// by SessionHeaderMenu and by the sidebar's row actions menu (ADR-0133, issue
+// #1319), but the onOpenChange-to-onCancel bridge + blank guard are verified
+// in isolation.
 export function RenameSessionDialog({
   initialName,
   onCancel,

@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { act, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import type { ComponentProps, ReactNode } from "react";
 import type { QueryClient } from "@tanstack/react-query";
 import type { AppConfig } from "../types/app-config";
 import type { ApprovalRequestPayload } from "../types/approval";
@@ -41,6 +42,59 @@ import { buildTauriWindowMock } from "./setup/tauriWindowMock";
 vi.mock("@tauri-apps/api/window", () => {
   const { module } = buildTauriWindowMock();
   return module;
+});
+
+// The same inline-content dropdown mock as the SessionSidebar.shell suite: the
+// row-menu wiring pin below needs the menu items clickable, not Radix's
+// portal/focus-trap internals.
+vi.mock("@/components/ui/dropdown-menu", () => {
+  function DropdownMenu({ children }: { children: ReactNode }) {
+    return <div data-testid="dropdown-menu-root">{children}</div>;
+  }
+  function DropdownMenuTrigger({
+    children,
+    onClick,
+    ...rest
+  }: ComponentProps<"button"> & { children: ReactNode }) {
+    return (
+      <button type="button" onClick={onClick} {...rest}>
+        {children}
+      </button>
+    );
+  }
+  function DropdownMenuContent({ children }: { children: ReactNode }) {
+    return <div role="menu">{children}</div>;
+  }
+  function DropdownMenuItem({
+    children,
+    onSelect,
+    variant,
+  }: {
+    children: ReactNode;
+    onSelect?: () => void;
+    variant?: "default" | "destructive";
+  }) {
+    return (
+      <div
+        role="menuitem"
+        data-variant={variant ?? "default"}
+        onClick={onSelect}
+        style={{ cursor: "pointer" }}
+      >
+        {children}
+      </div>
+    );
+  }
+  function DropdownMenuSeparator() {
+    return <div role="separator" />;
+  }
+  return {
+    DropdownMenu,
+    DropdownMenuTrigger,
+    DropdownMenuContent,
+    DropdownMenuItem,
+    DropdownMenuSeparator,
+  };
 });
 
 // QueryClient instances App mints, one per mount -- the seeding handle for the
@@ -107,6 +161,7 @@ vi.mock("../api", async (importOriginal) => {
     ...actual,
     listLiveSessions: vi.fn(async () => []),
     closeSession: vi.fn(async () => false),
+    renameSession: vi.fn(async (_sid: string, name: string) => name),
     createSession: vi.fn(async () => "sess-1"),
     listWorkingSet: vi.fn(async () => []),
     // The re-adopted session mounts a SessionPane; its per-pane listeners and
@@ -145,7 +200,7 @@ vi.mock("../api", async (importOriginal) => {
 });
 
 import App from "../App";
-import { listLiveSessions } from "../api";
+import { listLiveSessions, renameSession } from "../api";
 import type { LiveSessionEntry } from "../api";
 
 function idleLive(id: string, name: string): LiveSessionEntry {
@@ -250,6 +305,34 @@ describe("App shell-level sidebar wiring (issue #1007)", () => {
     expect(row.getAttribute("data-turn-failed")).toBe("true");
     expect(row.querySelector(".sidebar-status-dot")?.className.split(/\s+/)).toContain(
       "bg-warning",
+    );
+  });
+
+  it("routes the row menu's open-row rename through the sid-first hook signature (ADR-0133 wiring)", async () => {
+    vi.mocked(listLiveSessions).mockResolvedValue([idleLive("sess-1", "Rename me")]);
+    render(<App />);
+
+    await waitFor(() => expect(rowFor("Rename me")).not.toBeNull());
+
+    // The row menu's onRename arrives as (path, sid, newName) while
+    // renameEntry takes (sid, path, newName), so App transposes by hand --
+    // passing the hook directly (as the SessionPane path does) would land the
+    // .duck path in the sid slot. Assert at the api boundary: the wiring pin
+    // only holds when the first argument is the sid.
+    const row = rowFor("Rename me")!;
+    fireEvent.click(
+      within(row).getByRole("button", { name: "Row actions" }),
+    );
+    fireEvent.click(
+      within(row).getByRole("menuitem", { name: "Rename" }),
+    );
+
+    const input = await screen.findByLabelText("Session name");
+    fireEvent.change(input, { target: { value: "Renamed" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+
+    await waitFor(() =>
+      expect(renameSession).toHaveBeenCalledWith("sess-1", "Renamed"),
     );
   });
 });
