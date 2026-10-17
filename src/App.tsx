@@ -734,6 +734,31 @@ export default function App() {
     if (last !== undefined) handleRemoveInvocation(last);
   }, [pendingInvocations, handleRemoveInvocation]);
 
+  // Shared teardown for "close this session": the pane header menu (ADR-0093)
+  // and the sidebar row menu (ADR-0133, issue #1319) both fire cancel +
+  // approval cleanup + draft drop -- one body keeps the two surfaces in
+  // lockstep.
+  const closeSessionWithCleanup = (sid: string) => {
+    void closeOpen(sid);
+    // A closed session's cards can never be answered (close fires cancel, the
+    // gate resolves to deny); drop them so the coloring + a later reopen start
+    // clean (re-wired from the retired sidebar trigger by ADR-0093 slice 2,
+    // #512).
+    approvalEvents.clearSession(sid);
+    // A closed session's draft is unreachable (the pane is gone); drop the
+    // slot so the draft map tracks the open set.
+    composer.dropDraft(sid);
+  };
+
+  // Symmetric teardown for "delete this session" (issue #1319): the pane
+  // header menu and the sidebar row menu share the deletePersisted mutation +
+  // draft drop -- one body keeps the two surfaces in lockstep. `sid` is null
+  // for a cold persisted / archived row (nothing open to unmount or drop).
+  const deleteSessionWithCleanup = (path: string, sid: string | null) => {
+    void deletePersisted(path, sid);
+    if (sid) composer.dropDraft(sid);
+  };
+
   // ADR-0092 (#500): shell-level file ingest. When active, delegate to the
   // session's handleIngestMany. On cold start the picked files accumulate in
   // the shell-level pending file list (draft mode, Decision 6) — the bar's
@@ -981,7 +1006,10 @@ export default function App() {
                   onSetPinned={(path, pinned) => void setPinned(path, pinned)}
                   onArchive={(path, archived, sid) =>
                     void setArchived(path, archived, sid)}
-                  onDeleteArchived={(path) => void deletePersisted(path, null)}
+                  onDelete={deleteSessionWithCleanup}
+                  onRename={(path, sid, newName) =>
+                    void renameEntry(sid, path, newName)}
+                  onClose={closeSessionWithCleanup}
                   onOpenSearch={openSearch}
                   provider={appConfig?.provider ?? null}
                   onOpenSettings={() => openSettings()}
@@ -1129,23 +1157,8 @@ export default function App() {
                             duckPath={s.path}
                             onRename={renameEntry}
                             disabled={busy}
-                            onClose={(sid) => {
-                              void closeOpen(sid);
-                              // A closed session's cards can never be answered
-                              // (close fires cancel, the gate resolves to deny);
-                              // drop them so the coloring + a later reopen start
-                              // clean (re-wired from the retired sidebar trigger
-                              // by ADR-0093 slice 2, #512).
-                              approvalEvents.clearSession(sid);
-                              // A closed session's draft is unreachable (the
-                              // pane is gone); drop the slot so the draft map
-                              // tracks the open set.
-                              composer.dropDraft(sid);
-                            }}
-                            onDelete={(path, sid) => {
-                              void deletePersisted(path, sid);
-                              composer.dropDraft(sid);
-                            }}
+                            onClose={closeSessionWithCleanup}
+                            onDelete={deleteSessionWithCleanup}
                           />
                         </ErrorBoundary>
                       </div>

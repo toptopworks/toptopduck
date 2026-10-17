@@ -1,12 +1,68 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { act, fireEvent, render, screen, within } from "@testing-library/react";
 import { IntlProvider } from "react-intl";
-import type { ReactElement } from "react";
+import { type ComponentProps, type ReactElement, type ReactNode } from "react";
 import { DeleteSessionDialog, SessionSidebar } from "../SessionSidebar";
 import type { OpenSession } from "../sidebarModel";
 import type { SessionMetadata } from "../../types/session";
 import type { ProviderConfig } from "../../types/provider";
 import { TooltipProvider } from "@/components/ui/tooltip";
+
+// Radix DropdownMenu's pointer-event handling recurses under jsdom (the
+// SessionHeaderMenu suite's known limitation), so the dropdown-menu module is
+// mocked as a simple controlled shape: the trigger is a plain <button> and the
+// content always renders inline. The row-menu tests verify SessionSidebar's
+// LOGIC -- which items per row state, which callbacks, which dialog state --
+// not Radix's portal/focus-trap internals.
+vi.mock("@/components/ui/dropdown-menu", () => {
+  function DropdownMenu({ children }: { children: ReactNode }) {
+    return <div data-testid="dropdown-menu-root">{children}</div>;
+  }
+  function DropdownMenuTrigger({
+    children,
+    onClick,
+    ...rest
+  }: ComponentProps<"button"> & { children: ReactNode }) {
+    return (
+      <button type="button" onClick={onClick} {...rest}>
+        {children}
+      </button>
+    );
+  }
+  function DropdownMenuContent({ children }: { children: ReactNode }) {
+    return <div role="menu">{children}</div>;
+  }
+  function DropdownMenuItem({
+    children,
+    onSelect,
+    variant,
+  }: {
+    children: ReactNode;
+    onSelect?: () => void;
+    variant?: "default" | "destructive";
+  }) {
+    return (
+      <div
+        role="menuitem"
+        data-variant={variant ?? "default"}
+        onClick={onSelect}
+        style={{ cursor: "pointer" }}
+      >
+        {children}
+      </div>
+    );
+  }
+  function DropdownMenuSeparator() {
+    return <div role="separator" />;
+  }
+  return {
+    DropdownMenu,
+    DropdownMenuTrigger,
+    DropdownMenuContent,
+    DropdownMenuItem,
+    DropdownMenuSeparator,
+  };
+});
 
 // Shell-skeleton tests assert className contracts, not chrome. An empty English
 // provider + onError keeps the render quiet (missing-message warnings are
@@ -52,7 +108,9 @@ describe("SessionSidebar shell-skeleton visuals (ADR-0067, issue #171)", () => {
         onToggleArchived={() => {}}
         onSetPinned={() => {}}
         onArchive={() => {}}
-        onDeleteArchived={() => {}}
+        onDelete={() => {}}
+        onRename={() => {}}
+        onClose={() => {}}
         onOpenSearch={() => {}}
         provider={null}
         onOpenSettings={() => {}}
@@ -92,7 +150,9 @@ describe("SessionSidebar shell-skeleton visuals (ADR-0067, issue #171)", () => {
         onToggleArchived={() => {}}
         onSetPinned={() => {}}
         onArchive={() => {}}
-        onDeleteArchived={() => {}}
+        onDelete={() => {}}
+        onRename={() => {}}
+        onClose={() => {}}
         onOpenSearch={() => {}}
         provider={null}
         onOpenSettings={() => {}}
@@ -128,7 +188,9 @@ describe("SessionSidebar shell-skeleton visuals (ADR-0067, issue #171)", () => {
         onToggleArchived={() => {}}
         onSetPinned={() => {}}
         onArchive={() => {}}
-        onDeleteArchived={() => {}}
+        onDelete={() => {}}
+        onRename={() => {}}
+        onClose={() => {}}
         onOpenSearch={() => {}}
         provider={null}
         onOpenSettings={() => {}}
@@ -176,7 +238,9 @@ describe("SessionSidebar shell-skeleton visuals (ADR-0067, issue #171)", () => {
         onToggleArchived={() => {}}
         onSetPinned={() => {}}
         onArchive={() => {}}
-        onDeleteArchived={() => {}}
+        onDelete={() => {}}
+        onRename={() => {}}
+        onClose={() => {}}
         onOpenSearch={() => {}}
         provider={null}
         onOpenSettings={() => {}}
@@ -214,7 +278,9 @@ describe("SessionSidebar shell-skeleton visuals (ADR-0067, issue #171)", () => {
         onToggleArchived={() => {}}
         onSetPinned={() => {}}
         onArchive={() => {}}
-        onDeleteArchived={() => {}}
+        onDelete={() => {}}
+        onRename={() => {}}
+        onClose={() => {}}
         onOpenSearch={() => {}}
         provider={null}
         onOpenSettings={() => {}}
@@ -270,7 +336,9 @@ describe("SessionSidebar shell-skeleton visuals (ADR-0067, issue #171)", () => {
         onToggleArchived={() => {}}
         onSetPinned={() => {}}
         onArchive={() => {}}
-        onDeleteArchived={() => {}}
+        onDelete={() => {}}
+        onRename={() => {}}
+        onClose={() => {}}
         onOpenSearch={onOpenSearch}
         provider={null}
         onOpenSettings={() => {}}
@@ -321,7 +389,9 @@ describe("SessionSidebar shell-skeleton visuals (ADR-0067, issue #171)", () => {
         onToggleArchived={() => {}}
         onSetPinned={() => {}}
         onArchive={() => {}}
-        onDeleteArchived={() => {}}
+        onDelete={() => {}}
+        onRename={() => {}}
+        onClose={() => {}}
         onOpenSearch={onOpenSearch}
         provider={null}
         onOpenSettings={() => {}}
@@ -352,7 +422,9 @@ describe("SessionSidebar shell-skeleton visuals (ADR-0067, issue #171)", () => {
         onToggleArchived={() => {}}
         onSetPinned={() => {}}
         onArchive={() => {}}
-        onDeleteArchived={() => {}}
+        onDelete={() => {}}
+        onRename={() => {}}
+        onClose={() => {}}
         onOpenSearch={() => {}}
         provider={null}
         onOpenSettings={() => {}}
@@ -415,7 +487,9 @@ describe("SessionSidebar grouping toggle (ADR-0072, issue #251)", () => {
         onToggleArchived={() => {}}
         onSetPinned={() => {}}
         onArchive={() => {}}
-        onDeleteArchived={() => {}}
+        onDelete={() => {}}
+        onRename={() => {}}
+        onClose={() => {}}
         onOpenSearch={() => {}}
         provider={null}
         onOpenSettings={() => {}}
@@ -444,7 +518,9 @@ describe("SessionSidebar grouping toggle (ADR-0072, issue #251)", () => {
         onToggleArchived={() => {}}
         onSetPinned={() => {}}
         onArchive={() => {}}
-        onDeleteArchived={() => {}}
+        onDelete={() => {}}
+        onRename={() => {}}
+        onClose={() => {}}
         onOpenSearch={() => {}}
         provider={null}
         onOpenSettings={() => {}}
@@ -493,7 +569,9 @@ describe("SessionSidebar grouping toggle (ADR-0072, issue #251)", () => {
         onToggleArchived={() => {}}
         onSetPinned={() => {}}
         onArchive={() => {}}
-        onDeleteArchived={() => {}}
+        onDelete={() => {}}
+        onRename={() => {}}
+        onClose={() => {}}
         onOpenSearch={() => {}}
         provider={null}
         onOpenSettings={() => {}}
@@ -530,7 +608,9 @@ describe("SessionSidebar grouping toggle (ADR-0072, issue #251)", () => {
         onToggleArchived={() => {}}
         onSetPinned={() => {}}
         onArchive={() => {}}
-        onDeleteArchived={() => {}}
+        onDelete={() => {}}
+        onRename={() => {}}
+        onClose={() => {}}
         onOpenSearch={() => {}}
         provider={null}
         onOpenSettings={() => {}}
@@ -568,7 +648,9 @@ describe("SessionSidebar grouping toggle (ADR-0072, issue #251)", () => {
         onToggleArchived={() => {}}
         onSetPinned={() => {}}
         onArchive={() => {}}
-        onDeleteArchived={() => {}}
+        onDelete={() => {}}
+        onRename={() => {}}
+        onClose={() => {}}
         onOpenSearch={() => {}}
         provider={null}
         onOpenSettings={() => {}}
@@ -603,7 +685,9 @@ describe("SessionSidebar grouping toggle (ADR-0072, issue #251)", () => {
         onToggleArchived={() => {}}
         onSetPinned={() => {}}
         onArchive={() => {}}
-        onDeleteArchived={() => {}}
+        onDelete={() => {}}
+        onRename={() => {}}
+        onClose={() => {}}
         onOpenSearch={() => {}}
         provider={null}
         onOpenSettings={() => {}}
@@ -664,7 +748,9 @@ describe("SessionSidebar settings footer (issue #282)", () => {
         onToggleArchived={() => {}}
         onSetPinned={() => {}}
         onArchive={() => {}}
-        onDeleteArchived={() => {}}
+        onDelete={() => {}}
+        onRename={() => {}}
+        onClose={() => {}}
         onOpenSearch={() => {}}
         provider={provider}
         onOpenSettings={onOpenSettings}
@@ -717,7 +803,9 @@ describe("SessionSidebar pending-approval coloring (ADR-0083, issue #297)", () =
       onToggleArchived: () => {},
       onSetPinned: () => {},
       onArchive: () => {},
-      onDeleteArchived: () => {},
+      onDelete: () => {},
+      onRename: () => {},
+      onClose: () => {},
       onOpenSearch: () => {},
       provider: null,
       onOpenSettings: () => {},
@@ -776,7 +864,9 @@ describe("SessionSidebar turn-failed coloring (issue #1005)", () => {
       onToggleArchived: () => {},
       onSetPinned: () => {},
       onArchive: () => {},
-      onDeleteArchived: () => {},
+      onDelete: () => {},
+      onRename: () => {},
+      onClose: () => {},
       onOpenSearch: () => {},
       provider: null,
       onOpenSettings: () => {},
@@ -886,7 +976,9 @@ describe("SessionSidebar hover card content (ADR-0093, issue #513)", () => {
       onToggleArchived: () => {},
       onSetPinned: () => {},
       onArchive: () => {},
-      onDeleteArchived: () => {},
+      onDelete: () => {},
+      onRename: () => {},
+      onClose: () => {},
       onOpenSearch: () => {},
       provider: null,
       onOpenSettings: () => {},
@@ -984,7 +1076,9 @@ describe("SessionSidebar organization (ADR-0127, issue #1175)", () => {
       onToggleArchived: () => {},
       onSetPinned: () => {},
       onArchive: () => {},
-      onDeleteArchived: () => {},
+      onDelete: () => {},
+      onRename: () => {},
+      onClose: () => {},
       onOpenSearch: () => {},
       provider: null,
       onOpenSettings: () => {},
@@ -1041,7 +1135,7 @@ describe("SessionSidebar organization (ADR-0127, issue #1175)", () => {
     expect(sectionNames(container)).toEqual(["recent"]);
   });
 
-  it("trailing actions fire their callbacks WITHOUT activating the row (sibling buttons)", () => {
+  it("row-menu actions fire their callbacks WITHOUT activating the row (sibling trigger)", () => {
     const onActivate = vi.fn();
     const onOpenPersisted = vi.fn();
     const onSetPinned = vi.fn();
@@ -1059,14 +1153,14 @@ describe("SessionSidebar organization (ADR-0127, issue #1175)", () => {
     );
     const rows = container.querySelectorAll<HTMLElement>(".session-entry");
     const plainRow = rows[rows.length - 1];
-    // Pin the unpinned row; unpin the already-pinned row (label flips).
-    fireEvent.click(within(plainRow).getByRole("button", { name: "Pin" }));
+    // Pin the unpinned row; unpin the already-pinned row (item label flips).
+    fireEvent.click(within(plainRow).getByRole("menuitem", { name: "Pin" }));
     expect(onSetPinned).toHaveBeenCalledWith("/x/plain.duck", true);
-    fireEvent.click(within(rows[0]).getByRole("button", { name: "Unpin" }));
+    fireEvent.click(within(rows[0]).getByRole("menuitem", { name: "Unpin" }));
     expect(onSetPinned).toHaveBeenCalledWith("/x/p1.duck", false);
-    fireEvent.click(within(plainRow).getByRole("button", { name: "Archive" }));
+    fireEvent.click(within(plainRow).getByRole("menuitem", { name: "Archive" }));
     expect(onArchive).toHaveBeenCalledWith("/x/plain.duck", true, null);
-    // The main activate button never fired from any action click.
+    // The main activate button never fired from any item click.
     expect(onActivate).not.toHaveBeenCalled();
     expect(onOpenPersisted).not.toHaveBeenCalled();
   });
@@ -1117,7 +1211,7 @@ describe("SessionSidebar organization (ADR-0127, issue #1175)", () => {
     const onOpenPersisted = vi.fn();
     const onActivate = vi.fn();
     const onArchive = vi.fn();
-    const onDeleteArchived = vi.fn();
+    const onDelete = vi.fn();
     const archived: SessionMetadata[] = [
       { duck_path: "/x/arch.duck", display_name: "Archived One", last_modified_at: Date.now() - 86_400_000, source_summary: { first_source_name: null, source_count: 0, turn_count: 2 }, format_version: 1, pinned: false, archived: true },
     ];
@@ -1130,7 +1224,7 @@ describe("SessionSidebar organization (ADR-0127, issue #1175)", () => {
           onOpenPersisted,
           onActivate,
           onArchive,
-          onDeleteArchived,
+          onDelete,
         })}
       />,
     );
@@ -1161,20 +1255,20 @@ describe("SessionSidebar organization (ADR-0127, issue #1175)", () => {
     expect(screen.getByText("Data source")).toBeInTheDocument();
     vi.useRealTimers();
     // Restore takes the pure path (no sid to close).
-    fireEvent.click(within(row!).getByRole("button", { name: "Restore" }));
+    fireEvent.click(within(row!).getByRole("menuitem", { name: "Restore" }));
     expect(onArchive).toHaveBeenCalledWith("/x/arch.duck", false, null);
     // Delete opens the strong-confirm dialog; only a confirm fires the mutation.
-    fireEvent.click(within(row!).getByRole("button", { name: "Delete" }));
+    fireEvent.click(within(row!).getByRole("menuitem", { name: "Delete" }));
     const dialog = await screen.findByRole("alertdialog");
     expect(within(dialog).getByText(/Archived One/)).toBeInTheDocument();
     fireEvent.click(within(dialog).getByRole("button", { name: "Cancel" }));
-    expect(onDeleteArchived).not.toHaveBeenCalled();
-    fireEvent.click(within(row!).getByRole("button", { name: "Delete" }));
+    expect(onDelete).not.toHaveBeenCalled();
+    fireEvent.click(within(row!).getByRole("menuitem", { name: "Delete" }));
     const dialog2 = await screen.findByRole("alertdialog");
     fireEvent.click(
       within(dialog2).getByRole("button", { name: "Delete permanently" }),
     );
-    expect(onDeleteArchived).toHaveBeenCalledWith("/x/arch.duck");
+    expect(onDelete).toHaveBeenCalledWith("/x/arch.duck", null);
   });
 
   it("keeps the chrome row on an empty sidebar so the archived view stays reachable (all-archived escape)", () => {
@@ -1186,6 +1280,203 @@ describe("SessionSidebar organization (ADR-0127, issue #1175)", () => {
       screen.getByRole("button", { name: "Show archived sessions" }),
     ).toBeInTheDocument();
     expect(container.querySelector(".session-empty")).not.toBeNull();
+  });
+});
+
+// --- ADR-0133 (issue #1319): the row-end actions menu -------------------------
+
+describe("SessionSidebar row actions menu (ADR-0133, issue #1319)", () => {
+  function menuProps(overrides: Record<string, unknown> = {}) {
+    return {
+      collapsed: false,
+      // One open row (bound via openSessions) + one cold persisted row: the
+      // item sets and the sid-bearing callbacks diverge between the two.
+      sessions: [
+        { duck_path: "/x/open.duck", display_name: "Open One", last_modified_at: Date.now(), source_summary: { first_source_name: null, source_count: 1, turn_count: 2 }, format_version: 1, pinned: false, archived: false },
+        { duck_path: "/x/cold.duck", display_name: "Cold One", last_modified_at: Date.now() - 86_400_000, source_summary: { first_source_name: null, source_count: 0, turn_count: 1 }, format_version: 1, pinned: false, archived: false },
+      ],
+      openSessions: [
+        { sid: "sess-1", name: "Open One", path: "/x/open.duck", pendingIngestPaths: [], pendingQuestion: null, pendingSkillInvocations: [] },
+      ],
+      activeSessionId: null,
+      disabled: false,
+      loadError: null,
+      grouping: "flat" as const,
+      onNew: () => {},
+      onActivate: () => {},
+      onOpenPersisted: () => {},
+      onSwitchGrouping: () => {},
+      archivedSessions: [],
+      showArchived: false,
+      onToggleArchived: () => {},
+      onSetPinned: () => {},
+      onArchive: () => {},
+      onDelete: () => {},
+      onRename: () => {},
+      onClose: () => {},
+      onOpenSearch: () => {},
+      provider: null,
+      onOpenSettings: () => {},
+      ...overrides,
+    };
+  }
+
+  function rowBy(container: HTMLElement, name: string) {
+    const row = Array.from(
+      container.querySelectorAll<HTMLElement>(".session-entry"),
+    ).find((r) => r.querySelector(".session-name")?.textContent === name);
+    expect(row).toBeDefined();
+    return row!;
+  }
+
+  // The mock renders every row's menu content inline (always open), so the
+  // queries are scoped per row.
+  const itemNames = (row: HTMLElement) =>
+    Array.from(within(row).getAllByRole("menuitem")).map(
+      (item) => item.textContent,
+    );
+
+  it("open row carries Pin, Rename, Close, Archive, Delete; the persisted row drops Close", () => {
+    const { container } = renderShell(<SessionSidebar {...menuProps()} />);
+    expect(itemNames(rowBy(container, "Open One"))).toEqual([
+      "Pin",
+      "Rename",
+      "Close",
+      "Archive",
+      "Delete",
+    ]);
+    expect(itemNames(rowBy(container, "Cold One"))).toEqual([
+      "Pin",
+      "Rename",
+      "Archive",
+      "Delete",
+    ]);
+    // The destructive variant is the destructive styling's only net (the
+    // module mock does not render Radix's variant classes).
+    expect(
+      within(rowBy(container, "Open One")).getByRole("menuitem", {
+        name: "Delete",
+      }),
+    ).toHaveAttribute("data-variant", "destructive");
+  });
+
+  it("archived row carries only Restore + Delete", () => {
+    const archived: SessionMetadata[] = [
+      { duck_path: "/x/arch.duck", display_name: "Archived One", last_modified_at: Date.now() - 86_400_000, source_summary: { first_source_name: null, source_count: 0, turn_count: 2 }, format_version: 1, pinned: false, archived: true },
+    ];
+    const { container } = renderShell(
+      <SessionSidebar
+        {...menuProps({ archivedSessions: archived, showArchived: true })}
+      />,
+    );
+    expect(itemNames(rowBy(container, "Archived One"))).toEqual([
+      "Restore",
+      "Delete",
+    ]);
+  });
+
+  it("Close fires the shell callback with the sid directly (no dialog)", () => {
+    const onClose = vi.fn();
+    const { container } = renderShell(
+      <SessionSidebar {...menuProps({ onClose })} />,
+    );
+    fireEvent.click(
+      within(rowBy(container, "Open One")).getByRole("menuitem", {
+        name: "Close",
+      }),
+    );
+    expect(onClose).toHaveBeenCalledWith("sess-1");
+    expect(screen.queryByRole("dialog")).toBeNull();
+  });
+
+  it("Archive on an open row passes the sid so the shell closes it (ADR-0127 close-on-archive)", () => {
+    const onArchive = vi.fn();
+    const { container } = renderShell(
+      <SessionSidebar {...menuProps({ onArchive })} />,
+    );
+    fireEvent.click(
+      within(rowBy(container, "Open One")).getByRole("menuitem", {
+        name: "Archive",
+      }),
+    );
+    expect(onArchive).toHaveBeenCalledWith("/x/open.duck", true, "sess-1");
+  });
+
+  it("Rename opens the dialog and submits with the row's path + open sid", async () => {
+    const onRename = vi.fn();
+    const { container } = renderShell(
+      <SessionSidebar {...menuProps({ onRename })} />,
+    );
+    fireEvent.click(
+      within(rowBy(container, "Open One")).getByRole("menuitem", {
+        name: "Rename",
+      }),
+    );
+    const input = await screen.findByLabelText("Session name");
+    expect((input as HTMLInputElement).value).toBe("Open One");
+    fireEvent.change(input, { target: { value: "Renamed" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    expect(onRename).toHaveBeenCalledWith("/x/open.duck", "sess-1", "Renamed");
+  });
+
+  it("Rename on a persisted row submits with a null sid", async () => {
+    const onRename = vi.fn();
+    const { container } = renderShell(
+      <SessionSidebar {...menuProps({ onRename })} />,
+    );
+    fireEvent.click(
+      within(rowBy(container, "Cold One")).getByRole("menuitem", {
+        name: "Rename",
+      }),
+    );
+    const input = await screen.findByLabelText("Session name");
+    fireEvent.change(input, { target: { value: "Cold Renamed" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    expect(onRename).toHaveBeenCalledWith("/x/cold.duck", null, "Cold Renamed");
+  });
+
+  it("Delete goes through the strong-confirm dialog and passes the open sid", async () => {
+    const onDelete = vi.fn();
+    const { container } = renderShell(
+      <SessionSidebar {...menuProps({ onDelete })} />,
+    );
+    fireEvent.click(
+      within(rowBy(container, "Open One")).getByRole("menuitem", {
+        name: "Delete",
+      }),
+    );
+    const dialog = await screen.findByRole("alertdialog");
+    expect(within(dialog).getByText(/Open One/)).toBeInTheDocument();
+    fireEvent.click(
+      within(dialog).getByRole("button", { name: "Delete permanently" }),
+    );
+    expect(onDelete).toHaveBeenCalledWith("/x/open.duck", "sess-1");
+  });
+
+  it("Delete cancel fires nothing", async () => {
+    const onDelete = vi.fn();
+    const { container } = renderShell(
+      <SessionSidebar {...menuProps({ onDelete })} />,
+    );
+    fireEvent.click(
+      within(rowBy(container, "Cold One")).getByRole("menuitem", {
+        name: "Delete",
+      }),
+    );
+    const dialog = await screen.findByRole("alertdialog");
+    fireEvent.click(within(dialog).getByRole("button", { name: "Cancel" }));
+    expect(onDelete).not.toHaveBeenCalled();
+  });
+
+  it("the busy gate disables the trigger (busy parity with the retired pill)", () => {
+    const { container } = renderShell(
+      <SessionSidebar {...menuProps({ disabled: true })} />,
+    );
+    expect(
+      within(rowBy(container, "Open One")).getByRole("button", {
+        name: "Row actions",
+      }),
+    ).toBeDisabled();
   });
 });
 
@@ -1231,7 +1522,9 @@ describe("SessionSidebar single-flight hover machine (issue #1175)", () => {
       onToggleArchived: () => {},
       onSetPinned: () => {},
       onArchive: () => {},
-      onDeleteArchived: () => {},
+      onDelete: () => {},
+      onRename: () => {},
+      onClose: () => {},
       onOpenSearch: () => {},
       provider: null,
       onOpenSettings: () => {},
@@ -1380,7 +1673,9 @@ describe("SessionSidebar archived-view gating (issue #1175)", () => {
       onToggleArchived: () => {},
       onSetPinned: () => {},
       onArchive: () => {},
-      onDeleteArchived: () => {},
+      onDelete: () => {},
+      onRename: () => {},
+      onClose: () => {},
       onOpenSearch: () => {},
       provider: null,
       onOpenSettings: () => {},

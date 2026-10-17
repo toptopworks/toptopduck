@@ -1,5 +1,7 @@
 # 会话栏纯导航化：管理操作迁入 session-header + 行信息改 HoverCard 浮层
 
+> 部分被 [ADR-0133](./0133-session-row-action-menu.md) 取代：Decision 1 的「侧边栏行不再承载任何管理入口」**重写**——Rename / Close / Delete 以行尾「⋯」菜单回归行级，头部菜单保留并存；HoverCard 元信息浮层（Decision 2）与状态圆点（Decision 3）**保留**。详见 ADR-0133。
+
 ## Decision
 
 会话栏（`SessionSidebar`）每行从「导航 + 管理 + 信息」三角色收缩为**纯导航**，三个维度同步调整：

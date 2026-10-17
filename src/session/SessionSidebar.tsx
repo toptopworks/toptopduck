@@ -4,12 +4,14 @@ import {
   Archive,
   ArchiveRestore,
   Check,
+  MoreHorizontal,
   Pencil,
   Pin,
   PinOff,
   Search,
   Settings,
   Trash2,
+  X,
 } from "lucide-react";
 import {
   buildArchivedEntries,
@@ -41,6 +43,13 @@ import {
   DialogFooter,
   DialogTitle,
 } from "@/components/ui/dialog";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import {
@@ -80,8 +89,9 @@ function GroupTitle({ kind }: { kind: SidebarGroupKind }) {
 // lists every persisted .duck (ADR-0061 cold start) merged with the open
 // keep-alive sessions, Chat-style time-grouped and last-modified descending.
 // ADR-0093 (issue #511): each row is pure navigation (title + conditional
-// status dot). Management actions (rename / close / delete) moved to
-// .session-header (slice 2, #512).
+// status dot), management actions moved to .session-header (slice 2, #512);
+// ADR-0133 (issue #1319) returns the row-level actions to the row-end actions
+// menu, the header menu keeping the active-session anchor.
 
 // A frozen empty set so the optional prop's default keeps a stable identity
 // (no every-render fresh Set -> SidebarRow prop churn).
@@ -139,12 +149,21 @@ interface SessionSidebarProps {
    *  binding when archiving a MAIN-list row; restoring passes null (the
    *  archived row is never open -- open-is-unarchive, Decision 4). */
   onArchive: (path: string, archived: boolean, sid: string | null) => void;
-  /** Delete an archived row (ADR-0127 Decision 6): routes through the same
-   *  deletePersisted contract as the header-menu delete -- always the pure
-   *  path variant here, since an archived row never carries a sid
-   *  (open-is-unarchive); the confirm dialog lives in this component, the
-   *  mutation in the caller. */
-  onDeleteArchived: (path: string) => void;
+  /** Row-menu delete (ADR-0133, issue #1319): the same deletePersisted
+   *  contract as the header-menu delete, generalized to every row -- `sid`
+   *  is the open binding when the row is open (the ADR-0063 wait-release
+   *  close runs first), null for a cold persisted / archived row. The
+   *  strong-confirm dialog lives in the row menu, the mutation in the
+   *  caller. */
+  onDelete: (path: string, sid: string | null) => void;
+  /** Row-menu rename (ADR-0133, issue #1319): the renameEntry contract --
+   *  an open row renames via its sid, a cold persisted row rewrites the
+   *  .duck header in place by path. */
+  onRename: (path: string, sid: string | null, newName: string) => void;
+  /** Row-menu close (ADR-0133, issue #1319): open rows only. The shell
+   *  callback (cancel + approval cleanup + draft drop) is the same one the
+   *  header menu fires. */
+  onClose: (sid: string) => void;
   // Open the Ctrl/⌘+K search modal (ADR-0072, issue #252). The
   // shell owns the open state so the global keydown + this button share one
   // entry point; the button is the always-visible affordance for the same
@@ -178,7 +197,9 @@ export function SessionSidebar({
   onToggleArchived,
   onSetPinned,
   onArchive,
-  onDeleteArchived,
+  onDelete,
+  onRename,
+  onClose,
   onOpenSearch,
   provider,
   onOpenSettings,
@@ -194,13 +215,6 @@ export function SessionSidebar({
     const id = setInterval(() => setNow(Date.now()), 60_000);
     return () => clearInterval(id);
   }, []);
-
-  // The archived-row delete target (ADR-0127 Decision 6): the strong-confirm
-  // dialog state lives here; the mutation rides onDeleteArchived on confirm.
-  const [deleteTarget, setDeleteTarget] = useState<{
-    path: string;
-    name: string;
-  } | null>(null);
 
   // Single-flight hover-card state (issue #1175): the OPEN key is owned HERE,
   // not per row, so at most one metadata card exists at any moment -- moving
@@ -359,60 +373,19 @@ export function SessionSidebar({
               if (entry.sid) onActivate(entry.sid);
               else onOpenPersisted(entry.path, entry.name);
             }}
-            actions={
-              section.variant === "archived" ? (
-                <>
-                  <RowActionButton
-                    label={intl.formatMessage({
-                      id: "sidebar.row.restore",
-                      defaultMessage: "Restore",
-                    })}
-                    disabled={disabled}
-                    onClick={() => onArchive(entry.path, false, null)}
-                  >
-                    <ArchiveRestore className="size-3.5" aria-hidden />
-                  </RowActionButton>
-                  <RowActionButton
-                    label={intl.formatMessage({
-                      id: "sidebar.row.delete",
-                      defaultMessage: "Delete",
-                    })}
-                    disabled={disabled}
-                    onClick={() => setDeleteTarget({ path: entry.path, name: entry.name })}
-                  >
-                    <Trash2 className="size-3.5" aria-hidden />
-                  </RowActionButton>
-                </>
-              ) : (
-                <>
-                  <RowActionButton
-                    label={
-                      entry.pinned
-                        ? intl.formatMessage({ id: "sidebar.row.unpin", defaultMessage: "Unpin" })
-                        : intl.formatMessage({ id: "sidebar.row.pin", defaultMessage: "Pin" })
-                    }
-                    disabled={disabled}
-                    onClick={() => onSetPinned(entry.path, !entry.pinned)}
-                  >
-                    {entry.pinned ? (
-                      <PinOff className="size-3.5" aria-hidden />
-                    ) : (
-                      <Pin className="size-3.5" aria-hidden />
-                    )}
-                  </RowActionButton>
-                  <RowActionButton
-                    label={intl.formatMessage({
-                      id: "sidebar.row.archive",
-                      defaultMessage: "Archive",
-                    })}
-                    disabled={disabled}
-                    onClick={() => onArchive(entry.path, true, entry.sid)}
-                  >
-                    <Archive className="size-3.5" aria-hidden />
-                  </RowActionButton>
-                </>
-              )
-            }
+            menu={(
+              <RowActionsMenu
+                entry={entry}
+                displayName={resolveDisplayName(entry.name, intl)}
+                disabled={disabled}
+                archived={section.variant === "archived"}
+                onSetPinned={onSetPinned}
+                onArchive={onArchive}
+                onRename={onRename}
+                onClose={onClose}
+                onDelete={onDelete}
+              />
+            )}
           />
         ))}
       </ul>
@@ -509,21 +482,6 @@ export function SessionSidebar({
           </>
         )}
       </ul>
-
-      {/* Archived-row delete (ADR-0127 Decision 6): the same strong-confirm
-          dialog the header menu's delete uses, mounted here for the archived
-          section's rows. An archived session is never open (open-is-unarchive),
-          so the delete takes the pure path variant. */}
-      {deleteTarget && (
-        <DeleteSessionDialog
-          name={deleteTarget.name}
-          onCancel={() => setDeleteTarget(null)}
-          onConfirm={() => {
-            onDeleteArchived(deleteTarget.path);
-            setDeleteTarget(null);
-          }}
-        />
-      )}
 
       {/* Footer: the settings gear (issue #282). The .session-list flex:1
           scroll region above keeps this pinned to the column's bottom. Absent
@@ -667,61 +625,6 @@ function GroupingToggle({
   );
 }
 
-// One trailing row action (ADR-0127, issue #1175): an icon-only button with a
-// Tooltip + matching aria-label (the one-read-two-slots posture, issue #960).
-// Pure-icon buttons have no text content, so aria-label IS the accessible
-// name -- no sr-only span needed (contrast the status labels inside the main
-// button, issue #1005).
-function RowActionButton({
-  label,
-  disabled,
-  onClick,
-  children,
-}: {
-  label: string;
-  /** Busy parity with every sibling control (the WorkingSetList posture):
-   *  the actions are mutations too -- during a long archive-close wait a
-   *  repeat click would double-fire the close on an already-closing sid. */
-  disabled: boolean;
-  onClick: () => void;
-  children: ReactNode;
-}) {
-  return (
-    <Tooltip disableHoverableContent>
-      <TooltipTrigger asChild>
-        <button
-          type="button"
-          disabled={disabled}
-          className={cn(
-            // No cursor-pointer: the pill's icons keep the default arrow
-            // (WorkingSetList's ICON_BUTTON_BASE posture -- on the accent
-            // pill, color alone marks the hot icon).
-            `session-row-action ${bareButtonReset} flex size-7 items-center justify-center rounded-md text-muted-foreground`,
-            "transition-colors hover:text-foreground focus-visible:text-foreground",
-            "focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring",
-            "disabled:cursor-progress disabled:opacity-50",
-          )}
-          aria-label={label}
-          onClick={(e) => {
-            // The action buttons are SIBLINGS of the main activate button,
-            // so a click cannot reach it by bubbling; the stopPropagation is
-            // defensive against a future row-level handler (issue #1175).
-            e.stopPropagation();
-            onClick();
-          }}
-        >
-          {children}
-        </button>
-      </TooltipTrigger>
-      {/* pointer-events-none: the tip must never intercept the pointer on
-          its way up to the row above (the WorkingSetList hint posture). */}
-      <TooltipContent className="pointer-events-none data-[state=closed]:animate-none!">
-        {label}
-      </TooltipContent>
-    </Tooltip>
-  );
-}
-
 // The archived-view visibility toggle (ADR-0127 Decision 7, issue #1175): an
 // icon-only aria-pressed button beside the grouping toggle. Same weak-visible
 // posture as GroupingToggle (opacity-60, brightens on hover/focus/pressed) so
@@ -769,18 +672,19 @@ function ArchivedToggle({
 
 // One sidebar row: navigation + inline metadata (ADR-0093, issue #511/#513).
 // The row carries the session title, a conditional status dot, and a compact
-// relative-time span. Management actions (rename / export / close / delete)
-// moved to .session-header (slice 2); the persistent sub-line (first source +
-// turn count) is retired in favor of a HoverCard (slice 3, this change).
-// ADR-0127 (issue #1175): the row is now a main activate BUTTON plus a
-// trailing action-group SIBLING (pin/unpin + archive, or restore + delete in
-// the archived view) -- buttons cannot nest, so the whole-row button split.
-// The action group is the WorkingSetList ROW_ACTIONS_OVERLAY posture: an
-// absolute accent pill floating over the row tail with ZERO flex footprint
-// (a flow-laid group would squeeze the truncating session name), revealed on
-// row hover or focus-visible; opacity-0 + pointer-events-none keeps the
-// buttons in the tab order (unlike visibility:hidden), so keyboard focus
-// reveals the pill and the row stays keyboard reachable.
+// relative-time span. Management actions lived in .session-header from
+// ADR-0093 (slice 2) until ADR-0133 returned them to the row-end actions
+// menu; the persistent sub-line (first source + turn count) is retired in
+// favor of a HoverCard (slice 3, this change).
+// ADR-0127 (issue #1175): the row is a main activate BUTTON plus a trailing
+// SIBLING slot -- buttons cannot nest, so the whole-row button split. ADR-0133
+// (issue #1319) retired the inline action buttons for a single row-end `⋯`
+// menu in that slot (RowActionsMenu): still the ROW_ACTIONS_OVERLAY posture
+// -- an absolute accent pill floating over the row tail with ZERO flex
+// footprint (a flow-laid group would squeeze the truncating session name),
+// revealed on row hover or focus-visible; opacity-0 + pointer-events-none
+// keeps the trigger in the tab order (unlike visibility:hidden), so keyboard
+// focus reveals the pill and the row stays keyboard reachable.
 function SidebarRow({
   entry,
   displayName,
@@ -790,7 +694,7 @@ function SidebarRow({
   disabled,
   archived = false,
   onActivate,
-  actions,
+  menu,
   cardOpen,
   onHoverEnter,
   onHoverLeave,
@@ -821,10 +725,9 @@ function SidebarRow({
    *  tells AT the row is inert. */
   archived?: boolean;
   onActivate: () => void;
-  /** Trailing inline action group (ADR-0127, issue #1175), built by the
-   *  section renderer: pin/unpin + archive on main rows, restore + delete
-   *  on archived rows. */
-  actions: ReactNode;
+  /** The row-end actions menu (ADR-0133, issue #1319), built by the section
+   *  renderer: one RowActionsMenu per row in every row state. */
+  menu: ReactNode;
   /** Controlled metadata-card visibility (issue #1175): driven by the
    *  parent-owned single-flight machine -- see the state block in
    *  SessionSidebar for the transition contract. */
@@ -960,7 +863,7 @@ function SidebarRow({
             </span>
           </button>
           <div className="session-entry-actions absolute inset-y-0 right-1 z-10 flex items-center gap-0 rounded-md bg-accent opacity-0 pointer-events-none group-hover/row:opacity-100 group-hover/row:pointer-events-auto has-[:focus-visible]:opacity-100 has-[:focus-visible]:pointer-events-auto">
-            {actions}
+            {menu}
           </div>
         </li>
       </HoverCardTrigger>
@@ -977,6 +880,155 @@ function SidebarRow({
         />
       </HoverCardContent>
     </HoverCard>
+  );
+}
+
+// One row-end actions menu (ADR-0133, issue #1319): the single `⋯` trigger in
+// the hover pill reclaims the row-level Rename / Close / Delete that ADR-0093
+// moved to the session header, and absorbs the retired inline buttons (pin /
+// archive on main rows, restore / delete on archived rows). Items render by
+// row state -- open rows carry Close, archived rows carry only Restore +
+// Delete -- and the row-end invariant is ONE trigger button in every state.
+// Rename + Delete open local dialog state (the same exported dialogs the
+// header menu mounts, so the shared-component rule costs zero logic
+// duplication); Close fires the shell callback directly. The trigger mirrors
+// SessionHeaderMenu's glyph (MoreHorizontal at h-3.5 w-3.5) inside the pill's
+// size-7 hit area.
+function RowActionsMenu({
+  entry,
+  displayName,
+  disabled,
+  archived = false,
+  onSetPinned,
+  onArchive,
+  onRename,
+  onClose,
+  onDelete,
+}: {
+  entry: SidebarEntry;
+  /** Resolved upstream (resolveDisplayName) for the dialogs: the rename
+   *  prefill and the delete confirmation both show it. */
+  displayName: string;
+  /** Busy parity with every sibling control (the WorkingSetList posture):
+   *  delete / archive wait on the persistence axis -- a repeat open during
+   *  the wait would double-fire the close on an already-closing sid. */
+  disabled: boolean;
+  archived?: boolean;
+  onSetPinned: (path: string, pinned: boolean) => void;
+  /** Archive passes the open binding when present (archiving an open row
+   *  closes it first, the ADR-0127 Decision 6 contract); restore passes
+   *  null -- an archived row is never open (open-is-unarchive). */
+  onArchive: (path: string, archived: boolean, sid: string | null) => void;
+  onRename: (path: string, sid: string | null, newName: string) => void;
+  onClose: (sid: string) => void;
+  onDelete: (path: string, sid: string | null) => void;
+}) {
+  const intl = useIntl();
+  const [dialog, setDialog] = useState<"rename" | "delete" | null>(null);
+  const menuLabel = intl.formatMessage({
+    id: "sidebar.row.menu.ariaLabel",
+    defaultMessage: "Row actions",
+  });
+  // Narrow once: the open-row branches (the Close item, the sid-bearing
+  // callbacks) need the string, and narrowing does not survive into a
+  // closure over a property access.
+  const sid = entry.sid;
+  return (
+    <>
+      <DropdownMenu>
+        <DropdownMenuTrigger
+          disabled={disabled}
+          className={cn(
+            // No cursor-pointer: the pill's icons keep the default arrow
+            // (the WorkingSetList ICON_BUTTON_BASE posture, mirrored inline
+            // -- the constant is not exported; on the accent pill, color
+            // alone marks the hot icon).
+            `session-row-action ${bareButtonReset} flex size-7 items-center justify-center rounded-md text-muted-foreground`,
+            "transition-colors hover:text-foreground focus-visible:text-foreground",
+            "focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring",
+            "disabled:cursor-progress disabled:opacity-50",
+          )}
+          aria-label={menuLabel}
+          onClick={(e) => {
+            // The trigger is a SIBLING of the main activate button, so a
+            // click cannot reach it by bubbling; the stopPropagation is
+            // defensive against a future row-level handler (issue #1175).
+            e.stopPropagation();
+          }}
+        >
+          <MoreHorizontal className="h-3.5 w-3.5" aria-hidden strokeWidth={2.5} />
+        </DropdownMenuTrigger>
+        <DropdownMenuContent align="end" aria-label={menuLabel}>
+          {archived ? (
+            <DropdownMenuItem onSelect={() => onArchive(entry.path, false, null)}>
+              <ArchiveRestore aria-hidden />
+              <FormattedMessage id="sidebar.row.restore" defaultMessage="Restore" />
+            </DropdownMenuItem>
+          ) : (
+            <>
+              {/* Pin / Unpin are separate static branches: a dynamic
+                  FormattedMessage id would break the i18n:check CI gate. */}
+              {entry.pinned ? (
+                <DropdownMenuItem onSelect={() => onSetPinned(entry.path, false)}>
+                  <PinOff aria-hidden />
+                  <FormattedMessage id="sidebar.row.unpin" defaultMessage="Unpin" />
+                </DropdownMenuItem>
+              ) : (
+                <DropdownMenuItem onSelect={() => onSetPinned(entry.path, true)}>
+                  <Pin aria-hidden />
+                  <FormattedMessage id="sidebar.row.pin" defaultMessage="Pin" />
+                </DropdownMenuItem>
+              )}
+              <DropdownMenuItem onSelect={() => setDialog("rename")}>
+                <Pencil aria-hidden />
+                <FormattedMessage id="common.rename" defaultMessage="Rename" />
+              </DropdownMenuItem>
+              {sid ? (
+                <DropdownMenuItem onSelect={() => onClose(sid)}>
+                  <X aria-hidden />
+                  <FormattedMessage id="sidebar.row.close" defaultMessage="Close" />
+                </DropdownMenuItem>
+              ) : null}
+              <DropdownMenuItem onSelect={() => onArchive(entry.path, true, sid)}>
+                <Archive aria-hidden />
+                <FormattedMessage id="sidebar.row.archive" defaultMessage="Archive" />
+              </DropdownMenuItem>
+            </>
+          )}
+          {/* Delete rides EVERY row state -- one destructive item, hoisted out
+              of the row-state branches. */}
+          <DropdownMenuSeparator />
+          <DropdownMenuItem
+            variant="destructive"
+            onSelect={() => setDialog("delete")}
+          >
+            <Trash2 aria-hidden />
+            <FormattedMessage id="sidebar.row.delete" defaultMessage="Delete" />
+          </DropdownMenuItem>
+        </DropdownMenuContent>
+      </DropdownMenu>
+
+      {dialog === "rename" && (
+        <RenameSessionDialog
+          initialName={entry.name}
+          onCancel={() => setDialog(null)}
+          onSubmit={(newName) => {
+            setDialog(null);
+            onRename(entry.path, sid, newName);
+          }}
+        />
+      )}
+      {dialog === "delete" && (
+        <DeleteSessionDialog
+          name={displayName}
+          onCancel={() => setDialog(null)}
+          onConfirm={() => {
+            setDialog(null);
+            onDelete(entry.path, sid);
+          }}
+        />
+      )}
+    </>
   );
 }
 
@@ -1052,9 +1104,9 @@ function SidebarRowHoverContent({
 // (in cn) lets it override AlertDialogAction's built-in default variant, reusing
 // the destructive look without forking the copy-in component.
 // Exported for component-level testing (issue #111); the dialog is rendered
-// by SessionHeaderMenu and by the sidebar's archived-section delete (ADR-0127
-// Decision 6), but the destructive-semantics + ESC routing contract is
-// verified in isolation.
+// by SessionHeaderMenu and by the sidebar's row actions menu (ADR-0133, issue
+// #1319), but the destructive-semantics + ESC routing contract is verified in
+// isolation.
 export function DeleteSessionDialog({
   name,
   onCancel,
@@ -1105,9 +1157,10 @@ export function DeleteSessionDialog({
 // (ADR-0050: standard surface uses shadcn primitives). aria-describedby={undefined}
 // opts out of a Description (the visible Label already names the field), which
 // also silences Radix's missing-description warning.
-// Exported for component-level testing (issue #111); rendered only by
-// SessionHeaderMenu in production, but the onOpenChange-to-onCancel bridge + blank
-// guard are verified in isolation.
+// Exported for component-level testing (issue #111); the dialog is rendered
+// by SessionHeaderMenu and by the sidebar's row actions menu (ADR-0133, issue
+// #1319), but the onOpenChange-to-onCancel bridge + blank guard are verified
+// in isolation.
 export function RenameSessionDialog({
   initialName,
   onCancel,
