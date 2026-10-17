@@ -674,10 +674,16 @@
   "workingSet.rowCount": "{count} 行",
   "workingSet.staleRow": "已失效",
   "workingSet.staleRow.hint": "因「{name}」{reason, select, Deleted {已删除} Replaced {已更新} other {已变动}}而失效",
+  "workspace.artifact.folderFailed": "无法在文件夹中定位该文件",
   "workspace.artifact.loading": "正在加载文档",
   "workspace.artifact.missing": "该文件已不在磁盘上",
+  "workspace.artifact.moreActions": "更多操作",
   "workspace.artifact.openExternal": "在外部打开",
+  "workspace.artifact.openFolder": "在文件夹中显示",
   "workspace.artifact.openFailed": "无法在外部打开该文件",
+  "workspace.artifact.refresh": "刷新",
+  "workspace.artifact.saveAs": "另存为…",
+  "workspace.artifact.saveFailed": "无法另存该文件的副本",
   "workspace.collapse": "收起工作区",
   "workspace.expand": "展开工作区"
 }

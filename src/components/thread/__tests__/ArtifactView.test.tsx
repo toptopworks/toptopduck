@@ -10,18 +10,24 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { IntlProvider } from "react-intl";
-import { openPath } from "@tauri-apps/plugin-opener";
+import { openPath, revealItemInDir } from "@tauri-apps/plugin-opener";
+import { save as saveDialog } from "@tauri-apps/plugin-dialog";
 import embed from "vega-embed";
 import { catalogFor } from "../../../i18n";
-import { artifactExists, readArtifactText } from "../../../api";
+import { artifactExists, copyArtifactFile, readArtifactText } from "../../../api";
 import { ArtifactView } from "../ArtifactView";
 
 vi.mock("../../../api", () => ({
   artifactExists: vi.fn(),
   readArtifactText: vi.fn(),
+  copyArtifactFile: vi.fn(),
 }));
 vi.mock("@tauri-apps/plugin-opener", () => ({
   openPath: vi.fn(),
+  revealItemInDir: vi.fn(),
+}));
+vi.mock("@tauri-apps/plugin-dialog", () => ({
+  save: vi.fn(),
 }));
 // convertFileSrc reads window.__TAURI_INTERNALS__ (absent in jsdom); a pure
 // stand-in keeps the src assertion observable.
@@ -53,6 +59,22 @@ function renderView(
       </IntlProvider>
     </QueryClientProvider>,
   );
+}
+
+/** Opens the header's more menu (pointerDown on the trigger, Radix's open
+ *  gesture -- the VizExportFrame suite's helper). */
+async function openMoreMenu() {
+  fireEvent.pointerDown(screen.getByRole("button", { name: "更多操作" }), {
+    button: 0,
+    pointerType: "mouse",
+  });
+  await screen.findByRole("menu");
+}
+
+/** Fires the select gesture on a Radix menu item (pointerUp + click). */
+function activateItem(item: HTMLElement) {
+  fireEvent.pointerUp(item, { button: 0, pointerType: "mouse" });
+  fireEvent.click(item);
 }
 
 describe("ArtifactView", () => {
@@ -119,6 +141,173 @@ describe("ArtifactView", () => {
       await waitFor(() =>
         expect(within(header).queryByRole("status")).not.toBeInTheDocument(),
       );
+    });
+  });
+
+  describe("file header more menu (issue #1317)", () => {
+    it("exposes refresh / show-in-folder / save-as for an existing file", async () => {
+      vi.mocked(artifactExists).mockResolvedValue(true);
+      renderView("C:/sessions/s1/artifacts/report.pdf", "pdf");
+      await screen.findByTestId("artifact-frame");
+      await openMoreMenu();
+      expect(screen.getByRole("menuitem", { name: "刷新" })).toBeInTheDocument();
+      expect(screen.getByRole("menuitem", { name: "在文件夹中显示" })).toBeInTheDocument();
+      expect(screen.getByRole("menuitem", { name: "另存为…" })).toBeInTheDocument();
+    });
+
+    it("re-reads the markdown text on refresh (invalidate then re-key)", async () => {
+      vi.mocked(artifactExists).mockResolvedValue(true);
+      vi.mocked(readArtifactText)
+        .mockResolvedValueOnce("# One\n\nFirst body")
+        .mockResolvedValue("# Two\n\nSecond body");
+      renderView("C:/sessions/s1/artifacts/notes.md", "markdown");
+      expect(await screen.findByText("First body")).toBeInTheDocument();
+      await openMoreMenu();
+      activateItem(screen.getByRole("menuitem", { name: "刷新" }));
+      // The invalidated read lands before the re-key remount, so the fresh
+      // text replaces the old in place (staleTime Infinity never re-reads
+      // on its own).
+      expect(await screen.findByText("Second body")).toBeInTheDocument();
+      expect(readArtifactText).toHaveBeenCalledTimes(2);
+    });
+
+    it("remounts the iframe on refresh, the loading indicator returning", async () => {
+      vi.mocked(artifactExists).mockResolvedValue(true);
+      renderView("C:/sessions/s1/artifacts/report.pdf", "pdf");
+      const frame = await screen.findByTestId("artifact-frame");
+      fireEvent.load(frame);
+      expect(screen.queryByRole("status", { name: /正在加载|Loading/ })).not.toBeInTheDocument();
+      await openMoreMenu();
+      activateItem(screen.getByRole("menuitem", { name: "刷新" }));
+      // The re-keyed body mounts a fresh frame (jsdom never fires its
+      // load), so the indicator is back until the WebView's first paint.
+      expect(await screen.findByRole("status", { name: /正在加载|Loading/ })).toBeInTheDocument();
+    });
+
+    it("re-checks existence on refresh, retiring the action cluster", async () => {
+      vi.mocked(artifactExists).mockResolvedValueOnce(true).mockResolvedValue(false);
+      renderView("C:/sessions/s1/artifacts/report.pdf", "pdf");
+      await screen.findByTestId("artifact-frame");
+      await openMoreMenu();
+      activateItem(screen.getByRole("menuitem", { name: "刷新" }));
+      // The refresh's exists invalidation re-reads the gate without a
+      // stage switch: the missing note replaces the whole action cluster.
+      expect(await screen.findByText(/已不在磁盘上|no longer on disk/)).toBeInTheDocument();
+      expect(screen.queryByTestId("artifact-more-menu")).not.toBeInTheDocument();
+    });
+
+    it("saves a copy through the native dialog and the Rust copy lane", async () => {
+      vi.mocked(artifactExists).mockResolvedValue(true);
+      vi.mocked(saveDialog).mockResolvedValue("D:/copies/report.pdf");
+      vi.mocked(copyArtifactFile).mockResolvedValue(undefined);
+      renderView("C:/sessions/s1/artifacts/report.pdf", "pdf");
+      await screen.findByTestId("artifact-frame");
+      await openMoreMenu();
+      activateItem(screen.getByRole("menuitem", { name: "另存为…" }));
+      await waitFor(() => expect(copyArtifactFile).toHaveBeenCalledTimes(1));
+      // The picker defaults to the artifact's own name (the ticket's AC).
+      expect(saveDialog).toHaveBeenCalledWith({ defaultPath: "report.pdf" });
+      expect(copyArtifactFile).toHaveBeenCalledWith(
+        "C:/sessions/s1/artifacts/report.pdf",
+        "D:/copies/report.pdf",
+      );
+    });
+
+    it("keeps a cancelled save dialog a quiet no-op", async () => {
+      vi.mocked(artifactExists).mockResolvedValue(true);
+      vi.mocked(saveDialog).mockResolvedValue(null);
+      renderView("C:/sessions/s1/artifacts/report.pdf", "pdf");
+      await screen.findByTestId("artifact-frame");
+      await openMoreMenu();
+      activateItem(screen.getByRole("menuitem", { name: "另存为…" }));
+      await waitFor(() => expect(saveDialog).toHaveBeenCalledTimes(1));
+      expect(copyArtifactFile).not.toHaveBeenCalled();
+      // Quiet means quiet: a cancel routed into the failure slot would show
+      // a header note, so none may be live.
+      const header = screen.getByTestId("artifact-header");
+      expect(within(header).queryByRole("status")).not.toBeInTheDocument();
+    });
+
+    it("surfaces a failed copy as a header live note", async () => {
+      vi.mocked(artifactExists).mockResolvedValue(true);
+      vi.mocked(saveDialog).mockResolvedValue("D:/copies/report.pdf");
+      vi.mocked(copyArtifactFile).mockRejectedValue(new Error("disk full"));
+      renderView("C:/sessions/s1/artifacts/report.pdf", "pdf");
+      await screen.findByTestId("artifact-frame");
+      await openMoreMenu();
+      activateItem(screen.getByRole("menuitem", { name: "另存为…" }));
+      const header = screen.getByTestId("artifact-header");
+      expect(await within(header).findByRole("status")).toHaveTextContent(
+        /无法另存|Could not save/,
+      );
+    });
+
+    it("reveals the file in the folder through the opener plugin", async () => {
+      vi.mocked(artifactExists).mockResolvedValue(true);
+      vi.mocked(revealItemInDir).mockResolvedValue(undefined);
+      renderView("C:/sessions/s1/artifacts/report.pdf", "pdf");
+      await screen.findByTestId("artifact-frame");
+      await openMoreMenu();
+      activateItem(screen.getByRole("menuitem", { name: "在文件夹中显示" }));
+      await waitFor(() =>
+        expect(revealItemInDir).toHaveBeenCalledWith("C:/sessions/s1/artifacts/report.pdf"),
+      );
+    });
+
+    it("surfaces a failed reveal as a header live note", async () => {
+      vi.mocked(artifactExists).mockResolvedValue(true);
+      vi.mocked(revealItemInDir).mockRejectedValue(new Error("no file manager"));
+      renderView("C:/sessions/s1/artifacts/report.pdf", "pdf");
+      await screen.findByTestId("artifact-frame");
+      await openMoreMenu();
+      activateItem(screen.getByRole("menuitem", { name: "在文件夹中显示" }));
+      const header = screen.getByTestId("artifact-header");
+      expect(await within(header).findByRole("status")).toHaveTextContent(
+        /无法在文件夹|Could not locate/,
+      );
+    });
+
+    it("keeps one failure slot: a new action clears the previous note", async () => {
+      vi.mocked(artifactExists).mockResolvedValue(true);
+      vi.mocked(openPath).mockRejectedValue(new Error("no association"));
+      vi.mocked(revealItemInDir).mockResolvedValue(undefined);
+      renderView("C:/sessions/s1/artifacts/report.pdf", "pdf");
+      fireEvent.click(await screen.findByRole("button", { name: /外部打开|externally/ }));
+      const header = screen.getByTestId("artifact-header");
+      expect(await within(header).findByRole("status")).toBeInTheDocument();
+      await openMoreMenu();
+      activateItem(screen.getByRole("menuitem", { name: "在文件夹中显示" }));
+      await waitFor(() => expect(revealItemInDir).toHaveBeenCalledTimes(1));
+      await waitFor(() =>
+        expect(within(header).queryByRole("status")).not.toBeInTheDocument(),
+      );
+    });
+
+    it("clears a save-failure note when refresh starts", async () => {
+      vi.mocked(artifactExists).mockResolvedValue(true);
+      vi.mocked(saveDialog).mockResolvedValue("D:/copies/report.pdf");
+      vi.mocked(copyArtifactFile).mockRejectedValue(new Error("disk full"));
+      renderView("C:/sessions/s1/artifacts/report.pdf", "pdf");
+      await screen.findByTestId("artifact-frame");
+      await openMoreMenu();
+      activateItem(screen.getByRole("menuitem", { name: "另存为…" }));
+      const header = screen.getByTestId("artifact-header");
+      expect(await within(header).findByRole("status")).toBeInTheDocument();
+      await openMoreMenu();
+      activateItem(screen.getByRole("menuitem", { name: "刷新" }));
+      // Refresh leads with the same slot-clearing as every other action
+      // (scoped to the header: the re-keyed body mounts its own loading
+      // status).
+      await waitFor(() =>
+        expect(within(header).queryByRole("status")).not.toBeInTheDocument(),
+      );
+    });
+
+    it("exits the menu with the open action when the file is gone", async () => {
+      vi.mocked(artifactExists).mockResolvedValue(false);
+      renderView("C:/sessions/s1/artifacts/gone.pdf", "pdf");
+      expect(await screen.findByText(/已不在磁盘上|no longer on disk/)).toBeInTheDocument();
+      expect(screen.queryByTestId("artifact-more-menu")).not.toBeInTheDocument();
     });
   });
 

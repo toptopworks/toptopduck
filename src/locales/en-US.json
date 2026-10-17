@@ -674,10 +674,16 @@
   "workingSet.rowCount": "{count, plural, one {# row} other {# rows}}",
   "workingSet.staleRow": "Stale",
   "workingSet.staleRow.hint": "Invalidated because {name} was {reason, select, Deleted {deleted} Replaced {updated} other {changed}}",
+  "workspace.artifact.folderFailed": "Could not locate the file in the folder",
   "workspace.artifact.loading": "Loading document",
   "workspace.artifact.missing": "This file is no longer on disk",
+  "workspace.artifact.moreActions": "More actions",
   "workspace.artifact.openExternal": "Open externally",
+  "workspace.artifact.openFolder": "Show in folder",
   "workspace.artifact.openFailed": "Could not open the file externally",
+  "workspace.artifact.refresh": "Refresh",
+  "workspace.artifact.saveAs": "Save as…",
+  "workspace.artifact.saveFailed": "Could not save a copy of the file",
   "workspace.collapse": "Close workspace",
   "workspace.expand": "Open workspace"
 }
