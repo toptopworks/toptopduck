@@ -1060,11 +1060,12 @@ pub fn write_export_file(path: String, bytes: Vec<u8>) -> Result<(), String> {
 /// lane behind the stage header's more menu. The native save dialog runs
 /// before this call (the [`write_export_file`] posture), so a cancel never
 /// reaches the backend. `src` is a manifest entry path (settle-time
-/// backend-computed, ADR-0124) -- the same trust boundary as
-/// [`read_artifact_text`]: a compromised webview could probe any path, but it
-/// can already call `opener:allow-open-path` with `**`, so copying a file it
-/// could open adds no new exposure class. A plain `String` error rides the
-/// plugin log sink.
+/// backend-computed, ADR-0124) -- the same input class as
+/// [`read_artifact_text`], but deliberately without that command's extension
+/// pin or byte cap (every artifact kind copies, binaries included; a
+/// compromised webview can already write anywhere via [`write_export_file`]
+/// and reach any path via `opener:allow-open-path` with `**`). A plain
+/// `String` error rides the plugin log sink.
 #[tauri::command]
 pub fn copy_artifact_file(src: String, dest: String) -> Result<(), String> {
     std::fs::copy(&src, &dest)

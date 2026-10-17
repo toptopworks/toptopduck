@@ -184,6 +184,18 @@ describe("ArtifactView", () => {
       expect(await screen.findByRole("status", { name: /正在加载|Loading/ })).toBeInTheDocument();
     });
 
+    it("re-checks existence on refresh, retiring the action cluster", async () => {
+      vi.mocked(artifactExists).mockResolvedValueOnce(true).mockResolvedValue(false);
+      renderView("C:/sessions/s1/artifacts/report.pdf", "pdf");
+      await screen.findByTestId("artifact-frame");
+      await openMoreMenu();
+      activateItem(screen.getByRole("menuitem", { name: "刷新" }));
+      // The refresh's exists invalidation re-reads the gate without a
+      // stage switch: the missing note replaces the whole action cluster.
+      expect(await screen.findByText(/已不在磁盘上|no longer on disk/)).toBeInTheDocument();
+      expect(screen.queryByTestId("artifact-more-menu")).not.toBeInTheDocument();
+    });
+
     it("saves a copy through the native dialog and the Rust copy lane", async () => {
       vi.mocked(artifactExists).mockResolvedValue(true);
       vi.mocked(saveDialog).mockResolvedValue("D:/copies/report.pdf");
@@ -210,6 +222,10 @@ describe("ArtifactView", () => {
       activateItem(screen.getByRole("menuitem", { name: "另存为…" }));
       await waitFor(() => expect(saveDialog).toHaveBeenCalledTimes(1));
       expect(copyArtifactFile).not.toHaveBeenCalled();
+      // Quiet means quiet: a cancel routed into the failure slot would show
+      // a header note, so none may be live.
+      const header = screen.getByTestId("artifact-header");
+      expect(within(header).queryByRole("status")).not.toBeInTheDocument();
     });
 
     it("surfaces a failed copy as a header live note", async () => {
@@ -262,6 +278,26 @@ describe("ArtifactView", () => {
       await openMoreMenu();
       activateItem(screen.getByRole("menuitem", { name: "在文件夹中显示" }));
       await waitFor(() => expect(revealItemInDir).toHaveBeenCalledTimes(1));
+      await waitFor(() =>
+        expect(within(header).queryByRole("status")).not.toBeInTheDocument(),
+      );
+    });
+
+    it("clears a save-failure note when refresh starts", async () => {
+      vi.mocked(artifactExists).mockResolvedValue(true);
+      vi.mocked(saveDialog).mockResolvedValue("D:/copies/report.pdf");
+      vi.mocked(copyArtifactFile).mockRejectedValue(new Error("disk full"));
+      renderView("C:/sessions/s1/artifacts/report.pdf", "pdf");
+      await screen.findByTestId("artifact-frame");
+      await openMoreMenu();
+      activateItem(screen.getByRole("menuitem", { name: "另存为…" }));
+      const header = screen.getByTestId("artifact-header");
+      expect(await within(header).findByRole("status")).toBeInTheDocument();
+      await openMoreMenu();
+      activateItem(screen.getByRole("menuitem", { name: "刷新" }));
+      // Refresh leads with the same slot-clearing as every other action
+      // (scoped to the header: the re-keyed body mounts its own loading
+      // status).
       await waitFor(() =>
         expect(within(header).queryByRole("status")).not.toBeInTheDocument(),
       );

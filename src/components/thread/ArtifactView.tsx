@@ -52,6 +52,10 @@ import { useArtifactExists } from "../../session/useArtifactExists";
 import { isWithinArtifactsDir, type ArtifactRenderKind } from "../../session/workspace";
 import { RoundProse } from "./RoundProse";
 
+// The header's single failure slot (issue #1317): which action's live note
+// is showing. Starting any action clears the previous note.
+type FailureKind = "open" | "folder" | "save";
+
 export function ArtifactView({
   artifact,
   render,
@@ -72,7 +76,7 @@ export function ArtifactView({
   const exists = useArtifactExists(artifact.path);
   // One failure slot for the whole header (issue #1317): at most one live
   // note at a time -- starting an action clears the previous note.
-  const [failure, setFailure] = useState<"open" | "folder" | "save" | null>(null);
+  const [failure, setFailure] = useState<FailureKind | null>(null);
   // The stage body's remount counter: bumping it re-keys ArtifactStageBody,
   // re-running the iframe branches (a fresh iframe re-reads the file off
   // disk) and remounting the md text query.
@@ -102,9 +106,14 @@ export function ArtifactView({
     // md's text query is staleTime Infinity -- the remount alone never
     // re-reads, so the cache entry is invalidated first, and the await lets
     // the refetch land before the re-key (one deterministic read, no
-    // stale-text flash). The iframe branches need nothing (no query; the
-    // re-key remount re-reads from disk).
+    // stale-text flash). The exists entry rides the same await: staleTime 0
+    // alone never re-fires while the stage stays mounted (focus refetch is
+    // off app-wide), yet refresh is the affordance that means re-check
+    // disk, and the header's observer is always active so the fresh gate
+    // value lands before the re-key. The iframe branches need nothing (no
+    // query; the re-key remount re-reads from disk).
     await queryClient.invalidateQueries({ queryKey: artifactKeys.text(artifact.path) });
+    await queryClient.invalidateQueries({ queryKey: artifactKeys.exists(artifact.path) });
     setRefreshKey((k) => k + 1);
   };
   const handleOpenFolder = () => {
