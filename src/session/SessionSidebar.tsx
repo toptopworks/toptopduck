@@ -864,22 +864,24 @@ function SidebarRow({
       openDelay={0}
       closeDelay={0}
       onOpenChange={(open) => {
-        // Bridge Radix's own open/close intents into the parent machine --
-        // ONLY for genuine interaction: the pointer on the row (ptrInRef)
-        // or keyboard focus on the row (kbFocusRef, :focus-visible at the
-        // focusin). Radix drives handleOpen from BOTH trigger pointer-enters
-        // and trigger focus, and its internal open/close timers
-        // keep firing long after the interaction ended -- the
-        // focus-driven programmatic ones are pure harm: every restore the
-        // shell performs (menu close, dialog close -- CDP-measured for the
-        // Rename dialog, whose close-restore refocused the trigger and
-        // popped the card) arrives as an intent with NEITHER pointer nor
-        // keyboard on the row. Pointer-on-row intents are the legitimate
-        // hover path (the stale-leave suite depends on their re-arming);
-        // keyboard-focus intents are the non-pointer user's ONLY path to
-        // the card; everything else is silenced and the pointer path runs
-        // through the li's direct onPointerEnter/Leave instead.
-        if (!ptrInRef.current && !kbFocusRef.current) return;
+        // Bridge Radix's own open/close intents into the parent machine.
+        // OPEN intents pass only for genuine interaction: the pointer on
+        // the row (ptrInRef) or keyboard focus on the row (kbFocusRef,
+        // :focus-visible at the focusin). Radix drives handleOpen from BOTH
+        // trigger pointer-enters and trigger focus, and every programmatic
+        // restore the shell performs (menu close, dialog close --
+        // CDP-measured for the Rename dialog, whose close-restore refocused
+        // the trigger and popped the card) arrives as an intent with
+        // NEITHER marker on the row -- those are the spurious pops the gate
+        // exists to silence. CLOSE intents pass UNCONDITIONALLY: Radix
+        // defers every intent through a timer even at closeDelay 0, while
+        // the li's onBlur clears kbFocusRef synchronously during the
+        // focusout dispatch -- a gated close would read both markers false
+        // and strand an open card the instant a keyboard user Tabs off the
+        // row (the Escape dismiss feeds this same handler and would die
+        // there too). The leave is idempotent and stale-key guarded, so an
+        // unconditional close cannot mis-close anything.
+        if (open && !ptrInRef.current && !kbFocusRef.current) return;
         if (open) onHoverEnter();
         else onHoverLeave();
       }}

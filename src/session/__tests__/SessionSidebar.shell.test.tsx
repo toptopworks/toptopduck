@@ -1265,6 +1265,107 @@ describe("SessionSidebar hover card content (ADR-0093, issue #513)", () => {
     });
     expect(screen.getByText("Data source")).toBeInTheDocument();
   });
+
+  it("keyboard focus opens the card and blur retires it through the bridge", async () => {
+    // The li's onBlur clears kbFocusRef synchronously during the focusout
+    // dispatch, while Radix defers its close intent a macrotask even at
+    // closeDelay 0 -- a gated close would read both markers false and
+    // strand the card on the workspace the moment a keyboard user Tabs off
+    // the row (the Escape dismiss feeds the same gated onOpenChange).
+    // Close intents must pass the bridge unconditionally; only open intents
+    // carry the pointer-or-keyboard marker gate.
+    const persisted: SessionMetadata = {
+      duck_path: "/x/kbcard.duck",
+      display_name: "Keyboard Card",
+      last_modified_at: Date.now() - 3 * 3600_000,
+      source_summary: { first_source_name: "data.csv", source_count: 1, turn_count: 2 },
+      format_version: 1,
+      pinned: false,
+      archived: false,
+    };
+    vi.useFakeTimers();
+    const { container } = renderShell(<SessionSidebar {...sidebarProps({ sessions: [persisted] })} />);
+    const row = container.querySelector<HTMLElement>(".session-entry")!;
+    const main = row.querySelector<HTMLElement>(".session-entry-main")!;
+
+    // Keyboard focus at the focusin sets kbFocusRef; Radix's deferred open
+    // intent then bridges through and the 300 ms dwell opens the card --
+    // the non-pointer user's only path. The real .focus() establishes the
+    // focused state first: jsdom answers :focus-visible off the
+    // activeElement (loosely true once focused, per the classifier's guard
+    // comment), and a synthetic focusin alone would not set it.
+    // jsdom derives :focus-visible from the most recent interaction
+    // modality -- earlier tests' pointer/click events leave it in pointer
+    // modality, which would classify this focusin as a programmatic
+    // restore. A keyDown restores keyboard modality first, so the
+    // classifier takes the keyboard branch and sets kbFocusRef.
+    fireEvent.keyDown(document.body, { key: "Tab" });
+    main.focus();
+    fireEvent.focusIn(main);
+    await act(async () => {
+      vi.advanceTimersByTime(350);
+    });
+    expect(screen.getByText("Data source")).toBeInTheDocument();
+
+    // Tab away: the blur clears kbFocusRef first, the close intent lands a
+    // macrotask later -- it must still retire the card.
+    fireEvent.focusOut(main);
+    main.blur();
+    await act(async () => {
+      vi.advanceTimersByTime(400);
+    });
+    expect(screen.queryByText("Data source")).not.toBeInTheDocument();
+  });
+
+  it("the close-burst suppression expires by time, not only by a real leave", async () => {
+    // The re-entry pin above exercises disarm-by-leave; this one drives the
+    // expiry half. A lost pointerleave (portal layers -- the design premise
+    // of menuArmRef) never clears the arm, so past MENU_REENTRY_GRACE_MS the
+    // stale arm must fall away at the next enter and the card opens again:
+    // the row cannot go dark forever. Vitest's fake timers mock Date
+    // alongside the clock, so advancing also advances the arm's
+    // event-instant read.
+    const persisted: SessionMetadata = {
+      duck_path: "/x/graceexp.duck",
+      display_name: "Grace Expiry",
+      last_modified_at: Date.now() - 3 * 3600_000,
+      source_summary: { first_source_name: "data.csv", source_count: 1, turn_count: 2 },
+      format_version: 1,
+      pinned: false,
+      archived: false,
+    };
+    vi.useFakeTimers();
+    const { container } = renderShell(<SessionSidebar {...sidebarProps({ sessions: [persisted] })} />);
+    const row = container.querySelector<HTMLElement>(".session-entry")!;
+    const trigger = within(row).getByRole("button", { name: "Row actions" });
+
+    // Sanity arm of the machine: a dwell opens the card, opening the menu
+    // retires it and arms the suppression.
+    fireEvent.pointerEnter(row);
+    await act(async () => {
+      vi.advanceTimersByTime(350);
+    });
+    expect(screen.getByText("Data source")).toBeInTheDocument();
+    fireEvent.click(trigger);
+
+    // Menu close refreshes the arm and NO leave ever arrives (the
+    // lost-leave premise). The enter inside the grace is consumed...
+    menuRoot.current?.(false);
+    fireEvent.pointerEnter(row);
+    await act(async () => {
+      vi.advanceTimersByTime(400);
+    });
+    expect(screen.queryByText("Data source")).not.toBeInTheDocument();
+
+    // ...and the next enter, with no intervening leave anywhere, meets the
+    // stale arm past the grace, disarms it through the expiry branch, and
+    // opens the card.
+    fireEvent.pointerEnter(row);
+    await act(async () => {
+      vi.advanceTimersByTime(400);
+    });
+    expect(screen.getByText("Data source")).toBeInTheDocument();
+  });
 });
 
 describe("DeleteSessionDialog ESC routing (issue #258)", () => {
