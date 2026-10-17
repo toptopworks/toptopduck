@@ -99,6 +99,12 @@ const NO_PENDING_APPROVALS: ReadonlySet<string> = new Set();
 // Same frozen-empty posture for the turn-failure set (issue #1005).
 const NO_TURN_FAILURES: ReadonlySet<string> = new Set();
 
+// How long the row-menu enter suppression (menuArmRef) stays armed after its
+// last refresh: wide enough to cover Radix's post-mount open intent (~17 ms,
+// CDP-measured) and the browser's synthetic pointerEnter on menu close, far
+// below any genuine hover re-entry.
+const MENU_REENTRY_GRACE_MS = 250;
+
 interface SessionSidebarProps {
   // Collapse state (ADR-0054 level 1, issue #287): when true the whole
   // subtree goes inert so keyboard / screen-reader focus cannot land on the
@@ -235,11 +241,39 @@ export function SessionSidebar({
   const [cardKey, setCardKey] = useState<string | null>(null);
   const openTimer = useRef<number | undefined>(undefined);
   const closeTimer = useRef<number | undefined>(undefined);
+  // Close-burst re-entry suppression (see renderSection's onMenuOpenChange
+  // and MENU_REENTRY_GRACE_MS): the modal menu swallows the row's pointer
+  // event stream, and on close the browser re-dispatches a synthetic
+  // pointerEnter at the pointer's position -- the pointer never left the
+  // row (Escape close) -- which must not re-arm the 300 ms dwell. The arm
+  // expires MENU_REENTRY_GRACE_MS after its last refresh, so a genuine
+  // later re-entry opens the card again; a real pointer leave also clears
+  // it outright. (Enter intents DURING the open menu are menuOpenKeyRef's
+  // job -- this one only owns the post-close burst.)
+  const menuArmRef = useRef<{ key: string; at: number } | null>(null);
+  // The row whose actions menu is currently OPEN: every enter intent for
+  // that row -- the pointer's and, CDP-verified, Radix's own bridge intents
+  // fired on focus hand-off into the portal content (with NO underlying DOM
+  // event, possibly several, AFTER the row's pointerleave already cleared
+  // menuArmRef) -- is suppressed for the menu's whole lifetime. Cleared at
+  // close; menuArmRef then takes over for the close-burst window.
+  const menuOpenKeyRef = useRef<string | null>(null);
   const clearHoverTimers = () => {
     window.clearTimeout(openTimer.current);
     window.clearTimeout(closeTimer.current);
   };
   const rowHoverEnter = (key: string) => {
+    const arm = menuArmRef.current;
+    if (arm && arm.key === key) {
+      // Within the grace window the enter is a menu-interaction artifact;
+      // past it, the arm is stale and a real re-entry must open the card.
+      // The wall-clock read is an EVENT-instant measurement, not a render
+      // side effect -- this closure only ever runs from pointer/focus
+      // handlers; the purity rule cannot see that.
+      // eslint-disable-next-line react-hooks/purity -- event-instant clock read
+      if (Date.now() - arm.at < MENU_REENTRY_GRACE_MS) return;
+      menuArmRef.current = null;
+    }
     clearHoverTimers();
     hoverKeyRef.current = key;
     // Entering a DIFFERENT row retires the shown card immediately. The
@@ -250,9 +284,19 @@ export function SessionSidebar({
     // 300 ms dwell) -- the card must vanish while moving and reappear
     // only once the pointer settles.
     if (cardKey !== null && cardKey !== key) setCardKey(null);
-    openTimer.current = window.setTimeout(() => setCardKey(key), 300);
+    openTimer.current = window.setTimeout(() => {
+      // The dwell only fires while the pointer still rides the row
+      // (hoverKeyRef is nulled by the leave). Intents that slip past every
+      // entry gate -- CDP-traced Radix internal ones re-fire long after the
+      // pointer left, e.g. after a dialog's focus restore -- must not open
+      // a card for a row the pointer has left.
+      if (hoverKeyRef.current !== key) return;
+      setCardKey(key);
+    }, 300);
   };
   const rowHoverLeave = (key: string) => {
+    // A real leave disarms the suppression outright (see menuArmRef).
+    if (menuArmRef.current?.key === key) menuArmRef.current = null;
     // A stale leave from a row the pointer already left is ignored.
     if (hoverKeyRef.current !== key) return;
     clearHoverTimers();
@@ -365,7 +409,13 @@ export function SessionSidebar({
             disabled={disabled}
             archived={section.variant === "archived"}
             cardOpen={cardKey === entry.key}
-            onHoverEnter={() => rowHoverEnter(entry.key)}
+            onHoverEnter={() => {
+              // Suppressed for the row's own open menu (menuOpenKeyRef):
+              // this closure is BOTH the li's pointer entry and, via the
+              // HoverCard bridge, Radix's internal intent entry.
+              if (menuOpenKeyRef.current === entry.key) return;
+              rowHoverEnter(entry.key);
+            }}
             onHoverLeave={() => rowHoverLeave(entry.key)}
             onCardEnter={cardHoverEnter}
             onCardLeave={cardHoverLeave}
@@ -384,6 +434,26 @@ export function SessionSidebar({
                 onRename={onRename}
                 onClose={onClose}
                 onDelete={onDelete}
+                onMenuOpenChange={(open) => {
+                  // The metadata card and the row menu are both row-tail
+                  // overlays: opening the menu retires the card (the card
+                  // is necessarily open -- the pointer reached the trigger
+                  // through its 300 ms dwell), marks the row's menu open
+                  // (menuOpenKeyRef silences ALL enter intents for the
+                  // row -- pointer and Radix's bridge ones alike), and
+                  // arms the re-entry window. CLOSE clears the open mark
+                  // and refreshes the arm for the browser's synthetic
+                  // pointerEnter at the pointer's position.
+                  if (open) {
+                    menuOpenKeyRef.current = entry.key;
+                    menuArmRef.current = { key: entry.key, at: Date.now() };
+                    clearHoverTimers();
+                    setCardKey(null);
+                  } else {
+                    menuOpenKeyRef.current = null;
+                    menuArmRef.current = { key: entry.key, at: Date.now() };
+                  }
+                }}
               />
             )}
           />
@@ -762,27 +832,100 @@ function SidebarRow({
   // turn count) in a fixed-width card positioned to the right. Sweep flicker
   // is prevented by the parent machine's 300 ms open dwell (below), not by
   // Radix's openDelay, which is pinned to 0 under the controlled open.
+  // Pointer-on-row marker for the HoverCard bridge (see the bridge
+  // comment below): set by the li's own pointer handlers.
+  const ptrInRef = useRef(false);
+  // Keyboard-focus marker for the bridge: :focus-visible at the li's
+  // focusin (set in onFocus, cleared in onBlur). With ptrInRef this forms
+  // the bridge's two legitimate intents; a focusin matching NEITHER (a
+  // programmatic restore) leaves both false, silencing the bridge.
+  const kbFocusRef = useRef(false);
+  // Native pointerleave backstop. CDP-measured: when the pointer leaves the
+  // row into a PORTAL layer (the row menu), the native pointerleave fires
+  // but React's synthetic onPointerLeave can fail to derive -- leaving
+  // ptrInRef and the parent's hoverKey stuck "on", which let every later
+  // Radix intent (e.g. a dialog's focus restore) bridge through as a
+  // genuine hover. The native event is authoritative; a double-run (synthetic
+  // + native) is absorbed by the machine's stale-leave guard.
+  const liRef = useRef<HTMLLIElement | null>(null);
+  useEffect(() => {
+    const li = liRef.current;
+    if (!li) return;
+    const onNativeLeave = () => {
+      ptrInRef.current = false;
+      onHoverLeave();
+    };
+    li.addEventListener("pointerleave", onNativeLeave);
+    return () => li.removeEventListener("pointerleave", onNativeLeave);
+  }, [onHoverLeave]);
   return (
     <HoverCard
       open={cardOpen}
       openDelay={0}
       closeDelay={0}
       onOpenChange={(open) => {
-        // Bridge Radix's own open/close intents into the parent machine:
-        // Radix wires onFocus/onBlur on the trigger, and under a controlled
-        // open with no change handler that intent is lost -- keyboard focus
-        // is the only remaining path to the card for a non-pointer user.
-        // Pointer-driven intents re-fire what the row-level handlers already
-        // did; both paths are idempotent (timers re-armed, stale-leave
-        // guarded).
+        // Bridge Radix's own open/close intents into the parent machine.
+        // OPEN intents pass only for genuine interaction: the pointer on
+        // the row (ptrInRef) or keyboard focus on the row (kbFocusRef,
+        // :focus-visible at the focusin). Radix drives handleOpen from BOTH
+        // trigger pointer-enters and trigger focus, and every programmatic
+        // restore the shell performs (menu close, dialog close --
+        // CDP-measured for the Rename dialog, whose close-restore refocused
+        // the trigger and popped the card) arrives as an intent with
+        // NEITHER marker on the row -- those are the spurious pops the gate
+        // exists to silence. CLOSE intents pass UNCONDITIONALLY: Radix
+        // defers every intent through a timer even at closeDelay 0, while
+        // the li's onBlur clears kbFocusRef synchronously during the
+        // focusout dispatch -- a gated close would read both markers false
+        // and strand an open card the instant a keyboard user Tabs off the
+        // row (the Escape dismiss feeds this same handler and would die
+        // there too). The leave is idempotent and stale-key guarded, so an
+        // unconditional close cannot mis-close anything.
+        if (open && !ptrInRef.current && !kbFocusRef.current) return;
         if (open) onHoverEnter();
         else onHoverLeave();
       }}
     >
       <HoverCardTrigger asChild>
         <li
-          onPointerEnter={onHoverEnter}
-          onPointerLeave={onHoverLeave}
+          ref={liRef}
+          onPointerEnter={() => {
+            ptrInRef.current = true;
+            onHoverEnter();
+          }}
+          onPointerLeave={() => {
+            ptrInRef.current = false;
+            onHoverLeave();
+          }}
+          onFocus={(e) => {
+            // Classifies the focusin for the bridge. A pointer-modality
+            // (:focus-visible false) focusin on the row is always a
+            // PROGRAMMATIC restore (dialog/menu close-restore -- CDP
+            // round 7: the Rename dialog's restore landed here and its
+            // follow-up Radix intent popped the card): clear the pointer
+            // markers AND run the leave so the intent Radix fires right
+            // after cannot bridge through as a hover. Keyboard modality
+            // (Tab / Escape flows) sets kbFocusRef instead, keeping the
+            // bridge open -- trigger focus is the non-pointer user's only
+            // path to the card. Chromium answers :focus-visible correctly
+            // at the focusin instant; the try/catch is the jsdom guard
+            // (older jsdom throws on the selector, and jsdom's own loose
+            // implementation returning true just means the markers stay --
+            // the keyboard branch is what tests never reach).
+            try {
+              if (e.target.matches(":focus-visible")) {
+                kbFocusRef.current = true;
+              } else {
+                ptrInRef.current = false;
+                onHoverLeave();
+              }
+            } catch {
+              /* jsdom lacks the selector -- keep the markers untouched */
+            }
+          }}
+          onBlur={() => {
+            kbFocusRef.current = false;
+          }}
           className={cn(
             "session-entry group/row relative my-0.5 flex items-stretch rounded-md hover:bg-accent",
             entry.active && "active bg-accent",
@@ -858,7 +1001,11 @@ function SidebarRow({
                 aria-hidden="true"
               />
             )}
-            <span className="text-xs text-muted-foreground shrink-0 tabular-nums">
+            {/* The pill's opaque 28px ground is narrower than this label
+                (e.g. "11个月"), so once the pill shows the label's tail would
+                peek out beside the trigger -- hide the label under the SAME
+                two reveal conditions (row hover / focus inside the pill). */}
+            <span className="text-xs text-muted-foreground shrink-0 tabular-nums group-hover/row:opacity-0 group-has-[.session-entry-actions_:focus-visible]/row:opacity-0">
               {formatRelativeTime(entry.lastModifiedAt, now, intl.locale)}
             </span>
           </button>
@@ -904,6 +1051,7 @@ function RowActionsMenu({
   onRename,
   onClose,
   onDelete,
+  onMenuOpenChange,
 }: {
   entry: SidebarEntry;
   /** Resolved upstream (resolveDisplayName) for the dialogs: the rename
@@ -922,6 +1070,11 @@ function RowActionsMenu({
   onRename: (path: string, sid: string | null, newName: string) => void;
   onClose: (sid: string) => void;
   onDelete: (path: string, sid: string | null) => void;
+  /** The DropdownMenu root's open flips, forwarded verbatim: the parent
+   *  retires the metadata card on open -- the pointer is necessarily on
+   *  the row (it reached the trigger), so the card is necessarily open
+   *  and the two row-tail overlays would stack. */
+  onMenuOpenChange: (open: boolean) => void;
 }) {
   const intl = useIntl();
   const [dialog, setDialog] = useState<"rename" | "delete" | null>(null);
@@ -933,11 +1086,30 @@ function RowActionsMenu({
   // callbacks) need the string, and narrowing does not survive into a
   // closure over a property access.
   const sid = entry.sid;
+  // Whether the menu's closing interaction was pointer-driven: Radix always
+  // re-focuses the trigger on close, which is right for keyboard (Escape /
+  // Enter-select) but strands a focus ring + revealed pill after a pointer
+  // select. Reset on open so each open/close cycle starts clean.
+  const closedByPointerRef = useRef(false);
   return (
     <>
-      <DropdownMenu>
+      <DropdownMenu
+        onOpenChange={(open) => {
+          if (open) closedByPointerRef.current = false;
+          onMenuOpenChange(open);
+        }}
+      >
         <DropdownMenuTrigger
           disabled={disabled}
+          onFocus={(e) => {
+            // Pill intent, NOT card intent: the li carries Radix's
+            // HoverCard focus wiring, so this focus (click-focus or the
+            // close-restore) bubbling up would re-arm the 300 ms card
+            // dwell and pop the metadata card back over the open menu.
+            // Native :focus-visible styling (pill reveal) still applies --
+            // only the React synthetic propagation is stopped.
+            e.stopPropagation();
+          }}
           className={cn(
             // No cursor-pointer: the pill's icons keep the default arrow
             // (the WorkingSetList ICON_BUTTON_BASE posture, mirrored inline
@@ -958,7 +1130,27 @@ function RowActionsMenu({
         >
           <MoreHorizontal className="h-3.5 w-3.5" aria-hidden strokeWidth={2.5} />
         </DropdownMenuTrigger>
-        <DropdownMenuContent align="end" aria-label={menuLabel}>
+        <DropdownMenuContent
+          align="end"
+          aria-label={menuLabel}
+          // A pointerdown anywhere in the content (item select included --
+          // it bubbles) marks the close as pointer-driven; Escape unmarks.
+          onPointerDown={() => {
+            closedByPointerRef.current = true;
+          }}
+          onPointerDownOutside={() => {
+            closedByPointerRef.current = true;
+          }}
+          onEscapeKeyDown={() => {
+            closedByPointerRef.current = false;
+          }}
+          onCloseAutoFocus={(e) => {
+            // Radix restores trigger focus on every close; a pointer-driven
+            // close must not strand it there. Keyboard closes keep the
+            // restore (the keyboard user's next Tab target depends on it).
+            if (closedByPointerRef.current) e.preventDefault();
+          }}
+        >
           {archived ? (
             <DropdownMenuItem onSelect={() => onArchive(entry.path, false, null)}>
               <ArchiveRestore aria-hidden />
