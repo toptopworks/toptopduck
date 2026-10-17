@@ -1056,6 +1056,22 @@ pub fn write_export_file(path: String, bytes: Vec<u8>) -> Result<(), String> {
     std::fs::write(&path, &bytes).map_err(|e| format!("cannot write export {path}: {e}"))
 }
 
+/// Copy one artifact file to a user-chosen path (issue #1317): the save-as
+/// lane behind the stage header's more menu. The native save dialog runs
+/// before this call (the [`write_export_file`] posture), so a cancel never
+/// reaches the backend. `src` is a manifest entry path (settle-time
+/// backend-computed, ADR-0124) -- the same trust boundary as
+/// [`read_artifact_text`]: a compromised webview could probe any path, but it
+/// can already call `opener:allow-open-path` with `**`, so copying a file it
+/// could open adds no new exposure class. A plain `String` error rides the
+/// plugin log sink.
+#[tauri::command]
+pub fn copy_artifact_file(src: String, dest: String) -> Result<(), String> {
+    std::fs::copy(&src, &dest)
+        .map(|_| ())
+        .map_err(|e| format!("cannot copy artifact to {dest}: {e}"))
+}
+
 /// Read one page of a dataset's rows from the named session (ADR-0024 windowed
 /// display). Runs off the async/UI thread (AC8) like `ask`: a large OFFSET is
 /// an O(offset) scan, so holding the session lock on the IPC path would block
@@ -3771,6 +3787,41 @@ mod tests {
             .expect_err("a missing parent refuses");
         assert!(
             err.contains("cannot write export"),
+            "the error names the lane: {err}"
+        );
+    }
+
+    /// The save-as copy lane (#1317): the manifest entry lands verbatim at
+    /// the user-picked path, and a missing source errors naming the lane.
+    #[test]
+    fn copy_artifact_file_lands_bytes_verbatim() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let src = dir.path().join("report.html");
+        let payload = b"<html><body>report</body></html>".to_vec();
+        std::fs::write(&src, &payload).expect("write");
+        let dest = dir.path().join("copy.html");
+        copy_artifact_file(
+            src.to_string_lossy().into_owned(),
+            dest.to_string_lossy().into_owned(),
+        )
+        .expect("the picked path receives the copy");
+        assert_eq!(
+            std::fs::read(&dest).expect("read back"),
+            payload,
+            "the copy lands byte-for-byte"
+        );
+    }
+
+    #[test]
+    fn copy_artifact_file_errors_on_missing_source() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let err = copy_artifact_file(
+            dir.path().join("gone.md").to_string_lossy().into_owned(),
+            dir.path().join("out.md").to_string_lossy().into_owned(),
+        )
+        .expect_err("a missing source refuses");
+        assert!(
+            err.contains("cannot copy artifact"),
             "the error names the lane: {err}"
         );
     }
