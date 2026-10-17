@@ -1,7 +1,13 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { act, fireEvent, render, screen, within } from "@testing-library/react";
 import { IntlProvider } from "react-intl";
-import { type ComponentProps, type ReactElement, type ReactNode } from "react";
+import {
+  createContext,
+  useContext,
+  type ComponentProps,
+  type ReactElement,
+  type ReactNode,
+} from "react";
 import { DeleteSessionDialog, SessionSidebar } from "../SessionSidebar";
 import type { OpenSession } from "../sidebarModel";
 import type { SessionMetadata } from "../../types/session";
@@ -13,24 +19,80 @@ import { TooltipProvider } from "@/components/ui/tooltip";
 // mocked as a simple controlled shape: the trigger is a plain <button> and the
 // content always renders inline. The row-menu tests verify SessionSidebar's
 // LOGIC -- which items per row state, which callbacks, which dialog state --
-// not Radix's portal/focus-trap internals.
+// not Radix's portal/focus-trap internals. The content's onCloseAutoFocus is
+// captured where tests can fire it (the mocked shape has no close machinery
+// of its own).
+const menuClose = vi.hoisted(() => ({
+  current: null as null | ((e: { preventDefault: () => void }) => void),
+}));
+// The content's Escape hook, for tests that need to simulate a keyboard
+// close (the mocked shape has no close machinery of its own).
+const menuEscape = vi.hoisted(() => ({
+  current: null as null | (() => void),
+}));
+// The mocked root's open flip, for tests that need to CLOSE the menu (the
+// mocked shape has no close machinery of its own).
+const menuRoot = vi.hoisted(() => ({
+  current: null as null | ((open: boolean) => void),
+}));
 vi.mock("@/components/ui/dropdown-menu", () => {
-  function DropdownMenu({ children }: { children: ReactNode }) {
-    return <div data-testid="dropdown-menu-root">{children}</div>;
+  // The root's open intent rides context so the trigger can mirror Radix's
+  // contract (a trigger click fires onOpenChange(true)) without an open
+  // state machine -- the menu tests that care wire their assertions to it.
+  const MenuOpenCtx = createContext<{
+    onOpenChange?: (open: boolean) => void;
+  }>({});
+  function DropdownMenu({
+    children,
+    onOpenChange,
+  }: {
+    children: ReactNode;
+    onOpenChange?: (open: boolean) => void;
+  }) {
+    menuRoot.current = onOpenChange ?? null;
+    return (
+      <MenuOpenCtx.Provider value={{ onOpenChange }}>
+        <div data-testid="dropdown-menu-root">{children}</div>
+      </MenuOpenCtx.Provider>
+    );
   }
   function DropdownMenuTrigger({
     children,
     onClick,
     ...rest
   }: ComponentProps<"button"> & { children: ReactNode }) {
+    const { onOpenChange } = useContext(MenuOpenCtx);
     return (
-      <button type="button" onClick={onClick} {...rest}>
+      <button
+        type="button"
+        onClick={(e) => {
+          onClick?.(e);
+          onOpenChange?.(true);
+        }}
+        {...rest}
+      >
         {children}
       </button>
     );
   }
-  function DropdownMenuContent({ children }: { children: ReactNode }) {
-    return <div role="menu">{children}</div>;
+  function DropdownMenuContent({
+    children,
+    onCloseAutoFocus,
+    onPointerDown,
+    onEscapeKeyDown,
+  }: {
+    children: ReactNode;
+    onCloseAutoFocus?: (e: { preventDefault: () => void }) => void;
+    onPointerDown?: (e: React.PointerEvent) => void;
+    onEscapeKeyDown?: () => void;
+  }) {
+    menuClose.current = onCloseAutoFocus ?? null;
+    menuEscape.current = onEscapeKeyDown ?? null;
+    return (
+      <div role="menu" onPointerDown={onPointerDown}>
+        {children}
+      </div>
+    );
   }
   function DropdownMenuItem({
     children,
@@ -1035,6 +1097,174 @@ describe("SessionSidebar hover card content (ADR-0093, issue #513)", () => {
     // Turn count with 0 renders "no turns" (defaultMessage =0 arm).
     expect(screen.getByText("no turns")).toBeInTheDocument();
   });
+
+  it("opening the row menu retires the hover metadata card", async () => {
+    // The pointer necessarily dwelt on the row to reach the menu trigger,
+    // so the card is necessarily open when the menu opens -- the two
+    // row-tail overlays must not stack. The mocked trigger fires the
+    // root's onOpenChange(true) (Radix's real contract), and the parent
+    // machine answers by dropping the card.
+    const persisted: SessionMetadata = {
+      duck_path: "/x/menudismiss.duck",
+      display_name: "Menu Dismiss",
+      last_modified_at: Date.now() - 3 * 3600_000,
+      source_summary: { first_source_name: "data.csv", source_count: 1, turn_count: 2 },
+      format_version: 1,
+      pinned: false,
+      archived: false,
+    };
+    vi.useFakeTimers();
+    const { container } = renderShell(<SessionSidebar {...sidebarProps({ sessions: [persisted] })} />);
+    const row = container.querySelector<HTMLElement>(".session-entry")!;
+    fireEvent.pointerEnter(row);
+    await act(async () => {
+      vi.advanceTimersByTime(350);
+    });
+    expect(screen.getByText("Data source")).toBeInTheDocument();
+
+    fireEvent.click(within(row).getByRole("button", { name: "Row actions" }));
+    expect(screen.queryByText("Data source")).not.toBeInTheDocument();
+  });
+
+  it("menu-trigger focus never re-opens the card (bridge exclusion)", async () => {
+    // Real browsers focus the trigger on click, and Radix re-focuses it on
+    // menu close; both bubble to the li, where the HoverCard wiring would
+    // re-arm the 300 ms dwell and pop the card back over the open menu.
+    // The trigger's own focus is a pill intent and must stop there.
+    const persisted: SessionMetadata = {
+      duck_path: "/x/focusgate.duck",
+      display_name: "Focus Gate",
+      last_modified_at: Date.now() - 3 * 3600_000,
+      source_summary: { first_source_name: "data.csv", source_count: 1, turn_count: 2 },
+      format_version: 1,
+      pinned: false,
+      archived: false,
+    };
+    vi.useFakeTimers();
+    const { container } = renderShell(<SessionSidebar {...sidebarProps({ sessions: [persisted] })} />);
+    const row = container.querySelector<HTMLElement>(".session-entry")!;
+    fireEvent.pointerEnter(row);
+    await act(async () => {
+      vi.advanceTimersByTime(350);
+    });
+    const trigger = within(row).getByRole("button", { name: "Row actions" });
+    fireEvent.click(trigger);
+    expect(screen.queryByText("Data source")).not.toBeInTheDocument();
+
+    // The close-restore (or click) focus lands here: no card may return.
+    fireEvent.focus(trigger);
+    await act(async () => {
+      vi.advanceTimersByTime(400);
+    });
+    expect(screen.queryByText("Data source")).not.toBeInTheDocument();
+  });
+
+  it("pointer-driven menu close strands no focus; keyboard close restores it", () => {
+    // The mocked content captures onCloseAutoFocus (no close machinery of
+    // its own). A pointerdown anywhere in the content marks the close as
+    // pointer-driven -> the close-restore focus is refused; without one,
+    // the default (keyboard) restore stands.
+    const persisted: SessionMetadata = {
+      duck_path: "/x/closegate.duck",
+      display_name: "Close Gate",
+      last_modified_at: Date.now(),
+      source_summary: { first_source_name: null, source_count: 0, turn_count: 1 },
+      format_version: 1,
+      pinned: false,
+      archived: false,
+    };
+    const { container } = renderShell(
+      <SessionSidebar {...sidebarProps({ sessions: [persisted] })} />,
+    );
+    const trigger = within(
+      container.querySelector<HTMLElement>(".session-entry")!,
+    ).getByRole("button", { name: "Row actions" });
+
+    // Keyboard close first: no pointerdown -> restore stands.
+    fireEvent.click(trigger);
+    const preventDefault = vi.fn();
+    menuClose.current?.({ preventDefault });
+    expect(preventDefault).not.toHaveBeenCalled();
+
+    // Pointer close: a pointerdown inside the content marks it -> refused.
+    fireEvent.pointerDown(
+      container.querySelector<HTMLElement>(`[role="menuitem"]`)!,
+    );
+    menuClose.current?.({ preventDefault });
+    expect(preventDefault).toHaveBeenCalled();
+
+    // Escape clears the pointer mark: the keyboard close that follows keeps
+    // the restore (the pointer-modality close would have refused it).
+    menuEscape.current?.();
+    const preventDefaultAfterEscape = vi.fn();
+    menuClose.current?.({ preventDefault: preventDefaultAfterEscape });
+    expect(preventDefaultAfterEscape).not.toHaveBeenCalled();
+  });
+
+  it("menu close arms an enter suppression until a real leave (synthetic re-entry)", async () => {
+    // The modal menu holds body pointer-events:none; on release the browser
+    // re-dispatches a pointerEnter at the pointer's position -- the pointer
+    // never left the row (Escape close) -- and that synthetic re-entry must
+    // not re-arm the 300 ms dwell. The next enter after a real leave opens
+    // again.
+    const persisted: SessionMetadata = {
+      duck_path: "/x/reentry.duck",
+      display_name: "Re-entry",
+      last_modified_at: Date.now() - 3 * 3600_000,
+      source_summary: { first_source_name: "data.csv", source_count: 1, turn_count: 2 },
+      format_version: 1,
+      pinned: false,
+      archived: false,
+    };
+    vi.useFakeTimers();
+    const { container } = renderShell(<SessionSidebar {...sidebarProps({ sessions: [persisted] })} />);
+    const row = container.querySelector<HTMLElement>(".session-entry")!;
+    const trigger = within(row).getByRole("button", { name: "Row actions" });
+
+    // Sanity arm of the machine: a dwell opens the card.
+    fireEvent.pointerEnter(row);
+    await act(async () => {
+      vi.advanceTimersByTime(350);
+    });
+    expect(screen.getByText("Data source")).toBeInTheDocument();
+
+    // Menu open retires the card AND arms the suppression: Radix's own
+    // controlled-open intent (fired through the HoverCard bridge ~17 ms
+    // after the content mounts, CDP-measured) must not re-arm the dwell.
+    fireEvent.click(trigger);
+    expect(screen.queryByText("Data source")).not.toBeInTheDocument();
+    fireEvent.pointerEnter(row);
+    await act(async () => {
+      vi.advanceTimersByTime(400);
+    });
+    expect(screen.queryByText("Data source")).not.toBeInTheDocument();
+
+    // Pointer travels onto the open menu (real pointerleave -- it clears
+    // the arm) and Radix keeps firing bridge intents afterwards (CDP:
+    // three enters after the leave): silenced by the open-menu mark.
+    fireEvent.pointerLeave(row);
+    fireEvent.pointerEnter(row);
+    await act(async () => {
+      vi.advanceTimersByTime(400);
+    });
+    expect(screen.queryByText("Data source")).not.toBeInTheDocument();
+
+    // Menu close refreshes the arm; the synthetic re-entry is consumed.
+    menuRoot.current?.(false);
+    fireEvent.pointerEnter(row);
+    await act(async () => {
+      vi.advanceTimersByTime(400);
+    });
+    expect(screen.queryByText("Data source")).not.toBeInTheDocument();
+
+    // Past the grace window (a real leave + re-enter), the card opens again.
+    fireEvent.pointerLeave(row);
+    fireEvent.pointerEnter(row);
+    await act(async () => {
+      vi.advanceTimersByTime(400);
+    });
+    expect(screen.getByText("Data source")).toBeInTheDocument();
+  });
 });
 
 describe("DeleteSessionDialog ESC routing (issue #258)", () => {
@@ -1182,6 +1412,18 @@ describe("SessionSidebar organization (ADR-0127, issue #1175)", () => {
     expect(classes).toContain("pointer-events-none");
     expect(classes).toContain("group-hover/row:opacity-100");
     expect(classes).toContain("has-[:focus-visible]:opacity-100");
+    // The complementary half: the inline relative-time label hides under the
+    // SAME two conditions -- the pill's opaque ground is narrower than the
+    // label, so the label would peek out beside the trigger otherwise.
+    const time = container.querySelector<HTMLElement>(
+      ".session-entry .tabular-nums",
+    );
+    expect(time).not.toBeNull();
+    const timeClasses = time?.className.split(/\s+/);
+    expect(timeClasses).toContain("group-hover/row:opacity-0");
+    expect(timeClasses).toContain(
+      "group-has-[.session-entry-actions_:focus-visible]/row:opacity-0",
+    );
   });
 
   it("archived toggle carries aria-pressed and fires onToggleArchived", () => {
