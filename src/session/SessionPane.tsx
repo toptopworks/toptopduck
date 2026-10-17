@@ -137,6 +137,24 @@ const NO_APPROVALS: ApprovalEntry[] = [];
 const WORKSPACE_TABS = ["result", "workingSet"] as const;
 type WorkspaceTab = (typeof WORKSPACE_TABS)[number];
 
+// #1323 edge-docked scroll containers: both postures break the tabpanel out
+// of the workspace-body's p-4 (the host flex column is not a scroll
+// container, so nothing enters a scrollable overflow region) so the
+// scrollbars dock to the workspace edges; the breathing-room padding rides
+// the panel itself -- padding sits inside the scrollbar.
+/** The scrolling posture, broken out on all four sides -- all four, or the
+ * panel's pt stacks on the host's for a doubled 32px. */
+const EDGE_DOCKED_SCROLL_CLASS = "-m-4 overflow-y-auto p-4";
+
+/** The file stage posture (the WorkBuddy report pane): the panel retires as
+ * a scroll container -- a breakout inside a scroll container enters its
+ * scrollable overflow region (margins don't shrink it), so the panel would
+ * grow scrollbars that re-indent the very edges the breakout opened. The
+ * stage scrolls internally instead (ArtifactView's body / the iframe
+ * documents; md re-wraps its own padding). The top stays in the flow
+ * padding, or the stage header's border-b sits flush on the tab strip's. */
+const FILE_STAGE_CLASS = "-mx-4 -mb-4 overflow-hidden";
+
 export function SessionPane({ sessionId, isActive, pendingIngestPaths, onIngestConsumed, pendingQuestion, pendingSkillInvocations, onQuestionConsumed, onSeedDraft, onSeedInvocations, onComposerFields, onComposerFieldsUnmount, sessionName, onFirstTurnSettled, approvalEvents, duckPath, onRename, onClose, onDelete, disabled }: SessionPaneProps) {
   // This session's slice of the app-level approval map + the two stable
   // sessionId-bound callbacks (ADR-0056 addressing: the channel is global,
@@ -699,31 +717,10 @@ export function SessionPane({ sessionId, isActive, pendingIngestPaths, onIngestC
               aria-labelledby={resultTabId}
               hidden={tab !== "result"}
               className={cn(
-                // Both postures break the panel out of the workspace-body's
-                // p-4 (negative margins; the host flex column is not a scroll
-                // container, so nothing enters a scrollable overflow region)
-                // so the scrollbars dock to the workspace edges. The padding
-                // then rides the panel itself -- padding sits inside the
-                // scrollbar, so the bar stays at the edge while the content
-                // keeps its breathing room.
                 "min-h-0 flex-1 text-sm",
                 s.workspaceContent.kind === "file"
-                  ? // The file stage posture (the WorkBuddy report pane): the
-                // panel retires as a scroll container -- a breakout inside
-                // a scroll container enters its scrollable overflow region
-                // (margins don't shrink it), so the panel would grow
-                // scrollbars that re-indent the very edges the breakout
-                // opened up. The stage scrolls internally instead
-                // (ArtifactView's body / the iframe documents); md
-                // re-wraps its own padding to keep its text clear. The top
-                // stays in the flow padding: the stage header's border-b
-                // would otherwise sit flush on the tab strip's border-b.
-                  "-mx-4 -mb-4 overflow-hidden"
-                  : // The result posture: the panel keeps scrolling, now with
-                // its own padding (all four sides -- the top breakout
-                // matters as much as the rest, or the panel's pt would
-                // stack on the host's for a doubled 32px).
-                  "-m-4 overflow-y-auto p-4",
+                  ? FILE_STAGE_CLASS
+                  : EDGE_DOCKED_SCROLL_CLASS,
               )}
             >
               <WorkspaceResult
@@ -744,10 +741,9 @@ export function SessionPane({ sessionId, isActive, pendingIngestPaths, onIngestC
               role="tabpanel"
               aria-labelledby={workingSetTabId}
               hidden={tab !== "workingSet"}
-              // Same breakout posture as the result panel above: dock the
-              // scrollbars to the workspace edges, padding rides the panel
-              // (all four sides -- see the result panel's pt note).
-              className="min-h-0 flex-1 -m-4 p-4 overflow-y-auto text-sm"
+              // Same edge-docked posture as the result panel's scrolling
+              // branch (the constant above carries the why).
+              className={cn("min-h-0 flex-1 text-sm", EDGE_DOCKED_SCROLL_CLASS)}
             >
               {/* ADR-0123: the tab consumes the useWorkingSet seam itself;
                   the pane passes only session addressing, the execution-window

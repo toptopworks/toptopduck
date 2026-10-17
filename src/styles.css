@@ -301,13 +301,15 @@
  * sidebar layout shell -- visual group/entry/typography rules retired). The
  * negative right margin lifts the list out of the aside's p-2 so the thin
  * scrollbar docks against the sidebar's right border instead of floating an
- * 8px padding inboard of it; the list's own 8px padding then takes over as the
- * rows' inline breathing room, keeping the rows clear of the scrollbar and
- * left-aligned with the brand row / New button above. */
+ * 8px padding inboard of it; the right padding (same 8px width) keeps the
+ * rows clear of the thumb, while the left edge stays flush with the brand
+ * row / New button above -- that alignment is the aside's own p-2, carried
+ * over untouched (a two-sided padding would stack a second 8px on it and
+ * step every row inboard). */
 .session-list {
   list-style: none;
-  margin: 0 -8px 0 0; /* mirrors the aside's p-2 utility */
-  padding: 0 8px;
+  margin: 0 -8px 0 0;
+  padding: 0 8px 0 0;
   flex: 1;
   overflow-y: auto;
 }
