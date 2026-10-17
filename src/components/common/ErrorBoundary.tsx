@@ -146,7 +146,10 @@ export function DegradeCard({ error, onRetry, name, onReload }: DegradeCardProps
     <Card
       role="alert"
       data-region={name}
-      className="degrade-card gap-0 rounded-lg p-4 my-2 shadow-none border-l-[3px] border-l-destructive"
+      // #1323: an overflow-hidden host (the file-stage panel) clips a card
+      // taller than the pane with no scrollbar to reach it -- the card
+      // owns its scroll instead.
+      className="degrade-card gap-0 rounded-lg p-4 my-2 max-h-full overflow-y-auto shadow-none border-l-[3px] border-l-destructive"
     >
       <p className="m-0 mb-2 leading-normal">
         {intl.formatMessage({

@@ -139,7 +139,10 @@ export function ArtifactView({
     <div className="flex h-full min-h-0 flex-col">
       <header
         data-testid="artifact-header"
-        className="flex shrink-0 items-center justify-between gap-2 border-b px-4 py-1.5"
+        // Asymmetric padding on purpose: the name aligns with the body's 16px
+        // text edge (pl-4), while the actions pull 4px closer to the pane
+        // corner (pr-3) -- chrome hugs the corner, content keeps the margin.
+        className="flex shrink-0 items-center justify-between gap-2 border-b py-1.5 pl-4 pr-3"
       >
         {/* Layer-4 content (the file's own name) passes through untranslated;
             truncate keeps a long name from pushing the action out. */}
@@ -280,7 +283,17 @@ function ArtifactStageBody({
     return <PdfArtifactShell path={artifact.path} fileName={artifact.file_name} />;
   }
   if (render === "markdown") {
-    return <MarkdownArtifact path={artifact.path} exists={exists} />;
+    // The file panel breaks out of the workspace-body's p-4 (SessionPane), so
+    // the prose re-wraps its own padding: the scrollbar docks to the pane edge
+    // while the text keeps its breathing room. The iframe branches stay
+    // full-bleed -- the frame's own document scrolls inside its viewport edge
+    // (the WorkBuddy stage posture: the report fills the pane and owns its
+    // scrollbars).
+    return (
+      <div className="p-4">
+        <MarkdownArtifact path={artifact.path} exists={exists} />
+      </div>
+    );
   }
   return <ArtifactFallbackFace exists={exists} />;
 }

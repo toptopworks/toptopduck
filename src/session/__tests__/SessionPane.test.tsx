@@ -302,6 +302,38 @@ describe("SessionPane artifact stage boundary", () => {
 // the pill's render gate rides the real rail element -- jsdom has no layout,
 // so the pause is staged by stubbing the rail's geometry and dispatching the
 // scroll event by hand (the same rig the hook suite uses).
+describe("SessionPane workspace panel postures", () => {
+  beforeEach(() => {
+    vi.mocked(useSessionState).mockImplementation(paneSessionState);
+    vi.mocked(listSkills).mockResolvedValue({ skills: [] } as never);
+  });
+
+  // #1323: the file-kind panel retires as a scroll container (the stage
+  // scrolls internally); every other kind keeps the edge-docked scrolling
+  // posture. jsdom does no layout, so the pin is the class itself -- the
+  // rendered-DOM utility convention, not the rejected CSS-rule seam.
+  it("gives the file stage the overflow-hidden breakout posture", () => {
+    vi.mocked(useSessionState).mockImplementation(() =>
+      paneSessionStateWithWorkspace({
+        kind: "file",
+        path: "C:/artifacts/out/report.md",
+        fileName: "report.md",
+        render: "markdown",
+      }),
+    );
+    renderPane();
+
+    expect(screen.getByRole("tabpanel").className).toContain("overflow-hidden");
+  });
+
+  it("keeps non-file content on the scrolling breakout posture", () => {
+    vi.mocked(useSessionState).mockImplementation(paneSessionState);
+    renderPane();
+
+    expect(screen.getByRole("tabpanel").className).toContain("overflow-y-auto");
+  });
+});
+
 describe("SessionPane follow pill", () => {
   beforeEach(() => {
     vi.mocked(useSessionState).mockImplementation(paneSessionState);
