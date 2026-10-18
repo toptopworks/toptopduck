@@ -8,7 +8,7 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
-import { DeleteSessionDialog, RenameSessionDialog } from "./SessionSidebar";
+import { DeleteSessionDialog, RenameSessionDialog } from "./SessionDialogs";
 import { resolveDisplayName } from "./displayName";
 
 // Session-header context menu (ADR-0093, issue #512). The management actions
@@ -19,8 +19,8 @@ import { resolveDisplayName } from "./displayName";
 // h-3.5 w-3.5 to match WorkspaceToggle's icon visual weight -- issue #774:
 // one 28px hit-area spec across the header chrome family).
 //
-// Rename + Delete open local dialog state (the existing RenameSessionDialog /
-// DeleteSessionDialog exported from SessionSidebar); Close fires the shell
+// Rename + Delete open local dialog state (the shared RenameSessionDialog /
+// DeleteSessionDialog exported from SessionDialogs); Close fires the shell
 // callback directly (immediate, no dialog).
 
 type SessionHeaderMenuProps = {

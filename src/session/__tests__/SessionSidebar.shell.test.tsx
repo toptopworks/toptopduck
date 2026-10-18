@@ -8,7 +8,8 @@ import {
   type ReactElement,
   type ReactNode,
 } from "react";
-import { DeleteSessionDialog, SessionSidebar } from "../SessionSidebar";
+import { SessionSidebar } from "../SessionSidebar";
+import { DeleteSessionDialog } from "../SessionDialogs";
 import type { OpenSession } from "../sidebarModel";
 import type { SessionMetadata } from "../../types/session";
 import type { ProviderConfig } from "../../types/provider";
