@@ -114,10 +114,9 @@ pub(super) fn materialize_sql_references(
 }
 
 /// Copy `src` into `assets_dir` under its own file name, disambiguating
-/// same-named collisions with the `_2` suffix loop (the artifact
-/// materialization precedent: stem/ext constant per attempt, an empty
-/// extension formats without the separator dot). `None` on failure --
-/// logged, the caller leaves the original path in place.
+/// same-named collisions via the shared `_2` suffix loop
+/// (`super::artifacts::first_free_target`). `None` on failure -- logged,
+/// the caller leaves the original path in place.
 fn materialize_one(src: &Path, assets_dir: &Path) -> Option<PathBuf> {
     if let Err(e) = std::fs::create_dir_all(assets_dir) {
         log::warn!(
@@ -127,7 +126,7 @@ fn materialize_one(src: &Path, assets_dir: &Path) -> Option<PathBuf> {
         );
         return None;
     }
-    let Some(file_name) = src.file_name().and_then(|n| n.to_str()) else {
+    let Some(target) = super::artifacts::first_free_target(src, assets_dir) else {
         // The doc contract says every None exit is logged; a canonicalized
         // absolute file path always carries a file name, so this exit is the
         // non-UTF-8 spelling alone.
@@ -138,25 +137,6 @@ fn materialize_one(src: &Path, assets_dir: &Path) -> Option<PathBuf> {
         );
         return None;
     };
-    let file_name = file_name.to_string();
-    let stem = Path::new(&file_name)
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .unwrap_or("asset");
-    let ext = Path::new(&file_name)
-        .extension()
-        .and_then(|e| e.to_str())
-        .unwrap_or_default();
-    let mut target = assets_dir.join(&file_name);
-    let mut counter = 2u32;
-    while target.exists() {
-        target = assets_dir.join(if ext.is_empty() {
-            format!("{stem}_{counter}")
-        } else {
-            format!("{stem}_{counter}.{ext}")
-        });
-        counter += 1;
-    }
     match std::fs::copy(src, &target) {
         Ok(_) => Some(target),
         Err(e) => {
