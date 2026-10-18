@@ -43,7 +43,7 @@ use crate::model::{
 };
 use crate::persistence::read_duck;
 use crate::persistence::recipe::{
-    Recipe, RecipeEntry, RecipeOutcome, RecipeTraceEntry, RecipeTraceRound, RuntimeKind, SourceRef,
+    Recipe, RecipeEntry, RecipeOutcome, RecipeTurn, RecipeTraceEntry, RecipeTraceRound, RuntimeKind, SourceRef,
 };
 use crate::persistence::registry::{canonicalize_duck, release, try_acquire};
 use crate::provider::Provider;
@@ -449,7 +449,12 @@ impl<'a> Resumer<'a> {
             .iter()
             .map(|entry| match entry {
                 RecipeEntry::Turn(turn) => {
-                    let outcome = match &turn.outcome {
+                    // (outcome, preserved): a replay-degraded turn renders
+                    // Failed but ALSO carries its original Materialized entry
+                    // forward -- ADR-0035 Decision 2 calibration: display
+                    // degrades, the persisted history does not.
+                    let (outcome, preserved): (TurnOutcome, Option<Box<RecipeTurn>>) =
+                        match &turn.outcome {
                         RecipeOutcome::Materialized {
                             promotions,
                             body,
@@ -467,7 +472,10 @@ impl<'a> Resumer<'a> {
                                     .any(|p| p.reference_name == b.reference_name)
                             });
                             if let Some(b) = broke_here {
-                                TurnOutcome::Failed(b.failure.clone())
+                                (
+                                    TurnOutcome::Failed(b.failure.clone()),
+                                    Some(Box::new(turn.clone())),
+                                )
                             } else {
                                 // Live turn: every promotion was re-materialized
                                 // by replay (or, for a stale promotion, a
@@ -495,28 +503,38 @@ impl<'a> Resumer<'a> {
                                         sql: p.sql.clone(),
                                     });
                                 }
-                                TurnOutcome::Materialized {
-                                    promotions: rebuilt,
-                                    viz: None,
+                                (
+                                    TurnOutcome::Materialized {
+                                        promotions: rebuilt,
+                                        viz: None,
                                     // #847: the turn's terminal text restores
                                     // verbatim -- replay is LLM-free, so the
                                     // prose cannot be re-derived, only carried.
-                                    body: body.clone(),
-                                    assumption: assumption.clone(),
-                                }
+                                        body: body.clone(),
+                                        assumption: assumption.clone(),
+                                    },
+                                    None,
+                                )
                             }
                         }
                         RecipeOutcome::Textual {
                             text_kind,
                             body,
                             assumption,
-                        } => TurnOutcome::Textual {
-                            text_kind: *text_kind,
-                            body: body.clone(),
-                            assumption: assumption.clone(),
-                        },
-                        RecipeOutcome::Failed(failure) => TurnOutcome::Failed(failure.clone()),
-                        RecipeOutcome::Cancelled(reason) => TurnOutcome::Cancelled(*reason),
+                        } => (
+                            TurnOutcome::Textual {
+                                text_kind: *text_kind,
+                                body: body.clone(),
+                                assumption: assumption.clone(),
+                            },
+                            None,
+                        ),
+                        RecipeOutcome::Failed(failure) => {
+                            (TurnOutcome::Failed(failure.clone()), None)
+                        }
+                        RecipeOutcome::Cancelled(reason) => {
+                            (TurnOutcome::Cancelled(*reason), None)
+                        }
                     };
                     Ok(TimelineEntry::Turn {
                         record: TurnRecord {
@@ -579,6 +597,7 @@ impl<'a> Resumer<'a> {
                         // are read back as-is so the next persist re-writes the
                         // same values (no re-synthesis).
                         audit: TurnAudit::from_recipe_turn(turn),
+                        preserved,
                     })
                 }
                 RecipeEntry::Source(ev) => Ok(TimelineEntry::Source(ev.clone())),
@@ -1918,6 +1937,65 @@ mod tests {
         match &t2.outcome {
             TurnOutcome::Failed(TurnFailure::Execute { .. }) => {}
             other => panic!("expected Execute Failed at break turn, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn rebuild_timeline_carries_the_break_turns_original_entry() {
+        // Replay preservation: the degraded (Failed) break turn ALSO carries
+        // its original Materialized recipe entry on the timeline entry, so
+        // the next persist writes the recorded history back verbatim --
+        // display degrades, the persisted fact does not. The pre-break turn
+        // and every non-degraded outcome carry nothing.
+        let recipe = recipe_with(
+            vec![
+                materialized_turn("result_1", "SELECT 1"),
+                materialized_turn("result_2", "SELECT bad"),
+            ],
+            Some("people"),
+        );
+        let mut ws = WorkingSet::default();
+        ws.register_result(result_descriptor("result_1"));
+        let cancel = Arc::new(CancelToken::new());
+        let mut fake = FakeMaterializer::new(Vec::new());
+        let resumer = Resumer::new(&cancel, &mut fake, &recipe);
+        let brk = ReplayBreak {
+            reference_name: "result_2".into(),
+            failure: TurnFailure::Execute {
+                detail: "temp ref dead".into(),
+            },
+        };
+        let timeline = resumer.rebuild_timeline(&mut ws, Some(&brk)).unwrap();
+
+        let TimelineEntry::Turn { preserved, .. } = &timeline[0] else {
+            panic!("expected Turn, got {:?}", timeline[0])
+        };
+        assert!(preserved.is_none(), "a replayed-OK turn carries no preserved entry");
+
+        let TimelineEntry::Turn {
+            record, preserved, ..
+        } = &timeline[1]
+        else {
+            panic!("expected Turn, got {:?}", timeline[1])
+        };
+        assert!(
+            matches!(record.outcome, TurnOutcome::Failed(_)),
+            "the break turn still renders Failed"
+        );
+        let original = preserved
+            .as_ref()
+            .expect("the break turn carries its original Materialized entry");
+        assert!(matches!(
+            original.outcome,
+            RecipeOutcome::Materialized { .. }
+        ));
+        assert_eq!(original.question, "q_result_2");
+        match &original.outcome {
+            RecipeOutcome::Materialized { promotions, .. } => {
+                assert_eq!(promotions[0].sql, "SELECT bad");
+                assert_eq!(promotions[0].reference_name, "result_2");
+            }
+            _ => unreachable!("matched above"),
         }
     }
 

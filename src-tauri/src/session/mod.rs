@@ -587,10 +587,16 @@ pub struct Session {
 #[derive(Debug)]
 pub(super) enum TimelineEntry {
     /// A conversation turn: the IPC-visible [`TurnRecord`] paired with the
-    /// turn's persisted audit (trace + provenance, ADR-0078).
+    /// turn's persisted audit (trace + provenance, ADR-0078), plus -- for a
+    /// turn the resume DEGRADED to Failed -- the original Materialized
+    /// recipe entry (replay preservation: the timeline renders the honest
+    /// Failed, the next persist writes the recorded entry back verbatim).
+    /// `None` on every live-recorded turn and every non-degraded resume
+    /// entry; never crosses the IPC boundary.
     Turn {
         record: TurnRecord,
         audit: TurnAudit,
+        preserved: Option<Box<crate::persistence::recipe::RecipeTurn>>,
     },
     /// A source lifecycle event (ADR-0040): first-class timeline slot, not a turn.
     Source(SourceLifecycleEvent),
@@ -1350,6 +1356,7 @@ impl Session {
             // layer, read by build_recipe); the TurnRecord's display view
             // above is the same bounded shape.
             audit: TurnAudit::from_execution(rounds, usage, occupancy, skills, runtime),
+            preserved: None,
         });
         // ADR-0034 per-terminal-turn atomic write: the recipe is rewritten
         // whole-file at the bound path (temp + rename). No-op when no .duck
@@ -2455,7 +2462,11 @@ mod tests {
         // Inject the timeline entry -- simulates a resumed session whose
         // timeline was seeded from the recipe.
         let mut session = Session::new().expect("session");
-        session.timeline.push(TimelineEntry::Turn { record, audit });
+        session.timeline.push(TimelineEntry::Turn {
+            record,
+            audit,
+            preserved: None,
+        });
 
         let recipe = session.build_recipe();
         let turn = recipe
@@ -2534,11 +2545,19 @@ mod tests {
         );
 
         let external = match &session.timeline[0] {
-            TimelineEntry::Turn { record, audit } => (record, audit),
+            TimelineEntry::Turn {
+                record,
+                audit,
+                preserved: _,
+            } => (record, audit),
             _ => panic!("first entry is a turn"),
         };
         let builtin = match &session.timeline[1] {
-            TimelineEntry::Turn { record, audit } => (record, audit),
+            TimelineEntry::Turn {
+                record,
+                audit,
+                preserved: _,
+            } => (record, audit),
             _ => panic!("second entry is a turn"),
         };
         // Wire half: the thread's badge source.

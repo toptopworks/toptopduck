@@ -1626,6 +1626,30 @@ fn replay_failure_marks_turn_failed_and_preserves_prior_results() {
     // AC7 (no cloud LLM): resume succeeded with UnwiredProvider, which
     // refuses every `generate_tool_turn` round-trip with NotWired. The whole
     // productive chain replayed LLM-free.
+
+    // Replay preservation: open_duck's success path already rewrote the
+    // .duck. Read it back -- the degraded turn's RECORDED entry survives
+    // verbatim (its Materialized outcome, SQL, and result_2 promotion), not
+    // a Failed overwrite: the timeline shows the degrade, the recipe keeps
+    // the historical fact.
+    use toptopduck_lib::persistence::read_duck;
+    use toptopduck_lib::persistence::recipe::{RecipeEntry, RecipeOutcome};
+    let rewritten = read_duck(&duck).expect("read back the rewrite");
+    let break_turn = rewritten
+        .history
+        .iter()
+        .find_map(|e| match e {
+            RecipeEntry::Turn(t) if t.question == "多少单" => Some(t),
+            _ => None,
+        })
+        .expect("the break turn's entry survives the rewrite");
+    match &break_turn.outcome {
+        RecipeOutcome::Materialized { promotions, .. } => {
+            assert_eq!(promotions[0].reference_name, "result_2");
+            assert_eq!(promotions[0].sql, "SELECT COUNT(*) AS n FROM \"orders\".data");
+        }
+        other => panic!("recorded history overwritten by the replay degrade: {other:?}"),
+    }
 }
 
 // --- Concurrency: in-process single-writer + external-change detection -----

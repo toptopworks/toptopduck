@@ -190,7 +190,23 @@ impl RecipePersister {
         let history: Vec<RecipeEntry> = timeline
             .iter()
             .filter_map(|entry| match entry {
-                TimelineEntry::Turn { record, audit } => {
+                TimelineEntry::Turn {
+                    record,
+                    audit,
+                    preserved,
+                } => {
+                    // Replay preservation (ADR-0035 Decision 2 calibration):
+                    // a turn the resume degraded to Failed writes its
+                    // RECORDED Materialized entry back verbatim -- the
+                    // timeline shows the honest Failed, the recipe keeps the
+                    // historical fact (promotions, trace, usage, SQL). The
+                    // Failed-outcome guard keeps the pairing structural: only
+                    // a replay-degraded turn carries a preserved entry.
+                    if let Some(original) = preserved {
+                        if matches!(record.outcome, crate::model::TurnOutcome::Failed(_)) {
+                            return Some(RecipeEntry::Turn((**original).clone()));
+                        }
+                    }
                     // Build the trimmed outcome; the persisted trace +
                     // provenance come from the turn's recorded audit
                     // (ADR-0078, issue #319).
@@ -628,6 +644,7 @@ mod tests {
                     skills: Vec::new(),
                 },
             ),
+            preserved: None,
         }
     }
 
@@ -852,6 +869,7 @@ mod tests {
                 occupancy: None,
             },
             audit: TurnAudit::test_new(trace.clone(), provenance.clone()),
+            preserved: None,
         }];
 
         let persister = RecipePersister::new();
@@ -902,6 +920,7 @@ mod tests {
                 occupancy: None,
             },
             audit: TurnAudit::test_new(Vec::new(), Default::default()),
+            preserved: None,
         }];
 
         let persister = RecipePersister::new();
@@ -918,6 +937,63 @@ mod tests {
                 other => panic!("expected Materialized, got {other:?}"),
             },
             other => panic!("expected Turn, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn build_recipe_writes_a_replay_degraded_turn_back_verbatim() {
+        // Replay preservation: a Failed timeline entry carrying its original
+        // Materialized recipe entry projects BACK as that recorded entry --
+        // the working set holds no descriptor for the broken result (replay
+        // never re-materialized it), so the normal projection would drop the
+        // turn entirely and destroy the recorded history.
+        use crate::persistence::recipe::{RecipeOutcome, RecipePromotion, RecipeTurn};
+
+        let original = RecipeTurn::without_audit(
+            "q_break".to_string(),
+            RecipeOutcome::Materialized {
+                promotions: vec![RecipePromotion {
+                    reference_name: "result_2".into(),
+                    display_name: "result_2".into(),
+                    sql: "SELECT * FROM read_csv_auto('dead')".into(),
+                    stale: None,
+                }],
+                body: Some("the answer that shipped".into()),
+                assumption: None,
+            },
+        );
+
+        // The working set holds nothing for result_2 (the replay broke), and
+        // the timeline renders the honest Failed degrade.
+        let ws = WorkingSet::default();
+        let timeline = vec![TimelineEntry::Turn {
+            record: TurnRecord {
+                question: "q_break".into(),
+                outcome: TurnOutcome::Failed(crate::model::TurnFailure::Execute {
+                    detail: "replay broke".into(),
+                }),
+                trace: Vec::new(),
+                provenance: Default::default(),
+                asked_at: None,
+                settled_at: None,
+                invocations: Vec::new(),
+                artifacts: Vec::new(),
+                usage: None,
+                occupancy: None,
+            },
+            audit: TurnAudit::test_new(Vec::new(), Default::default()),
+            preserved: Some(Box::new(original.clone())),
+        }];
+
+        let persister = RecipePersister::new();
+        let recipe = persister.build_recipe(&ws, &timeline, &crate::session::SessionRuntimeFacts::default());
+        assert_eq!(recipe.history.len(), 1);
+        match &recipe.history[0] {
+            RecipeEntry::Turn(t) => {
+                assert_eq!(t.question, "q_break");
+                assert_eq!(t.outcome, original.outcome, "the recorded outcome survives verbatim");
+            }
+            other => panic!("expected a Turn entry, got {other:?}"),
         }
     }
 
@@ -950,6 +1026,7 @@ mod tests {
                 occupancy: None,
             },
             audit: TurnAudit::test_new(Vec::new(), Default::default()),
+            preserved: None,
         }];
 
         let persister = RecipePersister::new();
