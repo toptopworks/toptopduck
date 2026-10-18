@@ -26,6 +26,15 @@ pub struct WorkingSet {
     /// by name pattern) so a source whose sanitized name happens to look like
     /// `result_N` can never be mistaken for a derived result.
     results: HashSet<String>,
+    /// The never-reuse waterline for result_N minting (ADR-0022 monotonic
+    /// numbering): the smallest number the next mint may take. Resume seeds
+    /// it from every result_N name recorded in the recipe's history, so a
+    /// replay-degraded turn's recorded result -- present in the recipe but
+    /// absent from the working set -- can never be re-minted and collide
+    /// with the original on the recovery replay. Monotone (never lowered),
+    /// in-memory only, like the rest of the working set; registered results
+    /// need no floor help -- the scan below already sees them.
+    next_result_floor: u64,
     /// 血缘图（issue #40, ADR-0025/0040）：result_N → 它依赖的上游引用名
     /// 集合（源 + 其他 result_N）。在 result 物化时记录（provenance 解析
     /// provider SQL 的 FROM/JOIN），供删源时的 stale 级联传递闭包使用。保守
@@ -275,6 +284,15 @@ impl WorkingSet {
         self.results.insert(reference_name);
     }
 
+    /// Raise the never-reuse waterline (ADR-0022). Resume seeding: `floor` is
+    /// the highest result_N the recipe has ever recorded, plus one -- every
+    /// promotion the history holds (live, stale, or replay-degraded) counts,
+    /// so a number recorded while it was not in the working set is never
+    /// re-minted. Monotone: a lower floor never lowers the field.
+    pub fn raise_result_floor(&mut self, floor: u64) {
+        self.next_result_floor = self.next_result_floor.max(floor);
+    }
+
     /// The next result number: one past the max existing `result_N`, starting
     /// at 1 (ADR-0022 monotonic, never reused -- deleted results leave gaps, the
     /// next takes max+1, never back-filling). Scans only names recorded in
@@ -288,6 +306,7 @@ impl WorkingSet {
             .filter_map(|suffix| suffix.parse::<u64>().ok())
             .max()
             .map_or(1, |n| n + 1)
+            .max(self.next_result_floor)
     }
 
     /// Whether `reference_name` is a materialized turn result (main-DB table)
@@ -920,6 +939,28 @@ mod tests {
         // a gap leaves 6 as the next -- numbers are never back-filled.
         ws.register_result(result_descriptor("result_5"));
         assert_eq!(ws.next_result_number(), 6);
+    }
+
+    #[test]
+    fn result_floor_reserves_recorded_numbers() {
+        // ADR-0022 never-reuse waterline: resume seeds the floor from the
+        // recipe's recorded names, so a number whose result is absent from
+        // the working set (a replay-degraded turn's recorded promotion) is
+        // never re-minted and never collides on the recovery replay.
+        let mut ws = WorkingSet::default();
+        ws.register_result(result_descriptor("result_1"));
+        assert_eq!(ws.next_result_number(), 2);
+        // The recipe holds result_1..result_3; the working set only
+        // result_1 -- the floor carries the recorded maximum.
+        ws.raise_result_floor(4);
+        assert_eq!(
+            ws.next_result_number(),
+            4,
+            "the floor outranks the working-set scan"
+        );
+        // Monotone: a later lower seed never lowers the waterline.
+        ws.raise_result_floor(2);
+        assert_eq!(ws.next_result_number(), 4, "the floor never lowers");
     }
 
     #[test]

@@ -43,7 +43,8 @@ use crate::model::{
 };
 use crate::persistence::read_duck;
 use crate::persistence::recipe::{
-    Recipe, RecipeEntry, RecipeOutcome, RecipeTraceEntry, RecipeTraceRound, RuntimeKind, SourceRef,
+    Recipe, RecipeEntry, RecipeOutcome, RecipeTraceEntry, RecipeTraceRound, RecipeTurn,
+    RuntimeKind, SourceRef,
 };
 use crate::persistence::registry::{canonicalize_duck, release, try_acquire};
 use crate::provider::Provider;
@@ -379,17 +380,21 @@ impl<'a> Resumer<'a> {
     }
 
     /// Resume phase 4 (ADR-0028/0039/0040, issue #49 AC6): rebuild the
-    /// conversation timeline from the recipe, truncated at the replay
-    /// breakpoint if any. The Materialized turns' descriptors come from the
-    /// working set (just re-built by replay, display names restored); the break
-    /// turn (if any) renders as `Failed` with the replay's reason (ADR-0028
-    /// outcome C); entries strictly after the break turn are dropped (the
-    /// conversation stops at the breakpoint). viz is `None` (ADR-0036 not
-    /// persisted), so a reopened chart renders as a table (ADR-0033).
+    /// conversation timeline from the recipe. The Materialized turns'
+    /// descriptors come from the working set (just re-built by replay,
+    /// display names restored); on a replay break the break turn renders as
+    /// `Failed` with the replay's reason (ADR-0028 outcome C) and every turn
+    /// strictly after it renders as `Failed` with an explicit not-attempted
+    /// detail -- the conversation degrades from the breakpoint on, and no
+    /// recorded entry is dropped (ADR-0035 Decision 2: display degrades from
+    /// the breakpoint on, the persisted history does not). viz is `None`
+    /// (ADR-0036 not persisted), so a reopened chart renders as a table
+    /// (ADR-0033).
     ///
     /// Returns the rebuilt timeline; `open_duck` assigns it to `session.timeline`.
-    /// The rebuild is a 1:1 map over `recipe.history[..end]` (never filtered),
-    /// so the returned length IS `end`. Each turn entry carries its persisted
+    /// The rebuild is a 1:1 map over the full `recipe.history` (never
+    /// filtered), so the returned length IS `recipe.history.len()`. Each turn
+    /// entry carries its persisted
     /// audit (trace + provenance) harvested verbatim from the recipe, so
     /// alignment is structural (issue #325). Registers stale placeholders into
     /// `working_set` as a pre-pass (ADR-0041 dead turns stay visible but carry
@@ -399,9 +404,10 @@ impl<'a> Resumer<'a> {
         working_set: &mut WorkingSet,
         break_at: Option<&ReplayBreak>,
     ) -> Result<Vec<TimelineEntry>, ResumeError> {
-        // Locate the break turn's history index (if any) to truncate there.
-        // The productive_chain is the Materialized turns in timeline order, so
-        // turn K in that order maps to one history entry by reference name.
+        // Locate the break turn's history index (if any) to degrade from
+        // there. The productive_chain is the Materialized turns in timeline
+        // order, so turn K in that order maps to one history entry by
+        // reference name.
         let break_idx = break_at.and_then(|brk| {
             self.recipe.history.iter().position(|entry| match entry {
                 RecipeEntry::Turn(t) => matches!(
@@ -442,14 +448,25 @@ impl<'a> Resumer<'a> {
         // Stale turns are absent from the productive chain (ADR-0041), so the
         // rebuild closure below must find their descriptors already in the
         // working set -- register the placeholders first (ADR-0013: stale is
-        // not silently discarded).
+        // not silently discarded). `end` bounds the pre-pass, not the map:
+        // turns from the break on render degraded-Failed and never look up
+        // descriptors, so their promotions register nothing here.
         register_stale_placeholders(working_set, self.recipe, end);
 
-        let timeline = self.recipe.history[..end]
+        let timeline = self
+            .recipe
+            .history
             .iter()
-            .map(|entry| match entry {
+            .enumerate()
+            .map(|(idx, entry)| match entry {
                 RecipeEntry::Turn(turn) => {
-                    let outcome = match &turn.outcome {
+                    // (outcome, preserved): a replay-degraded turn renders
+                    // Failed but ALSO carries its original Materialized entry
+                    // forward -- ADR-0035 Decision 2 calibration: display
+                    // degrades, the persisted history does not.
+                    let (outcome, preserved): (TurnOutcome, Option<Box<RecipeTurn>>) = match &turn
+                        .outcome
+                    {
                         RecipeOutcome::Materialized {
                             promotions,
                             body,
@@ -467,7 +484,27 @@ impl<'a> Resumer<'a> {
                                     .any(|p| p.reference_name == b.reference_name)
                             });
                             if let Some(b) = broke_here {
-                                TurnOutcome::Failed(b.failure.clone())
+                                (
+                                    TurnOutcome::Failed(b.failure.clone()),
+                                    Some(Box::new(turn.clone())),
+                                )
+                            } else if break_idx.is_some_and(|b| idx > b) {
+                                // ADR-0035 Decision 2: a turn strictly after
+                                // the break was never attempted by this
+                                // replay. Degrade its display to Failed with
+                                // an explicit not-attempted detail and carry
+                                // the original entry forward -- the recorded
+                                // tail is never dropped, so the next resume
+                                // replays it once the break cause resolves.
+                                (
+                                    TurnOutcome::Failed(TurnFailure::Execute {
+                                        detail: format!(
+                                            "重放在更早一步（{}）断开，本轮未尝试执行",
+                                            break_at.map_or("", |b| &b.reference_name)
+                                        ),
+                                    }),
+                                    Some(Box::new(turn.clone())),
+                                )
                             } else {
                                 // Live turn: every promotion was re-materialized
                                 // by replay (or, for a stale promotion, a
@@ -495,28 +532,36 @@ impl<'a> Resumer<'a> {
                                         sql: p.sql.clone(),
                                     });
                                 }
-                                TurnOutcome::Materialized {
-                                    promotions: rebuilt,
-                                    viz: None,
-                                    // #847: the turn's terminal text restores
-                                    // verbatim -- replay is LLM-free, so the
-                                    // prose cannot be re-derived, only carried.
-                                    body: body.clone(),
-                                    assumption: assumption.clone(),
-                                }
+                                (
+                                    TurnOutcome::Materialized {
+                                        promotions: rebuilt,
+                                        viz: None,
+                                        // #847: the turn's terminal text restores
+                                        // verbatim -- replay is LLM-free, so the
+                                        // prose cannot be re-derived, only carried.
+                                        body: body.clone(),
+                                        assumption: assumption.clone(),
+                                    },
+                                    None,
+                                )
                             }
                         }
                         RecipeOutcome::Textual {
                             text_kind,
                             body,
                             assumption,
-                        } => TurnOutcome::Textual {
-                            text_kind: *text_kind,
-                            body: body.clone(),
-                            assumption: assumption.clone(),
-                        },
-                        RecipeOutcome::Failed(failure) => TurnOutcome::Failed(failure.clone()),
-                        RecipeOutcome::Cancelled(reason) => TurnOutcome::Cancelled(*reason),
+                        } => (
+                            TurnOutcome::Textual {
+                                text_kind: *text_kind,
+                                body: body.clone(),
+                                assumption: assumption.clone(),
+                            },
+                            None,
+                        ),
+                        RecipeOutcome::Failed(failure) => {
+                            (TurnOutcome::Failed(failure.clone()), None)
+                        }
+                        RecipeOutcome::Cancelled(reason) => (TurnOutcome::Cancelled(*reason), None),
                     };
                     Ok(TimelineEntry::Turn {
                         record: TurnRecord {
@@ -579,6 +624,7 @@ impl<'a> Resumer<'a> {
                         // are read back as-is so the next persist re-writes the
                         // same values (no re-synthesis).
                         audit: TurnAudit::from_recipe_turn(turn),
+                        preserved,
                     })
                 }
                 RecipeEntry::Source(ev) => Ok(TimelineEntry::Source(ev.clone())),
@@ -681,6 +727,30 @@ fn register_stale_placeholders(working_set: &mut WorkingSet, recipe: &Recipe, en
             working_set.register_result(placeholder);
         }
     }
+}
+
+/// The highest result_N ever recorded in the recipe's history, plus one:
+/// every promotion a Materialized turn recorded counts -- live, stale, or
+/// one this resume degraded (its recorded entry rides the timeline
+/// verbatim). Feeds [`crate::workingset::WorkingSet::raise_result_floor`]
+/// so minting never reuses a recorded number (ADR-0022).
+fn recorded_result_floor(recipe: &Recipe) -> u64 {
+    recipe
+        .history
+        .iter()
+        .filter_map(|entry| match entry {
+            RecipeEntry::Turn(turn) => match &turn.outcome {
+                RecipeOutcome::Materialized { promotions, .. } => promotions
+                    .iter()
+                    .filter_map(|p| p.reference_name.strip_prefix("result_"))
+                    .filter_map(|s| s.parse::<u64>().ok())
+                    .max(),
+                _ => None,
+            },
+            _ => None,
+        })
+        .max()
+        .map_or(1, |n| n + 1)
 }
 
 // --- Session resume entry point (ADR-0053 Decision 3) -----------------
@@ -809,6 +879,10 @@ impl super::Session {
         // the Resumer (and its disjoint-field borrows of session.cancel /
         // session.materializer) drops before phase 5's &mut session persist.
         {
+            // Computed before the Resumer's disjoint-field borrows of session
+            // begin -- duck_path() takes &session, which the mutable
+            // materializer borrow inside Resumer::new excludes.
+            let assets_dir = super::sql_assets::assets_dir(session.duck_path());
             let mut resumer = Resumer::new(&session.cancel, &mut *session.materializer, &recipe);
             // Phase 2: resolve the active-SOURCE pointer. The happy path
             // restores recipe.active; if the active was rebuilt + others
@@ -825,15 +899,18 @@ impl super::Session {
                     result_row_cap: session.result_row_cap,
                     result_count_cap: session.result_count_cap,
                     temp_path: &session.temp_path,
+                    assets_dir,
                     tool_output_refs: &mut session.tool_output_refs,
                 };
                 resumer.replay(&mut deps, &mut on_progress)?
             };
-            // Phase 4: rebuild the conversation timeline, truncated at the
-            // replay breakpoint (if any). Post-break entries are dropped
-            // ("对话停在断点"). rebuild_timeline returns the unified timeline
-            // (ThreadEntry + audit paired per turn, issue #325) so alignment is
-            // structural and no separate audit harvest is needed.
+            // Phase 4: rebuild the conversation timeline. On a replay break
+            // the conversation degrades from the breakpoint on (break turn
+            // Failed with the break's reason, later turns Failed with a
+            // not-attempted detail) and no recorded entry is dropped.
+            // rebuild_timeline returns the unified timeline (ThreadEntry +
+            // audit paired per turn, issue #325) so alignment is structural
+            // and no separate audit harvest is needed.
             session.timeline =
                 resumer.rebuild_timeline(&mut session.working_set, replay_break.as_ref())?;
             // ADR-0119 (issue #983): the discovery snapshot restores from
@@ -848,6 +925,16 @@ impl super::Session {
             // is the identity of the whole timeline.
             session.invoked_skills = recipe.invoked_skills();
         }
+
+        // ADR-0022 never-reuse waterline (issue #1328): seed the minting
+        // floor from every result_N the recipe has ever recorded. A turn
+        // degraded by this resume kept its recorded result in the recipe but
+        // contributed nothing to the working set, so without the floor the
+        // next live mint would reuse its number and collide with the
+        // original when the recovery replay reaches both.
+        session
+            .working_set
+            .raise_result_floor(recorded_result_floor(&recipe));
 
         // ADR-0095 Decision 6 (+ ADR-0102 Decision 1's `last_runtime`):
         // restore the session-level runtime facts from the recipe header.
@@ -1870,10 +1957,13 @@ mod tests {
     }
 
     #[test]
-    fn rebuild_timeline_truncates_and_marks_break_turn_failed() {
-        // A replay break at result_2 -> timeline truncates at result_2; the
-        // break turn renders as Failed (ADR-0028 outcome C); entries strictly
-        // after the break are dropped ("对话停在断点").
+    fn rebuild_timeline_degrades_from_the_break_and_drops_nothing() {
+        // A replay break at result_2 -> the break turn renders Failed with
+        // the break's reason (ADR-0028 outcome C) and every turn strictly
+        // after it renders Failed with an explicit not-attempted detail;
+        // the full history maps 1:1 and nothing is dropped (ADR-0035
+        // Decision 2: display degrades from the breakpoint on, the
+        // persisted history does not).
         let recipe = recipe_with(
             vec![
                 materialized_turn("result_1", "SELECT 1"),
@@ -1897,8 +1987,8 @@ mod tests {
             },
         };
         let timeline = resumer.rebuild_timeline(&mut ws, Some(&brk)).unwrap();
-        // Truncated at result_2: [result_1, result_2] (result_3 dropped).
-        assert_eq!(timeline.len(), 2);
+        // Full map: all three turns survive the rebuild.
+        assert_eq!(timeline.len(), 3);
         let TimelineEntry::Turn { record: t1, .. } = &timeline[0] else {
             panic!("expected Turn, got {:?}", timeline[0])
         };
@@ -1911,8 +2001,123 @@ mod tests {
             panic!("expected Turn, got {:?}", timeline[1])
         };
         match &t2.outcome {
-            TurnOutcome::Failed(TurnFailure::Execute { .. }) => {}
+            TurnOutcome::Failed(TurnFailure::Execute { detail }) => {
+                assert_eq!(detail, "resource cap");
+            }
             other => panic!("expected Execute Failed at break turn, got {other:?}"),
+        }
+        let TimelineEntry::Turn {
+            record: t3,
+            preserved,
+            ..
+        } = &timeline[2]
+        else {
+            panic!("expected Turn, got {:?}", timeline[2])
+        };
+        match &t3.outcome {
+            // The not-attempted detail names the break's reference so the
+            // degrade is diagnosable from the thread alone -- and never
+            // carries the break turn's own failure text.
+            TurnOutcome::Failed(TurnFailure::Execute { detail }) => {
+                assert_ne!(detail, "resource cap", "not the break turn's detail");
+                assert!(
+                    detail.contains("result_2"),
+                    "detail names the break: {detail}"
+                );
+            }
+            other => panic!("expected not-attempted Failed after the break, got {other:?}"),
+        }
+        assert!(
+            preserved.is_some(),
+            "the post-break turn carries its original entry forward"
+        );
+    }
+
+    #[test]
+    fn recorded_result_floor_harvests_every_recorded_promotion() {
+        // The waterline harvest feeds WorkingSet::raise_result_floor: every
+        // result_N the recipe ever recorded counts -- live, stale, or
+        // never-attempted alike -- because a replay-degraded turn's recorded
+        // number is exactly the one absent from the working set (ADR-0022,
+        // issue #1328). Gaps count: the harvest is a max, not a count.
+        let recipe = recipe_with(
+            vec![
+                materialized_turn("result_1", "SELECT 1"),
+                materialized_turn("result_3", "SELECT 3"),
+            ],
+            None,
+        );
+        assert_eq!(
+            recorded_result_floor(&recipe),
+            4,
+            "one past the highest recorded name"
+        );
+        assert_eq!(
+            recorded_result_floor(&recipe_with(Vec::new(), None)),
+            1,
+            "an empty history floors at 1"
+        );
+    }
+
+    #[test]
+    fn rebuild_timeline_carries_the_break_turns_original_entry() {
+        // Replay preservation: the degraded (Failed) break turn ALSO carries
+        // its original Materialized recipe entry on the timeline entry, so
+        // the next persist writes the recorded history back verbatim --
+        // display degrades, the persisted fact does not. The pre-break turn
+        // and every non-degraded outcome carry nothing.
+        let recipe = recipe_with(
+            vec![
+                materialized_turn("result_1", "SELECT 1"),
+                materialized_turn("result_2", "SELECT bad"),
+            ],
+            Some("people"),
+        );
+        let mut ws = WorkingSet::default();
+        ws.register_result(result_descriptor("result_1"));
+        let cancel = Arc::new(CancelToken::new());
+        let mut fake = FakeMaterializer::new(Vec::new());
+        let resumer = Resumer::new(&cancel, &mut fake, &recipe);
+        let brk = ReplayBreak {
+            reference_name: "result_2".into(),
+            failure: TurnFailure::Execute {
+                detail: "temp ref dead".into(),
+            },
+        };
+        let timeline = resumer.rebuild_timeline(&mut ws, Some(&brk)).unwrap();
+
+        let TimelineEntry::Turn { preserved, .. } = &timeline[0] else {
+            panic!("expected Turn, got {:?}", timeline[0])
+        };
+        assert!(
+            preserved.is_none(),
+            "a replayed-OK turn carries no preserved entry"
+        );
+
+        let TimelineEntry::Turn {
+            record, preserved, ..
+        } = &timeline[1]
+        else {
+            panic!("expected Turn, got {:?}", timeline[1])
+        };
+        assert!(
+            matches!(record.outcome, TurnOutcome::Failed(_)),
+            "the break turn still renders Failed"
+        );
+        let original = preserved
+            .as_ref()
+            .expect("the break turn carries its original Materialized entry");
+        assert!(matches!(
+            original.outcome,
+            RecipeOutcome::Materialized { .. }
+        ));
+        assert_eq!(original.question, "q_result_2");
+        match &original.outcome {
+            RecipeOutcome::Materialized { promotions, .. } => {
+                assert_eq!(promotions[0].sql, "SELECT bad");
+                assert_eq!(promotions[0].reference_name, "result_2");
+            }
+            _ => unreachable!("matched above"),
         }
     }
 
