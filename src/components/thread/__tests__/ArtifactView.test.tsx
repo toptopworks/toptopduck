@@ -3,8 +3,9 @@
 // load-bearing pins are the two iframe trust postures -- html sandboxed to
 // exactly "allow-scripts", pdf UNSANDBOXED (the built-in viewer is a document
 // renderer, not agent HTML) -- and the header chrome that survives every
-// degrade. The IPC reads (artifactExists / readArtifactText) and the OS
-// opener are mocked; convertFileSrc is a pure transform and stays real.
+// degrade. The IPC reads (artifactExists / readArtifactText), the OS
+// opener, and vega-embed are mocked; convertFileSrc gets a pure jsdom
+// stand-in so the src assertion stays observable.
 
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
@@ -19,14 +20,9 @@ import { ArtifactView } from "../ArtifactView";
 vi.mock("../../../api", () => ({
   artifactExists: vi.fn(),
   readArtifactText: vi.fn(),
-  copyArtifactFile: vi.fn(),
 }));
 vi.mock("@tauri-apps/plugin-opener", () => ({
   openPath: vi.fn(),
-  revealItemInDir: vi.fn(),
-}));
-vi.mock("@tauri-apps/plugin-dialog", () => ({
-  save: vi.fn(),
 }));
 // convertFileSrc reads window.__TAURI_INTERNALS__ (absent in jsdom); a pure
 // stand-in keeps the src assertion observable.

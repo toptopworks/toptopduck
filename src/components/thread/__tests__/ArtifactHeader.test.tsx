@@ -81,8 +81,8 @@ describe("ArtifactHeader", () => {
       vi.mocked(openPath).mockRejectedValue(new Error("no association"));
       renderHeader("C:/sessions/s1/artifacts/report.pdf", true);
       fireEvent.click(await screen.findByRole("button", { name: /外部打开|externally/ }));
-      // Scoped to the header, the same within() shape the full-view suite
-      // pins; no other status region exists here (the header owns no frame).
+      // Scoped to the header; no other status region exists here (the
+      // header owns no frame).
       const header = screen.getByTestId("artifact-header");
       expect(await within(header).findByRole("status")).toHaveTextContent(
         /无法在外部打开|Could not open/,
@@ -205,6 +205,24 @@ describe("ArtifactHeader", () => {
       // Refresh leads with the same slot-clearing as every other action; no
       // other status region exists in this suite, so the note vanishing
       // from the header is the whole signal.
+      await waitFor(() =>
+        expect(within(header).queryByRole("status")).not.toBeInTheDocument(),
+      );
+    });
+
+    it("clears a failure note when a save-as succeeds", async () => {
+      vi.mocked(openPath).mockRejectedValue(new Error("no association"));
+      vi.mocked(saveDialog).mockResolvedValue("D:/copies/report.pdf");
+      vi.mocked(copyArtifactFile).mockResolvedValue(undefined);
+      renderHeader("C:/sessions/s1/artifacts/report.pdf", true);
+      fireEvent.click(await screen.findByRole("button", { name: /外部打开|externally/ }));
+      const header = screen.getByTestId("artifact-header");
+      expect(await within(header).findByRole("status")).toBeInTheDocument();
+      await openMoreMenu();
+      activateItem(screen.getByRole("menuitem", { name: "另存为…" }));
+      await waitFor(() => expect(copyArtifactFile).toHaveBeenCalledTimes(1));
+      // Save-as leads with the same slot-clearing as every other action;
+      // a successful copy retires the live note.
       await waitFor(() =>
         expect(within(header).queryByRole("status")).not.toBeInTheDocument(),
       );

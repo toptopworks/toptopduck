@@ -1,8 +1,9 @@
 // The workspace's artifact stage (ADR-0124 Decision 4, issue #1088): the
 // file branch of the single-stage workspace, two-part under a persistent
-// file header (issue #1199) -- the header (name + external-open action) is
-// the stage's chrome and survives every degrade; the body renders per the
-// matrix. The matrix keys off the derived ArtifactRenderKind -- HTML rides
+// file header (issue #1199) -- the header (file name, external-open
+// action, more menu, failure slot) is the stage's chrome and survives
+// every degrade; the body renders per the matrix. The matrix keys off
+// the derived ArtifactRenderKind -- HTML rides
 // the sandboxed asset-protocol iframe, pdf rides the same protocol
 // UNSANDBOXED (the WebView's built-in viewer is a document renderer, not
 // executable agent HTML), md rides the IPC text read + the shared prose
@@ -64,7 +65,7 @@ export function ArtifactView({
     // stale-text flash). The exists entry rides the same await: staleTime 0
     // alone never re-fires while the stage stays mounted (focus refetch is
     // off app-wide), yet refresh is the affordance that means re-check
-    // disk, and the header's observer is always active so the fresh gate
+    // disk, and the stage's observer is always active so the fresh gate
     // value lands before the re-key. The iframe branches need nothing (no
     // query; the re-key remount re-reads from disk).
     await queryClient.invalidateQueries({ queryKey: artifactKeys.text(artifact.path) });
