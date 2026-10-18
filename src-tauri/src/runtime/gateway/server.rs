@@ -1883,18 +1883,15 @@ mod tests {
              Content-Length: {}\r\n\r\n",
             body.len()
         );
+        let split = body.len() / 2;
         stream.write_all(head.as_bytes()).unwrap();
-        stream
-            .write_all(&body.as_bytes()[..body.len() / 2])
-            .unwrap();
+        stream.write_all(&body.as_bytes()[..split]).unwrap();
         stream.flush().unwrap();
         // Let the fixture accept and park inside the body read with only
         // half of it on the wire -- a blocking read waits for the rest
         // instead of treating the gap as a short body.
         thread::sleep(Duration::from_millis(150));
-        stream
-            .write_all(&body.as_bytes()[body.len() / 2..])
-            .unwrap();
+        stream.write_all(&body.as_bytes()[split..]).unwrap();
         stream.flush().unwrap();
         let mut response = String::new();
         stream.read_to_string(&mut response).unwrap();
