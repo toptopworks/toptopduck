@@ -3474,7 +3474,6 @@ mod tests {
     #[test]
     fn temp_sql_reference_survives_close_and_reopen() {
         use crate::model::ThreadEntry;
-        use crate::provider::UnwiredProvider;
 
         let dir = tempfile::tempdir().expect("session dir");
         let duck = dir.path().join("session.duck");
@@ -3513,6 +3512,14 @@ mod tests {
             "the live turn materialized, got {outcome:?}"
         );
 
+        // ADR-0089 Decision 3: the assets copy is a dead file -- it never
+        // registers as a dataset, so it is absent from the working set (and
+        // with it, from the dataset UI and the fingerprint surface).
+        assert!(
+            session.get("kline").is_none(),
+            "the materialized copy is not a dataset"
+        );
+
         // The recorded SQL now points at the persistent copy, and the copy
         // exists under the session dir's assets/ subtree.
         let assets_csv = dir.path().join("assets").join("kline.csv");
@@ -3539,13 +3546,27 @@ mod tests {
 
         drop(session);
 
-        // Reopen LLM-free: the replay chain re-executes the stored SQL
-        // against the assets copy -- green, result_1 back in the working set,
-        // no Failed turn in the rebuilt timeline.
-        let resumed = Session::open_duck(
+        // Reopen LLM-free for the replay, then ask ONE more scripted turn
+        // whose SQL references the assets copy directly: the replay chain
+        // re-executes the stored SQL against the persistent copy (green,
+        // result_1 back in the working set), and the live follow-up through
+        // the wired TurnDeps.assets_dir is allowed by the read gate -- the
+        // live half of the dual-path claim (fs_acl.rs: the same preflight a
+        // replayed turn's SQL goes through).
+        let followup_sql = format!(
+            "SELECT COUNT(*) AS n FROM read_csv_auto('{}')",
+            assets_csv.to_string_lossy()
+        );
+        let mut resumed = Session::open_duck(
             &duck,
             std::sync::Arc::new(crate::cancel::CancelToken::new()),
-            Box::new(UnwiredProvider),
+            Box::new(FakeProvider::new().scripted_tool_turn_seq(
+                "再查",
+                vec![
+                    Ok(materialize_call(&followup_sql)),
+                    Ok(ToolTurnReply::Text("done".into())),
+                ],
+            )),
             Default::default(),
             |_| {},
             |_| panic!("no source issues expected"),
@@ -3556,6 +3577,15 @@ mod tests {
             resumed.get("result_1").is_some(),
             "replay re-materialized result_1 from the assets copy"
         );
+        let outcome = resumed.ask("再查");
+        assert!(
+            matches!(outcome, TurnOutcome::Materialized { .. }),
+            "the live follow-up referencing the assets copy materialized, got {outcome:?}"
+        );
+        assert!(
+            resumed.get("result_2").is_some(),
+            "the follow-up's result registered from the assets-path read"
+        );
         let any_failed = resumed.conversation().iter().any(|e| {
             matches!(
                 e,
@@ -3563,5 +3593,148 @@ mod tests {
             )
         });
         assert!(!any_failed, "no Failed turn after replay");
+    }
+
+    /// A persistent break cause degrades the conversation from the
+    /// breakpoint on without ever dropping a recorded turn: repeated
+    /// close/reopen cycles keep every turn the intervening sessions added
+    /// (ADR-0035 Decision 2 -- display degrades from the breakpoint on, the
+    /// persisted history does not), the result_N minting waterline never
+    /// reuses a recorded number (ADR-0022), and restoring the dead reference
+    /// returns the whole conversation to Materialized on the next resume.
+    #[test]
+    fn degraded_tail_survives_repeated_resumes_and_recovers() {
+        use crate::model::ThreadEntry;
+        use crate::provider::UnwiredProvider;
+
+        let dir = tempfile::tempdir().expect("session dir");
+        let duck = dir.path().join("session.duck");
+        let assets = |name: &str| dir.path().join("assets").join(name);
+
+        let mut session = Session::new().expect("session");
+        session.bind_duck(duck.clone(), "t".into()).expect("bind");
+        let csv = |name: &str, body: &str| {
+            let p = session.temp_path.join(name);
+            std::fs::write(&p, format!("v\n{body}\n")).expect("scratch csv");
+            p
+        };
+        let read_sql = |p: &std::path::Path| {
+            format!(
+                "SELECT COUNT(*) AS n FROM read_csv_auto('{}')",
+                p.to_string_lossy()
+            )
+        };
+
+        // Three recorded turns: result_1 and result_2 both reference temp
+        // scratch files (each settles into assets/), result_3 is a plain
+        // table read with no read_* path.
+        let k1 = csv("kline.csv", "1");
+        let k2 = csv("kline2.csv", "2");
+        session.provider = std::sync::Arc::new(FakeProvider::new().scripted_tool_turn_seq(
+            "查",
+            vec![
+                Ok(materialize_call(&read_sql(&k1))),
+                Ok(ToolTurnReply::Text("done".into())),
+                Ok(materialize_call(&read_sql(&k2))),
+                Ok(ToolTurnReply::Text("done".into())),
+                Ok(materialize_call("SELECT COUNT(*) AS n FROM result_1")),
+                Ok(ToolTurnReply::Text("done".into())),
+            ],
+        ));
+        for _ in 0..3 {
+            assert!(
+                matches!(session.ask("查"), TurnOutcome::Materialized { .. }),
+                "all three live turns materialize"
+            );
+        }
+        drop(session);
+
+        // The persistent break cause: turn 2's materialized copy is gone, so
+        // every replay breaks at result_2 until the file is restored.
+        std::fs::remove_file(assets("kline2.csv")).expect("break cause");
+
+        // Reopen 1: replay breaks at result_2 -> turns 2 and 3 degrade
+        // (break Failed + not-attempted Failed), nothing drops. Then one new
+        // turn -- the mint must take result_4 (the recorded result_2 /
+        // result_3 are absent from the working set; only the ADR-0022
+        // waterline keeps their numbers off the table).
+        let mut s1 = Session::open_duck(
+            &duck,
+            std::sync::Arc::new(crate::cancel::CancelToken::new()),
+            Box::new(FakeProvider::new().scripted_tool_turn_seq(
+                "再查",
+                vec![
+                    Ok(materialize_call("SELECT COUNT(*) AS n FROM result_1")),
+                    Ok(ToolTurnReply::Text("done".into())),
+                ],
+            )),
+            Default::default(),
+            |_| {},
+            |_| panic!("no source issues expected"),
+            |_| panic!("no active-abandoned callback expected"),
+        )
+        .expect("resume 1");
+        assert_eq!(s1.conversation().len(), 3, "no recorded turn dropped");
+        assert!(s1.get("result_1").is_some());
+        assert!(
+            s1.get("result_2").is_none() && s1.get("result_3").is_none(),
+            "the degraded turns contribute no working-set results"
+        );
+        match s1.ask("再查") {
+            TurnOutcome::Materialized { promotions, .. } => {
+                assert_eq!(
+                    promotions.last().map(|p| p.dataset.reference_name.as_str()),
+                    Some("result_4"),
+                    "the mint takes the waterline number, not the absent result_2"
+                );
+            }
+            other => panic!("the post-degrade ask materializes, got {other:?}"),
+        }
+        drop(s1);
+
+        // Reopen 2 with the cause STILL present: the same break recurs and
+        // the turn added between the resumes must survive it -- the recorded
+        // history is never re-truncated (the recurring-shredder regression).
+        let s2 = Session::open_duck(
+            &duck,
+            std::sync::Arc::new(crate::cancel::CancelToken::new()),
+            Box::new(UnwiredProvider),
+            Default::default(),
+            |_| {},
+            |_| panic!("no source issues expected"),
+            |_| panic!("no active-abandoned callback expected"),
+        )
+        .expect("resume 2");
+        assert_eq!(
+            s2.conversation().len(),
+            4,
+            "the turn added during the degraded window survives the recurring break"
+        );
+        assert!(s2.get("result_1").is_some());
+        drop(s2);
+
+        // Restore the dead reference: the next resume replays the whole
+        // chain green and the entire conversation returns to Materialized.
+        std::fs::write(assets("kline2.csv"), "v\n2\n").expect("restore");
+        let s3 = Session::open_duck(
+            &duck,
+            std::sync::Arc::new(crate::cancel::CancelToken::new()),
+            Box::new(UnwiredProvider),
+            Default::default(),
+            |_| {},
+            |_| panic!("no source issues expected"),
+            |_| panic!("no active-abandoned callback expected"),
+        )
+        .expect("resume 3");
+        let any_failed = s3.conversation().iter().any(|e| {
+            matches!(
+                e,
+                ThreadEntry::Turn(t) if matches!(t.outcome, TurnOutcome::Failed(_))
+            )
+        });
+        assert!(!any_failed, "the recovered conversation has no Failed turn");
+        for name in ["result_1", "result_2", "result_3", "result_4"] {
+            assert!(s3.get(name).is_some(), "{name} re-materialized on recovery");
+        }
     }
 }

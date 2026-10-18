@@ -61,6 +61,13 @@ pub(super) fn materialize_sql_references(
     let mut staged: Vec<(PathBuf, PathBuf)> = Vec::new();
     for promotion in promotions.iter_mut() {
         let Ok(analysis) = extract_read_paths(&promotion.sql) else {
+            // Defensive: live SQL passed the preflight's analyzer, so an
+            // extraction failure here should be unreachable -- but a skip
+            // with no trace leaves the replay break unexplainable later.
+            log::debug!(
+                target: "toptopduck::session",
+                "sql-reference settle skip: read-path extraction failed for a recorded promotion"
+            );
             continue;
         };
         if analysis.non_literal_read_found {
@@ -76,7 +83,17 @@ pub(super) fn materialize_sql_references(
         originals.sort_by_key(|p| std::cmp::Reverse(p.len()));
         for original in originals {
             let Some(canonical) = std::fs::canonicalize(&original).ok() else {
-                continue; // a missing reference: dead either way, not ours to fix
+                // Reachable: the referenced file vanished between the live
+                // preflight and settle. Warn now -- the failure only resurfaces
+                // as an unexplained replay break on the next resume (the
+                // artifact materialization precedent logs every best-effort
+                // skip).
+                log::warn!(
+                    target: "toptopduck::session",
+                    "sql-reference settle skip: referenced path no longer resolves: {}",
+                    original
+                );
+                continue;
             };
             if !canonical.starts_with(&temp_root) || !canonical.is_file() {
                 continue;
@@ -110,7 +127,18 @@ fn materialize_one(src: &Path, assets_dir: &Path) -> Option<PathBuf> {
         );
         return None;
     }
-    let file_name = src.file_name()?.to_str()?.to_string();
+    let Some(file_name) = src.file_name().and_then(|n| n.to_str()) else {
+        // The doc contract says every None exit is logged; a canonicalized
+        // absolute file path always carries a file name, so this exit is the
+        // non-UTF-8 spelling alone.
+        log::warn!(
+            target: "toptopduck::session",
+            "sql-reference materialization skipped: {}: file name missing or not valid UTF-8",
+            src.display()
+        );
+        return None;
+    };
+    let file_name = file_name.to_string();
     let stem = Path::new(&file_name)
         .file_stem()
         .and_then(|s| s.to_str())

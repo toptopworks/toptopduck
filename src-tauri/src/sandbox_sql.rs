@@ -62,8 +62,9 @@ pub(crate) enum PreflightError {
     /// agent-facing wording.
     StaleReference(String),
     /// The SQL embedded a `read_*` path outside the session source set +
-    /// working temp dir (ADR-0080). Carries the structured, path-naming
-    /// message the agent self-corrects from (ADR-0077).
+    /// working temp dir + read-only assets subtree (ADR-0080/0089). Carries
+    /// the structured, path-naming message the agent self-corrects from
+    /// (ADR-0077).
     FsAcl(String),
     /// The SQL embedded a `read_*` call whose path is not a literal string
     /// (ADR-0088 Decision 3). FsAcl cannot validate a runtime-computed path,

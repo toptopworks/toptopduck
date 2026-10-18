@@ -1005,6 +1005,89 @@ mod tests {
     }
 
     #[test]
+    fn build_recipe_writes_the_degraded_tail_back_verbatim() {
+        // ADR-0035 Decision 2 (recurrence calibration): EVERY turn degraded
+        // by the replay -- the break turn and each never-attempted turn
+        // after it -- carries its original entry and projects back
+        // verbatim. The recorded tail is never dropped by a persist, so a
+        // persistent break cause cannot shred the turns each intervening
+        // session added.
+        use crate::persistence::recipe::{RecipeOutcome, RecipePromotion, RecipeTurn};
+
+        let original_turn = |q: &str, name: &str| {
+            RecipeTurn::without_audit(
+                q.to_string(),
+                RecipeOutcome::Materialized {
+                    promotions: vec![RecipePromotion {
+                        reference_name: name.into(),
+                        display_name: name.into(),
+                        sql: format!("SELECT 1 AS {name}"),
+                        stale: None,
+                    }],
+                    body: None,
+                    assumption: None,
+                },
+            )
+        };
+        let degraded = |q: &str, name: &str, detail: &str| TimelineEntry::Turn {
+            record: TurnRecord {
+                question: q.into(),
+                outcome: TurnOutcome::Failed(crate::model::TurnFailure::Execute {
+                    detail: detail.into(),
+                }),
+                trace: Vec::new(),
+                provenance: Default::default(),
+                asked_at: None,
+                settled_at: None,
+                invocations: Vec::new(),
+                artifacts: Vec::new(),
+                usage: None,
+                occupancy: None,
+            },
+            audit: TurnAudit::test_new(Vec::new(), Default::default()),
+            preserved: Some(Box::new(original_turn(q, name))),
+        };
+
+        let timeline = vec![
+            degraded("q_break", "result_2", "replay broke at result_2"),
+            degraded(
+                "q_tail",
+                "result_3",
+                "not attempted: replay stopped earlier",
+            ),
+        ];
+
+        let persister = RecipePersister::new();
+        let recipe = persister.build_recipe(
+            &WorkingSet::default(),
+            &timeline,
+            &crate::session::SessionRuntimeFacts::default(),
+        );
+        assert_eq!(
+            recipe.history.len(),
+            2,
+            "the degraded tail is never dropped"
+        );
+        for (i, (q, name)) in [("q_break", "result_2"), ("q_tail", "result_3")]
+            .iter()
+            .enumerate()
+        {
+            match &recipe.history[i] {
+                RecipeEntry::Turn(t) => {
+                    assert_eq!(&t.question, q);
+                    match &t.outcome {
+                        RecipeOutcome::Materialized { promotions, .. } => {
+                            assert_eq!(&promotions[0].reference_name, name);
+                        }
+                        other => panic!("expected the recorded Materialized, got {other:?}"),
+                    }
+                }
+                other => panic!("expected a Turn entry, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
     fn build_recipe_drops_materialized_turn_with_no_surviving_promotions() {
         // A Materialized turn whose result_1 is NOT in the working set (GC'd)
         // -> the turn is dropped (ADR-0041 GC exception).
