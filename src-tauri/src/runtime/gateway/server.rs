@@ -1660,7 +1660,15 @@ mod tests {
             let handle = thread::spawn(move || {
                 while !flag.load(Ordering::SeqCst) {
                     match listener.accept() {
-                        Ok((stream, _)) => serve_one_rpc(stream),
+                        Ok((stream, _)) => {
+                            // The listener polls nonblocking, and a Windows
+                            // accept inherits that mode: reset the stream so
+                            // serve_one_rpc's blocking reads WAIT for the
+                            // request instead of misreading a WouldBlock
+                            // mid-body as a short read (issue #1332).
+                            let _ = stream.set_nonblocking(false);
+                            serve_one_rpc(stream)
+                        }
                         Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
                             thread::sleep(Duration::from_millis(10));
                         }
@@ -1751,6 +1759,27 @@ mod tests {
         let _ = stream.write_all(header.as_bytes());
         let _ = stream.write_all(body.as_bytes());
         let _ = stream.flush();
+        // Graceful close (issue #1332): `write_all` returning only means the
+        // kernel took the bytes -- on loopback much of the body can still sit
+        // in the receiver's buffer, and a bare drop can close abortively, so
+        // the RST would discard what the client has not read yet (the failure
+        // lands mid-body as os error 10053/10054 under parallel load). FIN
+        // first -- the FIN is ordered after the pending data -- then hold the
+        // socket until the peer closed, so the whole body always lands.
+        let _ = stream.shutdown(std::net::Shutdown::Write);
+        // The peer's close is the deterministic end signal; every client of
+        // this fixture reads its response out and closes straight away. The
+        // bound only guards a client that never closes: it parks the accept
+        // loop (and Drop's join), so past this deadline the drain gives up
+        // and the close is whatever a bare drop would have been.
+        let _ = stream.set_read_timeout(Some(Duration::from_secs(10)));
+        let mut sink = [0u8; 4096];
+        loop {
+            match stream.read(&mut sink) {
+                Ok(0) | Err(_) => break,
+                Ok(_) => {}
+            }
+        }
     }
 
     /// The JSON-RPC answer builder: `add` sums a+b, `fail` reports the
@@ -1833,6 +1862,50 @@ mod tests {
              loopback issue, not a gateway defect): {results:?}"
         );
         ctx
+    }
+
+    /// Issue #1332: the fixture's accepted stream must WAIT for a request
+    /// body that lands in a second write. The listener polls nonblocking,
+    /// and a Windows accept inherits that mode -- without the explicit
+    /// reset, `serve_one_rpc`'s blocking-read assumptions break and a
+    /// WouldBlock mid-body reads as a short body, closing with no response
+    /// (the client then dies at the status line with os error 10053).
+    /// Under full-suite parallel load the POSTs split across writes
+    /// regularly, which is what made the live_ctx family flake; splitting
+    /// the write deliberately pins the tolerant shape.
+    #[test]
+    fn live_fixture_serves_a_request_whose_body_lands_in_a_second_write() {
+        let server = LiveMcpServer::spawn();
+        let mut stream = TcpStream::connect(("127.0.0.1", server.port)).expect("connect");
+        let body = json!({"jsonrpc": "2.0", "id": 7, "method": "tools/list"}).to_string();
+        let head = format!(
+            "POST / HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\n\
+             Content-Length: {}\r\n\r\n",
+            body.len()
+        );
+        stream.write_all(head.as_bytes()).unwrap();
+        stream
+            .write_all(&body.as_bytes()[..body.len() / 2])
+            .unwrap();
+        stream.flush().unwrap();
+        // Let the fixture accept and park inside the body read with only
+        // half of it on the wire -- a blocking read waits for the rest
+        // instead of treating the gap as a short body.
+        thread::sleep(Duration::from_millis(150));
+        stream
+            .write_all(&body.as_bytes()[body.len() / 2..])
+            .unwrap();
+        stream.flush().unwrap();
+        let mut response = String::new();
+        stream.read_to_string(&mut response).unwrap();
+        assert!(
+            response.starts_with("HTTP/1.1 200 OK"),
+            "the split write still gets the full response: {response}"
+        );
+        assert!(
+            response.contains("\"id\":7"),
+            "the answer matches the request id: {response}"
+        );
     }
 
     // --- pure helpers ------------------------------------------------------
