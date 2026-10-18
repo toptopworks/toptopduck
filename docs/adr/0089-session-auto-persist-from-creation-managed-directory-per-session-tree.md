@@ -6,7 +6,7 @@
 
 2. **管理会话目录——app 管理、用户可见、可配置。** 所有会话存于一个 app 管理的目录，默认 `<Documents>/TOPTOPDuck/sessions/`（平台惯例的 Documents 子目录，非隐藏 `%APPDATA%`）。设置中显示当前路径 + 「更改…」+「在文件管理器中打开」。改目录后新会话进新目录，旧会话留原处——不做自动迁移（YAGNI）。根 `TOPTOPDuck/` 预留 `sessions/` 子目录层级，为未来扩展（技能库等）留结构空间，不预创建空目录。
 
-3. **Per-session 目录结构。** 每个会话是一个自包含目录 `{sessions}/{uuid}/`，内含固定名 `session.duck`（recipe）与可选 `assets/`（派生源，ADR-0087 D2）。取代 ADR-0087 的扁平 `{duck_stem}.assets/` 模式。复制 / 移动 / 删除一个目录 = 完整会话。`session.duck` 固定文件名——显示名在 recipe header 中，sidebar 是主交互面；UUID 目录名是稳定身份，不随显示名变化。
+3. **Per-session 目录结构。** 每个会话是一个自包含目录 `{sessions}/{uuid}/`，内含固定名 `session.duck`（recipe）与可选 `assets/`（双职责：派生源 ADR-0087 D2 + turn SQL 引用文件的哑副本——settle 时轮次 SQL 以 `read_*` 引用的会话临时文件复制为哑文件：不进工作集、不进数据集 UI、无指纹，仅供建存 SQL 重放时读取；SQL 路径同步重写为 assets 路径，重放链不依赖随进程消亡的临时目录；同名冲突沿 artifact 物化先例 `_2` 消歧；fs_acl 将 assets 子树列为只读面）。取代 ADR-0087 的扁平 `{duck_stem}.assets/` 模式。复制 / 移动 / 删除一个目录 = 完整会话。`session.duck` 固定文件名——显示名在 recipe header 中，sidebar 是主交互面；UUID 目录名是稳定身份，不随显示名变化。
 
 4. **自动命名——首条提问截断做标题，源做 hover 副提示。** 创建时显示名为占位符（如「新会话」）；首个达终态的轮次一次性将显示名更新为首条提问的有界截断（ADR-0039 同款截断规则），之后永不自动改名（用户可手动 rename）。源文件名不进主标题，仅作 sidebar 条目的 hover tooltip 副提示。统一规则覆盖所有会话类型——DuckDB 中心、纯 MCP / 技能、混合——不依赖源文件存在。
 
@@ -38,6 +38,7 @@ ADR-0034 Decision 5 定「每轮终态自动追加 + 原子写」，但未覆盖
 - **改目录时自动迁移已有会话**：移动 .duck + 改路径引用 + 处理打开态会话的复杂度，v1 不成比例。**否决（v1）**。
 - **扁平结构（`.duck` + `.assets/` 并列在 sessions/ 根）**：50 会话最多 100 个目录条目 + UUID 配对无法在文件管理器辨认；复制会话需复制两个条目。**否决**。
 - **.duck 文件名跟随显示名（显示名变化时 rename 文件）**：rename 链条 = 文件 rename + single-writer registry canonical path 更新 + 非法字符消毒 + collision detection，一整条新复杂度链。**否决**。
+- **将会话临时工作目录整体提升为持久化目录（`work/` 持久化）**：覆盖面更宽（python 直读的文件也活）但不解重放断链的全部缺口，且无筛选全保使 assets 无声膨胀——筛选反转成「全保 + 事后清理」，清理须理解 SQL 引用否则误删重放依赖；读写持久面进 fs_acl 引入新信任模型（同会话多开、指纹覆盖、sandbox 写语义重审）。**否决**——物化面后续按痛点从 turn SQL 引用增量扩展即可，无需推翻。
 - **命名从首个源文件名推导**：不覆盖纯 MCP / 技能会话（ADR-0087——一个会话可能全程不使用 DuckDB）；同一源多次分析重名。**否决**。
 - **命名回退链（源优先 > 提问截断 > 占位符）**：需要优先级判断 + 「名字是否仍是占位符」检测；统一用首条提问截断更简洁，源信息做 hover 副提示不丢。**否决**。
 - **recipe 加 `name_is_placeholder: bool` 区分占位符与用户已命名**：schema 变更（format_version bump）不值得——首轮终态一次性触发（检测 timeline 之前无轮次）是确定性事件，无歧义。**否决**。
@@ -57,4 +58,5 @@ ADR-0034 Decision 5 定「每轮终态自动追加 + 原子写」，但未覆盖
 - **single-writer registry（ADR-0035 Decision 3）不变**：canonical key 仍是 per-session 目录的 canonical path。createSession 时 `try_acquire` + `bind`；close 时 `release_key` + `Session::Drop`。
 - **前端「已保存 / 未保存」两态 UI 消失**：session 恒在绑定态，无需区分。`persistenceBusy` 状态简化——只在删除 / 归档的等待窗口短暂 busy。
 - **留实现期**：默认目录的平台 API 获取（Tauri path resolver）、UUID 生成（`uuid` crate）、close-time 空会话检测的具体 IPC 返回值、首次截断的字符上限对齐 ADR-0039。
+- **`assets/` 哑文件不走派生源通道**：派生源是注册进工作集的产品语义（描述符、指纹、UI 可见），SQL 引用哑文件是重放兜底——agent 裸写临时目录 + SQL 裸路径引用的绕法产物不配得到数据集身份；两者同名消歧同构（`_2` 后缀环）但职责分离。
 - **被 ADR-0095 校准**：session 持久化结构新增 `model` / `thought_level` / `cached_discovered` 三个可选字段，随会话一并持久化与恢复；旧会话文件缺字段按 `None` 反序列化（向后兼容）。

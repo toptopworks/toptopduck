@@ -18,6 +18,7 @@ mod rows_io;
 pub mod sandbox;
 pub mod skills;
 pub mod snapshot;
+mod sql_assets;
 pub mod source_lifecycle;
 pub(crate) mod turn_dispatch;
 pub mod turn_runner;
@@ -1210,7 +1211,7 @@ impl Session {
     fn record_turn(
         &mut self,
         question: &str,
-        outcome: TurnOutcome,
+        mut outcome: TurnOutcome,
         rounds: Vec<LoopRound>,
         invocations: Vec<crate::model::SkillInvocation>,
         runtime: TurnRuntime,
@@ -1290,6 +1291,17 @@ impl Session {
         // the per-session `artifacts/` directory so the manifest survives a
         // close/reopen. Frozen on the record; existence is a render-time
         // fact.
+        // Resume resilience for temp-referencing SQL: every read_* path
+        // into the session temp dir is copied into the per-session assets/
+        // dir (a dead file) and the promotion SQL is rewritten to the
+        // persistent path -- the temp dir dies with the process, and the
+        // recipe's replay chain must not depend on it. No-op unbound or for
+        // a turn with no temp references.
+        sql_assets::materialize_sql_references(
+            &mut outcome,
+            &self.temp_path,
+            self.persister.duck_path(),
+        );
         let artifacts = artifacts::settle_manifest(
             &presented,
             artifacts::reply_body(&outcome),
@@ -1662,7 +1674,7 @@ fn migrate_derived_sources(working_set: &mut WorkingSet, temp_path: &Path, duck_
         );
         return;
     };
-    let assets_dir = session_dir.join("assets");
+    let assets_dir = session_dir.join(sql_assets::ASSETS_DIR_NAME);
 
     // Collect (ref_name, old_path, new_path) for sources staged in
     // temp_path/derived/. Iterating the working set immutably first, then
@@ -3431,5 +3443,99 @@ mod tests {
             !session.is_timeline_empty(),
             "session with a skill lifecycle event is not empty"
         );
+    }
+
+    /// A turn whose SQL references a scratch file in the session temp dir
+    /// survives close -> reopen: settle materializes the reference into the
+    /// per-session `assets/` dir and rewrites the promotion SQL; resume
+    /// replays the stored SQL against the persistent copy -- no ReplayBreak,
+    /// result_1 re-materializes, the recorded history stays Materialized.
+    /// The bare-path workaround shape: a python/bash tool writes the csv,
+    /// `read_csv_auto` reads it back.
+    #[test]
+    fn temp_sql_reference_survives_close_and_reopen() {
+        use crate::model::ThreadEntry;
+        use crate::provider::UnwiredProvider;
+
+        let dir = tempfile::tempdir().expect("session dir");
+        let duck = dir.path().join("session.duck");
+
+        // Bind FIRST: the settle-time materialization derives the assets dir
+        // from the bound duck path, and createSession binds from the start
+        // (ADR-0089) -- an ask recorded before any binding has nothing to
+        // materialize for.
+        let mut session = Session::new().expect("session");
+        session.bind_duck(duck.clone(), "t".into()).expect("bind");
+
+        // The scripted SQL must name a path inside the session temp dir,
+        // which only exists once the session is constructed.
+        let csv = session.temp_path.join("kline.csv");
+        std::fs::write(&csv, "close,open
+1,2
+").expect("scratch csv");
+        let sql = format!(
+            "SELECT COUNT(*) AS n FROM read_csv_auto('{}')",
+            csv.to_string_lossy()
+        );
+        session.provider = std::sync::Arc::new(FakeProvider::new().scripted_tool_turn_seq(
+            "查",
+            vec![
+                Ok(materialize_call(&sql)),
+                Ok(ToolTurnReply::Text("done".into())),
+            ],
+        ));
+        let outcome = session.ask("查");
+        assert!(
+            matches!(outcome, TurnOutcome::Materialized { .. }),
+            "the live turn materialized, got {outcome:?}"
+        );
+
+        // The recorded SQL now points at the persistent copy, and the copy
+        // exists under the session dir's assets/ subtree.
+        let assets_csv = dir.path().join("assets").join("kline.csv");
+        assert!(assets_csv.is_file(), "scratch csv materialized under assets/");
+        let recipe = session.build_recipe();
+        let turn = materialized_turn(&recipe);
+        let promoted_sql = match &turn.outcome {
+            crate::persistence::recipe::RecipeOutcome::Materialized { promotions, .. } => {
+                promotions[0].sql.clone()
+            }
+            other => panic!("recorded outcome must be Materialized, got {other:?}"),
+        };
+        assert_eq!(
+            promoted_sql,
+            format!(
+                "SELECT COUNT(*) AS n FROM read_csv_auto('{}')",
+                assets_csv.to_string_lossy()
+            ),
+            "the recipe's replay SQL points at the assets copy"
+        );
+
+        drop(session);
+
+        // Reopen LLM-free: the replay chain re-executes the stored SQL
+        // against the assets copy -- green, result_1 back in the working set,
+        // no Failed turn in the rebuilt timeline.
+        let resumed = Session::open_duck(
+            &duck,
+            std::sync::Arc::new(crate::cancel::CancelToken::new()),
+            Box::new(UnwiredProvider),
+            Default::default(),
+            |_| {},
+            |_| panic!("no source issues expected"),
+            |_| panic!("no active-abandoned callback expected"),
+        )
+        .expect("resume");
+        assert!(
+            resumed.get("result_1").is_some(),
+            "replay re-materialized result_1 from the assets copy"
+        );
+        let any_failed = resumed.conversation().iter().any(|e| {
+            matches!(
+                e,
+                ThreadEntry::Turn(t) if matches!(t.outcome, TurnOutcome::Failed(_))
+            )
+        });
+        assert!(!any_failed, "no Failed turn after replay");
     }
 }

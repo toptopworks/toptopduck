@@ -809,6 +809,10 @@ impl super::Session {
         // the Resumer (and its disjoint-field borrows of session.cancel /
         // session.materializer) drops before phase 5's &mut session persist.
         {
+            // Computed before the Resumer's disjoint-field borrows of session
+            // begin -- duck_path() takes &session, which the mutable
+            // materializer borrow inside Resumer::new excludes.
+            let assets_dir = super::sql_assets::assets_dir(session.duck_path());
             let mut resumer = Resumer::new(&session.cancel, &mut *session.materializer, &recipe);
             // Phase 2: resolve the active-SOURCE pointer. The happy path
             // restores recipe.active; if the active was rebuilt + others
@@ -825,6 +829,7 @@ impl super::Session {
                     result_row_cap: session.result_row_cap,
                     result_count_cap: session.result_count_cap,
                     temp_path: &session.temp_path,
+                    assets_dir,
                     tool_output_refs: &mut session.tool_output_refs,
                 };
                 resumer.replay(&mut deps, &mut on_progress)?

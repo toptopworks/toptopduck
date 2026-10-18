@@ -19,7 +19,7 @@
 //! none of it (ADR-0053 Decision 4 -- stateless, owned by none).
 
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
 use duckdb::Connection;
@@ -98,6 +98,12 @@ pub(crate) struct TurnDeps<'a> {
     pub result_row_cap: u64,
     pub result_count_cap: usize,
     pub temp_path: &'a Path,
+    /// The session's persistent `assets/` dir (ADR-0089), derived from the
+    /// bound `.duck` path. `read_*` references into it pass the preflight
+    /// READ-ONLY: settle-time SQL-reference materialization rewrites replayed
+    /// SQL to point here, and a live follow-up turn may reference a
+    /// materialized copy. `None` for an unbound session.
+    pub assets_dir: Option<PathBuf>,
     /// Session-level ephemeral cache: `tool_output` file path to a cached
     /// derived-source registration (issue #440). Prevents re-staging +
     /// re-copy_in + re-ATTACH when the same tool_output file is referenced
@@ -129,6 +135,7 @@ impl<'a> TurnDeps<'a> {
             result_row_cap: 1_000,
             result_count_cap: 100,
             temp_path,
+            assets_dir: None,
             tool_output_refs,
         }
     }
@@ -201,7 +208,9 @@ impl Materializer for RealMaterializer {
         // structured "outside the allowed area" error.
         // refs are held for the post-install provenance record (issue #40).
         let analysis =
-            preflight_read_sql(&sql, deps.working_set, deps.temp_path).map_err(|e| match e {
+            preflight_read_sql(&sql, deps.working_set, deps.temp_path, deps.assets_dir.as_deref())
+                .map_err(
+                |e| match e {
                 PreflightError::StaleReference(s) => {
                     ExecError::new(ExecErrorKind::StaleReference, s)
                 }

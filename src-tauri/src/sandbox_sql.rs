@@ -90,6 +90,7 @@ pub(crate) fn preflight_read_sql(
     sql: &str,
     working_set: &WorkingSet,
     temp_path: &Path,
+    assets_dir: Option<&Path>,
 ) -> Result<PreflightAnalysis, PreflightError> {
     let analyzed = provenance::analyze(sql, working_set);
     if let Some(stale_ref) = analyzed.stale_ref {
@@ -105,7 +106,7 @@ pub(crate) fn preflight_read_sql(
             "read_* requires a literal path string; dynamic paths are not allowed".to_string(),
         ));
     }
-    let acl = FsAcl::new(working_set, temp_path);
+    let acl = FsAcl::new(working_set, temp_path, assets_dir);
     for path in &extraction.paths {
         if let Err(e) = acl.check(path, AccessMode::Read) {
             return Err(PreflightError::FsAcl(e.message()));
@@ -409,7 +410,7 @@ mod tests {
             "SELECT * FROM result_1 JOIN read_csv_auto('{}') ON TRUE",
             outside_file.to_string_lossy()
         );
-        let err = preflight_read_sql(&sql, &ws, temp.path()).unwrap_err();
+        let err = preflight_read_sql(&sql, &ws, temp.path(), None).unwrap_err();
         assert_eq!(err, PreflightError::StaleReference("result_1".into()));
     }
 
@@ -428,7 +429,7 @@ mod tests {
             "SELECT * FROM read_csv_auto('{}')",
             outside_file.to_string_lossy()
         );
-        let err = preflight_read_sql(&sql, &ws, temp.path()).unwrap_err();
+        let err = preflight_read_sql(&sql, &ws, temp.path(), None).unwrap_err();
         match err {
             PreflightError::FsAcl(msg) => {
                 assert!(msg.contains("outside the allowed"), "{msg}");
@@ -449,6 +450,7 @@ mod tests {
             r#"SELECT COUNT(*) AS n FROM "people".data"#,
             &ws,
             temp.path(),
+            None,
         )
         .expect("clean SQL passes preflight");
         assert_eq!(analysis.refs, ["people".to_string()].into_iter().collect(),);
@@ -460,7 +462,7 @@ mod tests {
     fn sql_reading_no_live_member_yields_empty_refs() {
         let temp = TempDir::new().unwrap();
         let ws = ws_with_people();
-        let analysis = preflight_read_sql("SELECT 1 AS x", &ws, temp.path())
+        let analysis = preflight_read_sql("SELECT 1 AS x", &ws, temp.path(), None)
             .expect("SELECT 1 passes preflight");
         assert!(analysis.refs.is_empty(), "{:?}", analysis.refs);
     }
@@ -474,7 +476,7 @@ mod tests {
     fn non_literal_read_path_is_refused_by_preflight() {
         let temp = TempDir::new().unwrap();
         let ws = WorkingSet::default();
-        let err = preflight_read_sql("SELECT * FROM read_csv_auto(some_column)", &ws, temp.path())
+        let err = preflight_read_sql("SELECT * FROM read_csv_auto(some_column)", &ws, temp.path(), None)
             .unwrap_err();
         match err {
             PreflightError::NonLiteralPath(msg) => {
@@ -494,7 +496,7 @@ mod tests {
     fn unparseable_sql_is_refused_by_preflight() {
         let temp = TempDir::new().unwrap();
         let ws = WorkingSet::default();
-        let err = preflight_read_sql("this is not sql at all", &ws, temp.path()).unwrap_err();
+        let err = preflight_read_sql("this is not sql at all", &ws, temp.path(), None).unwrap_err();
         match err {
             PreflightError::Unparseable(msg) => {
                 assert!(

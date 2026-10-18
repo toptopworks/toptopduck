@@ -373,6 +373,8 @@ impl super::Session {
                     request
                         .tools
                         .push(crate::session::artifacts::present_files_definition());
+                    let assets_dir =
+                        crate::session::sql_assets::assets_dir(self.duck_path());
                     let mut deps = TurnDeps {
                         engine: &self.admin_engine,
                         source_files: &mut self.source_files,
@@ -380,6 +382,7 @@ impl super::Session {
                         result_row_cap: self.result_row_cap,
                         result_count_cap: self.result_count_cap,
                         temp_path: &self.temp_path,
+                        assets_dir,
                         tool_output_refs: &mut self.tool_output_refs,
                     };
                     // The attachment read gate (ADR-0111, calibrated by
@@ -743,6 +746,7 @@ impl super::Session {
             let mcp_turn_done = crate::mcp::aggregator::TurnDoneFlag::new();
             mcp.arm_cancel_teardown(Arc::clone(&self.cancel), mcp_turn_done.flag());
             mcp.connect_all(inputs.mcp_servers, inputs.keychain);
+            let assets_dir = crate::session::sql_assets::assets_dir(self.duck_path());
             let deps = TurnDeps {
                 engine: &self.admin_engine,
                 source_files: &mut self.source_files,
@@ -750,6 +754,7 @@ impl super::Session {
                 result_row_cap: self.result_row_cap,
                 result_count_cap: self.result_count_cap,
                 temp_path: &self.temp_path,
+                assets_dir,
                 tool_output_refs: &mut self.tool_output_refs,
             };
             // The bridge face's read gate (issue #714; calibrated by
