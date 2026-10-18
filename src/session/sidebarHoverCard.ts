@@ -221,7 +221,7 @@ export function useSidebarHoverCard(): SidebarHoverCardMachine {
 // controlled open + intent gate, and the card content's handlers. The li ref
 // stays with the row (it renders the element); the bridge takes it as an
 // argument for the native pointerleave backstop.
-export interface SidebarHoverCardBridge {
+interface SidebarHoverCardBridge {
   /** Controlled card visibility for this row (the machine's single slot,
    *  read against this row's key). */
   cardOpen: boolean;

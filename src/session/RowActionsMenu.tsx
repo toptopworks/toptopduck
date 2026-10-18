@@ -38,7 +38,7 @@ export function RowActionsMenu({
   entry,
   displayName,
   disabled,
-  archived = false,
+  archived,
   onSetPinned,
   onArchive,
   onRename,
@@ -54,7 +54,7 @@ export function RowActionsMenu({
    *  delete / archive wait on the persistence axis -- a repeat open during
    *  the wait would double-fire the close on an already-closing sid. */
   disabled: boolean;
-  archived?: boolean;
+  archived: boolean;
   onSetPinned: (path: string, pinned: boolean) => void;
   /** Archive passes the open binding when present (archiving an open row
    *  closes it first, the ADR-0127 Decision 6 contract); restore passes

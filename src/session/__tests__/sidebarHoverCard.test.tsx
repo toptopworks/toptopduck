@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { act, renderHook } from "@testing-library/react";
 import { useRef, type FocusEvent } from "react";
 import {
+  MENU_REENTRY_GRACE_MS,
   useSidebarHoverCard,
   useSidebarHoverCardBridge,
 } from "../sidebarHoverCard";
@@ -212,7 +213,7 @@ describe("useSidebarHoverCard machine (issue #1175, collected by #1325)", () => 
     act(() => result.current.menuOpenChange("a", false));
     act(() => result.current.enter("a"));
     await act(async () => {
-      vi.advanceTimersByTime(400);
+      vi.advanceTimersByTime(MENU_REENTRY_GRACE_MS + 150);
     });
     expect(result.current.isOpen("a")).toBe(false);
 
@@ -221,7 +222,7 @@ describe("useSidebarHoverCard machine (issue #1175, collected by #1325)", () => 
     // opens the card.
     act(() => result.current.enter("a"));
     await act(async () => {
-      vi.advanceTimersByTime(400);
+      vi.advanceTimersByTime(300);
     });
     expect(result.current.isOpen("a")).toBe(true);
   });

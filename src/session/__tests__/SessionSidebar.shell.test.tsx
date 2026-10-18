@@ -26,11 +26,6 @@ import { TooltipProvider } from "@/components/ui/tooltip";
 const menuClose = vi.hoisted(() => ({
   current: null as null | ((e: { preventDefault: () => void }) => void),
 }));
-// The mocked root's open flip, for tests that need to CLOSE the menu (the
-// mocked shape has no close machinery of its own).
-const menuRoot = vi.hoisted(() => ({
-  current: null as null | ((open: boolean) => void),
-}));
 vi.mock("@/components/ui/dropdown-menu", () => {
   // The root's open intent rides context so the trigger can mirror Radix's
   // contract (a trigger click fires onOpenChange(true)) without an open
@@ -45,7 +40,6 @@ vi.mock("@/components/ui/dropdown-menu", () => {
     children: ReactNode;
     onOpenChange?: (open: boolean) => void;
   }) {
-    menuRoot.current = onOpenChange ?? null;
     return (
       <MenuOpenCtx.Provider value={{ onOpenChange }}>
         <div data-testid="dropdown-menu-root">{children}</div>
@@ -1087,6 +1081,79 @@ describe("SessionSidebar hover card content (ADR-0093, issue #513)", () => {
     expect(screen.getByText("—")).toBeInTheDocument();
     // Turn count with 0 renders "no turns" (defaultMessage =0 arm).
     expect(screen.getByText("no turns")).toBeInTheDocument();
+  });
+
+  it("holds the card through the leave grace, cancels the close on card enter, closes on card leave", async () => {
+    // Wiring pin (issue #1325): the row's pointerleave runs the 200 ms close
+    // grace; a pointer sweeping onto the card itself cancels the pending
+    // close (read-only per ADR-0127, but the pointer may rest there to
+    // read); leaving the CARD schedules its own close -- the row-leave guard
+    // cannot serve that path, the row's leave already ran.
+    const persisted: SessionMetadata = {
+      duck_path: "/x/grace.duck",
+      display_name: "Grace Card",
+      last_modified_at: Date.now() - 3 * 3600_000,
+      source_summary: { first_source_name: null, source_count: 0, turn_count: 0 },
+      format_version: 1,
+      pinned: false,
+      archived: false,
+    };
+    vi.useFakeTimers();
+    const { container } = renderShell(<SessionSidebar {...sidebarProps({ sessions: [persisted] })} />);
+    const row = container.querySelector<HTMLElement>(".session-entry")!;
+    fireEvent.pointerEnter(row);
+    await act(async () => {
+      vi.advanceTimersByTime(350);
+    });
+    expect(screen.getByText("Data source")).toBeInTheDocument();
+    // Inside the 200 ms grace the card stays up.
+    fireEvent.pointerLeave(row);
+    await act(async () => {
+      vi.advanceTimersByTime(199);
+    });
+    expect(screen.getByText("Data source")).toBeInTheDocument();
+    // Sweeping onto the card cancels the pending close.
+    const card = screen.getByText("Data source").closest("[data-state=\"open\"]")!;
+    fireEvent.pointerEnter(card);
+    await act(async () => {
+      vi.advanceTimersByTime(500);
+    });
+    expect(screen.getByText("Data source")).toBeInTheDocument();
+    // Leaving the CARD schedules its own close.
+    fireEvent.pointerLeave(card);
+    await act(async () => {
+      vi.advanceTimersByTime(200);
+    });
+    expect(screen.queryByText("Data source")).toBeNull();
+  });
+
+  it("closes the card when the pointer leaves the whole list (backstop)", async () => {
+    // Wiring pin (issue #1325): a pointerleave lost to the pill's
+    // pointer-events toggling never reaches the row; the list-level leave is
+    // the final backstop.
+    const persisted: SessionMetadata = {
+      duck_path: "/x/backstop.duck",
+      display_name: "Backstop Card",
+      last_modified_at: Date.now() - 3 * 3600_000,
+      source_summary: { first_source_name: null, source_count: 0, turn_count: 0 },
+      format_version: 1,
+      pinned: false,
+      archived: false,
+    };
+    vi.useFakeTimers();
+    const { container } = renderShell(<SessionSidebar {...sidebarProps({ sessions: [persisted] })} />);
+    const row = container.querySelector<HTMLElement>(".session-entry")!;
+    const list = container.querySelector<HTMLElement>(".session-list")!;
+    fireEvent.pointerEnter(row);
+    await act(async () => {
+      vi.advanceTimersByTime(350);
+    });
+    expect(screen.getByText("Data source")).toBeInTheDocument();
+    fireEvent.pointerLeave(list);
+    await act(async () => {
+      vi.advanceTimersByTime(200);
+    });
+    expect(screen.queryByText("Data source")).toBeNull();
   });
 
   it("opening the row menu retires the hover metadata card", async () => {
