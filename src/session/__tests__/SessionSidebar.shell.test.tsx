@@ -26,11 +26,6 @@ import { TooltipProvider } from "@/components/ui/tooltip";
 const menuClose = vi.hoisted(() => ({
   current: null as null | ((e: { preventDefault: () => void }) => void),
 }));
-// The content's Escape hook, for tests that need to simulate a keyboard
-// close (the mocked shape has no close machinery of its own).
-const menuEscape = vi.hoisted(() => ({
-  current: null as null | (() => void),
-}));
 // The mocked root's open flip, for tests that need to CLOSE the menu (the
 // mocked shape has no close machinery of its own).
 const menuRoot = vi.hoisted(() => ({
@@ -79,18 +74,13 @@ vi.mock("@/components/ui/dropdown-menu", () => {
   function DropdownMenuContent({
     children,
     onCloseAutoFocus,
-    onPointerDown,
-    onEscapeKeyDown,
   }: {
     children: ReactNode;
     onCloseAutoFocus?: (e: { preventDefault: () => void }) => void;
-    onPointerDown?: (e: React.PointerEvent) => void;
-    onEscapeKeyDown?: () => void;
   }) {
     menuClose.current = onCloseAutoFocus ?? null;
-    menuEscape.current = onEscapeKeyDown ?? null;
     return (
-      <div role="menu" onPointerDown={onPointerDown}>
+      <div role="menu">
         {children}
       </div>
     );
@@ -1162,9 +1152,13 @@ describe("SessionSidebar hover card content (ADR-0093, issue #513)", () => {
 
   it("pointer-driven menu close strands no focus; keyboard close restores it", () => {
     // The mocked content captures onCloseAutoFocus (no close machinery of
-    // its own). A pointerdown anywhere in the content marks the close as
-    // pointer-driven -> the close-restore focus is refused; without one,
-    // the default (keyboard) restore stands.
+    // its own). The close classification rides usePointerCloseIntent's
+    // window-level capture: a pointerdown anywhere before the close marks
+    // it pointer-driven -> the close-restore focus is refused; jsdom's
+    // synthetic clicks fire no pointerdown, so without one the default
+    // (keyboard) restore stands. (The Escape-clears-the-mark leg is pinned
+    // by usePointerCloseIntent's own specs -- keydown clears, in either
+    // order -- and is not re-pinned here.)
     const persisted: SessionMetadata = {
       duck_path: "/x/closegate.duck",
       display_name: "Close Gate",
@@ -1181,25 +1175,18 @@ describe("SessionSidebar hover card content (ADR-0093, issue #513)", () => {
       container.querySelector<HTMLElement>(".session-entry")!,
     ).getByRole("button", { name: "Row actions" });
 
-    // Keyboard close first: no pointerdown -> restore stands.
+    // Keyboard close first: jsdom's synthetic click fires no pointerdown
+    // -> restore stands.
     fireEvent.click(trigger);
     const preventDefault = vi.fn();
     menuClose.current?.({ preventDefault });
     expect(preventDefault).not.toHaveBeenCalled();
 
-    // Pointer close: a pointerdown inside the content marks it -> refused.
-    fireEvent.pointerDown(
-      container.querySelector<HTMLElement>(`[role="menuitem"]`)!,
-    );
+    // Pointer close: a pointerdown (window capture -- a menu item select,
+    // an outside dismiss, the trigger itself) arms it -> refused.
+    fireEvent.pointerDown(window);
     menuClose.current?.({ preventDefault });
     expect(preventDefault).toHaveBeenCalled();
-
-    // Escape clears the pointer mark: the keyboard close that follows keeps
-    // the restore (the pointer-modality close would have refused it).
-    menuEscape.current?.();
-    const preventDefaultAfterEscape = vi.fn();
-    menuClose.current?.({ preventDefault: preventDefaultAfterEscape });
-    expect(preventDefaultAfterEscape).not.toHaveBeenCalled();
   });
 });
 

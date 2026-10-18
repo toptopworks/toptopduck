@@ -1,4 +1,4 @@
-import { useRef, useState } from "react";
+import { useState } from "react";
 import { FormattedMessage, useIntl } from "react-intl";
 import {
   Archive,
@@ -18,6 +18,7 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { bareButtonReset } from "@/lib/buttonReset";
+import { usePointerCloseIntent } from "@/lib/usePointerCloseIntent";
 import { cn } from "@/lib/utils";
 import type { SidebarEntry } from "./sidebarModel";
 import { DeleteSessionDialog, RenameSessionDialog } from "./SessionDialogs";
@@ -78,19 +79,16 @@ export function RowActionsMenu({
   // callbacks) need the string, and narrowing does not survive into a
   // closure over a property access.
   const sid = entry.sid;
-  // Whether the menu's closing interaction was pointer-driven: Radix always
-  // re-focuses the trigger on close, which is right for keyboard (Escape /
-  // Enter-select) but strands a focus ring + revealed pill after a pointer
-  // select. Reset on open so each open/close cycle starts clean.
-  const closedByPointerRef = useRef(false);
+  // How the menu's closing interaction is classified (the #1309 shared
+  // hook): Radix always re-focuses the trigger on close, which is right
+  // for keyboard (Escape / Enter-select) but strands a focus ring +
+  // revealed pill after a pointer select. Last input wins -- the old
+  // open-side reset is subsumed, since every close is immediately preceded
+  // by the input event that caused it.
+  const closedByPointerRef = usePointerCloseIntent();
   return (
     <>
-      <DropdownMenu
-        onOpenChange={(open) => {
-          if (open) closedByPointerRef.current = false;
-          onMenuOpenChange(open);
-        }}
-      >
+      <DropdownMenu onOpenChange={onMenuOpenChange}>
         <DropdownMenuTrigger
           disabled={disabled}
           onFocus={(e) => {
@@ -125,21 +123,12 @@ export function RowActionsMenu({
         <DropdownMenuContent
           align="end"
           aria-label={menuLabel}
-          // A pointerdown anywhere in the content (item select included --
-          // it bubbles) marks the close as pointer-driven; Escape unmarks.
-          onPointerDown={() => {
-            closedByPointerRef.current = true;
-          }}
-          onPointerDownOutside={() => {
-            closedByPointerRef.current = true;
-          }}
-          onEscapeKeyDown={() => {
-            closedByPointerRef.current = false;
-          }}
           onCloseAutoFocus={(e) => {
             // Radix restores trigger focus on every close; a pointer-driven
-            // close must not strand it there. Keyboard closes keep the
-            // restore (the keyboard user's next Tab target depends on it).
+            // close must not strand it there (the hook's window-level
+            // capture saw the pointerdown -- item select included). Keyboard
+            // closes keep the restore (the keyboard user's next Tab target
+            // depends on it).
             if (closedByPointerRef.current) e.preventDefault();
           }}
         >
