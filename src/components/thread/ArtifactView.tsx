@@ -24,37 +24,15 @@
 
 import { useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { FormattedMessage, useIntl } from "react-intl";
-import { Button } from "../ui/button";
-import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuTrigger,
-} from "../ui/dropdown-menu";
-import {
-  ExternalLink,
-  FileDown,
-  FileWarning,
-  FolderOpen,
-  Loader2,
-  MoreHorizontal,
-  RefreshCw,
-  Save,
-} from "lucide-react";
+import { useIntl } from "react-intl";
+import { FileDown, FileWarning, Loader2 } from "lucide-react";
 import { convertFileSrc } from "@tauri-apps/api/core";
-import { save as saveDialog } from "@tauri-apps/plugin-dialog";
-import { openPath, revealItemInDir } from "@tauri-apps/plugin-opener";
-import { copyArtifactFile, readArtifactText } from "../../api";
-import { log } from "../../lib/log";
+import { readArtifactText } from "../../api";
 import { artifactKeys } from "../../session/queryKeys";
 import { useArtifactExists } from "../../session/useArtifactExists";
 import { isWithinArtifactsDir, type ArtifactRenderKind } from "../../session/workspace";
 import { RoundProse } from "./RoundProse";
-
-// The header's single failure slot (issue #1317): which action's live note
-// is showing. Starting any action clears the previous note.
-type FailureKind = "open" | "folder" | "save";
+import { ArtifactHeader } from "./ArtifactHeader";
 
 export function ArtifactView({
   artifact,
@@ -74,35 +52,12 @@ export function ArtifactView({
   // body's degrade share the entry (and the rail row's cache -- the same
   // artifactKeys key), so the check is paid once.
   const exists = useArtifactExists(artifact.path);
-  // One failure slot for the whole header (issue #1317): at most one live
-  // note at a time -- starting an action clears the previous note.
-  const [failure, setFailure] = useState<FailureKind | null>(null);
   // The stage body's remount counter: bumping it re-keys ArtifactStageBody,
   // re-running the iframe branches (a fresh iframe re-reads the file off
   // disk) and remounting the md text query.
   const [refreshKey, setRefreshKey] = useState(0);
   const queryClient = useQueryClient();
-  const intl = useIntl();
-  const openLabel = intl.formatMessage({
-    id: "workspace.artifact.openExternal",
-    defaultMessage: "Open externally",
-  });
-  const moreLabel = intl.formatMessage({
-    id: "workspace.artifact.moreActions",
-    defaultMessage: "More actions",
-  });
-  const handleOpen = () => {
-    setFailure(null);
-    // openPath hands the path to the OS opener; a failure is logged (the
-    // RoundProse openUrl twin) and surfaces as a caption note in the
-    // header, not a thrown promise.
-    openPath(artifact.path).catch((e: unknown) => {
-      log.warn("ArtifactView", "openPath failed", e);
-      setFailure("open");
-    });
-  };
   const handleRefresh = async () => {
-    setFailure(null);
     // md's text query is staleTime Infinity -- the remount alone never
     // re-reads, so the cache entry is invalidated first, and the await lets
     // the refetch land before the re-key (one deterministic read, no
@@ -116,126 +71,9 @@ export function ArtifactView({
     await queryClient.invalidateQueries({ queryKey: artifactKeys.exists(artifact.path) });
     setRefreshKey((k) => k + 1);
   };
-  const handleOpenFolder = () => {
-    setFailure(null);
-    revealItemInDir(artifact.path).catch((e: unknown) => {
-      log.warn("ArtifactView", "revealItemInDir failed", e);
-      setFailure("folder");
-    });
-  };
-  // A cancelled dialog is a quiet no-op (the exportRowsCsv posture).
-  const handleSaveAs = async () => {
-    setFailure(null);
-    try {
-      const target = await saveDialog({ defaultPath: artifact.file_name });
-      if (target === null) return;
-      await copyArtifactFile(artifact.path, target);
-    } catch (e) {
-      log.warn("ArtifactView", "save-as copy failed", e);
-      setFailure("save");
-    }
-  };
   return (
     <div className="flex h-full min-h-0 flex-col">
-      <header
-        data-testid="artifact-header"
-        // Asymmetric padding on purpose: the name aligns with the body's 16px
-        // text edge (pl-4), while the actions pull 4px closer to the pane
-        // corner (pr-3) -- chrome hugs the corner, content keeps the margin.
-        className="flex shrink-0 items-center justify-between gap-2 border-b py-1.5 pl-4 pr-3"
-      >
-        {/* Layer-4 content (the file's own name) passes through untranslated;
-            truncate keeps a long name from pushing the action out. */}
-        <p className="m-0 min-w-0 truncate text-sm font-medium">{artifact.file_name}</p>
-        <div className="flex shrink-0 items-center gap-2">
-          {exists ? (
-            <>
-              <Button
-                type="button"
-                variant="ghost"
-                size="icon"
-                data-testid="artifact-open-external"
-                title={openLabel}
-                aria-label={openLabel}
-                className="h-7 w-7 text-muted-foreground"
-                onClick={handleOpen}
-              >
-                <ExternalLink aria-hidden="true" className="h-3.5 w-3.5" />
-              </Button>
-              <DropdownMenu>
-                <DropdownMenuTrigger asChild>
-                  <Button
-                    type="button"
-                    variant="ghost"
-                    size="icon"
-                    data-testid="artifact-more-menu"
-                    title={moreLabel}
-                    aria-label={moreLabel}
-                    className="h-7 w-7 text-muted-foreground"
-                  >
-                    {/* The SessionHeaderMenu trigger shape (ADR-0067 #171). */}
-                    <MoreHorizontal aria-hidden="true" className="h-3.5 w-3.5" strokeWidth={2.5} />
-                  </Button>
-                </DropdownMenuTrigger>
-                <DropdownMenuContent align="end" aria-label={moreLabel}>
-                  <DropdownMenuItem onSelect={handleRefresh}>
-                    <RefreshCw aria-hidden />
-                    <FormattedMessage
-                      id="workspace.artifact.refresh"
-                      defaultMessage="Refresh"
-                    />
-                  </DropdownMenuItem>
-                  <DropdownMenuItem onSelect={handleOpenFolder}>
-                    <FolderOpen aria-hidden />
-                    <FormattedMessage
-                      id="workspace.artifact.openFolder"
-                      defaultMessage="Show in folder"
-                    />
-                  </DropdownMenuItem>
-                  <DropdownMenuItem onSelect={handleSaveAs}>
-                    <Save aria-hidden />
-                    <FormattedMessage
-                      id="workspace.artifact.saveAs"
-                      defaultMessage="Save as…"
-                    />
-                  </DropdownMenuItem>
-                </DropdownMenuContent>
-              </DropdownMenu>
-            </>
-          ) : (
-            <p className="m-0 text-xs text-muted-foreground">
-              <FormattedMessage
-                id="workspace.artifact.missing"
-                defaultMessage="This file is no longer on disk"
-              />
-            </p>
-          )}
-          {failure === "open" && (
-            <p className="m-0 text-xs text-muted-foreground" role="status">
-              <FormattedMessage
-                id="workspace.artifact.openFailed"
-                defaultMessage="Could not open the file externally"
-              />
-            </p>
-          )}
-          {failure === "folder" && (
-            <p className="m-0 text-xs text-muted-foreground" role="status">
-              <FormattedMessage
-                id="workspace.artifact.folderFailed"
-                defaultMessage="Could not locate the file in the folder"
-              />
-            </p>
-          )}
-          {failure === "save" && (
-            <p className="m-0 text-xs text-muted-foreground" role="status">
-              <FormattedMessage
-                id="workspace.artifact.saveFailed"
-                defaultMessage="Could not save a copy of the file"
-              />
-            </p>
-          )}
-        </div>
-      </header>
+      <ArtifactHeader artifact={artifact} exists={exists} onRefresh={handleRefresh} />
       <div className="min-h-0 flex-1 overflow-y-auto">
         <ArtifactStageBody
           key={refreshKey}
