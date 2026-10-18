@@ -454,11 +454,16 @@ fn component_eq(a: &std::path::Component, b: &std::path::Component) -> bool {
 }
 
 /// First unoccupied copy target for `src` inside `dir`, disambiguating
-/// same-named collisions with the `_2` suffix loop. Collision-loop
-/// invariants hoisted (#1090): stem/ext are constant per attempt, and an
-/// empty extension formats without the separator dot (`LICENSE_2`,
-/// never `LICENSE_2.`). `None` when the file name is missing or not
-/// valid UTF-8.
+/// same-named collisions with the `_2` suffix loop. An occupied target
+/// already holding `src`'s bytes IS the target: a re-mention of an
+/// already-materialized identical source reuses that copy instead of
+/// spilling `_2`, `_3`, ... (#1335 -- materialize is a COPY, so the temp
+/// source outlives the turn that first delivered it, and later replies
+/// re-mention it through the scan channel). Collision-loop invariants
+/// hoisted (#1090): stem/ext are constant per attempt, and an empty
+/// extension formats without the separator dot (`LICENSE_2`, never
+/// `LICENSE_2.`). `None` when the file name is missing or not valid
+/// UTF-8.
 pub(super) fn first_free_target(src: &Path, dir: &Path) -> Option<PathBuf> {
     let file_name = src.file_name()?.to_str()?;
     // The file name is UTF-8, so its stem (a substring split at the last
@@ -471,6 +476,9 @@ pub(super) fn first_free_target(src: &Path, dir: &Path) -> Option<PathBuf> {
     let mut target = dir.join(file_name);
     let mut counter = 2u32;
     while target.exists() {
+        if contents_match(src, &target) {
+            return Some(target);
+        }
         target = dir.join(if ext.is_empty() {
             format!("{stem}_{counter}")
         } else {
@@ -481,6 +489,23 @@ pub(super) fn first_free_target(src: &Path, dir: &Path) -> Option<PathBuf> {
     Some(target)
 }
 
+/// Byte equality of two files, gated by size (a cheap mismatch signal
+/// before reading either file whole). The #1335 reuse predicate: any
+/// read/stat failure simply means "not a match", falling through to the
+/// next disambiguation candidate.
+fn contents_match(a: &Path, b: &Path) -> bool {
+    let (Ok(ma), Ok(mb)) = (std::fs::metadata(a), std::fs::metadata(b)) else {
+        return false;
+    };
+    if ma.len() != mb.len() || ma.is_dir() || mb.is_dir() {
+        return false;
+    }
+    match (std::fs::read(a), std::fs::read(b)) {
+        (Ok(bytes_a), Ok(bytes_b)) => bytes_a == bytes_b,
+        _ => false,
+    }
+}
+
 /// Materialize one resolved hit (the persistence ruling, ADR-0124 Decision
 /// 2): a hit under the session temp working directory is COPIED into the
 /// per-session `artifacts/` directory (the temp dir dies with the session;
@@ -488,8 +513,10 @@ pub(super) fn first_free_target(src: &Path, dir: &Path) -> Option<PathBuf> {
 /// returned; anything else (a user-directory absolute hit) returns
 /// unchanged -- the app does not copy user files. Best-effort + logged: a
 /// copy failure leaves the temp path in place (the card degrades after
-/// close, honestly). A same-name collision takes a `_2`, `_3`, ... suffix
-/// so two distinct same-named files never overwrite each other. The
+/// close, honestly). A same-name collision with DIFFERENT bytes takes a
+/// `_2`, `_3`, ... suffix so two distinct same-named files never
+/// overwrite each other; identical bytes reuse the existing copy
+/// ([`first_free_target`], #1335). The
 /// returned flag is the entry's [`TurnArtifact::durable`] honest face:
 /// `true` for a materialized copy or a user-directory original, `false`
 /// for a temp path the copy could not move (openable until the session
@@ -1133,6 +1160,81 @@ mod tests {
         let second = std::fs::read_to_string(&manifest[1].path).expect("copy 2");
         assert_eq!(first, "one");
         assert_eq!(second, "two");
+    }
+
+    /// A re-mention of an identical, already-materialized source reuses
+    /// the existing copy: no `_2` spill, no extra manifest entry, no
+    /// second file on disk (#1335 -- materialize is a COPY, so the temp
+    /// source outlives the turn that first delivered it, and a later
+    /// reply mentioning it hits the scan channel again).
+    #[test]
+    fn settle_manifest_reuses_an_identical_remention_instead_of_spilling_2() {
+        let work = tempfile::tempdir().expect("workdir");
+        let session = tempfile::tempdir().expect("session dir");
+        let cwd = work.path();
+        let artifacts_dir = session.path().join(ARTIFACTS_DIR_NAME);
+        std::fs::write(cwd.join("report.html"), "one").expect("write");
+
+        let first = settle_manifest(&[], "报告在 `report.html`", cwd, Some(&artifacts_dir));
+        assert_eq!(first.len(), 1);
+        assert_eq!(first[0].file_name, "report.html");
+
+        let second = settle_manifest(
+            &[],
+            "在 `report.html` 基础上继续",
+            cwd,
+            Some(&artifacts_dir),
+        );
+        assert_eq!(second.len(), 1, "the manifest does not grow");
+        assert_eq!(second[0].path, first[0].path, "the same copy is reused");
+        assert_eq!(second[0].file_name, "report.html", "no _2 spill");
+        assert!(second[0].durable);
+        let on_disk = std::fs::read_dir(&artifacts_dir)
+            .expect("read artifacts dir")
+            .filter_map(|e| e.ok())
+            .count();
+        assert_eq!(on_disk, 1, "a single copy on disk");
+    }
+
+    /// After a divergent update takes `_2`, re-mentioning the updated
+    /// source reuses the `_2` copy: reuse is judged per collision-loop
+    /// candidate, not just on the plain name, so the sequence cannot
+    /// roll `_3` with bytes `_2` already holds (#1335).
+    #[test]
+    fn settle_manifest_reuses_a_remention_after_a_divergent_update() {
+        let work = tempfile::tempdir().expect("workdir");
+        let session = tempfile::tempdir().expect("session dir");
+        let cwd = work.path();
+        let artifacts_dir = session.path().join(ARTIFACTS_DIR_NAME);
+        std::fs::write(cwd.join("report.html"), "one").expect("write");
+
+        let first = settle_manifest(&[], "报告在 `report.html`", cwd, Some(&artifacts_dir));
+        assert_eq!(first.len(), 1);
+
+        std::fs::write(cwd.join("report.html"), "two").expect("rewrite");
+        let second = settle_manifest(
+            &[],
+            "更新后的报告在 `report.html`",
+            cwd,
+            Some(&artifacts_dir),
+        );
+        assert_eq!(second.len(), 1);
+        assert_eq!(second[0].file_name, "report_2.html", "divergent takes _2");
+
+        let third = settle_manifest(
+            &[],
+            "在 `report.html` 基础上继续",
+            cwd,
+            Some(&artifacts_dir),
+        );
+        assert_eq!(third.len(), 1);
+        assert_eq!(third[0].path, second[0].path, "the _2 copy is reused");
+        let names: Vec<String> = std::fs::read_dir(&artifacts_dir)
+            .expect("read artifacts dir")
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(names, vec!["report.html", "report_2.html"]);
     }
 
     /// A collision on an extension-less name (`LICENSE`) disambiguates
