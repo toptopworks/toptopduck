@@ -453,15 +453,15 @@ fn component_eq(a: &std::path::Component, b: &std::path::Component) -> bool {
     a == b
 }
 
-/// First unoccupied copy target for `src` inside `dir`, disambiguating
-/// same-named collisions with the `_2` suffix loop. An occupied target
-/// already holding `src`'s bytes IS the target: a re-mention of an
+/// First copy target for `src` inside `dir`. An occupied target already
+/// holding `src`'s bytes IS the target: a re-mention of an
 /// already-materialized identical source reuses that copy instead of
 /// spilling `_2`, `_3`, ... (#1335 -- materialize is a COPY, so the temp
 /// source outlives the turn that first delivered it, and later replies
-/// re-mention it through the scan channel). Collision-loop invariants
-/// hoisted (#1090): stem/ext are constant per attempt, and an empty
-/// extension formats without the separator dot (`LICENSE_2`, never
+/// re-mention it through the scan channel). Any other same-named
+/// collision disambiguates with the `_2` suffix loop. Collision-loop
+/// invariants hoisted (#1090): stem/ext are constant per attempt, and an
+/// empty extension formats without the separator dot (`LICENSE_2`, never
 /// `LICENSE_2.`). `None` when the file name is missing or not valid
 /// UTF-8.
 pub(super) fn first_free_target(src: &Path, dir: &Path) -> Option<PathBuf> {
@@ -493,11 +493,11 @@ pub(super) fn first_free_target(src: &Path, dir: &Path) -> Option<PathBuf> {
 /// before reading either file whole). The #1335 reuse predicate: any
 /// read/stat failure simply means "not a match", falling through to the
 /// next disambiguation candidate.
-fn contents_match(a: &Path, b: &Path) -> bool {
+pub(super) fn contents_match(a: &Path, b: &Path) -> bool {
     let (Ok(ma), Ok(mb)) = (std::fs::metadata(a), std::fs::metadata(b)) else {
         return false;
     };
-    if ma.len() != mb.len() || ma.is_dir() || mb.is_dir() {
+    if ma.len() != mb.len() {
         return false;
     }
     match (std::fs::read(a), std::fs::read(b)) {
@@ -547,6 +547,13 @@ fn materialize(path: PathBuf, cwd: &Path, artifacts_dir: Option<&Path>) -> (Path
     let Some(target) = first_free_target(&path, dir) else {
         return (path, false);
     };
+    // The loop's reuse exit hands back an occupied target that already
+    // holds `path`'s bytes (#1335): copying onto it would only rewrite
+    // identical bytes, and a locked or read-only destination would fail
+    // a materialization that has already succeeded.
+    if target.exists() && contents_match(&path, &target) {
+        return (target, true);
+    }
     match std::fs::copy(&path, &target) {
         Ok(_) => (target, true),
         Err(e) => {
@@ -1229,12 +1236,44 @@ mod tests {
         );
         assert_eq!(third.len(), 1);
         assert_eq!(third[0].path, second[0].path, "the _2 copy is reused");
-        let names: Vec<String> = std::fs::read_dir(&artifacts_dir)
+        let mut names: Vec<String> = std::fs::read_dir(&artifacts_dir)
             .expect("read artifacts dir")
             .filter_map(|e| e.ok())
             .map(|e| e.file_name().to_string_lossy().into_owned())
             .collect();
+        names.sort();
         assert_eq!(names, vec!["report.html", "report_2.html"]);
+    }
+
+    /// A reused target is handed back without re-copying: the loop
+    /// already proved the bytes identical, and rewriting them would let
+    /// a read-only (or locked) destination fail a materialization that
+    /// has already succeeded (#1335).
+    #[test]
+    fn settle_manifest_reuses_without_recopying_a_read_only_target() {
+        let work = tempfile::tempdir().expect("workdir");
+        let session = tempfile::tempdir().expect("session dir");
+        let cwd = work.path();
+        let artifacts_dir = session.path().join(ARTIFACTS_DIR_NAME);
+        std::fs::write(cwd.join("report.html"), "one").expect("write");
+
+        let first = settle_manifest(&[], "报告在 `report.html`", cwd, Some(&artifacts_dir));
+        assert_eq!(first.len(), 1);
+
+        let copy = artifacts_dir.join("report.html");
+        let mut perms = std::fs::metadata(&copy).expect("copy perms").permissions();
+        perms.set_readonly(true);
+        std::fs::set_permissions(&copy, perms).expect("read-only");
+
+        let second = settle_manifest(
+            &[],
+            "在 `report.html` 基础上继续",
+            cwd,
+            Some(&artifacts_dir),
+        );
+        assert_eq!(second.len(), 1);
+        assert_eq!(second[0].path, first[0].path, "the reused copy stands");
+        assert!(second[0].durable, "no rewrite means no read-only failure");
     }
 
     /// A collision on an extension-less name (`LICENSE`) disambiguates

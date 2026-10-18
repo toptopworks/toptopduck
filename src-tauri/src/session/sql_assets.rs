@@ -114,7 +114,8 @@ pub(super) fn materialize_sql_references(
 }
 
 /// Copy `src` into `assets_dir` under its own file name, disambiguating
-/// same-named collisions via the shared `_2` suffix loop
+/// same-named collisions via the shared `_2` suffix loop and reusing an
+/// occupied target already holding `src`'s bytes (#1335)
 /// (`super::artifacts::first_free_target`). `None` on failure -- logged,
 /// the caller leaves the original path in place.
 fn materialize_one(src: &Path, assets_dir: &Path) -> Option<PathBuf> {
@@ -137,6 +138,12 @@ fn materialize_one(src: &Path, assets_dir: &Path) -> Option<PathBuf> {
         );
         return None;
     };
+    // Same reuse exit as `materialize`: an occupied target already holds
+    // `src`'s bytes, and rewriting them would only risk a failure the
+    // copy has already survived (#1335).
+    if target.exists() && super::artifacts::contents_match(src, &target) {
+        return Some(target);
+    }
     match std::fs::copy(src, &target) {
         Ok(_) => Some(target),
         Err(e) => {
