@@ -453,6 +453,34 @@ fn component_eq(a: &std::path::Component, b: &std::path::Component) -> bool {
     a == b
 }
 
+/// First unoccupied copy target for `src` inside `dir`, disambiguating
+/// same-named collisions with the `_2` suffix loop. Collision-loop
+/// invariants hoisted (#1090): stem/ext are constant per attempt, and an
+/// empty extension formats without the separator dot (`LICENSE_2`,
+/// never `LICENSE_2.`). `None` when the file name is missing or not
+/// valid UTF-8.
+pub(super) fn first_free_target(src: &Path, dir: &Path) -> Option<PathBuf> {
+    let file_name = src.file_name()?.to_str()?;
+    // The file name is UTF-8, so its stem (a substring split at the last
+    // ASCII dot) always is too -- this cannot fire.
+    let stem = src
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .expect("stem of a UTF-8 file name");
+    let ext = src.extension().and_then(|e| e.to_str()).unwrap_or_default();
+    let mut target = dir.join(file_name);
+    let mut counter = 2u32;
+    while target.exists() {
+        target = dir.join(if ext.is_empty() {
+            format!("{stem}_{counter}")
+        } else {
+            format!("{stem}_{counter}.{ext}")
+        });
+        counter += 1;
+    }
+    Some(target)
+}
+
 /// Materialize one resolved hit (the persistence ruling, ADR-0124 Decision
 /// 2): a hit under the session temp working directory is COPIED into the
 /// per-session `artifacts/` directory (the temp dir dies with the session;
@@ -489,31 +517,9 @@ fn materialize(path: PathBuf, cwd: &Path, artifacts_dir: Option<&Path>) -> (Path
         );
         return (path, false);
     }
-    let file_name = match path.file_name().and_then(|n| n.to_str()) {
-        Some(name) => name.to_string(),
-        None => return (path, false),
+    let Some(target) = first_free_target(&path, dir) else {
+        return (path, false);
     };
-    let mut target = dir.join(&file_name);
-    // Collision-loop invariants hoisted (#1090): stem/ext are constant per
-    // attempt, and an empty extension formats without the separator dot
-    // (`LICENSE_2`, never `LICENSE_2.`).
-    let stem = Path::new(&file_name)
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .unwrap_or("artifact");
-    let ext = Path::new(&file_name)
-        .extension()
-        .and_then(|e| e.to_str())
-        .unwrap_or_default();
-    let mut counter = 2u32;
-    while target.exists() {
-        target = dir.join(if ext.is_empty() {
-            format!("{stem}_{counter}")
-        } else {
-            format!("{stem}_{counter}.{ext}")
-        });
-        counter += 1;
-    }
     match std::fs::copy(&path, &target) {
         Ok(_) => (target, true),
         Err(e) => {
@@ -533,7 +539,7 @@ fn materialize(path: PathBuf, cwd: &Path, artifacts_dir: Option<&Path>) -> (Path
 /// instead of recomputing them (the replayed history still narrates them).
 /// Plain copies, never hardlinks: an in-place edit on the cwd copy stays
 /// local and never writes through to the persistent layer or bypasses
-/// [`materialize`]'s `_2` versioning. A missing or empty directory is a
+/// [`first_free_target`]'s `_2` versioning. A missing or empty directory is a
 /// silent no-op; a per-file failure logs and continues (the `materialize`
 /// precedent).
 pub(crate) fn backfill_into_cwd(artifacts_dir: Option<&Path>, cwd: &Path) {
