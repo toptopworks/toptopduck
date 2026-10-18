@@ -8,7 +8,8 @@ import {
   type ReactElement,
   type ReactNode,
 } from "react";
-import { DeleteSessionDialog, SessionSidebar } from "../SessionSidebar";
+import { SessionSidebar } from "../SessionSidebar";
+import { DeleteSessionDialog } from "../SessionDialogs";
 import type { OpenSession } from "../sidebarModel";
 import type { SessionMetadata } from "../../types/session";
 import type { ProviderConfig } from "../../types/provider";
@@ -25,16 +26,6 @@ import { TooltipProvider } from "@/components/ui/tooltip";
 const menuClose = vi.hoisted(() => ({
   current: null as null | ((e: { preventDefault: () => void }) => void),
 }));
-// The content's Escape hook, for tests that need to simulate a keyboard
-// close (the mocked shape has no close machinery of its own).
-const menuEscape = vi.hoisted(() => ({
-  current: null as null | (() => void),
-}));
-// The mocked root's open flip, for tests that need to CLOSE the menu (the
-// mocked shape has no close machinery of its own).
-const menuRoot = vi.hoisted(() => ({
-  current: null as null | ((open: boolean) => void),
-}));
 vi.mock("@/components/ui/dropdown-menu", () => {
   // The root's open intent rides context so the trigger can mirror Radix's
   // contract (a trigger click fires onOpenChange(true)) without an open
@@ -49,7 +40,6 @@ vi.mock("@/components/ui/dropdown-menu", () => {
     children: ReactNode;
     onOpenChange?: (open: boolean) => void;
   }) {
-    menuRoot.current = onOpenChange ?? null;
     return (
       <MenuOpenCtx.Provider value={{ onOpenChange }}>
         <div data-testid="dropdown-menu-root">{children}</div>
@@ -78,18 +68,13 @@ vi.mock("@/components/ui/dropdown-menu", () => {
   function DropdownMenuContent({
     children,
     onCloseAutoFocus,
-    onPointerDown,
-    onEscapeKeyDown,
   }: {
     children: ReactNode;
     onCloseAutoFocus?: (e: { preventDefault: () => void }) => void;
-    onPointerDown?: (e: React.PointerEvent) => void;
-    onEscapeKeyDown?: () => void;
   }) {
     menuClose.current = onCloseAutoFocus ?? null;
-    menuEscape.current = onEscapeKeyDown ?? null;
     return (
-      <div role="menu" onPointerDown={onPointerDown}>
+      <div role="menu">
         {children}
       </div>
     );
@@ -1098,6 +1083,79 @@ describe("SessionSidebar hover card content (ADR-0093, issue #513)", () => {
     expect(screen.getByText("no turns")).toBeInTheDocument();
   });
 
+  it("holds the card through the leave grace, cancels the close on card enter, closes on card leave", async () => {
+    // Wiring pin (issue #1325): the row's pointerleave runs the 200 ms close
+    // grace; a pointer sweeping onto the card itself cancels the pending
+    // close (read-only per ADR-0127, but the pointer may rest there to
+    // read); leaving the CARD schedules its own close -- the row-leave guard
+    // cannot serve that path, the row's leave already ran.
+    const persisted: SessionMetadata = {
+      duck_path: "/x/grace.duck",
+      display_name: "Grace Card",
+      last_modified_at: Date.now() - 3 * 3600_000,
+      source_summary: { first_source_name: null, source_count: 0, turn_count: 0 },
+      format_version: 1,
+      pinned: false,
+      archived: false,
+    };
+    vi.useFakeTimers();
+    const { container } = renderShell(<SessionSidebar {...sidebarProps({ sessions: [persisted] })} />);
+    const row = container.querySelector<HTMLElement>(".session-entry")!;
+    fireEvent.pointerEnter(row);
+    await act(async () => {
+      vi.advanceTimersByTime(350);
+    });
+    expect(screen.getByText("Data source")).toBeInTheDocument();
+    // Inside the 200 ms grace the card stays up.
+    fireEvent.pointerLeave(row);
+    await act(async () => {
+      vi.advanceTimersByTime(199);
+    });
+    expect(screen.getByText("Data source")).toBeInTheDocument();
+    // Sweeping onto the card cancels the pending close.
+    const card = screen.getByText("Data source").closest("[data-state=\"open\"]")!;
+    fireEvent.pointerEnter(card);
+    await act(async () => {
+      vi.advanceTimersByTime(500);
+    });
+    expect(screen.getByText("Data source")).toBeInTheDocument();
+    // Leaving the CARD schedules its own close.
+    fireEvent.pointerLeave(card);
+    await act(async () => {
+      vi.advanceTimersByTime(200);
+    });
+    expect(screen.queryByText("Data source")).toBeNull();
+  });
+
+  it("closes the card when the pointer leaves the whole list (backstop)", async () => {
+    // Wiring pin (issue #1325): a pointerleave lost to the pill's
+    // pointer-events toggling never reaches the row; the list-level leave is
+    // the final backstop.
+    const persisted: SessionMetadata = {
+      duck_path: "/x/backstop.duck",
+      display_name: "Backstop Card",
+      last_modified_at: Date.now() - 3 * 3600_000,
+      source_summary: { first_source_name: null, source_count: 0, turn_count: 0 },
+      format_version: 1,
+      pinned: false,
+      archived: false,
+    };
+    vi.useFakeTimers();
+    const { container } = renderShell(<SessionSidebar {...sidebarProps({ sessions: [persisted] })} />);
+    const row = container.querySelector<HTMLElement>(".session-entry")!;
+    const list = container.querySelector<HTMLElement>(".session-list")!;
+    fireEvent.pointerEnter(row);
+    await act(async () => {
+      vi.advanceTimersByTime(350);
+    });
+    expect(screen.getByText("Data source")).toBeInTheDocument();
+    fireEvent.pointerLeave(list);
+    await act(async () => {
+      vi.advanceTimersByTime(200);
+    });
+    expect(screen.queryByText("Data source")).toBeNull();
+  });
+
   it("opening the row menu retires the hover metadata card", async () => {
     // The pointer necessarily dwelt on the row to reach the menu trigger,
     // so the card is necessarily open when the menu opens -- the two
@@ -1161,9 +1219,13 @@ describe("SessionSidebar hover card content (ADR-0093, issue #513)", () => {
 
   it("pointer-driven menu close strands no focus; keyboard close restores it", () => {
     // The mocked content captures onCloseAutoFocus (no close machinery of
-    // its own). A pointerdown anywhere in the content marks the close as
-    // pointer-driven -> the close-restore focus is refused; without one,
-    // the default (keyboard) restore stands.
+    // its own). The close classification rides usePointerCloseIntent's
+    // window-level capture: a pointerdown anywhere before the close marks
+    // it pointer-driven -> the close-restore focus is refused; jsdom's
+    // synthetic clicks fire no pointerdown, so without one the default
+    // (keyboard) restore stands. (The Escape-clears-the-mark leg is pinned
+    // by usePointerCloseIntent's own specs -- keydown clears, in either
+    // order -- and is not re-pinned here.)
     const persisted: SessionMetadata = {
       duck_path: "/x/closegate.duck",
       display_name: "Close Gate",
@@ -1180,191 +1242,18 @@ describe("SessionSidebar hover card content (ADR-0093, issue #513)", () => {
       container.querySelector<HTMLElement>(".session-entry")!,
     ).getByRole("button", { name: "Row actions" });
 
-    // Keyboard close first: no pointerdown -> restore stands.
+    // Keyboard close first: jsdom's synthetic click fires no pointerdown
+    // -> restore stands.
     fireEvent.click(trigger);
     const preventDefault = vi.fn();
     menuClose.current?.({ preventDefault });
     expect(preventDefault).not.toHaveBeenCalled();
 
-    // Pointer close: a pointerdown inside the content marks it -> refused.
-    fireEvent.pointerDown(
-      container.querySelector<HTMLElement>(`[role="menuitem"]`)!,
-    );
+    // Pointer close: a pointerdown (window capture -- a menu item select,
+    // an outside dismiss, the trigger itself) arms it -> refused.
+    fireEvent.pointerDown(window);
     menuClose.current?.({ preventDefault });
     expect(preventDefault).toHaveBeenCalled();
-
-    // Escape clears the pointer mark: the keyboard close that follows keeps
-    // the restore (the pointer-modality close would have refused it).
-    menuEscape.current?.();
-    const preventDefaultAfterEscape = vi.fn();
-    menuClose.current?.({ preventDefault: preventDefaultAfterEscape });
-    expect(preventDefaultAfterEscape).not.toHaveBeenCalled();
-  });
-
-  it("menu close arms an enter suppression until a real leave (synthetic re-entry)", async () => {
-    // The modal menu holds body pointer-events:none; on release the browser
-    // re-dispatches a pointerEnter at the pointer's position -- the pointer
-    // never left the row (Escape close) -- and that synthetic re-entry must
-    // not re-arm the 300 ms dwell. The next enter after a real leave opens
-    // again.
-    const persisted: SessionMetadata = {
-      duck_path: "/x/reentry.duck",
-      display_name: "Re-entry",
-      last_modified_at: Date.now() - 3 * 3600_000,
-      source_summary: { first_source_name: "data.csv", source_count: 1, turn_count: 2 },
-      format_version: 1,
-      pinned: false,
-      archived: false,
-    };
-    vi.useFakeTimers();
-    const { container } = renderShell(<SessionSidebar {...sidebarProps({ sessions: [persisted] })} />);
-    const row = container.querySelector<HTMLElement>(".session-entry")!;
-    const trigger = within(row).getByRole("button", { name: "Row actions" });
-
-    // Sanity arm of the machine: a dwell opens the card.
-    fireEvent.pointerEnter(row);
-    await act(async () => {
-      vi.advanceTimersByTime(350);
-    });
-    expect(screen.getByText("Data source")).toBeInTheDocument();
-
-    // Menu open retires the card AND arms the suppression: Radix's own
-    // controlled-open intent (fired through the HoverCard bridge ~17 ms
-    // after the content mounts, CDP-measured) must not re-arm the dwell.
-    fireEvent.click(trigger);
-    expect(screen.queryByText("Data source")).not.toBeInTheDocument();
-    fireEvent.pointerEnter(row);
-    await act(async () => {
-      vi.advanceTimersByTime(400);
-    });
-    expect(screen.queryByText("Data source")).not.toBeInTheDocument();
-
-    // Pointer travels onto the open menu (real pointerleave -- it clears
-    // the arm) and Radix keeps firing bridge intents afterwards (CDP:
-    // three enters after the leave): silenced by the open-menu mark.
-    fireEvent.pointerLeave(row);
-    fireEvent.pointerEnter(row);
-    await act(async () => {
-      vi.advanceTimersByTime(400);
-    });
-    expect(screen.queryByText("Data source")).not.toBeInTheDocument();
-
-    // Menu close refreshes the arm; the synthetic re-entry is consumed.
-    menuRoot.current?.(false);
-    fireEvent.pointerEnter(row);
-    await act(async () => {
-      vi.advanceTimersByTime(400);
-    });
-    expect(screen.queryByText("Data source")).not.toBeInTheDocument();
-
-    // Past the grace window (a real leave + re-enter), the card opens again.
-    fireEvent.pointerLeave(row);
-    fireEvent.pointerEnter(row);
-    await act(async () => {
-      vi.advanceTimersByTime(400);
-    });
-    expect(screen.getByText("Data source")).toBeInTheDocument();
-  });
-
-  it("keyboard focus opens the card and blur retires it through the bridge", async () => {
-    // The li's onBlur clears kbFocusRef synchronously during the focusout
-    // dispatch, while Radix defers its close intent a macrotask even at
-    // closeDelay 0 -- a gated close would read both markers false and
-    // strand the card on the workspace the moment a keyboard user Tabs off
-    // the row (the Escape dismiss feeds the same gated onOpenChange).
-    // Close intents must pass the bridge unconditionally; only open intents
-    // carry the pointer-or-keyboard marker gate.
-    const persisted: SessionMetadata = {
-      duck_path: "/x/kbcard.duck",
-      display_name: "Keyboard Card",
-      last_modified_at: Date.now() - 3 * 3600_000,
-      source_summary: { first_source_name: "data.csv", source_count: 1, turn_count: 2 },
-      format_version: 1,
-      pinned: false,
-      archived: false,
-    };
-    vi.useFakeTimers();
-    const { container } = renderShell(<SessionSidebar {...sidebarProps({ sessions: [persisted] })} />);
-    const row = container.querySelector<HTMLElement>(".session-entry")!;
-    const main = row.querySelector<HTMLElement>(".session-entry-main")!;
-
-    // Keyboard focus at the focusin sets kbFocusRef; Radix's deferred open
-    // intent then bridges through and the 300 ms dwell opens the card --
-    // the non-pointer user's only path. The real .focus() establishes the
-    // focused state first: jsdom answers :focus-visible off the
-    // activeElement (loosely true once focused, per the classifier's guard
-    // comment), and a synthetic focusin alone would not set it.
-    // jsdom derives :focus-visible from the most recent interaction
-    // modality -- earlier tests' pointer/click events leave it in pointer
-    // modality, which would classify this focusin as a programmatic
-    // restore. A keyDown restores keyboard modality first, so the
-    // classifier takes the keyboard branch and sets kbFocusRef.
-    fireEvent.keyDown(document.body, { key: "Tab" });
-    main.focus();
-    fireEvent.focusIn(main);
-    await act(async () => {
-      vi.advanceTimersByTime(350);
-    });
-    expect(screen.getByText("Data source")).toBeInTheDocument();
-
-    // Tab away: the blur clears kbFocusRef first, the close intent lands a
-    // macrotask later -- it must still retire the card.
-    fireEvent.focusOut(main);
-    main.blur();
-    await act(async () => {
-      vi.advanceTimersByTime(400);
-    });
-    expect(screen.queryByText("Data source")).not.toBeInTheDocument();
-  });
-
-  it("the close-burst suppression expires by time, not only by a real leave", async () => {
-    // The re-entry pin above exercises disarm-by-leave; this one drives the
-    // expiry half. A lost pointerleave (portal layers -- the design premise
-    // of menuArmRef) never clears the arm, so past MENU_REENTRY_GRACE_MS the
-    // stale arm must fall away at the next enter and the card opens again:
-    // the row cannot go dark forever. Vitest's fake timers mock Date
-    // alongside the clock, so advancing also advances the arm's
-    // event-instant read.
-    const persisted: SessionMetadata = {
-      duck_path: "/x/graceexp.duck",
-      display_name: "Grace Expiry",
-      last_modified_at: Date.now() - 3 * 3600_000,
-      source_summary: { first_source_name: "data.csv", source_count: 1, turn_count: 2 },
-      format_version: 1,
-      pinned: false,
-      archived: false,
-    };
-    vi.useFakeTimers();
-    const { container } = renderShell(<SessionSidebar {...sidebarProps({ sessions: [persisted] })} />);
-    const row = container.querySelector<HTMLElement>(".session-entry")!;
-    const trigger = within(row).getByRole("button", { name: "Row actions" });
-
-    // Sanity arm of the machine: a dwell opens the card, opening the menu
-    // retires it and arms the suppression.
-    fireEvent.pointerEnter(row);
-    await act(async () => {
-      vi.advanceTimersByTime(350);
-    });
-    expect(screen.getByText("Data source")).toBeInTheDocument();
-    fireEvent.click(trigger);
-
-    // Menu close refreshes the arm and NO leave ever arrives (the
-    // lost-leave premise). The enter inside the grace is consumed...
-    menuRoot.current?.(false);
-    fireEvent.pointerEnter(row);
-    await act(async () => {
-      vi.advanceTimersByTime(400);
-    });
-    expect(screen.queryByText("Data source")).not.toBeInTheDocument();
-
-    // ...and the next enter, with no intervening leave anywhere, meets the
-    // stale arm past the grace, disarms it through the expiry branch, and
-    // opens the card.
-    fireEvent.pointerEnter(row);
-    await act(async () => {
-      vi.advanceTimersByTime(400);
-    });
-    expect(screen.getByText("Data source")).toBeInTheDocument();
   });
 });
 
@@ -1820,166 +1709,6 @@ describe("SessionSidebar row actions menu (ADR-0133, issue #1319)", () => {
         name: "Row actions",
       }),
     ).toBeDisabled();
-  });
-});
-
-// --- ADR-0127 (issue #1175): the single-flight hover machine ------------------
-
-describe("SessionSidebar single-flight hover machine (issue #1175)", () => {
-  // One card max, parent-owned: the machine's transitions -- retire on
-  // foreign enter, 200 ms close grace, card-enter cancel, list-leave
-  // backstop, stale-leave guard -- are pinned with fake timers. The card's
-  // display name renders in a <p> (the row's name is a <span>), so the
-  // p-selector tells WHICH card is mounted without colliding with the row.
-
-  afterEach(() => {
-    vi.useRealTimers();
-  });
-
-  function meta(path: string, name: string): SessionMetadata {
-    return {
-      duck_path: path,
-      display_name: name,
-      last_modified_at: Date.now(),
-      source_summary: { first_source_name: null, source_count: 0, turn_count: 0 },
-      format_version: 1,
-      pinned: false,
-      archived: false,
-    };
-  }
-
-  function hoverProps() {
-    const base = {
-      collapsed: false,
-      openSessions: [] as OpenSession[],
-      activeSessionId: null,
-      disabled: false,
-      loadError: null as string | null,
-      grouping: "flat" as const,
-      onNew: () => {},
-      onActivate: () => {},
-      onOpenPersisted: () => {},
-      onSwitchGrouping: () => {},
-      archivedSessions: [] as SessionMetadata[],
-      showArchived: false,
-      onToggleArchived: () => {},
-      onSetPinned: () => {},
-      onArchive: () => {},
-      onDelete: () => {},
-      onRename: () => {},
-      onClose: () => {},
-      onOpenSearch: () => {},
-      provider: null,
-      onOpenSettings: () => {},
-    };
-    return {
-      ...base,
-      sessions: [meta("/x/a.duck", "Row A"), meta("/x/b.duck", "Row B")],
-    };
-  }
-
-  function rows(container: HTMLElement): HTMLElement[] {
-    return Array.from(container.querySelectorAll(".session-entry")) as HTMLElement[];
-  }
-
-  it("retires the shown card the moment a different row is entered, before its own dwell", async () => {
-    // The retire line is the sweep fix: without it the OLD card stays on
-    // screen the whole time the pointer travels (every enter cancels the
-    // pending close; the new card only opens after its own 300 ms dwell).
-    vi.useFakeTimers();
-    const { container } = renderShell(<SessionSidebar {...hoverProps()} />);
-    const [a, b] = rows(container);
-
-    fireEvent.pointerEnter(a);
-    await act(async () => {
-      vi.advanceTimersByTime(350);
-    });
-    expect(screen.getByText("Row A", { selector: "p" })).toBeInTheDocument();
-
-    fireEvent.pointerEnter(b);
-    // NO timer advance: A's card must be gone immediately...
-    expect(screen.queryByText("Row A", { selector: "p" })).toBeNull();
-    // ...and B's card opens only after its own dwell.
-    await act(async () => {
-      vi.advanceTimersByTime(299);
-    });
-    expect(screen.queryByText("Row B", { selector: "p" })).toBeNull();
-    await act(async () => {
-      vi.advanceTimersByTime(1);
-    });
-    expect(screen.getByText("Row B", { selector: "p" })).toBeInTheDocument();
-  });
-
-  it("honors the 200 ms close grace, and entering the card cancels the close", async () => {
-    vi.useFakeTimers();
-    const { container } = renderShell(<SessionSidebar {...hoverProps()} />);
-    const [a] = rows(container);
-
-    fireEvent.pointerEnter(a);
-    await act(async () => {
-      vi.advanceTimersByTime(350);
-    });
-    expect(screen.getByText("Row A", { selector: "p" })).toBeInTheDocument();
-
-    // Leave the row: the grace window keeps the card readable...
-    fireEvent.pointerLeave(a);
-    await act(async () => {
-      vi.advanceTimersByTime(199);
-    });
-    expect(screen.getByText("Row A", { selector: "p" })).toBeInTheDocument();
-    // ...and sweeping onto the card itself cancels the pending close
-    // (read-only per ADR-0127, but the pointer may rest there to read).
-    const card = screen.getByText("Data source").closest("[data-state=\"open\"]")!;
-    fireEvent.pointerEnter(card);
-    await act(async () => {
-      vi.advanceTimersByTime(500);
-    });
-    expect(screen.getByText("Row A", { selector: "p" })).toBeInTheDocument();
-    // Leaving the CARD schedules its own close (the row-leave guard cannot
-    // serve this path -- the row's leave already ran).
-    fireEvent.pointerLeave(card);
-    await act(async () => {
-      vi.advanceTimersByTime(200);
-    });
-    expect(screen.queryByText("Row A", { selector: "p" })).toBeNull();
-  });
-
-  it("closes the card when the pointer leaves the whole list (backstop)", async () => {
-    // A pointerleave lost to the pill's pointer-events toggling never
-    // reaches the row; the list-level leave is the final backstop.
-    vi.useFakeTimers();
-    const { container } = renderShell(<SessionSidebar {...hoverProps()} />);
-    const [a] = rows(container);
-    const list = container.querySelector(".session-list")!;
-
-    fireEvent.pointerEnter(a);
-    await act(async () => {
-      vi.advanceTimersByTime(350);
-    });
-    expect(screen.getByText("Row A", { selector: "p" })).toBeInTheDocument();
-    fireEvent.pointerLeave(list);
-    await act(async () => {
-      vi.advanceTimersByTime(200);
-    });
-    expect(screen.queryByText("Row A", { selector: "p" })).toBeNull();
-  });
-
-  it("ignores a stale leave from a row the pointer already left", async () => {
-    // After A -> B, a late leave of A must not clear B's pending open (the
-    // stale-key guard); B's card still opens on schedule.
-    vi.useFakeTimers();
-    const { container } = renderShell(<SessionSidebar {...hoverProps()} />);
-    const [a, b] = rows(container);
-
-    fireEvent.pointerEnter(a);
-    fireEvent.pointerLeave(a);
-    fireEvent.pointerEnter(b);
-    // Stale: the pointer's tracked row is B now.
-    fireEvent.pointerLeave(a);
-    await act(async () => {
-      vi.advanceTimersByTime(300);
-    });
-    expect(screen.getByText("Row B", { selector: "p" })).toBeInTheDocument();
   });
 });
 

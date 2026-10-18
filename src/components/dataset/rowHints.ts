@@ -69,6 +69,14 @@ import { useRef, useState, type RefObject } from "react";
 // presentation consumers of the closeDialog handoff, not protocol -- and the
 // replace path's Tauri file picker is picker adaptation, not hint protocol
 // (issue #1073 non-goals).
+//
+// Cf. src/session/sidebarHoverCard.ts (issue #1325, deliberately NOT
+// converged): the sidebar row hover-card machine is the same-family artifact
+// -- both fight Chromium's synthetic pointerEnter after a modal unlock (the
+// same-source artifact, tuned per surface at 300 ms here vs 250 ms there) --
+// but the protocols' lifetimes fork (restore gate + trigger capture vs
+// dwell/grace timers), so a forced merge would be a false seam; each stays
+// its protocol's owner.
 
 // The row-tooltip slot identity: which tooltip (kind) on which row owns the
 // mutex.
