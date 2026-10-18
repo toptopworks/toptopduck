@@ -207,17 +207,18 @@ impl Materializer for RealMaterializer {
         // whitelist (issue #334) so an out-of-bounds read_* becomes a
         // structured "outside the allowed area" error.
         // refs are held for the post-install provenance record (issue #40).
-        let analysis =
-            preflight_read_sql(&sql, deps.working_set, deps.temp_path, deps.assets_dir.as_deref())
-                .map_err(
-                |e| match e {
-                PreflightError::StaleReference(s) => {
-                    ExecError::new(ExecErrorKind::StaleReference, s)
-                }
-                PreflightError::FsAcl(s)
-                | PreflightError::NonLiteralPath(s)
-                | PreflightError::Unparseable(s) => ExecError::new(ExecErrorKind::Runtime, s),
-            })?;
+        let analysis = preflight_read_sql(
+            &sql,
+            deps.working_set,
+            deps.temp_path,
+            deps.assets_dir.as_deref(),
+        )
+        .map_err(|e| match e {
+            PreflightError::StaleReference(s) => ExecError::new(ExecErrorKind::StaleReference, s),
+            PreflightError::FsAcl(s)
+            | PreflightError::NonLiteralPath(s)
+            | PreflightError::Unparseable(s) => ExecError::new(ExecErrorKind::Runtime, s),
+        })?;
 
         // Acquire the admin connection once at this execution point (ADR-0104
         // Decision 2): this is the materialization point when the turn's SQL

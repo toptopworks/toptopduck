@@ -986,12 +986,19 @@ mod tests {
         }];
 
         let persister = RecipePersister::new();
-        let recipe = persister.build_recipe(&ws, &timeline, &crate::session::SessionRuntimeFacts::default());
+        let recipe = persister.build_recipe(
+            &ws,
+            &timeline,
+            &crate::session::SessionRuntimeFacts::default(),
+        );
         assert_eq!(recipe.history.len(), 1);
         match &recipe.history[0] {
             RecipeEntry::Turn(t) => {
                 assert_eq!(t.question, "q_break");
-                assert_eq!(t.outcome, original.outcome, "the recorded outcome survives verbatim");
+                assert_eq!(
+                    t.outcome, original.outcome,
+                    "the recorded outcome survives verbatim"
+                );
             }
             other => panic!("expected a Turn entry, got {other:?}"),
         }

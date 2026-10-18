@@ -456,6 +456,42 @@ mod tests {
         assert_eq!(analysis.refs, ["people".to_string()].into_iter().collect(),);
     }
 
+    /// ADR-0089 assets face: a read_* path under the session's assets/ dir
+    /// passes the PREFLIGHT itself (the surface a replayed turn's SQL goes
+    /// through), while the same path without the assets root is refused as
+    /// FsAcl. The replay half of SQL-reference dead-file resilience.
+    #[test]
+    fn preflight_allows_read_paths_under_the_assets_dir() {
+        let temp = TempDir::new().unwrap();
+        let session = TempDir::new().unwrap();
+        let assets = session.path().join("assets");
+        std::fs::create_dir_all(&assets).unwrap();
+        let dead_file = assets.join("kline.csv");
+        std::fs::write(
+            &dead_file, "x
+y
+",
+        )
+        .unwrap();
+        let sql = format!(
+            "SELECT COUNT(*) AS n FROM read_csv_auto('{}')",
+            dead_file.to_string_lossy()
+        );
+        let ws = WorkingSet::default();
+
+        // Without the assets root threaded in, the same SQL is refused --
+        // the old death shape a temp-referencing recipe hit on resume.
+        let refused = preflight_read_sql(&sql, &ws, temp.path(), None).unwrap_err();
+        assert!(
+            matches!(refused, PreflightError::FsAcl(_)),
+            "without the assets allowance the read is refused, got {refused:?}"
+        );
+
+        let analysis = preflight_read_sql(&sql, &ws, temp.path(), Some(&assets))
+            .expect("assets read passes the preflight");
+        assert!(analysis.refs.is_empty());
+    }
+
     /// A SQL that references neither a stale result nor a `read_*` path and
     /// reads no live member yields an empty ref set (no provenance edges).
     #[test]
@@ -476,8 +512,13 @@ mod tests {
     fn non_literal_read_path_is_refused_by_preflight() {
         let temp = TempDir::new().unwrap();
         let ws = WorkingSet::default();
-        let err = preflight_read_sql("SELECT * FROM read_csv_auto(some_column)", &ws, temp.path(), None)
-            .unwrap_err();
+        let err = preflight_read_sql(
+            "SELECT * FROM read_csv_auto(some_column)",
+            &ws,
+            temp.path(),
+            None,
+        )
+        .unwrap_err();
         match err {
             PreflightError::NonLiteralPath(msg) => {
                 assert!(

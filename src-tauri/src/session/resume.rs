@@ -43,7 +43,8 @@ use crate::model::{
 };
 use crate::persistence::read_duck;
 use crate::persistence::recipe::{
-    Recipe, RecipeEntry, RecipeOutcome, RecipeTurn, RecipeTraceEntry, RecipeTraceRound, RuntimeKind, SourceRef,
+    Recipe, RecipeEntry, RecipeOutcome, RecipeTraceEntry, RecipeTraceRound, RecipeTurn,
+    RuntimeKind, SourceRef,
 };
 use crate::persistence::registry::{canonicalize_duck, release, try_acquire};
 use crate::provider::Provider;
@@ -453,8 +454,9 @@ impl<'a> Resumer<'a> {
                     // Failed but ALSO carries its original Materialized entry
                     // forward -- ADR-0035 Decision 2 calibration: display
                     // degrades, the persisted history does not.
-                    let (outcome, preserved): (TurnOutcome, Option<Box<RecipeTurn>>) =
-                        match &turn.outcome {
+                    let (outcome, preserved): (TurnOutcome, Option<Box<RecipeTurn>>) = match &turn
+                        .outcome
+                    {
                         RecipeOutcome::Materialized {
                             promotions,
                             body,
@@ -507,9 +509,9 @@ impl<'a> Resumer<'a> {
                                     TurnOutcome::Materialized {
                                         promotions: rebuilt,
                                         viz: None,
-                                    // #847: the turn's terminal text restores
-                                    // verbatim -- replay is LLM-free, so the
-                                    // prose cannot be re-derived, only carried.
+                                        // #847: the turn's terminal text restores
+                                        // verbatim -- replay is LLM-free, so the
+                                        // prose cannot be re-derived, only carried.
                                         body: body.clone(),
                                         assumption: assumption.clone(),
                                     },
@@ -532,9 +534,7 @@ impl<'a> Resumer<'a> {
                         RecipeOutcome::Failed(failure) => {
                             (TurnOutcome::Failed(failure.clone()), None)
                         }
-                        RecipeOutcome::Cancelled(reason) => {
-                            (TurnOutcome::Cancelled(*reason), None)
-                        }
+                        RecipeOutcome::Cancelled(reason) => (TurnOutcome::Cancelled(*reason), None),
                     };
                     Ok(TimelineEntry::Turn {
                         record: TurnRecord {
@@ -1970,7 +1970,10 @@ mod tests {
         let TimelineEntry::Turn { preserved, .. } = &timeline[0] else {
             panic!("expected Turn, got {:?}", timeline[0])
         };
-        assert!(preserved.is_none(), "a replayed-OK turn carries no preserved entry");
+        assert!(
+            preserved.is_none(),
+            "a replayed-OK turn carries no preserved entry"
+        );
 
         let TimelineEntry::Turn {
             record, preserved, ..

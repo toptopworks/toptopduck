@@ -66,7 +66,15 @@ pub(super) fn materialize_sql_references(
         if analysis.non_literal_read_found {
             continue;
         }
-        for original in analysis.paths {
+        // Longest-first rewrite order: one referenced temp path can be a
+        // substring of another (`kline.csv` inside `kline.csv.bak` under the
+        // same temp prefix); a blind shorter-first replace would rewrite the
+        // longer literal's text in place and leave it half-migrated (the
+        // assets path, which does not exist). Rewriting the longest literal
+        // first leaves only true independent occurrences for the shorter.
+        let mut originals = analysis.paths;
+        originals.sort_by_key(|p| std::cmp::Reverse(p.len()));
+        for original in originals {
             let Some(canonical) = std::fs::canonicalize(&original).ok() else {
                 continue; // a missing reference: dead either way, not ours to fix
             };
@@ -83,9 +91,7 @@ pub(super) fn materialize_sql_references(
                     target
                 }
             };
-            promotion.sql = promotion
-                .sql
-                .replace(&original, &target.to_string_lossy());
+            promotion.sql = promotion.sql.replace(&original, &target.to_string_lossy());
         }
     }
 }
@@ -177,10 +183,8 @@ mod tests {
         let duck = session.path().join("session.duck");
         let csv = temp_csv(temp.path(), "kline.csv");
 
-        let mut outcome = promotion_with(&format!(
-            "SELECT * FROM read_csv_auto('{}') LIMIT 1",
-            csv
-        ));
+        let mut outcome =
+            promotion_with(&format!("SELECT * FROM read_csv_auto('{}') LIMIT 1", csv));
         materialize_sql_references(&mut outcome, temp.path(), Some(&duck));
 
         let assets_copy = session.path().join("assets").join("kline.csv");
@@ -274,6 +278,64 @@ mod tests {
         assert_eq!(
             promotions[0].sql, sql,
             "unbound session keeps the SQL verbatim"
+        );
+    }
+
+    #[test]
+    fn overlapping_path_prefixes_rewrite_independently() {
+        // `kline.csv` is a substring of `kline.csv.bak` under the same temp
+        // prefix, AND a same-named file already sits in assets/ -- so the
+        // shorter path stages as `kline_2.csv` while the longer stages as
+        // `kline.csv.bak`. A shorter-first blind replace would rewrite the
+        // longer literal's text in place to `kline_2.csv.bak`, a copy that
+        // does not exist; longest-first lands each literal on its OWN copy.
+        let temp = tempfile::tempdir().expect("tempdir");
+        let session = tempfile::tempdir().expect("session dir");
+        let duck = session.path().join("session.duck");
+        let assets = session.path().join("assets");
+        std::fs::create_dir_all(&assets).expect("assets dir");
+        std::fs::write(
+            assets.join("kline.csv"),
+            "prior turn
+",
+        )
+        .expect("occupy kline.csv");
+        let csv = temp_csv(temp.path(), "kline.csv");
+        let bak_path = temp.path().join("kline.csv.bak");
+        std::fs::write(
+            &bak_path, "b
+",
+        )
+        .expect("write bak");
+        let bak = bak_path.to_string_lossy().into_owned();
+
+        let mut outcome = promotion_with(&format!(
+            "SELECT * FROM read_csv_auto('{}') UNION ALL SELECT * FROM read_csv_auto('{}')",
+            csv, bak
+        ));
+        materialize_sql_references(&mut outcome, temp.path(), Some(&duck));
+
+        let staged_csv = assets.join("kline_2.csv");
+        let staged_bak = assets.join("kline.csv.bak");
+        assert!(
+            staged_csv.is_file(),
+            "the shorter path disambiguated to kline_2.csv"
+        );
+        assert!(
+            staged_bak.is_file(),
+            "the longer path staged under its own name"
+        );
+        let TurnOutcome::Materialized { promotions, .. } = &outcome else {
+            panic!("outcome kind unchanged");
+        };
+        let expected = format!(
+            "SELECT * FROM read_csv_auto('{}') UNION ALL SELECT * FROM read_csv_auto('{}')",
+            staged_csv.to_string_lossy(),
+            staged_bak.to_string_lossy()
+        );
+        assert_eq!(
+            promotions[0].sql, expected,
+            "each overlapping literal rewrites onto its own staged copy"
         );
     }
 

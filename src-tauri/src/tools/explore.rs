@@ -99,8 +99,13 @@ fn run_explore(
     // Gateway door (ADR-0013 stale-ref + ADR-0080 read_* whitelist), shared
     // with the materialize path. Explore ignores the dependency set -- it
     // never promotes, so it records no provenance.
-    preflight_read_sql(sql, deps.working_set, deps.temp_path, deps.assets_dir.as_deref())
-        .map_err(|e| match e {
+    preflight_read_sql(
+        sql,
+        deps.working_set,
+        deps.temp_path,
+        deps.assets_dir.as_deref(),
+    )
+    .map_err(|e| match e {
         PreflightError::StaleReference(s) => {
             format!("stale reference: `{s}` has been invalidated and may not anchor a new query")
         }

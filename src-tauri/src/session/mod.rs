@@ -18,8 +18,8 @@ mod rows_io;
 pub mod sandbox;
 pub mod skills;
 pub mod snapshot;
-mod sql_assets;
 pub mod source_lifecycle;
+mod sql_assets;
 pub(crate) mod turn_dispatch;
 pub mod turn_runner;
 
@@ -1297,6 +1297,12 @@ impl Session {
         // the per-session `artifacts/` directory so the manifest survives a
         // close/reopen. Frozen on the record; existence is a render-time
         // fact.
+        let artifacts = artifacts::settle_manifest(
+            &presented,
+            artifacts::reply_body(&outcome),
+            &self.temp_path,
+            artifacts::artifacts_dir(self.persister.duck_path()).as_deref(),
+        );
         // Resume resilience for temp-referencing SQL: every read_* path
         // into the session temp dir is copied into the per-session assets/
         // dir (a dead file) and the promotion SQL is rewritten to the
@@ -1307,12 +1313,6 @@ impl Session {
             &mut outcome,
             &self.temp_path,
             self.persister.duck_path(),
-        );
-        let artifacts = artifacts::settle_manifest(
-            &presented,
-            artifacts::reply_body(&outcome),
-            &self.temp_path,
-            artifacts::artifacts_dir(self.persister.duck_path()).as_deref(),
         );
         self.timeline.push(TimelineEntry::Turn {
             record: TurnRecord {
@@ -3489,9 +3489,13 @@ mod tests {
         // The scripted SQL must name a path inside the session temp dir,
         // which only exists once the session is constructed.
         let csv = session.temp_path.join("kline.csv");
-        std::fs::write(&csv, "close,open
+        std::fs::write(
+            &csv,
+            "close,open
 1,2
-").expect("scratch csv");
+",
+        )
+        .expect("scratch csv");
         let sql = format!(
             "SELECT COUNT(*) AS n FROM read_csv_auto('{}')",
             csv.to_string_lossy()
@@ -3512,7 +3516,10 @@ mod tests {
         // The recorded SQL now points at the persistent copy, and the copy
         // exists under the session dir's assets/ subtree.
         let assets_csv = dir.path().join("assets").join("kline.csv");
-        assert!(assets_csv.is_file(), "scratch csv materialized under assets/");
+        assert!(
+            assets_csv.is_file(),
+            "scratch csv materialized under assets/"
+        );
         let recipe = session.build_recipe();
         let turn = materialized_turn(&recipe);
         let promoted_sql = match &turn.outcome {

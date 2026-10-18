@@ -373,8 +373,7 @@ impl super::Session {
                     request
                         .tools
                         .push(crate::session::artifacts::present_files_definition());
-                    let assets_dir =
-                        crate::session::sql_assets::assets_dir(self.duck_path());
+                    let assets_dir = crate::session::sql_assets::assets_dir(self.duck_path());
                     let mut deps = TurnDeps {
                         engine: &self.admin_engine,
                         source_files: &mut self.source_files,

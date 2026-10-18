@@ -1646,7 +1646,10 @@ fn replay_failure_marks_turn_failed_and_preserves_prior_results() {
     match &break_turn.outcome {
         RecipeOutcome::Materialized { promotions, .. } => {
             assert_eq!(promotions[0].reference_name, "result_2");
-            assert_eq!(promotions[0].sql, "SELECT COUNT(*) AS n FROM \"orders\".data");
+            assert_eq!(
+                promotions[0].sql,
+                "SELECT COUNT(*) AS n FROM \"orders\".data"
+            );
         }
         other => panic!("recorded history overwritten by the replay degrade: {other:?}"),
     }

@@ -279,13 +279,17 @@ mod tests {
         let assets = session.path().join("assets");
         std::fs::create_dir_all(&assets).unwrap();
         let dead_file = assets.join("kline.csv");
-        std::fs::write(&dead_file, "x
+        std::fs::write(
+            &dead_file, "x
 y
-").unwrap();
+",
+        )
+        .unwrap();
         // FsAcl canonicalizes the roots, so the file must exist on disk.
         let acl = FsAcl::new(&WorkingSet::default(), temp.path(), Some(&assets));
         assert!(
-            acl.check(&dead_file.to_string_lossy(), AccessMode::Read).is_ok(),
+            acl.check(&dead_file.to_string_lossy(), AccessMode::Read)
+                .is_ok(),
             "assets dead file passes the read check"
         );
         let err = acl
@@ -310,7 +314,8 @@ y
             Some(&session.path().join("assets")),
         );
         assert!(
-            acl.check(&ghost.to_string_lossy(), AccessMode::Read).is_err(),
+            acl.check(&ghost.to_string_lossy(), AccessMode::Read)
+                .is_err(),
             "a missing assets root carries no read allowance"
         );
     }
