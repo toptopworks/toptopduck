@@ -1,7 +1,7 @@
 // The cold-start guidance banner's two test surfaces (issue #1337):
 // 1. The pure trigger matrix, tested per-cell at module level (the
-//    first_free_target precedent) -- 4 render states + 5 suppressed states,
-//    with the two loading gates and the keychain-fault stay-out.
+//    first_free_target precedent) -- 4 render states + 7 suppressed states,
+//    with the three unresolved-feed gates and the keychain-fault stay-out.
 // 2. The component: three gap forms each render their copy + the shared CTA,
 //    and the CTA routes through the openSettings channel.
 
@@ -29,7 +29,7 @@ function adapter(id: string, detected: boolean): ColdStartGapInputs["adapters"] 
 }
 
 function providerWith(profileCount: number): ColdStartGapInputs["provider"] {
-  if (profileCount === 0) return null;
+  if (profileCount === 0) return { profiles: [], active_profile: null };
   return {
     profiles: Array.from({ length: profileCount }, (_, i) => ({
       id: `profile-${i}`,
@@ -117,10 +117,6 @@ describe("deriveColdStartGap (trigger matrix)", () => {
     expect(deriveColdStartGap(gapInputs({ provider: providerWith(0) }))).toBe(
       "profile-missing",
     );
-    // An unresolved provider is the same zero-profile wall.
-    expect(deriveColdStartGap(gapInputs({ provider: null }))).toBe(
-      "profile-missing",
-    );
   });
 
   it("flags key-missing for a keyed-shape profile without a key", () => {
@@ -152,6 +148,14 @@ describe("deriveColdStartGap (trigger matrix)", () => {
     ).toBeNull();
   });
 
+  it("renders nothing while the provider feed is unresolved", () => {
+    // The app-config read pending or failed -- a defer, not a wall: under
+    // the old conflation this painted "no provider profile" on a possibly
+    // configured machine (a loaded zero-profile config is the wall, and
+    // providerWith(0) above pins that side).
+    expect(deriveColdStartGap(gapInputs({ provider: null }))).toBeNull();
+  });
+
   it("renders nothing on a keychain fault (the OS answer is unknowable, issue #275)", () => {
     expect(
       deriveColdStartGap(
@@ -165,6 +169,21 @@ describe("deriveColdStartGap (trigger matrix)", () => {
       deriveColdStartGap(
         gapInputs({
           pendingRuntime: { kind: "external", data: "qwen-code" },
+        }),
+      ),
+    ).toBeNull();
+  });
+
+  it("renders nothing for a detected external pending over a keyless profile", () => {
+    // The external branch's early return is the only thing keeping the key
+    // posture off a healthy external setup -- a CLI runtime consumes no API
+    // key, so a reordered derivation would paint a false key wall on the
+    // dominant external shape. The keyed-baseline cell above cannot tell.
+    expect(
+      deriveColdStartGap(
+        gapInputs({
+          pendingRuntime: { kind: "external", data: "qwen-code" },
+          activeHasKey: false,
         }),
       ),
     ).toBeNull();

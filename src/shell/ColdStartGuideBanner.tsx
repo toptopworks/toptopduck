@@ -33,8 +33,8 @@ export interface ColdStartGapInputs {
   provider: ProviderConfig | null;
   /** useProfileKeys.loading -- the key overlay's first fetch in flight. */
   keysLoading: boolean;
-  /** Whether the active profile has a keychain entry (false while loading
-   *  or on a dangling active_profile). */
+  /** Whether the active profile has a keychain entry (false while loading,
+   *  on a dangling active_profile, or on a first-mount fetch failure). */
   activeHasKey: boolean;
   /** Non-null when the keychain read itself faulted (issue #275) -- the
    *  banner stays out of the way rather than guessing a wall. */
@@ -43,10 +43,12 @@ export interface ColdStartGapInputs {
 
 // Pure seam (the #1337 trigger matrix; module-level for direct per-cell tests
 // per the first_free_target precedent). Order is load-bearing:
-// 1. The two loading gates first -- resolveStartupRuntime degrades an
+// 1. The unresolved-feed gates first -- resolveStartupRuntime degrades an
 //    unloaded table to built-in, so deriving from the resolved value while
 //    the table is in flight would point the banner at the wrong wall for the
-//    first frames (the double gate keeps the first painted frame correct).
+//    first frames; the provider feed stays null while its one-shot
+//    app-config read is pending or failed (the submit gate defers on the
+//    same state). The gates keep the first painted frame correct.
 // 2. Root cause before the key branch: a built-in pending over an external
 //    default IS the undetected-CLI degrade -- cli-missing wins over any key
 //    posture the degraded built-in would otherwise report.
@@ -66,7 +68,7 @@ export function deriveColdStartGap(
     );
     return detected ? null : "cli-missing";
   }
-  // The DEGRADE only (review fix, #1337): a built-in pending over an external
+  // The DEGRADE only (#1337): a built-in pending over an external
   // default whose CLI is genuinely undetected -- root cause wins over any key
   // posture. A DETECTED default under a manual built-in pick is no CLI wall:
   // the user chose built-in, so the key posture speaks (fall through).
@@ -77,9 +79,12 @@ export function deriveColdStartGap(
     );
     if (!defaultDetected) return "cli-missing";
   }
-  if (inputs.provider === null || inputs.provider.profiles.length === 0) {
-    return "profile-missing";
-  }
+  // An unresolved provider feed (the app-config read pending or failed) is
+  // a defer, not a wall -- the same posture as the gates above and the
+  // submit gate; only a LOADED zero-profile config is the profile-missing
+  // wall (the ADR-0098 fresh install).
+  if (inputs.provider === null) return null;
+  if (inputs.provider.profiles.length === 0) return "profile-missing";
   // A keychain fault is distinct from a missing key (issue #275): the OS
   // answer is unknowable, so the banner stays out of the way.
   if (inputs.activeKeychainFault !== null) return null;
@@ -90,7 +95,7 @@ export function deriveColdStartGap(
 // shape): the tinted surface lifts the banner off the shell background, and
 // the full-color info copy reads bright. role="status" overrides the
 // assertive "alert" default -- a conditional guidance state, not an
-// announcement. One-line layout: copy left, CTA right; `py-2` keeps the box
+// announcement. One-line layout: copy left, CTA right; `py-1.5` keeps the box
 // tight (the Alert base is py-3). The width rides the slot's --shell-bar-cap
 // custom property (styles.css) -- the SAME cap the bar track consumes, so the
 // banner follows the bar's width instead of mirroring a copied literal.
@@ -104,6 +109,40 @@ export function ColdStartGuideBanner({
   gap: ColdStartGap;
   onOpenSettings: () => void;
 }) {
+  // The gap-to-copy mapping is a guarded switch, not a ternary chain: every
+  // member named, and the never guard makes a fourth ColdStartGap value a
+  // compile error HERE instead of the key-missing copy by omission (the
+  // ResumeProgress precedent, issue #205). Each case keeps a STATIC
+  // FormattedMessage literal so formatjs extract resolves every id.
+  const copy = (() => {
+    switch (gap) {
+      case "cli-missing":
+        return (
+          <FormattedMessage
+            id="coldStart.guide.cliMissing"
+            defaultMessage="The CLI set as the default runtime was not detected — choose another runtime in Settings."
+          />
+        );
+      case "profile-missing":
+        return (
+          <FormattedMessage
+            id="coldStart.guide.profileMissing"
+            defaultMessage="No provider profile is configured yet — create one in Settings to use the built-in runtime."
+          />
+        );
+      case "key-missing":
+        return (
+          <FormattedMessage
+            id="coldStart.guide.keyMissing"
+            defaultMessage="The active profile has no API key — add one in Settings before asking."
+          />
+        );
+      default: {
+        const unhandled: never = gap;
+        throw new Error(`Unhandled ColdStartGap: ${String(unhandled)}`);
+      }
+    }
+  })();
   return (
     <Alert
       variant="info"
@@ -112,24 +151,7 @@ export function ColdStartGuideBanner({
     >
       <Info aria-hidden />
       <AlertDescription className="flex flex-wrap items-center justify-between gap-x-4 gap-y-2">
-        <span>
-          {gap === "cli-missing" ? (
-            <FormattedMessage
-              id="coldStart.guide.cliMissing"
-              defaultMessage="The CLI set as the default runtime was not detected — choose another runtime in Settings."
-            />
-          ) : gap === "profile-missing" ? (
-            <FormattedMessage
-              id="coldStart.guide.profileMissing"
-              defaultMessage="No provider profile is configured yet — create one in Settings to use the built-in runtime."
-            />
-          ) : (
-            <FormattedMessage
-              id="coldStart.guide.keyMissing"
-              defaultMessage="The active profile has no API key — add one in Settings before asking."
-            />
-          )}
-        </span>
+        <span>{copy}</span>
         <Button
           type="button"
           variant="outline"

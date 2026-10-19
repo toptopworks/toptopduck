@@ -238,11 +238,17 @@ describe("App cold-start guidance banner wiring (issue #1337)", () => {
     const status = await screen.findByRole("status");
     expect(within(status).getByText(/has no API key/i)).toBeInTheDocument();
 
-    // The CTA opens the Settings overlay; its close path bumps the epoch.
+    // The CTA opens the Settings overlay on the runtime section's API
+    // Access sub-tab (the honest gate's destination); its close path bumps
+    // the epoch.
     fireEvent.click(
       within(status).getByRole("button", { name: "Open Settings" }),
     );
     await screen.findByText("Back to workspace");
+    expect(screen.getByRole("tab", { name: "API Access" })).toHaveAttribute(
+      "aria-selected",
+      "true",
+    );
     fireEvent.click(document.querySelector(".settings-back")!);
 
     // The bump re-ran useProfileKeys; the keyed answer empties the gap and

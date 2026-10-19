@@ -515,11 +515,12 @@ export default function App() {
     (!profileKeys.activeHasKey || profileKeys.activeKeychainFault !== null);
 
   // The cold-start guidance banner (issue #1337): a pure derivation over the
-  // same primitives the submit gate reads. Null while either feed is still
-  // loading (the adapter table / the key overlay's first fetch), so the first
-  // painted frame carries the correct form; session-active renders never
-  // derive. Disappearance is free: the epoch bump + the cache subscription
-  // re-derive on every relevant change.
+  // same primitives the submit gate reads. Null while any feed is still
+  // unresolved (the adapter table / the key overlay's first fetch / the
+  // provider feed's one-shot app-config read), so the first painted frame
+  // carries the correct form; session-active renders never derive.
+  // Disappearance is free: the epoch bump + the cache subscription re-derive
+  // on every relevant change.
   const coldStartGap = isColdStart
     ? deriveColdStartGap({
         defaultRuntime: appConfig?.default_runtime,

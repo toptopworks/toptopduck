@@ -11,9 +11,10 @@ import { listAdapters } from "../api";
 import { log } from "../lib/log";
 
 /** The hook's snapshot: the resolved startup runtime plus the RAW adapter
- *  table. `adapters` is undefined while the read is in flight -- the
- *  cold-start guidance banner's loading gate reads that undefined-ness
- *  (#1337) instead of re-deriving "loaded" from the degraded resolution. */
+ *  table. `adapters` is undefined until the read lands, and a REJECTED read
+ *  stays undefined (the effect's catch logs it) -- the cold-start guidance
+ *  banner's loading gate reads that undefined-ness (#1337) instead of
+ *  re-deriving "loaded" from the degraded resolution. */
 export interface StartupRuntimeSnapshot {
   runtime: SessionRuntimeChoice;
   adapters: AdapterEntry[] | undefined;

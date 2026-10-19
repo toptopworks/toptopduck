@@ -548,9 +548,7 @@
      of mirroring a copied literal. */
   --shell-bar-cap: 720px;
 }
-.shell-bar-slot.centered .shell-bar-track {
-  width: min(100%, var(--shell-bar-cap));
-}
+.shell-bar-slot.centered .shell-bar-track,
 .shell-bar-slot.centered .cold-start-guide-banner {
   width: min(100%, var(--shell-bar-cap));
 }

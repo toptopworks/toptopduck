@@ -4,8 +4,8 @@
 // tree (the tax already paid for content_hash #381, enabled_agents #932,
 // enabled + disabled_skills #966). Per-test variants go through the
 // `overrides` parameter (spread AFTER the baseline). The vi.mock-hoisted
-// config literals (App.i18n / App.theme / App.sidebarWiring) cannot import
-// this module and stay hand-rolled there.
+// config literals (App.i18n / App.theme / App.sidebarWiring /
+// App.coldStartGuide) cannot import this module and stay hand-rolled there.
 import type { AppConfig } from "./types/app-config";
 import type { BuiltinScanResult } from "./types/cli-tool";
 import type { SkillEntry } from "./types/skills";
