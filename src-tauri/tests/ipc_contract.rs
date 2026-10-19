@@ -1673,6 +1673,30 @@ fn adapter_entry_wire_shape() {
     );
 }
 
+/// UserAdapterRow (issue #1341) crosses IPC as a flat snake_case struct --
+/// the shape `src/types/runtime.ts` mirrors. Every field serializes (the
+/// `#[serde(default)]` trio is a read-side default, never an omit), and the
+/// read side refuses unknown fields, so a serde attribute change fails here
+/// before the hand-mirror can drift.
+#[test]
+fn user_adapter_row_wire_shape() {
+    use std::collections::BTreeMap;
+    use toptopduck_lib::runtime::acp::adapter::StreamFormat;
+    use toptopduck_lib::runtime::acp::user_adapter_store::UserAdapterRow;
+    assert_wire(
+        &UserAdapterRow {
+            id: "user:11111111".into(),
+            name: "My CLI".into(),
+            command: "my-cli".into(),
+            args: vec!["--acp".into()],
+            env: BTreeMap::from([("MY_KEY".to_string(), "secret".to_string())]),
+            enabled: true,
+            stream_format: StreamFormat::Acp,
+        },
+        r#"{"id":"user:11111111","name":"My CLI","command":"my-cli","args":["--acp"],"env":{"MY_KEY":"secret"},"enabled":true,"stream_format":"acp"}"#,
+    );
+}
+
 /// SessionModelConfig (ADR-0095, issue #527) crosses IPC as a flat snake_case
 /// struct -- the shape `src/types/runtime.ts` mirrors. The None forms pin the
 /// "no selection / no discovery yet" honest defaults; the Some form pins the

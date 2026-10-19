@@ -27,8 +27,11 @@ const TMP_SUFFIX: &str = ".tmp";
 
 /// One user-defined adapter row. The storage AND wire shape (crosses IPC
 /// verbatim; env may carry plaintext keys, which is why the file is written
-/// with private permissions).
+/// with private permissions). Unknown fields refuse on the read side: a
+/// mistyped hand-edit key must not parse clean only to vanish on the next
+/// successful save.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct UserAdapterRow {
     /// `user:<short-uuid>` -- minted at create, never reused.
     pub id: String,
@@ -60,8 +63,10 @@ fn default_enabled() -> bool {
     true
 }
 
-/// The persisted document.
+/// The persisted document. Unknown fields refuse (same hand-edit honesty
+/// as the row).
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 struct UserAdaptersDoc {
     format_version: u32,
     adapters: Vec<UserAdapterRow>,
@@ -427,6 +432,23 @@ mod tests {
         .expect("write");
         let err = store.list().expect_err("duplicate id refuses");
         assert!(err.contains("duplicate adapter id"), "{err}");
+        assert!(store.load_for_picker().is_empty());
+    }
+
+    #[test]
+    fn an_unknown_field_refuses_instead_of_vanishing() {
+        // A mistyped key (args -> argss) parses the row but silently drops
+        // the user's value, and the next successful save erases the key;
+        // refusing keeps hand-edits honest (the module's own stance that
+        // user input must never silently vanish).
+        let (_dir, store) = temp_store();
+        std::fs::write(
+            store.path(),
+            r#"{"format_version": 1, "adapters": [{"id": "user:1", "name": "n", "command": "c", "argss": ["--acp"], "stream_format": "acp"}]}"#,
+        )
+        .expect("write");
+        let err = store.list().expect_err("unknown field refuses");
+        assert!(err.contains("unknown field"), "{err}");
         assert!(store.load_for_picker().is_empty());
     }
 
