@@ -36,6 +36,8 @@ vi.mock("../../../api", async (importOriginal) => {
   };
 });
 
+vi.mock("@tauri-apps/plugin-dialog", () => ({ open: vi.fn() }));
+
 function makeRow(overrides: Partial<UserAdapterRow> = {}): UserAdapterRow {
   return {
     id: "user:11111111",
@@ -314,5 +316,16 @@ describe("UserRuntimesSection", () => {
     renderSettings(<UserRuntimesSection onIpcBusy={vi.fn()} />);
     fireEvent.click(await screen.findByRole("button", { name: /^Disable$/ }));
     expect(await screen.findByText(/write failed/i)).toBeInTheDocument();
+  });
+
+  it("surfaces a failed command browse on the pane's error line", async () => {
+    const { open } = await import("@tauri-apps/plugin-dialog");
+    vi.mocked(open).mockRejectedValueOnce(new Error("dialog unavailable"));
+    renderSettings(<UserRuntimesSection onIpcBusy={vi.fn()} />);
+    fireEvent.click(await screen.findByRole("button", { name: /^Add$/ }));
+    fireEvent.click(screen.getByRole("button", { name: /Browse/i }));
+    expect(
+      await screen.findByText(/dialog unavailable/i),
+    ).toBeInTheDocument();
   });
 });

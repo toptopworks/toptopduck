@@ -222,13 +222,21 @@ function EditorDialog({
                     // The file picker bypasses hand-typing entirely -- the
                     // chosen absolute path fills the field verbatim (one
                     // token by construction).
-                    const picked = await openFileDialog({
-                      title: intl.formatMessage({
-                        id: "settings.runtime.userRun.editor.browse",
-                        defaultMessage: "Choose the CLI executable",
-                      }),
-                    });
-                    if (typeof picked === "string") setCommand(picked);
+                    try {
+                      const picked = await openFileDialog({
+                        title: intl.formatMessage({
+                          id: "settings.runtime.userRun.editor.browse",
+                          defaultMessage: "Choose the CLI executable",
+                        }),
+                      });
+                      if (typeof picked === "string") setCommand(picked);
+                    } catch (e) {
+                      // A failed dialog open surfaces on the pane's error
+                      // line (the sessions-dir picker posture), never as
+                      // an unhandled rejection.
+                      log.warn("UserRuntimesSection", "command browse failed", e);
+                      setSaveError(fmtError(e, intl));
+                    }
                   })();
                 }}
               >
