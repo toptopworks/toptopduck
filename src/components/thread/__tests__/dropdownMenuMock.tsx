@@ -54,9 +54,25 @@ const dropdownMenuTrigger = ({
   );
 };
 
-const dropdownMenuContent = ({ children }: { children: ReactNode }) => (
-  <div role="menu">{children}</div>
-);
+// The captured close-focus gate: the content mock records the
+// onCloseAutoFocus prop instead of dropping it (issue #1309), so the
+// posture suite can fire the captured handler with a synthetic close
+// event and pin the preventDefault gating without Radix's portal
+// lifecycle -- the same always-open trade as the rest of this module.
+export const closeAutoFocusCapture: {
+  handler: ((e: { preventDefault: () => void }) => void) | null;
+} = { handler: null };
+
+const dropdownMenuContent = ({
+  children,
+  onCloseAutoFocus,
+}: {
+  children: ReactNode;
+  onCloseAutoFocus?: (e: { preventDefault: () => void }) => void;
+}) => {
+  closeAutoFocusCapture.handler = onCloseAutoFocus ?? null;
+  return <div role="menu">{children}</div>;
+};
 
 const dropdownMenuItem = ({
   children,

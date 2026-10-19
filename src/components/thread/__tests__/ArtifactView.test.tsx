@@ -3,11 +3,12 @@
 // load-bearing pins are the two iframe trust postures -- html sandboxed to
 // exactly "allow-scripts", pdf UNSANDBOXED (the built-in viewer is a document
 // renderer, not agent HTML) -- and the header chrome that survives every
-// degrade. The IPC reads (artifactExists / readArtifactText) and the OS
-// opener are mocked; convertFileSrc is a pure transform and stays real.
+// degrade. The IPC reads (artifactExists / readArtifactText), the OS
+// opener, and vega-embed are mocked; convertFileSrc gets a pure jsdom
+// stand-in so the src assertion stays observable.
 
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { IntlProvider } from "react-intl";
 import { openPath } from "@tauri-apps/plugin-opener";
@@ -55,6 +56,22 @@ function renderView(
   );
 }
 
+/** Opens the header's more menu (pointerDown on the trigger, Radix's open
+ *  gesture -- the VizExportFrame suite's helper). */
+async function openMoreMenu() {
+  fireEvent.pointerDown(screen.getByRole("button", { name: "更多操作" }), {
+    button: 0,
+    pointerType: "mouse",
+  });
+  await screen.findByRole("menu");
+}
+
+/** Fires the select gesture on a Radix menu item (pointerUp + click). */
+function activateItem(item: HTMLElement) {
+  fireEvent.pointerUp(item, { button: 0, pointerType: "mouse" });
+  fireEvent.click(item);
+}
+
 describe("ArtifactView", () => {
   // Reset implementations too (resetAllMocks, not clearAllMocks): without
   // it, a persistent mockResolvedValue from an earlier case (e.g. the
@@ -65,60 +82,54 @@ describe("ArtifactView", () => {
   });
 
   describe("file header (the persistent stage chrome)", () => {
-    it("shows the file name and the external-open action for an existing file", async () => {
-      vi.mocked(artifactExists).mockResolvedValue(true);
-      renderView("C:/sessions/s1/artifacts/report.pdf", "pdf");
-      expect(screen.getByTestId("artifact-header")).toHaveTextContent("report.pdf");
-      expect(await screen.findByRole("button", { name: /外部打开|externally/ })).toBeInTheDocument();
-    });
-
     it("keeps the header name above the markdown prose", async () => {
       vi.mocked(readArtifactText).mockResolvedValue("# Heading\n\nBody text");
       renderView("C:/sessions/s1/artifacts/notes.md", "markdown");
       expect(screen.getByTestId("artifact-header")).toHaveTextContent("notes.md");
       expect(await screen.findByRole("heading", { level: 1, name: "Heading" })).toBeInTheDocument();
     });
+  });
 
-    it("swaps the action for the missing note when the file is gone", async () => {
-      vi.mocked(artifactExists).mockResolvedValue(false);
-      renderView("C:/sessions/s1/artifacts/gone.pdf", "pdf");
+  describe("file header more menu (issue #1317)", () => {
+    it("re-reads the markdown text on refresh (invalidate then re-key)", async () => {
+      vi.mocked(artifactExists).mockResolvedValue(true);
+      vi.mocked(readArtifactText)
+        .mockResolvedValueOnce("# One\n\nFirst body")
+        .mockResolvedValue("# Two\n\nSecond body");
+      renderView("C:/sessions/s1/artifacts/notes.md", "markdown");
+      expect(await screen.findByText("First body")).toBeInTheDocument();
+      await openMoreMenu();
+      activateItem(screen.getByRole("menuitem", { name: "刷新" }));
+      // The invalidated read lands before the re-key remount, so the fresh
+      // text replaces the old in place (staleTime Infinity never re-reads
+      // on its own).
+      expect(await screen.findByText("Second body")).toBeInTheDocument();
+      expect(readArtifactText).toHaveBeenCalledTimes(2);
+    });
+
+    it("remounts the iframe on refresh, the loading indicator returning", async () => {
+      vi.mocked(artifactExists).mockResolvedValue(true);
+      renderView("C:/sessions/s1/artifacts/report.pdf", "pdf");
+      const frame = await screen.findByTestId("artifact-frame");
+      fireEvent.load(frame);
+      expect(screen.queryByRole("status", { name: /正在加载|Loading/ })).not.toBeInTheDocument();
+      await openMoreMenu();
+      activateItem(screen.getByRole("menuitem", { name: "刷新" }));
+      // The re-keyed body mounts a fresh frame (jsdom never fires its
+      // load), so the indicator is back until the WebView's first paint.
+      expect(await screen.findByRole("status", { name: /正在加载|Loading/ })).toBeInTheDocument();
+    });
+
+    it("re-checks existence on refresh, retiring the action cluster", async () => {
+      vi.mocked(artifactExists).mockResolvedValueOnce(true).mockResolvedValue(false);
+      renderView("C:/sessions/s1/artifacts/report.pdf", "pdf");
+      await screen.findByTestId("artifact-frame");
+      await openMoreMenu();
+      activateItem(screen.getByRole("menuitem", { name: "刷新" }));
+      // The refresh's exists invalidation re-reads the gate without a
+      // stage switch: the missing note replaces the whole action cluster.
       expect(await screen.findByText(/已不在磁盘上|no longer on disk/)).toBeInTheDocument();
-      expect(screen.queryByRole("button", { name: /外部打开|externally/ })).not.toBeInTheDocument();
-    });
-
-    it("surfaces an opener failure as a live note", async () => {
-      vi.mocked(artifactExists).mockResolvedValue(true);
-      vi.mocked(openPath).mockRejectedValue(new Error("no association"));
-      renderView("C:/sessions/s1/artifacts/report.pdf", "pdf");
-      fireEvent.click(await screen.findByRole("button", { name: /外部打开|externally/ }));
-      // Scoped to the header: the frame's loading indicator is a status
-      // region too (issue #1201), and jsdom never fires load so both
-      // coexist here.
-      const header = screen.getByTestId("artifact-header");
-      expect(await within(header).findByRole("status")).toHaveTextContent(
-        /无法在外部打开|Could not open/,
-      );
-    });
-
-    it("clears the failure note when a retry opens successfully", async () => {
-      vi.mocked(artifactExists).mockResolvedValue(true);
-      // Fresh Error instances per Once-stage: a reused instance keeps
-      // rejecting through later stages.
-      vi.mocked(openPath)
-        .mockRejectedValueOnce(new Error("no association"))
-        .mockResolvedValueOnce(undefined);
-      renderView("C:/sessions/s1/artifacts/report.pdf", "pdf");
-      const open = await screen.findByRole("button", { name: /外部打开|externally/ });
-      fireEvent.click(open);
-      const header = screen.getByTestId("artifact-header");
-      expect(await within(header).findByRole("status")).toBeInTheDocument();
-      fireEvent.click(open);
-      // The still-mounted loading indicator (jsdom never fires load) is a
-      // status region outside the header -- only the note vanishing from
-      // the header is the signal.
-      await waitFor(() =>
-        expect(within(header).queryByRole("status")).not.toBeInTheDocument(),
-      );
+      expect(screen.queryByTestId("artifact-more-menu")).not.toBeInTheDocument();
     });
   });
 

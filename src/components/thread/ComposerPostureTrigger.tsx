@@ -3,6 +3,7 @@ import { FormattedMessage, useIntl } from "react-intl";
 import { ChevronDown, Info } from "lucide-react";
 
 import { fmtError } from "../../lib/error-presentation";
+import { usePointerCloseIntent } from "../../lib/usePointerCloseIntent";
 import type { SaveError } from "../../types/session";
 import type { CatalogModel } from "../../types/runtime";
 import { Tooltip, TooltipContent, TooltipTrigger } from "../ui/tooltip";
@@ -113,6 +114,10 @@ export function ComposerPostureTrigger({
   disabled,
 }: ComposerPostureTriggerProps) {
   const intl = useIntl();
+  // Menu closes restore focus to the trigger; when that restore was
+  // pointer-initiated it must be dropped -- the Tooltip wrapper would
+  // focus-open and strand (usePointerCloseIntent).
+  const pointerCloseRef = usePointerCloseIntent();
 
   // Honest read failure (issue #529): the inline error line replaces the
   // control entirely -- no menu to build, no default label to fake.
@@ -234,7 +239,13 @@ export function ComposerPostureTrigger({
         ) : (
           <DropdownMenuTrigger asChild>{triggerButton}</DropdownMenuTrigger>
         )}
-        <DropdownMenuContent align="end" className="w-60">
+        <DropdownMenuContent
+          align="end"
+          className="w-60"
+          onCloseAutoFocus={(e) => {
+            if (pointerCloseRef.current) e.preventDefault();
+          }}
+        >
           {catalogNote === "stale-runtime" && (
             <p className="text-warning px-2 py-1 text-xs">
               <FormattedMessage

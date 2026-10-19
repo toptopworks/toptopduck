@@ -3,7 +3,27 @@
 //! Started as the home for [`sha256_hex`] so the skills module and the session
 //! module share a single content-hash implementation (issue #364, ADR-0086).
 
+use std::process::Command;
+
 use sha2::{Digest, Sha256};
+
+/// Apply `CREATE_NO_WINDOW` (Windows) so a console child spawned from the
+/// release build does not flash a console window (issue #1305). The
+/// release build's `windows_subsystem = "windows"` leaves the parent
+/// without a console, so Windows would allocate a fresh one for every
+/// console child (CLI tools, MCP stdio servers, agent CLIs,
+/// `cmd /C mklink`); debug builds keep the console subsystem, so before
+/// this helper their children inherited the parent console and the flash
+/// was dev-invisible. One helper so every production spawn shares the
+/// flag (the `push_unique` discipline). No-op on other platforms.
+pub fn no_window(_command: &mut Command) {
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        use windows_sys::Win32::System::Threading::CREATE_NO_WINDOW;
+        _command.creation_flags(CREATE_NO_WINDOW);
+    }
+}
 
 /// SHA-256 of `bytes` as a lowercase hex string.
 ///
@@ -118,5 +138,22 @@ mod tests {
         push_capped_emit(&mut buf, "", &mut |delta| emitted.push(delta.to_string()));
         assert!(emitted.is_empty(), "an empty fragment emits no delta");
         assert_eq!(buf, "seed", "the buffer is untouched");
+    }
+
+    /// The Windows release-build console flash: the helper must keep spawns
+    /// working while latching `CREATE_NO_WINDOW`. `CommandExt` exposes no
+    /// readback getter at any stability level, so the value cannot be
+    /// asserted directly; the check is a spawn smoke, pinning the one
+    /// failure face a smoke can see (a combination CreateProcess rejects
+    /// fails the spawn). The value itself is never hand-transcribed: it is
+    /// the windows-sys CREATE_NO_WINDOW constant.
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn no_window_keeps_windows_spawns_working() {
+        let mut command = Command::new("cmd");
+        command.args(["/C", "exit", "0"]);
+        no_window(&mut command);
+        let status = command.status().expect("spawn under CREATE_NO_WINDOW");
+        assert!(status.success(), "the child runs and exits 0");
     }
 }

@@ -1,12 +1,115 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { act, fireEvent, render, screen, within } from "@testing-library/react";
 import { IntlProvider } from "react-intl";
-import type { ReactElement } from "react";
-import { DeleteSessionDialog, SessionSidebar } from "../SessionSidebar";
+import {
+  createContext,
+  useContext,
+  type ComponentProps,
+  type ReactElement,
+  type ReactNode,
+} from "react";
+import { SessionSidebar } from "../SessionSidebar";
+import { DeleteSessionDialog } from "../SessionDialogs";
 import type { OpenSession } from "../sidebarModel";
 import type { SessionMetadata } from "../../types/session";
 import type { ProviderConfig } from "../../types/provider";
 import { TooltipProvider } from "@/components/ui/tooltip";
+
+// Radix DropdownMenu's pointer-event handling recurses under jsdom (the
+// SessionHeaderMenu suite's known limitation), so the dropdown-menu module is
+// mocked as a simple controlled shape: the trigger is a plain <button> and the
+// content always renders inline. The row-menu tests verify SessionSidebar's
+// LOGIC -- which items per row state, which callbacks, which dialog state --
+// not Radix's portal/focus-trap internals. The content's onCloseAutoFocus is
+// captured where tests can fire it (the mocked shape has no close machinery
+// of its own).
+const menuClose = vi.hoisted(() => ({
+  current: null as null | ((e: { preventDefault: () => void }) => void),
+}));
+vi.mock("@/components/ui/dropdown-menu", () => {
+  // The root's open intent rides context so the trigger can mirror Radix's
+  // contract (a trigger click fires onOpenChange(true)) without an open
+  // state machine -- the menu tests that care wire their assertions to it.
+  const MenuOpenCtx = createContext<{
+    onOpenChange?: (open: boolean) => void;
+  }>({});
+  function DropdownMenu({
+    children,
+    onOpenChange,
+  }: {
+    children: ReactNode;
+    onOpenChange?: (open: boolean) => void;
+  }) {
+    return (
+      <MenuOpenCtx.Provider value={{ onOpenChange }}>
+        <div data-testid="dropdown-menu-root">{children}</div>
+      </MenuOpenCtx.Provider>
+    );
+  }
+  function DropdownMenuTrigger({
+    children,
+    onClick,
+    ...rest
+  }: ComponentProps<"button"> & { children: ReactNode }) {
+    const { onOpenChange } = useContext(MenuOpenCtx);
+    return (
+      <button
+        type="button"
+        onClick={(e) => {
+          onClick?.(e);
+          onOpenChange?.(true);
+        }}
+        {...rest}
+      >
+        {children}
+      </button>
+    );
+  }
+  function DropdownMenuContent({
+    children,
+    onCloseAutoFocus,
+  }: {
+    children: ReactNode;
+    onCloseAutoFocus?: (e: { preventDefault: () => void }) => void;
+  }) {
+    menuClose.current = onCloseAutoFocus ?? null;
+    return (
+      <div role="menu">
+        {children}
+      </div>
+    );
+  }
+  function DropdownMenuItem({
+    children,
+    onSelect,
+    variant,
+  }: {
+    children: ReactNode;
+    onSelect?: () => void;
+    variant?: "default" | "destructive";
+  }) {
+    return (
+      <div
+        role="menuitem"
+        data-variant={variant ?? "default"}
+        onClick={onSelect}
+        style={{ cursor: "pointer" }}
+      >
+        {children}
+      </div>
+    );
+  }
+  function DropdownMenuSeparator() {
+    return <div role="separator" />;
+  }
+  return {
+    DropdownMenu,
+    DropdownMenuTrigger,
+    DropdownMenuContent,
+    DropdownMenuItem,
+    DropdownMenuSeparator,
+  };
+});
 
 // Shell-skeleton tests assert className contracts, not chrome. An empty English
 // provider + onError keeps the render quiet (missing-message warnings are
@@ -52,7 +155,9 @@ describe("SessionSidebar shell-skeleton visuals (ADR-0067, issue #171)", () => {
         onToggleArchived={() => {}}
         onSetPinned={() => {}}
         onArchive={() => {}}
-        onDeleteArchived={() => {}}
+        onDelete={() => {}}
+        onRename={() => {}}
+        onClose={() => {}}
         onOpenSearch={() => {}}
         provider={null}
         onOpenSettings={() => {}}
@@ -92,7 +197,9 @@ describe("SessionSidebar shell-skeleton visuals (ADR-0067, issue #171)", () => {
         onToggleArchived={() => {}}
         onSetPinned={() => {}}
         onArchive={() => {}}
-        onDeleteArchived={() => {}}
+        onDelete={() => {}}
+        onRename={() => {}}
+        onClose={() => {}}
         onOpenSearch={() => {}}
         provider={null}
         onOpenSettings={() => {}}
@@ -128,7 +235,9 @@ describe("SessionSidebar shell-skeleton visuals (ADR-0067, issue #171)", () => {
         onToggleArchived={() => {}}
         onSetPinned={() => {}}
         onArchive={() => {}}
-        onDeleteArchived={() => {}}
+        onDelete={() => {}}
+        onRename={() => {}}
+        onClose={() => {}}
         onOpenSearch={() => {}}
         provider={null}
         onOpenSettings={() => {}}
@@ -176,7 +285,9 @@ describe("SessionSidebar shell-skeleton visuals (ADR-0067, issue #171)", () => {
         onToggleArchived={() => {}}
         onSetPinned={() => {}}
         onArchive={() => {}}
-        onDeleteArchived={() => {}}
+        onDelete={() => {}}
+        onRename={() => {}}
+        onClose={() => {}}
         onOpenSearch={() => {}}
         provider={null}
         onOpenSettings={() => {}}
@@ -214,7 +325,9 @@ describe("SessionSidebar shell-skeleton visuals (ADR-0067, issue #171)", () => {
         onToggleArchived={() => {}}
         onSetPinned={() => {}}
         onArchive={() => {}}
-        onDeleteArchived={() => {}}
+        onDelete={() => {}}
+        onRename={() => {}}
+        onClose={() => {}}
         onOpenSearch={() => {}}
         provider={null}
         onOpenSettings={() => {}}
@@ -270,7 +383,9 @@ describe("SessionSidebar shell-skeleton visuals (ADR-0067, issue #171)", () => {
         onToggleArchived={() => {}}
         onSetPinned={() => {}}
         onArchive={() => {}}
-        onDeleteArchived={() => {}}
+        onDelete={() => {}}
+        onRename={() => {}}
+        onClose={() => {}}
         onOpenSearch={onOpenSearch}
         provider={null}
         onOpenSettings={() => {}}
@@ -321,7 +436,9 @@ describe("SessionSidebar shell-skeleton visuals (ADR-0067, issue #171)", () => {
         onToggleArchived={() => {}}
         onSetPinned={() => {}}
         onArchive={() => {}}
-        onDeleteArchived={() => {}}
+        onDelete={() => {}}
+        onRename={() => {}}
+        onClose={() => {}}
         onOpenSearch={onOpenSearch}
         provider={null}
         onOpenSettings={() => {}}
@@ -352,7 +469,9 @@ describe("SessionSidebar shell-skeleton visuals (ADR-0067, issue #171)", () => {
         onToggleArchived={() => {}}
         onSetPinned={() => {}}
         onArchive={() => {}}
-        onDeleteArchived={() => {}}
+        onDelete={() => {}}
+        onRename={() => {}}
+        onClose={() => {}}
         onOpenSearch={() => {}}
         provider={null}
         onOpenSettings={() => {}}
@@ -415,7 +534,9 @@ describe("SessionSidebar grouping toggle (ADR-0072, issue #251)", () => {
         onToggleArchived={() => {}}
         onSetPinned={() => {}}
         onArchive={() => {}}
-        onDeleteArchived={() => {}}
+        onDelete={() => {}}
+        onRename={() => {}}
+        onClose={() => {}}
         onOpenSearch={() => {}}
         provider={null}
         onOpenSettings={() => {}}
@@ -444,7 +565,9 @@ describe("SessionSidebar grouping toggle (ADR-0072, issue #251)", () => {
         onToggleArchived={() => {}}
         onSetPinned={() => {}}
         onArchive={() => {}}
-        onDeleteArchived={() => {}}
+        onDelete={() => {}}
+        onRename={() => {}}
+        onClose={() => {}}
         onOpenSearch={() => {}}
         provider={null}
         onOpenSettings={() => {}}
@@ -493,7 +616,9 @@ describe("SessionSidebar grouping toggle (ADR-0072, issue #251)", () => {
         onToggleArchived={() => {}}
         onSetPinned={() => {}}
         onArchive={() => {}}
-        onDeleteArchived={() => {}}
+        onDelete={() => {}}
+        onRename={() => {}}
+        onClose={() => {}}
         onOpenSearch={() => {}}
         provider={null}
         onOpenSettings={() => {}}
@@ -530,7 +655,9 @@ describe("SessionSidebar grouping toggle (ADR-0072, issue #251)", () => {
         onToggleArchived={() => {}}
         onSetPinned={() => {}}
         onArchive={() => {}}
-        onDeleteArchived={() => {}}
+        onDelete={() => {}}
+        onRename={() => {}}
+        onClose={() => {}}
         onOpenSearch={() => {}}
         provider={null}
         onOpenSettings={() => {}}
@@ -568,7 +695,9 @@ describe("SessionSidebar grouping toggle (ADR-0072, issue #251)", () => {
         onToggleArchived={() => {}}
         onSetPinned={() => {}}
         onArchive={() => {}}
-        onDeleteArchived={() => {}}
+        onDelete={() => {}}
+        onRename={() => {}}
+        onClose={() => {}}
         onOpenSearch={() => {}}
         provider={null}
         onOpenSettings={() => {}}
@@ -603,7 +732,9 @@ describe("SessionSidebar grouping toggle (ADR-0072, issue #251)", () => {
         onToggleArchived={() => {}}
         onSetPinned={() => {}}
         onArchive={() => {}}
-        onDeleteArchived={() => {}}
+        onDelete={() => {}}
+        onRename={() => {}}
+        onClose={() => {}}
         onOpenSearch={() => {}}
         provider={null}
         onOpenSettings={() => {}}
@@ -664,7 +795,9 @@ describe("SessionSidebar settings footer (issue #282)", () => {
         onToggleArchived={() => {}}
         onSetPinned={() => {}}
         onArchive={() => {}}
-        onDeleteArchived={() => {}}
+        onDelete={() => {}}
+        onRename={() => {}}
+        onClose={() => {}}
         onOpenSearch={() => {}}
         provider={provider}
         onOpenSettings={onOpenSettings}
@@ -717,7 +850,9 @@ describe("SessionSidebar pending-approval coloring (ADR-0083, issue #297)", () =
       onToggleArchived: () => {},
       onSetPinned: () => {},
       onArchive: () => {},
-      onDeleteArchived: () => {},
+      onDelete: () => {},
+      onRename: () => {},
+      onClose: () => {},
       onOpenSearch: () => {},
       provider: null,
       onOpenSettings: () => {},
@@ -776,7 +911,9 @@ describe("SessionSidebar turn-failed coloring (issue #1005)", () => {
       onToggleArchived: () => {},
       onSetPinned: () => {},
       onArchive: () => {},
-      onDeleteArchived: () => {},
+      onDelete: () => {},
+      onRename: () => {},
+      onClose: () => {},
       onOpenSearch: () => {},
       provider: null,
       onOpenSettings: () => {},
@@ -886,7 +1023,9 @@ describe("SessionSidebar hover card content (ADR-0093, issue #513)", () => {
       onToggleArchived: () => {},
       onSetPinned: () => {},
       onArchive: () => {},
-      onDeleteArchived: () => {},
+      onDelete: () => {},
+      onRename: () => {},
+      onClose: () => {},
       onOpenSearch: () => {},
       provider: null,
       onOpenSettings: () => {},
@@ -943,6 +1082,179 @@ describe("SessionSidebar hover card content (ADR-0093, issue #513)", () => {
     // Turn count with 0 renders "no turns" (defaultMessage =0 arm).
     expect(screen.getByText("no turns")).toBeInTheDocument();
   });
+
+  it("holds the card through the leave grace, cancels the close on card enter, closes on card leave", async () => {
+    // Wiring pin (issue #1325): the row's pointerleave runs the 200 ms close
+    // grace; a pointer sweeping onto the card itself cancels the pending
+    // close (read-only per ADR-0127, but the pointer may rest there to
+    // read); leaving the CARD schedules its own close -- the row-leave guard
+    // cannot serve that path, the row's leave already ran.
+    const persisted: SessionMetadata = {
+      duck_path: "/x/grace.duck",
+      display_name: "Grace Card",
+      last_modified_at: Date.now() - 3 * 3600_000,
+      source_summary: { first_source_name: null, source_count: 0, turn_count: 0 },
+      format_version: 1,
+      pinned: false,
+      archived: false,
+    };
+    vi.useFakeTimers();
+    const { container } = renderShell(<SessionSidebar {...sidebarProps({ sessions: [persisted] })} />);
+    const row = container.querySelector<HTMLElement>(".session-entry")!;
+    fireEvent.pointerEnter(row);
+    await act(async () => {
+      vi.advanceTimersByTime(350);
+    });
+    expect(screen.getByText("Data source")).toBeInTheDocument();
+    // Inside the 200 ms grace the card stays up.
+    fireEvent.pointerLeave(row);
+    await act(async () => {
+      vi.advanceTimersByTime(199);
+    });
+    expect(screen.getByText("Data source")).toBeInTheDocument();
+    // Sweeping onto the card cancels the pending close.
+    const card = screen.getByText("Data source").closest("[data-state=\"open\"]")!;
+    fireEvent.pointerEnter(card);
+    await act(async () => {
+      vi.advanceTimersByTime(500);
+    });
+    expect(screen.getByText("Data source")).toBeInTheDocument();
+    // Leaving the CARD schedules its own close.
+    fireEvent.pointerLeave(card);
+    await act(async () => {
+      vi.advanceTimersByTime(200);
+    });
+    expect(screen.queryByText("Data source")).toBeNull();
+  });
+
+  it("closes the card when the pointer leaves the whole list (backstop)", async () => {
+    // Wiring pin (issue #1325): a pointerleave lost to the pill's
+    // pointer-events toggling never reaches the row; the list-level leave is
+    // the final backstop.
+    const persisted: SessionMetadata = {
+      duck_path: "/x/backstop.duck",
+      display_name: "Backstop Card",
+      last_modified_at: Date.now() - 3 * 3600_000,
+      source_summary: { first_source_name: null, source_count: 0, turn_count: 0 },
+      format_version: 1,
+      pinned: false,
+      archived: false,
+    };
+    vi.useFakeTimers();
+    const { container } = renderShell(<SessionSidebar {...sidebarProps({ sessions: [persisted] })} />);
+    const row = container.querySelector<HTMLElement>(".session-entry")!;
+    const list = container.querySelector<HTMLElement>(".session-list")!;
+    fireEvent.pointerEnter(row);
+    await act(async () => {
+      vi.advanceTimersByTime(350);
+    });
+    expect(screen.getByText("Data source")).toBeInTheDocument();
+    fireEvent.pointerLeave(list);
+    await act(async () => {
+      vi.advanceTimersByTime(200);
+    });
+    expect(screen.queryByText("Data source")).toBeNull();
+  });
+
+  it("opening the row menu retires the hover metadata card", async () => {
+    // The pointer necessarily dwelt on the row to reach the menu trigger,
+    // so the card is necessarily open when the menu opens -- the two
+    // row-tail overlays must not stack. The mocked trigger fires the
+    // root's onOpenChange(true) (Radix's real contract), and the parent
+    // machine answers by dropping the card.
+    const persisted: SessionMetadata = {
+      duck_path: "/x/menudismiss.duck",
+      display_name: "Menu Dismiss",
+      last_modified_at: Date.now() - 3 * 3600_000,
+      source_summary: { first_source_name: "data.csv", source_count: 1, turn_count: 2 },
+      format_version: 1,
+      pinned: false,
+      archived: false,
+    };
+    vi.useFakeTimers();
+    const { container } = renderShell(<SessionSidebar {...sidebarProps({ sessions: [persisted] })} />);
+    const row = container.querySelector<HTMLElement>(".session-entry")!;
+    fireEvent.pointerEnter(row);
+    await act(async () => {
+      vi.advanceTimersByTime(350);
+    });
+    expect(screen.getByText("Data source")).toBeInTheDocument();
+
+    fireEvent.click(within(row).getByRole("button", { name: "Row actions" }));
+    expect(screen.queryByText("Data source")).not.toBeInTheDocument();
+  });
+
+  it("menu-trigger focus never re-opens the card (bridge exclusion)", async () => {
+    // Real browsers focus the trigger on click, and Radix re-focuses it on
+    // menu close; both bubble to the li, where the HoverCard wiring would
+    // re-arm the 300 ms dwell and pop the card back over the open menu.
+    // The trigger's own focus is a pill intent and must stop there.
+    const persisted: SessionMetadata = {
+      duck_path: "/x/focusgate.duck",
+      display_name: "Focus Gate",
+      last_modified_at: Date.now() - 3 * 3600_000,
+      source_summary: { first_source_name: "data.csv", source_count: 1, turn_count: 2 },
+      format_version: 1,
+      pinned: false,
+      archived: false,
+    };
+    vi.useFakeTimers();
+    const { container } = renderShell(<SessionSidebar {...sidebarProps({ sessions: [persisted] })} />);
+    const row = container.querySelector<HTMLElement>(".session-entry")!;
+    fireEvent.pointerEnter(row);
+    await act(async () => {
+      vi.advanceTimersByTime(350);
+    });
+    const trigger = within(row).getByRole("button", { name: "Row actions" });
+    fireEvent.click(trigger);
+    expect(screen.queryByText("Data source")).not.toBeInTheDocument();
+
+    // The close-restore (or click) focus lands here: no card may return.
+    fireEvent.focus(trigger);
+    await act(async () => {
+      vi.advanceTimersByTime(400);
+    });
+    expect(screen.queryByText("Data source")).not.toBeInTheDocument();
+  });
+
+  it("pointer-driven menu close strands no focus; keyboard close restores it", () => {
+    // The mocked content captures onCloseAutoFocus (no close machinery of
+    // its own). The close classification rides usePointerCloseIntent's
+    // window-level capture: a pointerdown anywhere before the close marks
+    // it pointer-driven -> the close-restore focus is refused; jsdom's
+    // synthetic clicks fire no pointerdown, so without one the default
+    // (keyboard) restore stands. (The Escape-clears-the-mark leg is pinned
+    // by usePointerCloseIntent's own specs -- keydown clears, in either
+    // order -- and is not re-pinned here.)
+    const persisted: SessionMetadata = {
+      duck_path: "/x/closegate.duck",
+      display_name: "Close Gate",
+      last_modified_at: Date.now(),
+      source_summary: { first_source_name: null, source_count: 0, turn_count: 1 },
+      format_version: 1,
+      pinned: false,
+      archived: false,
+    };
+    const { container } = renderShell(
+      <SessionSidebar {...sidebarProps({ sessions: [persisted] })} />,
+    );
+    const trigger = within(
+      container.querySelector<HTMLElement>(".session-entry")!,
+    ).getByRole("button", { name: "Row actions" });
+
+    // Keyboard close first: jsdom's synthetic click fires no pointerdown
+    // -> restore stands.
+    fireEvent.click(trigger);
+    const preventDefault = vi.fn();
+    menuClose.current?.({ preventDefault });
+    expect(preventDefault).not.toHaveBeenCalled();
+
+    // Pointer close: a pointerdown (window capture -- a menu item select,
+    // an outside dismiss, the trigger itself) arms it -> refused.
+    fireEvent.pointerDown(window);
+    menuClose.current?.({ preventDefault });
+    expect(preventDefault).toHaveBeenCalled();
+  });
 });
 
 describe("DeleteSessionDialog ESC routing (issue #258)", () => {
@@ -984,7 +1296,9 @@ describe("SessionSidebar organization (ADR-0127, issue #1175)", () => {
       onToggleArchived: () => {},
       onSetPinned: () => {},
       onArchive: () => {},
-      onDeleteArchived: () => {},
+      onDelete: () => {},
+      onRename: () => {},
+      onClose: () => {},
       onOpenSearch: () => {},
       provider: null,
       onOpenSettings: () => {},
@@ -1041,7 +1355,7 @@ describe("SessionSidebar organization (ADR-0127, issue #1175)", () => {
     expect(sectionNames(container)).toEqual(["recent"]);
   });
 
-  it("trailing actions fire their callbacks WITHOUT activating the row (sibling buttons)", () => {
+  it("row-menu actions fire their callbacks WITHOUT activating the row (sibling trigger)", () => {
     const onActivate = vi.fn();
     const onOpenPersisted = vi.fn();
     const onSetPinned = vi.fn();
@@ -1059,14 +1373,14 @@ describe("SessionSidebar organization (ADR-0127, issue #1175)", () => {
     );
     const rows = container.querySelectorAll<HTMLElement>(".session-entry");
     const plainRow = rows[rows.length - 1];
-    // Pin the unpinned row; unpin the already-pinned row (label flips).
-    fireEvent.click(within(plainRow).getByRole("button", { name: "Pin" }));
+    // Pin the unpinned row; unpin the already-pinned row (item label flips).
+    fireEvent.click(within(plainRow).getByRole("menuitem", { name: "Pin" }));
     expect(onSetPinned).toHaveBeenCalledWith("/x/plain.duck", true);
-    fireEvent.click(within(rows[0]).getByRole("button", { name: "Unpin" }));
+    fireEvent.click(within(rows[0]).getByRole("menuitem", { name: "Unpin" }));
     expect(onSetPinned).toHaveBeenCalledWith("/x/p1.duck", false);
-    fireEvent.click(within(plainRow).getByRole("button", { name: "Archive" }));
+    fireEvent.click(within(plainRow).getByRole("menuitem", { name: "Archive" }));
     expect(onArchive).toHaveBeenCalledWith("/x/plain.duck", true, null);
-    // The main activate button never fired from any action click.
+    // The main activate button never fired from any item click.
     expect(onActivate).not.toHaveBeenCalled();
     expect(onOpenPersisted).not.toHaveBeenCalled();
   });
@@ -1088,6 +1402,18 @@ describe("SessionSidebar organization (ADR-0127, issue #1175)", () => {
     expect(classes).toContain("pointer-events-none");
     expect(classes).toContain("group-hover/row:opacity-100");
     expect(classes).toContain("has-[:focus-visible]:opacity-100");
+    // The complementary half: the inline relative-time label hides under the
+    // SAME two conditions -- the pill's opaque ground is narrower than the
+    // label, so the label would peek out beside the trigger otherwise.
+    const time = container.querySelector<HTMLElement>(
+      ".session-entry .tabular-nums",
+    );
+    expect(time).not.toBeNull();
+    const timeClasses = time?.className.split(/\s+/);
+    expect(timeClasses).toContain("group-hover/row:opacity-0");
+    expect(timeClasses).toContain(
+      "group-has-[.session-entry-actions_:focus-visible]/row:opacity-0",
+    );
   });
 
   it("archived toggle carries aria-pressed and fires onToggleArchived", () => {
@@ -1117,7 +1443,7 @@ describe("SessionSidebar organization (ADR-0127, issue #1175)", () => {
     const onOpenPersisted = vi.fn();
     const onActivate = vi.fn();
     const onArchive = vi.fn();
-    const onDeleteArchived = vi.fn();
+    const onDelete = vi.fn();
     const archived: SessionMetadata[] = [
       { duck_path: "/x/arch.duck", display_name: "Archived One", last_modified_at: Date.now() - 86_400_000, source_summary: { first_source_name: null, source_count: 0, turn_count: 2 }, format_version: 1, pinned: false, archived: true },
     ];
@@ -1130,7 +1456,7 @@ describe("SessionSidebar organization (ADR-0127, issue #1175)", () => {
           onOpenPersisted,
           onActivate,
           onArchive,
-          onDeleteArchived,
+          onDelete,
         })}
       />,
     );
@@ -1161,20 +1487,20 @@ describe("SessionSidebar organization (ADR-0127, issue #1175)", () => {
     expect(screen.getByText("Data source")).toBeInTheDocument();
     vi.useRealTimers();
     // Restore takes the pure path (no sid to close).
-    fireEvent.click(within(row!).getByRole("button", { name: "Restore" }));
+    fireEvent.click(within(row!).getByRole("menuitem", { name: "Restore" }));
     expect(onArchive).toHaveBeenCalledWith("/x/arch.duck", false, null);
     // Delete opens the strong-confirm dialog; only a confirm fires the mutation.
-    fireEvent.click(within(row!).getByRole("button", { name: "Delete" }));
+    fireEvent.click(within(row!).getByRole("menuitem", { name: "Delete" }));
     const dialog = await screen.findByRole("alertdialog");
     expect(within(dialog).getByText(/Archived One/)).toBeInTheDocument();
     fireEvent.click(within(dialog).getByRole("button", { name: "Cancel" }));
-    expect(onDeleteArchived).not.toHaveBeenCalled();
-    fireEvent.click(within(row!).getByRole("button", { name: "Delete" }));
+    expect(onDelete).not.toHaveBeenCalled();
+    fireEvent.click(within(row!).getByRole("menuitem", { name: "Delete" }));
     const dialog2 = await screen.findByRole("alertdialog");
     fireEvent.click(
       within(dialog2).getByRole("button", { name: "Delete permanently" }),
     );
-    expect(onDeleteArchived).toHaveBeenCalledWith("/x/arch.duck");
+    expect(onDelete).toHaveBeenCalledWith("/x/arch.duck", null);
   });
 
   it("keeps the chrome row on an empty sidebar so the archived view stays reachable (all-archived escape)", () => {
@@ -1189,161 +1515,200 @@ describe("SessionSidebar organization (ADR-0127, issue #1175)", () => {
   });
 });
 
-// --- ADR-0127 (issue #1175): the single-flight hover machine ------------------
+// --- ADR-0133 (issue #1319): the row-end actions menu -------------------------
 
-describe("SessionSidebar single-flight hover machine (issue #1175)", () => {
-  // One card max, parent-owned: the machine's transitions -- retire on
-  // foreign enter, 200 ms close grace, card-enter cancel, list-leave
-  // backstop, stale-leave guard -- are pinned with fake timers. The card's
-  // display name renders in a <p> (the row's name is a <span>), so the
-  // p-selector tells WHICH card is mounted without colliding with the row.
-
-  afterEach(() => {
-    vi.useRealTimers();
-  });
-
-  function meta(path: string, name: string): SessionMetadata {
+describe("SessionSidebar row actions menu (ADR-0133, issue #1319)", () => {
+  function menuProps(overrides: Record<string, unknown> = {}) {
     return {
-      duck_path: path,
-      display_name: name,
-      last_modified_at: Date.now(),
-      source_summary: { first_source_name: null, source_count: 0, turn_count: 0 },
-      format_version: 1,
-      pinned: false,
-      archived: false,
-    };
-  }
-
-  function hoverProps() {
-    const base = {
       collapsed: false,
-      openSessions: [] as OpenSession[],
+      // One open row (bound via openSessions) + one cold persisted row: the
+      // item sets and the sid-bearing callbacks diverge between the two.
+      sessions: [
+        { duck_path: "/x/open.duck", display_name: "Open One", last_modified_at: Date.now(), source_summary: { first_source_name: null, source_count: 1, turn_count: 2 }, format_version: 1, pinned: false, archived: false },
+        { duck_path: "/x/cold.duck", display_name: "Cold One", last_modified_at: Date.now() - 86_400_000, source_summary: { first_source_name: null, source_count: 0, turn_count: 1 }, format_version: 1, pinned: false, archived: false },
+      ],
+      openSessions: [
+        { sid: "sess-1", name: "Open One", path: "/x/open.duck", pendingIngestPaths: [], pendingQuestion: null, pendingSkillInvocations: [] },
+      ],
       activeSessionId: null,
       disabled: false,
-      loadError: null as string | null,
+      loadError: null,
       grouping: "flat" as const,
       onNew: () => {},
       onActivate: () => {},
       onOpenPersisted: () => {},
       onSwitchGrouping: () => {},
-      archivedSessions: [] as SessionMetadata[],
+      archivedSessions: [],
       showArchived: false,
       onToggleArchived: () => {},
       onSetPinned: () => {},
       onArchive: () => {},
-      onDeleteArchived: () => {},
+      onDelete: () => {},
+      onRename: () => {},
+      onClose: () => {},
       onOpenSearch: () => {},
       provider: null,
       onOpenSettings: () => {},
-    };
-    return {
-      ...base,
-      sessions: [meta("/x/a.duck", "Row A"), meta("/x/b.duck", "Row B")],
+      ...overrides,
     };
   }
 
-  function rows(container: HTMLElement): HTMLElement[] {
-    return Array.from(container.querySelectorAll(".session-entry")) as HTMLElement[];
+  function rowBy(container: HTMLElement, name: string) {
+    const row = Array.from(
+      container.querySelectorAll<HTMLElement>(".session-entry"),
+    ).find((r) => r.querySelector(".session-name")?.textContent === name);
+    expect(row).toBeDefined();
+    return row!;
   }
 
-  it("retires the shown card the moment a different row is entered, before its own dwell", async () => {
-    // The retire line is the sweep fix: without it the OLD card stays on
-    // screen the whole time the pointer travels (every enter cancels the
-    // pending close; the new card only opens after its own 300 ms dwell).
-    vi.useFakeTimers();
-    const { container } = renderShell(<SessionSidebar {...hoverProps()} />);
-    const [a, b] = rows(container);
+  // The mock renders every row's menu content inline (always open), so the
+  // queries are scoped per row.
+  const itemNames = (row: HTMLElement) =>
+    Array.from(within(row).getAllByRole("menuitem")).map(
+      (item) => item.textContent,
+    );
 
-    fireEvent.pointerEnter(a);
-    await act(async () => {
-      vi.advanceTimersByTime(350);
-    });
-    expect(screen.getByText("Row A", { selector: "p" })).toBeInTheDocument();
-
-    fireEvent.pointerEnter(b);
-    // NO timer advance: A's card must be gone immediately...
-    expect(screen.queryByText("Row A", { selector: "p" })).toBeNull();
-    // ...and B's card opens only after its own dwell.
-    await act(async () => {
-      vi.advanceTimersByTime(299);
-    });
-    expect(screen.queryByText("Row B", { selector: "p" })).toBeNull();
-    await act(async () => {
-      vi.advanceTimersByTime(1);
-    });
-    expect(screen.getByText("Row B", { selector: "p" })).toBeInTheDocument();
+  it("open row carries Pin, Rename, Close, Archive, Delete; the persisted row drops Close", () => {
+    const { container } = renderShell(<SessionSidebar {...menuProps()} />);
+    expect(itemNames(rowBy(container, "Open One"))).toEqual([
+      "Pin",
+      "Rename",
+      "Close",
+      "Archive",
+      "Delete",
+    ]);
+    expect(itemNames(rowBy(container, "Cold One"))).toEqual([
+      "Pin",
+      "Rename",
+      "Archive",
+      "Delete",
+    ]);
+    // The destructive variant is the destructive styling's only net (the
+    // module mock does not render Radix's variant classes).
+    expect(
+      within(rowBy(container, "Open One")).getByRole("menuitem", {
+        name: "Delete",
+      }),
+    ).toHaveAttribute("data-variant", "destructive");
   });
 
-  it("honors the 200 ms close grace, and entering the card cancels the close", async () => {
-    vi.useFakeTimers();
-    const { container } = renderShell(<SessionSidebar {...hoverProps()} />);
-    const [a] = rows(container);
-
-    fireEvent.pointerEnter(a);
-    await act(async () => {
-      vi.advanceTimersByTime(350);
-    });
-    expect(screen.getByText("Row A", { selector: "p" })).toBeInTheDocument();
-
-    // Leave the row: the grace window keeps the card readable...
-    fireEvent.pointerLeave(a);
-    await act(async () => {
-      vi.advanceTimersByTime(199);
-    });
-    expect(screen.getByText("Row A", { selector: "p" })).toBeInTheDocument();
-    // ...and sweeping onto the card itself cancels the pending close
-    // (read-only per ADR-0127, but the pointer may rest there to read).
-    const card = screen.getByText("Data source").closest("[data-state=\"open\"]")!;
-    fireEvent.pointerEnter(card);
-    await act(async () => {
-      vi.advanceTimersByTime(500);
-    });
-    expect(screen.getByText("Row A", { selector: "p" })).toBeInTheDocument();
-    // Leaving the CARD schedules its own close (the row-leave guard cannot
-    // serve this path -- the row's leave already ran).
-    fireEvent.pointerLeave(card);
-    await act(async () => {
-      vi.advanceTimersByTime(200);
-    });
-    expect(screen.queryByText("Row A", { selector: "p" })).toBeNull();
+  it("archived row carries only Restore + Delete", () => {
+    const archived: SessionMetadata[] = [
+      { duck_path: "/x/arch.duck", display_name: "Archived One", last_modified_at: Date.now() - 86_400_000, source_summary: { first_source_name: null, source_count: 0, turn_count: 2 }, format_version: 1, pinned: false, archived: true },
+    ];
+    const { container } = renderShell(
+      <SessionSidebar
+        {...menuProps({ archivedSessions: archived, showArchived: true })}
+      />,
+    );
+    expect(itemNames(rowBy(container, "Archived One"))).toEqual([
+      "Restore",
+      "Delete",
+    ]);
   });
 
-  it("closes the card when the pointer leaves the whole list (backstop)", async () => {
-    // A pointerleave lost to the pill's pointer-events toggling never
-    // reaches the row; the list-level leave is the final backstop.
-    vi.useFakeTimers();
-    const { container } = renderShell(<SessionSidebar {...hoverProps()} />);
-    const [a] = rows(container);
-    const list = container.querySelector(".session-list")!;
-
-    fireEvent.pointerEnter(a);
-    await act(async () => {
-      vi.advanceTimersByTime(350);
-    });
-    expect(screen.getByText("Row A", { selector: "p" })).toBeInTheDocument();
-    fireEvent.pointerLeave(list);
-    await act(async () => {
-      vi.advanceTimersByTime(200);
-    });
-    expect(screen.queryByText("Row A", { selector: "p" })).toBeNull();
+  it("Close fires the shell callback with the sid directly (no dialog)", () => {
+    const onClose = vi.fn();
+    const { container } = renderShell(
+      <SessionSidebar {...menuProps({ onClose })} />,
+    );
+    fireEvent.click(
+      within(rowBy(container, "Open One")).getByRole("menuitem", {
+        name: "Close",
+      }),
+    );
+    expect(onClose).toHaveBeenCalledWith("sess-1");
+    expect(screen.queryByRole("dialog")).toBeNull();
   });
 
-  it("ignores a stale leave from a row the pointer already left", async () => {
-    // After A -> B, a late leave of A must not clear B's pending open (the
-    // stale-key guard); B's card still opens on schedule.
-    vi.useFakeTimers();
-    const { container } = renderShell(<SessionSidebar {...hoverProps()} />);
-    const [a, b] = rows(container);
+  it("Archive on an open row passes the sid so the shell closes it (ADR-0127 close-on-archive)", () => {
+    const onArchive = vi.fn();
+    const { container } = renderShell(
+      <SessionSidebar {...menuProps({ onArchive })} />,
+    );
+    fireEvent.click(
+      within(rowBy(container, "Open One")).getByRole("menuitem", {
+        name: "Archive",
+      }),
+    );
+    expect(onArchive).toHaveBeenCalledWith("/x/open.duck", true, "sess-1");
+  });
 
-    fireEvent.pointerEnter(a);
-    fireEvent.pointerLeave(a);
-    fireEvent.pointerEnter(b);
-    // Stale: the pointer's tracked row is B now.
-    fireEvent.pointerLeave(a);
-    await act(async () => {
-      vi.advanceTimersByTime(300);
-    });
-    expect(screen.getByText("Row B", { selector: "p" })).toBeInTheDocument();
+  it("Rename opens the dialog and submits with the row's path + open sid", async () => {
+    const onRename = vi.fn();
+    const { container } = renderShell(
+      <SessionSidebar {...menuProps({ onRename })} />,
+    );
+    fireEvent.click(
+      within(rowBy(container, "Open One")).getByRole("menuitem", {
+        name: "Rename",
+      }),
+    );
+    const input = await screen.findByLabelText("Session name");
+    expect((input as HTMLInputElement).value).toBe("Open One");
+    fireEvent.change(input, { target: { value: "Renamed" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    expect(onRename).toHaveBeenCalledWith("/x/open.duck", "sess-1", "Renamed");
+  });
+
+  it("Rename on a persisted row submits with a null sid", async () => {
+    const onRename = vi.fn();
+    const { container } = renderShell(
+      <SessionSidebar {...menuProps({ onRename })} />,
+    );
+    fireEvent.click(
+      within(rowBy(container, "Cold One")).getByRole("menuitem", {
+        name: "Rename",
+      }),
+    );
+    const input = await screen.findByLabelText("Session name");
+    fireEvent.change(input, { target: { value: "Cold Renamed" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    expect(onRename).toHaveBeenCalledWith("/x/cold.duck", null, "Cold Renamed");
+  });
+
+  it("Delete goes through the strong-confirm dialog and passes the open sid", async () => {
+    const onDelete = vi.fn();
+    const { container } = renderShell(
+      <SessionSidebar {...menuProps({ onDelete })} />,
+    );
+    fireEvent.click(
+      within(rowBy(container, "Open One")).getByRole("menuitem", {
+        name: "Delete",
+      }),
+    );
+    const dialog = await screen.findByRole("alertdialog");
+    expect(within(dialog).getByText(/Open One/)).toBeInTheDocument();
+    fireEvent.click(
+      within(dialog).getByRole("button", { name: "Delete permanently" }),
+    );
+    expect(onDelete).toHaveBeenCalledWith("/x/open.duck", "sess-1");
+  });
+
+  it("Delete cancel fires nothing", async () => {
+    const onDelete = vi.fn();
+    const { container } = renderShell(
+      <SessionSidebar {...menuProps({ onDelete })} />,
+    );
+    fireEvent.click(
+      within(rowBy(container, "Cold One")).getByRole("menuitem", {
+        name: "Delete",
+      }),
+    );
+    const dialog = await screen.findByRole("alertdialog");
+    fireEvent.click(within(dialog).getByRole("button", { name: "Cancel" }));
+    expect(onDelete).not.toHaveBeenCalled();
+  });
+
+  it("the busy gate disables the trigger (busy parity with the retired pill)", () => {
+    const { container } = renderShell(
+      <SessionSidebar {...menuProps({ disabled: true })} />,
+    );
+    expect(
+      within(rowBy(container, "Open One")).getByRole("button", {
+        name: "Row actions",
+      }),
+    ).toBeDisabled();
   });
 });
 
@@ -1380,7 +1745,9 @@ describe("SessionSidebar archived-view gating (issue #1175)", () => {
       onToggleArchived: () => {},
       onSetPinned: () => {},
       onArchive: () => {},
-      onDeleteArchived: () => {},
+      onDelete: () => {},
+      onRename: () => {},
+      onClose: () => {},
       onOpenSearch: () => {},
       provider: null,
       onOpenSettings: () => {},

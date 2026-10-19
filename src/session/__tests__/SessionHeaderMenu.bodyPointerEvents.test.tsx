@@ -7,7 +7,7 @@ import {
   DropdownMenuItem,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
-import { DeleteSessionDialog, RenameSessionDialog } from "../SessionSidebar";
+import { DeleteSessionDialog, RenameSessionDialog } from "../SessionDialogs";
 import { catalogFor } from "../../i18n";
 
 // Regression (#518): opening Rename / Delete from the session-header dropdown

@@ -519,6 +519,7 @@ pub fn run() {
             commands::read_rows_tsv,
             commands::export_rows_csv,
             commands::write_export_file,
+            commands::copy_artifact_file,
             commands::set_api_key,
             commands::clear_api_key,
             commands::get_provider_config,

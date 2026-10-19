@@ -34,6 +34,28 @@
  * the last visual rules outside the layout-only shells. */
 * { box-sizing: border-box; }
 
+/* Thin scrollbars (Chromium ::-webkit-scrollbar; the shell runs on WebView2).
+   The WebView2 default classic bar is ~17px and visually dominates the
+   three-column shell; a 10px band with a 2px transparent inset (the thumb's
+   background clips to the padding box) yields a 6px rounded thumb matching the
+   thin-bar reference look (ChatGPT desktop, WorkBuddy). Space-taking on
+   purpose: the runtime scrollbar probe (--rail-sb-w in App.tsx) and the
+   scrollbar-gutter reservations measure the styled band width, so the layout
+   machinery keeps working unchanged. Thumb color rides the shadcn token system,
+   flipping with the .dark class (see useTheme). */
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb {
+  border: 2px solid transparent;
+  border-radius: 9999px;
+  background-color: color-mix(in srgb, var(--muted-foreground) 40%, transparent);
+  background-clip: padding-box;
+}
+::-webkit-scrollbar-thumb:hover {
+  background-color: color-mix(in srgb, var(--muted-foreground) 65%, transparent);
+}
+::-webkit-scrollbar-corner { background: transparent; }
+
 /* Viz (ADR-0016/0033): the chart container bounds a Vega-Embed render so a wide
    spec scrolls instead of bursting the panel. The degraded-viz disclosure moved
    to a warning Alert variant in issue #108 (ADR-0050). Vega-Embed 7 marks the
@@ -168,19 +190,21 @@
   --track-grid:
     0fr minmax(0, var(--rail-width, 460px)) minmax(var(--workspace-min-width), 1fr) 0fr;
   --track-grid-collapsed: 0fr minmax(0, 100%) minmax(0, 0fr) 0fr;
-  /* Collapsed reading column cap (issue #833): the retired centered fold
-   * track capped the RAIL box at 800px and the rail's horizontal gutter
-   * (--rail-gutter per side) ate into that budget; capping the content
-   * wrapper at 800px minus the same gutter keeps the grid-track-era text
-   * measure to within the retired era's 1px border (744px vs the old 743px
-   * -- the rail's border-right occupied 1px inside the capped track, which
-   * also left the old text 1px shy of the bar card). --rail-gutter is the
-   * single source for the bar's gutter inset and this cap; the rail's
-   * horizontal padding starts from it and relaxes by up to
-   * --rail-col-relax (see the .session-rail rule). Shared with the
-   * bar mirror so the two columns keep one source and one axis. */
+  /* Collapsed reading column cap (issue #833; recalibrated for the 1200px
+   * default window, issue #1286): the folded conversation track reads
+   * through one centered column -- this cap is both its text measure and
+   * the bar card's width ceiling, shared so the two keep one source and
+   * one axis. #833 pinned the measure at 744px (calc(800px - 2 * gutter))
+   * to stay within the retired centered-track era's 743px, while the
+   * 1024px default kept the cap unbound (the folded track was 744px -- the
+   * card rode the gutter inset alone). At the 1200px default the folded
+   * track is 920px and the pin opened 88px empty flanks per side; 800px
+   * splits the surplus between margin (60px per side at the default) and
+   * the reading measure. --rail-gutter stays the single source for the
+   * bar's gutter inset and the rail's horizontal padding, which relaxes by
+   * up to --rail-col-relax (see the .session-rail rule). */
   --rail-gutter: 1.75rem;
-  --reading-column-cap: calc(800px - 2 * var(--rail-gutter));
+  --reading-column-cap: 800px;
   /* Reading-column edge relax (issue #839): how far the rail's horizontal
    * padding may shrink below --rail-gutter per side, pulling the reading
    * column's edges toward the bar card's. Clamped to the measured
@@ -274,8 +298,21 @@
   transition: opacity 200ms ease;
 }
 /* The flex:1 scroll container of the grouped session list (part of the
- * sidebar layout shell -- visual group/entry/typography rules retired). */
-.session-list { list-style: none; margin: 0; padding: 0; flex: 1; overflow-y: auto; }
+ * sidebar layout shell -- visual group/entry/typography rules retired). The
+ * negative right margin lifts the list out of the aside's p-2 so the thin
+ * scrollbar docks against the sidebar's right border instead of floating an
+ * 8px padding inboard of it; the right padding (same 8px width) keeps the
+ * rows clear of the thumb, while the left edge stays flush with the brand
+ * row / New button above -- that alignment is the aside's own p-2, carried
+ * over untouched (a two-sided padding would stack a second 8px on it and
+ * step every row inboard). */
+.session-list {
+  list-style: none;
+  margin: 0 -8px 0 0;
+  padding: 0 8px 0 0;
+  flex: 1;
+  overflow-y: auto;
+}
 
 /* --- Row 1: thin top bar (ADR-0060 ~40px) -- layout-only ------------------
  * Codex-style (aligns dannysmith/tauri-template): the topbar spans the full
@@ -554,7 +591,7 @@
  * (scrollbar width minus the rail's padding relax) wider per side than
  * the column while the width formula is uncapped; overlay scrollbars
  * reserve and relax nothing, and once the cap binds, card and column
- * meet at 744px and sit flush. Below the cap the width consumes exactly
+ * meet at the cap and sit flush. Below the cap the width consumes exactly
  * the gutter inset per side (the auto margins resolve to zero; above
  * the cap they split the leftover), so nothing jumps when the fold
  * starts; keeping the width unscoped also makes the card ride the fold
@@ -694,6 +731,33 @@
    tracks the pointer 1:1 instead of lagging behind a 280ms animation. */
 .shell.rail-dragging .session-body,
 .shell.sidebar-dragging .session-body { transition: none; }
+/* The follow pill (#1307): the paused posture's visible exit -- the rail's
+   stick-to-bottom machine pauses on a user scroll and stays silent after
+   that; this button is the one-click way back. An absolute grid item on the
+   session-body: it takes no track space (the scroll extent never swells for
+   it), but grid placement still applies -- column 2 is the conversation
+   column in BOTH track postures (the fold only reshapes the third), so one
+   rule carries the workspace fold, and the fully-placed grid column
+   (start AND end non-auto -- an auto end line leaves the area as the whole
+   container) makes the column the containing block. Centering rides the
+   CSS2 abspos route (inset-inline 0 + auto margins), NOT justify-self:
+   alignment properties do not apply to absolutely-positioned grid items.
+   The explicit width the auto margins need comes from the utilities
+   (size-8) -- NO width declaration here: this unlayered rule would override
+   the utilities layer and reshape the round button. Seated above the bar
+   card on the same --shell-bar-h the rail's bottom padding reads; z-index
+   5 -- above the rail's in-flow content, below the rail resize handle
+   (10). The bar slot itself is z-auto: should the two ever overlap (the
+   transient frames after a bar-height change, before --shell-bar-h lands),
+   the pill paints over it. */
+.rail-follow-pill {
+  position: absolute;
+  grid-column: 2 / 3;
+  inset-inline: 0;
+  margin-inline: auto;
+  bottom: calc(var(--shell-bar-h, 0px) + 0.5rem);
+  z-index: 5;
+}
 /* Draggable rail resize handle (conversation/workspace boundary). A thin
    strip straddling the conversation/workspace column boundary; absolutely
    positioned within .main-area so its bottom spans the shell-level
@@ -783,7 +847,7 @@
      edges sit close to the bar card's -- under classic scrollbars the card
      ends a few pixels wider per side while the widths are uncapped;
      overlay scrollbars clamp the relax to zero, and above the cap the two
-     meet at 744px either way. The bar's own gutter inset is untouched. */
+     meet at the cap width either way. The bar's own gutter inset is untouched. */
   padding-block: 0.5rem;
   padding-inline:
     calc(var(--rail-gutter) - min(var(--rail-sb-w, 0px), var(--rail-col-relax)));
@@ -810,15 +874,14 @@
 /* Reading column (issue #833): the direct child wrapper carrying the rail's
    content. The rail itself is the full-width scroll container in the folded
    state (scrollbar at the window edge); this wrapper centers the thread
-   content and caps it at --reading-column-cap so the text measure carries
-   over from the retired centered-track era (within the retired era's 1px
-   border). The centering is axis-true because the rail's scrollbar-gutter
+   content and caps it at --reading-column-cap, the shared reading measure
+   (see the token). The centering is axis-true because the rail's scrollbar-gutter
    reserves both edges symmetrically (issue #839): the column lands on the
    track's centerline -- the bar card's axis -- whether or not the scrollbar
    is showing, and the reservation is stable, so crossing the overflow
    threshold costs no reflow. Inert in the expanded state -- the rail's 600px
    drag ceiling keeps the expanded content (533px max with 15px-classic
-   scrollbars, padding relaxed) well under the 744px cap, so the unscoped
+   scrollbars, padding relaxed) well under the 800px cap, so the unscoped
    max-width never binds there -- and continuous through the fold
    slide in both directions: min(cap, the rail's content width) rides the
    track without its own transition (a fold-scoped cap would drop at unfold

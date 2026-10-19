@@ -235,11 +235,13 @@ fn link_dir(source: &Path, link_path: &Path) -> std::io::Result<()> {
 /// reparse-point attribute, so the junction reads back as `acquired: linked`.
 #[cfg(target_os = "windows")]
 fn junction_via_mklink(source: &Path, link_path: &Path) -> std::io::Result<()> {
-    let output = std::process::Command::new("cmd")
+    let mut command = std::process::Command::new("cmd");
+    command
         .args(["/C", "mklink", "/J"])
         .arg(link_path)
-        .arg(source)
-        .output()?;
+        .arg(source);
+    crate::util::no_window(&mut command);
+    let output = command.output()?;
     if output.status.success() {
         Ok(())
     } else {

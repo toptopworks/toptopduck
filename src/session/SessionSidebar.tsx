@@ -1,16 +1,6 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { FormattedMessage, useIntl } from "react-intl";
-import {
-  Archive,
-  ArchiveRestore,
-  Check,
-  Pencil,
-  Pin,
-  PinOff,
-  Search,
-  Settings,
-  Trash2,
-} from "lucide-react";
+import { Archive, Check, Pencil, Search, Settings } from "lucide-react";
 import {
   buildArchivedEntries,
   buildSidebarModel,
@@ -20,29 +10,16 @@ import {
 } from "./sidebarModel";
 import { formatRelativeTime } from "./lastModifiedText";
 import { resolveDisplayName } from "./displayName";
+import { RowActionsMenu } from "./RowActionsMenu";
+import {
+  useSidebarHoverCard,
+  useSidebarHoverCardBridge,
+  type SidebarHoverCardMachine,
+} from "./sidebarHoverCard";
 import type { SessionMetadata } from "../types/session";
 import type { SidebarGrouping } from "../types/app-config";
 import type { ProviderConfig } from "../types/provider";
-import {
-  AlertDialog,
-  AlertDialogAction,
-  AlertDialogCancel,
-  AlertDialogContent,
-  AlertDialogDescription,
-  AlertDialogFooter,
-  AlertDialogHeader,
-  AlertDialogTitle,
-} from "@/components/ui/alert-dialog";
-import { buttonVariants } from "@/components/ui/button-variants";
 import { Button } from "@/components/ui/button";
-import {
-  Dialog,
-  DialogContent,
-  DialogFooter,
-  DialogTitle,
-} from "@/components/ui/dialog";
-import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
 import {
   Popover,
   PopoverContent,
@@ -80,8 +57,9 @@ function GroupTitle({ kind }: { kind: SidebarGroupKind }) {
 // lists every persisted .duck (ADR-0061 cold start) merged with the open
 // keep-alive sessions, Chat-style time-grouped and last-modified descending.
 // ADR-0093 (issue #511): each row is pure navigation (title + conditional
-// status dot). Management actions (rename / close / delete) moved to
-// .session-header (slice 2, #512).
+// status dot), management actions moved to .session-header (slice 2, #512);
+// ADR-0133 (issue #1319) returns the row-level actions to the row-end actions
+// menu, the header menu keeping the active-session anchor.
 
 // A frozen empty set so the optional prop's default keeps a stable identity
 // (no every-render fresh Set -> SidebarRow prop churn).
@@ -139,12 +117,21 @@ interface SessionSidebarProps {
    *  binding when archiving a MAIN-list row; restoring passes null (the
    *  archived row is never open -- open-is-unarchive, Decision 4). */
   onArchive: (path: string, archived: boolean, sid: string | null) => void;
-  /** Delete an archived row (ADR-0127 Decision 6): routes through the same
-   *  deletePersisted contract as the header-menu delete -- always the pure
-   *  path variant here, since an archived row never carries a sid
-   *  (open-is-unarchive); the confirm dialog lives in this component, the
-   *  mutation in the caller. */
-  onDeleteArchived: (path: string) => void;
+  /** Row-menu delete (ADR-0133, issue #1319): the same deletePersisted
+   *  contract as the header-menu delete, generalized to every row -- `sid`
+   *  is the open binding when the row is open (the ADR-0063 wait-release
+   *  close runs first), null for a cold persisted / archived row. The
+   *  strong-confirm dialog lives in the row menu, the mutation in the
+   *  caller. */
+  onDelete: (path: string, sid: string | null) => void;
+  /** Row-menu rename (ADR-0133, issue #1319): the renameEntry contract --
+   *  an open row renames via its sid, a cold persisted row rewrites the
+   *  .duck header in place by path. */
+  onRename: (path: string, sid: string | null, newName: string) => void;
+  /** Row-menu close (ADR-0133, issue #1319): open rows only. The shell
+   *  callback (cancel + approval cleanup + draft drop) is the same one the
+   *  header menu fires. */
+  onClose: (sid: string) => void;
   // Open the Ctrl/⌘+K search modal (ADR-0072, issue #252). The
   // shell owns the open state so the global keydown + this button share one
   // entry point; the button is the always-visible affordance for the same
@@ -178,7 +165,9 @@ export function SessionSidebar({
   onToggleArchived,
   onSetPinned,
   onArchive,
-  onDeleteArchived,
+  onDelete,
+  onRename,
+  onClose,
   onOpenSearch,
   provider,
   onOpenSettings,
@@ -195,66 +184,10 @@ export function SessionSidebar({
     return () => clearInterval(id);
   }, []);
 
-  // The archived-row delete target (ADR-0127 Decision 6): the strong-confirm
-  // dialog state lives here; the mutation rides onDeleteArchived on confirm.
-  const [deleteTarget, setDeleteTarget] = useState<{
-    path: string;
-    name: string;
-  } | null>(null);
-
-  // Single-flight hover-card state (issue #1175): the OPEN key is owned HERE,
-  // not per row, so at most one metadata card exists at any moment -- moving
-  // to a new row swaps the card (unmounting the old portal) instead of
-  // stacking fading ones behind the pointer. A per-row boolean cannot
-  // guarantee that: a pointerleave lost to the pill's pointer-events toggling
-  // strands that row's card open forever; here a lost leave self-heals the
-  // moment any other row is entered, and the list-level leave is the final
-  // backstop. Delays keep the old posture: 300 ms to open (sweep-proof),
-  // 200 ms grace on leave (cancelled by entering the card itself -- read-only
-  // per ADR-0127, but the pointer may still sweep onto it to read).
-  //
-  // hoverKey rides a ref, not state: render consumes only cardKey (the shown
-  // card), while hoverKey feeds the stale-leave guard and the list backstop
-  // -- handler-only reads. State here would re-render every row at
-  // pointer-crossing frequency with no visible change.
-  const hoverKeyRef = useRef<string | null>(null);
-  const [cardKey, setCardKey] = useState<string | null>(null);
-  const openTimer = useRef<number | undefined>(undefined);
-  const closeTimer = useRef<number | undefined>(undefined);
-  const clearHoverTimers = () => {
-    window.clearTimeout(openTimer.current);
-    window.clearTimeout(closeTimer.current);
-  };
-  const rowHoverEnter = (key: string) => {
-    clearHoverTimers();
-    hoverKeyRef.current = key;
-    // Entering a DIFFERENT row retires the shown card immediately. The
-    // 200 ms close grace belongs to the row->card read path only; clearing
-    // the previous row's leave timer without this kept the OLD card on
-    // screen the whole time the pointer traveled (each new row's enter
-    // cancelled the pending close, and the new card only opens after a
-    // 300 ms dwell) -- the card must vanish while moving and reappear
-    // only once the pointer settles.
-    if (cardKey !== null && cardKey !== key) setCardKey(null);
-    openTimer.current = window.setTimeout(() => setCardKey(key), 300);
-  };
-  const rowHoverLeave = (key: string) => {
-    // A stale leave from a row the pointer already left is ignored.
-    if (hoverKeyRef.current !== key) return;
-    clearHoverTimers();
-    hoverKeyRef.current = null;
-    closeTimer.current = window.setTimeout(() => setCardKey(null), 200);
-  };
-  const cardHoverEnter = () => window.clearTimeout(closeTimer.current);
-  // Leaving the CARD schedules its own close -- it must NOT reuse
-  // rowHoverLeave: by the time the pointer reached the card, the row's
-  // leave already nulled hoverKey, so rowHoverLeave's stale-key guard would
-  // swallow the close and strand the card open forever.
-  const cardHoverLeave = () => {
-    window.clearTimeout(closeTimer.current);
-    closeTimer.current = window.setTimeout(() => setCardKey(null), 200);
-  };
-  useEffect(() => clearHoverTimers, []);
+  // Single-flight hover-card machine (issue #1175, collected into
+  // sidebarHoverCard.ts by issue #1325): one metadata card max, keyed by
+  // row -- the full transition contract lives in the module's header.
+  const hover = useSidebarHoverCard();
 
   const model = buildSidebarModel(
     sessions,
@@ -350,69 +283,25 @@ export function SessionSidebar({
             }
             disabled={disabled}
             archived={section.variant === "archived"}
-            cardOpen={cardKey === entry.key}
-            onHoverEnter={() => rowHoverEnter(entry.key)}
-            onHoverLeave={() => rowHoverLeave(entry.key)}
-            onCardEnter={cardHoverEnter}
-            onCardLeave={cardHoverLeave}
+            hover={hover}
             onActivate={() => {
               if (entry.sid) onActivate(entry.sid);
               else onOpenPersisted(entry.path, entry.name);
             }}
-            actions={
-              section.variant === "archived" ? (
-                <>
-                  <RowActionButton
-                    label={intl.formatMessage({
-                      id: "sidebar.row.restore",
-                      defaultMessage: "Restore",
-                    })}
-                    disabled={disabled}
-                    onClick={() => onArchive(entry.path, false, null)}
-                  >
-                    <ArchiveRestore className="size-3.5" aria-hidden />
-                  </RowActionButton>
-                  <RowActionButton
-                    label={intl.formatMessage({
-                      id: "sidebar.row.delete",
-                      defaultMessage: "Delete",
-                    })}
-                    disabled={disabled}
-                    onClick={() => setDeleteTarget({ path: entry.path, name: entry.name })}
-                  >
-                    <Trash2 className="size-3.5" aria-hidden />
-                  </RowActionButton>
-                </>
-              ) : (
-                <>
-                  <RowActionButton
-                    label={
-                      entry.pinned
-                        ? intl.formatMessage({ id: "sidebar.row.unpin", defaultMessage: "Unpin" })
-                        : intl.formatMessage({ id: "sidebar.row.pin", defaultMessage: "Pin" })
-                    }
-                    disabled={disabled}
-                    onClick={() => onSetPinned(entry.path, !entry.pinned)}
-                  >
-                    {entry.pinned ? (
-                      <PinOff className="size-3.5" aria-hidden />
-                    ) : (
-                      <Pin className="size-3.5" aria-hidden />
-                    )}
-                  </RowActionButton>
-                  <RowActionButton
-                    label={intl.formatMessage({
-                      id: "sidebar.row.archive",
-                      defaultMessage: "Archive",
-                    })}
-                    disabled={disabled}
-                    onClick={() => onArchive(entry.path, true, entry.sid)}
-                  >
-                    <Archive className="size-3.5" aria-hidden />
-                  </RowActionButton>
-                </>
-              )
-            }
+            menu={(
+              <RowActionsMenu
+                entry={entry}
+                displayName={resolveDisplayName(entry.name, intl)}
+                disabled={disabled}
+                archived={section.variant === "archived"}
+                onSetPinned={onSetPinned}
+                onArchive={onArchive}
+                onRename={onRename}
+                onClose={onClose}
+                onDelete={onDelete}
+                onMenuOpenChange={(open) => hover.menuOpenChange(entry.key, open)}
+              />
+            )}
           />
         ))}
       </ul>
@@ -481,12 +370,7 @@ export function SessionSidebar({
         </p>
       )}
 
-      <ul
-        className="session-list"
-        onPointerLeave={() => {
-          if (hoverKeyRef.current !== null) rowHoverLeave(hoverKeyRef.current);
-        }}
-      >
+      <ul className="session-list" onPointerLeave={hover.listLeave}>
         {sections.map((section, i) => renderSection(section, i === 0))}
         {sections.length === 0 && (
           <>
@@ -509,21 +393,6 @@ export function SessionSidebar({
           </>
         )}
       </ul>
-
-      {/* Archived-row delete (ADR-0127 Decision 6): the same strong-confirm
-          dialog the header menu's delete uses, mounted here for the archived
-          section's rows. An archived session is never open (open-is-unarchive),
-          so the delete takes the pure path variant. */}
-      {deleteTarget && (
-        <DeleteSessionDialog
-          name={deleteTarget.name}
-          onCancel={() => setDeleteTarget(null)}
-          onConfirm={() => {
-            onDeleteArchived(deleteTarget.path);
-            setDeleteTarget(null);
-          }}
-        />
-      )}
 
       {/* Footer: the settings gear (issue #282). The .session-list flex:1
           scroll region above keeps this pinned to the column's bottom. Absent
@@ -667,61 +536,6 @@ function GroupingToggle({
   );
 }
 
-// One trailing row action (ADR-0127, issue #1175): an icon-only button with a
-// Tooltip + matching aria-label (the one-read-two-slots posture, issue #960).
-// Pure-icon buttons have no text content, so aria-label IS the accessible
-// name -- no sr-only span needed (contrast the status labels inside the main
-// button, issue #1005).
-function RowActionButton({
-  label,
-  disabled,
-  onClick,
-  children,
-}: {
-  label: string;
-  /** Busy parity with every sibling control (the WorkingSetList posture):
-   *  the actions are mutations too -- during a long archive-close wait a
-   *  repeat click would double-fire the close on an already-closing sid. */
-  disabled: boolean;
-  onClick: () => void;
-  children: ReactNode;
-}) {
-  return (
-    <Tooltip disableHoverableContent>
-      <TooltipTrigger asChild>
-        <button
-          type="button"
-          disabled={disabled}
-          className={cn(
-            // No cursor-pointer: the pill's icons keep the default arrow
-            // (WorkingSetList's ICON_BUTTON_BASE posture -- on the accent
-            // pill, color alone marks the hot icon).
-            `session-row-action ${bareButtonReset} flex size-7 items-center justify-center rounded-md text-muted-foreground`,
-            "transition-colors hover:text-foreground focus-visible:text-foreground",
-            "focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring",
-            "disabled:cursor-progress disabled:opacity-50",
-          )}
-          aria-label={label}
-          onClick={(e) => {
-            // The action buttons are SIBLINGS of the main activate button,
-            // so a click cannot reach it by bubbling; the stopPropagation is
-            // defensive against a future row-level handler (issue #1175).
-            e.stopPropagation();
-            onClick();
-          }}
-        >
-          {children}
-        </button>
-      </TooltipTrigger>
-      {/* pointer-events-none: the tip must never intercept the pointer on
-          its way up to the row above (the WorkingSetList hint posture). */}
-      <TooltipContent className="pointer-events-none data-[state=closed]:animate-none!">
-        {label}
-      </TooltipContent>
-    </Tooltip>
-  );
-}
-
 // The archived-view visibility toggle (ADR-0127 Decision 7, issue #1175): an
 // icon-only aria-pressed button beside the grouping toggle. Same weak-visible
 // posture as GroupingToggle (opacity-60, brightens on hover/focus/pressed) so
@@ -769,18 +583,19 @@ function ArchivedToggle({
 
 // One sidebar row: navigation + inline metadata (ADR-0093, issue #511/#513).
 // The row carries the session title, a conditional status dot, and a compact
-// relative-time span. Management actions (rename / export / close / delete)
-// moved to .session-header (slice 2); the persistent sub-line (first source +
-// turn count) is retired in favor of a HoverCard (slice 3, this change).
-// ADR-0127 (issue #1175): the row is now a main activate BUTTON plus a
-// trailing action-group SIBLING (pin/unpin + archive, or restore + delete in
-// the archived view) -- buttons cannot nest, so the whole-row button split.
-// The action group is the WorkingSetList ROW_ACTIONS_OVERLAY posture: an
-// absolute accent pill floating over the row tail with ZERO flex footprint
-// (a flow-laid group would squeeze the truncating session name), revealed on
-// row hover or focus-visible; opacity-0 + pointer-events-none keeps the
-// buttons in the tab order (unlike visibility:hidden), so keyboard focus
-// reveals the pill and the row stays keyboard reachable.
+// relative-time span. Management actions lived in .session-header from
+// ADR-0093 (slice 2) until ADR-0133 returned them to the row-end actions
+// menu; the persistent sub-line (first source + turn count) is retired in
+// favor of a HoverCard (slice 3, this change).
+// ADR-0127 (issue #1175): the row is a main activate BUTTON plus a trailing
+// SIBLING slot -- buttons cannot nest, so the whole-row button split. ADR-0133
+// (issue #1319) retired the inline action buttons for a single row-end `⋯`
+// menu in that slot (RowActionsMenu): still the ROW_ACTIONS_OVERLAY posture
+// -- an absolute accent pill floating over the row tail with ZERO flex
+// footprint (a flow-laid group would squeeze the truncating session name),
+// revealed on row hover or focus-visible; opacity-0 + pointer-events-none
+// keeps the trigger in the tab order (unlike visibility:hidden), so keyboard
+// focus reveals the pill and the row stays keyboard reachable.
 function SidebarRow({
   entry,
   displayName,
@@ -790,12 +605,8 @@ function SidebarRow({
   disabled,
   archived = false,
   onActivate,
-  actions,
-  cardOpen,
-  onHoverEnter,
-  onHoverLeave,
-  onCardEnter,
-  onCardLeave,
+  menu,
+  hover,
 }: {
   entry: SidebarEntry;
   displayName: string;
@@ -821,31 +632,20 @@ function SidebarRow({
    *  tells AT the row is inert. */
   archived?: boolean;
   onActivate: () => void;
-  /** Trailing inline action group (ADR-0127, issue #1175), built by the
-   *  section renderer: pin/unpin + archive on main rows, restore + delete
-   *  on archived rows. */
-  actions: ReactNode;
-  /** Controlled metadata-card visibility (issue #1175): driven by the
-   *  parent-owned single-flight machine -- see the state block in
-   *  SessionSidebar for the transition contract. */
-  cardOpen: boolean;
-  onHoverEnter: () => void;
-  onHoverLeave: () => void;
-  /** Cancels the close grace while the pointer is ON the card itself. */
-  onCardEnter: () => void;
-  /** Schedules the card's own close (the row-leave guard cannot serve this
-   *  path -- hoverKey is already null once the pointer is on the card). */
-  onCardLeave: () => void;
+  /** The row-end actions menu (ADR-0133, issue #1319), built by the section
+   *  renderer: one RowActionsMenu per row in every row state. */
+  menu: ReactNode;
+  /** The row's view of the list-level single-flight hover machine
+   *  (sidebarHoverCard.ts, issue #1325): the bridge hook derives this row's
+   *  handlers + controlled card open from it -- the full intent-classifying
+   *  contract lives in the module's header. */
+  hover: SidebarHoverCardMachine;
 }) {
   const intl = useIntl();
-  // Controlled HoverCard open state (issue #1175): the parent owns the
-  // boolean instead of Radix's uncontrolled trigger state machine. Sweeping
-  // the pointer down the pills toggles a pill's pointer-events as each
-  // row's :hover flips, which desyncs Radix's trigger/content bookkeeping
-  // and strands stuck-open metadata cards; a controlled open cannot strand.
-  // The delays (300 ms open dwell, 200 ms close grace, card-enter cancel)
-  // live in the parent's single-flight machine -- see the state block there
-  // for the full transition contract.
+  // The li ref stays with the row (it renders the element); the bridge uses
+  // it for the native pointerleave backstop (see sidebarHoverCard.ts).
+  const liRef = useRef<HTMLLIElement | null>(null);
+  const bridge = useSidebarHoverCardBridge(hover, entry.key, liRef);
 
   // ADR-0093 (issue #511): the MessageSquare leading icon + the inset shadow
   // left bar are retired. Active = accent background only; open = status dot
@@ -857,29 +657,19 @@ function SidebarRow({
   // ADR-0093 slice 3 (issue #513): the row is wrapped in a HoverCard so hover
   // or keyboard focus surfaces the full metadata (title + source summary +
   // turn count) in a fixed-width card positioned to the right. Sweep flicker
-  // is prevented by the parent machine's 300 ms open dwell (below), not by
-  // Radix's openDelay, which is pinned to 0 under the controlled open.
+  // is prevented by the machine's 300 ms open dwell, not by Radix's
+  // openDelay, which is pinned to 0 under the controlled open.
   return (
     <HoverCard
-      open={cardOpen}
+      open={bridge.cardOpen}
       openDelay={0}
       closeDelay={0}
-      onOpenChange={(open) => {
-        // Bridge Radix's own open/close intents into the parent machine:
-        // Radix wires onFocus/onBlur on the trigger, and under a controlled
-        // open with no change handler that intent is lost -- keyboard focus
-        // is the only remaining path to the card for a non-pointer user.
-        // Pointer-driven intents re-fire what the row-level handlers already
-        // did; both paths are idempotent (timers re-armed, stale-leave
-        // guarded).
-        if (open) onHoverEnter();
-        else onHoverLeave();
-      }}
+      onOpenChange={bridge.hoverOpenChange}
     >
       <HoverCardTrigger asChild>
         <li
-          onPointerEnter={onHoverEnter}
-          onPointerLeave={onHoverLeave}
+          ref={liRef}
+          {...bridge.liProps}
           className={cn(
             "session-entry group/row relative my-0.5 flex items-stretch rounded-md hover:bg-accent",
             entry.active && "active bg-accent",
@@ -955,12 +745,16 @@ function SidebarRow({
                 aria-hidden="true"
               />
             )}
-            <span className="text-xs text-muted-foreground shrink-0 tabular-nums">
+            {/* The pill's opaque 28px ground is narrower than this label
+                (e.g. "11个月"), so once the pill shows the label's tail would
+                peek out beside the trigger -- hide the label under the SAME
+                two reveal conditions (row hover / focus inside the pill). */}
+            <span className="text-xs text-muted-foreground shrink-0 tabular-nums group-hover/row:opacity-0 group-has-[.session-entry-actions_:focus-visible]/row:opacity-0">
               {formatRelativeTime(entry.lastModifiedAt, now, intl.locale)}
             </span>
           </button>
           <div className="session-entry-actions absolute inset-y-0 right-1 z-10 flex items-center gap-0 rounded-md bg-accent opacity-0 pointer-events-none group-hover/row:opacity-100 group-hover/row:pointer-events-auto has-[:focus-visible]:opacity-100 has-[:focus-visible]:pointer-events-auto">
-            {actions}
+            {menu}
           </div>
         </li>
       </HoverCardTrigger>
@@ -968,8 +762,7 @@ function SidebarRow({
         side="right"
         align="start"
         className="data-[state=open]:animate-none! data-[state=closed]:animate-none!"
-        onPointerEnter={onCardEnter}
-        onPointerLeave={onCardLeave}
+        {...bridge.cardProps}
       >
         <SidebarRowHoverContent
           entry={entry}
@@ -1034,128 +827,5 @@ function SidebarRowHoverContent({
         </div>
       </dl>
     </div>
-  );
-}
-
-// Strong-confirm delete dialog (ADR-0060, issue #81): deletion is irreversible,
-// so the dialog names the .duck explicitly and requires an explicit confirm.
-// The shell is a Radix AlertDialog (issue #105): role="alertdialog" + focus-trap
-// + scroll-lock come from the primitive. AlertDialog blocks overlay-click
-// dismiss by default (destructive guard -- a stray pointer-down cannot drop the
-// session). ESC routes to onCancel via onEscapeKeyDown, NOT onOpenChange:
-// AlertDialogAction's built-in auto-close fires onOpenChange(false) after a
-// confirm click, so an onOpenChange-to-onCancel bridge would invoke cancel on
-// every Delete; onEscapeKeyDown isolates the keyboard-cancel path, leaving the
-// Cancel/Action button routing (and their Radix auto-close) untouched. Cancel
-// renders before Action so Radix auto-focuses it (the safe escape). The
-// destructive Action passes buttonVariants({ variant: "destructive" }); twMerge
-// (in cn) lets it override AlertDialogAction's built-in default variant, reusing
-// the destructive look without forking the copy-in component.
-// Exported for component-level testing (issue #111); the dialog is rendered
-// by SessionHeaderMenu and by the sidebar's archived-section delete (ADR-0127
-// Decision 6), but the destructive-semantics + ESC routing contract is
-// verified in isolation.
-export function DeleteSessionDialog({
-  name,
-  onCancel,
-  onConfirm,
-}: {
-  name: string;
-  onCancel: () => void;
-  onConfirm: () => void;
-}) {
-  return (
-    <AlertDialog defaultOpen>
-      <AlertDialogContent onEscapeKeyDown={() => onCancel()}>
-        <AlertDialogHeader>
-          <AlertDialogTitle>
-            <FormattedMessage id="session.delete.title" defaultMessage="Delete this session?" />
-          </AlertDialogTitle>
-          <AlertDialogDescription>
-            <FormattedMessage
-              id="session.delete.body"
-              defaultMessage="“{name}” will be permanently deleted. This cannot be undone."
-              values={{ name }}
-            />
-          </AlertDialogDescription>
-        </AlertDialogHeader>
-        <AlertDialogFooter>
-          <AlertDialogCancel onClick={onCancel}>
-            <FormattedMessage id="common.cancel" defaultMessage="Cancel" />
-          </AlertDialogCancel>
-          <AlertDialogAction
-            className={buttonVariants({ variant: "destructive" })}
-            onClick={onConfirm}
-          >
-            <FormattedMessage id="session.delete.confirm" defaultMessage="Delete permanently" />
-          </AlertDialogAction>
-        </AlertDialogFooter>
-      </AlertDialogContent>
-    </AlertDialog>
-  );
-}
-
-// Rename dialog (ADR-0060, single entry point). Pre-fills the current name (or
-// empty for a never-saved session); blank submit is refused (Save disabled).
-// The shell is now a Radix Dialog (issue #105): portal + focus-trap +
-// scroll-lock + ESC + overlay-click dismiss come from the primitive, replacing
-// the hand-written overlay div. showCloseButton={false} lets Radix auto-focus
-// the Input (preserving the prior input autoFocus); ESC / overlay-click route
-// to onCancel via onOpenChange. The Input + Label are copy-in primitives
-// (ADR-0050: standard surface uses shadcn primitives). aria-describedby={undefined}
-// opts out of a Description (the visible Label already names the field), which
-// also silences Radix's missing-description warning.
-// Exported for component-level testing (issue #111); rendered only by
-// SessionHeaderMenu in production, but the onOpenChange-to-onCancel bridge + blank
-// guard are verified in isolation.
-export function RenameSessionDialog({
-  initialName,
-  onCancel,
-  onSubmit,
-}: {
-  initialName: string;
-  onCancel: () => void;
-  onSubmit: (newName: string) => void;
-}) {
-  const [value, setValue] = useState(initialName);
-  return (
-    <Dialog
-      open
-      onOpenChange={(o) => {
-        if (!o) onCancel();
-      }}
-    >
-      <DialogContent showCloseButton={false} aria-describedby={undefined}>
-        <form
-          onSubmit={(e) => {
-            e.preventDefault();
-            if (value.trim()) onSubmit(value);
-          }}
-          className="grid gap-4"
-        >
-          <DialogTitle>
-            <FormattedMessage id="session.rename.title" defaultMessage="Rename session" />
-          </DialogTitle>
-          <div className="grid gap-2">
-            <Label htmlFor="rename-session-input">
-              <FormattedMessage id="session.rename.label" defaultMessage="Session name" />
-            </Label>
-            <Input
-              id="rename-session-input"
-              value={value}
-              onChange={(e) => setValue(e.target.value)}
-            />
-          </div>
-          <DialogFooter>
-            <Button variant="outline" type="button" onClick={onCancel}>
-              <FormattedMessage id="common.cancel" defaultMessage="Cancel" />
-            </Button>
-            <Button type="submit" disabled={!value.trim()}>
-              <FormattedMessage id="common.save" defaultMessage="Save" />
-            </Button>
-          </DialogFooter>
-        </form>
-      </DialogContent>
-    </Dialog>
   );
 }

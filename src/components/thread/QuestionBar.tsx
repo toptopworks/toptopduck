@@ -267,12 +267,25 @@ export function QuestionBar({ onSubmit, onCancel, loading, phase = null, turnSta
             // selector / test dependent (Shell.test.tsx queries role="status", not
             // the class) and is dropped. role="status" + aria-live stay.
             <span
-              className="text-[0.82rem] text-muted-foreground whitespace-nowrap"
+              className="flex min-w-0 items-baseline text-[0.82rem] text-muted-foreground @max-[340px]:hidden"
               role="status"
               aria-live="polite"
             >
-              {phase !== null && phaseLabel(phase, intl)}
-              <WaitElapsedSuffix startedAt={turnStartedAt} pausedSince={turnPausedSince} />
+              {/* Narrow-bar contract: the phase label may ellipsize; the
+                  elapsed figure never shrinks (the turn-clock ruling makes it
+                  the anti-frozen signal) and the stop button stays inside the
+                  card. A single nowrap span could not shrink -- its min-content
+                  locked to the full label+figure width and pushed the stop
+                  button past the bar's right border. Below a 340px bar the
+                  whole slot hides (@container on the form): the fixed toolbar
+                  controls alone need ~240px, and a minute-tier figure adds
+                  ~80px more than the row can carry -- the rail tail's own live
+                  phase line carries the same signal, so the mirror goes before
+                  the controls do. */}
+              {phase !== null && <span className="truncate">{phaseLabel(phase, intl)}</span>}
+              <span className="shrink-0">
+                <WaitElapsedSuffix startedAt={turnStartedAt} pausedSince={turnPausedSince} />
+              </span>
             </span>
           )}
           {loading ? (

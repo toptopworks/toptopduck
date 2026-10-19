@@ -785,6 +785,7 @@ fn stdio_command(
         }
         cmd.env(TOOL_OUTPUT_ENV, dir);
     }
+    crate::util::no_window(&mut cmd);
     Ok(cmd)
 }
 

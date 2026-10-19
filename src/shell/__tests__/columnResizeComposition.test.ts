@@ -179,6 +179,18 @@ describe("column resize composition", () => {
     // silently overwrite the fire-callback capture, so the construction
     // count keeps that failure mode loud.
     expect(ResizeObserverStub.constructed).toBe(1);
+
+    // Widening the window lifts the rail's ceiling; the rendered width
+    // returns to the untouched 460 preference with no re-drag (#1303).
+    shellWidth = 2000;
+    act(() => {
+      window.dispatchEvent(new Event("resize"));
+    });
+    // The sidebar's rendered width stays at its 518 preference (its ceiling
+    // is now 2000 - 600 = 1400); the bridge keeps standing in for the DOM.
+    expect(result.current.sidebar.width).toBe(518);
+    act(() => fireRailContainerChange?.());
+    expect(result.current.rail.width).toBe(460);
   });
 
   it("the factory window layout re-clamps the rail on mount (entry 2)", () => {
@@ -240,5 +252,16 @@ describe("column resize composition", () => {
     expect(result.current.sidebar.width + result.current.rail.width).toBe(
       shellWidth - 320,
     );
+
+    // Widening back: both rendered widths spring to the preferences the
+    // shrink never touched — 518 (sidebar drag) and 600 (rail drag) (#1303).
+    shellWidth = 1920;
+    act(() => {
+      window.dispatchEvent(new Event("resize"));
+    });
+    expect(result.current.sidebar.width).toBe(518);
+    sidebarWidthLive = 518;
+    act(() => fireRailContainerChange?.());
+    expect(result.current.rail.width).toBe(600);
   });
 });

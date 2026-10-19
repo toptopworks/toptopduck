@@ -415,7 +415,7 @@ describe("useRailResize", () => {
     expect(result.current.width).toBe(280);
   });
 
-  it("does not spring back when the container widens again", () => {
+  it("springs back to the preference when the container widens again", () => {
     vi.stubGlobal("ResizeObserver", ResizeObserverStub);
     let ceiling = 280;
     const result = renderWithTarget(() => ceiling);
@@ -423,10 +423,35 @@ describe("useRailResize", () => {
     expect(result.current.width).toBe(280);
     ceiling = 600;
     act(() => fireContainerChange?.());
-    expect(result.current.width).toBe(280); // one-way by design; re-drag instead
+    // Preference/render split (#1303): the shrink never rewrote the 460
+    // preference, so the rendered width returns to it with no re-drag.
+    expect(result.current.width).toBe(RAIL_DEFAULT_WIDTH);
   });
 
-  it("re-anchors an in-flight drag so the next move does not jump past the ceiling", () => {
+  it("adjustWidth while the preference exceeds the ceiling writes the anti-correlated preference, not the ceiling", () => {
+    vi.stubGlobal("ResizeObserver", ResizeObserverStub);
+    let ceiling = 400;
+    const result = renderWithTarget(() => ceiling);
+    act(() => fireContainerChange?.());
+    // Cold start caps the rendered width at the 400 ceiling; the 460
+    // preference rides above it.
+    expect(result.current.width).toBe(400);
+
+    // The sidebar drags 20px wider — the compensation lowers the
+    // preference by exactly 20 (460 -> 440). Folding the environmental
+    // ceiling into the write (400) is the bug this pins: rendered stays
+    // at the ceiling either way, so only the later widen tells them apart.
+    act(() => {
+      result.current.adjustWidth(-20);
+    });
+    expect(result.current.width).toBe(400);
+
+    ceiling = 600;
+    act(() => fireContainerChange?.());
+    expect(result.current.width).toBe(440);
+  });
+
+  it("a move after a mid-drag shrink re-owns the width at the clamped ceiling", () => {
     vi.stubGlobal("ResizeObserver", ResizeObserverStub);
     let ceiling = 466;
     const result = renderWithTarget(() => ceiling);
@@ -445,14 +470,53 @@ describe("useRailResize", () => {
     ceiling = 280;
     act(() => fireContainerChange?.()); // mid-drag container shrink
     expect(result.current.width).toBe(280);
-    // Further moves recompute from the re-anchored width. Without the
-    // re-anchor, startWidth(460) + delta with floor min(350, 466) = 350
-    // would clamp back up to 350 (inverted range) and the handle would
-    // jump outside the rendered rail again.
+    // Further moves re-own the width at the clamped ceiling: the anchor
+    // stays at its pointerdown value (460 — the mid-drag re-anchor is
+    // gone), so the drag floor follows the rendered width (280) to keep
+    // the clamp range valid; a plain 350 floor would invert the range
+    // (350 above the 280 ceiling) and write the 350 floor artifact into
+    // the preference instead.
     act(() => {
       window.dispatchEvent(new PointerEvent("pointermove", { clientX: 1000 }));
     });
     expect(result.current.width).toBe(280);
+
+    // Widening springs to the re-owned 280 — not the pre-shrink 466 and
+    // not the 350 artifact an unfixed floor would have written (#1303).
+    ceiling = 600;
+    act(() => fireContainerChange?.());
+    expect(result.current.width).toBe(280);
+  });
+
+  it("a mid-drag container shrink without a further move keeps the preference", () => {
+    vi.stubGlobal("ResizeObserver", ResizeObserverStub);
+    let ceiling = 466;
+    const result = renderWithTarget(() => ceiling);
+    act(() => {
+      result.current.onResizeStart({
+        preventDefault: vi.fn(),
+        clientX: 500,
+      } as unknown as React.PointerEvent);
+    });
+    act(() => {
+      window.dispatchEvent(new PointerEvent("pointermove", { clientX: 616 }));
+    });
+    // The drag wrote the 466 preference; the render width matches it.
+    expect(result.current.width).toBe(466);
+
+    // Container shrinks mid-drag: only the rendered width drops.
+    ceiling = 280;
+    act(() => fireContainerChange?.());
+    expect(result.current.width).toBe(280);
+
+    act(() => {
+      window.dispatchEvent(new PointerEvent("pointerup"));
+    });
+    // No move after the shrink — the preference is still 466, so widening
+    // springs the rendered width back to it (#1303).
+    ceiling = 600;
+    act(() => fireContainerChange?.());
+    expect(result.current.width).toBe(466);
   });
 
   it("observes exactly the target element and disconnects on unmount", () => {

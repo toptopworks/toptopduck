@@ -683,6 +683,12 @@ fn run_server(listener: TcpListener, mode: ServerMode, state: Arc<ServerState>) 
     while !state.shutdown.load(Ordering::SeqCst) {
         match listener.accept() {
             Ok((stream, _)) => {
+                // The listener polls nonblocking, and a Windows accept
+                // inherits that mode: reset the stream so the connection
+                // handler's blocking reads WAIT for the request instead of
+                // misreading a WouldBlock as EOF/short body (issue #1332,
+                // same trap the unit fixture hit).
+                let _ = stream.set_nonblocking(false);
                 let st = state.clone();
                 let url = base_url.clone();
                 thread::spawn(move || handle_connection(stream, mode, st, &url));

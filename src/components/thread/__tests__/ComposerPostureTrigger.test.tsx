@@ -5,7 +5,7 @@ import { IntlProvider } from "react-intl";
 import { ComposerPostureTrigger } from "../ComposerPostureTrigger";
 import type { PostureCatalog } from "../ComposerPostureTrigger";
 import { TooltipProvider } from "../../ui/tooltip";
-import { selectPreventDefault } from "./dropdownMenuMock";
+import { closeAutoFocusCapture, selectPreventDefault } from "./dropdownMenuMock";
 import type { CatalogModel } from "../../../types/runtime";
 
 // ComposerPostureTrigger tests (ADR-0099 Decision 3, issues #574/#573): the
@@ -159,6 +159,24 @@ describe("ComposerPostureTrigger cascade menu (two-level)", () => {
     fireEvent.click(screen.getByRole("menuitemradio", { name: "gemini-2.5-flash" }));
     fireEvent.click(screen.getAllByRole("menuitem", { name: "Default (recommended)" })[0]);
     expect(selectPreventDefault).toHaveBeenCalledTimes(2);
+  });
+
+  it("prevents the close refocus after a pointerdown and not after a keydown", () => {
+    // The close-focus gate (usePointerCloseIntent, issue #1309): restoring
+    // focus to the Tooltip-wrapped trigger after a pointer close would
+    // strand its tooltip with no hover. The always-open mock has no close
+    // lifecycle, so the pinned handler is the one it captured at render.
+    renderTrigger();
+    const gate = closeAutoFocusCapture.handler;
+    expect(gate).toBeTypeOf("function");
+    fireEvent.pointerDown(document.body);
+    const pointerClose = { preventDefault: vi.fn() };
+    gate?.(pointerClose);
+    expect(pointerClose.preventDefault).toHaveBeenCalled();
+    fireEvent.keyDown(document.body, { key: "Escape" });
+    const keyboardClose = { preventDefault: vi.fn() };
+    gate?.(keyboardClose);
+    expect(keyboardClose.preventDefault).not.toHaveBeenCalled();
   });
 
   it("clears the dimension via the leading Default (recommended) row", () => {

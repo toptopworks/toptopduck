@@ -111,17 +111,30 @@ impl FsAclError {
 ///   files the agent produces live here and are cleared on session drop
 ///   (ADR-0029 invariant 2). The per-source `.duckdb` snapshots also live here;
 ///   SQL still sees them READ_ONLY via catalog attach, independent of this ACL.
+/// - `assets_root`: the canonicalized per-session `assets/` dir (ADR-0089),
+///   a READ-ONLY subtree. Unlike `source_roots` (exact per-file entries) this
+///   is a directory-tree rule: SQL-reference dead files land there under
+///   settle-time disambiguated names nobody enumerates in advance, so the
+///   allowance covers whatever the subtree holds.
 pub(crate) struct FsAcl {
     source_roots: Vec<PathBuf>,
     temp_root: PathBuf,
+    assets_root: Option<PathBuf>,
 }
 
 impl FsAcl {
     /// Build the whitelist from the working set's source paths + the session
-    /// temp dir. A source whose original file no longer exists on disk
+    /// temp dir + the per-session assets/ dir (ADR-0089: SQL-reference dead
+    /// files live there so replay -- and a live follow-up referencing a
+    /// materialized copy -- can read_* them; read-only, the same immutable
+    /// rule as sources). A root whose original file no longer exists on disk
     /// (canonicalization fails) is dropped from `source_roots` -- it cannot be
     /// read_* anyway, and carrying a phantom root would be dead policy.
-    pub(crate) fn new(working_set: &WorkingSet, temp_path: &Path) -> Self {
+    pub(crate) fn new(
+        working_set: &WorkingSet,
+        temp_path: &Path,
+        assets_dir: Option<&Path>,
+    ) -> Self {
         let temp_root = canonicalize(temp_path).unwrap_or_else(|| temp_path.to_path_buf());
         let source_roots = working_set
             .source_paths()
@@ -131,6 +144,7 @@ impl FsAcl {
         Self {
             source_roots,
             temp_root,
+            assets_root: assets_dir.and_then(canonicalize),
         }
     }
 
@@ -160,6 +174,19 @@ impl FsAcl {
                     reason: FsAclReason::ReadOnlyRoot,
                 }),
             };
+        }
+        // The read-only assets subtree (ADR-0089): read OK, write refused --
+        // dead files are replay inputs, not scratch space.
+        if let Some(root) = &self.assets_root {
+            if resolved.starts_with(root) {
+                return match mode {
+                    AccessMode::Read => Ok(()),
+                    AccessMode::Write => Err(FsAclError {
+                        requested: requested.to_string(),
+                        reason: FsAclReason::ReadOnlyRoot,
+                    }),
+                };
+            }
         }
         // The read-write temp root: anything underneath is allowed either mode.
         if resolved.starts_with(&self.temp_root) {
@@ -240,12 +267,65 @@ mod tests {
         ws
     }
 
+    /// ADR-0089 assets face: a path inside the session's assets/ dir passes
+    /// the READ check and is refused for WRITE -- the same immutable rule as
+    /// a source root. This is the preflight half of SQL-reference dead-file
+    /// replay: without the allowance, a materialized copy is just as dead as
+    /// the temp original it replaced.
+    #[test]
+    fn assets_dir_is_readable_and_write_refused() {
+        let temp = TempDir::new().unwrap();
+        let session = TempDir::new().unwrap();
+        let assets = session.path().join("assets");
+        std::fs::create_dir_all(&assets).unwrap();
+        let dead_file = assets.join("kline.csv");
+        std::fs::write(
+            &dead_file, "x
+y
+",
+        )
+        .unwrap();
+        // FsAcl canonicalizes the roots, so the file must exist on disk.
+        let acl = FsAcl::new(&WorkingSet::default(), temp.path(), Some(&assets));
+        assert!(
+            acl.check(&dead_file.to_string_lossy(), AccessMode::Read)
+                .is_ok(),
+            "assets dead file passes the read check"
+        );
+        let err = acl
+            .check(&dead_file.to_string_lossy(), AccessMode::Write)
+            .unwrap_err();
+        assert!(
+            matches!(err.reason, FsAclReason::ReadOnlyRoot),
+            "assets is read-only, got {err:?}"
+        );
+    }
+
+    /// A nonexistent assets/ dir canonicalizes to nothing and is simply not
+    /// carried -- no phantom root, no policy change for an unbound session.
+    #[test]
+    fn missing_assets_dir_is_not_carried() {
+        let temp = TempDir::new().unwrap();
+        let session = TempDir::new().unwrap();
+        let ghost = session.path().join("assets").join("gone.csv");
+        let acl = FsAcl::new(
+            &WorkingSet::default(),
+            temp.path(),
+            Some(&session.path().join("assets")),
+        );
+        assert!(
+            acl.check(&ghost.to_string_lossy(), AccessMode::Read)
+                .is_err(),
+            "a missing assets root carries no read allowance"
+        );
+    }
+
     /// AC #2 / AC #4: an absolute path outside every allowed root is refused as
     /// `OutsideAllowedArea`. This is the core path-escape rejection.
     #[test]
     fn absolute_out_of_bounds_path_is_refused() {
         let temp = TempDir::new().unwrap();
-        let acl = FsAcl::new(&WorkingSet::default(), temp.path());
+        let acl = FsAcl::new(&WorkingSet::default(), temp.path(), None);
         // A path that does exist on disk (so canonicalization succeeds) but is
         // outside the temp dir: the temp dir's own parent is a safe stand-in.
         let outside = temp
@@ -284,7 +364,7 @@ mod tests {
             .file_name()
             .and_then(|n| n.to_str())
             .expect("escape-target filename is valid UTF-8");
-        let acl = FsAcl::new(&WorkingSet::default(), temp.path());
+        let acl = FsAcl::new(&WorkingSet::default(), temp.path(), None);
         // The literal relative path: resolve() joins it against the CWD and
         // canonicalizes to cwd.parent/target_name, which is outside temp_root.
         let err = acl
@@ -313,7 +393,7 @@ mod tests {
         // Place a symlink INSIDE the temp dir pointing at the outside file.
         let link = temp.path().join("alias.csv");
         symlink(&outside_file, &link).unwrap();
-        let acl = FsAcl::new(&WorkingSet::default(), temp.path());
+        let acl = FsAcl::new(&WorkingSet::default(), temp.path(), None);
         // Reading via the in-bounds link alias canonicalizes to the outside
         // target -> refused (not authorized by the in-bounds alias).
         let err = acl
@@ -329,7 +409,7 @@ mod tests {
         let temp = TempDir::new().unwrap();
         let file = temp.path().join("scratch.csv");
         fs::write(&file, "x").unwrap();
-        let acl = FsAcl::new(&WorkingSet::default(), temp.path());
+        let acl = FsAcl::new(&WorkingSet::default(), temp.path(), None);
         acl.check(&file.to_string_lossy(), AccessMode::Read)
             .expect("read inside temp dir allowed");
         // Write to a not-yet-existing file inside the temp dir: parent resolves,
@@ -348,7 +428,7 @@ mod tests {
         let src_file = src.path().join("people.csv");
         fs::write(&src_file, "x").unwrap();
         let ws = ws_with_source(&src_file.to_string_lossy());
-        let acl = FsAcl::new(&ws, temp.path());
+        let acl = FsAcl::new(&ws, temp.path(), None);
         acl.check(&src_file.to_string_lossy(), AccessMode::Read)
             .expect("reading a source file allowed");
         let err = acl
@@ -363,7 +443,7 @@ mod tests {
     #[test]
     fn missing_read_target_is_unresolvable() {
         let temp = TempDir::new().unwrap();
-        let acl = FsAcl::new(&WorkingSet::default(), temp.path());
+        let acl = FsAcl::new(&WorkingSet::default(), temp.path(), None);
         let ghost = temp.path().join("does-not-exist.csv");
         let err = acl
             .check(&ghost.to_string_lossy(), AccessMode::Read)
@@ -379,7 +459,7 @@ mod tests {
     fn vanished_source_is_not_carried_as_a_root() {
         let temp = TempDir::new().unwrap();
         let ws = ws_with_source("/no/such/path/vanished.csv");
-        let acl = FsAcl::new(&ws, temp.path());
+        let acl = FsAcl::new(&ws, temp.path(), None);
         assert!(acl.source_roots.is_empty(), "vanished source not carried");
     }
 
@@ -409,7 +489,7 @@ mod tests {
         fs::create_dir(&evil_dir).unwrap();
         let evil_file = evil_dir.join("secret.csv");
         fs::write(&evil_file, "x").unwrap();
-        let acl = FsAcl::new(&WorkingSet::default(), &temp_root);
+        let acl = FsAcl::new(&WorkingSet::default(), &temp_root, None);
         let err = acl
             .check(&evil_file.to_string_lossy(), AccessMode::Read)
             .unwrap_err();
@@ -435,7 +515,7 @@ mod tests {
             eprintln!("skipped: Windows symlink creation needs Developer Mode / admin");
             return;
         }
-        let acl = FsAcl::new(&WorkingSet::default(), temp.path());
+        let acl = FsAcl::new(&WorkingSet::default(), temp.path(), None);
         // Reading via the in-bounds link alias canonicalizes to the outside
         // dir -> refused (not authorized by the in-bounds alias).
         let err = acl
@@ -460,7 +540,7 @@ mod tests {
         fs::create_dir(&tool_output).unwrap();
         let file = tool_output.join("result.csv");
         fs::write(&file, "x").unwrap();
-        let acl = FsAcl::new(&WorkingSet::default(), temp.path());
+        let acl = FsAcl::new(&WorkingSet::default(), temp.path(), None);
         acl.check(&file.to_string_lossy(), AccessMode::Read)
             .expect("read inside tool_output/ allowed");
     }
@@ -477,7 +557,7 @@ mod tests {
         let outside = TempDir::new().unwrap();
         let outside_file = outside.path().join("secret.csv");
         fs::write(&outside_file, "x").unwrap();
-        let acl = FsAcl::new(&WorkingSet::default(), temp.path());
+        let acl = FsAcl::new(&WorkingSet::default(), temp.path(), None);
         let err = acl
             .check(&outside_file.to_string_lossy(), AccessMode::Read)
             .unwrap_err();

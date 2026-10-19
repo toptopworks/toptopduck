@@ -1,8 +1,9 @@
 // The workspace's artifact stage (ADR-0124 Decision 4, issue #1088): the
 // file branch of the single-stage workspace, two-part under a persistent
-// file header (issue #1199) -- the header (name + external-open action) is
-// the stage's chrome and survives every degrade; the body renders per the
-// matrix. The matrix keys off the derived ArtifactRenderKind -- HTML rides
+// file header (issue #1199) -- the header (file name, external-open
+// action, more menu, failure slot) is the stage's chrome and survives
+// every degrade; the body renders per the matrix. The matrix keys off
+// the derived ArtifactRenderKind -- HTML rides
 // the sandboxed asset-protocol iframe, pdf rides the same protocol
 // UNSANDBOXED (the WebView's built-in viewer is a document renderer, not
 // executable agent HTML), md rides the IPC text read + the shared prose
@@ -23,18 +24,16 @@
 // warning face, hides the open action, and NOTHING rewrites the manifest.
 
 import { useState } from "react";
-import { useQuery } from "@tanstack/react-query";
-import { FormattedMessage, useIntl } from "react-intl";
-import { Button } from "../ui/button";
-import { ExternalLink, FileDown, FileWarning, Loader2 } from "lucide-react";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { useIntl } from "react-intl";
+import { FileDown, FileWarning, Loader2 } from "lucide-react";
 import { convertFileSrc } from "@tauri-apps/api/core";
-import { openPath } from "@tauri-apps/plugin-opener";
 import { readArtifactText } from "../../api";
-import { log } from "../../lib/log";
 import { artifactKeys } from "../../session/queryKeys";
 import { useArtifactExists } from "../../session/useArtifactExists";
 import { isWithinArtifactsDir, type ArtifactRenderKind } from "../../session/workspace";
 import { RoundProse } from "./RoundProse";
+import { ArtifactHeader } from "./ArtifactHeader";
 
 export function ArtifactView({
   artifact,
@@ -54,65 +53,31 @@ export function ArtifactView({
   // body's degrade share the entry (and the rail row's cache -- the same
   // artifactKeys key), so the check is paid once.
   const exists = useArtifactExists(artifact.path);
-  const [openFailed, setOpenFailed] = useState(false);
-  const intl = useIntl();
-  const openLabel = intl.formatMessage({
-    id: "workspace.artifact.openExternal",
-    defaultMessage: "Open externally",
-  });
-  const handleOpen = () => {
-    setOpenFailed(false);
-    // openPath hands the path to the OS opener; a failure is logged (the
-    // RoundProse openUrl twin) and surfaces as a caption note in the
-    // header, not a thrown promise.
-    openPath(artifact.path).catch((e: unknown) => {
-      log.warn("ArtifactView", "openPath failed", e);
-      setOpenFailed(true);
-    });
+  // The stage body's remount counter: bumping it re-keys ArtifactStageBody,
+  // re-running the iframe branches (a fresh iframe re-reads the file off
+  // disk) and remounting the md text query.
+  const [refreshKey, setRefreshKey] = useState(0);
+  const queryClient = useQueryClient();
+  const handleRefresh = async () => {
+    // md's text query is staleTime Infinity -- the remount alone never
+    // re-reads, so the cache entry is invalidated first, and the await lets
+    // the refetch land before the re-key (one deterministic read, no
+    // stale-text flash). The exists entry rides the same await: staleTime 0
+    // alone never re-fires while the stage stays mounted (focus refetch is
+    // off app-wide), yet refresh is the affordance that means re-check
+    // disk, and the stage's observer is always active so the fresh gate
+    // value lands before the re-key. The iframe branches need nothing (no
+    // query; the re-key remount re-reads from disk).
+    await queryClient.invalidateQueries({ queryKey: artifactKeys.text(artifact.path) });
+    await queryClient.invalidateQueries({ queryKey: artifactKeys.exists(artifact.path) });
+    setRefreshKey((k) => k + 1);
   };
   return (
     <div className="flex h-full min-h-0 flex-col">
-      <header
-        data-testid="artifact-header"
-        className="flex shrink-0 items-center justify-between gap-2 border-b px-4 py-1.5"
-      >
-        {/* Layer-4 content (the file's own name) passes through untranslated;
-            truncate keeps a long name from pushing the action out. */}
-        <p className="m-0 min-w-0 truncate text-sm font-medium">{artifact.file_name}</p>
-        <div className="flex shrink-0 items-center gap-2">
-          {exists ? (
-            <Button
-              type="button"
-              variant="ghost"
-              size="icon"
-              data-testid="artifact-open-external"
-              title={openLabel}
-              aria-label={openLabel}
-              className="h-7 w-7 text-muted-foreground"
-              onClick={handleOpen}
-            >
-              <ExternalLink aria-hidden="true" className="h-3.5 w-3.5" />
-            </Button>
-          ) : (
-            <p className="m-0 text-xs text-muted-foreground">
-              <FormattedMessage
-                id="workspace.artifact.missing"
-                defaultMessage="This file is no longer on disk"
-              />
-            </p>
-          )}
-          {openFailed && (
-            <p className="m-0 text-xs text-muted-foreground" role="status">
-              <FormattedMessage
-                id="workspace.artifact.openFailed"
-                defaultMessage="Could not open the file externally"
-              />
-            </p>
-          )}
-        </div>
-      </header>
+      <ArtifactHeader artifact={artifact} exists={exists} onRefresh={handleRefresh} />
       <div className="min-h-0 flex-1 overflow-y-auto">
         <ArtifactStageBody
+          key={refreshKey}
           artifact={artifact}
           render={render}
           duckPath={duckPath}
@@ -157,7 +122,17 @@ function ArtifactStageBody({
     return <PdfArtifactShell path={artifact.path} fileName={artifact.file_name} />;
   }
   if (render === "markdown") {
-    return <MarkdownArtifact path={artifact.path} exists={exists} />;
+    // The file panel breaks out of the workspace-body's p-4 (SessionPane), so
+    // the prose re-wraps its own padding: the scrollbar docks to the pane edge
+    // while the text keeps its breathing room. The iframe branches stay
+    // full-bleed -- the frame's own document scrolls inside its viewport edge
+    // (the WorkBuddy stage posture: the report fills the pane and owns its
+    // scrollbars).
+    return (
+      <div className="p-4">
+        <MarkdownArtifact path={artifact.path} exists={exists} />
+      </div>
+    );
   }
   return <ArtifactFallbackFace exists={exists} />;
 }

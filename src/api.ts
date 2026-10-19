@@ -1016,6 +1016,14 @@ export async function readArtifactText(path: string): Promise<string> {
   return invoke<string>("read_artifact_text", { path });
 }
 
+// Copy one artifact file to the path the native save dialog returned (issue
+// #1317): the save-as lane behind the stage header's more menu. Same contract
+// as writeExportFile -- the picker runs first, so a cancel never reaches the
+// backend; the source is the manifest entry the stage already renders.
+export async function copyArtifactFile(src: string, dest: string): Promise<void> {
+  await invoke<void>("copy_artifact_file", { src, dest });
+}
+
 // --- System tray (issue #1140, ADR-0125) --------------------------------------
 //
 // Session-AGNOSTIC: no sessionId. The backend emits these when the user acts
