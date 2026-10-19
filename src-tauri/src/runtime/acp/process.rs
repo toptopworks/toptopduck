@@ -64,9 +64,15 @@ const KILL_REAP_POLL: Duration = Duration::from_millis(10);
 /// differs (selection + injection argv flags + `current_dir`). The caller
 /// keeps the error wording (the turn path and the probe path name the
 /// failing adapter / CLI differently).
-pub(super) fn spawn_piped(binary: &Path, argv: &[&str], stderr: Stdio) -> std::io::Result<Child> {
+pub(super) fn spawn_piped(
+    binary: &Path,
+    argv: &[String],
+    env: &std::collections::BTreeMap<String, String>,
+    stderr: Stdio,
+) -> std::io::Result<Child> {
     let mut cmd = Command::new(binary);
     cmd.args(argv)
+        .envs(env)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(stderr);
@@ -86,13 +92,15 @@ pub(super) fn spawn_piped(binary: &Path, argv: &[&str], stderr: Stdio) -> std::i
 /// wording (each driver names its own CLI).
 pub(super) fn spawn_turn(
     binary: &Path,
-    spec_argv: &[&str],
+    spec_argv: &[String],
+    env: &std::collections::BTreeMap<String, String>,
     selection_flags: &[String],
     injection_flags: &[String],
     cwd: &str,
 ) -> std::io::Result<Child> {
     let mut cmd = Command::new(binary);
     cmd.args(spec_argv);
+    cmd.envs(env);
     cmd.args(selection_flags);
     cmd.args(injection_flags);
     cmd.stdin(Stdio::piped());

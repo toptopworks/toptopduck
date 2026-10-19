@@ -373,6 +373,7 @@ export function SettingsView({
     test: false,
     sessionsDir: false,
     probe: false,
+    userAdapter: false,
     defaultRuntime: false,
   });
   const handlePaneIpcBusy = useCallback<IpcBusyReporter>((channel, busy) => {

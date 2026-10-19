@@ -194,3 +194,17 @@ export type ProbeError =
   | { kind: "HandshakeFailure"; data: string }
   | { kind: "ProbeUnreachable"; data: string }
   | { kind: "Timeout" };
+
+// One user-defined adapter row (issue #1341). Mirrors the Rust
+// `user_adapter_store::UserAdapterRow`: crosses IPC verbatim on both the
+// management list and the CRUD replies. `stream_format` is always "acp" on
+// the wire today (the schema stores it; this knife only accepts ACP).
+export interface UserAdapterRow {
+  id: string;
+  name: string;
+  command: string;
+  args: string[];
+  env: Record<string, string>;
+  enabled: boolean;
+  stream_format: "acp";
+}

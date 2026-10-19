@@ -45,9 +45,14 @@ use crate::persistence::{
     validate_sessions_dir, SaveError, SessionMetadata, SessionsRoot,
 };
 use crate::provider::live_config::{ActiveKeyError, LiveProviderConfig};
-use crate::runtime::acp::adapter::{detect_adapter, v1_adapters, AdapterSpec, StreamFormat};
+use crate::runtime::acp::adapter::{
+    detect_adapter, v1_adapters, AdapterId, AdapterSpec, StreamFormat,
+};
 use crate::runtime::acp::catalog_store::{
     now_millis, AdapterCatalogEntry, AdapterCatalogStore, AdapterCatalogs, CachedOutcome,
+};
+use crate::runtime::acp::user_adapter_store::{
+    is_valid_command_token, mint_user_adapter_id, UserAdapterRow, UserAdapterStore,
 };
 use crate::session::loop_contract::DiscoveredRuntime;
 use crate::session::{
@@ -208,6 +213,7 @@ pub fn create_session(
     live: State<'_, LiveProviderConfig>,
     sessions_root: State<'_, SessionsRoot>,
     skills_root: State<'_, SkillsRoot>,
+    user_store: State<'_, UserAdapterStore>,
 ) -> Result<CreateSessionReply, SessionError> {
     let cancel = Arc::new(CancelToken::new());
     // The real LLM provider (ADR-0007/0064): a LiveProvider router that reads
@@ -227,7 +233,7 @@ pub fn create_session(
     // resolution resume falls back to (`startup_runtime_choice`), so both
     // startup points share one degrade rule (undetected default -> built-in
     // for this session only, config field untouched).
-    let startup = startup_runtime_choice(live.inner());
+    let startup = startup_runtime_choice(live.inner(), &user_store);
     let handle = store.get(&id)?;
     // ADR-0100 Decision 1 (issue #581): the fresh session's startup model /
     // thought-level = the startup adapter's backfill entry -- SELECTED +
@@ -2159,6 +2165,7 @@ pub async fn open_duck(
     store: State<'_, Arc<SessionStore>>,
     live: State<'_, LiveProviderConfig>,
     sessions_root: State<'_, SessionsRoot>,
+    user_store: State<'_, UserAdapterStore>,
     session_id: String,
     path: String,
 ) -> Result<(), SessionError> {
@@ -2205,8 +2212,13 @@ pub async fn open_duck(
     // State handle must not cross into the 'static blocking task; the
     // resolved spec is plain data) -- it is the fallback for a pre-#589
     // recipe whose header carries no `last_runtime` (the ADR-0098 Decision 2
-    // semantics, unchanged for old files).
-    let startup = startup_runtime_choice(live.inner());
+    // semantics, unchanged for old files). The merged adapter table is
+    // captured here for the same reason (issue #1341): plain data crossing
+    // into the task, so the resume resolution sees user-defined rows too.
+    let merged = merged_adapters(&user_store);
+    let startup = resolve_default_runtime(&live.load().default_runtime, &merged, |spec| {
+        detect_adapter(spec).is_some()
+    });
     // One config read feeds both the session-level engine-defaults snapshot
     // (issue #741: same source as create_session, resolved BEFORE the
     // blocking task -- the State handle must not cross into the 'static
@@ -2292,7 +2304,7 @@ pub async fn open_duck(
         // restored after the resets so the restored values win. Extracted
         // into `apply_resumed_postures` so the wiring is testable without
         // an AppHandle.
-        apply_resumed_postures(&handle_for_task, runtime_facts, startup, |spec| {
+        apply_resumed_postures(&handle_for_task, runtime_facts, startup, &merged, |spec| {
             detect_adapter(spec).is_some()
         });
         // Remove the orphaned empty per-session directory create_session made
@@ -2643,19 +2655,71 @@ pub struct AdapterEntry {
 /// detection state (ADR-0083). Detection is deliberately uncached -- the
 /// composer re-scans on demand (the user may install a CLI between scans) --
 /// so `list_adapters` and `rescan_adapters` share this one projection.
-fn scan_adapters() -> Vec<AdapterEntry> {
-    v1_adapters()
+fn scan_adapters(user: &UserAdapterStore) -> Vec<AdapterEntry> {
+    let specs: Vec<AdapterSpec> = v1_adapters()
+        .iter()
+        .cloned()
+        .chain(
+            user.load_for_picker()
+                .iter()
+                .filter(|row| row.enabled)
+                .map(user_row_to_spec),
+        )
+        .collect();
+    let mut entries: Vec<AdapterEntry> = specs
         .iter()
         .map(|spec| {
             let binary = detect_adapter(spec);
             AdapterEntry {
                 id: spec.id.as_str().to_string(),
-                display_name: spec.display_name.to_string(),
+                display_name: spec.display_name.clone(),
                 detected: binary.is_some(),
                 binary_path: binary,
                 stream_format: spec.stream_format,
             }
         })
+        .collect();
+    entries.sort_by(|a, b| cmp_display_order((&a.display_name, &a.id), (&b.display_name, &b.id)));
+    entries
+}
+
+/// Project a user-defined registry row onto the engine's spec (issue #1341):
+/// the command doubles as the single binary-name candidate (a bare name
+/// resolves through the PATH scan, an absolute path is used verbatim --
+/// `detect_adapter`), the row's args ride verbatim as the argv prefix, and
+/// no per-CLI injection surface exists (ADR-0081's zero per-CLI code
+/// preserved -- the row's env is data, not code).
+fn user_row_to_spec(row: &UserAdapterRow) -> AdapterSpec {
+    AdapterSpec {
+        id: AdapterId::new(row.id.clone()),
+        display_name: row.name.clone(),
+        binary_names: vec![row.command.clone()],
+        argv: row.args.clone(),
+        probe_argv: None,
+        stream_format: StreamFormat::Acp,
+        model_arg: None,
+        effort: None,
+        env: row.env.clone(),
+    }
+}
+
+/// The merged table's display order (issue #1341): alphabetical on the
+/// display name, the id as the stable tiebreaker. One comparator so the
+/// picker projection and the settings management list cannot drift; both
+/// frontends render the projections verbatim.
+fn cmp_display_order(a: (&str, &str), b: (&str, &str)) -> std::cmp::Ordering {
+    a.0.cmp(b.0).then_with(|| a.1.cmp(b.1))
+}
+
+/// The full merged table (the resolution face, issue #1341): every built-in
+/// spec ++ every user-defined row, enabled AND disabled -- the PICKER
+/// projection filters `enabled`; resolution keeps a disabled row resolvable
+/// for sessions / defaults that already name it.
+fn merged_adapters(user: &UserAdapterStore) -> Vec<AdapterSpec> {
+    v1_adapters()
+        .iter()
+        .cloned()
+        .chain(user.load_for_picker().iter().map(user_row_to_spec))
         .collect()
 }
 
@@ -2663,11 +2727,8 @@ fn scan_adapters() -> Vec<AdapterEntry> {
 /// to `None` and the command boundary rejects them -- the frontend only ever
 /// offers ids that `list_adapters` returned, so an unknown id is a stale /
 /// buggy client, not a user mistake.
-fn resolve_adapter(id: &str) -> Option<AdapterSpec> {
-    v1_adapters()
-        .iter()
-        .find(|spec| spec.id.as_str() == id)
-        .cloned()
+fn resolve_adapter(id: &str, merged: &[AdapterSpec]) -> Option<AdapterSpec> {
+    merged.iter().find(|spec| spec.id.as_str() == id).cloned()
 }
 
 /// Map the handle's storage form (`None` = built-in) onto the wire choice.
@@ -2684,11 +2745,12 @@ fn runtime_choice_to_wire(spec: Option<AdapterSpec>) -> SessionRuntimeChoice {
 /// as user-facing text).
 fn resolve_runtime_choice(
     runtime: SessionRuntimeChoice,
+    merged: &[AdapterSpec],
 ) -> Result<Option<AdapterSpec>, SessionError> {
     Ok(match runtime {
         SessionRuntimeChoice::BuiltIn => None,
         SessionRuntimeChoice::External(adapter_id) => {
-            Some(resolve_adapter(&adapter_id).ok_or_else(|| {
+            Some(resolve_adapter(&adapter_id, merged).ok_or_else(|| {
                 SessionError::Engine(format!("unknown adapter id `{adapter_id}`"))
             })?)
         }
@@ -2702,8 +2764,8 @@ fn resolve_runtime_choice(
 /// verbatim; adding a CLI upstream (`v1_adapters()`) grows the list with
 /// zero frontend change.
 #[tauri::command]
-pub fn list_adapters() -> Vec<AdapterEntry> {
-    scan_adapters()
+pub fn list_adapters(user_store: State<'_, UserAdapterStore>) -> Vec<AdapterEntry> {
+    scan_adapters(&user_store)
 }
 
 /// Re-run the adapter PATH scan on demand (issue #353, AC: rescan IPC) -- the
@@ -2712,8 +2774,153 @@ pub fn list_adapters() -> Vec<AdapterEntry> {
 /// re-detect is an explicit wire action (and a future cached scan has the
 /// invalidation seam already).
 #[tauri::command]
-pub fn rescan_adapters() -> Vec<AdapterEntry> {
-    scan_adapters()
+pub fn rescan_adapters(user_store: State<'_, UserAdapterStore>) -> Vec<AdapterEntry> {
+    scan_adapters(&user_store)
+}
+
+// --- User-defined adapter registry (issue #1341) ---------------------------
+
+/// The create/update wire payload: everything the user edits. The id and the
+/// enabled flag are store-owned (minted at create / flipped by its own
+/// command), and `stream_format` is not wire-settable at all -- this knife
+/// adds user rows on the ACP channel alone.
+#[derive(Debug, serde::Deserialize)]
+pub struct UserAdapterDraft {
+    pub name: String,
+    pub command: String,
+    #[serde(default)]
+    pub args: Vec<String>,
+    #[serde(default)]
+    pub env: std::collections::BTreeMap<String, String>,
+}
+
+/// Validate a draft at the backend boundary (the form validates first; this
+/// is the IPC backstop): a non-empty name and a single-token command.
+fn validate_user_adapter_draft(draft: &UserAdapterDraft) -> Result<(), String> {
+    if draft.name.trim().is_empty() {
+        return Err("name must not be empty".to_string());
+    }
+    if !is_valid_command_token(draft.command.trim()) {
+        return Err(format!(
+            "command must be one token without whitespace or quotes: `{}`",
+            draft.command
+        ));
+    }
+    Ok(())
+}
+
+/// Create a user-defined adapter (issue #1341): mint a fresh `user:` id,
+/// enabled by default, on the ACP channel. Returns the stored row.
+#[tauri::command]
+pub fn create_user_adapter(
+    user_store: State<'_, UserAdapterStore>,
+    draft: UserAdapterDraft,
+) -> Result<UserAdapterRow, String> {
+    validate_user_adapter_draft(&draft)?;
+    let name = draft.name.trim().to_string();
+    let command = draft.command.trim().to_string();
+    user_store.mutate(|rows| {
+        // Id minting re-rolls on collision with an existing row (a 8-hex
+        // space, so this loop virtually never iterates).
+        let id = loop {
+            let id = mint_user_adapter_id();
+            if !rows.iter().any(|r| r.id == id) {
+                break id;
+            }
+        };
+        let row = UserAdapterRow {
+            id,
+            name,
+            command,
+            args: draft.args,
+            env: draft.env,
+            enabled: true,
+            stream_format: StreamFormat::Acp,
+        };
+        rows.push(row.clone());
+        Ok(row)
+    })
+}
+
+/// Update a user-defined adapter's editable fields (issue #1341). The id,
+/// the enabled flag, and the stream format are store-owned and ride
+/// unchanged.
+#[tauri::command]
+pub fn update_user_adapter(
+    user_store: State<'_, UserAdapterStore>,
+    adapter_id: String,
+    draft: UserAdapterDraft,
+) -> Result<UserAdapterRow, String> {
+    validate_user_adapter_draft(&draft)?;
+    let name = draft.name.trim().to_string();
+    let command = draft.command.trim().to_string();
+    user_store.mutate(|rows| {
+        let row = rows
+            .iter_mut()
+            .find(|r| r.id == adapter_id)
+            .ok_or_else(|| format!("unknown user adapter id `{adapter_id}`"))?;
+        row.name = name;
+        row.command = command;
+        row.args = draft.args;
+        row.env = draft.env;
+        Ok(row.clone())
+    })
+}
+
+/// Delete a user-defined adapter (issue #1341) and its catalog-cache entry
+/// (no stale probe result outlives its id). A `default_runtime` naming the
+/// deleted row degrades per-start to built-in through the existing
+/// resolution -- the config field itself is never rewritten, so recreating
+/// the row restores the default (ADR-0098 Decision 3 semantics).
+#[tauri::command]
+pub fn delete_user_adapter(
+    user_store: State<'_, UserAdapterStore>,
+    catalog_store: State<'_, AdapterCatalogStore>,
+    adapter_id: String,
+) -> Result<(), String> {
+    user_store.mutate(|rows| {
+        let before = rows.len();
+        rows.retain(|r| r.id != adapter_id);
+        if rows.len() == before {
+            return Err(format!("unknown user adapter id `{adapter_id}`"));
+        }
+        Ok(())
+    })?;
+    catalog_store.remove_entry(&adapter_id);
+    Ok(())
+}
+
+/// Flip a user-defined adapter's enabled flag (issue #1341): `false` keeps
+/// the row out of the picker projection while it stays resolvable for
+/// sessions / defaults that already name it.
+#[tauri::command]
+pub fn set_user_adapter_enabled(
+    user_store: State<'_, UserAdapterStore>,
+    adapter_id: String,
+    enabled: bool,
+) -> Result<(), String> {
+    user_store.mutate(|rows| {
+        let row = rows
+            .iter_mut()
+            .find(|r| r.id == adapter_id)
+            .ok_or_else(|| format!("unknown user adapter id `{adapter_id}`"))?;
+        row.enabled = enabled;
+        Ok(())
+    })
+}
+
+/// The management-face list (issue #1341): every user row, disabled ones
+/// included, in the same alphabetical display order as the picker (the
+/// shared comparator -- the two faces cannot drift). A corrupt registry is
+/// an EXPLICIT error here: the settings tab surfaces it, and the file is
+/// never rewritten on a failed read.
+#[tauri::command]
+pub fn list_user_adapters(
+    user_store: State<'_, UserAdapterStore>,
+) -> Result<Vec<UserAdapterRow>, String> {
+    let mut rows = user_store.list()?;
+    rows.sort_by(|a, b| cmp_display_order((&a.name, &a.id), (&b.name, &b.id)));
+    Ok(rows)
 }
 
 /// Run the adapter diagnostic probe (ADR-0096, issues #534/#535): a session-
@@ -2743,11 +2950,12 @@ pub fn rescan_adapters() -> Vec<AdapterEntry> {
 #[tauri::command]
 pub async fn probe_adapter(
     catalog_store: State<'_, AdapterCatalogStore>,
+    user_store: State<'_, UserAdapterStore>,
     adapter_id: String,
 ) -> Result<crate::runtime::acp::probe::ProbeOk, crate::runtime::acp::probe::ProbeError> {
     use crate::runtime::acp::probe::{self, ProbeError, PROBE_TIMEOUT};
 
-    let spec = resolve_adapter(&adapter_id);
+    let spec = resolve_adapter(&adapter_id, &merged_adapters(&user_store));
     // Fresh detection, never the frontend's possibly-stale table state. An
     // unknown id (None) is a stale / buggy client (the settings tab only
     // offers `list_adapters` ids) -- same refusal shape as a vanished
@@ -2877,13 +3085,14 @@ pub fn get_session_runtime(
 pub fn set_session_runtime(
     store: State<'_, Arc<SessionStore>>,
     live: State<'_, LiveProviderConfig>,
+    user_store: State<'_, UserAdapterStore>,
     session_id: String,
     runtime: SessionRuntimeChoice,
 ) -> Result<(), SessionError> {
     let id = SessionId::parse(&session_id)?;
     let handle = store.get(&id)?;
     reject_if_resuming(&handle)?;
-    let spec = resolve_runtime_choice(runtime)?;
+    let spec = resolve_runtime_choice(runtime, &merged_adapters(&user_store))?;
     apply_runtime_switch(&handle, spec, live.inner());
     Ok(())
 }
@@ -2937,12 +3146,13 @@ fn apply_runtime_switch(
 /// has something to look at in the log dir.
 fn resolve_default_runtime(
     default: &DefaultRuntime,
+    merged: &[AdapterSpec],
     detected: impl Fn(&AdapterSpec) -> bool,
 ) -> Option<AdapterSpec> {
     match default {
         DefaultRuntime::BuiltIn => None,
         DefaultRuntime::External(id) => {
-            let Some(spec) = resolve_adapter(id) else {
+            let Some(spec) = resolve_adapter(id, merged) else {
                 // Only a hand-edited config reaches here (set_default_runtime
                 // rejects unknown ids), so warn on the config anomaly.
                 log::warn!(
@@ -2971,10 +3181,15 @@ fn resolve_default_runtime(
 /// (lock-light -- [`LiveProviderConfig::load`] takes no lock) + a fresh PATH
 /// scan per candidate adapter. Shared by `create_session` and `open_duck` so
 /// both startup points apply ONE degrade rule.
-fn startup_runtime_choice(live: &LiveProviderConfig) -> Option<AdapterSpec> {
-    resolve_default_runtime(&live.load().default_runtime, |spec| {
-        detect_adapter(spec).is_some()
-    })
+fn startup_runtime_choice(
+    live: &LiveProviderConfig,
+    user: &UserAdapterStore,
+) -> Option<AdapterSpec> {
+    resolve_default_runtime(
+        &live.load().default_runtime,
+        &merged_adapters(user),
+        |spec| detect_adapter(spec).is_some(),
+    )
 }
 
 /// Resolve the recipe-header `last_runtime` into the resumed session's
@@ -2988,6 +3203,7 @@ fn startup_runtime_choice(live: &LiveProviderConfig) -> Option<AdapterSpec> {
 fn resume_runtime_choice(
     last: Option<&LastRuntime>,
     default: Option<AdapterSpec>,
+    merged: &[AdapterSpec],
     detected: impl Fn(&AdapterSpec) -> bool,
 ) -> Option<AdapterSpec> {
     match last {
@@ -2996,7 +3212,7 @@ fn resume_runtime_choice(
         None => default,
         Some(LastRuntime::BuiltIn) => None,
         Some(LastRuntime::External(id)) => {
-            let Some(spec) = resolve_adapter(id) else {
+            let Some(spec) = resolve_adapter(id, merged) else {
                 // Only a hand-edited recipe reaches here (the stamp records a
                 // v1-table id), so warn on the anomaly. The field is kept on
                 // disk -- resolution degrades, never rewrites.
@@ -3043,6 +3259,7 @@ fn apply_resumed_postures(
     handle: &SessionHandle,
     runtime_facts: SessionRuntimeFacts,
     startup: Option<AdapterSpec>,
+    merged: &[AdapterSpec],
     detected: impl Fn(&AdapterSpec) -> bool,
 ) {
     // ADR-0080 (issue #294): resume zeroes trust. Trust state is
@@ -3064,6 +3281,7 @@ fn apply_resumed_postures(
     handle.set_runtime_choice(resume_runtime_choice(
         runtime_facts.last_runtime.as_ref(),
         startup,
+        merged,
         detected,
     ));
     // ADR-0095 Decision 6: restore the model config AFTER the reset batch
@@ -3096,10 +3314,11 @@ fn apply_resumed_postures(
 #[tauri::command]
 pub fn set_default_runtime(
     live: State<'_, LiveProviderConfig>,
+    user_store: State<'_, UserAdapterStore>,
     runtime: DefaultRuntime,
 ) -> Result<AppConfig, StoreCommandError> {
     if let DefaultRuntime::External(id) = &runtime {
-        if resolve_adapter(id).is_none() {
+        if resolve_adapter(id, &merged_adapters(&user_store)).is_none() {
             return Err(StoreCommandError::UnknownAdapter(id.clone()));
         }
     }
@@ -3182,9 +3401,10 @@ pub fn get_last_model_posture(
 #[tauri::command]
 pub fn clear_last_model_posture(
     live: State<'_, LiveProviderConfig>,
+    user_store: State<'_, UserAdapterStore>,
     adapter_id: String,
 ) -> Result<AppConfig, StoreCommandError> {
-    if resolve_adapter(&adapter_id).is_none() {
+    if resolve_adapter(&adapter_id, &merged_adapters(&user_store)).is_none() {
         return Err(StoreCommandError::UnknownAdapter(adapter_id));
     }
     live.set_last_model_posture(&adapter_id, ModelPosture::default())
@@ -3989,12 +4209,150 @@ mod tests {
         move |spec| ids.contains(&spec.id.as_str())
     }
 
+    /// A draft fixture (issue #1341): a valid single-token command + name.
+    fn valid_draft() -> UserAdapterDraft {
+        UserAdapterDraft {
+            name: "My CLI".to_string(),
+            command: "my-cli".to_string(),
+            args: vec!["--acp".to_string()],
+            env: Default::default(),
+        }
+    }
+
+    /// The backend boundary of the form's gating (issue #1341): an empty
+    /// name or a multi-token command rejects at the IPC backstop.
+    #[test]
+    fn user_adapter_draft_validation_rejects_empty_name_and_multi_token_commands() {
+        assert!(validate_user_adapter_draft(&valid_draft()).is_ok());
+        let mut spaced = valid_draft();
+        spaced.command = "my cli".into();
+        assert!(validate_user_adapter_draft(&spaced).is_err());
+        let mut quoted = valid_draft();
+        quoted.command = "\"my-cli\"".into();
+        assert!(validate_user_adapter_draft(&quoted).is_err());
+        let mut nameless = valid_draft();
+        nameless.name = "   ".into();
+        assert!(validate_user_adapter_draft(&nameless).is_err());
+    }
+
+    /// Issue #1341: deleting a user row a `default_runtime` names degrades
+    /// the start to built-in through the existing resolution (the config
+    /// value rides unchanged -- never rewritten), and recreating the same
+    /// id restores it.
+    #[test]
+    fn deleting_a_referenced_user_adapter_degrades_and_readding_restores() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let user = UserAdapterStore::new(dir.path().join("user-adapters.json"));
+        let seed = |user: &UserAdapterStore| {
+            user.mutate(|rows| {
+                rows.push(user_row_fixture("user:deadbeef", "beta-cli", true));
+                Ok(())
+            })
+            .expect("seed row");
+        };
+        seed(&user);
+        let default = DefaultRuntime::External("user:deadbeef".into());
+        let with_row = resolve_default_runtime(
+            &default,
+            &merged_adapters(&user),
+            detected_ids(&["user:deadbeef"]),
+        );
+        assert_eq!(
+            with_row.map(|spec| spec.id.as_str().to_string()),
+            Some("user:deadbeef".to_string()),
+            "a detected user row serves as the default runtime"
+        );
+        user.mutate(|rows| {
+            rows.retain(|r| r.id != "user:deadbeef");
+            Ok(())
+        })
+        .expect("delete row");
+        assert!(
+            resolve_default_runtime(
+                &default,
+                &merged_adapters(&user),
+                detected_ids(&["user:deadbeef"])
+            )
+            .is_none(),
+            "the deleted default degrades to built-in while the field stays as written"
+        );
+        seed(&user);
+        assert!(
+            resolve_default_runtime(
+                &default,
+                &merged_adapters(&user),
+                detected_ids(&["user:deadbeef"])
+            )
+            .is_some(),
+            "recreating the same id restores the default"
+        );
+    }
+
+    /// A user-registry row fixture (issue #1341) -- the command is a bare
+    /// name so the PATH scan decides detection, matching the fixture binary's
+    /// shape in the wiring suites.
+    fn user_row_fixture(id: &str, name: &str, enabled: bool) -> UserAdapterRow {
+        UserAdapterRow {
+            id: id.to_string(),
+            name: name.to_string(),
+            command: "acp-fake-cli".to_string(),
+            args: vec!["--acp".to_string()],
+            env: Default::default(),
+            enabled,
+            stream_format: StreamFormat::Acp,
+        }
+    }
+
+    /// Issue #1341: user-defined rows merge into the picker projection in
+    /// the shared alphabetical display order, and `enabled: false` keeps a
+    /// row out of the picker while staying resolvable (sessions / defaults
+    /// that already name it keep working).
+    #[test]
+    fn user_rows_merge_into_the_picker_in_display_order() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let user = UserAdapterStore::new(dir.path().join("user-adapters.json"));
+        user.mutate(|rows| {
+            rows.push(user_row_fixture("user:aaaaaaaa", "zeta-cli", true));
+            rows.push(user_row_fixture("user:bbbbbbbb", "alpha-cli", true));
+            rows.push(user_row_fixture("user:cccccccc", "hidden-cli", false));
+            Ok(())
+        })
+        .expect("seed user rows");
+        let entries = scan_adapters(&user);
+        let names: Vec<&str> = entries.iter().map(|e| e.display_name.as_str()).collect();
+        assert!(
+            !names.contains(&"hidden-cli"),
+            "disabled rows stay out of the picker"
+        );
+        let mut expected: Vec<&str> = v1_adapters()
+            .iter()
+            .map(|s| s.display_name.as_str())
+            .chain(["alpha-cli", "zeta-cli"])
+            .collect();
+        expected.sort();
+        assert_eq!(
+            names, expected,
+            "built-ins and user rows share one alphabetical order"
+        );
+        // Resolution sees BOTH enabled and disabled user rows.
+        let merged = merged_adapters(&user);
+        assert!(resolve_adapter("user:aaaaaaaa", &merged).is_some());
+        assert!(
+            resolve_adapter("user:cccccccc", &merged).is_some(),
+            "a disabled row stays resolvable"
+        );
+    }
+
     #[test]
     fn default_runtime_built_in_resolves_to_none() {
         // The fresh-install default keeps the pre-#569 start: built-in (None
         // on the handle). The detected signal is irrelevant for BuiltIn.
         assert_eq!(
-            resolve_default_runtime(&DefaultRuntime::BuiltIn, detected_ids(&["gemini-cli"])),
+            resolve_default_runtime(
+                &DefaultRuntime::BuiltIn,
+                v1_adapters(),
+                detected_ids(&["gemini-cli"])
+            ),
             None
         );
     }
@@ -4005,6 +4363,7 @@ mod tests {
         // exact CLI (issue #569 AC2).
         let spec = resolve_default_runtime(
             &DefaultRuntime::External("gemini-cli".into()),
+            v1_adapters(),
             detected_ids(&["gemini-cli"]),
         )
         .expect("detected default resolves external");
@@ -4018,11 +4377,11 @@ mod tests {
         // value resolve external again -- the field was never rewritten.
         let default = DefaultRuntime::External("gemini-cli".into());
         assert_eq!(
-            resolve_default_runtime(&default, detected_ids(&[])),
+            resolve_default_runtime(&default, v1_adapters(), detected_ids(&[])),
             None,
             "undetected default degrades to built-in for this start"
         );
-        let spec = resolve_default_runtime(&default, detected_ids(&["gemini-cli"]))
+        let spec = resolve_default_runtime(&default, v1_adapters(), detected_ids(&["gemini-cli"]))
             .expect("re-detected default resolves external again");
         assert_eq!(spec.id.as_str(), "gemini-cli");
     }
@@ -4035,6 +4394,7 @@ mod tests {
         assert_eq!(
             resolve_default_runtime(
                 &DefaultRuntime::External("gemini-cli".into()),
+                v1_adapters(),
                 detected_ids(&["codex"])
             ),
             None
@@ -4044,6 +4404,7 @@ mod tests {
         assert_eq!(
             resolve_default_runtime(
                 &DefaultRuntime::External("no-such-cli".into()),
+                v1_adapters(),
                 detected_ids(&["gemini-cli", "codex"])
             ),
             None
@@ -4060,6 +4421,7 @@ mod tests {
         let spec = resume_runtime_choice(
             Some(&LastRuntime::External("gemini-cli".into())),
             None,
+            v1_adapters(),
             detected_ids(&["gemini-cli"]),
         )
         .expect("a recorded detected runtime continues the session");
@@ -4068,6 +4430,7 @@ mod tests {
             resume_runtime_choice(
                 Some(&LastRuntime::BuiltIn),
                 Some(spec.clone()),
+                v1_adapters(),
                 detected_ids(&["gemini-cli"]),
             ),
             None,
@@ -4082,12 +4445,17 @@ mod tests {
         // semantics -- the RESOLVED default runtime, whatever it resolved to.
         let fallback = crate::runtime::acp::adapter::gemini_cli();
         assert_eq!(
-            resume_runtime_choice(None, Some(fallback.clone()), detected_ids(&[])),
+            resume_runtime_choice(
+                None,
+                Some(fallback.clone()),
+                v1_adapters(),
+                detected_ids(&[])
+            ),
             Some(fallback),
             "no recorded runtime -> the resolved default lands verbatim"
         );
         assert_eq!(
-            resume_runtime_choice(None, None, detected_ids(&["gemini-cli"])),
+            resume_runtime_choice(None, None, v1_adapters(), detected_ids(&["gemini-cli"])),
             None,
             "no recorded runtime + built-in default -> built-in"
         );
@@ -4101,17 +4469,22 @@ mod tests {
         // Resolution also never substitutes a different detected CLI.
         let last = LastRuntime::External("gemini-cli".into());
         assert_eq!(
-            resume_runtime_choice(Some(&last), None, detected_ids(&[])),
+            resume_runtime_choice(Some(&last), None, v1_adapters(), detected_ids(&[])),
             None,
             "undetected runtime degrades this resume to built-in"
         );
         assert_eq!(
-            resume_runtime_choice(Some(&last), None, detected_ids(&["codex"])),
+            resume_runtime_choice(Some(&last), None, v1_adapters(), detected_ids(&["codex"])),
             None,
             "a missing CLI never silently resumes on another detected adapter"
         );
-        let spec = resume_runtime_choice(Some(&last), None, detected_ids(&["gemini-cli"]))
-            .expect("re-detected runtime resolves external again");
+        let spec = resume_runtime_choice(
+            Some(&last),
+            None,
+            v1_adapters(),
+            detected_ids(&["gemini-cli"]),
+        )
+        .expect("re-detected runtime resolves external again");
         assert_eq!(spec.id.as_str(), "gemini-cli");
         // An id outside the v1 table (hand-edited recipe) degrades the same
         // way -- resolution is total, the persisted field stays as written.
@@ -4119,6 +4492,7 @@ mod tests {
             resume_runtime_choice(
                 Some(&LastRuntime::External("no-such-cli".into())),
                 None,
+                v1_adapters(),
                 detected_ids(&["gemini-cli", "codex"])
             ),
             None
@@ -4192,6 +4566,7 @@ mod tests {
                 ..Default::default()
             },
             Some(crate::runtime::acp::adapter::codex()),
+            v1_adapters(),
             detected_ids(&["gemini-cli"]),
         );
         assert_eq!(
@@ -4215,6 +4590,7 @@ mod tests {
             &handle,
             SessionRuntimeFacts::default(),
             Some(gemini.clone()),
+            v1_adapters(),
             detected_ids(&[]),
         );
         assert_eq!(
@@ -4237,6 +4613,7 @@ mod tests {
                 ..Default::default()
             },
             Some(gemini.clone()),
+            v1_adapters(),
             detected_ids(&[]),
         );
         assert!(
@@ -4260,15 +4637,16 @@ mod tests {
             crate::provider::keychain::KeychainStore::new(),
             dir.path().join("config.json"),
         );
+        let user = UserAdapterStore::new(dir.path().join("user-adapters.json"));
         assert_eq!(
-            startup_runtime_choice(&live),
+            startup_runtime_choice(&live, &user),
             None,
             "fresh-install config starts built-in (AC1)"
         );
         live.set_default_runtime(DefaultRuntime::External("no-such-cli".into()))
             .expect("the store persists the value verbatim");
         assert_eq!(
-            startup_runtime_choice(&live),
+            startup_runtime_choice(&live, &user),
             None,
             "an id outside the v1 table degrades to built-in at startup"
         );
@@ -4320,7 +4698,7 @@ mod tests {
             },
         )
         .expect("seed gemini-cli posture");
-        let gemini = resolve_adapter("gemini-cli").expect("v1 adapter");
+        let gemini = resolve_adapter("gemini-cli", v1_adapters()).expect("v1 adapter");
         assert_eq!(
             segment_start_posture(Some(&gemini), &live),
             ModelPosture {
@@ -4329,7 +4707,7 @@ mod tests {
             },
             "the segment-start adapter's entry injects"
         );
-        let codex = resolve_adapter("codex").expect("v1 adapter");
+        let codex = resolve_adapter("codex", v1_adapters()).expect("v1 adapter");
         assert_eq!(
             segment_start_posture(Some(&codex), &live),
             ModelPosture::default(),
@@ -4425,7 +4803,7 @@ mod tests {
             model: Some("claude-opus-4-5".into()),
             thought_level: Some("max".into()),
         });
-        let gemini = resolve_adapter("gemini-cli").expect("v1 adapter");
+        let gemini = resolve_adapter("gemini-cli", v1_adapters()).expect("v1 adapter");
         apply_runtime_switch(&handle, Some(gemini.clone()), &live);
         assert_eq!(handle.runtime_choice(), Some(gemini));
         assert_eq!(
@@ -4463,7 +4841,7 @@ mod tests {
             model: Some("gemini-2.5-pro".into()),
             thought_level: Some("high".into()),
         });
-        let codex = resolve_adapter("codex").expect("v1 adapter");
+        let codex = resolve_adapter("codex", v1_adapters()).expect("v1 adapter");
         apply_runtime_switch(&handle, Some(codex), &live);
         assert_eq!(
             handle.external_model_config(),
@@ -4489,8 +4867,8 @@ mod tests {
         // the last selection back.
         let (_dir, live) = posture_live();
         let (_store, handle) = posture_handle();
-        let gemini = resolve_adapter("gemini-cli").expect("v1 adapter");
-        let codex = resolve_adapter("codex").expect("v1 adapter");
+        let gemini = resolve_adapter("gemini-cli", v1_adapters()).expect("v1 adapter");
+        let codex = resolve_adapter("codex", v1_adapters()).expect("v1 adapter");
         apply_runtime_switch(&handle, Some(gemini.clone()), &live);
         // An explicit selection while on gemini lands on its entry (the
         // same helper the set command calls -- the write point stays ONE).
@@ -4532,7 +4910,7 @@ mod tests {
                 thought_level: Some("old-level".into()),
             });
         }
-        let gemini = resolve_adapter("gemini-cli").expect("v1 adapter");
+        let gemini = resolve_adapter("gemini-cli", v1_adapters()).expect("v1 adapter");
         apply_runtime_switch(&handle, Some(gemini), &live);
         let s = handle.session_lock().expect("session lock");
         assert_eq!(
@@ -4552,7 +4930,7 @@ mod tests {
         // The single write point: the post-set pair lands on the runtime
         // adapter's entry and survives a reload (issue #581 AC2).
         let (_dir, live) = posture_live();
-        let gemini = resolve_adapter("gemini-cli").expect("v1 adapter");
+        let gemini = resolve_adapter("gemini-cli", v1_adapters()).expect("v1 adapter");
         record_last_model_posture(
             &live,
             Some(gemini),
@@ -4601,7 +4979,7 @@ mod tests {
             crate::provider::keychain::KeychainStore::new(),
             dir.path().join("nonexistent").join("config.json"),
         );
-        let gemini = resolve_adapter("gemini-cli").expect("v1 adapter");
+        let gemini = resolve_adapter("gemini-cli", v1_adapters()).expect("v1 adapter");
         record_last_model_posture(
             &live,
             Some(gemini),
@@ -4630,7 +5008,7 @@ mod tests {
         // are the observable.
         let (_dir, live) = posture_live();
         let (_store, handle) = posture_handle();
-        let gemini = resolve_adapter("gemini-cli").expect("v1 adapter");
+        let gemini = resolve_adapter("gemini-cli", v1_adapters()).expect("v1 adapter");
         handle.set_runtime_and_posture(
             Some(gemini),
             PosturePair {
@@ -4743,8 +5121,8 @@ mod tests {
         // switch's segment while a matching runtime lets the write land.
         let (_dir, live) = posture_live();
         let (_store, handle) = posture_handle();
-        let gemini = resolve_adapter("gemini-cli").expect("v1 adapter");
-        let codex = resolve_adapter("codex").expect("v1 adapter");
+        let gemini = resolve_adapter("gemini-cli", v1_adapters()).expect("v1 adapter");
+        let codex = resolve_adapter("codex", v1_adapters()).expect("v1 adapter");
         handle.set_runtime_and_posture(
             Some(gemini),
             PosturePair {
@@ -4969,16 +5347,29 @@ mod tests {
 
     // --- Runtime selector helpers (issue #353) ------------------------------
 
-    /// scan_adapters projects exactly the v1 table (count-agnostic), each entry
+    /// scan_adapters projects the merged table (count-agnostic), each entry
     /// carrying its id + display name + a fresh PATH-scan detection flag + the
-    /// resolved binary path. The composer picker + the settings adapter panel
-    /// render this table verbatim -- a CLI added upstream never touches either.
+    /// resolved binary path, in the merged alphabetical display order (issue
+    /// #1341). The composer picker + the settings adapter panel render this
+    /// table verbatim -- a CLI added upstream never touches either.
     #[test]
     fn scan_adapters_projects_the_v1_table_with_detection_state() {
-        let entries = scan_adapters();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let user = UserAdapterStore::new(dir.path().join("user-adapters.json"));
+        let entries = scan_adapters(&user);
         let adapters = v1_adapters();
         assert_eq!(entries.len(), adapters.len(), "one entry per v1 adapter");
-        for (entry, spec) in entries.iter().zip(adapters.iter()) {
+        // The display order is the projection's alphabetical sort, not the
+        // registration array's order (issue #1341) -- sort the specs by the
+        // same comparator before zipping.
+        let mut sorted: Vec<&AdapterSpec> = adapters.iter().collect();
+        sorted.sort_by(|a, b| {
+            cmp_display_order(
+                (&a.display_name, a.id.as_str()),
+                (&b.display_name, b.id.as_str()),
+            )
+        });
+        for (entry, spec) in entries.iter().zip(sorted.iter()) {
             assert_eq!(entry.id, spec.id.as_str(), "id round-trips");
             assert_eq!(
                 entry.display_name, spec.display_name,
@@ -5004,11 +5395,12 @@ mod tests {
     #[test]
     fn resolve_adapter_round_trips_known_ids_and_rejects_unknown() {
         for spec in v1_adapters() {
-            let resolved = resolve_adapter(spec.id.as_str()).expect("known id resolves");
+            let resolved =
+                resolve_adapter(spec.id.as_str(), v1_adapters()).expect("known id resolves");
             assert_eq!(resolved.id, spec.id);
         }
         assert!(
-            resolve_adapter("definitely-not-an-adapter").is_none(),
+            resolve_adapter("definitely-not-an-adapter", v1_adapters()).is_none(),
             "unknown ids do not resolve"
         );
     }
@@ -5022,7 +5414,7 @@ mod tests {
         // None <-> BuiltIn.
         assert_eq!(runtime_choice_to_wire(None), SessionRuntimeChoice::BuiltIn);
         assert_eq!(
-            resolve_runtime_choice(SessionRuntimeChoice::BuiltIn).unwrap(),
+            resolve_runtime_choice(SessionRuntimeChoice::BuiltIn, v1_adapters()).unwrap(),
             None
         );
         // A known external id round-trips through both maps.
@@ -5031,14 +5423,18 @@ mod tests {
             runtime_choice_to_wire(Some(spec.clone())),
             SessionRuntimeChoice::External(spec.id.as_str().to_string())
         );
-        let back = resolve_runtime_choice(SessionRuntimeChoice::External(spec.id.as_str().into()))
-            .expect("known id resolves");
+        let back = resolve_runtime_choice(
+            SessionRuntimeChoice::External(spec.id.as_str().into()),
+            v1_adapters(),
+        )
+        .expect("known id resolves");
         assert_eq!(back.unwrap().id, spec.id);
         // An unknown external id rejects (Engine -- the frontend resync path
         // drives off the reject).
-        let err = resolve_runtime_choice(SessionRuntimeChoice::External(
-            "definitely-not-an-adapter".into(),
-        ))
+        let err = resolve_runtime_choice(
+            SessionRuntimeChoice::External("definitely-not-an-adapter".into()),
+            v1_adapters(),
+        )
         .expect_err("unknown id rejects");
         assert!(
             matches!(err, SessionError::Engine(_)),

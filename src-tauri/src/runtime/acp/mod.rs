@@ -44,4 +44,5 @@ mod ndjson;
 pub mod probe;
 mod process;
 mod turn_io;
+pub mod user_adapter_store;
 pub mod wire;

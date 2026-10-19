@@ -22,10 +22,12 @@
 //!   CLI-specific fact arrives as spec data; per-CLI session addressing
 //!   rides the MCP bridge descriptor, not the CLI argv).
 //!
-//! The argv prefix is pure CLI-specific data (a `&'static [&'static str]`),
-//! not a code path.
+//! The argv prefix is pure CLI-specific data (an owned string list), not a
+//! code path.
 
+use std::collections::BTreeMap;
 use std::path::PathBuf;
+use std::sync::LazyLock;
 
 use crate::session::loop_contract::DiscoveredRuntime;
 
@@ -73,42 +75,42 @@ pub enum StreamFormat {
 /// dual-surface spec (which flag would win?) is unrepresentable, and the
 /// injection dispatch in [`crate::runtime::acp::turn_io::build_model_flags`]
 /// is a single exhaustive match with no silent precedence.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EffortSurface {
     /// The `-c` runtime-config override: the engine appends
     /// `["-c", "{key}={value}"]` to argv when a thought level is selected
     /// (codex's `model_reasoning_effort`).
-    ConfigKey(&'static str),
+    ConfigKey(String),
     /// The argv flag at spawn: the engine appends `[flag, value]` parallel
     /// to [`AdapterSpec::model_arg`] (claude-code's `--effort`).
-    ArgvFlag(&'static str),
+    ArgvFlag(String),
 }
 
 /// A stable identifier for a CLI adapter: the composer picker's key
 /// (ADR-0083) and the id persisted on an external turn's provenance +
 /// mirrored across IPC (ADR-0101). Distinct from the binary name and from
 /// the display name.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct AdapterId(&'static str);
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct AdapterId(String);
 
 impl AdapterId {
     /// Build a new adapter id. `pub` so the slice-9c integration test can mint a
-    /// fake-CLI adapter; production code still uses the constructors below
-    /// ([`gemini_cli`], etc.), so a stray id fails review rather than the
-    /// type system.
-    pub const fn new(name: &'static str) -> Self {
-        Self(name)
+    /// fake-CLI adapter (and issue #1341 mints `user:<uuid>` rows); production
+    /// code still uses the constructors below ([`gemini_cli`], etc.), so a
+    /// stray id fails review rather than the type system.
+    pub fn new(name: impl Into<String>) -> Self {
+        Self(name.into())
     }
 
-    /// The id as a static string (provenance + IPC carry it verbatim).
-    pub fn as_str(self) -> &'static str {
-        self.0
+    /// The id as a string slice (provenance + IPC carry it verbatim).
+    pub fn as_str(&self) -> &str {
+        &self.0
     }
 }
 
 impl std::fmt::Display for AdapterId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.0)
+        f.write_str(&self.0)
     }
 }
 
@@ -121,12 +123,12 @@ pub struct AdapterSpec {
     /// Stable id (provenance + IPC key).
     pub id: AdapterId,
     /// Human-readable name for the composer runtime picker (ADR-0083).
-    pub display_name: &'static str,
+    pub display_name: String,
     /// Candidate binary names for the PATH scan, in priority order. The first
     /// that resolves wins. Multiple names cover installer variation (an npm
     /// wrapper vs a native installer shipping different binary names); every
     /// current spec is single-name, so the shape is a forward reservation.
-    pub binary_names: &'static [&'static str],
+    pub binary_names: Vec<String>,
     /// The argv prefix that puts the CLI into its stdio protocol mode. The
     /// engine spawns `<resolved-binary> <argv-prefix...>` and speaks the
     /// protocol selected by [`StreamFormat`] over stdio. The prefix is the
@@ -135,7 +137,7 @@ pub struct AdapterSpec {
     /// turn input (non-ACP model/effort flags, bridge config overrides) --
     /// it never contributes a CLI-specific argument itself; every
     /// CLI-specific fact arrives as spec data.
-    pub argv: &'static [&'static str],
+    pub argv: Vec<String>,
     /// The argv prefix the diagnostic probe uses to spawn this CLI (ADR-0096).
     /// `None` on ACP adapters -- the probe reuses [`Self::argv`] (the same
     /// protocol mode the turn drives). A non-ACP adapter whose probe surface
@@ -147,7 +149,7 @@ pub struct AdapterSpec {
     /// 5). Like [`Self::argv`], pure CLI-specific data: the probe kernel
     /// reads it and
     /// names no CLI.
-    pub probe_argv: Option<&'static [&'static str]>,
+    pub probe_argv: Option<Vec<String>>,
     /// The wire protocol the CLI speaks over stdio (ADR-0094). Selects the
     /// engine's per-format dispatch path.
     pub stream_format: StreamFormat,
@@ -157,7 +159,7 @@ pub struct AdapterSpec {
     /// model via a `session/set_config_option` request after the handshake
     /// instead (`NewSessionRequest` in `wire::MODELED_SCHEMA` carries no
     /// model field).
-    pub model_arg: Option<&'static str>,
+    pub model_arg: Option<String>,
     /// The ONE surface the reasoning-effort selection rides (ADR-0095 /
     /// ADR-0097 Decision 6): a `-c` config override key (codex) or an argv
     /// flag (claude-code's `--effort`). `None` on ACP adapters -- the ACP
@@ -166,13 +168,26 @@ pub struct AdapterSpec {
     /// a type invariant: a dual-surface spec cannot be constructed, so the
     /// injection needs no precedence rule.
     pub effort: Option<EffortSurface>,
+    /// Extra environment variables injected into every spawn of this CLI
+    /// (issue #1341): a user-defined row's env map (API keys etc.), always
+    /// empty on built-in specs. Carried on the spec so the turn spawn and
+    /// the probe spawn share ONE injection point.
+    pub env: BTreeMap<String, String>,
 }
 
 impl AdapterSpec {
     /// The composer picker + provenance key for this adapter.
     pub fn adapter_id(&self) -> AdapterId {
-        self.id
+        self.id.clone()
     }
+}
+
+/// Owned-copy helper for the constructor literals: the specs carry owned rows
+/// (user-defined adapters are runtime data, issue #1341) while the built-in
+/// constructors stay hand-editable `&str` literals -- this is the one
+/// literal-to-owned hop.
+fn owned(vs: &[&str]) -> Vec<String> {
+    vs.iter().map(|v| (*v).to_string()).collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -188,16 +203,17 @@ impl AdapterSpec {
 /// (its `config.js` option table; no alias). Live E2E verifies it against a
 /// real install. If gemini-cli renames or graduates the flag, ONLY this
 /// constant changes -- the engine is untouched (ADR-0081 zero per-CLI code).
-pub const fn gemini_cli() -> AdapterSpec {
+pub fn gemini_cli() -> AdapterSpec {
     AdapterSpec {
         id: AdapterId::new("gemini-cli"),
-        display_name: "gemini-cli",
-        binary_names: &["gemini"],
-        argv: &["--experimental-acp"],
+        display_name: "gemini-cli".into(),
+        binary_names: owned(&["gemini"]),
+        argv: owned(&["--experimental-acp"]),
         stream_format: StreamFormat::Acp,
         probe_argv: None,
         model_arg: None,
         effort: None,
+        env: BTreeMap::new(),
     }
 }
 
@@ -217,12 +233,12 @@ pub const fn gemini_cli() -> AdapterSpec {
 /// E2E verifies it against a real install. If codex changes the flags, ONLY
 /// this constant changes -- the engine is untouched (ADR-0081 zero per-CLI
 /// code).
-pub const fn codex() -> AdapterSpec {
+pub fn codex() -> AdapterSpec {
     AdapterSpec {
         id: AdapterId::new("codex"),
-        display_name: "codex",
-        binary_names: &["codex"],
-        argv: &[
+        display_name: "codex".into(),
+        binary_names: owned(&["codex"]),
+        argv: owned(&[
             "exec",
             "--json",
             "--skip-git-repo-check",
@@ -245,19 +261,20 @@ pub const fn codex() -> AdapterSpec {
             // flags coexist on one spawn.
             "-c",
             "model_reasoning_summary=detailed",
-        ],
+        ]),
         stream_format: StreamFormat::CodexEventStream,
         // The probe surface is the `app-server` subcommand, NOT the turn's
         // `exec --json` (ADR-0096 D2) -- a different communication channel
         // whose `model/list` RPC returns the per-model catalog.
-        probe_argv: Some(&["app-server"]),
+        probe_argv: Some(owned(&["app-server"])),
         // ADR-0095: codex's native `exec` takes the model as `--model <id>`
         // and the reasoning effort via the config override
         // `-c model_reasoning_effort=<value>` (same `-c` mechanism the bridge
         // injection uses, ADR-0094). No argv-shaped effort flag (ADR-0097
         // Decision 6 leaves codex on the `-c` surface).
-        model_arg: Some("--model"),
-        effort: Some(EffortSurface::ConfigKey("model_reasoning_effort")),
+        model_arg: Some("--model".into()),
+        effort: Some(EffortSurface::ConfigKey("model_reasoning_effort".into())),
+        env: BTreeMap::new(),
     }
 }
 
@@ -270,16 +287,17 @@ pub const fn codex() -> AdapterSpec {
 /// NOTE: the `--acp` spelling is pinned by qwen-code's own CLI; live E2E
 /// verifies it against a real install. If qwen-code renames the flag, ONLY this
 /// constant changes -- the engine is untouched (ADR-0081 zero per-CLI code).
-pub const fn qwen_code() -> AdapterSpec {
+pub fn qwen_code() -> AdapterSpec {
     AdapterSpec {
         id: AdapterId::new("qwen-code"),
-        display_name: "qwen-code",
-        binary_names: &["qwen"],
-        argv: &["--acp"],
+        display_name: "qwen-code".into(),
+        binary_names: owned(&["qwen"]),
+        argv: owned(&["--acp"]),
         stream_format: StreamFormat::Acp,
         probe_argv: None,
         model_arg: None,
         effort: None,
+        env: BTreeMap::new(),
     }
 }
 
@@ -294,16 +312,17 @@ pub const fn qwen_code() -> AdapterSpec {
 /// NOTE: the `acp` subcommand is pinned by opencode's own CLI; live E2E
 /// verifies it against a real install. If opencode renames the subcommand or
 /// adds a `--flag` alias, ONLY this constant changes -- the engine is untouched.
-pub const fn opencode() -> AdapterSpec {
+pub fn opencode() -> AdapterSpec {
     AdapterSpec {
         id: AdapterId::new("opencode"),
-        display_name: "opencode",
-        binary_names: &["opencode"],
-        argv: &["acp"],
+        display_name: "opencode".into(),
+        binary_names: owned(&["opencode"]),
+        argv: owned(&["acp"]),
         stream_format: StreamFormat::Acp,
         probe_argv: None,
         model_arg: None,
         effort: None,
+        env: BTreeMap::new(),
     }
 }
 
@@ -334,13 +353,13 @@ pub const fn opencode() -> AdapterSpec {
 /// verifies them against a real install (ADR-0097 unresolved item). If
 /// claude-code renames a flag, ONLY this constant changes -- the engine is
 /// untouched (ADR-0081 zero per-CLI code).
-pub const fn claude_code() -> AdapterSpec {
+pub fn claude_code() -> AdapterSpec {
     AdapterSpec {
         id: AdapterId::new("claude-code"),
-        display_name: "claude-code",
+        display_name: "claude-code".into(),
         // The npm package `@anthropic-ai/claude-code` ships the `claude`
         // binary (native installers ship the same name).
-        binary_names: &["claude"],
+        binary_names: owned(&["claude"]),
         // ADR-0097 Decision 7: the minimal flag set, no version gating. The
         // deny list is one comma-joined argv element (claude-code's
         // `--disallowedTools` spelling). The allow list opens ONLY the
@@ -350,7 +369,7 @@ pub const fn claude_code() -> AdapterSpec {
         // ever reached the gateway. With both lists present deny wins on
         // overlap, so the native tools stay sealed (the literal is
         // drift-guarded by a test against the canonical server name).
-        argv: &[
+        argv: owned(&[
             "--print",
             "--output-format",
             "stream-json",
@@ -374,7 +393,7 @@ pub const fn claude_code() -> AdapterSpec {
              TodoWrite,BashOutput,KillShell,SlashCommand",
             "--allowedTools",
             "mcp__toptopduck-gateway",
-        ],
+        ]),
         stream_format: StreamFormat::ClaudeStreamJson,
         // The probe reuses the turn argv (ADR-0097 Decision 5): both surfaces
         // speak the same stream-json control plane -- the probe sends a
@@ -386,30 +405,33 @@ pub const fn claude_code() -> AdapterSpec {
         // ADR-0095/0097: claude-code's headless mode takes the model as
         // `--model <id>` and the reasoning effort as `--effort <level>` --
         // both argv-shaped (no `-c` config surface on this CLI).
-        model_arg: Some("--model"),
-        effort: Some(EffortSurface::ArgvFlag("--effort")),
+        model_arg: Some("--model".into()),
+        effort: Some(EffortSurface::ArgvFlag("--effort".into())),
+        env: BTreeMap::new(),
     }
 }
 
-/// All v1 adapters, in the composer picker's display order (ADR-0083). Adding
-/// a CLI = adding one entry here + one constructor above.
+/// All v1 adapters -- the built-in half of the adapter table (ADR-0083, made
+/// user-mergeable by issue #1341). Adding a CLI = adding one entry here + one
+/// constructor above. The array order is registration order ONLY: the
+/// picker's display order is the merged alphabetical sort the projection
+/// layer owns (issue #1341), not this array's order.
 pub fn v1_adapters() -> &'static [AdapterSpec] {
-    // A pure-data static backing slice: const-constructible data in a plain
-    // `static` is simpler than LazyLock and avoids the indirection.
+    // Owned fields (user-defined adapters are runtime data, issue #1341) mean
+    // the table is no longer const-constructible: a LazyLock'd Vec built from
+    // the constructors -- still the single field source, no constructor/entry
+    // drift -- is the backing store.
+    static V1_ADAPTERS: LazyLock<Vec<AdapterSpec>> = LazyLock::new(|| {
+        vec![
+            gemini_cli(),
+            codex(),
+            qwen_code(),
+            opencode(),
+            claude_code(),
+        ]
+    });
     &V1_ADAPTERS
 }
-
-// The per-adapter constructors are `const fn`, so V1_ADAPTERS invokes them
-// directly -- no field duplication, no drift between a constructor and its
-// array entry. Adding a CLI = adding one `const fn` constructor + one call
-// here; `v1_adapters()` stays the picker source.
-static V1_ADAPTERS: [AdapterSpec; 5] = [
-    gemini_cli(),
-    codex(),
-    qwen_code(),
-    opencode(),
-    claude_code(),
-];
 
 // ---------------------------------------------------------------------------
 // Detection (PATH scan)
@@ -429,11 +451,19 @@ static V1_ADAPTERS: [AdapterSpec; 5] = [
 /// caching -- detection is cheap and the picker re-scans on demand (the user
 /// may install a CLI between scans).
 pub fn detect_adapter(spec: &AdapterSpec) -> Option<PathBuf> {
-    // The single process-PATH wrapper lives in `cli_tools::builtin`
-    // (issue #683): the adapter scan and the builtin-CLI detection resolve
-    // names with one rule set.
-    for name in spec.binary_names {
-        if let Some(path) = crate::cli_tools::builtin::which(name) {
+    // An ABSOLUTE candidate (a user row's command path, issue #1341) is used
+    // verbatim: an is-file check, never PATH-scanned and never
+    // PATHEXT-completed. A bare name goes through the single process-PATH
+    // wrapper in `cli_tools::builtin` (issue #683): the adapter scan and the
+    // builtin-CLI detection resolve names with one rule set. Built-in specs
+    // are always bare, so this adds a shape, not a behavior change.
+    for name in &spec.binary_names {
+        let candidate = PathBuf::from(name);
+        if candidate.is_absolute() {
+            if candidate.is_file() {
+                return Some(candidate);
+            }
+        } else if let Some(path) = crate::cli_tools::builtin::which(name) {
             return Some(path);
         }
     }
@@ -858,17 +888,17 @@ mod tests {
             assert!(spec.effort.is_none(), "{}", spec.id);
         }
         let codex = codex();
-        assert_eq!(codex.model_arg, Some("--model"));
+        assert_eq!(codex.model_arg.as_deref(), Some("--model"));
         assert_eq!(
             codex.effort,
-            Some(EffortSurface::ConfigKey("model_reasoning_effort")),
+            Some(EffortSurface::ConfigKey("model_reasoning_effort".into())),
             "codex effort rides `-c`"
         );
         let claude = claude_code();
-        assert_eq!(claude.model_arg, Some("--model"));
+        assert_eq!(claude.model_arg.as_deref(), Some("--model"));
         assert_eq!(
             claude.effort,
-            Some(EffortSurface::ArgvFlag("--effort")),
+            Some(EffortSurface::ArgvFlag("--effort".into())),
             "claude-code has no `-c` config surface"
         );
     }
@@ -885,7 +915,7 @@ mod tests {
         for spec in [gemini_cli(), qwen_code(), opencode(), claude_code()] {
             assert!(spec.probe_argv.is_none(), "{}", spec.id);
         }
-        assert_eq!(codex().probe_argv, Some(&["app-server"][..]));
+        assert_eq!(codex().probe_argv, Some(vec!["app-server".into()]));
     }
 
     /// ADR-0128: the claude-code TURN argv carries `--input-format
@@ -914,7 +944,10 @@ mod tests {
     #[test]
     fn claude_turn_argv_requests_partial_message_deltas() {
         assert!(
-            claude_code().argv.contains(&"--include-partial-messages"),
+            claude_code()
+                .argv
+                .iter()
+                .any(|a| a == "--include-partial-messages"),
             "--include-partial-messages rides the turn argv"
         );
     }
@@ -945,13 +978,14 @@ mod tests {
 
     /// v1_adapters is internally consistent: non-empty, unique ids, every
     /// entry has a non-empty display name + binary names. Count-agnostic --
-    /// adding a CLI (one `const fn` constructor + one V1_ADAPTERS entry) never
-    /// touches this test.
+    /// adding a CLI (one constructor + one V1_ADAPTERS entry) never touches
+    /// this test.
     #[test]
     fn v1_adapters_is_internally_consistent() {
         let adapters = v1_adapters();
         assert!(!adapters.is_empty(), "v1 ships at least one adapter");
-        let unique: std::collections::HashSet<AdapterId> = adapters.iter().map(|a| a.id).collect();
+        let unique: std::collections::HashSet<AdapterId> =
+            adapters.iter().map(|a| a.id.clone()).collect();
         assert_eq!(
             adapters.len(),
             unique.len(),
@@ -1038,17 +1072,19 @@ mod tests {
         assert_eq!(spec.stream_format, StreamFormat::ClaudeStreamJson);
         // Turn argv pins: the headless flags + session-persistence opt-out +
         // the native-tool deny list (ADR-0097 Decision 1/3/7).
-        assert!(spec
-            .argv
-            .starts_with(&["--print", "--output-format", "stream-json"]));
-        assert!(spec.argv.contains(&"--verbose"));
-        assert!(spec.argv.contains(&"--no-session-persistence"));
+        assert!(spec.argv.iter().map(String::as_str).take(3).eq([
+            "--print",
+            "--output-format",
+            "stream-json"
+        ]));
+        assert!(spec.argv.iter().any(|a| *a == "--verbose"));
+        assert!(spec.argv.iter().any(|a| *a == "--no-session-persistence"));
         let deny = spec
             .argv
             .iter()
             .position(|a| *a == "--disallowedTools")
             .expect("the deny list rides the turn argv");
-        let deny_value = spec.argv[deny + 1];
+        let deny_value = &spec.argv[deny + 1];
         for tool in [
             "Task",
             "Bash",
@@ -1072,8 +1108,8 @@ mod tests {
         }
         // No session addressing: neither flag may ride the turn argv
         // (ADR-0097 Decision 1 -- resume / session state is app-side).
-        assert!(!spec.argv.contains(&"--resume"));
-        assert!(!spec.argv.contains(&"--session-id"));
+        assert!(!spec.argv.iter().any(|a| *a == "--resume"));
+        assert!(!spec.argv.iter().any(|a| *a == "--session-id"));
     }
 
     /// qwen-code uses the `qwen` binary plus the stable `["--acp"]` flag

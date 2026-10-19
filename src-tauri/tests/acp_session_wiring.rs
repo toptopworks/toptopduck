@@ -41,13 +41,14 @@ use toptopduck_lib::{
 fn fake_cli_adapter() -> AdapterSpec {
     AdapterSpec {
         id: AdapterId::new("fake-cli"),
-        display_name: "fake-cli",
-        binary_names: &["acp-fake-cli"],
-        argv: &[],
+        display_name: "fake-cli".into(),
+        binary_names: vec!["acp-fake-cli".into()],
+        argv: Vec::new(),
         stream_format: toptopduck_lib::runtime::acp::adapter::StreamFormat::Acp,
         probe_argv: None,
         model_arg: None,
         effort: None,
+        env: std::collections::BTreeMap::new(),
     }
 }
 
@@ -995,13 +996,14 @@ fn external_prehandshake_failure_preserves_cached_discovery() {
     // the engine exits pre-handshake with `discovered_runtime: None`.
     session.set_external_runtime(Some(AdapterSpec {
         id: AdapterId::new("missing-cli"),
-        display_name: "missing-cli",
-        binary_names: &["definitely-not-on-path-530"],
-        argv: &[],
+        display_name: "missing-cli".into(),
+        binary_names: vec!["definitely-not-on-path-530".into()],
+        argv: Vec::new(),
         stream_format: toptopduck_lib::runtime::acp::adapter::StreamFormat::Acp,
         probe_argv: None,
         model_arg: None,
         effort: None,
+        env: std::collections::BTreeMap::new(),
     }));
     let second = session.ask("this one cannot even spawn");
     std::env::set_var("PATH", old_path);

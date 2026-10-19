@@ -27,6 +27,7 @@ import {
   SettingsRow,
 } from "./settings-chrome";
 import { Tooltip, TooltipContent, TooltipTrigger } from "../ui/tooltip";
+import { UserRuntimesSection } from "./UserRuntimesSection";
 
 // Local CLI tab (issue #489, ADR-0091): the adapter management panel inside
 // the Settings runtime section. Lists every v1 adapter from `listAdapters`
@@ -464,8 +465,9 @@ function directoryModelCount(probe: ProbeState, cached?: AdapterCatalogEntry): n
 export function LocalCliTab({
   onIpcBusy,
 }: {
-  /** Narrowed pass-through: the local CLI tab fires only the probe channel. */
-  onIpcBusy: (channel: "probe", busy: boolean) => void;
+  /** Narrowed pass-through: the probe channel + the user-registry CRUD
+   *  channel fired by the custom-runtimes section below. */
+  onIpcBusy: (channel: "probe" | "userAdapter", busy: boolean) => void;
 }) {
   const intl = useIntl();
   const queryClient = useQueryClient();
@@ -743,6 +745,11 @@ export function LocalCliTab({
       )}
 
       {rescanError && <p className="text-destructive text-sm">{rescanError}</p>}
+
+      {/* The user-defined registry (issue #1341): row cards + editor under
+          the detected built-ins. The picker itself needs no change -- the
+          backend projection merges this registry into `list_adapters`. */}
+      <UserRuntimesSection onIpcBusy={onIpcBusy} />
     </div>
   );
 }

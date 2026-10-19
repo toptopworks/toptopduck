@@ -22,6 +22,13 @@ vi.mock("../../../api", async (importOriginal) => {
     rescanAdapters: vi.fn(),
     probeAdapter: vi.fn(),
     getAdapterCatalogs: vi.fn(),
+    // The custom-runtimes section mounted inside the tab (issue #1341): its
+    // query must not touch the real Tauri transport in jsdom.
+    listUserAdapters: vi.fn().mockResolvedValue([]),
+    createUserAdapter: vi.fn(),
+    updateUserAdapter: vi.fn(),
+    deleteUserAdapter: vi.fn(),
+    setUserAdapterEnabled: vi.fn(),
   };
 });
 

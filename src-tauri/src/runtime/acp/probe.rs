@@ -171,7 +171,8 @@ pub fn spawn_child(spec: &AdapterSpec, binary: Option<&Path>) -> Result<ChildHan
     // spawn keeps stderr inherited.
     super::process::spawn_piped(
         binary,
-        spec.probe_argv.unwrap_or(spec.argv),
+        spec.probe_argv.as_deref().unwrap_or(&spec.argv),
+        &spec.env,
         std::process::Stdio::piped(),
     )
     .map(|inner| ChildHandle { inner })

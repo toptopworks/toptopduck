@@ -51,6 +51,7 @@ import type {
 import type {
   AdapterCatalogs,
   AdapterEntry,
+  UserAdapterRow,
   ProbeOk,
   SessionModelConfig,
   SessionRuntimeChoice,
@@ -1064,4 +1065,50 @@ export async function onTrayNewSession(cb: () => void): Promise<UnlistenFn> {
 // never invokes it -- one shot per page load.
 export async function trayReady(): Promise<void> {
   return invoke("tray_ready");
+}
+
+// --- User-defined adapter registry (issue #1341) -----------------------------
+
+// The create/update payload: the editable fields only. The id is minted
+// server-side at create; `enabled` flips through its own command.
+export interface UserAdapterDraft {
+  name: string;
+  command: string;
+  args: string[];
+  env: Record<string, string>;
+}
+
+// The management-face list: every user row, disabled ones included, in the
+// same alphabetical order the picker projects. A corrupt registry REJECTS
+// here (the settings tab surfaces the error; the picker face stays
+// refusal-free server-side).
+export async function listUserAdapters(): Promise<UserAdapterRow[]> {
+  return invoke<UserAdapterRow[]>("list_user_adapters");
+}
+
+export async function createUserAdapter(
+  draft: UserAdapterDraft,
+): Promise<UserAdapterRow> {
+  return invoke<UserAdapterRow>("create_user_adapter", { draft });
+}
+
+export async function updateUserAdapter(
+  adapterId: string,
+  draft: UserAdapterDraft,
+): Promise<UserAdapterRow> {
+  return invoke<UserAdapterRow>("update_user_adapter", { adapterId, draft });
+}
+
+// Deleting also drops the row's catalog-cache entry server-side. A
+// `default_runtime` naming the row degrades per-start to built-in (the
+// config field is never rewritten).
+export async function deleteUserAdapter(adapterId: string): Promise<void> {
+  return invoke<void>("delete_user_adapter", { adapterId });
+}
+
+export async function setUserAdapterEnabled(
+  adapterId: string,
+  enabled: boolean,
+): Promise<void> {
+  return invoke<void>("set_user_adapter_enabled", { adapterId, enabled });
 }
