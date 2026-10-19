@@ -2,13 +2,18 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { fireEvent, screen, waitFor } from "@testing-library/react";
 
 import { UserRuntimesSection } from "../UserRuntimesSection";
-import { isSingleTokenCommand, parseArgGroups } from "../user-runtime-form";
+import {
+  formatArgGroups,
+  isSingleTokenCommand,
+  parseArgGroups,
+} from "../user-runtime-form";
 import {
   createUserAdapter,
   deleteUserAdapter,
   listUserAdapters,
   probeAdapter,
   setUserAdapterEnabled,
+  updateUserAdapter,
 } from "../../../api";
 import type { UserAdapterRow } from "../../../types/runtime";
 import { renderSettings } from "./helpers";
@@ -81,6 +86,26 @@ describe("isSingleTokenCommand", () => {
     expect(isSingleTokenCommand("my cli")).toBe(false);
     expect(isSingleTokenCommand("\"quoted\"")).toBe(false);
     expect(isSingleTokenCommand("")).toBe(false);
+  });
+});
+
+describe("formatArgGroups", () => {
+  it("round-trips every token shape parseArgGroups can produce", () => {
+    const cases: string[][] = [
+      [],
+      ["--acp"],
+      ["--acp", "two words"],
+      ["it's"],
+      [`a"b`],
+      [""],
+    ];
+    for (const args of cases) {
+      expect(parseArgGroups(formatArgGroups(args))).toEqual(args);
+    }
+  });
+
+  it("leaves plain tokens unwrapped", () => {
+    expect(formatArgGroups(["--acp", "run"])).toBe("--acp run");
   });
 });
 
@@ -208,5 +233,86 @@ describe("UserRuntimesSection", () => {
       await screen.findByText(/Could not find or start the command/i),
     ).toBeInTheDocument();
     expect(probeAdapter).toHaveBeenCalledWith("user:11111111");
+  });
+
+  it("degrades an unknown probe reject kind to the unreachable wording", async () => {
+    // Frontend/backend skew: a reject carrying a kind the frontend does not
+    // know must NOT pass the narrowing as a structured ProbeError.
+    vi.mocked(listUserAdapters).mockResolvedValue([makeRow()]);
+    vi.mocked(probeAdapter).mockRejectedValueOnce({ kind: "FutureKind" });
+    renderSettings(<UserRuntimesSection onIpcBusy={vi.fn()} />);
+    fireEvent.click(await screen.findByRole("button", { name: /^Edit$/ }));
+    fireEvent.click(screen.getByRole("button", { name: /^Test$/ }));
+    expect(
+      await screen.findByText(/ACP handshake failed/i),
+    ).toBeInTheDocument();
+  });
+
+  it("swaps to editing the saved row: Test lights up and a second Save updates", async () => {
+    const saved = makeRow({ args: ["--acp", "two words"] });
+    vi.mocked(createUserAdapter).mockResolvedValueOnce(saved);
+    vi.mocked(updateUserAdapter).mockResolvedValueOnce(saved);
+    renderSettings(<UserRuntimesSection onIpcBusy={vi.fn()} />);
+    fireEvent.click(await screen.findByRole("button", { name: /^Add$/ }));
+
+    const textboxes = screen.getAllByRole("textbox");
+    fireEvent.change(textboxes[0], { target: { value: "My CLI" } });
+    fireEvent.change(textboxes[1], { target: { value: "my-cli" } });
+    fireEvent.click(screen.getByRole("button", { name: /^Save$/ }));
+    await waitFor(() => expect(createUserAdapter).toHaveBeenCalledTimes(1));
+
+    // The dialog now edits the minted row: Test names a persisted id...
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: /^Test$/ })).toBeEnabled(),
+    );
+    // ...and the args resync is lossless (the quoted group stays one token).
+    expect(
+      screen.getByDisplayValue("--acp \"two words\""),
+    ).toBeInTheDocument();
+
+    // A second Save routes through update, not a duplicate create.
+    fireEvent.click(screen.getByRole("button", { name: /^Save$/ }));
+    await waitFor(() =>
+      expect(updateUserAdapter).toHaveBeenCalledWith("user:11111111", {
+        name: "My CLI",
+        command: "my-cli",
+        args: ["--acp", "two words"],
+        env: { MY_KEY: "secret" },
+      }),
+    );
+    expect(createUserAdapter).toHaveBeenCalledTimes(1);
+  });
+
+  it("saves an edit through updateUserAdapter with the row's id", async () => {
+    vi.mocked(listUserAdapters).mockResolvedValue([makeRow()]);
+    vi.mocked(updateUserAdapter).mockResolvedValueOnce(
+      makeRow({ name: "Renamed" }),
+    );
+    renderSettings(<UserRuntimesSection onIpcBusy={vi.fn()} />);
+    fireEvent.click(await screen.findByRole("button", { name: /^Edit$/ }));
+
+    fireEvent.change(screen.getByDisplayValue("My CLI"), {
+      target: { value: "Renamed" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: /^Save$/ }));
+    await waitFor(() =>
+      expect(updateUserAdapter).toHaveBeenCalledWith("user:11111111", {
+        name: "Renamed",
+        command: "my-cli",
+        args: ["--acp"],
+        env: { MY_KEY: "secret" },
+      }),
+    );
+    expect(createUserAdapter).not.toHaveBeenCalled();
+  });
+
+  it("surfaces a toggle failure instead of swallowing it", async () => {
+    vi.mocked(listUserAdapters).mockResolvedValue([makeRow()]);
+    vi.mocked(setUserAdapterEnabled).mockRejectedValueOnce(
+      new Error("write failed"),
+    );
+    renderSettings(<UserRuntimesSection onIpcBusy={vi.fn()} />);
+    fireEvent.click(await screen.findByRole("button", { name: /^Disable$/ }));
+    expect(await screen.findByText(/write failed/i)).toBeInTheDocument();
   });
 });

@@ -42,3 +42,19 @@ export function parseArgGroups(input: string): string[] | null {
 export function isSingleTokenCommand(command: string): boolean {
   return command.length > 0 && !/[\s"']/.test(command);
 }
+
+/** The inverse of `parseArgGroups`: re-quote each token so the text parses
+ *  back to the same argv (an open-edit-save round-trip must not silently
+ *  regroup `["two words"]` into two tokens). Wraps in the quote character
+ *  the token does not itself contain; a token carrying BOTH quote kinds has
+ *  no lossless spelling in this syntax (hand-edited JSON only) and degrades
+ *  to whatever `parseArgGroups` makes of the emitted text, visibly. */
+export function formatArgGroups(args: readonly string[]): string {
+  return args
+    .map((arg) => {
+      if (arg.includes(`"`)) return `'${arg}'`;
+      if (arg.length === 0 || /[\s']/.test(arg)) return `"${arg}"`;
+      return arg;
+    })
+    .join(" ");
+}

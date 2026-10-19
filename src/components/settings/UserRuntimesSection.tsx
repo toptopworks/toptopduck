@@ -39,7 +39,8 @@ import {
 } from "../ui/dialog";
 import { Input } from "../ui/input";
 import { HeaderActionButton, SettingsCard, SettingsRow } from "./settings-chrome";
-import { isSingleTokenCommand, parseArgGroups } from "./user-runtime-form";
+import { toProbeError } from "./probe-error";
+import { formatArgGroups, isSingleTokenCommand, parseArgGroups } from "./user-runtime-form";
 
 // User-defined runtimes (issue #1341): the registry pane under the Local CLI
 // tab. Row cards for every `user-adapters.json` row (disabled ones included)
@@ -78,17 +79,21 @@ type TestState =
 function EditorDialog({
   row,
   onClose,
+  onSaved,
   onIpcBusy,
 }: {
   row: UserAdapterRow | null;
   onClose: () => void;
+  /** Reports the persisted row (the create -> edit swap: the dialog stays
+   *  open editing the minted row, so Test names a real id). */
+  onSaved: (row: UserAdapterRow) => void;
   onIpcBusy: (channel: "probe" | "userAdapter", busy: boolean) => void;
 }) {
   const intl = useIntl();
   const queryClient = useQueryClient();
   const [name, setName] = useState(row?.name ?? "");
   const [command, setCommand] = useState(row?.command ?? "");
-  const [argsText, setArgsText] = useState(row?.args.join(" ") ?? "");
+  const [argsText, setArgsText] = useState(formatArgGroups(row?.args ?? []));
   const [envRows, setEnvRows] = useState<EnvRow[]>(
     row ? Object.entries(row.env).map(([key, value]) => ({ key, value })) : [],
   );
@@ -133,9 +138,10 @@ function EditorDialog({
       invalidate();
       // Stay open on the saved row (create -> edit swap; the Test button
       // needs the persisted id). A save does not clear a test result.
+      onSaved(saved);
       setName(saved.name);
       setCommand(saved.command);
-      setArgsText(saved.args.join(" "));
+      setArgsText(formatArgGroups(saved.args));
       setEnvRows(Object.entries(saved.env).map(([key, value]) => ({ key, value })));
     } catch (e) {
       log.warn("UserRuntimesSection", "user adapter save failed", e);
@@ -155,14 +161,10 @@ function EditorDialog({
       setTest({ status: "ok" });
     } catch (e) {
       log.warn("UserRuntimesSection", "user adapter probe failed", e);
-      // Shape the reject like LocalCliTab's probe face: a structured
-      // ProbeError passes through, anything else degrades to the
+      // The shared narrowing (LocalCliTab's probe face): a structured reject
+      // with a KNOWN kind passes through, anything else degrades to the
       // frontend-only unreachable kind.
-      const error: ProbeError =
-        typeof e === "object" && e !== null && "kind" in e
-          ? (e as ProbeError)
-          : { kind: "ProbeUnreachable", data: String(e) };
-      setTest({ status: "failed", error });
+      setTest({ status: "failed", error: toProbeError(e) });
     } finally {
       onIpcBusy("probe", false);
     }
@@ -380,6 +382,7 @@ export function UserRuntimesSection({
   const [editing, setEditing] = useState<UserAdapterRow | null | undefined>(undefined);
   // `undefined` = closed; `null` = create; a row = edit.
   const [deleteError, setDeleteError] = useState<string | null>(null);
+  const [toggleError, setToggleError] = useState<string | null>(null);
   const [busyId, setBusyId] = useState<string | null>(null);
 
   const { data, isPending, isError, error } = useQuery({
@@ -397,12 +400,17 @@ export function UserRuntimesSection({
   async function handleToggle(row: UserAdapterRow) {
     if (busyId !== null) return;
     setBusyId(row.id);
+    setToggleError(null);
     onIpcBusy("userAdapter", true);
     try {
       await setUserAdapterEnabled(row.id, !row.enabled);
       invalidate();
     } catch (e) {
       log.warn("UserRuntimesSection", "user adapter toggle failed", e);
+      // The toggle is a write on the management face: a failure surfaces,
+      // same as save/delete on this pane (a silent badge would lie about
+      // the persisted state).
+      setToggleError(fmtError(e, intl));
     } finally {
       setBusyId(null);
       onIpcBusy("userAdapter", false);
@@ -543,10 +551,12 @@ export function UserRuntimesSection({
         </SettingsCard>
       )}
       {deleteError && <p className="text-destructive text-sm">{deleteError}</p>}
+      {toggleError && <p className="text-destructive text-sm">{toggleError}</p>}
       {editing !== undefined && (
         <EditorDialog
           row={editing}
           onClose={() => setEditing(undefined)}
+          onSaved={(saved) => setEditing(saved)}
           onIpcBusy={onIpcBusy}
         />
       )}

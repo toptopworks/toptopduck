@@ -28,6 +28,7 @@ import {
 } from "./settings-chrome";
 import { Tooltip, TooltipContent, TooltipTrigger } from "../ui/tooltip";
 import { UserRuntimesSection } from "./UserRuntimesSection";
+import { toProbeError } from "./probe-error";
 
 // Local CLI tab (issue #489, ADR-0091): the adapter management panel inside
 // the Settings runtime section. Lists every v1 adapter from `listAdapters`
@@ -64,34 +65,6 @@ type ProbeState =
   | { status: "probing" }
   | { status: "ok"; result: ProbeOk }
   | { status: "failed"; error: ProbeError };
-
-/** The kinds the backend can reject with -- the runtime kind allowlist for
- *  the reject-shape check in `handleProbe` (a `kind` field alone proves
- *  nothing: an unknown value would otherwise flow into `ProbeErrorText`
- *  and surface as a render-time contract-break throw instead of a
- *  degraded error row). */
-const PROBE_ERROR_KINDS: ReadonlySet<string> = new Set([
-  "NotDetected",
-  "SpawnFailure",
-  "HandshakeFailure",
-  "Timeout",
-]);
-
-/** Narrow an IPC reject to a `ProbeError`: a reject shaped like one (a known
- *  kind) passes through; anything else -- a non-shaped reject or an unknown
- *  kind (frontend/backend skew) -- degrades to the frontend-only
- *  `ProbeUnreachable`, never a false handshake failure or a render throw. */
-function toProbeError(e: unknown): ProbeError {
-  if (
-    typeof e === "object" &&
-    e !== null &&
-    "kind" in e &&
-    PROBE_ERROR_KINDS.has(e.kind as string)
-  ) {
-    return e as ProbeError;
-  }
-  return { kind: "ProbeUnreachable", data: String(e) };
-}
 
 /** The probe success block: dispatch on the per-format `kind` -- the ACP flat
  *  catalog or the per-model catalog (codex / claude-code, ADR-0096 D2/D3 +
