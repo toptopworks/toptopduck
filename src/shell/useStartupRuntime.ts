@@ -10,6 +10,15 @@ import type { DefaultRuntime } from "../types/app-config";
 import { listAdapters } from "../api";
 import { log } from "../lib/log";
 
+/** The hook's snapshot: the resolved startup runtime plus the RAW adapter
+ *  table. `adapters` is undefined while the read is in flight -- the
+ *  cold-start guidance banner's loading gate reads that undefined-ness
+ *  (#1337) instead of re-deriving "loaded" from the degraded resolution. */
+export interface StartupRuntimeSnapshot {
+  runtime: SessionRuntimeChoice;
+  adapters: AdapterEntry[] | undefined;
+}
+
 /** The cold-start startup runtime (ADR-0098 Decisions 2/3, issue #572): the
  *  `default_runtime` preference resolved against the shared adapter table.
  *  App renders <QueryClientProvider> itself, so it lives OUTSIDE the provider
@@ -20,7 +29,7 @@ import { log } from "../lib/log";
 export function useStartupRuntime(
   queryClient: QueryClient,
   defaultRuntime: DefaultRuntime | undefined,
-): SessionRuntimeChoice {
+): StartupRuntimeSnapshot {
   const subscribe = useCallback(
     (onStoreChange: () => void) => queryClient.getQueryCache().subscribe(onStoreChange),
     [queryClient],
@@ -50,7 +59,10 @@ export function useStartupRuntime(
   // and only the built-in constant / a stable external object keep that
   // callback from churning on every render.
   return useMemo(
-    () => resolveStartupRuntime(defaultRuntime, adapters),
+    () => ({
+      runtime: resolveStartupRuntime(defaultRuntime, adapters),
+      adapters,
+    }),
     [defaultRuntime, adapters],
   );
 }

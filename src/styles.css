@@ -543,9 +543,16 @@
      The vertical rhythm stays 2rem. */
   padding-block: 2rem;
   padding-inline: var(--rail-gutter);
+  /* The bar column's width cap, single-sourced (#1337): the track and the
+     guidance banner both consume it, so the banner follows the bar instead
+     of mirroring a copied literal. */
+  --shell-bar-cap: 720px;
 }
 .shell-bar-slot.centered .shell-bar-track {
-  width: min(100%, 720px);
+  width: min(100%, var(--shell-bar-cap));
+}
+.shell-bar-slot.centered .cold-start-guide-banner {
+  width: min(100%, var(--shell-bar-cap));
 }
 .shell-bar-slot.bottom {
   bottom: 0;

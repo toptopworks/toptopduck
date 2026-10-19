@@ -13,6 +13,12 @@ import { cva } from "class-variance-authority";
 // privacy disclosure (issue #108):
 // - default (bg-card, the shadcn info surface) carries the informational
 //   disclosures (privacy, ADR-0057 large-result / many-columns hints);
+// - info (the --info token's tint, in the warning tint's shape -- the
+//   PrivacyControls disclosure precedent, issue #864) carries a conditional
+//   guidance state that mounts/unmounts with a config gap (#1337); the
+//   description takes the FULL info color (no /80 dimming) -- with no
+//   AlertTitle the description IS the primary copy, and the copy reads
+//   brighter than muted on purpose;
 // - warning (text-/bg-/border-warning, amber) carries the cautionary
 //   disclosures (a stale result, a viz that failed to render, the ADR-0046
 //   session-count soft-cap) -- the bespoke amber tint the legacy styles.css
@@ -27,6 +33,7 @@ export const alertVariants = cva(
     variants: {
       variant: {
         default: "bg-card text-card-foreground",
+        info: "border-info/40 bg-info/10 text-info [&>svg]:text-current *:data-[slot=alert-description]:text-info",
         warning:
           "border-warning/40 bg-warning/10 text-warning [&>svg]:text-current *:data-[slot=alert-description]:text-warning/80",
         destructive:
