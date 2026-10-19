@@ -257,4 +257,31 @@ describe("App cold-start guidance banner wiring (issue #1337)", () => {
       expect(screen.queryByText(/has no API key/i)).not.toBeInTheDocument(),
     );
   });
+
+  it("stays out of the way when the keys IPC fetch rejects (issue #1339)", async () => {
+    // Built-in default + keyless shape, but the overlay fetch itself
+    // rejects: the submit gate still blocks (conservative, ADR-0092), yet
+    // the banner must not paint "no API key" on an unknowable answer. The
+    // reject has no DOM marker of its own, so the fetches are parked on a
+    // deferred and released once the cold-start surface has settled.
+    configHolder.current = { kind: "built_in" };
+    const rejects: Array<(e: unknown) => void> = [];
+    vi.mocked(listProviderProfiles).mockImplementation(
+      () =>
+        new Promise((_resolve, reject) => {
+          rejects.push(reject);
+        }),
+    );
+    render(<App />);
+    await screen.findByText("What would you like to analyze?");
+    // BOTH mount-time consumers park on the IPC (the picker's overlay fetch
+    // + App's useProfileKeys); release every parked promise so neither feed
+    // stays pending. The microtask hops let the catch land before act exits.
+    await act(async () => {
+      for (const reject of rejects) reject(new Error("ipc down"));
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(screen.queryByRole("status")).not.toBeInTheDocument();
+  });
 });

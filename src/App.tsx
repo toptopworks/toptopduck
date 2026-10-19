@@ -530,6 +530,7 @@ export default function App() {
         keysLoading: profileKeys.loading,
         activeHasKey: profileKeys.activeHasKey,
         activeKeychainFault: profileKeys.activeKeychainFault,
+        keysFetchFault: profileKeys.keysFetchFault,
       })
     : null;
 
