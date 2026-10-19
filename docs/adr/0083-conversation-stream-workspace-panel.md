@@ -37,7 +37,7 @@ ADR-0045 定 rail/workspace 分离并显式否决纯内联对话流——分析�
 - **延伸 ADR-0060/0073**：三栏 shell 结构与 session-header（会话身份区）不变；运行时 / 技能 / 授权模式三个选择器归 rail composer 按钮行。
 - **推翻 ADR-0054 的 rail 固定宽前提（新 shell 下）**：工作区折叠时 rail 升主变宽；最小宽 + Tauri `minWidth` 兜底、rail 可折叠与窗口尺寸策略保留。
 - **校准（折叠几何）**：工作区折叠时的对话列几何为「全宽轨 + 内容限宽居中」——rail 滚动容器占满 pane 全宽（滚动条恒贴窗口右缘，两侧空白同为滚动面），thread 内容与 shell 级 bar 按同一限宽居中阅读列对齐（800px 帽减 `--rail-gutter` 两侧；rail 横向 padding 自该值放宽至多一个滚动条宽，bar 与列按居中轴线对齐）；网格轨居中列形态退役。
-- **校准（运行时 picker 数据源与展示序，#1341 / ADR-0134）**：composer 运行时 picker 的数据源从「编译期 v1 表 verbatim 投影、数组序即展示序（策展序）」演进为「v1 表 ++ 用户态注册表（`user-adapters.json`）**合并投影**」；展示序从策展数组序改为**统一字母序**（`display_name` 字母序、同名 id 稳定 tiebreak，Rust 投影层单点定死、前端 renders verbatim）——内置与自定义运行时同等对待，策展排序不再承担展示职责，`V1_ADAPTERS` 数组退为注册序。
+- **被 ADR-0134 校准（运行时 picker 数据源与展示序）**：本文只定入口归属（Decision：运行时选择为按钮行独立入口，入口不变）；数据源与展示序由 ADR-0134 定为「v1 表 ++ 用户态注册表（`user-adapters.json`）**合并投影**」与**统一字母序**（`display_name` 字母序、同名 id 稳定 tiebreak，Rust 投影层单点定死、前端 renders verbatim）——内置与自定义运行时同等对待；旧的「v1 表 verbatim 投影、数组序即展示序（策展序）」载于 `V1_ADAPTERS` 代码注释而非本文条款，随 ADR-0134 退役、数组退为注册序。见 ADR-0134。
 - **QuestionBar 跨度再演进**：从「跨 rail + workspace」（ADR-0062 R1）到 rail 内——工作区默认折叠后全宽跨度失去前提。
 - **源载入入口归并**：添加文件入口收进「+」面板（拖放快捷途径保留），原独立加源入口退役；ingest 管线与源生命周期事件（ADR-0040）不变。
 - **挂载 / 启用态呈现**：「+」按钮 badge（技能 + MCP 计数）+ 生命周期事件条（ADR-0078）共承，输入区不加 staged chip 行。
