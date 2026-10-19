@@ -77,9 +77,15 @@ describe("useStartupRuntime (cache subscription)", () => {
     const client = createQueryClient();
     const { result } = renderHook(() => useStartupRuntime(client, EXTERNAL_QWEN));
     // Before the table lands the resolution degrades to built-in.
-    expect(result.current).toEqual(RUNTIME_CHOICE_DEFAULT);
+    expect(result.current).toEqual({
+      runtime: RUNTIME_CHOICE_DEFAULT,
+      adapters: undefined,
+    });
     await waitFor(() =>
-      expect(result.current).toEqual({ kind: "external", data: "qwen-code" }),
+      expect(result.current).toEqual({
+        runtime: { kind: "external", data: "qwen-code" },
+        adapters: [entry("qwen-code", true)],
+      }),
     );
     expect(listAdapters).toHaveBeenCalledTimes(1);
   });
@@ -89,7 +95,10 @@ describe("useStartupRuntime (cache subscription)", () => {
     const client = createQueryClient();
     client.setQueryData(adapterKeys.all(), [entry("qwen-code", true)]);
     const { result } = renderHook(() => useStartupRuntime(client, EXTERNAL_QWEN));
-    expect(result.current).toEqual({ kind: "external", data: "qwen-code" });
+    expect(result.current).toEqual({
+      runtime: { kind: "external", data: "qwen-code" },
+      adapters: [entry("qwen-code", true)],
+    });
     expect(listAdapters).not.toHaveBeenCalled();
   });
 
@@ -104,7 +113,10 @@ describe("useStartupRuntime (cache subscription)", () => {
       { initialProps: { dr: EXTERNAL_QWEN } },
     );
     await waitFor(() =>
-      expect(result.current).toEqual({ kind: "external", data: "qwen-code" }),
+      expect(result.current).toEqual({
+        runtime: { kind: "external", data: "qwen-code" },
+        adapters: [entry("qwen-code", true), entry("gemini-cli", true)],
+      }),
     );
     act(() => {
       client.setQueryData(adapterKeys.all(), [
@@ -113,7 +125,10 @@ describe("useStartupRuntime (cache subscription)", () => {
       ]);
     });
     rerender({ dr: { kind: "external", data: "gemini-cli" } });
-    expect(result.current).toEqual({ kind: "external", data: "gemini-cli" });
+    expect(result.current).toEqual({
+      runtime: { kind: "external", data: "gemini-cli" },
+      adapters: [entry("qwen-code", true), entry("gemini-cli", true)],
+    });
   });
 
   it("keeps the built-in degrade when the adapter read rejects", async () => {
@@ -121,6 +136,9 @@ describe("useStartupRuntime (cache subscription)", () => {
     const client = createQueryClient();
     const { result } = renderHook(() => useStartupRuntime(client, EXTERNAL_QWEN));
     await waitFor(() => expect(listAdapters).toHaveBeenCalled());
-    expect(result.current).toEqual(RUNTIME_CHOICE_DEFAULT);
+    expect(result.current).toEqual({
+      runtime: RUNTIME_CHOICE_DEFAULT,
+      adapters: undefined,
+    });
   });
 });
