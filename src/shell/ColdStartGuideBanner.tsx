@@ -39,6 +39,10 @@ export interface ColdStartGapInputs {
   /** Non-null when the keychain read itself faulted (issue #275) -- the
    *  banner stays out of the way rather than guessing a wall. */
   activeKeychainFault: string | null;
+  /** Non-null when the keys IPC fetch itself rejected (issue #1339) -- the
+   *  same stay-out posture: an unreadable answer is not evidence of a
+   *  missing key. */
+  keysFetchFault: string | null;
 }
 
 // Pure seam (the #1337 trigger matrix; module-level for direct per-cell tests
@@ -86,8 +90,11 @@ export function deriveColdStartGap(
   if (inputs.provider === null) return null;
   if (inputs.provider.profiles.length === 0) return "profile-missing";
   // A keychain fault is distinct from a missing key (issue #275): the OS
-  // answer is unknowable, so the banner stays out of the way.
-  if (inputs.activeKeychainFault !== null) return null;
+  // answer is unknowable, so the banner stays out of the way. Same for a
+  // rejected keys IPC (issue #1339): absent evidence is not a key wall.
+  if (inputs.activeKeychainFault !== null || inputs.keysFetchFault !== null) {
+    return null;
+  }
   return inputs.activeHasKey ? null : "key-missing";
 }
 

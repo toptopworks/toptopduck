@@ -1,7 +1,8 @@
 // The cold-start guidance banner's two test surfaces (issue #1337):
 // 1. The pure trigger matrix, tested per-cell at module level (the
-//    first_free_target precedent) -- 4 render states + 7 suppressed states,
-//    with the three unresolved-feed gates and the keychain-fault stay-out.
+//    first_free_target precedent) -- the render states, the three
+//    unresolved-feed gates, the two fault stay-outs (keychain read +
+//    keys fetch, issues #275/#1339), and the healthy-posture nulls.
 // 2. The component: three gap forms each render their copy + the shared CTA,
 //    and the CTA routes through the openSettings channel.
 
@@ -53,6 +54,7 @@ function gapInputs(overrides?: Partial<ColdStartGapInputs>): ColdStartGapInputs 
     keysLoading: false,
     activeHasKey: true,
     activeKeychainFault: null,
+    keysFetchFault: null,
     ...overrides,
   };
 }
@@ -162,6 +164,45 @@ describe("deriveColdStartGap (trigger matrix)", () => {
         gapInputs({ activeHasKey: false, activeKeychainFault: "locked" }),
       ),
     ).toBeNull();
+  });
+
+  it("renders nothing when the keys IPC fetch rejected (issue #1339)", () => {
+    // Riding the keyless posture: without the stay-out this state falls
+    // through to key-missing -- a keyed baseline cell has no discriminative
+    // power here (both answers are null).
+    expect(
+      deriveColdStartGap(
+        gapInputs({ activeHasKey: false, keysFetchFault: "ipc down" }),
+      ),
+    ).toBeNull();
+  });
+
+  it("keeps the root-cause walls over a keys fetch fault (issue #1339)", () => {
+    // The fetch-fault stay-out sits with the keychain-fault branch (it mutes
+    // only the KEY posture): a real CLI wall still speaks. A guard hoisted
+    // above the CLI branches would mute the degrade and this cell goes red.
+    expect(
+      deriveColdStartGap(
+        gapInputs({
+          defaultRuntime: { kind: "external", data: "qwen-code" },
+          adapters: adapter("qwen-code", false),
+          keysFetchFault: "ipc down",
+        }),
+      ),
+    ).toBe("cli-missing");
+  });
+
+  it("keeps the profile-missing wall over a keys fetch fault (issue #1339)", () => {
+    // The other half of the stay-out's precedence: the fault branch mutes
+    // only the KEY posture, so a zero-profile config still speaks even with
+    // a rejected keys IPC -- hoisting the fault check above the profile
+    // branch would mute this wall and the cell goes red. Reachable in the
+    // real wiring: the flag survives a profilesLen N-to-0 transition.
+    expect(
+      deriveColdStartGap(
+        gapInputs({ provider: providerWith(0), keysFetchFault: "ipc down" }),
+      ),
+    ).toBe("profile-missing");
   });
 
   it("renders nothing for a detected external pending", () => {
