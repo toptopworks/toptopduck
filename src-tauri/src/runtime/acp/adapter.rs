@@ -1151,6 +1151,38 @@ mod tests {
         let _ = detect_adapter(&spec);
     }
 
+    /// An ABSOLUTE candidate is used verbatim (issue #1341): an extension-less
+    /// file must resolve to exactly itself -- falling through to the PATH
+    /// scan would PATHEXT-complete it on Windows -- and a directory or a
+    /// missing absolute path must resolve to nothing, never a PATH-scan
+    /// fallback.
+    #[test]
+    fn an_absolute_path_candidate_resolves_verbatim_or_not_at_all() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut spec = gemini_cli();
+
+        let exe = dir.path().join("cli");
+        std::fs::write(&exe, b"stub").expect("write");
+        spec.binary_names = vec![exe.to_string_lossy().into_owned()];
+        assert_eq!(detect_adapter(&spec), Some(exe));
+
+        let nested = dir.path().join("nested");
+        std::fs::create_dir(&nested).expect("mkdir");
+        spec.binary_names = vec![nested.to_string_lossy().into_owned()];
+        assert_eq!(
+            detect_adapter(&spec),
+            None,
+            "a directory is not an executable"
+        );
+
+        spec.binary_names = vec![dir.path().join("absent").to_string_lossy().into_owned()];
+        assert_eq!(
+            detect_adapter(&spec),
+            None,
+            "a missing path has no fallback"
+        );
+    }
+
     /// AdapterId round-trips through Display + as_str (provenance + IPC).
     #[test]
     fn adapter_id_displays_as_its_str() {

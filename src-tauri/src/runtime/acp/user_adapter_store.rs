@@ -15,7 +15,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
-use super::adapter::StreamFormat;
+use super::adapter::{v1_adapters, StreamFormat};
 
 /// The sidecar file name (resolved against the OS app-data dir by the setup
 /// hook, the same anchoring the catalog cache uses).
@@ -96,12 +96,31 @@ fn parse_doc(raw: &str) -> Result<Vec<UserAdapterRow>, String> {
             doc.format_version, USER_ADAPTERS_FORMAT_VERSION
         ));
     }
+    // Id namespace rules (the file is hand-editable, so the parse boundary
+    // enforces them): a row id may not collide with a built-in id -- the
+    // merge resolves first-match v1-then-user, so a colliding row would be
+    // silently shadowed, and deleting it would drop the built-in's catalog
+    // cache -- and ids must be unique within the document (update finds the
+    // first row, delete removes all: the same broken input must not carry
+    // two different meanings).
+    let builtin_ids: std::collections::HashSet<&str> =
+        v1_adapters().iter().map(|spec| spec.id.as_str()).collect();
+    let mut seen_ids: std::collections::HashSet<&str> = std::collections::HashSet::new();
     for row in &doc.adapters {
         if row.stream_format != StreamFormat::Acp {
             return Err(format!(
                 "adapter `{}` carries stream_format `{:?}`; user-defined adapters only support `acp`",
                 row.id, row.stream_format
             ));
+        }
+        if builtin_ids.contains(row.id.as_str()) {
+            return Err(format!(
+                "adapter id `{}` collides with a built-in adapter id; user-defined rows must not shadow built-ins",
+                row.id
+            ));
+        }
+        if !seen_ids.insert(row.id.as_str()) {
+            return Err(format!("duplicate adapter id `{}` in the registry", row.id));
         }
     }
     Ok(doc.adapters)
@@ -376,6 +395,39 @@ mod tests {
         assert!(!is_valid_command_token("my\tcli"));
         assert!(!is_valid_command_token(r#""my-cli""#));
         assert!(!is_valid_command_token("'my-cli'"));
+    }
+
+    #[test]
+    fn an_id_colliding_with_a_builtin_refuses() {
+        // A hand-edited row cannot shadow a built-in: the merge resolves
+        // first-match v1-then-user, so a colliding id would silently resolve
+        // to the built-in spec (and deleting it would drop the built-in's
+        // catalog cache).
+        let (_dir, store) = temp_store();
+        let builtin_id = v1_adapters()[0].id.as_str().to_string();
+        std::fs::write(
+            store.path(),
+            format!(
+                r#"{{"format_version": 1, "adapters": [{{"id": "{builtin_id}", "name": "n", "command": "c", "stream_format": "acp"}}]}}"#
+            ),
+        )
+        .expect("write");
+        let err = store.list().expect_err("builtin-id collision refuses");
+        assert!(err.contains("built-in adapter id"), "{err}");
+        assert!(store.load_for_picker().is_empty());
+    }
+
+    #[test]
+    fn duplicate_ids_within_the_registry_refuse() {
+        let (_dir, store) = temp_store();
+        std::fs::write(
+            store.path(),
+            r#"{"format_version": 1, "adapters": [{"id": "user:1", "name": "a", "command": "c", "stream_format": "acp"}, {"id": "user:1", "name": "b", "command": "c", "stream_format": "acp"}]}"#,
+        )
+        .expect("write");
+        let err = store.list().expect_err("duplicate id refuses");
+        assert!(err.contains("duplicate adapter id"), "{err}");
+        assert!(store.load_for_picker().is_empty());
     }
 
     #[test]

@@ -2871,12 +2871,16 @@ pub fn update_user_adapter(
 /// (no stale probe result outlives its id). A `default_runtime` naming the
 /// deleted row degrades per-start to built-in through the existing
 /// resolution -- the config field itself is never rewritten, so recreating
-/// the row restores the default (ADR-0098 Decision 3 semantics).
-#[tauri::command]
-pub fn delete_user_adapter(
-    user_store: State<'_, UserAdapterStore>,
-    catalog_store: State<'_, AdapterCatalogStore>,
-    adapter_id: String,
+/// the row with the same id restores the default (ADR-0098 Decision 3
+/// semantics).
+///
+/// The body lives in [`delete_user_adapter_impl`] (the `State` shell minus
+/// the shell) so the registry removal and the cache removal are testable as
+/// one unit over real stores.
+fn delete_user_adapter_impl(
+    user_store: &UserAdapterStore,
+    catalog_store: &AdapterCatalogStore,
+    adapter_id: &str,
 ) -> Result<(), String> {
     user_store.mutate(|rows| {
         let before = rows.len();
@@ -2886,8 +2890,17 @@ pub fn delete_user_adapter(
         }
         Ok(())
     })?;
-    catalog_store.remove_entry(&adapter_id);
+    catalog_store.remove_entry(adapter_id);
     Ok(())
+}
+
+#[tauri::command]
+pub fn delete_user_adapter(
+    user_store: State<'_, UserAdapterStore>,
+    catalog_store: State<'_, AdapterCatalogStore>,
+    adapter_id: String,
+) -> Result<(), String> {
+    delete_user_adapter_impl(&user_store, &catalog_store, &adapter_id)
 }
 
 /// Flip a user-defined adapter's enabled flag (issue #1341): `false` keeps
@@ -4285,6 +4298,52 @@ mod tests {
             )
             .is_some(),
             "recreating the same id restores the default"
+        );
+    }
+
+    /// Issue #1341: the delete command frees the deleted row's catalog-cache
+    /// entry and ONLY that entry -- the command-level wiring (a store-level
+    /// remove alone does not prove the two travel together).
+    #[test]
+    fn delete_user_adapter_frees_exactly_the_deleted_catalog_entry() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let user = UserAdapterStore::new(dir.path().join("user-adapters.json"));
+        let catalog = AdapterCatalogStore::new(
+            dir.path()
+                .join(crate::runtime::acp::catalog_store::CATALOGS_FILE_NAME),
+        );
+        user.mutate(|rows| {
+            rows.push(user_row_fixture("user:deadbeef", "beta-cli", true));
+            Ok(())
+        })
+        .expect("seed row");
+        let entry = AdapterCatalogEntry {
+            probe_kind: crate::runtime::acp::catalog_store::ProbeKind::CodexEventStream,
+            outcome: CachedOutcome::CodexEventStream { models: Vec::new() },
+            probed_at_millis: now_millis(),
+        };
+        catalog.store_entry("user:deadbeef", entry.clone());
+        catalog.store_entry("user:11111111", entry);
+
+        delete_user_adapter_impl(&user, &catalog, "user:deadbeef").expect("delete");
+
+        assert!(user.list().expect("list").is_empty());
+        let catalogs = catalog.load();
+        assert!(
+            !catalogs.contains_key("user:deadbeef"),
+            "the deleted id's cache entry is gone"
+        );
+        assert!(
+            catalogs.contains_key("user:11111111"),
+            "the sibling entry stays"
+        );
+
+        // An unknown id refuses and touches neither store.
+        let err = delete_user_adapter_impl(&user, &catalog, "user:nosuch").expect_err("unknown id");
+        assert!(err.contains("unknown user adapter id"), "{err}");
+        assert!(
+            catalog.load().contains_key("user:11111111"),
+            "a refused delete leaves the cache untouched"
         );
     }
 
