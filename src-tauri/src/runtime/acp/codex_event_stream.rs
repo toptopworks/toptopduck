@@ -511,7 +511,8 @@ pub(super) fn run_codex_event_stream(
     );
     let mut child = match super::process::spawn_turn(
         binary,
-        adapter.argv,
+        &adapter.argv,
+        &adapter.env,
         &model_flags,
         &config_flags,
         &input.cwd,
@@ -613,15 +614,20 @@ pub(super) fn run_codex_event_stream(
                         let thread_id = pump.thread_id.clone().expect("checked above");
                         window_resumes += 1;
                         super::process::kill_and_reap(&mut child);
-                        let resume_argv: Vec<&str> = adapter
+                        let resume_argv: Vec<String> = adapter
                             .argv
                             .iter()
-                            .copied()
-                            .chain(["resume", thread_id.as_str(), WINDOW_CONVERGENCE_NUDGE])
+                            .cloned()
+                            .chain([
+                                "resume".to_string(),
+                                thread_id.to_string(),
+                                WINDOW_CONVERGENCE_NUDGE.to_string(),
+                            ])
                             .collect();
                         match super::process::spawn_turn(
                             binary,
                             &resume_argv,
+                            &adapter.env,
                             &model_flags,
                             &config_flags,
                             &input.cwd,

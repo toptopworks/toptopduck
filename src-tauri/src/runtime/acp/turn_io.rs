@@ -50,12 +50,12 @@ pub(crate) fn build_model_flags(
     thought_level: Option<&str>,
 ) -> Vec<String> {
     let mut flags = Vec::new();
-    if let (Some(flag), Some(id)) = (adapter.model_arg, model) {
+    if let (Some(flag), Some(id)) = (adapter.model_arg.as_deref(), model) {
         flags.push(flag.to_string());
         flags.push(id.to_string());
     }
     if let Some(level) = thought_level {
-        match adapter.effort {
+        match adapter.effort.as_ref() {
             Some(EffortSurface::ConfigKey(key)) => {
                 flags.push("-c".to_string());
                 flags.push(format!("{key}={level}"));
@@ -95,16 +95,17 @@ mod tests {
 
     // --- build_model_flags (ADR-0095/0097) -----------------------------------
 
-    fn stub_spec(model_arg: Option<&'static str>, effort: Option<EffortSurface>) -> AdapterSpec {
+    fn stub_spec(model_arg: Option<String>, effort: Option<EffortSurface>) -> AdapterSpec {
         AdapterSpec {
             id: crate::runtime::acp::adapter::AdapterId::new("stub"),
-            display_name: "stub",
-            binary_names: &["nonexistent"],
-            argv: &["--json"],
+            display_name: "stub".into(),
+            binary_names: vec!["nonexistent".into()],
+            argv: vec!["--json".into()],
             stream_format: crate::runtime::acp::adapter::StreamFormat::CodexEventStream,
             probe_argv: None,
             model_arg,
             effort,
+            env: std::collections::BTreeMap::new(),
         }
     }
 
@@ -112,8 +113,8 @@ mod tests {
     #[test]
     fn model_flags_carry_model_and_effort() {
         let s = stub_spec(
-            Some("--model"),
-            Some(EffortSurface::ConfigKey("model_reasoning_effort")),
+            Some("--model".into()),
+            Some(EffortSurface::ConfigKey("model_reasoning_effort".into())),
         );
         assert_eq!(
             build_model_flags(&s, Some("gpt-5.1"), Some("high")),
@@ -130,8 +131,8 @@ mod tests {
     #[test]
     fn model_flags_empty_without_selection_or_spec_fields() {
         let s = stub_spec(
-            Some("--model"),
-            Some(EffortSurface::ConfigKey("model_reasoning_effort")),
+            Some("--model".into()),
+            Some(EffortSurface::ConfigKey("model_reasoning_effort".into())),
         );
         assert!(build_model_flags(&s, None, None).is_empty());
         let acp_like = stub_spec(None, None);
@@ -151,7 +152,10 @@ mod tests {
     /// constructed at all.
     #[test]
     fn model_flags_carry_argv_shaped_effort() {
-        let s = stub_spec(Some("--model"), Some(EffortSurface::ArgvFlag("--effort")));
+        let s = stub_spec(
+            Some("--model".into()),
+            Some(EffortSurface::ArgvFlag("--effort".into())),
+        );
         assert_eq!(
             build_model_flags(&s, Some("claude-sonnet-4"), Some("high")),
             vec![
@@ -163,7 +167,7 @@ mod tests {
         );
         // A level without the flag spec contributes nothing.
         assert_eq!(
-            build_model_flags(&stub_spec(Some("--model"), None), None, Some("high")),
+            build_model_flags(&stub_spec(Some("--model".into()), None), None, Some("high")),
             Vec::<String>::new()
         );
     }

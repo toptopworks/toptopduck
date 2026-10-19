@@ -667,7 +667,7 @@ impl super::Session {
         // (ADR-0085: serve borrows in place, engine drives in parallel).
         // The kill-log face (#886): captured before the engine takes
         // ownership of the spec below.
-        let runtime_face = adapter.id.as_str();
+        let runtime_face = adapter.id.to_string();
         // The shared phase tap (issue #1242): the engine thread's
         // fold-layer emissions and the gateway serve's authoritative
         // tool-call rows both ride the caller's ONE `on_phase` channel
@@ -853,7 +853,7 @@ impl super::Session {
         let usage = std::mem::take(&mut merged.usage);
         let occupancy = merged.occupancy.take();
         (
-            turn_outcome_from_loop(merged, self.session_id.as_ref(), runtime_face),
+            turn_outcome_from_loop(merged, self.session_id.as_ref(), &runtime_face),
             trace,
             usage,
             occupancy,

@@ -229,6 +229,42 @@ impl AdapterCatalogStore {
             serde_json::to_string_pretty(&catalogs).map_err(|e| format!("serialize: {e}"))?;
         write_atomic(&self.path, &json)
     }
+
+    /// Remove ONE adapter's cache entry, leaving every other adapter's entry
+    /// untouched (issue #1341: deleting a user-defined adapter must not leave
+    /// a stale catalog behind its gone id). Same write posture as
+    /// [`Self::store_entry`]: read-modify-write under the in-process lock,
+    /// one atomic write, failures logged and swallowed (the cache is an
+    /// enhancement). A missing key is a no-op -- no write at all.
+    pub fn remove_entry(&self, adapter_id: &str) {
+        let Ok(_guard) = self.write_lock.lock() else {
+            log::warn!(
+                target: "toptopduck::catalog_cache",
+                "catalog cache write lock poisoned; skipping cache remove for `{adapter_id}`"
+            );
+            return;
+        };
+        let mut catalogs = self.load();
+        if catalogs.remove(adapter_id).is_none() {
+            return;
+        }
+        let json = match serde_json::to_string_pretty(&catalogs) {
+            Ok(json) => json,
+            Err(e) => {
+                log::warn!(
+                    target: "toptopduck::catalog_cache",
+                    "catalog cache remove-serialize failed for `{adapter_id}`: {e}"
+                );
+                return;
+            }
+        };
+        if let Err(detail) = write_atomic(&self.path, &json) {
+            log::warn!(
+                target: "toptopduck::catalog_cache",
+                "catalog cache remove-write failed for `{adapter_id}`: {detail}"
+            );
+        }
+    }
 }
 
 /// Parse a cache document string into the typed map (the pure seam the unit
@@ -397,6 +433,28 @@ mod tests {
         assert_eq!(loaded.get("gemini-cli"), Some(&acp_entry("sonnet", 3_000)));
         assert_eq!(loaded.get("codex"), Some(&codex_entry(2_000)));
         assert_eq!(loaded.len(), 2);
+    }
+
+    /// Issue #1341: deleting a user-defined adapter removes exactly its own
+    /// cache entry; other adapters' entries survive, and removing a missing
+    /// key is a no-op.
+    #[test]
+    fn remove_entry_removes_only_that_adapter() {
+        let (_dir, store) = temp_store();
+        store.store_entry("gemini-cli", acp_entry("opus", 1_000));
+        store.store_entry("user:abcd1234", acp_entry("m1", 2_000));
+        store.remove_entry("user:abcd1234");
+        let loaded = store.load();
+        assert!(!loaded.contains_key("user:abcd1234"));
+        assert_eq!(
+            loaded.get("gemini-cli"),
+            Some(&acp_entry("opus", 1_000)),
+            "sibling entries survive the remove"
+        );
+        // Removing a key that is already gone is a no-op (no error, no
+        // rewrite that could disturb anything).
+        store.remove_entry("user:abcd1234");
+        assert_eq!(store.load().len(), 1);
     }
 
     #[test]

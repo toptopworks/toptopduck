@@ -43,7 +43,10 @@ export type RuntimeSectionProps = {
   onDefaultRuntimeChanged: (cfg: AppConfig) => void;
   /** Narrowed pass-through: the runtime pane's children fire key / test /
    *  probe / defaultRuntime, never sessionsDir. */
-  onIpcBusy: (channel: "key" | "test" | "probe" | "defaultRuntime", busy: boolean) => void;
+  onIpcBusy: (
+    channel: "key" | "test" | "probe" | "defaultRuntime" | "userAdapter",
+    busy: boolean,
+  ) => void;
   initialEditProfileId?: string;
   profilesControlsRef: React.MutableRefObject<ProfilesControls | null>;
 };

@@ -439,6 +439,26 @@ pub fn run() {
             };
             app.manage(catalog_store);
 
+            // User-defined adapter registry (issue #1341):
+            // `user-adapters.json` under the OS app-data dir, same resolution
+            // + honest temp-dir fallback as the catalog cache. Env rows may
+            // carry plaintext keys, hence the private-permission write face
+            // inside the store.
+            let user_adapter_store = match app.path().app_data_dir() {
+                Ok(dir) => runtime::acp::user_adapter_store::UserAdapterStore::new(dir.join(
+                    runtime::acp::user_adapter_store::USER_ADAPTERS_FILE_NAME,
+                )),
+                Err(e) => {
+                    log::warn!(
+                        "failed to resolve app-data dir; user adapter registry falls back to a temp path: {e}"
+                    );
+                    runtime::acp::user_adapter_store::UserAdapterStore::new(
+                        std::env::temp_dir().join("toptopduck-user-adapters.json"),
+                    )
+                }
+            };
+            app.manage(user_adapter_store);
+
             // System tray residency (ADR-0125, issue #1140). The tray is the
             // resident surface while the main window is hidden: closing the
             // window hides it instead of killing the process, because a
@@ -563,6 +583,11 @@ pub fn run() {
             commands::list_adapters,
             commands::rescan_adapters,
             commands::probe_adapter,
+            commands::list_user_adapters,
+            commands::create_user_adapter,
+            commands::update_user_adapter,
+            commands::delete_user_adapter,
+            commands::set_user_adapter_enabled,
             commands::get_adapter_catalogs,
             commands::get_session_runtime,
             commands::set_session_runtime,

@@ -654,9 +654,14 @@ impl ChildHandle {
 }
 
 fn spawn(binary: &Path, adapter: &AdapterSpec) -> Result<ChildHandle, String> {
-    super::process::spawn_piped(binary, adapter.argv, std::process::Stdio::inherit())
-        .map(|inner| ChildHandle { inner })
-        .map_err(|e| format!("failed to spawn ACP agent `{}`: {e}", adapter.id))
+    super::process::spawn_piped(
+        binary,
+        &adapter.argv,
+        &adapter.env,
+        std::process::Stdio::inherit(),
+    )
+    .map(|inner| ChildHandle { inner })
+    .map_err(|e| format!("failed to spawn ACP agent `{}`: {e}", adapter.id))
 }
 
 // ---------------------------------------------------------------------------
@@ -2888,13 +2893,14 @@ mod tests {
     fn codex_event_stream_dispatches_to_driver() {
         let spec = AdapterSpec {
             id: crate::runtime::acp::adapter::AdapterId::new("stub-test"),
-            display_name: "stub-test",
-            binary_names: &["nonexistent"],
-            argv: &["--json"],
+            display_name: "stub-test".into(),
+            binary_names: vec!["nonexistent".into()],
+            argv: vec!["--json".into()],
             stream_format: StreamFormat::CodexEventStream,
-            probe_argv: Some(&["probe"]),
+            probe_argv: Some(vec!["probe".into()]),
             model_arg: None,
             effort: None,
+            env: std::collections::BTreeMap::new(),
         };
         let cancel = Arc::new(CancelToken::new());
         let engine = AcpEngine::new(spec, cancel);
@@ -2937,13 +2943,18 @@ mod tests {
     fn claude_stream_json_dispatches_to_driver() {
         let spec = AdapterSpec {
             id: crate::runtime::acp::adapter::AdapterId::new("stub-claude"),
-            display_name: "stub-claude",
-            binary_names: &["nonexistent"],
-            argv: &["--print", "--output-format", "stream-json"],
+            display_name: "stub-claude".into(),
+            binary_names: vec!["nonexistent".into()],
+            argv: vec![
+                "--print".into(),
+                "--output-format".into(),
+                "stream-json".into(),
+            ],
             stream_format: StreamFormat::ClaudeStreamJson,
-            probe_argv: Some(&["probe"]),
+            probe_argv: Some(vec!["probe".into()]),
             model_arg: None,
             effort: None,
+            env: std::collections::BTreeMap::new(),
         };
         let cancel = Arc::new(CancelToken::new());
         let engine = AcpEngine::new(spec, cancel);

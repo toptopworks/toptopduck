@@ -1522,6 +1522,37 @@ fn acp_turn_injects_model_and_thought_level() {
     );
 }
 
+/// Issue #1341: a spec's env map (a user-defined adapter's credentials /
+/// config) reaches the spawned CLI -- observed via the fixture's trace file,
+/// the same assertable face the set-option injection test uses.
+#[test]
+fn acp_turn_injects_the_spec_env_into_the_spawn() {
+    let cancel = Arc::new(CancelToken::new());
+    let mut spec = gemini_cli();
+    spec.env.insert(
+        "ACP_FAKE_ENV_PROBE".to_string(),
+        "delivered-by-spec-1341".to_string(),
+    );
+    let eng = AcpEngine::new(spec, cancel).with_caps(24, Some(std::time::Duration::from_secs(10)));
+    let approval = ApprovalState::new();
+    let sink = RecordingSink::default();
+    let trace = TraceFile::new();
+    let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    std::env::set_var("ACP_FAKE_SCENARIO", "text_reply");
+    std::env::set_var("ACP_FAKE_TRACE_FILE", &trace.path);
+    // The harness env does NOT carry the probe var: the only delivery path
+    // is the spec's env map through the spawn (a mutant that drops the envs
+    // pass leaves the trace without the line).
+    std::env::remove_var("ACP_FAKE_ENV_PROBE");
+    let outcome = eng.run(&input(), &fake_cli(), &approval, &sink, |_| {});
+    assert!(matches!(outcome.termination, Termination::Text(_)));
+    let got = trace.read_all();
+    assert!(
+        got.contains("ACP_FAKE_RECEIVED_ENV=delivered-by-spec-1341"),
+        "the spec's env must reach the spawned CLI; trace: {got}"
+    );
+}
+
 /// A CLI that rejects the config injection (RPC error on
 /// `session/set_config_option`) fails the turn honestly as a Runtime
 /// naming the config id and the rejected value -- the acknowledged posture,

@@ -91,6 +91,13 @@ fn spawn_heartbeat() {
 
 fn main() {
     let scenario = std::env::var("ACP_FAKE_SCENARIO").unwrap_or_else(|_| "text_reply".into());
+    // Env-injection observability (issue #1341): when the harness sets
+    // ACP_FAKE_ENV_PROBE, trace the value the SPAWN actually delivered -- the
+    // one assertable face of the spec's env channel (stdout is the engine's
+    // protocol channel; stderr inherits to the CI console).
+    if let Ok(value) = std::env::var("ACP_FAKE_ENV_PROBE") {
+        trace_line(&format!("ACP_FAKE_RECEIVED_ENV={value}"));
+    }
     // The silent-handshake scenario must still be observably alive (its
     // whole point is to hang past the probe's wall-clock timeout).
     if scenario == "handshake_silent" {

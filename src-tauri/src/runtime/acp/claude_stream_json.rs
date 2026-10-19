@@ -435,7 +435,8 @@ pub(super) fn run_claude_stream_json(
     );
     let mut child = match super::process::spawn_turn(
         binary,
-        adapter.argv,
+        &adapter.argv,
+        &adapter.env,
         &model_flags,
         &mcp_flags,
         &input.cwd,
