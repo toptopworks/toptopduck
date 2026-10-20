@@ -7,6 +7,7 @@ import {
   isSingleTokenCommand,
   parseArgGroups,
 } from "../user-runtime-form";
+import { adapterKeys } from "../../../session/queryKeys";
 import {
   deleteUserAdapter,
   listUserAdapters,
@@ -157,23 +158,35 @@ describe("UserRuntimesSection", () => {
   it("toggles a row's enabled flag", async () => {
     vi.mocked(listUserAdapters).mockResolvedValue([makeRow()]);
     vi.mocked(setUserAdapterEnabled).mockResolvedValueOnce(undefined);
-    renderSettings(
+    // The mutation must invalidate the picker-wide `all()` face, not just
+    // the pane's own `user()` rows: the catalogs key sits under `all()` but
+    // NOT under `user()`, so it turns invalid only if the broad invalidation
+    // fired. It has no active observer here, so the flag survives without a
+    // refetch race.
+    const { queryClient } = renderSettings(
       <UserRuntimesSection onEdit={vi.fn()} onIpcBusy={vi.fn()} />,
     );
+    queryClient.setQueryData(adapterKeys.catalogs(), {});
     fireEvent.click(
       await screen.findByRole("switch", { name: "Toggle adapter My CLI" }),
     );
     await waitFor(() =>
       expect(setUserAdapterEnabled).toHaveBeenCalledWith("user:11111111", false),
     );
+    await waitFor(() =>
+      expect(
+        queryClient.getQueryState(adapterKeys.catalogs())?.isInvalidated,
+      ).toBe(true),
+    );
   });
 
   it("deletes a row only after the confirm dialog", async () => {
     vi.mocked(listUserAdapters).mockResolvedValue([makeRow()]);
     vi.mocked(deleteUserAdapter).mockResolvedValueOnce(undefined);
-    renderSettings(
+    const { queryClient } = renderSettings(
       <UserRuntimesSection onEdit={vi.fn()} onIpcBusy={vi.fn()} />,
     );
+    queryClient.setQueryData(adapterKeys.catalogs(), {});
     fireEvent.click(
       await screen.findByRole("button", { name: "Delete adapter My CLI" }),
     );
@@ -184,6 +197,11 @@ describe("UserRuntimesSection", () => {
     fireEvent.click(screen.getByRole("button", { name: /^Delete$/ }));
     await waitFor(() =>
       expect(deleteUserAdapter).toHaveBeenCalledWith("user:11111111"),
+    );
+    await waitFor(() =>
+      expect(
+        queryClient.getQueryState(adapterKeys.catalogs())?.isInvalidated,
+      ).toBe(true),
     );
   });
 

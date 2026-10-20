@@ -1274,6 +1274,38 @@ describe("LocalCliTab custom CLI adapter editor (issue #1341)", () => {
     });
   });
 
+  it("removes an env row and saves an empty record", async () => {
+    // The remove seam rides the shared EnvRowsEditor (issue #1343): deleting
+    // the last row lands on the empty-state hint and the save drops the env
+    // key entirely instead of persisting the seeded-but-emptied row.
+    const saved = makeRow({ env: {} });
+    vi.mocked(createUserAdapter).mockResolvedValueOnce(saved);
+    renderTab();
+    fireEvent.click(await screen.findByRole("button", { name: /^Add$/ }));
+
+    const textboxes = screen.getAllByRole("textbox");
+    fireEvent.change(textboxes[0], { target: { value: "My CLI" } });
+    fireEvent.change(textboxes[1], { target: { value: "my-cli" } });
+    fireEvent.change(textboxes[2], { target: { value: "--acp" } });
+    fireEvent.click(
+      screen.getByRole("button", { name: /^Environment variables$/ }),
+    );
+    fireEvent.change(screen.getByLabelText("Env name (row 1)"), {
+      target: { value: "K" },
+    });
+    fireEvent.change(screen.getByLabelText("Env value (row 1)"), {
+      target: { value: "v" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Remove env (row 1)" }));
+    expect(await screen.findByText(/No environment variables/i)).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: /^Add$/ }));
+    await waitFor(() => expect(createUserAdapter).toHaveBeenCalledTimes(1));
+    expect(createUserAdapter).toHaveBeenCalledWith(
+      expect.objectContaining({ env: {} }),
+    );
+  });
+
   it("shows the launch-failure wording when the probe rejects NotDetected", async () => {
     vi.mocked(listUserAdapters).mockResolvedValue([makeRow()]);
     // A fresh Error instance per rejection (the once-chain pitfall).

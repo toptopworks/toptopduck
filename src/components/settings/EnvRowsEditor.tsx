@@ -4,7 +4,8 @@ import { Trash2 } from "lucide-react";
 import { Input } from "../ui/input";
 import { RowRemoveButton } from "./settings-chrome";
 
-/** One editable env row (blank keys are dropped at save). */
+/** One editable env row -- rendered and propagated verbatim; the save-time
+ * blank-key drop is each consumer's policy, not the editor's. */
 export interface EnvRow {
   key: string;
   value: string;
