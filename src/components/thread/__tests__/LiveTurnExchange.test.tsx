@@ -10,6 +10,7 @@
 // faces), plus the streaming prose postures (ADR-0120) and the trailing
 // thinking-status postures (issue #1167).
 
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { describe, expect, it } from "vitest";
 import { render, screen } from "@testing-library/react";
 import { IntlProvider } from "react-intl";
@@ -18,17 +19,23 @@ import { catalogFor } from "../../../i18n";
 import { LiveTurnExchange } from "../LiveTurnExchange";
 import type { LiveRoundRow, LiveTurn } from "../../../session/useTurnFlow";
 
+// The attribution marker reads the shared adapter-table cache (issue #1351),
+// so the exchange needs a QueryClient like the app tree provides.
+const queryClient = new QueryClient();
+
 function renderExchange(liveTurn: LiveTurn, waitStartedAt: number | null = null) {
   return render(
     <IntlProvider locale="zh-CN" messages={catalogFor("zh-CN")}>
       <TooltipProvider>
-        <LiveTurnExchange
-          liveTurn={liveTurn}
-          waitStartedAt={waitStartedAt}
-          mentionedDataset={null}
-          onRespondApproval={() => {}}
-          onThinkingExpandedChange={() => {}}
-        />
+        <QueryClientProvider client={queryClient}>
+          <LiveTurnExchange
+            liveTurn={liveTurn}
+            waitStartedAt={waitStartedAt}
+            mentionedDataset={null}
+            onRespondApproval={() => {}}
+            onThinkingExpandedChange={() => {}}
+          />
+        </QueryClientProvider>
       </TooltipProvider>
     </IntlProvider>,
   );

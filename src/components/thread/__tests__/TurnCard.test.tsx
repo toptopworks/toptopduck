@@ -8,6 +8,7 @@
 // User-actor badge derivation hand-off, the per-outcome width caps, the
 // folds, the cancel-reason split (#883), and the textual markdown (#827).
 
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { describe, expect, it } from "vitest";
 import { fireEvent, render, screen } from "@testing-library/react";
 import { IntlProvider } from "react-intl";
@@ -16,6 +17,10 @@ import { catalogFor, type EffectiveLocale } from "../../../i18n";
 import { TurnCard } from "../TurnCard";
 import type { DatasetDescriptor } from "../../../types/dataset";
 import type { TextKind, TraceEntry, TurnRecord } from "../../../types/thread";
+
+// The attribution marker reads the shared adapter-table cache (issue #1351),
+// so the card tree needs a QueryClient like the app tree provides.
+const queryClient = new QueryClient();
 
 // Thread chrome routes through react-intl (ADR-0052); zh-CN matches the
 // shared fixture convention, and the marker's label is the raw adapter id
@@ -26,19 +31,21 @@ function cardEl(record: TurnRecord, defaultOpenDetail?: boolean, locale: Effecti
   return (
     <IntlProvider locale={locale} messages={catalogFor(locale)}>
       <TooltipProvider>
-        <TurnCard
-          record={record}
-          selectedResult={null}
-          onSelectResult={() => {}}
-          staleAnchor={undefined}
-          hasJumpTarget={false}
-          onStaleChipJump={undefined}
-          mentionedDataset={null}
-          skillIndex={undefined}
-          onRetryTurn={undefined}
-          busy={false}
-          defaultOpenDetail={defaultOpenDetail}
-        />
+        <QueryClientProvider client={queryClient}>
+          <TurnCard
+            record={record}
+            selectedResult={null}
+            onSelectResult={() => {}}
+            staleAnchor={undefined}
+            hasJumpTarget={false}
+            onStaleChipJump={undefined}
+            mentionedDataset={null}
+            skillIndex={undefined}
+            onRetryTurn={undefined}
+            busy={false}
+            defaultOpenDetail={defaultOpenDetail}
+          />
+        </QueryClientProvider>
       </TooltipProvider>
     </IntlProvider>
   );

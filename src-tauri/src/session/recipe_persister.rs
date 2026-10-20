@@ -641,6 +641,7 @@ mod tests {
                 PersistedTurnProvenance {
                     runtime: Some(RuntimeKind::BuiltIn),
                     adapter_id: None,
+                    adapter_display_name: None,
                     skills: Vec::new(),
                 },
             ),
@@ -848,6 +849,7 @@ mod tests {
         let provenance = PersistedTurnProvenance {
             runtime: Some(RuntimeKind::External),
             adapter_id: Some("gemini-cli".into()),
+            adapter_display_name: None,
             skills: vec![],
         };
 

@@ -356,6 +356,14 @@ pub struct TurnProvenance {
     /// renders the honest "External (unrecorded)" degradation for them).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub adapter_id: Option<String>,
+    /// The adapter's display name snapshotted at the turn's stamp time
+    /// (issue #1351): the tombstone the attribution line falls back to when
+    /// the adapter row no longer resolves (deleted or disabled). `None` on
+    /// External turns persisted before the field existed (`#[serde(default)]`,
+    /// no migration -- the live registry then resolves the current name, or
+    /// the raw id renders, the honest floor).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub adapter_display_name: Option<String>,
     /// The skills INVOKED on this turn (ADR-0119, issue #983): one row per
     /// name in first-invocation order, each carrying the `content_hash`
     /// pinned at the name's last invocation of the turn so the frontend can
@@ -1716,10 +1724,33 @@ mod tests {
         let provenance = TurnProvenance {
             runtime: Some(RuntimeKind::External),
             adapter_id: Some("gemini-cli".into()),
+            adapter_display_name: None,
             skills: Vec::new(),
         };
         let json = serde_json::to_string(&provenance).expect("serialize");
         assert_eq!(json, r#"{"runtime":"External","adapter_id":"gemini-cli"}"#);
+        let back: TurnProvenance = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(back, provenance);
+    }
+
+    #[test]
+    fn external_provenance_round_trips_adapter_display_name() {
+        // Issue #1351: an External turn persists the adapter's display name
+        // alongside the id -- the tombstone that keeps the attribution line
+        // readable after the adapter row is deleted or disabled. The name
+        // survives the serialize -> deserialize cycle verbatim; absent, the
+        // key omits (the strictly-additive serde-default degrade).
+        let provenance = TurnProvenance {
+            runtime: Some(RuntimeKind::External),
+            adapter_id: Some("user:ba3b2de2".into()),
+            adapter_display_name: Some("My local CLI".into()),
+            skills: Vec::new(),
+        };
+        let json = serde_json::to_string(&provenance).expect("serialize");
+        assert_eq!(
+            json,
+            r#"{"runtime":"External","adapter_id":"user:ba3b2de2","adapter_display_name":"My local CLI"}"#
+        );
         let back: TurnProvenance = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(back, provenance);
     }
@@ -1734,6 +1765,10 @@ mod tests {
         let back: TurnProvenance = serde_json::from_str(legacy).expect("deserialize");
         assert_eq!(back.runtime, Some(RuntimeKind::External));
         assert_eq!(back.adapter_id, None, "missing adapter id degrades to None");
+        assert_eq!(
+            back.adapter_display_name, None,
+            "missing name degrades to None"
+        );
     }
 
     #[test]
@@ -1744,6 +1779,7 @@ mod tests {
         let provenance = TurnProvenance {
             runtime: Some(RuntimeKind::BuiltIn),
             adapter_id: None,
+            adapter_display_name: None,
             skills: Vec::new(),
         };
         let json = serde_json::to_string(&provenance).expect("serialize");
@@ -1843,6 +1879,7 @@ mod tests {
         let provenance = TurnProvenance {
             runtime: Some(RuntimeKind::BuiltIn),
             adapter_id: None,
+            adapter_display_name: None,
             skills: vec![SkillProvenance {
                 name: "sql-coach".into(),
                 content_hash: "abc123".into(),
@@ -1878,6 +1915,7 @@ mod tests {
         let provenance = TurnProvenance {
             runtime: Some(RuntimeKind::BuiltIn),
             adapter_id: None,
+            adapter_display_name: None,
             skills: vec![
                 SkillProvenance {
                     name: "sql-coach".into(),
@@ -1910,6 +1948,7 @@ mod tests {
             !TurnProvenance {
                 runtime: Some(RuntimeKind::External),
                 adapter_id: None,
+                adapter_display_name: None,
                 skills: Vec::new(),
             }
             .is_empty(),
@@ -1919,6 +1958,7 @@ mod tests {
             !TurnProvenance {
                 runtime: None,
                 adapter_id: None,
+                adapter_display_name: None,
                 skills: vec![SkillProvenance {
                     name: "s".into(),
                     content_hash: String::new(),

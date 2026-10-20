@@ -669,9 +669,16 @@ impl TurnAudit {
         skills: Vec<SkillProvenance>,
         runtime: TurnRuntime,
     ) -> Self {
-        let (runtime_kind, adapter_id) = match &runtime {
-            TurnRuntime::BuiltIn => (RuntimeKind::BuiltIn, None),
-            TurnRuntime::External { adapter_id } => (RuntimeKind::External, adapter_id.clone()),
+        let (runtime_kind, adapter_id, adapter_display_name) = match &runtime {
+            TurnRuntime::BuiltIn => (RuntimeKind::BuiltIn, None, None),
+            TurnRuntime::External {
+                adapter_id,
+                display_name,
+            } => (
+                RuntimeKind::External,
+                adapter_id.clone(),
+                display_name.clone(),
+            ),
         };
         Self {
             trace: rounds
@@ -683,6 +690,7 @@ impl TurnAudit {
             provenance: PersistedTurnProvenance {
                 runtime: Some(runtime_kind),
                 adapter_id,
+                adapter_display_name,
                 skills,
             },
         }
@@ -1263,8 +1271,11 @@ impl Session {
             TurnRuntime::BuiltIn => Some(LastRuntime::BuiltIn),
             TurnRuntime::External {
                 adapter_id: Some(id),
+                ..
             } => Some(LastRuntime::External(id.clone())),
-            TurnRuntime::External { adapter_id: None } => self.runtime_facts.last_runtime.clone(),
+            TurnRuntime::External {
+                adapter_id: None, ..
+            } => self.runtime_facts.last_runtime.clone(),
         };
         // ADR-0089 Decision 4: on the first terminal turn, auto-name the
         // session from the first question's bounded truncation (ADR-0039
@@ -2412,6 +2423,7 @@ mod tests {
         let harvested_provenance = PersistedTurnProvenance {
             runtime: Some(RuntimeKind::External),
             adapter_id: None,
+            adapter_display_name: None,
             skills: vec![],
         };
 
@@ -2519,6 +2531,9 @@ mod tests {
             Vec::new(),
             TurnRuntime::External {
                 adapter_id: Some("gemini-cli".into()),
+                // Issue #1351: a display name distinct from the id pins the
+                // passthrough (an equal pair could pass by coincidence).
+                display_name: Some("Gemini CLI".into()),
             },
             None,
             Vec::new(),
@@ -2564,7 +2579,8 @@ mod tests {
         assert_eq!(
             external.0.provenance.runtime,
             Some(TurnRuntime::External {
-                adapter_id: Some("gemini-cli".into())
+                adapter_id: Some("gemini-cli".into()),
+                display_name: Some("Gemini CLI".into()),
             }),
             "the external turn's wire provenance names the adapter"
         );
@@ -2597,6 +2613,7 @@ mod tests {
             Some(PersistedTurnProvenance {
                 runtime: Some(RuntimeKind::External),
                 adapter_id: Some("gemini-cli".into()),
+                adapter_display_name: Some("Gemini CLI".into()),
                 skills: Vec::new(),
             })
         );
@@ -2605,6 +2622,7 @@ mod tests {
             Some(PersistedTurnProvenance {
                 runtime: Some(RuntimeKind::BuiltIn),
                 adapter_id: None,
+                adapter_display_name: None,
                 skills: Vec::new(),
             })
         );

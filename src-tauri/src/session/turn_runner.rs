@@ -179,13 +179,15 @@ impl super::Session {
         // top -- the same dispatch the match below reads, taken BEFORE it so
         // the recorded attribution is the turn's own even if the selector
         // changes while the turn runs. An external turn names its adapter
-        // (the stable id, persisted + mirrored across IPC); a built-in turn
-        // records only the kind. Every outcome kind records it, including a
-        // failed external spawn -- the turn was still the external runtime's
-        // to run.
+        // (the stable id, persisted + mirrored across IPC) and snapshots its
+        // display name (issue #1351 -- the id may outlive the registry row,
+        // the name rides the turn); a built-in turn records only the kind.
+        // Every outcome kind records it, including a failed external spawn
+        // -- the turn was still the external runtime's to run.
         let attribution = match &self.external_runtime {
             Some(spec) => TurnRuntime::External {
                 adapter_id: Some(spec.id.as_str().to_string()),
+                display_name: Some(spec.display_name.clone()),
             },
             None => TurnRuntime::BuiltIn,
         };

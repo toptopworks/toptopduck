@@ -1,3 +1,4 @@
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { describe, expect, it, vi } from "vitest";
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { IntlProvider } from "react-intl";
@@ -45,11 +46,17 @@ const mockDataset: DatasetDescriptor = {
 // Thread chrome routes through react-intl (ADR-0052). Renders the element inside
 // a zh-CN IntlProvider so the Chinese chrome assertions hold. Wraps in
 // TooltipProvider too: the rail card truncation sites use Radix Tooltip
-// (ADR-0050/0054, issue #106), which needs the context App normally provides.
+// (ADR-0050/0054, issue #106), which needs the context App normally provides,
+// and in a QueryClient for the attribution marker's adapter-table read
+// (issue #1351).
+const queryClient = new QueryClient();
+
 function renderThread(ui: ReactElement) {
   return render(
     <IntlProvider locale="zh-CN" messages={catalogFor("zh-CN")}>
-      <TooltipProvider>{ui}</TooltipProvider>
+      <QueryClientProvider client={queryClient}>
+        <TooltipProvider>{ui}</TooltipProvider>
+      </QueryClientProvider>
     </IntlProvider>,
   );
 }
@@ -1773,15 +1780,17 @@ describe("Thread", () => {
       // record appends -- the chip count stays one, now on the settled side.
       rerender(
         <IntlProvider locale="zh-CN" messages={catalogFor("zh-CN")}>
-          <TooltipProvider>
-            <Thread
-              entries={[turnEntry(record)]}
-              selectedResult={null}
-              onSelectResult={() => {}}
-              datasetLabels={labels}
-              liveTurn={null}
-            />
-          </TooltipProvider>
+          <QueryClientProvider client={queryClient}>
+            <TooltipProvider>
+              <Thread
+                entries={[turnEntry(record)]}
+                selectedResult={null}
+                onSelectResult={() => {}}
+                datasetLabels={labels}
+                liveTurn={null}
+              />
+            </TooltipProvider>
+          </QueryClientProvider>
         </IntlProvider>,
       );
       expect(screen.getByText(/→员工表/)).toBeInTheDocument();
@@ -1856,14 +1865,16 @@ describe("Thread", () => {
       // produces).
       rerender(
         <IntlProvider locale="zh-CN" messages={catalogFor("zh-CN")}>
-          <TooltipProvider>
-            <Thread
-              entries={[turnEntry(record)]}
-              selectedResult={null}
-              onSelectResult={() => {}}
-              liveTurn={null}
-            />
-          </TooltipProvider>
+          <QueryClientProvider client={queryClient}>
+            <TooltipProvider>
+              <Thread
+                entries={[turnEntry(record)]}
+                selectedResult={null}
+                onSelectResult={() => {}}
+                liveTurn={null}
+              />
+            </TooltipProvider>
+          </QueryClientProvider>
         </IntlProvider>,
       );
       // Issue #1282: the settled card tucks its process behind the turn-level
@@ -1932,14 +1943,16 @@ describe("Thread", () => {
       fireEvent.click(screen.getByRole("button", { name: "思考 · 0.9s" }));
       rerender(
         <IntlProvider locale="zh-CN" messages={catalogFor("zh-CN")}>
-          <TooltipProvider>
-            <Thread
-              entries={[turnEntry(record)]}
-              selectedResult={null}
-              onSelectResult={() => {}}
-              liveTurn={null}
-            />
-          </TooltipProvider>
+          <QueryClientProvider client={queryClient}>
+            <TooltipProvider>
+              <Thread
+                entries={[turnEntry(record)]}
+                selectedResult={null}
+                onSelectResult={() => {}}
+                liveTurn={null}
+              />
+            </TooltipProvider>
+          </QueryClientProvider>
         </IntlProvider>,
       );
       // Issue #1282: expand the settled card's process head to reach the folds.
@@ -1974,17 +1987,19 @@ describe("Thread", () => {
       // A call starts in the same round: the fold must not snap shut.
       rerender(
         <IntlProvider locale="zh-CN" messages={catalogFor("zh-CN")}>
-          <TooltipProvider>
-            <Thread
-              entries={[]}
-              selectedResult={null}
-              onSelectResult={() => {}}
-              liveTurn={{
-                ...liveTurn,
-                rounds: [liveRound({ thinking, rows: [liveRow({ key: "call-0" })] })],
-              }}
-            />
-          </TooltipProvider>
+          <QueryClientProvider client={queryClient}>
+            <TooltipProvider>
+              <Thread
+                entries={[]}
+                selectedResult={null}
+                onSelectResult={() => {}}
+                liveTurn={{
+                  ...liveTurn,
+                  rounds: [liveRound({ thinking, rows: [liveRow({ key: "call-0" })] })],
+                }}
+              />
+            </TooltipProvider>
+          </QueryClientProvider>
         </IntlProvider>,
       );
       const toggle = document.querySelector(".live-turn-exchange .thinking-toggle");
@@ -2023,34 +2038,38 @@ describe("Thread", () => {
       // must survive it.
       rerender(
         <IntlProvider locale="zh-CN" messages={catalogFor("zh-CN")}>
-          <TooltipProvider>
-            <Thread
-              entries={[]}
-              selectedResult={null}
-              onSelectResult={() => {}}
-              liveTurn={{
-                ...liveTurn,
-                step: 2,
-                rounds: [
-                  liveRound({ thinking: openedThinking }),
-                  liveRound({ rows: [liveRow({ key: "call-0" })] }),
-                ],
-              }}
-            />
-          </TooltipProvider>
+          <QueryClientProvider client={queryClient}>
+            <TooltipProvider>
+              <Thread
+                entries={[]}
+                selectedResult={null}
+                onSelectResult={() => {}}
+                liveTurn={{
+                  ...liveTurn,
+                  step: 2,
+                  rounds: [
+                    liveRound({ thinking: openedThinking }),
+                    liveRound({ rows: [liveRow({ key: "call-0" })] }),
+                  ],
+                }}
+              />
+            </TooltipProvider>
+          </QueryClientProvider>
         </IntlProvider>,
       );
       // The settle swap in one commit: the opened fold still seeds.
       rerender(
         <IntlProvider locale="zh-CN" messages={catalogFor("zh-CN")}>
-          <TooltipProvider>
-            <Thread
-              entries={[turnEntry(record)]}
-              selectedResult={null}
-              onSelectResult={() => {}}
-              liveTurn={null}
-            />
-          </TooltipProvider>
+          <QueryClientProvider client={queryClient}>
+            <TooltipProvider>
+              <Thread
+                entries={[turnEntry(record)]}
+                selectedResult={null}
+                onSelectResult={() => {}}
+                liveTurn={null}
+              />
+            </TooltipProvider>
+          </QueryClientProvider>
         </IntlProvider>,
       );
       // Issue #1282: expand the settled card's process head to reach the folds.
@@ -2092,14 +2111,16 @@ describe("Thread", () => {
       // replacement block and the fold stays open on it.
       rerender(
         <IntlProvider locale="zh-CN" messages={catalogFor("zh-CN")}>
-          <TooltipProvider>
-            <Thread
-              entries={[]}
-              selectedResult={null}
-              onSelectResult={() => {}}
-              liveTurn={{ ...liveTurn, rounds: [liveRound({ thinking: replacedThinking })] }}
-            />
-          </TooltipProvider>
+          <QueryClientProvider client={queryClient}>
+            <TooltipProvider>
+              <Thread
+                entries={[]}
+                selectedResult={null}
+                onSelectResult={() => {}}
+                liveTurn={{ ...liveTurn, rounds: [liveRound({ thinking: replacedThinking })] }}
+              />
+            </TooltipProvider>
+          </QueryClientProvider>
         </IntlProvider>,
       );
       const liveToggle = document.querySelector(".live-turn-exchange .thinking-toggle");
@@ -2108,14 +2129,16 @@ describe("Thread", () => {
       // The settle swap: the seed keys on the replacement reference.
       rerender(
         <IntlProvider locale="zh-CN" messages={catalogFor("zh-CN")}>
-          <TooltipProvider>
-            <Thread
-              entries={[turnEntry(record)]}
-              selectedResult={null}
-              onSelectResult={() => {}}
-              liveTurn={null}
-            />
-          </TooltipProvider>
+          <QueryClientProvider client={queryClient}>
+            <TooltipProvider>
+              <Thread
+                entries={[turnEntry(record)]}
+                selectedResult={null}
+                onSelectResult={() => {}}
+                liveTurn={null}
+              />
+            </TooltipProvider>
+          </QueryClientProvider>
         </IntlProvider>,
       );
       // Issue #1282: expand the settled card's process head to reach the fold.
@@ -2151,14 +2174,16 @@ describe("Thread", () => {
       fireEvent.click(toggle); // re-close before the settle
       rerender(
         <IntlProvider locale="zh-CN" messages={catalogFor("zh-CN")}>
-          <TooltipProvider>
-            <Thread
-              entries={[turnEntry(record)]}
-              selectedResult={null}
-              onSelectResult={() => {}}
-              liveTurn={null}
-            />
-          </TooltipProvider>
+          <QueryClientProvider client={queryClient}>
+            <TooltipProvider>
+              <Thread
+                entries={[turnEntry(record)]}
+                selectedResult={null}
+                onSelectResult={() => {}}
+                liveTurn={null}
+              />
+            </TooltipProvider>
+          </QueryClientProvider>
         </IntlProvider>,
       );
       // Issue #1282: the head expansion reveals the fold; the re-closed
@@ -2205,14 +2230,16 @@ describe("Thread", () => {
       // Turn A settles: its fold mounts already open.
       rerender(
         <IntlProvider locale="zh-CN" messages={catalogFor("zh-CN")}>
-          <TooltipProvider>
-            <Thread
-              entries={[turnEntry(recordA)]}
-              selectedResult={null}
-              onSelectResult={() => {}}
-              liveTurn={null}
-            />
-          </TooltipProvider>
+          <QueryClientProvider client={queryClient}>
+            <TooltipProvider>
+              <Thread
+                entries={[turnEntry(recordA)]}
+                selectedResult={null}
+                onSelectResult={() => {}}
+                liveTurn={null}
+              />
+            </TooltipProvider>
+          </QueryClientProvider>
         </IntlProvider>,
       );
       // Issue #1282: expand the settled card's process head to reach the fold.
@@ -2224,32 +2251,36 @@ describe("Thread", () => {
       // then settles: B's fold mounts collapsed, A's stays open.
       rerender(
         <IntlProvider locale="zh-CN" messages={catalogFor("zh-CN")}>
-          <TooltipProvider>
-            <Thread
-              entries={[turnEntry(recordA)]}
-              selectedResult={null}
-              onSelectResult={() => {}}
-              liveTurn={{
-                question: "问乙",
-                askedAt: ASKED_AT + 1000,
-                invocationNames: [],
-                step: 1,
-                rounds: [liveRound({ thinking: thinkingB })],
-              }}
-            />
-          </TooltipProvider>
+          <QueryClientProvider client={queryClient}>
+            <TooltipProvider>
+              <Thread
+                entries={[turnEntry(recordA)]}
+                selectedResult={null}
+                onSelectResult={() => {}}
+                liveTurn={{
+                  question: "问乙",
+                  askedAt: ASKED_AT + 1000,
+                  invocationNames: [],
+                  step: 1,
+                  rounds: [liveRound({ thinking: thinkingB })],
+                }}
+              />
+            </TooltipProvider>
+          </QueryClientProvider>
         </IntlProvider>,
       );
       rerender(
         <IntlProvider locale="zh-CN" messages={catalogFor("zh-CN")}>
-          <TooltipProvider>
-            <Thread
-              entries={[turnEntry(recordA), turnEntry(recordB)]}
-              selectedResult={null}
-              onSelectResult={() => {}}
-              liveTurn={null}
-            />
-          </TooltipProvider>
+          <QueryClientProvider client={queryClient}>
+            <TooltipProvider>
+              <Thread
+                entries={[turnEntry(recordA), turnEntry(recordB)]}
+                selectedResult={null}
+                onSelectResult={() => {}}
+                liveTurn={null}
+              />
+            </TooltipProvider>
+          </QueryClientProvider>
         </IntlProvider>,
       );
       // Issue #1282: every still-collapsed head opens (A's is already open

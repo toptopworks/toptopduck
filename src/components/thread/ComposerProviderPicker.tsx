@@ -230,6 +230,13 @@ export function ComposerProviderPicker({
   // of the selector list. Surfaced at the top of the Local CLI group so the
   // user knows their current pick is broken before the next turn fails.
   const activeAdapterStale = isExternal && activeAdapterId !== null && activeAdapter === null;
+  // The display-name resolve for the closed trigger + tooltip (issue #1351):
+  // the FULL wire table, detected or not -- an undetected-but-registered
+  // adapter still has a name worth showing; only a deleted row (no row at
+  // all) falls to the raw id.
+  const activeAdapterDisplayName = isExternal
+    ? ((adapterData ?? []).find((a) => a.id === activeAdapterId)?.display_name ?? null)
+    : null;
   // The startup backfill entry (ADR-0100, issue #581): what a NEW session on
   // this adapter starts with. Read only on the cold-start bar (in-session
   // truth is the model-config query above). Enabled flips true whenever the
@@ -525,7 +532,7 @@ export function ComposerProviderPicker({
       id: "composer.runtimePicker.tooltip.external",
       defaultMessage: "External runtime: {adapter}",
     },
-    { adapter: activeAdapter?.display_name ?? activeAdapterId ?? "" },
+    { adapter: activeAdapterDisplayName ?? activeAdapterId ?? "" },
   );
   const activeStatus = activeProfile ? profileKeys[activeProfile.id] : undefined;
   const hasKey = activeStatus?.has_key ?? false;
@@ -612,7 +619,7 @@ export function ComposerProviderPicker({
                     },
                     {
                       label: isExternal
-                        ? (activeAdapter?.display_name ?? activeAdapterId ?? "")
+                        ? (activeAdapterDisplayName ?? activeAdapterId ?? "")
                         : providerName,
                     },
                   )}

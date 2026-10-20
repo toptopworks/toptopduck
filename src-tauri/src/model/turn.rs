@@ -325,6 +325,12 @@ pub enum TurnRuntime {
     External {
         /// The stable `AdapterId` string of the CLI that drove the turn.
         adapter_id: Option<String>,
+        /// The adapter's display name snapshotted at stamp time (issue
+        /// #1351): the tombstone the attribution label falls back to when
+        /// the registry no longer resolves the id (deleted or disabled).
+        /// `None` on turns recorded before the field (the live name then
+        /// wins, or the raw id renders).
+        display_name: Option<String>,
     },
 }
 

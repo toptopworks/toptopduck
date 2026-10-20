@@ -173,7 +173,17 @@ export interface TraceEntry {
 // never reads it (ADR-0101 Decision 3).
 export type TurnRuntime =
   | { kind: "built_in" }
-  | { kind: "external"; data: { adapter_id: string | null } };
+  | {
+    kind: "external";
+    data: {
+      adapter_id: string | null;
+      /** The adapter's display name snapshotted at stamp time (issue
+         * #1351): the tombstone the attribution label falls back to when the
+         * registry no longer resolves the id. Optional -- a pre-#1351 peer
+         * omits the key entirely. */
+      display_name?: string | null;
+    };
+  };
 
 // Per-turn provenance crossing IPC (issue #381, ADR-0101; ADR-0119): the
 // skills invoked on the turn -- the invocation records' name set, either

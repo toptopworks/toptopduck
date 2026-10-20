@@ -722,9 +722,23 @@ fn turn_provenance_runtime_attribution_shapes() {
             skills: vec![],
             runtime: Some(TurnRuntime::External {
                 adapter_id: Some("gemini-cli".into()),
+                display_name: None,
             }),
         },
-        r#"{"skills":[],"runtime":{"kind":"external","data":{"adapter_id":"gemini-cli"}}}"#,
+        r#"{"skills":[],"runtime":{"kind":"external","data":{"adapter_id":"gemini-cli","display_name":null}}}"#,
+    );
+
+    // External with the stamp-time display name (issue #1351): the tombstone
+    // rides the wire alongside the id.
+    assert_wire(
+        &TurnProvenance {
+            skills: vec![],
+            runtime: Some(TurnRuntime::External {
+                adapter_id: Some("user:ba3b2de2".into()),
+                display_name: Some("My local CLI".into()),
+            }),
+        },
+        r#"{"skills":[],"runtime":{"kind":"external","data":{"adapter_id":"user:ba3b2de2","display_name":"My local CLI"}}}"#,
     );
 
     // External recorded before the adapter id existed: null, never omitted
@@ -733,9 +747,12 @@ fn turn_provenance_runtime_attribution_shapes() {
     assert_wire(
         &TurnProvenance {
             skills: vec![],
-            runtime: Some(TurnRuntime::External { adapter_id: None }),
+            runtime: Some(TurnRuntime::External {
+                adapter_id: None,
+                display_name: None,
+            }),
         },
-        r#"{"skills":[],"runtime":{"kind":"external","data":{"adapter_id":null}}}"#,
+        r#"{"skills":[],"runtime":{"kind":"external","data":{"adapter_id":null,"display_name":null}}}"#,
     );
 
     // Built-in: a unit kind, no data key (mirrors SessionRuntimeChoice).
