@@ -11,11 +11,11 @@
 //! read never rewrites the file.
 
 use std::collections::BTreeMap;
-use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 use super::adapter::{v1_adapters, StreamFormat};
+use super::atomic_write::write_atomic;
 
 /// The sidecar file name (resolved against the OS app-data dir by the setup
 /// hook, the same anchoring the catalog cache uses).
@@ -23,7 +23,6 @@ pub const USER_ADAPTERS_FILE_NAME: &str = "user-adapters.json";
 /// The one document version this build reads and writes (ADR-0036-style
 /// version routing: a newer file refuses, an older one does not exist).
 const USER_ADAPTERS_FORMAT_VERSION: u32 = 1;
-const TMP_SUFFIX: &str = ".tmp";
 
 /// One user-defined adapter row. The storage AND wire shape (crosses IPC
 /// verbatim; env may carry plaintext keys, which is why the file is written
@@ -212,58 +211,15 @@ impl UserAdapterStore {
 }
 
 /// Serialize + persist the document: pretty JSON (hand-editable, stable
-/// diffs), atomic temp+fsync+rename (a crash before the rename leaves the
-/// prior file intact).
+/// diffs), atomic temp+fsync+rename on the private-permissions face (a
+/// crash before the rename leaves the prior file intact).
 fn save_doc(target: &Path, rows: &[UserAdapterRow]) -> Result<(), String> {
     let doc = UserAdaptersDoc {
         format_version: USER_ADAPTERS_FORMAT_VERSION,
         adapters: rows.to_vec(),
     };
     let json = serde_json::to_string_pretty(&doc).map_err(|e| format!("serialize: {e}"))?;
-    write_atomic_private(target, &json)
-}
-
-/// Write a string payload atomically with PRIVATE permissions (issue #1341:
-/// env rows may carry plaintext keys): `<target>.tmp` in the same directory,
-/// fsync, chmod BEFORE the rename (the final file never exists with wider
-/// perms), rename over the target. Unix: 0600; Windows: the default ACL
-/// (user-profile files are private by default, no special-casing).
-fn write_atomic_private(target: &Path, json: &str) -> Result<(), String> {
-    let file_name = target
-        .file_name()
-        .and_then(|n| n.to_str())
-        .ok_or_else(|| "could not derive temp file path".to_string())?;
-    let tmp = target.with_file_name(format!("{file_name}{TMP_SUFFIX}"));
-    if let Some(parent) = target.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| format!("create dir: {e}"))?;
-    }
-    {
-        // Private-at-CREATION, not chmod-after-write: the temp holding the
-        // plaintext-env JSON is never readable beyond the owner, not even in
-        // the create->chmod window a post-hoc permissions pass would leave
-        // open (issue #1341 review).
-        #[cfg(unix)]
-        let mut file = {
-            use std::os::unix::fs::OpenOptionsExt;
-            std::fs::OpenOptions::new()
-                .write(true)
-                .create(true)
-                .truncate(true)
-                .mode(0o600)
-                .open(&tmp)
-                .map_err(|e| format!("create temp: {e}"))?
-        };
-        #[cfg(not(unix))]
-        let mut file = std::fs::File::create(&tmp).map_err(|e| format!("create temp: {e}"))?;
-        file.write_all(json.as_bytes())
-            .map_err(|e| format!("write temp: {e}"))?;
-        file.sync_all().map_err(|e| format!("sync temp: {e}"))?;
-    }
-    if let Err(e) = std::fs::rename(&tmp, target) {
-        let _ = std::fs::remove_file(&tmp);
-        return Err(format!("rename: {e}"));
-    }
-    Ok(())
+    write_atomic(target, &json, true)
 }
 
 #[cfg(test)]

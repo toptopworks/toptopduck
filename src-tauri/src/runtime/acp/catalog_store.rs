@@ -19,19 +19,15 @@
 //! the whole cache.
 
 use std::collections::HashMap;
-use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
+use super::atomic_write::write_atomic;
 use crate::runtime::acp::probe::{CatalogModel, ModelCatalogOutcome};
 use crate::session::loop_contract::DiscoveredRuntime;
 
 /// The file name under the OS app-data directory.
 pub const CATALOGS_FILE_NAME: &str = "adapter-catalogs.json";
-
-/// The temp-file suffix for the atomic write (same directory as the target
-/// so the rename is intra-volume -- mirrors `persistence::io`).
-const TMP_SUFFIX: &str = ".tmp";
 
 /// Which probe channel produced the cached catalog (ADR-0096 D2 -- the
 /// per-format dispatch dimension, not the CLI identity). Serialized as the
@@ -208,26 +204,16 @@ impl AdapterCatalogStore {
             );
             return;
         };
-        if let Err(detail) = self.store_entry_locked(adapter_id, entry) {
+        // An insert always lands, so the op reports a hit unconditionally.
+        if let Err(detail) = self.mutate_locked(|catalogs| {
+            catalogs.insert(adapter_id.to_string(), entry);
+            true
+        }) {
             log::warn!(
                 target: "toptopduck::catalog_cache",
                 "adapter catalog cache write failed for `{adapter_id}` (probe result unaffected): {detail}"
             );
         }
-    }
-
-    /// The locked read-modify-write core, split out so the failure detail
-    /// reads as one typed Result.
-    fn store_entry_locked(
-        &self,
-        adapter_id: &str,
-        entry: AdapterCatalogEntry,
-    ) -> Result<(), String> {
-        let mut catalogs = self.load();
-        catalogs.insert(adapter_id.to_string(), entry);
-        let json =
-            serde_json::to_string_pretty(&catalogs).map_err(|e| format!("serialize: {e}"))?;
-        write_atomic(&self.path, &json)
     }
 
     /// Remove ONE adapter's cache entry, leaving every other adapter's entry
@@ -244,26 +230,26 @@ impl AdapterCatalogStore {
             );
             return;
         };
-        let mut catalogs = self.load();
-        if catalogs.remove(adapter_id).is_none() {
-            return;
-        }
-        let json = match serde_json::to_string_pretty(&catalogs) {
-            Ok(json) => json,
-            Err(e) => {
-                log::warn!(
-                    target: "toptopduck::catalog_cache",
-                    "catalog cache remove-serialize failed for `{adapter_id}`: {e}"
-                );
-                return;
-            }
-        };
-        if let Err(detail) = write_atomic(&self.path, &json) {
+        if let Err(detail) = self.mutate_locked(|catalogs| catalogs.remove(adapter_id).is_some()) {
             log::warn!(
                 target: "toptopduck::catalog_cache",
-                "catalog cache remove-write failed for `{adapter_id}`: {detail}"
+                "adapter catalog cache remove failed for `{adapter_id}` (cache is an enhancement): {detail}"
             );
         }
+    }
+
+    /// The locked read-modify-write core both mutations ride (issue #1343):
+    /// load, let `op` mutate the map (`false` = nothing hit, no write at
+    /// all -- removing a missing key is a no-op), serialize, one atomic
+    /// write, with the failure detail as one typed Result.
+    fn mutate_locked(&self, op: impl FnOnce(&mut AdapterCatalogs) -> bool) -> Result<(), String> {
+        let mut catalogs = self.load();
+        if !op(&mut catalogs) {
+            return Ok(());
+        }
+        let json =
+            serde_json::to_string_pretty(&catalogs).map_err(|e| format!("serialize: {e}"))?;
+        write_atomic(&self.path, &json, false)
     }
 }
 
@@ -298,31 +284,6 @@ fn load_from_str(raw: &str) -> Result<AdapterCatalogs, String> {
         }
     }
     Ok(out)
-}
-
-/// Write a string payload atomically: `<target>.tmp` in the same directory,
-/// fsync, rename over the target (mirrors `persistence::io::save_atomic`;
-/// a crash before the rename leaves the prior target intact).
-fn write_atomic(target: &Path, json: &str) -> Result<(), String> {
-    let file_name = target
-        .file_name()
-        .and_then(|n| n.to_str())
-        .ok_or_else(|| "could not derive temp file path".to_string())?;
-    let tmp = target.with_file_name(format!("{file_name}{TMP_SUFFIX}"));
-    if let Some(parent) = target.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| format!("create dir: {e}"))?;
-    }
-    {
-        let mut file = std::fs::File::create(&tmp).map_err(|e| format!("create temp: {e}"))?;
-        file.write_all(json.as_bytes())
-            .map_err(|e| format!("write temp: {e}"))?;
-        file.sync_all().map_err(|e| format!("sync temp: {e}"))?;
-    }
-    if let Err(e) = std::fs::rename(&tmp, target) {
-        let _ = std::fs::remove_file(&tmp);
-        return Err(format!("rename: {e}"));
-    }
-    Ok(())
 }
 
 /// Now, wall-clock milliseconds since the Unix epoch (the entry stamp).

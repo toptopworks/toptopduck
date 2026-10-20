@@ -35,6 +35,7 @@
 
 pub mod adapter;
 pub mod app_server;
+mod atomic_write;
 pub mod catalog_store;
 pub mod claude_control;
 pub mod claude_stream_json;
