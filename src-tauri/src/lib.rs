@@ -245,15 +245,7 @@ pub fn run() {
             // and NOT alongside any `.duck`. Fall back to a temp path if the OS
             // app-data dir cannot be resolved (the app still boots; prefs reset
             // each launch instead of persisting).
-            let app_config_path = match app.path().app_data_dir() {
-                Ok(dir) => dir.join("config.json"),
-                Err(e) => {
-                    log::warn!(
-                        "failed to resolve app-data dir; app-config falls back to a temp path: {e}"
-                    );
-                    std::env::temp_dir().join("toptopduck-config.json")
-                }
-            };
+            let app_config_path = app_data_path(app.handle(), "config.json", "app-config");
             // The atomic write renames a temp file inside the parent dir, so the
             // parent must exist. create_dir_all is idempotent; a failure is
             // non-fatal (the write later honest-errors, app-config degrades),
@@ -275,28 +267,12 @@ pub fn run() {
             // the app still boots, the registry just resets to empty each
             // launch instead of persisting. The directory itself is minted
             // lazily on first create; a never-created registry lists empty.
-            let skills_root = match app.path().app_data_dir() {
-                Ok(dir) => dir.join("skills"),
-                Err(e) => {
-                    log::warn!(
-                        "failed to resolve app-data dir; skills registry falls back to a temp path: {e}"
-                    );
-                    std::env::temp_dir().join("toptopduck-skills")
-                }
-            };
+            let skills_root = app_data_path(app.handle(), "skills", "skills registry");
 
             // Agent-definitions registry root (issue #932, ADR-0117): the
             // same app-data-dir resolution + honest temp-dir fallback as the
             // skills root; minted lazily on first create.
-            let agents_root = match app.path().app_data_dir() {
-                Ok(dir) => dir.join("agents"),
-                Err(e) => {
-                    log::warn!(
-                        "failed to resolve app-data dir; agents registry falls back to a temp path: {e}"
-                    );
-                    std::env::temp_dir().join("toptopduck-agents")
-                }
-            };
+            let agents_root = app_data_path(app.handle(), "agents", "agents registry");
 
             let keychain = KeychainStore::new();
             let live = LiveProviderConfig::new(keychain, app_config_path);
@@ -368,7 +344,12 @@ pub fn run() {
             // WITHOUT clearing the config (the path might be temporarily
             // unavailable, e.g. an unmounted external drive).
             let sessions_root = {
-                match boot_cfg.sessions_dir.as_ref().map(|s| s.trim()).filter(|s| !s.is_empty()) {
+                match boot_cfg
+                    .sessions_dir
+                    .as_ref()
+                    .map(|s| s.trim())
+                    .filter(|s| !s.is_empty())
+                {
                     Some(p) => {
                         let path = PathBuf::from(p);
                         if path.is_dir() {
@@ -424,19 +405,12 @@ pub fn run() {
             // `adapter-catalogs.json` under the OS app-data dir, with the
             // same honest temp-dir fallback. The probe click is the only
             // write point; reads honest-degrade to empty on a corrupt file.
-            let catalog_store = match app.path().app_data_dir() {
-                Ok(dir) => runtime::acp::catalog_store::AdapterCatalogStore::new(dir.join(
+            let catalog_store =
+                runtime::acp::catalog_store::AdapterCatalogStore::new(app_data_path(
+                    app.handle(),
                     runtime::acp::catalog_store::CATALOGS_FILE_NAME,
-                )),
-                Err(e) => {
-                    log::warn!(
-                        "failed to resolve app-data dir; adapter catalog cache falls back to a temp path: {e}"
-                    );
-                    runtime::acp::catalog_store::AdapterCatalogStore::new(
-                        std::env::temp_dir().join("toptopduck-adapter-catalogs.json"),
-                    )
-                }
-            };
+                    "adapter catalog cache",
+                ));
             app.manage(catalog_store);
 
             // User-defined adapter registry (issue #1341):
@@ -444,19 +418,12 @@ pub fn run() {
             // + honest temp-dir fallback as the catalog cache. Env rows may
             // carry plaintext keys, hence the private-permission write face
             // inside the store.
-            let user_adapter_store = match app.path().app_data_dir() {
-                Ok(dir) => runtime::acp::user_adapter_store::UserAdapterStore::new(dir.join(
+            let user_adapter_store =
+                runtime::acp::user_adapter_store::UserAdapterStore::new(app_data_path(
+                    app.handle(),
                     runtime::acp::user_adapter_store::USER_ADAPTERS_FILE_NAME,
-                )),
-                Err(e) => {
-                    log::warn!(
-                        "failed to resolve app-data dir; user adapter registry falls back to a temp path: {e}"
-                    );
-                    runtime::acp::user_adapter_store::UserAdapterStore::new(
-                        std::env::temp_dir().join("toptopduck-user-adapters.json"),
-                    )
-                }
-            };
+                    "user adapter registry",
+                ));
             app.manage(user_adapter_store);
 
             // System tray residency (ADR-0125, issue #1140). The tray is the
@@ -638,6 +605,21 @@ pub fn run() {
 /// side fails here rather than silently repointing at another bin that
 /// builds into the same target dir.
 const BRIDGE_BIN_NAME: &str = "toptopduck-acp-bridge";
+
+/// Resolve `<app_data_dir>/<file>` with the honest temp-dir fallback every
+/// app-data artifact uses (issue #1343): when the OS app-data dir cannot be
+/// resolved the app still boots and the artifact just resets each launch
+/// instead of persisting (one warn here naming `what`, temp file
+/// `toptopduck-<file>` under the temp dir).
+fn app_data_path(app: &tauri::AppHandle, file: &str, what: &str) -> PathBuf {
+    match app.path().app_data_dir() {
+        Ok(dir) => dir.join(file),
+        Err(e) => {
+            log::warn!("failed to resolve app-data dir; {what} falls back to a temp path: {e}");
+            std::env::temp_dir().join(format!("toptopduck-{file}"))
+        }
+    }
+}
 
 /// Resolve the bridge binary beside `exe_path` (issue #798). `Some` requires
 /// the sibling file to exist: in dev, `tauri dev` runs the app from

@@ -29,6 +29,7 @@ import {
   SettingsCard,
   SettingsRow,
 } from "./settings-chrome";
+import { EnvRowsEditor } from "./EnvRowsEditor";
 
 // Add/edit form for one CLI tool registration (issue #671, ADR-0108
 // Decision 2). A full-page replacement for the tool list (the McpServerForm
@@ -493,56 +494,12 @@ export function CliToolForm({
             </Button>
           )}
         >
-          {envRows.length === 0 ? (
-            <p className="text-muted-foreground text-xs">
-              <FormattedMessage
-                id="settings.form.envEmpty"
-                defaultMessage="No environment variables. Click Add variable to create one."
-              />
-            </p>
-          ) : (
-            <div className="space-y-1.5">
-              {envRows.map((row, index) => (
-                <div key={index} className="flex items-center gap-2">
-                  <Input
-                    className="w-40 font-mono text-xs"
-                    value={row.key}
-                    placeholder="LOG_LEVEL"
-                    aria-label={intl.formatMessage(
-                      { id: "settings.cli.form.envKey", defaultMessage: "Env name (row {row})" },
-                      { row: index + 1 },
-                    )}
-                    onChange={(e) =>
-                      setEnvRows((prev) =>
-                        prev.map((r, i) => (i === index ? { ...r, key: e.target.value } : r)),
-                      )}
-                  />
-                  <Input
-                    className="flex-1 font-mono text-xs"
-                    value={row.value}
-                    placeholder="info"
-                    aria-label={intl.formatMessage(
-                      { id: "settings.cli.form.envValue", defaultMessage: "Env value (row {row})" },
-                      { row: index + 1 },
-                    )}
-                    onChange={(e) =>
-                      setEnvRows((prev) =>
-                        prev.map((r, i) => (i === index ? { ...r, value: e.target.value } : r)),
-                      )}
-                  />
-                  <RowRemoveButton
-                    label={intl.formatMessage(
-                      { id: "settings.cli.form.removeEnv", defaultMessage: "Remove env (row {row})" },
-                      { row: index + 1 },
-                    )}
-                    icon={Trash2}
-                    onClick={() =>
-                      setEnvRows((prev) => prev.filter((_, i) => i !== index))}
-                  />
-                </div>
-              ))}
-            </div>
-          )}
+          <EnvRowsEditor
+            rows={envRows}
+            onChange={setEnvRows}
+            keyPlaceholder="LOG_LEVEL"
+            valuePlaceholder="info"
+          />
         </FoldHead>
 
         {error && (

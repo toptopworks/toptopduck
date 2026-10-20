@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { FormattedMessage, useIntl } from "react-intl";
-import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { useQuery, useQueryClient, type QueryClient } from "@tanstack/react-query";
 import { FolderOpen, Loader2, Pencil, Plus, Trash2 } from "lucide-react";
 import { open as openFileDialog } from "@tauri-apps/plugin-dialog";
 
@@ -38,10 +38,10 @@ import {
   PaneBackLink,
   PaneHeader,
   RowActionButton,
-  RowRemoveButton,
   SettingsCard,
   SettingsRow,
 } from "./settings-chrome";
+import { EnvRowsEditor, type EnvRow } from "./EnvRowsEditor";
 import { toProbeError } from "./probe-error";
 import { formatArgGroups, isSingleTokenCommand, parseArgGroups } from "./user-runtime-form";
 
@@ -68,10 +68,13 @@ import { formatArgGroups, isSingleTokenCommand, parseArgGroups } from "./user-ru
 // create save returns straight to the list. Saving never requires the test
 // to pass (the probe is a diagnostic, not a gate).
 
-/** One editable env row (blank keys are dropped at save). */
-interface EnvRow {
-  key: string;
-  value: string;
+/** Every CRUD mutation lands on BOTH caches in the same event: the registry
+ *  pane's own rows and the picker's merged projection -- the backend's
+ *  `list_adapters` merges the user rows in, so the shared adapter cache is
+ *  stale the moment a row changes. */
+function invalidateAdapterQueries(queryClient: QueryClient) {
+  void queryClient.invalidateQueries({ queryKey: adapterKeys.user() });
+  void queryClient.invalidateQueries({ queryKey: adapterKeys.all() });
 }
 
 /** The editor's probe lifecycle, three states on the wire + busy. */
@@ -122,13 +125,6 @@ export function EditorForm({
     isSingleTokenCommand(command.trim()) &&
     args !== null;
 
-  function invalidate() {
-    void queryClient.invalidateQueries({ queryKey: adapterKeys.user() });
-    // The picker projection is the merged view -- a row change must land on
-    // the shared adapter cache in the same event.
-    void queryClient.invalidateQueries({ queryKey: adapterKeys.all() });
-  }
-
   async function handleSave() {
     if (saving || !isFormValid || args === null) return;
     setSaving(true);
@@ -150,7 +146,7 @@ export function EditorForm({
       } else {
         await createUserAdapter(draft);
       }
-      invalidate();
+      invalidateAdapterQueries(queryClient);
       // A save closes the form back to the list (the McpServerForm flow);
       // the invalidated queries refetch the saved row.
       onClose();
@@ -324,56 +320,7 @@ export function EditorForm({
             </Button>
           )}
         >
-          {envRows.length === 0 ? (
-            <p className="text-muted-foreground text-xs">
-              <FormattedMessage
-                id="settings.form.envEmpty"
-                defaultMessage="No environment variables. Click Add variable to create one."
-              />
-            </p>
-          ) : (
-            <div className="space-y-1.5">
-              {envRows.map((entry, index) => (
-                <div key={index} className="flex items-center gap-2">
-                  <Input
-                    className="w-40 font-mono text-xs"
-                    value={entry.key}
-                    placeholder="KEY"
-                    aria-label={intl.formatMessage(
-                      { id: "settings.cli.form.envKey", defaultMessage: "Env name (row {row})" },
-                      { row: index + 1 },
-                    )}
-                    onChange={(e) =>
-                      setEnvRows((rows) =>
-                        rows.map((r, i) => (i === index ? { ...r, key: e.target.value } : r)),
-                      )}
-                  />
-                  <Input
-                    className="flex-1 font-mono text-xs"
-                    value={entry.value}
-                    placeholder="value"
-                    aria-label={intl.formatMessage(
-                      { id: "settings.cli.form.envValue", defaultMessage: "Env value (row {row})" },
-                      { row: index + 1 },
-                    )}
-                    onChange={(e) =>
-                      setEnvRows((rows) =>
-                        rows.map((r, i) => (i === index ? { ...r, value: e.target.value } : r)),
-                      )}
-                  />
-                  <RowRemoveButton
-                    label={intl.formatMessage(
-                      { id: "settings.cli.form.removeEnv", defaultMessage: "Remove env (row {row})" },
-                      { row: index + 1 },
-                    )}
-                    icon={Trash2}
-                    onClick={() =>
-                      setEnvRows((rows) => rows.filter((_, i) => i !== index))}
-                  />
-                </div>
-              ))}
-            </div>
-          )}
+          <EnvRowsEditor rows={envRows} onChange={setEnvRows} />
         </FoldHead>
 
         {/* The probe diagnostic's three states (the dialog editor's copy,
@@ -488,11 +435,6 @@ export function UserRuntimesSection({
   const rows = data ?? [];
   const loadError = isError ? fmtError(error, intl) : null;
 
-  function invalidate() {
-    void queryClient.invalidateQueries({ queryKey: adapterKeys.user() });
-    void queryClient.invalidateQueries({ queryKey: adapterKeys.all() });
-  }
-
   async function handleToggle(row: UserAdapterRow) {
     if (busyId !== null) return;
     setBusyId(row.id);
@@ -500,7 +442,7 @@ export function UserRuntimesSection({
     onIpcBusy("userAdapter", true);
     try {
       await setUserAdapterEnabled(row.id, !row.enabled);
-      invalidate();
+      invalidateAdapterQueries(queryClient);
     } catch (e) {
       log.warn("UserRuntimesSection", "user adapter toggle failed", e);
       // The toggle is a write on the management face: a failure surfaces,
@@ -517,7 +459,7 @@ export function UserRuntimesSection({
     onIpcBusy("userAdapter", true);
     try {
       await deleteUserAdapter(id);
-      invalidate();
+      invalidateAdapterQueries(queryClient);
       setDeleteError(null);
     } catch (e) {
       log.warn("UserRuntimesSection", "user adapter delete failed", e);

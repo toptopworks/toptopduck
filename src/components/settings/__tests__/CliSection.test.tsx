@@ -205,6 +205,51 @@ describe("CliSection", () => {
     });
   });
 
+  it("removes an env row and saves an empty record", async () => {
+    // The CliToolForm face of the shared EnvRowsEditor (issue #1343): the
+    // remove button drops the row, the empty state takes over, and the save
+    // writes an empty env record. Also pins this form's placeholder face
+    // (LOG_LEVEL / info vs the registry's KEY / value defaults).
+    vi.mocked(upsertCliTool).mockResolvedValue(makeAppConfig([]));
+    renderWithProviders(
+      <CliSection appConfig={makeAppConfig([])} onCliToolsChanged={vi.fn()} />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "New" }));
+    fireEvent.change(screen.getByLabelText(/Name \(locked after save\)/), {
+      target: { value: "my-pandoc" },
+    });
+    fireEvent.change(screen.getByLabelText(/Description/), {
+      target: { value: "Converts documents." },
+    });
+    fireEvent.change(screen.getByLabelText(/Executable/), {
+      target: { value: "pandoc" },
+    });
+    fireEvent.click(
+      screen.getByRole("button", {
+        name: /^Environment variables \(optional, non-secret\)$/,
+      }),
+    );
+    expect(screen.getByPlaceholderText("LOG_LEVEL")).toBeInTheDocument();
+    expect(screen.getByPlaceholderText("info")).toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText("Env name (row 1)"), {
+      target: { value: "LOG_LEVEL" },
+    });
+    fireEvent.change(screen.getByLabelText("Env value (row 1)"), {
+      target: { value: "info" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Remove env (row 1)" }));
+    expect(
+      await screen.findByText(/No environment variables/i),
+    ).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Add" }));
+    await waitFor(() => {
+      expect(upsertCliTool).toHaveBeenCalledWith(
+        expect.objectContaining({ env: {} }),
+      );
+    });
+  });
+
   it("shows the Save label on the edit-mode footer (the Add-vs-Save fork)", () => {
     // The create flow pins the Add arm (the description and save-state
     // tests click Add); the edit flow must read Save -- the fork's other
