@@ -15,7 +15,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 use super::adapter::{v1_adapters, StreamFormat};
-use super::atomic_write::write_atomic;
+use crate::persistence::io::{write_str_atomic, WritePerms};
 
 /// The sidecar file name (resolved against the OS app-data dir by the setup
 /// hook, the same anchoring the catalog cache uses).
@@ -211,15 +211,21 @@ impl UserAdapterStore {
 }
 
 /// Serialize + persist the document: pretty JSON (hand-editable, stable
-/// diffs), atomic temp+fsync+rename on the private-permissions face (a
-/// crash before the rename leaves the prior file intact).
+/// diffs), one ride on the shared atomic-write core on the private-
+/// permissions face (a crash before the rename leaves the prior file
+/// intact).
 fn save_doc(target: &Path, rows: &[UserAdapterRow]) -> Result<(), String> {
     let doc = UserAdaptersDoc {
         format_version: USER_ADAPTERS_FORMAT_VERSION,
         adapters: rows.to_vec(),
     };
     let json = serde_json::to_string_pretty(&doc).map_err(|e| format!("serialize: {e}"))?;
-    write_atomic(target, &json, true)
+    // The registry file's directory may not exist yet (first save on a fresh
+    // install); the shared core deliberately does not create it.
+    if let Some(parent) = target.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| format!("create dir: {e}"))?;
+    }
+    write_str_atomic(target, &json, WritePerms::Private).map_err(|e| e.to_string())
 }
 
 #[cfg(test)]

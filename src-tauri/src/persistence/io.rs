@@ -138,30 +138,96 @@ pub fn temp_path_for(target: &Path) -> Option<PathBuf> {
     Some(target.with_file_name(format!("{file_name}{TMP_SUFFIX}")))
 }
 
-/// Write any JSON-serializable document atomically (recipes and the
-/// organization sidecar share this crash-posture): serialize to JSON
-/// (pretty, for human-readable artifacts and git-friendly diffs), write to
+/// Which permissions face an atomic write takes (issue #1348). The repo
+/// convention for "pick a face" is an enum (cf. `ProbeKind`, `SaveError`)
+/// so call sites self-document instead of passing a bare bool.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WritePerms {
+    /// Mode-at-creation privacy (issue #1341: files that may carry plaintext
+    /// keys): 0600 at temp-open time on Unix, so the final file never exists
+    /// with wider perms -- not even in the create->chmod window a post-hoc
+    /// permissions pass would leave open. Windows user-profile files already
+    /// carry an owner-private default ACL, so no special-casing there.
+    Private,
+    /// Plain `File::create` posture: umask default on Unix (cache sidecars
+    /// and other non-secret artifacts).
+    Default,
+}
+
+/// Why the shared atomic-write core failed. Two failure sites only: the
+/// temp-file stage (create/write/fsync) and the rename stage. Either way the
+/// prior target is untouched; a rename failure best-effort removes the temp.
+/// Domain errors (`SaveError`, app-config's `WriteError`) map the two
+/// variants losslessly via `From`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AtomicWriteError {
+    Io(String),
+    Rename(String),
+}
+
+impl std::fmt::Display for AtomicWriteError {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        match self {
+            Self::Io(d) => write!(f, "write temp file failed: {d}"),
+            Self::Rename(d) => write!(f, "replace failed: {d}"),
+        }
+    }
+}
+impl std::error::Error for AtomicWriteError {}
+
+impl From<AtomicWriteError> for SaveError {
+    fn from(e: AtomicWriteError) -> Self {
+        match e {
+            AtomicWriteError::Io(d) => SaveError::Io(d),
+            AtomicWriteError::Rename(d) => SaveError::Rename(d),
+        }
+    }
+}
+
+/// The shared atomic-write core (issue #1348): write `contents` to
 /// `<target>.tmp` in the same directory, `fsync`, then rename over the
 /// target. The rename is atomic on the same volume; a crash before rename
 /// leaves the prior target intact and a stale temp behind (overwritten on
-/// the next save).
-pub fn save_atomic<T: serde::Serialize>(target: &Path, value: &T) -> Result<(), SaveError> {
-    // pretty + sorted keys is unnecessary (serde_json::to_string_pretty keeps
-    // struct order, which is stable), so plain pretty suffices and reads
-    // cleanly in a text editor / git diff.
-    let json =
-        serde_json::to_string_pretty(value).map_err(|e| SaveError::Serialize(e.to_string()))?;
+/// the next write). Does NOT create parent directories -- each caller's
+/// directory contract stays what it was. Zero-dependency on purpose (std +
+/// serde only): the persistence crate split lifts this file whole.
+pub fn write_str_atomic(
+    target: &Path,
+    contents: &str,
+    perms: WritePerms,
+) -> Result<(), AtomicWriteError> {
     let tmp = temp_path_for(target)
-        .ok_or_else(|| SaveError::Io("could not derive temp file path".into()))?;
+        .ok_or_else(|| AtomicWriteError::Io("could not derive temp file path".into()))?;
 
     {
-        let mut file = fs::File::create(&tmp).map_err(|e| SaveError::Io(e.to_string()))?;
-        file.write_all(json.as_bytes())
-            .map_err(|e| SaveError::Io(e.to_string()))?;
+        #[cfg(unix)]
+        let mut file = if matches!(perms, WritePerms::Private) {
+            use std::os::unix::fs::OpenOptionsExt;
+            std::fs::OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .mode(0o600)
+                .open(&tmp)
+        } else {
+            std::fs::File::create(&tmp)
+        }
+        .map_err(|e| AtomicWriteError::Io(e.to_string()))?;
+        #[cfg(not(unix))]
+        let mut file = {
+            // The default ACL on Windows user-profile files is already
+            // owner-private; the perms face needs no special-casing.
+            let _ = perms;
+            std::fs::File::create(&tmp)
+        }
+        .map_err(|e| AtomicWriteError::Io(e.to_string()))?;
+        file.write_all(contents.as_bytes())
+            .map_err(|e| AtomicWriteError::Io(e.to_string()))?;
         // fsync the data before the rename so a crash right after the rename
         // never leaves a 0-byte / partially-flushed target. Best-effort on
         // platforms where fsync is a no-op for some FS.
-        file.sync_all().map_err(|e| SaveError::Io(e.to_string()))?;
+        file.sync_all()
+            .map_err(|e| AtomicWriteError::Io(e.to_string()))?;
     }
 
     if let Err(e) = fs::rename(&tmp, target) {
@@ -169,9 +235,22 @@ pub fn save_atomic<T: serde::Serialize>(target: &Path, value: &T) -> Result<(), 
         // untouched (the rename never happened). A failed remove here is
         // swallowed -- it would mask the real (rename) failure.
         let _ = fs::remove_file(&tmp);
-        return Err(SaveError::Rename(e.to_string()));
+        return Err(AtomicWriteError::Rename(e.to_string()));
     }
     Ok(())
+}
+
+/// Write any JSON-serializable document atomically (recipes and the
+/// organization sidecar share this crash-posture): serialize to JSON
+/// (pretty, for human-readable artifacts and git-friendly diffs), then one
+/// ride on the shared atomic-write core.
+pub fn save_atomic<T: serde::Serialize>(target: &Path, value: &T) -> Result<(), SaveError> {
+    // pretty + sorted keys is unnecessary (serde_json::to_string_pretty keeps
+    // struct order, which is stable), so plain pretty suffices and reads
+    // cleanly in a text editor / git diff.
+    let json =
+        serde_json::to_string_pretty(value).map_err(|e| SaveError::Serialize(e.to_string()))?;
+    write_str_atomic(target, &json, WritePerms::Default).map_err(SaveError::from)
 }
 
 /// Read a recipe, routing on `format_version` (ADR-0036 Decision 1). The file
