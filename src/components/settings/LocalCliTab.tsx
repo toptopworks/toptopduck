@@ -1,7 +1,7 @@
 import { useRef, useState } from "react";
 import { FormattedMessage, useIntl, type IntlShape } from "react-intl";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { Loader2, RefreshCw } from "lucide-react";
+import { Plus, RefreshCw, Zap } from "lucide-react";
 
 import { fmtError } from "../../lib/error-presentation";
 import { log } from "../../lib/log";
@@ -16,18 +16,18 @@ import type {
   DiscoveredRuntime,
   ProbeError,
   ProbeOk,
+  UserAdapterRow,
 } from "../../types/runtime";
 import { Badge } from "../ui/badge";
-import { Button } from "../ui/button";
+
 import {
   HeaderActionButton,
+  NameBadge,
+  RowActionButton,
   RowFoldChevron,
-  SETTINGS_TOOLTIP_CLASS,
   SettingsCard,
-  SettingsRow,
 } from "./settings-chrome";
-import { Tooltip, TooltipContent, TooltipTrigger } from "../ui/tooltip";
-import { UserRuntimesSection } from "./UserRuntimesSection";
+import { EditorForm, UserRuntimesSection } from "./UserRuntimesSection";
 import { toProbeError } from "./probe-error";
 
 // Local CLI tab (issue #489, ADR-0091): the adapter management panel inside
@@ -446,6 +446,12 @@ export function LocalCliTab({
   const queryClient = useQueryClient();
   const [rescanError, setRescanError] = useState<string | null>(null);
   const [rescanning, setRescanning] = useState(false);
+  // The custom-runtime editor (issue #1341): `undefined` = closed, `null` =
+  // create, a row = edit. The form replaces the whole tab -- the Add button
+  // rides the tab header beside Rescan (the CliSection list/form swap).
+  const [editingRuntime, setEditingRuntime] = useState<
+    UserAdapterRow | null | undefined
+  >(undefined);
   // Per-adapter probe state; one entry per probed row, keyed by adapter id.
   const [probeStates, setProbeStates] = useState<Record<string, ProbeState>>({});
   // Expanded adapter ids (issue #552): component-local, never persisted -- the
@@ -546,6 +552,16 @@ export function LocalCliTab({
     }
   }
 
+  if (editingRuntime !== undefined) {
+    return (
+      <EditorForm
+        row={editingRuntime}
+        onClose={() => setEditingRuntime(undefined)}
+        onIpcBusy={onIpcBusy}
+      />
+    );
+  }
+
   return (
     <div className="space-y-4">
       <div className="flex items-center justify-between">
@@ -555,16 +571,26 @@ export function LocalCliTab({
             defaultMessage="Detected CLI adapters"
           />
         </span>
-        <HeaderActionButton
-          label={intl.formatMessage({
-            id: "common.rescan",
-            defaultMessage: "Rescan",
-          })}
-          icon={RefreshCw}
-          spinning={rescanning}
-          disabled={rescanning}
-          onClick={() => void handleRescan()}
-        />
+        <div className="flex items-center gap-1">
+          <HeaderActionButton
+            label={intl.formatMessage({
+              id: "common.add",
+              defaultMessage: "Add",
+            })}
+            icon={Plus}
+            onClick={() => setEditingRuntime(null)}
+          />
+          <HeaderActionButton
+            label={intl.formatMessage({
+              id: "common.rescan",
+              defaultMessage: "Rescan",
+            })}
+            icon={RefreshCw}
+            spinning={rescanning}
+            disabled={rescanning}
+            onClick={() => void handleRescan()}
+          />
+        </div>
       </div>
 
       {isPending && (
@@ -605,93 +631,81 @@ export function LocalCliTab({
             // the toggle must not flicker away while a probe runs.
             const hasFoldContent = foldContent !== null;
             return (
-              <SettingsRow
-                key={a.id}
-                title={a.display_name}
-                description={
-                  a.binary_path ? (
-                    <code className="font-mono text-xs">{a.binary_path}</code>
-                  ) : undefined
-                }
-                action={(
-                  <div className="flex items-center gap-2">
-                    {probe.status === "failed" ? (
-                      <Badge variant="destructive">
-                        <FormattedMessage
-                          id="settings.runtime.localCli.probe.testFailed"
-                          defaultMessage="Test failed"
-                        />
-                      </Badge>
-                    ) : modelCount !== null ? (
-                      <Badge variant="secondary">
-                        <FormattedMessage
-                          id="settings.runtime.localCli.probe.modelCount"
-                          defaultMessage="{count} models"
-                          values={{ count: modelCount }}
-                        />
-                      </Badge>
-                    ) : null}
-                    {probeable && (
-                      <Tooltip>
-                        <TooltipTrigger asChild>
-                          {/* aria-disabled instead of disabled: a disabled
-                              button fires no pointer events, and this tooltip
-                              is the only last-tested surface -- it must stay
-                              hoverable mid-probe, exactly when the expanded
-                              fold shows the stale cached catalog. The click
-                              guard keeps the button inert while probing. */}
-                          <Button
-                            type="button"
-                            variant="ghost"
-                            size="sm"
-                            onClick={() => {
-                              if (probe.status !== "probing") void handleProbe(a.id);
-                            }}
-                            aria-disabled={probe.status === "probing" || undefined}
-                            className="aria-disabled:opacity-50"
-                          >
-                            {probe.status === "probing" && (
-                              <Loader2 className="size-3.5 animate-spin" aria-hidden />
-                            )}
-                            <FormattedMessage
-                              id="settings.runtime.localCli.probe.test"
-                              defaultMessage="Test"
-                            />
-                          </Button>
-                        </TooltipTrigger>
-                        {cached && (
-                          <TooltipContent side="top" className={SETTINGS_TOOLTIP_CLASS}>
-                            <FormattedMessage
-                              id="settings.runtime.localCli.probe.cachedAt"
-                              defaultMessage="Last tested"
-                            />
-                            {": "}
-                            <span className="font-mono">
-                              {formatProbedAt(intl, cached.probed_at_millis)}
-                            </span>
-                          </TooltipContent>
-                        )}
-                      </Tooltip>
+              <div key={a.id} className="hover:bg-accent px-4 py-3">
+                <div className="flex items-center gap-3">
+                  {/* The chevron rides the row END (after the actions):
+                   * collapsed rows without fold content render none, and
+                   * the shrink-0 action group keeps the title block
+                   * flush-left either way -- no placeholder, no dead
+                   * toggle (#552). An already-expanded row keeps its
+                   * chevron mid-flight (#554, per the fold comment above). */}
+                  <div className="min-w-0 flex-1">
+                    <div className="flex items-center gap-2">
+                      <span className="text-sm font-medium truncate">
+                        {a.display_name}
+                      </span>
+                      {a.detected ? (
+                        <NameBadge variant="success">
+                          <FormattedMessage
+                            id="settings.runtime.localCli.detected"
+                            defaultMessage="Available"
+                          />
+                        </NameBadge>
+                      ) : (
+                        <NameBadge>
+                          <FormattedMessage
+                            id="settings.runtime.localCli.notInstalled"
+                            defaultMessage="Not installed"
+                          />
+                        </NameBadge>
+                      )}
+                      {probe.status === "failed" && (
+                        <NameBadge variant="destructive">
+                          <FormattedMessage
+                            id="settings.runtime.localCli.probe.testFailed"
+                            defaultMessage="Test failed"
+                          />
+                        </NameBadge>
+                      )}
+                      {modelCount !== null && (
+                        <NameBadge>
+                          <FormattedMessage
+                            id="settings.runtime.localCli.probe.modelCount"
+                            defaultMessage="{count} models"
+                            values={{ count: modelCount }}
+                          />
+                        </NameBadge>
+                      )}
+                    </div>
+                    {a.binary_path && (
+                      <div className="text-muted-foreground mt-1 truncate font-mono text-xs">
+                        {a.binary_path}
+                      </div>
                     )}
-                    {a.detected ? (
-                      <Badge variant="default">
-                        <FormattedMessage
-                          id="settings.runtime.localCli.detected"
-                          defaultMessage="Available"
-                        />
-                      </Badge>
-                    ) : (
-                      // Muted text: an absent adapter is inert information,
-                      // lower visual weight than an installed one.
-                      <Badge
-                        variant="secondary"
-                        className="text-muted-foreground font-normal"
-                      >
-                        <FormattedMessage
-                          id="settings.runtime.localCli.notInstalled"
-                          defaultMessage="Not installed"
-                        />
-                      </Badge>
+                  </div>
+                  <div className="flex shrink-0 items-center gap-0.5">
+                    {probeable && (
+                      <RowActionButton
+                        disabled={probe.status === "probing"}
+                        spinning={probe.status === "probing"}
+                        icon={Zap}
+                        label={intl.formatMessage(
+                          {
+                            id: "settings.runtime.localCli.testLabel",
+                            defaultMessage: "Test adapter {name}",
+                          },
+                          { name: a.display_name },
+                        )}
+                        tooltip={
+                          cached
+                            ? `${intl.formatMessage({
+                              id: "settings.runtime.localCli.probe.cachedAt",
+                              defaultMessage: "Last tested",
+                            })}: ${formatProbedAt(intl, cached.probed_at_millis)}`
+                            : undefined
+                        }
+                        onClick={() => void handleProbe(a.id)}
+                      />
                     )}
                     {(hasFoldContent || expanded) && (
                       <RowFoldChevron
@@ -701,17 +715,16 @@ export function LocalCliTab({
                       />
                     )}
                   </div>
-                )}
-              >
+                </div>
                 {expanded && foldContent !== null && (
                   // Fold indent aligned with the MCP expanded content's
                   // ml-7 visual hierarchy (issue #552 item 6). Skipped when
                   // the fold is empty (mid-flight no-cache re-probe): an
                   // indent-only block would paint stray vertical spacing
                   // under the row.
-                  <div className="ml-7">{foldContent}</div>
+                  <div className="mt-3 ml-7">{foldContent}</div>
                 )}
-              </SettingsRow>
+              </div>
             );
           })}
         </SettingsCard>
@@ -719,10 +732,11 @@ export function LocalCliTab({
 
       {rescanError && <p className="text-destructive text-sm">{rescanError}</p>}
 
-      {/* The user-defined registry (issue #1341): row cards + editor under
-          the detected built-ins. The picker itself needs no change -- the
-          backend projection merges this registry into `list_adapters`. */}
-      <UserRuntimesSection onIpcBusy={onIpcBusy} />
+      {/* The user-defined registry (issue #1341): row cards under the
+          detected built-ins. Editing swaps the whole tab for the editor
+          form. The picker itself needs no change -- the backend projection
+          merges this registry into `list_adapters`. */}
+      <UserRuntimesSection onEdit={setEditingRuntime} onIpcBusy={onIpcBusy} />
     </div>
   );
 }

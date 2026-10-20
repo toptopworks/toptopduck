@@ -314,7 +314,7 @@ export function RowFoldChevron({
   return (
     <button
       type="button"
-      className="text-muted-foreground hover:text-foreground shrink-0 cursor-pointer"
+      className="text-muted-foreground hover:text-foreground flex size-7 shrink-0 cursor-pointer items-center justify-center"
       onClick={onToggle}
       aria-label={label}
       aria-expanded={expanded}
@@ -328,13 +328,30 @@ export function RowFoldChevron({
   );
 }
 
-/** The settings row badge (the DESIGN.md badge-secondary token:
- *  typography.badge 12px/500 on rounded.md with 2px 8px padding, muted
- *  surface + muted-foreground text) -- the shared chrome for row badges
- *  that are not state alerts. */
-export function NameBadge({ children }: { children: ReactNode }) {
+/** The settings row badge. The default variant rides the DESIGN.md
+ *  badge-secondary token (typography.badge 12px/500 on rounded.md with
+ *  2px 8px padding, muted surface + muted-foreground text); the
+ *  destructive and success variants carry state instead. */
+export function NameBadge({
+  children,
+  variant = "default",
+}: {
+  children: ReactNode;
+  /** default: the muted annotation; destructive: failure-grade (the badge
+   *  token's destructive surface); success: the probe-positive green (the
+   *  StatusDot's connected hue). */
+  variant?: "default" | "destructive" | "success";
+}) {
   return (
-    <span className="bg-muted text-muted-foreground shrink-0 rounded-md px-2 py-0.5 text-xs font-medium leading-none">
+    <span
+      data-slot="name-badge"
+      className={cn(
+        "shrink-0 rounded-md px-2 py-0.5 text-xs font-medium leading-none",
+        variant === "destructive" && "bg-destructive text-white",
+        variant === "success" && "bg-green-500/10 text-green-600 dark:text-green-400",
+        variant === "default" && "bg-muted text-muted-foreground",
+      )}
+    >
       {children}
     </span>
   );
