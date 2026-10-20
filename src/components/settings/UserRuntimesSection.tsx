@@ -9,19 +9,18 @@ import { log } from "../../lib/log";
 import {
   createUserAdapter,
   deleteUserAdapter,
+  getAdapterCatalogs,
   listUserAdapters,
-  probeAdapter,
   setUserAdapterEnabled,
   updateUserAdapter,
   type UserAdapterDraft,
 } from "../../api";
 import { adapterKeys } from "../../session/queryKeys";
-import type { ProbeError, UserAdapterRow } from "../../types/runtime";
+import type { ProbeError, ProbeOk, UserAdapterRow } from "../../types/runtime";
 import { Button } from "../ui/button";
 import { Input } from "../ui/input";
 import { Label } from "../ui/label";
 import { Switch } from "../ui/switch";
-import { cn } from "../../lib/utils";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -43,11 +42,15 @@ import {
 } from "./settings-chrome";
 import { EnvRowsEditor, type EnvRow } from "./EnvRowsEditor";
 import { toProbeError } from "./probe-error";
+import { ProbeFaceRow } from "./probe-face";
+import type { ProbeRowHost } from "./useAdapterProbes";
 import { formatArgGroups, isSingleTokenCommand, parseArgGroups } from "./user-runtime-form";
 
 // User-defined runtimes (issue #1341): the registry pane under the Local CLI
 // tab. Row cards for every `user-adapters.json` row (disabled ones included)
-// + a delete confirm. The editor is a full-pane form (the CliToolForm
+// + a delete confirm; the rows carry the shared probe face (issue #1346)
+// through `ProbeFaceRow`, fed by the tab-owned `useAdapterProbes` instance.
+// The editor is a full-pane form (the CliToolForm
 // posture: back link, form pane header, one card of row-stacked fields, and
 // the save footer inside the card) owned by the TAB -- its Add button sits
 // in the tab header beside Rescan, and the open form replaces the whole tab.
@@ -92,10 +95,16 @@ export function EditorForm({
   row,
   onClose,
   onIpcBusy,
+  onProbeOnce,
 }: {
   row: UserAdapterRow | null;
   onClose: () => void;
   onIpcBusy: (channel: "probe" | "userAdapter", busy: boolean) => void;
+  /** The tab's busy-counted probe core: the form's Test fires through it
+   *  so the row probes and the form test can never early-clear each
+   *  other's busy mirror, and the result mirrors into the catalogs cache
+   *  (issue #1346 AC: the row face shows the result after the close). */
+  onProbeOnce: (id: string) => Promise<ProbeOk>;
 }) {
   const intl = useIntl();
   const queryClient = useQueryClient();
@@ -162,18 +171,15 @@ export function EditorForm({
   async function handleTest() {
     if (row === null || test.status === "probing") return;
     setTest({ status: "probing" });
-    onIpcBusy("probe", true);
     try {
-      await probeAdapter(row.id);
+      await onProbeOnce(row.id);
       setTest({ status: "ok" });
     } catch (e) {
       log.warn("UserRuntimesSection", "user adapter probe failed", e);
-      // The shared narrowing (LocalCliTab's probe face): a structured reject
+      // The shared narrowing (the probe face's): a structured reject
       // with a KNOWN kind passes through, anything else degrades to the
       // frontend-only unreachable kind.
       setTest({ status: "failed", error: toProbeError(e) });
-    } finally {
-      onIpcBusy("probe", false);
     }
   }
 
@@ -403,19 +409,24 @@ export function EditorForm({
   );
 }
 
-/** The registry pane: every user row as a card. Editing hands the row to
- *  `onEdit` -- the tab owns the editor form (its Add button sits in the tab
- *  header). The list query rejects on a corrupt registry (management face)
- *  -- the error renders in place of the cards. */
+/** The registry pane: every user row as a card, carrying the shared probe
+ *  face (issue #1346). Editing hands the row to `onEdit` -- the tab owns
+ *  the editor form (its Add button sits in the tab header). The list query
+ *  rejects on a corrupt registry (management face) -- the error renders in
+ *  place of the cards. */
 export function UserRuntimesSection({
   onEdit,
   onIpcBusy,
+  probes,
 }: {
   /** Reports the row to edit (the tab swaps itself for the editor form). */
   onEdit: (row: UserAdapterRow) => void;
-  /** The channel this pane fires: the CRUD writes (the probe test fires
-   *  from the tab-owned editor form). */
+  /** The channel this pane fires: the CRUD writes (the probe fires from
+   *  the tab-owned probe lifecycle below and the editor form). */
   onIpcBusy: (channel: "probe" | "userAdapter", busy: boolean) => void;
+  /** The tab-owned probe lifecycle (the single busy counter for the
+   *  shared "probe" channel) -- the rows' probe face reads from it. */
+  probes: ProbeRowHost;
 }) {
   const intl = useIntl();
   const queryClient = useQueryClient();
@@ -434,6 +445,14 @@ export function UserRuntimesSection({
   });
   const rows = data ?? [];
   const loadError = isError ? fmtError(error, intl) : null;
+
+  // The probe-catalog cache for the rows' last-tested face -- the same key
+  // the tab's built-ins read (TanStack dedupes the small sidecar read), so
+  // a probe mirror from either surface lands on both.
+  const { data: cachedCatalogs } = useQuery({
+    queryKey: adapterKeys.catalogs(),
+    queryFn: getAdapterCatalogs,
+  });
 
   async function handleToggle(row: UserAdapterRow) {
     if (busyId !== null) return;
@@ -494,35 +513,30 @@ export function UserRuntimesSection({
             </p>
           )}
           {rows.map((row) => (
-            <div key={row.id} className="hover:bg-accent px-4 py-3">
-              <div className="flex items-center gap-3">
-                <div className="min-w-0 flex-1">
-                  <div className="flex items-center gap-2">
-                    <span
-                      className={cn(
-                        "text-sm font-medium truncate",
-                        // A disabled adapter is dormant (ADR-0106): the
-                        // quieted name keeps the row's state legible.
-                        !row.enabled && "text-muted-foreground",
-                      )}
-                    >
-                      {row.name}
-                    </span>
-                    {!row.enabled && (
-                      <NameBadge>
-                        <FormattedMessage
-                          id="settings.runtime.userRun.disabled"
-                          defaultMessage="Disabled"
-                        />
-                      </NameBadge>
-                    )}
-                  </div>
-                  <div className="text-muted-foreground mt-1 truncate font-mono text-xs">
-                    {row.command}
-                    {row.args.length > 0 && ` ${row.args.join(" ")}`}
-                  </div>
+            <ProbeFaceRow
+              key={row.id}
+              // A disabled adapter is dormant (ADR-0106): the quieted name
+              // keeps the row's state legible.
+              name={row.name}
+              nameMuted={!row.enabled}
+              rowBadges={
+                !row.enabled ? (
+                  <NameBadge>
+                    <FormattedMessage
+                      id="settings.runtime.userRun.disabled"
+                      defaultMessage="Disabled"
+                    />
+                  </NameBadge>
+                ) : null
+              }
+              subtitle={(
+                <div className="text-muted-foreground mt-1 truncate font-mono text-xs">
+                  {row.command}
+                  {row.args.length > 0 && ` ${row.args.join(" ")}`}
                 </div>
-                <div className="flex shrink-0 items-center gap-0.5">
+              )}
+              actions={(
+                <>
                   {/* The enable toggle (ADR-0106): the row's machine-level
                    * state, before the action buttons so it reads as the
                    * row's primary control, not an action. */}
@@ -562,9 +576,18 @@ export function UserRuntimesSection({
                     icon={Trash2}
                     onClick={() => setConfirmTarget(row)}
                   />
-                </div>
-              </div>
-            </div>
+                </>
+              )}
+              // The registry list carries no detection state: every row
+              // offers the probe, and a failed probe is the honest answer
+              // (the probe is a diagnostic, not a gate).
+              probeable
+              probe={probes.probeStates[row.id] ?? { status: "idle" }}
+              cached={cachedCatalogs?.[row.id]}
+              expanded={probes.expandedRows.has(row.id)}
+              onProbe={() => void probes.probe(row.id)}
+              onToggleFold={() => probes.toggleFold(row.id)}
+            />
           ))}
         </SettingsCard>
       )}
