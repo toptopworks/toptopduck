@@ -1251,17 +1251,18 @@ describe("LocalCliTab custom CLI adapter editor (issue #1341)", () => {
       target: { value: "--acp \"two words\"" },
     });
     // One env row: KEY / value. The env section starts collapsed when it
-    // has no rows; expanding it seeds the blank row. Anchored: the
-    // unanchored form also matches the FieldHint info button.
+    // has no rows; expanding it seeds the blank row -- named by its label
+    // without clicking Add, so the seeding itself stays pinned. Anchored:
+    // the unanchored form also matches the FieldHint info button.
     fireEvent.click(
       screen.getByRole("button", { name: /^Environment variables$/ }),
     );
-    fireEvent.click(screen.getByRole("button", { name: /Add variable/i }));
-    const envInputs = screen
-      .getAllByRole("textbox")
-      .filter((el) => (el as HTMLInputElement).value === "");
-    fireEvent.change(envInputs[0], { target: { value: "K" } });
-    fireEvent.change(envInputs[1], { target: { value: "v" } });
+    fireEvent.change(screen.getByLabelText("Env name (row 1)"), {
+      target: { value: "K" },
+    });
+    fireEvent.change(screen.getByLabelText("Env value (row 1)"), {
+      target: { value: "v" },
+    });
 
     fireEvent.click(screen.getByRole("button", { name: /^Add$/ }));
     await waitFor(() => expect(createUserAdapter).toHaveBeenCalledTimes(1));
@@ -1370,6 +1371,31 @@ describe("LocalCliTab custom CLI adapter editor (issue #1341)", () => {
       }),
     );
     expect(createUserAdapter).not.toHaveBeenCalled();
+  });
+
+  it("keeps the form open and surfaces the error when the save rejects", async () => {
+    vi.mocked(createUserAdapter).mockRejectedValueOnce(
+      new Error("write refused"),
+    );
+    renderTab();
+    fireEvent.click(await screen.findByRole("button", { name: /^Add$/ }));
+
+    fireEvent.change(screen.getByLabelText("Name"), {
+      target: { value: "My CLI" },
+    });
+    fireEvent.change(screen.getByLabelText("Program"), {
+      target: { value: "my-cli" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: /^Add$/ }));
+    // A rejected write lands on the form's one error line and the form
+    // stays mounted -- the draft is not lost behind a close.
+    expect(await screen.findByText(/write refused/i)).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: /Back to CLI list/i }),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByText(/Detected CLI adapters/i),
+    ).not.toBeInTheDocument();
   });
 
   it("surfaces a failed command browse on the form's error line", async () => {

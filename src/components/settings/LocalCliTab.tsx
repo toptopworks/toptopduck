@@ -557,7 +557,6 @@ export function LocalCliTab({
       <EditorForm
         row={editingRuntime}
         onClose={() => setEditingRuntime(undefined)}
-        onSaved={() => setEditingRuntime(undefined)}
         onIpcBusy={onIpcBusy}
       />
     );
@@ -634,10 +633,12 @@ export function LocalCliTab({
             return (
               <div key={a.id} className="hover:bg-accent px-4 py-3">
                 <div className="flex items-center gap-3">
-                  {/* The chevron rides the row END (after the actions): rows
-                   * without fold content render none, and the shrink-0
-                   * action group keeps the title block flush-left either
-                   * way -- no placeholder, no dead toggle (#552). */}
+                  {/* The chevron rides the row END (after the actions):
+                   * collapsed rows without fold content render none, and
+                   * the shrink-0 action group keeps the title block
+                   * flush-left either way -- no placeholder, no dead
+                   * toggle (#552). An already-expanded row keeps its
+                   * chevron mid-flight (#554, per the fold comment above). */}
                   <div className="min-w-0 flex-1">
                     <div className="flex items-center gap-2">
                       <span className="text-sm font-medium truncate">

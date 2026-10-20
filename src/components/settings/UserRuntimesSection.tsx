@@ -88,13 +88,10 @@ type TestState =
 export function EditorForm({
   row,
   onClose,
-  onSaved,
   onIpcBusy,
 }: {
   row: UserAdapterRow | null;
   onClose: () => void;
-  /** Closes the form back to the list after a successful save. */
-  onSaved: () => void;
   onIpcBusy: (channel: "probe" | "userAdapter", busy: boolean) => void;
 }) {
   const intl = useIntl();
@@ -156,7 +153,7 @@ export function EditorForm({
       invalidate();
       // A save closes the form back to the list (the McpServerForm flow);
       // the invalidated queries refetch the saved row.
-      onSaved();
+      onClose();
     } catch (e) {
       log.warn("UserRuntimesSection", "user adapter save failed", e);
       setError(fmtError(e, intl));
@@ -413,7 +410,9 @@ export function EditorForm({
               />
             )}
             {"data" in test.error && test.error.data && (
-              <span className="font-mono text-xs"> {test.error.data}</span>
+              // String() degrades a skew payload the same way the built-in
+              // fold does -- a bare object child would throw at render.
+              <span className="font-mono text-xs"> {String(test.error.data)}</span>
             )}
           </p>
         )}
@@ -421,9 +420,9 @@ export function EditorForm({
           <p className="settings-error text-destructive px-4 py-1.5 text-sm">{error}</p>
         )}
 
-        {/* Save / Test / Cancel (the McpServerForm footer: the save carries
-         * the busy spinner and is disabled until the form is valid; the
-         * probe is the outline diagnostic at the end). */}
+        {/* Save / Test / Cancel (the McpServerForm footer posture: the save
+         * carries the busy spinner and is disabled until the form is valid;
+         * this form appends the outline Test diagnostic at the end). */}
         <div className="flex items-center gap-2 px-4 py-3">
           <Button
             type="button"
@@ -467,7 +466,8 @@ export function UserRuntimesSection({
 }: {
   /** Reports the row to edit (the tab swaps itself for the editor form). */
   onEdit: (row: UserAdapterRow) => void;
-  /** The channels this pane fires: the CRUD writes + the probe test. */
+  /** The channel this pane fires: the CRUD writes (the probe test fires
+   *  from the tab-owned editor form). */
   onIpcBusy: (channel: "probe" | "userAdapter", busy: boolean) => void;
 }) {
   const intl = useIntl();
@@ -529,14 +529,12 @@ export function UserRuntimesSection({
 
   return (
     <div className="space-y-4">
-      <div className="flex items-center justify-between">
-        <span className="text-sm font-medium">
-          <FormattedMessage
-            id="settings.runtime.userRun.title"
-            defaultMessage="Custom adapters"
-          />
-        </span>
-      </div>
+      <p className="text-sm font-medium">
+        <FormattedMessage
+          id="settings.runtime.userRun.title"
+          defaultMessage="Custom adapters"
+        />
+      </p>
       {isPending && (
         <p className="text-muted-foreground text-sm">
           <FormattedMessage id="settings.reading" defaultMessage="Reading current config…" />

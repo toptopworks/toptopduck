@@ -328,10 +328,10 @@ export function RowFoldChevron({
   );
 }
 
-/** The settings row badge (the DESIGN.md badge-secondary token:
- *  typography.badge 12px/500 on rounded.md with 2px 8px padding, muted
- *  surface + muted-foreground text) -- the shared chrome for row badges
- *  that are not state alerts. */
+/** The settings row badge. The default variant rides the DESIGN.md
+ *  badge-secondary token (typography.badge 12px/500 on rounded.md with
+ *  2px 8px padding, muted surface + muted-foreground text); the
+ *  destructive and success variants carry state instead. */
 export function NameBadge({
   children,
   variant = "default",
