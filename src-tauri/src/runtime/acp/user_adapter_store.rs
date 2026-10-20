@@ -278,6 +278,22 @@ mod tests {
         assert!(raw.contains("\"format_version\": 1"), "doc: {raw}");
     }
 
+    /// Issue #1348: saving creates the registry file's parent directory on
+    /// first write (fresh install) -- the shared core deliberately does not.
+    #[test]
+    fn mutate_creates_missing_parent_directory() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("nested").join(USER_ADAPTERS_FILE_NAME);
+        let store = UserAdapterStore::new(path);
+        store
+            .mutate(|rows| {
+                rows.push(sample_row("user:11111111"));
+                Ok(())
+            })
+            .expect("create");
+        assert_eq!(store.list().expect("list").len(), 1);
+    }
+
     #[test]
     fn a_rejected_mutation_never_touches_the_file() {
         let (_dir, store) = temp_store();

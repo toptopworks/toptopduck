@@ -444,6 +444,16 @@ mod tests {
         );
     }
 
+    /// Issue #1348: the store creates the sidecar's parent directory on
+    /// first write (fresh install) -- the shared core deliberately does not.
+    #[test]
+    fn store_entry_creates_missing_parent_directory() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = AdapterCatalogStore::new(dir.path().join("nested").join(CATALOGS_FILE_NAME));
+        store.store_entry("user:gemini-cli", acp_entry("gemini-2.5-pro", 0));
+        assert_eq!(store.load().len(), 1, "entry survives a reload");
+    }
+
     #[test]
     fn concurrent_store_entries_both_land() {
         // Two adapters probed concurrently: the in-process lock serializes

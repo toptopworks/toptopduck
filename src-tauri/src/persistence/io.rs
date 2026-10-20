@@ -22,8 +22,10 @@ use serde_json::Value;
 
 /// Suffix appended to the target file name for the temp file. Same directory
 /// as the target so the `rename` is intra-volume (atomic). The temp file is
-/// created fresh each save (`File::create` truncates), so a stale temp from
-/// a prior crashed write is overwritten, not appended to.
+/// overwritten each save -- truncated on the Default face, removed and
+/// recreated on the Private face (mode() only applies at creation, so a
+/// stale temp carrying a wider mode must not be reused) -- never appended
+/// to.
 const TMP_SUFFIX: &str = ".tmp";
 
 /// Why a save failed. Every failure leaves the prior recipe file (if any)
@@ -202,6 +204,10 @@ pub fn write_str_atomic(
     {
         #[cfg(unix)]
         let mut file = if matches!(perms, WritePerms::Private) {
+            // mode() only applies when the open creates the file; a stale
+            // temp from an older build may carry a wider mode, so drop it
+            // first and guarantee a fresh 0600 create.
+            let _ = fs::remove_file(&tmp);
             use std::os::unix::fs::OpenOptionsExt;
             std::fs::OpenOptions::new()
                 .write(true)
