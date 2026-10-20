@@ -386,6 +386,35 @@ describe("ComposerProviderPicker two-level popover (ADR-0099)", () => {
     expect(setSessionRuntime).not.toHaveBeenCalled();
   });
 
+  it("names an undetected-but-registered adapter on the trigger (issue #1351)", async () => {
+    // The session's active adapter is registered but not detected (binary
+    // missing / PATH changed): the full wire table still carries its row, so
+    // the trigger shows the name, not the raw id. Only a deleted or
+    // disabled row falls to the id.
+    vi.mocked(getSessionRuntime).mockResolvedValue({
+      kind: "external",
+      data: "user:ba3b2de2",
+    });
+    vi.mocked(listAdapters).mockResolvedValue([
+      adapter("user:ba3b2de2", "My local CLI", false),
+    ]);
+    renderPicker(pickerJsx());
+    await screen.findByRole("button", { name: "Runtime: My local CLI" });
+  });
+
+  it("falls to the raw id on the trigger when the adapter row is gone", async () => {
+    // The deleted-row floor of the display-name resolve (issue #1351):
+    // the session still points at the id, but no row carries it -- the
+    // trigger shows the id, the honest floor.
+    vi.mocked(getSessionRuntime).mockResolvedValue({
+      kind: "external",
+      data: "user:ba3b2de2",
+    });
+    vi.mocked(listAdapters).mockResolvedValue([]);
+    renderPicker(pickerJsx());
+    await screen.findByRole("button", { name: "Runtime: user:ba3b2de2" });
+  });
+
   it("reverts the runtime to built-in when a profile option is picked while external", async () => {
     vi.mocked(getSessionRuntime).mockResolvedValue({
       kind: "external",

@@ -126,6 +126,16 @@ fn parse_doc(raw: &str) -> Result<Vec<UserAdapterRow>, String> {
         if !seen_ids.insert(row.id.as_str()) {
             return Err(format!("duplicate adapter id `{}` in the registry", row.id));
         }
+        // The name is the attribution tombstone's raw material (issue #1351)
+        // and the picker's row label: an empty one would render blank faces
+        // downstream, so the boundary rejects it here (the UI form already
+        // trims-and-rejects; this guards the hand-editable file).
+        if row.name.trim().is_empty() {
+            return Err(format!(
+                "adapter `{}` carries an empty name; user-defined rows must name their CLI",
+                row.id
+            ));
+        }
     }
     Ok(doc.adapters)
 }
@@ -335,6 +345,24 @@ mod tests {
         std::fs::write(store.path(), br#"{"format_version": 2, "adapters": []}"#).expect("write");
         let err = store.list().expect_err("newer format refuses");
         assert!(err.contains("format_version 2"), "{err}");
+        assert!(store.load_for_picker().is_empty());
+    }
+
+    #[test]
+    fn an_empty_name_refuses_to_parse() {
+        // Issue #1351: the name is the attribution tombstone's raw material
+        // and the picker's row label -- a hand-edited blank one would render
+        // empty faces downstream, so the parse boundary rejects it (trimmed,
+        // so whitespace-only hits the same wall; the UI form already
+        // trims-and-rejects).
+        let (_dir, store) = temp_store();
+        std::fs::write(
+            store.path(),
+            br#"{"format_version": 1, "adapters": [{"id": "user:1", "name": "  ", "command": "c", "stream_format": "acp"}]}"#,
+        )
+        .expect("write");
+        let err = store.list().expect_err("empty name refuses");
+        assert!(err.contains("empty name"), "{err}");
         assert!(store.load_for_picker().is_empty());
     }
 

@@ -776,6 +776,11 @@ fn external_turn_records_invocation_set_provenance() {
         Some("fake-cli"),
         "the live snapshot names the driving adapter's stable id"
     );
+    assert_eq!(
+        last_turn.provenance.adapter_display_name.as_deref(),
+        Some("fake-cli"),
+        "the live snapshot carries the adapter's display name at stamp time (issue #1351)"
+    );
 }
 
 /// Issue #702 (calibrated by ADR-0119): a resumed session whose discovery

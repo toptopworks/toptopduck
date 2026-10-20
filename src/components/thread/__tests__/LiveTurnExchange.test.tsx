@@ -10,7 +10,8 @@
 // faces), plus the streaming prose postures (ADR-0120) and the trailing
 // thinking-status postures (issue #1167).
 
-import { describe, expect, it } from "vitest";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { describe, expect, it, vi } from "vitest";
 import { render, screen } from "@testing-library/react";
 import { IntlProvider } from "react-intl";
 import { TooltipProvider } from "../../ui/tooltip";
@@ -18,17 +19,34 @@ import { catalogFor } from "../../../i18n";
 import { LiveTurnExchange } from "../LiveTurnExchange";
 import type { LiveRoundRow, LiveTurn } from "../../../session/useTurnFlow";
 
+// The attribution marker reads the shared adapter-table cache (issue #1351),
+// so the exchange needs a QueryClient like the app tree provides. The api
+// mock resolves an empty table -- the raw-id assertions stay declared
+// rather than an accident of a failed fetch; retry:false keeps a mounting
+// marker from stacking background retries, staleTime:Infinity keeps a
+// seeded cache from refetching under it.
+vi.mock("../../../api", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../../../api")>()),
+  listAdapters: vi.fn().mockResolvedValue([]),
+}));
+
+const queryClient = new QueryClient({
+  defaultOptions: { queries: { retry: false, staleTime: Infinity } },
+});
+
 function renderExchange(liveTurn: LiveTurn, waitStartedAt: number | null = null) {
   return render(
     <IntlProvider locale="zh-CN" messages={catalogFor("zh-CN")}>
       <TooltipProvider>
-        <LiveTurnExchange
-          liveTurn={liveTurn}
-          waitStartedAt={waitStartedAt}
-          mentionedDataset={null}
-          onRespondApproval={() => {}}
-          onThinkingExpandedChange={() => {}}
-        />
+        <QueryClientProvider client={queryClient}>
+          <LiveTurnExchange
+            liveTurn={liveTurn}
+            waitStartedAt={waitStartedAt}
+            mentionedDataset={null}
+            onRespondApproval={() => {}}
+            onThinkingExpandedChange={() => {}}
+          />
+        </QueryClientProvider>
       </TooltipProvider>
     </IntlProvider>,
   );
@@ -73,7 +91,7 @@ describe("LiveTurnExchange runtime attribution marker (issue #818)", () => {
     // keep the suite green while the marker vanished until the settle swap
     // (#620).
     const { container } = renderExchange(
-      liveTurnWith({ kind: "external", data: { adapter_id: "claude-code" } }),
+      liveTurnWith({ kind: "external", data: { adapter_id: "claude-code", display_name: null } }),
     );
     const marker = container.querySelector(".runtime-attribution");
     expect(marker).not.toBeNull();

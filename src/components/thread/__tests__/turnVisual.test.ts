@@ -118,13 +118,23 @@ describe("lifecycleRunMarks (run-position contract)", () => {
 });
 
 describe("runtimeMarkerName (issue #818 per-turn attribution gate)", () => {
-  const external = (adapterId: string | null): TurnRuntime => ({
+  const external = (adapterId: string | null, displayName: string | null = null): TurnRuntime => ({
     kind: "external",
-    data: { adapter_id: adapterId },
+    data: { adapter_id: adapterId, display_name: displayName },
   });
 
   it("names an external turn by its adapter id", () => {
-    expect(runtimeMarkerName(external("claude-code"))).toBe("claude-code");
+    expect(runtimeMarkerName(external("claude-code"))).toEqual({
+      adapterId: "claude-code",
+      persistedName: null,
+    });
+  });
+
+  it("carries the stamp-time display name alongside the id (issue #1351)", () => {
+    expect(runtimeMarkerName(external("user:ba3b2de2", "My local CLI"))).toEqual({
+      adapterId: "user:ba3b2de2",
+      persistedName: "My local CLI",
+    });
   });
 
   it("stays silent for the built-in default -- an unmarked turn reads as default", () => {

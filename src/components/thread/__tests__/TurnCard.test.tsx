@@ -8,7 +8,8 @@
 // User-actor badge derivation hand-off, the per-outcome width caps, the
 // folds, the cancel-reason split (#883), and the textual markdown (#827).
 
-import { describe, expect, it } from "vitest";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { describe, expect, it, vi } from "vitest";
 import { fireEvent, render, screen } from "@testing-library/react";
 import { IntlProvider } from "react-intl";
 import { TooltipProvider } from "../../ui/tooltip";
@@ -16,6 +17,21 @@ import { catalogFor, type EffectiveLocale } from "../../../i18n";
 import { TurnCard } from "../TurnCard";
 import type { DatasetDescriptor } from "../../../types/dataset";
 import type { TextKind, TraceEntry, TurnRecord } from "../../../types/thread";
+
+// The attribution marker reads the shared adapter-table cache (issue #1351),
+// so the card tree needs a QueryClient like the app tree provides. The api
+// mock resolves an empty table -- the raw-id assertions stay declared
+// rather than an accident of a failed fetch; retry:false keeps a mounting
+// marker from stacking background retries, staleTime:Infinity keeps a
+// seeded cache from refetching under it.
+vi.mock("../../../api", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../../../api")>()),
+  listAdapters: vi.fn().mockResolvedValue([]),
+}));
+
+const queryClient = new QueryClient({
+  defaultOptions: { queries: { retry: false, staleTime: Infinity } },
+});
 
 // Thread chrome routes through react-intl (ADR-0052); zh-CN matches the
 // shared fixture convention, and the marker's label is the raw adapter id
@@ -26,19 +42,21 @@ function cardEl(record: TurnRecord, defaultOpenDetail?: boolean, locale: Effecti
   return (
     <IntlProvider locale={locale} messages={catalogFor(locale)}>
       <TooltipProvider>
-        <TurnCard
-          record={record}
-          selectedResult={null}
-          onSelectResult={() => {}}
-          staleAnchor={undefined}
-          hasJumpTarget={false}
-          onStaleChipJump={undefined}
-          mentionedDataset={null}
-          skillIndex={undefined}
-          onRetryTurn={undefined}
-          busy={false}
-          defaultOpenDetail={defaultOpenDetail}
-        />
+        <QueryClientProvider client={queryClient}>
+          <TurnCard
+            record={record}
+            selectedResult={null}
+            onSelectResult={() => {}}
+            staleAnchor={undefined}
+            hasJumpTarget={false}
+            onStaleChipJump={undefined}
+            mentionedDataset={null}
+            skillIndex={undefined}
+            onRetryTurn={undefined}
+            busy={false}
+            defaultOpenDetail={defaultOpenDetail}
+          />
+        </QueryClientProvider>
       </TooltipProvider>
     </IntlProvider>
   );
@@ -81,7 +99,7 @@ const previewDataset: DatasetDescriptor = {
 describe("TurnCard runtime attribution marker (issue #818)", () => {
   it("keeps the marker on a Failed turn, in the muted caption family", () => {
     const record: TurnRecord = {
-      ...recordWith({ kind: "external", data: { adapter_id: "claude-code" } }),
+      ...recordWith({ kind: "external", data: { adapter_id: "claude-code", display_name: null } }),
       outcome: { kind: "Failed", data: { kind: "Execute", data: { detail: "boom" } } },
     };
     const { container } = renderCard(record);

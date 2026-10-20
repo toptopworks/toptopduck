@@ -589,8 +589,8 @@ impl<'a> Resumer<'a> {
                             // assembly-time content_hash for the frontend
                             // drift check) and the runtime projection. A
                             // persisted External turn without an adapter id
-                            // (pre-extension recording) projects to
-                            // External { adapter_id: None } -- the thread's
+                            // (pre-extension recording) projects to an
+                            // all-null External payload -- the thread's
                             // "not recorded" degradation.
                             provenance: TurnProvenance {
                                 skills: turn.provenance.skills.clone(),
@@ -598,6 +598,7 @@ impl<'a> Resumer<'a> {
                                     RuntimeKind::BuiltIn => TurnRuntime::BuiltIn,
                                     RuntimeKind::External => TurnRuntime::External {
                                         adapter_id: turn.provenance.adapter_id.clone(),
+                                        display_name: turn.provenance.adapter_display_name.clone(),
                                     },
                                 }),
                             },
@@ -1897,14 +1898,20 @@ mod tests {
 
     #[test]
     fn rebuild_timeline_projects_runtime_attribution_to_the_wire() {
-        // ADR-0101: the resume projection maps the persisted pair (runtime
-        // kind + adapter id) onto the wire `TurnRuntime` the thread's segment
-        // badges read. Every recorded shape survives the rebuild: an external
-        // turn names its adapter, a pre-extension external turn degrades to
-        // `External { adapter_id: None }` (never a fabricated id), a built-in
-        // turn carries only the kind, and a v1-era turn without a runtime
-        // stays unattributed.
-        fn attributed(runtime: Option<RuntimeKind>, adapter_id: Option<&str>) -> RecipeEntry {
+        // ADR-0101 + issue #1351: the resume projection maps the persisted
+        // triple (runtime kind + adapter id + display name) onto the wire
+        // `TurnRuntime` the thread's attribution labels read. Every recorded
+        // shape survives the rebuild: an external turn names its adapter --
+        // a custom adapter whose name differs from its id pins that the
+        // tombstone rides the projection verbatim -- a pre-extension
+        // external turn degrades to nulls (never fabricated values), a
+        // built-in turn carries only the kind, and a v1-era turn without a
+        // runtime stays unattributed.
+        fn attributed(
+            runtime: Option<RuntimeKind>,
+            adapter_id: Option<&str>,
+            adapter_display_name: Option<&str>,
+        ) -> RecipeEntry {
             RecipeEntry::Turn(RecipeTurn::with_audit(
                 "q",
                 RecipeOutcome::Textual {
@@ -1916,6 +1923,7 @@ mod tests {
                 crate::persistence::recipe::TurnProvenance {
                     runtime,
                     adapter_id: adapter_id.map(Into::into),
+                    adapter_display_name: adapter_display_name.map(Into::into),
                     skills: Vec::new(),
                 },
                 TurnTimestamps::default(),
@@ -1923,10 +1931,15 @@ mod tests {
         }
         let recipe = recipe_with(
             vec![
-                attributed(Some(RuntimeKind::External), Some("gemini-cli")),
-                attributed(Some(RuntimeKind::External), None),
-                attributed(Some(RuntimeKind::BuiltIn), None),
-                attributed(None, None),
+                attributed(Some(RuntimeKind::External), Some("gemini-cli"), None),
+                attributed(
+                    Some(RuntimeKind::External),
+                    Some("user:ba3b2de2"),
+                    Some("My local CLI"),
+                ),
+                attributed(Some(RuntimeKind::External), None, None),
+                attributed(Some(RuntimeKind::BuiltIn), None, None),
+                attributed(None, None, None),
             ],
             None,
         );
@@ -1946,9 +1959,17 @@ mod tests {
             runtimes,
             vec![
                 Some(TurnRuntime::External {
-                    adapter_id: Some("gemini-cli".into())
+                    adapter_id: Some("gemini-cli".into()),
+                    display_name: None,
                 }),
-                Some(TurnRuntime::External { adapter_id: None }),
+                Some(TurnRuntime::External {
+                    adapter_id: Some("user:ba3b2de2".into()),
+                    display_name: Some("My local CLI".into()),
+                }),
+                Some(TurnRuntime::External {
+                    adapter_id: None,
+                    display_name: None,
+                }),
                 Some(TurnRuntime::BuiltIn),
                 None,
             ],
