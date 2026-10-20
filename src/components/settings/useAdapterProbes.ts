@@ -33,7 +33,7 @@ export type ProbeState =
  *  return (the form's `probeOnce` stays tab-owned). */
 export interface ProbeRowHost {
   probeStates: Record<string, ProbeState>;
-  expandedRows: Set<string>;
+  expandedRows: ReadonlySet<string>;
   probe: (id: string) => Promise<void>;
   toggleFold: (id: string) => void;
 }

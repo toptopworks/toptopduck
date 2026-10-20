@@ -50,7 +50,7 @@ export function LocalCliTab({
   const [editingRuntime, setEditingRuntime] = useState<
     UserAdapterRow | null | undefined
   >(undefined);
-  // The shared probe lifecycle (./probe-face.tsx): one instance for the
+  // The shared probe lifecycle (./useAdapterProbes.ts): one instance for the
   // whole tab -- the built-in rows, the registry rows, and the editor
   // form's Test all count against the same "probe" busy mirror.
   const probes = useAdapterProbes(onIpcBusy);
