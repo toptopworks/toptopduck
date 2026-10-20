@@ -218,7 +218,7 @@ describe("useTurnFlow", () => {
       await waitFor(() =>
         expect(result.current.liveTurn?.runtime).toEqual({
           kind: "external",
-          data: { adapter_id: "claude-code" },
+          data: { adapter_id: "claude-code", display_name: null },
         }),
       );
       // Phase evolution spreads the previous state, so the attribution
@@ -226,7 +226,7 @@ describe("useTurnFlow", () => {
       emitProgress(SID, { Thinking: { attempt: 1 } });
       expect(result.current.liveTurn?.runtime).toEqual({
         kind: "external",
-        data: { adapter_id: "claude-code" },
+        data: { adapter_id: "claude-code", display_name: null },
       });
     });
 
@@ -758,7 +758,7 @@ describe("useTurnFlow", () => {
       expect(choiceToTurnRuntime({ kind: "built_in" })).toEqual({ kind: "built_in" });
       expect(choiceToTurnRuntime({ kind: "external", data: "claude-code" })).toEqual({
         kind: "external",
-        data: { adapter_id: "claude-code" },
+        data: { adapter_id: "claude-code", display_name: null },
       });
     });
 
@@ -1180,7 +1180,7 @@ describe("useTurnFlow", () => {
       expect(thread?.[0]).toMatchObject({
         entry: "Turn",
         data: {
-          provenance: { runtime: { kind: "external", data: { adapter_id: "claude-code" } } },
+          provenance: { runtime: { kind: "external", data: { adapter_id: "claude-code", display_name: null } } },
         },
       });
     });

@@ -520,5 +520,5 @@ export function runtimeMarkerName(runtime: TurnRuntime | undefined): RuntimeMark
   if (runtime?.kind !== "external") return null;
   const { adapter_id: adapterId, display_name: displayName } = runtime.data;
   if (adapterId === null) return null;
-  return { adapterId, persistedName: displayName ?? null };
+  return { adapterId, persistedName: displayName };
 }

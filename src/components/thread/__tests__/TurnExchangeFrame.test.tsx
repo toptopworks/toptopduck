@@ -9,7 +9,8 @@
 // (runtimeMarkerName).
 
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
+import { act, waitFor } from "@testing-library/react";
 import { renderI18n } from "../../common/__tests__/helpers";
 import { TurnExchangeFrame } from "../TurnExchangeFrame";
 import { adapterKeys } from "../../../session/queryKeys";
@@ -18,27 +19,40 @@ import type { TurnRuntime } from "../../../types/thread";
 
 // The marker's live-name tier reads the shared adapter table cache, so the
 // frame needs a QueryClient; suites that pin the silence cells leave the
-// cache empty (the resolve then floors at the tombstone / raw id).
+// cache empty (the resolve then floors at the tombstone / raw id). The api
+// mock keeps that emptiness declared rather than an accident of a failed
+// fetch; retry:false + staleTime:Infinity keep a mounting marker from
+// stacking background retries and a seeded cache from refetching under it.
+vi.mock("../../../api", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../../../api")>()),
+  listAdapters: vi.fn().mockResolvedValue([]),
+}));
+
 function renderFrame(
   runtime: TurnRuntime | undefined,
   invokedSkills?: string[],
   adapters?: AdapterEntry[],
 ) {
-  const queryClient = new QueryClient();
+  const queryClient = new QueryClient({
+    defaultOptions: { queries: { retry: false, staleTime: Infinity } },
+  });
   if (adapters) queryClient.setQueryData(adapterKeys.all(), adapters);
-  return renderI18n(
-    <QueryClientProvider client={queryClient}>
-      <TurnExchangeFrame
-        question="问"
-        askedAt={0}
-        invokedSkills={invokedSkills}
-        runtime={runtime}
-        mentionedDataset={null}
-      >
-        <p>轮</p>
-      </TurnExchangeFrame>
-    </QueryClientProvider>,
-  );
+  return {
+    queryClient,
+    ...renderI18n(
+      <QueryClientProvider client={queryClient}>
+        <TurnExchangeFrame
+          question="问"
+          askedAt={0}
+          invokedSkills={invokedSkills}
+          runtime={runtime}
+          mentionedDataset={null}
+        >
+          <p>轮</p>
+        </TurnExchangeFrame>
+      </QueryClientProvider>,
+    ),
+  };
 }
 
 const adapterRow = (id: string, display_name: string): AdapterEntry => ({
@@ -53,7 +67,7 @@ describe("TurnExchangeFrame runtime attribution marker (issue #818)", () => {
   it("opens the assistant stream with the marker naming the adapter", () => {
     const { container } = renderFrame({
       kind: "external",
-      data: { adapter_id: "claude-code" },
+      data: { adapter_id: "claude-code", display_name: null },
     });
     const stream = container.querySelector(".assistant-stream");
     expect(stream).not.toBeNull();
@@ -69,7 +83,10 @@ describe("TurnExchangeFrame runtime attribution marker (issue #818)", () => {
   });
 
   it("renders no marker for a pre-id external runtime", () => {
-    const { container } = renderFrame({ kind: "external", data: { adapter_id: null } });
+    const { container } = renderFrame({
+      kind: "external",
+      data: { adapter_id: null, display_name: null },
+    });
     expect(container.querySelector(".runtime-attribution")).toBeNull();
   });
 
@@ -84,13 +101,45 @@ describe("TurnExchangeFrame runtime attribution marker (issue #818)", () => {
     expect(container.querySelector(".runtime-attribution")).toHaveTextContent("Renamed CLI");
   });
 
-  it("falls back to the persisted stamp-time name when the adapter row is gone", () => {
-    // Deleted or disabled adapter: the tombstone name rides the turn.
+  it("falls back to the persisted stamp-time name when the adapter row is gone (deleted or disabled)", () => {
+    // Deleted or disabled adapter: the tombstone name rides the turn (the
+    // backend's enabled filter keeps disabled rows out of the wire table,
+    // so both absences land here identically).
     const { container } = renderFrame({
       kind: "external",
       data: { adapter_id: "user:ba3b2de2", display_name: "My local CLI" },
     });
     expect(container.querySelector(".runtime-attribution")).toHaveTextContent("My local CLI");
+  });
+
+  it("resolves a pre-fix turn (no persisted name) against the live table", () => {
+    // A turn recorded before the name rode the wire + a live adapter row:
+    // the shared cache resolves the current name -- the honest ceiling for
+    // turns the tombstone never covered.
+    const { container } = renderFrame(
+      { kind: "external", data: { adapter_id: "user:ba3b2de2", display_name: null } },
+      undefined,
+      [adapterRow("user:ba3b2de2", "My local CLI")],
+    );
+    expect(container.querySelector(".runtime-attribution")).toHaveTextContent("My local CLI");
+  });
+
+  it("follows a live rename after mount (issue #1351 realtime)", async () => {
+    // The reactive half of the rename-follow clause: a marker already
+    // mounted switches its label when the adapter table updates underneath
+    // (the settings-close invalidation replays exactly this shape).
+    const { queryClient, container } = renderFrame(
+      { kind: "external", data: { adapter_id: "user:ba3b2de2", display_name: "My local CLI" } },
+      undefined,
+      [adapterRow("user:ba3b2de2", "Old name")],
+    );
+    expect(container.querySelector(".runtime-attribution")).toHaveTextContent("Old name");
+    act(() => {
+      queryClient.setQueryData(adapterKeys.all(), [adapterRow("user:ba3b2de2", "Renamed CLI")]);
+    });
+    await waitFor(() =>
+      expect(container.querySelector(".runtime-attribution")).toHaveTextContent("Renamed CLI"),
+    );
   });
 });
 

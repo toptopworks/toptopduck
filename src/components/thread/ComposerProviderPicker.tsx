@@ -221,7 +221,8 @@ export function ComposerProviderPicker({
     queryKey: adapterKeys.all(),
     queryFn: listAdapters,
   });
-  const adapters: AdapterEntry[] = (adapterData ?? []).filter((a) => a.detected);
+  const adapterRows: AdapterEntry[] = adapterData ?? [];
+  const adapters: AdapterEntry[] = adapterRows.filter((a) => a.detected);
   const activeAdapter = isExternal
     ? (adapters.find((a) => a.id === activeAdapterId) ?? null)
     : null;
@@ -232,10 +233,10 @@ export function ComposerProviderPicker({
   const activeAdapterStale = isExternal && activeAdapterId !== null && activeAdapter === null;
   // The display-name resolve for the closed trigger + tooltip (issue #1351):
   // the FULL wire table, detected or not -- an undetected-but-registered
-  // adapter still has a name worth showing; only a deleted row (no row at
-  // all) falls to the raw id.
+  // adapter still has a name worth showing; only a deleted or disabled row
+  // (no row at all) falls to the raw id.
   const activeAdapterDisplayName = isExternal
-    ? ((adapterData ?? []).find((a) => a.id === activeAdapterId)?.display_name ?? null)
+    ? (adapterRows.find((a) => a.id === activeAdapterId)?.display_name ?? null)
     : null;
   // The startup backfill entry (ADR-0100, issue #581): what a NEW session on
   // this adapter starts with. Read only on the cold-start bar (in-session

@@ -179,9 +179,9 @@ export type TurnRuntime =
       adapter_id: string | null;
       /** The adapter's display name snapshotted at stamp time (issue
          * #1351): the tombstone the attribution label falls back to when the
-         * registry no longer resolves the id. Optional -- a pre-#1351 peer
-         * omits the key entirely. */
-      display_name?: string | null;
+         * registry no longer resolves the id. Null, not absent -- the live
+         * wire always carries the key, same contract as adapter_id. */
+      display_name: string | null;
     };
   };
 

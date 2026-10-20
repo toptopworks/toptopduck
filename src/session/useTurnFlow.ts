@@ -426,7 +426,11 @@ export function liveRoundsToTrace(
 export function choiceToTurnRuntime(choice: SessionRuntimeChoice): TurnRuntime {
   switch (choice.kind) {
     case "external":
-      return { kind: "external", data: { adapter_id: choice.data } };
+      // No stamp-time name on the optimistic append: the live turn's
+      // adapter is by definition in the table, so the marker's first tier
+      // resolves the current name; the settle swap brings the stamped
+      // provenance.
+      return { kind: "external", data: { adapter_id: choice.data, display_name: null } };
     case "built_in":
       return { kind: "built_in" };
     default: {

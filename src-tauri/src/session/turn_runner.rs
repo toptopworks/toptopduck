@@ -176,9 +176,8 @@ impl super::Session {
         let turns = self.turns();
         let locale = self.provider.response_locale();
         // ADR-0101: the turn's runtime attribution, snapshotted at the turn
-        // top -- the same dispatch the match below reads, taken BEFORE it so
-        // the recorded attribution is the turn's own even if the selector
-        // changes while the turn runs. An external turn names its adapter
+        // top -- the same dispatch the match below reads, so the recorded
+        // attribution is the turn's own. An external turn names its adapter
         // (the stable id, persisted + mirrored across IPC) and snapshots its
         // display name (issue #1351 -- the id may outlive the registry row,
         // the name rides the turn); a built-in turn records only the kind.

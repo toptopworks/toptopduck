@@ -118,7 +118,7 @@ describe("lifecycleRunMarks (run-position contract)", () => {
 });
 
 describe("runtimeMarkerName (issue #818 per-turn attribution gate)", () => {
-  const external = (adapterId: string | null, displayName?: string | null): TurnRuntime => ({
+  const external = (adapterId: string | null, displayName: string | null = null): TurnRuntime => ({
     kind: "external",
     data: { adapter_id: adapterId, display_name: displayName },
   });

@@ -589,8 +589,8 @@ impl<'a> Resumer<'a> {
                             // assembly-time content_hash for the frontend
                             // drift check) and the runtime projection. A
                             // persisted External turn without an adapter id
-                            // (pre-extension recording) projects to
-                            // External { adapter_id: None } -- the thread's
+                            // (pre-extension recording) projects to an
+                            // all-null External payload -- the thread's
                             // "not recorded" degradation.
                             provenance: TurnProvenance {
                                 skills: turn.provenance.skills.clone(),
