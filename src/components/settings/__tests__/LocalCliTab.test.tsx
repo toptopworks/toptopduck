@@ -124,6 +124,19 @@ const claudeAdapters: AdapterEntry[] = [
   { id: "claude-code", display_name: "claude-code", detected: true, binary_path: "/usr/local/bin/claude", stream_format: "claude_stream_json" },
 ];
 
+function makeRow(overrides: Partial<UserAdapterRow> = {}): UserAdapterRow {
+  return {
+    id: "user:11111111",
+    name: "My CLI",
+    command: "my-cli",
+    args: ["--acp"],
+    env: { MY_KEY: "secret" },
+    enabled: true,
+    stream_format: "acp",
+    ...overrides,
+  };
+}
+
 function renderTab(onIpcBusy = vi.fn()) {
   // The returned queryClient lets the catalog-cache tests assert actual
   // setQueryData writes (the probe mirror), not just their render absence.
@@ -1169,24 +1182,49 @@ describe("LocalCliTab fold (issue #552)", () => {
   });
 });
 
+// The detected card's scope (issue #1346): the merged `list_adapters`
+// projection also carries the enabled user rows (the picker's view), but
+// the card is the built-ins' face -- the user rows' full face (management +
+// probe) lives in the registry section below, and rendering both would
+// duplicate the row per enable toggle.
+describe("LocalCliTab detected-card scope (issue #1346)", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.mocked(listAdapters).mockResolvedValue(mockAdapters);
+    vi.mocked(rescanAdapters).mockResolvedValue(mockAdapters);
+    vi.mocked(getAdapterCatalogs).mockResolvedValue({});
+    vi.mocked(listUserAdapters).mockResolvedValue([]);
+  });
+
+  it("keeps the detected card to the built-ins; the registry owns the user rows", async () => {
+    vi.mocked(listAdapters).mockResolvedValue([
+      ...mockAdapters,
+      {
+        id: "user:11111111",
+        display_name: "My CLI",
+        detected: true,
+        binary_path: "C:/bin/my-cli",
+        stream_format: "acp",
+      },
+    ]);
+    vi.mocked(listUserAdapters).mockResolvedValue([makeRow()]);
+    renderTab();
+
+    await screen.findAllByRole("button", { name: /^Test adapter/ });
+    // The built-in card still renders its rows...
+    expect(screen.getByText("qwen-code")).toBeInTheDocument();
+    // ...and the user row renders ONCE: the registry row. The merged card
+    // must not duplicate it (the pre-fix leak rendered the name twice).
+    expect(screen.getAllByText("My CLI")).toHaveLength(1);
+    expect(screen.getAllByText(/my-cli --acp/)).toHaveLength(1);
+  });
+});
+
 // The custom-runtime editor (issue #1341): the tab-header Add button swaps
 // the WHOLE tab for the full-pane editor form (the CliToolForm posture) --
 // the form's gating, the parsed create draft, the persisted-row test
 // surface, and the back-link round trip.
 describe("LocalCliTab custom CLI adapter editor (issue #1341)", () => {
-  function makeRow(overrides: Partial<UserAdapterRow> = {}): UserAdapterRow {
-    return {
-      id: "user:11111111",
-      name: "My CLI",
-      command: "my-cli",
-      args: ["--acp"],
-      env: { MY_KEY: "secret" },
-      enabled: true,
-      stream_format: "acp",
-      ...overrides,
-    };
-  }
-
   beforeEach(() => {
     vi.clearAllMocks();
     vi.mocked(listAdapters).mockResolvedValue([]);
@@ -1333,6 +1371,36 @@ describe("LocalCliTab custom CLI adapter editor (issue #1341)", () => {
     expect(
       await screen.findByText(/the connection failed/i),
     ).toBeInTheDocument();
+  });
+
+  // Issue #1346 AC: the form's Test result must survive the close -- the
+  // probe core mirrors the entry into the catalogs query cache, so the
+  // registry row shows the badge the moment the list renders again, with
+  // no second probe IPC.
+  it("mirrors the form's Test into the registry row face (no re-probe on return)", async () => {
+    vi.mocked(listUserAdapters).mockResolvedValue([makeRow()]);
+    vi.mocked(probeAdapter).mockResolvedValueOnce({
+      kind: "acp",
+      data: {
+        discovered: {
+          models: ["fake-opus", "fake-sonnet"],
+          current_model: "fake-opus",
+          thought_levels: [],
+          current_thought_level: null,
+          adapter_id: "user:11111111",
+        },
+      },
+    });
+    renderTab();
+    fireEvent.click(await screen.findByRole("button", { name: "Edit adapter My CLI" }));
+    fireEvent.click(screen.getByRole("button", { name: /^Test$/ }));
+    expect(await screen.findByText("Connected")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: /Back to CLI list/i }));
+    // The row face reads the mirrored cache entry -- badge visible
+    // immediately, one probe call total.
+    expect(await screen.findByText("2 models")).toBeInTheDocument();
+    expect(probeAdapter).toHaveBeenCalledTimes(1);
   });
 
   it("closes back to the list after a save (create or update)", async () => {
