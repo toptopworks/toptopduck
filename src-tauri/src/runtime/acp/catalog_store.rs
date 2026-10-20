@@ -22,7 +22,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
-use super::atomic_write::write_atomic;
+use crate::persistence::io::{write_str_atomic, WritePerms};
 use crate::runtime::acp::probe::{CatalogModel, ModelCatalogOutcome};
 use crate::session::loop_contract::DiscoveredRuntime;
 
@@ -194,18 +194,8 @@ impl AdapterCatalogStore {
     /// the probe result still returns to the caller (the cache is an
     /// enhancement, never a dependency of the probe's own answer).
     pub fn store_entry(&self, adapter_id: &str, entry: AdapterCatalogEntry) {
-        // Poisoning only happens on a panic mid-write; treating the cache as
-        // unlockable (skip the write, keep serving reads) is the honest
-        // degrade for a pure-cache artifact.
-        let Ok(_guard) = self.write_lock.lock() else {
-            log::warn!(
-                target: "toptopduck::catalog_cache",
-                "catalog cache write lock poisoned; skipping cache write for `{adapter_id}`"
-            );
-            return;
-        };
         // An insert always lands, so the op reports a hit unconditionally.
-        if let Err(detail) = self.mutate_locked(|catalogs| {
+        if let Err(detail) = self.mutate_locked(adapter_id, |catalogs| {
             catalogs.insert(adapter_id.to_string(), entry);
             true
         }) {
@@ -223,14 +213,9 @@ impl AdapterCatalogStore {
     /// one atomic write, failures logged and swallowed (the cache is an
     /// enhancement). A missing key is a no-op -- no write at all.
     pub fn remove_entry(&self, adapter_id: &str) {
-        let Ok(_guard) = self.write_lock.lock() else {
-            log::warn!(
-                target: "toptopduck::catalog_cache",
-                "catalog cache write lock poisoned; skipping cache remove for `{adapter_id}`"
-            );
-            return;
-        };
-        if let Err(detail) = self.mutate_locked(|catalogs| catalogs.remove(adapter_id).is_some()) {
+        if let Err(detail) =
+            self.mutate_locked(adapter_id, |catalogs| catalogs.remove(adapter_id).is_some())
+        {
             log::warn!(
                 target: "toptopduck::catalog_cache",
                 "adapter catalog cache remove failed for `{adapter_id}` (cache is an enhancement): {detail}"
@@ -238,18 +223,39 @@ impl AdapterCatalogStore {
         }
     }
 
-    /// The locked read-modify-write core both mutations ride (issue #1343):
-    /// load, let `op` mutate the map (`false` = nothing hit, no write at
-    /// all -- removing a missing key is a no-op), serialize, one atomic
-    /// write, with the failure detail as one typed Result.
-    fn mutate_locked(&self, op: impl FnOnce(&mut AdapterCatalogs) -> bool) -> Result<(), String> {
+    /// The locked read-modify-write core both mutations ride (issues #1343
+    /// and #1348): take the write lock (poisoning degrades to a skip, not a
+    /// second failure log), load, let `op` mutate the map (`false` = nothing
+    /// hit, no write at all -- removing a missing key is a no-op), serialize,
+    /// one atomic write via the shared core, with the failure detail as one
+    /// typed Result.
+    fn mutate_locked(
+        &self,
+        id: &str,
+        op: impl FnOnce(&mut AdapterCatalogs) -> bool,
+    ) -> Result<(), String> {
+        // Poisoning only happens on a panic mid-write; treating the cache as
+        // unlockable (skip the write, keep serving reads) is the honest
+        // degrade for a pure-cache artifact.
+        let Ok(_guard) = self.write_lock.lock() else {
+            log::warn!(
+                target: "toptopduck::catalog_cache",
+                "catalog cache write lock poisoned; skipping cache mutation for `{id}`"
+            );
+            return Ok(());
+        };
         let mut catalogs = self.load();
         if !op(&mut catalogs) {
             return Ok(());
         }
+        // The cache sidecar's directory may not exist yet (first probe on a
+        // fresh install); the shared core deliberately does not create it.
+        if let Some(parent) = self.path.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| format!("create dir: {e}"))?;
+        }
         let json =
             serde_json::to_string_pretty(&catalogs).map_err(|e| format!("serialize: {e}"))?;
-        write_atomic(&self.path, &json, false)
+        write_str_atomic(&self.path, &json, WritePerms::Default).map_err(|e| e.to_string())
     }
 }
 
@@ -416,6 +422,36 @@ mod tests {
         // rewrite that could disturb anything).
         store.remove_entry("user:abcd1234");
         assert_eq!(store.load().len(), 1);
+    }
+
+    /// Issue #1348: a miss must not rewrite the file AT ALL. The hazard: a
+    /// corrupt file degrades to an empty cache on load, so a miss that
+    /// still writes would clobber the file with `{}`. Asserting raw bytes
+    /// is what makes the miss-no-write guard load-bearing -- on a healthy
+    /// file the same writer round-trips byte-identical, so only a corrupt
+    /// fixture goes red if the early return is deleted.
+    #[test]
+    fn remove_missing_key_leaves_corrupt_file_bytes_untouched() {
+        let (dir, store) = temp_store();
+        let path = dir.path().join(CATALOGS_FILE_NAME);
+        let corrupt = b"{ not valid json";
+        std::fs::write(&path, corrupt).expect("seed corrupt file");
+        store.remove_entry("user:missing");
+        let after = std::fs::read(&path).expect("file still present");
+        assert_eq!(
+            after, corrupt,
+            "a miss must not rewrite the file (a corrupt file would become `{{}}`)"
+        );
+    }
+
+    /// Issue #1348: the store creates the sidecar's parent directory on
+    /// first write (fresh install) -- the shared core deliberately does not.
+    #[test]
+    fn store_entry_creates_missing_parent_directory() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = AdapterCatalogStore::new(dir.path().join("nested").join(CATALOGS_FILE_NAME));
+        store.store_entry("user:gemini-cli", acp_entry("gemini-2.5-pro", 0));
+        assert_eq!(store.load().len(), 1, "entry survives a reload");
     }
 
     #[test]
