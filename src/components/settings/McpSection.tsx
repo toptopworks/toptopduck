@@ -844,7 +844,10 @@ function ToolTable({ tools }: { tools: McpToolInfo[] }) {
                       side="top"
                       className={cn(
                         SETTINGS_TOOLTIP_CLASS,
-                        "max-w-sm max-h-40 overflow-y-auto",
+                        // pointer-events-auto overrides the display-only
+                        // base: this body scrolls and stays open under
+                        // the pointer.
+                        "max-w-sm max-h-40 overflow-y-auto pointer-events-auto",
                       )}
                     >
                       {tool.description}
