@@ -63,7 +63,7 @@ const DELEGATION: TraceEntry = {
 // the delegation entry's row carries the fold.
 function renderSettledTrace(
   renderSubTrace: (entry: TraceEntry) => ReactElement = (entry) => (
-    <DelegationSubTraceBody name={entry.name} task={entry.summary} subRounds={entry.sub_rounds} />
+    <DelegationSubTraceBody subRounds={entry.sub_rounds} />
   ),
 ) {
   return renderWithProviders(
@@ -74,16 +74,16 @@ function renderSettledTrace(
 describe("DelegationSubTraceBody inline panel (issue #1355)", () => {
   it("keeps the panel closed until the row fold opens it, then renders the sub-rounds", () => {
     renderSettledTrace();
-    // Closed by default: neither the panel head nor the sub-round content
-    // is in the document.
-    expect(screen.queryByText("Sub-agent trace · analyst")).not.toBeInTheDocument();
+    // Closed by default: neither the panel nor the sub-round content is in
+    // the document.
+    expect(document.querySelector(".subtrace-panel")).toBeNull();
     expect(screen.queryByText("Checking the sheet first.")).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: /sub-agent trace/i }));
-    // The panel head names the delegating sub-agent and carries the task
-    // head (the row's own summary -- which also reads on the line, so the
-    // head anchors by its hook class).
-    expect(screen.getByText("Sub-agent trace · analyst")).toBeInTheDocument();
-    expect(document.querySelector(".subtrace-task")?.textContent).toBe("clean the sheet");
+    // The settled panel rides as pure trace -- no task head (the row line
+    // above already previews the task) and no title (the row head already
+    // names the delegation).
+    expect(document.querySelector(".subtrace-panel")).not.toBeNull();
+    expect(document.querySelector(".subtrace-task")).toBeNull();
     // The sub-round's prose renders; its tool string sits behind the round's
     // step fold (the main trace's posture), collapsed by default.
     expect(screen.getByText("Checking the sheet first.")).toBeInTheDocument();
@@ -97,7 +97,7 @@ describe("DelegationSubTraceBody inline panel (issue #1355)", () => {
     // step fold with it) -- the ephemerality the settle-swap collapse
     // leans on (#1355's known limitation).
     fireEvent.click(screen.getByRole("button", { name: /sub-agent trace/i }));
-    expect(screen.queryByText("Sub-agent trace · analyst")).not.toBeInTheDocument();
+    expect(document.querySelector(".subtrace-panel")).toBeNull();
     expect(screen.queryByText("Checking the sheet first.")).not.toBeInTheDocument();
   });
 
@@ -109,8 +109,6 @@ describe("DelegationSubTraceBody inline panel (issue #1355)", () => {
     };
     const { container } = renderSettledTrace(() => (
       <DelegationSubTraceBody
-        name={DELEGATION.name}
-        task={DELEGATION.summary}
         subRounds={[thinkingRound]}
       />
     ));
@@ -141,7 +139,7 @@ describe("DelegationSubTraceBody inline panel (issue #1355)", () => {
       <TraceRowList
         entries={[DELEGATION, plain]}
         renderSubTrace={(entry) => (
-          <DelegationSubTraceBody name={entry.name} task={entry.summary} subRounds={entry.sub_rounds} />
+          <DelegationSubTraceBody subRounds={entry.sub_rounds} />
         )}
       />,
     );
@@ -164,7 +162,6 @@ describe("DelegationSubTraceBody inline panel (issue #1355)", () => {
     fireEvent.click(toggles[0]);
     expect(container.querySelector(".summary-fold-block")).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: /sub-agent trace/i }));
-    expect(screen.getByText("Sub-agent trace · analyst")).toBeInTheDocument();
     // Opening the panel must not also toggle the row's summary fold.
     expect(container.querySelector(".summary-fold-block")).toBeNull();
   });
@@ -180,8 +177,6 @@ it("keeps a vega-lite fence in the sub-trace static (issue #1093 pin)", async ()
   };
   renderSettledTrace(() => (
     <DelegationSubTraceBody
-      name={DELEGATION.name}
-      task={DELEGATION.summary}
       subRounds={[fenceRound]}
     />
   ));
@@ -202,8 +197,6 @@ describe("DelegationSubTraceBody usage subtotal (ADR-0129, issue #1270)", () => 
   function renderSubtotalTrace() {
     renderSettledTrace((entry) => (
       <DelegationSubTraceBody
-        name={entry.name}
-        task={entry.summary}
         subRounds={entry.sub_rounds}
         usage={{
           input_tokens: 40,

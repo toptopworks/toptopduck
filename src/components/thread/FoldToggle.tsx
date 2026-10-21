@@ -25,11 +25,16 @@ export function FoldToggle({
   expanded,
   onToggle,
   children,
+  className,
 }: {
   hookClass: FoldHookClass;
   expanded: boolean;
   onToggle: () => void;
   children: ReactNode;
+  /** Extra utilities appended last (twMerge, last wins) -- the summary-line
+   *  callers pass "mt-0": the block-flow mt-0.5 breathing gap is what knocks
+   *  the toggle off the text inside a flex items-center summary line. */
+  className?: string;
 }) {
   return (
     <button
@@ -37,6 +42,7 @@ export function FoldToggle({
       className={cn(
         hookClass,
         "mt-0.5 flex items-center gap-1 cursor-pointer text-xs text-muted-foreground hover:text-foreground",
+        className,
       )}
       aria-expanded={expanded}
       onClick={onToggle}

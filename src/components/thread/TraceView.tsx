@@ -107,6 +107,7 @@ function RunningRow({
               <span onClick={(e) => e.stopPropagation()}>
                 <FoldToggle
                   hookClass="subtrace-toggle"
+                  className="mt-0"
                   expanded={subOpen}
                   onToggle={() => setSubOpen((v) => !v)}
                 >
@@ -121,7 +122,7 @@ function RunningRow({
         )}
       />
       {view !== undefined && subOpen && (
-        <DelegationSubTraceBody name={row.name} task={view.task} report={view.report}>
+        <DelegationSubTraceBody task={view.task} report={view.report}>
           {/* The running fold's rounds: the same block shape the settle's
               sub_rounds render -- thinking fold, then the call rows; no
               prose, ADR-0135 filters the deltas -- with live rows (spinner
@@ -206,8 +207,8 @@ export function LiveRow({
   // exists once the turn settles (#1270), so the live panel carries none.
   // ADR-0135: while the turn is live the panel takes the task's full text
   // (the started phase carried it) and the report's full text once the
-  // completion landed -- both drop at settle, where the bounded summary and
-  // excerpt take over (Decision 3's honest degrade).
+  // completion landed -- both drop at settle (Decision 3's honest degrade):
+  // the bounded summary rides the row line, the settled panel pure trace.
   const entry = traceEntryFromRow(row);
   const view = row.delegation;
   return (
@@ -216,8 +217,6 @@ export function LiveRow({
       afterName={resolvedBadge}
       subTrace={(
         <DelegationSubTraceBody
-          name={row.name}
-          task={view?.task ?? row.summary}
           report={view?.report}
           subRounds={row.subRounds}
         />

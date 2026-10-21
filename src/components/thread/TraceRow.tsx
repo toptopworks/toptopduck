@@ -171,6 +171,7 @@ export function TraceRow({
                 <span onClick={(e) => e.stopPropagation()}>
                   <FoldToggle
                     hookClass="subtrace-toggle"
+                    className="mt-0"
                     expanded={subOpen}
                     onToggle={() => setSubOpen((v) => !v)}
                   >

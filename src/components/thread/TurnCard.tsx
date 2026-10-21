@@ -352,8 +352,6 @@ function TraceRoundBlock({
           calls={calls}
           renderSubTrace={(entry) => (
             <DelegationSubTraceBody
-              name={entry.name}
-              task={entry.summary}
               subRounds={entry.sub_rounds}
               usage={subtotalByEntry.get(entry)?.usage}
             />
