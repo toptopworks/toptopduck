@@ -203,10 +203,10 @@ export function useSessionFileOps({
     [intl, patchOpenName, refreshSessions, setShellError],
   );
 
-  // ADR-0089 Decision 4: after the first terminal turn, the backend auto-names
-  // the session from the first question's bounded truncation. This syncs the
-  // in-memory open-session entry + the persisted sidebar list so both surfaces
-  // reflect the new name without a manual refresh.
+  // ADR-0089 Decision 4 (calibrated by #1353): the backend names the session
+  // at the first question's acceptance; this terminal-state chain re-reads
+  // the landed name and syncs the in-memory open-session entry + the
+  // persisted sidebar list so both surfaces reflect it.
   const syncSessionName = useCallback(
     async (sid: string) => {
       try {

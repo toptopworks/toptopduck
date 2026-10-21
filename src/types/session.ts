@@ -230,6 +230,17 @@ export interface TurnProgress {
   phase: TurnPhase;
 }
 
+// A `session-named` side-channel event (ADR-0089 Decision 4, calibrated by
+// issue #1353): the turn-start auto-name push. Fired exactly once when a
+// session's first question is accepted -- ahead of the turn's terminal
+// state -- so the sidebar row + session header show the new name without
+// waiting for the first turn to settle. Mirrors the Rust
+// `SessionNamedPayload`.
+export interface SessionNamedPayload {
+  session_id: string;
+  name: string;
+}
+
 // --- Persisted session metadata ------------------------------------------
 
 // The working-set summary rendered as a sidebar entry's sub-line (ADR-0060:

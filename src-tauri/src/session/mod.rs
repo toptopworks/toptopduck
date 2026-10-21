@@ -1121,6 +1121,17 @@ impl Session {
         self.working_set.get(reference_name).cloned()
     }
 
+    /// Auto-name the session from a question's bounded truncation (ADR-0089
+    /// Decision 4, calibrated by issue #1353): the shared naming core for
+    /// the turn-start push (`ask_with_phase_and_auto_name`, which emits) and
+    /// `record_turn`'s silent same-value fallback. Memory-only -- the disk
+    /// persists at the terminal turn's recipe save. Returns the landed name.
+    fn auto_name_from_question(&mut self, question: &str) -> String {
+        let name = truncate_session_name(question);
+        self.persister.set_session_name(name.clone());
+        name
+    }
+
     /// Rename a dataset's display label (ADR-0037): display-only -- the reference
     /// name is untouched, so every existing reference (SQL FROM, the recipe
     /// chain, the active pointer) stays valid and nothing is rewritten or
@@ -1189,7 +1200,9 @@ impl Session {
     /// Facade for callers without the command-layer approval wiring (tests):
     /// built-in tools classify Allow at the gateway without touching the sink,
     /// so a fresh [`ApprovalState`] + a no-op sink behaves identically to the
-    /// store-attached pair on the built-in tool table.
+    /// store-attached pair on the built-in tool table. The first question
+    /// also auto-names the session (ADR-0089 Decision 4) -- this routes
+    /// through [`Self::ask_with_phase_and_auto_name`].
     pub fn ask(&mut self, question: &str) -> TurnOutcome {
         let approval = ApprovalState::new();
         let sink = NullApprovalSink;
@@ -1201,7 +1214,7 @@ impl Session {
         // No discovery snapshot either: tests that need skill injection call
         // ask_with_phase directly with resolved fragments (issue #364).
         let inputs = TurnInputs::empty(&keychain);
-        self.ask_with_phase(question, &approval, &sink, |_| {}, &inputs)
+        self.ask_with_phase_and_auto_name(question, &approval, &sink, |_| {}, |_| {}, &inputs)
     }
 
     // Turn orchestration (ask_with_phase / run_external_turn /
@@ -1277,21 +1290,22 @@ impl Session {
                 adapter_id: None, ..
             } => self.runtime_facts.last_runtime.clone(),
         };
-        // ADR-0089 Decision 4: on the first terminal turn, auto-name the
-        // session from the first question's bounded truncation (ADR-0039
-        // same-kind rule: verbatim question cut at a char boundary, never an
-        // LLM summary). After this one-time trigger the name is never auto-
-        // changed -- subsequent turns leave it untouched, and a user rename
-        // sticks. Source/skill lifecycle events do not count as turns, so a
-        // session that loaded files or mounted skills before its first
-        // question still auto-names on that first question.
-        let is_first_turn = !self
-            .timeline
-            .iter()
-            .any(|e| matches!(e, TimelineEntry::Turn { .. }));
-        if is_first_turn {
-            self.persister
-                .set_session_name(truncate_session_name(question));
+        // ADR-0089 Decision 4 (calibrated by issue #1353): the first
+        // question's bounded truncation (ADR-0039 same-kind rule: verbatim
+        // question cut at a char boundary, never an LLM summary) auto-names
+        // the session at turn START (`ask_with_phase_and_auto_name`, before
+        // any runtime branch). This block is the silent same-value fallback:
+        // turn-start naming writes no timeline entry, so the predicate still
+        // holds here and the re-set is idempotent -- it exists for direct
+        // `record_turn` callers (tests) and adds nothing in production.
+        // After this one-time trigger the name is never auto-changed --
+        // subsequent turns leave it untouched, and a user rename sticks.
+        // One window excepted: a rename between acceptance and the first
+        // turn's record still meets this fallback and is overwritten.
+        // The no-turn test is the shared predicate's one definition (see
+        // `timeline_has_turn`).
+        if !self.timeline_has_turn() {
+            self.auto_name_from_question(question);
         }
         // ADR-0078 (issue #297): the DISPLAY view of the trace rides the
         // TurnRecord so the rail can expand a completed turn's tool-call chain
@@ -3195,8 +3209,97 @@ mod tests {
         assert_eq!(
             session.session_name(),
             Some("how many people?"),
-            "first terminal turn auto-names the session"
+            "first recorded turn auto-names the session (record_turn fallback)"
         );
+    }
+
+    /// Issue #1353 (ADR-0089 Decision 4 calibrated): the first question's
+    /// ACCEPTANCE names the session -- the push fires once, at turn start
+    /// before the turn settles, and `record_turn`'s fallback re-sets the
+    /// same value silently (no second event).
+    #[test]
+    fn ask_with_auto_name_fires_once_at_first_question_acceptance() {
+        let provider = crate::provider::fake::FakeProvider::new().scripted_tool_turn_seq(
+            "how many people?",
+            vec![Ok(ToolTurnReply::Text("42".into()))],
+        );
+        let mut session = Session::with_provider(Box::new(provider)).expect("session");
+        let approval = crate::approval::ApprovalState::new();
+        let keychain = super::KeychainStore::new();
+        let inputs = super::TurnInputs::empty(&keychain);
+        // The shared observation sequence pins the ORDERING contract: the
+        // name push lands before the turn emits its first phase event (i.e.
+        // ahead of everything the terminal state could race against).
+        #[derive(Debug, PartialEq)]
+        enum Obs {
+            Named(String),
+            Phase,
+        }
+        let obs: std::sync::Arc<std::sync::Mutex<Vec<Obs>>> = Default::default();
+        let obs_phase = std::sync::Arc::clone(&obs);
+        session.ask_with_phase_and_auto_name(
+            "how many people?",
+            &approval,
+            &super::NullApprovalSink,
+            move |phase| {
+                if matches!(phase, crate::model::TurnPhase::Thinking { .. }) {
+                    obs_phase.lock().expect("obs lock").push(Obs::Phase);
+                }
+            },
+            |name| {
+                obs.lock()
+                    .expect("obs lock")
+                    .push(Obs::Named(name.to_string()));
+            },
+            &inputs,
+        );
+        let obs = obs.lock().expect("obs lock");
+        // Exactly one push across the whole turn (the turn-start site fired
+        // it; the record_turn fallback re-set the same value silently) ...
+        assert_eq!(obs.iter().filter(|o| matches!(o, Obs::Named(_))).count(), 1);
+        // ... and it precedes the turn's first phase event.
+        assert_eq!(
+            obs.first(),
+            Some(&Obs::Named("how many people?".to_string()))
+        );
+        drop(obs);
+        assert_eq!(
+            session.session_name(),
+            Some("how many people?"),
+            "the turn-start push names the session before the turn settles"
+        );
+    }
+
+    /// Issue #1353: only the FIRST question names -- a session that already
+    /// holds a recorded turn never auto-names (or fires the push) again.
+    #[test]
+    fn ask_with_auto_name_does_not_fire_on_subsequent_questions() {
+        let provider = crate::provider::fake::FakeProvider::new()
+            .scripted_tool_turn_seq(
+                "first question",
+                vec![Ok(ToolTurnReply::Text("answer 1".into()))],
+            )
+            .scripted_tool_turn_seq(
+                "second question",
+                vec![Ok(ToolTurnReply::Text("answer 2".into()))],
+            );
+        let mut session = Session::with_provider(Box::new(provider)).expect("session");
+        let approval = crate::approval::ApprovalState::new();
+        let keychain = super::KeychainStore::new();
+        let inputs = super::TurnInputs::empty(&keychain);
+        let mut fires = 0u32;
+        for question in ["first question", "second question"] {
+            session.ask_with_phase_and_auto_name(
+                question,
+                &approval,
+                &super::NullApprovalSink,
+                |_| {},
+                |_| fires += 1,
+                &inputs,
+            );
+        }
+        assert_eq!(fires, 1, "only the first question's acceptance names");
+        assert_eq!(session.session_name(), Some("first question"));
     }
 
     #[test]
@@ -3276,12 +3379,13 @@ mod tests {
         session.rename("My Analysis").expect("rename");
         assert_eq!(session.session_name(), Some("My Analysis"));
 
-        // First terminal turn: per ADR-0089 Decision 4, the auto-name fires
-        // unconditionally on the first turn (the ADR explicitly rejects a
-        // name_is_placeholder flag). The user rename before the first turn
-        // is overwritten -- but this is the designed behavior: the first
-        // question's truncation is more meaningful, and a user is unlikely
-        // to rename before asking.
+        // First recorded turn: the acceptance-time naming (ADR-0089
+        // Decision 4, calibrated by #1353) already fired, and record_turn's
+        // same-value fallback re-applies the truncation here (the ADR
+        // explicitly rejects a name_is_placeholder flag). The user rename
+        // before the first turn is overwritten -- designed behavior: the
+        // first question's truncation is more meaningful, and a user is
+        // unlikely to rename before asking.
         session.record_turn(
             "what is the total?",
             TurnOutcome::Textual {
@@ -3367,11 +3471,12 @@ mod tests {
 
     #[test]
     fn record_turn_auto_names_on_failed_and_cancelled_first_turn() {
-        // ADR-0089 Decision 4: "first terminal turn" includes all terminal
-        // outcomes -- Failed / Cancelled / Materialized, not just Textual.
-        // The auto-name logic in record_turn is outcome-agnostic (no match on
-        // outcome before set_session_name). This test pins that contract so a
-        // future `match outcome` guard does not silently regress it.
+        // ADR-0089 Decision 4: naming is outcome-agnostic -- the
+        // acceptance-time trigger already fired before any outcome existed,
+        // and record_turn's fallback re-applies it for Failed / Cancelled /
+        // Materialized, not just Textual (no match on outcome before
+        // set_session_name). This test pins that contract so a future
+        // `match outcome` guard does not silently regress it.
         let (mut session_a, _duck) = session_with_duck("");
         session_a.record_turn(
             "why did it break?",

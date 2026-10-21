@@ -35,6 +35,7 @@ import {
   createSession,
   listLiveSessions,
   onResumeProgress,
+  onSessionNamed,
   openDuck,
   setAuthorizationMode,
   setSessionPosture,
@@ -880,6 +881,36 @@ export function useShellSessions({
     },
     [mapSessions],
   );
+
+  // Issue #1353 (ADR-0089 Decision 4 calibrated): mount-once listener for
+  // the backend's turn-start auto-name push (the same long-lived posture as
+  // the pane's turn-progress listener, ADR-0059 C-4 -- mount listen once,
+  // unmount unlisten). The event fires when a session's first question is
+  // accepted, before the turn settles, so the sidebar row + session header
+  // read the new name immediately. patchOpenName is the same narrow
+  // in-memory name-write renameEntry / syncSessionName funnel through; no
+  // refreshSessions here -- the persisted display_name correction stays
+  // with the terminal-state chain (syncSessionName, unchanged).
+  useEffect(() => {
+    let active = true;
+    let unlisten: (() => void) | null = null;
+    void onSessionNamed((ev) => {
+      if (!active) return;
+      patchOpenName(ev.session_id, ev.name);
+    }).then((un) => {
+      // Unmount raced the listen resolution: unlisten immediately so the
+      // orphan callback cannot fire setters post-unmount.
+      if (!active) {
+        un();
+        return;
+      }
+      unlisten = un;
+    });
+    return () => {
+      active = false;
+      unlisten?.();
+    };
+  }, [patchOpenName]);
 
   // Nested facade (#1155): the file-ops species destructures here; its
   // members ride the return below.

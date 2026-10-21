@@ -37,7 +37,7 @@ use crate::mcp::McpClient;
 use crate::model::{
     DatasetDescriptor, DatasetPrivacy, DeleteImpactEntry, LoadOutcome, ProfileId, ProfileKeyStatus,
     ProfileTestOutcome, Protocol, ProviderConfig, ProviderConfigView, RemoveSourceError, RowPage,
-    SheetGuidance, ThreadEntry, TurnOutcome, TurnProgress,
+    SessionNamedPayload, SheetGuidance, ThreadEntry, TurnOutcome, TurnProgress,
 };
 use crate::persistence::recipe::LastRuntime;
 use crate::persistence::{
@@ -262,7 +262,8 @@ pub fn create_session(
         std::fs::create_dir_all(&session_dir)
             .map_err(|e| SessionError::Engine(format!("failed to create session dir: {e}")))?;
         // Bind immediately (ADR-0089 Decision 1): empty session_name is the
-        // placeholder; the first terminal turn's auto-naming overwrites it.
+        // placeholder; the first question's acceptance auto-names the session
+        // (ADR-0089 Decision 4).
         let handle = store.get(&id)?;
         // Seat the backfill posture BEFORE the bind so the initial recipe
         // persists it (ADR-0100 Decision 1; see the helper's doc).
@@ -698,7 +699,7 @@ pub fn preview_delete_impact(
 /// session-lock failure (not a turn failure -- that is a `Failed` outcome).
 /// ADR-0055: if the session was closed while this turn was in flight, the
 /// outcome is discarded
-/// inside `Session::ask` (no thread append, no recipe persist).
+/// inside `ask_with_phase` (no thread append, no recipe persist).
 // Tauri command wiring keeps the per-command states + the IPC params flat;
 // the 8th param is the optional invocation list (ADR-0119). Same posture as
 // the dispatch core's `#[allow(clippy::too_many_arguments)]`.
@@ -759,6 +760,13 @@ pub async fn ask(
     // artifact is iframe-servable before the card can render.
     let app_for_scope = app.clone();
     let sid = id.clone();
+    // Issue #1353 (ADR-0089 Decision 4 calibrated): the same-boundary
+    // AppHandle clone emits the `session-named` push -- fired exactly once
+    // by `ask_with_phase_and_auto_name` when the session's first question is
+    // accepted, so the sidebar row + session header update without waiting
+    // for the terminal-state sync chain.
+    let app_for_named = app.clone();
+    let sid_for_named = id.clone();
     // Clone the skills-root path off the managed State so it can move into the
     // spawn_blocking closure (the State borrow does not cross the await). The
     // registry root is read below to resolve each mounted skill's SKILL.md body
@@ -793,7 +801,7 @@ pub async fn ask(
             skill_invocations.as_deref().unwrap_or(&[]),
         );
         let inputs = assembled.turn_inputs(&mcp_servers);
-        let outcome = s.ask_with_phase(
+        let outcome = s.ask_with_phase_and_auto_name(
             &question,
             &approval,
             &sink,
@@ -813,6 +821,25 @@ pub async fn ask(
                     log::debug!(
                         target: "toptopduck::commands",
                         "turn-progress emit failed (likely a torn-down webview): {e}"
+                    );
+                }
+            },
+            move |name| {
+                // Issue #1353: the turn-start auto-name push. Fire-and-forget
+                // like turn-progress above -- the name also lands through the
+                // terminal-state sync chain (syncSessionName), so a dropped
+                // event is a missed early update, not a lost one. Debug-level
+                // for the same reason (a torn-down webview fails every emit).
+                if let Err(e) = app_for_named.emit(
+                    "session-named",
+                    &SessionNamedPayload {
+                        session_id: sid_for_named.clone(),
+                        name: name.to_string(),
+                    },
+                ) {
+                    log::debug!(
+                        target: "toptopduck::commands",
+                        "session-named emit failed (likely a torn-down webview): {e}"
                     );
                 }
             },
@@ -1923,9 +1950,10 @@ pub fn rename_session(
     s.rename(&new_name).map_err(SessionError::RenameSession)
 }
 
-/// Read the OPEN session's current display name (ADR-0089 Decision 4). After
-/// the first terminal turn auto-names the session, the frontend uses this to
-/// refresh the sidebar entry + the session header without re-reading the
+/// Read the OPEN session's current display name (ADR-0089 Decision 4). The
+/// first question's acceptance auto-names the session; the frontend uses
+/// this on the terminal-state chain to refresh the sidebar entry + the
+/// session header without re-reading the
 /// `.duck` file from disk. Returns the name carried by the in-memory
 /// persister (the same value the next atomic write will persist).
 #[tauri::command]

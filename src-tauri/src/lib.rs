@@ -63,11 +63,11 @@ pub use model::{
     ExportIoStep, ExportRowsError, GuidanceReason, GuidanceRequest, GuidanceSheet,
     GuidanceSheetState, LoadError, LoadOutcome, ProfileId, ProfileKeyStatus, ProfileTestOutcome,
     Protocol, ProviderConfig, ProviderConfigView, ProviderProfile, RectifyProvenance,
-    RemoveSourceError, RenameError, RowPage, RowReadError, SheetGuidance, SheetRectify,
-    SkillProvenance, SourceLifecycleEvent, SourceLifecycleKind, StaleAnchor, StaleReason, TextKind,
-    ThinkingTrace, ThreadEntry, TraceEntryView, TraceRound, TurnFailure, TurnOutcome, TurnPhase,
-    TurnProgress, TurnProvenance, TurnRecord, TurnRuntime, VizSpec, DEFAULT_PROFILE_ID,
-    DEFAULT_PROVIDER_BASE_URL, DEFAULT_PROVIDER_MODEL,
+    RemoveSourceError, RenameError, RowPage, RowReadError, SessionNamedPayload, SheetGuidance,
+    SheetRectify, SkillProvenance, SourceLifecycleEvent, SourceLifecycleKind, StaleAnchor,
+    StaleReason, TextKind, ThinkingTrace, ThreadEntry, TraceEntryView, TraceRound, TurnFailure,
+    TurnOutcome, TurnPhase, TurnProgress, TurnProvenance, TurnRecord, TurnRuntime, VizSpec,
+    DEFAULT_PROFILE_ID, DEFAULT_PROVIDER_BASE_URL, DEFAULT_PROVIDER_MODEL,
 };
 pub use persistence::{
     DuckPath, LoadError as DuckLoadError, MigrationError, RecipeError, SaveError, SessionMetadata,

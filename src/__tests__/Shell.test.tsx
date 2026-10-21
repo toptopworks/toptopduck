@@ -106,6 +106,9 @@ vi.mock("../api", async (importOriginal) => {
       resumeProgressCb.current = cb;
       return () => {};
     }),
+    // Issue #1353: the shell-level session-named listener mounts with App;
+    // inert no-op keeps jsdom off the real Tauri listen.
+    onSessionNamed: vi.fn(async () => () => {}),
     // The app-level approval channel (issue #297) mounts on App render; no
     // Shell.test scenario drives approvals, so inert no-op listeners keep the
     // real @tauri-apps/api/event listen (absent in jsdom) from firing.

@@ -639,6 +639,19 @@ pub struct TurnProgress {
     pub phase: TurnPhase,
 }
 
+/// One `session-named` side-channel event (issue #1353, calibrating ADR-0089
+/// Decision 4): the turn-start auto-name push. Fires exactly once, when the
+/// session's first question is accepted (before any runtime branch), so the
+/// frontend updates the sidebar row + session header without waiting for the
+/// turn's terminal state. `session_id` addressing mirrors [`TurnProgress`]
+/// (ADR-0056); `name` is the landed bounded truncation, already visible on
+/// the session when the event fires.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionNamedPayload {
+    pub session_id: SessionId,
+    pub name: String,
+}
+
 /// A shared live-phase emission face (issue #1242): the external turn's two
 /// parallel threads -- the ACP engine driving its fold-layer emissions and
 /// the gateway serve emitting its authoritative tool-call rows -- both feed

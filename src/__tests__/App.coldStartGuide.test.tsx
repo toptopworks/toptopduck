@@ -111,6 +111,9 @@ vi.mock("../api", async (importOriginal) => {
     createSession: vi.fn(async () => "sess-1"),
     listWorkingSet: vi.fn(async () => []),
     onTurnProgress: vi.fn(async () => () => {}),
+    // Issue #1353: the shell-level session-named listener mounts with App;
+    // inert no-op keeps jsdom off the real Tauri listen.
+    onSessionNamed: vi.fn(async () => () => {}),
     getAuthorizationMode: vi.fn(async () => "per_call" as const),
     setAuthorizationMode: vi.fn(async () => {}),
     listSkills: vi.fn(async () => ({ skills: [], ignored: [] })),

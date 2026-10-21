@@ -29,6 +29,7 @@ import type {
   ResumeProgress,
   SaveError,
   SessionMetadata,
+  SessionNamedPayload,
   TurnProgress,
 } from "./types/session";
 import type {
@@ -409,6 +410,18 @@ export async function onTurnProgress(
   cb: (ev: TurnProgress) => void,
 ): Promise<UnlistenFn> {
   return listen<TurnProgress>("turn-progress", (e) => cb(e.payload));
+}
+
+// Subscribe to session-named events (issue #1353, calibrating ADR-0089
+// Decision 4). Fired exactly once when a session's first question is
+// accepted -- before the turn settles -- carrying the addressing sessionId
+// (ADR-0056) and the landed name. The shell patches the open-set entry so
+// the sidebar + session header show the name immediately; the
+// terminal-state chain still corrects the persisted display_name after.
+export async function onSessionNamed(
+  cb: (ev: SessionNamedPayload) => void,
+): Promise<UnlistenFn> {
+  return listen<SessionNamedPayload>("session-named", (e) => cb(e.payload));
 }
 
 // List every persisted .duck session's metadata for the cold-start sidebar
