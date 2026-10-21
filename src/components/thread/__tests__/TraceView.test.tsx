@@ -472,12 +472,12 @@ describe("LiveRow approval originator annotation (issue #934)", () => {
   });
 });
 
-// The settled live row's sub-trace affordance (issue #934, PR #946 review):
-// a delegation row whose completion event carried sub_rounds renders the
-// modal affordance -- the LiveRow composition the live exchange actually
-// ships (the pure projection has its own pin in useTurnFlow's suites).
-describe("LiveRow settled sub-trace affordance (issue #934)", () => {
-  it("renders the affordance on a delegation row carrying sub-rounds", () => {
+// The settled live row's sub-trace fold (issue #934, inlined by #1355): a
+// delegation row whose completion event carried sub_rounds renders the
+// row fold -- the LiveRow composition the live exchange actually ships (the
+// pure projection has its own pin in useTurnFlow's suites).
+describe("LiveRow settled sub-trace fold (issue #934)", () => {
+  it("renders the fold on a delegation row carrying sub-rounds and opens the inline panel", () => {
     const { container } = renderWithProviders(
       <LiveRow
         row={rowWith({
@@ -491,6 +491,11 @@ describe("LiveRow settled sub-trace affordance (issue #934)", () => {
         onRespond={vi.fn()}
       />,
     );
-    expect(container.querySelector(".subtrace-open")).not.toBeNull();
+    expect(container.querySelector(".subtrace-toggle")).not.toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: /sub-agent trace/i }));
+    // The panel opens inline beneath the row; the live path carries no
+    // usage subtotal (usage settles with the turn, #1270).
+    expect(screen.getByText("Sub-agent trace · analyst")).toBeInTheDocument();
+    expect(screen.getByText("child prose")).toBeInTheDocument();
   });
 });

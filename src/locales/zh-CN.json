@@ -662,7 +662,7 @@
   "thread.trace.successAria": "调用成功",
   "thread.trace.thinkingToggle": "思考 · {sec}s",
   "thread.trace.toggle": "轨迹 · {count} 次调用",
-  "thread.trace.viewSubtrace": "子轨迹",
+  "thread.trace.viewSubtrace": "子智能体轨迹",
   "thread.userBubble.invokedSkillsAria": "随此消息调用的技能",
   "viz.chartLabel": "图表",
   "viz.error.invalidJson": "图表定义不是有效的 JSON",

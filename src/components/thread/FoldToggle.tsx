@@ -11,9 +11,13 @@ import { cn } from "@/lib/utils";
 
 // The hook class is the fold's selector / test anchor. A literal union of the
 // folds that exist (the turn-level process fold, the per-round thinking fold,
-// the per-round steps fold) so a typo'd class fails at the call site, not as
-// a selector miss.
-export type FoldHookClass = "thinking-toggle" | "trace-toggle" | "process-toggle";
+// the per-round steps fold, the delegation sub-trace fold) so a typo'd class
+// fails at the call site, not as a selector miss.
+export type FoldHookClass =
+  | "thinking-toggle"
+  | "trace-toggle"
+  | "process-toggle"
+  | "subtrace-toggle";
 
 export function FoldToggle({
   hookClass,
