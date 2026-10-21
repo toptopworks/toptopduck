@@ -63,7 +63,7 @@ const DELEGATION: TraceEntry = {
 // the delegation entry's row carries the fold.
 function renderSettledTrace(
   renderSubTrace: (entry: TraceEntry) => ReactElement = (entry) => (
-    <DelegationSubTraceBody entry={entry} />
+    <DelegationSubTraceBody name={entry.name} task={entry.summary} subRounds={entry.sub_rounds} />
   ),
 ) {
   return renderWithProviders(
@@ -107,8 +107,12 @@ describe("DelegationSubTraceBody inline panel (issue #1355)", () => {
       text: "Checking the sheet first.",
       calls: [],
     };
-    const { container } = renderSettledTrace((entry) => (
-      <DelegationSubTraceBody entry={{ ...entry, sub_rounds: [thinkingRound] }} />
+    const { container } = renderSettledTrace(() => (
+      <DelegationSubTraceBody
+        name={DELEGATION.name}
+        task={DELEGATION.summary}
+        subRounds={[thinkingRound]}
+      />
     ));
     fireEvent.click(screen.getByRole("button", { name: /sub-agent trace/i }));
     // The honest fold head is present; the raw text stays folded until the
@@ -136,7 +140,9 @@ describe("DelegationSubTraceBody inline panel (issue #1355)", () => {
     const { container } = renderWithProviders(
       <TraceRowList
         entries={[DELEGATION, plain]}
-        renderSubTrace={(entry) => <DelegationSubTraceBody entry={entry} />}
+        renderSubTrace={(entry) => (
+          <DelegationSubTraceBody name={entry.name} task={entry.summary} subRounds={entry.sub_rounds} />
+        )}
       />,
     );
     const toggles = container.querySelectorAll(".subtrace-toggle");
@@ -172,8 +178,12 @@ it("keeps a vega-lite fence in the sub-trace static (issue #1093 pin)", async ()
     ...SUB_ROUND,
     text: "```vega-lite\n{\"mark\": \"bar\"}\n```",
   };
-  renderSettledTrace((entry) => (
-    <DelegationSubTraceBody entry={{ ...entry, sub_rounds: [fenceRound] }} />
+  renderSettledTrace(() => (
+    <DelegationSubTraceBody
+      name={DELEGATION.name}
+      task={DELEGATION.summary}
+      subRounds={[fenceRound]}
+    />
   ));
   fireEvent.click(screen.getByRole("button", { name: /sub-agent trace/i }));
   await waitFor(() => expect(vi.mocked(embed)).toHaveBeenCalledTimes(1));
@@ -192,7 +202,9 @@ describe("DelegationSubTraceBody usage subtotal (ADR-0129, issue #1270)", () => 
   function renderSubtotalTrace() {
     renderSettledTrace((entry) => (
       <DelegationSubTraceBody
-        entry={entry}
+        name={entry.name}
+        task={entry.summary}
+        subRounds={entry.sub_rounds}
         usage={{
           input_tokens: 40,
           cache_read_tokens: 0,

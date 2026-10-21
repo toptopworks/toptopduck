@@ -789,11 +789,13 @@ fn trace_entry_view_is_a_flat_snake_case_object() {
     use toptopduck_lib::{OperationKind, TraceEntryView, TraceRound};
     assert_wire(
         &TraceEntryView {
+            id: None,
             name: "explore".into(),
             operation_kind: OperationKind::Read,
             summary: "SELECT count(*) FROM orders".into(),
             success: false,
             result_excerpt: "no such table".into(),
+            report: None,
             sub_rounds: None,
         },
         r#"{"name":"explore","operation_kind":"read","summary":"SELECT count(*) FROM orders","success":false,"result_excerpt":"no such table"}"#,
@@ -806,20 +808,24 @@ fn trace_entry_view_is_a_flat_snake_case_object() {
     // own flat shape).
     assert_wire(
         &TraceEntryView {
+            id: None,
             name: "analyst".into(),
             operation_kind: OperationKind::Execute,
             summary: "clean the sheet".into(),
             success: true,
             result_excerpt: String::new(),
+            report: None,
             sub_rounds: Some(vec![TraceRound {
                 thinking: None,
                 text: Some("child prose".into()),
                 calls: vec![TraceEntryView {
+                    id: None,
                     name: "explore".into(),
                     operation_kind: OperationKind::Read,
                     summary: "SELECT 1".into(),
                     success: true,
                     result_excerpt: String::new(),
+                    report: None,
                     sub_rounds: None,
                 }],
             }]),
@@ -1177,19 +1183,23 @@ fn turn_phase_serializes_externally_tagged() {
     );
     assert_wire(
         &TurnPhase::ToolCallStarted {
+            id: None,
             name: "materialize".into(),
             operation_kind: OperationKind::Write,
             summary: "SELECT 1".into(),
+            task: None,
         },
         r#"{"ToolCallStarted":{"name":"materialize","operation_kind":"write","summary":"SELECT 1"}}"#,
     );
     assert_wire(
         &TurnPhase::ToolCallCompleted(TraceEntryView {
+            id: None,
             name: "materialize".into(),
             operation_kind: OperationKind::Write,
             summary: "SELECT 1".into(),
             success: true,
             result_excerpt: String::new(),
+            report: None,
             sub_rounds: None,
         }),
         r#"{"ToolCallCompleted":{"name":"materialize","operation_kind":"write","summary":"SELECT 1","success":true,"result_excerpt":""}}"#,
@@ -1214,6 +1224,50 @@ fn turn_phase_serializes_externally_tagged() {
 }
 
 #[test]
+fn delegation_live_phases_carry_identity_and_full_text() {
+    // ADR-0135: the delegation's live surface. The started phase carries
+    // the execute-entry-minted id plus the task's FULL text (Decision 3 --
+    // the trace summary stays bounded, the task rides live-only); the
+    // completed entry carries the same id (the routing fact that pairs
+    // same-name parallel rows, Decision 2) plus the report's full text;
+    // and a forwarded sub-event rides wrapped in DelegationSubEvent with
+    // the owning delegation's id (Decision 1). All additive: the absent
+    // fields skip serialization, so the ordinary-call shapes pinned above
+    // are unchanged.
+    use toptopduck_lib::{OperationKind, TraceEntryView, TurnPhase};
+    assert_wire(
+        &TurnPhase::ToolCallStarted {
+            id: Some("gateway-1".into()),
+            name: "analyst".into(),
+            operation_kind: OperationKind::Execute,
+            summary: "clean the sheet".into(),
+            task: Some("Clean the whole sheet and report".into()),
+        },
+        r#"{"ToolCallStarted":{"id":"gateway-1","name":"analyst","operation_kind":"execute","summary":"clean the sheet","task":"Clean the whole sheet and report"}}"#,
+    );
+    assert_wire(
+        &TurnPhase::ToolCallCompleted(TraceEntryView {
+            id: Some("gateway-1".into()),
+            name: "analyst".into(),
+            operation_kind: OperationKind::Execute,
+            summary: "clean the sheet".into(),
+            success: true,
+            result_excerpt: String::new(),
+            report: Some("Done; 3 rows cleaned.".into()),
+            sub_rounds: None,
+        }),
+        r#"{"ToolCallCompleted":{"id":"gateway-1","name":"analyst","operation_kind":"execute","summary":"clean the sheet","success":true,"result_excerpt":"","report":"Done; 3 rows cleaned."}}"#,
+    );
+    assert_wire(
+        &TurnPhase::DelegationSubEvent {
+            delegation_id: "gateway-1".into(),
+            phase: Box::new(TurnPhase::Thinking { attempt: 2 }),
+        },
+        r#"{"DelegationSubEvent":{"delegation_id":"gateway-1","phase":{"Thinking":{"attempt":2}}}}"#,
+    );
+}
+
+#[test]
 fn turn_record_carries_round_grouped_trace_and_timestamps() {
     // ADR-0103 (issue #608): TurnRecord.trace is round-grouped -- each round
     // an optional thinking block + optional prose + its calls -- and the
@@ -1230,11 +1284,13 @@ fn turn_record_carries_round_grouped_trace_and_timestamps() {
         }),
         text: Some("先看一眼数据。".into()),
         calls: vec![TraceEntryView {
+            id: None,
             name: "explore".into(),
             operation_kind: OperationKind::Read,
             summary: "SELECT 1".into(),
             success: true,
             result_excerpt: String::new(),
+            report: None,
             sub_rounds: None,
         }],
     };

@@ -645,11 +645,15 @@ impl From<&RecipeTraceEntry> for TraceEntryView {
     /// same expanded trace.
     fn from(entry: &RecipeTraceEntry) -> Self {
         Self {
+            // ADR-0135: id / report are live-only -- the recipe carries
+            // neither, so the resumed trace keeps its excerpt-only posture.
+            id: None,
             name: entry.name.clone(),
             operation_kind: entry.operation_kind,
             summary: entry.summary.clone(),
             success: entry.success,
             result_excerpt: entry.result_excerpt.clone(),
+            report: None,
             // The nested sub-trace (ADR-0117 Decision 6, issue #934) resumes
             // verbatim: the sub-rounds map through the round-level mapping
             // below, so a reopened session renders the sub-trace under the

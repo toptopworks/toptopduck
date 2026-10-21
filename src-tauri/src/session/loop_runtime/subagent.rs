@@ -142,6 +142,13 @@ pub(crate) fn delegation_dynamic_tool(
             let batch = Arc::clone(&batch);
             let ctx = Arc::clone(&ctx);
             Box::pin(async move {
+                // The delegation's call id, minted at the execute entry
+                // (ADR-0135 Decision 2): one identity for the started
+                // phase, every forwarded sub-event, and the landed entry --
+                // same-name parallel delegations route on it, never on a
+                // name+order pairing. The refusal arms mint-and-land the
+                // same way (the id exists even when nothing live rides it).
+                let delegation_id = next_call_id();
                 // A missing, non-string, or blank prompt is refused up
                 // front (#944 review Advisory A): the schema says
                 // required, but providers do not enforce schemas against a
@@ -152,7 +159,16 @@ pub(crate) fn delegation_dynamic_tool(
                     Some(task) if !task.trim().is_empty() => task.to_string(),
                     _ => {
                         let refusal = "delegation refused: no task prompt was provided".to_string();
-                        land_delegation_entry(&ctx, &name, "", &refusal, false, false, Vec::new());
+                        land_delegation_entry(
+                            &ctx,
+                            &delegation_id,
+                            &name,
+                            "",
+                            &refusal,
+                            false,
+                            false,
+                            Vec::new(),
+                        );
                         return Ok(rig_agent::tool::ToolOutput::text(refusal));
                     }
                 };
@@ -170,20 +186,32 @@ pub(crate) fn delegation_dynamic_tool(
                          {DELEGATION_BATCH_CAP} delegations (the cap); defer the task to a \
                          later batch or narrow the delegation"
                     );
-                    land_delegation_entry(&ctx, &name, &task, &refusal, false, false, Vec::new());
+                    land_delegation_entry(
+                        &ctx,
+                        &delegation_id,
+                        &name,
+                        &task,
+                        &refusal,
+                        false,
+                        false,
+                        Vec::new(),
+                    );
                     return Ok(rig_agent::tool::ToolOutput::text(refusal));
                 }
                 emit_phase(
                     &ctx.phases,
                     TurnPhase::ToolCallStarted {
+                        id: Some(delegation_id.clone()),
                         name: name.clone(),
                         operation_kind: OperationKind::Execute,
                         summary: delegation_summary(&task),
+                        task: Some(task.clone()),
                     },
                 );
-                let report = run_subagent(&spec, &task, &ctx).await;
+                let report = run_subagent(&spec, &task, &ctx, &delegation_id).await;
                 let entry = land_delegation_entry(
                     &ctx,
+                    &delegation_id,
                     &name,
                     &task,
                     &report.text,
@@ -191,10 +219,15 @@ pub(crate) fn delegation_dynamic_tool(
                     report.capped,
                     report.rounds,
                 );
-                emit_phase(
-                    &ctx.phases,
-                    TurnPhase::ToolCallCompleted(crate::model::TraceEntryView::from(&entry)),
-                );
+                // ADR-0135 Decisions 2/3: the live completion carries the
+                // delegation's id (the routing fact that pairs the started
+                // row) and the report's full text (live-only display) --
+                // the landed entry keeps neither, so both ride the wire
+                // view, not the record.
+                let mut view = crate::model::TraceEntryView::from(&entry);
+                view.id = Some(delegation_id);
+                view.report = Some(report.text.clone());
+                emit_phase(&ctx.phases, TurnPhase::ToolCallCompleted(view));
                 Ok(rig_agent::tool::ToolOutput::text(report.text))
             })
         },
@@ -249,6 +282,10 @@ enum RunExit {
 /// collection, nothing else.
 struct SubagentRun {
     ctx: Arc<SubagentCtx>,
+    /// The delegation's execute-entry id (ADR-0135 Decision 2): the
+    /// abandonment Drop lands its cancelled entry under the same identity
+    /// the started phase and every forwarded sub-event carried.
+    delegation_id: String,
     name: String,
     task: String,
     channel: Arc<super::adapter::CompletionChannel>,
@@ -274,6 +311,7 @@ impl Drop for SubagentRun {
         let report = finish_run(self, RunExit::Abandoned);
         land_delegation_entry(
             &self.ctx,
+            &self.delegation_id,
             &self.name,
             &self.task,
             &report.text,
@@ -401,7 +439,36 @@ fn failure_text_with_orphans(base: &str, promoted: &[String]) -> String {
 /// turn's no-progress clock: sub-agent generation activity IS turn
 /// progress, so the watchdog's cap times the whole turn including the
 /// sub-agent's model calls (the un-layered wall clock of Decision 5).
-async fn run_subagent(spec: &DelegationSpec, task: &str, ctx: &Arc<SubagentCtx>) -> SubagentReport {
+/// The delegation's tagged sink (ADR-0135 Decision 1): wraps the turn's
+/// phase sink so every phase the sub-agent's fold produces rides as a
+/// [`TurnPhase::DelegationSubEvent`] carrying the delegation's id, except
+/// `TextDelta` -- filtered at this single convergence point (the round
+/// prose goes live only through the settle's sub_rounds). The gate path is
+/// untouched: approval cards keep their own channel (the dispatch origin
+/// annotation, issue #934).
+fn tagged_delegation_sink(phases: &PhaseSink, delegation_id: &str) -> PhaseSink {
+    let phases = Arc::clone(phases);
+    let delegation_id = delegation_id.to_string();
+    Arc::new(Mutex::new(move |phase: TurnPhase| {
+        if matches!(phase, TurnPhase::TextDelta { .. }) {
+            return;
+        }
+        emit_phase(
+            &phases,
+            TurnPhase::DelegationSubEvent {
+                delegation_id: delegation_id.clone(),
+                phase: Box::new(phase),
+            },
+        );
+    }))
+}
+
+async fn run_subagent(
+    spec: &DelegationSpec,
+    task: &str,
+    ctx: &Arc<SubagentCtx>,
+    delegation_id: &str,
+) -> SubagentReport {
     // The promotions watermark for the orphan note (PR #944 review Advisory
     // G): a failed run names the result_N it promoted before dying -- they
     // entered the shared working set with no visible producer in the report.
@@ -467,7 +534,10 @@ async fn run_subagent(spec: &DelegationSpec, task: &str, ctx: &Arc<SubagentCtx>)
         .add_hook(finish_watcher)
         .into_future()
         .await;
-    let noop_sink: PhaseSink = Arc::new(Mutex::new(|_phase: TurnPhase| {}));
+    // The tagged sink (ADR-0135 Decision 1): replaces the noop -- every
+    // phase the sub-agent's fold produces rides to the turn's sink wrapped
+    // as a DelegationSubEvent carrying the delegation's id.
+    let tagged_sink = tagged_delegation_sink(&ctx.phases, delegation_id);
     // The abandonment guard (PR #946 review Important 3): owns the fold,
     // the private channel, and the watermark so a mid-run drop still
     // collects and lands the cancelled entry. Constructed AFTER the stream
@@ -476,6 +546,7 @@ async fn run_subagent(spec: &DelegationSpec, task: &str, ctx: &Arc<SubagentCtx>)
     // normal exit collects through the same `finish_run` and disarms.
     let mut run = SubagentRun {
         ctx: Arc::clone(ctx),
+        delegation_id: delegation_id.to_string(),
         name: spec.name.clone(),
         task: task.to_string(),
         channel: Arc::clone(&channel),
@@ -489,7 +560,7 @@ async fn run_subagent(spec: &DelegationSpec, task: &str, ctx: &Arc<SubagentCtx>)
             None => break RunExit::Done,
             Some(Err(err)) => break RunExit::Failed(err),
             Some(Ok(item)) => {
-                run.fold.event(&item, &run.channel, &noop_sink);
+                run.fold.event(&item, &run.channel, &tagged_sink);
                 if let Some(clock) = &ctx.clock {
                     clock.touch();
                 }
@@ -562,8 +633,10 @@ fn subagent_failure_text(err: &StreamingError, cap_stamped: bool) -> String {
 /// -- the one excerpt a reader of the trace actually wants), with a capped
 /// report's tail marker reserved through the cut (issue #1047) and the
 /// entry's flag keying the projections' one success-excerpt exception.
+#[allow(clippy::too_many_arguments)]
 fn land_delegation_entry(
     ctx: &SubagentCtx,
+    id: &str,
     name: &str,
     task: &str,
     report: &str,
@@ -571,9 +644,12 @@ fn land_delegation_entry(
     capped: bool,
     rounds: Vec<LoopRound>,
 ) -> TraceEntry {
+    // The id arrives minted at the execute entry (ADR-0135 Decision 2):
+    // the landed entry, the started phase, and every forwarded sub-event
+    // share one identity -- the mint is no longer the landing's own fact.
     let mut entry = if success {
         TraceEntry::succeeded(
-            next_call_id(),
+            id.to_string(),
             name.to_string(),
             OperationKind::Execute,
             delegation_summary(task),
@@ -581,7 +657,7 @@ fn land_delegation_entry(
         )
     } else {
         TraceEntry::failed(
-            next_call_id(),
+            id.to_string(),
             name.to_string(),
             OperationKind::Execute,
             delegation_summary(task),
@@ -676,5 +752,64 @@ mod tests {
             clean, "sub-agent failed: ended without a final report",
             "no orphans: the base text rides untouched"
         );
+    }
+
+    /// ADR-0135 Decision 1: the tagged sink forwards every non-delta phase
+    /// wrapped as a DelegationSubEvent carrying the delegation's id, and
+    /// drops TextDelta at the sink (the single convergence point) -- the
+    /// round prose goes live only through the settle's sub_rounds.
+    #[test]
+    fn tagged_sink_forwards_tagged_and_filters_text_deltas() {
+        let seen: Arc<Mutex<Vec<TurnPhase>>> = Arc::new(Mutex::new(Vec::new()));
+        let inner: PhaseSink = {
+            let seen = Arc::clone(&seen);
+            Arc::new(Mutex::new(move |phase: TurnPhase| {
+                seen.lock().expect("recording sink poisoned").push(phase)
+            }))
+        };
+        let tagged = tagged_delegation_sink(&inner, "gateway-1");
+        for phase in [
+            TurnPhase::Thinking { attempt: 1 },
+            TurnPhase::TextDelta {
+                delta: "dropped".into(),
+            },
+            TurnPhase::ThinkingCompleted {
+                duration_ms: 10,
+                text: "child reasoning".into(),
+            },
+            TurnPhase::ToolCallStarted {
+                id: None,
+                name: "explore".into(),
+                operation_kind: crate::approval::OperationKind::Read,
+                summary: "SELECT 1".into(),
+                task: None,
+            },
+        ] {
+            emit_phase(&tagged, phase);
+        }
+        let seen = seen.lock().expect("recording sink poisoned");
+        assert_eq!(seen.len(), 3, "the delta never rides: {seen:?}");
+        let inner_phases: Vec<&TurnPhase> = seen
+            .iter()
+            .map(|phase| match phase {
+                TurnPhase::DelegationSubEvent {
+                    delegation_id,
+                    phase,
+                } => {
+                    assert_eq!(delegation_id, "gateway-1");
+                    assert!(
+                        !matches!(phase.as_ref(), TurnPhase::TextDelta { .. }),
+                        "no delta crosses the sink"
+                    );
+                    phase.as_ref()
+                }
+                other => panic!("every forwarded phase rides wrapped: {other:?}"),
+            })
+            .collect();
+        assert!(matches!(
+            inner_phases[0],
+            TurnPhase::Thinking { attempt: 1 }
+        ));
+        assert!(matches!(inner_phases[2], TurnPhase::ToolCallStarted { .. }));
     }
 }

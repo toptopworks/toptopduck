@@ -937,9 +937,11 @@ impl JsonPump {
                 // round grouping relies on).
                 let round = self.tracker.call_round(on_phase);
                 on_phase(TurnPhase::ToolCallStarted {
+                    id: None,
                     name: command,
                     operation_kind: OperationKind::Execute,
                     summary,
+                    task: None,
                 });
                 on_phase(TurnPhase::ToolCallCompleted(TraceEntryView::from(&entry)));
                 self.tracker.land_call(round, entry);
@@ -1008,9 +1010,11 @@ impl JsonPump {
                 let round = self.tracker.call_round(on_phase);
                 if !gateway_routed {
                     on_phase(TurnPhase::ToolCallStarted {
+                        id: None,
                         name,
                         operation_kind,
                         summary,
+                        task: None,
                     });
                     on_phase(TurnPhase::ToolCallCompleted(TraceEntryView::from(&entry)));
                 }

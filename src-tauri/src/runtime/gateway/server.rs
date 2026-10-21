@@ -954,9 +954,11 @@ fn handle_tools_call(msg: &Value, ctx: &mut GatewayCtx, outcome: &mut GatewayOut
                         // Post-gate start (issue #1242): the card (if any)
                         // resolved, so the running row can exist.
                         ctx.events.emit(TurnPhase::ToolCallStarted {
+                            id: None,
                             name: call.name.clone(),
                             operation_kind: OperationKind::Write,
                             summary: summary.clone(),
+                            task: None,
                         });
                         // The gate-pending window can race a same-name mint
                         // -- the typed error rides the result so the model
@@ -1058,9 +1060,11 @@ fn handle_tools_call(msg: &Value, ctx: &mut GatewayCtx, outcome: &mut GatewayOut
             // resolved), the summary the real argument summary -- the same
             // facts the settle trace row carries.
             ctx.events.emit(TurnPhase::ToolCallStarted {
+                id: None,
                 name: call.name.clone(),
                 operation_kind,
                 summary: summary.clone(),
+                task: None,
             });
             // Route by name shape (ADR-0076 gateway routing + ADR-0105
             // Decision 4 + ADR-0108 Decision 6): a namespaced name (an
@@ -1187,9 +1191,11 @@ fn local_meta_result(
     events: &dyn TurnPhaseSink,
 ) -> Response {
     events.emit(TurnPhase::ToolCallStarted {
+        id: None,
         name: call.name.clone(),
         operation_kind: OperationKind::Read,
         summary: summary.to_string(),
+        task: None,
     });
     let excerpt = crate::mcp::meta_tools::meta_payload_text(payload);
     let entry = TraceEntry::succeeded(
@@ -3545,9 +3551,11 @@ mod tests {
             got,
             vec![
                 TurnPhase::ToolCallStarted {
+                    id: None,
                     name: "explore".into(),
                     operation_kind: OperationKind::Read,
                     summary: "SELECT 1 AS x".into(),
+                    task: None,
                 },
                 TurnPhase::ToolCallCompleted(TraceEntryView::from(&outcome.trace[0])),
             ],
@@ -3658,9 +3666,11 @@ mod tests {
             got,
             vec![
                 TurnPhase::ToolCallStarted {
+                    id: None,
                     name: "mcp_list_servers".into(),
                     operation_kind: OperationKind::Read,
                     summary: meta_tools::LIST_SUMMARY.to_string(),
+                    task: None,
                 },
                 TurnPhase::ToolCallCompleted(TraceEntryView::from(&outcome.trace[0])),
             ],
