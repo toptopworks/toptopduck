@@ -426,10 +426,12 @@ fn failure_text_with_orphans(base: &str, promoted: &[String]) -> String {
 /// phase sink so every phase the sub-agent's fold produces rides as a
 /// [`TurnPhase::DelegationSubEvent`] carrying the delegation's id, except
 /// `TextDelta` -- filtered at this single convergence point (the round
-/// prose goes live only through the settle's sub_rounds). The gate path is
-/// untouched: approval cards keep their own channel (the dispatch origin
-/// annotation, issue #934).
-fn tagged_delegation_sink(phases: &PhaseSink, delegation_id: &str) -> PhaseSink {
+/// prose goes live only through the settle's sub_rounds). The dispatch
+/// server reuses this shape for a sub-agent's tool-call phases (issue
+/// #1359: the request carries the delegation id; the per-request forward
+/// wraps here). The gate path is untouched: approval cards keep their own
+/// channel (the dispatch origin annotation, issue #934).
+pub(super) fn tagged_delegation_sink(phases: &PhaseSink, delegation_id: &str) -> PhaseSink {
     let phases = Arc::clone(phases);
     let delegation_id = delegation_id.to_string();
     Arc::new(Mutex::new(move |phase: TurnPhase| {
@@ -520,6 +522,11 @@ async fn run_subagent(
                 // dispatch names its delegating sub-agent, so the approval
                 // card reads "sub-agent X wants to call Y".
                 Some(spec.name.clone()),
+                // The delegation identity (issue #1359): every sub-face
+                // dispatch carries its delegation's call id, so the
+                // dispatch server forwards the call's phases into that
+                // delegation's live panel instead of the main rail.
+                Some(delegation_id.to_string()),
             )
         })
         .collect::<Vec<_>>();

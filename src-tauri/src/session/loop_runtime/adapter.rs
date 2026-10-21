@@ -52,6 +52,12 @@ pub(crate) struct DispatchRequest {
     /// call. Rides the request so the approval gate can annotate its card
     /// ("sub-agent X wants to call Y") without a second channel.
     pub(crate) origin: Option<String>,
+    /// The dispatching delegation's call id (issue #1359): present when the
+    /// call rides a sub-agent's tool face, `None` for a main-loop call.
+    /// Rides the request so the dispatch server forwards the call's phases
+    /// through the tagged wrapper (the delegation's live panel) without a
+    /// second channel -- the same posture as `origin`.
+    pub(crate) delegation_id: Option<String>,
     pub(crate) resp: mpsc::Sender<DispatchOutcome>,
 }
 
@@ -175,6 +181,7 @@ pub(crate) fn gateway_dynamic_tool(
     channel: Arc<CompletionChannel>,
     dispatch: mpsc::Sender<DispatchRequest>,
     origin: Option<String>,
+    delegation_id: Option<String>,
 ) -> rig_agent::tool::DynamicTool {
     let name = def.name.clone();
     rig_agent::tool::DynamicTool::new(
@@ -191,6 +198,7 @@ pub(crate) fn gateway_dynamic_tool(
             let channel = Arc::clone(&channel);
             let dispatch = dispatch.clone();
             let origin = origin.clone();
+            let delegation_id = delegation_id.clone();
             Box::pin(async move {
                 // The blocking dispatch round-trip (channel send + the
                 // caller thread's gated execution) must not sit on the async
@@ -202,6 +210,7 @@ pub(crate) fn gateway_dynamic_tool(
                             call,
                             channel,
                             origin,
+                            delegation_id,
                             resp: resp_tx,
                         })
                         .is_err()
