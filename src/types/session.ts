@@ -205,9 +205,16 @@ export type TurnPhase =
   | { Thinking: { attempt: number } }
   | {
     ToolCallStarted: {
+      // The call's id, present only on a delegation row (ADR-0135
+      // Decision 2): pairs the started row with its completion and its
+      // forwarded sub-events. Absent on an ordinary call.
+      id?: string;
       name: string;
       operation_kind: OperationKind;
       summary: string;
+      // The delegation task's full text (ADR-0135 Decision 3), present
+      // only on a delegation row -- live-only, never persisted.
+      task?: string;
     };
   }
   | { ToolCallCompleted: TraceEntry }
@@ -220,7 +227,13 @@ export type TurnPhase =
   // Wraps the trace's own ThinkingTrace verbatim (the same reuse
   // ToolCallCompleted makes of TraceEntry): the live state stores the block
   // as-is and the round's fold renders it unchanged.
-  | { ThinkingCompleted: ThinkingTrace };
+  | { ThinkingCompleted: ThinkingTrace }
+  // ADR-0135: one forwarded sub-event of a running delegation -- the inner
+  // phase the sub-agent's fold produced, tagged with the owning
+  // delegation's call id so the frontend routes it into that delegation's
+  // live buffer (same-name parallels included). Only the four non-delta
+  // variants ever ride here; TextDelta is filtered at the Rust sink.
+  | { DelegationSubEvent: { delegation_id: string; phase: TurnPhase } };
 
 // A `turn-progress` side-channel event addressed by sessionId (ADR-0059,
 // issue #76). Mirrors the Rust `TurnProgress`. The phase never enters the

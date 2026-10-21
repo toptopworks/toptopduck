@@ -296,6 +296,10 @@ fn reduced_trace(entry: &TraceEntry) -> TraceEntryView {
         "a failed trace entry keeps its result message (ADR-0078 failure anchor)"
     );
     TraceEntryView {
+        // ADR-0135: id / report are live-only routing and display facts --
+        // the projection that serves the recorded trace and the resumed
+        // trace carries neither.
+        id: None,
         name: entry.name.clone(),
         operation_kind: entry.operation_kind,
         summary: entry.summary.clone(),
@@ -305,6 +309,7 @@ fn reduced_trace(entry: &TraceEntry) -> TraceEntryView {
         } else {
             entry.result_excerpt.clone()
         },
+        report: None,
         // The nested sub-trace (ADR-0117 Decision 6): the sub-rounds ride the
         // round-level display mapping, so a sub-round's entries take the same
         // slim projection above (a successful sub-call's excerpt empties, a

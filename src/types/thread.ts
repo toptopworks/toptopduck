@@ -140,6 +140,11 @@ export interface TraceRound {
 // issue #1047) while a failed call carries its bounded error / denial
 // message -- the cross-turn failure retrospection anchor.
 export interface TraceEntry {
+  // The call's id, present ONLY on a live delegation's completion
+  // (ADR-0135 Decision 2): the routing fact that pairs the completion with
+  // its started row. Never lands on the recorded trace or the recipe --
+  // absent everywhere the persisted wire carries the entry.
+  id?: string;
   // Tool name -- a built-in (explore / materialize / describe / sample) or an
   // external MCP server's tool name.
   name: string;
@@ -154,6 +159,11 @@ export interface TraceEntry {
   // -- the capped delegation report's truncation notice excepted
   // (issue #1047).
   result_excerpt: string;
+  // The delegation report's FULL text (ADR-0135 Decision 3), present only
+  // on a live delegation's completion -- a display-face fact the slim
+  // projection does not persist (after resume only the excerpt exists, so
+  // the panel honestly degrades). Same absent-when-unset posture as id.
+  report?: string;
   // The delegation entry's nested sub-trace (ADR-0117 Decision 6, issue
   // #934): the sub-agent's rounds under the same slim projection the main
   // trace takes. Optional: absent for every ordinary call (serde

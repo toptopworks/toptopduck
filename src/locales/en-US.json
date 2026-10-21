@@ -658,6 +658,8 @@
   "thread.trace.op.network": "network",
   "thread.trace.op.read": "read",
   "thread.trace.op.write": "write",
+  "thread.trace.delegationBatch": "{done} of {total} done, {running} running",
+  "thread.trace.delegationStep": "step {n}",
   "thread.trace.subtraceTitle": "Sub-agent trace · {name}",
   "thread.trace.successAria": "Call succeeded",
   "thread.trace.thinkingToggle": "Thinking · {sec}s",

@@ -1261,9 +1261,11 @@ impl Pump {
                     row_identity(title.as_deref(), tool_call_id, *kind);
                 if !gateway {
                     on_phase(TurnPhase::ToolCallStarted {
+                        id: None,
                         name: name.clone(),
                         operation_kind,
                         summary: summary.clone(),
+                        task: None,
                     });
                 }
                 if let Some(end) = RowEnd::from_wire_status(*status) {

@@ -859,9 +859,11 @@ impl ClaudePump {
                 let summary = truncate_trace_excerpt(&summary, TRACE_EXCERPT_MAX);
                 if gateway_bare.is_none() {
                     on_phase(TurnPhase::ToolCallStarted {
+                        id: None,
                         name: bare.to_string(),
                         operation_kind,
                         summary: summary.clone(),
+                        task: None,
                     });
                 }
                 self.pending.push(PendingClaudeCall {

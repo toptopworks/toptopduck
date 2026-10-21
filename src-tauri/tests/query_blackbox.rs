@@ -1625,16 +1625,20 @@ fn ask_with_phase_records_the_tool_call_event_stream_on_a_result_turn() {
         vec![
             TurnPhase::Thinking { attempt: 1 },
             TurnPhase::ToolCallStarted {
+                id: None,
                 name: "materialize".into(),
                 operation_kind: OperationKind::Write,
                 summary: "SELECT 1 AS n".into(),
+                task: None,
             },
             TurnPhase::ToolCallCompleted(TraceEntryView {
+                id: None,
                 name: "materialize".into(),
                 operation_kind: OperationKind::Write,
                 summary: "SELECT 1 AS n".into(),
                 success: true,
                 result_excerpt: String::new(),
+                report: None,
                 sub_rounds: None,
             }),
             TurnPhase::Thinking { attempt: 2 },

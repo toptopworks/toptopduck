@@ -354,6 +354,7 @@ fn external_gateway_renamed_call_settles_to_one_authoritative_row() {
                 name,
                 operation_kind,
                 summary,
+                ..
             } => Some((name.clone(), *operation_kind, summary.clone())),
             _ => None,
         })

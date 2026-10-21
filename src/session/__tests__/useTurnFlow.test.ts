@@ -197,6 +197,237 @@ describe("useTurnFlow", () => {
     });
   });
 
+  describe("delegation live sub-events (ADR-0135)", () => {
+    // A pending ask keeps the live turn mounted so the phase stream folds.
+    async function setupLiveTurn() {
+      const { deps } = setup();
+      vi.mocked(askQuestion).mockImplementation(
+        () => new Promise<TurnOutcome>(() => {}),
+      );
+      const { result } = renderHook(() => useTurnFlow(SID, deps));
+      await waitFor(() => expect(turnProgressCb.current).not.toBeNull());
+      act(() => {
+        void result.current.handleAsk("q");
+      });
+      return result;
+    }
+
+    const delegationStarted = (id: string) =>
+      ({
+        ToolCallStarted: {
+          id,
+          name: "analyst",
+          operation_kind: "execute",
+          summary: "clean the sheet",
+          task: "Clean the whole sheet, report back",
+        },
+      }) as const;
+
+    it("routes forwarded sub-events into the owning delegation's buffer", async () => {
+      const result = await setupLiveTurn();
+      emitProgress(SID, { Thinking: { attempt: 1 } });
+      emitProgress(SID, delegationStarted("d1"));
+      emitProgress(SID, {
+        DelegationSubEvent: {
+          delegation_id: "d1",
+          phase: { Thinking: { attempt: 1 } },
+        },
+      });
+      emitProgress(SID, {
+        DelegationSubEvent: {
+          delegation_id: "d1",
+          phase: { ThinkingCompleted: { duration_ms: 500, text: "child reasoning" } },
+        },
+      });
+      emitProgress(SID, {
+        DelegationSubEvent: {
+          delegation_id: "d1",
+          phase: {
+            ToolCallStarted: {
+              name: "explore",
+              operation_kind: "read",
+              summary: "SELECT 1",
+            },
+          },
+        },
+      });
+      // The main face carries the delegation row alone: the sub-events fold
+      // into the buffer, never into the turn's own rounds.
+      const rounds = result.current.liveTurn?.rounds ?? [];
+      expect(rounds[0]?.rows).toHaveLength(1);
+      const view = rounds[0]?.rows[0]?.delegation;
+      expect(view?.task).toBe("Clean the whole sheet, report back");
+      expect(view?.step).toBe(1);
+      // The buffer's rounds: the sub-fold's own thinking + its running
+      // sub-call row, grouped by the sub-fold's own step.
+      expect(view?.rounds).toEqual([
+        {
+          thinking: { duration_ms: 500, text: "child reasoning" },
+          rows: [
+            expect.objectContaining({ name: "explore", running: true, key: "call-0" }),
+          ],
+        },
+      ]);
+      // A sub-event for an unknown id (the buffer's turn is gone) drops
+      // rather than inventing a fold.
+      emitProgress(SID, {
+        DelegationSubEvent: {
+          delegation_id: "stranger",
+          phase: { Thinking: { attempt: 2 } },
+        },
+      });
+      // The main face is untouched by the stranger: still the one
+      // delegation row, nothing leaked into the turn's own rounds.
+      expect(result.current.liveTurn?.rounds[0]?.rows).toHaveLength(1);
+      expect(result.current.liveTurn?.rounds[0]?.rows[0]?.delegation?.step).toBe(1);
+    });
+
+    it("pairs same-name parallel delegations by id at completion", async () => {
+      const result = await setupLiveTurn();
+      emitProgress(SID, { Thinking: { attempt: 1 } });
+      // Two same-name delegations with one task -- the name+summary scan
+      // cannot tell them apart; the execute-entry ids can (Decision 2).
+      emitProgress(SID, delegationStarted("d1"));
+      emitProgress(SID, delegationStarted("d2"));
+      emitProgress(SID, {
+        DelegationSubEvent: { delegation_id: "d2", phase: { Thinking: { attempt: 3 } } },
+      });
+      // The completion carries d1's id: the FIRST started row (the one a
+      // last-wins name+summary scan would mispair onto d2) settles, d2
+      // keeps running, and the buffers keep their own facts.
+      emitProgress(SID, {
+        ToolCallCompleted: {
+          id: "d1",
+          name: "analyst",
+          operation_kind: "execute",
+          summary: "clean the sheet",
+          success: true,
+          result_excerpt: "",
+          report: "Done; 3 rows cleaned.",
+        },
+      });
+      const rows = result.current.liveTurn?.rounds[0]?.rows ?? [];
+      expect(rows[0]).toMatchObject({ running: false, success: true, callId: "d1" });
+      expect(rows[1]).toMatchObject({ running: true, callId: "d2" });
+      // d1's buffer parks the report's full text and exhausts its fold; d2's
+      // keeps its own step (d1's sub-events never crossed).
+      expect(rows[0]?.delegation?.report).toBe("Done; 3 rows cleaned.");
+      // The task's full text survives the landing too (live-only display
+      // until settle): the completed panel reads it, not the summary.
+      expect(rows[0]?.delegation?.task).toBe("Clean the whole sheet, report back");
+      expect(rows[0]?.delegation?.rounds).toEqual([]);
+      expect(rows[1]?.delegation?.step).toBe(3);
+    });
+
+    it("keeps a thinking-only sub-round on the live rounds", async () => {
+      const result = await setupLiveTurn();
+      emitProgress(SID, { Thinking: { attempt: 1 } });
+      emitProgress(SID, delegationStarted("d1"));
+      emitProgress(SID, {
+        DelegationSubEvent: { delegation_id: "d1", phase: { Thinking: { attempt: 1 } } },
+      });
+      emitProgress(SID, {
+        DelegationSubEvent: {
+          delegation_id: "d1",
+          phase: { ThinkingCompleted: { duration_ms: 400, text: "final reasoning" } },
+        },
+      });
+      // A sub-round may carry thinking and no sub-call (the report round's
+      // only trace in production): the thinkings term of the last-step max
+      // must still mint the round -- dropping it would lose the round
+      // entirely.
+      const view = result.current.liveTurn?.rounds[0]?.rows[0]?.delegation;
+      expect(view?.rounds).toHaveLength(1);
+      expect(view?.rounds[0]?.thinking).toEqual({
+        duration_ms: 400,
+        text: "final reasoning",
+      });
+    });
+
+    it("derives the row chip counts from the forwarded events", async () => {
+      const result = await setupLiveTurn();
+      emitProgress(SID, { Thinking: { attempt: 1 } });
+      for (const id of ["d1", "d2", "d3"]) {
+        emitProgress(SID, delegationStarted(id));
+      }
+      emitProgress(SID, {
+        DelegationSubEvent: { delegation_id: "d2", phase: { Thinking: { attempt: 4 } } },
+      });
+      emitProgress(SID, {
+        ToolCallCompleted: {
+          id: "d1",
+          name: "analyst",
+          operation_kind: "execute",
+          summary: "clean the sheet",
+          success: true,
+          result_excerpt: "",
+        },
+      });
+      const rows = result.current.liveTurn?.rounds[0]?.rows ?? [];
+      // The batch counts read the turn's delegation rows: d1 settled, d2/d3
+      // running; every running row's chip reads the same aggregate.
+      expect(rows[1]?.delegation?.batch).toEqual({ done: 1, running: 2, total: 3 });
+      // Each buffer's own step stays its own: d2's fold advanced to 4,
+      // d3's never opened (null -- the chip's ?? 1 floor).
+      expect(rows[1]?.delegation?.step).toBe(4);
+      expect(rows[2]?.delegation?.step).toBeNull();
+      // The batch is per round (per model-turn -- the cap counter's scope):
+      // a NEXT round's delegation reads its own batch, never the turn-wide
+      // tally, so it reads as a lone delegation again.
+      emitProgress(SID, { Thinking: { attempt: 2 } });
+      emitProgress(SID, delegationStarted("d4"));
+      const laterRows = result.current.liveTurn?.rounds[1]?.rows ?? [];
+      expect(laterRows[0]?.delegation?.batch).toEqual({ done: 0, running: 1, total: 1 });
+    });
+
+    it("falls a completed delegation whose id matches no buffer to the name+summary row", async () => {
+      const result = await setupLiveTurn();
+      emitProgress(SID, { Thinking: { attempt: 1 } });
+      // An ordinary running row -- no id, not a delegation -- sharing the
+      // name and summary the stray completion carries.
+      emitProgress(SID, {
+        ToolCallStarted: {
+          name: "analyst",
+          operation_kind: "execute",
+          summary: "clean the sheet",
+        },
+      });
+      // The id matches no buffer (no started phase ever opened one): the
+      // completion settles the running row by name+summary -- Decision 2's
+      // explicit fallback -- instead of appending a second row.
+      emitProgress(SID, {
+        ToolCallCompleted: {
+          id: "ghost",
+          name: "analyst",
+          operation_kind: "execute",
+          summary: "clean the sheet",
+          success: true,
+          result_excerpt: "",
+        },
+      });
+      const rows = result.current.liveTurn?.rounds[0]?.rows ?? [];
+      expect(rows).toHaveLength(1);
+      expect(rows[0]).toMatchObject({ running: false, success: true });
+      expect(rows[0]?.callId).toBeUndefined();
+    });
+
+    it("degrades a phase the fold does not know instead of crashing", async () => {
+      const result = await setupLiveTurn();
+      emitProgress(SID, { Thinking: { attempt: 1 } });
+      emitProgress(SID, {
+        ThinkingCompleted: { duration_ms: 100, text: "reasoning" },
+      });
+      emitProgress(
+        SID,
+        { UnknownMarker: {} } as unknown as Parameters<typeof emitProgress>[1],
+      );
+      // A future variant folds nowhere: the round stands as it was, empty
+      // of rows, its thinking intact.
+      expect(result.current.liveTurn?.rounds).toHaveLength(1);
+      expect(result.current.liveTurn?.rounds[0]?.rows).toHaveLength(0);
+    });
+  });
+
   describe("live runtime attribution (issue #818)", () => {
     it("carries the ask-time choice on the live turn once the read resolves", async () => {
       const { deps } = setup();
@@ -1034,7 +1265,7 @@ describe("useTurnFlow", () => {
       // padding to absent members -- round 1's round carries neither prose
       // nor thinking, not null placeholders.
       const rounds = buildLiveRounds(
-        { step: 2, calls: [], roundTexts: [null, "第二轮散文。"], roundThinkings: [null, null] },
+        { step: 2, calls: [], roundTexts: [null, "第二轮散文。"], roundThinkings: [null, null], delegations: {} },
         [],
       );
       expect(rounds).toHaveLength(2);
@@ -1075,6 +1306,7 @@ describe("useTurnFlow", () => {
         // askedAt -- the turn identity is not the derivation's concern.
         {
           step: 3,
+          delegations: {},
           calls: [
             call({
               key: "call-2",

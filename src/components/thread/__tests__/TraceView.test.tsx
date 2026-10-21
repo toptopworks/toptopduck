@@ -500,3 +500,153 @@ describe("LiveRow settled sub-trace fold (issue #934)", () => {
     expect(screen.queryByText(/^Used /)).not.toBeInTheDocument();
   });
 });
+
+// ADR-0135: the delegation row's live affordances -- the running row's
+// status chip (step / batch counts) and the inline live panel fed from the
+// delegation buffer, plus the completed row's live-only full texts.
+describe("LiveRow delegation live affordances (ADR-0135)", () => {
+  it("shows the chip and the inline live panel on a running delegation row", () => {
+    const { container } = renderWithProviders(
+      <LiveRow
+        row={rowWith({
+          approval: null,
+          running: true,
+          callId: "d1",
+          delegation: {
+            task: "Clean the whole sheet, report back",
+            rounds: [
+              {
+                thinking: { duration_ms: 500, text: "child reasoning" },
+                rows: [
+                  {
+                    key: "call-0",
+                    name: "explore",
+                    server: null,
+                    operationKind: "read",
+                    summary: "SELECT 1",
+                    approval: null,
+                    running: true,
+                    success: null,
+                    resultExcerpt: "",
+                  },
+                ],
+              },
+            ],
+            step: 2,
+            batch: { done: 0, running: 1, total: 1 },
+          },
+        })}
+        onRespond={vi.fn()}
+      />,
+    );
+    // The single-delegation chip reads the running fold's step.
+    expect(screen.getByText("step 2")).toBeInTheDocument();
+    // The panel stays closed until the fold opens; the task's full text and
+    // the running sub-call ride inside.
+    expect(screen.queryByText("Clean the whole sheet, report back")).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: /sub-agent trace/i }));
+    expect(screen.getByText("Clean the whole sheet, report back")).toBeInTheDocument();
+    expect(screen.getByText("SELECT 1")).toBeInTheDocument();
+    // The sub-round's thinking rides the same honest fold the settled panel
+    // uses, collapsed by default.
+    const thinking = container.querySelectorAll(".thinking-toggle");
+    expect(thinking).toHaveLength(1);
+    expect(screen.queryByText("child reasoning")).not.toBeInTheDocument();
+  });
+
+  it("does not fold the summary line when the sub-trace toggle is clicked", () => {
+    const { container } = renderWithProviders(
+      <LiveRow
+        row={rowWith({
+          approval: null,
+          running: true,
+          callId: "d1",
+          delegation: {
+            task: "Clean the whole sheet, report back",
+            rounds: [],
+            step: 1,
+            batch: { done: 0, running: 1, total: 1 },
+          },
+        })}
+        onRespond={vi.fn()}
+      />,
+    );
+    const chevron = container.querySelector(".summary-fold-toggle");
+    expect(chevron).toHaveAttribute("aria-expanded", "false");
+    fireEvent.click(screen.getByRole("button", { name: /sub-agent trace/i }));
+    // The panel opens while the summary line's own fold stays put: the
+    // toggle's wrapper stops the click before it bubbles into the line's
+    // fold handler.
+    expect(screen.getByText("Clean the whole sheet, report back")).toBeInTheDocument();
+    expect(chevron).toHaveAttribute("aria-expanded", "false");
+    // Positive control: clicking the summary line itself does fold it.
+    fireEvent.click(screen.getByText(SUMMARY, { selector: ".trace-summary" }));
+    expect(chevron).toHaveAttribute("aria-expanded", "true");
+  });
+
+  it("reads the batch counts on the chip when the turn carries a batch", () => {
+    renderWithProviders(
+      <LiveRow
+        row={rowWith({
+          approval: null,
+          running: true,
+          delegation: {
+            task: "t",
+            rounds: [],
+            step: null,
+            batch: { done: 3, running: 2, total: 5 },
+          },
+        })}
+        onRespond={vi.fn()}
+      />,
+    );
+    expect(screen.getByText("3 of 5 done, 2 running")).toBeInTheDocument();
+  });
+
+  it("renders the task and report full texts on a completed delegation row", () => {
+    const { container } = renderWithProviders(
+      <LiveRow
+        row={rowWith({
+          approval: null,
+          running: false,
+          success: true,
+          callId: "d1",
+          delegation: {
+            task: "Full task text that outran the bounded summary",
+            report: "Done; 3 rows cleaned.",
+            rounds: [],
+            step: null,
+            batch: { done: 1, running: 0, total: 1 },
+          },
+          subRounds: [
+            {
+              calls: [
+                {
+                  name: "explore",
+                  operation_kind: "read",
+                  summary: "SELECT 1",
+                  success: true,
+                  result_excerpt: "",
+                },
+              ],
+            },
+          ],
+        })}
+        onRespond={vi.fn()}
+      />,
+    );
+    // No chip on the completed row -- the panel is the affordance.
+    expect(screen.queryByText(/^step /)).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: /sub-agent trace/i }));
+    // The head carries the task's FULL text; the tail carries the report's
+    // full text -- both live-only (the settled panel renders neither).
+    expect(document.querySelector(".subtrace-task")?.textContent).toBe(
+      "Full task text that outran the bounded summary",
+    );
+    expect(document.querySelector(".subtrace-report")?.textContent).toBe(
+      "Done; 3 rows cleaned.",
+    );
+    // The landed sub_rounds render their calls behind the step fold.
+    expect(container.querySelectorAll(".trace-toggle")).toHaveLength(1);
+  });
+});

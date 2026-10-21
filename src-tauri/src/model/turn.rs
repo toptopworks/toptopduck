@@ -544,6 +544,14 @@ pub struct ThinkingTrace {
 /// failure retrospection anchor.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TraceEntryView {
+    /// The call's id, present ONLY on a live delegation's completion
+    /// (ADR-0135 Decision 2): the routing fact that pairs the completion
+    /// with its started row where name+summary would mispair same-name
+    /// parallel delegations. Never lands on the recorded trace or the
+    /// recipe -- the projection mints nothing, so the persisted wire shape
+    /// is unchanged (absent on this field).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
     /// Tool name -- a built-in (`explore` / `materialize` / `describe` /
     /// `sample`) or an external MCP server's tool name.
     pub name: String,
@@ -559,6 +567,13 @@ pub struct TraceEntryView {
     /// empty for a successful call -- the capped delegation report's
     /// truncation notice excepted (issue #1047).
     pub result_excerpt: String,
+    /// The delegation report's FULL text (ADR-0135 Decision 3), present only
+    /// on a live delegation's completion -- a display-face fact the slim
+    /// projection does not persist (the recorded entry keeps its bounded
+    /// excerpt); after resume only the excerpt exists. Same absent-on-wire
+    /// posture as [`Self::id`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub report: Option<String>,
     /// The delegation entry's nested sub-trace (ADR-0117 Decision 6, issue
     /// #934): the sub-agent's rounds under the same slim projection the
     /// main trace takes. Absent for every ordinary call; the nesting is
@@ -597,9 +612,22 @@ pub enum TurnPhase {
     /// starts once allowed. The frontend renders the in-flight row (spinner);
     /// `summary` matches the approval card's so the two merge into one row.
     ToolCallStarted {
+        /// The call's id, present only on a delegation row (ADR-0135
+        /// Decision 2): the id minted at the delegation's execute entry,
+        /// pairing the started row with its completion and its forwarded
+        /// sub-events. Absent on an ordinary call -- those keep the
+        /// name+summary pairing, the existing rule.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
         name: String,
         operation_kind: OperationKind,
         summary: String,
+        /// The delegation task's full text (ADR-0135 Decision 3), present
+        /// only on a delegation row: the reader-facing task the trace's
+        /// bounded summary stands in for while live. Absent on an ordinary
+        /// call.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        task: Option<String>,
     },
     /// A tool call finished dispatch (or was denied at the gate): the trace
     /// entry exactly as it lands on [`TurnRecord::trace`]. Fired once per
@@ -624,6 +652,18 @@ pub enum TurnPhase {
     /// and the frontend renders the round without a thinking fold (honest
     /// degrade).
     ThinkingCompleted { duration_ms: u64, text: String },
+    /// One forwarded sub-event of a running delegation (ADR-0135 Decision 1):
+    /// the sub-agent's event fold produced the inner phase; the tagged sink
+    /// forwards it wrapped with the owning delegation's call id (Decision 2),
+    /// so the frontend routes it into that delegation's live buffer --
+    /// same-name parallel delegations included, which no name+order pairing
+    /// could separate. Only the four non-delta variants ever ride here:
+    /// `TextDelta` is filtered at the sink (the round prose goes live only
+    /// through the settle's `sub_rounds`).
+    DelegationSubEvent {
+        delegation_id: String,
+        phase: Box<TurnPhase>,
+    },
 }
 
 /// One `turn-progress` side-channel event (ADR-0059, issue #76). Wraps a
