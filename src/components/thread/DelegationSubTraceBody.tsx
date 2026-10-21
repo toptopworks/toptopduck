@@ -3,7 +3,7 @@ import { RoundProse } from "./RoundProse";
 import { ThinkingFold } from "./ThinkingFold";
 import { TraceStepFold } from "./TraceRow";
 import { UsageFooter } from "./UsageFooter";
-import type { SubagentUsage, TraceEntry } from "../../types/thread";
+import type { TokenUsage, TraceEntry } from "../../types/thread";
 
 // The delegation row's inline sub-trace panel (ADR-0117 Decision 6 as
 // settled by issue #1355, replacing the #934 modal): the row head carries
@@ -25,10 +25,14 @@ import type { SubagentUsage, TraceEntry } from "../../types/thread";
  *  at this layer was unreachable dead code, removed per the #946 review). */
 export function DelegationSubTraceBody({
   entry,
-  subtotal,
+  usage,
 }: {
   entry: TraceEntry;
-  subtotal?: SubagentUsage;
+  /** The sub-agent's usage subtotal (ADR-0129 Decision 6, issue #1270),
+   *  already paired to THIS row by TurnCard's name+ordinal cursor -- the
+   *  bare TokenUsage, not SubagentUsage, so the panel cannot mispair a
+   *  same-name sibling's subtotal. */
+  usage?: TokenUsage;
 }) {
   return (
     <div className="subtrace-panel mt-1 space-y-3 border-l border-border pl-3">
@@ -48,13 +52,16 @@ export function DelegationSubTraceBody({
         {/* ADR-0129 Decision 6 (issue #1270): the sub-agent's usage
             subtotal, when the turn's table carried one -- the row-level
             attribution the built-in runtime's private folds make possible. */}
-        {subtotal !== undefined && (
+        {usage !== undefined && (
           <div className="subtrace-usage text-xs text-muted-foreground">
-            <UsageFooter usage={subtotal.usage} />
+            <UsageFooter usage={usage} />
           </div>
         )}
       </div>
       {(entry.sub_rounds ?? []).map((round, i) => (
+        // The sub-rounds are append-only within the entry and never
+        // reordered, so the index is a stable key (the same YAGNI call the
+        // main trace's row lists make).
         <div key={i} className="trace-round">
           {/* The round's thinking: the same honest fold the main trace
               renders, collapsed by default. */}

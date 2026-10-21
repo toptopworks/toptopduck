@@ -1,8 +1,9 @@
 // The shared fold chrome: a compact chevron + label button, the chevron
 // rotating on expand; aria-expanded conveys the fold state. Used by the
 // turn-level process fold, the settled per-round thinking + steps folds
-// (TurnCard), and the live thinking fold (issue #610) -- one chrome so the
-// settle swap does not move the fold the user is looking at. The hook class
+// (TurnCard), the live thinking fold (issue #610), and the delegation
+// sub-trace fold (issue #1355) -- one chrome so the settle swap does not
+// move the fold the user is looking at. The hook class
 // is the fold's selector / test anchor, the label rides children.
 
 import type { ReactNode } from "react";

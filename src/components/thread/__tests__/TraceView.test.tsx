@@ -497,5 +497,6 @@ describe("LiveRow settled sub-trace fold (issue #934)", () => {
     // usage subtotal (usage settles with the turn, #1270).
     expect(screen.getByText("Sub-agent trace · analyst")).toBeInTheDocument();
     expect(screen.getByText("child prose")).toBeInTheDocument();
+    expect(screen.queryByText(/^Used /)).not.toBeInTheDocument();
   });
 });

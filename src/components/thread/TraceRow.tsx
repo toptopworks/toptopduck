@@ -212,11 +212,11 @@ export function TraceRow({
 // the turn head when the card is expanded, hidden (not unmounted data -- the
 // TurnRecord carries it) when collapsed. The chrome rides the shared
 // TraceList so the live exchange's row list renders identically (issue #620).
-// `renderSubTrace` is the delegation view-affordance injection (issue #934):
-// the settled trace's caller (TurnCard) supplies it for every row -- the
-// dialog self-guards to the rows carrying a nested sub-trace -- and the
-// sub-trace viewer itself passes none (a sub-agent's calls never carry
-// their own sub-trace).
+// `renderSubTrace` is the delegation panel-body injection (issues #934,
+// #1355): the callers supply it for every row -- TraceRow itself gates on
+// the entry's sub-rounds (see hasSubTrace above) -- and the sub-trace
+// panel passes none (a sub-agent's calls never carry their own
+// sub-trace).
 export function TraceRowList({
   entries,
   renderSubTrace,

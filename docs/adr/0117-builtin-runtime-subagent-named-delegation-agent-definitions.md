@@ -54,6 +54,6 @@
 - **CONTEXT.md**：三处修订（「执行轨迹」「运行时」「网关」）+ 两新增词条（「子智能体」「agent 定义」，见 Decision 7）。
 - **轮次工具面随注册表条目数增长**：token 成本为用户策展责任，与 CLI 注册项同轴。
 - **委派调用入主轮计步序**（1 调用 = 1 步），主 agent 的预算感知与帽值语义不变（ADR-0081）。
-- **留实施期**：子轨迹查看 UI 形态；rig 同批工具调用的并发执行语义核实（「允许并行」决策不受影响）；审批发起方标注的 ToolContext 载荷形状；`general-purpose` 的 preamble 文案；agent 定义 frontmatter 解析器与社区格式宽容降级的实现面。
+- **留实施期**：rig 同批工具调用的并发执行语义核实（「允许并行」决策不受影响）；审批发起方标注的 ToolContext 载荷形状；`general-purpose` 的 preamble 文案；agent 定义 frontmatter 解析器与社区格式宽容降级的实现面。
 - **留尾**：外部运行时委派跟随；并行审批排队呈现；会话级预设第二消费面。
 - **边界不变**：「激活仅用户与主 agent 可为」；`activate_skill` / `read_skill_file` 的条件挂载语义（ADR-0110/0111）。

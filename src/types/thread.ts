@@ -159,7 +159,8 @@ export interface TraceEntry {
   // trace takes. Optional: absent for every ordinary call (serde
   // skip_serializing_if none); the nesting is physically depth 1 (the
   // sub-face excludes every delegation tool), so a nested entry never itself
-  // carries one. Rendered in the delegation modal, never as flat rows.
+  // carries one. Rendered in the row's inline sub-trace panel, never as
+  // flat rows.
   sub_rounds?: TraceRound[];
 }
 
@@ -295,8 +296,8 @@ export interface TurnUsage {
 }
 
 // One named built-in sub-agent's usage subtotal (ADR-0129, #1270). The
-// name is the delegation spec's identity -- the same one the delegation
-// trace dialog keys on (#933).
+// name is the delegation spec's identity -- the one TurnCard's name+ordinal
+// cursor pairs the subtotal to its row by.
 export interface SubagentUsage {
   name: string;
   usage: TokenUsage;

@@ -59,8 +59,8 @@ interface TurnCardProps {
   onSelectFile?: (path: string) => void;
   /** Issue #1093: promotes an in-stream fence chart's body onto the
    *  workspace stage. Optional (the read-only precedent above): the
-   *  delegation dialog and the md artifact renderer never receive it, so
-   *  their fences stay static. */
+   *  delegation sub-trace panel and the md artifact renderer never receive
+   *  it, so their fences stay static. */
   onSelectViz?: (spec: string) => void;
   /** Issue #1093: the staged spec text -- the in-stream selection mirror
    *  (aria-current + ring) lights every fence whose body matches it. */
@@ -171,7 +171,11 @@ export function TurnCard({
   // ordinal; a run that failed closed (sub-trace present, no table entry)
   // still does and shifts later same-name rows -- distinguishing it needs
   // a Rust-side anchor, out of scope here. Recomputed per render (pure;
-  // the table is settle-frozen).
+  // the table is settle-frozen). The map keys on entry object identity
+  // (Map SameValueZero over a structural interface): build and lookup
+  // share one record reference within this render, so any layer that
+  // clones or normalizes the rounds between them silently drops the
+  // pairing.
   const subtotalByEntry = new Map<TraceEntry, SubagentUsage>();
   {
     const subagents = record.usage?.subagents;
@@ -349,7 +353,7 @@ function TraceRoundBlock({
           renderSubTrace={(entry) => (
             <DelegationSubTraceBody
               entry={entry}
-              subtotal={subtotalByEntry.get(entry)}
+              usage={subtotalByEntry.get(entry)?.usage}
             />
           )}
         />

@@ -49,8 +49,9 @@ interface ThreadProps {
   onSelectFile?: (path: string) => void;
   /** Issue #1093: click an in-stream fence chart to promote its body onto
    *  the workspace stage (the stream -> stage link). Optional: absent
-   *  handlers keep every fence static (the delegation dialog and the md
-   *  artifact renderer mount RoundProse bare, never through Thread). */
+   *  handlers keep every fence static (the delegation sub-trace panel and
+   *  the md artifact renderer mount RoundProse bare, never through
+   *  Thread). */
   onSelectViz?: (spec: string) => void;
   /** Issue #1093: the staged spec text -- the in-stream mirror lights every
    *  fence whose body equals it (null = no chart is staged). */
