@@ -205,10 +205,11 @@ export function LiveRow({
   // `traceEntryFromRow` mapping (PR #946 review: a second hand-written
   // literal here is how the field list drifted). The usage subtotal only
   // exists once the turn settles (#1270), so the live panel carries none.
-  // ADR-0135: while the turn is live the panel takes the task's full text
-  // (the started phase carried it) and the report's full text once the
-  // completion landed -- both drop at settle (Decision 3's honest degrade):
-  // the bounded summary rides the row line, the settled panel pure trace.
+  // ADR-0135: the running face's panel takes the task's full text while
+  // the delegation runs; on this path only the report's full text rides,
+  // from the completion until the turn settles (Decision 3's honest
+  // degrade): the bounded summary rides the row line, the settled panel
+  // pure trace.
   const entry = traceEntryFromRow(row);
   const view = row.delegation;
   return (

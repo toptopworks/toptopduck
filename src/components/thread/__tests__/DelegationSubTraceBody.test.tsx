@@ -17,8 +17,9 @@ vi.mock("vega-embed", () => ({
 
 // The delegation row's inline sub-trace (issue #1355, retiring the #934
 // modal): the row head carries the fold toggle, and the open fold renders
-// the panel full width beneath the row -- identity + task head, the usage
-// subtotal, and the sub-agent's rounds in the main trace's folding posture.
+// the panel full width beneath the row -- the sub-agent's rounds in the
+// main trace's folding posture, with the usage subtotal as the closing
+// receipt (the task head rides the running face only).
 
 function renderWithProviders(ui: ReactElement) {
   return render(
@@ -73,17 +74,21 @@ function renderSettledTrace(
 
 describe("DelegationSubTraceBody inline panel (issue #1355)", () => {
   it("keeps the panel closed until the row fold opens it, then renders the sub-rounds", () => {
-    renderSettledTrace();
+    const { container } = renderSettledTrace();
     // Closed by default: neither the panel nor the sub-round content is in
     // the document.
     expect(document.querySelector(".subtrace-panel")).toBeNull();
     expect(screen.queryByText("Checking the sheet first.")).not.toBeInTheDocument();
+    // The row-line toggle rides the summary line's flex centering -- mt-0
+    // cancels the block-flow breathing gap (the same twMerge-override
+    // species the #876 Badge shrink pin covers).
+    expect(container.querySelector(".subtrace-toggle")).toHaveClass("mt-0");
     fireEvent.click(screen.getByRole("button", { name: /sub-agent trace/i }));
     // The settled panel rides as pure trace -- no task head (the row line
     // above already previews the task) and no title (the row head already
     // names the delegation).
-    expect(document.querySelector(".subtrace-panel")).not.toBeNull();
     expect(document.querySelector(".subtrace-task")).toBeNull();
+    expect(document.querySelector(".subtrace-title")).toBeNull();
     // The sub-round's prose renders; its tool string sits behind the round's
     // step fold (the main trace's posture), collapsed by default.
     expect(screen.getByText("Checking the sheet first.")).toBeInTheDocument();
@@ -187,10 +192,10 @@ it("keeps a vega-lite fence in the sub-trace static (issue #1093 pin)", async ()
   ).not.toBeInTheDocument();
 });
 
-// The panel's usage subtotal row (ADR-0129 Decision 6, issue #1270): a
-// built-in turn's delegation row carries the sub-agent's subtotal in the
-// panel head; absent for external-runtime turns (their process aggregate
-// never splits).
+// The panel's usage subtotal receipt (ADR-0129 Decision 6, issue #1270):
+// a built-in turn's delegation row carries the sub-agent's subtotal as
+// the panel's closing line; absent for external-runtime turns (their
+// process aggregate never splits).
 describe("DelegationSubTraceBody usage subtotal (ADR-0129, issue #1270)", () => {
   // The shared subtotal fixture: one delegation entry whose sub-agent
   // carried input 40 + output 10 (no cache buckets).
@@ -211,13 +216,23 @@ describe("DelegationSubTraceBody usage subtotal (ADR-0129, issue #1270)", () => 
   it("renders the sub-agent's subtotal when provided", () => {
     renderSubtotalTrace();
     fireEvent.click(screen.getByRole("button", { name: /sub-agent trace/i }));
+    // The receipt closes the panel behind the sub-rounds (the #1361
+    // layout: usage moved from the head to the tail).
+    const rounds = document.querySelectorAll(".trace-round");
+    const receipt = document.querySelector(".subtrace-usage");
+    expect(rounds).toHaveLength(1);
+    expect(receipt).not.toBeNull();
+    expect(
+      rounds[0].compareDocumentPosition(receipt as Element) &
+      Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
     // The pill form (issue #1278): the subtotal reads as the derived total
     // (input 40 + output 10); the buckets ride the pill's Popover.
     const footer = document.querySelector(".usage-footer");
     expect(footer?.textContent).toContain("Used 50");
   });
 
-  it("opens the subtotal pill's bucket detail from the panel head", () => {
+  it("opens the subtotal pill's bucket detail from the panel tail", () => {
     renderSubtotalTrace();
     fireEvent.click(screen.getByRole("button", { name: /sub-agent trace/i }));
     fireEvent.click(screen.getByRole("button", { name: "Used 50" }));

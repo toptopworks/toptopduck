@@ -11,27 +11,27 @@ import type { TokenUsage, TraceRound } from "../../types/thread";
 // beneath the row -- the sub-agent's rounds in the main trace's folding
 // posture (each round's thinking fold + connective prose + its "Trace ·
 // N calls" step fold, stacked flush exactly as the main trace stacks its
-// rounds), the live task head above them, and the usage subtotal as the
-// closing line -- so a sub-round reads exactly like a main round. The rows
-// reuse the main trace's row list, whose nesting is physically depth 1 (the
-// sub-face excludes every delegation tool), so no recursion guard is
-// needed. The panel mounts only while the row's fold is open, so the settle
-// swap collapses it -- the known limitation recorded on the issue; there
-// is no dialog left to close out from under the reader.
+// rounds), the running face's task head above them, the usage subtotal as
+// the closing receipt -- so a sub-round reads exactly like a main round.
+// The rows reuse the main trace's row list, whose nesting is physically
+// depth 1 (the sub-face excludes every delegation tool), so no recursion
+// guard is needed. The panel mounts only while the row's fold is open, so
+// the settle swap collapses it -- the known limitation recorded on the
+// issue; there is no dialog left to close out from under the reader.
 //
-// ADR-0135: the panel is also the RUNNING delegation's live face. The live
-// caller (TraceView) passes the task's full text, the report's full text
-// once landed (live-only, Decision 3), and the running fold's rounds as
-// children; the completion swaps the children for the row's landed
-// sub_rounds (the settle isomorphism #934's Advisory G anchors). The task
-// head is live-only: a settled panel mounts none -- the row line above
-// already previews the task (its hover fold carries the full digest), so
-// the reopened panel reads as pure trace.
+// ADR-0135: the panel is also the RUNNING delegation's live face. The
+// running face's caller (TraceView's RunningRow) passes the task's full
+// text, the report's full text once landed (live-only, Decision 3), and
+// the running fold's rounds as children; the completion swaps the children
+// for the row's landed sub_rounds (the settle isomorphism #934's Advisory
+// G anchors). The task head rides the running face only -- its contract
+// lives on the `task` prop's doc.
 
-/** The expanded panel body: the rounds with the live task's full text as
- *  their head and the usage subtotal as the closing line; the report's
- *  full text trails when the live completion carried one. Never empty on
- *  the settled path:
+/** The expanded panel body: the rounds stacked flush; the running face
+ *  opens with the live task's full text as the rounds' head, the settled
+ *  face closes with the usage subtotal as the receipt line, and the
+ *  report's full text trails while the turn is live. Never empty on the
+ *  settled path:
  *  TraceRow gates the fold on the entry's sub-rounds, so this renders only
  *  behind an open fold (the round convention is none-never-empty -- an
  *  empty-note branch at this layer was unreachable dead code, removed per
@@ -45,15 +45,16 @@ export function DelegationSubTraceBody({
   usage,
   children,
 }: {
-  /** The task head's text, LIVE-ONLY (ADR-0135 Decision 3): the full text
-   *  while running -- a just-started delegation's panel opens on it before
-   *  any event lands. Settled callers pass none: the row line above already
-   *  previews the task, so the settled panel rides as pure trace. */
+  /** The task head's text, RUNNING-FACE-ONLY (ADR-0135 Decision 3): the
+   *  full text while the delegation runs -- a just-started delegation's
+   *  panel opens on it before any event lands. Non-running callers pass
+   *  none: the row line above already previews the task, so the reopened
+   *  panel rides as pure trace. */
   task?: string;
   /** The report's FULL text (ADR-0135 Decision 3), present only while the
    *  turn is live: the completion event carried it; the settled entry
    *  keeps its bounded excerpt, so the reopened panel honestly degrades to
-   *  the summary head with no tail. */
+   *  pure trace with no tail. */
   report?: string;
   /** The settled sub-rounds (the entry's `sub_rounds` projection); ignored
    *  when children mount. */
@@ -81,30 +82,30 @@ export function DelegationSubTraceBody({
           {task}
         </div>
       )}
-      {/* The rounds ride one wrapper and stack flush, exactly as the main
-          trace stacks its rounds; the section gaps are explicit margins on
-          the task / report / usage blocks (v4's space-y sibling rule
-          out-specifies a child's tighter margin beat). */}
-      <div>
-        {children ??
-          (subRounds ?? []).map((round, i) => (
+      {/* The rounds stack flush as direct panel children, exactly as the
+          main trace stacks its rounds; the section gaps are explicit
+          margins on the task / report / usage blocks -- heterogeneous
+          beats a space-y container cannot carry (its sibling margin
+          collapses with a next block's tighter top margin, and max wins --
+          the receipt's mt-1 would never render). */}
+      {children ??
+        (subRounds ?? []).map((round, i) => (
           // The sub-rounds are append-only within the entry and never
-          // reordered, so the index is a stable key (the same YAGNI call the
-          // main trace's row lists make).
-            <div key={i} className="trace-round">
-              {/* The round's thinking: the same honest fold the main trace
+          // reordered, so the index is a stable key (the same YAGNI call
+          // the main trace's row lists make).
+          <div key={i} className="trace-round">
+            {/* The round's thinking: the same honest fold the main trace
                 renders, collapsed by default. */}
-              {round.thinking && <ThinkingFold thinking={round.thinking} />}
-              {/* The round's connective prose, the same markdown face the main
-                rounds use. */}
-              {round.text && <RoundProse text={round.text} />}
-              {/* The round's tool string behind the same step fold the main
+            {round.thinking && <ThinkingFold thinking={round.thinking} />}
+            {/* The round's connective prose, the same markdown face the
+                main rounds use. */}
+            {round.text && <RoundProse text={round.text} />}
+            {/* The round's tool string behind the same step fold the main
                 rounds use (a sub-agent's calls never carry their own
                 sub-trace). */}
-              <TraceStepFold calls={round.calls} />
-            </div>
-          ))}
-      </div>
+            <TraceStepFold calls={round.calls} />
+          </div>
+        ))}
       {report !== undefined && (
         // ADR-0135 Decision 3: the report's full text, the terminal answer
         // the trace's bounded excerpt stands in for -- the panel's tail

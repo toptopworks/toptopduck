@@ -545,8 +545,16 @@ describe("LiveRow delegation live affordances (ADR-0135)", () => {
     // The panel stays closed until the fold opens; the task's full text and
     // the running sub-call ride inside.
     expect(screen.queryByText("Clean the whole sheet, report back")).not.toBeInTheDocument();
+    // The row-line toggle rides the summary line's flex centering -- mt-0
+    // cancels the block-flow breathing gap.
+    expect(container.querySelector(".subtrace-toggle")).toHaveClass("mt-0");
     fireEvent.click(screen.getByRole("button", { name: /sub-agent trace/i }));
-    expect(screen.getByText("Clean the whole sheet, report back")).toBeInTheDocument();
+    // The task's full text opens the panel as the live task head block --
+    // pre-wrap and height-capped so the task's own line structure survives
+    // (the thinking-fold block's posture).
+    const taskHead = document.querySelector(".subtrace-task");
+    expect(taskHead?.textContent).toBe("Clean the whole sheet, report back");
+    expect(taskHead).toHaveClass("whitespace-pre-wrap", "max-h-48");
     expect(screen.getByText("SELECT 1")).toBeInTheDocument();
     // The sub-round's thinking rides the same honest fold the settled panel
     // uses, collapsed by default.
