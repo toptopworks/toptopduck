@@ -348,8 +348,9 @@ export function useSessionState(
   // The optimistic Turn append happens INSIDE handleAsk on the success path
   // only (the IPC-failure catch early-returns without appending), so checking
   // the cache AFTER the await distinguishes success from failure. After the
-  // first turn, the name is never auto-changed again (the backend enforces
-  // this in record_turn); subsequent turns never fire onFirstTurnSettled.
+  // first turn, the name is never auto-changed again (the shared
+  // timeline_has_turn predicate enforces this -- turn start plus
+  // record_turn's fallback); subsequent turns never fire onFirstTurnSettled.
   const handleAskWithAutoName = useCallback(
     async (question: string, invocations?: string[]) => {
       const key = sessionKeys.thread(sessionId);

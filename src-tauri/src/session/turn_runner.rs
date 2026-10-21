@@ -180,8 +180,10 @@ impl super::Session {
     }
 
     /// Run one turn AND surface its discrete progress events (ADR-0059,
-    /// calibrated by ADR-0078). Same semantics as [`Self::ask`]; the
-    /// `on_phase` callback receives the [`TurnPhase`] event stream: Thinking
+    /// calibrated by ADR-0078). Same semantics as [`Self::ask`] except the
+    /// first-question auto-name (ADR-0089 Decision 4), which fires only on
+    /// [`Self::ask_with_phase_and_auto_name`]; the `on_phase` callback
+    /// receives the [`TurnPhase`] event stream: Thinking
     /// before each provider round-trip (carrying the 1-based step so a
     /// multi-step trajectory reads honestly, "step N") and the
     /// ToolCallStarted / ToolCallCompleted pair around each tool dispatch --

@@ -1289,6 +1289,24 @@ fn turn_progress_wraps_phase_with_session_id() {
 }
 
 #[test]
+fn session_named_payload_wire_shape() {
+    // ADR-0089 Decision 4 (calibrated by #1353): a session-named event is
+    // { session_id, name } -- the addressing id mirrors TurnProgress so the
+    // shell's mount-once listener can land the accepted name before the
+    // turn settles. Pin the wrapper so a field rename on either side is
+    // caught before types.ts drifts.
+    use toptopduck_lib::{SessionId, SessionNamedPayload};
+    const SID: &str = "550e8400-e29b-41d4-a716-446655440000";
+    assert_wire(
+        &SessionNamedPayload {
+            session_id: SessionId::parse(SID).expect("valid v4 UUID"),
+            name: "how many people?".to_string(),
+        },
+        r#"{"session_id":"550e8400-e29b-41d4-a716-446655440000","name":"how many people?"}"#,
+    );
+}
+
+#[test]
 fn resume_event_serializes_externally_tagged() {
     // ADR-0034: ResumeEvent crosses IPC externally-tagged, one variant per
     // source-verification / replay step. Pin both variants so the frontend's

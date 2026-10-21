@@ -1200,7 +1200,9 @@ impl Session {
     /// Facade for callers without the command-layer approval wiring (tests):
     /// built-in tools classify Allow at the gateway without touching the sink,
     /// so a fresh [`ApprovalState`] + a no-op sink behaves identically to the
-    /// store-attached pair on the built-in tool table.
+    /// store-attached pair on the built-in tool table. The first question
+    /// also auto-names the session (ADR-0089 Decision 4) -- this routes
+    /// through [`Self::ask_with_phase_and_auto_name`].
     pub fn ask(&mut self, question: &str) -> TurnOutcome {
         let approval = ApprovalState::new();
         let sink = NullApprovalSink;
@@ -1298,9 +1300,10 @@ impl Session {
         // `record_turn` callers (tests) and adds nothing in production.
         // After this one-time trigger the name is never auto-changed --
         // subsequent turns leave it untouched, and a user rename sticks.
-        // Source/skill lifecycle events do not count as turns, so a session
-        // that loaded files or mounted skills before its first question
-        // still auto-names on that first question.
+        // One window excepted: a rename between acceptance and the first
+        // turn's record still meets this fallback and is overwritten.
+        // The no-turn test is the shared predicate's one definition (see
+        // `timeline_has_turn`).
         if !self.timeline_has_turn() {
             self.auto_name_from_question(question);
         }
@@ -3206,7 +3209,7 @@ mod tests {
         assert_eq!(
             session.session_name(),
             Some("how many people?"),
-            "first terminal turn auto-names the session"
+            "first recorded turn auto-names the session (record_turn fallback)"
         );
     }
 
@@ -3376,12 +3379,13 @@ mod tests {
         session.rename("My Analysis").expect("rename");
         assert_eq!(session.session_name(), Some("My Analysis"));
 
-        // First terminal turn: per ADR-0089 Decision 4, the auto-name fires
-        // unconditionally on the first turn (the ADR explicitly rejects a
-        // name_is_placeholder flag). The user rename before the first turn
-        // is overwritten -- but this is the designed behavior: the first
-        // question's truncation is more meaningful, and a user is unlikely
-        // to rename before asking.
+        // First recorded turn: the acceptance-time naming (ADR-0089
+        // Decision 4, calibrated by #1353) already fired, and record_turn's
+        // same-value fallback re-applies the truncation here (the ADR
+        // explicitly rejects a name_is_placeholder flag). The user rename
+        // before the first turn is overwritten -- designed behavior: the
+        // first question's truncation is more meaningful, and a user is
+        // unlikely to rename before asking.
         session.record_turn(
             "what is the total?",
             TurnOutcome::Textual {
@@ -3467,11 +3471,12 @@ mod tests {
 
     #[test]
     fn record_turn_auto_names_on_failed_and_cancelled_first_turn() {
-        // ADR-0089 Decision 4: "first terminal turn" includes all terminal
-        // outcomes -- Failed / Cancelled / Materialized, not just Textual.
-        // The auto-name logic in record_turn is outcome-agnostic (no match on
-        // outcome before set_session_name). This test pins that contract so a
-        // future `match outcome` guard does not silently regress it.
+        // ADR-0089 Decision 4: naming is outcome-agnostic -- the
+        // acceptance-time trigger already fired before any outcome existed,
+        // and record_turn's fallback re-applies it for Failed / Cancelled /
+        // Materialized, not just Textual (no match on outcome before
+        // set_session_name). This test pins that contract so a future
+        // `match outcome` guard does not silently regress it.
         let (mut session_a, _duck) = session_with_duck("");
         session_a.record_turn(
             "why did it break?",
