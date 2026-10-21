@@ -276,6 +276,9 @@ describe("useTurnFlow", () => {
           phase: { Thinking: { attempt: 2 } },
         },
       });
+      // The main face is untouched by the stranger: still the one
+      // delegation row, nothing leaked into the turn's own rounds.
+      expect(result.current.liveTurn?.rounds[0]?.rows).toHaveLength(1);
       expect(result.current.liveTurn?.rounds[0]?.rows[0]?.delegation?.step).toBe(1);
     });
 
@@ -309,8 +312,36 @@ describe("useTurnFlow", () => {
       // d1's buffer parks the report's full text and exhausts its fold; d2's
       // keeps its own step (d1's sub-events never crossed).
       expect(rows[0]?.delegation?.report).toBe("Done; 3 rows cleaned.");
+      // The task's full text survives the landing too (live-only display
+      // until settle): the completed panel reads it, not the summary.
+      expect(rows[0]?.delegation?.task).toBe("Clean the whole sheet, report back");
       expect(rows[0]?.delegation?.rounds).toEqual([]);
       expect(rows[1]?.delegation?.step).toBe(3);
+    });
+
+    it("keeps a thinking-only sub-round on the live rounds", async () => {
+      const result = await setupLiveTurn();
+      emitProgress(SID, { Thinking: { attempt: 1 } });
+      emitProgress(SID, delegationStarted("d1"));
+      emitProgress(SID, {
+        DelegationSubEvent: { delegation_id: "d1", phase: { Thinking: { attempt: 1 } } },
+      });
+      emitProgress(SID, {
+        DelegationSubEvent: {
+          delegation_id: "d1",
+          phase: { ThinkingCompleted: { duration_ms: 400, text: "final reasoning" } },
+        },
+      });
+      // A sub-round may carry thinking and no sub-call (the report round's
+      // only trace in production): the thinkings term of the last-step max
+      // must still mint the round -- dropping it would lose the round
+      // entirely.
+      const view = result.current.liveTurn?.rounds[0]?.rows[0]?.delegation;
+      expect(view?.rounds).toHaveLength(1);
+      expect(view?.rounds[0]?.thinking).toEqual({
+        duration_ms: 400,
+        text: "final reasoning",
+      });
     });
 
     it("derives the row chip counts from the forwarded events", async () => {
@@ -347,6 +378,53 @@ describe("useTurnFlow", () => {
       emitProgress(SID, delegationStarted("d4"));
       const laterRows = result.current.liveTurn?.rounds[1]?.rows ?? [];
       expect(laterRows[0]?.delegation?.batch).toEqual({ done: 0, running: 1, total: 1 });
+    });
+
+    it("falls a completed delegation whose id matches no buffer to the name+summary row", async () => {
+      const result = await setupLiveTurn();
+      emitProgress(SID, { Thinking: { attempt: 1 } });
+      // An ordinary running row -- no id, not a delegation -- sharing the
+      // name and summary the stray completion carries.
+      emitProgress(SID, {
+        ToolCallStarted: {
+          name: "analyst",
+          operation_kind: "execute",
+          summary: "clean the sheet",
+        },
+      });
+      // The id matches no buffer (no started phase ever opened one): the
+      // completion settles the running row by name+summary -- Decision 2's
+      // explicit fallback -- instead of appending a second row.
+      emitProgress(SID, {
+        ToolCallCompleted: {
+          id: "ghost",
+          name: "analyst",
+          operation_kind: "execute",
+          summary: "clean the sheet",
+          success: true,
+          result_excerpt: "",
+        },
+      });
+      const rows = result.current.liveTurn?.rounds[0]?.rows ?? [];
+      expect(rows).toHaveLength(1);
+      expect(rows[0]).toMatchObject({ running: false, success: true });
+      expect(rows[0]?.callId).toBeUndefined();
+    });
+
+    it("degrades a phase the fold does not know instead of crashing", async () => {
+      const result = await setupLiveTurn();
+      emitProgress(SID, { Thinking: { attempt: 1 } });
+      emitProgress(SID, {
+        ThinkingCompleted: { duration_ms: 100, text: "reasoning" },
+      });
+      emitProgress(
+        SID,
+        { UnknownMarker: {} } as unknown as Parameters<typeof emitProgress>[1],
+      );
+      // A future variant folds nowhere: the round stands as it was, empty
+      // of rows, its thinking intact.
+      expect(result.current.liveTurn?.rounds).toHaveLength(1);
+      expect(result.current.liveTurn?.rounds[0]?.rows).toHaveLength(0);
     });
   });
 

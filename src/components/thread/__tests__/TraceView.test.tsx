@@ -554,6 +554,36 @@ describe("LiveRow delegation live affordances (ADR-0135)", () => {
     expect(screen.queryByText("child reasoning")).not.toBeInTheDocument();
   });
 
+  it("does not fold the summary line when the sub-trace toggle is clicked", () => {
+    const { container } = renderWithProviders(
+      <LiveRow
+        row={rowWith({
+          approval: null,
+          running: true,
+          callId: "d1",
+          delegation: {
+            task: "Clean the whole sheet, report back",
+            rounds: [],
+            step: 1,
+            batch: { done: 0, running: 1, total: 1 },
+          },
+        })}
+        onRespond={vi.fn()}
+      />,
+    );
+    const chevron = container.querySelector(".summary-fold-toggle");
+    expect(chevron).toHaveAttribute("aria-expanded", "false");
+    fireEvent.click(screen.getByRole("button", { name: /sub-agent trace/i }));
+    // The panel opens while the summary line's own fold stays put: the
+    // toggle's wrapper stops the click before it bubbles into the line's
+    // fold handler.
+    expect(screen.getByText("Clean the whole sheet, report back")).toBeInTheDocument();
+    expect(chevron).toHaveAttribute("aria-expanded", "false");
+    // Positive control: clicking the summary line itself does fold it.
+    fireEvent.click(screen.getByText(SUMMARY, { selector: ".trace-summary" }));
+    expect(chevron).toHaveAttribute("aria-expanded", "true");
+  });
+
   it("reads the batch counts on the chip when the turn carries a batch", () => {
     renderWithProviders(
       <LiveRow

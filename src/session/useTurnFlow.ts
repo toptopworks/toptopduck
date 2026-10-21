@@ -354,13 +354,11 @@ export function buildLiveRounds(
   // sequential delegations of later rounds read their own batch, never the
   // turn-wide tally.
   const delegationRows = rows.filter((r) => r.callId !== undefined);
-  const rowsById = new Map<string, { step: number; running: boolean }>();
-  for (const r of delegationRows) {
-    rowsById.set(r.callId as string, { step: r.step, running: r.running });
-  }
   const views = new Map<string, DelegationLiveView>();
   for (const [id, buffer] of Object.entries(live.delegations)) {
-    const row = rowsById.get(id);
+    // One delegation id is one row (the execute entry mints them unique),
+    // so a find reads it directly -- nothing to keep an index for.
+    const row = delegationRows.find((r) => r.callId === id);
     if (row === undefined) continue;
     const batchRows = delegationRows.filter((r) => r.step === row.step);
     const total = batchRows.length;
@@ -634,7 +632,6 @@ interface DelegationBuffer {
 // The shared empty-fold sentinel: safe to hand to every buffer because a
 // fold is only ever replaced (spread), never mutated in place.
 const EMPTY_FOLD: RoundFold = { step: null, calls: [], roundThinkings: [] };
-const NO_DELEGATIONS: Record<string, DelegationBuffer> = {};
 
 /** The in-flight turn's raw progress state: the turn-progress channel alone
  *  (approval cards merge in at the liveTurn derivation). Internal to the
@@ -788,6 +785,9 @@ function applyRoundFold(fold: RoundFold, phase: TurnPhase): RoundFold {
     // the pass-through keeps the type honest.
     return fold;
   }
+  // A variant this fold does not know (a future one) folds nowhere --
+  // degrade honestly rather than crash on the tail destructure below.
+  if (!("ToolCallCompleted" in phase)) return fold;
   // ToolCallCompleted: the trace entry as it lands. Completes the matching
   // running row; a gate-denied call (no started event) appends a completed
   // row directly. A delegation's entry carries its id -- pair on that
@@ -822,7 +822,7 @@ function applyRoundFold(fold: RoundFold, phase: TurnPhase): RoundFold {
 
 /** Apply one fold phase onto the MAIN live state: applyRoundFold over a
  *  LiveState returns a {...fold} spread that carries the caller's OWN
- *  delegations back -- so the composition takes the three fold fields
+ *  delegations back -- so the composition takes each fold field
  *  explicitly, never the spread (the delegation buffers are opened and
  *  exhausted around this call, and a stale spread would wipe them). */
 function foldInto(live: LiveState, phase: TurnPhase): LiveState {
@@ -1084,7 +1084,7 @@ export function useTurnFlow(sessionId: string, deps: UseTurnFlowDeps): UseTurnFl
         calls: [],
         roundTexts: [],
         roundThinkings: [],
-        delegations: NO_DELEGATIONS,
+        delegations: {},
       });
       // Issue #725: the ask-time runtime choice, fired BEFORE the ask
       // dispatch -- synchronously at submit, no await in between, so it

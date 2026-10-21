@@ -200,13 +200,7 @@ pub(crate) fn delegation_dynamic_tool(
                 }
                 emit_phase(
                     &ctx.phases,
-                    TurnPhase::ToolCallStarted {
-                        id: Some(delegation_id.clone()),
-                        name: name.clone(),
-                        operation_kind: OperationKind::Execute,
-                        summary: delegation_summary(&task),
-                        task: Some(task.clone()),
-                    },
+                    delegation_started_phase(&delegation_id, &name, &task),
                 );
                 let report = run_subagent(&spec, &task, &ctx, &delegation_id).await;
                 let entry = land_delegation_entry(
@@ -219,14 +213,11 @@ pub(crate) fn delegation_dynamic_tool(
                     report.capped,
                     report.rounds,
                 );
-                // ADR-0135 Decisions 2/3: the live completion carries the
-                // delegation's id (the routing fact that pairs the started
-                // row) and the report's full text (live-only display) --
-                // the landed entry keeps neither, so both ride the wire
-                // view, not the record.
-                let mut view = crate::model::TraceEntryView::from(&entry);
-                view.id = Some(delegation_id);
-                view.report = Some(report.text.clone());
+                let view = delegation_completed_view(
+                    crate::model::TraceEntryView::from(&entry),
+                    &delegation_id,
+                    &report.text,
+                );
                 emit_phase(&ctx.phases, TurnPhase::ToolCallCompleted(view));
                 Ok(rig_agent::tool::ToolOutput::text(report.text))
             })
@@ -431,14 +422,6 @@ fn failure_text_with_orphans(base: &str, promoted: &[String]) -> String {
     format!("(promoted before dying: {}) {base}", promoted.join(", "))
 }
 
-/// Run one sub-agent to its terminal reply (ADR-0117 Decisions 2/4/5) and
-/// map its exit onto the report text the main model reads. The sub-agent's
-/// events fold locally (the nested sub-trace data; projected by #934),
-/// with a no-op phase sink -- its thinking markers never interleave with
-/// the main rail's step numbering -- while every inbound event re-arms the
-/// turn's no-progress clock: sub-agent generation activity IS turn
-/// progress, so the watchdog's cap times the whole turn including the
-/// sub-agent's model calls (the un-layered wall clock of Decision 5).
 /// The delegation's tagged sink (ADR-0135 Decision 1): wraps the turn's
 /// phase sink so every phase the sub-agent's fold produces rides as a
 /// [`TurnPhase::DelegationSubEvent`] carrying the delegation's id, except
@@ -463,6 +446,42 @@ fn tagged_delegation_sink(phases: &PhaseSink, delegation_id: &str) -> PhaseSink 
     }))
 }
 
+/// ADR-0135 Decision 2: the delegation's live started phase carries the
+/// minted id (the routing fact the completion pairs on) beside the task's
+/// full text -- live-only display; the landed entry keeps neither.
+fn delegation_started_phase(id: &str, name: &str, task: &str) -> TurnPhase {
+    TurnPhase::ToolCallStarted {
+        id: Some(id.to_string()),
+        name: name.to_string(),
+        operation_kind: OperationKind::Execute,
+        summary: delegation_summary(task),
+        task: Some(task.to_string()),
+    }
+}
+
+/// ADR-0135 Decision 3: the live completion view carries the delegation's
+/// id and the report's full text -- both ride the wire view, not the
+/// record (the landed entry keeps its bounded excerpt alone).
+fn delegation_completed_view(
+    mut view: crate::model::TraceEntryView,
+    id: &str,
+    report: &str,
+) -> crate::model::TraceEntryView {
+    view.id = Some(id.to_string());
+    view.report = Some(report.to_string());
+    view
+}
+
+/// Run one sub-agent to its terminal reply (ADR-0117 Decisions 2/4/5) and
+/// map its exit onto the report text the main model reads. The sub-agent's
+/// events fold locally (the nested sub-trace data; projected by #934) and
+/// ride the turn's phase sink tagged with the delegation's id (ADR-0135
+/// Decision 1) -- they surface in the delegation's live panel, never
+/// interleaving with the main rail's step numbering -- while every inbound
+/// event re-arms the turn's no-progress clock: sub-agent generation
+/// activity IS turn progress, so the watchdog's cap times the whole turn
+/// including the sub-agent's model calls (the un-layered wall clock of
+/// Decision 5).
 async fn run_subagent(
     spec: &DelegationSpec,
     task: &str,
@@ -730,6 +749,42 @@ pub(crate) fn subagent_ctx(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// ADR-0135 Decisions 2/3, the live emit contract (PR #1358 review
+    /// Important 2): the started phase carries the minted id and the
+    /// task's full text, the completion view the id and the report's full
+    /// text -- pinned at the constructors because no black-box round
+    /// drives a real delegation.
+    #[test]
+    fn the_live_started_phase_carries_the_minted_id_and_task() {
+        let TurnPhase::ToolCallStarted { id, task, .. } =
+            delegation_started_phase("gateway-1", "analyst", "Clean the sheet")
+        else {
+            panic!("expected a started phase");
+        };
+        assert_eq!(id.as_deref(), Some("gateway-1"));
+        assert_eq!(task.as_deref(), Some("Clean the sheet"));
+    }
+
+    #[test]
+    fn the_live_completed_view_carries_the_id_and_report() {
+        let view = delegation_completed_view(
+            crate::model::TraceEntryView {
+                name: "analyst".to_string(),
+                operation_kind: OperationKind::Execute,
+                summary: "clean the sheet".to_string(),
+                success: true,
+                result_excerpt: String::new(),
+                id: None,
+                report: None,
+                sub_rounds: None,
+            },
+            "gateway-1",
+            "Done; 3 rows.",
+        );
+        assert_eq!(view.id.as_deref(), Some("gateway-1"));
+        assert_eq!(view.report.as_deref(), Some("Done; 3 rows."));
+    }
 
     /// The orphan note survives the excerpt cap on a verbose failure body
     /// (PR #946 review Important 2): the note rides the HEAD of the failure
