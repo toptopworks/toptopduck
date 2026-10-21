@@ -1,6 +1,6 @@
 import { Loader2 } from "lucide-react";
 import { ApprovalAbandonedBadge, ApprovalCard, ApprovalResolvedBadge } from "./ApprovalCard";
-import { DelegationTraceDialog } from "./DelegationTraceDialog";
+import { DelegationSubTraceBody } from "./DelegationSubTraceBody";
 import { OperationBadge, TraceRow } from "./TraceRow";
 import { TraceSummaryFold } from "./TraceSummaryFold";
 import { isSettledRow, traceEntryFromRow, type LiveRoundRow } from "../../session/useTurnFlow";
@@ -90,16 +90,17 @@ export function LiveRow({
   }
   // The delegation row's sub-trace rides the optimistic turn flow (issue
   // #934): the entry the settled row renders carries what the live
-  // ToolCallCompleted delivered, sub-trace included, so the view affordance
-  // is present before any refetch could ever widen it. The projection is
-  // the one `traceEntryFromRow` mapping (PR #946 review: a second
-  // hand-written literal here is how the field list drifted).
+  // ToolCallCompleted delivered, sub-trace included, so the fold is present
+  // before any refetch could ever widen it. The projection is the one
+  // `traceEntryFromRow` mapping (PR #946 review: a second hand-written
+  // literal here is how the field list drifted). The usage subtotal only
+  // exists once the turn settles (#1270), so the live panel carries none.
   const entry = traceEntryFromRow(row);
   return (
     <TraceRow
       entry={entry}
       afterName={resolvedBadge}
-      subTraceView={<DelegationTraceDialog entry={entry} />}
+      subTrace={<DelegationSubTraceBody entry={entry} />}
     />
   );
 }

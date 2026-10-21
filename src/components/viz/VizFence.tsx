@@ -59,7 +59,8 @@ export function VizFence({
   /** Issue #1093: promotes this fence's body onto the workspace stage. The
    *  handler receives the RAW body text -- the stage view's identity is the
    *  fence's own spec. Absent (the default): the chart renders inert/static,
-   *  the posture the delegation dialog and the md artifact renderer get. */
+   *  the posture the delegation sub-trace panel and the md artifact
+   *  renderer get. */
   onSelectViz?: (spec: string) => void;
   /** Issue #1093: this body is the staged spec -- the selection mirror
    *  (aria-current + the teal ring). Identity is the body TEXT, so twin

@@ -454,7 +454,7 @@ describe("TurnCard usage footer (ADR-0129, issue #1270)", () => {
 // name-ordinal walk runs at TURN scope -- a same-spec re-delegation in a
 // later round must reach the SECOND table entry (a per-round cursor reads
 // the first again), and a refused row (no sub-trace) consumes no ordinal.
-// Each delegation dialog annotates its own run's subtotal, never a
+// Each delegation row's expansion annotates its own run's subtotal, never a
 // same-name sibling's.
 describe("TurnCard sub-agent subtotal pairing (ADR-0129, issue #1270)", () => {
   const analystRun = (): TraceEntry => ({
@@ -497,10 +497,10 @@ describe("TurnCard sub-agent subtotal pairing (ADR-0129, issue #1270)", () => {
     // fold -- the head opens first.
     fireEvent.click(screen.getByRole("button", { name: /已回答/ }));
     screen.getAllByText("轨迹 · 1 次调用").forEach((t) => fireEvent.click(t));
-    fireEvent.click(screen.getAllByText("子轨迹")[roundIndex]);
+    fireEvent.click(screen.getAllByText("子智能体轨迹")[roundIndex]);
   };
 
-  it("round 1's dialog carries the first run's subtotal", () => {
+  it("round 1's expansion carries the first run's subtotal", () => {
     openSubtrace(0);
     expectUsageLine("已用 40");
   });
@@ -525,9 +525,9 @@ describe("TurnCard sub-agent subtotal pairing (ADR-0129, issue #1270)", () => {
     // Issue #1282: the head opens first; the per-round fold lives inside it.
     fireEvent.click(screen.getByRole("button", { name: /已回答/ }));
     fireEvent.click(screen.getByText("轨迹 · 2 次调用"));
-    // The refusal renders no sub-trace affordance (the dialog's own
-    // self-guard) -- exactly one openable dialog remains.
-    const buttons = screen.getAllByText("子轨迹");
+    // The refusal renders no sub-trace fold (the row's own gate) --
+    // exactly one openable expansion remains.
+    const buttons = screen.getAllByText("子智能体轨迹");
     expect(buttons).toHaveLength(1);
     fireEvent.click(buttons[0]);
     expectUsageLine("已用 40");

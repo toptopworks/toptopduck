@@ -662,7 +662,7 @@
   "thread.trace.successAria": "Call succeeded",
   "thread.trace.thinkingToggle": "Thinking · {sec}s",
   "thread.trace.toggle": "Trace · {count} {count, plural, one {call} other {calls}}",
-  "thread.trace.viewSubtrace": "Sub-trace",
+  "thread.trace.viewSubtrace": "Sub-agent trace",
   "thread.userBubble.invokedSkillsAria": "Skills invoked with this message",
   "viz.chartLabel": "Chart",
   "viz.error.invalidJson": "the chart definition is not valid JSON",

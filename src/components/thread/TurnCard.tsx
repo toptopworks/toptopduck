@@ -12,16 +12,15 @@
 // TurnExchangeFrame / RoundBody -- the modules the live exchange mounts too,
 // so the settle swap cannot move a member.
 
-import { useState, type ReactNode } from "react";
+import type { ReactNode } from "react";
 import { FormattedMessage, useIntl } from "react-intl";
 import { cn } from "@/lib/utils";
 import { Button } from "../ui/button";
-import { DelegationTraceDialog } from "./DelegationTraceDialog";
-import { TraceRowList } from "./TraceRow";
+import { DelegationSubTraceBody } from "./DelegationSubTraceBody";
+import { TraceStepFold } from "./TraceRow";
 import { ArtifactCard } from "./ArtifactCard";
 import { ResultPreviewCard } from "./ResultPreviewCard";
 import { CopyButton } from "./CopyButton";
-import { FoldToggle } from "./FoldToggle";
 import { RoundProse } from "./RoundProse";
 import { RoundBody } from "./RoundBody";
 import { TurnProcessFold } from "./TurnProcessFold";
@@ -60,8 +59,8 @@ interface TurnCardProps {
   onSelectFile?: (path: string) => void;
   /** Issue #1093: promotes an in-stream fence chart's body onto the
    *  workspace stage. Optional (the read-only precedent above): the
-   *  delegation dialog and the md artifact renderer never receive it, so
-   *  their fences stay static. */
+   *  delegation sub-trace panel and the md artifact renderer never receive
+   *  it, so their fences stay static. */
   onSelectViz?: (spec: string) => void;
   /** Issue #1093: the staged spec text -- the in-stream selection mirror
    *  (aria-current + ring) lights every fence whose body matches it. */
@@ -172,7 +171,11 @@ export function TurnCard({
   // ordinal; a run that failed closed (sub-trace present, no table entry)
   // still does and shifts later same-name rows -- distinguishing it needs
   // a Rust-side anchor, out of scope here. Recomputed per render (pure;
-  // the table is settle-frozen).
+  // the table is settle-frozen). The map keys on entry object identity
+  // (Map SameValueZero over a structural interface): build and lookup
+  // share one record reference within this render, so any layer that
+  // clones or normalizes the rounds between them silently drops the
+  // pairing.
   const subtotalByEntry = new Map<TraceEntry, SubagentUsage>();
   {
     const subagents = record.usage?.subagents;
@@ -309,10 +312,10 @@ function OutcomeGlyph({ visual }: { visual: ReturnType<typeof outcomeVisual> }) 
 // skeleton (thinking fold + connective prose) rides RoundBody -- the module
 // the live round block mounts too, so the settle swap does not move them;
 // `thinkingInitiallyExpanded` seeds the fold with the live turn's open
-// posture at the settle swap (issue #620). This adapter owns the round's
-// step fold (default collapsed, ADR-0078 long-rail posture). Fold state is
-// session-ephemeral UI state; the trace data persists on the TurnRecord /
-// recipe.
+// posture at the settle swap (issue #620). The round's step fold rides the
+// shared TraceStepFold (default collapsed, ADR-0078 long-rail posture).
+// Fold state is session-ephemeral UI state; the trace data persists on the
+// TurnRecord / recipe.
 function TraceRoundBlock({
   round,
   thinkingInitiallyExpanded,
@@ -326,11 +329,10 @@ function TraceRoundBlock({
   selectedVizSpec?: string | null;
   /** ADR-0129 Decision 6 (issue #1270): the turn-scoped entry-to-subtotal
    *  pairing computed once in the card (see TurnCard) -- a delegation row
-   *  annotates its dialog with ITS run's subtotal, never a same-name
-   *  sibling's (external-runtime turns carry none). */
+   *  annotates its inline expansion with ITS run's subtotal, never a
+   *  same-name sibling's (external-runtime turns carry none). */
   subtotalByEntry: ReadonlyMap<TraceEntry, SubagentUsage>;
 }) {
-  const [stepsExpanded, setStepsExpanded] = useState(false);
   const { thinking, text, calls } = round;
   return (
     <RoundBody
@@ -343,31 +345,18 @@ function TraceRoundBlock({
       selectedVizSpec={selectedVizSpec}
     >
       {calls.length > 0 && (
-        // The round's step fold: the call count reads "Trace · N calls" so a
-        // rail scan shows which rounds made multiple calls without expanding.
-        <>
-          <FoldToggle
-            hookClass="trace-toggle"
-            expanded={stepsExpanded}
-            onToggle={() => setStepsExpanded((v) => !v)}
-          >
-            <FormattedMessage
-              id="thread.trace.toggle"
-              defaultMessage="Trace · {count} {count, plural, one {call} other {calls}}"
-              values={{ count: calls.length }}
-            />
-          </FoldToggle>
-          {/* renderSubTrace (issue #934): a settled delegation entry carries its
-              nested sub-trace; the affordance opens the modal viewer. */}
-          {stepsExpanded && (
-            <TraceRowList
-              entries={calls}
-              renderSubTrace={(entry) => (
-                <DelegationTraceDialog entry={entry} subtotal={subtotalByEntry.get(entry)} />
-              )}
+        // renderSubTrace (issue #934): a settled delegation entry carries
+        // its nested sub-trace; the row's fold expands the inline panel
+        // beneath the row (issue #1355).
+        <TraceStepFold
+          calls={calls}
+          renderSubTrace={(entry) => (
+            <DelegationSubTraceBody
+              entry={entry}
+              usage={subtotalByEntry.get(entry)?.usage}
             />
           )}
-        </>
+        />
       )}
     </RoundBody>
   );
