@@ -494,8 +494,9 @@ describe("LiveRow settled sub-trace fold (issue #934)", () => {
     expect(container.querySelector(".subtrace-toggle")).not.toBeNull();
     fireEvent.click(screen.getByRole("button", { name: /sub-agent trace/i }));
     // The panel opens inline beneath the row; the live path carries no
-    // usage subtotal (usage settles with the turn, #1270).
-    expect(screen.getByText("Sub-agent trace · analyst")).toBeInTheDocument();
+    // usage subtotal (usage settles with the turn, #1270), and the settled
+    // panel mounts no task head (the row line previews the task).
+    expect(container.querySelector(".subtrace-task")).toBeNull();
     expect(screen.getByText("child prose")).toBeInTheDocument();
     expect(screen.queryByText(/^Used /)).not.toBeInTheDocument();
   });
@@ -544,8 +545,16 @@ describe("LiveRow delegation live affordances (ADR-0135)", () => {
     // The panel stays closed until the fold opens; the task's full text and
     // the running sub-call ride inside.
     expect(screen.queryByText("Clean the whole sheet, report back")).not.toBeInTheDocument();
+    // The row-line toggle rides the summary line's flex centering -- mt-0
+    // cancels the block-flow breathing gap.
+    expect(container.querySelector(".subtrace-toggle")).toHaveClass("mt-0");
     fireEvent.click(screen.getByRole("button", { name: /sub-agent trace/i }));
-    expect(screen.getByText("Clean the whole sheet, report back")).toBeInTheDocument();
+    // The task's full text opens the panel as the live task head block --
+    // pre-wrap and height-capped so the task's own line structure survives
+    // (the thinking-fold block's posture).
+    const taskHead = document.querySelector(".subtrace-task");
+    expect(taskHead?.textContent).toBe("Clean the whole sheet, report back");
+    expect(taskHead).toHaveClass("whitespace-pre-wrap", "max-h-48");
     expect(screen.getByText("SELECT 1")).toBeInTheDocument();
     // The sub-round's thinking rides the same honest fold the settled panel
     // uses, collapsed by default.
@@ -603,7 +612,7 @@ describe("LiveRow delegation live affordances (ADR-0135)", () => {
     expect(screen.getByText("3 of 5 done, 2 running")).toBeInTheDocument();
   });
 
-  it("renders the task and report full texts on a completed delegation row", () => {
+  it("renders the report full text, and no task head, on a completed delegation row", () => {
     const { container } = renderWithProviders(
       <LiveRow
         row={rowWith({
@@ -638,11 +647,10 @@ describe("LiveRow delegation live affordances (ADR-0135)", () => {
     // No chip on the completed row -- the panel is the affordance.
     expect(screen.queryByText(/^step /)).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: /sub-agent trace/i }));
-    // The head carries the task's FULL text; the tail carries the report's
-    // full text -- both live-only (the settled panel renders neither).
-    expect(document.querySelector(".subtrace-task")?.textContent).toBe(
-      "Full task text that outran the bounded summary",
-    );
+    // The tail carries the report's full text (the completion event's
+    // live-only cargo); the task head is running-only -- the completed
+    // panel mounts none, the row line previews the task.
+    expect(document.querySelector(".subtrace-task")).toBeNull();
     expect(document.querySelector(".subtrace-report")?.textContent).toBe(
       "Done; 3 rows cleaned.",
     );

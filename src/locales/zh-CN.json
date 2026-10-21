@@ -660,7 +660,6 @@
   "thread.trace.op.write": "写",
   "thread.trace.delegationBatch": "{total} 个中 {done} 个完成，{running} 个运行中",
   "thread.trace.delegationStep": "第 {n} 步",
-  "thread.trace.subtraceTitle": "子智能体轨迹 · {name}",
   "thread.trace.successAria": "调用成功",
   "thread.trace.thinkingToggle": "思考 · {sec}s",
   "thread.trace.toggle": "轨迹 · {count} 次调用",
