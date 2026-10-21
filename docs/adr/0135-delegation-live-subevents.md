@@ -2,18 +2,18 @@
 
 ## Decision
 
-1. **live 子事件由 tagged sink 转发既有非 delta phase。** `run_subagent` 的 noop sink 替换为 tagged sink：子智能体事件 fold 产出的 `Thinking` / `ThinkingCompleted` / `ToolCallStarted` / `ToolCallCompleted` 原样转发，每条贴所属委派的 call id；`TextDelta` 滤除——轮文本的 live 面不流式，随 settle 的 `sub_rounds` 全量可见。审批卡既有通道不变（子面 dispatch 的 `origin` 标注，ADR-0117）。
+1. **live 子事件由 tagged 通路转发既有非 delta phase。** 两个汇入点共用同一包裹形态：`run_subagent` 的 noop sink 替换为 tagged sink，转发子智能体事件 fold 产出的 `Thinking` / `ThinkingCompleted`；子面 dispatch 请求携带委派 id，dispatch 环路按 id 选 tagged 包裹转发工具调用对（`ToolCallStarted` / `ToolCallCompleted`）。每条贴所属委派的 call id；`TextDelta` 滤除——轮文本的 live 面不流式，随 settle 的 `sub_rounds` 全量可见。审批卡既有通道不变（子面 dispatch 的 `origin` 标注，ADR-0117）。
 2. **事件身份由起点铸造单一 id。** 委派 execute 入口铸 call id，贯穿 started/completed phase、每条子事件与落地条目；持久 `TraceEntry` 不携带——id 是纯 live 路由事实（LiveTurn 不入 thread cache 的既有边界），同名并行委派由此可路由。
 3. **全文为 live-only。** 任务全文随 started phase、报告全文随 completed phase 到达前端，仅渲染于展开区；持久投影维持瘦身摘录（`TRACE_EXCERPT_MAX`），resume 后全文不可见——与成功摘录持久后清空（ADR-0036）同姿态。
 
 ## Context
 
-委派运行期间前端唯一可见是委托行 spinner：`run_subagent` 以 noop sink 驱动子智能体的事件 fold，thinking / 轮文本事件按 `TurnPhase` 形状产生即被丢弃，仅审批卡 live 可见（子面 dispatch 的 `origin` 标注）；子代理的工具调用走宿主 dispatch 通路发射 phase，不在此列。并行批次上限 `DELEGATION_BATCH_CAP`（8）、运行可达分钟级，「在工作」与「卡死」不可区分。事件转发的基础设施已存在——子事件 fold 与主 fold 同构，thinking 两族 phase 本就在产生，缺口只是替换 noop；工具调用对不经 fold（dispatch 通路定稿时未携委派身份），其转发是后续接线。
+委派运行期间前端唯一可见是委托行 spinner：`run_subagent` 以 noop sink 驱动子智能体的事件 fold，thinking / 轮文本事件按 `TurnPhase` 形状产生即被丢弃，仅审批卡 live 可见（子面 dispatch 的 `origin` 标注）；子智能体的工具调用走宿主 dispatch 通路发射 phase，不在此列。并行批次上限 `DELEGATION_BATCH_CAP`（8）、运行可达分钟级，「在工作」与「卡死」不可区分。事件转发的基础设施已存在——子事件 fold 与主 fold 同构，thinking 两族 phase 本就在产生，缺口只是替换 noop；工具调用对不经 fold（fold 无工具 phase 发射点），由 dispatch 通路转发：子面请求携带委派 id，环路按 id 包裹，主面请求保持 plain。
 
 ## Why
 
-1. **行内展开面是唯一子轨迹面**（ADR-0117 Decision 6）：live 尾窗与 settled `sub_rounds` 同构复用同一渲染，live→settle 只是数据续播，无第二呈现面；定稿时 live 只承载 thinking 两族，工具调用对随 `sub_rounds` 于 settle 显形（live 期间以无归属行浮于主轨）。
-2. **转发即达**：thinking 两族事件已在产生，转发零 Rust 逻辑增量；「在干什么」由轮推进与 thinking 全文（折叠）覆盖，工具调用对的转发待 dispatch 通路携带委派身份后并入，过程性 prose 价值密度低。
+1. **行内展开面是唯一子轨迹面**（ADR-0117 Decision 6）：live 尾窗与 settled `sub_rounds` 同构复用同一渲染，live→settle 只是数据续播，无第二呈现面；live 面承载 thinking 两族与工具调用对（后者由 dispatch 请求携带的委派 id 路由），轮文本仍随 settle 全量可见——换帧无行蒸发与凭空显形。
+2. **转发即达**：thinking 两族事件已在产生，转发零 Rust 逻辑增量；「在干什么」由轮推进与 thinking 全文（折叠）覆盖，工具调用对经 dispatch 通路携带委派身份并入，过程性 prose 价值密度低。
 3. **同名并行需要真身份**：`DELEGATION_BATCH_CAP`（8）下按名称与顺序的前端配对存在同名歧义，起点铸造是唯一干净解。
 4. **全文与摘录是两个面**：240 字符摘录服务模型输入与持久审计，读者需要的任务书与终局报告是显示面事实——截断常数分设，持久契约不动。
 
