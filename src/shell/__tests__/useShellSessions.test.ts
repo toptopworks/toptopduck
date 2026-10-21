@@ -25,6 +25,14 @@ type DragDropEvent = {
 const dropListener = vi.hoisted(() => ({
   current: null as ((event: DragDropEvent) => void) | null,
 }));
+
+// Issue #1353: the mount-once session-named listener registers on mount; the
+// hoisted slot captures the registered callback so a test can push a
+// synthetic turn-start auto-name event.
+type SessionNamedEvent = { session_id: string; name: string };
+const namedListener = vi.hoisted(() => ({
+  current: null as ((ev: SessionNamedEvent) => void) | null,
+}));
 vi.mock("@tauri-apps/api/webviewWindow", () => ({
   getCurrentWebviewWindow: () => ({
     onDragDropEvent: (cb: (event: DragDropEvent) => void) => {
@@ -63,6 +71,14 @@ vi.mock("../../api", async (importOriginal) => {
       persist_suspended: false,
     })),
     setAuthorizationMode: vi.fn(async () => {}),
+    // Issue #1353: capture the session-named callback into the hoisted slot
+    // (the mock body runs synchronously, so the slot is set at mount).
+    onSessionNamed: vi.fn(async (cb: (ev: SessionNamedEvent) => void) => {
+      namedListener.current = cb;
+      return () => {
+        namedListener.current = null;
+      };
+    }),
     // ADR-0112 pre-activation materialization (mint-chain activation loop +
     // the in-session materializer). Default no-op; the materialization tests
     // assert calls.
@@ -146,6 +162,7 @@ describe("useShellSessions", () => {
     // RTL auto-cleanup unmounts the prior hook (clearing the slot via the
     // listener's unlisten), but reset defensively so a test starts from null.
     dropListener.current = null;
+    namedListener.current = null;
     // Drop any prior test's `.question-bar` hit-test stub (#501).
     document.body.innerHTML = "";
   });
@@ -156,6 +173,35 @@ describe("useShellSessions", () => {
     expect(result.current.activeSessionId).toBeNull();
     expect(result.current.busy).toBe(false);
     expect(result.current.resumeStatus).toEqual({ kind: "idle" });
+  });
+
+  // Issue #1353 (ADR-0089 Decision 4 calibrated): the turn-start auto-name
+  // push lands through patchOpenName -- the open-set entry (what the sidebar
+  // row + session header read) shows the name without waiting for the turn
+  // to settle.
+  it("session-named event patches the open entry's name immediately", async () => {
+    vi.mocked(createSession).mockResolvedValue(reply("s1"));
+    const { result } = renderSessions();
+    await act(async () => {
+      await result.current.createSessionWithQuestion(
+        "how many rows?",
+        [],
+        DEFAULT_POSTURE,
+        [],
+      );
+    });
+    expect(result.current.openSessions[0]).toMatchObject({
+      sid: "s1",
+      name: "",
+    });
+    expect(namedListener.current).not.toBeNull();
+    await act(async () => {
+      namedListener.current?.({ session_id: "s1", name: "how many rows?" });
+    });
+    expect(result.current.openSessions[0]).toMatchObject({
+      sid: "s1",
+      name: "how many rows?",
+    });
   });
 
   it("createSessionWithQuestion mints + registers + activates, carrying pendingQuestion", async () => {

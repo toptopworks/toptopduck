@@ -37,7 +37,7 @@ use crate::mcp::McpClient;
 use crate::model::{
     DatasetDescriptor, DatasetPrivacy, DeleteImpactEntry, LoadOutcome, ProfileId, ProfileKeyStatus,
     ProfileTestOutcome, Protocol, ProviderConfig, ProviderConfigView, RemoveSourceError, RowPage,
-    SheetGuidance, ThreadEntry, TurnOutcome, TurnProgress,
+    SessionNamedPayload, SheetGuidance, ThreadEntry, TurnOutcome, TurnProgress,
 };
 use crate::persistence::recipe::LastRuntime;
 use crate::persistence::{
@@ -759,6 +759,13 @@ pub async fn ask(
     // artifact is iframe-servable before the card can render.
     let app_for_scope = app.clone();
     let sid = id.clone();
+    // Issue #1353 (ADR-0089 Decision 4 calibrated): the same-boundary
+    // AppHandle clone emits the `session-named` push -- fired exactly once
+    // by `ask_with_phase_and_auto_name` when the session's first question is
+    // accepted, so the sidebar row + session header update without waiting
+    // for the terminal-state sync chain.
+    let app_for_named = app.clone();
+    let sid_for_named = id.clone();
     // Clone the skills-root path off the managed State so it can move into the
     // spawn_blocking closure (the State borrow does not cross the await). The
     // registry root is read below to resolve each mounted skill's SKILL.md body
@@ -793,7 +800,7 @@ pub async fn ask(
             skill_invocations.as_deref().unwrap_or(&[]),
         );
         let inputs = assembled.turn_inputs(&mcp_servers);
-        let outcome = s.ask_with_phase(
+        let outcome = s.ask_with_phase_and_auto_name(
             &question,
             &approval,
             &sink,
@@ -813,6 +820,25 @@ pub async fn ask(
                     log::debug!(
                         target: "toptopduck::commands",
                         "turn-progress emit failed (likely a torn-down webview): {e}"
+                    );
+                }
+            },
+            move |name| {
+                // Issue #1353: the turn-start auto-name push. Fire-and-forget
+                // like turn-progress above -- the name also lands through the
+                // terminal-state sync chain (syncSessionName), so a dropped
+                // event is a missed early update, not a lost one. Debug-level
+                // for the same reason (a torn-down webview fails every emit).
+                if let Err(e) = app_for_named.emit(
+                    "session-named",
+                    &SessionNamedPayload {
+                        session_id: sid_for_named.clone(),
+                        name: name.to_string(),
+                    },
+                ) {
+                    log::debug!(
+                        target: "toptopduck::commands",
+                        "session-named emit failed (likely a torn-down webview): {e}"
                     );
                 }
             },

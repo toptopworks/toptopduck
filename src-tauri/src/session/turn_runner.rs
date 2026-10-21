@@ -41,7 +41,7 @@ use crate::session::skills::SkillTurnState;
 use crate::skills::SkillPromptFragment;
 use crate::window;
 
-use super::{now_epoch_ms, ACP_BRIDGE_BIN_ENV, GATEWAY_SERVER_NAME};
+use super::{now_epoch_ms, TimelineEntry, ACP_BRIDGE_BIN_ENV, GATEWAY_SERVER_NAME};
 
 /// The per-turn borrowed data inputs for [`super::Session::ask_with_phase`] (issue
 /// #378): the effective MCP servers, the keychain for secret env resolution,
@@ -138,6 +138,45 @@ impl super::Session {
         if let Some(discovered) = outcome.discovered_runtime.clone() {
             self.set_last_discovered_runtime(discovered);
         }
+    }
+
+    /// Issue #1353 (ADR-0089 Decision 4, calibrated): auto-name the session
+    /// when the FIRST question is accepted -- here, at the turn top, before
+    /// any runtime branch. The name's value (the question's bounded
+    /// truncation, ADR-0039) is fully determined at submit, so waiting for
+    /// the turn's terminal state bought no semantic distinction (a cancelled
+    /// or failed first turn names either way). Memory-only write: the disk
+    /// still persists at the terminal turn's recipe save, and `record_turn`
+    /// keeps its own naming as a silent same-value fallback (its direct
+    /// callers -- tests -- name exactly as before). `on_named` fires exactly
+    /// once, at this turn start, so the command layer can push a
+    /// `session-named` event ahead of the terminal state.
+    pub fn ask_with_phase_and_auto_name(
+        &mut self,
+        question: &str,
+        approval: &ApprovalState,
+        sink: &dyn ApprovalSink,
+        on_phase: impl FnMut(TurnPhase) + Send + 'static,
+        on_named: impl FnOnce(&str),
+        inputs: &TurnInputs<'_>,
+    ) -> TurnOutcome {
+        if !self.timeline_has_turn() {
+            let name = self.auto_name_from_question(question);
+            on_named(&name);
+        }
+        self.ask_with_phase(question, approval, sink, on_phase, inputs)
+    }
+
+    /// Whether the timeline already holds a recorded turn -- the auto-name
+    /// predicate (ADR-0089 Decision 4): source/skill lifecycle events do not
+    /// count as turns, so a session that loaded files or mounted skills
+    /// before its first question still auto-names on that first question.
+    /// `pub(super)`: `record_turn` (the fallback namer, session/mod.rs)
+    /// shares the one predicate.
+    pub(super) fn timeline_has_turn(&self) -> bool {
+        self.timeline
+            .iter()
+            .any(|e| matches!(e, TimelineEntry::Turn { .. }))
     }
 
     /// Run one turn AND surface its discrete progress events (ADR-0059,
