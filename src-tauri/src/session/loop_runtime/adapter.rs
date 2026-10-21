@@ -204,6 +204,15 @@ pub(crate) fn gateway_dynamic_tool(
                 // caller thread's gated execution) must not sit on the async
                 // runtime's thread.
                 let outcome = tokio::task::spawn_blocking(move || {
+                    // The identity pair rides together (issue #1359):
+                    // origin and delegation_id are co-set -- Some iff the
+                    // call rides a sub-agent's tool face, so a half-set
+                    // state cannot silently resurface the ownerless
+                    // main-rail rows the per-request forward retires.
+                    // Asserted at the request's construction so the
+                    // panic rides the join's honest abort path, never
+                    // unwinding the dispatch server's loop.
+                    debug_assert!(origin.is_some() == delegation_id.is_some());
                     let (resp_tx, resp_rx) = mpsc::channel::<DispatchOutcome>();
                     if dispatch
                         .send(DispatchRequest {

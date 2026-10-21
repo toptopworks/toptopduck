@@ -2694,7 +2694,7 @@ fn delegation_runs_a_subagent_over_the_shared_face_with_one_numberer() {
     // record -- the delegation itself, then the main loop's own. The
     // sub-agent's calls no longer run on the main rail at all (issue #1359):
     // their card pair rides tagged sub-events into the delegation's live
-    // panel, carrying the SAME id the delegation's own started phase minted,
+    // panel, carrying the SAME id the delegation's own started phase carried,
     // while the record-side landing under the delegation entry is the
     // sub_trace assertion above.
     let mut delegation_id: Option<String> = None;
@@ -2725,7 +2725,7 @@ fn delegation_runs_a_subagent_over_the_shared_face_with_one_numberer() {
         vec!["analyst".to_string(), "materialize".to_string()],
         "the main rail carries only its own completions: the delegation row, then the main loop's materialize"
     );
-    let id = delegation_id.expect("the delegation's started phase minted its id");
+    let id = delegation_id.expect("the delegation's started phase carried its id");
     assert_eq!(
         tagged,
         vec![(id.clone(), "started"), (id, "completed")],
