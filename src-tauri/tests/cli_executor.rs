@@ -127,11 +127,12 @@ fn over_cap_output_truncates_with_an_explicit_marker() {
 }
 
 #[test]
-fn missing_executable_is_a_call_time_error_and_the_entry_stays() {
+fn a_missing_bare_name_is_a_call_time_error_with_the_probe_copy() {
     // The bare-name leg (issue #1364): no separator means PATH resolution,
     // and a miss is its own structured error naming the search that came
-    // up empty -- still probe semantics, the entry stays and re-arms. The
-    // empty controlled PATH keeps the miss deterministic.
+    // up empty -- still probe semantics, the message states the entry
+    // stays and re-arms. The empty controlled PATH keeps the miss
+    // deterministic.
     let mut t = tool("fake");
     t.executable = "definitely-not-a-real-tool-xyz".to_string();
     let temp = TempDir::new().unwrap();
@@ -159,6 +160,25 @@ fn missing_executable_is_a_call_time_error_and_the_entry_stays() {
             .content
             .contains("definitely-not-a-real-tool-xyz"),
         "the registered string is the error surface, not a resolved path"
+    );
+}
+
+#[test]
+fn a_bare_name_with_the_process_path_misses_structurally() {
+    // The production wiring leg (issue #1364): both dispatch callers pass
+    // `None`, and `execute` folds in the process PATH -- this test is that
+    // fold's only pin. A definitely-absent bare name must land in the
+    // structured miss, not the "failed to spawn" lookup the fold's
+    // deletion would fall back to (the same absence assumption the
+    // builtin scanner's definitely-absent probe rests on).
+    let mut t = tool("fake");
+    t.executable = "definitely-not-a-real-tool-xyz".to_string();
+    let outcome = run(&t, json!({"args": []}));
+    assert!(outcome.result.is_error);
+    assert!(
+        outcome.result.content.contains("not found on PATH"),
+        "the None leg resolves through the process PATH: {}",
+        outcome.result.content
     );
 }
 
@@ -790,4 +810,35 @@ fn a_bare_name_spawns_the_cmd_shim_installed_by_npm_style_clis() {
         outcome.result.content
     );
     assert_eq!(outcome.result.content.trim_end(), "from-shim");
+}
+
+#[test]
+#[cfg(unix)]
+fn a_resolved_but_unspawnable_bare_name_keeps_the_registered_string() {
+    // The registered-string convention (issue #1364): a bare name that
+    // resolves but fails to spawn must be reported under the registered
+    // string, never the resolved absolute path. A resolved
+    // non-executable file is the cheap deterministic shape.
+    use std::os::unix::fs::PermissionsExt;
+    let bin = TempDir::new().unwrap();
+    let shim = bin.path().join("dbx-like-shim");
+    std::fs::write(&shim, b"not executable").unwrap();
+    std::fs::set_permissions(&shim, std::fs::Permissions::from_mode(0o644)).unwrap();
+    let mut t = tool("fake");
+    t.executable = "dbx-like-shim".to_string();
+    let work = TempDir::new().unwrap();
+    let path_env = std::env::join_paths([bin.path()]).unwrap();
+    let outcome = execute(
+        &t,
+        &call(json!({"args": []})),
+        work.path(),
+        &CancelToken::new(),
+        Some(path_env),
+    );
+    assert!(outcome.result.is_error);
+    assert!(
+        outcome.result.content.contains("`dbx-like-shim`"),
+        "the error names the registered bare name, not the resolved path: {}",
+        outcome.result.content
+    );
 }

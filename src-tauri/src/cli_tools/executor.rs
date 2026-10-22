@@ -77,7 +77,9 @@ pub fn execute(
 }
 
 /// The testable core: `cap` is the per-stream byte cap (tests shrink it);
-/// `path_env` is the PATH the bare-name resolution searches.
+/// `path_env` is the PATH the bare-name resolution searches -- a `None` at
+/// this layer means no PATH to search, and a bare name degrades to the
+/// spawn's own lookup.
 fn execute_capped(
     tool: &CliToolConfig,
     call: &ToolUse,
@@ -292,7 +294,8 @@ enum SpawnRoute {
     /// relative) is pinned, and a bare name with no PATH to search
     /// degrades to the spawn's own lookup (the pre-routing behavior).
     Direct(PathBuf),
-    /// A bare name that resolved to an absolute PATH hit.
+    /// A bare name that resolved to a PATH hit (as joined from the PATH
+    /// entry, so absolute only when the entry is).
     Resolved(PathBuf),
     /// A bare name the PATH search missed.
     Miss,
@@ -1211,22 +1214,31 @@ mod tests {
     // --- spawn routing (issue #1364) ----------------------------------------
 
     /// One controlled-PATH entry: `join_paths` of the dir, the injection
-    /// shape every routing test uses (no environment mutation).
+    /// shape the PATH-injecting routing tests use (no environment
+    /// mutation).
     fn path_env_of(dir: &Path) -> OsString {
         std::env::join_paths([dir]).expect("join")
     }
 
     #[test]
     fn spawn_route_pins_a_separated_executable_verbatim() {
-        for exe in [
-            "C:/tools/dbx.exe",
-            r"D:\tools\dbx.exe",
-            "./bin/dbx",
-            "sub/dbx",
-        ] {
+        // The PATH-less legs: pass-through regardless of PATH presence.
+        for exe in ["C:/tools/dbx.exe", r"D:\tools\dbx.exe"] {
             match spawn_route(exe, None) {
                 SpawnRoute::Direct(path) => assert_eq!(path, PathBuf::from(exe)),
                 other => panic!("{exe} must pass through verbatim, got {other:?}"),
+            }
+        }
+        // The decoy leg: a `/`-separated name must stay `Direct` even with
+        // a live PATH to search, where a misroute to the bare-name branch
+        // would miss instead. On Windows this is the only pin that reddens
+        // if the `/` clause drops from the separator predicate.
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(dir.path().join("dbx.exe"), b"bin").expect("write decoy");
+        for exe in ["./bin/dbx", "sub/dbx"] {
+            match spawn_route(exe, Some(path_env_of(dir.path()).as_os_str())) {
+                SpawnRoute::Direct(path) => assert_eq!(path, PathBuf::from(exe)),
+                other => panic!("{exe} must stay Direct beside a decoy, got {other:?}"),
             }
         }
     }
