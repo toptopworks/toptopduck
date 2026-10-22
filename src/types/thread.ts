@@ -135,7 +135,7 @@ export interface TraceRound {
 // snake_case fields; operation_kind reuses the approval gateway's enum).
 // Field-for-field the persisted recipe form, so a live turn, its recorded
 // TurnRecord.trace, and its resumed reincarnation all render identically:
-// a successful call's result payload is dropped (the .duck carries none of
+// a successful call's result payload is dropped (the recipe.json carries none of
 // it, ADR-0036; the capped delegation report's truncation notice excepted,
 // issue #1047) while a failed call carries its bounded error / denial
 // message -- the cross-turn failure retrospection anchor.

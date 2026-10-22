@@ -25,11 +25,11 @@ use crate::tools::read_paths::extract_read_paths;
 /// per-session tree holds `session.duck` + `assets/`).
 pub(super) const ASSETS_DIR_NAME: &str = "assets";
 
-/// The session's `assets/` dir derived from the bound `.duck` path. `None`
+/// The session's `assets/` dir derived from the bound `recipe.json` path. `None`
 /// when unbound (nothing to materialize for -- there is no resume) or the
 /// duck path has no parent directory.
-pub(super) fn assets_dir(duck_path: Option<&Path>) -> Option<PathBuf> {
-    duck_path
+pub(super) fn assets_dir(recipe_path: Option<&Path>) -> Option<PathBuf> {
+    recipe_path
         .and_then(Path::parent)
         .map(|dir| dir.join(ASSETS_DIR_NAME))
 }
@@ -47,9 +47,9 @@ pub(super) fn assets_dir(duck_path: Option<&Path>) -> Option<PathBuf> {
 pub(super) fn materialize_sql_references(
     outcome: &mut TurnOutcome,
     temp_path: &Path,
-    duck_path: Option<&Path>,
+    recipe_path: Option<&Path>,
 ) {
-    let Some(assets_dir) = assets_dir(duck_path) else {
+    let Some(assets_dir) = assets_dir(recipe_path) else {
         return;
     };
     let TurnOutcome::Materialized { promotions, .. } = outcome else {

@@ -24,7 +24,7 @@ function meta(
   opts: Partial<SessionMetadata> = {},
 ): SessionMetadata {
   return {
-    duck_path: path,
+    recipe_path: path,
     display_name: name,
     last_modified_at: NOW - ageDays * MS_PER_DAY,
     source_summary: {
@@ -298,7 +298,7 @@ describe("buildSearchEntries (ADR-0072, issue #252)", () => {
       meta("/hold.duck", "hold", 100),
       ...Array.from({ length: 11 }, (_, i) => {
         const n = 10 - i;
-        return meta(`/s${n}.duck`, `session-${String(n).padStart(2, "0")}`, n);
+        return meta(`/s${n}.recipe.json`, `session-${String(n).padStart(2, "0")}`, n);
       }),
     ];
     const entries = buildSearchEntries(thirteen, [], null, "session");
@@ -318,10 +318,10 @@ describe("buildSearchEntries (ADR-0072, issue #252)", () => {
     // Eleven sessions match; the oldest (session-10) is the active session.
     const eleven = Array.from({ length: 11 }, (_, i) => {
       const n = 10 - i;
-      return meta(`/s${n}.duck`, `session-${String(n).padStart(2, "0")}`, n);
+      return meta(`/s${n}.recipe.json`, `session-${String(n).padStart(2, "0")}`, n);
     });
     const open: OpenSession[] = [
-      { sid: "uuid-active", name: "session-10", path: "/s10.duck", pendingIngestPaths: [], pendingQuestion: null, pendingSkillInvocations: [] },
+      { sid: "uuid-active", name: "session-10", path: "/s10.recipe.json", pendingIngestPaths: [], pendingQuestion: null, pendingSkillInvocations: [] },
     ];
     // The binding is live: queried alone, the stale row carries the active flag.
     const solo = buildSearchEntries(eleven, open, "uuid-active", "session-10");
@@ -377,7 +377,7 @@ describe("buildSearchEntries (ADR-0072, issue #252)", () => {
 
   it("excludes never-saved open sessions (search scope = list_sessions only)", () => {
     // ADR-0072: the ⌘K modal filters the list_sessions result -- an
-    // unsaved new session (no .duck) is not in list_sessions, so it never
+    // unsaved new session (no recipe.json) is not in list_sessions, so it never
     // appears here even when it is the active session. The sidebar still lists
     // it; the modal is a persisted-session jump surface.
     const open: OpenSession[] = [

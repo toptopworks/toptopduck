@@ -30,6 +30,7 @@ import type {
   SaveError,
   SessionMetadata,
   SessionNamedPayload,
+  SourceNotice,
   TurnProgress,
 } from "./types/session";
 import type {
@@ -66,16 +67,16 @@ import type {
 // the multi-tab UI lands in a later PRD.
 
 /** The wire reply from `create_session` (ADR-0089): the runtime session id +
- *  the bound `session.duck` path. Every session is persisted from creation. */
+ *  the bound `recipe.json` path. Every session is persisted from creation. */
 export interface CreateSessionReply {
   session_id: string;
-  duck_path: string;
+  recipe_path: string;
 }
 
 // Create a new session (ADR-0056/0089): the backend builds an independent
 // in-memory DuckDB instance + per-session cancel token, binds them to a
 // backend-generated id (UUID), AND immediately persists by creating a
-// per-session directory + initial session.duck. This is the `+ tab` action.
+// per-session directory + initial recipe.json. This is the `+ tab` action.
 export async function createSession(): Promise<CreateSessionReply> {
   return invoke<CreateSessionReply>("create_session");
 }
@@ -91,13 +92,13 @@ export async function closeSession(sessionId: string): Promise<boolean> {
 
 /** One row from `list_live_sessions` (issue #842): a live backend session the
  * reloaded frontend can re-adopt. The consumer rule is close-when
- * `in_flight` is true OR `duck_path` is null -- a null path is never
- * adoptable whatever the flag says. `duck_path` / `session_name` are null for
+ * `in_flight` is true OR `recipe_path` is null -- a null path is never
+ * adoptable whatever the flag says. `recipe_path` / `session_name` are null for
  * an unbound session or when any holder occupied the session lock at sweep
  * time (an in-flight turn, a transient command, a poisoned lock). */
 export interface LiveSessionEntry {
   session_id: string;
-  duck_path: string | null;
+  recipe_path: string | null;
   session_name: string | null;
   in_flight: boolean;
 }
@@ -384,11 +385,11 @@ export async function testProfile(
 
 // --- Cross-session persistence (issue #48, ADR-0034/0036) -----------------
 
-// Open a .duck and resume the named session WITHIN THE SAME session_id
+// Open a recipe.json and resume the named session WITHIN THE SAME session_id
 // (ADR-0056: open reuses the id; it does NOT create a new session). Runs off
 // the UI thread; a `resume-progress` event fires per source / replayed turn.
-export async function openDuck(sessionId: string, path: string): Promise<void> {
-  await invoke<void>("open_duck", { sessionId, path });
+export async function openRecipe(sessionId: string, path: string): Promise<void> {
+  await invoke<void>("open_recipe", { sessionId, path });
 }
 
 // Subscribe to resume-progress events (ADR-0034/0059 visible progress, issue
@@ -424,10 +425,10 @@ export async function onSessionNamed(
   return listen<SessionNamedPayload>("session-named", (e) => cb(e.payload));
 }
 
-// List every persisted .duck session's metadata for the cold-start sidebar
+// List every persisted recipe.json session's metadata for the cold-start sidebar
 // (ADR-0060/0061, issue #76). The backend scans the managed sessions directory
 // (ADR-0089) and derives each entry from its recipe + mtime; unreadable paths
-// are skipped. duck_path is the .duck path -- pass it back to openDuck to
+// are skipped. recipe_path is the recipe.json path -- pass it back to openRecipe to
 // resume. `includeArchived` (ADR-0127) appends the archived rows (mtime desc)
 // after the pinned block + unarchived mtime-desc block -- the archived view's
 // fetch; the default response excludes them so tray / search never see them.
@@ -441,9 +442,9 @@ export async function listSessions(
 
 // Pin or unpin a persisted session (ADR-0127, issue #1174). Organization
 // state lives in the sessions-root sidecar keyed by the session-directory
-// uuid -- the .duck is never rewritten. Unknown paths are idempotent no-ops
+// uuid -- the recipe.json is never rewritten. Unknown paths are idempotent no-ops
 // backend-side; pinning an archived session is a no-op (mutual exclusion).
-// `path` is the .duck file path (SessionMetadata.duck_path).
+// `path` is the recipe.json file path (SessionMetadata.recipe_path).
 export async function setSessionPinned(path: string, pinned: boolean): Promise<void> {
   await invoke<void>("set_session_pinned", { path, pinned });
 }
@@ -459,16 +460,16 @@ export async function setSessionArchived(
   await invoke<void>("set_session_archived", { path, archived });
 }
 
-// Delete a persisted .duck file (ADR-0060, issue #81). The frontend closes the
+// Delete a persisted recipe.json file (ADR-0060, issue #81). The frontend closes the
 // session first when it is open, then calls this. The backend removes the
 // per-session directory; a missing file is idempotent success.
-// `path` is the .duck file path (the SessionMetadata.duck_path from listSessions).
+// `path` is the recipe.json file path (the SessionMetadata.recipe_path from listSessions).
 export async function deleteSession(path: string): Promise<void> {
   await invoke<void>("delete_session", { path });
 }
 
 // Rename the OPEN session bound to `sessionId` (ADR-0060, issue #81). Sets the
-// recipe header name and rewrites the bound .duck; the bound path is untouched.
+// recipe header name and rewrites the bound recipe.json; the bound path is untouched.
 // For a never-saved session the name is held in memory until save-as.
 export async function renameSession(
   sessionId: string,
@@ -484,8 +485,8 @@ export async function getSessionName(sessionId: string): Promise<string> {
   return invoke<string>("get_session_name", { sessionId });
 }
 
-// Rename a CLOSED .duck recipe's session_name in place (ADR-0060, issue #81).
-// `path` is the .duck file path (SessionMetadata.duck_path). The backend reads
+// Rename a CLOSED recipe.json recipe's session_name in place (ADR-0060, issue #81).
+// `path` is the recipe.json file path (SessionMetadata.recipe_path). The backend reads
 // the recipe, rewrites the header, atomic-saves -- no DuckDB instance is built.
 // Refuses a path currently held open (rename those via renameSession by id).
 export async function renamePersistedSession(
@@ -501,6 +502,14 @@ export async function renamePersistedSession(
 // matching a backend Display string; null after a clean save.
 export async function takePersistError(sessionId: string): Promise<SaveError | null> {
   return invoke<SaveError | null>("take_persist_error", { sessionId });
+}
+
+// Read + clear the named session's resume-hit source status notices
+// (ADR-0136): a watermark-hit open succeeded even though a source file is
+// missing or changed since settle. Drained once after an open; later calls
+// return an empty list.
+export async function takeSourceNotices(sessionId: string): Promise<SourceNotice[]> {
+  return invoke<SourceNotice[]>("take_source_notices", { sessionId });
 }
 
 // --- App-level config (issue #53, ADR-0038) --------------------------------
@@ -989,7 +998,7 @@ export async function getSessionModelConfig(
 // selection's own persist outcome cannot be mis-attributed or swallowed by
 // the shared banner channel. `persist_error` = the typed SaveError of a
 // failed write; `persist_suspended` = true when the write was withheld on a
-// pending ADR-0035 conflict (externally modified .duck). Both null/false =
+// pending ADR-0035 conflict (externally modified recipe.json). Both null/false =
 // the write landed (or the session is unbound, nothing to persist).
 export interface SetPosturePersistOutcome {
   persist_error: SaveError | null;
@@ -1045,18 +1054,18 @@ export async function copyArtifactFile(src: string, dest: string): Promise<void>
 // side at click time (the webview may be mid-load), so the frontend only
 // carries the session-level consequence.
 
-// The `tray://open-session` payload: the `.duck` path alone (the stable
+// The `tray://open-session` payload: the `recipe.json` path alone (the stable
 // session identity, ADR-0089). The display name for the open action is
 // resolved from the persisted-session list -- same source, no duplicate wire
 // field.
 export interface TrayOpenSession {
-  duck_path: string;
+  recipe_path: string;
 }
 
 // Subscribe to tray menu "open session" clicks (ADR-0125 Decision 5). The
 // sidebar-parity rule (Decision 5): the action is exactly what a sidebar
 // click on the same session does -- an already-open session is only
-// activated (idempotent), a closed one resumes through the same openDuck
+// activated (idempotent), a closed one resumes through the same openRecipe
 // path.
 export async function onTrayOpenSession(
   cb: (ev: TrayOpenSession) => void,

@@ -54,7 +54,7 @@ function GroupTitle({ kind }: { kind: SidebarGroupKind }) {
 }
 
 // The Chat-style session sidebar (ADR-0060, issue #81). Col 1 of the shell:
-// lists every persisted .duck (ADR-0061 cold start) merged with the open
+// lists every persisted recipe.json (ADR-0061 cold start) merged with the open
 // keep-alive sessions, Chat-style time-grouped and last-modified descending.
 // ADR-0093 (issue #511): each row is pure navigation (title + conditional
 // status dot), management actions moved to .session-header (slice 2, #512);
@@ -126,7 +126,7 @@ interface SessionSidebarProps {
   onDelete: (path: string, sid: string | null) => void;
   /** Row-menu rename (ADR-0133, issue #1319): the renameEntry contract --
    *  an open row renames via its sid, a cold persisted row rewrites the
-   *  .duck header in place by path. */
+   *  recipe.json header in place by path. */
   onRename: (path: string, sid: string | null, newName: string) => void;
   /** Row-menu close (ADR-0133, issue #1319): open rows only. The shell
    *  callback (cancel + approval cleanup + draft drop) is the same one the

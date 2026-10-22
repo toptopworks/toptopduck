@@ -121,6 +121,7 @@ function paneSessionStateWithWorkspace(workspaceContent: unknown): never {
     loading: false,
     error: null,
     persistError: null,
+    sourceNotices: [],
     haltedRemaining: null,
     guidance: null,
     guidanceError: null,
@@ -186,7 +187,7 @@ function renderPane() {
             sessionName=""
             onFirstTurnSettled={noop}
             approvalEvents={approvalEvents}
-            duckPath="C:/sessions/sid-1.duck"
+            recipePath="C:/sessions/sid-1.duck"
             onRename={noop}
             onClose={noop}
             onDelete={noop}

@@ -4,7 +4,7 @@
 
 1. **上传源快照从进程临时目录迁入 per-session 树。** copy-in 落 `{uuid}/<ref>.duckdb`，快照形态与挂载机制不变——admin 与每轮 sandbox 并发只读挂载同一文件照旧（源与结果必须异库：sandbox 不能只读挂载 admin 持写锁的伴生库）。会话关闭后快照常驻树，直至会话删除。派生源快照（`assets/`，ADR-0087 Decision 4）与 SQL 引用哑副本的冻结语义不动。
 
-2. **结果历史落伴生库 `data.duckdb`，派生缓存语义。** admin 引擎按需物化（ADR-0104 不变）时打开树内伴生库（不存在则创建；不执行 SQL 的会话仍零实例零文件）。`result_N` 驻伴生库文件，经 buffer manager 在 RAM 中作有界缓存；权威态恒为 recipe——伴生库 header 记 recipe 链摘要水印。
+2. **结果历史落伴生库 `analytics.duckdb`（实现期自 `data.duckdb` 改名：文件 stem 即 DuckDB 主 catalog 名，`data.csv` 源的引用名 `data` 会与主库撞名致 ATTACH 失败），派生缓存语义。** admin 引擎按需物化（ADR-0104 不变）时打开树内伴生库（不存在则创建；不执行 SQL 的会话仍零实例零文件）。`result_N` 驻伴生库文件，经 buffer manager 在 RAM 中作有界缓存；权威态恒为 recipe——伴生库 `_meta` 元数据行记 recipe 链摘要水印。
 
 3. **resume 水印命中免重放，失配全量重建。** 打开时伴生库存在且水印等于当前 recipe 链摘要 → 挂树内源快照、开伴生库、跳过整链重放——零源文件重读、零结果 SQL 重算。源完整性校验照查，源消失或漂移在命中路径不再阻断，降级为「源已变更或不在场，工作集为 ingest 时快照」提示；重放路径的 re-link 与阻断语义不变。伴生库缺失/失配/版本不识 → 删除后走既有重放路径**原样**重建，重建写穿进新建伴生库并盖水印——存量纯 recipe 会话零迁移代码经此获得伴生库与树内快照。水印在 recipe settle 时加盖；recipe 写盘与水印写库两文件非原子，崩在中间 → 下次打开失配 → 一次全量重建，良性。clean close 执行 CHECKPOINT 收拢 WAL。
 

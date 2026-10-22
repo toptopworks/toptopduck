@@ -39,7 +39,7 @@ pub struct LiveProviderConfig {
     /// Serializes the in-process writers (`store` + MCP upsert + sessions-dir).
     /// All do read-modify-write on the config file; without coordination two writers
     /// interleave and lose an entire update (`T1 load -> T2 load -> T1 write ->
-    /// T2 write` drops T1). Mirrors the `.duck` single-writer (issue #50).
+    /// T2 write` drops T1). Mirrors the `recipe.json` single-writer (issue #50).
     /// Pure reads (`load`) do NOT take this lock -- they honest-degrade and
     /// tolerate reading a value that is about to be overwritten.
     write_lock: Arc<Mutex<()>>,

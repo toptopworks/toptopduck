@@ -38,16 +38,16 @@ import { ArtifactHeader } from "./ArtifactHeader";
 export function ArtifactView({
   artifact,
   render,
-  duckPath,
+  recipePath,
 }: {
   /** The manifest entry the view resolves (thread-derived, settle-frozen):
    *  the path (identity) + file_name (display) the derivation carries. */
   artifact: { path: string; file_name: string };
   /** The derived render matrix branch (deriveWorkspaceContent's output). */
   render: ArtifactRenderKind;
-  /** The session's bound .duck path -- anchors the artifacts-dir scope check
+  /** The session's bound recipe.json path -- anchors the artifacts-dir scope check
    *  for the html/pdf iframe branches. */
-  duckPath: string;
+  recipePath: string;
 }) {
   // One existence read for the whole stage: the header's action gate and the
   // body's degrade share the entry (and the rail row's cache -- the same
@@ -80,7 +80,7 @@ export function ArtifactView({
           key={refreshKey}
           artifact={artifact}
           render={render}
-          duckPath={duckPath}
+          recipePath={recipePath}
           exists={exists}
         />
       </div>
@@ -95,12 +95,12 @@ export function ArtifactView({
 function ArtifactStageBody({
   artifact,
   render,
-  duckPath,
+  recipePath,
   exists,
 }: {
   artifact: { path: string; file_name: string };
   render: ArtifactRenderKind;
-  duckPath: string;
+  recipePath: string;
   exists: boolean;
 }) {
   // The iframe branches share one degrade gate (Decision 2/4): the scope
@@ -108,7 +108,7 @@ function ArtifactStageBody({
   // settle/stable strings), and a missing in-scope file must render the
   // face, not point a frame at a denial the protocol would show as the
   // WebView's own error page.
-  const inScope = isWithinArtifactsDir(artifact.path, duckPath);
+  const inScope = isWithinArtifactsDir(artifact.path, recipePath);
   if (render === "html") {
     if (!inScope || !exists) {
       return <ArtifactFallbackFace exists={exists} />;

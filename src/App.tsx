@@ -1051,7 +1051,7 @@ export default function App() {
               controls only: the sidebar collapse toggle (left) + nav buttons
               + window controls (right). The session name + workspace toggle
               live in each SessionPane's own header (session-scoped chrome
-              lives with the session). The Open / Save .duck buttons live in
+              lives with the session). The Open / Save recipe.json buttons live in
               the session sidebar (below New session). ADR-0067 (#171): visual
               rules -> inline utilities; the .topbar grid + flex layout shell
               stays in styles.css. Settings mode (ADR-0075 overlay) unmounts
@@ -1176,7 +1176,7 @@ export default function App() {
                             sessionName={s.name}
                             onFirstTurnSettled={syncSessionName}
                             approvalEvents={approvalEvents}
-                            duckPath={s.path}
+                            recipePath={s.path}
                             onRename={renameEntry}
                             disabled={busy}
                             onClose={closeSessionWithCleanup}

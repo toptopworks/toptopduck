@@ -61,7 +61,7 @@ use crate::provider::prompt::ResponseLocale;
 /// The tray's registered id; the rebuild path re-resolves the tray by it.
 const TRAY_ID: &str = "main-tray";
 
-/// Emitted when a tray menu session item is clicked. Payload is the `.duck`
+/// Emitted when a tray menu session item is clicked. Payload is the `recipe.json`
 /// path (the stable session identity, ADR-0089) -- the frontend resolves the
 /// display name from its persisted-session list, keeping the wire shape
 /// minimal and the payload type shared with nothing else.
@@ -77,7 +77,7 @@ const ID_OPEN_MAIN: &str = "tray-open-main";
 const ID_QUIT: &str = "tray-quit";
 const ID_RECENT_HEADER: &str = "tray-recent-header";
 const ID_MORE: &str = "tray-more";
-/// Session item ids embed the `.duck` path after this prefix; the click
+/// Session item ids embed the `recipe.json` path after this prefix; the click
 /// handler parses it back out. A path collision with the fixed ids is
 /// impossible by namespace: session ids always start with this prefix,
 /// the fixed ids never do.
@@ -92,11 +92,11 @@ const MORE_CAP: usize = 10;
 /// [`plan_tray_event`]).
 const REBUILD_THROTTLE: Duration = Duration::from_secs(5);
 
-/// The `tray://open-session` payload. `duck_path` alone; see
+/// The `tray://open-session` payload. `recipe_path` alone; see
 /// [`OPEN_SESSION_EVENT`].
 #[derive(Debug, Clone, serde::Serialize)]
 struct OpenSessionPayload {
-    duck_path: String,
+    recipe_path: String,
 }
 
 /// All user-facing tray strings in one locale. Two languages only -- the app
@@ -177,9 +177,9 @@ fn session_label<'a>(m: &'a SessionMetadata, texts: &'a TrayTexts) -> &'a str {
 /// What a tray menu click asks for, parsed back out of the menu item id.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum TrayAction {
-    /// Open (or reveal) the persisted session bound to this `.duck` path.
+    /// Open (or reveal) the persisted session bound to this `recipe.json` path.
     OpenSession {
-        duck_path: String,
+        recipe_path: String,
     },
     NewSession,
     OpenMain,
@@ -202,7 +202,7 @@ fn parse_menu_id(id: &str) -> Option<TrayAction> {
     }
     id.strip_prefix(ID_SESSION_PREFIX)
         .map(|path| TrayAction::OpenSession {
-            duck_path: path.to_string(),
+            recipe_path: path.to_string(),
         })
 }
 
@@ -247,7 +247,7 @@ fn plan_menu(metas: &[SessionMetadata], texts: &TrayTexts) -> Vec<MenuEntry> {
     }
     fn session_row(m: &SessionMetadata, texts: &TrayTexts) -> MenuRow {
         row(
-            format!("{ID_SESSION_PREFIX}{}", m.duck_path.as_str()),
+            format!("{ID_SESSION_PREFIX}{}", m.recipe_path.as_str()),
             session_label(m, texts),
             true,
         )
@@ -366,7 +366,7 @@ pub(crate) fn close_hides(tray_available: bool) -> bool {
 /// the process -- neither has a webview half, so neither is buffered.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum PendingSessionAction {
-    OpenSession { duck_path: String },
+    OpenSession { recipe_path: String },
     NewSession,
 }
 
@@ -428,10 +428,10 @@ impl TrayReadiness {
 /// tail of the direct path and the handshake replay.
 pub(crate) fn emit_session_action(app: &AppHandle, action: &PendingSessionAction) {
     let result = match action {
-        PendingSessionAction::OpenSession { duck_path } => app.emit(
+        PendingSessionAction::OpenSession { recipe_path } => app.emit(
             OPEN_SESSION_EVENT,
             OpenSessionPayload {
-                duck_path: duck_path.clone(),
+                recipe_path: recipe_path.clone(),
             },
         ),
         PendingSessionAction::NewSession => app.emit(NEW_SESSION_EVENT, ()),
@@ -581,9 +581,9 @@ pub(crate) fn init(app: &AppHandle) -> bool {
         // idiom (ADR-0125 Decision 4) is left = reveal window, right = menu.
         .show_menu_on_left_click(false)
         .on_menu_event(|app, event| match parse_menu_id(event.id().as_ref()) {
-            Some(TrayAction::OpenSession { duck_path }) => {
+            Some(TrayAction::OpenSession { recipe_path }) => {
                 show_main(app);
-                dispatch_session_action(app, PendingSessionAction::OpenSession { duck_path });
+                dispatch_session_action(app, PendingSessionAction::OpenSession { recipe_path });
             }
             Some(TrayAction::NewSession) => {
                 show_main(app);
@@ -620,11 +620,11 @@ pub(crate) fn init(app: &AppHandle) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::persistence::{DuckPath, SourceSummary};
+    use crate::persistence::{RecipePath, SourceSummary};
 
     fn meta(path: &str, name: &str) -> SessionMetadata {
         SessionMetadata {
-            duck_path: DuckPath::new(path),
+            recipe_path: RecipePath::new(path),
             display_name: name.into(),
             last_modified_at: 0,
             source_summary: SourceSummary {
@@ -641,7 +641,7 @@ mod tests {
     }
 
     fn paths(metas: &[SessionMetadata]) -> Vec<&str> {
-        metas.iter().map(|m| m.duck_path.as_str()).collect()
+        metas.iter().map(|m| m.recipe_path.as_str()).collect()
     }
 
     /// Test-only token for a separator slot in the plan kind assertions.
@@ -693,29 +693,41 @@ mod tests {
 
     #[test]
     fn split_three_stays_top_level() {
-        let metas: Vec<_> = (0..3).map(|i| meta(&format!("s{i}.duck"), "n")).collect();
+        let metas: Vec<_> = (0..3)
+            .map(|i| meta(&format!("s{i}.recipe.json"), "n"))
+            .collect();
         let (recent, more) = split_recent(&metas);
-        assert_eq!(paths(recent), vec!["s0.duck", "s1.duck", "s2.duck"]);
+        assert_eq!(
+            paths(recent),
+            vec!["s0.recipe.json", "s1.recipe.json", "s2.recipe.json"]
+        );
         assert!(more.is_empty());
     }
 
     #[test]
     fn split_four_puts_the_fourth_into_more() {
-        let metas: Vec<_> = (0..4).map(|i| meta(&format!("s{i}.duck"), "n")).collect();
+        let metas: Vec<_> = (0..4)
+            .map(|i| meta(&format!("s{i}.recipe.json"), "n"))
+            .collect();
         let (recent, more) = split_recent(&metas);
-        assert_eq!(paths(recent), vec!["s0.duck", "s1.duck", "s2.duck"]);
-        assert_eq!(paths(more), vec!["s3.duck"]);
+        assert_eq!(
+            paths(recent),
+            vec!["s0.recipe.json", "s1.recipe.json", "s2.recipe.json"]
+        );
+        assert_eq!(paths(more), vec!["s3.recipe.json"]);
     }
 
     #[test]
     fn split_caps_more_at_ten() {
-        let metas: Vec<_> = (0..20).map(|i| meta(&format!("s{i}.duck"), "n")).collect();
+        let metas: Vec<_> = (0..20)
+            .map(|i| meta(&format!("s{i}.recipe.json"), "n"))
+            .collect();
         let (recent, more) = split_recent(&metas);
         assert_eq!(recent.len(), 3);
         assert_eq!(more.len(), 10);
         // Order is preserved newest-first (the scan's sort).
-        assert_eq!(more[0].duck_path.as_str(), "s3.duck");
-        assert_eq!(more[9].duck_path.as_str(), "s12.duck");
+        assert_eq!(more[0].recipe_path.as_str(), "s3.recipe.json");
+        assert_eq!(more[9].recipe_path.as_str(), "s12.recipe.json");
     }
 
     #[test]
@@ -727,30 +739,30 @@ mod tests {
             SessionMetadata {
                 last_modified_at: 100,
                 pinned: true,
-                ..meta("pinned-old.duck", "p")
+                ..meta("pinned-old.recipe.json", "p")
             },
             SessionMetadata {
                 last_modified_at: 900,
-                ..meta("fresh.duck", "f")
+                ..meta("fresh.recipe.json", "f")
             },
             SessionMetadata {
                 last_modified_at: 500,
                 pinned: true,
-                ..meta("pinned-mid.duck", "p")
+                ..meta("pinned-mid.recipe.json", "p")
             },
             SessionMetadata {
                 last_modified_at: 700,
-                ..meta("recent.duck", "r")
+                ..meta("recent.recipe.json", "r")
             },
         ];
         sort_recency_first(&mut metas);
         assert_eq!(
             paths(&metas),
             vec![
-                "fresh.duck",
-                "recent.duck",
-                "pinned-mid.duck",
-                "pinned-old.duck"
+                "fresh.recipe.json",
+                "recent.recipe.json",
+                "pinned-mid.recipe.json",
+                "pinned-old.recipe.json"
             ]
         );
     }
@@ -761,16 +773,16 @@ mod tests {
     fn label_falls_back_to_unnamed_for_blank_display_names() {
         let texts = texts_for(ResponseLocale::ZhCN);
         assert_eq!(
-            session_label(&meta("a.duck", ""), &texts),
+            session_label(&meta("a.recipe.json", ""), &texts),
             texts.unnamed_session
         );
         // Whitespace-only is just as unreadable in a menu row.
         assert_eq!(
-            session_label(&meta("a.duck", "  "), &texts),
+            session_label(&meta("a.recipe.json", "  "), &texts),
             texts.unnamed_session
         );
         assert_eq!(
-            session_label(&meta("a.duck", "我的分析"), &texts),
+            session_label(&meta("a.recipe.json", "我的分析"), &texts),
             "我的分析"
         );
     }
@@ -779,11 +791,11 @@ mod tests {
 
     #[test]
     fn parse_round_trips_a_session_path() {
-        let id = format!("{ID_SESSION_PREFIX}C:\\sessions\\uuid\\session.duck");
+        let id = format!("{ID_SESSION_PREFIX}C:\\sessions\\uuid\\session.recipe.json");
         assert_eq!(
             parse_menu_id(&id),
             Some(TrayAction::OpenSession {
-                duck_path: "C:\\sessions\\uuid\\session.duck".into()
+                recipe_path: "C:\\sessions\\uuid\\session.recipe.json".into()
             })
         );
     }
@@ -816,7 +828,7 @@ mod tests {
 
     fn open(path: &str) -> PendingSessionAction {
         PendingSessionAction::OpenSession {
-            duck_path: path.into(),
+            recipe_path: path.into(),
         }
     }
 
@@ -825,8 +837,8 @@ mod tests {
         let readiness = TrayReadiness::default();
         // Three clicks before the frontend registers its listeners: each
         // reports buffered (the caller skips its emit)...
-        assert!(readiness.record(&open("a.duck")));
-        assert!(readiness.record(&open("b.duck")));
+        assert!(readiness.record(&open("a.recipe.json")));
+        assert!(readiness.record(&open("b.recipe.json")));
         assert!(readiness.record(&PendingSessionAction::NewSession));
         // ...and only the LAST action replays -- a rapid double click is
         // one user intent, not a queue.
@@ -844,7 +856,7 @@ mod tests {
         readiness.mark_ready();
         // record returning false = not buffered = the caller emits
         // directly (the steady path: zero handshake traffic per click).
-        assert!(!readiness.record(&open("a.duck")));
+        assert!(!readiness.record(&open("a.recipe.json")));
         assert_eq!(readiness.mark_ready(), None);
     }
 
@@ -856,18 +868,18 @@ mod tests {
         // earliest backend-visible signal, so clicks buffer again until
         // the next tray_ready.
         readiness.page_load_started();
-        assert!(readiness.record(&open("c.duck")));
-        assert_eq!(readiness.mark_ready(), Some(open("c.duck")));
+        assert!(readiness.record(&open("c.recipe.json")));
+        assert_eq!(readiness.mark_ready(), Some(open("c.recipe.json")));
     }
 
     #[test]
     fn a_page_load_keeps_an_action_that_raced_the_reload() {
         let readiness = TrayReadiness::default();
-        assert!(readiness.record(&open("a.duck")));
+        assert!(readiness.record(&open("a.recipe.json")));
         // The webview reloaded before the ready landed; the buffered
         // intent survives and the freshly loaded page replays it.
         readiness.page_load_started();
-        assert_eq!(readiness.mark_ready(), Some(open("a.duck")));
+        assert_eq!(readiness.mark_ready(), Some(open("a.recipe.json")));
     }
 
     // --- wire names (the frontend listens on these exact strings) ----------
@@ -884,7 +896,9 @@ mod tests {
 
     #[test]
     fn plan_pins_the_full_assembly_order() {
-        let metas: Vec<_> = (0..4).map(|i| meta(&format!("s{i}.duck"), "n")).collect();
+        let metas: Vec<_> = (0..4)
+            .map(|i| meta(&format!("s{i}.recipe.json"), "n"))
+            .collect();
         let plan = plan_menu(&metas, &texts_for(ResponseLocale::EnUS));
         let rows: Vec<(&str, &str, bool)> = plan
             .iter()
@@ -897,9 +911,9 @@ mod tests {
             rows,
             vec![
                 (ID_RECENT_HEADER, "Recent sessions", false),
-                ("tray-open-session::s0.duck", "n", true),
-                ("tray-open-session::s1.duck", "n", true),
-                ("tray-open-session::s2.duck", "n", true),
+                ("tray-open-session::s0.recipe.json", "n", true),
+                ("tray-open-session::s1.recipe.json", "n", true),
+                ("tray-open-session::s2.recipe.json", "n", true),
                 (ID_NEW_SESSION, "New session", true),
                 (ID_OPEN_MAIN, "Open main window", true),
                 (ID_QUIT, "Quit", true),
@@ -913,7 +927,7 @@ mod tests {
                 assert_eq!(title, "More");
                 assert_eq!(
                     children.iter().map(|c| c.id.as_str()).collect::<Vec<_>>(),
-                    vec!["tray-open-session::s3.duck"]
+                    vec!["tray-open-session::s3.recipe.json"]
                 );
             }
             other => panic!("expected the more submenu at index 4, got {other:?}"),
@@ -922,7 +936,9 @@ mod tests {
 
     #[test]
     fn plan_omits_the_more_submenu_when_empty() {
-        let metas: Vec<_> = (0..3).map(|i| meta(&format!("s{i}.duck"), "n")).collect();
+        let metas: Vec<_> = (0..3)
+            .map(|i| meta(&format!("s{i}.recipe.json"), "n"))
+            .collect();
         let plan = plan_menu(&metas, &texts_for(ResponseLocale::ZhCN));
         assert!(plan.iter().all(|e| !matches!(e, MenuEntry::More { .. })));
         // With no sessions at all the header + the three fixed actions
@@ -955,7 +971,9 @@ mod tests {
     fn plan_separates_sessions_from_actions_and_quit() {
         // Two separators, three zones: the session block (header + rows +
         // more), the window actions, and the exit on its own.
-        let metas: Vec<_> = (0..4).map(|i| meta(&format!("s{i}.duck"), "n")).collect();
+        let metas: Vec<_> = (0..4)
+            .map(|i| meta(&format!("s{i}.recipe.json"), "n"))
+            .collect();
         let plan = plan_menu(&metas, &texts_for(ResponseLocale::EnUS));
         let kinds: Vec<&str> = plan
             .iter()
@@ -969,9 +987,9 @@ mod tests {
             kinds,
             vec![
                 ID_RECENT_HEADER,
-                "tray-open-session::s0.duck",
-                "tray-open-session::s1.duck",
-                "tray-open-session::s2.duck",
+                "tray-open-session::s0.recipe.json",
+                "tray-open-session::s1.recipe.json",
+                "tray-open-session::s2.recipe.json",
                 ID_MORE,
                 SEP,
                 ID_NEW_SESSION,

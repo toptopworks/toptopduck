@@ -20,7 +20,7 @@ export type SessionFlowKind =
 
 /** The full error-tag domain. SessionFlowKind members tag a session-layer
  *  mutation/query reject (verb-prefixed banner); "shell" tags a shell-layer IPC
- *  reject (createSession / openDuck / save / delete / rename persisted /
+ *  reject (createSession / openRecipe / save / delete / rename persisted /
  *  profile switch); "read" tags a ResultView readRows reject. "shell" and
  *  "read" both render via toAppError without a verb prefix. */
 export type AppErrorKind = SessionFlowKind | "shell" | "read";

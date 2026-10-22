@@ -110,18 +110,18 @@ interface SessionPaneProps {
    *  its own session's entries (merged into the live trace by useTurnFlow)
    *  and binds the respond + settled-clear callbacks to its sessionId. */
   approvalEvents: UseApprovalEvents;
-  /** ADR-0093 (issue #512): the bound `.duck` path for session-level
+  /** ADR-0093 (issue #512): the bound `recipe.json` path for session-level
    *  management actions (rename / delete). Always non-null since
    *  ADR-0089: createSession binds immediately. */
-  duckPath: string;
+  recipePath: string;
   /** ADR-0093 (issue #512): shell callback to rename this session's entry. */
-  onRename: (sessionId: string, duckPath: string, newName: string) => void;
+  onRename: (sessionId: string, recipePath: string, newName: string) => void;
   /** ADR-0093 (issue #512): shell callback to close this session (fires
    *  cancel + approval cleanup + draft drop). */
   onClose: (sessionId: string) => void;
   /** ADR-0093 (issue #512): shell callback to permanently delete this
-   *  session. Receives the .duck path + runtime sid. */
-  onDelete: (duckPath: string, sessionId: string) => void;
+   *  session. Receives the recipe.json path + runtime sid. */
+  onDelete: (recipePath: string, sessionId: string) => void;
   /** Shell-wide busy gate: disables the header menu trigger during
    *  persistence / resume operations (ADR-0093, matching the sidebar's
    *  disabled={busy} contract). */
@@ -155,7 +155,7 @@ const EDGE_DOCKED_SCROLL_CLASS = "-m-4 overflow-y-auto p-4";
  * padding, or the stage header's border-b sits flush on the tab strip's. */
 const FILE_STAGE_CLASS = "-mx-4 -mb-4 overflow-hidden";
 
-export function SessionPane({ sessionId, isActive, pendingIngestPaths, onIngestConsumed, pendingQuestion, pendingSkillInvocations, onQuestionConsumed, onSeedDraft, onSeedInvocations, onComposerFields, onComposerFieldsUnmount, sessionName, onFirstTurnSettled, approvalEvents, duckPath, onRename, onClose, onDelete, disabled }: SessionPaneProps) {
+export function SessionPane({ sessionId, isActive, pendingIngestPaths, onIngestConsumed, pendingQuestion, pendingSkillInvocations, onQuestionConsumed, onSeedDraft, onSeedInvocations, onComposerFields, onComposerFieldsUnmount, sessionName, onFirstTurnSettled, approvalEvents, recipePath, onRename, onClose, onDelete, disabled }: SessionPaneProps) {
   // This session's slice of the app-level approval map + the two stable
   // sessionId-bound callbacks (ADR-0056 addressing: the channel is global,
   // the pane acts on its own session only). The respond / clearSession
@@ -452,7 +452,7 @@ export function SessionPane({ sessionId, isActive, pendingIngestPaths, onIngestC
         </span>
         <SessionHeaderMenu
           sessionName={sessionName}
-          duckPath={duckPath}
+          recipePath={recipePath}
           sessionId={sessionId}
           onRename={onRename}
           onClose={onClose}
@@ -690,6 +690,28 @@ export function SessionPane({ sessionId, isActive, pendingIngestPaths, onIngestC
                 </AlertDescription>
               </Alert>
             )}
+            {s.sourceNotices.length > 0 && (
+              // ADR-0136: a watermark-hit resume opened even though a source
+              // file is missing or changed since settle -- the working set IS
+              // the ingest-time snapshot. Polite status surface (same posture
+              // as the persist banner): informational, not interrupting.
+              <Alert variant="warning" role="status" className="mt-1.5">
+                <AlertDescription>
+                  <p className="m-0">
+                    <FormattedMessage
+                      id="resume.sourceNotice"
+                      defaultMessage="Source file changed or unavailable: {names}. The working set is the snapshot from ingest time."
+                      values={{
+                        names: intl.formatList(
+                          s.sourceNotices.map((n) => n.data.reference_name),
+                          { type: "conjunction" },
+                        ),
+                      }}
+                    />
+                  </p>
+                </AlertDescription>
+              </Alert>
+            )}
             {s.persistError && (
               // ADR-0067 (issue #172): the bespoke .persist-warning container
               // (hardcoded amber #fff4e5 / #ffd9a0 / #8a5200) retired into a
@@ -727,7 +749,7 @@ export function SessionPane({ sessionId, isActive, pendingIngestPaths, onIngestC
                 key={`result-${regionRetryEpoch}`}
                 content={s.workspaceContent}
                 sessionId={sessionId}
-                duckPath={duckPath}
+                recipePath={recipePath}
                 hasData={s.datasets.length > 0}
                 onResetRegion={resetSessionCache}
                 onResetArtifact={resetArtifactCache}
@@ -805,7 +827,7 @@ export function SessionPane({ sessionId, isActive, pendingIngestPaths, onIngestC
 function WorkspaceResult({
   content,
   sessionId,
-  duckPath,
+  recipePath,
   hasData,
   onResetRegion,
   onResetArtifact,
@@ -815,9 +837,9 @@ function WorkspaceResult({
 }: {
   content: WorkspaceContent;
   sessionId: string;
-  /** The session's bound .duck path -- anchors the HTML branch's
+  /** The session's bound recipe.json path -- anchors the HTML branch's
    *  artifacts-dir scope check (ADR-0124 Decision 4). */
-  duckPath: string;
+  recipePath: string;
   hasData: boolean;
   /** ADR-0058 L2 result-partition retry: remove the session slice so a
    *  remounted ResultView re-fetches fresh rows instead of re-throwing against
@@ -931,7 +953,7 @@ function WorkspaceResult({
           <ArtifactView
             artifact={{ path: content.path, file_name: content.fileName }}
             render={content.render}
-            duckPath={duckPath}
+            recipePath={recipePath}
           />
         </ErrorBoundary>
       );

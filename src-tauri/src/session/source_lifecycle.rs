@@ -282,10 +282,11 @@ impl super::Session {
         // elsewhere first. copy_in clears any stale swap file from a prior failed
         // attempt before writing.
         let swap_alias = format!("{reference_name}__swap");
-        let new_snap = match ingest::loader::copy_in(path, &self.temp_path, &swap_alias, reader) {
-            Ok(s) => s,
-            Err(e) => return LoadOutcome::Error(e),
-        };
+        let new_snap =
+            match ingest::loader::copy_in(path, &self.snapshot_dir(), &swap_alias, reader) {
+                Ok(s) => s,
+                Err(e) => return LoadOutcome::Error(e),
+            };
 
         // Confirm the new snapshot mounts BEFORE retiring the old one: pre-attach
         // it under the swap alias (distinct from `<ref>`, so both co-exist). A

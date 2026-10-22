@@ -1,4 +1,4 @@
-//! Forward migration pipeline (ADR-0036 Decision 1): a `.duck` whose
+//! Forward migration pipeline (ADR-0036 Decision 1): a `recipe.json` whose
 //! `format_version` is BELOW the current app version steps through per-version
 //! JSON transforms, each producing the next version's shape, until it reaches
 //! the current version. The pipeline composes -- adding a transform extends it
@@ -96,7 +96,7 @@ pub fn migrate_to_current(value: Value, from_version: u32) -> Result<Value, Migr
         v += 1;
         // Stamp the stepped-to version. A non-object root cannot carry
         // `format_version` and is a structural error, not a panic -- the
-        // `format_version` honest-parse guard in `read_duck` keeps the
+        // `format_version` honest-parse guard in `read_recipe` keeps the
         // production path on an object root, but this is a pub API so it
         // defends its own contract (ADR-0034 honest parse).
         let obj = current.as_object_mut().ok_or_else(|| {
@@ -244,7 +244,7 @@ mod transforms {
         else {
             // A Materialized outcome missing `sql` is corrupt; the typed
             // deserialize rejects it downstream. Stay side-effect-free (no
-            // guess), but log the skip so a corrupt .duck is diagnosable
+            // guess), but log the skip so a corrupt recipe.json is diagnosable
             // rather than a silent no-trace.
             log::warn!("v1->v2 migration: Materialized turn missing sql; no synthetic trace");
             return;

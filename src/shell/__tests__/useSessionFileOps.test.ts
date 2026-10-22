@@ -80,7 +80,7 @@ describe("useSessionFileOps", () => {
     vi.clearAllMocks();
   });
 
-  it("renameEntry rewrites a closed .duck header via renamePersistedSession + refreshes (closed branch, #204)", async () => {
+  it("renameEntry rewrites a closed recipe.json header via renamePersistedSession + refreshes (closed branch, #204)", async () => {
     // The closed branch (sid=null, path set) rewrites the recipe header in place
     // by path, then refreshes the sidebar so list_sessions re-derives the name.
     vi.mocked(renamePersistedSession).mockResolvedValueOnce();

@@ -1,5 +1,5 @@
 //! Recipe model (ADR-0034/0036/0042): the durable, portable description of a
-//! Session's current working set. A `.duck` file is this recipe serialized as
+//! Session's current working set. A `recipe.json` file is this recipe serialized as
 //! text (JSON). The recipe holds only what resume needs to rebuild the working
 //! set -- never the materialized result data (re-derived by eager replay),
 //! never the LLM viz state (regenerated on demand, ADR-0033/0036), never any
@@ -132,7 +132,7 @@ pub const RECIPE_FORMAT_VERSION: u32 = 7;
 /// One source Dataset's portable reference (ADR-0034/0036/0042). Paths use
 /// the **hybrid representation** ADR-0036 §4 mandates: `source_path` is always
 /// absolute (the fallback resolver); `relative_path` is set when the source
-/// lives inside the `.duck` file's directory subtree (the primary resolver --
+/// lives inside the `recipe.json` file's directory subtree (the primary resolver --
 /// it survives "move the folder" portability). Cross-volume / outside-subtree
 /// sources carry `relative_path = None`, and resume falls back to
 /// `source_path`. Both forms undergo fingerprint verification (ADR-0035).
@@ -152,7 +152,7 @@ pub struct SourceRef {
     /// (ADR-0036 §4). Older v1 recipes written before hybrid paths land here
     /// and resume treats them as absolute-only.
     pub source_path: String,
-    /// Path relative to the `.duck` file's directory, when the source lives in
+    /// Path relative to the `recipe.json` file's directory, when the source lives in
     /// that subtree (ADR-0036 §4). `None` when the source is outside the
     /// subtree or on a different volume (where a relative path is not
     /// expressible). Resume tries this first, then `source_path`.
@@ -245,7 +245,7 @@ pub struct RecipeTraceEntry {
     /// Empty for a successful call (the capped delegation report's
     /// truncation notice excepted, issue #1047 -- a status fact, kept): its
     /// dispatch content is a data-bearing
-    /// descriptor / shape JSON the .duck should not carry (ADR-0036 contents
+    /// descriptor / shape JSON the recipe.json should not carry (ADR-0036 contents
     /// boundary -- though the excerpt is already bounded at capture, the
     /// success payload is rebuilt on resume anyway), so persisting it would
     /// add noise without value.
@@ -254,7 +254,7 @@ pub struct RecipeTraceEntry {
     /// #934): the sub-agent's rounds persisted under the SAME slim projection
     /// the main rounds take (a successful sub-call's excerpt empties, a
     /// failed one keeps its bounded message) -- no full-tool-result channel
-    /// opens for the sub-trace (the .duck stays a bounded-text recipe).
+    /// opens for the sub-trace (the recipe.json stays a bounded-text recipe).
     /// Absent for every ordinary call and for pre-#934 sessions (serde
     /// default). The nesting is physically depth 1 (the sub-face excludes
     /// every delegation tool), so a nested entry never itself carries one.
@@ -340,7 +340,7 @@ pub enum LastRuntime {
 /// [`RuntimeKind::BuiltIn`] (issue #319); skills stay empty until skill
 /// tracking lands (the skill surface itself is defined by ADR-0079).
 /// v1-era migrated turns carry no runtime or skill provenance and round-trip
-/// the default (omitted from the .duck).
+/// the default (omitted from the recipe.json).
 /// `#[serde(default)]` keeps older v2 recipes (and the migration output)
 /// deserializing cleanly.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -377,7 +377,7 @@ pub struct TurnProvenance {
 impl TurnProvenance {
     /// Whether this provenance carries no information (no runtime, no skills).
     /// Used by `skip_serializing_if` so a v2 recipe omits the field for turns
-    /// with no recorded provenance, keeping the `.duck` file lean.
+    /// with no recorded provenance, keeping the `recipe.json` file lean.
     fn is_empty(&self) -> bool {
         self.runtime.is_none() && self.skills.is_empty()
     }
@@ -425,7 +425,7 @@ pub(crate) fn synthetic_materialize_trace(sql: &str) -> Vec<RecipeTraceEntry> {
 /// Truncate a trace-entry summary string to [`TRACE_SUMMARY_MAX`] chars,
 /// appending an ellipsis when cut. Shared by [`synthetic_materialize_trace`]
 /// and the agent loop's live `materialize` summary (`summarize_field`) so a
-/// persisted trace never bloats the `.duck` file while staying recognizable.
+/// persisted trace never bloats the `recipe.json` file while staying recognizable.
 pub(crate) fn truncate_trace_summary(s: &str) -> String {
     crate::util::truncate_chars_with_ellipsis(s, TRACE_SUMMARY_MAX)
 }
@@ -640,7 +640,7 @@ pub enum RecipeOutcome {
 ///
 /// **Construction invariant:** a `Recipe` is built
 /// only through [`Recipe::build`] on the write path ([`Session::build_recipe`])
-/// or deserialized via [`crate::persistence::io::read_duck`] (which routes on
+/// or deserialized via [`crate::persistence::io::read_recipe`] (which routes on
 /// `format_version` and deduplicates source names). `format_version` is the
 /// one PRIVATE field: it is always [`RECIPE_FORMAT_VERSION`] (pinned by
 /// `build`, never caller-settable), so a struct-literal construction from
@@ -651,7 +651,7 @@ pub enum RecipeOutcome {
 /// -- "no illegal state reaches disk" -- is carried by the private
 /// `format_version` + `build`'s validation, not by field-level encapsulation.
 /// Serde still (de)serializes `format_version` because the derive lives in
-/// this module -- the field rides the `.duck` file for version routing
+/// this module -- the field rides the `recipe.json` file for version routing
 /// (ADR-0036), even though the Rust value is the constant.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Recipe {
@@ -795,9 +795,9 @@ impl Recipe {
     /// Construct a recipe with the cross-field invariants validated. This is
     /// the SINGLE write point -- [`Session::build_recipe`]
     /// calls it, and no other production path constructs a `Recipe` (the open
-    /// path goes through serde deserialize, which `read_duck`'s version routing
+    /// path goes through serde deserialize, which `read_recipe`'s version routing
     /// and duplicate-source check guards). The constructor is the Rust-side
-    /// mirror of the parse-time checks in `read_duck`: it makes the illegal
+    /// mirror of the parse-time checks in `read_recipe`: it makes the illegal
     /// states unrepresentable from the write side too, so a future internal
     /// caller cannot persist a recipe the reader would reject.
     ///
@@ -909,7 +909,7 @@ impl Recipe {
 
     /// The format version this recipe carries (ADR-0036). Always
     /// [`RECIPE_FORMAT_VERSION`] for a recipe built via [`Recipe::build`] or
-    /// read through [`crate::persistence::io::read_duck`] (which routes on the
+    /// read through [`crate::persistence::io::read_recipe`] (which routes on the
     /// file's version before deserializing). Exposed as an accessor because
     /// the field is private (caller-settable versions are illegal).
     pub fn format_version(&self) -> u32 {
@@ -1036,7 +1036,7 @@ mod tests {
     #[test]
     fn recipe_round_trips_through_json() {
         // The recipe survives a serialize -> deserialize cycle byte-for-byte
-        // (equality), so the .duck file written on save reads back identically
+        // (equality), so the recipe.json file written on save reads back identically
         // on resume -- the foundation of the persistence contract.
         let recipe = build_recipe();
         let json = serde_json::to_string(&recipe).expect("serialize");
@@ -1062,7 +1062,7 @@ mod tests {
         // the model narrated between tool batches -- the loop's outcome
         // retention deliberately keeps them. The wire form is the minimal
         // `{"text": ...}` (thinking skips when absent, calls when empty) and
-        // that exact shape round-trips, so a .duck carrying it reads back
+        // that exact shape round-trips, so a recipe.json carrying it reads back
         // with neither a ghost round nor dropped prose.
         let round = RecipeTraceRound {
             thinking: None,
@@ -1146,7 +1146,7 @@ mod tests {
 
     #[test]
     fn serialized_recipe_carries_no_secrets_or_materialized_data() {
-        // ADR-0036 secrets-never + contents boundary: the .duck text must
+        // ADR-0036 secrets-never + contents boundary: the recipe.json text must
         // never carry an API key, a materialized result's columns / sample /
         // row-count / fingerprint, or a viz spec. The recipe type prevents
         // these structurally (no such fields exist), but this test pins that
@@ -1298,7 +1298,7 @@ mod tests {
     /// Pre-#52 forward-compat (issue #52): a v1 recipe written before the
     /// `stale` field existed omits it on disk. `#[serde(default)]` must
     /// deserialize such a turn as live (`stale: None`) -- removing the default
-    /// would break reopening every pre-#52 .duck file with a cryptic
+    /// would break reopening every pre-#52 recipe.json file with a cryptic
     /// "missing field `stale`" error. Pins the load-bearing serde attribute.
     #[test]
     fn materialized_outcome_without_stale_field_deserializes_as_live() {
@@ -1415,7 +1415,7 @@ mod tests {
     // above (they construct via struct literal in-module, but Session's live
     // write path goes through build); these tests pin the rejection branches so
     // a future loosening of build() fails loudly here rather than silently
-    // persisting a recipe read_duck would later reject.
+    // persisting a recipe read_recipe would later reject.
 
     #[test]
     fn build_accepts_a_valid_recipe_and_pins_format_version() {
@@ -1596,7 +1596,7 @@ mod tests {
     fn recipe_turn_omits_empty_trace_and_default_provenance_from_json() {
         // ADR-0078: the trace + provenance are persisted substructures, but a
         // turn with no tool trajectory and untracked provenance omits BOTH
-        // fields (skip_serializing_if), keeping the .duck lean. A v1-era
+        // fields (skip_serializing_if), keeping the recipe.json lean. A v1-era
         // Textual turn serializes to the same shape v1 carried (no trace /
         // provenance keys) -- the round trip is byte-stable.
         let turn = RecipeTurn::without_audit(
@@ -1618,9 +1618,9 @@ mod tests {
     fn usage_round_trips_and_old_recipes_open_without_it() {
         // ADR-0129 (issue #1270): a usage-bearing turn round-trips the
         // aggregate + the built-in sub-agent subtotals verbatim; a turn
-        // without usage omits the key (lean .duck); and a turn persisted
+        // without usage omits the key (lean recipe.json); and a turn persisted
         // BEFORE the field (no usage key on disk) deserializes with `None`
-        // -- the old-.duck zero-migration rule (Decision 4: serde default,
+        // -- the old-recipe.json zero-migration rule (Decision 4: serde default,
         // no format_version bump).
         let mut turn = RecipeTurn::without_audit(
             "问一句",
@@ -1660,7 +1660,7 @@ mod tests {
             .remove("usage");
         let legacy = serde_json::to_string(&legacy_value).expect("re-serialize");
         assert_ne!(legacy, json, "the legacy form actually dropped the key");
-        let old: RecipeTurn = serde_json::from_str(&legacy).expect("old .duck opens");
+        let old: RecipeTurn = serde_json::from_str(&legacy).expect("old recipe.json opens");
         assert!(old.usage.is_none(), "the old turn degrades to no usage");
         // A no-usage turn omits the key entirely.
         let bare = RecipeTurn::without_audit(
@@ -1683,7 +1683,7 @@ mod tests {
         // ADR-0130: an occupancy-bearing turn round-trips the reading
         // verbatim (numerator + the ACP-reported window); a turn with no
         // reading omits the key; and a turn persisted BEFORE the field
-        // deserializes with `None` -- the same old-.duck zero-migration
+        // deserializes with `None` -- the same old-recipe.json zero-migration
         // rule `usage` rides (serde default, no format_version bump).
         let mut turn = RecipeTurn::without_audit(
             "问一句",
@@ -1720,7 +1720,7 @@ mod tests {
         // ADR-0101: an External turn persists the adapter id alongside the
         // runtime kind, so a mixed thread's reader can tell WHICH external CLI
         // produced each turn. The pair survives the serialize -> deserialize
-        // cycle -- the .duck written on save reads back identically on resume.
+        // cycle -- the recipe.json written on save reads back identically on resume.
         let provenance = TurnProvenance {
             runtime: Some(RuntimeKind::External),
             adapter_id: Some("gemini-cli".into()),
@@ -1829,7 +1829,7 @@ mod tests {
     #[test]
     fn recipe_turn_round_trips_a_synthetic_trace_through_json() {
         // A Materialized turn's synthesized single-call trace survives a
-        // serialize -> deserialize cycle, so the .duck written on save reads
+        // serialize -> deserialize cycle, so the recipe.json written on save reads
         // back identically on resume -- the foundation for the v2 display-part
         // contract (ADR-0078/0082).
         let turn = RecipeTurn {
@@ -1942,7 +1942,7 @@ mod tests {
     #[test]
     fn provenance_is_empty_when_default() {
         // The skip_serializing_if predicate: a default provenance (no runtime,
-        // no skills) reports empty so the field is omitted from the .duck.
+        // no skills) reports empty so the field is omitted from the recipe.json.
         assert!(TurnProvenance::default().is_empty());
         assert!(
             !TurnProvenance {

@@ -259,7 +259,7 @@ describe("SessionSidebar shell-skeleton visuals (ADR-0067, issue #171)", () => {
 
   it("session-entry-main has no status dot for a not-open persisted entry (ADR-0093, issue #511)", () => {
     const persisted: SessionMetadata = {
-      duck_path: "/x/closed.duck",
+      recipe_path: "/x/closed.duck",
       display_name: "Closed",
       last_modified_at: Date.now(),
       source_summary: { first_source_name: null, source_count: 0, turn_count: 0 },
@@ -299,7 +299,7 @@ describe("SessionSidebar shell-skeleton visuals (ADR-0067, issue #171)", () => {
 
   it("session-entry-main keeps appearance-none reset + hover:bg-accent + rounded-md on the default row", () => {
     const persisted: SessionMetadata = {
-      duck_path: "/x/default.duck",
+      recipe_path: "/x/default.duck",
       display_name: "Default",
       last_modified_at: Date.now(),
       source_summary: { first_source_name: null, source_count: 0, turn_count: 0 },
@@ -501,7 +501,7 @@ describe("SessionSidebar grouping toggle (ADR-0072, issue #251)", () => {
   // has an anchor (the first group-title row).
   function onePersisted(): SessionMetadata {
     return {
-      duck_path: "/x/solo.duck",
+      recipe_path: "/x/solo.duck",
       display_name: "Solo",
       last_modified_at: Date.now(),
       source_summary: { first_source_name: null, source_count: 0, turn_count: 0 },
@@ -1035,7 +1035,7 @@ describe("SessionSidebar hover card content (ADR-0093, issue #513)", () => {
 
   it("shows source summary + turn count when sourceCount > 0", async () => {
     const persisted: SessionMetadata = {
-      duck_path: "/x/sourced.duck",
+      recipe_path: "/x/sourced.duck",
       display_name: "With Sources",
       last_modified_at: Date.now() - 3 * 3600_000,
       source_summary: { first_source_name: "data.csv", source_count: 3, turn_count: 5 },
@@ -1061,7 +1061,7 @@ describe("SessionSidebar hover card content (ADR-0093, issue #513)", () => {
 
   it("shows em-dash fallback for data source when sourceCount === 0", async () => {
     const persisted: SessionMetadata = {
-      duck_path: "/x/empty.duck",
+      recipe_path: "/x/empty.duck",
       display_name: "No Sources",
       last_modified_at: Date.now(),
       source_summary: { first_source_name: null, source_count: 0, turn_count: 0 },
@@ -1090,7 +1090,7 @@ describe("SessionSidebar hover card content (ADR-0093, issue #513)", () => {
     // read); leaving the CARD schedules its own close -- the row-leave guard
     // cannot serve that path, the row's leave already ran.
     const persisted: SessionMetadata = {
-      duck_path: "/x/grace.duck",
+      recipe_path: "/x/grace.duck",
       display_name: "Grace Card",
       last_modified_at: Date.now() - 3 * 3600_000,
       source_summary: { first_source_name: null, source_count: 0, turn_count: 0 },
@@ -1132,7 +1132,7 @@ describe("SessionSidebar hover card content (ADR-0093, issue #513)", () => {
     // pointer-events toggling never reaches the row; the list-level leave is
     // the final backstop.
     const persisted: SessionMetadata = {
-      duck_path: "/x/backstop.duck",
+      recipe_path: "/x/backstop.duck",
       display_name: "Backstop Card",
       last_modified_at: Date.now() - 3 * 3600_000,
       source_summary: { first_source_name: null, source_count: 0, turn_count: 0 },
@@ -1163,7 +1163,7 @@ describe("SessionSidebar hover card content (ADR-0093, issue #513)", () => {
     // root's onOpenChange(true) (Radix's real contract), and the parent
     // machine answers by dropping the card.
     const persisted: SessionMetadata = {
-      duck_path: "/x/menudismiss.duck",
+      recipe_path: "/x/menudismiss.duck",
       display_name: "Menu Dismiss",
       last_modified_at: Date.now() - 3 * 3600_000,
       source_summary: { first_source_name: "data.csv", source_count: 1, turn_count: 2 },
@@ -1190,7 +1190,7 @@ describe("SessionSidebar hover card content (ADR-0093, issue #513)", () => {
     // re-arm the 300 ms dwell and pop the card back over the open menu.
     // The trigger's own focus is a pill intent and must stop there.
     const persisted: SessionMetadata = {
-      duck_path: "/x/focusgate.duck",
+      recipe_path: "/x/focusgate.duck",
       display_name: "Focus Gate",
       last_modified_at: Date.now() - 3 * 3600_000,
       source_summary: { first_source_name: "data.csv", source_count: 1, turn_count: 2 },
@@ -1227,7 +1227,7 @@ describe("SessionSidebar hover card content (ADR-0093, issue #513)", () => {
     // by usePointerCloseIntent's own specs -- keydown clears, in either
     // order -- and is not re-pinned here.)
     const persisted: SessionMetadata = {
-      duck_path: "/x/closegate.duck",
+      recipe_path: "/x/closegate.duck",
       display_name: "Close Gate",
       last_modified_at: Date.now(),
       source_summary: { first_source_name: null, source_count: 0, turn_count: 1 },
@@ -1310,9 +1310,9 @@ describe("SessionSidebar organization (ADR-0127, issue #1175)", () => {
     // Server order: the pinned block rides first (array position = MRU), so
     // Pin Old (older mtime) precedes Pin New; the body follows mtime-desc.
     return [
-      { duck_path: "/x/p1.duck", display_name: "Pin Old", last_modified_at: Date.now() - 3 * 86_400_000, source_summary: { first_source_name: null, source_count: 0, turn_count: 1 }, format_version: 1, pinned: true, archived: false },
-      { duck_path: "/x/p2.duck", display_name: "Pin New", last_modified_at: Date.now() - 86_400_000, source_summary: { first_source_name: null, source_count: 0, turn_count: 1 }, format_version: 1, pinned: true, archived: false },
-      { duck_path: "/x/plain.duck", display_name: "Plain", last_modified_at: Date.now(), source_summary: { first_source_name: null, source_count: 0, turn_count: 1 }, format_version: 1, pinned: false, archived: false },
+      { recipe_path: "/x/p1.duck", display_name: "Pin Old", last_modified_at: Date.now() - 3 * 86_400_000, source_summary: { first_source_name: null, source_count: 0, turn_count: 1 }, format_version: 1, pinned: true, archived: false },
+      { recipe_path: "/x/p2.duck", display_name: "Pin New", last_modified_at: Date.now() - 86_400_000, source_summary: { first_source_name: null, source_count: 0, turn_count: 1 }, format_version: 1, pinned: true, archived: false },
+      { recipe_path: "/x/plain.duck", display_name: "Plain", last_modified_at: Date.now(), source_summary: { first_source_name: null, source_count: 0, turn_count: 1 }, format_version: 1, pinned: false, archived: false },
     ];
   }
 
@@ -1347,7 +1347,7 @@ describe("SessionSidebar organization (ADR-0127, issue #1175)", () => {
 
   it("omits the pinned section when no rows are pinned (empty-collection rule)", () => {
     const sessions: SessionMetadata[] = [
-      { duck_path: "/x/plain.duck", display_name: "Plain", last_modified_at: Date.now(), source_summary: { first_source_name: null, source_count: 0, turn_count: 1 }, format_version: 1, pinned: false, archived: false },
+      { recipe_path: "/x/plain.duck", display_name: "Plain", last_modified_at: Date.now(), source_summary: { first_source_name: null, source_count: 0, turn_count: 1 }, format_version: 1, pinned: false, archived: false },
     ];
     const { container } = renderShell(
       <SessionSidebar {...orgProps({ sessions })} />,
@@ -1445,7 +1445,7 @@ describe("SessionSidebar organization (ADR-0127, issue #1175)", () => {
     const onArchive = vi.fn();
     const onDelete = vi.fn();
     const archived: SessionMetadata[] = [
-      { duck_path: "/x/arch.duck", display_name: "Archived One", last_modified_at: Date.now() - 86_400_000, source_summary: { first_source_name: null, source_count: 0, turn_count: 2 }, format_version: 1, pinned: false, archived: true },
+      { recipe_path: "/x/arch.duck", display_name: "Archived One", last_modified_at: Date.now() - 86_400_000, source_summary: { first_source_name: null, source_count: 0, turn_count: 2 }, format_version: 1, pinned: false, archived: true },
     ];
     const { container } = renderShell(
       <SessionSidebar
@@ -1524,8 +1524,8 @@ describe("SessionSidebar row actions menu (ADR-0133, issue #1319)", () => {
       // One open row (bound via openSessions) + one cold persisted row: the
       // item sets and the sid-bearing callbacks diverge between the two.
       sessions: [
-        { duck_path: "/x/open.duck", display_name: "Open One", last_modified_at: Date.now(), source_summary: { first_source_name: null, source_count: 1, turn_count: 2 }, format_version: 1, pinned: false, archived: false },
-        { duck_path: "/x/cold.duck", display_name: "Cold One", last_modified_at: Date.now() - 86_400_000, source_summary: { first_source_name: null, source_count: 0, turn_count: 1 }, format_version: 1, pinned: false, archived: false },
+        { recipe_path: "/x/open.duck", display_name: "Open One", last_modified_at: Date.now(), source_summary: { first_source_name: null, source_count: 1, turn_count: 2 }, format_version: 1, pinned: false, archived: false },
+        { recipe_path: "/x/cold.duck", display_name: "Cold One", last_modified_at: Date.now() - 86_400_000, source_summary: { first_source_name: null, source_count: 0, turn_count: 1 }, format_version: 1, pinned: false, archived: false },
       ],
       openSessions: [
         { sid: "sess-1", name: "Open One", path: "/x/open.duck", pendingIngestPaths: [], pendingQuestion: null, pendingSkillInvocations: [] },
@@ -1594,7 +1594,7 @@ describe("SessionSidebar row actions menu (ADR-0133, issue #1319)", () => {
 
   it("archived row carries only Restore + Delete", () => {
     const archived: SessionMetadata[] = [
-      { duck_path: "/x/arch.duck", display_name: "Archived One", last_modified_at: Date.now() - 86_400_000, source_summary: { first_source_name: null, source_count: 0, turn_count: 2 }, format_version: 1, pinned: false, archived: true },
+      { recipe_path: "/x/arch.duck", display_name: "Archived One", last_modified_at: Date.now() - 86_400_000, source_summary: { first_source_name: null, source_count: 0, turn_count: 2 }, format_version: 1, pinned: false, archived: true },
     ];
     const { container } = renderShell(
       <SessionSidebar
@@ -1720,7 +1720,7 @@ describe("SessionSidebar archived-view gating (issue #1175)", () => {
     // own gate on showArchived -- it must not depend on the caller keeping
     // archivedSessions empty while hidden.
     const archived: SessionMetadata = {
-      duck_path: "/x/arch.duck",
+      recipe_path: "/x/arch.duck",
       display_name: "Archived One",
       last_modified_at: Date.now(),
       source_summary: { first_source_name: null, source_count: 0, turn_count: 0 },

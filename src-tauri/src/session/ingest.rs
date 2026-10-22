@@ -109,7 +109,7 @@ impl super::Session {
         let snapshot_path = self
             .source_files
             .remove(reference_name)
-            .unwrap_or_else(|| self.temp_path.join(format!("{reference_name}.duckdb")));
+            .unwrap_or_else(|| self.snapshot_dir().join(format!("{reference_name}.duckdb")));
         if let Err(e) = fs::remove_file(&snapshot_path) {
             log::warn!(
                 target: "toptopduck::session",
@@ -135,10 +135,11 @@ impl super::Session {
         };
 
         // copy-in must succeed before the working set is touched.
-        let snap = match ingest::loader::copy_in(path, &self.temp_path, &reference_name, reader) {
-            Ok(s) => s,
-            Err(e) => return LoadOutcome::Error(e),
-        };
+        let snap =
+            match ingest::loader::copy_in(path, &self.snapshot_dir(), &reference_name, reader) {
+                Ok(s) => s,
+                Err(e) => return LoadOutcome::Error(e),
+            };
 
         // Attach the snapshot read-only (ADR-0005 engine-level enforcement).
         // `attach_path` is tool-controlled (temp dir + sanitized alias), not user
@@ -455,7 +456,7 @@ impl super::Session {
         // file is copy_in's own responsibility, but the CSV is ours to remove.
         let snap = match ingest::loader::copy_in(
             &csv_path,
-            &self.temp_path,
+            &self.snapshot_dir(),
             reference_name,
             "read_csv_auto",
         ) {

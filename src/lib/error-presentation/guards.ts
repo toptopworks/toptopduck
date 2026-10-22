@@ -85,7 +85,7 @@ export function isMigrationError(e: unknown): e is MigrationError {
   }
 }
 
-// Narrow an unknown value to a DuckLoadError -- the .duck load error
+// Narrow an unknown value to a DuckLoadError -- the recipe.json load error
 // (persistence::io::LoadError), distinct from the ingest model::LoadError
 // (issue #120). Migration recurses into isMigrationError.
 export function isDuckLoadError(e: unknown): e is DuckLoadError {
@@ -111,7 +111,7 @@ export function isDuckLoadError(e: unknown): e is DuckLoadError {
   }
 }
 
-// Narrow an unknown IPC reject to a ResumeError (issue #120). The `open_duck`
+// Narrow an unknown IPC reject to a ResumeError (issue #120). The `open_recipe`
 // command wraps its ResumeError in SessionError::Resume, so this guard is
 // reached via isSessionError's Resume branch. Load recurses into
 // isDuckLoadError; SourceMissing / Replay verify their struct fields;

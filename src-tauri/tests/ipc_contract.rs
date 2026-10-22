@@ -667,7 +667,7 @@ fn turn_outcome_cancelled_carries_optional_reason() {
 
 #[test]
 fn turn_outcome_cancelled_without_data_key_deserializes_as_manual() {
-    // Pre-#883 compat: live IPC peers and .duck recordings written before the
+    // Pre-#883 compat: live IPC peers and recipe.json recordings written before the
     // reason payload existed omit the `data` key entirely (then a unit
     // variant). The newtype-over-Option shape must deserialize such a
     // payload as a manual cancel -- losing the Option would break opening
@@ -1039,7 +1039,7 @@ fn session_error_serializes_as_adjacently_tagged_kind_data() {
 //
 // Pin the JSON shape of the four typed error enums that cross the Rust<->
 // frontend boundary as command rejects / return values: ResumeError (the
-// `open_duck` reject), SaveError (the `take_persist_error` returned value),
+// `open_recipe` reject), SaveError (the `take_persist_error` returned value),
 // and the nested DuckLoadError + MigrationError (which ride inside
 // ResumeError::Load). All adjacently-tagged (`#[serde(tag="kind", content =
 // "data")]`), the same shape the rest of the wire contract uses, so the
@@ -1067,7 +1067,7 @@ fn migration_error_serializes_adjacently_tagged() {
 
 #[test]
 fn duck_load_error_serializes_adjacently_tagged() {
-    // The .duck load error (persistence::io::LoadError) -- distinct from the
+    // The recipe.json load error (persistence::io::LoadError) -- distinct from the
     // ingest model::LoadError. Nests MigrationError under data; the inner enum
     // keeps its own kind/data shape so the frontend recurses uniformly.
     use toptopduck_lib::{DuckLoadError, MigrationError};
@@ -1095,7 +1095,7 @@ fn duck_load_error_serializes_adjacently_tagged() {
 #[test]
 fn save_error_serializes_adjacently_tagged() {
     // SaveError is the take_persist_error returned value (Option<SaveError>).
-    // AlreadyOpen carries the canonical .duck path (PathBuf -> a JSON string)
+    // AlreadyOpen carries the canonical recipe.json path (PathBuf -> a JSON string)
     // so the UI can name exactly which file is double-open.
     use std::path::PathBuf;
     use toptopduck_lib::SaveError;
@@ -1119,7 +1119,7 @@ fn save_error_serializes_adjacently_tagged() {
 
 #[test]
 fn resume_error_serializes_adjacently_tagged() {
-    // ResumeError is the open_duck command's typed reject (no longer flattened
+    // ResumeError is the open_recipe command's typed reject (no longer flattened
     // to SessionError::Engine(string)). Load recurses into DuckLoadError.
     use std::path::PathBuf;
     use toptopduck_lib::{DuckLoadError, ResumeError};
@@ -1434,15 +1434,15 @@ fn source_summary_serializes_flat_snake_case() {
 #[test]
 fn session_metadata_serializes_flat_snake_case() {
     // ADR-0060/0061 (issue #76): SessionMetadata is the flat snake_case sidebar
-    // entry. duck_path is the .duck path (the stable identity, renamed from
+    // entry. recipe_path is the recipe.json path (the stable identity, renamed from
     // session_id in issue #462 to disambiguate from the runtime UUID). Pin the
     // full field order so a rename / reorder is caught before types.ts drifts.
     // ADR-0127 (issue #1174) appends the organization flags joined from the
     // sidecar; the frontend type follows in #1175.
-    use toptopduck_lib::{DuckPath, SessionMetadata, SourceSummary};
+    use toptopduck_lib::{RecipePath, SessionMetadata, SourceSummary};
     assert_wire(
         &SessionMetadata {
-            duck_path: DuckPath::new("/x/analysis.duck"),
+            recipe_path: RecipePath::new("/x/analysis.duck"),
             display_name: "analysis".into(),
             last_modified_at: 1_700_000_000_000,
             source_summary: SourceSummary {
@@ -1454,7 +1454,7 @@ fn session_metadata_serializes_flat_snake_case() {
             pinned: false,
             archived: false,
         },
-        r#"{"duck_path":"/x/analysis.duck","display_name":"analysis","last_modified_at":1700000000000,"source_summary":{"first_source_name":"orders","source_count":1,"turn_count":2},"format_version":1,"pinned":false,"archived":false}"#,
+        r#"{"recipe_path":"/x/analysis.duck","display_name":"analysis","last_modified_at":1700000000000,"source_summary":{"first_source_name":"orders","source_count":1,"turn_count":2},"format_version":1,"pinned":false,"archived":false}"#,
     );
 }
 
@@ -2040,7 +2040,7 @@ fn live_session_entry_serializes_as_a_flat_snake_case_row() {
     let sid = SessionId::parse("d3b07384-d9a0-4c30-8e9b-5f3a7b2c1e10").expect("valid v4 id");
     let row = LiveSessionEntry {
         session_id: sid.clone(),
-        duck_path: Some("/sessions/a/session.duck".into()),
+        recipe_path: Some("/sessions/a/session.duck".into()),
         session_name: Some("analysis".into()),
         in_flight: false,
     };
@@ -2048,7 +2048,7 @@ fn live_session_entry_serializes_as_a_flat_snake_case_row() {
         serde_json::to_value(&row).expect("serialize"),
         serde_json::json!({
             "session_id": "d3b07384-d9a0-4c30-8e9b-5f3a7b2c1e10",
-            "duck_path": "/sessions/a/session.duck",
+            "recipe_path": "/sessions/a/session.duck",
             "session_name": "analysis",
             "in_flight": false,
         }),
@@ -2058,7 +2058,7 @@ fn live_session_entry_serializes_as_a_flat_snake_case_row() {
     // and null name must stay explicit nulls (not omitted, not defaulted).
     let degraded = LiveSessionEntry {
         session_id: sid,
-        duck_path: None,
+        recipe_path: None,
         session_name: None,
         in_flight: true,
     };
@@ -2066,7 +2066,7 @@ fn live_session_entry_serializes_as_a_flat_snake_case_row() {
         serde_json::to_value(&degraded).expect("serialize"),
         serde_json::json!({
             "session_id": "d3b07384-d9a0-4c30-8e9b-5f3a7b2c1e10",
-            "duck_path": null,
+            "recipe_path": null,
             "session_name": null,
             "in_flight": true,
         }),

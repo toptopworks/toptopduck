@@ -291,7 +291,7 @@ pub enum CancelledReason {
 ///
 /// This is the IPC + persistence shared type --
 /// [`crate::persistence::recipe`] re-uses it for its own (wider) provenance
-/// struct, so the wire shape and the `.duck` shape stay byte-identical
+/// struct, so the wire shape and the `recipe.json` shape stay byte-identical
 /// (issue #381 lifts it from recipe to model so the IPC [`TurnRecord`] carries
 /// it without forking a parallel type).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -539,7 +539,7 @@ pub struct ThinkingTrace {
 /// carry. Field-for-field the persisted [`crate::persistence::recipe::
 /// RecipeTraceEntry`] shape, so a live turn and its resumed reincarnation
 /// render identically: a successful call's result payload is dropped at
-/// capture (data-bearing; the `.duck` carries none of it, ADR-0036) while a
+/// capture (data-bearing; the `recipe.json` carries none of it, ADR-0036) while a
 /// failed call carries its bounded error / denial message -- the cross-turn
 /// failure retrospection anchor.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -670,7 +670,7 @@ pub enum TurnPhase {
 /// [`TurnPhase`] with the addressing `session_id` so a multi-session frontend
 /// filters the global Tauri event broadcast down to the one SessionPane that
 /// owns the turn (ADR-0056). `session_id` is the runtime id the `ask` command
-/// received (a typed UUID), NOT the `duck_path` [`crate::SessionMetadata`]
+/// received (a typed UUID), NOT the `recipe_path` [`crate::SessionMetadata`]
 /// exposes. The field is required -- a phase without a session it belongs to is
 /// not addressable, so the type makes the missing-id state unrepresentable.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

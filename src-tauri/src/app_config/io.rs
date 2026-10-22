@@ -1,5 +1,5 @@
 //! App-config atomic IO (ADR-0038): the second at-rest artifact, alongside the
-//! user-owned `.duck`. The on-disk file is small JSON in the OS app-data
+//! user-owned `recipe.json`. The on-disk file is small JSON in the OS app-data
 //! directory; this module owns its write + read semantics.
 //!
 //! **Write** rides the shared atomic-write core
@@ -8,9 +8,9 @@
 //! target. The rename is intra-volume atomic; a crash mid-write leaves either
 //! the prior complete config or the next complete one -- never a half-file.
 //!
-//! **Read** uses a DIFFERENT policy from `.duck`: app-config honest-DEGRADES to
+//! **Read** uses a DIFFERENT policy from `recipe.json`: app-config honest-DEGRADES to
 //! built-in defaults on ANY failure (missing file, corrupt JSON, version
-//! mismatch, detected secret field). A `.duck` honest-REFUSES (the user's
+//! mismatch, detected secret field). A `recipe.json` honest-REFUSES (the user's
 //! analysis is at stake); app-config is just prefs, so "no crash, reset to
 //! defaults" is the right call (ADR-0038 / issue #53 AC: "损坏/缺失 -> 默认值,
 //! 不崩"). [`read_at`] therefore returns `AppConfig`, not `Result` -- every
@@ -588,7 +588,7 @@ mod tests {
     #[test]
     fn read_a_higher_version_degrades_to_defaults() {
         // A newer app's config must not be silently mis-parsed (mirror of the
-        // .duck honest-refuse, but app-config degrades because it is non-essential).
+        // recipe.json honest-refuse, but app-config degrades because it is non-essential).
         let (_dir, path) = temp("config.json");
         let future = format!(
             "{{\"format_version\":{future},\"theme\":\"dark\"}}",

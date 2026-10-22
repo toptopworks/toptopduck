@@ -16,7 +16,7 @@
 //! [`StoreCommandError`] is serde-structured like [`SessionError`], so the
 //! frontend narrows on `kind` and renders a locale message -- the Chinese
 //! wording no longer crosses IPC. The cold-store subset covers `delete_session`
-//! / `rename_persisted_session` (a cross-session `.duck` file), the keychain
+//! / `rename_persisted_session` (a cross-session `recipe.json` file), the keychain
 //! commands, and `set_provider_config` / `set_app_config`. The remaining
 //! session-agnostic commands (read-only listing / has-key) cannot
 //! fail with a user-facing refusal and keep returning `Result<T, String>`.
@@ -75,7 +75,7 @@ const CLOSE_WAIT_RELEASE_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// A session-AGNOSTIC cold-store command failed (issue #130). The cold-store
 /// commands -- `delete_session` / `rename_persisted_session` (a cross-session
-/// `.duck` file), `set_api_key` / `clear_api_key` (the OS keychain), and
+/// `recipe.json` file), `set_api_key` / `clear_api_key` (the OS keychain), and
 /// `set_provider_config` / `set_app_config` (an app-config write) -- reject with
 /// this typed enum instead of a free-text `String`, so the frontend renders each
 /// refusal through the locale catalog (ADR-0052 layer 2) and the Chinese wording
@@ -94,7 +94,7 @@ const CLOSE_WAIT_RELEASE_TIMEOUT: Duration = Duration::from_secs(120);
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "kind", content = "data")]
 pub enum StoreCommandError {
-    /// A delete / cold-rename targeted a `.duck` path an open in-memory session
+    /// A delete / cold-rename targeted a `recipe.json` path an open in-memory session
     /// owns. The single-writer canonical-key gate refused it (ADR-0035 Decision
     /// 3); the frontend closes the session first.
     #[error("session is open; close it first")]
@@ -158,7 +158,7 @@ impl From<crate::provider::live_config::CliToolWriteError> for StoreCommandError
 }
 
 /// Reject a mutating command while THIS session is resuming (ADR-0053, made
-/// per-session by ADR-0056). `open_duck(session_id, ...)` rebuilds that one
+/// per-session by ADR-0056). `open_recipe(session_id, ...)` rebuilds that one
 /// session's contents off-thread; a concurrent mutating command targeting the
 /// SAME session would silently operate on the stale pre-resume session and be
 /// overwritten when `*s = new_session` lands. The frontend's shared `loading`
@@ -196,7 +196,7 @@ fn reject_if_in_flight(handle: &SessionHandle) -> Result<(), SessionError> {
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct CreateSessionReply {
     pub session_id: SessionId,
-    pub duck_path: String,
+    pub recipe_path: String,
 }
 
 /// Create a new session (ADR-0056/0089): the backend builds an independent
@@ -247,11 +247,13 @@ pub fn create_session(
     // session's own posture and never consults the backfill map.
     let posture = session_posture(segment_start_posture(startup.as_ref(), live.inner()));
     handle.set_runtime_choice(startup);
-    // ADR-0089: per-session directory `{sessions_root}/{uuid}/session.duck`.
-    // The UUID directory name is the stable identity; session.duck is the
-    // fixed recipe filename.
+    // ADR-0089: per-session directory `{sessions_root}/{uuid}/`. The UUID
+    // directory name is the stable identity; the fixed recipe filename is
+    // `recipe.json` (ADR-0136 D5 -- the recipe is JSON text and real database
+    // files now live beside it; the old `session.duck` name stays
+    // forever-readable, no in-place migration).
     let session_dir = sessions_root.path().join(id.to_string());
-    let duck_path = session_dir.join("session.duck");
+    let recipe_path = session_dir.join("recipe.json");
 
     // Rollback closure: if any step after store.create() fails, the handle is
     // already in the store map (with a live DuckDB instance + cancel token).
@@ -286,11 +288,11 @@ pub fn create_session(
         let cfg = live.load();
         let seed = crate::skills::seed_from_config(&cfg, &live.cli_tools(), &skills_root.0);
         s.set_discovery_snapshot(seed);
-        s.bind_duck(duck_path.clone(), String::new())
+        s.bind_recipe(recipe_path.clone(), String::new())
             .map_err(|e| SessionError::Engine(e.to_string()))?;
         Ok(CreateSessionReply {
             session_id: id.clone(),
-            duck_path: duck_path.to_string_lossy().into_owned(),
+            recipe_path: recipe_path.to_string_lossy().into_owned(),
         })
     })();
 
@@ -311,7 +313,7 @@ pub fn create_session(
 /// <=120s, ADR-0021 soft-cancel) and the ask's post-turn check sees `closing`
 /// and discards the outcome (no thread append, no recipe persist). New commands
 /// targeting this id after close reject as unknown session. The DuckDB instance
-/// + the bound `.duck` canonical-writer key are released when the last
+/// + the bound `recipe.json` canonical-writer key are released when the last
 /// `Arc<SessionHandle>` drops (immediately if no ask is in flight, or when the
 /// in-flight ask's clone drops after its discard).
 ///
@@ -332,13 +334,13 @@ pub fn close_session(
 
 /// The wire row from `list_live_sessions` (issue #842): one live session the
 /// reloaded frontend can re-adopt (or, for `in_flight`, close and re-open
-/// from disk). Mirrors [`crate::LiveSessionSnapshot`] with the `.duck` path
+/// from disk). Mirrors [`crate::LiveSessionSnapshot`] with the `recipe.json` path
 /// flattened to a lossy string, the same conversion `create_session`'s reply
 /// uses.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct LiveSessionEntry {
     pub session_id: SessionId,
-    pub duck_path: Option<String>,
+    pub recipe_path: Option<String>,
     pub session_name: Option<String>,
     pub in_flight: bool,
 }
@@ -356,7 +358,7 @@ pub fn list_live_sessions(
         .into_iter()
         .map(|row| LiveSessionEntry {
             session_id: row.session_id,
-            duck_path: row.duck_path.map(|p| p.to_string_lossy().into_owned()),
+            recipe_path: row.recipe_path.map(|p| p.to_string_lossy().into_owned()),
             session_name: row.session_name,
             in_flight: row.in_flight,
         })
@@ -860,7 +862,7 @@ pub async fn ask(
         // the per-session `artifacts/` directory widens the asset protocol
         // scope to it right here, before any card can render -- the
         // artifacts dir may not have existed when the session opened.
-        grant_artifact_asset_scope(&app_for_scope, s.duck_path());
+        grant_artifact_asset_scope(&app_for_scope, s.recipe_path());
         Ok::<TurnOutcome, SessionError>(outcome)
     })
     .await
@@ -998,13 +1000,13 @@ pub fn conversation(
     let id = SessionId::parse(&session_id)?;
     let handle = store.get(&id)?;
     let s = handle.session_lock()?;
-    let duck_path = s.duck_path().map(PathBuf::from);
+    let recipe_path = s.recipe_path().map(PathBuf::from);
     let entries = s.conversation();
     // ADR-0124 (issue #1087): a reopened session's materialized artifacts
     // must be iframe-servable before a card can render -- grant the asset
     // protocol scope for the per-session artifacts directory on every
     // thread read (session open / remount; idempotent by pattern).
-    grant_artifact_asset_scope(&app, duck_path.as_deref());
+    grant_artifact_asset_scope(&app, recipe_path.as_deref());
     Ok(entries)
 }
 
@@ -1023,8 +1025,8 @@ const ARTIFACT_TEXT_MAX_BYTES: u64 = 2 * 1024 * 1024;
 /// adds nothing. Failures log and degrade: the iframe render then fails
 /// honest (whether the card offers an external-open fallback is #1088's
 /// render-time concern, not a grant-time fact).
-fn grant_artifact_asset_scope(app: &tauri::AppHandle, duck_path: Option<&Path>) {
-    let Some(dir) = crate::session::artifacts::artifacts_dir(duck_path) else {
+fn grant_artifact_asset_scope(app: &tauri::AppHandle, recipe_path: Option<&Path>) {
+    let Some(dir) = crate::session::artifacts::artifacts_dir(recipe_path) else {
         return;
     };
     if let Err(e) = app.asset_protocol_scope().allow_directory(&dir, false) {
@@ -1670,7 +1672,7 @@ pub async fn test_profile(
 //
 // The second at-rest artifact: preferences, defaults, and the no-key endpoint
 // config. Lives in the OS app-data directory, orthogonal to the portable
-// `.duck`. Honest-degrades to defaults on any read failure (missing/corrupt ->
+// `recipe.json`. Honest-degrades to defaults on any read failure (missing/corrupt ->
 // built-in defaults, never a crash). The frontend loads it on startup (theme +
 // locale) and persists edits through `set_app_config`.
 
@@ -1725,7 +1727,7 @@ pub async fn list_sessions(
 
 /// Pin or unpin a persisted session (ADR-0127, issue #1174). Organization
 /// state lives in the `sessions_root/index.json` sidecar, keyed by the
-/// session-directory uuid -- never in the `.duck` (no recipe rewrite, no
+/// session-directory uuid -- never in the `recipe.json` (no recipe rewrite, no
 /// mtime disturbance, no single-writer gate). Path guard mirrors
 /// `delete_session` (canonicalize + under-root check); unknown uuids are
 /// idempotent no-ops. Pinning an archived session is a no-op (mutual
@@ -1767,7 +1769,7 @@ pub async fn set_session_archived(
     .map_err(|e| StoreCommandError::IoFailure(e.to_string()))?
 }
 
-/// Resolve a `.duck` path to its sidecar key (the `{uuid}` directory name,
+/// Resolve a `recipe.json` path to its sidecar key (the `{uuid}` directory name,
 /// ADR-0089) after the under-root guard. Mirrors `delete_session`'s approach:
 /// canonicalize the duck (parent-dir fallback), require the parent directory
 /// to sit under the canonicalized sessions root. Every sidecar write that can
@@ -1775,14 +1777,14 @@ pub async fn set_session_archived(
 /// path does not, but it only removes, so a key it fails to address is
 /// inert -- same posture as the unknown-uuid no-op.
 fn session_dir_uuid_under_root(root: &Path, duck: &str) -> Result<String, StoreCommandError> {
-    use crate::persistence::canonicalize_duck;
+    use crate::persistence::canonicalize_recipe;
     let trimmed = duck.trim();
     if trimmed.is_empty() {
         return Err(StoreCommandError::IoFailure(
             "empty session path; cannot resolve the sidecar key".into(),
         ));
     }
-    let canonical = canonicalize_duck(Path::new(trimmed)).map_err(|e| {
+    let canonical = canonicalize_recipe(Path::new(trimmed)).map_err(|e| {
         StoreCommandError::IoFailure(format!("cannot canonicalize session path {trimmed}: {e}"))
     })?;
     let canonical_root = std::fs::canonicalize(root).map_err(|e| {
@@ -1836,7 +1838,7 @@ fn unarchive_after_open(sessions_root: &Path, duck: &Path) {
     if let Err(e) = crate::persistence::organization::set_archived(sessions_root, &uuid, false) {
         log::warn!(
             target: "toptopduck::session",
-            "open_duck: failed to unarchive {uuid}: {e}"
+            "open_recipe: failed to unarchive {uuid}: {e}"
         );
     }
 }
@@ -1862,7 +1864,7 @@ pub async fn delete_session(
     sessions_root: State<'_, SessionsRoot>,
     path: String,
 ) -> Result<(), StoreCommandError> {
-    use crate::persistence::{canonicalize_duck, release, try_acquire};
+    use crate::persistence::{canonicalize_recipe, release, try_acquire};
     let trimmed = path.trim().to_string();
     let root = sessions_root.path();
     tauri::async_runtime::spawn_blocking(move || -> Result<(), StoreCommandError> {
@@ -1870,25 +1872,25 @@ pub async fn delete_session(
             return Ok(());
         }
         let path = PathBuf::from(&trimmed);
-        // Canonicalize the .duck for the single-writer gate. canonicalize_duck
+        // Canonicalize the recipe.json for the single-writer gate. canonicalize_recipe
         // succeeds even when the file itself is gone (it canonicalizes the
         // parent dir and rejoins the file name), so an Err means the parent is
         // gone too -- the session is definitely absent; idempotent success.
         // Log the error so a fabricated success (e.g. permission denied on the
         // parent) is diagnosable instead of silently lost.
-        let canonical = match canonicalize_duck(&path) {
+        let canonical = match canonicalize_recipe(&path) {
             Ok(c) => c,
             Err(e) => {
                 log::warn!(
                     target: "toptopduck::session",
-                    "delete_session: canonicalize_duck failed for {}: {e}",
+                    "delete_session: canonicalize_recipe failed for {}: {e}",
                     path.display()
                 );
                 return Ok(());
             }
         };
         // ADR-0089: delete the per-session directory (session.duck + assets/),
-        // not just the .duck file. The .duck's parent is `{uuid}/`. Derive from
+        // not just the recipe.json file. The recipe.json's parent is `{uuid}/`. Derive from
         // the canonical path (not the raw input) so the starts_with check below
         // matches the also-canonicalized root — on Windows, canonicalize adds
         // the `\\?\` verbatim prefix, and a non-prefixed path would never
@@ -1934,7 +1936,7 @@ pub async fn delete_session(
 }
 
 /// Rename the OPEN session bound to `session_id` (ADR-0060, issue #81). Sets the
-/// user-facing session_name and rewrites the bound `.duck` recipe header; the
+/// user-facing session_name and rewrites the bound `recipe.json` recipe header; the
 /// bound path is untouched, so sidebar addressing stays stable. Rejects a blank
 /// name. Delegates to [`Session::rename`].
 #[tauri::command]
@@ -1954,7 +1956,7 @@ pub fn rename_session(
 /// first question's acceptance auto-names the session; the frontend uses
 /// this on the terminal-state chain to refresh the sidebar entry + the
 /// session header without re-reading the
-/// `.duck` file from disk. Returns the name carried by the in-memory
+/// `recipe.json` file from disk. Returns the name carried by the in-memory
 /// persister (the same value the next atomic write will persist).
 #[tauri::command]
 pub fn get_session_name(
@@ -1973,13 +1975,13 @@ pub fn get_session_name(
 /// behavioral branch -- BlankName before canonicalize, the OpenConflict gate,
 /// and `release` on every post-acquire path -- lives here.
 fn rename_persisted_session_blocking(path: &Path, new_name: &str) -> Result<(), StoreCommandError> {
-    use crate::persistence::{canonicalize_duck, read_duck, release, save_atomic, try_acquire};
+    use crate::persistence::{canonicalize_recipe, read_recipe, release, save_atomic, try_acquire};
     let trimmed = new_name.trim();
     if trimmed.is_empty() {
         return Err(StoreCommandError::BlankName(RenameSessionError::EmptyName));
     }
     let canonical =
-        canonicalize_duck(path).map_err(|e| StoreCommandError::IoFailure(e.to_string()))?;
+        canonicalize_recipe(path).map_err(|e| StoreCommandError::IoFailure(e.to_string()))?;
     // Gate: try_acquire returns false when the canonical path is already
     // held -- an open session owns it. Refuse rather than race its writer.
     if !try_acquire(&canonical) {
@@ -1987,7 +1989,7 @@ fn rename_persisted_session_blocking(path: &Path, new_name: &str) -> Result<(), 
     }
     let outcome = (|| -> Result<(), StoreCommandError> {
         let mut recipe =
-            read_duck(path).map_err(|e| StoreCommandError::IoFailure(e.to_string()))?;
+            read_recipe(path).map_err(|e| StoreCommandError::IoFailure(e.to_string()))?;
         recipe.session_name = trimmed.to_string();
         save_atomic(path, &recipe).map_err(|e| StoreCommandError::IoFailure(e.to_string()))
     })();
@@ -1995,7 +1997,7 @@ fn rename_persisted_session_blocking(path: &Path, new_name: &str) -> Result<(), 
     outcome
 }
 
-/// Rename a CLOSED `.duck` recipe's session_name in place (ADR-0060, issue #81).
+/// Rename a CLOSED `recipe.json` recipe's session_name in place (ADR-0060, issue #81).
 /// For a session that is not currently open: read the recipe, rewrite the
 /// session_name header, atomic-save -- no DuckDB instance is built. The
 /// canonical-writer key doubles as the "is this path open in a running session"
@@ -2018,10 +2020,10 @@ pub async fn rename_persisted_session(
 
 // --- Cross-session persistence (issue #48, ADR-0034/0036) -------------------
 //
-// Save / open a `.duck` recipe document. Save binds the live session to a
+// Save / open a `recipe.json` recipe document. Save binds the live session to a
 // path (every subsequent terminal turn atomically rewrites it). Open resumes
 // the session across the restart boundary WITHIN THE SAME session_id
-// (ADR-0056: tab <-> sessionId binding is stable; open_duck reuses the id and
+// (ADR-0056: tab <-> sessionId binding is stable; open_recipe reuses the id and
 // replaces the session's contents, it does NOT mint a new id -- that is
 // create_session's job): each source is re-read + fingerprint-verified, the
 // productive SQL chain is eagerly re-executed LLM-free, and the conversation
@@ -2033,7 +2035,7 @@ pub async fn rename_persisted_session(
 /// under the app-config write-lock, and updates the in-memory
 /// `SessionsRoot` live — no restart needed. New sessions land in the new
 /// directory immediately; already-open sessions stay in place (their bound
-/// `duck_path` is unchanged). The sidebar re-scans the new directory on the
+/// `recipe_path` is unchanged). The sidebar re-scans the new directory on the
 /// frontend's next `list_sessions` call. Returns the updated `AppConfig`.
 ///
 /// `path = None` clears the override (falls back to the computed default).
@@ -2075,7 +2077,7 @@ pub fn get_sessions_dir(sessions_root: State<'_, SessionsRoot>) -> Result<String
 }
 
 /// Best-effort removal of the orphaned empty per-session directory left when
-/// `open_duck` rebinds a session from the `create_session`-generated path to
+/// `open_recipe` rebinds a session from the `create_session`-generated path to
 /// the resume target (ADR-0089 Decision 6 parity for the open path, matching
 /// `close_and_cleanup_empty` for the close path).
 ///
@@ -2091,7 +2093,7 @@ pub fn get_sessions_dir(sessions_root: State<'_, SessionsRoot>) -> Result<String
 ///   rather than risk deleting an equivalent path's parent.
 /// - `starts_with(sessions_root)`: skip if the stale directory is outside the
 ///   managed sessions root (defense-in-depth, matches `delete_session`'s M2
-///   guard at `commands.rs:1377-1395` — an external `.duck` rebind must never
+///   guard at `commands.rs:1377-1395` — an external `recipe.json` rebind must never
 ///   trigger deletion of a user-chosen parent directory).
 fn cleanup_orphaned_session_dir(
     stale_duck: Option<&Path>,
@@ -2127,7 +2129,7 @@ fn cleanup_orphaned_session_dir(
     let Some(stale_dir) = stale.parent() else {
         log::warn!(
             target: "toptopduck::session",
-            "cleanup_orphaned_session_dir: stale duck_path has no parent, skipping: {}",
+            "cleanup_orphaned_session_dir: stale recipe_path has no parent, skipping: {}",
             stale.display(),
         );
         return;
@@ -2177,7 +2179,7 @@ fn cleanup_orphaned_session_dir(
     }
 }
 
-/// Open a `.duck` and resume the named session across the restart boundary
+/// Open a `recipe.json` and resume the named session across the restart boundary
 /// (ADR-0034/0056). Runs off the async/UI thread (AC8): resume re-reads every
 /// source and re-executes the productive SQL chain, which can take seconds.
 /// Progress is emitted as a `resume-progress` event per source verification
@@ -2188,7 +2190,7 @@ fn cleanup_orphaned_session_dir(
 /// flag, so a `cancel` / `close_session` during or after resume still reaches
 /// the right session.
 #[tauri::command]
-pub async fn open_duck(
+pub async fn open_recipe(
     app: tauri::AppHandle,
     store: State<'_, Arc<SessionStore>>,
     live: State<'_, LiveProviderConfig>,
@@ -2206,7 +2208,7 @@ pub async fn open_duck(
     // Symmetric with `ask` (which applies the same guard before entering a
     // turn): refuse resume while a turn is in flight. A turn blocked in the
     // approval gate still holds session_lock, so without this guard
-    // open_duck's spawn_blocking would block on session_lock with resuming
+    // open_recipe's spawn_blocking would block on session_lock with resuming
     // latched, freezing every mutating command via reject_if_resuming until
     // the turn is respond/cancel unstuck. The frontend `busy` flag is the
     // primary defense; this is the Rust-side backstop for a second window /
@@ -2254,7 +2256,7 @@ pub async fn open_duck(
     let cfg = live.load();
     let engine_defaults = cfg.engine.clone();
     let inner = tauri::async_runtime::spawn_blocking(move || {
-        let mut new_session = Session::open_duck(
+        let mut new_session = Session::open_recipe(
             &path,
             cancel_token,
             provider,
@@ -2318,10 +2320,10 @@ pub async fn open_duck(
         let mut s = handle_for_task.session_lock()?;
         // Capture the pre-resume binding before the rebind. create_session
         // bound a fresh empty session.duck in a new per-session directory;
-        // open_duck rebinds the session to `path` (the resume target),
+        // open_recipe rebinds the session to `path` (the resume target),
         // orphaning that directory. Without cleanup, list_sessions surfaces a
         // phantom empty sidebar entry that multiplies on each click.
-        let stale_duck = s.duck_path().map(|p| p.to_path_buf());
+        let stale_duck = s.recipe_path().map(|p| p.to_path_buf());
         let stale_was_empty = s.is_timeline_empty();
         *s = new_session;
         // Release the session lock before filesystem cleanup.
@@ -2336,7 +2338,7 @@ pub async fn open_duck(
             detect_adapter(spec).is_some()
         });
         // Remove the orphaned empty per-session directory create_session made
-        // when open_duck rebinds to a different resume target path. The old
+        // when open_recipe rebinds to a different resume target path. The old
         // Session::Drop (fired by the `*s = new_session` assignment above)
         // already released the canonical single-writer key, so remove_dir_all
         // cannot race a writer. Best-effort: a failure logs a warning (the
@@ -2383,10 +2385,29 @@ pub fn take_persist_error(
     Ok(s.take_persist_error())
 }
 
+/// Read + clear the named session's resume-hit source status notices
+/// (ADR-0136 D3): a watermark-hit resume opens even when a source file was
+/// moved/deleted/changed since settle -- the working set is the ingest-time
+/// snapshot -- and these notices are the honest "the file no longer backs
+/// the loaded data" signal for that path. The frontend drains them once
+/// after an open; every subsequent call returns an empty vec. Empty for
+/// every replay-path resume (the replay path's blocking semantics are
+/// unchanged, ADR-0035).
+#[tauri::command]
+pub fn take_source_notices(
+    store: State<'_, Arc<SessionStore>>,
+    session_id: String,
+) -> Result<Vec<crate::SourceNotice>, SessionError> {
+    let id = SessionId::parse(&session_id)?;
+    let handle = store.get(&id)?;
+    let mut s = handle.session_lock()?;
+    Ok(s.take_source_notices())
+}
+
 /// Read + clear the named session's pending external-change conflict, if any
 /// (ADR-0035 Decision 3 / issue #50). The frontend polls this after each turn /
 /// source event / resume: a non-`None` value means the auto-write was
-/// suspended because the `.duck` file's on-disk hash diverged from the
+/// suspended because the `recipe.json` file's on-disk hash diverged from the
 /// session's baseline (another window, a text editor, or a sync tool edited
 /// the file). The frontend surfaces a three-option conflict UI (reload / keep
 /// mine / save as new); the engine NEVER silently clobbers the externally-edited
@@ -3220,7 +3241,7 @@ fn resolve_default_runtime(
 
 /// The command-path resolution: an honest-degrade app-config read
 /// (lock-light -- [`LiveProviderConfig::load`] takes no lock) + a fresh PATH
-/// scan per candidate adapter. Shared by `create_session` and `open_duck` so
+/// scan per candidate adapter. Shared by `create_session` and `open_recipe` so
 /// both startup points apply ONE degrade rule.
 fn startup_runtime_choice(
     live: &LiveProviderConfig,
@@ -3290,7 +3311,7 @@ fn stamp_resumed_identity(session: &mut Session, sid: &SessionId) {
 }
 
 /// Apply the resumed session's postures to the handle after the swap
-/// (`open_duck`). The whole reset + restore batch in one free function so
+/// (`open_recipe`). The whole reset + restore batch in one free function so
 /// the command-layer wiring is testable without an AppHandle: the
 /// security-plane resets fire first, then the execution-plane continuation,
 /// then the ADR-0095 trio -- restored last so the restored values win.
@@ -3317,7 +3338,7 @@ fn apply_resumed_postures(
     // keeps the old semantics (the resolved default runtime); an undetected
     // adapter degrades THIS resume to the built-in start while the persisted
     // value survives on the Session's recipe-header facts -- restored inside
-    // `Session::open_duck`, whose phase-5 rewrite already re-emitted it
+    // `Session::open_recipe`, whose phase-5 rewrite already re-emitted it
     // unchanged, so a re-detected CLI is honored by the next resume.
     handle.set_runtime_choice(resume_runtime_choice(
         runtime_facts.last_runtime.as_ref(),
@@ -3399,7 +3420,7 @@ fn session_posture(p: ModelPosture) -> PosturePair {
 /// Seat the resolved startup posture on a fresh session (ADR-0100 Decision 1,
 /// issue #581): the pair lands on BOTH slots at once -- the handle-held slot
 /// the lock-light reads serve and the Session storage the recipe persists.
-/// Called before the initial `bind_duck`, so the first recipe already carries
+/// Called before the initial `bind_recipe`, so the first recipe already carries
 /// the posture: without the Session-side half the injection would reach the
 /// recipe only at the first turn top (the `ask` mirror), and a restart
 /// before then would resume the session unselected even though the backfill
@@ -3471,7 +3492,7 @@ pub struct SessionModelConfig {
 /// (no post-hoc shared-slot read racing the session banner poll).
 /// `persist_error` is the typed [`SaveError`] of a failed write;
 /// `persist_suspended` is true when the write was withheld because an
-/// ADR-0035 pending conflict (externally modified .duck) suspends the
+/// ADR-0035 pending conflict (externally modified recipe.json) suspends the
 /// auto-write. Both None/false = the write landed (or the session is
 /// unbound, in-memory-only, nothing to persist).
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -4152,7 +4173,7 @@ mod tests {
     }
 
     // ADR-0127 Decision 4 wiring (review Important 1): the seam is what
-    // open_duck calls after a successful bind -- pinned here so deleting the
+    // open_recipe calls after a successful bind -- pinned here so deleting the
     // call can never again pass silently.
     #[test]
     fn unarchive_after_open_removes_archived_membership_under_the_root() {
@@ -4617,7 +4638,7 @@ mod tests {
 
     #[test]
     fn apply_resumed_postures_lands_the_resume_continuation_on_the_handle() {
-        // The open_duck wiring -- the command itself needs an AppHandle, so
+        // The open_recipe wiring -- the command itself needs an AppHandle, so
         // the batch lives in a free function (issue #589): the stale
         // pre-resume choice is OVERWRITTEN by the resume continuation, the
         // ADR-0095 trio restores after the resets, a pre-#589 recipe falls
@@ -5386,7 +5407,7 @@ mod tests {
     #[test]
     fn rename_persisted_session_blank_name_short_circuits_before_canonicalize() {
         let dir = tempfile::tempdir().expect("tempdir");
-        // `no_such_subdir` was never created -> canonicalize_duck (which
+        // `no_such_subdir` was never created -> canonicalize_recipe (which
         // canonicalizes the parent dir) would fail here.
         let missing_parent = dir.path().join("no_such_subdir").join("file.duck");
         let err = rename_persisted_session_blocking(&missing_parent, "   ")
@@ -5419,12 +5440,12 @@ mod tests {
     /// never acquired, and that the gate runs only after canonicalize succeeds.
     #[test]
     fn rename_persisted_session_held_key_yields_open_conflict() {
-        use crate::persistence::{canonicalize_duck, release, try_acquire};
+        use crate::persistence::{canonicalize_recipe, release, try_acquire};
         let dir = tempfile::tempdir().expect("tempdir");
-        // Parent (dir) exists, so canonicalize_duck succeeds even though the
+        // Parent (dir) exists, so canonicalize_recipe succeeds even though the
         // file itself is absent (it canonicalizes the parent + rejoins the name).
         let file = dir.path().join("held.duck");
-        let canonical = canonicalize_duck(&file).expect("canonicalize (parent-based)");
+        let canonical = canonicalize_recipe(&file).expect("canonicalize (parent-based)");
         assert!(try_acquire(&canonical), "test takes the canonical key");
         let err =
             rename_persisted_session_blocking(&file, "new name").expect_err("held key rejects");
@@ -5581,7 +5602,7 @@ mod tests {
         );
     }
 
-    // --- cleanup_orphaned_session_dir (ADR-0089 D6 parity for open_duck) ---
+    // --- cleanup_orphaned_session_dir (ADR-0089 D6 parity for open_recipe) ---
 
     /// Helper: create a sessions-root-like temp tree with a stale session
     /// directory containing a `session.duck` placeholder.

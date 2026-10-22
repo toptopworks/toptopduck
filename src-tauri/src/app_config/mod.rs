@@ -1,8 +1,8 @@
 //! App-level config (ADR-0038): the SECOND durable at-rest artifact, alongside
-//! the user-owned `.duck`. App-config holds ONLY preferences, defaults, and
+//! the user-owned `recipe.json`. App-config holds ONLY preferences, defaults, and
 //! data-free state -- never a key, never user-data values, never dataset
 //! contents. It lives in the OS app-data directory (machine-local, not portable
-//! across users -- orthogonal to the shareable `.duck`).
+//! across users -- orthogonal to the shareable `recipe.json`).
 //!
 //! - [`model`] -- the durable schema (what persists, what does NOT). The
 //!   secrets-never invariant starts here: there is no key field anywhere.

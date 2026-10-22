@@ -1,6 +1,6 @@
-//! Cross-session persistence (ADR-0034/0036/0042): the `.duck` recipe.
+//! Cross-session persistence (ADR-0034/0036/0042): the `recipe.json` recipe.
 //!
-//! A session bound to a `.duck` path rewrites the whole recipe atomically on
+//! A session bound to a `recipe.json` path rewrites the whole recipe atomically on
 //! every terminal turn / source lifecycle event (ADR-0034 per-turn atomic
 //! write). Resume reads the recipe back, verifies each source's post-rectify
 //! fingerprint (ADR-0035/0042), and eagerly re-executes the productive SQL
@@ -13,9 +13,9 @@
 //! - [`migration`] -- forward migration pipeline for older `format_version`
 //!   (ADR-0036 Decision 1).
 //! - [`organization`] -- pin/archive sidecar `index.json` (ADR-0127): shell
-//!   layer organization state, outside the `.duck` content domain.
+//!   layer organization state, outside the `recipe.json` content domain.
 //! - [`registry`] -- in-process single-writer enforcement (ADR-0035 Decision 3, #50):
-//!   tracks the canonical `.duck` paths currently open in this process.
+//!   tracks the canonical `recipe.json` paths currently open in this process.
 
 pub mod io;
 pub mod listing;
@@ -24,10 +24,10 @@ pub mod organization;
 pub mod recipe;
 pub mod registry;
 
-pub use io::{read_duck, save_atomic, LoadError, SaveError};
+pub use io::{read_recipe, save_atomic, LoadError, SaveError};
 pub(crate) use listing::{default_sessions_root, validate_sessions_dir};
 pub use listing::{
-    list_session_metadata, scan_sessions_dir, scan_sessions_dir_including_archived, DuckPath,
+    list_session_metadata, scan_sessions_dir, scan_sessions_dir_including_archived, RecipePath,
     SessionMetadata, SessionsRoot, SourceSummary,
 };
 pub use migration::{migrate_to_current, MigrationError};
@@ -35,4 +35,4 @@ pub use recipe::{
     ProductiveTurn, Recipe, RecipeEntry, RecipeError, RecipeOutcome, RecipeTurn, SourceRef,
     RECIPE_FORMAT_VERSION,
 };
-pub use registry::{canonicalize_duck, release, try_acquire};
+pub use registry::{canonicalize_recipe, release, try_acquire};

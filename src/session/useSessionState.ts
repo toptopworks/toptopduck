@@ -1,7 +1,7 @@
-import { useCallback, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { useIntl } from "react-intl";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { conversation, takePersistError } from "../api";
+import { conversation, takePersistError, takeSourceNotices } from "../api";
 import { toAppError } from "../lib/error-presentation";
 import { sessionKeys } from "./queryKeys";
 import { useIngestFlow } from "./useIngestFlow";
@@ -22,7 +22,7 @@ import {
 } from "./workspace";
 import type { AppError, SessionFlowKind } from "../types/error";
 import type { DatasetDescriptor, GuidanceRequest, SheetGuidance, StaleAnchor } from "../types/dataset";
-import type { SaveError, TurnPhase } from "../types/session";
+import type { SaveError, SourceNotice, TurnPhase } from "../types/session";
 import type { ThreadEntry } from "../types/thread";
 
 // Per-session state + actions (ADR-0051). The shell (<App>) creates the
@@ -109,6 +109,10 @@ export interface UseSessionState {
    *  rendered via the locale catalog in the session pane's persist-warning
    *  banner. null after a clean save or once read. */
   persistError: SaveError | null;
+  /** ADR-0136: source status notices from a watermark-hit resume -- the open
+   *  succeeded but a source file is missing / changed since settle. Drained
+   *  once per pane mount; rendered as a workspace notice. */
+  sourceNotices: SourceNotice[];
   guidance: { request: GuidanceRequest; path: string } | null;
   /** Issue #748: the guided-submit failure rendered inline inside the
    *  GuidedLoadDialog (the workspace banner would sit behind the modal
@@ -274,6 +278,24 @@ export function useSessionState(
   const loading = turnLoading || mutationLoading;
   const [error, setError] = useState<AppError | null>(null);
   const [persistError, setPersistError] = useState<SaveError | null>(null);
+  const [sourceNotices, setSourceNotices] = useState<SourceNotice[]>([]);
+
+  // ADR-0136: drain the resume-hit source notices once per pane mount (the
+  // backend holds them until read; every replay-path resume drains an empty
+  // list, a no-op).
+  useEffect(() => {
+    let cancelled = false;
+    takeSourceNotices(sessionId)
+      .then((notices) => {
+        if (!cancelled) setSourceNotices(notices);
+      })
+      .catch(() => {
+        // swallow -- notice polling must not surface its own failure
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [sessionId]);
 
   // --- Derived: workspace content ------------------------------------------
   const workspaceContent = useMemo(
@@ -471,6 +493,7 @@ export function useSessionState(
     turnPausedSince,
     error,
     persistError,
+    sourceNotices,
     guidance,
     guidanceError,
     haltedRemaining,

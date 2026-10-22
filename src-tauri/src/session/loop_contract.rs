@@ -48,7 +48,7 @@ pub(crate) const DEFAULT_NO_PROGRESS_CAP: Duration = Duration::from_secs(120);
 /// reopened request's prompt (the built-in loop as the reopened rig prompt,
 /// ACP as the same-session `session/prompt`, claude as the same-process
 /// stream-json user frame, codex as the `exec resume` prompt) and it lands
-/// nowhere else (no trace entry, no `.duck` record, no next-turn window
+/// nowhere else (no trace entry, no `recipe.json` record, no next-turn window
 /// assembly).
 pub(crate) const WINDOW_CONVERGENCE_NUDGE: &str = "You have reached the step budget for this window of the turn. Continue the task, but start consolidating: finish the current step and work toward your final answer.";
 

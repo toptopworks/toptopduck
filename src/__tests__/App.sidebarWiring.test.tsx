@@ -207,7 +207,7 @@ import { listLiveSessions, renameSession } from "../api";
 import type { LiveSessionEntry } from "../api";
 
 function idleLive(id: string, name: string): LiveSessionEntry {
-  return { session_id: id, duck_path: `/x/${id}.duck`, session_name: name, in_flight: false };
+  return { session_id: id, recipe_path: `/x/${id}.recipe.json`, session_name: name, in_flight: false };
 }
 
 /** The sidebar row (`li.session-entry`) whose button carries the session's
@@ -320,7 +320,7 @@ describe("App shell-level sidebar wiring (issue #1007)", () => {
     // The row menu's onRename arrives as (path, sid, newName) while
     // renameEntry takes (sid, path, newName), so App transposes by hand --
     // passing the hook directly (as the SessionPane path does) would land the
-    // .duck path in the sid slot. Assert at the api boundary: the wiring pin
+    // recipe.json path in the sid slot. Assert at the api boundary: the wiring pin
     // only holds when the first argument is the sid.
     const row = rowFor("Rename me")!;
     fireEvent.click(

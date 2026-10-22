@@ -15,12 +15,12 @@ import type { SessionMetadata } from "../../types/session";
 // subscribe wrappers; the hoisted slots capture the registered callbacks so
 // a test can fire a synthetic tray event payload.
 const trayListeners = vi.hoisted(() => ({
-  open: null as ((ev: { duck_path: string }) => void) | null,
+  open: null as ((ev: { recipe_path: string }) => void) | null,
   newSession: null as (() => void) | null,
 }));
 
 vi.mock("../../api", () => ({
-  onTrayOpenSession: vi.fn(async (cb: (ev: { duck_path: string }) => void) => {
+  onTrayOpenSession: vi.fn(async (cb: (ev: { recipe_path: string }) => void) => {
     trayListeners.open = cb;
     return () => {
       trayListeners.open = null;
@@ -37,7 +37,7 @@ vi.mock("../../api", () => ({
 
 function persisted(path: string, displayName: string): SessionMetadata {
   return {
-    duck_path: path,
+    recipe_path: path,
     display_name: displayName,
     last_modified_at: 0,
     source_summary: { first_source_name: null, source_count: 0, turn_count: 0 },
@@ -99,7 +99,7 @@ describe("useTrayEvents", () => {
     await renderTray(deps);
 
     act(() => {
-      trayListeners.open!({ duck_path: "a.duck" });
+      trayListeners.open!({ recipe_path: "a.duck" });
     });
 
     // The wire payload carries only the path; the name is derived from the
@@ -114,7 +114,7 @@ describe("useTrayEvents", () => {
     await renderTray(deps);
 
     act(() => {
-      trayListeners.open!({ duck_path: "gone.duck" });
+      trayListeners.open!({ recipe_path: "gone.duck" });
     });
 
     expect(deps.openPersisted).toHaveBeenCalledWith("gone.duck", "");
@@ -144,7 +144,7 @@ describe("useTrayEvents", () => {
     const rendered = await renderTray(mounted);
 
     act(() => {
-      trayListeners.open!({ duck_path: "a.duck" });
+      trayListeners.open!({ recipe_path: "a.duck" });
     });
     expect(openPersisted).toHaveBeenCalledWith("a.duck", "");
 
@@ -156,7 +156,7 @@ describe("useTrayEvents", () => {
     await rerenderTray(rendered, refreshed, 2);
 
     act(() => {
-      trayListeners.open!({ duck_path: "a.duck" });
+      trayListeners.open!({ recipe_path: "a.duck" });
     });
     expect(openPersisted).toHaveBeenLastCalledWith("a.duck", "我的分析");
     expect(openPersisted).toHaveBeenCalledTimes(2);
@@ -180,7 +180,7 @@ describe("useTrayEvents", () => {
     const rendered = await renderTray(mounted);
 
     act(() => {
-      trayListeners.open!({ duck_path: "a.duck" });
+      trayListeners.open!({ recipe_path: "a.duck" });
     });
     expect(mountedOpen).toHaveBeenCalledTimes(1);
 
@@ -193,7 +193,7 @@ describe("useTrayEvents", () => {
     await rerenderTray(rendered, moved, 2);
 
     act(() => {
-      trayListeners.open!({ duck_path: "a.duck" });
+      trayListeners.open!({ recipe_path: "a.duck" });
     });
     expect(movedOpen).toHaveBeenCalledWith("a.duck", "");
     expect(mountedOpen).toHaveBeenCalledTimes(1);
