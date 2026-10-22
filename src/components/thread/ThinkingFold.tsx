@@ -13,7 +13,7 @@
 // way.
 
 import { useEffect, useState } from "react";
-import { FormattedMessage } from "react-intl";
+import { FormattedMessage, useIntl } from "react-intl";
 import { FoldToggle } from "./FoldToggle";
 import type { ThinkingTrace } from "../../types/thread";
 
@@ -27,6 +27,7 @@ export function ThinkingFold({
   onExpandedChange?: (expanded: boolean) => void;
 }) {
   const [expanded, setExpanded] = useState(initialExpanded);
+  const intl = useIntl();
   // Report on every posture/identity change (idempotent -- the collector
   // no-ops a report that matches its current state): a toggle flips
   // `expanded`; a last-wins completion swaps `thinking` while the fold the
@@ -45,8 +46,20 @@ export function ThinkingFold({
           values={{ sec: (thinking.duration_ms / 1000).toFixed(1) }}
         />
       </FoldToggle>
+      {/* Keyboard-reachable scroll region (#1363): the tabindex puts the
+          height-capped block in the Tab order so arrow keys scroll it
+          instead of the page; the region label names it for assistive
+          tech. */}
       {expanded && (
-        <p className="round-thinking m-0 mt-0.5 ml-5 rounded-md bg-muted p-2 text-xs text-muted-foreground whitespace-pre-wrap break-words max-h-48 overflow-y-auto">
+        <p
+          className="round-thinking m-0 mt-0.5 ml-5 rounded-md bg-muted p-2 text-xs text-muted-foreground whitespace-pre-wrap break-words max-h-48 overflow-y-auto"
+          tabIndex={0}
+          role="region"
+          aria-label={intl.formatMessage({
+            id: "thread.trace.thinkingAria",
+            defaultMessage: "Agent thinking",
+          })}
+        >
           {thinking.text}
         </p>
       )}

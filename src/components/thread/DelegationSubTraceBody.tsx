@@ -1,4 +1,5 @@
 import type { ReactNode } from "react";
+import { useIntl } from "react-intl";
 import { RoundProse } from "./RoundProse";
 import { ThinkingFold } from "./ThinkingFold";
 import { TraceStepFold } from "./TraceRow";
@@ -70,15 +71,27 @@ export function DelegationSubTraceBody({
    *  it from the delegation buffer, running rows and all. */
   children?: ReactNode;
 }) {
+  const intl = useIntl();
   return (
     <div className="subtrace-panel mt-1 border-l border-border pl-3">
       {/* The delegation's task head, live-only: agent-written layer-4
           content, passing through. The block rides the thinking-fold
           block's posture (muted surface, pre-wrap, height-capped) so the
           task's own line structure survives instead of collapsing into a
-          wall of text. */}
+          wall of text. Keyboard-reachable scroll region (#1363): the
+          tabindex puts the height-capped block in the Tab order so arrow
+          keys scroll it instead of the page; the region label names it
+          for assistive tech. */}
       {task !== undefined && (
-        <div className="subtrace-task mb-3 rounded-md bg-muted p-2 text-xs text-muted-foreground whitespace-pre-wrap break-words max-h-48 overflow-y-auto">
+        <div
+          className="subtrace-task mb-3 rounded-md bg-muted p-2 text-xs text-muted-foreground whitespace-pre-wrap break-words max-h-48 overflow-y-auto"
+          tabIndex={0}
+          role="region"
+          aria-label={intl.formatMessage({
+            id: "thread.trace.delegationTaskAria",
+            defaultMessage: "Delegation task",
+          })}
+        >
           {task}
         </div>
       )}
