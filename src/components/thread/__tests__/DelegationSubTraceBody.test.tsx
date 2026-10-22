@@ -252,3 +252,20 @@ describe("DelegationSubTraceBody usage subtotal (ADR-0129, issue #1270)", () => 
     expect(screen.queryByText(/^Used /)).not.toBeInTheDocument();
   });
 });
+
+// Issue #1363: the task head is a height-capped scroll container riding
+// the thinking-block posture; tabindex/region semantics put it on the
+// keyboard path (the scroll is browser-native once the container can
+// take focus).
+describe("DelegationSubTraceBody task head (issue #1363)", () => {
+  it("exposes the live task head as a focusable scrollable region", () => {
+    renderWithProviders(
+      <DelegationSubTraceBody task="clean the sheet" subRounds={[SUB_ROUND]} />,
+    );
+    const head = document.querySelector(".subtrace-task");
+    expect(head).not.toBeNull();
+    expect(head).toHaveAttribute("tabindex", "0");
+    expect(head).toHaveAttribute("role", "region");
+    expect(head).toHaveAttribute("aria-label", "Delegation task");
+  });
+});

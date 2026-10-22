@@ -26,6 +26,7 @@
 // in place and KEEPS the fold open -- the one unlocked in-between).
 
 import { useState, type ReactNode } from "react";
+import { useIntl } from "react-intl";
 import { ChevronRight } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { SUMMARY_ROW_REVEAL_CLASS } from "./turn-visual";
@@ -49,6 +50,7 @@ export function TraceSummaryFold({
   head?: ReactNode;
 }) {
   const [expanded, setExpanded] = useState(false);
+  const intl = useIntl();
   return (
     <>
       <span
@@ -79,8 +81,20 @@ export function TraceSummaryFold({
           />
         </button>
       </span>
+      {/* Keyboard-reachable scroll region (#1363): the tabindex puts the
+          height-capped block in the Tab order so arrow keys scroll it
+          instead of the page; the region label names it for assistive
+          tech. */}
       {expanded && (
-        <p className="summary-fold-block m-0 mt-0.5 rounded-md bg-muted p-2 font-mono text-xs text-muted-foreground whitespace-pre-wrap break-words max-h-48 overflow-y-auto">
+        <p
+          className="summary-fold-block m-0 mt-0.5 rounded-md bg-muted p-2 font-mono text-xs text-muted-foreground whitespace-pre-wrap break-words max-h-48 overflow-y-auto"
+          tabIndex={0}
+          role="region"
+          aria-label={intl.formatMessage({
+            id: "thread.trace.summaryBlockAria",
+            defaultMessage: "Full summary",
+          })}
+        >
           {summary}
         </p>
       )}
