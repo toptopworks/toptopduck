@@ -267,5 +267,8 @@ describe("DelegationSubTraceBody task head (issue #1363)", () => {
     expect(head).toHaveAttribute("tabindex", "0");
     expect(head).toHaveAttribute("role", "region");
     expect(head).toHaveAttribute("aria-label", "Delegation task");
+    // A stray `//` comment at the children position compiles to literal
+    // text (#1363 review); the head must carry only its content.
+    expect(screen.queryByText(/Keyboard-reachable/)).not.toBeInTheDocument();
   });
 });

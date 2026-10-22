@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { render } from "@testing-library/react";
+import { render, screen } from "@testing-library/react";
 import { IntlProvider } from "react-intl";
 import type { ReactElement } from "react";
 
@@ -26,5 +26,8 @@ describe("TechnicalDetailsFold scroll container (issue #1363)", () => {
     expect(stack).toHaveAttribute("tabindex", "0");
     expect(stack).toHaveAttribute("role", "region");
     expect(stack).toHaveAttribute("aria-label", "Error stack");
+    // A stray `//` comment at the children position compiles to literal
+    // text (#1363 review); the fold must carry only its content.
+    expect(screen.queryByText(/Keyboard-reachable/)).not.toBeInTheDocument();
   });
 });
