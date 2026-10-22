@@ -54,7 +54,7 @@ fn call(input: Value) -> ToolUse {
 
 fn run(tool: &CliToolConfig, input: Value) -> toptopduck_lib::tools::ToolOutcome {
     let temp = TempDir::new().unwrap();
-    execute(tool, &call(input), temp.path(), &CancelToken::new())
+    execute(tool, &call(input), temp.path(), &CancelToken::new(), None)
 }
 
 #[test]
@@ -128,18 +128,37 @@ fn over_cap_output_truncates_with_an_explicit_marker() {
 
 #[test]
 fn missing_executable_is_a_call_time_error_and_the_entry_stays() {
+    // The bare-name leg (issue #1364): no separator means PATH resolution,
+    // and a miss is its own structured error naming the search that came
+    // up empty -- still probe semantics, the entry stays and re-arms. The
+    // empty controlled PATH keeps the miss deterministic.
     let mut t = tool("fake");
     t.executable = "definitely-not-a-real-tool-xyz".to_string();
-    let outcome = run(&t, json!({"args": []}));
+    let temp = TempDir::new().unwrap();
+    let path_env = std::env::join_paths([temp.path()]).unwrap();
+    let outcome = execute(
+        &t,
+        &call(json!({"args": []})),
+        temp.path(),
+        &CancelToken::new(),
+        Some(path_env),
+    );
     assert!(outcome.result.is_error);
     assert!(
-        outcome.result.content.contains("failed to spawn"),
-        "spawn failure is structured: {}",
+        outcome.result.content.contains("not found on PATH"),
+        "the miss names the empty search: {}",
         outcome.result.content
     );
     assert!(
         outcome.result.content.contains("re-arms"),
         "the message states the probe semantics"
+    );
+    assert!(
+        outcome
+            .result
+            .content
+            .contains("definitely-not-a-real-tool-xyz"),
+        "the registered string is the error surface, not a resolved path"
     );
 }
 
@@ -181,6 +200,7 @@ fn cwd_is_the_session_work_temp_dir() {
         &call(json!({"args": ["--pwd"]})),
         temp.path(),
         &CancelToken::new(),
+        None,
     );
     assert!(!outcome.result.is_error);
     assert_eq!(
@@ -246,6 +266,7 @@ fn round_cancel_kills_the_child_and_surfaces_a_tool_error() {
         &call(json!({"args": ["--sleep", "10000", "--exit", "0"]})),
         temp.path(),
         &cancel,
+        None,
     );
     assert!(outcome.result.is_error);
     assert!(
@@ -373,6 +394,7 @@ fn file_delivery_writes_the_temp_file_and_the_argv_receives_the_path() {
         &call(json!({"code": "print('hello')"})),
         temp.path(),
         &CancelToken::new(),
+        None,
     );
     assert!(!outcome.result.is_error, "{}", outcome.result.content);
     assert_eq!(outcome.result.content, "print('hello')");
@@ -395,6 +417,7 @@ fn file_delivery_temp_files_are_deleted_on_a_nonzero_exit() {
         &call(json!({"code": "x"})),
         temp.path(),
         &CancelToken::new(),
+        None,
     );
     assert!(outcome.result.is_error);
     assert!(
@@ -416,7 +439,13 @@ fn file_delivery_temp_files_are_deleted_on_cancel() {
         &["--cat", "{code}", "--sleep", "10000"],
         vec![file_param("code")],
     );
-    let outcome = execute(&tool, &call(json!({"code": "x"})), temp.path(), &cancel);
+    let outcome = execute(
+        &tool,
+        &call(json!({"code": "x"})),
+        temp.path(),
+        &cancel,
+        None,
+    );
     assert!(outcome.result.is_error);
     assert!(
         no_temp_files_left(&temp),
@@ -436,6 +465,7 @@ fn stdin_delivery_pipes_the_value_and_closes_stdin() {
         &call(json!({"payload": "piped body"})),
         temp.path(),
         &CancelToken::new(),
+        None,
     );
     assert!(!outcome.result.is_error, "{}", outcome.result.content);
     assert_eq!(outcome.result.content, "piped body");
@@ -456,6 +486,7 @@ fn stdin_and_file_channels_combine_in_one_registration() {
         &call(json!({"code": "CODE", "input": "DATA"})),
         temp.path(),
         &CancelToken::new(),
+        None,
     );
     assert!(!outcome.result.is_error, "{}", outcome.result.content);
     assert_eq!(outcome.result.content, "DATACODE");
@@ -479,6 +510,7 @@ fn a_child_that_never_reads_stdin_still_succeeds_without_a_marker() {
         &call(json!({"payload": "uninspected body"})),
         temp.path(),
         &CancelToken::new(),
+        None,
     );
     assert!(!outcome.result.is_error, "{}", outcome.result.content);
     assert!(
@@ -502,6 +534,7 @@ fn a_broken_stdin_pipe_marks_the_delivery_incomplete() {
         &call(json!({"payload": big})),
         temp.path(),
         &CancelToken::new(),
+        None,
     );
     assert!(
         !outcome.result.is_error,
@@ -529,6 +562,7 @@ fn run_keep_temp(
         &call_with_id(call_id, input),
         temp.path(),
         &CancelToken::new(),
+        None,
     );
     (outcome, temp)
 }
@@ -673,7 +707,7 @@ fn distinct_call_ids_keep_distinct_spill_files() {
     let temp = TempDir::new().unwrap();
     for id in ["tu_a", "tu_b"] {
         let call = call_with_id(id, json!({"args": ["--flood", (cap + 8192).to_string()]}));
-        let outcome = execute(&tool("fake"), &call, temp.path(), &CancelToken::new());
+        let outcome = execute(&tool("fake"), &call, temp.path(), &CancelToken::new(), None);
         assert!(!outcome.result.is_error);
     }
     let names: Vec<String> = std::fs::read_dir(temp.path().join("tool_output"))
@@ -688,4 +722,72 @@ fn distinct_call_ids_keep_distinct_spill_files() {
         names.contains(&"fake-tu_b.csv".to_string()),
         "both files survive: {names:?}"
     );
+}
+
+// --- bare-name call-time PATH resolution (issue #1364) -----------------------
+
+#[test]
+fn a_separated_missing_executable_keeps_the_failed_to_spawn_copy() {
+    // The pinned leg: a separated executable reaches the spawn exactly as
+    // registered, so its failure stays the spawn's own error -- the
+    // original probe copy, untouched by the bare-name routing.
+    let mut t = tool("fake");
+    t.executable = TempDir::new()
+        .unwrap()
+        .path()
+        .join("definitely-missing-xyz.exe")
+        .to_string_lossy()
+        .into_owned();
+    let outcome = run(&t, json!({"args": []}));
+    assert!(outcome.result.is_error);
+    assert!(
+        outcome.result.content.contains("failed to spawn"),
+        "the spawn failure keeps its copy: {}",
+        outcome.result.content
+    );
+    assert!(
+        outcome.result.content.contains("re-arms"),
+        "the message states the probe semantics"
+    );
+}
+
+#[test]
+fn a_bare_name_spawns_the_cmd_shim_installed_by_npm_style_clis() {
+    // The npm/scoop install shape (issue #1364): the only thing on PATH is
+    // a `.cmd` batch shim (Windows) or an extensionless executable script
+    // (Unix) -- no `.exe` anywhere, so CreateProcess's own bare-name search
+    // can never find it. The call-time resolution must, and the real spawn
+    // must succeed end to end.
+    let bin = TempDir::new().unwrap();
+    let name = "dbx-like-shim";
+    #[cfg(windows)]
+    std::fs::write(
+        bin.path().join(format!("{name}.cmd")),
+        "@echo off\r\necho from-shim\r\n",
+    )
+    .unwrap();
+    #[cfg(not(windows))]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let shim = bin.path().join(name);
+        std::fs::write(&shim, "#!/bin/sh\necho from-shim\n").unwrap();
+        std::fs::set_permissions(&shim, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let mut t = tool("fake");
+    t.executable = name.to_string();
+    let work = TempDir::new().unwrap();
+    let path_env = std::env::join_paths([bin.path()]).unwrap();
+    let outcome = execute(
+        &t,
+        &call(json!({"args": []})),
+        work.path(),
+        &CancelToken::new(),
+        Some(path_env),
+    );
+    assert!(
+        !outcome.result.is_error,
+        "the shim resolves and spawns: {}",
+        outcome.result.content
+    );
+    assert_eq!(outcome.result.content.trim_end(), "from-shim");
 }

@@ -1113,8 +1113,13 @@ fn handle_tools_call(msg: &Value, ctx: &mut GatewayCtx, outcome: &mut GatewayOut
                 // output-cap discipline a built-in-initiated call gets -- one
                 // execution engine, two callers. CLI tools never promote, so
                 // no side-effect channel rides here.
-                let executed =
-                    crate::cli_tools::executor::execute(tool, call, ctx.deps.temp_path, ctx.cancel);
+                let executed = crate::cli_tools::executor::execute(
+                    tool,
+                    call,
+                    ctx.deps.temp_path,
+                    ctx.cancel,
+                    None,
+                );
                 result_envelope(executed.result)
             } else {
                 // The builtin dispatch runs under the shared issue #321

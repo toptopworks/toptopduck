@@ -555,7 +555,7 @@ fn dispatch_gated_call_inner(
         // The registered-CLI dispatch arm (issue #671, ADR-0108 Decision 3):
         // direct argv spawn, cwd = the session's work temp dir, cancel = the
         // turn's shared token (process-tree termination on round cancel).
-        crate::cli_tools::executor::execute(tool, call, deps.temp_path, gate.cancel)
+        crate::cli_tools::executor::execute(tool, call, deps.temp_path, gate.cancel, None)
     } else {
         tools::dispatch(call, deps, gate.cancel, materializer)
     };
