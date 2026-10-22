@@ -1045,7 +1045,12 @@ function KvEditor({
                 onChange={(e) =>
                   actions.update(i, { value: e.target.value })}
                 placeholder={
-                  entry.isSecret ? "Stored in credential store" : "value"
+                  entry.isSecret
+                    ? intl.formatMessage({
+                        id: "settings.mcp.form.secretValuePlaceholder",
+                        defaultMessage: "Stored in credential store",
+                      })
+                    : "value"
                 }
                 type={entry.isSecret ? "password" : "text"}
                 aria-label={L.valueLabel(i + 1)}

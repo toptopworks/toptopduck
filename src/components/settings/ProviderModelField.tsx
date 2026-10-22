@@ -301,7 +301,7 @@ function PreflightResult({ outcome }: { outcome: ProfileTestOutcome }) {
         <DetailFold detail={outcome.data.detail}>
           <FormattedMessage
             id="settings.profiles.test.keychainUnavailable"
-            defaultMessage="Credential store unavailable — the system credential store could not be read. Check it, then test again."
+            defaultMessage="Credential store unavailable — it could not be read. Check it, then test again."
           />
         </DetailFold>
       );
