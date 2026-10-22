@@ -48,3 +48,4 @@ L2 的 `COPY/ATTACH/INSTALL/LOAD` 由 `CREATE TABLE result_N AS <query>` 的子�
 - **历史结果**（`result_N`，admin 主库 base 表）：经 `duckdb::types::Value` + Appender 做类型无关的按行镜像，成为沙箱主库的同名 base 表（流式，内存 O(单行)）。新结果以同法镜像回 admin，再由 admin 派生/注册（路径不变）。
 
 **分类**：沙箱对 `read_*` 的拒错串含 `"disabled by configuration"`，被既有分类器归为 `Resource`——与资源上限同路径，**不进重试回路**（同一 SQL 撞同一墙，ADR-0028）。
+- **被 ADR-0136 校准**：L3「资源上限」的施加通道与默认值不变；工作集存储落位文件连接后，`memory_limit` 事实上覆盖表存储缓存（buffer manager 逐出），不再有不可逐出面。见 ADR-0136。

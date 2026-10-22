@@ -43,3 +43,4 @@ ADR-0087 将 DuckDB 从唯一引擎降为默认工具——「一个会话可能
 - **不变项**：ADR-0035 Decision 3 的 single-writer registry 是文件级、在 `createSession` 时获取，与引擎正交；ADR-0089 Decision 6 的空会话 close 清理走 timeline 判定；ADR-0005 资源上限语义不变——时点从构造移到物化，仍在实例打开时应用一次；会话临时目录与 `tool_output` 子目录（ADR-0087 Decision 3）照旧在会话构造时创建——文件系统准备不是引擎物化。
 - **CONTEXT.md 不变**：「会话」词条的「打开时其工作集在内存中物化」对非空工作集仍成立，空工作集平凡成立；引擎是实现实体，不进 glossary。
 - **留实现期**：按需访问器的具体形态、TurnDeps 按需引擎源的载体形状、「纯聊天会话全程零引擎」的回归钉。
+- **被 ADR-0136 校准**：按需物化三决策与 Decision 4 的「resume 时物化」语义不动；Decision 4 的急切重放在伴生库水印命中路径豁免；Considered 末条的重命名否决（`session.duck` → `recipe.json`）失效。见 ADR-0136。
