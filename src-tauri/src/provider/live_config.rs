@@ -853,6 +853,23 @@ impl LiveProviderConfig {
             .into_iter()
             .filter(|tool| tool.enabled)
             .filter(|tool| {
+                // The validate-side emptiness rule's read twin (the upsert
+                // rejects a blank `executable`): a hand-edited entry with
+                // one is dropped here rather than reaching the executor as
+                // a nameless miss.
+                if tool.executable.trim().is_empty() {
+                    log::warn!(
+                        "cli tool `{}` in the config file has a blank \
+                         executable; it is excluded from the tool surface \
+                         (set an executable path or name)",
+                        tool.name
+                    );
+                    false
+                } else {
+                    true
+                }
+            })
+            .filter(|tool| {
                 // The validate-side legal-shape rule's read twin (issue
                 // #675): one predicate, `has_legal_shape`, serves both
                 // sides. A hand-edited file claiming builtin provenance

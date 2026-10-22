@@ -18,6 +18,7 @@
 //! -- a Windows job object (kill-on-close) or a Unix process group kill --
 //! so grandchildren the tool spawned die with it.
 
+use std::ffi::{OsStr, OsString};
 use std::fs::File;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -25,6 +26,7 @@ use std::process::{Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use super::builtin::which_in;
 use super::config::{render_call, CliToolConfig, RenderedFileValue};
 use crate::cancel::CancelToken;
 use crate::provider::tool_calling::{ToolResult, ToolUse};
@@ -54,22 +56,37 @@ const KILL_GRACE: Duration = Duration::from_secs(2);
 
 /// Execute one CLI tool call (the `execute_call` dispatch arm's entry).
 /// `session_temp_dir` is the cwd; `cancel` is the turn's shared token.
+/// `path_env` follows the startup-scan injection idiom: `None` reads the
+/// process PATH, `Some` is a test's controlled PATH.
 pub fn execute(
     tool: &CliToolConfig,
     call: &ToolUse,
     session_temp_dir: &Path,
     cancel: &CancelToken,
+    path_env: Option<OsString>,
 ) -> ToolOutcome {
-    execute_capped(tool, call, session_temp_dir, cancel, OUTPUT_CAP_BYTES)
+    let path_env = path_env.or_else(|| std::env::var_os("PATH"));
+    execute_capped(
+        tool,
+        call,
+        session_temp_dir,
+        cancel,
+        OUTPUT_CAP_BYTES,
+        path_env,
+    )
 }
 
-/// The testable core: `cap` is the per-stream byte cap (tests shrink it).
+/// The testable core: `cap` is the per-stream byte cap (tests shrink it);
+/// `path_env` is the PATH the bare-name resolution searches -- a `None` at
+/// this layer means no PATH to search, and a bare name degrades to the
+/// spawn's own lookup.
 fn execute_capped(
     tool: &CliToolConfig,
     call: &ToolUse,
     session_temp_dir: &Path,
     cancel: &CancelToken,
     cap: usize,
+    path_env: Option<OsString>,
 ) -> ToolOutcome {
     let error = |content: String| ToolOutcome {
         result: ToolResult {
@@ -103,7 +120,31 @@ fn execute_capped(
             ));
         }
     };
-    let mut command = Command::new(&tool.executable);
+    // Bare-name routing (issue #1364): an `executable` with no path
+    // separator resolves against the PATH at call time with the builtin
+    // scanner's exact semantics (`which_in` -- `.exe`/`.bat`/`.cmd`
+    // candidates on Windows, the empty-stub guard inherited), because
+    // CreateProcess's own bare-name search appends only `.exe` and never
+    // finds an npm/scoop `.cmd` shim. Any separated value passes through
+    // exactly as registered: pinned. The registered string stays the
+    // wording on every trace/error surface, and the resolution never
+    // writes back to the registry -- the registry is the author's truth,
+    // the resolution is a call-time fact.
+    let spawn_target = match spawn_route(&tool.executable, path_env.as_deref()) {
+        SpawnRoute::Direct(path) | SpawnRoute::Resolved(path) => path,
+        // The bare name missed the PATH search: its own structured error,
+        // naming the search that came up empty. Probe semantics unchanged
+        // -- the registration stays and re-arms.
+        SpawnRoute::Miss => {
+            return error(format!(
+                "`{}` not found on PATH (bare names also match `.exe`, `.bat`, \
+                 and `.cmd` on Windows). The registration is kept; install the \
+                 CLI or fix the executable and the tool re-arms.",
+                tool.executable
+            ));
+        }
+    };
+    let mut command = Command::new(&spawn_target);
     command
         .args(&rendered.argv)
         .current_dir(session_temp_dir)
@@ -241,6 +282,42 @@ fn execute_capped(
             "`{}` exited with a non-zero status ({status})\n[stderr]\n{stderr}{stdin_note}{stdout_note}",
             tool.executable
         ))
+    }
+}
+
+/// Where a registered executable spawns from (issue #1364): the bare-name
+/// routing decision, taken ahead of the spawn so a miss gets its own error
+/// surface distinct from the spawn's own failures.
+#[derive(Debug)]
+enum SpawnRoute {
+    /// Spawned exactly as registered -- a separated path (absolute or
+    /// relative) is pinned, and a bare name with no PATH to search
+    /// degrades to the spawn's own lookup (the pre-routing behavior).
+    Direct(PathBuf),
+    /// A bare name that resolved to a PATH hit (as joined from the PATH
+    /// entry, so absolute only when the entry is).
+    Resolved(PathBuf),
+    /// A bare name the PATH search missed.
+    Miss,
+}
+
+/// Route one registered `executable` (issue #1364): no path separator
+/// means a PATH name -- resolved with the builtin scanner's semantics --
+/// while any separated value passes through verbatim. The resolution is
+/// call-time only; the registry is never rewritten.
+fn spawn_route(executable: &str, path_env: Option<&OsStr>) -> SpawnRoute {
+    let is_path = executable
+        .chars()
+        .any(|c| c == std::path::MAIN_SEPARATOR || c == '/');
+    if is_path {
+        return SpawnRoute::Direct(PathBuf::from(executable));
+    }
+    let Some(path_env) = path_env else {
+        return SpawnRoute::Direct(PathBuf::from(executable));
+    };
+    match which_in(executable, path_env) {
+        Some(resolved) => SpawnRoute::Resolved(resolved),
+        None => SpawnRoute::Miss,
     }
 }
 
@@ -1132,5 +1209,62 @@ mod tests {
             SPILL_COMPONENT_MAX_CHARS,
             "a hostile id cannot push the path past platform limits"
         );
+    }
+
+    // --- spawn routing (issue #1364) ----------------------------------------
+
+    /// One controlled-PATH entry: `join_paths` of the dir, the injection
+    /// shape the PATH-injecting routing tests use (no environment
+    /// mutation).
+    fn path_env_of(dir: &Path) -> OsString {
+        std::env::join_paths([dir]).expect("join")
+    }
+
+    #[test]
+    fn spawn_route_pins_a_separated_executable_verbatim() {
+        // The PATH-less legs: pass-through regardless of PATH presence.
+        for exe in ["C:/tools/dbx.exe", r"D:\tools\dbx.exe"] {
+            match spawn_route(exe, None) {
+                SpawnRoute::Direct(path) => assert_eq!(path, PathBuf::from(exe)),
+                other => panic!("{exe} must pass through verbatim, got {other:?}"),
+            }
+        }
+        // The decoy leg: a `/`-separated name must stay `Direct` even with
+        // a live PATH to search, where a misroute to the bare-name branch
+        // would miss instead. On Windows this is the only pin that reddens
+        // if the `/` clause drops from the separator predicate.
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(dir.path().join("dbx.exe"), b"bin").expect("write decoy");
+        for exe in ["./bin/dbx", "sub/dbx"] {
+            match spawn_route(exe, Some(path_env_of(dir.path()).as_os_str())) {
+                SpawnRoute::Direct(path) => assert_eq!(path, PathBuf::from(exe)),
+                other => panic!("{exe} must stay Direct beside a decoy, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn spawn_route_resolves_a_bare_name_with_scanner_semantics() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let shim = if cfg!(windows) { "shim.cmd" } else { "shim" };
+        std::fs::write(dir.path().join(shim), b"bin").expect("write");
+        match spawn_route("shim", Some(path_env_of(dir.path()).as_os_str())) {
+            SpawnRoute::Resolved(path) => assert_eq!(path, dir.path().join(shim)),
+            other => panic!("bare name must resolve, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn spawn_route_misses_a_bare_name_absent_from_the_path() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        assert!(matches!(
+            spawn_route("shim", Some(path_env_of(dir.path()).as_os_str())),
+            SpawnRoute::Miss
+        ));
+    }
+
+    #[test]
+    fn spawn_route_degrades_to_direct_without_a_path() {
+        assert!(matches!(spawn_route("shim", None), SpawnRoute::Direct(_)));
     }
 }
