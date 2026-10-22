@@ -269,7 +269,7 @@ describe("LocalCliTab probe (issue #534/#535, ADR-0096)", () => {
     // non-current model all fail these.
     expect(screen.getByText("fake-opus (default)")).toBeInTheDocument();
     expect(screen.getByText("fake-sonnet")).toBeInTheDocument();
-    // Thinking render as badges with the current value marked
+    // Thinking renders as badges with the current value marked
     // (issue #552 effort badge group).
     expect(screen.getByText("medium (default)")).toBeInTheDocument();
   });

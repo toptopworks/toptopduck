@@ -14,8 +14,8 @@ describe("DisclosureBanner", () => {
     expect(screen.getByText(/前 3 行示例/)).toBeInTheDocument();
     // The schema segment is brand-neutral: "data types", never the engine (#739).
     expect(container).toHaveTextContent(/列名和类型/);
-    // The key-isolation guarantee: keychain-only storage, and the app's own
-    // interface never holds the key.
+    // The key-isolation guarantee: the key is stored only in the credential
+    // store, and the app's own interface never holds the key.
     expect(container).toHaveTextContent(/只保存在这台电脑的系统凭据库里/);
     expect(container).toHaveTextContent(/应用界面本身从不持有密钥/);
   });
