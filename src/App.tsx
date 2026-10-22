@@ -1265,7 +1265,7 @@ export default function App() {
                         >
                           <FormattedMessage
                             id="coldStart.greeting"
-                            defaultMessage="What would you like to analyze?"
+                            defaultMessage="Ask a data question — get analysis, reports, and insights."
                           />
                         </label>
                         {/* Issue #1337: the guidance banner sits between the

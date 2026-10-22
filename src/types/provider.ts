@@ -48,7 +48,7 @@ export interface ProviderConfig {
 
 // The active profile's key status pair (ADR-0029, issue #275): has_key is
 // authoritative when keychain_fault is null; a non-null fault means the OS
-// keychain read failed, so the consumer renders "Keychain unavailable" instead
+// keychain read failed, so the consumer renders "Credential store unavailable" instead
 // of misreading as "no key configured" (a boolean only -- the decrypted key
 // lives only in the Rust core, ADR-0029 invariant 3). The fault detail is a
 // technical English string (locked / service down / permission revoked / corrupt

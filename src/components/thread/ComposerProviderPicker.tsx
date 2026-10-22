@@ -522,7 +522,7 @@ export function ComposerProviderPicker({
   });
   const keychainUnavailableMark = intl.formatMessage({
     id: "composer.providerPicker.keychainUnavailable",
-    defaultMessage: "Keychain unavailable",
+    defaultMessage: "Credential store unavailable",
   });
   // The external-runtime tooltip names the selected adapter (the closed chip
   // shows the glyph alone; the tooltip is where the user reads WHICH

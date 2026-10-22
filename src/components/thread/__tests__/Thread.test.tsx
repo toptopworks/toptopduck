@@ -1729,7 +1729,7 @@ describe("Thread", () => {
           onLoadApprovalAttachments={onLoad}
         />,
       );
-      fireEvent.click(screen.getByRole("button", { name: "查看传值文件（1）" }));
+      fireEvent.click(screen.getByRole("button", { name: "查看传入的文件（1）" }));
       expect(onLoad).toHaveBeenCalledWith("req-1");
       expect(await screen.findByText("print(1); print(2)")).toBeInTheDocument();
     });

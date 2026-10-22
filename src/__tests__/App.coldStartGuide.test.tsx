@@ -276,7 +276,7 @@ describe("App cold-start guidance banner wiring (issue #1337)", () => {
         }),
     );
     render(<App />);
-    await screen.findByText("What would you like to analyze?");
+    await screen.findByText("Ask a data question — get analysis, reports, and insights.");
     // BOTH mount-time consumers park on the IPC (the picker's overlay fetch
     // + App's useProfileKeys); release every parked promise so neither feed
     // stays pending. The microtask hops let the catch land before act exits.

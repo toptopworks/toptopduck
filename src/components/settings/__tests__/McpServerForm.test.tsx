@@ -174,8 +174,13 @@ describe("McpServerForm (issue #388)", () => {
     // Non-secret env: LOG_LEVEL=info
     expect(screen.getByDisplayValue("LOG_LEVEL")).toBeInTheDocument();
     expect(screen.getByDisplayValue("info")).toBeInTheDocument();
-    // Secret env: API_KEY (value empty — keychain is one-way)
+    // Secret env: API_KEY (value empty — keychain is one-way); its value
+    // input's placeholder names where the secret lives (intl-sourced).
     expect(screen.getByDisplayValue("API_KEY")).toBeInTheDocument();
+    expect(
+      (screen.getByLabelText("Variable value (row 2)") as HTMLInputElement)
+        .placeholder,
+    ).toBe("Stored in credential store");
   });
 
   it("conditionally renders url field for sse transport", () => {

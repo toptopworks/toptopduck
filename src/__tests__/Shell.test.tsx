@@ -527,7 +527,7 @@ describe("App multi-session shell (issue #81 ACs)", () => {
     // ADR-0092: no auto-resume, no auto-create. The centered bar + greeting
     // show in the main area. createSession has not been called.
     render(<App />);
-    expect(screen.getByText(/你想分析什么/)).toBeInTheDocument();
+    expect(screen.getByText(/问一个数据问题/)).toBeInTheDocument();
     // The shell-level bar IS rendered (centered), so the textbox is present.
     expect(screen.getByRole("textbox", { name: "提问" })).toBeInTheDocument();
     expect(createSession).not.toHaveBeenCalled();
@@ -561,7 +561,7 @@ describe("App multi-session shell (issue #81 ACs)", () => {
         expect(document.querySelector(".settings-overlay")).toBeInTheDocument(),
       );
       expect(createSession).not.toHaveBeenCalled();
-      expect(screen.getByText(/你想分析什么/)).toBeInTheDocument();
+      expect(screen.getByText(/问一个数据问题/)).toBeInTheDocument();
     } finally {
       // The beforeEach only clearAllMocks (call history), so mock IMPLEMENTATIONS
       // leak into later tests. Restore the factory defaults — a lingering
@@ -601,7 +601,7 @@ describe("App multi-session shell (issue #81 ACs)", () => {
         "aria-selected",
         "true",
       );
-      expect(screen.getByText(/你想分析什么/)).toBeInTheDocument();
+      expect(screen.getByText(/问一个数据问题/)).toBeInTheDocument();
     } finally {
       // The beforeEach only clearAllMocks (call history), so the mock
       // IMPLEMENTATION must be restored (null is an App-level state, not an
@@ -851,7 +851,7 @@ describe("App multi-session shell (issue #81 ACs)", () => {
       );
       // Navigate back to the centered cold-start bar (sidebar "+").
       fireEvent.click(document.querySelector(".sidebar-new-button") as HTMLButtonElement);
-      await waitFor(() => expect(screen.getByText(/你想分析什么/)).toBeInTheDocument());
+      await waitFor(() => expect(screen.getByText(/问一个数据问题/)).toBeInTheDocument());
       // The trigger re-seeds from the resolved default — the consumed
       // built-in pick is gone.
       await waitFor(() =>
@@ -2926,10 +2926,10 @@ describe("App composer refactor follow-ups (issue #504)", () => {
     render(<App />);
     // No h1 or h2 greeting — the cold-start text is a <label>, not a heading.
     expect(document.querySelector("h1")).not.toBeInTheDocument();
-    expect(screen.queryByRole("heading", { name: /你想分析什么/ })).not.toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: /问一个数据问题/ })).not.toBeInTheDocument();
     // The greeting renders as a visible <label> associated with the textarea.
     expect(screen.getByLabelText("提问")).toBeInTheDocument();
-    expect(screen.getByText(/你想分析什么/)).toBeInTheDocument();
+    expect(screen.getByText(/问一个数据问题/)).toBeInTheDocument();
   });
 });
 

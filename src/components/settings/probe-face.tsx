@@ -138,7 +138,7 @@ function AcpProbeResult({ catalog }: { catalog: DiscoveredRuntime }) {
           <span className="text-muted-foreground">
             <FormattedMessage
               id="settings.runtime.localCli.probe.thoughtLevels"
-              defaultMessage="Thought levels"
+              defaultMessage="Thinking"
             />
             {": "}
           </span>

@@ -674,7 +674,7 @@ describe("ProviderModelField (issue #236, ADR-0070)", () => {
     fireEvent.click(screen.getByRole("button", { name: "Test connection" }));
     // Distinct from KeyRejected: the trust root itself is unavailable, and the
     // technical detail folds under the summary like Incompatible.
-    await screen.findByText(/Keychain unavailable/);
+    await screen.findByText(/Credential store unavailable/);
     expect(screen.queryByText(/Key rejected/)).not.toBeInTheDocument();
     expect(
       screen.getByText("keychain access failed: The user canceled"),

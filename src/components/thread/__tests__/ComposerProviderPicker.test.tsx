@@ -474,7 +474,7 @@ describe("ComposerProviderPicker two-level popover (ADR-0099)", () => {
     await openPopover();
     const trigger = screen.getByRole("combobox", { name: PROFILE_SELECT });
     await openSelect(trigger);
-    const mark = await screen.findByText("Keychain unavailable");
+    const mark = await screen.findByText("Credential store unavailable");
     expect(mark.closest("[role=\"option\"]")?.textContent).toContain("Anthropic");
   });
 
