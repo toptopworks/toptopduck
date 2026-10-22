@@ -174,7 +174,7 @@ function formatStoreCommandError(e: StoreCommandError, intl: IntlShape): string 
     case "KeychainFailure":
       return intl.formatMessage({
         id: "error.store.keychainFailure",
-        defaultMessage: "Failed to access the OS keychain",
+        defaultMessage: "Failed to access the system credential store",
       });
     case "ConfigWriteFailure":
       return intl.formatMessage({

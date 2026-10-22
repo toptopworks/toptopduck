@@ -580,7 +580,7 @@ export function McpServerForm({
         description={(
           <FormattedMessage
             id="settings.mcp.form.description"
-            defaultMessage="Set how this server connects. Secrets are kept in your system keychain and never appear in the config file."
+            defaultMessage="Set how this server connects. Secrets are kept in your system credential store and never appear in the config file."
           />
         )}
         action={(
@@ -1045,7 +1045,7 @@ function KvEditor({
                 onChange={(e) =>
                   actions.update(i, { value: e.target.value })}
                 placeholder={
-                  entry.isSecret ? "Stored in keychain" : "value"
+                  entry.isSecret ? "Stored in credential store" : "value"
                 }
                 type={entry.isSecret ? "password" : "text"}
                 aria-label={L.valueLabel(i + 1)}

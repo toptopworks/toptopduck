@@ -103,7 +103,7 @@ export function ComposerRuntimeMenu({
   });
   const keychainUnavailableMark = intl.formatMessage({
     id: "composer.providerPicker.keychainUnavailable",
-    defaultMessage: "Keychain unavailable",
+    defaultMessage: "Credential store unavailable",
   });
 
   // The synthetic option for a held adapter the detected table no longer

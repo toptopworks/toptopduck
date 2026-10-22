@@ -269,7 +269,7 @@ describe("LocalCliTab probe (issue #534/#535, ADR-0096)", () => {
     // non-current model all fail these.
     expect(screen.getByText("fake-opus (default)")).toBeInTheDocument();
     expect(screen.getByText("fake-sonnet")).toBeInTheDocument();
-    // Thought levels render as badges with the current value marked
+    // Thinking render as badges with the current value marked
     // (issue #552 effort badge group).
     expect(screen.getByText("medium (default)")).toBeInTheDocument();
   });
@@ -292,7 +292,7 @@ describe("LocalCliTab probe (issue #534/#535, ADR-0096)", () => {
       await screen.findByText(byFoldedText("fake-opus (default)")),
     ).toBeInTheDocument();
     // No levels means no thought-level row at all -- no label, no "—".
-    expect(screen.queryByText(byFoldedText("Thought levels"))).toBeNull();
+    expect(screen.queryByText(byFoldedText("Thinking"))).toBeNull();
   });
 
   it("renders the honest no-models line and keeps an unmatched current model visible", async () => {
@@ -1156,7 +1156,7 @@ describe("LocalCliTab fold (issue #552)", () => {
     ).toBeInTheDocument();
     // The row's label renders positively too -- a stray deletion of the
     // label span would otherwise leave only the badges pinned.
-    expect(screen.getByText(byFoldedText("Thought levels"))).toBeInTheDocument();
+    expect(screen.getByText(byFoldedText("Thinking"))).toBeInTheDocument();
     // Three badges, one per level; the current value carries the (default)
     // annotation shape only for marked entries.
     expect(await screen.findByText("low")).toBeInTheDocument();
