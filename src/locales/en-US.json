@@ -1,7 +1,7 @@
 {
   "activeSourceDelete.description": "This is the dataset your conversation is using. After removing it, pick one of the remaining datasets to continue (or cancel — the working set stays unchanged).",
   "activeSourceDelete.title": "Remove the current dataset {name}",
-  "coldStart.greeting": "What would you like to analyze?",
+  "coldStart.greeting": "Ask a data question — get analysis, reports, and insights.",
   "coldStart.guide.cliMissing": "The CLI set as the default runtime was not detected — choose another runtime in Settings.",
   "coldStart.guide.keyMissing": "The active profile has no API key — add one in Settings before asking.",
   "coldStart.guide.openSettings": "Open Settings",
