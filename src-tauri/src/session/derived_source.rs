@@ -30,7 +30,7 @@ use sqlparser::dialect::DuckDbDialect;
 use sqlparser::parser::Parser;
 
 use crate::guardrail::{ExecError, ExecErrorKind};
-use crate::ingest::schema::quote_ident;
+use crate::ingest::schema::{attach_sql, quote_ident};
 use crate::ingest::{self, loader};
 use crate::model::{DatasetDescriptor, DatasetPrivacy, RectifyProvenance};
 use crate::session::materializer::{CachedDerivedRef, TurnDeps};
@@ -202,11 +202,7 @@ fn process_one_derived(
 
     // ATTACH the snapshot to admin as a read-only catalog (same as
     // uploaded sources — `"ref".data` resolves identically).
-    let attach_path = snap.file_path.to_string_lossy();
-    let attach_sql = format!(
-        "ATTACH '{attach_path}' AS {} (READ_ONLY);",
-        quote_ident(ref_name)
-    );
+    let attach_sql = attach_sql(&snap.file_path.to_string_lossy(), ref_name);
     if let Err(e) = deps.engine.execute_batch(&attach_sql) {
         let _ = std::fs::remove_file(&snap.file_path);
         let _ = std::fs::remove_file(&persistent_path);

@@ -37,7 +37,7 @@ use super::{
     SourceResolution, TimelineEntry, TurnAudit,
 };
 use crate::cancel::CancelToken;
-use crate::ingest::schema::quote_ident;
+use crate::ingest::schema::attach_sql;
 use crate::model::{
     DatasetDescriptor, DatasetPrivacy, LoadError, RectifyProvenance, TraceEntryView, TraceRound,
     TurnFailure, TurnOutcome, TurnProvenance, TurnRecord, TurnRuntime,
@@ -1267,11 +1267,7 @@ impl super::Session {
         // the recipe's name is already unique, ADR-0036 parse-time check).
         let snap =
             crate::ingest::loader::copy_in(path, &self.snapshot_dir(), reference_name, reader)?;
-        let attach_path = snap.file_path.to_string_lossy();
-        let attach_sql = format!(
-            "ATTACH '{attach_path}' AS {} (READ_ONLY);",
-            quote_ident(reference_name)
-        );
+        let attach_sql = attach_sql(&snap.file_path.to_string_lossy(), reference_name);
         if let Err(e) = self.admin_engine.execute_batch(&attach_sql) {
             if let Err(io_err) = fs::remove_file(&snap.file_path) {
                 log::warn!(
@@ -1332,11 +1328,7 @@ impl super::Session {
         // resume_ingest_at maintains).
         for src in &recipe.sources {
             let file = companion::snapshot_file(tree, &src.reference_name);
-            let attach_sql = format!(
-                "ATTACH '{}' AS {} (READ_ONLY);",
-                file.to_string_lossy(),
-                quote_ident(&src.reference_name)
-            );
+            let attach_sql = attach_sql(&file.to_string_lossy(), &src.reference_name);
             if let Err(e) = self.admin_engine.execute_batch(&attach_sql) {
                 return Err(ResumeError::Restore {
                     reference_name: src.reference_name.clone(),

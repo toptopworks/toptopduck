@@ -25,7 +25,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use crate::ingest;
-use crate::ingest::schema::quote_ident;
+use crate::ingest::schema::{attach_sql, quote_ident};
 use crate::model::{
     DatasetDescriptor, LoadError, LoadOutcome, RectifyProvenance, RemoveSourceError,
     SourceLifecycleEvent, SourceLifecycleKind, StaleAnchor, StaleReason,
@@ -296,10 +296,10 @@ impl super::Session {
         // engine open this snapshot?) ahead of any destructive step, so a bad new
         // file never costs the user the old one.
         let swap_path = new_snap.file_path.to_string_lossy().into_owned();
-        if let Err(e) = self.admin_engine.execute_batch(&format!(
-            "ATTACH '{swap_path}' AS {} (READ_ONLY);",
-            quote_ident(&swap_alias),
-        )) {
+        if let Err(e) = self
+            .admin_engine
+            .execute_batch(&attach_sql(&swap_path, &swap_alias))
+        {
             log::warn!(
                 target: "toptopduck::session",
                 "pre-attach of new snapshot failed during replace for {reference_name}: {e}"
@@ -385,10 +385,10 @@ impl super::Session {
         // implementation-level cost of skipping a swap-then-cleanup round-trip
         // (not an ADR-level decision -- a second attach-pass would complicate
         // the replace path for a near-zero-probability OS-level failure).
-        if let Err(e) = self.admin_engine.execute_batch(&format!(
-            "ATTACH '{attach_path}' AS {} (READ_ONLY);",
-            quote_ident(reference_name)
-        )) {
+        if let Err(e) = self
+            .admin_engine
+            .execute_batch(&attach_sql(&attach_path, reference_name))
+        {
             return LoadOutcome::Error(LoadError::Other {
                 detail: format!("failed to mount new snapshot: {e}"),
             });
