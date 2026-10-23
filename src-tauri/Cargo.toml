@@ -1,6 +1,6 @@
 [package]
 name = "toptopduck"
-version = "0.2.0"
+version = "0.3.0"
 description = "Local-first AI data analysis desktop tool"
 edition = "2021"
 # MSRV 1.86 (ADR-0116): rig's edition-2024 crates floor at 1.85, and one step
