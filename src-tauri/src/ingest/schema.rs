@@ -341,14 +341,15 @@ pub fn quote_ident(name: &str) -> String {
 }
 
 /// Render the read-only snapshot attach statement
-/// (`ATTACH '<path>' AS <ident> (READ_ONLY);`). The identifier must be a
-/// sanitized machine name (`[A-Za-z0-9_]`): ingest-side callers enforce
-/// this via `sanitize_identifier`, resume-side callers trust the
-/// tool-written recipe. The snapshot file name embeds the identifier
-/// (`ingest::loader::copy_in`), so its charset -- not the quoting -- is
-/// what guards the verbatim single-quoted path.
+/// (`ATTACH '<path>' AS <ident> (READ_ONLY);`). Single quotes in the path
+/// are doubled (the SQL string-literal escape), so any path -- including an
+/// app-data dir under an apostrophe-bearing user name -- renders intact.
+/// The identifier must be a sanitized machine name (`[A-Za-z0-9_]`):
+/// ingest-side callers enforce this via `sanitize_identifier`, resume-side
+/// callers trust the tool-written recipe.
 pub fn attach_sql(path: &str, name: &str) -> String {
-    format!("ATTACH '{path}' AS {} (READ_ONLY);", quote_ident(name))
+    let escaped = path.replace('\'', "''");
+    format!("ATTACH '{escaped}' AS {} (READ_ONLY);", quote_ident(name))
 }
 
 #[cfg(test)]
@@ -372,13 +373,13 @@ mod tests {
     }
 
     #[test]
-    fn interpolates_attach_path_verbatim() {
-        // Single quotes pass through unescaped (characterizes the
-        // interpolation contract; see attach_sql's doc for what guards
-        // real paths).
+    fn escapes_attach_path_quotes() {
+        // Single quotes double (SQL string-literal escaping), so paths like
+        // an app-data dir under an apostrophe-bearing user name render
+        // intact.
         assert_eq!(
             attach_sql("/tmp/we'ird", "s0"),
-            "ATTACH '/tmp/we'ird' AS \"s0\" (READ_ONLY);"
+            "ATTACH '/tmp/we''ird' AS \"s0\" (READ_ONLY);"
         );
     }
 
