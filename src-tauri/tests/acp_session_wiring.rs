@@ -809,15 +809,15 @@ fn resumed_external_turn_without_invocations_records_empty_provenance() {
     );
 
     let duck_dir = tempfile::tempdir().unwrap();
-    let duck_path = duck_dir.path().join("resume.duck");
+    let recipe_path = duck_dir.path().join("resume.duck");
     let (mut session, old_path, _guard) = external_session("text_reply");
     session
-        .bind_duck(duck_path.clone(), "resume".into())
+        .bind_recipe(recipe_path.clone(), "resume".into())
         .expect("bind");
     drop(session);
 
-    let mut resumed = Session::open_duck(
-        &duck_path,
+    let mut resumed = Session::open_recipe(
+        &recipe_path,
         Arc::new(toptopduck_lib::CancelToken::new()),
         Box::new(toptopduck_lib::UnwiredProvider),
         Default::default(),

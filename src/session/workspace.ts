@@ -141,7 +141,7 @@ export function findArtifact(
 }
 
 /** Whether an artifact path sits inside the per-session artifacts directory
- * (ADR-0124 Decision 4): `artifacts/` under the bound .duck's parent -- the
+ * (ADR-0124 Decision 4): `artifacts/` under the bound recipe.json's parent -- the
  * one directory the asset protocol's runtime scope grants. Only in-scope
  * html/pdf are iframe-servable; a user-directory original (or an unbound
  * temp path) degrades to the fallback face under the stage header instead
@@ -150,10 +150,10 @@ export function findArtifact(
  * case-differing collision on a case-sensitive host is pathological.
  * ponytail: hand-rolled dirname/sep (no path polyfill in the webview); if
  * mixed-separator duck paths ever appear, normalize at the IPC edge. */
-export function isWithinArtifactsDir(path: string, duckPath: string): boolean {
-  const sep = duckPath.includes("\\") ? "\\" : "/";
-  const last = Math.max(duckPath.lastIndexOf("/"), duckPath.lastIndexOf("\\"));
-  const prefix = `${last === -1 ? "" : duckPath.slice(0, last)}${sep}artifacts${sep}`;
+export function isWithinArtifactsDir(path: string, recipePath: string): boolean {
+  const sep = recipePath.includes("\\") ? "\\" : "/";
+  const last = Math.max(recipePath.lastIndexOf("/"), recipePath.lastIndexOf("\\"));
+  const prefix = `${last === -1 ? "" : recipePath.slice(0, last)}${sep}artifacts${sep}`;
   return path.toLowerCase().startsWith(prefix.toLowerCase());
 }
 

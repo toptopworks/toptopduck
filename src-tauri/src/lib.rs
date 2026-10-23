@@ -70,8 +70,8 @@ pub use model::{
     DEFAULT_PROFILE_ID, DEFAULT_PROVIDER_BASE_URL, DEFAULT_PROVIDER_MODEL,
 };
 pub use persistence::{
-    DuckPath, LoadError as DuckLoadError, MigrationError, RecipeError, SaveError, SessionMetadata,
-    SessionsRoot, SourceSummary,
+    LoadError as DuckLoadError, MigrationError, RecipeError, RecipePath, SaveError,
+    SessionMetadata, SessionsRoot, SourceSummary,
 };
 pub use provider::fake::FakeProvider;
 pub use provider::keychain::{KeychainStore, ProviderConfigSource, StaticConfig};
@@ -80,7 +80,8 @@ pub use provider::prompt::ResponseLocale;
 pub use provider::{LiveProvider, Provider, ProviderError, UnwiredProvider};
 pub use session::{
     is_resuming, ActiveAbandoned, ActiveResolution, PendingConflict, RenameSessionError,
-    ResumeError, ResumeEvent, ResumeProgress, Session, SourceIssue, SourceResolution, TurnInputs,
+    ResumeError, ResumeEvent, ResumeProgress, Session, SourceIssue, SourceNotice, SourceResolution,
+    TurnInputs,
 };
 pub use session_store::{
     ClosingFlag, LiveSessionSnapshot, SessionError, SessionHandle, SessionId, SessionStore,
@@ -242,7 +243,7 @@ pub fn run() {
 
             // ADR-0038: app-config lives in the OS app-data dir (e.g.
             // %APPDATA%/<identifier>/config.json), NOT in the working directory
-            // and NOT alongside any `.duck`. Fall back to a temp path if the OS
+            // and NOT alongside any `recipe.json`. Fall back to a temp path if the OS
             // app-data dir cannot be resolved (the app still boots; prefs reset
             // each launch instead of persisting).
             let app_config_path = app_data_path(app.handle(), "config.json", "app-config");
@@ -538,8 +539,9 @@ pub fn run() {
             commands::set_sessions_dir,
             commands::get_sessions_dir,
             commands::set_default_runtime,
-            commands::open_duck,
+            commands::open_recipe,
             commands::take_persist_error,
+            commands::take_source_notices,
             commands::take_pending_conflict,
             commands::respond_tool_approval,
             commands::get_approval_attachments,

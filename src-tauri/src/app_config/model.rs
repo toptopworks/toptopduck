@@ -1,5 +1,5 @@
 //! App-level config model (ADR-0038): the durable shape of the SECOND at-rest
-//! artifact, alongside the user-owned `.duck`. This holds ONLY preferences,
+//! artifact, alongside the user-owned `recipe.json`. This holds ONLY preferences,
 //! defaults, and data-free state (path pointers, numeric ceilings, booleans)
 //! -- never a key, never user-data values, never dataset contents.
 //!
@@ -22,7 +22,7 @@ use crate::mcp::config::McpServerRegistry;
 use crate::model::{ProviderConfig, DEFAULT_PROVIDER_BASE_URL, DEFAULT_PROVIDER_MODEL};
 use crate::window::WINDOW_TURNS;
 
-/// App-config schema version (ADR-0038 -- separate domain from the `.duck`
+/// App-config schema version (ADR-0038 -- separate domain from the `recipe.json`
 /// `format_version`: app-config is machine-local and migrates with the app, not
 /// across users). v2 (issue #150, ADR-0064) marks the provider schema shape
 /// change to the multi-profile `ProviderConfig { profiles, active_profile }`.

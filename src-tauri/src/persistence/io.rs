@@ -1,4 +1,4 @@
-//! Atomic `.duck` file IO (ADR-0034/0035): every per-turn persistence write
+//! Atomic `recipe.json` file IO (ADR-0034/0035): every per-turn persistence write
 //! is a temp-file + rename whole-file rewrite, so a crash mid-write never
 //! leaves a corrupt recipe (it leaves either the prior complete recipe or
 //! the next complete one -- never a half-written file). The temp file lands
@@ -48,7 +48,7 @@ pub enum SaveError {
     Serialize(String),
     Io(String),
     Rename(String),
-    /// ADR-0035 Decision 3 / issue #50: the canonical `.duck` path is already held
+    /// ADR-0035 Decision 3 / issue #50: the canonical `recipe.json` path is already held
     /// open by another Session in this process. The save is refused BEFORE
     /// any IO so the existing file is never clobbered. Carries the canonical
     /// path so the UI can name exactly which file is double-open.
@@ -60,14 +60,14 @@ impl std::fmt::Display for SaveError {
         match self {
             // Artifact-neutral wording: the atomic-write protocol serves
             // both recipes and the organization sidecar, so the message
-            // must not name `.duck` for a failed `index.json` write.
+            // must not name `recipe.json` for a failed `index.json` write.
             Self::Serialize(d) => write!(f, "serialize failed: {d}"),
             Self::Io(d) => write!(f, "write temp file failed: {d}"),
             Self::Rename(d) => write!(f, "replace failed: {d}"),
             Self::AlreadyOpen(p) => {
                 write!(
                     f,
-                    "the .duck is already open in this process: {}",
+                    "the recipe file is already open in this process: {}",
                     p.display()
                 )
             }
@@ -83,7 +83,7 @@ impl std::error::Error for SaveError {}
 ///
 /// Crosses IPC serde-structured (issue #120): `#[serde(tag = "kind", content =
 /// "data")]`, the adjacently-tagged shape the rest of the wire contract uses.
-/// Nests inside `ResumeError::Load` (the `open_duck` command's typed reject),
+/// Nests inside `ResumeError::Load` (the `open_recipe` command's typed reject),
 /// so the frontend recurses `ResumeError::Load.data.kind` to render the
 /// version-mismatch "please upgrade" hint or the io/parse/migration detail.
 /// Distinct from [`crate::model::LoadError`] (the ingest error). The
@@ -117,11 +117,11 @@ impl From<crate::persistence::migration::MigrationError> for LoadError {
 impl std::fmt::Display for LoadError {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         match self {
-            Self::Io(d) => write!(f, "read .duck failed: {d}"),
-            Self::Parse(d) => write!(f, "parse .duck failed: {d}"),
+            Self::Io(d) => write!(f, "read recipe.json failed: {d}"),
+            Self::Parse(d) => write!(f, "parse recipe.json failed: {d}"),
             Self::VersionMismatch { found, supported } => write!(
                 f,
-                "this .duck was made by a newer app (format_version={found}); \
+                "this recipe.json was made by a newer app (format_version={found}); \
                  current app supports only {supported}, please upgrade"
             ),
             // Delegate to MigrationError's Display (names the failing step /
@@ -265,13 +265,13 @@ pub fn save_atomic<T: serde::Serialize>(target: &Path, value: &T) -> Result<(), 
 /// [`migrate_to_current`] (each per-version transform fills defaults / remaps
 /// semantics), then deserialize; higher -> honest refuse (a newer-made file is
 /// never silently mis-parsed). A missing or non-numeric `format_version` is an
-/// honest Parse error -- the field is mandatory on every v1+ .duck (ADR-0036).
+/// honest Parse error -- the field is mandatory on every v1+ recipe.json (ADR-0036).
 ///
 /// The forward-migrate path returns the recipe in memory; ADR-0036 KISS lands
 /// persistence of the migrated shape on the next normal auto-write (the
-/// caller's `open_duck` persists post-resume), so this function itself stays
+/// caller's `open_recipe` persists post-resume), so this function itself stays
 /// side-effect free and never backs up the original file (YAGNI).
-pub fn read_duck(path: &Path) -> Result<Recipe, LoadError> {
+pub fn read_recipe(path: &Path) -> Result<Recipe, LoadError> {
     let text = fs::read_to_string(path).map_err(|e| LoadError::Io(e.to_string()))?;
     let value: Value = serde_json::from_str(&text).map_err(|e| LoadError::Parse(e.to_string()))?;
     let raw = value
@@ -300,7 +300,7 @@ pub fn read_duck(path: &Path) -> Result<Recipe, LoadError> {
     let recipe: Recipe =
         serde_json::from_value(value).map_err(|e| LoadError::Parse(e.to_string()))?;
     // Parse, don't validate (rust/security.md §input-validation): a hand-edited
-    // or corrupted .duck is external input (ADR-0034 user-owned document), so a
+    // or corrupted recipe.json is external input (ADR-0034 user-owned document), so a
     // structural invariant like unique source reference names must surface here
     // as an honest parse error -- not later as a confusing mid-resume ambiguity
     // over which duplicate source to re-read.
@@ -360,12 +360,12 @@ mod tests {
     #[test]
     fn save_then_read_round_trips() {
         // ADR-0034: write a recipe, read it back, get the same recipe -- the
-        // .duck is a faithful portable document of the working set.
+        // recipe.json is a faithful portable document of the working set.
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("session.duck");
         let recipe = sample_recipe("round-trip");
         save_atomic(&path, &recipe).expect("save");
-        let back = read_duck(&path).expect("read");
+        let back = read_recipe(&path).expect("read");
         assert_eq!(back, recipe);
     }
 
@@ -391,7 +391,7 @@ mod tests {
         let path = dir.path().join("session.duck");
         save_atomic(&path, &sample_recipe("first")).expect("save 1");
         save_atomic(&path, &sample_recipe("second")).expect("save 2");
-        let back = read_duck(&path).expect("read");
+        let back = read_recipe(&path).expect("read");
         assert_eq!(back.session_name, "second");
     }
 
@@ -408,7 +408,7 @@ mod tests {
             future = RECIPE_FORMAT_VERSION + 1
         );
         fs::write(&path, &future).expect("write");
-        match read_duck(&path) {
+        match read_recipe(&path) {
             Err(LoadError::VersionMismatch { found, supported }) => {
                 assert_eq!(found, RECIPE_FORMAT_VERSION + 1);
                 assert_eq!(supported, RECIPE_FORMAT_VERSION);
@@ -424,11 +424,11 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("broken.duck");
         fs::write(&path, b"not json {").expect("write");
-        assert!(matches!(read_duck(&path), Err(LoadError::Parse(_))));
+        assert!(matches!(read_recipe(&path), Err(LoadError::Parse(_))));
     }
 
     #[test]
-    fn read_duck_migrates_a_lower_version_to_current() {
+    fn read_recipe_migrates_a_lower_version_to_current() {
         // ADR-0036 forward migration: a file whose format_version is BELOW the
         // current app version is reshaped through the migration pipeline and
         // returned as a current-version Recipe -- not refused. Uses the
@@ -463,7 +463,7 @@ mod tests {
         });
         fs::write(&path, serde_json::to_string(&v0).unwrap()).expect("write");
 
-        let recipe = read_duck(&path).expect("migrated read");
+        let recipe = read_recipe(&path).expect("migrated read");
         assert_eq!(recipe.format_version(), RECIPE_FORMAT_VERSION);
         assert_eq!(
             recipe.sources[0].display_name, "people",

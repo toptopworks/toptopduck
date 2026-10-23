@@ -38,8 +38,8 @@ use crate::session::TOOL_OUTPUT_DIR_NAME;
 use crate::tools::read_paths::{extract_read_paths, is_file_function};
 
 /// Subdirectory under `temp_path` for staging derived source files when no
-/// `.duck` is bound (ADR-0087 D4). Files here are migrated to the per-session
-/// directory's `assets/` subdirectory on `bind_duck` (ADR-0089). Lifecycle
+/// `recipe.json` is bound (ADR-0087 D4). Files here are migrated to the per-session
+/// directory's `assets/` subdirectory on `bind_recipe` (ADR-0089). Lifecycle
 /// follows the TempDir RAII (cleaned on session drop).
 pub(crate) const DERIVED_STAGING_DIR: &str = "derived";
 
@@ -191,12 +191,14 @@ fn process_one_derived(
         }
     };
 
-    // copy_in: create a read-only snapshot (same path as uploaded sources).
-    let snap =
-        loader::copy_in(&persistent_path, deps.temp_path, ref_name, reader_fn).map_err(|e| {
+    // copy_in: create a read-only snapshot (same path rule as uploaded
+    // sources -- the tree `snapshots/` dir for a bound session, ADR-0136 D1).
+    let snap = loader::copy_in(&persistent_path, &deps.snapshot_dir, ref_name, reader_fn).map_err(
+        |e| {
             let _ = std::fs::remove_file(&persistent_path);
             ExecError::new(ExecErrorKind::Runtime, e.to_string())
-        })?;
+        },
+    )?;
 
     // ATTACH the snapshot to admin as a read-only catalog (same as
     // uploaded sources — `"ref".data` resolves identically).

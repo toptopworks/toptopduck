@@ -82,7 +82,7 @@ function renderMenu(overrides: {
     <IntlProvider locale="en-US" messages={catalogFor("en-US")} defaultLocale="en-US">
       <SessionHeaderMenu
         sessionName="My Session"
-        duckPath="/test/session.duck"
+        recipePath="/test/session.duck"
         sessionId="sess-1"
         onRename={onRename}
         onClose={onClose}

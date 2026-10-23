@@ -21,8 +21,8 @@ import type {
 const intl = catalogIntl("en-US");
 const en = catalogFor("en-US");
 
-// Wrap a ResumeError as the open_duck reject shape: SessionError::Resume
-// (issue #120). open_duck rejects with its ResumeError wrapped in
+// Wrap a ResumeError as the open_recipe reject shape: SessionError::Resume
+// (issue #120). open_recipe rejects with its ResumeError wrapped in
 // SessionError::Resume, so the frontend recurses Resume.data.
 function resume(err: ResumeError): SessionError {
   return { kind: "Resume", data: err };
@@ -49,9 +49,9 @@ describe("fmtError — SessionError", () => {
   });
 });
 
-describe("fmtError — SessionError::Resume (open_duck reject)", () => {
+describe("fmtError — SessionError::Resume (open_recipe reject)", () => {
   it("renders each ResumeError kind via the locale catalog (issue #120)", () => {
-    // open_duck wraps its ResumeError in SessionError::Resume; fmtError
+    // open_recipe wraps its ResumeError in SessionError::Resume; fmtError
     // recurses Resume.data.kind -> locale. Every kind is pinned to its id.
     const cases: Array<[ResumeError, string]> = [
       [{ kind: "Cancelled" }, en["error.resume.cancelled"]],
@@ -76,7 +76,7 @@ describe("fmtError — SessionError::Resume (open_duck reject)", () => {
   });
 
   it("recurses ResumeError::Load into the nested DuckLoadError kind", () => {
-    // Load delegates to the nested .duck load error so the version-mismatch
+    // Load delegates to the nested recipe.json load error so the version-mismatch
     // "please upgrade" hint (with interpolated versions) surfaces, not a
     // generic "resume failed".
     expect(

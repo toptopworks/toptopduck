@@ -26,6 +26,11 @@ pub fn copy_in(
     alias: &str,
     reader_fn: &str,
 ) -> Result<Snapshot, LoadError> {
+    // The caller may hand us the tree snapshot directory that does not exist
+    // yet (first ingest into a fresh session tree, ADR-0136 D1) -- create it
+    // so Connection::open below can land the file. Idempotent for the temp
+    // faces, which already exist.
+    let _ = fs::create_dir_all(temp_dir);
     let file_path: PathBuf = temp_dir.join(format!("{alias}.duckdb"));
     // Clear any stale file from a previous failed attempt.
     if file_path.exists() {

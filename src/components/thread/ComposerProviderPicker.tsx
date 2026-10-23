@@ -288,7 +288,7 @@ export function ComposerProviderPicker({
   // break silently nor be swallowed by the shared banner error channel.
   const [posturePersistFault, setPosturePersistFault] = useState<SaveError | null>(null);
   // True when the persist was withheld on a pending ADR-0035 conflict (the
-  // .duck changed externally; the auto-write refuses to clobber it).
+  // recipe.json changed externally; the auto-write refuses to clobber it).
   const [posturePersistSuspended, setPosturePersistSuspended] = useState(false);
 
   // The posture the bar displays: the session's model config in-session, or

@@ -98,8 +98,12 @@ pub(crate) struct TurnDeps<'a> {
     pub result_row_cap: u64,
     pub result_count_cap: usize,
     pub temp_path: &'a Path,
+    /// Where source copy-in drops `<ref>.duckdb` snapshots: the bound session
+    /// tree's `snapshots/` (ADR-0136 D1) or the temp dir (unbound). Owned --
+    /// computed once at deps assembly from the session's binding.
+    pub snapshot_dir: PathBuf,
     /// The session's persistent `assets/` dir (ADR-0089), derived from the
-    /// bound `.duck` path. `read_*` references into it pass the preflight
+    /// bound `recipe.json` path. `read_*` references into it pass the preflight
     /// READ-ONLY: settle-time SQL-reference materialization rewrites replayed
     /// SQL to point here, and a live follow-up turn may reference a
     /// materialized copy. `None` for an unbound session.
@@ -135,6 +139,7 @@ impl<'a> TurnDeps<'a> {
             result_row_cap: 1_000,
             result_count_cap: 100,
             temp_path,
+            snapshot_dir: temp_path.to_path_buf(),
             assets_dir: None,
             tool_output_refs,
         }

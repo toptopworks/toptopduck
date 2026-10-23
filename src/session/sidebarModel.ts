@@ -5,7 +5,7 @@
 // and so the sidebar component stays a thin caller of these functions.
 //
 // Identity split (ADR-0060/0061/0089): a PERSISTED session's stable identity is
-// its `.duck` file path (SessionMetadata.duck_path); an OPEN session's runtime
+// its `recipe.json` file path (SessionMetadata.recipe_path); an OPEN session's runtime
 // identity is its ephemeral UUID (createSession). Since ADR-0089 every session
 // is persisted from creation, so every OpenSession carries a non-null path —
 // the "unsaved" state no longer exists.
@@ -29,7 +29,7 @@ export interface OpenSession {
   /** Display name. Starts empty (placeholder); updated by rename or the first
    *  turn's auto-naming. */
   name: string;
-  /** Bound `.duck` path (SessionMetadata.duck_path shape). Always non-null
+  /** Bound `recipe.json` path (SessionMetadata.recipe_path shape). Always non-null
    *  since ADR-0089: createSession binds immediately. */
   path: string;
   /** Pending data-file paths routed to this session's ingest but not yet
@@ -78,7 +78,7 @@ export interface SidebarEntry {
   /** The runtime sid when the session is OPEN in this shell, else null (the
    *  entry is a cold persisted row; clicking it resumes / mints a sid). */
   sid: string | null;
-  /** Bound `.duck` path. Always non-null since ADR-0089. */
+  /** Bound `recipe.json` path. Always non-null since ADR-0089. */
   path: string;
   /** Whether this entry is the currently active session. */
   active: boolean;
@@ -158,7 +158,7 @@ export function formatLastModified(lastModifiedAt: number, now: number): LastMod
   return { kind: "date", date: new Date(lastModifiedAt) };
 }
 
-/** Index open sessions by their bound .duck path so a persisted row can look up
+/** Index open sessions by their bound recipe.json path so a persisted row can look up
  *  its runtime binding in one read. Every session has a path since ADR-0089.
  *  Shared by buildSearchEntries + buildSidebarModel. */
 function indexOpenByPath(open: OpenSession[]): Map<string, OpenSession> {
@@ -173,17 +173,17 @@ function indexOpenByPath(open: OpenSession[]): Map<string, OpenSession> {
  *  binding. An open binding upgrades the row with its runtime sid + the
  *  (possibly renamed) in-memory name; both constructors emit the same
  *  persisted-row shape. Returns SearchEntry (path non-null) since
- *  m.duck_path is always a string. */
+ *  m.recipe_path is always a string. */
 function persistedEntry(
   m: SessionMetadata,
   bound: OpenSession | null,
   activeSessionId: string | null,
 ): SearchEntry {
   return {
-    key: m.duck_path,
+    key: m.recipe_path,
     name: bound?.name ?? m.display_name,
     sid: bound?.sid ?? null,
-    path: m.duck_path,
+    path: m.recipe_path,
     active: bound !== null && bound.sid === activeSessionId,
     pinned: m.pinned,
     firstSourceName: m.source_summary.first_source_name,
@@ -218,7 +218,7 @@ const BY_MTIME_DESC = (a: SidebarEntry, b: SidebarEntry): number =>
  *  activate-by-sid instead of re-resuming).
  *
  *  Scope (ADR-0072): only PERSISTED sessions are searchable -- the
- *  `list_sessions` result. An unsaved new session (no .duck) is NOT in
+ *  `list_sessions` result. An unsaved new session (no recipe.json) is NOT in
  *  list_sessions and never appears here, even when it is the active session
  *  (the sidebar still lists it; the modal is a persisted-session jump surface).
  *  Every emitted row therefore has a non-null path, so the return type is
@@ -249,7 +249,7 @@ export function buildSearchEntries(
     // a false positive at the boundary.
     const hay = `${m.display_name} ${m.source_summary.first_source_name ?? ""}`;
     if (!matches(hay)) continue;
-    entries.push(persistedEntry(m, openByPath.get(m.duck_path) ?? null, activeSessionId));
+    entries.push(persistedEntry(m, openByPath.get(m.recipe_path) ?? null, activeSessionId));
   }
   entries.sort(BY_MTIME_DESC);
   return entries.slice(0, MAX_SEARCH_RESULTS);
@@ -285,14 +285,14 @@ export function buildSidebarModel(
   grouping: SidebarGrouping,
 ): SidebarModel {
   const openByPath = indexOpenByPath(open);
-  const persistedPaths = new Set(persisted.map((m) => m.duck_path));
+  const persistedPaths = new Set(persisted.map((m) => m.recipe_path));
 
   const entries: SidebarEntry[] = [];
 
   // Persisted rows (resume-on-click targets). An open binding upgrades the row
   // with its runtime sid + the (possibly renamed) in-memory name.
   for (const m of persisted) {
-    entries.push(persistedEntry(m, openByPath.get(m.duck_path) ?? null, activeSessionId));
+    entries.push(persistedEntry(m, openByPath.get(m.recipe_path) ?? null, activeSessionId));
   }
 
   // Open sessions not yet in the persisted list: a just-created session (or one

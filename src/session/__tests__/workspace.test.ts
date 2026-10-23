@@ -317,7 +317,7 @@ describe("artifact derivation (ADR-0124, issue #1088)", () => {
         isWithinArtifactsDir("C:\\sessions\\s1\\artifacts\\a.html", "C:\\sessions\\s1\\session.duck"),
       ).toBe(true);
       expect(
-        isWithinArtifactsDir("/home/u/.duck/s1/artifacts/a.html", "/home/u/.duck/s1/session.duck"),
+        isWithinArtifactsDir("/home/u/sessions/s1/artifacts/a.html", "/home/u/sessions/s1/session.duck"),
       ).toBe(true);
     });
 

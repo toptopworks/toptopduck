@@ -1436,7 +1436,7 @@ fn window_resume_converges_after_exhaustion() {
 /// The convergence nudge is in-flight only (ADR-0128): it rides the
 /// reopened window's prompt -- the second model request's last message --
 /// and persists nowhere: no trace round's text carries it (the trace is
-/// what lands on `.duck` and what the next turn's window assembles from).
+/// what lands on `recipe.json` and what the next turn's window assembles from).
 #[test]
 fn window_resume_nudge_stays_in_flight() {
     let mut h = Harness::new();

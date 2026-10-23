@@ -22,7 +22,7 @@
 //! its own `Arc` clone until the turn finishes; its post-turn check sees
 //! `closing` and discards the outcome (ADR-0055 -- no thread append, no recipe
 //! persist). When the last `Arc` drops, the `Session` drops: DuckDB memory is
-//! freed and the bound `.duck` canonical-writer key is released.
+//! freed and the bound `recipe.json` canonical-writer key is released.
 //!
 //! ## Type-enforced invariants (issue #73)
 //!
@@ -141,8 +141,8 @@ pub enum SessionError {
     /// (ADR-0021 single-flight, per session via ADR-0056).
     #[error("该会话有查询进行中，请先取消或等待完成")]
     InFlight,
-    /// A resume failed (issue #120): the `open_duck` command wraps
-    /// [`Session::open_duck`](crate::session::Session::open_duck)'s typed
+    /// A resume failed (issue #120): the `open_recipe` command wraps
+    /// [`Session::open_recipe`](crate::session::Session::open_recipe)'s typed
     /// [`ResumeError`](crate::session::ResumeError) here instead of flattening
     /// it to [`Self::Engine`] (string), so the frontend recurses
     /// `Resume.data.kind` and renders the resume-domain locale message. The
@@ -258,14 +258,14 @@ pub struct SessionHandle {
     /// `Session` (cloned into it at construction); `close_session` and the
     /// `cancel` command fire it through [`Self::fire_cancel`] without the
     /// session lock. [`Self::cancel_token`] is the only escape hatch, used by
-    /// `open_duck` to attach the SAME token to the resumed session.
+    /// `open_recipe` to attach the SAME token to the resumed session.
     cancel: Arc<CancelToken>,
     /// ADR-0055 closing flag, monotonic via [`ClosingFlag`]. Set by
     /// [`Self::mark_closing`], read by [`Self::is_closing`] (and by the
     /// `Session`'s post-turn check via the clone attached at construction).
     closing: ClosingFlag,
     /// ADR-0053 resume guard, made per-session in the multi-session store.
-    /// While `open_duck` rebuilds THIS session's contents, mutating commands
+    /// While `open_recipe` rebuilds THIS session's contents, mutating commands
     /// targeting it reject rather than silently operating on the stale
     /// pre-resume session whose work `*s = new_session` would overwrite.
     /// Interior-mutable so it toggles through `&Arc<SessionHandle>`.
@@ -299,7 +299,7 @@ pub struct SessionHandle {
     /// composer picker's get/set are lock-light -- a write never blocks on an
     /// in-flight turn; `ask` mirrors both into the Session at turn top, so a
     /// switch takes effect exactly at the turn boundary. The pair is
-    /// PERSISTED to the recipe and restored on resume via open_duck's
+    /// PERSISTED to the recipe and restored on resume via open_recipe's
     /// restore call; the runtime choice is restored from the recipe-header
     /// `last_runtime` (ADR-0102 Decision 1, issue #589 -- segment
     /// continuation; the runtime is execution-plane session state, so unlike
@@ -358,7 +358,7 @@ impl SessionHandle {
     }
 
     /// Clone of the cancel token -- the only escape hatch for the inner `Arc`,
-    /// used by `open_duck` to attach the SAME token to the resumed session so a
+    /// used by `open_recipe` to attach the SAME token to the resumed session so a
     /// `cancel` / `close_session` after resume still reaches it.
     pub fn cancel_token(&self) -> Arc<CancelToken> {
         Arc::clone(&self.cancel)
@@ -377,20 +377,20 @@ impl SessionHandle {
         self.closing.get()
     }
 
-    /// Clone of the closing flag -- `open_duck` re-attaches the SAME flag to
+    /// Clone of the closing flag -- `open_recipe` re-attaches the SAME flag to
     /// the resumed session so a `close_session` after resume still discards
     /// in-flight turns. Monotonic: the clone exposes `set` / `get` only.
     pub fn closing_flag(&self) -> ClosingFlag {
         self.closing.clone()
     }
 
-    /// Whether `open_duck` is currently rebuilding this session (ADR-0053).
+    /// Whether `open_recipe` is currently rebuilding this session (ADR-0053).
     /// Mutating commands read this to reject during resume.
     pub fn is_resuming(&self) -> bool {
         self.resuming.load(Ordering::SeqCst)
     }
 
-    /// Toggle the resume flag. Set by the `open_duck` command before resume
+    /// Toggle the resume flag. Set by the `open_recipe` command before resume
     /// starts and cleared when it ends (success or error).
     pub fn set_resuming(&self, value: bool) {
         self.resuming.store(value, Ordering::SeqCst);
@@ -407,7 +407,7 @@ impl SessionHandle {
             .map_err(|_| SessionError::Engine("drop signal lock poisoned".into()))
     }
 
-    /// ADR-0063: install a fresh drop-signal receiver. Used by `open_duck` to
+    /// ADR-0063: install a fresh drop-signal receiver. Used by `open_recipe` to
     /// re-arm the signal on resume (the new session gets the matching sender via
     /// [`crate::session::Session::set_drop_signal`]). See
     /// [`SessionStore::create`] for the pair's initial construction.
@@ -430,7 +430,7 @@ impl SessionHandle {
     }
 
     /// Reset the approval posture to the default (ADR-0080: resume 归零).
-    /// Called by `open_duck` after a successful resume -- the authorization
+    /// Called by `open_recipe` after a successful resume -- the authorization
     /// mode + trust set are session-level and must not survive a resume
     /// (they are not in the recipe / app-config).
     pub fn reset_approval(&self) {
@@ -581,7 +581,7 @@ impl SessionHandle {
     }
 
     /// Restore the persisted ADR-0095 trio from the resumed recipe
-    /// (open_duck). Unlike the reset-to-default lineage (`reset_approval`),
+    /// (open_recipe). Unlike the reset-to-default lineage (`reset_approval`),
     /// the model + thought-level pair + the
     /// discovery cache SURVIVE a resume -- ADR-0095 Decision 6: losing the
     /// model selection is an unexpected degradation of the resume promise
@@ -605,7 +605,7 @@ impl SessionHandle {
 }
 
 /// One row of [`SessionStore::list_live`] (issue #842): a live session the
-/// frontend no longer knows about after a webview reload. `duck_path` /
+/// frontend no longer knows about after a webview reload. `recipe_path` /
 /// `session_name` are `None` for an unbound session (test constructors) or
 /// when any holder occupies the session lock at sweep time -- an in-flight
 /// turn, a transient non-turn command, or a poisoned mutex (`try_lock` folds
@@ -614,7 +614,7 @@ impl SessionHandle {
 #[derive(Debug, Clone)]
 pub struct LiveSessionSnapshot {
     pub session_id: SessionId,
-    pub duck_path: Option<std::path::PathBuf>,
+    pub recipe_path: Option<std::path::PathBuf>,
     pub session_name: Option<String>,
     pub in_flight: bool,
 }
@@ -679,7 +679,7 @@ impl SessionStore {
             drop_signal: Mutex::new(Some(drop_rx)),
             // ADR-0080 (issue #294): per-session approval state, defaulting to
             // PerCall mode + an empty trust set. Reset on resume
-            // (SessionHandle::reset_approval via open_duck).
+            // (SessionHandle::reset_approval via open_recipe).
             approval: Arc::new(crate::approval::ApprovalState::new()),
             // Issue #353: the built-in runtime is the honest default (ADR-0081);
             // an external CLI is an explicit per-session pick, restored on
@@ -725,7 +725,7 @@ impl SessionStore {
     /// Enumerate every live session as [`LiveSessionSnapshot`] rows (issue
     /// #842): the startup re-adoption sweep. A webview reload wipes the
     /// frontend's open-session set (and with it every runtime sid) while the
-    /// sessions here stay alive holding their single-writer `.duck` keys --
+    /// sessions here stay alive holding their single-writer `recipe.json` keys --
     /// without this enumeration the reloaded frontend has no path back to
     /// those sessions and every re-open of the same file rejects with
     /// `AlreadyOpen` until process restart. Rows are sorted by sid so the
@@ -737,7 +737,7 @@ impl SessionStore {
     /// adopt now". Locking follows the ADR-0056 brief-lock invariant: the map
     /// read lock is held only to clone the handles; each session is then read
     /// via `try_session_lock` so an in-flight turn (which holds the session
-    /// lock for its whole duration) degrades that row to `duck_path: None`
+    /// lock for its whole duration) degrades that row to `recipe_path: None`
     /// instead of blocking the sweep.
     pub fn list_live(&self) -> Result<Vec<LiveSessionSnapshot>, SessionError> {
         let handles: Vec<(SessionId, Arc<SessionHandle>)> = {
@@ -753,18 +753,18 @@ impl SessionStore {
             .into_iter()
             .map(|(session_id, handle)| {
                 let in_flight = handle.is_in_flight() || handle.is_resuming();
-                let (duck_path, session_name) = handle
+                let (recipe_path, session_name) = handle
                     .try_session_lock()
                     .map(|s| {
                         (
-                            s.duck_path().map(std::path::PathBuf::from),
+                            s.recipe_path().map(std::path::PathBuf::from),
                             s.session_name().map(str::to_string),
                         )
                     })
                     .unwrap_or((None, None));
                 LiveSessionSnapshot {
                     session_id,
-                    duck_path,
+                    recipe_path,
                     session_name,
                     in_flight,
                 }
@@ -838,7 +838,7 @@ impl SessionStore {
         // try_lock: never blocks. If the ask holds the lock, skip cleanup.
         let session_dir = handle.try_session_lock().and_then(|s| {
             if s.is_timeline_empty() {
-                s.duck_path()
+                s.recipe_path()
                     .and_then(|p| p.parent())
                     .map(std::path::PathBuf::from)
             } else {
@@ -1289,11 +1289,11 @@ mod tests {
         assert_eq!(handle.cached_discovered(), None);
     }
 
-    /// `open_duck` calls `reset_approval` after the resume swap (ADR-0080:
+    /// `open_recipe` calls `reset_approval` after the resume swap (ADR-0080:
     /// resume 归零). This test verifies the handle-level mechanism: set a
     /// non-default approval posture, call `reset_approval` (the exact call
-    /// `open_duck` makes after the resumed Session is live), and confirm the
-    /// defaults are restored. If the reset call were removed from `open_duck`
+    /// `open_recipe` makes after the resumed Session is live), and confirm the
+    /// defaults are restored. If the reset call were removed from `open_recipe`
     /// or `reset_approval` stopped working, a resumed session would inherit the
     /// prior session's NoConfirmation mode (violating ADR-0080).
     #[test]
@@ -1319,7 +1319,7 @@ mod tests {
             "pre-condition: non-default mode"
         );
 
-        // open_duck's resume swap calls reset_approval after the new Session
+        // open_recipe's resume swap calls reset_approval after the new Session
         // is live (ADR-0080: resume 归零).
         handle.reset_approval();
 

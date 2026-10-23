@@ -315,6 +315,21 @@ impl WorkingSet {
         self.results.contains(reference_name)
     }
 
+    /// The active pointer's reference NAME (`None` when unset) -- the settle
+    /// capture face for the companion meta (ADR-0136): the persisted
+    /// active-SOURCE pointer must ride the settled working-set shape verbatim.
+    pub fn active_name(&self) -> Option<&str> {
+        self.active.as_deref()
+    }
+
+    /// A clone of the provenance graph (result name -> dependency names) --
+    /// the settle capture face for the companion meta (ADR-0136), so the
+    /// resume hit path restores the stale cascade's input without re-parsing
+    /// the recorded SQL.
+    pub fn provenance_map(&self) -> HashMap<String, HashSet<String>> {
+        self.provenance.clone()
+    }
+
     /// The verbatim SQL FROM fragment for a dataset, or `None` if it isn't
     /// registered. A source is an attached read-only catalog, referenced as
     /// `"<ref>".data` (ADR-0012); a derived result is a main-DB physical table,
@@ -367,7 +382,7 @@ impl WorkingSet {
         self.datasets.is_empty()
     }
 
-    /// Update a source's `source_path` in place (issue #433: bind_duck migrates
+    /// Update a source's `source_path` in place (issue #433: bind_recipe migrates
     /// derived sources from `temp_path/derived/` to the per-session `assets/`
     /// subdirectory, ADR-0089/0087 D2).
     /// Returns `false` if the reference name isn't registered (a stale view
@@ -1022,7 +1037,7 @@ mod tests {
     #[test]
     fn update_source_path_updates_existing_descriptor_and_returns_true() {
         // The happy path: a registered source's source_path is replaced in place.
-        // Used by bind_duck to migrate derived files from temp/derived/ to
+        // Used by bind_recipe to migrate derived files from temp/derived/ to
         // the per-session assets/ subdirectory (issue #433, ADR-0087/0089 D2).
         let mut ws = WorkingSet::default();
         ws.register(descriptor("people")); // source_path "/people.csv"

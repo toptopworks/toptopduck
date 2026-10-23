@@ -6,7 +6,7 @@
 
 2. **管理会话目录——app 管理、用户可见、可配置。** 所有会话存于一个 app 管理的目录，默认 `<Documents>/TOPTOPDuck/sessions/`（平台惯例的 Documents 子目录，非隐藏 `%APPDATA%`）。设置中显示当前路径 + 「更改…」+「在文件管理器中打开」。改目录后新会话进新目录，旧会话留原处——不做自动迁移（YAGNI）。根 `TOPTOPDuck/` 预留 `sessions/` 子目录层级，为未来扩展（技能库等）留结构空间，不预创建空目录。
 
-3. **Per-session 目录结构。** 每个会话是一个自包含目录 `{sessions}/{uuid}/`，内含固定名 `session.duck`（recipe）与可选 `assets/`（双职责：派生源 ADR-0087 D2 + turn SQL 引用文件的哑副本——settle 时轮次 SQL 以 `read_*` 引用的会话临时文件复制为哑文件：不进工作集、不进数据集 UI、无指纹，仅供建存 SQL 重放时读取；SQL 路径同步重写为 assets 路径，重放链不依赖随进程消亡的临时目录；同名冲突自动消歧；`assets/` 子树只读，读写边界与源一致）。取代 ADR-0087 的扁平 `{duck_stem}.assets/` 模式。复制 / 移动 / 删除一个目录 = 完整会话。`session.duck` 固定文件名——显示名在 recipe header 中，sidebar 是主交互面；UUID 目录名是稳定身份，不随显示名变化。
+3. **Per-session 目录结构。** 每个会话是一个自包含目录 `{sessions}/{uuid}/`，内含固定名 `session.duck`（recipe）与可选 `assets/`（双职责：派生源 ADR-0087 Decision 4 + turn SQL 引用文件的哑副本——settle 时轮次 SQL 以 `read_*` 引用的会话临时文件复制为哑文件：不进工作集、不进数据集 UI、无指纹，仅供建存 SQL 重放时读取；SQL 路径同步重写为 assets 路径，重放链不依赖随进程消亡的临时目录；同名冲突自动消歧；`assets/` 子树只读，读写边界与源一致）。取代 ADR-0087 的扁平 `{duck_stem}.assets/` 模式。复制 / 移动 / 删除一个目录 = 完整会话。`session.duck` 固定文件名——显示名在 recipe header 中，sidebar 是主交互面；UUID 目录名是稳定身份，不随显示名变化。
 
 4. **自动命名——首条提问截断做标题，源做 hover 副提示。** 创建时显示名为占位符（如「新会话」）；首问被接受时一次性将显示名更新为首条提问的有界截断（ADR-0039 同款截断规则），之后永不自动改名（用户可手动 rename）。源文件名不进主标题，仅作 sidebar 条目的 hover tooltip 副提示。统一规则覆盖所有会话类型——DuckDB 中心、纯 MCP / 技能、混合——不依赖源文件存在。名字的值在提交时刻已完全确定，命名与持久化解耦：受理即命名、即时对前端可见（取消或失败的首轮照旧），磁盘仍随首个轮次终态的 recipe 写入落盘。
 
@@ -60,3 +60,4 @@ ADR-0034 Decision 5 定「每轮终态自动追加 + 原子写」，但未覆盖
 - **留实现期**：默认目录的平台 API 获取（Tauri path resolver）、UUID 生成（`uuid` crate）、close-time 空会话检测的具体 IPC 返回值、首次截断的字符上限对齐 ADR-0039。
 - **`assets/` 哑文件不走派生源通道**：派生源是注册进工作集的产品语义（描述符、指纹、UI 可见）；哑文件只是重放兜底——agent 直接写临时目录、SQL 裸路径引用的产物不取得数据集语义。两者同名消歧同构（`_2` 后缀环）但职责分离。
 - **被 ADR-0095 校准**：session 持久化结构新增 `model` / `thought_level` / `cached_discovered` 三个可选字段，随会话一并持久化与恢复；旧会话文件缺字段按 `None` 反序列化（向后兼容）。
+- **被 ADR-0136 校准**：per-session 目录内容扩为 `recipe.json`（或旧名 `session.duck`）+ 源快照 `<ref>.duckdb` + 伴生库与 WAL + `assets/` + `artifacts/`；「复制目录 = 完整会话」从携引用升级为携数据（应用内导入导出入口仍不设）。见 ADR-0136。

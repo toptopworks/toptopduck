@@ -25,7 +25,7 @@ export interface UseTrayEventsDeps {
   /** From usePersistedSessions: the disk-derived list, read to resolve the
    *  open action's display name (the wire payload carries only the path). */
   sessions: SessionMetadata[];
-  /** From useShellSessions: the sidebar-click resume path (openDuck under
+  /** From useShellSessions: the sidebar-click resume path (openRecipe under
    *  the hood). Its open-or-activate branch carries the already-open
    *  idempotency, so this hook routes every open click straight through. */
   openPersisted: (path: string, name: string) => Promise<void>;
@@ -55,8 +55,8 @@ export function useTrayEvents({
       // opens with the empty name and honest-degrades through the open
       // error path.
       const name =
-        sessions.find((s) => s.duck_path === ev.duck_path)?.display_name ?? "";
-      void openPersisted(ev.duck_path, name);
+        sessions.find((s) => s.recipe_path === ev.recipe_path)?.display_name ?? "";
+      void openPersisted(ev.recipe_path, name);
     });
     const newPromise = onTrayNewSession(() => {
       goToEmptyState();

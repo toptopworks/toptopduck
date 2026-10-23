@@ -167,7 +167,7 @@ let profileKeyCalls: number;
 function idleLive(id: string, name: string): LiveSessionEntry {
   return {
     session_id: id,
-    duck_path: `/x/${id}.duck`,
+    recipe_path: `/x/${id}.recipe.json`,
     session_name: name,
     in_flight: false,
   };
