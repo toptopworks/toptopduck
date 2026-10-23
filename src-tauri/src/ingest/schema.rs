@@ -340,9 +340,43 @@ pub fn quote_ident(name: &str) -> String {
     format!("\"{escaped}\"")
 }
 
+/// Render the read-only snapshot attach statement
+/// (`ATTACH '<path>' AS <ident> (READ_ONLY);`). Both arguments are
+/// tool-controlled values (snapshot dir + sanitized alias), so the path is
+/// interpolated verbatim and only the identifier is quoted.
+pub fn attach_sql(path: &str, name: &str) -> String {
+    format!("ATTACH '{path}' AS {} (READ_ONLY);", quote_ident(name))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn renders_canonical_read_only_attach() {
+        assert_eq!(
+            attach_sql(r"C:\tmp\snap\s0.duckdb", "s0"),
+            r#"ATTACH 'C:\tmp\snap\s0.duckdb' AS "s0" (READ_ONLY);"#
+        );
+    }
+
+    #[test]
+    fn quotes_attach_identifier() {
+        assert_eq!(
+            attach_sql("/tmp/x", "we\"ird"),
+            "ATTACH '/tmp/x' AS \"we\"\"ird\" (READ_ONLY);"
+        );
+    }
+
+    #[test]
+    fn interpolates_attach_path_verbatim() {
+        // The path is tool-controlled, never user input: single quotes pass
+        // through unescaped (characterizes the interpolation contract).
+        assert_eq!(
+            attach_sql("/tmp/we'ird", "s0"),
+            "ATTACH '/tmp/we'ird' AS \"s0\" (READ_ONLY);"
+        );
+    }
 
     #[test]
     fn canonicalizes_aliases_to_single_name() {

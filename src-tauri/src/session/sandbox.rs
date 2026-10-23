@@ -35,7 +35,7 @@ use duckdb::{appender_params_from_iter, Connection};
 
 use crate::app_config::model::EngineDefaults;
 use crate::guardrail::{apply_resource_caps, classify_duckdb_error, ExecError, ExecErrorKind};
-use crate::ingest::schema::quote_ident;
+use crate::ingest::schema::{attach_sql, quote_ident};
 use crate::workingset::WorkingSet;
 
 /// Open a fresh sandbox instance with the engine resource caps from the
@@ -80,11 +80,7 @@ pub(crate) fn attach_sources(
                 format!("源「{}」缺少快照文件记录", d.reference_name),
             )
         })?;
-        let attach_sql = format!(
-            "ATTACH '{}' AS {} (READ_ONLY)",
-            file.to_string_lossy(),
-            quote_ident(&d.reference_name)
-        );
+        let attach_sql = attach_sql(&file.to_string_lossy(), &d.reference_name);
         sandbox.execute_batch(&attach_sql).map_err(|e| {
             ExecError::new(
                 classify_duckdb_error(&e.to_string()),

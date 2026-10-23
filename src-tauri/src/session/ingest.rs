@@ -23,7 +23,7 @@ use std::path::Path;
 use calamine::Data;
 
 use crate::ingest;
-use crate::ingest::schema::quote_ident;
+use crate::ingest::schema::{attach_sql, quote_ident};
 use crate::ingest::tidy::{auto_tidy, forward_fill_merges, TidyOutcome};
 use crate::model::{
     DatasetDescriptor, DatasetPrivacy, GuidanceRequest, GuidanceSheet, GuidanceSheetState,
@@ -141,15 +141,10 @@ impl super::Session {
                 Err(e) => return LoadOutcome::Error(e),
             };
 
-        // Attach the snapshot read-only (ADR-0005 engine-level enforcement).
-        // `attach_path` is tool-controlled (temp dir + sanitized alias), not user
-        // input, so interpolation is safe; the user-supplied source path is bound
-        // as a parameter during copy-in (see ingest::loader).
-        let attach_path = snap.file_path.to_string_lossy();
-        let attach_sql = format!(
-            "ATTACH '{attach_path}' AS {} (READ_ONLY);",
-            quote_ident(&reference_name),
-        );
+        // Attach the snapshot read-only (ADR-0005 engine-level enforcement);
+        // the user-supplied source path is bound as a parameter during
+        // copy-in (see ingest::loader).
+        let attach_sql = attach_sql(&snap.file_path.to_string_lossy(), &reference_name);
         if let Err(e) = self.admin_engine.execute_batch(&attach_sql) {
             if let Err(io_err) = std::fs::remove_file(&snap.file_path) {
                 log::warn!(
@@ -474,11 +469,7 @@ impl super::Session {
         // The temp CSV is only needed during copy-in; the snapshot holds the data.
         let _ = fs::remove_file(&csv_path);
 
-        let attach_path = snap.file_path.to_string_lossy();
-        let attach_sql = format!(
-            "ATTACH '{attach_path}' AS {} (READ_ONLY);",
-            quote_ident(reference_name)
-        );
+        let attach_sql = attach_sql(&snap.file_path.to_string_lossy(), reference_name);
         if let Err(e) = self.admin_engine.execute_batch(&attach_sql) {
             if let Err(io_err) = fs::remove_file(&snap.file_path) {
                 log::warn!(
