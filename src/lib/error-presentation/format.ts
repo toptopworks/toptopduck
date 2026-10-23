@@ -594,11 +594,12 @@ export function fmtError(e: unknown, intl: IntlShape): string {
 
 // Extract the technical detail for the collapsed "Technical details" fold
 // (issue #119 / #120). Returns the underlying string from a typed error's
-// `data` -- SessionError::Engine, ResumeError::Engine / SourceMissing / Replay
-// / AlreadyOpen, the nested RecipeLoadError io/parse/migration detail, or a
-// SaveError's io/serde/rename detail / AlreadyOpen path, or a StoreCommandError's
-// io/keychain/config-write/invalid-cli-tool detail -- and null for every
-// variant whose message is already self-contained (so the fold is omitted).
+// `data` -- SessionError::Engine, ResumeError::SourceMissing / Replay /
+// Restore / AlreadyOpen, the nested RecipeLoadError io/parse/migration detail,
+// or a SaveError's io/serde/rename detail / AlreadyOpen path, or a
+// StoreCommandError's io/keychain/config-write/invalid-cli-tool detail -- and
+// null for every variant whose message is already self-contained (so the fold
+// is omitted).
 // fmtError keeps this detail OUT of the primary message; ADR-0029 holds -- the
 // Rust side is audited to keep secrets out of these payloads (the resume /
 // save paths are keychain-free) -- so the raw detail is safe to surface.
@@ -654,8 +655,9 @@ export function errorDetail(e: unknown): string | null {
 }
 
 // Detail for a nested ResumeError (issue #120), reached via SessionError::
-// Resume. SourceMissing / Replay carry their detail; AlreadyOpen carries the
-// canonical path; the rest are self-contained (the message already names them).
+// Resume. SourceMissing / Replay / Restore carry their detail; AlreadyOpen
+// carries the canonical path; the rest are self-contained (the message
+// already names them).
 function resumeErrorDetail(e: ResumeError): string | null {
   switch (e.kind) {
     case "Load":

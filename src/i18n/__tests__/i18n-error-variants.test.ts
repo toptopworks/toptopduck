@@ -90,6 +90,10 @@ const CATALOG_IDS: Readonly<Record<string, Readonly<Record<string, string | null
     Aborted: "error.resume.aborted",
     AlreadyOpen: "error.recipe.alreadyOpen",
   },
+  // The key stays the Rust enum name: the key-set assertion compares against
+  // the golden error_variant_kinds.json, whose keys are the Rust enum names.
+  // The TS type renamed to RecipeLoadError; the Rust enum did not -- do not
+  // "fix" this key to match the TS name.
   DuckLoadError: {
     Io: "error.recipe.loadIo",
     Parse: "error.recipe.loadParse",

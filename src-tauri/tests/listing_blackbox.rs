@@ -1,7 +1,7 @@
 //! list_sessions black-box (issue #76, ADR-0060/0061): drive the session-list
 //! derivation through the crate's public API only -- the same pure
 //! `list_session_metadata` the `list_sessions` Tauri command wraps (a directory
-//! scan of per-session recipes -- `recipe.json` first, the legacy `recipe.json`
+//! scan of per-session recipes -- `recipe.json` first, the legacy `session.duck`
 //! accepted -- ADR-0089). Writes real
 //! `recipe.json` recipes via the invariant-validating `Recipe::build` + `save_atomic`,
 //! then asserts the LIST shape the cold-start sidebar consumes: every readable

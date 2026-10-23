@@ -652,10 +652,24 @@ mod tests {
         .expect("save");
 
         let list = scan_sessions_dir(root.path());
-        let names: Vec<&str> = list.iter().map(|m| m.display_name.as_str()).collect();
+        // Both suffixes list; assert an unordered set -- the mtime sort
+        // (pinned separately by scan_lists_sessions_sorted_by_mtime_desc)
+        // ties when both writes land in the same millisecond, and a stable
+        // sort then falls back to read_dir order, which the filesystem does
+        // not guarantee.
+        let mut names: Vec<&str> = list.iter().map(|m| m.display_name.as_str()).collect();
+        names.sort_unstable();
         assert_eq!(names, vec!["fresh", "legacy"], "both suffixes list");
-        assert!(list[0].recipe_path.as_str().ends_with("recipe.json"));
-        assert!(list[1].recipe_path.as_str().ends_with("session.duck"));
+        let fresh = list
+            .iter()
+            .find(|m| m.display_name == "fresh")
+            .expect("fresh lists");
+        let legacy = list
+            .iter()
+            .find(|m| m.display_name == "legacy")
+            .expect("legacy lists");
+        assert!(fresh.recipe_path.as_str().ends_with("recipe.json"));
+        assert!(legacy.recipe_path.as_str().ends_with("session.duck"));
 
         // Precedence: when BOTH names exist in one directory, the new name
         // wins (it is first in the scan order). Writing the new name into the
