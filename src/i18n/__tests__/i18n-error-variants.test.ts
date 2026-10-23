@@ -81,25 +81,29 @@ const CATALOG_IDS: Readonly<Record<string, Readonly<Record<string, string | null
     Cancelled: "error.rowRead.cancelled",
   },
   ResumeError: {
-    Load: null, // recurses DuckLoadError
+    Load: null, // recurses RecipeLoadError
     SourceMissing: "error.resume.sourceMissing",
     Replay: "error.resume.replay",
+    Restore: "error.resume.restore",
     ActiveMissing: "error.resume.activeMissing",
     Cancelled: "error.resume.cancelled",
     Aborted: "error.resume.aborted",
-    AlreadyOpen: "error.duck.alreadyOpen",
+    AlreadyOpen: "error.recipe.alreadyOpen",
   },
-  DuckLoadError: {
-    Io: "error.duck.loadIo",
-    Parse: "error.duck.loadParse",
-    VersionMismatch: "error.duck.versionMismatch",
-    Migration: "error.duck.migration",
+  // Key = the Rust enum name re-exported at the crate root; the key-set
+  // assertion compares against the golden error_variant_kinds.json, so a
+  // future Rust-side rename must move this key in lockstep.
+  RecipeLoadError: {
+    Io: "error.recipe.loadIo",
+    Parse: "error.recipe.loadParse",
+    VersionMismatch: "error.recipe.versionMismatch",
+    Migration: "error.recipe.migration",
   },
   SaveError: {
     Serialize: "error.save.serialize",
     Io: "error.save.io",
     Rename: "error.save.rename",
-    AlreadyOpen: "error.duck.alreadyOpen",
+    AlreadyOpen: "error.recipe.alreadyOpen",
   },
   StoreCommandError: {
     OpenConflict: "error.store.openConflict",
@@ -126,7 +130,7 @@ const CATALOG_IDS: Readonly<Record<string, Readonly<Record<string, string | null
     EmptyName: "error.session.renameEmpty",
   },
   MigrationError: {
-    // Both variants ride the parent DuckLoadError::Migration message; their data
+    // Both variants ride the parent RecipeLoadError::Migration message; their data
     // only feeds the technical-details fold, so they have no own catalog id.
     NoTransform: null,
     Field: null,

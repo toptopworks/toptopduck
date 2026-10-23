@@ -1,13 +1,13 @@
 {
-  "DuckLoadError": [
+  "MigrationError": [
+    "Field",
+    "NoTransform"
+  ],
+  "RecipeLoadError": [
     "Io",
     "Migration",
     "Parse",
     "VersionMismatch"
-  ],
-  "MigrationError": [
-    "Field",
-    "NoTransform"
   ],
   "RemoveSourceError": [
     "InvalidContinueWith",
@@ -30,6 +30,7 @@
     "Cancelled",
     "Load",
     "Replay",
+    "Restore",
     "SourceMissing"
   ],
   "RowReadError": [

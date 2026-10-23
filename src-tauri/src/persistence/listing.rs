@@ -396,7 +396,7 @@ mod tests {
         // / source_summary / format_version, all derived from the recipe + file.
         let dir = tempfile::tempdir().expect("tempdir");
         let path = write_recipe(
-            &dir.path().join("analysis.duck"),
+            &dir.path().join("analysis.json"),
             Recipe::build(
                 "我的分析".into(),
                 vec![csv_source("orders")],
@@ -484,7 +484,7 @@ mod tests {
         // display label.
         let dir = tempfile::tempdir().expect("tempdir");
         let path = write_recipe(
-            &dir.path().join("noname.duck"),
+            &dir.path().join("noname.json"),
             Recipe::build(
                 String::new(),
                 vec![csv_source("people")],
@@ -511,7 +511,7 @@ mod tests {
         // turns. display_name falls back to the session_name "空" (non-empty).
         let dir = tempfile::tempdir().expect("tempdir");
         let path = write_recipe(
-            &dir.path().join("empty.duck"),
+            &dir.path().join("empty.json"),
             Recipe::build("空".into(), Vec::new(), Vec::new(), None).expect("build"),
         );
         let m = &list_session_metadata(&[path])[0];
@@ -527,7 +527,7 @@ mod tests {
         // readable v1 recipe is dropped, never listed with fabricated metadata.
         let dir = tempfile::tempdir().expect("tempdir");
         let good = write_recipe(
-            &dir.path().join("good.duck"),
+            &dir.path().join("good.json"),
             Recipe::build(
                 "ok".into(),
                 vec![csv_source("s")],
@@ -536,10 +536,10 @@ mod tests {
             )
             .expect("build"),
         );
-        let missing = dir.path().join("gone.duck").to_string_lossy().into_owned();
+        let missing = dir.path().join("gone.json").to_string_lossy().into_owned();
         let foreign = {
             // A real file that is NOT a recipe (read_recipe rejects it).
-            let p = dir.path().join("foreign.duck");
+            let p = dir.path().join("foreign.json");
             std::fs::write(&p, "not json").expect("write");
             p.to_string_lossy().into_owned()
         };
@@ -554,7 +554,7 @@ mod tests {
         // NOT turns -- turn_count counts RecipeEntry::Turn only.
         let dir = tempfile::tempdir().expect("tempdir");
         let path = write_recipe(
-            &dir.path().join("lifecycle.duck"),
+            &dir.path().join("lifecycle.json"),
             Recipe::build(
                 "lc".into(),
                 vec![csv_source("a"), csv_source("b")],
@@ -598,8 +598,10 @@ mod tests {
 
     // --- scan_sessions_dir (ADR-0089 production data source) ---------------
 
-    /// Write a recipe into `{dir}/{uuid}/session.duck` so it matches the
-    /// managed-directory layout. Returns the metadata path.
+    /// Write a recipe into `{dir}/{uuid}/session.duck` (the legacy name) so it
+    /// matches the managed-directory layout. The D5 acceptance face itself is
+    /// `scan_accepts_both_recipe_file_names`; every other test through this
+    /// helper only needs SOME readable recipe file. Returns the metadata path.
     fn write_session(root: &std::path::Path, uuid: &str, recipe: Recipe) -> std::path::PathBuf {
         let session_dir = root.join(uuid);
         std::fs::create_dir_all(&session_dir).expect("create session dir");
@@ -650,10 +652,24 @@ mod tests {
         .expect("save");
 
         let list = scan_sessions_dir(root.path());
-        let names: Vec<&str> = list.iter().map(|m| m.display_name.as_str()).collect();
+        // Both suffixes list; assert an unordered set -- the mtime sort
+        // (pinned separately by scan_lists_sessions_sorted_by_mtime_desc)
+        // ties when both writes land in the same millisecond, and a stable
+        // sort then falls back to read_dir order, which the filesystem does
+        // not guarantee.
+        let mut names: Vec<&str> = list.iter().map(|m| m.display_name.as_str()).collect();
+        names.sort_unstable();
         assert_eq!(names, vec!["fresh", "legacy"], "both suffixes list");
-        assert!(list[0].recipe_path.as_str().ends_with("recipe.json"));
-        assert!(list[1].recipe_path.as_str().ends_with("session.duck"));
+        let fresh = list
+            .iter()
+            .find(|m| m.display_name == "fresh")
+            .expect("fresh lists");
+        let legacy = list
+            .iter()
+            .find(|m| m.display_name == "legacy")
+            .expect("legacy lists");
+        assert!(fresh.recipe_path.as_str().ends_with("recipe.json"));
+        assert!(legacy.recipe_path.as_str().ends_with("session.duck"));
 
         // Precedence: when BOTH names exist in one directory, the new name
         // wins (it is first in the scan order). Writing the new name into the
@@ -722,7 +738,7 @@ mod tests {
     }
 
     #[test]
-    fn scan_skips_non_dir_entries_and_dirs_without_session_duck() {
+    fn scan_skips_non_dir_entries_and_dirs_without_a_recipe_file() {
         let root = tempfile::tempdir().expect("tempdir");
         // A valid session.
         write_session(
@@ -738,7 +754,7 @@ mod tests {
         );
         // A loose file in the root (not a session directory).
         std::fs::write(root.path().join("loose.txt"), "not a session").expect("write");
-        // A subdirectory with no session.duck (partial / stale).
+        // A subdirectory with no recipe.json (partial / stale).
         std::fs::create_dir_all(root.path().join("uuid-empty")).expect("mkdir");
 
         let list = scan_sessions_dir(root.path());
@@ -748,7 +764,8 @@ mod tests {
 
     // --- organization sidecar join (ADR-0127, issue #1174) -------------------
 
-    /// Write `{uuid}/session.duck` with a one-source recipe named `name`.
+    /// Write `{uuid}/session.duck` (the legacy name via `write_session`) with a
+    /// one-source recipe named `name`.
     fn write_named_session(root: &Path, uuid: &str, name: &str) {
         write_session(
             root,
@@ -837,18 +854,15 @@ mod tests {
     }
 
     #[test]
-    fn scan_keeps_organization_keys_for_dirs_with_an_unreadable_duck() {
+    fn scan_keeps_organization_keys_for_dirs_with_an_unreadable_recipe() {
         // The directory is the identity (ADR-0089): a corrupt recipe.json is an
         // honest-skip for the ROW, but not an orphaned KEY -- a temporarily
         // unreadable recipe must not cost the session its pin/archive state.
         let root = tempfile::tempdir().expect("tempdir");
         write_named_session(root.path(), "uuid-a", "a");
         organization::set_pinned(root.path(), "uuid-a", true).expect("pin a");
-        std::fs::write(
-            root.path().join("uuid-a").join("session.duck"),
-            "{ not json",
-        )
-        .expect("corrupt the duck");
+        std::fs::write(root.path().join("uuid-a").join("recipe.json"), "{ not json")
+            .expect("corrupt the recipe");
 
         let list = scan_sessions_dir(root.path());
         assert!(list.is_empty(), "the corrupt recipe honest-skips the row");

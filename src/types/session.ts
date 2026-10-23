@@ -84,7 +84,7 @@ export type ExportRowsError =
     data: { step: "Create" | "Write" | "Flush" | "Rename"; path: string; detail: string };
   };
 
-// Why a forward migration step failed (issue #120). Rides DuckLoadError::
+// Why a forward migration step failed (issue #120). Rides RecipeLoadError::
 // Migration inside ResumeError::Load. Mirrors the Rust `MigrationError` (serde
 // adjacently-tagged). `Field` carries the missing/ill-typed field detail;
 // `NoTransform` names a gap in the migration chain (no registered step for the
@@ -94,11 +94,13 @@ export type MigrationError =
   | { kind: "Field"; data: string };
 
 // The recipe.json load error (persistence::io::LoadError, issue #120) -- DISTINCT
-// from the ingest `LoadError` above. Nests MigrationError. Crosses IPC inside
+// from the ingest `LoadError` above. The Rust crate root re-exports the enum
+// under this same name (`RecipeLoadError`) to keep the two LoadErrors apart;
+// only the wire `kind` strings cross IPC. Nests MigrationError. Crosses IPC inside
 // ResumeError::Load (the open_recipe reject); the frontend recurses
 // ResumeError::Load.data.kind to render the version-mismatch "please upgrade"
 // hint or the io/parse/migration detail.
-export type DuckLoadError =
+export type RecipeLoadError =
   | { kind: "Io"; data: string }
   | { kind: "Parse"; data: string }
   | { kind: "VersionMismatch"; data: { found: number; supported: number } }
@@ -107,17 +109,21 @@ export type DuckLoadError =
 // Why a resume failed (issue #120). The `open_recipe` command wraps this in
 // `SessionError::Resume`. Mirrors
 // the Rust `ResumeError` (serde adjacently-tagged). `Load` recurses into
-// DuckLoadError; `AlreadyOpen` carries the canonical recipe.json path (PathBuf ->
+// RecipeLoadError; `Restore` names the snapshot whose in-tree read-only ATTACH
+// failed on the watermark-hit path (ADR-0136 D3) -- the recipe.json itself read
+// fine, so this is NOT a file-unreadable message; `AlreadyOpen` carries the
+// canonical recipe.json path (PathBuf ->
 // string). Command-boundary internal failures (mutex poison / join panic) stay
 // on `SessionError::Engine` -- they are not resume-domain, so they do not ride
 // this enum.
 export type ResumeError =
-  | { kind: "Load"; data: DuckLoadError }
+  | { kind: "Load"; data: RecipeLoadError }
   | {
     kind: "SourceMissing";
     data: { reference_name: string; path: string; detail: string };
   }
   | { kind: "Replay"; data: { reference_name: string; detail: string } }
+  | { kind: "Restore"; data: { reference_name: string; detail: string } }
   | { kind: "ActiveMissing"; data: string }
   | { kind: "Cancelled" }
   | { kind: "Aborted" }

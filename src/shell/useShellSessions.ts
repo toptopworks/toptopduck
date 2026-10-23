@@ -728,7 +728,7 @@ export function useShellSessions({
       try {
         // createSession mints a new session + binds an empty recipe at
         // sessions/{new_uuid}/recipe.json. The resume target is the EXISTING
-        // file at `path` (a prior session's duck), not the freshly-created empty
+        // file at `path` (a prior session's recipe.json), not the freshly-created empty
         // one — so openRecipe replays `path` into the minted sid and the open-set
         // entry binds `path` too (the sidebar's already-open lookup keys on it).
         const { session_id: sid } = await createSession();

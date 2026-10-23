@@ -9,7 +9,7 @@
 
 import type { IntlShape } from "react-intl";
 import type {
-  DuckLoadError,
+  RecipeLoadError,
   ExportRowsError,
   MigrationError,
   RemoveSourceError,
@@ -29,26 +29,26 @@ import {
   isStoreCommandError,
 } from "./guards";
 
-// Format a DuckLoadError through the locale catalog (issue #120). The
+// Format a RecipeLoadError through the locale catalog (issue #120). The
 // version-mismatch "please upgrade" hint interpolates the found / supported
 // versions into the message; the io / parse / migration messages are generic
 // and the underlying detail rides the technical-details fold via errorDetail.
-function formatDuckLoadError(e: DuckLoadError, intl: IntlShape): string {
+function formatRecipeLoadError(e: RecipeLoadError, intl: IntlShape): string {
   switch (e.kind) {
     case "Io":
       return intl.formatMessage({
-        id: "error.duck.loadIo",
+        id: "error.recipe.loadIo",
         defaultMessage: "Couldn't read this file",
       });
     case "Parse":
       return intl.formatMessage({
-        id: "error.duck.loadParse",
+        id: "error.recipe.loadParse",
         defaultMessage: "This file seems to be corrupted or incomplete",
       });
     case "VersionMismatch":
       return intl.formatMessage(
         {
-          id: "error.duck.versionMismatch",
+          id: "error.recipe.versionMismatch",
           defaultMessage:
             "This file was created by a newer version of the app (file version {found}; this app supports up to {supported}). Please update the app and open it again.",
         },
@@ -56,25 +56,26 @@ function formatDuckLoadError(e: DuckLoadError, intl: IntlShape): string {
       );
     case "Migration":
       return intl.formatMessage({
-        id: "error.duck.migration",
+        id: "error.recipe.migration",
         defaultMessage: "Couldn't upgrade this file to the current format",
       });
     default: {
       const unhandled: never = e;
-      throw new Error(`unhandled DuckLoadError kind: ${JSON.stringify(unhandled)}`);
+      throw new Error(`unhandled RecipeLoadError kind: ${JSON.stringify(unhandled)}`);
     }
   }
 }
 
 // Format a ResumeError through the locale catalog (issue #120). Load recurses
-// into formatDuckLoadError; SourceMissing / Replay / ActiveMissing interpolate
-// the reference name; AlreadyOpen shares the merged `error.duck.alreadyOpen`
-// id with SaveError::AlreadyOpen (DRY -- the single-writer invariant is one
-// message, not two).
+// into formatRecipeLoadError; SourceMissing / Replay / Restore / ActiveMissing
+// interpolate the reference name; AlreadyOpen shares the merged
+// `error.recipe.alreadyOpen` id with SaveError::AlreadyOpen (DRY -- the
+// single-writer invariant is one message, not two). Restore's message names
+// the SNAPSHOT mount, deliberately not the recipe.json read -- that succeeded.
 function formatResumeError(e: ResumeError, intl: IntlShape): string {
   switch (e.kind) {
     case "Load":
-      return formatDuckLoadError(e.data, intl);
+      return formatRecipeLoadError(e.data, intl);
     case "SourceMissing":
       return intl.formatMessage(
         { id: "error.resume.sourceMissing", defaultMessage: "Couldn't find the dataset \"{name}\"" },
@@ -83,6 +84,11 @@ function formatResumeError(e: ResumeError, intl: IntlShape): string {
     case "Replay":
       return intl.formatMessage(
         { id: "error.resume.replay", defaultMessage: "Failed to restore \"{name}\"" },
+        { name: e.data.reference_name },
+      );
+    case "Restore":
+      return intl.formatMessage(
+        { id: "error.resume.restore", defaultMessage: "Failed to restore the snapshot \"{name}\"" },
         { name: e.data.reference_name },
       );
     case "ActiveMissing":
@@ -105,7 +111,7 @@ function formatResumeError(e: ResumeError, intl: IntlShape): string {
       });
     case "AlreadyOpen":
       return intl.formatMessage({
-        id: "error.duck.alreadyOpen",
+        id: "error.recipe.alreadyOpen",
         defaultMessage: "This file is already open in the app",
       });
     default: {
@@ -116,7 +122,7 @@ function formatResumeError(e: ResumeError, intl: IntlShape): string {
 }
 
 // Format a SaveError through the locale catalog (issue #120). AlreadyOpen
-// shares the merged `error.duck.alreadyOpen` id with ResumeError::AlreadyOpen.
+// shares the merged `error.recipe.alreadyOpen` id with ResumeError::AlreadyOpen.
 function formatSaveError(e: SaveError, intl: IntlShape): string {
   switch (e.kind) {
     case "Serialize":
@@ -136,7 +142,7 @@ function formatSaveError(e: SaveError, intl: IntlShape): string {
       });
     case "AlreadyOpen":
       return intl.formatMessage({
-        id: "error.duck.alreadyOpen",
+        id: "error.recipe.alreadyOpen",
         defaultMessage: "This file is already open in the app",
       });
     default: {
@@ -560,8 +566,8 @@ export function fmtError(e: unknown, intl: IntlShape): string {
   }
   // Invariant: the top-level reject kind sets are disjoint (SessionError kinds
   // and SaveError kinds share none), so checking isSessionError before
-  // isSaveError is unambiguous. If a future command rejects a bare DuckLoadError
-  // (its `Io` collides with SaveError::Io), add an isDuckLoadError branch here
+  // isSaveError is unambiguous. If a future command rejects a bare RecipeLoadError
+  // (its `Io` collides with SaveError::Io), add an isRecipeLoadError branch here
   // before isSaveError.
   if (isSaveError(e)) {
     return formatSaveError(e, intl);
@@ -588,11 +594,12 @@ export function fmtError(e: unknown, intl: IntlShape): string {
 
 // Extract the technical detail for the collapsed "Technical details" fold
 // (issue #119 / #120). Returns the underlying string from a typed error's
-// `data` -- SessionError::Engine, ResumeError::Engine / SourceMissing / Replay
-// / AlreadyOpen, the nested DuckLoadError io/parse/migration detail, or a
-// SaveError's io/serde/rename detail / AlreadyOpen path, or a StoreCommandError's
-// io/keychain/config-write/invalid-cli-tool detail -- and null for every
-// variant whose message is already self-contained (so the fold is omitted).
+// `data` -- SessionError::Engine, ResumeError::SourceMissing / Replay /
+// Restore / AlreadyOpen, the nested RecipeLoadError io/parse/migration detail,
+// or a SaveError's io/serde/rename detail / AlreadyOpen path, or a
+// StoreCommandError's io/keychain/config-write/invalid-cli-tool detail -- and
+// null for every variant whose message is already self-contained (so the fold
+// is omitted).
 // fmtError keeps this detail OUT of the primary message; ADR-0029 holds -- the
 // Rust side is audited to keep secrets out of these payloads (the resume /
 // save paths are keychain-free) -- so the raw detail is safe to surface.
@@ -648,14 +655,16 @@ export function errorDetail(e: unknown): string | null {
 }
 
 // Detail for a nested ResumeError (issue #120), reached via SessionError::
-// Resume. SourceMissing / Replay carry their detail; AlreadyOpen carries the
-// canonical path; the rest are self-contained (the message already names them).
+// Resume. SourceMissing / Replay / Restore carry their detail; AlreadyOpen
+// carries the canonical path; the rest are self-contained (the message
+// already names them).
 function resumeErrorDetail(e: ResumeError): string | null {
   switch (e.kind) {
     case "Load":
-      return duckLoadErrorDetail(e.data);
+      return recipeLoadErrorDetail(e.data);
     case "SourceMissing":
     case "Replay":
+    case "Restore":
       return e.data.detail;
     case "AlreadyOpen":
       return e.data;
@@ -706,11 +715,11 @@ function exportRowsErrorDetail(e: ExportRowsError): string | null {
   }
 }
 
-// Detail for a nested DuckLoadError (issue #120). VersionMismatch's versions
+// Detail for a nested RecipeLoadError (issue #120). VersionMismatch's versions
 // are already in the message, so it carries no fold detail; the migration
 // branch recurses into the MigrationError (Field detail or the NoTransform
 // version gap).
-function duckLoadErrorDetail(e: DuckLoadError): string | null {
+function recipeLoadErrorDetail(e: RecipeLoadError): string | null {
   switch (e.kind) {
     case "Io":
     case "Parse":
@@ -721,7 +730,7 @@ function duckLoadErrorDetail(e: DuckLoadError): string | null {
       return migrationErrorDetail(e.data);
     default: {
       const unhandled: never = e;
-      throw new Error(`unhandled DuckLoadError kind: ${JSON.stringify(unhandled)}`);
+      throw new Error(`unhandled RecipeLoadError kind: ${JSON.stringify(unhandled)}`);
     }
   }
 }

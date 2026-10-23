@@ -1320,10 +1320,12 @@ impl super::Session {
         recipe_path: &Path,
         meta: &companion::WorkingSetMeta,
     ) -> Result<Vec<SourceNotice>, ResumeError> {
-        let tree = recipe_path.parent().ok_or_else(|| {
-            ResumeError::Load(crate::persistence::io::LoadError::Io(
-                "recipe path has no parent directory; cannot locate the session tree".into(),
-            ))
+        let tree = recipe_path.parent().ok_or_else(|| ResumeError::Restore {
+            reference_name: recipe_path
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default(),
+            detail: "recipe path has no parent directory; cannot locate the session tree".into(),
         })?;
         // Mount each tree snapshot read-only + record the file so the
         // per-turn sandboxes re-attach it (the same source_files contract
@@ -1336,9 +1338,10 @@ impl super::Session {
                 quote_ident(&src.reference_name)
             );
             if let Err(e) = self.admin_engine.execute_batch(&attach_sql) {
-                return Err(ResumeError::Load(crate::persistence::io::LoadError::Io(
-                    format!("挂载树内快照失败（{}）：{e}", src.reference_name),
-                )));
+                return Err(ResumeError::Restore {
+                    reference_name: src.reference_name.clone(),
+                    detail: format!("挂载树内快照失败：{e}"),
+                });
             }
             self.source_files.insert(src.reference_name.clone(), file);
         }
@@ -2352,6 +2355,66 @@ mod tests {
                 assert!(detail.contains("result_99"), "got {detail}");
             }
             other => panic!("expected ResumeError::Replay, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn restore_hit_reports_restore_when_a_snapshot_fails_to_attach() {
+        // Contract (ADR-0136 D3): on the watermark-hit path the recipe.json
+        // already read fine, so a snapshot whose read-only ATTACH fails is
+        // fresh corruption in the probe-to-attach window -- reported as
+        // Restore, never Load (whose frontend message blames the recipe
+        // read). `probe` normally guarantees the snapshots exist; a direct
+        // call skips probe, which is exactly this arm's premise.
+        let mut session = crate::Session::new().expect("session");
+        let tree = tempfile::tempdir().expect("tempdir");
+        let recipe = recipe_with(Vec::new(), Some("orders"));
+        // The tree deliberately holds no snapshot file: a READ_ONLY ATTACH
+        // cannot create it, so the attach fails deterministically.
+        let err = session
+            .restore_hit(
+                &recipe,
+                &tree.path().join("recipe.json"),
+                &companion::WorkingSetMeta::default(),
+            )
+            .expect_err("missing snapshot fails the hit restore");
+        match err {
+            ResumeError::Restore {
+                reference_name,
+                detail,
+            } => {
+                assert_eq!(reference_name, "orders");
+                assert!(!detail.is_empty(), "got {detail}");
+            }
+            other => panic!("expected ResumeError::Restore, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn restore_hit_reports_restore_for_a_parentless_recipe_path() {
+        // The defense arm: a recipe path with no parent cannot locate the
+        // tree. Unreachable through open_recipe (probe folds a parentless
+        // path into a miss first), so only a direct call exercises it; a
+        // parentless path has no file name either, so the payload carries
+        // an empty reference_name.
+        let mut session = crate::Session::new().expect("session");
+        let recipe = recipe_with(Vec::new(), Some("orders"));
+        let err = session
+            .restore_hit(
+                &recipe,
+                Path::new(""),
+                &companion::WorkingSetMeta::default(),
+            )
+            .expect_err("parentless path fails the hit restore");
+        match err {
+            ResumeError::Restore {
+                reference_name,
+                detail,
+            } => {
+                assert_eq!(reference_name, "");
+                assert!(!detail.is_empty(), "got {detail}");
+            }
+            other => panic!("expected ResumeError::Restore, got {other:?}"),
         }
     }
 }

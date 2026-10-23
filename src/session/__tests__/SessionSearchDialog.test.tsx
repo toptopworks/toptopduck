@@ -59,7 +59,7 @@ describe("SessionSearchDialog (ADR-0072, issue #252)", () => {
       <SessionSearchDialog
         {...baseProps}
         open={false}
-        sessions={[meta("/a.duck", "alpha")]}
+        sessions={[meta("/a.json", "alpha")]}
       />,
     );
     expect(screen.queryByRole("dialog")).toBeNull();
@@ -70,8 +70,8 @@ describe("SessionSearchDialog (ADR-0072, issue #252)", () => {
       <SessionSearchDialog
         {...baseProps}
         sessions={[
-          meta("/a.duck", "alpha", { last_modified_at: 2000 }),
-          meta("/b.duck", "beta", { last_modified_at: 1000 }),
+          meta("/a.json", "alpha", { last_modified_at: 2000 }),
+          meta("/b.json", "beta", { last_modified_at: 1000 }),
         ]}
       />,
     );
@@ -89,10 +89,10 @@ describe("SessionSearchDialog (ADR-0072, issue #252)", () => {
       <SessionSearchDialog
         {...baseProps}
         sessions={[
-          meta("/a.duck", "alpha", {
+          meta("/a.json", "alpha", {
             source_summary: { first_source_name: "alpha_src", source_count: 1, turn_count: 1 },
           }),
-          meta("/b.duck", "beta", {
+          meta("/b.json", "beta", {
             source_summary: { first_source_name: "beta_src", source_count: 1, turn_count: 1 },
           }),
         ]}
@@ -115,7 +115,7 @@ describe("SessionSearchDialog (ADR-0072, issue #252)", () => {
     renderDialog(
       <SessionSearchDialog
         {...baseProps}
-        sessions={[meta("/a.duck", "alpha")]}
+        sessions={[meta("/a.json", "alpha")]}
       />,
     );
     fireEvent.change(screen.getByRole("combobox"), { target: { value: "zzz" } });
@@ -135,8 +135,8 @@ describe("SessionSearchDialog (ADR-0072, issue #252)", () => {
         onActivate={onActivate}
         onOpenPersisted={onOpenPersisted}
         sessions={[
-          meta("/a.duck", "alpha", { last_modified_at: 2000 }),
-          meta("/b.duck", "beta", { last_modified_at: 1000 }),
+          meta("/a.json", "alpha", { last_modified_at: 2000 }),
+          meta("/b.json", "beta", { last_modified_at: 1000 }),
         ]}
       />,
     );
@@ -147,7 +147,7 @@ describe("SessionSearchDialog (ADR-0072, issue #252)", () => {
     expect(screen.getAllByRole("option")[1]).toHaveAttribute("aria-selected", "true");
     // Enter on beta (cold persisted row) -> onOpenPersisted with path + name.
     fireEvent.keyDown(input, { key: "Enter" });
-    expect(onOpenPersisted).toHaveBeenCalledWith("/b.duck", "beta");
+    expect(onOpenPersisted).toHaveBeenCalledWith("/b.json", "beta");
     expect(onActivate).not.toHaveBeenCalled();
   });
 
@@ -157,7 +157,7 @@ describe("SessionSearchDialog (ADR-0072, issue #252)", () => {
     const onActivate = vi.fn();
     const onOpenPersisted = vi.fn();
     const openSessions: OpenSession[] = [
-      { sid: "uuid-a", name: "alpha", path: "/a.duck", pendingIngestPaths: [], pendingQuestion: null, pendingSkillInvocations: [] },
+      { sid: "uuid-a", name: "alpha", path: "/a.json", pendingIngestPaths: [], pendingQuestion: null, pendingSkillInvocations: [] },
     ];
     renderDialog(
       <SessionSearchDialog
@@ -166,7 +166,7 @@ describe("SessionSearchDialog (ADR-0072, issue #252)", () => {
         activeSessionId="uuid-a"
         onActivate={onActivate}
         onOpenPersisted={onOpenPersisted}
-        sessions={[meta("/a.duck", "alpha")]}
+        sessions={[meta("/a.json", "alpha")]}
       />,
     );
     fireEvent.keyDown(screen.getByRole("combobox"), { key: "Enter" });
@@ -178,7 +178,7 @@ describe("SessionSearchDialog (ADR-0072, issue #252)", () => {
     const onActivate = vi.fn();
     const onOpenPersisted = vi.fn();
     const openSessions: OpenSession[] = [
-      { sid: "uuid-a", name: "alpha", path: "/a.duck", pendingIngestPaths: [], pendingQuestion: null, pendingSkillInvocations: [] },
+      { sid: "uuid-a", name: "alpha", path: "/a.json", pendingIngestPaths: [], pendingQuestion: null, pendingSkillInvocations: [] },
     ];
     renderDialog(
       <SessionSearchDialog
@@ -186,7 +186,7 @@ describe("SessionSearchDialog (ADR-0072, issue #252)", () => {
         openSessions={openSessions}
         onActivate={onActivate}
         onOpenPersisted={onOpenPersisted}
-        sessions={[meta("/a.duck", "alpha")]}
+        sessions={[meta("/a.json", "alpha")]}
       />,
     );
     fireEvent.click(screen.getByRole("option"));
@@ -199,7 +199,7 @@ describe("SessionSearchDialog (ADR-0072, issue #252)", () => {
     const { rerender } = renderDialog(
       <SessionSearchDialog
         {...baseProps}
-        sessions={[meta("/a.duck", "alpha"), meta("/b.duck", "beta")]}
+        sessions={[meta("/a.json", "alpha"), meta("/b.json", "beta")]}
       />,
     );
     fireEvent.change(screen.getByRole("combobox"), { target: { value: "beta" } });
@@ -211,7 +211,7 @@ describe("SessionSearchDialog (ADR-0072, issue #252)", () => {
         <SessionSearchDialog
           {...baseProps}
           open={false}
-          sessions={[meta("/a.duck", "alpha"), meta("/b.duck", "beta")]}
+          sessions={[meta("/a.json", "alpha"), meta("/b.json", "beta")]}
         />
       </IntlProvider>,
     );
@@ -220,7 +220,7 @@ describe("SessionSearchDialog (ADR-0072, issue #252)", () => {
         <SessionSearchDialog
           {...baseProps}
           open={true}
-          sessions={[meta("/a.duck", "alpha"), meta("/b.duck", "beta")]}
+          sessions={[meta("/a.json", "alpha"), meta("/b.json", "beta")]}
         />
       </IntlProvider>,
     );
@@ -238,7 +238,7 @@ describe("SessionSearchDialog (ADR-0072, issue #252)", () => {
       <SessionSearchDialog
         {...baseProps}
         onOpenChange={onOpenChange}
-        sessions={[meta("/a.duck", "alpha")]}
+        sessions={[meta("/a.json", "alpha")]}
       />,
     );
     fireEvent.keyDown(screen.getByRole("dialog"), { key: "Escape" });
@@ -250,9 +250,9 @@ describe("SessionSearchDialog (ADR-0072, issue #252)", () => {
       <SessionSearchDialog
         {...baseProps}
         sessions={[
-          meta("/a.duck", "alpha", { last_modified_at: 3000 }),
-          meta("/b.duck", "beta", { last_modified_at: 2000 }),
-          meta("/c.duck", "gamma", { last_modified_at: 1000 }),
+          meta("/a.json", "alpha", { last_modified_at: 3000 }),
+          meta("/b.json", "beta", { last_modified_at: 2000 }),
+          meta("/c.json", "gamma", { last_modified_at: 1000 }),
         ]}
       />,
     );
@@ -273,8 +273,8 @@ describe("SessionSearchDialog (ADR-0072, issue #252)", () => {
         {...baseProps}
         onOpenPersisted={onOpenPersisted}
         sessions={[
-          meta("/a.duck", "alpha", { last_modified_at: 2000 }),
-          meta("/b.duck", "beta", { last_modified_at: 1000 }),
+          meta("/a.json", "alpha", { last_modified_at: 2000 }),
+          meta("/b.json", "beta", { last_modified_at: 1000 }),
         ]}
       />,
     );
@@ -284,7 +284,7 @@ describe("SessionSearchDialog (ADR-0072, issue #252)", () => {
     expect(options[1]).toHaveAttribute("aria-selected", "true");
     expect(options[0]).toHaveAttribute("aria-selected", "false");
     fireEvent.keyDown(screen.getByRole("combobox"), { key: "Enter" });
-    expect(onOpenPersisted).toHaveBeenCalledWith("/b.duck", "beta");
+    expect(onOpenPersisted).toHaveBeenCalledWith("/b.json", "beta");
   });
 
   it("clamps the selection when the filter narrows it past the end", () => {
@@ -297,9 +297,9 @@ describe("SessionSearchDialog (ADR-0072, issue #252)", () => {
         {...baseProps}
         onOpenPersisted={onOpenPersisted}
         sessions={[
-          meta("/a.duck", "alpha", { last_modified_at: 3000 }),
-          meta("/b.duck", "beta", { last_modified_at: 2000 }),
-          meta("/c.duck", "gamma", { last_modified_at: 1000 }),
+          meta("/a.json", "alpha", { last_modified_at: 3000 }),
+          meta("/b.json", "beta", { last_modified_at: 2000 }),
+          meta("/c.json", "gamma", { last_modified_at: 1000 }),
         ]}
       />,
     );
@@ -313,7 +313,7 @@ describe("SessionSearchDialog (ADR-0072, issue #252)", () => {
     expect(options).toHaveLength(1);
     expect(options[0]).toHaveAttribute("aria-selected", "true");
     fireEvent.keyDown(input, { key: "Enter" });
-    expect(onOpenPersisted).toHaveBeenCalledWith("/a.duck", "alpha");
+    expect(onOpenPersisted).toHaveBeenCalledWith("/a.json", "alpha");
   });
 
   it("formats same-year mtimes without a year and prior-year mtimes with one", () => {
@@ -326,10 +326,10 @@ describe("SessionSearchDialog (ADR-0072, issue #252)", () => {
         <SessionSearchDialog
           {...baseProps}
           sessions={[
-            meta("/a.duck", "alpha", {
+            meta("/a.json", "alpha", {
               last_modified_at: new Date("2026-06-01T12:00:00").getTime(),
             }),
-            meta("/b.duck", "beta", {
+            meta("/b.json", "beta", {
               last_modified_at: new Date("2024-12-31T12:00:00").getTime(),
             }),
           ]}
@@ -359,7 +359,7 @@ describe("SessionSearchDialog (ADR-0072, issue #252)", () => {
       <SessionSearchDialog
         {...baseProps}
         sessions={[
-          meta("/a.duck", "alpha", {
+          meta("/a.json", "alpha", {
             last_modified_at: 2000,
             source_summary: {
               first_source_name: "Alpha Source",
@@ -391,8 +391,8 @@ describe("SessionSearchDialog (ADR-0072, issue #252)", () => {
       <SessionSearchDialog
         {...baseProps}
         sessions={[
-          meta("/a.duck", "alpha", { last_modified_at: 2000 }),
-          meta("/b.duck", "beta", { last_modified_at: 1000 }),
+          meta("/a.json", "alpha", { last_modified_at: 2000 }),
+          meta("/b.json", "beta", { last_modified_at: 1000 }),
         ]}
       />,
     );
@@ -450,8 +450,8 @@ describe("SessionSearchDialog (ADR-0072, issue #252)", () => {
       <SessionSearchDialog
         {...baseProps}
         sessions={[
-          meta("/a.duck", "alpha", { last_modified_at: 2000 }),
-          meta("/b.duck", "beta", { last_modified_at: 1000 }),
+          meta("/a.json", "alpha", { last_modified_at: 2000 }),
+          meta("/b.json", "beta", { last_modified_at: 1000 }),
         ]}
       />,
     );
@@ -465,8 +465,8 @@ describe("SessionSearchDialog (ADR-0072, issue #252)", () => {
           {...baseProps}
           open={false}
           sessions={[
-            meta("/a.duck", "alpha", { last_modified_at: 2000 }),
-            meta("/b.duck", "beta", { last_modified_at: 1000 }),
+            meta("/a.json", "alpha", { last_modified_at: 2000 }),
+            meta("/b.json", "beta", { last_modified_at: 1000 }),
           ]}
         />
       </IntlProvider>,
@@ -477,8 +477,8 @@ describe("SessionSearchDialog (ADR-0072, issue #252)", () => {
           {...baseProps}
           open={true}
           sessions={[
-            meta("/a.duck", "alpha", { last_modified_at: 2000 }),
-            meta("/b.duck", "beta", { last_modified_at: 1000 }),
+            meta("/a.json", "alpha", { last_modified_at: 2000 }),
+            meta("/b.json", "beta", { last_modified_at: 1000 }),
           ]}
         />
       </IntlProvider>,
@@ -501,10 +501,10 @@ describe("SessionSearchDialog (ADR-0072, issue #252)", () => {
         <SessionSearchDialog
           {...baseProps}
           sessions={[
-            meta("/a.duck", "alpha", {
+            meta("/a.json", "alpha", {
               last_modified_at: new Date("2026-07-26T10:00:00").getTime(),
             }),
-            meta("/b.duck", "beta", {
+            meta("/b.json", "beta", {
               last_modified_at: new Date("2026-07-25T10:00:00").getTime(),
             }),
           ]}

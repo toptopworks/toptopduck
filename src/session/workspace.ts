@@ -149,7 +149,7 @@ export function findArtifact(
  * Case-insensitive: Windows (the app's host) folds path case, and a
  * case-differing collision on a case-sensitive host is pathological.
  * ponytail: hand-rolled dirname/sep (no path polyfill in the webview); if
- * mixed-separator duck paths ever appear, normalize at the IPC edge. */
+ * mixed-separator recipe paths ever appear, normalize at the IPC edge. */
 export function isWithinArtifactsDir(path: string, recipePath: string): boolean {
   const sep = recipePath.includes("\\") ? "\\" : "/";
   const last = Math.max(recipePath.lastIndexOf("/"), recipePath.lastIndexOf("\\"));

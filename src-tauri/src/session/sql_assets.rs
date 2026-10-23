@@ -22,7 +22,7 @@ use crate::model::TurnOutcome;
 use crate::tools::read_paths::extract_read_paths;
 
 /// The per-session directory's `assets/` subdirectory name (ADR-0089: the
-/// per-session tree holds `session.duck` + `assets/`).
+/// per-session tree holds `recipe.json` + `assets/`).
 pub(super) const ASSETS_DIR_NAME: &str = "assets";
 
 /// The session's `assets/` dir derived from the bound `recipe.json` path. `None`
@@ -195,7 +195,7 @@ mod tests {
     fn temp_reference_is_copied_into_assets_and_sql_rewritten() {
         let temp = tempfile::tempdir().expect("tempdir");
         let session = tempfile::tempdir().expect("session dir");
-        let duck = session.path().join("session.duck");
+        let duck = session.path().join("recipe.json");
         let csv = temp_csv(temp.path(), "kline.csv");
 
         let mut outcome =
@@ -221,7 +221,7 @@ mod tests {
     fn same_named_files_disambiguate_with_suffix() {
         let temp = tempfile::tempdir().expect("tempdir");
         let session = tempfile::tempdir().expect("session dir");
-        let duck = session.path().join("session.duck");
+        let duck = session.path().join("recipe.json");
         let sub_a = temp.path().join("a");
         let sub_b = temp.path().join("b");
         std::fs::create_dir_all(&sub_a).expect("dir a");
@@ -254,7 +254,7 @@ mod tests {
         let temp = tempfile::tempdir().expect("session temp");
         let elsewhere = tempfile::tempdir().expect("user dir");
         let session = tempfile::tempdir().expect("session dir");
-        let duck = session.path().join("session.duck");
+        let duck = session.path().join("recipe.json");
         let user_csv = elsewhere.path().join("user.csv");
         std::fs::write(&user_csv, "x\n").expect("user csv");
         let user = user_csv.to_string_lossy().into_owned();
@@ -306,7 +306,7 @@ mod tests {
         // does not exist; longest-first lands each literal on its OWN copy.
         let temp = tempfile::tempdir().expect("tempdir");
         let session = tempfile::tempdir().expect("session dir");
-        let duck = session.path().join("session.duck");
+        let duck = session.path().join("recipe.json");
         let assets = session.path().join("assets");
         std::fs::create_dir_all(&assets).expect("assets dir");
         std::fs::write(
@@ -358,7 +358,7 @@ mod tests {
     fn same_file_under_two_spellings_copies_once() {
         let temp = tempfile::tempdir().expect("tempdir");
         let session = tempfile::tempdir().expect("session dir");
-        let duck = session.path().join("session.duck");
+        let duck = session.path().join("recipe.json");
         let csv = temp_csv(temp.path(), "one.csv");
         #[cfg(windows)]
         let alias = {

@@ -95,18 +95,18 @@ beforeEach(() => {
 
 describe("useTrayEvents", () => {
   it("open: a session click routes through the sidebar path with the persisted display name", async () => {
-    const deps = makeDeps({ sessions: [persisted("a.duck", "我的分析")] });
+    const deps = makeDeps({ sessions: [persisted("a.json", "我的分析")] });
     await renderTray(deps);
 
     act(() => {
-      trayListeners.open!({ recipe_path: "a.duck" });
+      trayListeners.open!({ recipe_path: "a.json" });
     });
 
     // The wire payload carries only the path; the name is derived from the
     // persisted list (same scan the sidebar renders). The already-open
     // idempotency is openPersisted's own branch, pinned in
     // useShellSessions.test.
-    expect(deps.openPersisted).toHaveBeenCalledWith("a.duck", "我的分析");
+    expect(deps.openPersisted).toHaveBeenCalledWith("a.json", "我的分析");
   });
 
   it("open: a path missing from the persisted list opens with the empty name", async () => {
@@ -114,10 +114,10 @@ describe("useTrayEvents", () => {
     await renderTray(deps);
 
     act(() => {
-      trayListeners.open!({ recipe_path: "gone.duck" });
+      trayListeners.open!({ recipe_path: "gone.json" });
     });
 
-    expect(deps.openPersisted).toHaveBeenCalledWith("gone.duck", "");
+    expect(deps.openPersisted).toHaveBeenCalledWith("gone.json", "");
   });
 
   it("new: navigates to the empty state (the sidebar + action)", async () => {
@@ -144,21 +144,21 @@ describe("useTrayEvents", () => {
     const rendered = await renderTray(mounted);
 
     act(() => {
-      trayListeners.open!({ recipe_path: "a.duck" });
+      trayListeners.open!({ recipe_path: "a.json" });
     });
-    expect(openPersisted).toHaveBeenCalledWith("a.duck", "");
+    expect(openPersisted).toHaveBeenCalledWith("a.json", "");
 
     const refreshed = makeDeps({
       openPersisted,
       goToEmptyState,
-      sessions: [persisted("a.duck", "我的分析")],
+      sessions: [persisted("a.json", "我的分析")],
     });
     await rerenderTray(rendered, refreshed, 2);
 
     act(() => {
-      trayListeners.open!({ recipe_path: "a.duck" });
+      trayListeners.open!({ recipe_path: "a.json" });
     });
-    expect(openPersisted).toHaveBeenLastCalledWith("a.duck", "我的分析");
+    expect(openPersisted).toHaveBeenLastCalledWith("a.json", "我的分析");
     expect(openPersisted).toHaveBeenCalledTimes(2);
   });
 
@@ -180,7 +180,7 @@ describe("useTrayEvents", () => {
     const rendered = await renderTray(mounted);
 
     act(() => {
-      trayListeners.open!({ recipe_path: "a.duck" });
+      trayListeners.open!({ recipe_path: "a.json" });
     });
     expect(mountedOpen).toHaveBeenCalledTimes(1);
 
@@ -193,9 +193,9 @@ describe("useTrayEvents", () => {
     await rerenderTray(rendered, moved, 2);
 
     act(() => {
-      trayListeners.open!({ recipe_path: "a.duck" });
+      trayListeners.open!({ recipe_path: "a.json" });
     });
-    expect(movedOpen).toHaveBeenCalledWith("a.duck", "");
+    expect(movedOpen).toHaveBeenCalledWith("a.json", "");
     expect(mountedOpen).toHaveBeenCalledTimes(1);
   });
 
@@ -220,7 +220,7 @@ describe("useTrayEvents", () => {
       expect(trayReady).toHaveBeenCalledTimes(1);
     });
 
-    await rerenderTray(rendered, makeDeps({ sessions: [persisted("a.duck", "n")] }), 2);
+    await rerenderTray(rendered, makeDeps({ sessions: [persisted("a.json", "n")] }), 2);
 
     expect(trayReady).toHaveBeenCalledTimes(1);
   });

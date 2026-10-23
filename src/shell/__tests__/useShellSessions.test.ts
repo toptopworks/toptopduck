@@ -132,7 +132,7 @@ const DEFAULT_POSTURE: PendingComposerPosture = {
 
 /** Build a CreateSessionReply for mock returns (ADR-0089). */
 function reply(sid: string) {
-  return { session_id: sid, recipe_path: `/sessions/${sid}/session.duck` };
+  return { session_id: sid, recipe_path: `/sessions/${sid}/recipe.json` };
 }
 
 // The #501 drop tests pin the composer bar's geometry via the shared
@@ -217,7 +217,7 @@ describe("useShellSessions", () => {
     expect(result.current.openSessions[0]).toMatchObject({
       sid: "s1",
       name: "",
-      path: "/sessions/s1/session.duck",
+      path: "/sessions/s1/recipe.json",
       pendingIngestPaths: [],
       pendingQuestion: "how many rows?",
     });
@@ -569,7 +569,7 @@ describe("useShellSessions", () => {
     vi.mocked(openRecipe).mockResolvedValueOnce();
     const { result } = renderSessions();
     await act(async () => {
-      await result.current.openPersisted("/x/a.duck", "a");
+      await result.current.openPersisted("/x/a.json", "a");
     });
     // Happy path completed: session registered, resume cleared (no soft-lock).
     expect(result.current.activeSessionId).toBe("r1");
@@ -598,15 +598,15 @@ describe("useShellSessions", () => {
     vi.mocked(openRecipe).mockResolvedValueOnce();
     const { result } = renderSessions();
     await act(async () => {
-      await result.current.openPersisted("/x/a.duck", "a");
-      await result.current.openPersisted("/x/b.duck", "b");
+      await result.current.openPersisted("/x/a.json", "a");
+      await result.current.openPersisted("/x/b.json", "b");
     });
     expect(result.current.activeSessionId).toBe("p2");
 
     const mintsBefore = vi.mocked(createSession).mock.calls.length;
     const resumesBefore = vi.mocked(openRecipe).mock.calls.length;
     await act(async () => {
-      await result.current.openPersisted("/x/a.duck", "a");
+      await result.current.openPersisted("/x/a.json", "a");
     });
 
     expect(result.current.activeSessionId).toBe("p1");
@@ -636,7 +636,7 @@ describe("useShellSessions", () => {
     // wait-release promise is pending (cold start -> activeSessionId null ->
     // a routed drop mints).
     act(() => {
-      void result.current.deletePersisted("/x/a.duck", "s1");
+      void result.current.deletePersisted("/x/a.json", "s1");
     });
     await waitFor(() => expect(result.current.busy).toBe(true));
     // While busy the listener is unbound, so a drop payload has nowhere to
@@ -733,12 +733,12 @@ describe("useShellSessions", () => {
     vi.mocked(openRecipe).mockResolvedValueOnce();
     const { result } = renderSessions();
     await act(async () => {
-      await result.current.openPersisted("/x/a.duck", "a");
+      await result.current.openPersisted("/x/a.json", "a");
     });
     expect(result.current.activeSessionId).toBe("p1");
     expect(result.current.openSessions[0]).toMatchObject({
       sid: "p1",
-      path: "/x/a.duck",
+      path: "/x/a.json",
       pendingIngestPaths: [],
     });
     const mintsBefore = vi.mocked(createSession).mock.calls.length;
@@ -750,7 +750,7 @@ describe("useShellSessions", () => {
     expect(vi.mocked(createSession).mock.calls.length).toBe(mintsBefore);
     expect(result.current.openSessions[0]).toMatchObject({
       sid: "p1",
-      path: "/x/a.duck",
+      path: "/x/a.json",
       pendingIngestPaths: ["/x/drop.csv"],
     });
   });
@@ -828,7 +828,7 @@ describe("useShellSessions", () => {
     expect(result.current.openSessions[0].name).toBe("");
 
     await act(async () => {
-      await result.current.renameEntry("s1", "/sessions/s1/session.duck", "new");
+      await result.current.renameEntry("s1", "/sessions/s1/recipe.json", "new");
     });
 
     expect(result.current.openSessions[0].name).toBe("Landed");
@@ -923,13 +923,13 @@ describe("useShellSessions startup re-adoption sweep (issue #842)", () => {
     vi.mocked(listLiveSessions).mockResolvedValue([
       {
         session_id: "a",
-        recipe_path: "/sessions/a/session.duck",
+        recipe_path: "/sessions/a/recipe.json",
         session_name: "分析",
         in_flight: false,
       },
       {
         session_id: "b",
-        recipe_path: "/sessions/b/session.duck",
+        recipe_path: "/sessions/b/recipe.json",
         session_name: null,
         in_flight: false,
       },
@@ -941,7 +941,7 @@ describe("useShellSessions startup re-adoption sweep (issue #842)", () => {
     expect(result.current.openSessions[0]).toMatchObject({
       sid: "a",
       name: "分析",
-      path: "/sessions/a/session.duck",
+      path: "/sessions/a/recipe.json",
       pendingIngestPaths: [],
       pendingQuestion: null,
     });
@@ -957,14 +957,14 @@ describe("useShellSessions startup re-adoption sweep (issue #842)", () => {
     vi.mocked(listLiveSessions).mockResolvedValue([
       {
         session_id: "x",
-        recipe_path: "/sessions/x/session.duck",
+        recipe_path: "/sessions/x/recipe.json",
         session_name: null,
         in_flight: true,
       },
       { session_id: "y", recipe_path: null, session_name: null, in_flight: false },
       {
         session_id: "z",
-        recipe_path: "/sessions/z/session.duck",
+        recipe_path: "/sessions/z/recipe.json",
         session_name: "活的",
         in_flight: false,
       },
@@ -1012,7 +1012,7 @@ describe("useShellSessions startup re-adoption sweep (issue #842)", () => {
     // expected idempotent path at debug level; a genuine failure stays a
     // warn so it remains observable. Neither surfaces a shell error.
     vi.mocked(listLiveSessions).mockResolvedValue([
-      { session_id: "x", recipe_path: "/sessions/x/session.duck", session_name: null, in_flight: true },
+      { session_id: "x", recipe_path: "/sessions/x/recipe.json", session_name: null, in_flight: true },
       { session_id: "y", recipe_path: null, session_name: null, in_flight: true },
     ]);
     vi.mocked(closeSession)

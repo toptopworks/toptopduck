@@ -70,7 +70,7 @@ pub use model::{
     DEFAULT_PROFILE_ID, DEFAULT_PROVIDER_BASE_URL, DEFAULT_PROVIDER_MODEL,
 };
 pub use persistence::{
-    LoadError as DuckLoadError, MigrationError, RecipeError, RecipePath, SaveError,
+    LoadError as RecipeLoadError, MigrationError, RecipeError, RecipePath, SaveError,
     SessionMetadata, SessionsRoot, SourceSummary,
 };
 pub use provider::fake::FakeProvider;

@@ -14,7 +14,7 @@
 //! clobbers).
 //!
 //! The registry keys on the canonical path so trivially-different spellings of
-//! the same file (`a.duck` / `./a.duck` / absolute-vs-relative / `A.DUCK` on
+//! the same file (`a.json` / `./a.json` / absolute-vs-relative / `A.JSON` on
 //! case-insensitive volumes) collapse to one entry -- the single-writer
 //! contract cannot be evaded by a path synonym.
 
@@ -110,14 +110,14 @@ mod tests {
     fn canonicalize_collapses_relative_and_dot_spellings() {
         // ADR-0035 Decision 3: the registry keys on the canonical path, so a trivially
         // different spelling of the same file does not evade single-writer.
-        // `a.duck`, `./a.duck`, and the absolute path all canonicalize to one
+        // `a.json`, `./a.json`, and the absolute path all canonicalize to one
         // key when the file exists.
         let dir = tempfile::tempdir().expect("tempdir");
-        let abs = dir.path().join("a.duck");
+        let abs = dir.path().join("a.json");
         std::fs::write(&abs, b"{}").expect("write");
         let direct = canonicalize_recipe(&abs).expect("abs");
-        let relative = canonicalize_recipe(&dir.path().join("./a.duck")).expect("rel");
-        let dotted = canonicalize_recipe(&dir.path().join(".").join("a.duck")).expect("dot");
+        let relative = canonicalize_recipe(&dir.path().join("./a.json")).expect("rel");
+        let dotted = canonicalize_recipe(&dir.path().join(".").join("a.json")).expect("dot");
         assert_eq!(direct, relative);
         assert_eq!(direct, dotted);
     }
@@ -129,10 +129,10 @@ mod tests {
         // the parent + re-join the file name so the not-yet-created file still
         // gets a stable canonical key.
         let dir = tempfile::tempdir().expect("tempdir");
-        let target = dir.path().join("brand-new.duck");
+        let target = dir.path().join("brand-new.json");
         assert!(!target.exists());
         let canonical = canonicalize_recipe(&target).expect("canonicalize");
-        assert!(canonical.ends_with("brand-new.duck"));
+        assert!(canonical.ends_with("brand-new.json"));
         // Creating the file after canonicalize must NOT change the key -- the
         // whole point of pre-acquire is that bind can lock the path before the
         // write.
@@ -146,7 +146,7 @@ mod tests {
         // ADR-0035 Decision 3 single-writer: a second acquire of the same canonical
         // path fails; after release, it can be re-acquired (e.g. drop + reopen).
         let dir = tempfile::tempdir().expect("tempdir");
-        let path = dir.path().join("once.duck");
+        let path = dir.path().join("once.json");
         std::fs::write(&path, b"{}").expect("write");
         let key = canonicalize_recipe(&path).expect("canonicalize");
 

@@ -86,9 +86,9 @@ describe("useSessionFileOps", () => {
     vi.mocked(renamePersistedSession).mockResolvedValueOnce();
     const { result, refreshSessions, setShellError } = renderFileOps();
     await act(async () => {
-      await result.current.renameEntry(null, "/x/foo.duck", "new");
+      await result.current.renameEntry(null, "/x/foo.json", "new");
     });
-    expect(renamePersistedSession).toHaveBeenCalledWith("/x/foo.duck", "new");
+    expect(renamePersistedSession).toHaveBeenCalledWith("/x/foo.json", "new");
     expect(refreshSessions).toHaveBeenCalledTimes(1);
     expect(setShellError).not.toHaveBeenCalled();
   });
@@ -102,9 +102,9 @@ describe("useSessionFileOps", () => {
     );
     const { result, refreshSessions, setShellError } = renderFileOps();
     await act(async () => {
-      await result.current.renameEntry(null, "/x/foo.duck", "new");
+      await result.current.renameEntry(null, "/x/foo.json", "new");
     });
-    expect(renamePersistedSession).toHaveBeenCalledWith("/x/foo.duck", "new");
+    expect(renamePersistedSession).toHaveBeenCalledWith("/x/foo.json", "new");
     expect(setShellError).toHaveBeenCalledTimes(1);
     expect(refreshSessions).not.toHaveBeenCalled();
   });
@@ -115,7 +115,7 @@ describe("useSessionFileOps", () => {
     // accidental empty rename cannot trigger a spurious sidebar re-fetch.
     const { result, refreshSessions, setShellError } = renderFileOps();
     await act(async () => {
-      await result.current.renameEntry("s1", "/sessions/s1/session.duck", "   ");
+      await result.current.renameEntry("s1", "/sessions/s1/recipe.json", "   ");
     });
     expect(renameSession).not.toHaveBeenCalled();
     expect(renamePersistedSession).not.toHaveBeenCalled();
@@ -129,7 +129,7 @@ describe("useSessionFileOps", () => {
     vi.mocked(renameSession).mockResolvedValueOnce("Landed");
     const { result, patchOpenName, refreshSessions, setShellError } = renderFileOps();
     await act(async () => {
-      await result.current.renameEntry("s1", "/sessions/s1/session.duck", "new");
+      await result.current.renameEntry("s1", "/sessions/s1/recipe.json", "new");
     });
     expect(renameSession).toHaveBeenCalledWith("s1", "new");
     expect(patchOpenName).toHaveBeenCalledWith("s1", "Landed");
@@ -185,7 +185,7 @@ describe("useSessionFileOps", () => {
     );
     const waitReject = renderFileOps();
     await act(async () => {
-      await waitReject.result.current.deletePersisted("/x/a.duck", "s1");
+      await waitReject.result.current.deletePersisted("/x/a.json", "s1");
     });
     expect(waitReject.unmountOpen).toHaveBeenCalledWith("s1");
     // Exactly once: the teardown happens in the catch arm only -- a teardown
@@ -202,7 +202,7 @@ describe("useSessionFileOps", () => {
     vi.mocked(deleteSession).mockResolvedValueOnce();
     const waitResolve = renderFileOps();
     await act(async () => {
-      await waitResolve.result.current.deletePersisted("/x/b.duck", "s2");
+      await waitResolve.result.current.deletePersisted("/x/b.json", "s2");
     });
     expect(waitResolve.unmountOpen).toHaveBeenCalledWith("s2");
     // ADR-0063 Decision 2 ordering: the wait-release resolves FIRST, and the
@@ -212,7 +212,7 @@ describe("useSessionFileOps", () => {
     expect(
       vi.mocked(closeSessionAndWaitRelease).mock.invocationCallOrder.at(-1),
     ).toBeLessThan(waitResolve.unmountOpen.mock.invocationCallOrder[0]);
-    expect(deleteSession).toHaveBeenCalledWith("/x/b.duck");
+    expect(deleteSession).toHaveBeenCalledWith("/x/b.json");
     expect(waitResolve.unmountOpen.mock.invocationCallOrder[0]).toBeLessThan(
       vi.mocked(deleteSession).mock.invocationCallOrder[0],
     );
@@ -225,7 +225,7 @@ describe("useSessionFileOps", () => {
     vi.mocked(deleteSession).mockRejectedValueOnce(new Error("gate busy"));
     const deleteReject = renderFileOps();
     await act(async () => {
-      await deleteReject.result.current.deletePersisted("/x/c.duck", null);
+      await deleteReject.result.current.deletePersisted("/x/c.json", null);
     });
     expect(deleteReject.setShellError).toHaveBeenCalledTimes(1);
     expect(deleteReject.refreshSessions).not.toHaveBeenCalled();
@@ -238,9 +238,9 @@ describe("useSessionFileOps", () => {
     it("setPinned: success refreshes; a reject surfaces on the shell error without a refresh", async () => {
       const ok = renderFileOps();
       await act(async () => {
-        await ok.result.current.setPinned("/x/a.duck", true);
+        await ok.result.current.setPinned("/x/a.json", true);
       });
-      expect(setSessionPinned).toHaveBeenCalledWith("/x/a.duck", true);
+      expect(setSessionPinned).toHaveBeenCalledWith("/x/a.json", true);
       expect(ok.refreshSessions).toHaveBeenCalledTimes(1);
       expect(ok.setShellError).not.toHaveBeenCalled();
       // A pure sidecar write takes NO persistenceBusy wait (contrast delete).
@@ -249,7 +249,7 @@ describe("useSessionFileOps", () => {
       vi.mocked(setSessionPinned).mockRejectedValueOnce(new Error("io"));
       const bad = renderFileOps();
       await act(async () => {
-        await bad.result.current.setPinned("/x/a.duck", false);
+        await bad.result.current.setPinned("/x/a.json", false);
       });
       expect(bad.setShellError).toHaveBeenCalledTimes(1);
       expect(bad.refreshSessions).not.toHaveBeenCalled();
@@ -258,9 +258,9 @@ describe("useSessionFileOps", () => {
     it("setArchived restore: pure sidecar path -- no close, no busy", async () => {
       const { result, unmountOpen, refreshSessions } = renderFileOps();
       await act(async () => {
-        await result.current.setArchived("/x/a.duck", false, null);
+        await result.current.setArchived("/x/a.json", false, null);
       });
-      expect(setSessionArchived).toHaveBeenCalledWith("/x/a.duck", false);
+      expect(setSessionArchived).toHaveBeenCalledWith("/x/a.json", false);
       expect(closeSessionAndWaitRelease).not.toHaveBeenCalled();
       expect(unmountOpen).not.toHaveBeenCalled();
       expect(refreshSessions).toHaveBeenCalledTimes(1);
@@ -270,7 +270,7 @@ describe("useSessionFileOps", () => {
     it("setArchived on an OPEN session closes it first via wait-release, then writes (Decision 6 delete contract)", async () => {
       const { result, unmountOpen, refreshSessions } = renderFileOps();
       await act(async () => {
-        await result.current.setArchived("/x/a.duck", true, "s1");
+        await result.current.setArchived("/x/a.json", true, "s1");
       });
       // Ordering mirrors deletePersisted: wait-release resolves, THEN the
       // pane tears down, THEN the sidecar write, THEN the refetch.
@@ -293,7 +293,7 @@ describe("useSessionFileOps", () => {
       const { result, unmountOpen, setShellError, refreshSessions } =
         renderFileOps();
       await act(async () => {
-        await result.current.setArchived("/x/a.duck", true, "s1");
+        await result.current.setArchived("/x/a.json", true, "s1");
       });
       expect(unmountOpen).toHaveBeenCalledWith("s1");
       expect(setShellError).toHaveBeenCalledTimes(1);
@@ -311,11 +311,11 @@ describe("useSessionFileOps", () => {
       const { result, unmountOpen, setShellError, refreshSessions } =
         renderFileOps();
       await act(async () => {
-        await result.current.setArchived("/x/a.duck", true, "s1");
+        await result.current.setArchived("/x/a.json", true, "s1");
       });
       expect(closeSessionAndWaitRelease).toHaveBeenCalledWith("s1");
       expect(unmountOpen).toHaveBeenCalledWith("s1");
-      expect(setSessionArchived).toHaveBeenCalledWith("/x/a.duck", true);
+      expect(setSessionArchived).toHaveBeenCalledWith("/x/a.json", true);
       expect(setShellError).toHaveBeenCalledTimes(1);
       expect(refreshSessions).not.toHaveBeenCalled();
       expect(result.current.persistenceBusy).toBe(false);
@@ -336,7 +336,7 @@ describe("useSessionFileOps", () => {
       const { result, unmountOpen } = renderFileOps();
       let pending: Promise<void> | undefined;
       act(() => {
-        pending = result.current.setArchived("/x/a.duck", true, "s1");
+        pending = result.current.setArchived("/x/a.json", true, "s1");
       });
       // During the wait: busy. The write has not started.
       expect(result.current.persistenceBusy).toBe(true);
@@ -347,7 +347,7 @@ describe("useSessionFileOps", () => {
       });
       expect(unmountOpen).toHaveBeenCalledWith("s1");
       // After the wait: busy closed, and the write ran to completion.
-      expect(setSessionArchived).toHaveBeenCalledWith("/x/a.duck", true);
+      expect(setSessionArchived).toHaveBeenCalledWith("/x/a.json", true);
       expect(result.current.persistenceBusy).toBe(false);
     });
   });

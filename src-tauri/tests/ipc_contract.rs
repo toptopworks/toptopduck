@@ -1010,8 +1010,8 @@ fn session_error_serializes_as_adjacently_tagged_kind_data() {
     use std::path::PathBuf;
     use toptopduck_lib::ResumeError;
     assert_wire(
-        &SessionError::Resume(ResumeError::AlreadyOpen(PathBuf::from("/x/a.duck"))),
-        r#"{"kind":"Resume","data":{"kind":"AlreadyOpen","data":"/x/a.duck"}}"#,
+        &SessionError::Resume(ResumeError::AlreadyOpen(PathBuf::from("/x/a.json"))),
+        r#"{"kind":"Resume","data":{"kind":"AlreadyOpen","data":"/x/a.json"}}"#,
     );
     // Issue #121: source-management domain errors wrap their typed sub-enums the
     // same way Resume wraps ResumeError -- the frontend recurses `<variant>.
@@ -1040,7 +1040,7 @@ fn session_error_serializes_as_adjacently_tagged_kind_data() {
 // Pin the JSON shape of the four typed error enums that cross the Rust<->
 // frontend boundary as command rejects / return values: ResumeError (the
 // `open_recipe` reject), SaveError (the `take_persist_error` returned value),
-// and the nested DuckLoadError + MigrationError (which ride inside
+// and the nested RecipeLoadError + MigrationError (which ride inside
 // ResumeError::Load). All adjacently-tagged (`#[serde(tag="kind", content =
 // "data")]`), the same shape the rest of the wire contract uses, so the
 // frontend narrows on `kind` at every depth. src/types.ts mirrors the shapes
@@ -1066,28 +1066,28 @@ fn migration_error_serializes_adjacently_tagged() {
 }
 
 #[test]
-fn duck_load_error_serializes_adjacently_tagged() {
+fn recipe_load_error_serializes_adjacently_tagged() {
     // The recipe.json load error (persistence::io::LoadError) -- distinct from the
     // ingest model::LoadError. Nests MigrationError under data; the inner enum
     // keeps its own kind/data shape so the frontend recurses uniformly.
-    use toptopduck_lib::{DuckLoadError, MigrationError};
+    use toptopduck_lib::{MigrationError, RecipeLoadError};
     assert_wire(
-        &DuckLoadError::Io("io-fail".into()),
+        &RecipeLoadError::Io("io-fail".into()),
         r#"{"kind":"Io","data":"io-fail"}"#,
     );
     assert_wire(
-        &DuckLoadError::Parse("parse-fail".into()),
+        &RecipeLoadError::Parse("parse-fail".into()),
         r#"{"kind":"Parse","data":"parse-fail"}"#,
     );
     assert_wire(
-        &DuckLoadError::VersionMismatch {
+        &RecipeLoadError::VersionMismatch {
             found: 3,
             supported: 1,
         },
         r#"{"kind":"VersionMismatch","data":{"found":3,"supported":1}}"#,
     );
     assert_wire(
-        &DuckLoadError::Migration(MigrationError::Field("bad".into())),
+        &RecipeLoadError::Migration(MigrationError::Field("bad".into())),
         r#"{"kind":"Migration","data":{"kind":"Field","data":"bad"}}"#,
     );
 }
@@ -1112,19 +1112,19 @@ fn save_error_serializes_adjacently_tagged() {
         r#"{"kind":"Rename","data":"rename-fail"}"#,
     );
     assert_wire(
-        &SaveError::AlreadyOpen(PathBuf::from("/x/a.duck")),
-        r#"{"kind":"AlreadyOpen","data":"/x/a.duck"}"#,
+        &SaveError::AlreadyOpen(PathBuf::from("/x/a.json")),
+        r#"{"kind":"AlreadyOpen","data":"/x/a.json"}"#,
     );
 }
 
 #[test]
 fn resume_error_serializes_adjacently_tagged() {
     // ResumeError is the open_recipe command's typed reject (no longer flattened
-    // to SessionError::Engine(string)). Load recurses into DuckLoadError.
+    // to SessionError::Engine(string)). Load recurses into RecipeLoadError.
     use std::path::PathBuf;
-    use toptopduck_lib::{DuckLoadError, ResumeError};
+    use toptopduck_lib::{RecipeLoadError, ResumeError};
     assert_wire(
-        &ResumeError::Load(DuckLoadError::VersionMismatch {
+        &ResumeError::Load(RecipeLoadError::VersionMismatch {
             found: 3,
             supported: 1,
         }),
@@ -1154,8 +1154,17 @@ fn resume_error_serializes_adjacently_tagged() {
     assert_wire(&ResumeError::Aborted, r#"{"kind":"Aborted"}"#);
     // AlreadyOpen carries the canonical path (PathBuf -> JSON string).
     assert_wire(
-        &ResumeError::AlreadyOpen(PathBuf::from("/x/a.duck")),
-        r#"{"kind":"AlreadyOpen","data":"/x/a.duck"}"#,
+        &ResumeError::AlreadyOpen(PathBuf::from("/x/a.json")),
+        r#"{"kind":"AlreadyOpen","data":"/x/a.json"}"#,
+    );
+    // Restore names the snapshot whose read-only ATTACH failed on the
+    // watermark-hit path (ADR-0136 D3) -- not a recipe.json read failure.
+    assert_wire(
+        &ResumeError::Restore {
+            reference_name: "orders".into(),
+            detail: "attach failed".into(),
+        },
+        r#"{"kind":"Restore","data":{"reference_name":"orders","detail":"attach failed"}}"#,
     );
 }
 
@@ -1442,7 +1451,7 @@ fn session_metadata_serializes_flat_snake_case() {
     use toptopduck_lib::{RecipePath, SessionMetadata, SourceSummary};
     assert_wire(
         &SessionMetadata {
-            recipe_path: RecipePath::new("/x/analysis.duck"),
+            recipe_path: RecipePath::new("/x/analysis.json"),
             display_name: "analysis".into(),
             last_modified_at: 1_700_000_000_000,
             source_summary: SourceSummary {
@@ -1454,7 +1463,7 @@ fn session_metadata_serializes_flat_snake_case() {
             pinned: false,
             archived: false,
         },
-        r#"{"recipe_path":"/x/analysis.duck","display_name":"analysis","last_modified_at":1700000000000,"source_summary":{"first_source_name":"orders","source_count":1,"turn_count":2},"format_version":1,"pinned":false,"archived":false}"#,
+        r#"{"recipe_path":"/x/analysis.json","display_name":"analysis","last_modified_at":1700000000000,"source_summary":{"first_source_name":"orders","source_count":1,"turn_count":2},"format_version":1,"pinned":false,"archived":false}"#,
     );
 }
 
@@ -2040,7 +2049,7 @@ fn live_session_entry_serializes_as_a_flat_snake_case_row() {
     let sid = SessionId::parse("d3b07384-d9a0-4c30-8e9b-5f3a7b2c1e10").expect("valid v4 id");
     let row = LiveSessionEntry {
         session_id: sid.clone(),
-        recipe_path: Some("/sessions/a/session.duck".into()),
+        recipe_path: Some("/sessions/a/recipe.json".into()),
         session_name: Some("analysis".into()),
         in_flight: false,
     };
@@ -2048,7 +2057,7 @@ fn live_session_entry_serializes_as_a_flat_snake_case_row() {
         serde_json::to_value(&row).expect("serialize"),
         serde_json::json!({
             "session_id": "d3b07384-d9a0-4c30-8e9b-5f3a7b2c1e10",
-            "recipe_path": "/sessions/a/session.duck",
+            "recipe_path": "/sessions/a/recipe.json",
             "session_name": "analysis",
             "in_flight": false,
         }),

@@ -123,7 +123,7 @@ fn turn_questions(session: &Session) -> Vec<String> {
 #[test]
 fn watermark_hit_reopens_without_replay() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let duck = dir.path().join("s.duck");
+    let duck = dir.path().join("s.json");
     let session = build_hit_session(&duck, &fixture("people.csv"));
     let expected_names = dataset_names(&session);
     let expected_questions = turn_questions(&session);
@@ -168,7 +168,7 @@ fn watermark_hit_reopens_without_replay() {
 #[test]
 fn watermark_hit_opens_with_a_missing_source_as_a_notice() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let duck = dir.path().join("s.duck");
+    let duck = dir.path().join("s.json");
     // A private copy of the fixture so the test can delete it.
     let csv = dir.path().join("people.csv");
     fs::copy(fixture("people.csv"), &csv).expect("copy fixture");
@@ -201,7 +201,7 @@ fn watermark_hit_opens_with_a_missing_source_as_a_notice() {
 #[test]
 fn watermark_hit_reports_a_changed_source_as_a_notice() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let duck = dir.path().join("s.duck");
+    let duck = dir.path().join("s.json");
     let csv = dir.path().join("people.csv");
     fs::copy(fixture("people.csv"), &csv).expect("copy fixture");
     let session = build_hit_session(&duck, &csv);
@@ -225,7 +225,7 @@ fn watermark_hit_reports_a_changed_source_as_a_notice() {
 #[test]
 fn a_corrupt_companion_falls_back_to_full_replay_then_hits() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let duck = dir.path().join("s.duck");
+    let duck = dir.path().join("s.json");
     let session = build_hit_session(&duck, &fixture("people.csv"));
     drop(session);
     fs::write(dir.path().join("analytics.duckdb"), b"not a duckdb file")
@@ -273,7 +273,7 @@ fn an_edited_chain_invalidates_the_watermark() {
     use toptopduck_lib::persistence::{read_recipe, save_atomic};
 
     let dir = tempfile::tempdir().expect("tempdir");
-    let duck = dir.path().join("s.duck");
+    let duck = dir.path().join("s.json");
     let session = build_hit_session(&duck, &fixture("people.csv"));
     drop(session);
     let mut recipe = read_recipe(&duck).expect("read recipe");
@@ -320,7 +320,7 @@ fn an_edited_chain_invalidates_the_watermark() {
 #[test]
 fn a_legacy_pure_recipe_session_replays_once_then_hits() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let duck = dir.path().join("s.duck");
+    let duck = dir.path().join("s.json");
     // Pre-0136 test order: unbound SQL first, bind last.
     let provider = FakeProvider::new().scripted_tool_turn_seq(
         "多少人",
@@ -370,7 +370,7 @@ fn a_legacy_pure_recipe_session_replays_once_then_hits() {
 #[test]
 fn a_clean_close_leaves_a_self_contained_tree_without_a_wal() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let duck = dir.path().join("s.duck");
+    let duck = dir.path().join("s.json");
     let session = build_hit_session(&duck, &fixture("people.csv"));
     drop(session);
 
@@ -392,7 +392,7 @@ fn a_clean_close_leaves_a_self_contained_tree_without_a_wal() {
 #[test]
 fn a_watermark_miss_rebuilds_results_from_scratch() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let duck = dir.path().join("s.duck");
+    let duck = dir.path().join("s.json");
     let session = build_hit_session(&duck, &fixture("people.csv"));
     drop(session);
     // Force a miss by deleting one tree snapshot (the probe requires all of
@@ -420,7 +420,7 @@ fn a_watermark_miss_rebuilds_results_from_scratch() {
 #[test]
 fn a_replaced_source_survives_close_and_the_reopen_hit_serves_it() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let duck = dir.path().join("s.duck");
+    let duck = dir.path().join("s.json");
     let csv_v1 = dir.path().join("people.csv");
     fs::copy(fixture("people.csv"), &csv_v1).expect("copy fixture");
     // Same schema, one extra row: a same-schema replace is the silent-wrong-

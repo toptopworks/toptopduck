@@ -1754,7 +1754,7 @@ fn resume_progress_events_carry_one_session_id_and_cover_the_resume_sequence() {
     // progress). The command layer wraps each ResumeEvent with the session_id;
     // here we drive the same callback and assert one id addresses every event.
     let dir = tempfile::tempdir().expect("tempdir");
-    let duck = dir.path().join("resumed.duck");
+    let duck = dir.path().join("resumed.json");
 
     // Build + persist a real recipe.json: one source + one productive turn.
     let cancel = Arc::new(CancelToken::new());

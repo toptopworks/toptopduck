@@ -362,7 +362,7 @@ mod tests {
         // ADR-0034: write a recipe, read it back, get the same recipe -- the
         // recipe.json is a faithful portable document of the working set.
         let dir = tempfile::tempdir().expect("tempdir");
-        let path = dir.path().join("session.duck");
+        let path = dir.path().join("recipe.json");
         let recipe = sample_recipe("round-trip");
         save_atomic(&path, &recipe).expect("save");
         let back = read_recipe(&path).expect("read");
@@ -375,7 +375,7 @@ mod tests {
         // target, so no `.tmp` litters the directory (a stale temp would pile
         // up across saves without this).
         let dir = tempfile::tempdir().expect("tempdir");
-        let path = dir.path().join("session.duck");
+        let path = dir.path().join("recipe.json");
         save_atomic(&path, &sample_recipe("clean")).expect("save");
         let tmp = temp_path_for(&path).expect("temp path");
         assert!(!tmp.exists(), "temp file must not linger after save");
@@ -388,7 +388,7 @@ mod tests {
         // file. A second save on the same path replaces the first recipe
         // entirely (not appended, not merged).
         let dir = tempfile::tempdir().expect("tempdir");
-        let path = dir.path().join("session.duck");
+        let path = dir.path().join("recipe.json");
         save_atomic(&path, &sample_recipe("first")).expect("save 1");
         save_atomic(&path, &sample_recipe("second")).expect("save 2");
         let back = read_recipe(&path).expect("read");
@@ -401,7 +401,7 @@ mod tests {
         // format_version) must NOT be silently mis-parsed. The error names
         // both versions so the user understands they must upgrade.
         let dir = tempfile::tempdir().expect("tempdir");
-        let path = dir.path().join("future.duck");
+        let path = dir.path().join("future.json");
         // Hand-write a recipe whose format_version is ahead of v1.
         let future = format!(
             "{{\"format_version\":{future},\"session_name\":\"x\",\"sources\":[],\"history\":[]}}",
@@ -422,7 +422,7 @@ mod tests {
         // ADR-0036 / ADR-0017 honest-degrade: a file that is not a valid recipe
         // surfaces as a parse error, not a silent empty recipe.
         let dir = tempfile::tempdir().expect("tempdir");
-        let path = dir.path().join("broken.duck");
+        let path = dir.path().join("broken.json");
         fs::write(&path, b"not json {").expect("write");
         assert!(matches!(read_recipe(&path), Err(LoadError::Parse(_))));
     }
@@ -436,7 +436,7 @@ mod tests {
         // the legacy outcome_kind discriminator) so both migration kinds are
         // exercised at the read boundary.
         let dir = tempfile::tempdir().expect("tempdir");
-        let path = dir.path().join("v0.duck");
+        let path = dir.path().join("v0.json");
         let v0 = serde_json::json!({
             "format_version": 0,
             "session_name": "v0 分析",

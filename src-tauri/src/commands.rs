@@ -191,7 +191,7 @@ fn reject_if_in_flight(handle: &SessionHandle) -> Result<(), SessionError> {
 }
 
 /// The wire reply from `create_session` (ADR-0089): the runtime session id +
-/// the bound `session.duck` path. The frontend stores both so every open
+/// the bound `recipe.json` path. The frontend stores both so every open
 /// session is known-persisted from creation.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct CreateSessionReply {
@@ -203,7 +203,7 @@ pub struct CreateSessionReply {
 /// in-memory DuckDB instance (ADR-0012/0027), allocates a per-session cancel
 /// token (ADR-0021), binds them to a backend-generated id (UUID v4), and
 /// immediately persists by creating a per-session directory + initial
-/// `session.duck` under the managed sessions root (ADR-0089 Decision 1). The
+/// `recipe.json` under the managed sessions root (ADR-0089 Decision 1). The
 /// session is bound from creation -- no pure-memory phase, no manual first
 /// save. Returns the id + the bound path so the frontend tracks a
 /// known-persisted session.
@@ -1701,7 +1701,7 @@ pub fn set_app_config(
 
 /// List every persisted session's metadata for the cold-start left sidebar
 /// (ADR-0060/0061/0089). Scans the managed sessions directory for per-session
-/// `*/session.duck` recipes (ADR-0089), replacing the former app-config
+/// `*/recipe.json` recipes (ADR-0089), replacing the former app-config
 /// `recent_files` approach. A recipe that is no longer readable is skipped
 /// (the listing never fabricates metadata). Runs the per-entry file reads off
 /// the async/UI thread (AC8): a cold start over slow or network-mounted
@@ -1846,7 +1846,7 @@ fn unarchive_after_open(sessions_root: &Path, duck: &Path) {
 /// Delete a persisted session (ADR-0060/0089, issue #81). The frontend closes
 /// the session FIRST when it is open (so no canonical-writer key is held and
 /// the in-memory instance is gone), then calls this. Removes the entire
-/// per-session directory (`{uuid}/` containing `session.duck` + optional
+/// per-session directory (`{uuid}/` containing `recipe.json` + optional
 /// `assets/`) so the next `list_sessions` (directory scan) no longer lists it.
 /// Irreversible -- the frontend gates it behind a strong confirm.
 ///
@@ -1889,7 +1889,7 @@ pub async fn delete_session(
                 return Ok(());
             }
         };
-        // ADR-0089: delete the per-session directory (session.duck + assets/),
+        // ADR-0089: delete the per-session directory (recipe.json + assets/),
         // not just the recipe.json file. The recipe.json's parent is `{uuid}/`. Derive from
         // the canonical path (not the raw input) so the starts_with check below
         // matches the also-canonicalized root — on Windows, canonicalize adds
@@ -1902,7 +1902,7 @@ pub async fn delete_session(
         };
         // Guard against a path whose parent is not under the managed sessions
         // root (M2). Without this, a malformed or future caller passing
-        // `sessions_root/session.duck` would wipe the entire root. Propagate
+        // `sessions_root/recipe.json` would wipe the entire root. Propagate
         // canonicalize errors rather than falling back to the raw root — a
         // non-prefixed fallback would cause starts_with to fail against the
         // canonical session_dir on Windows.
@@ -2319,7 +2319,7 @@ pub async fn open_recipe(
         let runtime_facts = new_session.runtime_facts().clone();
         let mut s = handle_for_task.session_lock()?;
         // Capture the pre-resume binding before the rebind. create_session
-        // bound a fresh empty session.duck in a new per-session directory;
+        // bound a fresh empty recipe.json in a new per-session directory;
         // open_recipe rebinds the session to `path` (the resume target),
         // orphaning that directory. Without cleanup, list_sessions surfaces a
         // phantom empty sidebar entry that multiplies on each click.
@@ -4115,7 +4115,7 @@ mod tests {
     #[test]
     fn session_dir_uuid_under_root_resolves_the_uuid_directory() {
         let root = tempfile::tempdir().expect("tempdir");
-        let duck = root.path().join("abc-123").join("session.duck");
+        let duck = root.path().join("abc-123").join("recipe.json");
         std::fs::create_dir_all(duck.parent().expect("parent")).expect("mkdir");
         std::fs::write(&duck, "").expect("write");
         let uuid = session_dir_uuid_under_root(root.path(), &duck.to_string_lossy())
@@ -4133,7 +4133,7 @@ mod tests {
     fn session_dir_uuid_under_root_refuses_paths_outside_the_root() {
         let root = tempfile::tempdir().expect("tempdir");
         let outside = tempfile::tempdir().expect("tempdir");
-        let duck = outside.path().join("abc-123").join("session.duck");
+        let duck = outside.path().join("abc-123").join("recipe.json");
         std::fs::create_dir_all(duck.parent().expect("parent")).expect("mkdir");
         std::fs::write(&duck, "").expect("write");
         let err = session_dir_uuid_under_root(root.path(), &duck.to_string_lossy())
@@ -4158,10 +4158,10 @@ mod tests {
         // pass such a prefix): an in-root ghost and a root-escape spelling
         // both refuse with the typed IO lane rather than resolve lexically.
         let root = tempfile::tempdir().expect("tempdir");
-        let ghost = root.path().join("ghost").join("session.duck");
+        let ghost = root.path().join("ghost").join("recipe.json");
         for path in [
             ghost.to_string_lossy().into_owned(),
-            format!("{}/../../elsewhere/session.duck", root.path().display()),
+            format!("{}/../../elsewhere/recipe.json", root.path().display()),
         ] {
             let err = session_dir_uuid_under_root(root.path(), &path)
                 .expect_err("an unresolvable path refuses");
@@ -4178,7 +4178,7 @@ mod tests {
     #[test]
     fn unarchive_after_open_removes_archived_membership_under_the_root() {
         let root = tempfile::tempdir().expect("tempdir");
-        let duck = root.path().join("arch-1").join("session.duck");
+        let duck = root.path().join("arch-1").join("recipe.json");
         std::fs::create_dir_all(duck.parent().expect("parent")).expect("mkdir");
         std::fs::write(&duck, "").expect("write");
         std::fs::create_dir_all(root.path().join("pin-1")).expect("mkdir pin-1");
@@ -4219,7 +4219,7 @@ mod tests {
             r#"{"format":1,"pinned":[],"archived":["arch-1"]}"#,
         )
         .expect("write sidecar");
-        let foreign = elsewhere.path().join("arch-1").join("session.duck");
+        let foreign = elsewhere.path().join("arch-1").join("recipe.json");
         std::fs::create_dir_all(foreign.parent().expect("parent")).expect("mkdir foreign");
         std::fs::write(&foreign, "").expect("write foreign");
         unarchive_after_open(managed.path(), &foreign);
@@ -4234,7 +4234,7 @@ mod tests {
             "no cross-root unarchive on a uuid collision: {sidecar}"
         );
         let quiet = tempfile::tempdir().expect("tempdir");
-        let duck = quiet.path().join("plain").join("session.duck");
+        let duck = quiet.path().join("plain").join("recipe.json");
         std::fs::create_dir_all(duck.parent().expect("parent")).expect("mkdir");
         std::fs::write(&duck, "").expect("write");
         unarchive_after_open(quiet.path(), &duck);
@@ -5409,7 +5409,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         // `no_such_subdir` was never created -> canonicalize_recipe (which
         // canonicalizes the parent dir) would fail here.
-        let missing_parent = dir.path().join("no_such_subdir").join("file.duck");
+        let missing_parent = dir.path().join("no_such_subdir").join("file.json");
         let err = rename_persisted_session_blocking(&missing_parent, "   ")
             .expect_err("blank name rejects");
         assert_eq!(
@@ -5425,7 +5425,7 @@ mod tests {
     #[test]
     fn rename_persisted_session_nonblank_name_reaches_canonicalize() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let missing_parent = dir.path().join("no_such_subdir").join("file.duck");
+        let missing_parent = dir.path().join("no_such_subdir").join("file.json");
         let err = rename_persisted_session_blocking(&missing_parent, "new name")
             .expect_err("missing parent rejects");
         assert!(
@@ -5444,7 +5444,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         // Parent (dir) exists, so canonicalize_recipe succeeds even though the
         // file itself is absent (it canonicalizes the parent + rejoins the name).
-        let file = dir.path().join("held.duck");
+        let file = dir.path().join("held.json");
         let canonical = canonicalize_recipe(&file).expect("canonicalize (parent-based)");
         assert!(try_acquire(&canonical), "test takes the canonical key");
         let err =
@@ -5605,11 +5605,11 @@ mod tests {
     // --- cleanup_orphaned_session_dir (ADR-0089 D6 parity for open_recipe) ---
 
     /// Helper: create a sessions-root-like temp tree with a stale session
-    /// directory containing a `session.duck` placeholder.
+    /// directory containing a `recipe.json` placeholder.
     fn make_stale_session(root: &Path, uuid: &str) -> PathBuf {
         let dir = root.join(uuid);
         std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(dir.join("session.duck"), b"{}").unwrap();
+        std::fs::write(dir.join("recipe.json"), b"{}").unwrap();
         dir
     }
 
@@ -5620,8 +5620,8 @@ mod tests {
         let root = tmp.path().join("sessions");
         std::fs::create_dir_all(&root).unwrap();
         let stale_dir = make_stale_session(&root, "uuid-a");
-        let stale_duck = stale_dir.join("session.duck");
-        let resume_target = tmp.path().join("external.duck");
+        let stale_duck = stale_dir.join("recipe.json");
+        let resume_target = tmp.path().join("external.json");
         std::fs::write(&resume_target, b"{}").unwrap();
 
         cleanup_orphaned_session_dir(Some(&stale_duck), &resume_target, true, &root);
@@ -5635,8 +5635,8 @@ mod tests {
         let root = tmp.path().join("sessions");
         std::fs::create_dir_all(&root).unwrap();
         let stale_dir = make_stale_session(&root, "uuid-b");
-        let stale_duck = stale_dir.join("session.duck");
-        let resume_target = tmp.path().join("other.duck");
+        let stale_duck = stale_dir.join("recipe.json");
+        let resume_target = tmp.path().join("other.json");
         std::fs::write(&resume_target, b"{}").unwrap();
 
         cleanup_orphaned_session_dir(
@@ -5655,7 +5655,7 @@ mod tests {
         let root = tmp.path().join("sessions");
         std::fs::create_dir_all(&root).unwrap();
         let stale_dir = make_stale_session(&root, "uuid-c");
-        let stale_duck = stale_dir.join("session.duck");
+        let stale_duck = stale_dir.join("recipe.json");
 
         cleanup_orphaned_session_dir(
             Some(&stale_duck),
@@ -5674,9 +5674,9 @@ mod tests {
         std::fs::create_dir_all(&root).unwrap();
         let external_dir = tmp.path().join("external-session");
         std::fs::create_dir_all(&external_dir).unwrap();
-        let external_duck = external_dir.join("session.duck");
+        let external_duck = external_dir.join("recipe.json");
         std::fs::write(&external_duck, b"{}").unwrap();
-        let resume_target = tmp.path().join("other.duck");
+        let resume_target = tmp.path().join("other.json");
         std::fs::write(&resume_target, b"{}").unwrap();
 
         cleanup_orphaned_session_dir(Some(&external_duck), &resume_target, true, &root);
@@ -5693,7 +5693,7 @@ mod tests {
         std::fs::create_dir_all(&root).unwrap();
 
         // No stale_duck path → pure no-op, must not panic.
-        cleanup_orphaned_session_dir(None, &tmp.path().join("resume.duck"), true, &root);
+        cleanup_orphaned_session_dir(None, &tmp.path().join("resume.json"), true, &root);
     }
 
     #[test]
@@ -5704,9 +5704,9 @@ mod tests {
         std::fs::create_dir_all(&root).unwrap();
         // Create then manually delete to simulate "already gone".
         let stale_dir = make_stale_session(&root, "uuid-d");
-        let stale_duck = stale_dir.join("session.duck");
+        let stale_duck = stale_dir.join("recipe.json");
         std::fs::remove_dir_all(&stale_dir).unwrap();
-        let resume_target = tmp.path().join("other.duck");
+        let resume_target = tmp.path().join("other.json");
         std::fs::write(&resume_target, b"{}").unwrap();
 
         // stale_duck path still points to the gone dir; canonicalize of the
@@ -5728,8 +5728,8 @@ mod tests {
         // Two sessions under the same root, different uuid dirs.
         let stale_dir = make_stale_session(&root, "uuid-e");
         let target_dir = make_stale_session(&root, "uuid-f");
-        let stale_duck = stale_dir.join("session.duck");
-        let resume_target = target_dir.join("session.duck");
+        let stale_duck = stale_dir.join("recipe.json");
+        let resume_target = target_dir.join("recipe.json");
 
         cleanup_orphaned_session_dir(Some(&stale_duck), &resume_target, true, &root);
         assert!(!stale_dir.exists(), "stale orphan should be deleted");
