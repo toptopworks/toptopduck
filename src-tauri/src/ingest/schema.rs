@@ -341,9 +341,12 @@ pub fn quote_ident(name: &str) -> String {
 }
 
 /// Render the read-only snapshot attach statement
-/// (`ATTACH '<path>' AS <ident> (READ_ONLY);`). Both arguments are
-/// tool-controlled values (snapshot dir + sanitized alias), so the path is
-/// interpolated verbatim and only the identifier is quoted.
+/// (`ATTACH '<path>' AS <ident> (READ_ONLY);`). The identifier must be a
+/// sanitized machine name (`[A-Za-z0-9_]`): ingest-side callers enforce
+/// this via `sanitize_identifier`, resume-side callers trust the
+/// tool-written recipe. The snapshot file name embeds the identifier
+/// (`ingest::loader::copy_in`), so its charset -- not the quoting -- is
+/// what guards the verbatim single-quoted path.
 pub fn attach_sql(path: &str, name: &str) -> String {
     format!("ATTACH '{path}' AS {} (READ_ONLY);", quote_ident(name))
 }
@@ -370,8 +373,9 @@ mod tests {
 
     #[test]
     fn interpolates_attach_path_verbatim() {
-        // The path is tool-controlled, never user input: single quotes pass
-        // through unescaped (characterizes the interpolation contract).
+        // Single quotes pass through unescaped (characterizes the
+        // interpolation contract; see attach_sql's doc for what guards
+        // real paths).
         assert_eq!(
             attach_sql("/tmp/we'ird", "s0"),
             "ATTACH '/tmp/we'ird' AS \"s0\" (READ_ONLY);"
