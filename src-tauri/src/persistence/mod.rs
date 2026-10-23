@@ -33,6 +33,6 @@ pub use listing::{
 pub use migration::{migrate_to_current, MigrationError};
 pub use recipe::{
     ProductiveTurn, Recipe, RecipeEntry, RecipeError, RecipeOutcome, RecipeTurn, SourceRef,
-    RECIPE_FORMAT_VERSION,
+    LEGACY_RECIPE_FILE_NAME, RECIPE_FILE_NAME, RECIPE_FORMAT_VERSION,
 };
 pub use registry::{canonicalize_recipe, release, try_acquire};

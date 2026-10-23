@@ -349,10 +349,11 @@ impl super::Session {
                 detail: format!("failed to release old snapshot: {e}"),
             });
         }
-        // Old detached -- remove its file. Best-effort (mirrors rollback_excel):
-        // a remove failure (e.g. a lingering handle on Windows) is logged, then
-        // the promote step falls back to attaching the swap file in place.
-        let formal = self.temp_path.join(format!("{reference_name}.duckdb"));
+        // Old detached -- remove its file from the tree (where the snapshot
+        // lives). Best-effort (mirrors rollback_excel): a remove failure
+        // (e.g. a lingering handle on Windows) is logged, then the promote
+        // step falls back to attaching the swap file in place.
+        let formal = self.snapshot_dir().join(format!("{reference_name}.duckdb"));
         if let Err(e) = fs::remove_file(&formal) {
             log::warn!(
                 target: "toptopduck::session",
@@ -361,7 +362,7 @@ impl super::Session {
         }
         // Promote the swap file to the formal name when possible; if rename
         // fails (the old file couldn't be cleared), attach the swap file where
-        // it is -- the session temp dir is wiped on drop either way.
+        // it is -- both files live in the tree, resident until session delete.
         let attach_path = match fs::rename(&new_snap.file_path, &formal) {
             Ok(()) => formal.to_string_lossy().into_owned(),
             Err(e) => {

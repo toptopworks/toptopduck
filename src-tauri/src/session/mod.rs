@@ -1,6 +1,9 @@
 //! Per-session state: an in-memory DuckDB parent (working-set metadata + future
-//! result_N) plus READ_ONLY-attached source snapshots (ADR-0004/0005/0012). The
-//! per-session temp dir holds the snapshot files and is cleared on drop (ADR-0012).
+//! result_N) plus READ_ONLY-attached source snapshots (ADR-0004/0005/0012).
+//! Snapshots live in the per-session tree's `snapshots/` dir, resident until
+//! session delete (ADR-0136); the temp dir is scratch space (swap files, sheet
+//! CSVs) cleared on drop (ADR-0012), and only unbound test sessions keep their
+//! snapshots there.
 
 pub mod artifacts;
 mod companion;
@@ -2889,6 +2892,47 @@ mod tests {
         assert!(
             !session.admin_engine.is_materialized(),
             "a no-tool turn + metadata reads keep the engine at zero instances"
+        );
+    }
+
+    /// ADR-0136 D2 zero-file rule for a BOUND session: the settle persists
+    /// the recipe, but the stamp gate refuses to be the thing that
+    /// materializes the engine -- no companion file may appear for a session
+    /// that never ran SQL. The unbound AC1 test above cannot see this: its
+    /// stamp path is a no-op.
+    #[test]
+    fn a_bound_text_only_session_never_gains_a_companion_file() {
+        let provider = FakeProvider::new().scripted_tool_turn_seq(
+            "你好",
+            vec![Ok(ToolTurnReply::Text("你好！有什么可以帮你的？".into()))],
+        );
+        let dir = tempfile::tempdir().expect("tempdir");
+        let recipe = dir.path().join("recipe.json");
+        let mut session = Session::with_provider(Box::new(provider)).expect("session");
+        session
+            .bind_recipe(recipe.clone(), "零文件".into())
+            .expect("bind");
+        match session.ask("你好") {
+            TurnOutcome::Textual { .. } => {}
+            other => panic!("expected a textual turn, got {other:?}"),
+        }
+        assert!(recipe.exists(), "the text turn settled the recipe");
+        assert!(
+            !session.admin_engine.is_materialized(),
+            "the stamp gate must not materialize a zero-instance session"
+        );
+        assert!(
+            !dir.path()
+                .join(super::companion::COMPANION_FILE_NAME)
+                .exists(),
+            "no companion file for a no-SQL session"
+        );
+        drop(session);
+        assert!(
+            !dir.path()
+                .join(super::companion::COMPANION_FILE_NAME)
+                .exists(),
+            "still no companion after close"
         );
     }
 

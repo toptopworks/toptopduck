@@ -467,7 +467,7 @@ impl RecipePersister {
     }
 
     /// Adopt a resumed `recipe.json` binding (ADR-0035 resume path). The single-
-    /// writer key is acquired externally by `open_recipe`'s `OpenDuckGuard`;
+    /// writer key is acquired externally by `open_recipe`'s `OpenRecipeGuard`;
     /// this method records the canonical path for later release and sets all
     /// four persistence fields in one shot.
     pub(super) fn adopt_resumed(

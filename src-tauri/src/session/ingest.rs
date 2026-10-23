@@ -603,8 +603,14 @@ impl super::Session {
                     "DETACH failed during excel rollback for {reference_name}: {e}"
                 );
             }
-            if let Err(e) = fs::remove_file(self.temp_path.join(format!("{reference_name}.duckdb")))
-            {
+            // The snapshot file lives in the session tree (attach_sheet's
+            // copy-in); `source_files` holds the recorded path, with the
+            // snapshot-dir join as the fallback (mirrors release_snapshot).
+            let snapshot_path = self
+                .source_files
+                .remove(reference_name)
+                .unwrap_or_else(|| self.snapshot_dir().join(format!("{reference_name}.duckdb")));
+            if let Err(e) = fs::remove_file(&snapshot_path) {
                 log::warn!(
                     target: "toptopduck::session",
                     "snapshot file removal failed during excel rollback for {reference_name}: {e}"

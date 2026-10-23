@@ -2700,7 +2700,7 @@ describe("Composer control row (ADR-0083, issues #350/#351)", () => {
   });
 
   it("resume renders the backend's actual posture for the NEW sid (ADR-0080 reset)", async () => {
-    // The backend resets the posture on a successful resume (open_duck ->
+    // The backend resets the posture on a successful resume (open_recipe ->
     // reset_approval); the frontend contract is that the resumed session's
     // chip re-reads it for the NEW sid and renders the landed value -- NOT a
     // hardcoded default. Pin a non-default read (no_confirmation) so a

@@ -42,7 +42,7 @@ use crate::model::{
 use crate::persistence::recipe::LastRuntime;
 use crate::persistence::{
     default_sessions_root, scan_sessions_dir, scan_sessions_dir_including_archived,
-    validate_sessions_dir, SaveError, SessionMetadata, SessionsRoot,
+    validate_sessions_dir, SaveError, SessionMetadata, SessionsRoot, RECIPE_FILE_NAME,
 };
 use crate::provider::live_config::{ActiveKeyError, LiveProviderConfig};
 use crate::runtime::acp::adapter::{
@@ -253,7 +253,7 @@ pub fn create_session(
     // files now live beside it; the old `session.duck` name stays
     // forever-readable, no in-place migration).
     let session_dir = sessions_root.path().join(id.to_string());
-    let recipe_path = session_dir.join("recipe.json");
+    let recipe_path = session_dir.join(RECIPE_FILE_NAME);
 
     // Rollback closure: if any step after store.create() fails, the handle is
     // already in the store map (with a live DuckDB instance + cancel token).

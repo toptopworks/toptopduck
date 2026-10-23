@@ -70,7 +70,7 @@ use crate::workingset::WorkingSet;
 /// (`SessionHandle::is_resuming`, read by `commands::reject_if_resuming`), so
 /// this counter has NO production reader. It is retained ONLY as a RAII probe
 /// that `persistence_blackbox.rs` asserts rises and falls around a resume
-/// (`is_resuming_flag_is_true_during_open_duck_and_cleared_after`).
+/// (`is_resuming_flag_is_true_during_open_recipe_and_cleared_after`).
 ///
 /// A COUNT (not a boolean) so concurrent resumes compose: two `open_recipe`
 /// calls each acquire (+1), one finishing (-1) leaves it > 0 while the other

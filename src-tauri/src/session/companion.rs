@@ -26,7 +26,9 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::model::{DatasetDescriptor, RectifyProvenance, StaleAnchor};
-use crate::persistence::recipe::{Recipe, RecipeEntry, RecipeOutcome, RECIPE_FORMAT_VERSION};
+use crate::persistence::recipe::{
+    Recipe, RecipeEntry, RecipeOutcome, RecipePromotion, RECIPE_FORMAT_VERSION,
+};
 use crate::workingset::WorkingSet;
 
 /// The companion DB file name inside the per-session tree (ADR-0136 D1/D2).
@@ -141,6 +143,28 @@ struct CompanionMeta {
 /// EXCLUDES the display half (session name, timeline prose) and the source
 /// PATHS (a re-link relocates the same fingerprint without changing data), so
 /// those edits never cost a replay.
+/// The recipe's live promotions in history order -- the one traversal shared
+/// by the digest (what a rebuild would re-execute) and the degraded-settle
+/// check (each live promotion's result must be in the working set), so the
+/// two views can never drift apart.
+fn live_promotions(recipe: &Recipe) -> impl Iterator<Item = &RecipePromotion> {
+    recipe
+        .history
+        .iter()
+        .filter_map(|entry| {
+            // Source/skill lifecycle events are not replay inputs; a
+            // non-materialized turn executes no SQL on replay.
+            let RecipeEntry::Turn(turn) = entry else {
+                return None;
+            };
+            let RecipeOutcome::Materialized { promotions, .. } = &turn.outcome else {
+                return None;
+            };
+            Some(promotions.iter())
+        })
+        .flatten()
+}
+
 fn chain_digest(recipe: &Recipe) -> String {
     #[derive(Serialize)]
     struct ChainSource<'a> {
@@ -166,22 +190,14 @@ fn chain_digest(recipe: &Recipe) -> String {
         .expect("recipe projection serializes");
         hasher.update(bytes);
     }
-    for entry in &recipe.history {
-        let RecipeEntry::Turn(turn) = entry else {
-            continue; // source/skill lifecycle events are not replay inputs
-        };
-        let RecipeOutcome::Materialized { promotions, .. } = &turn.outcome else {
-            continue; // non-materialized turns execute no SQL on replay
-        };
-        for p in promotions {
-            let bytes = serde_json::to_vec(&ChainPromotion {
-                reference_name: &p.reference_name,
-                sql: &p.sql,
-                stale: p.stale.as_ref(),
-            })
-            .expect("recipe projection serializes");
-            hasher.update(bytes);
-        }
+    for p in live_promotions(recipe) {
+        let bytes = serde_json::to_vec(&ChainPromotion {
+            reference_name: &p.reference_name,
+            sql: &p.sql,
+            stale: p.stale.as_ref(),
+        })
+        .expect("recipe projection serializes");
+        hasher.update(bytes);
     }
     hasher
         .finalize()
@@ -207,23 +223,15 @@ pub(super) fn stamp(
     working_set: &WorkingSet,
     source_stats: HashMap<String, SourceStat>,
 ) -> anyhow::Result<()> {
-    for entry in &recipe.history {
-        let RecipeEntry::Turn(turn) = entry else {
-            continue;
-        };
-        let RecipeOutcome::Materialized { promotions, .. } = &turn.outcome else {
-            continue;
-        };
-        for p in promotions {
-            if p.stale.is_none() && working_set.get(&p.reference_name).is_none() {
-                log::info!(
-                    target: "toptopduck::session",
-                    "companion watermark skipped: recorded result {} is degraded out of the \
-                     working set -- the session stays on the replay path (ADR-0136 D3)",
-                    p.reference_name
-                );
-                return Ok(());
-            }
+    for p in live_promotions(recipe) {
+        if p.stale.is_none() && working_set.get(&p.reference_name).is_none() {
+            log::info!(
+                target: "toptopduck::session",
+                "companion watermark skipped: recorded result {} is degraded out of the \
+                 working set -- the session stays on the replay path (ADR-0136 D3)",
+                p.reference_name
+            );
+            return Ok(());
         }
     }
     let meta = CompanionMeta {
@@ -232,10 +240,8 @@ pub(super) fn stamp(
         working_set: WorkingSetMeta::capture(working_set, source_stats),
     };
     let json = serde_json::to_string(&meta)?;
-    conn.execute_batch(
-        "CREATE TABLE IF NOT EXISTS _meta (key TEXT PRIMARY KEY, value TEXT);
-         DELETE FROM _meta WHERE key = 'meta';",
-    )?;
+    conn.execute_batch("CREATE TABLE IF NOT EXISTS _meta (key TEXT PRIMARY KEY, value TEXT)")?;
+    conn.execute("DELETE FROM _meta WHERE key = ?", params![META_KEY])?;
     conn.execute(
         "INSERT INTO _meta (key, value) VALUES (?, ?)",
         params![META_KEY, json],
@@ -252,9 +258,6 @@ pub(super) fn stamp(
 /// the existing replay path rebuilds it.
 pub(super) fn probe(recipe_path: &Path, recipe: &Recipe) -> Option<WorkingSetMeta> {
     let companion = companion_path(recipe_path)?;
-    if !companion.exists() {
-        return None;
-    }
     let meta = read_meta(&companion)?;
     if meta.version != META_VERSION || meta.watermark != chain_digest(recipe) {
         return None;
@@ -268,9 +271,6 @@ pub(super) fn probe(recipe_path: &Path, recipe: &Recipe) -> Option<WorkingSetMet
     // could not proceed either).
     for s in &recipe.sources {
         let file = snapshot_file(tree, &s.reference_name);
-        if !file.exists() {
-            return None;
-        }
         if Connection::open_with_flags(&file, read_only_config()?).is_err() {
             return None;
         }
@@ -391,17 +391,50 @@ mod tests {
     fn stamp_skips_a_degraded_settle() {
         // ADR-0136 D3: a live recorded result absent from the working set is
         // a replay break -- stamping it would freeze the degraded state
-        // behind a hit forever, so the stamp refuses.
+        // behind a hit forever, so the stamp refuses. Asserted against the
+        // companion's own _meta row -- the probe would also miss for a
+        // missing tree snapshot, so it cannot discriminate here.
         let dir = tempfile::tempdir().expect("tempdir");
         let recipe = recipe_with("SELECT 1");
-        let conn = Connection::open(dir.path().join(COMPANION_FILE_NAME)).expect("companion");
+        let companion = dir.path().join(COMPANION_FILE_NAME);
+        let conn = Connection::open(&companion).expect("companion");
         stamp(&conn, &recipe, &WorkingSet::default(), HashMap::new()).expect("stamp call");
         drop(conn);
-        let duck = dir.path().join("recipe.json");
+        let row: Option<String> = Connection::open(&companion)
+            .expect("companion readable")
+            .query_row(
+                "SELECT value FROM _meta WHERE key = ?",
+                params![META_KEY],
+                |r| r.get(0),
+            )
+            .ok();
         assert!(
-            probe(&duck, &recipe).is_none(),
+            row.is_none(),
             "no _meta row was written for the degraded settle"
         );
+    }
+
+    #[test]
+    fn probe_misses_on_a_future_meta_version() {
+        // The version gate is forward-looking insurance: a _meta row from a
+        // future build -- even one carrying the correct digest -- must not be
+        // interpreted; the probe treats it as a miss and replay rebuilds.
+        let (dir, recipe) = tree_with_companion();
+        let future = serde_json::to_string(&CompanionMeta {
+            version: META_VERSION + 1,
+            watermark: chain_digest(&recipe),
+            working_set: WorkingSetMeta::default(),
+        })
+        .expect("meta serializes");
+        let conn = Connection::open(dir.path().join(COMPANION_FILE_NAME)).expect("companion");
+        conn.execute(
+            "INSERT OR REPLACE INTO _meta (key, value) VALUES (?, ?)",
+            params![META_KEY, future],
+        )
+        .expect("rewrite row");
+        drop(conn);
+        let duck = dir.path().join("recipe.json");
+        assert!(probe(&duck, &recipe).is_none(), "future version -> miss");
     }
 
     #[test]

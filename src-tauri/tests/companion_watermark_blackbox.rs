@@ -68,7 +68,7 @@ fn productive(sql: &str) -> Vec<Result<ToolTurnReply, toptopduck_lib::ProviderEr
 /// Build the production-shaped session: bind FIRST (create_session order,
 /// ADR-0089), then ingest one CSV source + run two productive turns. Source
 /// snapshots land in `{duck_dir}/snapshots/`, the result history in the
-/// companion `{duck_dir}/data.duckdb`, and each settle stamps the watermark.
+/// companion `{duck_dir}/analytics.duckdb`, and each settle stamps the watermark.
 /// The caller drops the returned session to simulate a clean close.
 fn build_hit_session(duck: &Path, csv: &Path) -> Session {
     let provider = FakeProvider::new()
@@ -300,6 +300,17 @@ fn an_edited_chain_invalidates_the_watermark() {
         dataset_names(&resumed),
         vec!["people".to_string(), "result_1".into(), "result_2".into()]
     );
+    drop(resumed);
+
+    // The rebuild re-stamped the companion against the EDITED chain -- the
+    // next open hits.
+    let (events, cb) = collect_events();
+    let _reopened = resume_defaults(&duck, Arc::new(CancelToken::new()), cb).expect("second open");
+    assert!(
+        events.borrow().is_empty(),
+        "post-rebuild reopen hits: {:?}",
+        events.borrow()
+    );
 }
 
 /// AC4: a legacy pure-recipe session (pre-0136 order: SQL ran before the
@@ -399,4 +410,57 @@ fn a_watermark_miss_rebuilds_results_from_scratch() {
         .read_rows("result_1", 0, 10)
         .expect("rebuilt result readable");
     assert_eq!(page.total, 1);
+}
+
+/// A replace settles the REPLACEMENT into the tree: the retire step must
+/// remove the old snapshot and promote the swap inside `snapshots/` (a
+/// temp-dir formal path would strand the stale file in the tree while the
+/// stamped watermark describes the replacement -- the reopen hit would then
+/// serve pre-replacement data). The reopened hit must read the replaced rows.
+#[test]
+fn a_replaced_source_survives_close_and_the_reopen_hit_serves_it() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let duck = dir.path().join("s.duck");
+    let csv_v1 = dir.path().join("people.csv");
+    fs::copy(fixture("people.csv"), &csv_v1).expect("copy fixture");
+    // Same schema, one extra row: a same-schema replace is the silent-wrong-
+    // data shape -- only the row count can tell v1 from v2.
+    let csv_v2 = dir.path().join("people_v2.csv");
+    fs::write(
+        &csv_v2,
+        "id,name,joined,active,score\n1,Alice,2021-03-15,true,3.5\n2,Bob,2020-07-22,false,4.2\n3,Cara,2022-01-08,true,2.8\n4,Dan,2019-11-30,false,5.0\n5,Eve,2023-04-04,true,3.9\n6,Fay,2023-06-01,true,4.4\n",
+    )
+    .expect("write v2");
+
+    let mut session = build_hit_session(&duck, &csv_v1);
+    match session.replace_source("people", &csv_v2) {
+        LoadOutcome::Loaded(_) => {}
+        other => panic!("expected replace to load, got {other:?}"),
+    }
+    drop(session); // clean close: the tree must hold the REPLACEMENT
+
+    let (events, cb) = collect_events();
+    let mut resumed =
+        resume_defaults(&duck, Arc::new(CancelToken::new()), cb).expect("reopen after replace");
+    assert!(
+        events.borrow().is_empty(),
+        "the replacement settled into the watermark: the reopen hits (got {:?})",
+        events.borrow()
+    );
+    let page = resumed
+        .read_rows("people", 0, 10)
+        .expect("source readable on the hit path");
+    // Pin the QUERIED rows, not `total` -- the page's total is the
+    // descriptor's row count (restored from the stamped meta), so it would
+    // report the replacement's count even over stale snapshot data.
+    assert_eq!(
+        page.rows.len(),
+        6,
+        "the reopened hit serves the REPLACED rows"
+    );
+    assert!(
+        page.rows.iter().flatten().any(|c| c.contains("Fay")),
+        "the extra v2 row is present in the served data"
+    );
+    assert!(resumed.take_source_notices().is_empty());
 }

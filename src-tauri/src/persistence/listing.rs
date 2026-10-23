@@ -18,7 +18,9 @@
 
 use crate::persistence::organization;
 use crate::persistence::recipe::RecipeEntry;
-use crate::persistence::{read_recipe, LoadError, Recipe};
+use crate::persistence::{
+    read_recipe, LoadError, Recipe, LEGACY_RECIPE_FILE_NAME, RECIPE_FILE_NAME,
+};
 use std::path::{Path, PathBuf};
 use std::sync::RwLock;
 use std::time::UNIX_EPOCH;
@@ -235,7 +237,7 @@ fn scan_sessions_dir_scoped(dir: &Path, include_archived: bool) -> Vec<SessionMe
             // sessions; the old `session.duck` stays forever accepted (no
             // in-place migration). New name first -- it is the one every new
             // write uses.
-            let recipe = ["recipe.json", "session.duck"]
+            let recipe = [RECIPE_FILE_NAME, LEGACY_RECIPE_FILE_NAME]
                 .iter()
                 .map(|name| session_dir.join(name))
                 .find(|p| p.exists())?;
@@ -652,6 +654,32 @@ mod tests {
         assert_eq!(names, vec!["fresh", "legacy"], "both suffixes list");
         assert!(list[0].recipe_path.as_str().ends_with("recipe.json"));
         assert!(list[1].recipe_path.as_str().ends_with("session.duck"));
+
+        // Precedence: when BOTH names exist in one directory, the new name
+        // wins (it is first in the scan order). Writing the new name into the
+        // legacy directory also makes it the newest file, so the rescan finds
+        // the entry by name rather than index.
+        save_atomic(
+            &root.path().join("uuid-legacy").join("recipe.json"),
+            &Recipe::build(
+                "legacy".into(),
+                vec![csv_source("old")],
+                Vec::new(),
+                Some("old".into()),
+            )
+            .expect("build"),
+        )
+        .expect("save");
+        let list = scan_sessions_dir(root.path());
+        let legacy = list
+            .iter()
+            .find(|m| m.display_name == "legacy")
+            .expect("legacy lists");
+        assert!(
+            legacy.recipe_path.as_str().ends_with("recipe.json"),
+            "the new name wins when both exist: {}",
+            legacy.recipe_path.as_str()
+        );
     }
 
     #[test]

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useIntl } from "react-intl";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { conversation, takePersistError, takeSourceNotices } from "../api";
@@ -278,23 +278,40 @@ export function useSessionState(
   const loading = turnLoading || mutationLoading;
   const [error, setError] = useState<AppError | null>(null);
   const [persistError, setPersistError] = useState<SaveError | null>(null);
-  const [sourceNotices, setSourceNotices] = useState<SourceNotice[]>([]);
+  const [sourceNoticesFor, setSourceNoticesFor] = useState<{
+    sid: string;
+    notices: SourceNotice[];
+  }>({ sid: sessionId, notices: [] });
+  // The visible notices are the drained ones only while they belong to the
+  // current session -- a session switch hides the previous session's notices
+  // without a synchronous reset setState in the drain effect.
+  const sourceNotices =
+    sourceNoticesFor.sid === sessionId ? sourceNoticesFor.notices : [];
 
   // ADR-0136: drain the resume-hit source notices once per pane mount (the
   // backend holds them until read; every replay-path resume drains an empty
-  // list, a no-op).
+  // list, a no-op). The result APPENDS onto the state it already shares the
+  // sid with: StrictMode's dev double-invoke drains twice -- the first run
+  // takes the notices, the remount gets an empty list -- and a plain replace
+  // would let the empty second drain clobber the first result; appending is
+  // order-independent. A drain for a different sid replaces, and the ref
+  // guard drops a stale session's late resolve entirely.
+  const drainSidRef = useRef(sessionId);
   useEffect(() => {
-    let cancelled = false;
+    drainSidRef.current = sessionId;
     takeSourceNotices(sessionId)
       .then((notices) => {
-        if (!cancelled) setSourceNotices(notices);
+        if (drainSidRef.current === sessionId) {
+          setSourceNoticesFor((prev) =>
+            prev.sid === sessionId
+              ? { sid: sessionId, notices: [...prev.notices, ...notices] }
+              : { sid: sessionId, notices },
+          );
+        }
       })
       .catch(() => {
         // swallow -- notice polling must not surface its own failure
       });
-    return () => {
-      cancelled = true;
-    };
   }, [sessionId]);
 
   // --- Derived: workspace content ------------------------------------------

@@ -129,6 +129,14 @@ use crate::model::{
 /// path (ADR-0036).
 pub const RECIPE_FORMAT_VERSION: u32 = 7;
 
+/// The recipe file name every new write uses (ADR-0136 D5). One constant for
+/// the writer (session creation) and the scanner -- a write-side rename the
+/// scan never hears about would silently drop new sessions from the list.
+pub const RECIPE_FILE_NAME: &str = "recipe.json";
+/// The pre-0136 recipe file name, accepted by the scan forever (no in-place
+/// migration, ADR-0136 D5).
+pub const LEGACY_RECIPE_FILE_NAME: &str = "session.duck";
+
 /// One source Dataset's portable reference (ADR-0034/0036/0042). Paths use
 /// the **hybrid representation** ADR-0036 §4 mandates: `source_path` is always
 /// absolute (the fallback resolver); `relative_path` is set when the source
