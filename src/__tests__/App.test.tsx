@@ -96,6 +96,9 @@ vi.mock("../api", async (importOriginal) => {
     // ADR-0059: the turn-progress listener mounts with every SessionPane.
     // Stub it (no-op unlisten) so jsdom doesn't hit the real Tauri listen.
     onTurnProgress: vi.fn(async () => () => {}),
+    // Issue #1353: the shell-level session-named listener mounts with App;
+    // inert no-op keeps jsdom off the real Tauri listen.
+    onSessionNamed: vi.fn(async () => () => {}),
     // The tray channel (issue #1140) mounts with App; no App.test flow
     // drives tray events, so inert no-op listeners keep jsdom off the real
     // Tauri listen.
@@ -152,7 +155,7 @@ import { flowFailedMessage } from "../lib/error-presentation";
 // flows, not the shell management actions). Collected here so the three render
 // sites share one source instead of repeating five identical lines each.
 const HEADER_MGMT_PROPS = {
-  duckPath: "/test/session.duck",
+  recipePath: "/test/recipe.json",
   onRename: () => {},
   onClose: () => {},
   onDelete: () => {},

@@ -1,18 +1,21 @@
-import type { ReactNode } from "react";
-import { useIntl, type IntlShape } from "react-intl";
+import { useState, type ReactNode } from "react";
+import { FormattedMessage, useIntl, type IntlShape } from "react-intl";
 import { Check, TriangleAlert } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { cn } from "@/lib/utils";
+import { FoldToggle } from "./FoldToggle";
 import { TraceList } from "./TraceList";
 import { TraceSummaryFold } from "./TraceSummaryFold";
 import type { OperationKind } from "../../types/approval";
 import type { TraceEntry } from "../../types/thread";
 
 // The trace-row rendering family (ADR-0078, issue #297), extracted from
-// TraceView so the delegation sub-trace viewer can reuse the rows without a
-// circular import: the viewer composes rows, and the rows' view-affordance
-// slot is injected by the caller (TraceView / TurnCard), never imported
-// here. The operation badge + glyph helpers ride along -- LiveRow (still in
+// TraceView so the delegation sub-trace panel can reuse the rows without a
+// circular import: the panel composes rows, and the panel body is injected
+// by the caller (TraceView / TurnCard), never imported here. The row owns
+// the sub-trace fold itself (issue #1355): the toggle rides the summary
+// line's tail, the injected body renders beneath the row while open. The
+// operation badge + glyph helpers ride along -- LiveRow (still in
 // TraceView) and the rows share them.
 
 // The operation badge (ADR-0083): a compact i18n label per OperationKind.
@@ -78,6 +81,42 @@ function SuccessGlyph({ success }: { success: boolean }) {
   );
 }
 
+// One round's step fold (the "Trace · N calls" tier, ADR-0078's folding
+// discipline): the round's call count reads on the fold head so a rail scan
+// shows which rounds made multiple calls without expanding; the rows mount
+// only while expanded. Shared by the settled main trace's round adapter
+// (TurnCard) and the delegation sub-trace's rounds (issue #1355) so the two
+// faces cannot drift; `renderSubTrace` is the delegation panel injection
+// (issue #934) -- the sub-face passes none.
+export function TraceStepFold({
+  calls,
+  renderSubTrace,
+}: {
+  calls: ReadonlyArray<TraceEntry>;
+  renderSubTrace?: (entry: TraceEntry) => ReactNode;
+}) {
+  const [stepsExpanded, setStepsExpanded] = useState(false);
+  if (calls.length === 0) return null;
+  return (
+    <>
+      <FoldToggle
+        hookClass="trace-toggle"
+        expanded={stepsExpanded}
+        onToggle={() => setStepsExpanded((v) => !v)}
+      >
+        <FormattedMessage
+          id="thread.trace.toggle"
+          defaultMessage="Trace · {count} {count, plural, one {call} other {calls}}"
+          values={{ count: calls.length }}
+        />
+      </FoldToggle>
+      {stepsExpanded && (
+        <TraceRowList entries={calls} renderSubTrace={renderSubTrace} />
+      )}
+    </>
+  );
+}
+
 // One completed trace entry (the expanded trace of a settled turn, or a
 // settled live row). Tool name + operation badge + argument summary, with the
 // failure excerpt beneath (the cross-turn retrospection anchor, ADR-0078).
@@ -85,17 +124,23 @@ function SuccessGlyph({ success }: { success: boolean }) {
 // monospace face (it IS the SQL / reference the call ran). `afterName` is
 // the live card's resolved-approval badge slot (a settled TurnRecord trace
 // has no approval chrome -- the persisted entries carry the call alone);
-// `subTraceView` is the delegation row's view-affordance slot (issue #934)
-// -- the row stays one line, the affordance (the caller's) opens the modal.
+// `subTrace` is the delegation row's inline panel body (issue #934, inlined
+// by #1355) -- the row stays one line with the fold toggle at its tail, and
+// the body renders full width beneath the row while open.
 export function TraceRow({
   entry,
   afterName = null,
-  subTraceView = null,
+  subTrace = null,
 }: {
   entry: TraceEntry;
   afterName?: ReactNode;
-  subTraceView?: ReactNode;
+  subTrace?: ReactNode;
 }) {
+  const [subOpen, setSubOpen] = useState(false);
+  // The gate lives here, once: a row whose entry carries no sub-rounds (or
+  // whose caller supplied no body) renders neither the toggle nor the panel,
+  // so the callers inject the body unconditionally over their row lists.
+  const hasSubTrace = subTrace !== null && (entry.sub_rounds?.length ?? 0) > 0;
   return (
     <li className="trace-row flex items-start gap-1.5 py-0.5 text-xs">
       <span className="mt-px">
@@ -118,7 +163,25 @@ export function TraceRow({
               <span className="trace-name font-medium min-w-0 truncate">{entry.name}</span>
               <OperationBadge kind={entry.operation_kind} />
               {afterName}
-              {subTraceView}
+              {hasSubTrace && (
+                // stopPropagation: the toggle sits inside the row head's
+                // summary-fold line (the whole line toggles the summary's
+                // expand block); folding the sub-trace is a different
+                // action and must not also fold the summary.
+                <span onClick={(e) => e.stopPropagation()}>
+                  <FoldToggle
+                    hookClass="subtrace-toggle"
+                    className="mt-0"
+                    expanded={subOpen}
+                    onToggle={() => setSubOpen((v) => !v)}
+                  >
+                    <FormattedMessage
+                      id="thread.trace.viewSubtrace"
+                      defaultMessage="Sub-agent trace"
+                    />
+                  </FoldToggle>
+                </span>
+              )}
             </>
           )}
         />
@@ -137,6 +200,10 @@ export function TraceRow({
             {entry.result_excerpt}
           </span>
         )}
+        {/* The expanded panel mounts full width beneath the row; unmounting
+         * on fold -- and on the settle swap, which rebuilds the row -- is
+         * the known limitation recorded on the issue (#1355). */}
+        {hasSubTrace && subOpen && subTrace}
       </div>
     </li>
   );
@@ -146,11 +213,11 @@ export function TraceRow({
 // the turn head when the card is expanded, hidden (not unmounted data -- the
 // TurnRecord carries it) when collapsed. The chrome rides the shared
 // TraceList so the live exchange's row list renders identically (issue #620).
-// `renderSubTrace` is the delegation view-affordance injection (issue #934):
-// the settled trace's caller (TurnCard) supplies it for every row -- the
-// dialog self-guards to the rows carrying a nested sub-trace -- and the
-// sub-trace viewer itself passes none (a sub-agent's calls never carry
-// their own sub-trace).
+// `renderSubTrace` is the delegation panel-body injection (issues #934,
+// #1355): the callers supply it for every row -- TraceRow itself gates on
+// the entry's sub-rounds (see hasSubTrace above) -- and the sub-trace
+// panel passes none (a sub-agent's calls never carry their own
+// sub-trace).
 export function TraceRowList({
   entries,
   renderSubTrace,
@@ -166,7 +233,7 @@ export function TraceRowList({
         <TraceRow
           key={i}
           entry={entry}
-          subTraceView={renderSubTrace?.(entry) ?? null}
+          subTrace={renderSubTrace?.(entry) ?? null}
         />
       ))}
     </TraceList>

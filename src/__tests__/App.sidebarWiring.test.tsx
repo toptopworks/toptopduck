@@ -168,6 +168,9 @@ vi.mock("../api", async (importOriginal) => {
     // composer reads must stay off the real Tauri bridge (same stubs as
     // App.test.tsx's pane-driving flows).
     onTurnProgress: vi.fn(async () => () => {}),
+    // Issue #1353: the shell-level session-named listener mounts with App;
+    // inert no-op keeps jsdom off the real Tauri listen.
+    onSessionNamed: vi.fn(async () => () => {}),
     getAuthorizationMode: vi.fn(async () => "per_call" as const),
     setAuthorizationMode: vi.fn(async () => {}),
     listSkills: vi.fn(async () => ({ skills: [], ignored: [] })),
@@ -204,7 +207,7 @@ import { listLiveSessions, renameSession } from "../api";
 import type { LiveSessionEntry } from "../api";
 
 function idleLive(id: string, name: string): LiveSessionEntry {
-  return { session_id: id, duck_path: `/x/${id}.duck`, session_name: name, in_flight: false };
+  return { session_id: id, recipe_path: `/x/${id}.recipe.json`, session_name: name, in_flight: false };
 }
 
 /** The sidebar row (`li.session-entry`) whose button carries the session's
@@ -317,7 +320,7 @@ describe("App shell-level sidebar wiring (issue #1007)", () => {
     // The row menu's onRename arrives as (path, sid, newName) while
     // renameEntry takes (sid, path, newName), so App transposes by hand --
     // passing the hook directly (as the SessionPane path does) would land the
-    // .duck path in the sid slot. Assert at the api boundary: the wiring pin
+    // recipe.json path in the sid slot. Assert at the api boundary: the wiring pin
     // only holds when the first argument is the sid.
     const row = rowFor("Rename me")!;
     fireEvent.click(

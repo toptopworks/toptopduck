@@ -10,9 +10,10 @@ import { alertVariants } from "./alert-variants";
 // components and stays react-refresh-clean (cf. button/badge variants from
 // #105/#107). The default role is "alert" (assertive), set before {...props} so
 // a caller overrides it where the disclosure semantics differ: info -> note
-// (static), warning -> status (polite); a destructive disclosure would keep the
-// "alert" default. See alert-variants.ts for the variant -> disclosure-surface
-// mapping.
+// (static), warning -> status (polite), and a CONDITIONAL guidance state that
+// mounts/unmounts with a config gap also takes status (the cold-start banner,
+// #1337); a destructive disclosure would keep the "alert" default. See
+// alert-variants.ts for the variant -> disclosure-surface mapping.
 
 function Alert({
   className,

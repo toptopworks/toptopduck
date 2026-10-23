@@ -1,8 +1,9 @@
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { describe, expect, it, vi } from "vitest";
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { IntlProvider } from "react-intl";
 import { TooltipProvider } from "../../ui/tooltip";
-import type { ReactElement } from "react";
+import type { ComponentProps, ReactElement } from "react";
 import { catalogFor } from "../../../i18n";
 import { cancelled, failed, sourceAdded } from "../../../session/__tests__/fixtures";
 import { embedOk } from "../../common/__tests__/helpers";
@@ -19,6 +20,16 @@ import type { ThreadEntry, TurnRecord } from "../../../types/thread";
 // the chart render is mocked -- the stage-link pin below is meaningful
 // (chart draws), not vacuous.
 vi.mock("vega-embed", () => ({ default: vi.fn() }));
+
+// The attribution marker reads the shared adapter table cache (issue
+// #1351); resolving against an empty table keeps the raw-id assertions
+// below declared rather than an accident of a failed fetch. The rest of
+// the api surface stays real-shaped (importOriginal) because the thread
+// tree imports more of it than the marker's one call.
+vi.mock("../../../api", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../../../api")>()),
+  listAdapters: vi.fn().mockResolvedValue([]),
+}));
 
 // A materialized-record fixture (reference_name overridden per test) -- the
 // only outcome that needs a full dataset payload. File-local per the suite
@@ -45,12 +56,49 @@ const mockDataset: DatasetDescriptor = {
 // Thread chrome routes through react-intl (ADR-0052). Renders the element inside
 // a zh-CN IntlProvider so the Chinese chrome assertions hold. Wraps in
 // TooltipProvider too: the rail card truncation sites use Radix Tooltip
-// (ADR-0050/0054, issue #106), which needs the context App normally provides.
+// (ADR-0050/0054, issue #106), which needs the context App normally provides,
+// and in a QueryClient for the attribution marker's adapter-table read
+// (issue #1351).
+// retry:false keeps a mounting marker from stacking background retries;
+// staleTime:Infinity keeps a seeded cache from refetching under it.
+const queryClient = new QueryClient({
+  defaultOptions: { queries: { retry: false, staleTime: Infinity } },
+});
+
 function renderThread(ui: ReactElement) {
   return render(
     <IntlProvider locale="zh-CN" messages={catalogFor("zh-CN")}>
-      <TooltipProvider>{ui}</TooltipProvider>
+      <QueryClientProvider client={queryClient}>
+        <TooltipProvider>{ui}</TooltipProvider>
+      </QueryClientProvider>
     </IntlProvider>,
+  );
+}
+
+// The rerender tree factory: every settle/swap rerender in this suite
+// rebuilds the full provider stack (RTL's rerender replaces the tree, so
+// the providers must ride every call), and the sites differ only in
+// entries, liveTurn, and the occasional datasetLabels -- one factory keeps
+// the stack single-sourced (the cardEl convention in TurnCard.test.tsx;
+// helpers.tsx's migrate-on-next-touch note).
+function threadTree(
+  props: Pick<ComponentProps<typeof Thread>, "entries" | "liveTurn"> &
+    Partial<Pick<ComponentProps<typeof Thread>, "datasetLabels">>,
+) {
+  return (
+    <IntlProvider locale="zh-CN" messages={catalogFor("zh-CN")}>
+      <QueryClientProvider client={queryClient}>
+        <TooltipProvider>
+          <Thread
+            entries={props.entries}
+            liveTurn={props.liveTurn}
+            selectedResult={null}
+            onSelectResult={() => {}}
+            datasetLabels={props.datasetLabels}
+          />
+        </TooltipProvider>
+      </QueryClientProvider>
+    </IntlProvider>
   );
 }
 
@@ -1681,7 +1729,7 @@ describe("Thread", () => {
           onLoadApprovalAttachments={onLoad}
         />,
       );
-      fireEvent.click(screen.getByRole("button", { name: "查看传值文件（1）" }));
+      fireEvent.click(screen.getByRole("button", { name: "查看传入的文件（1）" }));
       expect(onLoad).toHaveBeenCalledWith("req-1");
       expect(await screen.findByText("print(1); print(2)")).toBeInTheDocument();
     });
@@ -1772,17 +1820,7 @@ describe("Thread", () => {
       // The settle swap: the live exchange folds away as the optimistic
       // record appends -- the chip count stays one, now on the settled side.
       rerender(
-        <IntlProvider locale="zh-CN" messages={catalogFor("zh-CN")}>
-          <TooltipProvider>
-            <Thread
-              entries={[turnEntry(record)]}
-              selectedResult={null}
-              onSelectResult={() => {}}
-              datasetLabels={labels}
-              liveTurn={null}
-            />
-          </TooltipProvider>
-        </IntlProvider>,
+        threadTree({ entries: [turnEntry(record)], liveTurn: null, datasetLabels: labels }),
       );
       expect(screen.getByText(/→员工表/)).toBeInTheDocument();
       expect(container.querySelectorAll(".turn-active-chip")).toHaveLength(1);
@@ -1854,18 +1892,7 @@ describe("Thread", () => {
       // The settle swap in one commit: the live turn nulls AND the
       // optimistic record appends (the same single rerender the hook's batch
       // produces).
-      rerender(
-        <IntlProvider locale="zh-CN" messages={catalogFor("zh-CN")}>
-          <TooltipProvider>
-            <Thread
-              entries={[turnEntry(record)]}
-              selectedResult={null}
-              onSelectResult={() => {}}
-              liveTurn={null}
-            />
-          </TooltipProvider>
-        </IntlProvider>,
-      );
+      rerender(threadTree({ entries: [turnEntry(record)], liveTurn: null }));
       // Issue #1282: the settled card tucks its process behind the turn-level
       // head; expanding it reveals the seeded per-round face.
       fireEvent.click(screen.getByRole("button", { name: /已回答/ }));
@@ -1930,18 +1957,7 @@ describe("Thread", () => {
       );
       // Open the middle round's fold (live index 1).
       fireEvent.click(screen.getByRole("button", { name: "思考 · 0.9s" }));
-      rerender(
-        <IntlProvider locale="zh-CN" messages={catalogFor("zh-CN")}>
-          <TooltipProvider>
-            <Thread
-              entries={[turnEntry(record)]}
-              selectedResult={null}
-              onSelectResult={() => {}}
-              liveTurn={null}
-            />
-          </TooltipProvider>
-        </IntlProvider>,
-      );
+      rerender(threadTree({ entries: [turnEntry(record)], liveTurn: null }));
       // Issue #1282: expand the settled card's process head to reach the folds.
       fireEvent.click(screen.getByRole("button", { name: /已取消/ }));
       // The opened fold now sits at trace index 0 (the gate round dropped);
@@ -1972,21 +1988,10 @@ describe("Thread", () => {
       fireEvent.click(screen.getByRole("button", { name: "思考 · 0.9s" }));
       expect(screen.getByText("推理")).toBeInTheDocument();
       // A call starts in the same round: the fold must not snap shut.
-      rerender(
-        <IntlProvider locale="zh-CN" messages={catalogFor("zh-CN")}>
-          <TooltipProvider>
-            <Thread
-              entries={[]}
-              selectedResult={null}
-              onSelectResult={() => {}}
-              liveTurn={{
-                ...liveTurn,
-                rounds: [liveRound({ thinking, rows: [liveRow({ key: "call-0" })] })],
-              }}
-            />
-          </TooltipProvider>
-        </IntlProvider>,
-      );
+      rerender(threadTree({ entries: [], liveTurn: {
+        ...liveTurn,
+        rounds: [liveRound({ thinking, rows: [liveRow({ key: "call-0" })] })],
+      } }));
       const toggle = document.querySelector(".live-turn-exchange .thinking-toggle");
       expect(toggle?.getAttribute("aria-expanded")).toBe("true");
       expect(screen.getByText("推理")).toBeInTheDocument();
@@ -2021,38 +2026,16 @@ describe("Thread", () => {
       // A later progress event (same turn -- the SAME submit stamp, a NEW
       // liveTurn object: the memo rebuilds on every event): the collector
       // must survive it.
-      rerender(
-        <IntlProvider locale="zh-CN" messages={catalogFor("zh-CN")}>
-          <TooltipProvider>
-            <Thread
-              entries={[]}
-              selectedResult={null}
-              onSelectResult={() => {}}
-              liveTurn={{
-                ...liveTurn,
-                step: 2,
-                rounds: [
-                  liveRound({ thinking: openedThinking }),
-                  liveRound({ rows: [liveRow({ key: "call-0" })] }),
-                ],
-              }}
-            />
-          </TooltipProvider>
-        </IntlProvider>,
-      );
+      rerender(threadTree({ entries: [], liveTurn: {
+        ...liveTurn,
+        step: 2,
+        rounds: [
+          liveRound({ thinking: openedThinking }),
+          liveRound({ rows: [liveRow({ key: "call-0" })] }),
+        ],
+      } }));
       // The settle swap in one commit: the opened fold still seeds.
-      rerender(
-        <IntlProvider locale="zh-CN" messages={catalogFor("zh-CN")}>
-          <TooltipProvider>
-            <Thread
-              entries={[turnEntry(record)]}
-              selectedResult={null}
-              onSelectResult={() => {}}
-              liveTurn={null}
-            />
-          </TooltipProvider>
-        </IntlProvider>,
-      );
+      rerender(threadTree({ entries: [turnEntry(record)], liveTurn: null }));
       // Issue #1282: expand the settled card's process head to reach the folds.
       fireEvent.click(screen.getByRole("button", { name: /已取消/ }));
       const toggles = document.querySelectorAll(".turn-entry .thinking-toggle");
@@ -2090,34 +2073,12 @@ describe("Thread", () => {
       expect(screen.getByText("推理一版")).toBeInTheDocument();
       // The same round completes again (last-wins): the slot now carries the
       // replacement block and the fold stays open on it.
-      rerender(
-        <IntlProvider locale="zh-CN" messages={catalogFor("zh-CN")}>
-          <TooltipProvider>
-            <Thread
-              entries={[]}
-              selectedResult={null}
-              onSelectResult={() => {}}
-              liveTurn={{ ...liveTurn, rounds: [liveRound({ thinking: replacedThinking })] }}
-            />
-          </TooltipProvider>
-        </IntlProvider>,
-      );
+      rerender(threadTree({ entries: [], liveTurn: { ...liveTurn, rounds: [liveRound({ thinking: replacedThinking })] } }));
       const liveToggle = document.querySelector(".live-turn-exchange .thinking-toggle");
       expect(liveToggle?.getAttribute("aria-expanded")).toBe("true");
       expect(screen.getByText("推理二版")).toBeInTheDocument();
       // The settle swap: the seed keys on the replacement reference.
-      rerender(
-        <IntlProvider locale="zh-CN" messages={catalogFor("zh-CN")}>
-          <TooltipProvider>
-            <Thread
-              entries={[turnEntry(record)]}
-              selectedResult={null}
-              onSelectResult={() => {}}
-              liveTurn={null}
-            />
-          </TooltipProvider>
-        </IntlProvider>,
-      );
+      rerender(threadTree({ entries: [turnEntry(record)], liveTurn: null }));
       // Issue #1282: expand the settled card's process head to reach the fold.
       fireEvent.click(screen.getByRole("button", { name: /已取消/ }));
       const settledToggle = document.querySelector(".turn-entry .thinking-toggle");
@@ -2149,18 +2110,7 @@ describe("Thread", () => {
       const toggle = screen.getByRole("button", { name: "思考 · 0.9s" });
       fireEvent.click(toggle); // open
       fireEvent.click(toggle); // re-close before the settle
-      rerender(
-        <IntlProvider locale="zh-CN" messages={catalogFor("zh-CN")}>
-          <TooltipProvider>
-            <Thread
-              entries={[turnEntry(record)]}
-              selectedResult={null}
-              onSelectResult={() => {}}
-              liveTurn={null}
-            />
-          </TooltipProvider>
-        </IntlProvider>,
-      );
+      rerender(threadTree({ entries: [turnEntry(record)], liveTurn: null }));
       // Issue #1282: the head expansion reveals the fold; the re-closed
       // posture mounts collapsed inside it.
       fireEvent.click(screen.getByRole("button", { name: /已取消/ }));
@@ -2203,18 +2153,7 @@ describe("Thread", () => {
       );
       fireEvent.click(screen.getByRole("button", { name: "思考 · 0.9s" }));
       // Turn A settles: its fold mounts already open.
-      rerender(
-        <IntlProvider locale="zh-CN" messages={catalogFor("zh-CN")}>
-          <TooltipProvider>
-            <Thread
-              entries={[turnEntry(recordA)]}
-              selectedResult={null}
-              onSelectResult={() => {}}
-              liveTurn={null}
-            />
-          </TooltipProvider>
-        </IntlProvider>,
-      );
+      rerender(threadTree({ entries: [turnEntry(recordA)], liveTurn: null }));
       // Issue #1282: expand the settled card's process head to reach the fold.
       fireEvent.click(screen.getByRole("button", { name: /已取消/ }));
       expect(document.querySelector(".turn-entry .thinking-toggle")?.getAttribute("aria-expanded")).toBe(
@@ -2222,36 +2161,14 @@ describe("Thread", () => {
       );
       // Turn B goes live (a NEW submit stamp) with its own thinking block,
       // then settles: B's fold mounts collapsed, A's stays open.
-      rerender(
-        <IntlProvider locale="zh-CN" messages={catalogFor("zh-CN")}>
-          <TooltipProvider>
-            <Thread
-              entries={[turnEntry(recordA)]}
-              selectedResult={null}
-              onSelectResult={() => {}}
-              liveTurn={{
-                question: "问乙",
-                askedAt: ASKED_AT + 1000,
-                invocationNames: [],
-                step: 1,
-                rounds: [liveRound({ thinking: thinkingB })],
-              }}
-            />
-          </TooltipProvider>
-        </IntlProvider>,
-      );
-      rerender(
-        <IntlProvider locale="zh-CN" messages={catalogFor("zh-CN")}>
-          <TooltipProvider>
-            <Thread
-              entries={[turnEntry(recordA), turnEntry(recordB)]}
-              selectedResult={null}
-              onSelectResult={() => {}}
-              liveTurn={null}
-            />
-          </TooltipProvider>
-        </IntlProvider>,
-      );
+      rerender(threadTree({ entries: [turnEntry(recordA)], liveTurn: {
+        question: "问乙",
+        askedAt: ASKED_AT + 1000,
+        invocationNames: [],
+        step: 1,
+        rounds: [liveRound({ thinking: thinkingB })],
+      } }));
+      rerender(threadTree({ entries: [turnEntry(recordA), turnEntry(recordB)], liveTurn: null }));
       // Issue #1282: every still-collapsed head opens (A's is already open
       // from the previous settle) -- each fold mounts inside its own.
       screen
@@ -2570,10 +2487,10 @@ describe("Thread", () => {
             turnEntry(runtimeTurn({ kind: "built_in" })),
             turnEntry(runtimeTurn({ kind: "built_in" })),
             turnEntry(
-              runtimeTurn({ kind: "external", data: { adapter_id: "gemini-cli" } }),
+              runtimeTurn({ kind: "external", data: { adapter_id: "gemini-cli", display_name: null } }),
             ),
             turnEntry(
-              runtimeTurn({ kind: "external", data: { adapter_id: "gemini-cli" } }),
+              runtimeTurn({ kind: "external", data: { adapter_id: "gemini-cli", display_name: null } }),
             ),
           ]}
           selectedResult={null}
@@ -2600,7 +2517,7 @@ describe("Thread", () => {
     it("stays silent for a pre-attribution external turn (no not-recorded fallback)", () => {
       const { container } = renderThread(
         <Thread
-          entries={[turnEntry(runtimeTurn({ kind: "external", data: { adapter_id: null } }))]}
+          entries={[turnEntry(runtimeTurn({ kind: "external", data: { adapter_id: null, display_name: null } }))]}
           selectedResult={null}
           onSelectResult={() => {}}
         />,
@@ -2614,10 +2531,10 @@ describe("Thread", () => {
       renderThread(
         <Thread
           entries={[
-            turnEntry(runtimeTurn({ kind: "external", data: { adapter_id: "codex" } })),
+            turnEntry(runtimeTurn({ kind: "external", data: { adapter_id: "codex", display_name: null } })),
             // Optimistic / pre-extension row: no runtime field.
             turnEntry(runtimeTurn(undefined)),
-            turnEntry(runtimeTurn({ kind: "external", data: { adapter_id: "codex" } })),
+            turnEntry(runtimeTurn({ kind: "external", data: { adapter_id: "codex", display_name: null } })),
           ]}
           selectedResult={null}
           onSelectResult={() => {}}

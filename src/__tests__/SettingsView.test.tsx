@@ -41,7 +41,7 @@ vi.mock("../api", async (importOriginal) => {
     onTrayOpenSession: vi.fn(async () => () => {}),
     onTrayNewSession: vi.fn(async () => () => {}),
     closeSession: vi.fn(async () => false),
-    createSession: vi.fn(async () => ({ session_id: "sess-1", duck_path: "/sessions/sess-1/session.duck" })),
+    createSession: vi.fn(async () => ({ session_id: "sess-1", recipe_path: "/sessions/sess-1/recipe.json" })),
     listSessions: vi.fn(async () => []),
     listWorkingSet: vi.fn(async () => []),
     activeDataset: vi.fn(async () => null),
@@ -62,6 +62,9 @@ vi.mock("../api", async (importOriginal) => {
     // useSessionState mounts a long-lived listener on SessionPane mount; mock
     // it so opening a session does not reach the real Tauri event bus.
     onTurnProgress: vi.fn(async () => () => {}),
+    // Issue #1353: the shell-level session-named listener mounts with App;
+    // inert no-op keeps jsdom off the real Tauri listen.
+    onSessionNamed: vi.fn(async () => () => {}),
     getProviderConfig: vi.fn(async () => ({
       base_url: "https://api.anthropic.com",
       model: "claude-sonnet-4-6",

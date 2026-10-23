@@ -35,7 +35,8 @@ import {
   createSession,
   listLiveSessions,
   onResumeProgress,
-  openDuck,
+  onSessionNamed,
+  openRecipe,
   setAuthorizationMode,
   setSessionPosture,
   setSessionRuntime,
@@ -101,7 +102,7 @@ export interface UseShellSessionsDeps {
    *  after a save / delete / rename lands on disk. */
   refreshSessions: () => void;
   /** From useShellError: surfaces a shell-layer AppError (kind "shell") for a
-   *  createSession / openDuck / save / delete / rename reject. */
+   *  createSession / openRecipe / save / delete / rename reject. */
   setShellError: (error: AppError | null) => void;
 }
 
@@ -325,7 +326,7 @@ export function useShellSessions({
   // Issue #842: the startup re-adoption sweep. A webview reload (dev Ctrl+R /
   // HMR full-reload, WebView2 F5) wipes this hook's open-session set while the
   // backend sessions stay alive holding their canonical single-writer keys --
-  // every re-open of the same `.duck` then rejects with AlreadyOpen until
+  // every re-open of the same `recipe.json` then rejects with AlreadyOpen until
   // process restart. On mount the frontend asks the backend which sessions
   // are still live: idle ones are re-adopted into the open set (the backend
   // returns them sid-sorted, so activating the first is deterministic), while
@@ -353,7 +354,7 @@ export function useShellSessions({
       }
       let firstAdopted: string | null = null;
       for (const entry of live) {
-        if (entry.in_flight || entry.duck_path === null) {
+        if (entry.in_flight || entry.recipe_path === null) {
           // Note the bounded transient window (ADR-0021 soft-cancel): the
           // single-writer key releases only when the cancelled turn's Arc
           // drops (HTTP <=120s), so a sidebar re-open inside that window
@@ -396,7 +397,7 @@ export function useShellSessions({
         registerOpen({
           sid: entry.session_id,
           name: entry.session_name ?? "",
-          path: entry.duck_path,
+          path: entry.recipe_path,
           pendingIngestPaths: [],
           pendingQuestion: null,
           pendingSkillInvocations: [],
@@ -411,7 +412,7 @@ export function useShellSessions({
   }, []);
 
   // Shared mint: createSession (backend creates + persists immediately,
-  // returning the runtime id + bound .duck path, ADR-0061/0089) -> apply the
+  // returning the runtime id + bound recipe.json path, ADR-0061/0089) -> apply the
   // cold-start composer posture -> registerOpen + activate -> refresh the
   // sidebar. Every cold-start creation path (bar submit, window drop) funnels
   // through here; the paths differ only in the pending payload the new
@@ -446,7 +447,7 @@ export function useShellSessions({
       if (mintingRef.current) return;
       mintingRef.current = true;
       try {
-        const { session_id: sid, duck_path: path } = await createSession();
+        const { session_id: sid, recipe_path: path } = await createSession();
         if (opts.posture) {
           const posture = opts.posture;
           // One write per posture facet, isolated: a rejected write logs +
@@ -464,7 +465,7 @@ export function useShellSessions({
           // RESOLVED value (never a reject): surface it like the picker's
           // fault lines, because an un-surfaced verdict leaves the selection
           // in memory only -- a restart resumes the recipe without it and
-          // the user has no signal the .duck write failed, breaking "set
+          // the user has no signal the recipe.json write failed, breaking "set
           // means persisted" (ADR-0095 Decision 6) silently.
           const surfacePersistVerdict = (
             outcome: SetPosturePersistOutcome,
@@ -554,7 +555,7 @@ export function useShellSessions({
   // them on mount — files ingest first (handleIngestMany), then the question
   // fires via handleAsk — and clears each through onIngestConsumed /
   // onQuestionConsumed. ADR-0089 auto-persist applies (createSession binds
-  // the .duck immediately).
+  // the recipe.json immediately).
   const createSessionWithQuestion = useCallback(
     async (
       question: string,
@@ -674,9 +675,9 @@ export function useShellSessions({
     [mapSessions],
   );
 
-  // Resume a persisted .duck into a fresh runtime instance (ADR-0061/0034).
-  // open_duck reuses the id (ADR-0056), so createSession mints it first, then
-  // openDuck loads the recipe + replays the chain into that id. If the same
+  // Resume a persisted recipe.json into a fresh runtime instance (ADR-0061/0034).
+  // open_recipe reuses the id (ADR-0056), so createSession mints it first, then
+  // openRecipe loads the recipe + replays the chain into that id. If the same
   // path is already open, just switch to it (no second instance, keep-alive).
   const openPersisted = useCallback(
     async (path: string, name: string) => {
@@ -700,7 +701,7 @@ export function useShellSessions({
         // microtask, so a throw escapes PAST the outer try/catch -- it surfaces
         // as an unhandled rejection, busy sticks true (soft-lock), and the
         // listener leaks. Log and bail; the outer flow still clears
-        // resumeStatus when openDuck resolves/rejects. #83 R5: the targetSid
+        // resumeStatus when openRecipe resolves/rejects. #83 R5: the targetSid
         // filter below is the multi-session isolation seam (issue #203).
         try {
           if (ev.session_id !== targetSid) return;
@@ -725,14 +726,14 @@ export function useShellSessions({
         }
       });
       try {
-        // createSession mints a new session + binds an empty session.duck at
-        // sessions/{new_uuid}/session.duck. The resume target is the EXISTING
-        // file at `path` (a prior session's duck), not the freshly-created empty
-        // one — so openDuck replays `path` into the minted sid and the open-set
+        // createSession mints a new session + binds an empty recipe at
+        // sessions/{new_uuid}/recipe.json. The resume target is the EXISTING
+        // file at `path` (a prior session's recipe.json), not the freshly-created empty
+        // one — so openRecipe replays `path` into the minted sid and the open-set
         // entry binds `path` too (the sidebar's already-open lookup keys on it).
         const { session_id: sid } = await createSession();
         targetSid = sid;
-        await openDuck(sid, path);
+        await openRecipe(sid, path);
         await queryClient.invalidateQueries({ queryKey: ["session", sid] });
         registerOpen({
           sid,
@@ -744,7 +745,7 @@ export function useShellSessions({
         });
         setResumeStatus({ kind: "idle" });
       } catch (e) {
-        // C2: if createSession succeeded but openDuck failed, the just-minted
+        // C2: if createSession succeeded but openRecipe failed, the just-minted
         // session is persisted on disk (ADR-0089 auto-persist). Close it
         // best-effort so it does not linger as a ghost empty row in the
         // sidebar scan. The close IPC itself may fail (the session may have
@@ -807,7 +808,7 @@ export function useShellSessions({
   // and discards (no thread append, no recipe entry). The orphan ask promise
   // resolves against an absent cache (TanStack setQueryData on a removed key
   // is a no-op) and the turn-progress listener cleanup runs in the pane's
-  // unmount effect. The .duck stays on disk and remains in the sidebar
+  // unmount effect. The recipe.json stays on disk and remains in the sidebar
   // (re-openable). NOT delete -- the delete path uses the wait-release variant
   // (see deletePersisted), not this fire-and-forget close.
   //
@@ -880,6 +881,36 @@ export function useShellSessions({
     },
     [mapSessions],
   );
+
+  // Issue #1353 (ADR-0089 Decision 4 calibrated): mount-once listener for
+  // the backend's turn-start auto-name push (the same long-lived posture as
+  // the pane's turn-progress listener, ADR-0059 C-4 -- mount listen once,
+  // unmount unlisten). The event fires when a session's first question is
+  // accepted, before the turn settles, so the sidebar row + session header
+  // read the new name immediately. patchOpenName is the same narrow
+  // in-memory name-write renameEntry / syncSessionName funnel through; no
+  // refreshSessions here -- the persisted display_name correction stays
+  // with the terminal-state chain (syncSessionName, unchanged).
+  useEffect(() => {
+    let active = true;
+    let unlisten: (() => void) | null = null;
+    void onSessionNamed((ev) => {
+      if (!active) return;
+      patchOpenName(ev.session_id, ev.name);
+    }).then((un) => {
+      // Unmount raced the listen resolution: unlisten immediately so the
+      // orphan callback cannot fire setters post-unmount.
+      if (!active) {
+        un();
+        return;
+      }
+      unlisten = un;
+    });
+    return () => {
+      active = false;
+      unlisten?.();
+    };
+  }, [patchOpenName]);
 
   // Nested facade (#1155): the file-ops species destructures here; its
   // members ride the return below.

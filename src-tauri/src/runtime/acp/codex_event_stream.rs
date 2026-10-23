@@ -511,7 +511,8 @@ pub(super) fn run_codex_event_stream(
     );
     let mut child = match super::process::spawn_turn(
         binary,
-        adapter.argv,
+        &adapter.argv,
+        &adapter.env,
         &model_flags,
         &config_flags,
         &input.cwd,
@@ -613,15 +614,20 @@ pub(super) fn run_codex_event_stream(
                         let thread_id = pump.thread_id.clone().expect("checked above");
                         window_resumes += 1;
                         super::process::kill_and_reap(&mut child);
-                        let resume_argv: Vec<&str> = adapter
+                        let resume_argv: Vec<String> = adapter
                             .argv
                             .iter()
-                            .copied()
-                            .chain(["resume", thread_id.as_str(), WINDOW_CONVERGENCE_NUDGE])
+                            .cloned()
+                            .chain([
+                                "resume".to_string(),
+                                thread_id.to_string(),
+                                WINDOW_CONVERGENCE_NUDGE.to_string(),
+                            ])
                             .collect();
                         match super::process::spawn_turn(
                             binary,
                             &resume_argv,
+                            &adapter.env,
                             &model_flags,
                             &config_flags,
                             &input.cwd,
@@ -931,9 +937,11 @@ impl JsonPump {
                 // round grouping relies on).
                 let round = self.tracker.call_round(on_phase);
                 on_phase(TurnPhase::ToolCallStarted {
+                    id: None,
                     name: command,
                     operation_kind: OperationKind::Execute,
                     summary,
+                    task: None,
                 });
                 on_phase(TurnPhase::ToolCallCompleted(TraceEntryView::from(&entry)));
                 self.tracker.land_call(round, entry);
@@ -1002,9 +1010,11 @@ impl JsonPump {
                 let round = self.tracker.call_round(on_phase);
                 if !gateway_routed {
                     on_phase(TurnPhase::ToolCallStarted {
+                        id: None,
                         name,
                         operation_kind,
                         summary,
+                        task: None,
                     });
                     on_phase(TurnPhase::ToolCallCompleted(TraceEntryView::from(&entry)));
                 }

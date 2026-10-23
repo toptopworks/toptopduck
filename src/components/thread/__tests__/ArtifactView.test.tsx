@@ -36,12 +36,12 @@ vi.mock("vega-embed", () => ({
   default: vi.fn().mockResolvedValue({ finalize: vi.fn(), view: { resize: vi.fn() } }),
 }));
 
-const DUCK = "C:/sessions/s1/session.duck";
+const DUCK = "C:/sessions/s1/recipe.json";
 
 function renderView(
   path: string,
   renderKind: "html" | "pdf" | "markdown" | "card",
-  duckPath = DUCK,
+  recipePath = DUCK,
 ) {
   return render(
     <QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
@@ -49,7 +49,7 @@ function renderView(
         <ArtifactView
           artifact={{ path, file_name: path.split("/").pop() ?? path }}
           render={renderKind}
-          duckPath={duckPath}
+          recipePath={recipePath}
         />
       </IntlProvider>
     </QueryClientProvider>,

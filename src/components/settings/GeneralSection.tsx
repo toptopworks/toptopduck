@@ -198,7 +198,7 @@ export function GeneralSection({
           description={(
             <FormattedMessage
               id="settings.locale.hint"
-              defaultMessage="Switching the language only affects new turns going forward; past turns keep the language they were generated in (ADR-0039 verbatim principle)."
+              defaultMessage="Switching the language only affects new turns going forward; past turns keep the language they were generated in."
             />
           )}
           action={(

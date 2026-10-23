@@ -40,7 +40,7 @@ export const SETTINGS_SECTIONS: ReadonlyArray<SettingsSection> = [
  *  Profiles pane's field IPCs, sessionsDir by General, probe by the local
  *  CLI tab's adapter probe, defaultRuntime by the default-runtime control's
  *  Save, issue #571) and mirrored up through a single reporter. */
-export type IpcChannel = "key" | "test" | "sessionsDir" | "probe" | "defaultRuntime";
+export type IpcChannel = "key" | "test" | "sessionsDir" | "probe" | "defaultRuntime" | "userAdapter";
 
 /** Why the user is leaving the overlay for the workspace (issue #1040):
  *  "new-skill" is the Skills pane's New button -- the shell answers it by

@@ -10,6 +10,7 @@
 //! connection then lives until session close (Decision 3: one-way transition,
 //! no idle reclaim).
 
+use std::path::PathBuf;
 use std::sync::OnceLock;
 
 use duckdb::Connection;
@@ -26,6 +27,14 @@ use crate::guardrail::apply_resource_caps;
 /// needs no lock beyond whatever the caller already holds.
 pub(crate) struct AdminEngine {
     conn: OnceLock<Connection>,
+    /// The tree-internal companion DB path (ADR-0136 D2), set at bind/adopt
+    /// BEFORE first materialization. `None`-slot (never set) keeps the
+    /// in-memory engine -- unbound test sessions and any session that never
+    /// binds. Set-once: a rebind after materialization keeps the original
+    /// file (logged below) -- the live connection is authoritative for its
+    /// own lifetime, and the new path's companion is (re)built by replay on
+    /// the next open.
+    db_path: OnceLock<PathBuf>,
     /// The session-level engine-defaults snapshot (issue #741), taken from the
     /// app-config at session construction. The engine applies it at first
     /// materialization; the per-turn sandboxes read the SAME snapshot via
@@ -43,7 +52,33 @@ impl AdminEngine {
     pub(crate) fn new(engine_defaults: EngineDefaults) -> Self {
         Self {
             conn: OnceLock::new(),
+            db_path: OnceLock::new(),
             engine_defaults,
+        }
+    }
+
+    /// Point the engine at the tree-internal companion DB (ADR-0136 D2).
+    /// Must run BEFORE the first SQL need for the session's own tree; a call
+    /// after materialization (a rebind of an already-live session) is
+    /// ignored + logged -- see the field doc.
+    pub(crate) fn set_db_path(&self, path: PathBuf) {
+        if self.conn.get().is_some() {
+            log::info!(
+                target: "toptopduck::session",
+                "companion rebind after materialization ignored (engine keeps {}): {}",
+                self.db_path
+                    .get()
+                    .map(|p| p.display().to_string())
+                    .unwrap_or_else(|| "<in-memory>".into()),
+                path.display()
+            );
+            return;
+        }
+        if self.db_path.set(path).is_err() {
+            log::info!(
+                target: "toptopduck::session",
+                "companion path re-set before materialization ignored (first set wins)"
+            );
         }
     }
 
@@ -58,9 +93,11 @@ impl AdminEngine {
         &self.engine_defaults
     }
 
-    /// Materialize the engine: open the in-memory connection and apply the
-    /// engine-level resource caps (ADR-0005 L3) from the session snapshot
-    /// (issue #741), one step (ADR-0104 Decision 1). A no-op once
+    /// Materialize the engine: open the connection -- the tree companion DB
+    /// when a path was set (ADR-0136 D2: `result_N` then lives in the file
+    /// behind the buffer manager's bounded cache), else in-memory -- and
+    /// apply the engine-level resource caps (ADR-0005 L3) from the session
+    /// snapshot (issue #741), one step (ADR-0104 Decision 1). A no-op once
     /// materialized (Decision 3: held until session close, no idle reclaim).
     /// Cap application is best-effort as before -- a rejected setting logs
     /// and the session continues with the engine's default limits.
@@ -68,7 +105,10 @@ impl AdminEngine {
         if self.conn.get().is_some() {
             return Ok(());
         }
-        let conn = Connection::open_in_memory()?;
+        let conn = match self.db_path.get() {
+            Some(path) => Connection::open(path)?,
+            None => Connection::open_in_memory()?,
+        };
         apply_resource_caps(
             &conn,
             &self.engine_defaults.memory_limit,
@@ -79,13 +119,38 @@ impl AdminEngine {
         // silently re-eagering the engine at some assembly point.
         log::info!(
             target: "toptopduck::session",
-            "admin engine materialized (first SQL need)"
+            "admin engine materialized (first SQL need) at {}",
+            self.db_path
+                .get()
+                .map(|p| p.display().to_string())
+                .unwrap_or_else(|| "<in-memory>".into())
         );
         // Losing a concurrent first materialization drops (closes) the loser's
         // connection and keeps the winner's. No current caller can race here:
         // every production resolution holds the session lock.
         let _ = self.conn.set(conn);
         Ok(())
+    }
+
+    /// Fold the WAL into the main file (ADR-0136 D3, clean close). Best-effort
+    /// and logged: a failed CHECKPOINT leaves the WAL beside the file, which
+    /// DuckDB replays transparently on the next open -- observability, not a
+    /// correctness gate. A no-op when the engine never materialized.
+    pub(crate) fn checkpoint(&self) {
+        let Some(conn) = self.conn.get() else {
+            return;
+        };
+        if let Err(e) = conn.execute_batch("CHECKPOINT") {
+            log::warn!(target: "toptopduck::session", "clean-close CHECKPOINT failed: {e}");
+        }
+    }
+
+    /// Whether the engine has materialized (ADR-0104). Production use: the
+    /// settle-time watermark stamp (ADR-0136 D3) writes only when the
+    /// companion exists -- stamping must not be the thing that materializes a
+    /// zero-instance session.
+    pub(crate) fn is_materialized(&self) -> bool {
+        self.conn.get().is_some()
     }
 
     /// Acquire the session connection, materializing the engine if this is
@@ -122,14 +187,6 @@ impl AdminEngine {
         let engine = Self::new(EngineDefaults::default());
         engine.materialize().expect("test engine materializes");
         engine
-    }
-
-    /// Test-only: whether the engine has materialized. The zero-instance
-    /// assertions (a session that never executes SQL stays unmaterialized)
-    /// read this; production resolves through [`Self::acquire`].
-    #[cfg(test)]
-    pub(crate) fn is_materialized(&self) -> bool {
-        self.conn.get().is_some()
     }
 
     /// Test-only borrow of the materialized connection. Panics when the

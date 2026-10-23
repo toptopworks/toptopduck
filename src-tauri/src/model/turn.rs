@@ -291,7 +291,7 @@ pub enum CancelledReason {
 ///
 /// This is the IPC + persistence shared type --
 /// [`crate::persistence::recipe`] re-uses it for its own (wider) provenance
-/// struct, so the wire shape and the `.duck` shape stay byte-identical
+/// struct, so the wire shape and the `recipe.json` shape stay byte-identical
 /// (issue #381 lifts it from recipe to model so the IPC [`TurnRecord`] carries
 /// it without forking a parallel type).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -325,6 +325,12 @@ pub enum TurnRuntime {
     External {
         /// The stable `AdapterId` string of the CLI that drove the turn.
         adapter_id: Option<String>,
+        /// The adapter's display name snapshotted at stamp time (issue
+        /// #1351): the tombstone the attribution label falls back to when
+        /// the registry no longer resolves the id (deleted or disabled).
+        /// `None` on turns recorded before the field (the live name then
+        /// wins, or the raw id renders).
+        display_name: Option<String>,
     },
 }
 
@@ -533,11 +539,19 @@ pub struct ThinkingTrace {
 /// carry. Field-for-field the persisted [`crate::persistence::recipe::
 /// RecipeTraceEntry`] shape, so a live turn and its resumed reincarnation
 /// render identically: a successful call's result payload is dropped at
-/// capture (data-bearing; the `.duck` carries none of it, ADR-0036) while a
+/// capture (data-bearing; the `recipe.json` carries none of it, ADR-0036) while a
 /// failed call carries its bounded error / denial message -- the cross-turn
 /// failure retrospection anchor.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TraceEntryView {
+    /// The call's id, present ONLY on a live delegation's completion
+    /// (ADR-0135 Decision 2): the routing fact that pairs the completion
+    /// with its started row where name+summary would mispair same-name
+    /// parallel delegations. Never lands on the recorded trace or the
+    /// recipe -- the projection mints nothing, so the persisted wire shape
+    /// is unchanged (absent on this field).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
     /// Tool name -- a built-in (`explore` / `materialize` / `describe` /
     /// `sample`) or an external MCP server's tool name.
     pub name: String,
@@ -553,6 +567,13 @@ pub struct TraceEntryView {
     /// empty for a successful call -- the capped delegation report's
     /// truncation notice excepted (issue #1047).
     pub result_excerpt: String,
+    /// The delegation report's FULL text (ADR-0135 Decision 3), present only
+    /// on a live delegation's completion -- a display-face fact the slim
+    /// projection does not persist (the recorded entry keeps its bounded
+    /// excerpt); after resume only the excerpt exists. Same absent-on-wire
+    /// posture as [`Self::id`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub report: Option<String>,
     /// The delegation entry's nested sub-trace (ADR-0117 Decision 6, issue
     /// #934): the sub-agent's rounds under the same slim projection the
     /// main trace takes. Absent for every ordinary call; the nesting is
@@ -591,9 +612,22 @@ pub enum TurnPhase {
     /// starts once allowed. The frontend renders the in-flight row (spinner);
     /// `summary` matches the approval card's so the two merge into one row.
     ToolCallStarted {
+        /// The call's id, present only on a delegation row (ADR-0135
+        /// Decision 2): the id minted at the delegation's execute entry,
+        /// pairing the started row with its completion and its forwarded
+        /// sub-events. Absent on an ordinary call -- those keep the
+        /// name+summary pairing, the existing rule.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
         name: String,
         operation_kind: OperationKind,
         summary: String,
+        /// The delegation task's full text (ADR-0135 Decision 3), present
+        /// only on a delegation row: the reader-facing task the trace's
+        /// bounded summary stands in for while live. Absent on an ordinary
+        /// call.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        task: Option<String>,
     },
     /// A tool call finished dispatch (or was denied at the gate): the trace
     /// entry exactly as it lands on [`TurnRecord::trace`]. Fired once per
@@ -618,19 +652,44 @@ pub enum TurnPhase {
     /// and the frontend renders the round without a thinking fold (honest
     /// degrade).
     ThinkingCompleted { duration_ms: u64, text: String },
+    /// One forwarded sub-event of a running delegation (ADR-0135 Decision 1):
+    /// the sub-agent's event fold produced the inner phase; the tagged sink
+    /// forwards it wrapped with the owning delegation's call id (Decision 2),
+    /// so the frontend routes it into that delegation's live buffer --
+    /// same-name parallel delegations included, which no name+order pairing
+    /// could separate. Only the four non-delta variants ever ride here:
+    /// `TextDelta` is filtered at the sink (the round prose goes live only
+    /// through the settle's `sub_rounds`).
+    DelegationSubEvent {
+        delegation_id: String,
+        phase: Box<TurnPhase>,
+    },
 }
 
 /// One `turn-progress` side-channel event (ADR-0059, issue #76). Wraps a
 /// [`TurnPhase`] with the addressing `session_id` so a multi-session frontend
 /// filters the global Tauri event broadcast down to the one SessionPane that
 /// owns the turn (ADR-0056). `session_id` is the runtime id the `ask` command
-/// received (a typed UUID), NOT the `duck_path` [`crate::SessionMetadata`]
+/// received (a typed UUID), NOT the `recipe_path` [`crate::SessionMetadata`]
 /// exposes. The field is required -- a phase without a session it belongs to is
 /// not addressable, so the type makes the missing-id state unrepresentable.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TurnProgress {
     pub session_id: SessionId,
     pub phase: TurnPhase,
+}
+
+/// One `session-named` side-channel event (issue #1353, calibrating ADR-0089
+/// Decision 4): the turn-start auto-name push. Fires exactly once, when the
+/// session's first question is accepted (before any runtime branch), so the
+/// frontend updates the sidebar row + session header without waiting for the
+/// turn's terminal state. `session_id` addressing mirrors [`TurnProgress`]
+/// (ADR-0056); `name` is the landed bounded truncation, already visible on
+/// the session when the event fires.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionNamedPayload {
+    pub session_id: SessionId,
+    pub name: String,
 }
 
 /// A shared live-phase emission face (issue #1242): the external turn's two

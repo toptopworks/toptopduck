@@ -1,4 +1,4 @@
-//! Atomic `.duck` file IO (ADR-0034/0035): every per-turn persistence write
+//! Atomic `recipe.json` file IO (ADR-0034/0035): every per-turn persistence write
 //! is a temp-file + rename whole-file rewrite, so a crash mid-write never
 //! leaves a corrupt recipe (it leaves either the prior complete recipe or
 //! the next complete one -- never a half-written file). The temp file lands
@@ -22,8 +22,10 @@ use serde_json::Value;
 
 /// Suffix appended to the target file name for the temp file. Same directory
 /// as the target so the `rename` is intra-volume (atomic). The temp file is
-/// created fresh each save (`File::create` truncates), so a stale temp from
-/// a prior crashed write is overwritten, not appended to.
+/// overwritten each save -- truncated on the Default face, removed and
+/// recreated on the Private face (mode() only applies at creation, so a
+/// stale temp carrying a wider mode must not be reused) -- never appended
+/// to.
 const TMP_SUFFIX: &str = ".tmp";
 
 /// Why a save failed. Every failure leaves the prior recipe file (if any)
@@ -46,7 +48,7 @@ pub enum SaveError {
     Serialize(String),
     Io(String),
     Rename(String),
-    /// ADR-0035 Decision 3 / issue #50: the canonical `.duck` path is already held
+    /// ADR-0035 Decision 3 / issue #50: the canonical `recipe.json` path is already held
     /// open by another Session in this process. The save is refused BEFORE
     /// any IO so the existing file is never clobbered. Carries the canonical
     /// path so the UI can name exactly which file is double-open.
@@ -58,14 +60,14 @@ impl std::fmt::Display for SaveError {
         match self {
             // Artifact-neutral wording: the atomic-write protocol serves
             // both recipes and the organization sidecar, so the message
-            // must not name `.duck` for a failed `index.json` write.
+            // must not name `recipe.json` for a failed `index.json` write.
             Self::Serialize(d) => write!(f, "serialize failed: {d}"),
             Self::Io(d) => write!(f, "write temp file failed: {d}"),
             Self::Rename(d) => write!(f, "replace failed: {d}"),
             Self::AlreadyOpen(p) => {
                 write!(
                     f,
-                    "the .duck is already open in this process: {}",
+                    "the recipe file is already open in this process: {}",
                     p.display()
                 )
             }
@@ -81,7 +83,7 @@ impl std::error::Error for SaveError {}
 ///
 /// Crosses IPC serde-structured (issue #120): `#[serde(tag = "kind", content =
 /// "data")]`, the adjacently-tagged shape the rest of the wire contract uses.
-/// Nests inside `ResumeError::Load` (the `open_duck` command's typed reject),
+/// Nests inside `ResumeError::Load` (the `open_recipe` command's typed reject),
 /// so the frontend recurses `ResumeError::Load.data.kind` to render the
 /// version-mismatch "please upgrade" hint or the io/parse/migration detail.
 /// Distinct from [`crate::model::LoadError`] (the ingest error). The
@@ -115,11 +117,11 @@ impl From<crate::persistence::migration::MigrationError> for LoadError {
 impl std::fmt::Display for LoadError {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         match self {
-            Self::Io(d) => write!(f, "read .duck failed: {d}"),
-            Self::Parse(d) => write!(f, "parse .duck failed: {d}"),
+            Self::Io(d) => write!(f, "read recipe.json failed: {d}"),
+            Self::Parse(d) => write!(f, "parse recipe.json failed: {d}"),
             Self::VersionMismatch { found, supported } => write!(
                 f,
-                "this .duck was made by a newer app (format_version={found}); \
+                "this recipe.json was made by a newer app (format_version={found}); \
                  current app supports only {supported}, please upgrade"
             ),
             // Delegate to MigrationError's Display (names the failing step /
@@ -138,30 +140,100 @@ pub fn temp_path_for(target: &Path) -> Option<PathBuf> {
     Some(target.with_file_name(format!("{file_name}{TMP_SUFFIX}")))
 }
 
-/// Write any JSON-serializable document atomically (recipes and the
-/// organization sidecar share this crash-posture): serialize to JSON
-/// (pretty, for human-readable artifacts and git-friendly diffs), write to
+/// Which permissions face an atomic write takes (issue #1348). The repo
+/// convention for "pick a face" is an enum (cf. `ProbeKind`, `SaveError`)
+/// so call sites self-document instead of passing a bare bool.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WritePerms {
+    /// Mode-at-creation privacy (issue #1341: files that may carry plaintext
+    /// keys): 0600 at temp-open time on Unix, so the final file never exists
+    /// with wider perms -- not even in the create->chmod window a post-hoc
+    /// permissions pass would leave open. Windows user-profile files already
+    /// carry an owner-private default ACL, so no special-casing there.
+    Private,
+    /// Plain `File::create` posture: umask default on Unix (cache sidecars
+    /// and other non-secret artifacts).
+    Default,
+}
+
+/// Why the shared atomic-write core failed. Two failure sites only: the
+/// temp-file stage (create/write/fsync) and the rename stage. Either way the
+/// prior target is untouched; a rename failure best-effort removes the temp.
+/// Domain errors (`SaveError`, app-config's `WriteError`) map the two
+/// variants losslessly via `From`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AtomicWriteError {
+    Io(String),
+    Rename(String),
+}
+
+impl std::fmt::Display for AtomicWriteError {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        match self {
+            Self::Io(d) => write!(f, "write temp file failed: {d}"),
+            Self::Rename(d) => write!(f, "replace failed: {d}"),
+        }
+    }
+}
+impl std::error::Error for AtomicWriteError {}
+
+impl From<AtomicWriteError> for SaveError {
+    fn from(e: AtomicWriteError) -> Self {
+        match e {
+            AtomicWriteError::Io(d) => SaveError::Io(d),
+            AtomicWriteError::Rename(d) => SaveError::Rename(d),
+        }
+    }
+}
+
+/// The shared atomic-write core (issue #1348): write `contents` to
 /// `<target>.tmp` in the same directory, `fsync`, then rename over the
 /// target. The rename is atomic on the same volume; a crash before rename
 /// leaves the prior target intact and a stale temp behind (overwritten on
-/// the next save).
-pub fn save_atomic<T: serde::Serialize>(target: &Path, value: &T) -> Result<(), SaveError> {
-    // pretty + sorted keys is unnecessary (serde_json::to_string_pretty keeps
-    // struct order, which is stable), so plain pretty suffices and reads
-    // cleanly in a text editor / git diff.
-    let json =
-        serde_json::to_string_pretty(value).map_err(|e| SaveError::Serialize(e.to_string()))?;
+/// the next write). Does NOT create parent directories -- each caller's
+/// directory contract stays what it was. Zero-dependency on purpose (std +
+/// serde only): the persistence crate split lifts this file whole.
+pub fn write_str_atomic(
+    target: &Path,
+    contents: &str,
+    perms: WritePerms,
+) -> Result<(), AtomicWriteError> {
     let tmp = temp_path_for(target)
-        .ok_or_else(|| SaveError::Io("could not derive temp file path".into()))?;
+        .ok_or_else(|| AtomicWriteError::Io("could not derive temp file path".into()))?;
 
     {
-        let mut file = fs::File::create(&tmp).map_err(|e| SaveError::Io(e.to_string()))?;
-        file.write_all(json.as_bytes())
-            .map_err(|e| SaveError::Io(e.to_string()))?;
+        #[cfg(unix)]
+        let mut file = if matches!(perms, WritePerms::Private) {
+            // mode() only applies when the open creates the file; a stale
+            // temp from an older build may carry a wider mode, so drop it
+            // first and guarantee a fresh 0600 create.
+            let _ = fs::remove_file(&tmp);
+            use std::os::unix::fs::OpenOptionsExt;
+            std::fs::OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .mode(0o600)
+                .open(&tmp)
+        } else {
+            std::fs::File::create(&tmp)
+        }
+        .map_err(|e| AtomicWriteError::Io(e.to_string()))?;
+        #[cfg(not(unix))]
+        let mut file = {
+            // The default ACL on Windows user-profile files is already
+            // owner-private; the perms face needs no special-casing.
+            let _ = perms;
+            std::fs::File::create(&tmp)
+        }
+        .map_err(|e| AtomicWriteError::Io(e.to_string()))?;
+        file.write_all(contents.as_bytes())
+            .map_err(|e| AtomicWriteError::Io(e.to_string()))?;
         // fsync the data before the rename so a crash right after the rename
         // never leaves a 0-byte / partially-flushed target. Best-effort on
         // platforms where fsync is a no-op for some FS.
-        file.sync_all().map_err(|e| SaveError::Io(e.to_string()))?;
+        file.sync_all()
+            .map_err(|e| AtomicWriteError::Io(e.to_string()))?;
     }
 
     if let Err(e) = fs::rename(&tmp, target) {
@@ -169,9 +241,22 @@ pub fn save_atomic<T: serde::Serialize>(target: &Path, value: &T) -> Result<(), 
         // untouched (the rename never happened). A failed remove here is
         // swallowed -- it would mask the real (rename) failure.
         let _ = fs::remove_file(&tmp);
-        return Err(SaveError::Rename(e.to_string()));
+        return Err(AtomicWriteError::Rename(e.to_string()));
     }
     Ok(())
+}
+
+/// Write any JSON-serializable document atomically (recipes and the
+/// organization sidecar share this crash-posture): serialize to JSON
+/// (pretty, for human-readable artifacts and git-friendly diffs), then one
+/// ride on the shared atomic-write core.
+pub fn save_atomic<T: serde::Serialize>(target: &Path, value: &T) -> Result<(), SaveError> {
+    // pretty + sorted keys is unnecessary (serde_json::to_string_pretty keeps
+    // struct order, which is stable), so plain pretty suffices and reads
+    // cleanly in a text editor / git diff.
+    let json =
+        serde_json::to_string_pretty(value).map_err(|e| SaveError::Serialize(e.to_string()))?;
+    write_str_atomic(target, &json, WritePerms::Default).map_err(SaveError::from)
 }
 
 /// Read a recipe, routing on `format_version` (ADR-0036 Decision 1). The file
@@ -180,13 +265,13 @@ pub fn save_atomic<T: serde::Serialize>(target: &Path, value: &T) -> Result<(), 
 /// [`migrate_to_current`] (each per-version transform fills defaults / remaps
 /// semantics), then deserialize; higher -> honest refuse (a newer-made file is
 /// never silently mis-parsed). A missing or non-numeric `format_version` is an
-/// honest Parse error -- the field is mandatory on every v1+ .duck (ADR-0036).
+/// honest Parse error -- the field is mandatory on every v1+ recipe.json (ADR-0036).
 ///
 /// The forward-migrate path returns the recipe in memory; ADR-0036 KISS lands
 /// persistence of the migrated shape on the next normal auto-write (the
-/// caller's `open_duck` persists post-resume), so this function itself stays
+/// caller's `open_recipe` persists post-resume), so this function itself stays
 /// side-effect free and never backs up the original file (YAGNI).
-pub fn read_duck(path: &Path) -> Result<Recipe, LoadError> {
+pub fn read_recipe(path: &Path) -> Result<Recipe, LoadError> {
     let text = fs::read_to_string(path).map_err(|e| LoadError::Io(e.to_string()))?;
     let value: Value = serde_json::from_str(&text).map_err(|e| LoadError::Parse(e.to_string()))?;
     let raw = value
@@ -215,7 +300,7 @@ pub fn read_duck(path: &Path) -> Result<Recipe, LoadError> {
     let recipe: Recipe =
         serde_json::from_value(value).map_err(|e| LoadError::Parse(e.to_string()))?;
     // Parse, don't validate (rust/security.md §input-validation): a hand-edited
-    // or corrupted .duck is external input (ADR-0034 user-owned document), so a
+    // or corrupted recipe.json is external input (ADR-0034 user-owned document), so a
     // structural invariant like unique source reference names must surface here
     // as an honest parse error -- not later as a confusing mid-resume ambiguity
     // over which duplicate source to re-read.
@@ -275,12 +360,12 @@ mod tests {
     #[test]
     fn save_then_read_round_trips() {
         // ADR-0034: write a recipe, read it back, get the same recipe -- the
-        // .duck is a faithful portable document of the working set.
+        // recipe.json is a faithful portable document of the working set.
         let dir = tempfile::tempdir().expect("tempdir");
-        let path = dir.path().join("session.duck");
+        let path = dir.path().join("recipe.json");
         let recipe = sample_recipe("round-trip");
         save_atomic(&path, &recipe).expect("save");
-        let back = read_duck(&path).expect("read");
+        let back = read_recipe(&path).expect("read");
         assert_eq!(back, recipe);
     }
 
@@ -290,7 +375,7 @@ mod tests {
         // target, so no `.tmp` litters the directory (a stale temp would pile
         // up across saves without this).
         let dir = tempfile::tempdir().expect("tempdir");
-        let path = dir.path().join("session.duck");
+        let path = dir.path().join("recipe.json");
         save_atomic(&path, &sample_recipe("clean")).expect("save");
         let tmp = temp_path_for(&path).expect("temp path");
         assert!(!tmp.exists(), "temp file must not linger after save");
@@ -303,10 +388,10 @@ mod tests {
         // file. A second save on the same path replaces the first recipe
         // entirely (not appended, not merged).
         let dir = tempfile::tempdir().expect("tempdir");
-        let path = dir.path().join("session.duck");
+        let path = dir.path().join("recipe.json");
         save_atomic(&path, &sample_recipe("first")).expect("save 1");
         save_atomic(&path, &sample_recipe("second")).expect("save 2");
-        let back = read_duck(&path).expect("read");
+        let back = read_recipe(&path).expect("read");
         assert_eq!(back.session_name, "second");
     }
 
@@ -316,14 +401,14 @@ mod tests {
         // format_version) must NOT be silently mis-parsed. The error names
         // both versions so the user understands they must upgrade.
         let dir = tempfile::tempdir().expect("tempdir");
-        let path = dir.path().join("future.duck");
+        let path = dir.path().join("future.json");
         // Hand-write a recipe whose format_version is ahead of v1.
         let future = format!(
             "{{\"format_version\":{future},\"session_name\":\"x\",\"sources\":[],\"history\":[]}}",
             future = RECIPE_FORMAT_VERSION + 1
         );
         fs::write(&path, &future).expect("write");
-        match read_duck(&path) {
+        match read_recipe(&path) {
             Err(LoadError::VersionMismatch { found, supported }) => {
                 assert_eq!(found, RECIPE_FORMAT_VERSION + 1);
                 assert_eq!(supported, RECIPE_FORMAT_VERSION);
@@ -337,13 +422,13 @@ mod tests {
         // ADR-0036 / ADR-0017 honest-degrade: a file that is not a valid recipe
         // surfaces as a parse error, not a silent empty recipe.
         let dir = tempfile::tempdir().expect("tempdir");
-        let path = dir.path().join("broken.duck");
+        let path = dir.path().join("broken.json");
         fs::write(&path, b"not json {").expect("write");
-        assert!(matches!(read_duck(&path), Err(LoadError::Parse(_))));
+        assert!(matches!(read_recipe(&path), Err(LoadError::Parse(_))));
     }
 
     #[test]
-    fn read_duck_migrates_a_lower_version_to_current() {
+    fn read_recipe_migrates_a_lower_version_to_current() {
         // ADR-0036 forward migration: a file whose format_version is BELOW the
         // current app version is reshaped through the migration pipeline and
         // returned as a current-version Recipe -- not refused. Uses the
@@ -351,7 +436,7 @@ mod tests {
         // the legacy outcome_kind discriminator) so both migration kinds are
         // exercised at the read boundary.
         let dir = tempfile::tempdir().expect("tempdir");
-        let path = dir.path().join("v0.duck");
+        let path = dir.path().join("v0.json");
         let v0 = serde_json::json!({
             "format_version": 0,
             "session_name": "v0 分析",
@@ -378,7 +463,7 @@ mod tests {
         });
         fs::write(&path, serde_json::to_string(&v0).unwrap()).expect("write");
 
-        let recipe = read_duck(&path).expect("migrated read");
+        let recipe = read_recipe(&path).expect("migrated read");
         assert_eq!(recipe.format_version(), RECIPE_FORMAT_VERSION);
         assert_eq!(
             recipe.sources[0].display_name, "people",

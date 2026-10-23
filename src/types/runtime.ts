@@ -194,3 +194,24 @@ export type ProbeError =
   | { kind: "HandshakeFailure"; data: string }
   | { kind: "ProbeUnreachable"; data: string }
   | { kind: "Timeout" };
+
+// The id prefix minted server-side for every user-defined registry row
+// (`user:` + 8 hex, user_adapter_store.rs). The merged `list_adapters`
+// projection carries these ids for the picker; the settings tab's
+// detected-CLI card splits on the prefix -- the user rows' full face lives
+// in the registry section.
+export const USER_ADAPTER_ID_PREFIX = "user:";
+
+// One user-defined adapter row (issue #1341). Mirrors the Rust
+// `user_adapter_store::UserAdapterRow`: crosses IPC verbatim on both the
+// management list and the CRUD replies. `stream_format` is always "acp" on
+// the wire today (the schema stores it; this knife only accepts ACP).
+export interface UserAdapterRow {
+  id: string;
+  name: string;
+  command: string;
+  args: string[];
+  env: Record<string, string>;
+  enabled: boolean;
+  stream_format: "acp";
+}

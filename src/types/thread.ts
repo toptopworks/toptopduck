@@ -135,11 +135,16 @@ export interface TraceRound {
 // snake_case fields; operation_kind reuses the approval gateway's enum).
 // Field-for-field the persisted recipe form, so a live turn, its recorded
 // TurnRecord.trace, and its resumed reincarnation all render identically:
-// a successful call's result payload is dropped (the .duck carries none of
+// a successful call's result payload is dropped (the recipe.json carries none of
 // it, ADR-0036; the capped delegation report's truncation notice excepted,
 // issue #1047) while a failed call carries its bounded error / denial
 // message -- the cross-turn failure retrospection anchor.
 export interface TraceEntry {
+  // The call's id, present ONLY on a live delegation's completion
+  // (ADR-0135 Decision 2): the routing fact that pairs the completion with
+  // its started row. Never lands on the recorded trace or the recipe --
+  // absent everywhere the persisted wire carries the entry.
+  id?: string;
   // Tool name -- a built-in (explore / materialize / describe / sample) or an
   // external MCP server's tool name.
   name: string;
@@ -154,12 +159,18 @@ export interface TraceEntry {
   // -- the capped delegation report's truncation notice excepted
   // (issue #1047).
   result_excerpt: string;
+  // The delegation report's FULL text (ADR-0135 Decision 3), present only
+  // on a live delegation's completion -- a display-face fact the slim
+  // projection does not persist (after resume only the excerpt exists, so
+  // the panel honestly degrades). Same absent-when-unset posture as id.
+  report?: string;
   // The delegation entry's nested sub-trace (ADR-0117 Decision 6, issue
   // #934): the sub-agent's rounds under the same slim projection the main
   // trace takes. Optional: absent for every ordinary call (serde
   // skip_serializing_if none); the nesting is physically depth 1 (the
   // sub-face excludes every delegation tool), so a nested entry never itself
-  // carries one. Rendered in the delegation modal, never as flat rows.
+  // carries one. Rendered in the row's inline sub-trace panel, never as
+  // flat rows.
   sub_rounds?: TraceRound[];
 }
 
@@ -173,7 +184,17 @@ export interface TraceEntry {
 // never reads it (ADR-0101 Decision 3).
 export type TurnRuntime =
   | { kind: "built_in" }
-  | { kind: "external"; data: { adapter_id: string | null } };
+  | {
+    kind: "external";
+    data: {
+      adapter_id: string | null;
+      /** The adapter's display name snapshotted at stamp time (issue
+         * #1351): the tombstone the attribution label falls back to when the
+         * registry no longer resolves the id. Null, not absent -- the live
+         * wire always carries the key, same contract as adapter_id. */
+      display_name: string | null;
+    };
+  };
 
 // Per-turn provenance crossing IPC (issue #381, ADR-0101; ADR-0119): the
 // skills invoked on the turn -- the invocation records' name set, either
@@ -285,8 +306,8 @@ export interface TurnUsage {
 }
 
 // One named built-in sub-agent's usage subtotal (ADR-0129, #1270). The
-// name is the delegation spec's identity -- the same one the delegation
-// trace dialog keys on (#933).
+// name is the delegation spec's identity -- the one TurnCard's name+ordinal
+// cursor pairs the subtotal to its row by.
 export interface SubagentUsage {
   name: string;
   usage: TokenUsage;

@@ -41,13 +41,14 @@ use toptopduck_lib::{
 fn fake_cli_adapter() -> AdapterSpec {
     AdapterSpec {
         id: AdapterId::new("fake-cli"),
-        display_name: "fake-cli",
-        binary_names: &["acp-fake-cli"],
-        argv: &[],
+        display_name: "fake-cli".into(),
+        binary_names: vec!["acp-fake-cli".into()],
+        argv: Vec::new(),
         stream_format: toptopduck_lib::runtime::acp::adapter::StreamFormat::Acp,
         probe_argv: None,
         model_arg: None,
         effort: None,
+        env: std::collections::BTreeMap::new(),
     }
 }
 
@@ -353,6 +354,7 @@ fn external_gateway_renamed_call_settles_to_one_authoritative_row() {
                 name,
                 operation_kind,
                 summary,
+                ..
             } => Some((name.clone(), *operation_kind, summary.clone())),
             _ => None,
         })
@@ -775,6 +777,11 @@ fn external_turn_records_invocation_set_provenance() {
         Some("fake-cli"),
         "the live snapshot names the driving adapter's stable id"
     );
+    assert_eq!(
+        last_turn.provenance.adapter_display_name.as_deref(),
+        Some("fake-cli"),
+        "the live snapshot carries the adapter's display name at stamp time (issue #1351)"
+    );
 }
 
 /// Issue #702 (calibrated by ADR-0119): a resumed session whose discovery
@@ -802,15 +809,15 @@ fn resumed_external_turn_without_invocations_records_empty_provenance() {
     );
 
     let duck_dir = tempfile::tempdir().unwrap();
-    let duck_path = duck_dir.path().join("resume.duck");
+    let recipe_path = duck_dir.path().join("resume.json");
     let (mut session, old_path, _guard) = external_session("text_reply");
     session
-        .bind_duck(duck_path.clone(), "resume".into())
+        .bind_recipe(recipe_path.clone(), "resume".into())
         .expect("bind");
     drop(session);
 
-    let mut resumed = Session::open_duck(
-        &duck_path,
+    let mut resumed = Session::open_recipe(
+        &recipe_path,
         Arc::new(toptopduck_lib::CancelToken::new()),
         Box::new(toptopduck_lib::UnwiredProvider),
         Default::default(),
@@ -995,13 +1002,14 @@ fn external_prehandshake_failure_preserves_cached_discovery() {
     // the engine exits pre-handshake with `discovered_runtime: None`.
     session.set_external_runtime(Some(AdapterSpec {
         id: AdapterId::new("missing-cli"),
-        display_name: "missing-cli",
-        binary_names: &["definitely-not-on-path-530"],
-        argv: &[],
+        display_name: "missing-cli".into(),
+        binary_names: vec!["definitely-not-on-path-530".into()],
+        argv: Vec::new(),
         stream_format: toptopduck_lib::runtime::acp::adapter::StreamFormat::Acp,
         probe_argv: None,
         model_arg: None,
         effort: None,
+        env: std::collections::BTreeMap::new(),
     }));
     let second = session.ask("this one cannot even spawn");
     std::env::set_var("PATH", old_path);

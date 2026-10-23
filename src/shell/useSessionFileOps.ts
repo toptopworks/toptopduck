@@ -111,7 +111,7 @@ export function useSessionFileOps({
     [intl, unmountOpen, setShellError],
   );
 
-  // Delete a persisted .duck (ADR-0060/0063, irreversible). If the session is
+  // Delete a persisted recipe.json (ADR-0060/0063, irreversible). If the session is
   // open, close it via the WAIT-RELEASE variant: the UI pane STAYS mounted
   // during the wait (delete is an explicit user intent -- it does NOT get
   // close's zero-wait contract, ADR-0063 Decision 2), and only unmounts after
@@ -139,7 +139,7 @@ export function useSessionFileOps({
   );
 
   // Pin or unpin (ADR-0127, issue #1175). A pure sidecar write keyed by the
-  // session-directory uuid -- no .duck rewrite, so no persistenceBusy wait
+  // session-directory uuid -- no recipe.json rewrite, so no persistenceBusy wait
   // (contrast deletePersisted): the write is a single atomic JSON save.
   const setPinned = useCallback(
     async (path: string, pinned: boolean): Promise<void> => {
@@ -181,7 +181,7 @@ export function useSessionFileOps({
   );
 
   // Rename a sidebar entry (ADR-0060, single entry point). An OPEN session
-  // renames in-memory + re-persists via its sid; a CLOSED .duck rewrites the
+  // renames in-memory + re-persists via its sid; a CLOSED recipe.json rewrites the
   // recipe header in place by path. The bound path is untouched either way.
   const renameEntry = useCallback(
     async (sid: string | null, path: string, newName: string) => {
@@ -203,10 +203,10 @@ export function useSessionFileOps({
     [intl, patchOpenName, refreshSessions, setShellError],
   );
 
-  // ADR-0089 Decision 4: after the first terminal turn, the backend auto-names
-  // the session from the first question's bounded truncation. This syncs the
-  // in-memory open-session entry + the persisted sidebar list so both surfaces
-  // reflect the new name without a manual refresh.
+  // ADR-0089 Decision 4 (calibrated by #1353): the backend names the session
+  // at the first question's acceptance; this terminal-state chain re-reads
+  // the landed name and syncs the in-memory open-session entry + the
+  // persisted sidebar list so both surfaces reflect it.
   const syncSessionName = useCallback(
     async (sid: string) => {
       try {

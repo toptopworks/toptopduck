@@ -415,8 +415,8 @@ export const RoundProse = memo(function RoundProse({
   mode?: RoundProseMode;
   /** Issue #1093: promotes a settled fence's body onto the workspace stage.
    *  Optional (the ArtifactCard read-only precedent): only the TurnCard
-   *  stream wires it -- the delegation dialog and the md artifact renderer
-   *  mount RoundProse bare, so their fences stay static. */
+   *  stream wires it -- the delegation sub-trace panel and the md artifact
+   *  renderer mount RoundProse bare, so their fences stay static. */
   onSelectViz?: (spec: string) => void;
   /** Issue #1093: the staged spec text, for the in-stream selection mirror.
    *  null (or an absent handler) = no fence is lit. */

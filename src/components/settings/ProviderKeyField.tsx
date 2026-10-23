@@ -289,12 +289,12 @@ export function ProviderKeyField({
           {draftMode ? (
             <FormattedMessage
               id="settings.profiles.key.hintDraft"
-              defaultMessage="The key is saved to this machine's OS keychain together with the profile when you create it."
+              defaultMessage="The key is saved to this machine's credential store together with the profile when you create it."
             />
           ) : hasKey ? (
             <FormattedMessage
               id="settings.profiles.key.hintSet"
-              defaultMessage="A key is saved for this profile. Use “Clear key” to remove it; the key never leaves the OS keychain."
+              defaultMessage="A key is saved for this profile. Use “Clear key” to remove it; the key never leaves the system credential store."
             />
           ) : (
             <FormattedMessage

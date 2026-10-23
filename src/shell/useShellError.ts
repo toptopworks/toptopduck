@@ -1,5 +1,5 @@
 // Shell-level error state (issue #194). Owns the single AppError surfaced at
-// the shell layer -- a createSession / openDuck / save / delete / rename
+// the shell layer -- a createSession / openRecipe / save / delete / rename
 // persisted / profile-switch reject, set by the shell's async handlers via
 // toAppError(e, intl, "shell").
 //

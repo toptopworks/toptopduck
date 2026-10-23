@@ -409,9 +409,11 @@ fn dispatch_gated_call_inner(
                         }
                         Ok(GateOutcome::Allow) => {
                             on_phase(TurnPhase::ToolCallStarted {
+                                id: None,
                                 name: call.name.clone(),
                                 operation_kind: OperationKind::Write,
                                 summary: summary.clone(),
+                                task: None,
                             });
                             match crate::skills::create::execute_skill_creation(
                                 live,
@@ -527,9 +529,11 @@ fn dispatch_gated_call_inner(
     // as running. The summary matches the approval card's (both come from
     // classify_call) so the frontend merges the two into one row.
     on_phase(TurnPhase::ToolCallStarted {
+        id: None,
         name: call.name.clone(),
         operation_kind,
         summary: summary.clone(),
+        task: None,
     });
     // ADR-0076 (slice C-loop) + ADR-0105 Decision 4: route by name shape. A
     // namespaced `mcp__<slug>__<tool>` name goes to the matching external
@@ -551,7 +555,7 @@ fn dispatch_gated_call_inner(
         // The registered-CLI dispatch arm (issue #671, ADR-0108 Decision 3):
         // direct argv spawn, cwd = the session's work temp dir, cancel = the
         // turn's shared token (process-tree termination on round cancel).
-        crate::cli_tools::executor::execute(tool, call, deps.temp_path, gate.cancel)
+        crate::cli_tools::executor::execute(tool, call, deps.temp_path, gate.cancel, None)
     } else {
         tools::dispatch(call, deps, gate.cancel, materializer)
     };
@@ -616,9 +620,11 @@ fn local_meta_call(
     on_phase: &mut impl FnMut(TurnPhase),
 ) -> (ToolResult, TraceEntry) {
     on_phase(TurnPhase::ToolCallStarted {
+        id: None,
         name: call.name.clone(),
         operation_kind: OperationKind::Read,
         summary: summary.to_string(),
+        task: None,
     });
     // A success is emptied at the persisted mapping; the in-memory form
     // keeps nothing here either -- the payload itself rides the result.
@@ -1678,9 +1684,11 @@ mod tests {
         assert_eq!(
             phases[0],
             TurnPhase::ToolCallStarted {
+                id: None,
                 name: "explore".into(),
                 operation_kind: OperationKind::Read,
                 summary: "SELECT * FROM missing".into(),
+                task: None,
             }
         );
         match &phases[1] {
@@ -1725,9 +1733,11 @@ mod tests {
         assert_eq!(
             phases[0],
             TurnPhase::ToolCallStarted {
+                id: None,
                 name: "materialize".into(),
                 operation_kind: OperationKind::Write,
                 summary: "SELECT 1 AS x".into(),
+                task: None,
             }
         );
         match &phases[1] {
@@ -1867,9 +1877,11 @@ mod tests {
         assert_eq!(
             phases[0],
             TurnPhase::ToolCallStarted {
+                id: None,
                 name: "create_skill".into(),
                 operation_kind: OperationKind::Write,
                 summary: "Create skill `sql-coach`: Coach SQL.".into(),
+                task: None,
             }
         );
         let on_disk =

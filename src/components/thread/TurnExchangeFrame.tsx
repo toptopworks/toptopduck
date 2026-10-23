@@ -80,7 +80,7 @@ export function TurnExchangeFrame({
     isStale?: boolean;
   }
 )) {
-  const runtimeName = runtimeMarkerName(runtime);
+  const runtimeLabel = runtimeMarkerName(runtime);
   return (
     <div
       className={cn(
@@ -105,7 +105,12 @@ export function TurnExchangeFrame({
           weakened && "opacity-60",
         )}
       >
-        {runtimeName !== null && <RuntimeAttributionMarker adapterId={runtimeName} />}
+        {runtimeLabel !== null && (
+          <RuntimeAttributionMarker
+            adapterId={runtimeLabel.adapterId}
+            persistedName={runtimeLabel.persistedName}
+          />
+        )}
         {(mentionedDataset || drifted.length > 0) && (
           <StreamHeader>
             {mentionedDataset && <TurnActiveChip dataset={mentionedDataset} />}

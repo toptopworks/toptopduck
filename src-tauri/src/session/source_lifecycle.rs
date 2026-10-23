@@ -25,7 +25,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use crate::ingest;
-use crate::ingest::schema::quote_ident;
+use crate::ingest::schema::{attach_sql, quote_ident};
 use crate::model::{
     DatasetDescriptor, LoadError, LoadOutcome, RectifyProvenance, RemoveSourceError,
     SourceLifecycleEvent, SourceLifecycleKind, StaleAnchor, StaleReason,
@@ -282,10 +282,11 @@ impl super::Session {
         // elsewhere first. copy_in clears any stale swap file from a prior failed
         // attempt before writing.
         let swap_alias = format!("{reference_name}__swap");
-        let new_snap = match ingest::loader::copy_in(path, &self.temp_path, &swap_alias, reader) {
-            Ok(s) => s,
-            Err(e) => return LoadOutcome::Error(e),
-        };
+        let new_snap =
+            match ingest::loader::copy_in(path, &self.snapshot_dir(), &swap_alias, reader) {
+                Ok(s) => s,
+                Err(e) => return LoadOutcome::Error(e),
+            };
 
         // Confirm the new snapshot mounts BEFORE retiring the old one: pre-attach
         // it under the swap alias (distinct from `<ref>`, so both co-exist). A
@@ -295,10 +296,10 @@ impl super::Session {
         // engine open this snapshot?) ahead of any destructive step, so a bad new
         // file never costs the user the old one.
         let swap_path = new_snap.file_path.to_string_lossy().into_owned();
-        if let Err(e) = self.admin_engine.execute_batch(&format!(
-            "ATTACH '{swap_path}' AS {} (READ_ONLY);",
-            quote_ident(&swap_alias),
-        )) {
+        if let Err(e) = self
+            .admin_engine
+            .execute_batch(&attach_sql(&swap_path, &swap_alias))
+        {
             log::warn!(
                 target: "toptopduck::session",
                 "pre-attach of new snapshot failed during replace for {reference_name}: {e}"
@@ -348,10 +349,11 @@ impl super::Session {
                 detail: format!("failed to release old snapshot: {e}"),
             });
         }
-        // Old detached -- remove its file. Best-effort (mirrors rollback_excel):
-        // a remove failure (e.g. a lingering handle on Windows) is logged, then
-        // the promote step falls back to attaching the swap file in place.
-        let formal = self.temp_path.join(format!("{reference_name}.duckdb"));
+        // Old detached -- remove its file from the tree (where the snapshot
+        // lives). Best-effort (mirrors rollback_excel): a remove failure
+        // (e.g. a lingering handle on Windows) is logged, then the promote
+        // step falls back to attaching the swap file in place.
+        let formal = self.snapshot_dir().join(format!("{reference_name}.duckdb"));
         if let Err(e) = fs::remove_file(&formal) {
             log::warn!(
                 target: "toptopduck::session",
@@ -360,7 +362,7 @@ impl super::Session {
         }
         // Promote the swap file to the formal name when possible; if rename
         // fails (the old file couldn't be cleared), attach the swap file where
-        // it is -- the session temp dir is wiped on drop either way.
+        // it is -- both files live in the tree, resident until session delete.
         let attach_path = match fs::rename(&new_snap.file_path, &formal) {
             Ok(()) => formal.to_string_lossy().into_owned(),
             Err(e) => {
@@ -383,10 +385,10 @@ impl super::Session {
         // implementation-level cost of skipping a swap-then-cleanup round-trip
         // (not an ADR-level decision -- a second attach-pass would complicate
         // the replace path for a near-zero-probability OS-level failure).
-        if let Err(e) = self.admin_engine.execute_batch(&format!(
-            "ATTACH '{attach_path}' AS {} (READ_ONLY);",
-            quote_ident(reference_name)
-        )) {
+        if let Err(e) = self
+            .admin_engine
+            .execute_batch(&attach_sql(&attach_path, reference_name))
+        {
             return LoadOutcome::Error(LoadError::Other {
                 detail: format!("failed to mount new snapshot: {e}"),
             });

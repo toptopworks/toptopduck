@@ -13,13 +13,13 @@ use std::path::{Path, PathBuf};
 use crate::persistence::recipe::{
     Recipe, RecipeEntry, RecipeOutcome, RecipePromotion, RecipeTurn, SourceRef, TurnTimestamps,
 };
-use crate::persistence::registry::{canonicalize_duck, release, try_acquire};
+use crate::persistence::registry::{canonicalize_recipe, release, try_acquire};
 use crate::persistence::{save_atomic, SaveError};
 use crate::workingset::WorkingSet;
 
 use super::TimelineEntry;
 
-/// Why a `.duck` auto-write was suspended (ADR-0035 Decision 3, issue #50).
+/// Why a `recipe.json` auto-write was suspended (ADR-0035 Decision 3, issue #50).
 /// Surfaced by [`RecipePersister::take_pending_conflict`] so the caller can
 /// render the three-option conflict UI (reload / keep mine / save as new).
 /// The engine NEVER silently clobbers the externally-edited file; the caller
@@ -27,7 +27,7 @@ use super::TimelineEntry;
 /// [`RecipePersister::conflict_save_as_new`] (and drop + reopen for reload).
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct PendingConflict {
-    /// The bound `.duck` path whose on-disk content diverged.
+    /// The bound `recipe.json` path whose on-disk content diverged.
     pub path: PathBuf,
     /// The hash the session recorded after its last successful write -- what
     /// the session believes the disk file SHOULD look like.
@@ -38,7 +38,7 @@ pub struct PendingConflict {
     pub found_hash: String,
 }
 
-/// SHA-256 of a `.duck` file's bytes (ADR-0035 Decision 3, issue #50). Used as the
+/// SHA-256 of a `recipe.json` file's bytes (ADR-0035 Decision 3, issue #50). Used as the
 /// pre-write external-change baseline: the persister records this after every
 /// successful write and compares the file's current hash before the next write.
 /// The recipe is small text, so a whole-file read is the KISS choice (no
@@ -56,7 +56,7 @@ pub(super) fn hash_file(path: &Path) -> Result<Option<String>, std::io::Error> {
     Ok(Some(crate::util::sha256_hex(&bytes)))
 }
 
-/// The session's persistence concern (issue #415): owns the `.duck` binding,
+/// The session's persistence concern (issue #415): owns the `recipe.json` binding,
 /// the external-change baseline, the single-writer registry key, and the
 /// projection from the live working set + timeline to a persisted
 /// [`Recipe`]. Extracted from [`Session`](super::Session) so the projection
@@ -69,17 +69,17 @@ pub(super) fn hash_file(path: &Path) -> Result<Option<String>, std::io::Error> {
 /// this struct would introduce a second release path and break the explicit
 /// ordering guarantee.
 pub(super) struct RecipePersister {
-    /// The bound `.duck` path (ADR-0034). When `Some`, every terminal turn
+    /// The bound `recipe.json` path (ADR-0034). When `Some`, every terminal turn
     /// and source lifecycle event atomically rewrites the recipe at this path.
-    duck_path: Option<PathBuf>,
+    recipe_path: Option<PathBuf>,
     /// The user-facing session name (ADR-0034). Carried in the recipe header.
     session_name: Option<String>,
     /// The most recent per-turn atomic-write failure (ADR-0034).
     persist_error: Option<SaveError>,
-    /// The canonical form of [`Self::duck_path`] (ADR-0035 Decision 3): the
+    /// The canonical form of [`Self::recipe_path`] (ADR-0035 Decision 3): the
     /// registry key under which this persister holds the file.
-    duck_canonical: Option<PathBuf>,
-    /// SHA-256 of the `.duck` file's bytes as of the last successful write
+    recipe_canonical: Option<PathBuf>,
+    /// SHA-256 of the `recipe.json` file's bytes as of the last successful write
     /// (ADR-0035 Decision 3).
     last_written_hash: Option<String>,
     /// A pre-write external-change conflict surfaced by the hash check
@@ -94,25 +94,25 @@ pub(super) struct RecipePersister {
 }
 
 impl RecipePersister {
-    /// A fresh, unbound persister -- no `.duck` path, no baseline, no errors.
+    /// A fresh, unbound persister -- no `recipe.json` path, no baseline, no errors.
     pub(super) fn new() -> Self {
         Self {
-            duck_path: None,
+            recipe_path: None,
             session_name: None,
             persist_error: None,
-            duck_canonical: None,
+            recipe_canonical: None,
             last_written_hash: None,
             pending_conflict: None,
             discovery_snapshot: Vec::new(),
         }
     }
 
-    /// The bound `.duck` path, if any (ADR-0034).
-    pub(super) fn duck_path(&self) -> Option<&Path> {
-        self.duck_path.as_deref()
+    /// The bound `recipe.json` path, if any (ADR-0034).
+    pub(super) fn recipe_path(&self) -> Option<&Path> {
+        self.recipe_path.as_deref()
     }
 
-    /// The user-facing session name, if bound to a `.duck` (ADR-0034).
+    /// The user-facing session name, if bound to a `recipe.json` (ADR-0034).
     pub(super) fn session_name(&self) -> Option<&str> {
         self.session_name.as_deref()
     }
@@ -145,7 +145,7 @@ impl RecipePersister {
     // --- Projection --------------------------------------------------------
 
     /// Project the live working set + timeline into a persisted [`Recipe`]
-    /// (ADR-0034/0036/0041/0078/0084/0086). The persister supplies the `.duck`
+    /// (ADR-0034/0036/0041/0078/0084/0086). The persister supplies the `recipe.json`
     /// path (for relative-path resolution, ADR-0036 Decision 4) and the session
     /// name; the working set and timeline are passed by reference because they
     /// live on [`Session`](super::Session).
@@ -157,9 +157,9 @@ impl RecipePersister {
     ) -> Recipe {
         // ADR-0036 Decision 4 hybrid paths: `source_path` is always absolute
         // (fallback resolver); `relative_path` is set when the source lives
-        // inside the .duck file's directory subtree (primary resolver,
+        // inside the recipe.json file's directory subtree (primary resolver,
         // survives "move the folder").
-        let duck_dir = self.duck_path.as_deref().and_then(Path::parent);
+        let duck_dir = self.recipe_path.as_deref().and_then(Path::parent);
         let sources: Vec<SourceRef> = working_set
             .list()
             .iter()
@@ -328,14 +328,14 @@ impl RecipePersister {
     // --- Write loop --------------------------------------------------------
 
     /// Write the recipe at the bound path (ADR-0034 atomic write). No-op when
-    /// no `.duck` is bound.
+    /// no `recipe.json` is bound.
     fn persist(
         &self,
         working_set: &WorkingSet,
         timeline: &[TimelineEntry],
         config: &super::SessionRuntimeFacts,
     ) -> Result<(), SaveError> {
-        let Some(path) = &self.duck_path else {
+        let Some(path) = &self.recipe_path else {
             return Ok(());
         };
         let recipe = self.build_recipe(working_set, timeline, config);
@@ -360,7 +360,7 @@ impl RecipePersister {
         timeline: &[TimelineEntry],
         config: &super::SessionRuntimeFacts,
     ) {
-        let Some(path) = self.duck_path.as_deref() else {
+        let Some(path) = self.recipe_path.as_deref() else {
             return; // unbound -- in-memory-only session, nothing to persist.
         };
         // While a conflict is pending, the auto-write is SUSPENDED.
@@ -378,7 +378,7 @@ impl RecipePersister {
                     });
                     log::warn!(
                         target: "toptopduck::session",
-                        "检测到 .duck 外部变更，挂起自动写盘：{}",
+                        "检测到 recipe.json 外部变更，挂起自动写盘：{}",
                         path.display()
                     );
                     return;
@@ -400,7 +400,7 @@ impl RecipePersister {
                     });
                     log::warn!(
                         target: "toptopduck::session",
-                        "外部变更检测读 .duck 失败，保守挂起自动写盘：{}",
+                        "外部变更检测读 recipe.json 失败，保守挂起自动写盘：{}",
                         path.display()
                     );
                     return;
@@ -408,7 +408,7 @@ impl RecipePersister {
             }
         }
         if let Err(e) = self.persist(working_set, timeline, config) {
-            log::error!(target: "toptopduck::session", "自动保存 .duck 失败：{e}");
+            log::error!(target: "toptopduck::session", "自动保存 recipe.json 失败：{e}");
             self.persist_error = Some(e);
             return;
         }
@@ -420,7 +420,7 @@ impl RecipePersister {
 
     // --- Bind / adopt / release (single-writer gate) -----------------------
 
-    /// Bind to a `.duck` path (ADR-0034/0035 Decision 3). Canonicalizes the
+    /// Bind to a `recipe.json` path (ADR-0034/0035 Decision 3). Canonicalizes the
     /// path, acquires the single-writer registry key (releasing the old one if
     /// re-binding to a different path), sets the path + name, and performs the
     /// first write + baseline seed.
@@ -442,23 +442,23 @@ impl RecipePersister {
         timeline: &[TimelineEntry],
         config: &super::SessionRuntimeFacts,
     ) -> Result<(), SaveError> {
-        let canonical = canonicalize_duck(&path).map_err(|e| SaveError::Io(e.to_string()))?;
+        let canonical = canonicalize_recipe(&path).map_err(|e| SaveError::Io(e.to_string()))?;
         // Single-writer gate: re-binding the SAME canonical path is an update;
         // any other path goes through try_acquire.
-        if self.duck_canonical.as_deref() != Some(canonical.as_path()) {
+        if self.recipe_canonical.as_deref() != Some(canonical.as_path()) {
             if !try_acquire(&canonical) {
                 return Err(SaveError::AlreadyOpen(canonical));
             }
-            if let Some(old) = self.duck_canonical.take() {
+            if let Some(old) = self.recipe_canonical.take() {
                 release(&old);
             }
         }
-        self.duck_canonical = Some(canonical);
-        self.duck_path = Some(path);
+        self.recipe_canonical = Some(canonical);
+        self.recipe_path = Some(path);
         self.session_name = Some(session_name);
         let result = self.persist(working_set, timeline, config);
         if result.is_ok() {
-            if let Some(h) = self.duck_path.as_deref().and_then(Self::compute_baseline) {
+            if let Some(h) = self.recipe_path.as_deref().and_then(Self::compute_baseline) {
                 self.last_written_hash = Some(h);
             }
             self.pending_conflict = None;
@@ -466,8 +466,8 @@ impl RecipePersister {
         result
     }
 
-    /// Adopt a resumed `.duck` binding (ADR-0035 resume path). The single-
-    /// writer key is acquired externally by `open_duck`'s `OpenDuckGuard`;
+    /// Adopt a resumed `recipe.json` binding (ADR-0035 resume path). The single-
+    /// writer key is acquired externally by `open_recipe`'s `OpenRecipeGuard`;
     /// this method records the canonical path for later release and sets all
     /// four persistence fields in one shot.
     pub(super) fn adopt_resumed(
@@ -477,8 +477,8 @@ impl RecipePersister {
         session_name: String,
         baseline_hash: Option<String>,
     ) {
-        self.duck_path = Some(path);
-        self.duck_canonical = Some(canonical);
+        self.recipe_path = Some(path);
+        self.recipe_canonical = Some(canonical);
         self.session_name = Some(session_name);
         self.last_written_hash = baseline_hash;
     }
@@ -488,7 +488,7 @@ impl RecipePersister {
     /// calls this BEFORE firing the drop signal so the delete-path awaiter
     /// resolves precisely when the gate will succeed.
     pub(super) fn release_key(&mut self) {
-        if let Some(canonical) = self.duck_canonical.take() {
+        if let Some(canonical) = self.recipe_canonical.take() {
             release(&canonical);
         }
     }
@@ -504,10 +504,9 @@ impl RecipePersister {
         timeline: &[TimelineEntry],
         config: &super::SessionRuntimeFacts,
     ) -> Result<(), SaveError> {
-        let path = self
-            .duck_path
-            .clone()
-            .ok_or_else(|| SaveError::Io("no .duck path bound; cannot resolve conflict".into()))?;
+        let path = self.recipe_path.clone().ok_or_else(|| {
+            SaveError::Io("no recipe.json path bound; cannot resolve conflict".into())
+        })?;
         let recipe = self.build_recipe(working_set, timeline, config);
         save_atomic(&path, &recipe)?;
         if let Some(h) = Self::compute_baseline(&path) {
@@ -527,8 +526,8 @@ impl RecipePersister {
         timeline: &[TimelineEntry],
         config: &super::SessionRuntimeFacts,
     ) -> Result<(), SaveError> {
-        let canonical = canonicalize_duck(&new_path).map_err(|e| SaveError::Io(e.to_string()))?;
-        if self.duck_canonical.as_deref() == Some(canonical.as_path()) {
+        let canonical = canonicalize_recipe(&new_path).map_err(|e| SaveError::Io(e.to_string()))?;
+        if self.recipe_canonical.as_deref() == Some(canonical.as_path()) {
             return Err(SaveError::AlreadyOpen(canonical));
         }
         if !try_acquire(&canonical) {
@@ -541,12 +540,12 @@ impl RecipePersister {
             release(&canonical);
             return Err(e);
         }
-        if let Some(old) = self.duck_canonical.take() {
+        if let Some(old) = self.recipe_canonical.take() {
             release(&old);
         }
-        self.duck_canonical = Some(canonical);
+        self.recipe_canonical = Some(canonical);
         self.last_written_hash = Self::compute_baseline(&new_path);
-        self.duck_path = Some(new_path);
+        self.recipe_path = Some(new_path);
         self.pending_conflict = None;
         Ok(())
     }
@@ -641,6 +640,7 @@ mod tests {
                 PersistedTurnProvenance {
                     runtime: Some(RuntimeKind::BuiltIn),
                     adapter_id: None,
+                    adapter_display_name: None,
                     skills: Vec::new(),
                 },
             ),
@@ -700,14 +700,14 @@ mod tests {
     #[test]
     fn build_recipe_records_relative_path_for_in_subtree_source() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let duck = dir.path().join("session.duck");
+        let duck = dir.path().join("recipe.json");
         let csv = dir.path().join("data.csv");
 
         let mut ws = WorkingSet::default();
         ws.register(test_source("people", csv.to_str().unwrap()));
 
         let mut persister = RecipePersister::new();
-        persister.duck_path = Some(duck);
+        persister.recipe_path = Some(duck);
 
         let recipe =
             persister.build_recipe(&ws, &[], &crate::session::SessionRuntimeFacts::default());
@@ -726,8 +726,8 @@ mod tests {
     #[test]
     fn build_recipe_omits_relative_path_for_out_of_subtree_source() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let duck = dir.path().join("session.duck");
-        // A source in a DIFFERENT tempdir (outside the .duck subtree).
+        let duck = dir.path().join("recipe.json");
+        // A source in a DIFFERENT tempdir (outside the recipe.json subtree).
         let other_dir = tempfile::tempdir().expect("other tempdir");
         let csv = other_dir.path().join("outside.csv");
 
@@ -735,7 +735,7 @@ mod tests {
         ws.register(test_source("people", csv.to_str().unwrap()));
 
         let mut persister = RecipePersister::new();
-        persister.duck_path = Some(duck);
+        persister.recipe_path = Some(duck);
 
         let recipe =
             persister.build_recipe(&ws, &[], &crate::session::SessionRuntimeFacts::default());
@@ -848,6 +848,7 @@ mod tests {
         let provenance = PersistedTurnProvenance {
             runtime: Some(RuntimeKind::External),
             adapter_id: Some("gemini-cli".into()),
+            adapter_display_name: None,
             skills: vec![],
         };
 
@@ -1146,7 +1147,7 @@ mod tests {
     #[test]
     fn bind_writes_recipe_and_seeds_baseline() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let path = dir.path().join("test.duck");
+        let path = dir.path().join("test.json");
 
         let mut persister = RecipePersister::new();
         let ws = WorkingSet::default();
@@ -1160,18 +1161,18 @@ mod tests {
             )
             .expect("bind");
 
-        assert_eq!(persister.duck_path(), Some(path.as_path()));
+        assert_eq!(persister.recipe_path(), Some(path.as_path()));
         assert!(persister.last_written_hash.is_some(), "baseline seeded");
         assert!(path.exists(), "file written");
 
-        let recipe = crate::persistence::read_duck(&path).expect("read back");
+        let recipe = crate::persistence::read_recipe(&path).expect("read back");
         assert_eq!(recipe.session_name, "test session");
     }
 
     #[test]
     fn save_if_bound_after_bind_writes_updated_recipe() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let path = dir.path().join("test.duck");
+        let path = dir.path().join("test.json");
 
         let mut persister = RecipePersister::new();
         let ws = WorkingSet::default();
@@ -1189,14 +1190,14 @@ mod tests {
         persister.set_session_name("updated".into());
         persister.save_if_bound(&ws, &[], &crate::session::SessionRuntimeFacts::default());
 
-        let recipe = crate::persistence::read_duck(&path).expect("read back");
+        let recipe = crate::persistence::read_recipe(&path).expect("read back");
         assert_eq!(recipe.session_name, "updated");
     }
 
     #[test]
     fn save_if_bound_detects_external_edit_and_stashes_conflict() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let path = dir.path().join("test.duck");
+        let path = dir.path().join("test.json");
 
         let mut persister = RecipePersister::new();
         let ws = WorkingSet::default();
@@ -1228,7 +1229,7 @@ mod tests {
     #[test]
     fn conflict_keep_mine_overwrites_and_clears_conflict() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let path = dir.path().join("test.duck");
+        let path = dir.path().join("test.json");
 
         let mut persister = RecipePersister::new();
         let ws = WorkingSet::default();
@@ -1260,15 +1261,15 @@ mod tests {
             persister.take_pending_conflict().is_none(),
             "conflict cleared"
         );
-        let recipe = crate::persistence::read_duck(&path).expect("read back");
+        let recipe = crate::persistence::read_recipe(&path).expect("read back");
         assert_eq!(recipe.session_name, "mine");
     }
 
     #[test]
     fn conflict_save_as_new_writes_new_file_and_rebinds() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let old_path = dir.path().join("old.duck");
-        let new_path = dir.path().join("new.duck");
+        let old_path = dir.path().join("old.json");
+        let new_path = dir.path().join("new.json");
 
         let mut persister = RecipePersister::new();
         let ws = WorkingSet::default();
@@ -1301,7 +1302,7 @@ mod tests {
             )
             .expect("save as new");
 
-        assert_eq!(persister.duck_path(), Some(new_path.as_path()));
+        assert_eq!(persister.recipe_path(), Some(new_path.as_path()));
         assert!(new_path.exists(), "new file written");
         assert!(
             persister.take_pending_conflict().is_none(),
@@ -1315,14 +1316,14 @@ mod tests {
     fn adopt_resumed_sets_all_four_fields() {
         let mut persister = RecipePersister::new();
         persister.adopt_resumed(
-            PathBuf::from("/tmp/resumed.duck"),
-            PathBuf::from("/tmp/resumed.duck"),
+            PathBuf::from("/tmp/resumed.json"),
+            PathBuf::from("/tmp/resumed.json"),
             "resumed".into(),
             Some("abc123".into()),
         );
         assert_eq!(
-            persister.duck_path(),
-            Some(std::path::Path::new("/tmp/resumed.duck"))
+            persister.recipe_path(),
+            Some(std::path::Path::new("/tmp/resumed.json"))
         );
         assert_eq!(persister.session_name(), Some("resumed"));
         assert_eq!(
@@ -1339,7 +1340,7 @@ mod tests {
         persister.release_key();
         // After bind -> releases; second call is a no-op.
         let dir = tempfile::tempdir().expect("tempdir");
-        let path = dir.path().join("gate.duck");
+        let path = dir.path().join("gate.json");
         let ws = WorkingSet::default();
         persister
             .bind(
@@ -1350,10 +1351,10 @@ mod tests {
                 &crate::session::SessionRuntimeFacts::default(),
             )
             .expect("bind");
-        assert!(persister.duck_canonical.is_some());
+        assert!(persister.recipe_canonical.is_some());
 
         persister.release_key();
-        assert!(persister.duck_canonical.is_none(), "key released");
+        assert!(persister.recipe_canonical.is_none(), "key released");
 
         // Idempotent: second release is a no-op (no panic).
         persister.release_key();

@@ -21,7 +21,7 @@ import { LABEL_HIDE_NARROW } from "./composer-visual";
 // dropdown between confirm-each-call (the default, Hand icon) and
 // no-confirmation (ShieldAlert icon, every external tool call auto-passes
 // through the gateway). The posture is session-scoped and resume-resetting --
-// the backend (`open_duck` -> `reset_approval`) returns it to per_call on a
+// the backend (`open_recipe` -> `reset_approval`) returns it to per_call on a
 // resume, and this Select re-reads it via the session-keyed query (a resume
 // mints a NEW session id whose fresh SessionPane mount issues the read). The
 // no-confirmation trigger face rides the --warning token: the posture is an

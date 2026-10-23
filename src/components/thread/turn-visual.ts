@@ -508,8 +508,17 @@ export function lifecycleRunMarks(
 // old IPC peer) and an external turn persisted before adapter ids existed --
 // stay silent: an attribution is only worth rendering when it can name who
 // ran the turn, and in a mixed thread an unmarked stretch reads as the
-// default runtime. Returns the adapter id to display, null for no marker.
-export function runtimeMarkerName(runtime: TurnRuntime | undefined): string | null {
+// default runtime. Returns the label inputs -- the stable adapter id plus
+// the stamp-time display name riding the turn (issue #1351) -- or null for
+// no marker; the marker resolves which string to render.
+export interface RuntimeMarkerLabel {
+  readonly adapterId: string;
+  readonly persistedName: string | null;
+}
+
+export function runtimeMarkerName(runtime: TurnRuntime | undefined): RuntimeMarkerLabel | null {
   if (runtime?.kind !== "external") return null;
-  return runtime.data.adapter_id;
+  const { adapter_id: adapterId, display_name: displayName } = runtime.data;
+  if (adapterId === null) return null;
+  return { adapterId, persistedName: displayName };
 }

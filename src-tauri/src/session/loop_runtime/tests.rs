@@ -478,6 +478,60 @@ fn bridged_runtime(provider: Arc<dyn Provider>) -> LoopRuntime {
     LoopRuntime::bridged(provider)
 }
 
+/// The dispatch server's per-request forward switch (issue #1359): a
+/// request carrying a delegation id rides the tagged wrapper (its phases
+/// land on the sink as `DelegationSubEvent`s carrying that id, `TextDelta`
+/// filtered -- the delegation's live panel, never an ownerless main-rail
+/// row), a main-face request keeps the plain sink (verbatim, deltas
+/// included). Mutation-kill standard: removing the switch fails either leg
+/// (always-plain drops the wrapper, always-tagged wraps the main face).
+#[test]
+fn dispatch_forward_switches_sink_by_delegation_id() {
+    use super::adapter::{emit_phase, PhaseSink};
+    use super::forward_sink_for;
+
+    let recorded: Arc<Mutex<Vec<TurnPhase>>> = Arc::new(Mutex::new(Vec::new()));
+    let recorder = Arc::clone(&recorded);
+    let phases: PhaseSink = Arc::new(Mutex::new(move |p: TurnPhase| {
+        recorder.lock().unwrap().push(p);
+    }));
+    let started = TurnPhase::ToolCallStarted {
+        id: None,
+        name: "explore".into(),
+        operation_kind: crate::OperationKind::Read,
+        summary: "SELECT 1".into(),
+        task: None,
+    };
+    let delta = TurnPhase::TextDelta {
+        delta: "partial".into(),
+    };
+
+    // Main face: plain forward -- both phases verbatim, in order.
+    let main = forward_sink_for(&phases, None);
+    emit_phase(&main, delta.clone());
+    emit_phase(&main, started.clone());
+    assert_eq!(
+        recorded.lock().unwrap().as_slice(),
+        &[delta.clone(), started.clone()],
+        "the main face's phases stay plain on the live rail"
+    );
+
+    // Sub face: tagged wrapper -- the delta filtered, the call pair
+    // wrapped with the delegation's id.
+    recorded.lock().unwrap().clear();
+    let tagged = forward_sink_for(&phases, Some("del-1"));
+    emit_phase(&tagged, delta);
+    emit_phase(&tagged, started.clone());
+    assert_eq!(
+        recorded.lock().unwrap().as_slice(),
+        &[TurnPhase::DelegationSubEvent {
+            delegation_id: "del-1".into(),
+            phase: Box::new(started),
+        }],
+        "a delegated call's phases ride the tagged wrapper with the id"
+    );
+}
+
 /// Multi-step success with thinking, prose, and two dispatch rounds: the
 /// trace is round-grouped (thinking
 /// and prose on round 1, the batch's entries in dispatch order), the
@@ -1382,7 +1436,7 @@ fn window_resume_converges_after_exhaustion() {
 /// The convergence nudge is in-flight only (ADR-0128): it rides the
 /// reopened window's prompt -- the second model request's last message --
 /// and persists nowhere: no trace round's text carries it (the trace is
-/// what lands on `.duck` and what the next turn's window assembles from).
+/// what lands on `recipe.json` and what the next turn's window assembles from).
 #[test]
 fn window_resume_nudge_stays_in_flight() {
     let mut h = Harness::new();
@@ -2637,23 +2691,45 @@ fn delegation_runs_a_subagent_over_the_shared_face_with_one_numberer() {
 
     // Live card <-> persisted row are same-source (PR #944 review Advisory
     // G): every call the rail saw as a completed card also lands in the
-    // record -- the sub-agent's materialize under the delegation entry, the
-    // delegation itself, then the main loop's own. No ghost row runs on the
-    // live rail and vanishes from the trace.
-    let completed_names: Vec<String> = h
-        .phases
-        .lock()
-        .unwrap()
-        .iter()
-        .filter_map(|p| match p {
-            TurnPhase::ToolCallCompleted(view) => Some(view.name.clone()),
-            _ => None,
-        })
-        .collect();
+    // record -- the delegation itself, then the main loop's own. The
+    // sub-agent's calls no longer run on the main rail at all (issue #1359):
+    // their card pair rides tagged sub-events into the delegation's live
+    // panel, carrying the SAME id the delegation's own started phase carried,
+    // while the record-side landing under the delegation entry is the
+    // sub_trace assertion above.
+    let mut delegation_id: Option<String> = None;
+    let mut tagged: Vec<(String, &str)> = Vec::new();
+    let mut completed_names: Vec<String> = Vec::new();
+    for p in h.phases.lock().unwrap().iter() {
+        match p {
+            TurnPhase::ToolCallStarted {
+                id: Some(id), name, ..
+            } if name == "analyst" => delegation_id = Some(id.clone()),
+            TurnPhase::DelegationSubEvent {
+                delegation_id: id,
+                phase,
+            } => {
+                let kind = match phase.as_ref() {
+                    TurnPhase::ToolCallStarted { name, .. } if name == "materialize" => "started",
+                    TurnPhase::ToolCallCompleted(view) if view.name == "materialize" => "completed",
+                    _ => continue,
+                };
+                tagged.push((id.clone(), kind));
+            }
+            TurnPhase::ToolCallCompleted(view) => completed_names.push(view.name.clone()),
+            _ => {}
+        }
+    }
     assert_eq!(
         completed_names,
-        vec!["materialize", "analyst", "materialize"],
-        "the sub-agent's card completed first, then the delegation, then the main loop's own"
+        vec!["analyst".to_string(), "materialize".to_string()],
+        "the main rail carries only its own completions: the delegation row, then the main loop's materialize"
+    );
+    let id = delegation_id.expect("the delegation's started phase carried its id");
+    assert_eq!(
+        tagged,
+        vec![(id.clone(), "started"), (id, "completed")],
+        "the sub-agent's call pair rides tagged sub-events with the delegation's id (issue #1359)"
     );
 }
 

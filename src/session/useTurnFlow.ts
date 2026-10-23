@@ -54,6 +54,11 @@ export interface LiveCall {
    *  Thinking event's attempt at the moment the call arrived. Drives the
    *  settled fold's round grouping (issue #608, ADR-0103). */
   step: number;
+  /** The delegation's call id (ADR-0135 Decision 2): present only on
+   *  delegation rows -- pairs the completion by id (same-name parallels
+   *  cannot mispair) and keys the row's live panel into the delegation
+   *  buffer. */
+  callId?: string;
   name: string;
   operationKind: OperationKind;
   summary: string;
@@ -105,6 +110,37 @@ export interface LiveTraceRow {
   /** The delegation entry's nested sub-rounds (issue #934), carried through
    *  the merge so the settled row renders the view affordance. */
   subRounds?: TraceRound[];
+  /** The delegation's call id (ADR-0135): rides from the started call so
+   *  the completion pairs by id and the panel keys into the buffer. */
+  callId?: string;
+  /** The delegation row's live view (ADR-0135): the full-text facts and
+   *  the running fold's rounds, assembled at the round-grouping derivation
+   *  (the single place with both the rows and the buffers in hand). The
+   *  chip (step / batch counts) and the running row's inline panel read
+   *  from it; once the completion lands, `rounds` is absent and the row's
+   *  `subRounds` take over the panel. */
+  delegation?: DelegationLiveView;
+}
+
+/** A delegation row's live view (ADR-0135): assembled by buildLiveRounds,
+ *  never stored on the live state -- derived, so it cannot drift from the
+ *  buffers it summarizes. */
+export interface DelegationLiveView {
+  /** The task's full text (Decision 3, live-only). */
+  task: string;
+  /** The report's full text once the completion lands; undefined while the
+   *  delegation runs. */
+  report?: string;
+  /** The sub-agent's running fold as rounds (empty before the first
+   *  sub-event, exhausted once the completion lands -- the row's
+   *  `subRounds` render the panel from then on; only a RUNNING row
+   *  consumes it). */
+  rounds: LiveRound[];
+  /** The running fold's latest step (the single-delegation chip's "step n"). */
+  step: number | null;
+  /** The batch's counts (the aggregate chip's "N of M done, K running"),
+   *  derived from the turn's delegation rows. */
+  batch: { done: number; running: number; total: number };
 }
 
 /** One live round's row: a `LiveTraceRow` with the round membership stripped
@@ -237,6 +273,7 @@ export function mergeLiveTrace(
         success: call.success,
         resultExcerpt: call.resultExcerpt,
         subRounds: call.subRounds,
+        callId: call.callId,
       });
     } else {
       rows.push({
@@ -251,6 +288,7 @@ export function mergeLiveTrace(
         success: call.success,
         resultExcerpt: call.resultExcerpt,
         subRounds: call.subRounds,
+        callId: call.callId,
       });
     }
   }
@@ -300,10 +338,42 @@ function liveApprovalResponse(
  *  array spans the furthest reach of any source; untouched slots stay
  *  undefined. Pure -- unit-tested without the hook. */
 export function buildLiveRounds(
-  live: Pick<LiveState, "calls" | "step" | "roundTexts" | "roundThinkings">,
+  live: Pick<
+    LiveState,
+    "calls" | "step" | "roundTexts" | "roundThinkings" | "delegations"
+  >,
   approvals: ReadonlyArray<ApprovalEntry>,
 ): LiveRound[] {
   const rows = mergeLiveTrace(live.calls, approvals, live.step);
+  // The delegation rows' live views (ADR-0135): derived here -- the single
+  // place with both the rows and the buffers in hand -- so the chip facts
+  // and the running fold's rounds cannot drift from what they summarize.
+  // The batch counts read the delegation rows of ONE round (a row with a
+  // callId IS one; the batch is per model-turn, and one round is one batch
+  // -- the driver resets the cap counter at every turn boundary), so
+  // sequential delegations of later rounds read their own batch, never the
+  // turn-wide tally.
+  const delegationRows = rows.filter((r) => r.callId !== undefined);
+  const views = new Map<string, DelegationLiveView>();
+  for (const [id, buffer] of Object.entries(live.delegations)) {
+    // One delegation id is one row (the execute entry mints them unique),
+    // so a find reads it directly -- nothing to keep an index for.
+    const row = delegationRows.find((r) => r.callId === id);
+    if (row === undefined) continue;
+    const batchRows = delegationRows.filter((r) => r.step === row.step);
+    const total = batchRows.length;
+    const runningCount = batchRows.filter((r) => r.running).length;
+    views.set(id, {
+      task: buffer.task,
+      report: buffer.report,
+      // The running fold's rounds; the completion exhausts the fold (its
+      // rows empty) and the row's landed subRounds take the panel over --
+      // only a running row consumes the rounds field.
+      rounds: foldRounds(buffer.fold),
+      step: buffer.fold.step,
+      batch: { done: total - runningCount, running: runningCount, total },
+    });
+  }
   const lastStep = Math.max(
     rows.reduce((m, r) => Math.max(m, r.step), 0),
     live.roundTexts.length,
@@ -328,6 +398,38 @@ export function buildLiveRounds(
         success: r.success,
         resultExcerpt: r.resultExcerpt,
         subRounds: r.subRounds,
+        callId: r.callId,
+        delegation: r.callId !== undefined ? views.get(r.callId) : undefined,
+      })),
+  }));
+}
+
+/** Project one delegation's running fold onto the LiveRound shape (issue
+ *  #1356): the same index-is-the-round grouping the main fold takes, over
+ *  the buffer's sub-agent calls. No approval merge (a sub-face card is the
+ *  main surface's row, ADR-0117's origin annotation) and no prose
+ *  (ADR-0135 filtered the deltas at the Rust sink) -- thinking blocks and
+ *  call rows are all a sub-round carries. */
+function foldRounds(fold: RoundFold): LiveRound[] {
+  const lastStep = Math.max(
+    fold.calls.reduce((m, c) => Math.max(m, c.step), 0),
+    fold.roundThinkings.length,
+  );
+  return Array.from({ length: lastStep }, (_, i) => ({
+    thinking: fold.roundThinkings[i] ?? undefined,
+    rows: fold.calls
+      .filter((c) => c.step === i + 1)
+      .map((c) => ({
+        key: c.key,
+        name: c.name,
+        server: null,
+        operationKind: c.operationKind,
+        summary: c.summary,
+        approval: null,
+        running: c.running,
+        success: c.success,
+        resultExcerpt: c.resultExcerpt,
+        subRounds: c.subRounds,
       })),
   }));
 }
@@ -426,7 +528,11 @@ export function liveRoundsToTrace(
 export function choiceToTurnRuntime(choice: SessionRuntimeChoice): TurnRuntime {
   switch (choice.kind) {
     case "external":
-      return { kind: "external", data: { adapter_id: choice.data } };
+      // No stamp-time name on the optimistic append: the live turn's
+      // adapter is by definition in the table, so the marker's first tier
+      // resolves the current name; the settle swap brings the stamped
+      // provenance.
+      return { kind: "external", data: { adapter_id: choice.data, display_name: null } };
     case "built_in":
       return { kind: "built_in" };
     default: {
@@ -499,25 +605,53 @@ export interface UseTurnFlow {
   handleCancel: () => Promise<void>;
 }
 
+/** The round-evolving slice of a live fold (issue #1356): the fields the
+ *  four non-delta phase families move. Shared by the main turn's live
+ *  state and each delegation's buffer, so the two folds apply the same
+ *  events through the same code (applyRoundFold). */
+interface RoundFold {
+  step: number | null;
+  calls: LiveCall[];
+  /** Per-round thinking blocks (index = step-1, null when none), from the
+   *  ThinkingCompleted events (issues #608/#610). */
+  roundThinkings: Array<ThinkingTrace | null>;
+}
+
+/** One delegation's live buffer (ADR-0135): the task / report full texts
+ *  (Decision 3, live-only -- never projected onto the settled trace) plus
+ *  the sub-agent's rounds fold (Decision 1's forwarded sub-events), keyed
+ *  by the delegation's execute-entry id. */
+interface DelegationBuffer {
+  task: string;
+  /** The report's full text once the completion lands; undefined while the
+   *  delegation runs. */
+  report?: string;
+  fold: RoundFold;
+}
+
+// The shared empty-fold sentinel: safe to hand to every buffer because a
+// fold is only ever replaced (spread), never mutated in place.
+const EMPTY_FOLD: RoundFold = { step: null, calls: [], roundThinkings: [] };
+
 /** The in-flight turn's raw progress state: the turn-progress channel alone
  *  (approval cards merge in at the liveTurn derivation). Internal to the
  *  hook module -- the pure helpers take only the grouping inputs (see
  *  buildLiveRounds' Pick), so this shape stays free to evolve with the
  *  event stream. */
-interface LiveState {
+interface LiveState extends RoundFold {
   question: string;
   askedAt: number;
   /** The submit-time staging (see LiveTurn.invocationNames). Survives phase
    *  evolution (applyPhase spreads the previous state). */
   invocationNames: string[];
-  step: number | null;
-  calls: LiveCall[];
   /** Per-round connective prose (index = step-1, null when none), from the
    *  TextDelta stream (ADR-0126; fragments appended in arrival order). */
   roundTexts: Array<string | null>;
-  /** Per-round thinking blocks (index = step-1, null when none), from the
-   *  ThinkingCompleted events (issues #608/#610). */
-  roundThinkings: Array<ThinkingTrace | null>;
+  /** The turn's live delegation buffers (ADR-0135), keyed by the
+   *  delegation's call id. Survives phase evolution (applyPhase spreads
+   *  the previous state); dies with the live turn at settle -- the
+   *  full-text facts are live-only by decision. */
+  delegations: Record<string, DelegationBuffer>;
   /** The ask-time runtime choice mapped onto the thread's attribution
    *  (issue #818): stamped onto the live state when the submit-time read
    *  resolves, so the live exchange renders the same marker the optimistic
@@ -540,10 +674,12 @@ function callRow(
   success: boolean | null,
   resultExcerpt: string,
   subRounds?: TraceRound[],
+  callId?: string,
 ): LiveCall {
   return {
     key: `call-${seq}`,
     step,
+    callId,
     name,
     operationKind,
     summary,
@@ -567,76 +703,110 @@ function lastRunningMatchIdx(calls: LiveCall[], name: string, summary: string): 
   return -1;
 }
 
-/** One progress event applied to the live state (pure). null passes through
- *  -- a late event past the ask's finally finds no live turn and drops. */
-function applyPhase(live: LiveState | null, phase: TurnPhase): LiveState | null {
-  if (live === null) return null;
+/** The index of the LAST running call carrying the delegation's id
+ *  (ADR-0135 Decision 2) -- the delegation completion's pairing target,
+ *  immune to the same name+summary collision parallel delegations with one
+ *  task would hit. -1 when none exists. */
+function lastRunningIdMatchIdx(calls: LiveCall[], id: string): number {
+  for (let i = calls.length - 1; i >= 0; i--) {
+    if (calls[i].running && calls[i].callId === id) return i;
+  }
+  return -1;
+}
+
+/** Complete the running row at `idx` with a landed entry (extracted from
+ *  applyPhase's inline map at issue #1356 -- the id-paired delegation
+ *  completion and the name+summary ordinary one share the landing). */
+function completeCallAt(calls: LiveCall[], idx: number, entry: TraceEntry): LiveCall[] {
+  return calls.map((c, i) =>
+    i === idx
+      ? {
+          ...c,
+          running: false,
+          success: entry.success,
+          resultExcerpt: entry.result_excerpt,
+          // The delegation entry's nested sub-trace rides the completion
+          // event (issue #934); undefined for an ordinary call.
+          subRounds: entry.sub_rounds,
+        }
+      : c,
+  );
+}
+
+/** Apply one phase to a round fold (issue #1356): the four families the
+ *  main fold and every delegation's buffer share. TextDelta (main-only --
+ *  ADR-0135 filters it at the Rust sink, prose never enters a delegation
+ *  fold) and the DelegationSubEvent wrapper (the router, not a fold event)
+ *  stay in applyPhase. Pure. */
+function applyRoundFold(fold: RoundFold, phase: TurnPhase): RoundFold {
   if ("Thinking" in phase) {
     // The LLM round-trip wait: surface the 1-based step.
-    return { ...live, step: phase.Thinking.attempt };
-  }
-  if ("TextDelta" in phase) {
-    // ADR-0126: one streamed prose fragment, APPENDED to the current
-    // round's text (the Thinking event that opened it has already arrived,
-    // the same ordering premise ThinkingCompleted relies on).
-    const step = live.step ?? 1;
-    const roundTexts = appendRoundText(live.roundTexts, step, phase.TextDelta.delta);
-    return { ...live, roundTexts };
+    return { ...fold, step: phase.Thinking.attempt };
   }
   if ("ThinkingCompleted" in phase) {
     // ADR-0103 (issues #608/#610): the round's thinking block completed,
     // attached to the CURRENT round (the Thinking event that opened it has
     // already arrived, same ordering premise as TextDelta). Kept per round
-    // on the live state -- the live thinking fold renders from it and the
-    // settle projection reuses it via the rounds; a runtime without a
-    // thinking data source never fires the event (honest degrade).
-    const step = live.step ?? 1;
+    // on the fold -- the live thinking fold renders from it and the settle
+    // projection reuses it via the rounds; a runtime without a thinking
+    // data source never fires the event (honest degrade).
+    const step = fold.step ?? 1;
     return {
-      ...live,
-      roundThinkings: withRoundSlot(live.roundThinkings, step, phase.ThinkingCompleted),
+      ...fold,
+      roundThinkings: withRoundSlot(fold.roundThinkings, step, phase.ThinkingCompleted),
     };
   }
   if ("ToolCallStarted" in phase) {
-    const { name, operation_kind, summary } = phase.ToolCallStarted;
-    const step = live.step ?? 1;
+    const { id, name, operation_kind, summary } = phase.ToolCallStarted;
+    const step = fold.step ?? 1;
     return {
-      ...live,
+      ...fold,
       calls: [
-        ...live.calls,
-        callRow(live.calls.length, step, name, operation_kind, summary, true, null, ""),
+        ...fold.calls,
+        callRow(
+          fold.calls.length,
+          step,
+          name,
+          operation_kind,
+          summary,
+          true,
+          null,
+          "",
+          undefined,
+          id,
+        ),
       ],
     };
   }
+  if ("TextDelta" in phase || "DelegationSubEvent" in phase) {
+    // Router-owned variants (applyPhase owns both): a delta never enters a
+    // fold -- main prose or nothing, per ADR-0135's sink-side filter -- and
+    // the wrapper unwraps before routing. Unreachable here by contract;
+    // the pass-through keeps the type honest.
+    return fold;
+  }
+  // A variant this fold does not know (a future one) folds nowhere --
+  // degrade honestly rather than crash on the tail destructure below.
+  if (!("ToolCallCompleted" in phase)) return fold;
   // ToolCallCompleted: the trace entry as it lands. Completes the matching
   // running row; a gate-denied call (no started event) appends a completed
-  // row directly.
+  // row directly. A delegation's entry carries its id -- pair on that
+  // first (ADR-0135 Decision 2), the name+summary scan remains the
+  // ordinary call's rule.
   const entry = phase.ToolCallCompleted;
-  const idx = lastRunningMatchIdx(live.calls, entry.name, entry.summary);
+  const idIdx = entry.id !== undefined ? lastRunningIdMatchIdx(fold.calls, entry.id) : -1;
+  const idx =
+    idIdx >= 0 ? idIdx : lastRunningMatchIdx(fold.calls, entry.name, entry.summary);
   if (idx >= 0) {
-    return {
-      ...live,
-      calls: live.calls.map((c, i) =>
-        i === idx
-          ? {
-              ...c,
-              running: false,
-              success: entry.success,
-              resultExcerpt: entry.result_excerpt,
-              // The delegation entry's nested sub-trace rides the completion
-              // event (issue #934); undefined for an ordinary call.
-              subRounds: entry.sub_rounds,
-            }
-          : c,
-      ),
-    };
+    return { ...fold, calls: completeCallAt(fold.calls, idx, entry) };
   }
-  const step = live.step ?? 1;
+  const step = fold.step ?? 1;
   return {
-    ...live,
+    ...fold,
     calls: [
-      ...live.calls,
+      ...fold.calls,
       callRow(
-        live.calls.length,
+        fold.calls.length,
         step,
         entry.name,
         entry.operation_kind,
@@ -648,6 +818,83 @@ function applyPhase(live: LiveState | null, phase: TurnPhase): LiveState | null 
       ),
     ],
   };
+}
+
+/** Apply one fold phase onto the MAIN live state: applyRoundFold over a
+ *  LiveState returns a {...fold} spread that carries the caller's OWN
+ *  delegations back -- so the composition takes each fold field
+ *  explicitly, never the spread (the delegation buffers are opened and
+ *  exhausted around this call, and a stale spread would wipe them). */
+function foldInto(live: LiveState, phase: TurnPhase): LiveState {
+  const { step, calls, roundThinkings } = applyRoundFold(live, phase);
+  return { ...live, step, calls, roundThinkings };
+}
+
+/** One progress event applied to the live state (pure). null passes through
+ *  -- a late event past the ask's finally finds no live turn and drops. */
+function applyPhase(live: LiveState | null, phase: TurnPhase): LiveState | null {
+  if (live === null) return null;
+  if ("DelegationSubEvent" in phase) {
+    // ADR-0135 Decision 1: one forwarded sub-event of a running delegation,
+    // routed into that delegation's buffer by the id the tagged sink
+    // stamped -- same-name parallels included. The started phase (which
+    // opened the buffer) always precedes the sub-events, so a missing
+    // buffer means the turn's own state is gone: drop the orphan rather
+    // than invent a fold.
+    const { delegation_id, phase: inner } = phase.DelegationSubEvent;
+    const buffer = live.delegations[delegation_id];
+    if (buffer === undefined) return live;
+    return {
+      ...live,
+      delegations: {
+        ...live.delegations,
+        [delegation_id]: { ...buffer, fold: applyRoundFold(buffer.fold, inner) },
+      },
+    };
+  }
+  if ("TextDelta" in phase) {
+    // ADR-0126: one streamed prose fragment, APPENDED to the current
+    // round's text (the Thinking event that opened it has already arrived,
+    // the same ordering premise ThinkingCompleted relies on). Main-fold
+    // only: a delegation's fold never sees a delta (ADR-0135 filters them
+    // at the Rust sink -- the round prose rides the settle's sub_rounds).
+    const step = live.step ?? 1;
+    const roundTexts = appendRoundText(live.roundTexts, step, phase.TextDelta.delta);
+    return { ...live, roundTexts };
+  }
+  if ("ToolCallStarted" in phase) {
+    // ADR-0135 Decisions 2/3: a started phase carrying the task's full
+    // text is a delegation -- open its buffer beside the row (the id keys
+    // the sub-event routing and the completion pair).
+    const { id, task } = phase.ToolCallStarted;
+    const delegations =
+      id !== undefined && task !== undefined
+        ? { ...live.delegations, [id]: { task, fold: EMPTY_FOLD } }
+        : live.delegations;
+    return foldInto({ ...live, delegations }, phase);
+  }
+  if ("ToolCallCompleted" in phase) {
+    // ADR-0135: the delegation's completion parks the report's full text
+    // on the buffer (live-only, Decision 3) and exhausts the running fold
+    // (Decision 1) -- the row's landed sub_rounds take the panel over from
+    // here; the task / report texts outlive the fold until the turn
+    // settles.
+    const id = phase.ToolCallCompleted.id;
+    const buffer = id !== undefined ? live.delegations[id] : undefined;
+    if (id !== undefined && buffer !== undefined) {
+      return foldInto(
+        {
+          ...live,
+          delegations: {
+            ...live.delegations,
+            [id]: { ...buffer, report: phase.ToolCallCompleted.report, fold: EMPTY_FOLD },
+          },
+        },
+        phase,
+      );
+    }
+  }
+  return foldInto(live, phase);
 }
 
 /** Extend a per-round slot array to `step` and set its value, padding the
@@ -837,6 +1084,7 @@ export function useTurnFlow(sessionId: string, deps: UseTurnFlowDeps): UseTurnFl
         calls: [],
         roundTexts: [],
         roundThinkings: [],
+        delegations: {},
       });
       // Issue #725: the ask-time runtime choice, fired BEFORE the ask
       // dispatch -- synchronously at submit, no await in between, so it

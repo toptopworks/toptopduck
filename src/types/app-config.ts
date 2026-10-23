@@ -1,5 +1,5 @@
 // App-level config types split from the single-file src/types.ts (issue #197,
-// ADR-0038). The second at-rest artifact (alongside .duck): preferences,
+// ADR-0038). The second at-rest artifact (alongside recipe.json): preferences,
 // defaults, and the no-key endpoint config. Mirrors the Rust
 // `app_config::model` types verbatim. The API key NEVER appears here -- it
 // lives in the OS keychain; app-config has no key field at all (enforced

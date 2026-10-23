@@ -23,7 +23,7 @@ use std::path::Path;
 use calamine::Data;
 
 use crate::ingest;
-use crate::ingest::schema::quote_ident;
+use crate::ingest::schema::{attach_sql, quote_ident};
 use crate::ingest::tidy::{auto_tidy, forward_fill_merges, TidyOutcome};
 use crate::model::{
     DatasetDescriptor, DatasetPrivacy, GuidanceRequest, GuidanceSheet, GuidanceSheetState,
@@ -109,7 +109,7 @@ impl super::Session {
         let snapshot_path = self
             .source_files
             .remove(reference_name)
-            .unwrap_or_else(|| self.temp_path.join(format!("{reference_name}.duckdb")));
+            .unwrap_or_else(|| self.snapshot_dir().join(format!("{reference_name}.duckdb")));
         if let Err(e) = fs::remove_file(&snapshot_path) {
             log::warn!(
                 target: "toptopduck::session",
@@ -135,20 +135,16 @@ impl super::Session {
         };
 
         // copy-in must succeed before the working set is touched.
-        let snap = match ingest::loader::copy_in(path, &self.temp_path, &reference_name, reader) {
-            Ok(s) => s,
-            Err(e) => return LoadOutcome::Error(e),
-        };
+        let snap =
+            match ingest::loader::copy_in(path, &self.snapshot_dir(), &reference_name, reader) {
+                Ok(s) => s,
+                Err(e) => return LoadOutcome::Error(e),
+            };
 
-        // Attach the snapshot read-only (ADR-0005 engine-level enforcement).
-        // `attach_path` is tool-controlled (temp dir + sanitized alias), not user
-        // input, so interpolation is safe; the user-supplied source path is bound
-        // as a parameter during copy-in (see ingest::loader).
-        let attach_path = snap.file_path.to_string_lossy();
-        let attach_sql = format!(
-            "ATTACH '{attach_path}' AS {} (READ_ONLY);",
-            quote_ident(&reference_name),
-        );
+        // Attach the snapshot read-only (ADR-0005 engine-level enforcement);
+        // the user-supplied source path is bound as a parameter during
+        // copy-in (see ingest::loader).
+        let attach_sql = attach_sql(&snap.file_path.to_string_lossy(), &reference_name);
         if let Err(e) = self.admin_engine.execute_batch(&attach_sql) {
             if let Err(io_err) = std::fs::remove_file(&snap.file_path) {
                 log::warn!(
@@ -455,7 +451,7 @@ impl super::Session {
         // file is copy_in's own responsibility, but the CSV is ours to remove.
         let snap = match ingest::loader::copy_in(
             &csv_path,
-            &self.temp_path,
+            &self.snapshot_dir(),
             reference_name,
             "read_csv_auto",
         ) {
@@ -473,11 +469,7 @@ impl super::Session {
         // The temp CSV is only needed during copy-in; the snapshot holds the data.
         let _ = fs::remove_file(&csv_path);
 
-        let attach_path = snap.file_path.to_string_lossy();
-        let attach_sql = format!(
-            "ATTACH '{attach_path}' AS {} (READ_ONLY);",
-            quote_ident(reference_name)
-        );
+        let attach_sql = attach_sql(&snap.file_path.to_string_lossy(), reference_name);
         if let Err(e) = self.admin_engine.execute_batch(&attach_sql) {
             if let Err(io_err) = fs::remove_file(&snap.file_path) {
                 log::warn!(
@@ -602,8 +594,14 @@ impl super::Session {
                     "DETACH failed during excel rollback for {reference_name}: {e}"
                 );
             }
-            if let Err(e) = fs::remove_file(self.temp_path.join(format!("{reference_name}.duckdb")))
-            {
+            // The snapshot file lives in the session tree (attach_sheet's
+            // copy-in); `source_files` holds the recorded path, with the
+            // snapshot-dir join as the fallback (mirrors release_snapshot).
+            let snapshot_path = self
+                .source_files
+                .remove(reference_name)
+                .unwrap_or_else(|| self.snapshot_dir().join(format!("{reference_name}.duckdb")));
+            if let Err(e) = fs::remove_file(&snapshot_path) {
                 log::warn!(
                     target: "toptopduck::session",
                     "snapshot file removal failed during excel rollback for {reference_name}: {e}"

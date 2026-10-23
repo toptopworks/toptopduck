@@ -25,6 +25,14 @@ type DragDropEvent = {
 const dropListener = vi.hoisted(() => ({
   current: null as ((event: DragDropEvent) => void) | null,
 }));
+
+// Issue #1353: the mount-once session-named listener registers on mount; the
+// hoisted slot captures the registered callback so a test can push a
+// synthetic turn-start auto-name event.
+type SessionNamedEvent = { session_id: string; name: string };
+const namedListener = vi.hoisted(() => ({
+  current: null as ((ev: SessionNamedEvent) => void) | null,
+}));
 vi.mock("@tauri-apps/api/webviewWindow", () => ({
   getCurrentWebviewWindow: () => ({
     onDragDropEvent: (cb: (event: DragDropEvent) => void) => {
@@ -52,7 +60,7 @@ vi.mock("../../api", async (importOriginal) => {
     // test overrides per case.
     renameSession: vi.fn(async () => ""),
     onResumeProgress: vi.fn(async () => () => {}),
-    openDuck: vi.fn(async () => {}),
+    openRecipe: vi.fn(async () => {}),
     // ADR-0092 cold-start posture application (runtime + auth mode + skill
     // mounts + MCP enables, all before registerOpen). Default no-ops; the
     // posture tests assert calls.
@@ -63,6 +71,14 @@ vi.mock("../../api", async (importOriginal) => {
       persist_suspended: false,
     })),
     setAuthorizationMode: vi.fn(async () => {}),
+    // Issue #1353: capture the session-named callback into the hoisted slot
+    // (the mock body runs synchronously, so the slot is set at mount).
+    onSessionNamed: vi.fn(async (cb: (ev: SessionNamedEvent) => void) => {
+      namedListener.current = cb;
+      return () => {
+        namedListener.current = null;
+      };
+    }),
     // ADR-0112 pre-activation materialization (mint-chain activation loop +
     // the in-session materializer). Default no-op; the materialization tests
     // assert calls.
@@ -87,7 +103,7 @@ import {
   closeSessionAndWaitRelease,
   createSession,
   listLiveSessions,
-  openDuck,
+  openRecipe,
   onResumeProgress,
   renameSession,
   setAuthorizationMode,
@@ -116,7 +132,7 @@ const DEFAULT_POSTURE: PendingComposerPosture = {
 
 /** Build a CreateSessionReply for mock returns (ADR-0089). */
 function reply(sid: string) {
-  return { session_id: sid, duck_path: `/sessions/${sid}/session.duck` };
+  return { session_id: sid, recipe_path: `/sessions/${sid}/recipe.json` };
 }
 
 // The #501 drop tests pin the composer bar's geometry via the shared
@@ -146,6 +162,7 @@ describe("useShellSessions", () => {
     // RTL auto-cleanup unmounts the prior hook (clearing the slot via the
     // listener's unlisten), but reset defensively so a test starts from null.
     dropListener.current = null;
+    namedListener.current = null;
     // Drop any prior test's `.question-bar` hit-test stub (#501).
     document.body.innerHTML = "";
   });
@@ -156,6 +173,35 @@ describe("useShellSessions", () => {
     expect(result.current.activeSessionId).toBeNull();
     expect(result.current.busy).toBe(false);
     expect(result.current.resumeStatus).toEqual({ kind: "idle" });
+  });
+
+  // Issue #1353 (ADR-0089 Decision 4 calibrated): the turn-start auto-name
+  // push lands through patchOpenName -- the open-set entry (what the sidebar
+  // row + session header read) shows the name without waiting for the turn
+  // to settle.
+  it("session-named event patches the open entry's name immediately", async () => {
+    vi.mocked(createSession).mockResolvedValue(reply("s1"));
+    const { result } = renderSessions();
+    await act(async () => {
+      await result.current.createSessionWithQuestion(
+        "how many rows?",
+        [],
+        DEFAULT_POSTURE,
+        [],
+      );
+    });
+    expect(result.current.openSessions[0]).toMatchObject({
+      sid: "s1",
+      name: "",
+    });
+    expect(namedListener.current).not.toBeNull();
+    await act(async () => {
+      namedListener.current?.({ session_id: "s1", name: "how many rows?" });
+    });
+    expect(result.current.openSessions[0]).toMatchObject({
+      sid: "s1",
+      name: "how many rows?",
+    });
   });
 
   it("createSessionWithQuestion mints + registers + activates, carrying pendingQuestion", async () => {
@@ -171,7 +217,7 @@ describe("useShellSessions", () => {
     expect(result.current.openSessions[0]).toMatchObject({
       sid: "s1",
       name: "",
-      path: "/sessions/s1/session.duck",
+      path: "/sessions/s1/recipe.json",
       pendingIngestPaths: [],
       pendingQuestion: "how many rows?",
     });
@@ -520,10 +566,10 @@ describe("useShellSessions", () => {
       return () => {};
     });
     vi.mocked(createSession).mockResolvedValueOnce(reply("r1"));
-    vi.mocked(openDuck).mockResolvedValueOnce();
+    vi.mocked(openRecipe).mockResolvedValueOnce();
     const { result } = renderSessions();
     await act(async () => {
-      await result.current.openPersisted("/x/a.duck", "a");
+      await result.current.openPersisted("/x/a.json", "a");
     });
     // Happy path completed: session registered, resume cleared (no soft-lock).
     expect(result.current.activeSessionId).toBe("r1");
@@ -547,25 +593,25 @@ describe("useShellSessions", () => {
     // click on an open session must switch to it without minting or
     // resuming anything new.
     vi.mocked(createSession).mockResolvedValueOnce(reply("p1"));
-    vi.mocked(openDuck).mockResolvedValueOnce();
+    vi.mocked(openRecipe).mockResolvedValueOnce();
     vi.mocked(createSession).mockResolvedValueOnce(reply("p2"));
-    vi.mocked(openDuck).mockResolvedValueOnce();
+    vi.mocked(openRecipe).mockResolvedValueOnce();
     const { result } = renderSessions();
     await act(async () => {
-      await result.current.openPersisted("/x/a.duck", "a");
-      await result.current.openPersisted("/x/b.duck", "b");
+      await result.current.openPersisted("/x/a.json", "a");
+      await result.current.openPersisted("/x/b.json", "b");
     });
     expect(result.current.activeSessionId).toBe("p2");
 
     const mintsBefore = vi.mocked(createSession).mock.calls.length;
-    const resumesBefore = vi.mocked(openDuck).mock.calls.length;
+    const resumesBefore = vi.mocked(openRecipe).mock.calls.length;
     await act(async () => {
-      await result.current.openPersisted("/x/a.duck", "a");
+      await result.current.openPersisted("/x/a.json", "a");
     });
 
     expect(result.current.activeSessionId).toBe("p1");
     expect(vi.mocked(createSession).mock.calls.length).toBe(mintsBefore);
-    expect(vi.mocked(openDuck).mock.calls.length).toBe(resumesBefore);
+    expect(vi.mocked(openRecipe).mock.calls.length).toBe(resumesBefore);
   });
 
   // --- Issue #204: hook-level coverage gaps --------------------------------
@@ -590,7 +636,7 @@ describe("useShellSessions", () => {
     // wait-release promise is pending (cold start -> activeSessionId null ->
     // a routed drop mints).
     act(() => {
-      void result.current.deletePersisted("/x/a.duck", "s1");
+      void result.current.deletePersisted("/x/a.json", "s1");
     });
     await waitFor(() => expect(result.current.busy).toBe(true));
     // While busy the listener is unbound, so a drop payload has nowhere to
@@ -616,7 +662,7 @@ describe("useShellSessions", () => {
     // A second cold-start drop while the first createSession is still in flight
     // is ignored (no second mint); the guard re-arms once the first mint
     // resolves, so a later drop mints again.
-    let resolveCreate: (val: { session_id: string; duck_path: string }) => void = () => {};
+    let resolveCreate: (val: { session_id: string; recipe_path: string }) => void = () => {};
     vi.mocked(createSession).mockImplementation(
       () => new Promise((resolve) => { resolveCreate = resolve; }),
     );
@@ -678,21 +724,21 @@ describe("useShellSessions", () => {
   it("onWebviewDrop routes a drop onto an active PERSISTED session -- path + pendingIngestPaths coexist (#205)", async () => {
     // Domain decision (issue #205): a drop onto an ALREADY-active session
     // routes to that session's ingest even when the session is resumed /
-    // .duck-bound (path !== null). `path` and `pendingIngestPaths` are
+    // recipe.json-bound (path !== null). `path` and `pendingIngestPaths` are
     // independent -- the resumed + pending-drop combination is legal, not a
     // type error. This pins the decision so a future "tighten OpenSession into
     // a discriminated union" refactor cannot silently break the active-session
     // drop route (#81 A1).
     vi.mocked(createSession).mockResolvedValueOnce(reply("p1"));
-    vi.mocked(openDuck).mockResolvedValueOnce();
+    vi.mocked(openRecipe).mockResolvedValueOnce();
     const { result } = renderSessions();
     await act(async () => {
-      await result.current.openPersisted("/x/a.duck", "a");
+      await result.current.openPersisted("/x/a.json", "a");
     });
     expect(result.current.activeSessionId).toBe("p1");
     expect(result.current.openSessions[0]).toMatchObject({
       sid: "p1",
-      path: "/x/a.duck",
+      path: "/x/a.json",
       pendingIngestPaths: [],
     });
     const mintsBefore = vi.mocked(createSession).mock.calls.length;
@@ -704,7 +750,7 @@ describe("useShellSessions", () => {
     expect(vi.mocked(createSession).mock.calls.length).toBe(mintsBefore);
     expect(result.current.openSessions[0]).toMatchObject({
       sid: "p1",
-      path: "/x/a.duck",
+      path: "/x/a.json",
       pendingIngestPaths: ["/x/drop.csv"],
     });
   });
@@ -782,7 +828,7 @@ describe("useShellSessions", () => {
     expect(result.current.openSessions[0].name).toBe("");
 
     await act(async () => {
-      await result.current.renameEntry("s1", "/sessions/s1/session.duck", "new");
+      await result.current.renameEntry("s1", "/sessions/s1/recipe.json", "new");
     });
 
     expect(result.current.openSessions[0].name).toBe("Landed");
@@ -877,13 +923,13 @@ describe("useShellSessions startup re-adoption sweep (issue #842)", () => {
     vi.mocked(listLiveSessions).mockResolvedValue([
       {
         session_id: "a",
-        duck_path: "/sessions/a/session.duck",
+        recipe_path: "/sessions/a/recipe.json",
         session_name: "分析",
         in_flight: false,
       },
       {
         session_id: "b",
-        duck_path: "/sessions/b/session.duck",
+        recipe_path: "/sessions/b/recipe.json",
         session_name: null,
         in_flight: false,
       },
@@ -895,7 +941,7 @@ describe("useShellSessions startup re-adoption sweep (issue #842)", () => {
     expect(result.current.openSessions[0]).toMatchObject({
       sid: "a",
       name: "分析",
-      path: "/sessions/a/session.duck",
+      path: "/sessions/a/recipe.json",
       pendingIngestPaths: [],
       pendingQuestion: null,
     });
@@ -911,14 +957,14 @@ describe("useShellSessions startup re-adoption sweep (issue #842)", () => {
     vi.mocked(listLiveSessions).mockResolvedValue([
       {
         session_id: "x",
-        duck_path: "/sessions/x/session.duck",
+        recipe_path: "/sessions/x/recipe.json",
         session_name: null,
         in_flight: true,
       },
-      { session_id: "y", duck_path: null, session_name: null, in_flight: false },
+      { session_id: "y", recipe_path: null, session_name: null, in_flight: false },
       {
         session_id: "z",
-        duck_path: "/sessions/z/session.duck",
+        recipe_path: "/sessions/z/recipe.json",
         session_name: "活的",
         in_flight: false,
       },
@@ -927,7 +973,7 @@ describe("useShellSessions startup re-adoption sweep (issue #842)", () => {
     await waitFor(() => expect(closeSession).toHaveBeenCalledTimes(2));
     await waitFor(() => expect(result.current.openSessions).toHaveLength(1));
     // The in-flight turn's session and the lock-degraded unbound row are
-    // closed best-effort (turn cancelled, .duck stays on disk); only the
+    // closed best-effort (turn cancelled, recipe.json stays on disk); only the
     // adoptable row enters the open set.
     expect(closeSession).toHaveBeenCalledWith("x");
     expect(closeSession).toHaveBeenCalledWith("y");
@@ -966,8 +1012,8 @@ describe("useShellSessions startup re-adoption sweep (issue #842)", () => {
     // expected idempotent path at debug level; a genuine failure stays a
     // warn so it remains observable. Neither surfaces a shell error.
     vi.mocked(listLiveSessions).mockResolvedValue([
-      { session_id: "x", duck_path: "/sessions/x/session.duck", session_name: null, in_flight: true },
-      { session_id: "y", duck_path: null, session_name: null, in_flight: true },
+      { session_id: "x", recipe_path: "/sessions/x/recipe.json", session_name: null, in_flight: true },
+      { session_id: "y", recipe_path: null, session_name: null, in_flight: true },
     ]);
     vi.mocked(closeSession)
       .mockRejectedValueOnce({ kind: "NotFound" })

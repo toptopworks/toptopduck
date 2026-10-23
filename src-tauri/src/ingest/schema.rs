@@ -340,9 +340,48 @@ pub fn quote_ident(name: &str) -> String {
     format!("\"{escaped}\"")
 }
 
+/// Render the read-only snapshot attach statement
+/// (`ATTACH '<path>' AS <ident> (READ_ONLY);`). Single quotes in the path
+/// are doubled (the SQL string-literal escape), so any path -- including an
+/// app-data dir under an apostrophe-bearing user name -- renders intact.
+/// The identifier must be a sanitized machine name (`[A-Za-z0-9_]`):
+/// ingest-side callers enforce this via `sanitize_identifier`, resume-side
+/// callers trust the tool-written recipe.
+pub fn attach_sql(path: &str, name: &str) -> String {
+    let escaped = path.replace('\'', "''");
+    format!("ATTACH '{escaped}' AS {} (READ_ONLY);", quote_ident(name))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn renders_canonical_read_only_attach() {
+        assert_eq!(
+            attach_sql(r"C:\tmp\snap\s0.duckdb", "s0"),
+            r#"ATTACH 'C:\tmp\snap\s0.duckdb' AS "s0" (READ_ONLY);"#
+        );
+    }
+
+    #[test]
+    fn quotes_attach_identifier() {
+        assert_eq!(
+            attach_sql("/tmp/x", "we\"ird"),
+            "ATTACH '/tmp/x' AS \"we\"\"ird\" (READ_ONLY);"
+        );
+    }
+
+    #[test]
+    fn escapes_attach_path_quotes() {
+        // Single quotes double (SQL string-literal escaping), so paths like
+        // an app-data dir under an apostrophe-bearing user name render
+        // intact.
+        assert_eq!(
+            attach_sql("/tmp/we'ird", "s0"),
+            "ATTACH '/tmp/we''ird' AS \"s0\" (READ_ONLY);"
+        );
+    }
 
     #[test]
     fn canonicalizes_aliases_to_single_name() {

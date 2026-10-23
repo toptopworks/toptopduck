@@ -11,6 +11,10 @@ import { usePersistedSessions } from "./shell/usePersistedSessions";
 import { useShellSessions } from "./shell/useShellSessions";
 import { useTrayEvents } from "./shell/useTrayEvents";
 import { useAppConfigState } from "./shell/useAppConfigState";
+import {
+  ColdStartGuideBanner,
+  deriveColdStartGap,
+} from "./shell/ColdStartGuideBanner";
 import { useStartupRuntime } from "./shell/useStartupRuntime";
 import { useSidebarResize } from "./shell/useSidebarResize";
 import { useRailResize } from "./shell/useRailResize";
@@ -480,10 +484,8 @@ export default function App() {
   // create_session resolution, so an unset pending skips the runtime write
   // (the minted session already carries the resolved runtime) while an
   // explicit pick still applies via setSessionRuntime.
-  const startupRuntime = useStartupRuntime(
-    queryClient,
-    appConfig?.default_runtime,
-  );
+  const { runtime: startupRuntime, adapters: startupAdapters } =
+    useStartupRuntime(queryClient, appConfig?.default_runtime);
   // The cold-start selection channel (composer-selection-write.ts): owns
   // the pending runtime + posture pair, the write port the picker routes
   // through, and the namespace reset for effective-runtime identity
@@ -511,6 +513,26 @@ export default function App() {
     provider !== null &&
     !profileKeys.loading &&
     (!profileKeys.activeHasKey || profileKeys.activeKeychainFault !== null);
+
+  // The cold-start guidance banner (issue #1337): a pure derivation over the
+  // same primitives the submit gate reads. Null while any feed is still
+  // unresolved (the adapter table / the key overlay's first fetch / the
+  // provider feed's one-shot app-config read), so the first painted frame
+  // carries the correct form; session-active renders never derive.
+  // Disappearance is free: the epoch bump + the cache subscription re-derive
+  // on every relevant change.
+  const coldStartGap = isColdStart
+    ? deriveColdStartGap({
+        defaultRuntime: appConfig?.default_runtime,
+        pendingRuntime: effectivePendingRuntime,
+        adapters: startupAdapters,
+        provider,
+        keysLoading: profileKeys.loading,
+        activeHasKey: profileKeys.activeHasKey,
+        activeKeychainFault: profileKeys.activeKeychainFault,
+        keysFetchFault: profileKeys.keysFetchFault,
+      })
+    : null;
 
   // ADR-0092: shell-level bar submit handler. When activeSessionId is
   // non-null, delegate to the active session's handleAsk; when the pane has
@@ -1029,7 +1051,7 @@ export default function App() {
               controls only: the sidebar collapse toggle (left) + nav buttons
               + window controls (right). The session name + workspace toggle
               live in each SessionPane's own header (session-scoped chrome
-              lives with the session). The Open / Save .duck buttons live in
+              lives with the session). The Open / Save recipe.json buttons live in
               the session sidebar (below New session). ADR-0067 (#171): visual
               rules -> inline utilities; the .topbar grid + flex layout shell
               stays in styles.css. Settings mode (ADR-0075 overlay) unmounts
@@ -1154,7 +1176,7 @@ export default function App() {
                             sessionName={s.name}
                             onFirstTurnSettled={syncSessionName}
                             approvalEvents={approvalEvents}
-                            duckPath={s.path}
+                            recipePath={s.path}
                             onRename={renameEntry}
                             disabled={busy}
                             onClose={closeSessionWithCleanup}
@@ -1236,15 +1258,27 @@ export default function App() {
                     }}
                   >
                     {isColdStart && (
-                      <label
-                        htmlFor={COMPOSER_INPUT_ID}
-                        className="cold-start-greeting m-0 text-center text-[1.4rem] font-semibold text-foreground"
-                      >
-                        <FormattedMessage
-                          id="coldStart.greeting"
-                          defaultMessage="What would you like to analyze?"
-                        />
-                      </label>
+                      <>
+                        <label
+                          htmlFor={COMPOSER_INPUT_ID}
+                          className="cold-start-greeting m-0 text-center text-[1.4rem] font-semibold text-foreground"
+                        >
+                          <FormattedMessage
+                            id="coldStart.greeting"
+                            defaultMessage="Ask a data question — get analysis, reports, and insights."
+                          />
+                        </label>
+                        {/* Issue #1337: the guidance banner sits between the
+                            greeting and the bar track -- same slot width as
+                            the bar, no scrollable inside (the slot's wheel
+                            forwarding stays a structural no-op). */}
+                        {coldStartGap !== null && (
+                          <ColdStartGuideBanner
+                            gap={coldStartGap}
+                            onOpenSettings={() => openSettings({ section: "runtime" })}
+                          />
+                        )}
+                      </>
                     )}
                     <div className="shell-bar-track">
                       {/* Issue #836: opaque backdrop over the conversation

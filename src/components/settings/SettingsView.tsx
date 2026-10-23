@@ -363,20 +363,25 @@ export function SettingsView({
   const profilesControlsRef = useRef<ProfilesControls | null>(null);
 
   // Key / test IPCs are owned by pane children whose busy state dies on
-  // unmount, so their in-flight transitions are mirrored here (channel booleans,
-  // set idempotently). The pane reports from the field's IPC finally block,
-  // which runs even after a section switch unmounts the pane -- so the close
-  // guard still blocks until that IPC settles (ADR-0075: close is blocked while
-  // ANY in-flight IPC, not only while the owning pane stays mounted).
-  const paneIpcBusyRef = useRef<Record<IpcChannel, boolean>>({
-    key: false,
-    test: false,
-    sessionsDir: false,
-    probe: false,
-    defaultRuntime: false,
+  // unmount, so their in-flight transitions are mirrored here. The mirror
+  // counts instead of storing booleans: one channel can carry concurrent
+  // IPCs (a list probe beside an editor-form probe, a toggle beside a
+  // delete), and a boolean mirror would let the first settle clear the
+  // channel while another is still in flight. The pane reports from the
+  // field's IPC finally block, which runs even after a section switch
+  // unmounts the pane -- so the close guard still blocks until that IPC
+  // settles (ADR-0075: close is blocked while ANY in-flight IPC, not only
+  // while the owning pane stays mounted).
+  const paneIpcBusyRef = useRef<Record<IpcChannel, number>>({
+    key: 0,
+    test: 0,
+    sessionsDir: 0,
+    probe: 0,
+    userAdapter: 0,
+    defaultRuntime: 0,
   });
   const handlePaneIpcBusy = useCallback<IpcBusyReporter>((channel, busy) => {
-    paneIpcBusyRef.current[channel] = busy;
+    paneIpcBusyRef.current[channel] += busy ? 1 : -1;
   }, []);
 
   // Single close path (ADR-0075): block while any IPC is in flight, flush a
@@ -387,7 +392,7 @@ export function SettingsView({
   async function requestClose(intent?: WorkspaceExitIntent) {
     const ctl = profilesControlsRef.current;
     const paneIpc = paneIpcBusyRef.current;
-    if (commitsInFlightRef.current > 0 || Object.values(paneIpc).some(Boolean) || ctl?.busy) return;
+    if (commitsInFlightRef.current > 0 || Object.values(paneIpc).some((count) => count > 0) || ctl?.busy) return;
     if (ctl && !(await ctl.flush())) return;
     if (ctl?.addDirty) {
       setConfirmDiscardOpen(true);

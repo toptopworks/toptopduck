@@ -1,8 +1,22 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { fireEvent, screen, waitFor } from "@testing-library/react";
 import { LocalCliTab } from "../LocalCliTab";
-import { listAdapters, rescanAdapters, probeAdapter, getAdapterCatalogs } from "../../../api";
-import type { AdapterEntry, AdapterCatalogs, DiscoveredRuntime, ProbeOk } from "../../../types/runtime";
+import {
+  listAdapters,
+  rescanAdapters,
+  probeAdapter,
+  getAdapterCatalogs,
+  listUserAdapters,
+  createUserAdapter,
+  updateUserAdapter,
+} from "../../../api";
+import type {
+  AdapterEntry,
+  AdapterCatalogs,
+  DiscoveredRuntime,
+  ProbeOk,
+  UserAdapterRow,
+} from "../../../types/runtime";
 import { adapterKeys } from "../../../session/queryKeys";
 import { renderSettings } from "./helpers";
 
@@ -22,8 +36,17 @@ vi.mock("../../../api", async (importOriginal) => {
     rescanAdapters: vi.fn(),
     probeAdapter: vi.fn(),
     getAdapterCatalogs: vi.fn(),
+    // The custom-runtimes section mounted inside the tab (issue #1341): its
+    // query must not touch the real Tauri transport in jsdom.
+    listUserAdapters: vi.fn().mockResolvedValue([]),
+    createUserAdapter: vi.fn(),
+    updateUserAdapter: vi.fn(),
+    deleteUserAdapter: vi.fn(),
+    setUserAdapterEnabled: vi.fn(),
   };
 });
+
+vi.mock("@tauri-apps/plugin-dialog", () => ({ open: vi.fn() }));
 
 const mockAdapters: AdapterEntry[] = [
   { id: "qwen-code", display_name: "qwen-code", detected: true, binary_path: "/usr/local/bin/qwen", stream_format: "acp" },
@@ -101,6 +124,19 @@ const claudeAdapters: AdapterEntry[] = [
   { id: "claude-code", display_name: "claude-code", detected: true, binary_path: "/usr/local/bin/claude", stream_format: "claude_stream_json" },
 ];
 
+function makeRow(overrides: Partial<UserAdapterRow> = {}): UserAdapterRow {
+  return {
+    id: "user:11111111",
+    name: "My CLI",
+    command: "my-cli",
+    args: ["--acp"],
+    env: { MY_KEY: "secret" },
+    enabled: true,
+    stream_format: "acp",
+    ...overrides,
+  };
+}
+
 function renderTab(onIpcBusy = vi.fn()) {
   // The returned queryClient lets the catalog-cache tests assert actual
   // setQueryData writes (the probe mirror), not just their render absence.
@@ -124,7 +160,7 @@ const byFoldedText = (fragment: string) =>
  *  adapter). Every detected adapter now offers the button, so a singular
  *  findByRole would be ambiguous. */
 async function clickTestButton() {
-  const buttons = await screen.findAllByRole("button", { name: "Test" });
+  const buttons = await screen.findAllByRole("button", { name: /^Test adapter/ });
   fireEvent.click(buttons[0]);
 }
 
@@ -150,7 +186,7 @@ describe("LocalCliTab probe (issue #534/#535, ADR-0096)", () => {
     renderTab();
     // qwen-code (acp) + codex (codex_event_stream) each get one button; the
     // undetected gemini-cli gets none.
-    const buttons = await screen.findAllByRole("button", { name: "Test" });
+    const buttons = await screen.findAllByRole("button", { name: /^Test adapter/ });
     expect(buttons).toHaveLength(2);
     expect(screen.getByText("gemini-cli")).toBeInTheDocument();
   });
@@ -166,13 +202,13 @@ describe("LocalCliTab probe (issue #534/#535, ADR-0096)", () => {
     renderTab(onIpcBusy);
 
     await clickTestButton();
-    const busy = (await screen.findAllByRole("button", { name: "Test" }))[0];
-    expect(busy).toHaveAttribute("aria-disabled", "true");
+    const busy = (await screen.findAllByRole("button", { name: /^Test adapter/ }))[0];
+    expect(busy).toBeDisabled();
     expect(onIpcBusy).toHaveBeenCalledWith("probe", true);
 
     release(acpOk);
     await waitFor(() => expect(onIpcBusy).toHaveBeenCalledWith("probe", false));
-    expect((await screen.findAllByRole("button", { name: "Test" }))[0]).not.toHaveAttribute("aria-disabled");
+    expect((await screen.findAllByRole("button", { name: /^Test adapter/ }))[0]).not.toHaveAttribute("aria-disabled");
   });
 
   it("reports busy=false even when the probe rejects", async () => {
@@ -182,7 +218,7 @@ describe("LocalCliTab probe (issue #534/#535, ADR-0096)", () => {
 
     await clickTestButton();
     await waitFor(() => expect(onIpcBusy).toHaveBeenCalledWith("probe", false));
-    expect((await screen.findAllByRole("button", { name: "Test" }))[0]).not.toHaveAttribute("aria-disabled");
+    expect((await screen.findAllByRole("button", { name: /^Test adapter/ }))[0]).not.toHaveAttribute("aria-disabled");
   });
 
   // The busy report is a count mirror, not a boolean mirror: the first probe
@@ -200,7 +236,7 @@ describe("LocalCliTab probe (issue #534/#535, ADR-0096)", () => {
     const onIpcBusy = vi.fn();
     renderTab(onIpcBusy);
 
-    const buttons = await screen.findAllByRole("button", { name: "Test" });
+    const buttons = await screen.findAllByRole("button", { name: /^Test adapter/ });
     expect(buttons).toHaveLength(2);
     fireEvent.click(buttons[0]);
     fireEvent.click(buttons[1]);
@@ -209,7 +245,7 @@ describe("LocalCliTab probe (issue #534/#535, ADR-0096)", () => {
 
     // First probe settles: the channel must stay busy (the second is alive).
     released[0](acpOk);
-    await screen.findAllByRole("button", { name: "Test" });
+    await screen.findAllByRole("button", { name: /^Test adapter/ });
     expect(onIpcBusy).not.toHaveBeenCalledWith("probe", false);
 
     // Second settles: now the channel goes quiet.
@@ -233,7 +269,7 @@ describe("LocalCliTab probe (issue #534/#535, ADR-0096)", () => {
     // non-current model all fail these.
     expect(screen.getByText("fake-opus (default)")).toBeInTheDocument();
     expect(screen.getByText("fake-sonnet")).toBeInTheDocument();
-    // Thought levels render as badges with the current value marked
+    // Thinking renders as badges with the current value marked
     // (issue #552 effort badge group).
     expect(screen.getByText("medium (default)")).toBeInTheDocument();
   });
@@ -256,7 +292,7 @@ describe("LocalCliTab probe (issue #534/#535, ADR-0096)", () => {
       await screen.findByText(byFoldedText("fake-opus (default)")),
     ).toBeInTheDocument();
     // No levels means no thought-level row at all -- no label, no "—".
-    expect(screen.queryByText(byFoldedText("Thought levels"))).toBeNull();
+    expect(screen.queryByText(byFoldedText("Thinking"))).toBeNull();
   });
 
   it("renders the honest no-models line and keeps an unmatched current model visible", async () => {
@@ -335,7 +371,7 @@ describe("LocalCliTab probe (issue #534/#535, ADR-0096)", () => {
     renderTab();
 
     // The codex row is the second adapter -- click its button specifically.
-    const buttons = await screen.findAllByRole("button", { name: "Test" });
+    const buttons = await screen.findAllByRole("button", { name: /^Test adapter/ });
     fireEvent.click(buttons[1]);
     expect(
       await screen.findByText(byFoldedText("GPT-5.2 Codex (default):")),
@@ -362,7 +398,7 @@ describe("LocalCliTab probe (issue #534/#535, ADR-0096)", () => {
     });
     renderTab();
 
-    const buttons = await screen.findAllByRole("button", { name: "Test" });
+    const buttons = await screen.findAllByRole("button", { name: /^Test adapter/ });
     fireEvent.click(buttons[1]);
     // The line is the model name alone: no colon, no badge group.
     expect(
@@ -375,7 +411,7 @@ describe("LocalCliTab probe (issue #534/#535, ADR-0096)", () => {
     vi.mocked(probeAdapter).mockResolvedValue(codexUnavailable);
     renderTab();
 
-    const buttons = await screen.findAllByRole("button", { name: "Test" });
+    const buttons = await screen.findAllByRole("button", { name: /^Test adapter/ });
     fireEvent.click(buttons[1]);
     expect(
       await screen.findByText(
@@ -388,7 +424,7 @@ describe("LocalCliTab probe (issue #534/#535, ADR-0096)", () => {
     vi.mocked(probeAdapter).mockResolvedValue(codexEmpty);
     renderTab();
 
-    const buttons = await screen.findAllByRole("button", { name: "Test" });
+    const buttons = await screen.findAllByRole("button", { name: /^Test adapter/ });
     fireEvent.click(buttons[1]);
     expect(
       await screen.findByText(byFoldedText("Started, but no models were reported.")),
@@ -404,7 +440,7 @@ describe("LocalCliTab probe (issue #534/#535, ADR-0096)", () => {
 
     // The claude-code row is the third DETECTED adapter -- click its
     // button (the undetected gemini-cli has none).
-    const buttons = await screen.findAllByRole("button", { name: "Test" });
+    const buttons = await screen.findAllByRole("button", { name: /^Test adapter/ });
     fireEvent.click(buttons[2]);
     expect(
       await screen.findByText(byFoldedText("Claude Sonnet 4 (default):")),
@@ -420,7 +456,7 @@ describe("LocalCliTab probe (issue #534/#535, ADR-0096)", () => {
     vi.mocked(probeAdapter).mockResolvedValue(claudeUnavailable);
     renderTab();
 
-    const buttons = await screen.findAllByRole("button", { name: "Test" });
+    const buttons = await screen.findAllByRole("button", { name: /^Test adapter/ });
     fireEvent.click(buttons[2]);
     expect(
       await screen.findByText(
@@ -434,7 +470,7 @@ describe("LocalCliTab probe (issue #534/#535, ADR-0096)", () => {
     vi.mocked(probeAdapter).mockResolvedValue(claudeEmpty);
     renderTab();
 
-    const buttons = await screen.findAllByRole("button", { name: "Test" });
+    const buttons = await screen.findAllByRole("button", { name: /^Test adapter/ });
     fireEvent.click(buttons[2]);
     expect(
       await screen.findByText(byFoldedText("Started, but no models were reported.")),
@@ -522,7 +558,7 @@ describe("LocalCliTab probe (issue #534/#535, ADR-0096)", () => {
       await screen.findByText(byFoldedText("Handshake with the CLI failed.")),
     ).toBeInTheDocument();
 
-    fireEvent.click((await screen.findAllByRole("button", { name: "Test" }))[0]);
+    fireEvent.click((await screen.findAllByRole("button", { name: /^Test adapter/ }))[0]);
     expect(
       await screen.findByText(byFoldedText("fake-opus (default)")),
     ).toBeInTheDocument();
@@ -552,7 +588,7 @@ describe("LocalCliTab catalog cache (issue #536)", () => {
       },
     });
     renderTab();
-    await screen.findAllByRole("button", { name: "Test" });
+    await screen.findAllByRole("button", { name: /^Test adapter/ });
 
     // Collapsed by default: the directory is not in the DOM.
     expect(screen.queryByText(byFoldedText("fake-opus (default)"))).toBeNull();
@@ -610,7 +646,7 @@ describe("LocalCliTab catalog cache (issue #536)", () => {
   it("renders nothing for an adapter with no cached entry", async () => {
     renderTab();
 
-    await screen.findAllByRole("button", { name: "Test" });
+    await screen.findAllByRole("button", { name: /^Test adapter/ });
     expect(screen.queryByRole("button", { name: "qwen-code" })).toBeNull();
     expect(
       screen.queryByText(byFoldedText("fake-opus (default)")),
@@ -641,7 +677,7 @@ describe("LocalCliTab catalog cache (issue #536)", () => {
     vi.mocked(probeAdapter).mockResolvedValue(codexUnavailable);
     const { queryClient } = renderTab();
 
-    const buttons = await screen.findAllByRole("button", { name: "Test" });
+    const buttons = await screen.findAllByRole("button", { name: /^Test adapter/ });
     fireEvent.click(buttons[1]);
     // The unavailable outcome auto-expanded the row -- the honest line is
     // already visible without a chevron click.
@@ -661,7 +697,7 @@ describe("LocalCliTab catalog cache (issue #536)", () => {
     vi.mocked(probeAdapter).mockResolvedValue(claudeAvailable);
     const { queryClient } = renderTab();
 
-    const buttons = await screen.findAllByRole("button", { name: "Test" });
+    const buttons = await screen.findAllByRole("button", { name: /^Test adapter/ });
     fireEvent.click(buttons[2]);
     await screen.findByText(byFoldedText("Claude Sonnet 4 (default):"));
     const cached = queryClient.getQueryData<AdapterCatalogs>(adapterKeys.catalogs());
@@ -713,7 +749,7 @@ describe("LocalCliTab fold (issue #552)", () => {
   it("renders no chevron for untested rows (idle without cache)", async () => {
     renderTab();
 
-    await screen.findAllByRole("button", { name: "Test" });
+    await screen.findAllByRole("button", { name: /^Test adapter/ });
     expect(screen.queryByRole("button", { name: "qwen-code" })).toBeNull();
     expect(screen.queryByRole("button", { name: "codex" })).toBeNull();
     expect(screen.queryByRole("button", { name: "gemini-cli" })).toBeNull();
@@ -728,7 +764,7 @@ describe("LocalCliTab fold (issue #552)", () => {
 
     await clickTestButton();
     await waitFor(() =>
-      expect(screen.getAllByRole("button", { name: "Test" })[0]).toHaveAttribute("aria-disabled", "true"),
+      expect(screen.getAllByRole("button", { name: /^Test adapter/ })[0]).toBeDisabled(),
     );
     // Mid-flight: the probe has no content yet -- no dead toggle.
     expect(screen.queryByRole("button", { name: "qwen-code" })).toBeNull();
@@ -771,7 +807,7 @@ describe("LocalCliTab fold (issue #552)", () => {
     vi.mocked(probeAdapter).mockResolvedValue(codexAvailable);
     renderTab();
 
-    const buttons = await screen.findAllByRole("button", { name: "Test" });
+    const buttons = await screen.findAllByRole("button", { name: /^Test adapter/ });
     fireEvent.click(buttons[1]);
     expect(
       await screen.findByText(byFoldedText("GPT-5.2 Codex (default):")),
@@ -806,7 +842,7 @@ describe("LocalCliTab fold (issue #552)", () => {
     const chevron = await rowChevron("qwen-code");
     await screen.findByText(byFoldedText("fake-opus (default)"));
 
-    fireEvent.click((await screen.findAllByRole("button", { name: "Test" }))[0]);
+    fireEvent.click((await screen.findAllByRole("button", { name: /^Test adapter/ }))[0]);
     // This case seeds no cache, so the mid-flight fold is empty -- the row
     // stays expanded, the chevron stays mounted (issue #554: an expanded row
     // never unmounts its toggle mid-flight), and the settled result
@@ -840,7 +876,7 @@ describe("LocalCliTab fold (issue #552)", () => {
     // expanded row keeps its chevron and aria-expanded stays true.
     await clickTestButton();
     await waitFor(() =>
-      expect(screen.getAllByRole("button", { name: "Test" })[0]).toHaveAttribute("aria-disabled", "true"),
+      expect(screen.getAllByRole("button", { name: /^Test adapter/ })[0]).toBeDisabled(),
     );
     expect(chevron).toBeInTheDocument();
     expect(chevron).toHaveAttribute("aria-expanded", "true");
@@ -880,7 +916,7 @@ describe("LocalCliTab fold (issue #552)", () => {
 
     await clickTestButton();
     await waitFor(() =>
-      expect(screen.getAllByRole("button", { name: "Test" })[0]).toHaveAttribute("aria-disabled", "true"),
+      expect(screen.getAllByRole("button", { name: /^Test adapter/ })[0]).toHaveAttribute("aria-disabled", "true"),
     );
     // Badge layer: the stale count is gone mid-flight (the pre-existing
     // contract). Fold layer: the stale catalog stays.
@@ -936,7 +972,7 @@ describe("LocalCliTab fold (issue #552)", () => {
     vi.mocked(probeAdapter).mockResolvedValue(codexAvailable);
     renderTab();
 
-    const buttons = await screen.findAllByRole("button", { name: "Test" });
+    const buttons = await screen.findAllByRole("button", { name: /^Test adapter/ });
     fireEvent.click(buttons[1]);
     expect(await screen.findByText("2 models")).toBeInTheDocument();
     expect(screen.queryByText("0 models")).toBeNull();
@@ -948,10 +984,10 @@ describe("LocalCliTab fold (issue #552)", () => {
 
     await clickTestButton();
     const badge = await screen.findByText("Test failed");
-    expect(badge.closest("[data-slot=badge]")).toHaveClass("bg-destructive");
+    expect(badge.closest("[data-slot=name-badge]")).toHaveClass("bg-destructive");
     // The Test buttons stay beside the badge (the badge replaces the N
     // models summary slot, never the actions).
-    expect((await screen.findAllByRole("button", { name: "Test" })).length).toBeGreaterThan(0);
+    expect((await screen.findAllByRole("button", { name: /^Test adapter/ })).length).toBeGreaterThan(0);
   });
 
   // A failed probe outranks the cached count on every surface: the red badge
@@ -990,7 +1026,7 @@ describe("LocalCliTab fold (issue #552)", () => {
     vi.mocked(probeAdapter).mockResolvedValue(codexUnavailable);
     renderTab();
 
-    const buttons = await screen.findAllByRole("button", { name: "Test" });
+    const buttons = await screen.findAllByRole("button", { name: /^Test adapter/ });
     fireEvent.click(buttons[1]);
     await screen.findByRole("button", { name: "codex", expanded: true });
     expect(screen.queryByText("Test failed")).toBeNull();
@@ -1001,7 +1037,7 @@ describe("LocalCliTab fold (issue #552)", () => {
     vi.mocked(probeAdapter).mockResolvedValue(codexEmpty);
     renderTab();
 
-    const buttons = await screen.findAllByRole("button", { name: "Test" });
+    const buttons = await screen.findAllByRole("button", { name: /^Test adapter/ });
     fireEvent.click(buttons[1]);
     await screen.findByRole("button", { name: "codex", expanded: true });
     expect(screen.queryByText("0 models")).toBeNull();
@@ -1028,7 +1064,7 @@ describe("LocalCliTab fold (issue #552)", () => {
     expect(await screen.findByText("2 models")).toBeInTheDocument();
     await clickTestButton();
     await waitFor(() =>
-      expect(screen.getAllByRole("button", { name: "Test" })[0]).toHaveAttribute("aria-disabled", "true"),
+      expect(screen.getAllByRole("button", { name: /^Test adapter/ })[0]).toHaveAttribute("aria-disabled", "true"),
     );
     expect(screen.queryByText("2 models")).toBeNull();
     expect(screen.queryByText("Test failed")).toBeNull();
@@ -1055,7 +1091,7 @@ describe("LocalCliTab fold (issue #552)", () => {
     });
     renderTab();
 
-    const buttons = await screen.findAllByRole("button", { name: "Test" });
+    const buttons = await screen.findAllByRole("button", { name: /^Test adapter/ });
     fireEvent.pointerEnter(buttons[0], { pointerType: "mouse" });
     fireEvent.pointerMove(buttons[0], { pointerType: "mouse" });
     const tooltip = await screen.findByRole("tooltip");
@@ -1074,7 +1110,7 @@ describe("LocalCliTab fold (issue #552)", () => {
   it("shows no tooltip when the row has no cached entry", async () => {
     renderTab();
 
-    const buttons = await screen.findAllByRole("button", { name: "Test" });
+    const buttons = await screen.findAllByRole("button", { name: /^Test adapter/ });
     fireEvent.pointerEnter(buttons[0], { pointerType: "mouse" });
     fireEvent.pointerMove(buttons[0], { pointerType: "mouse" });
     expect(screen.queryByRole("tooltip")).toBeNull();
@@ -1098,7 +1134,7 @@ describe("LocalCliTab fold (issue #552)", () => {
     );
     renderTab();
 
-    const buttons = await screen.findAllByRole("button", { name: "Test" });
+    const buttons = await screen.findAllByRole("button", { name: /^Test adapter/ });
     fireEvent.click(buttons[0]);
     expect(buttons[0]).toHaveAttribute("aria-disabled", "true");
     fireEvent.pointerEnter(buttons[0], { pointerType: "mouse" });
@@ -1120,7 +1156,7 @@ describe("LocalCliTab fold (issue #552)", () => {
     ).toBeInTheDocument();
     // The row's label renders positively too -- a stray deletion of the
     // label span would otherwise leave only the badges pinned.
-    expect(screen.getByText(byFoldedText("Thought levels"))).toBeInTheDocument();
+    expect(screen.getByText(byFoldedText("Thinking"))).toBeInTheDocument();
     // Three badges, one per level; the current value carries the (default)
     // annotation shape only for marked entries.
     expect(await screen.findByText("low")).toBeInTheDocument();
@@ -1132,7 +1168,7 @@ describe("LocalCliTab fold (issue #552)", () => {
     vi.mocked(probeAdapter).mockResolvedValue(codexAvailable);
     renderTab();
 
-    const buttons = await screen.findAllByRole("button", { name: "Test" });
+    const buttons = await screen.findAllByRole("button", { name: /^Test adapter/ });
     fireEvent.click(buttons[1]);
     expect(
       await screen.findByText(byFoldedText("GPT-5.2 Codex (default):")),
@@ -1143,5 +1179,333 @@ describe("LocalCliTab fold (issue #552)", () => {
     expect(screen.getByText("low")).toBeInTheDocument();
     expect(screen.getByText("low (default)")).toBeInTheDocument();
     expect(screen.getByText("high")).toBeInTheDocument();
+  });
+});
+
+// The detected card's scope (issue #1346): the merged `list_adapters`
+// projection also carries the enabled user rows (the picker's view), but
+// the card is the built-ins' face -- the user rows' full face (management +
+// probe) lives in the registry section below, and rendering both would
+// duplicate the row per enable toggle.
+describe("LocalCliTab detected-card scope (issue #1346)", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.mocked(listAdapters).mockResolvedValue(mockAdapters);
+    vi.mocked(rescanAdapters).mockResolvedValue(mockAdapters);
+    vi.mocked(getAdapterCatalogs).mockResolvedValue({});
+    vi.mocked(listUserAdapters).mockResolvedValue([]);
+  });
+
+  it("keeps the detected card to the built-ins; the registry owns the user rows", async () => {
+    vi.mocked(listAdapters).mockResolvedValue([
+      ...mockAdapters,
+      {
+        id: "user:11111111",
+        display_name: "My CLI",
+        detected: true,
+        binary_path: "C:/bin/my-cli",
+        stream_format: "acp",
+      },
+    ]);
+    vi.mocked(listUserAdapters).mockResolvedValue([makeRow()]);
+    renderTab();
+
+    await screen.findAllByRole("button", { name: /^Test adapter/ });
+    // The built-in card still renders its rows...
+    expect(screen.getByText("qwen-code")).toBeInTheDocument();
+    // ...and the user row renders ONCE: the registry row. The merged card
+    // must not duplicate it (the pre-fix leak rendered the name twice).
+    expect(screen.getAllByText("My CLI")).toHaveLength(1);
+    expect(screen.getAllByText(/my-cli --acp/)).toHaveLength(1);
+  });
+});
+
+// The custom-runtime editor (issue #1341): the tab-header Add button swaps
+// the WHOLE tab for the full-pane editor form (the CliToolForm posture) --
+// the form's gating, the parsed create draft, the persisted-row test
+// surface, and the back-link round trip.
+describe("LocalCliTab custom CLI adapter editor (issue #1341)", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.mocked(listAdapters).mockResolvedValue([]);
+    vi.mocked(getAdapterCatalogs).mockResolvedValue({});
+    vi.mocked(listUserAdapters).mockResolvedValue([]);
+  });
+
+  it("swaps the whole tab for the editor form and back via the back link", async () => {
+    renderTab();
+    fireEvent.click(await screen.findByRole("button", { name: /^Add$/ }));
+    // The tab list unmounts: the form replaces it (the CliToolForm posture).
+    expect(
+      screen.queryByText(/Detected CLI adapters/i),
+    ).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: /Back to CLI list/i }));
+    expect(
+      await screen.findByText(/Detected CLI adapters/i),
+    ).toBeInTheDocument();
+  });
+
+  it("gates the Add button on a valid shape (the McpServerForm posture)", async () => {
+    renderTab();
+    fireEvent.click(await screen.findByRole("button", { name: /^Add$/ }));
+
+    // The button itself is the validity signal: disabled until a name, a
+    // single-token program, and balanced argument quotes all hold.
+    const save = screen.getByRole("button", { name: /^Add$/ });
+    expect(save).toBeDisabled();
+
+    fireEvent.change(screen.getByLabelText("Name"), {
+      target: { value: "My CLI" },
+    });
+    fireEvent.change(screen.getByLabelText("Program"), {
+      target: { value: "my cli" },
+    });
+    expect(save).toBeDisabled();
+
+    fireEvent.change(screen.getByLabelText("Program"), {
+      target: { value: "my-cli" },
+    });
+    expect(save).toBeEnabled();
+    // The probe needs a persisted row, so Test stays disabled in create mode.
+    expect(screen.getByRole("button", { name: /^Test$/ })).toBeDisabled();
+
+    // An unbalanced quote in the arguments disables it again.
+    fireEvent.change(screen.getByLabelText("Arguments"), {
+      target: { value: "\"never closed" },
+    });
+    expect(save).toBeDisabled();
+  });
+
+  it("saves the parsed draft (quote-grouped args, env record) via create", async () => {
+    const saved = makeRow({ args: ["--acp", "two words"], env: { K: "v" } });
+    vi.mocked(createUserAdapter).mockResolvedValueOnce(saved);
+    renderTab();
+    fireEvent.click(await screen.findByRole("button", { name: /^Add$/ }));
+
+    const textboxes = screen.getAllByRole("textbox");
+    fireEvent.change(textboxes[0], { target: { value: "My CLI" } });
+    fireEvent.change(textboxes[1], { target: { value: "my-cli" } });
+    fireEvent.change(textboxes[2], {
+      target: { value: "--acp \"two words\"" },
+    });
+    // One env row: KEY / value. The env section starts collapsed when it
+    // has no rows; expanding it seeds the blank row -- named by its label
+    // without clicking Add, so the seeding itself stays pinned. Anchored:
+    // the unanchored form also matches the FieldHint info button.
+    fireEvent.click(
+      screen.getByRole("button", { name: /^Environment variables$/ }),
+    );
+    fireEvent.change(screen.getByLabelText("Env name (row 1)"), {
+      target: { value: "K" },
+    });
+    fireEvent.change(screen.getByLabelText("Env value (row 1)"), {
+      target: { value: "v" },
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: /^Add$/ }));
+    await waitFor(() => expect(createUserAdapter).toHaveBeenCalledTimes(1));
+    expect(createUserAdapter).toHaveBeenCalledWith({
+      name: "My CLI",
+      command: "my-cli",
+      args: ["--acp", "two words"],
+      env: { K: "v" },
+    });
+  });
+
+  it("removes an env row and saves an empty record", async () => {
+    // The remove seam rides the shared EnvRowsEditor (issue #1343): deleting
+    // the last row lands on the empty-state hint and the save drops the env
+    // key entirely instead of persisting the seeded-but-emptied row.
+    const saved = makeRow({ env: {} });
+    vi.mocked(createUserAdapter).mockResolvedValueOnce(saved);
+    renderTab();
+    fireEvent.click(await screen.findByRole("button", { name: /^Add$/ }));
+
+    const textboxes = screen.getAllByRole("textbox");
+    fireEvent.change(textboxes[0], { target: { value: "My CLI" } });
+    fireEvent.change(textboxes[1], { target: { value: "my-cli" } });
+    fireEvent.change(textboxes[2], { target: { value: "--acp" } });
+    fireEvent.click(
+      screen.getByRole("button", { name: /^Environment variables$/ }),
+    );
+    fireEvent.change(screen.getByLabelText("Env name (row 1)"), {
+      target: { value: "K" },
+    });
+    fireEvent.change(screen.getByLabelText("Env value (row 1)"), {
+      target: { value: "v" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Remove env (row 1)" }));
+    expect(await screen.findByText(/No environment variables/i)).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: /^Add$/ }));
+    await waitFor(() => expect(createUserAdapter).toHaveBeenCalledTimes(1));
+    expect(createUserAdapter).toHaveBeenCalledWith(
+      expect.objectContaining({ env: {} }),
+    );
+  });
+
+  it("shows the launch-failure wording when the probe rejects NotDetected", async () => {
+    vi.mocked(listUserAdapters).mockResolvedValue([makeRow()]);
+    // A fresh Error instance per rejection (the once-chain pitfall).
+    vi.mocked(probeAdapter).mockRejectedValueOnce({
+      kind: "NotDetected",
+      data: "user:11111111",
+    });
+    renderTab();
+    fireEvent.click(await screen.findByRole("button", { name: "Edit adapter My CLI" }));
+    fireEvent.click(screen.getByRole("button", { name: /^Test$/ }));
+    expect(
+      await screen.findByText(/Could not find or start the program/i),
+    ).toBeInTheDocument();
+    expect(probeAdapter).toHaveBeenCalledWith("user:11111111");
+  });
+
+  it("degrades an unknown probe reject kind to the unreachable wording", async () => {
+    // Frontend/backend skew: a reject carrying a kind the frontend does not
+    // know must NOT pass the narrowing as a structured ProbeError.
+    vi.mocked(listUserAdapters).mockResolvedValue([makeRow()]);
+    vi.mocked(probeAdapter).mockRejectedValueOnce({ kind: "FutureKind" });
+    renderTab();
+    fireEvent.click(await screen.findByRole("button", { name: "Edit adapter My CLI" }));
+    fireEvent.click(screen.getByRole("button", { name: /^Test$/ }));
+    expect(
+      await screen.findByText(/the connection failed/i),
+    ).toBeInTheDocument();
+  });
+
+  // Issue #1346 AC: the form's Test result must survive the close -- the
+  // probe core mirrors the entry into the catalogs query cache, so the
+  // registry row shows the badge the moment the list renders again, with
+  // no second probe IPC.
+  it("mirrors the form's Test into the registry row face (no re-probe on return)", async () => {
+    vi.mocked(listUserAdapters).mockResolvedValue([makeRow()]);
+    vi.mocked(probeAdapter).mockResolvedValueOnce({
+      kind: "acp",
+      data: {
+        discovered: {
+          models: ["fake-opus", "fake-sonnet"],
+          current_model: "fake-opus",
+          thought_levels: [],
+          current_thought_level: null,
+          adapter_id: "user:11111111",
+        },
+      },
+    });
+    renderTab();
+    fireEvent.click(await screen.findByRole("button", { name: "Edit adapter My CLI" }));
+    fireEvent.click(screen.getByRole("button", { name: /^Test$/ }));
+    expect(await screen.findByText("Connected")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: /Back to CLI list/i }));
+    // The row face reads the mirrored cache entry -- badge visible
+    // immediately, one probe call total.
+    expect(await screen.findByText("2 models")).toBeInTheDocument();
+    expect(probeAdapter).toHaveBeenCalledTimes(1);
+  });
+
+  it("closes back to the list after a save (create or update)", async () => {
+    const saved = makeRow({ args: ["--acp", "two words"] });
+    vi.mocked(createUserAdapter).mockResolvedValueOnce(saved);
+    // The refetch after the invalidation reports the saved row.
+    vi.mocked(listUserAdapters).mockResolvedValue([saved]);
+    renderTab();
+    fireEvent.click(await screen.findByRole("button", { name: /^Add$/ }));
+
+    fireEvent.change(screen.getByLabelText("Name"), {
+      target: { value: "My CLI" },
+    });
+    fireEvent.change(screen.getByLabelText("Program"), {
+      target: { value: "my-cli" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: /^Add$/ }));
+    await waitFor(() => expect(createUserAdapter).toHaveBeenCalledTimes(1));
+
+    // The form closes and the list renders the saved row.
+    expect(
+      await screen.findByText(/Detected CLI adapters/i),
+    ).toBeInTheDocument();
+    expect(await screen.findByText("My CLI")).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: /Back to CLI list/i }),
+    ).not.toBeInTheDocument();
+
+    // An edit saves through update and closes the same way.
+    fireEvent.click(await screen.findByRole("button", { name: "Edit adapter My CLI" }));
+    fireEvent.change(screen.getByLabelText("Name"), {
+      target: { value: "Renamed" },
+    });
+    const renamed = makeRow({ name: "Renamed", args: ["--acp", "two words"] });
+    vi.mocked(updateUserAdapter).mockResolvedValueOnce(renamed);
+    vi.mocked(listUserAdapters).mockResolvedValue([renamed]);
+    fireEvent.click(screen.getByRole("button", { name: /^Save$/ }));
+    await waitFor(() =>
+      expect(updateUserAdapter).toHaveBeenCalledWith("user:11111111", {
+        name: "Renamed",
+        command: "my-cli",
+        args: ["--acp", "two words"],
+        env: { MY_KEY: "secret" },
+      }),
+    );
+    expect(await screen.findByText("Renamed")).toBeInTheDocument();
+    expect(createUserAdapter).toHaveBeenCalledTimes(1);
+  });
+
+  it("saves an edit through updateUserAdapter with the row's id", async () => {
+    vi.mocked(listUserAdapters).mockResolvedValue([makeRow()]);
+    vi.mocked(updateUserAdapter).mockResolvedValueOnce(
+      makeRow({ name: "Renamed" }),
+    );
+    renderTab();
+    fireEvent.click(await screen.findByRole("button", { name: "Edit adapter My CLI" }));
+
+    fireEvent.change(screen.getByDisplayValue("My CLI"), {
+      target: { value: "Renamed" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: /^Save$/ }));
+    await waitFor(() =>
+      expect(updateUserAdapter).toHaveBeenCalledWith("user:11111111", {
+        name: "Renamed",
+        command: "my-cli",
+        args: ["--acp"],
+        env: { MY_KEY: "secret" },
+      }),
+    );
+    expect(createUserAdapter).not.toHaveBeenCalled();
+  });
+
+  it("keeps the form open and surfaces the error when the save rejects", async () => {
+    vi.mocked(createUserAdapter).mockRejectedValueOnce(
+      new Error("write refused"),
+    );
+    renderTab();
+    fireEvent.click(await screen.findByRole("button", { name: /^Add$/ }));
+
+    fireEvent.change(screen.getByLabelText("Name"), {
+      target: { value: "My CLI" },
+    });
+    fireEvent.change(screen.getByLabelText("Program"), {
+      target: { value: "my-cli" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: /^Add$/ }));
+    // A rejected write lands on the form's one error line and the form
+    // stays mounted -- the draft is not lost behind a close.
+    expect(await screen.findByText(/write refused/i)).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: /Back to CLI list/i }),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByText(/Detected CLI adapters/i),
+    ).not.toBeInTheDocument();
+  });
+
+  it("surfaces a failed command browse on the form's error line", async () => {
+    const { open } = await import("@tauri-apps/plugin-dialog");
+    vi.mocked(open).mockRejectedValueOnce(new Error("dialog unavailable"));
+    renderTab();
+    fireEvent.click(await screen.findByRole("button", { name: /^Add$/ }));
+    fireEvent.click(screen.getByRole("button", { name: /Browse/i }));
+    expect(
+      await screen.findByText(/dialog unavailable/i),
+    ).toBeInTheDocument();
   });
 });

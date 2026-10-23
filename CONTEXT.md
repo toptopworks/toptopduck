@@ -64,13 +64,13 @@ LLM 接入的线协议，支持两种——**anthropic**（Anthropic Messages �
 _Avoid_: 提供商(provider)、API、后端(backend)
 
 **接入档案 (Profile)**:
-一套命名的 LLM 接入组合 = 协议 + endpoint + model + key，是用户在设置里创建、命名的单元，仅驱动内置运行时。档案集**可为空**——仅使用外部 CLI 运行时的用户可不配置任何接入档案，空档案集是合法持久状态、非待修复异常（ADR-0098）。非机密部分（协议/endpoint/model/展示名）住 app-config（ADR-0038），key 住 OS keychain 的 per-profile slot（ADR-0029）；活跃 Profile **至多一个**、零档案时无活跃，不进 `.duck`（ADR-0034/0036）。它是机器级接入偏好，与具体分析正交，与默认运行时相互独立。
+一套命名的 LLM 接入组合 = 协议 + endpoint + model + key，是用户在设置里创建、命名的单元，仅驱动内置运行时。档案集**可为空**——仅使用外部 CLI 运行时的用户可不配置任何接入档案，空档案集是合法持久状态、非待修复异常（ADR-0098）。非机密部分（协议/endpoint/model/展示名）住 app-config（ADR-0038），key 住 OS keychain 的 per-profile slot（ADR-0029）；活跃 Profile **至多一个**、零档案时无活跃，不进 recipe 文件（ADR-0034/0036）。它是机器级接入偏好，与具体分析正交，与默认运行时相互独立。
 _Avoid_: 账号(account)、连接(connection)、配置项(config item)
 
 ### Agent 执行
 
 **运行时 (Runtime)**:
-一次轮次的执行引擎：接收（提问 + 窗口化上下文 + 工具面），产出执行轨迹与终局答复。两种并存且可换——**内置**（app 自有 agent 循环，由活跃 BYOK 档案驱动）与**外部**（app 拉起的第三方 CLI agent 进程）。运行时**无状态**：不持任何权威会话状态（thread、窗口、recipe 全归 app）；进程存活只是传输层优化，不是状态边界。会话内换运行时是**必要的可选操作**——任意轮次边界可换、同一条 thread 可混跑，但非常态路径；每轮在 thread 中携带其执行运行时的归属。内置运行时的轮内可派生**子智能体**（见该词条）——嵌套执行体不构成新运行时段、不动轮次归属与计步序（见 ADR-0117）。
+一次轮次的执行引擎：接收（提问 + 窗口化上下文 + 工具面），产出执行轨迹与终局答复。两种并存且可换——**内置**（app 自有 agent 循环，由活跃 BYOK 档案驱动）与**外部**（app 拉起的第三方 CLI agent 进程）。外部 CLI 的适配器来源两种——**内置适配器表**（随版策展，编译期定义）与**用户注册的自定义运行时**（`user-adapters.json`，含 command / args / env / enabled，第一刀限 ACP 兼容 CLI，见 ADR-0134）——picker 合并投影两源、统一字母序，两者同等对待。运行时**无状态**：不持任何权威会话状态（thread、窗口、recipe 全归 app）；进程存活只是传输层优化，不是状态边界。会话内换运行时是**必要的可选操作**——任意轮次边界可换、同一条 thread 可混跑，但非常态路径；每轮在 thread 中携带其执行运行时的归属。内置运行时的轮内可派生**子智能体**（见该词条）——嵌套执行体不构成新运行时段、不动轮次归属与计步序（见 ADR-0117）。
 _Avoid_: 提供商(provider)——那是协议档案；引擎(engine)——易与 DuckDB 引擎混；agent——太泛
 
 **默认运行时 (Default Runtime)**:

@@ -83,6 +83,11 @@ export const adapterKeys = {
    *  probe writes the entry back via setQueryData (the backend cache write
    *  and this key update are the same event). */
   catalogs: () => ["adapters", "catalogs"] as const,
+  /** User-defined adapter registry (issue #1341): the management-face list
+   *  (every user row, disabled included). CRUD mutations invalidate BOTH
+   *  this and `all()` -- the picker projection is the merged view, so a row
+   *  change must land on both surfaces at once. */
+  user: () => ["adapters", "user"] as const,
   /** One adapter's startup model-posture backfill entry (ADR-0100, issue
    *  #581): the model + thought-level a NEW session on that adapter starts
    *  with. Keyed per adapter id (postures are adapter-namespaced, Decision

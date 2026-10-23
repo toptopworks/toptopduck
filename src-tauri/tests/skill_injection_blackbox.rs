@@ -634,7 +634,7 @@ fn agent_invocation_survives_a_failed_turn_and_a_restart() {
     put_skill(&skills_root, "sql-coach", "Coach SQL.", "Coach the SQL.\n");
 
     let duck_dir = tempfile::tempdir().unwrap();
-    let duck_path = duck_dir.path().join("mid.duck");
+    let recipe_path = duck_dir.path().join("mid.json");
 
     let provider = InvokeThenFailProvider {
         calls: std::sync::atomic::AtomicUsize::new(0),
@@ -646,7 +646,7 @@ fn agent_invocation_survives_a_failed_turn_and_a_restart() {
     .expect("session");
     session.set_discovery_snapshot(vec!["sql-coach".to_string()]);
     session
-        .bind_duck(duck_path.clone(), "mid".into())
+        .bind_recipe(recipe_path.clone(), "mid".into())
         .expect("bind");
     let fragments = resolve_prompt_fragments(&skills_root, &session.discovery_snapshot());
 
@@ -700,8 +700,8 @@ fn agent_invocation_survives_a_failed_turn_and_a_restart() {
     // The invoked fold re-derives off the persisted records after a restart.
     // The live session must drop first: it owns the canonical key.
     drop(session);
-    let resumed = Session::open_duck(
-        &duck_path,
+    let resumed = Session::open_recipe(
+        &recipe_path,
         Arc::new(toptopduck_lib::CancelToken::new()),
         Box::new(toptopduck_lib::UnwiredProvider),
         Default::default(),

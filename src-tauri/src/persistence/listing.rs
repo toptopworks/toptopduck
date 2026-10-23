@@ -1,24 +1,26 @@
 //! Session-listing metadata (ADR-0060/0061/0089, issue #76): derive the
-//! left-sidebar / cold-start session list from the persisted `.duck` recipes.
+//! left-sidebar / cold-start session list from the persisted `recipe.json` recipes.
 //! ADR-0089 moved the data source from the app-config `recent_files` list to a
 //! managed sessions directory scan (`scan_sessions_dir`), but every metadata
 //! field still comes from either the recipe (ADR-0034) or the file itself.
 //!
-//! ## duck_path = the `.duck` file path
+//! ## recipe_path = the `recipe.json` file path
 //!
 //! A runtime [`crate::SessionId`] is a UUID minted when a session enters the
 //! in-memory [`crate::SessionStore`] and dies with it; it is NOT persisted. The
 //! recipe (ADR-0034) carries no id field either. So the only stable, portable
-//! identity of a persisted session is its **file path**. `duck_path` here is
+//! identity of a persisted session is its **file path**. `recipe_path` here is
 //! that path string (renamed from `session_id` in issue #462 to disambiguate
 //! from the runtime UUID). The frontend uses it as the stable sidebar key;
 //! clicking a session mints a FRESH runtime id via `create_session` and resumes
-//! the path into it (`open_duck(new_id, path)`), so the list-sessions path and
+//! the path into it (`open_recipe(new_id, path)`), so the list-sessions path and
 //! the runtime id are deliberately different things.
 
 use crate::persistence::organization;
 use crate::persistence::recipe::RecipeEntry;
-use crate::persistence::{read_duck, LoadError, Recipe};
+use crate::persistence::{
+    read_recipe, LoadError, Recipe, LEGACY_RECIPE_FILE_NAME, RECIPE_FILE_NAME,
+};
 use std::path::{Path, PathBuf};
 use std::sync::RwLock;
 use std::time::UNIX_EPOCH;
@@ -27,7 +29,8 @@ use serde::{Deserialize, Serialize};
 use tauri::Manager; // for AppHandle::path()
 
 /// The root directory of all managed sessions (ADR-0089, issue #452). Each
-/// session lives in a per-session subdirectory `{uuid}/session.duck`. Resolved
+/// session lives in a per-session subdirectory `{uuid}/recipe.json` (the
+/// pre-0136 `session.duck` name stays forever accepted, ADR-0136 D5). Resolved
 /// at setup from `<Documents>/TOPTOPDuck/sessions/` (or the app-config
 /// `sessions_dir` override) and managed as Tauri state so every session-scoped
 /// command shares one path source. The inner [`RwLock`] lets
@@ -86,19 +89,19 @@ pub(crate) fn default_sessions_root(app: &tauri::AppHandle) -> PathBuf {
     }
 }
 
-/// Typed `.duck` file path — the stable identity of a persisted session
+/// Typed recipe file path — the stable identity of a persisted session
 /// (ADR-0060/0061, issue #462). Distinct from the runtime [`SessionId`] (a
-/// UUID): this is the persisted path the frontend passes back to `open_duck`.
+/// UUID): this is the persisted path the frontend passes back to `open_recipe`.
 /// Transparent serde keeps the wire format a bare string so the frontend type
 /// stays `string`. The inner field is private; construction goes through
-/// [`DuckPath::new`] and access through [`DuckPath::as_str`] so future
-/// validation (non-empty, `.duck` suffix) can be added without breaking call
+/// [`RecipePath::new`] and access through [`RecipePath::as_str`] so future
+/// validation (non-empty, `recipe.json` suffix) can be added without breaking call
 /// sites.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(transparent)]
-pub struct DuckPath(String);
+pub struct RecipePath(String);
 
-impl DuckPath {
+impl RecipePath {
     /// Construct from a path string. No validation yet — any string is
     /// accepted (the only producer is `build_session_metadata`, which feeds a
     /// verified disk path).
@@ -118,10 +121,10 @@ impl DuckPath {
 /// grouped by relative time).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SessionMetadata {
-    /// The stable identity of a persisted session: the `.duck` file path (see
+    /// The stable identity of a persisted session: the recipe file path (see
     /// the module doc for why this is not a UUID). The frontend passes it back
-    /// to `open_duck` to resume.
-    pub duck_path: DuckPath,
+    /// to `open_recipe` to resume.
+    pub recipe_path: RecipePath,
     /// User-facing name: the recipe's `session_name` when the user named the
     /// session, otherwise the first source's display label (ADR-0060: the
     /// default name is the first source's name). Empty only when the session
@@ -129,7 +132,7 @@ pub struct SessionMetadata {
     pub display_name: String,
     /// File modification time, milliseconds since the Unix epoch. The recipe
     /// deliberately stores no timestamps (ADR-0036), so the mtime comes from the
-    /// filesystem -- the `.duck` is rewritten atomically on every terminal
+    /// filesystem -- the `recipe.json` is rewritten atomically on every terminal
     /// turn / source event, so it tracks the last real change.
     pub last_modified_at: i64,
     /// The working-set summary rendered as the sidebar entry's sub-line
@@ -166,7 +169,7 @@ pub struct SourceSummary {
     pub turn_count: usize,
 }
 
-/// Build the session list from a set of `.duck` file paths (ADR-0060/0061).
+/// Build the session list from a set of `recipe.json` file paths (ADR-0060/0061).
 /// A path that cannot be read (file moved/deleted, foreign format, corrupt) is
 /// SKIPPED -- it is no longer a persisted session, and listing it with
 /// fabricated metadata would be a silent lie (ADR-0017).
@@ -182,7 +185,8 @@ pub fn list_session_metadata(paths: &[String]) -> Vec<SessionMetadata> {
 }
 
 /// Scan a managed sessions directory (ADR-0089) for per-session subdirectories
-/// `{uuid}/session.duck`. Returns one `SessionMetadata` per readable recipe,
+/// `{uuid}/recipe.json` (or the legacy `session.duck`, ADR-0136 D5). Returns one
+/// `SessionMetadata` per readable recipe,
 /// joined with the organization sidecar (ADR-0127): pinned rows first in
 /// sidecar array order, then the rest by mtime descending (most-recent first)
 /// so the sidebar's default ordering is immediately useful. Archived rows are
@@ -190,7 +194,7 @@ pub fn list_session_metadata(paths: &[String]) -> Vec<SessionMetadata> {
 /// never see them. A missing / unreadable directory yields an empty vec -- the
 /// app boots cleanly on a first launch with no sessions.
 ///
-/// Each subdirectory that does not contain a readable `session.duck` is
+/// Each subdirectory that does not contain a readable recipe file is
 /// silently skipped (ADR-0017 honest-skip) -- it may be a partial / stale
 /// directory, not a session the sidebar should fabricate metadata for.
 pub fn scan_sessions_dir(dir: &Path) -> Vec<SessionMetadata> {
@@ -223,21 +227,28 @@ fn scan_sessions_dir_scoped(dir: &Path, include_archived: bool) -> Vec<SessionMe
                 return None;
             }
             // Organization keys survive an unreadable recipe: the DIRECTORY
-            // is the session identity (ADR-0089), so a corrupt .duck
+            // is the session identity (ADR-0089), so a corrupt recipe.json
             // (honest-skip below) must not sweep its pin/archive state --
             // only a missing directory makes a key orphaned.
             if let Some(name) = session_dir.file_name().and_then(|n| n.to_str()) {
                 known.insert(name.to_owned());
             }
-            let duck = session_dir.join("session.duck");
-            build_session_metadata(&duck)
+            // ADR-0136 D5: the recipe filename is `recipe.json` for new
+            // sessions; the old `session.duck` stays forever accepted (no
+            // in-place migration). New name first -- it is the one every new
+            // write uses.
+            let recipe = [RECIPE_FILE_NAME, LEGACY_RECIPE_FILE_NAME]
+                .iter()
+                .map(|name| session_dir.join(name))
+                .find(|p| p.exists())?;
+            build_session_metadata(&recipe)
         })
         .collect();
     // Join the organization sidecar (ADR-0127): the scan set also drives the
     // orphan-key sweep, so the sidecar stays bounded and self-heals.
     let org = organization::load_and_sweep(dir, &known);
     for m in &mut metas {
-        if let Some(uuid) = organization::session_dir_uuid(m.duck_path.as_str()) {
+        if let Some(uuid) = organization::session_dir_uuid(m.recipe_path.as_str()) {
             m.pinned = org.pinned.contains(&uuid);
             m.archived = org.archived.contains(&uuid);
         }
@@ -260,14 +271,14 @@ fn scan_sessions_dir_scoped(dir: &Path, include_archived: bool) -> Vec<SessionMe
     // Cached: the key re-derives the uuid from the duck path (a parse plus
     // a String allocation), which no comparison should repeat.
     metas.sort_by_cached_key(|m| {
-        organization::session_dir_uuid(m.duck_path.as_str())
+        organization::session_dir_uuid(m.recipe_path.as_str())
             .and_then(|uuid| pinned_rank.get(uuid.as_str()).copied())
             .unwrap_or(usize::MAX)
     });
     metas
 }
 
-/// Derive one session's metadata from its `.duck` path. Returns `None` on any
+/// Derive one session's metadata from its `recipe.json` path. Returns `None` on any
 /// read / stat failure (the file is absent or not a readable v1 recipe) so the
 /// caller can skip it without a panic or a fabricated entry. An `Io` failure
 /// (file moved or deleted) is dropped silently -- ADR-0017 honest-skip, the
@@ -278,7 +289,7 @@ fn scan_sessions_dir_scoped(dir: &Path, include_archived: bool) -> Vec<SessionMe
 /// vanishing without a trace. The list never fabricates metadata either way.
 fn build_session_metadata(path: &Path) -> Option<SessionMetadata> {
     let path_str = path.to_string_lossy();
-    let recipe = match read_duck(path) {
+    let recipe = match read_recipe(path) {
         Ok(r) => r,
         // ADR-0017 honest-skip: a plain missing / moved file is no longer a
         // session, so it is dropped quietly (the cold-start sidebar only lists
@@ -295,7 +306,7 @@ fn build_session_metadata(path: &Path) -> Option<SessionMetadata> {
     };
     let mtime = file_mtime_millis(&path_str).unwrap_or(0);
     Some(SessionMetadata {
-        duck_path: DuckPath::new(path_str.into_owned()),
+        recipe_path: RecipePath::new(path_str.into_owned()),
         display_name: display_name(&recipe),
         last_modified_at: mtime,
         source_summary: source_summary(&recipe),
@@ -350,9 +361,9 @@ fn file_mtime_millis(path: &str) -> Option<i64> {
 #[cfg(test)]
 mod tests {
     //! list_session_metadata derivation (ADR-0060/0061, issue #76). Each test
-    //! writes a real `.duck` via the invariant-validating `Recipe::build` +
+    //! writes a real `recipe.json` via the invariant-validating `Recipe::build` +
     //! `save_atomic`, then asserts the derived metadata -- the same round-trip
-    //! `read_duck` uses, so the listing reads exactly what resume reads.
+    //! `read_recipe` uses, so the listing reads exactly what resume reads.
 
     use super::*;
     use crate::model::{SourceLifecycleEvent, SourceLifecycleKind};
@@ -381,11 +392,11 @@ mod tests {
 
     #[test]
     fn derives_all_fields_from_a_readable_recipe() {
-        // AC: list_sessions returns duck_path / display_name / last_modified_at
+        // AC: list_sessions returns recipe_path / display_name / last_modified_at
         // / source_summary / format_version, all derived from the recipe + file.
         let dir = tempfile::tempdir().expect("tempdir");
         let path = write_recipe(
-            &dir.path().join("analysis.duck"),
+            &dir.path().join("analysis.json"),
             Recipe::build(
                 "我的分析".into(),
                 vec![csv_source("orders")],
@@ -430,8 +441,8 @@ mod tests {
         let list = list_session_metadata(std::slice::from_ref(&path));
         assert_eq!(list.len(), 1);
         let m = &list[0];
-        // duck_path is the file path (the stable identity, see module doc).
-        assert_eq!(m.duck_path, DuckPath::new(path.clone()));
+        // recipe_path is the file path (the stable identity, see module doc).
+        assert_eq!(m.recipe_path, RecipePath::new(path.clone()));
         // display_name = the user-given session_name.
         assert_eq!(m.display_name, "我的分析");
         // source_summary: first source name + 1 source + 2 turns (the source
@@ -445,7 +456,7 @@ mod tests {
         // format_version is the current recipe version.
         assert_eq!(m.format_version, crate::persistence::RECIPE_FORMAT_VERSION);
         // mtime is the file's actual modification time in epoch millis -- pin
-        // both the unit (millis, not micros/nanos) and the source (this .duck
+        // both the unit (millis, not micros/nanos) and the source (this recipe.json
         // path) by comparing against an independent stat, so a unit or source
         // bug cannot slip through as merely "non-zero".
         let file_mtime = std::fs::metadata(&path)
@@ -473,7 +484,7 @@ mod tests {
         // display label.
         let dir = tempfile::tempdir().expect("tempdir");
         let path = write_recipe(
-            &dir.path().join("noname.duck"),
+            &dir.path().join("noname.json"),
             Recipe::build(
                 String::new(),
                 vec![csv_source("people")],
@@ -500,7 +511,7 @@ mod tests {
         // turns. display_name falls back to the session_name "空" (non-empty).
         let dir = tempfile::tempdir().expect("tempdir");
         let path = write_recipe(
-            &dir.path().join("empty.duck"),
+            &dir.path().join("empty.json"),
             Recipe::build("空".into(), Vec::new(), Vec::new(), None).expect("build"),
         );
         let m = &list_session_metadata(&[path])[0];
@@ -516,7 +527,7 @@ mod tests {
         // readable v1 recipe is dropped, never listed with fabricated metadata.
         let dir = tempfile::tempdir().expect("tempdir");
         let good = write_recipe(
-            &dir.path().join("good.duck"),
+            &dir.path().join("good.json"),
             Recipe::build(
                 "ok".into(),
                 vec![csv_source("s")],
@@ -525,16 +536,16 @@ mod tests {
             )
             .expect("build"),
         );
-        let missing = dir.path().join("gone.duck").to_string_lossy().into_owned();
+        let missing = dir.path().join("gone.json").to_string_lossy().into_owned();
         let foreign = {
-            // A real file that is NOT a recipe (read_duck rejects it).
-            let p = dir.path().join("foreign.duck");
+            // A real file that is NOT a recipe (read_recipe rejects it).
+            let p = dir.path().join("foreign.json");
             std::fs::write(&p, "not json").expect("write");
             p.to_string_lossy().into_owned()
         };
         let list = list_session_metadata(&[missing, good.clone(), foreign]);
         assert_eq!(list.len(), 1, "only the readable recipe is listed");
-        assert_eq!(list[0].duck_path, DuckPath::new(good));
+        assert_eq!(list[0].recipe_path, RecipePath::new(good));
     }
 
     #[test]
@@ -543,7 +554,7 @@ mod tests {
         // NOT turns -- turn_count counts RecipeEntry::Turn only.
         let dir = tempfile::tempdir().expect("tempdir");
         let path = write_recipe(
-            &dir.path().join("lifecycle.duck"),
+            &dir.path().join("lifecycle.json"),
             Recipe::build(
                 "lc".into(),
                 vec![csv_source("a"), csv_source("b")],
@@ -587,8 +598,10 @@ mod tests {
 
     // --- scan_sessions_dir (ADR-0089 production data source) ---------------
 
-    /// Write a recipe into `{dir}/{uuid}/session.duck` so it matches the
-    /// managed-directory layout. Returns the metadata path.
+    /// Write a recipe into `{dir}/{uuid}/session.duck` (the legacy name) so it
+    /// matches the managed-directory layout. The D5 acceptance face itself is
+    /// `scan_accepts_both_recipe_file_names`; every other test through this
+    /// helper only needs SOME readable recipe file. Returns the metadata path.
     fn write_session(root: &std::path::Path, uuid: &str, recipe: Recipe) -> std::path::PathBuf {
         let session_dir = root.join(uuid);
         std::fs::create_dir_all(&session_dir).expect("create session dir");
@@ -604,6 +617,85 @@ mod tests {
         let missing = std::env::temp_dir().join("toptopduck-test-nonexistent-scan");
         let _ = std::fs::remove_dir_all(&missing);
         assert!(scan_sessions_dir(&missing).is_empty());
+    }
+
+    #[test]
+    fn scan_accepts_both_recipe_file_names() {
+        // ADR-0136 D5: new sessions write `recipe.json`; the legacy
+        // `session.duck` stays forever accepted with no in-place migration.
+        // Both suffixes list; the new name wins when both somehow exist.
+        let root = tempfile::tempdir().expect("tempdir");
+        write_session(
+            root.path(),
+            "uuid-legacy",
+            Recipe::build(
+                "legacy".into(),
+                vec![csv_source("old")],
+                Vec::new(),
+                Some("old".into()),
+            )
+            .expect("build"),
+        );
+        // A new-name session: same layout, different recipe file name.
+        let session_dir = root.path().join("uuid-new");
+        std::fs::create_dir_all(&session_dir).expect("create session dir");
+        save_atomic(
+            &session_dir.join("recipe.json"),
+            &Recipe::build(
+                "fresh".into(),
+                vec![csv_source("new")],
+                Vec::new(),
+                Some("new".into()),
+            )
+            .expect("build"),
+        )
+        .expect("save");
+
+        let list = scan_sessions_dir(root.path());
+        // Both suffixes list; assert an unordered set -- the mtime sort
+        // (pinned separately by scan_lists_sessions_sorted_by_mtime_desc)
+        // ties when both writes land in the same millisecond, and a stable
+        // sort then falls back to read_dir order, which the filesystem does
+        // not guarantee.
+        let mut names: Vec<&str> = list.iter().map(|m| m.display_name.as_str()).collect();
+        names.sort_unstable();
+        assert_eq!(names, vec!["fresh", "legacy"], "both suffixes list");
+        let fresh = list
+            .iter()
+            .find(|m| m.display_name == "fresh")
+            .expect("fresh lists");
+        let legacy = list
+            .iter()
+            .find(|m| m.display_name == "legacy")
+            .expect("legacy lists");
+        assert!(fresh.recipe_path.as_str().ends_with("recipe.json"));
+        assert!(legacy.recipe_path.as_str().ends_with("session.duck"));
+
+        // Precedence: when BOTH names exist in one directory, the new name
+        // wins (it is first in the scan order). Writing the new name into the
+        // legacy directory also makes it the newest file, so the rescan finds
+        // the entry by name rather than index.
+        save_atomic(
+            &root.path().join("uuid-legacy").join("recipe.json"),
+            &Recipe::build(
+                "legacy".into(),
+                vec![csv_source("old")],
+                Vec::new(),
+                Some("old".into()),
+            )
+            .expect("build"),
+        )
+        .expect("save");
+        let list = scan_sessions_dir(root.path());
+        let legacy = list
+            .iter()
+            .find(|m| m.display_name == "legacy")
+            .expect("legacy lists");
+        assert!(
+            legacy.recipe_path.as_str().ends_with("recipe.json"),
+            "the new name wins when both exist: {}",
+            legacy.recipe_path.as_str()
+        );
     }
 
     #[test]
@@ -646,7 +738,7 @@ mod tests {
     }
 
     #[test]
-    fn scan_skips_non_dir_entries_and_dirs_without_session_duck() {
+    fn scan_skips_non_dir_entries_and_dirs_without_a_recipe_file() {
         let root = tempfile::tempdir().expect("tempdir");
         // A valid session.
         write_session(
@@ -662,7 +754,7 @@ mod tests {
         );
         // A loose file in the root (not a session directory).
         std::fs::write(root.path().join("loose.txt"), "not a session").expect("write");
-        // A subdirectory with no session.duck (partial / stale).
+        // A subdirectory with no recipe.json (partial / stale).
         std::fs::create_dir_all(root.path().join("uuid-empty")).expect("mkdir");
 
         let list = scan_sessions_dir(root.path());
@@ -672,7 +764,8 @@ mod tests {
 
     // --- organization sidecar join (ADR-0127, issue #1174) -------------------
 
-    /// Write `{uuid}/session.duck` with a one-source recipe named `name`.
+    /// Write `{uuid}/session.duck` (the legacy name via `write_session`) with a
+    /// one-source recipe named `name`.
     fn write_named_session(root: &Path, uuid: &str, name: &str) {
         write_session(
             root,
@@ -761,18 +854,15 @@ mod tests {
     }
 
     #[test]
-    fn scan_keeps_organization_keys_for_dirs_with_an_unreadable_duck() {
-        // The directory is the identity (ADR-0089): a corrupt .duck is an
+    fn scan_keeps_organization_keys_for_dirs_with_an_unreadable_recipe() {
+        // The directory is the identity (ADR-0089): a corrupt recipe.json is an
         // honest-skip for the ROW, but not an orphaned KEY -- a temporarily
         // unreadable recipe must not cost the session its pin/archive state.
         let root = tempfile::tempdir().expect("tempdir");
         write_named_session(root.path(), "uuid-a", "a");
         organization::set_pinned(root.path(), "uuid-a", true).expect("pin a");
-        std::fs::write(
-            root.path().join("uuid-a").join("session.duck"),
-            "{ not json",
-        )
-        .expect("corrupt the duck");
+        std::fs::write(root.path().join("uuid-a").join("recipe.json"), "{ not json")
+            .expect("corrupt the recipe");
 
         let list = scan_sessions_dir(root.path());
         assert!(list.is_empty(), "the corrupt recipe honest-skips the row");

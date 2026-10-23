@@ -321,6 +321,7 @@ impl LoopRuntime {
                 call,
                 channel,
                 origin,
+                delegation_id,
                 resp,
             } in req_rx
             {
@@ -377,7 +378,13 @@ impl LoopRuntime {
                     }
                     continue;
                 }
-                let phases = Arc::clone(&phases);
+                // The per-request phase forward (issue #1359): a dispatch
+                // carrying a delegation id rides the tagged wrapper (its
+                // phases surface in that delegation's live panel, never as
+                // ownerless rows on the main rail); the main face keeps the
+                // plain sink. The loop is single-threaded serial, so the
+                // choice is a local per-iteration decision.
+                let phases = forward_sink_for(&phases, delegation_id.as_deref());
                 let mut forward = |phase: TurnPhase| adapter::emit_phase(&phases, phase);
                 // Freeze across the dispatch (ADR-0115): a gateway tool
                 // execution, a CLI tool's run, or an approval pending on the
@@ -519,6 +526,17 @@ impl LoopRuntime {
                 self.model_name.as_deref(),
             )
         })
+    }
+}
+
+/// The dispatch server's per-request phase sink (issue #1359): a request
+/// carrying a delegation id forwards through the tagged wrapper (its phases
+/// surface in that delegation's live panel, never as ownerless rows on the
+/// main rail), a main-face request keeps the turn's plain sink.
+fn forward_sink_for(phases: &PhaseSink, delegation_id: Option<&str>) -> PhaseSink {
+    match delegation_id {
+        Some(id) => subagent::tagged_delegation_sink(phases, id),
+        None => Arc::clone(phases),
     }
 }
 
@@ -734,6 +752,9 @@ async fn drive_turn(inputs: DriveInputs) -> DriveOutcome {
             req_tx.clone(),
             // A main-loop dispatch carries no originator -- only a
             // sub-agent's sub-face names one (issue #934).
+            None,
+            // Nor a delegation id -- the main face's phases stay plain
+            // (issue #1359).
             None,
         )
     };

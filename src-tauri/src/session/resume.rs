@@ -7,20 +7,20 @@
 //! It does NOT hold the [`super::Session`] -- phase methods borrow `working_set` /
 //! [`TurnDeps`] and return structured results.
 //!
-//! [`super::Session::open_duck`] is the entry point that owns the full 5-phase
+//! [`super::Session::open_recipe`] is the entry point that owns the full 5-phase
 //! orchestration: phase 1 (source re-ingest via [`super::Session::resume_sources`] +
 //! [`super::Session::resume_ingest_at`] + [`super::Session::resolve_source_path`]), phases 2-4
 //! (delegated to [`Resumer`]), and phase 5 (persist). It lives here alongside
 //! the [`Resumer`] so a reader of resume holds one file, not two.
 //!
 //! The pre-ADR-0056 resume global state also lives here --
-//! [`RESUMING_COUNT`] / [`ResumeFlagGuard`] / [`OpenDuckGuard`] (ADR-0053
+//! [`RESUMING_COUNT`] / [`ResumeFlagGuard`] / [`OpenRecipeGuard`] (ADR-0053
 //! Decision 3 extension of ADR-0035). NOTE: since ADR-0056 the LIVE
 //! command-layer resume gate is per-session (`SessionHandle::is_resuming`,
 //! read by `commands::reject_if_resuming`); the process-global
 //! [`is_resuming`] / [`resuming_count`] below are retained ONLY as a
 //! test/diagnostic RAII probe -- `persistence_blackbox.rs` asserts
-//! `Session::open_duck` raises and clears the count around a resume, and no
+//! `Session::open_recipe` raises and clears the count around a resume, and no
 //! production call site reads them. They are re-exported by the parent module
 //! and from `lib.rs` so those integration tests can reach them.
 
@@ -30,29 +30,30 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
+use super::companion;
 use super::materializer::{Materializer, TurnDeps};
 use super::{
-    ActiveAbandoned, ActiveResolution, ResumeError, ResumeEvent, SourceIssue, SourceResolution,
-    TimelineEntry, TurnAudit,
+    ActiveAbandoned, ActiveResolution, ResumeError, ResumeEvent, SourceIssue, SourceNotice,
+    SourceResolution, TimelineEntry, TurnAudit,
 };
 use crate::cancel::CancelToken;
-use crate::ingest::schema::quote_ident;
+use crate::ingest::schema::attach_sql;
 use crate::model::{
     DatasetDescriptor, DatasetPrivacy, LoadError, RectifyProvenance, TraceEntryView, TraceRound,
     TurnFailure, TurnOutcome, TurnProvenance, TurnRecord, TurnRuntime,
 };
-use crate::persistence::read_duck;
+use crate::persistence::read_recipe;
 use crate::persistence::recipe::{
     Recipe, RecipeEntry, RecipeOutcome, RecipeTraceEntry, RecipeTraceRound, RecipeTurn,
     RuntimeKind, SourceRef,
 };
-use crate::persistence::registry::{canonicalize_duck, release, try_acquire};
+use crate::persistence::registry::{canonicalize_recipe, release, try_acquire};
 use crate::provider::Provider;
 use crate::workingset::WorkingSet;
 
 // --- Resume global state (ADR-0035 Decision 3, ADR-0053 Decision 3) ---------
 
-/// Process-global count of in-flight resumes: > 0 while any `Session::open_duck`
+/// Process-global count of in-flight resumes: > 0 while any `Session::open_recipe`
 /// is rebuilding a session across the restart boundary.
 ///
 /// Historical role (pre-ADR-0056): this was the Rust-side backstop that
@@ -69,16 +70,16 @@ use crate::workingset::WorkingSet;
 /// (`SessionHandle::is_resuming`, read by `commands::reject_if_resuming`), so
 /// this counter has NO production reader. It is retained ONLY as a RAII probe
 /// that `persistence_blackbox.rs` asserts rises and falls around a resume
-/// (`is_resuming_flag_is_true_during_open_duck_and_cleared_after`).
+/// (`is_resuming_flag_is_true_during_open_recipe_and_cleared_after`).
 ///
-/// A COUNT (not a boolean) so concurrent resumes compose: two `open_duck`
+/// A COUNT (not a boolean) so concurrent resumes compose: two `open_recipe`
 /// calls each acquire (+1), one finishing (-1) leaves it > 0 while the other
 /// runs. Process-global (not per-Session) because the hazard historically
 /// spanned two Session instances -- the old one in managed state and the new
 /// one under construction.
 static RESUMING_COUNT: AtomicUsize = AtomicUsize::new(0);
 
-/// Whether any `Session::open_duck` resume is currently in flight.
+/// Whether any `Session::open_recipe` resume is currently in flight.
 ///
 /// Historical role (pre-ADR-0056): checked at the top of every mutating
 /// command to reject a concurrent IPC call during resume. Since ADR-0056 the
@@ -86,7 +87,7 @@ static RESUMING_COUNT: AtomicUsize = AtomicUsize::new(0);
 /// (read by `commands::reject_if_resuming`); this free function now has NO
 /// production caller and is retained only as the integration-test probe over
 /// [`RESUMING_COUNT`]. The count returns to zero on every exit from
-/// `open_duck` (success or error) via the [`ResumeFlagGuard`] RAII guard, so a
+/// `open_recipe` (success or error) via the [`ResumeFlagGuard`] RAII guard, so a
 /// resume failure can never leave it stuck > 0.
 pub fn is_resuming() -> bool {
     RESUMING_COUNT.load(Ordering::SeqCst) > 0
@@ -100,11 +101,11 @@ pub fn resuming_count() -> usize {
 }
 
 /// RAII guard that increments [`RESUMING_COUNT`] on construction and
-/// decrements on drop. Acquired at the top of `Session::open_duck`; held to the
+/// decrements on drop. Acquired at the top of `Session::open_recipe`; held to the
 /// end of the function so every exit path (success, load error, cancel, abort,
 /// replay invariant violation) drops the guard and decrements. NOT
 /// `mem::forget`-transferred to the resumed Session (unlike the registry key)
-/// -- the counter marks "resume is running", and resume ends when `open_duck`
+/// -- the counter marks "resume is running", and resume ends when `open_recipe`
 /// returns, not when the Session later drops.
 #[must_use = "dropping the guard early decrements RESUMING_COUNT; keep it bound for the whole resume scope"]
 pub(crate) struct ResumeFlagGuard;
@@ -123,15 +124,15 @@ impl Drop for ResumeFlagGuard {
 }
 
 /// RAII guard for the single-writer registry key acquired at the top of
-/// `Session::open_duck` (ADR-0035 Decision 3, issue #50). Resume can fail at
+/// `Session::open_recipe` (ADR-0035 Decision 3, issue #50). Resume can fail at
 /// several points (load, source verify, replay, history rebuild) -- each `?`
 /// would leak the registry entry, blocking the path until process exit. The
 /// guard's Drop releases the key on every error exit; on success,
 /// [`std::mem::forget`] disarms the guard so the resumed Session owns the key
 /// (and releases it on its own Drop).
-pub(crate) struct OpenDuckGuard(PathBuf);
+pub(crate) struct OpenRecipeGuard(PathBuf);
 
-impl OpenDuckGuard {
+impl OpenRecipeGuard {
     /// Acquire the canonical path or return [`ResumeError::AlreadyOpen`] --
     /// the file is already held by another Session in this process.
     pub(crate) fn acquire(canonical: PathBuf) -> Result<Self, ResumeError> {
@@ -143,7 +144,7 @@ impl OpenDuckGuard {
     }
 }
 
-impl Drop for OpenDuckGuard {
+impl Drop for OpenRecipeGuard {
     fn drop(&mut self) {
         release(&self.0);
     }
@@ -155,7 +156,7 @@ impl Drop for OpenDuckGuard {
 /// method has ALREADY written the resolution into the working set (the pointer
 /// restore / continuation is part of phase 2's contract); this enum is the
 /// observable outcome so a unit test can assert which branch fired without
-/// poking at `WorkingSet` internals, and `open_duck` can log it.
+/// poking at `WorkingSet` internals, and `open_recipe` can log it.
 #[derive(Debug, PartialEq)]
 pub(crate) enum ResolvedActive {
     /// `recipe.active` was `None`, or the last source was rebuilt so the
@@ -188,7 +189,7 @@ pub(crate) struct ReplayBreak {
 /// the shared cancel token, the [`Materializer`] (the same trait object the
 /// live-turn agent loop drives through the `materialize` tool), and the
 /// recipe -- never the `Session`. Each phase method borrows `working_set` /
-/// [`TurnDeps`] and returns a structured result; `Session::open_duck` applies
+/// [`TurnDeps`] and returns a structured result; `Session::open_recipe` applies
 /// it.
 ///
 /// Why a deep module (ADR-0053 Why 1/3): reading resume means reading this file
@@ -300,13 +301,13 @@ impl<'a> Resumer<'a> {
     ///
     /// **Trust boundary (ADR-0036 Decision 5):** the recipe SQL re-executed
     /// here is parse-time untrusted at the resume boundary. v1 treats the
-    /// `.duck` as a single-user, self-produced document, so resume reuses the
+    /// `recipe.json` as a single-user, self-produced document, so resume reuses the
     /// SAME defenses a live turn relies on (sandbox preflight FsAcl
     /// read_* path whitelist, subquery wrapping rejects non-SELECT) rather
     /// than a recipe-specific SQL
-    /// AST whitelist. A portable / cross-user `.duck` (email / USB / attach)
+    /// AST whitelist. A portable / cross-user `recipe.json` (email / USB / attach)
     /// would additionally need a SQL AST whitelist + PII redaction + an
-    /// "opened an external .duck" risk prompt -- all three are explicitly v2.
+    /// "opened an external recipe.json" risk prompt -- all three are explicitly v2.
     ///
     /// On a round-K SQL failure resume does NOT abort: turn K is rendered as
     /// `Failed` (ADR-0028 outcome C), turns K+1.. are dropped, and K-1's
@@ -391,7 +392,7 @@ impl<'a> Resumer<'a> {
     /// (ADR-0036 not persisted), so a reopened chart renders as a table
     /// (ADR-0033).
     ///
-    /// Returns the rebuilt timeline; `open_duck` assigns it to `session.timeline`.
+    /// Returns the rebuilt timeline; `open_recipe` assigns it to `session.timeline`.
     /// The rebuild is a 1:1 map over the full `recipe.history` (never
     /// filtered), so the returned length IS `recipe.history.len()`. Each turn
     /// entry carries its persisted
@@ -589,8 +590,8 @@ impl<'a> Resumer<'a> {
                             // assembly-time content_hash for the frontend
                             // drift check) and the runtime projection. A
                             // persisted External turn without an adapter id
-                            // (pre-extension recording) projects to
-                            // External { adapter_id: None } -- the thread's
+                            // (pre-extension recording) projects to an
+                            // all-null External payload -- the thread's
                             // "not recorded" degradation.
                             provenance: TurnProvenance {
                                 skills: turn.provenance.skills.clone(),
@@ -598,6 +599,7 @@ impl<'a> Resumer<'a> {
                                     RuntimeKind::BuiltIn => TurnRuntime::BuiltIn,
                                     RuntimeKind::External => TurnRuntime::External {
                                         adapter_id: turn.provenance.adapter_id.clone(),
+                                        display_name: turn.provenance.adapter_display_name.clone(),
                                     },
                                 }),
                             },
@@ -644,11 +646,15 @@ impl From<&RecipeTraceEntry> for TraceEntryView {
     /// same expanded trace.
     fn from(entry: &RecipeTraceEntry) -> Self {
         Self {
+            // ADR-0135: id / report are live-only -- the recipe carries
+            // neither, so the resumed trace keeps its excerpt-only posture.
+            id: None,
             name: entry.name.clone(),
             operation_kind: entry.operation_kind,
             summary: entry.summary.clone(),
             success: entry.success,
             result_excerpt: entry.result_excerpt.clone(),
+            report: None,
             // The nested sub-trace (ADR-0117 Decision 6, issue #934) resumes
             // verbatim: the sub-rounds map through the round-level mapping
             // below, so a reopened session renders the sub-trace under the
@@ -754,12 +760,12 @@ fn recorded_result_floor(recipe: &Recipe) -> u64 {
 }
 
 // --- Session resume entry point (ADR-0053 Decision 3) -----------------
-// The full 5-phase open_duck orchestrator + phase 1 source re-ingest
+// The full 5-phase open_recipe orchestrator + phase 1 source re-ingest
 // helpers. Sibling impl block -- same pattern as source_lifecycle.rs
 // and ingest.rs (ADR-0053 Decision 5 physical-move precedent).
 
 impl super::Session {
-    /// Open a `.duck` and resume the session across the restart boundary
+    /// Open a `recipe.json` and resume the session across the restart boundary
     /// (ADR-0034/0035, issue #49). Reads the recipe, re-reads + fingerprint-
     /// verifies each source (interactive re-link / rebuild on Missing / Drift),
     /// resolves the active-SOURCE pointer (interactive continuation if the
@@ -781,7 +787,7 @@ impl super::Session {
     /// caller (not a cloud model) for every integrity decision. The provider is
     /// wired only so the next NEW turn after resume reaches a live model.
     ///
-    /// On success the `.duck` is rewritten to reflect the post-resume state
+    /// On success the `recipe.json` is rewritten to reflect the post-resume state
     /// (relinked paths, rebuilt sources dropped, truncated timeline with the
     /// failed turn) -- a failure here is captured in `persist_error` (non-
     /// blocking; the session is live regardless, ADR-0035 honest signal). On
@@ -794,7 +800,7 @@ impl super::Session {
     /// cancel, abort, replay invariant) releases the key. On success the
     /// resumed Session takes ownership (the guard is forgotten) and releases
     /// the key on its own Drop.
-    pub fn open_duck(
+    pub fn open_recipe(
         path: &Path,
         cancel: Arc<CancelToken>,
         provider: Box<dyn Provider>,
@@ -816,9 +822,9 @@ impl super::Session {
         // resumed Session. Acquiring BEFORE the cancel guard / recipe read
         // means a duplicate-opener refusal never disturbs an in-flight cancel
         // state.
-        let canonical = canonicalize_duck(path)
+        let canonical = canonicalize_recipe(path)
             .map_err(|e| ResumeError::Load(crate::persistence::io::LoadError::Io(e.to_string())))?;
-        let registry = OpenDuckGuard::acquire(canonical.clone())?;
+        let registry = OpenRecipeGuard::acquire(canonical.clone())?;
 
         // Mark resume as in-flight + clear any stale cancel request, mirroring
         // `ask`'s per-turn guard (ADR-0021). The resume_sources / replay
@@ -827,12 +833,12 @@ impl super::Session {
         // state indistinguishable from data corruption. Drop on exit clears
         // in-flight, the interrupt slot, and the turn's generation -- a stop
         // that landed mid-resume is consumed there instead of persisting to
-        // the first ask (RAII -- every exit from open_duck, success or error,
+        // the first ask (RAII -- every exit from open_recipe, success or error,
         // drops the guard). The resumed Session reuses the
         // SAME Arc<CancelToken>, so the next ask's begin_turn composes cleanly.
         let _guard = cancel.begin_turn();
 
-        let mut recipe = read_duck(path).map_err(ResumeError::Load)?;
+        let mut recipe = read_recipe(path).map_err(ResumeError::Load)?;
         // Seed the external-change baseline from the file AS READ (ADR-0035 Decision 3,
         // issue #50): any external edit during the resume phases (re-ingest /
         // replay can take seconds) surfaces at the post-resume persist via the
@@ -861,37 +867,80 @@ impl super::Session {
         // above), so the artifacts dir derives from the same source as the
         // settle-time materialize.
         super::artifacts::backfill_into_cwd(
-            super::artifacts::artifacts_dir(session.duck_path()).as_deref(),
+            super::artifacts::artifacts_dir(session.recipe_path()).as_deref(),
             &session.temp_path,
         );
 
-        // Phase 1: re-read + verify each source (interactive re-link / rebuild).
-        // Returns the set of rebuilt (dropped) sources; recipe.sources[i] is
-        // updated in place for any relinked path.
-        let rebuilt =
-            session.resume_sources(path, &mut recipe, &mut on_progress, &mut on_source_issue)?;
+        // ADR-0136 D3: the companion watermark decides the restore shape.
+        // Point the engine at the tree companion FIRST (slot only -- the open
+        // itself stays on-demand), then probe. A hit (companion present,
+        // digest equal, snapshots validated) restores the settled working set
+        // with ZERO source re-reads and ZERO SQL re-execution; any miss --
+        // absent / mismatched / unreadable companion, unknown meta version, a
+        // missing or unopenable snapshot -- discards the companion and the
+        // existing replay path below rebuilds it verbatim (legacy
+        // pure-recipe sessions enter the hit path this way after one replay).
+        session.point_engine_at_tree();
+        let restored = if let Some(meta) = super::companion::probe(path, &recipe) {
+            // A probe-validated companion failing mid-restore is a fresh
+            // corruption (TOCTOU window), not a cache miss: the replay
+            // fallback would re-fail on the same disk state, so the `?`
+            // surfaces it honestly instead of falling back.
+            let notices = session.restore_hit(&recipe, path, &meta)?;
+            session.source_notices = notices;
+            log::info!(
+                target: "toptopduck::session",
+                "resume watermark hit -- replay skipped: {}",
+                path.display()
+            );
+            true
+        } else {
+            false
+        };
+        if !restored {
+            super::companion::discard(path);
+        }
+
+        // Phase 1 (replay path only): re-read + verify each source
+        // (interactive re-link / rebuild). Returns the set of rebuilt
+        // (dropped) sources; recipe.sources[i] is updated in place for any
+        // relinked path. The hit path skips it -- the tree snapshots ARE the
+        // ingest-time data; source status degraded to notices above.
+        let rebuilt = if restored {
+            HashSet::new()
+        } else {
+            session.resume_sources(path, &mut recipe, &mut on_progress, &mut on_source_issue)?
+        };
 
         // Phase 2/3/4 via the Resumer deep module (ADR-0053 Decision 3): the
         // Resumer borrows the shared cancel + the SAME Materializer trait
         // object the live-turn agent loop drives + the recipe. It does NOT
         // hold the Session -- each phase method borrows working_set / TurnDeps
-        // and returns a structured result, which open_duck applies. Scoped so
+        // and returns a structured result, which open_recipe applies. Scoped so
         // the Resumer (and its disjoint-field borrows of session.cancel /
         // session.materializer) drops before phase 5's &mut session persist.
         {
             // Computed before the Resumer's disjoint-field borrows of session
-            // begin -- duck_path() takes &session, which the mutable
+            // begin -- recipe_path() takes &session, which the mutable
             // materializer borrow inside Resumer::new excludes.
-            let assets_dir = super::sql_assets::assets_dir(session.duck_path());
+            let assets_dir = super::sql_assets::assets_dir(session.recipe_path());
+            let snapshot_dir = session.snapshot_dir();
             let mut resumer = Resumer::new(&session.cancel, &mut *session.materializer, &recipe);
-            // Phase 2: resolve the active-SOURCE pointer. The happy path
-            // restores recipe.active; if the active was rebuilt + others
-            // remain, the caller picks an explicit continuation (ADR-0035
-            // no-silent-fallback, AC5).
-            resumer.resolve_active(&mut session.working_set, &rebuilt, &mut on_active_abandoned)?;
-            // Phase 3: replay the productive SQL chain (partial on failure --
-            // K-1 results preserved, K rendered as Failed, AC6).
-            let replay_break = {
+            let replay_break = if restored {
+                None // ADR-0136 D3: the hit path IS phases 2-3, already done.
+            } else {
+                // Phase 2: resolve the active-SOURCE pointer. The happy path
+                // restores recipe.active; if the active was rebuilt + others
+                // remain, the caller picks an explicit continuation
+                // (ADR-0035 no-silent-fallback, AC5).
+                resumer.resolve_active(
+                    &mut session.working_set,
+                    &rebuilt,
+                    &mut on_active_abandoned,
+                )?;
+                // Phase 3: replay the productive SQL chain (partial on
+                // failure -- K-1 results preserved, K rendered as Failed,
+                // AC6).
                 let mut deps = TurnDeps {
                     engine: &session.admin_engine,
                     source_files: &mut session.source_files,
@@ -899,6 +948,7 @@ impl super::Session {
                     result_row_cap: session.result_row_cap,
                     result_count_cap: session.result_count_cap,
                     temp_path: &session.temp_path,
+                    snapshot_dir,
                     assets_dir,
                     tool_output_refs: &mut session.tool_output_refs,
                 };
@@ -942,7 +992,7 @@ impl super::Session {
         // Session's recipe-header facts (so the post-resume persist below
         // rewrites them unchanged -- an undetected-adapter degrade at the
         // command layer never destroys the persisted value) and the
-        // caller-visible read (open_duck at the command layer restores the
+        // caller-visible read (open_recipe at the command layer restores the
         // posture trio onto the handle and resolves `last_runtime` into the
         // restored runtime choice via `Session::runtime_facts`).
         session.runtime_facts = super::SessionRuntimeFacts {
@@ -953,7 +1003,7 @@ impl super::Session {
         };
 
         // Phase 5: persist the post-resume state. adopt_resumed already set
-        // duck_path + the baseline, so only the write remains. build_recipe
+        // recipe_path + the baseline, so only the write remains. build_recipe
         // reads the live working set, so relinked paths, dropped (rebuilt)
         // sources, and the truncated timeline (failed turn at K) land in the
         // persisted recipe. A failure is non-blocking -- the session is live;
@@ -972,29 +1022,32 @@ impl super::Session {
     }
 
     /// Resolve a recipe source path to a filesystem path (ADR-0036 Decision 4
-    /// hybrid paths). The relative form -- taken against the `.duck` file's
+    /// hybrid paths). The relative form -- taken against the `recipe.json` file's
     /// directory -- wins when present and the candidate exists; that is the
     /// form that survives "move the folder" portability. Otherwise the
     /// absolute `source_path` is the fallback. Fingerprint verification
     /// upstream catches a wrong pick, so the choice here is safe.
     ///
     /// Trust boundary (rust/security.md Input Validation section + ADR-0036): the
-    /// `.duck` is external input. A hand-edited or externally-sourced recipe
-    /// whose `relative_path` escapes the `.duck`'s directory subtree
+    /// `recipe.json` is external input. A hand-edited or externally-sourced recipe
+    /// whose `relative_path` escapes the `recipe.json`'s directory subtree
     /// (`../../etc/passwd`, `~/../.ssh/id_rsa`, ...) would otherwise let a
     /// malicious recipe pull arbitrary files into the DuckDB snapshot (and
     /// from there into LLM samples / column names). The relative candidate
-    /// is canonicalized and MUST remain inside the `.duck`'s directory; an
+    /// is canonicalized and MUST remain inside the `recipe.json`'s directory; an
     /// escape is rejected at this boundary as a `SourceMissing` (path
     /// traversal refused). A missing candidate falls through to the absolute
     /// fallback, which fingerprint verification then refuses if it is also
     /// missing or drifted (ADR-0035 honest degrade -- not a silent traversal).
-    fn resolve_source_path(duck_path: &Path, src: &SourceRef) -> Result<PathBuf, ResumeError> {
+    pub(super) fn resolve_source_path(
+        recipe_path: &Path,
+        src: &SourceRef,
+    ) -> Result<PathBuf, ResumeError> {
         let absolute = PathBuf::from(&src.source_path);
         let Some(relative) = &src.relative_path else {
             return Ok(absolute);
         };
-        let Some(base) = duck_path.parent() else {
+        let Some(base) = recipe_path.parent() else {
             return Ok(absolute);
         };
         let candidate = base.join(relative);
@@ -1030,7 +1083,7 @@ impl super::Session {
             return Err(ResumeError::SourceMissing {
                 reference_name: src.reference_name.clone(),
                 path: relative.clone(),
-                detail: "相对路径越出 .duck 目录（已拒绝路径遍历）".into(),
+                detail: "相对路径越出 recipe.json 目录（已拒绝路径遍历）".into(),
             });
         }
         Ok(canonical)
@@ -1055,7 +1108,7 @@ impl super::Session {
     /// one `Source` progress event per source (ADR-0034 visible progress).
     fn resume_sources(
         &mut self,
-        duck_path: &Path,
+        recipe_path: &Path,
         recipe: &mut Recipe,
         on_progress: &mut impl FnMut(ResumeEvent),
         on_source_issue: &mut impl FnMut(SourceIssue) -> SourceResolution,
@@ -1080,7 +1133,7 @@ impl super::Session {
             // Rebuild drops the source and breaks to the next one.
             loop {
                 let src = recipe.sources[i].clone();
-                let path = Self::resolve_source_path(duck_path, &src)?;
+                let path = Self::resolve_source_path(recipe_path, &src)?;
                 match self.resume_ingest_at(&src.reference_name, &src.display_name, &path) {
                     Ok(descriptor) => {
                         if descriptor.fingerprint == src.fingerprint {
@@ -1212,12 +1265,9 @@ impl super::Session {
         };
         // copy-in + attach under the explicit reference name (no de-conflict:
         // the recipe's name is already unique, ADR-0036 parse-time check).
-        let snap = crate::ingest::loader::copy_in(path, &self.temp_path, reference_name, reader)?;
-        let attach_path = snap.file_path.to_string_lossy();
-        let attach_sql = format!(
-            "ATTACH '{attach_path}' AS {} (READ_ONLY);",
-            quote_ident(reference_name)
-        );
+        let snap =
+            crate::ingest::loader::copy_in(path, &self.snapshot_dir(), reference_name, reader)?;
+        let attach_sql = attach_sql(&snap.file_path.to_string_lossy(), reference_name);
         if let Err(e) = self.admin_engine.execute_batch(&attach_sql) {
             if let Err(io_err) = fs::remove_file(&snap.file_path) {
                 log::warn!(
@@ -1246,6 +1296,97 @@ impl super::Session {
         };
         self.working_set.register(descriptor.clone());
         Ok(descriptor)
+    }
+
+    /// The watermark-hit restore (ADR-0136 D3): mount the tree snapshots
+    /// read-only onto admin (opening the companion in the process), rebuild
+    /// the working set from the settled meta, and check each source file's
+    /// existence + (mtime, size) -- degraded to [`SourceNotice`]s, because on
+    /// a hit the working set IS the ingest-time snapshot and a missing or
+    /// drifted file no longer blocks or re-links. Zero source re-reads, zero
+    /// SQL re-execution.
+    ///
+    /// Called only after [`companion::probe`] validated the companion + every
+    /// snapshot read-only; an ATTACH failure here is a fresh corruption in
+    /// the probe-to-attach window and surfaces as an honest resume error (the
+    /// replay fallback would re-fail on the same disk state).
+    fn restore_hit(
+        &mut self,
+        recipe: &Recipe,
+        recipe_path: &Path,
+        meta: &companion::WorkingSetMeta,
+    ) -> Result<Vec<SourceNotice>, ResumeError> {
+        let tree = recipe_path.parent().ok_or_else(|| ResumeError::Restore {
+            reference_name: recipe_path
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default(),
+            detail: "recipe path has no parent directory; cannot locate the session tree".into(),
+        })?;
+        // Mount each tree snapshot read-only + record the file so the
+        // per-turn sandboxes re-attach it (the same source_files contract
+        // resume_ingest_at maintains).
+        for src in &recipe.sources {
+            let file = companion::snapshot_file(tree, &src.reference_name);
+            let attach_sql = attach_sql(&file.to_string_lossy(), &src.reference_name);
+            if let Err(e) = self.admin_engine.execute_batch(&attach_sql) {
+                return Err(ResumeError::Restore {
+                    reference_name: src.reference_name.clone(),
+                    detail: format!("挂载树内快照失败：{e}"),
+                });
+            }
+            self.source_files.insert(src.reference_name.clone(), file);
+        }
+        // Restore the settled working-set shape verbatim: descriptors, result
+        // membership, provenance edges, and the active source pointer. The
+        // result_N tables themselves are already in the companion admin just
+        // opened.
+        let results: HashSet<&str> = meta.results.iter().map(String::as_str).collect();
+        for d in &meta.descriptors {
+            if results.contains(d.reference_name.as_str()) {
+                self.working_set.register_result(d.clone());
+            } else {
+                self.working_set.register(d.clone());
+            }
+        }
+        for (result, deps) in &meta.provenance {
+            self.working_set
+                .record_provenance(result, deps.iter().cloned().collect());
+        }
+        if let Some(active) = &meta.active {
+            self.working_set.set_active(active);
+        }
+        // Source status: stat-level only. A file that no longer resolves or
+        // stats is Missing; a (mtime, size) difference from the settle-time
+        // stamp is Changed. No content check -- reading the file is exactly
+        // what the hit path exists to avoid.
+        let mut notices = Vec::new();
+        for src in &recipe.sources {
+            let notice = match Self::resolve_source_path(recipe_path, src)
+                .ok()
+                .and_then(|path| companion::source_stat(&path))
+            {
+                Some(now) => match meta.source_stats.get(&src.reference_name) {
+                    Some(was) if was != &now => Some(SourceNotice::Changed {
+                        reference_name: src.reference_name.clone(),
+                    }),
+                    _ => None,
+                },
+                None => Some(SourceNotice::Missing {
+                    reference_name: src.reference_name.clone(),
+                }),
+            };
+            if let Some(n) = notice {
+                log::warn!(
+                    target: "toptopduck::session",
+                    "resume hit source notice ({:?}) for {}",
+                    n,
+                    src.reference_name
+                );
+                notices.push(n);
+            }
+        }
+        Ok(notices)
     }
 }
 #[cfg(test)]
@@ -1428,7 +1569,7 @@ mod tests {
 
     /// The nested sub-trace round-trips from the recipe (ADR-0117 Decision 6,
     /// issue #934): a persisted delegation entry's sub-rounds survive the
-    /// .duck serialization verbatim and rebuild onto the display view under
+    /// recipe.json serialization verbatim and rebuild onto the display view under
     /// the delegation entry -- a reopened session renders the sub-trace the
     /// live turn recorded, and a pre-#934 entry (no `sub_rounds` key on the
     /// wire) resumes without one.
@@ -1456,7 +1597,7 @@ mod tests {
                 }],
             }]),
         };
-        // The .duck wire round-trip: sub_rounds serialize under the
+        // The recipe.json wire round-trip: sub_rounds serialize under the
         // delegation entry and deserialize back field-identical.
         let json = serde_json::to_value(&persisted).expect("entry serializes");
         let back: RecipeTraceEntry = serde_json::from_value(json).expect("entry deserializes");
@@ -1897,14 +2038,20 @@ mod tests {
 
     #[test]
     fn rebuild_timeline_projects_runtime_attribution_to_the_wire() {
-        // ADR-0101: the resume projection maps the persisted pair (runtime
-        // kind + adapter id) onto the wire `TurnRuntime` the thread's segment
-        // badges read. Every recorded shape survives the rebuild: an external
-        // turn names its adapter, a pre-extension external turn degrades to
-        // `External { adapter_id: None }` (never a fabricated id), a built-in
-        // turn carries only the kind, and a v1-era turn without a runtime
-        // stays unattributed.
-        fn attributed(runtime: Option<RuntimeKind>, adapter_id: Option<&str>) -> RecipeEntry {
+        // ADR-0101 + issue #1351: the resume projection maps the persisted
+        // triple (runtime kind + adapter id + display name) onto the wire
+        // `TurnRuntime` the thread's attribution labels read. Every recorded
+        // shape survives the rebuild: an external turn names its adapter --
+        // a custom adapter whose name differs from its id pins that the
+        // tombstone rides the projection verbatim -- a pre-extension
+        // external turn degrades to nulls (never fabricated values), a
+        // built-in turn carries only the kind, and a v1-era turn without a
+        // runtime stays unattributed.
+        fn attributed(
+            runtime: Option<RuntimeKind>,
+            adapter_id: Option<&str>,
+            adapter_display_name: Option<&str>,
+        ) -> RecipeEntry {
             RecipeEntry::Turn(RecipeTurn::with_audit(
                 "q",
                 RecipeOutcome::Textual {
@@ -1916,6 +2063,7 @@ mod tests {
                 crate::persistence::recipe::TurnProvenance {
                     runtime,
                     adapter_id: adapter_id.map(Into::into),
+                    adapter_display_name: adapter_display_name.map(Into::into),
                     skills: Vec::new(),
                 },
                 TurnTimestamps::default(),
@@ -1923,10 +2071,15 @@ mod tests {
         }
         let recipe = recipe_with(
             vec![
-                attributed(Some(RuntimeKind::External), Some("gemini-cli")),
-                attributed(Some(RuntimeKind::External), None),
-                attributed(Some(RuntimeKind::BuiltIn), None),
-                attributed(None, None),
+                attributed(Some(RuntimeKind::External), Some("gemini-cli"), None),
+                attributed(
+                    Some(RuntimeKind::External),
+                    Some("user:ba3b2de2"),
+                    Some("My local CLI"),
+                ),
+                attributed(Some(RuntimeKind::External), None, None),
+                attributed(Some(RuntimeKind::BuiltIn), None, None),
+                attributed(None, None, None),
             ],
             None,
         );
@@ -1946,9 +2099,17 @@ mod tests {
             runtimes,
             vec![
                 Some(TurnRuntime::External {
-                    adapter_id: Some("gemini-cli".into())
+                    adapter_id: Some("gemini-cli".into()),
+                    display_name: None,
                 }),
-                Some(TurnRuntime::External { adapter_id: None }),
+                Some(TurnRuntime::External {
+                    adapter_id: Some("user:ba3b2de2".into()),
+                    display_name: Some("My local CLI".into()),
+                }),
+                Some(TurnRuntime::External {
+                    adapter_id: None,
+                    display_name: None,
+                }),
                 Some(TurnRuntime::BuiltIn),
                 None,
             ],
@@ -2186,6 +2347,66 @@ mod tests {
                 assert!(detail.contains("result_99"), "got {detail}");
             }
             other => panic!("expected ResumeError::Replay, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn restore_hit_reports_restore_when_a_snapshot_fails_to_attach() {
+        // Contract (ADR-0136 D3): on the watermark-hit path the recipe.json
+        // already read fine, so a snapshot whose read-only ATTACH fails is
+        // fresh corruption in the probe-to-attach window -- reported as
+        // Restore, never Load (whose frontend message blames the recipe
+        // read). `probe` normally guarantees the snapshots exist; a direct
+        // call skips probe, which is exactly this arm's premise.
+        let mut session = crate::Session::new().expect("session");
+        let tree = tempfile::tempdir().expect("tempdir");
+        let recipe = recipe_with(Vec::new(), Some("orders"));
+        // The tree deliberately holds no snapshot file: a READ_ONLY ATTACH
+        // cannot create it, so the attach fails deterministically.
+        let err = session
+            .restore_hit(
+                &recipe,
+                &tree.path().join("recipe.json"),
+                &companion::WorkingSetMeta::default(),
+            )
+            .expect_err("missing snapshot fails the hit restore");
+        match err {
+            ResumeError::Restore {
+                reference_name,
+                detail,
+            } => {
+                assert_eq!(reference_name, "orders");
+                assert!(!detail.is_empty(), "got {detail}");
+            }
+            other => panic!("expected ResumeError::Restore, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn restore_hit_reports_restore_for_a_parentless_recipe_path() {
+        // The defense arm: a recipe path with no parent cannot locate the
+        // tree. Unreachable through open_recipe (probe folds a parentless
+        // path into a miss first), so only a direct call exercises it; a
+        // parentless path has no file name either, so the payload carries
+        // an empty reference_name.
+        let mut session = crate::Session::new().expect("session");
+        let recipe = recipe_with(Vec::new(), Some("orders"));
+        let err = session
+            .restore_hit(
+                &recipe,
+                Path::new(""),
+                &companion::WorkingSetMeta::default(),
+            )
+            .expect_err("parentless path fails the hit restore");
+        match err {
+            ResumeError::Restore {
+                reference_name,
+                detail,
+            } => {
+                assert_eq!(reference_name, "");
+                assert!(!detail.is_empty(), "got {detail}");
+            }
+            other => panic!("expected ResumeError::Restore, got {other:?}"),
         }
     }
 }

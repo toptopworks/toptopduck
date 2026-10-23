@@ -8,7 +8,8 @@
 // User-actor badge derivation hand-off, the per-outcome width caps, the
 // folds, the cancel-reason split (#883), and the textual markdown (#827).
 
-import { describe, expect, it } from "vitest";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { describe, expect, it, vi } from "vitest";
 import { fireEvent, render, screen } from "@testing-library/react";
 import { IntlProvider } from "react-intl";
 import { TooltipProvider } from "../../ui/tooltip";
@@ -16,6 +17,21 @@ import { catalogFor, type EffectiveLocale } from "../../../i18n";
 import { TurnCard } from "../TurnCard";
 import type { DatasetDescriptor } from "../../../types/dataset";
 import type { TextKind, TraceEntry, TurnRecord } from "../../../types/thread";
+
+// The attribution marker reads the shared adapter-table cache (issue #1351),
+// so the card tree needs a QueryClient like the app tree provides. The api
+// mock resolves an empty table -- the raw-id assertions stay declared
+// rather than an accident of a failed fetch; retry:false keeps a mounting
+// marker from stacking background retries, staleTime:Infinity keeps a
+// seeded cache from refetching under it.
+vi.mock("../../../api", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../../../api")>()),
+  listAdapters: vi.fn().mockResolvedValue([]),
+}));
+
+const queryClient = new QueryClient({
+  defaultOptions: { queries: { retry: false, staleTime: Infinity } },
+});
 
 // Thread chrome routes through react-intl (ADR-0052); zh-CN matches the
 // shared fixture convention, and the marker's label is the raw adapter id
@@ -26,19 +42,21 @@ function cardEl(record: TurnRecord, defaultOpenDetail?: boolean, locale: Effecti
   return (
     <IntlProvider locale={locale} messages={catalogFor(locale)}>
       <TooltipProvider>
-        <TurnCard
-          record={record}
-          selectedResult={null}
-          onSelectResult={() => {}}
-          staleAnchor={undefined}
-          hasJumpTarget={false}
-          onStaleChipJump={undefined}
-          mentionedDataset={null}
-          skillIndex={undefined}
-          onRetryTurn={undefined}
-          busy={false}
-          defaultOpenDetail={defaultOpenDetail}
-        />
+        <QueryClientProvider client={queryClient}>
+          <TurnCard
+            record={record}
+            selectedResult={null}
+            onSelectResult={() => {}}
+            staleAnchor={undefined}
+            hasJumpTarget={false}
+            onStaleChipJump={undefined}
+            mentionedDataset={null}
+            skillIndex={undefined}
+            onRetryTurn={undefined}
+            busy={false}
+            defaultOpenDetail={defaultOpenDetail}
+          />
+        </QueryClientProvider>
       </TooltipProvider>
     </IntlProvider>
   );
@@ -81,7 +99,7 @@ const previewDataset: DatasetDescriptor = {
 describe("TurnCard runtime attribution marker (issue #818)", () => {
   it("keeps the marker on a Failed turn, in the muted caption family", () => {
     const record: TurnRecord = {
-      ...recordWith({ kind: "external", data: { adapter_id: "claude-code" } }),
+      ...recordWith({ kind: "external", data: { adapter_id: "claude-code", display_name: null } }),
       outcome: { kind: "Failed", data: { kind: "Execute", data: { detail: "boom" } } },
     };
     const { container } = renderCard(record);
@@ -436,7 +454,7 @@ describe("TurnCard usage footer (ADR-0129, issue #1270)", () => {
 // name-ordinal walk runs at TURN scope -- a same-spec re-delegation in a
 // later round must reach the SECOND table entry (a per-round cursor reads
 // the first again), and a refused row (no sub-trace) consumes no ordinal.
-// Each delegation dialog annotates its own run's subtotal, never a
+// Each delegation row's expansion annotates its own run's subtotal, never a
 // same-name sibling's.
 describe("TurnCard sub-agent subtotal pairing (ADR-0129, issue #1270)", () => {
   const analystRun = (): TraceEntry => ({
@@ -479,10 +497,10 @@ describe("TurnCard sub-agent subtotal pairing (ADR-0129, issue #1270)", () => {
     // fold -- the head opens first.
     fireEvent.click(screen.getByRole("button", { name: /已回答/ }));
     screen.getAllByText("轨迹 · 1 次调用").forEach((t) => fireEvent.click(t));
-    fireEvent.click(screen.getAllByText("子轨迹")[roundIndex]);
+    fireEvent.click(screen.getAllByText("子智能体轨迹")[roundIndex]);
   };
 
-  it("round 1's dialog carries the first run's subtotal", () => {
+  it("round 1's expansion carries the first run's subtotal", () => {
     openSubtrace(0);
     expectUsageLine("已用 40");
   });
@@ -507,9 +525,9 @@ describe("TurnCard sub-agent subtotal pairing (ADR-0129, issue #1270)", () => {
     // Issue #1282: the head opens first; the per-round fold lives inside it.
     fireEvent.click(screen.getByRole("button", { name: /已回答/ }));
     fireEvent.click(screen.getByText("轨迹 · 2 次调用"));
-    // The refusal renders no sub-trace affordance (the dialog's own
-    // self-guard) -- exactly one openable dialog remains.
-    const buttons = screen.getAllByText("子轨迹");
+    // The refusal renders no sub-trace fold (the row's own gate) --
+    // exactly one openable expansion remains.
+    const buttons = screen.getAllByText("子智能体轨迹");
     expect(buttons).toHaveLength(1);
     fireEvent.click(buttons[0]);
     expectUsageLine("已用 40");

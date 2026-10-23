@@ -84,7 +84,7 @@ export type ExportRowsError =
     data: { step: "Create" | "Write" | "Flush" | "Rename"; path: string; detail: string };
   };
 
-// Why a forward migration step failed (issue #120). Rides DuckLoadError::
+// Why a forward migration step failed (issue #120). Rides RecipeLoadError::
 // Migration inside ResumeError::Load. Mirrors the Rust `MigrationError` (serde
 // adjacently-tagged). `Field` carries the missing/ill-typed field detail;
 // `NoTransform` names a gap in the migration chain (no registered step for the
@@ -93,31 +93,37 @@ export type MigrationError =
   | { kind: "NoTransform"; data: { from: number; supported: number } }
   | { kind: "Field"; data: string };
 
-// The .duck load error (persistence::io::LoadError, issue #120) -- DISTINCT
-// from the ingest `LoadError` above. Nests MigrationError. Crosses IPC inside
-// ResumeError::Load (the open_duck reject); the frontend recurses
+// The recipe.json load error (persistence::io::LoadError, issue #120) -- DISTINCT
+// from the ingest `LoadError` above. The Rust crate root re-exports the enum
+// under this same name (`RecipeLoadError`) to keep the two LoadErrors apart;
+// only the wire `kind` strings cross IPC. Nests MigrationError. Crosses IPC inside
+// ResumeError::Load (the open_recipe reject); the frontend recurses
 // ResumeError::Load.data.kind to render the version-mismatch "please upgrade"
 // hint or the io/parse/migration detail.
-export type DuckLoadError =
+export type RecipeLoadError =
   | { kind: "Io"; data: string }
   | { kind: "Parse"; data: string }
   | { kind: "VersionMismatch"; data: { found: number; supported: number } }
   | { kind: "Migration"; data: MigrationError };
 
-// Why a resume failed (issue #120). The `open_duck` command wraps this in
+// Why a resume failed (issue #120). The `open_recipe` command wraps this in
 // `SessionError::Resume`. Mirrors
 // the Rust `ResumeError` (serde adjacently-tagged). `Load` recurses into
-// DuckLoadError; `AlreadyOpen` carries the canonical .duck path (PathBuf ->
+// RecipeLoadError; `Restore` names the snapshot whose in-tree read-only ATTACH
+// failed on the watermark-hit path (ADR-0136 D3) -- the recipe.json itself read
+// fine, so this is NOT a file-unreadable message; `AlreadyOpen` carries the
+// canonical recipe.json path (PathBuf ->
 // string). Command-boundary internal failures (mutex poison / join panic) stay
 // on `SessionError::Engine` -- they are not resume-domain, so they do not ride
 // this enum.
 export type ResumeError =
-  | { kind: "Load"; data: DuckLoadError }
+  | { kind: "Load"; data: RecipeLoadError }
   | {
     kind: "SourceMissing";
     data: { reference_name: string; path: string; detail: string };
   }
   | { kind: "Replay"; data: { reference_name: string; detail: string } }
+  | { kind: "Restore"; data: { reference_name: string; detail: string } }
   | { kind: "ActiveMissing"; data: string }
   | { kind: "Cancelled" }
   | { kind: "Aborted" }
@@ -125,7 +131,7 @@ export type ResumeError =
 
 // Why a save failed (issue #120). Returned by `take_persist_error` as
 // `SaveError | null` (a value, not a reject). Mirrors the Rust `SaveError`
-// (serde adjacently-tagged). `AlreadyOpen` carries the canonical .duck path;
+// (serde adjacently-tagged). `AlreadyOpen` carries the canonical recipe.json path;
 // the Serialize/Io/Rename data strings ride the technical-details fold.
 export type SaveError =
   | { kind: "Serialize"; data: string }
@@ -135,7 +141,7 @@ export type SaveError =
 
 // Why a session-agnostic cold-store command failed (issue #130). Mirrors the
 // Rust `StoreCommandError` (serde adjacently-tagged). Rejects from
-// delete_session / rename_persisted_session (a cross-session .duck file),
+// delete_session / rename_persisted_session (a cross-session recipe.json file),
 // set_api_key / clear_api_key (the OS keychain), and set_provider_config /
 // set_app_config (an app-config write). BlankName wraps RenameSessionError so
 // the blank-name refusal matches rename_session's (one shape, one catalog id);
@@ -152,11 +158,21 @@ export type StoreCommandError =
   | { kind: "UnknownAdapter"; data: string }
   | { kind: "InvalidCliTool"; data: string };
 
+// A non-blocking source status notice from the resume watermark hit path
+// (ADR-0136): the hit opens even when a source file was moved/deleted/changed
+// since settle -- the working set is the ingest-time snapshot -- and this
+// notice is the honest "the file no longer backs the loaded data" signal.
+// Mirrors the Rust `SourceNotice` (serde adjacently-tagged). Drained once per
+// open via takeSourceNotices; empty on every replay-path resume.
+export type SourceNotice =
+  | { kind: "Missing"; data: { reference_name: string } }
+  | { kind: "Changed"; data: { reference_name: string } };
+
 // --- Progress side-channel events ----------------------------------------
 
 // One resume-progress event (issue #48, ADR-0034 visible progress). Mirrors
 // the Rust `ResumeEvent` (serde externally-tagged: `"Source"` / `"Replay"` as
-// the variant key). Emitted by the backend `open_duck` command via a Tauri
+// the variant key). Emitted by the backend `open_recipe` command via a Tauri
 // event per source verification and per replayed productive turn.
 export type ResumeEvent =
   | {
@@ -179,7 +195,7 @@ export type ResumeEvent =
 // frontend filters the global Tauri event broadcast to the one SessionPane that
 // owns the resume. v1 emitted a bare ResumeEvent -- a single-session legacy.
 // Mirrors the Rust `ResumeProgress`. `session_id` is the runtime id (UUID
-// string) the open_duck command received.
+// string) the open_recipe command received.
 export interface ResumeProgress {
   session_id: string;
   event: ResumeEvent;
@@ -205,9 +221,16 @@ export type TurnPhase =
   | { Thinking: { attempt: number } }
   | {
     ToolCallStarted: {
+      // The call's id, present only on a delegation row (ADR-0135
+      // Decision 2): pairs the started row with its completion and its
+      // forwarded sub-events. Absent on an ordinary call.
+      id?: string;
       name: string;
       operation_kind: OperationKind;
       summary: string;
+      // The delegation task's full text (ADR-0135 Decision 3), present
+      // only on a delegation row -- live-only, never persisted.
+      task?: string;
     };
   }
   | { ToolCallCompleted: TraceEntry }
@@ -220,7 +243,13 @@ export type TurnPhase =
   // Wraps the trace's own ThinkingTrace verbatim (the same reuse
   // ToolCallCompleted makes of TraceEntry): the live state stores the block
   // as-is and the round's fold renders it unchanged.
-  | { ThinkingCompleted: ThinkingTrace };
+  | { ThinkingCompleted: ThinkingTrace }
+  // ADR-0135: one forwarded sub-event of a running delegation -- the inner
+  // phase the sub-agent's fold produced, tagged with the owning
+  // delegation's call id so the frontend routes it into that delegation's
+  // live buffer (same-name parallels included). Only the four non-delta
+  // variants ever ride here; TextDelta is filtered at the Rust sink.
+  | { DelegationSubEvent: { delegation_id: string; phase: TurnPhase } };
 
 // A `turn-progress` side-channel event addressed by sessionId (ADR-0059,
 // issue #76). Mirrors the Rust `TurnProgress`. The phase never enters the
@@ -228,6 +257,17 @@ export type TurnPhase =
 export interface TurnProgress {
   session_id: string;
   phase: TurnPhase;
+}
+
+// A `session-named` side-channel event (ADR-0089 Decision 4, calibrated by
+// issue #1353): the turn-start auto-name push. Fired exactly once when a
+// session's first question is accepted -- ahead of the turn's terminal
+// state -- so the sidebar row + session header show the new name without
+// waiting for the first turn to settle. Mirrors the Rust
+// `SessionNamedPayload`.
+export interface SessionNamedPayload {
+  session_id: string;
+  name: string;
 }
 
 // --- Persisted session metadata ------------------------------------------
@@ -244,13 +284,13 @@ export interface SourceSummary {
 }
 
 // One persisted session's sidebar metadata (ADR-0060/0061, issue #76). Mirrors
-// the Rust `SessionMetadata`. `duck_path` is the `.duck` file path -- the
+// the Rust `SessionMetadata`. `recipe_path` is the `recipe.json` file path -- the
 // stable identity of a persisted session (the runtime UUID is not persisted);
-// pass it back to openDuck to resume. Every other field is derived from the
+// pass it back to openRecipe to resume. Every other field is derived from the
 // recipe + the file mtime (zero new persistence). Renamed from `session_id` in
 // issue #462 to disambiguate from the runtime UUID that addresses live IPC.
 export interface SessionMetadata {
-  duck_path: string;
+  recipe_path: string;
   display_name: string;
   // File mtime, milliseconds since the Unix epoch.
   last_modified_at: number;

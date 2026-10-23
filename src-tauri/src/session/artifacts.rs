@@ -16,7 +16,7 @@
 //! Hits that resolve INSIDE the session temp working directory (the
 //! external agent's cwd / the built-in tool output area -- wiped on session
 //! close) are materialized by copy into the per-session persistent
-//! `artifacts/` directory (beside `session.duck`, the same per-session
+//! `artifacts/` directory (beside `recipe.json`, the same per-session
 //! directory semantics as the derived-source `assets/` channel); the
 //! manifest stores the materialized path. User-directory absolute hits
 //! stay in place -- the app does not copy user files. File existence is a
@@ -35,19 +35,19 @@ use crate::provider::tool_calling::{ToolDefinition, ToolUse};
 pub(crate) const PRESENT_FILES: &str = "present_files";
 
 /// The per-session persistent artifacts directory name: a subdirectory of
-/// the session directory (the `.duck`'s parent, `{sessions_root}/{uuid}/`),
+/// the session directory (the `recipe.json`'s parent, `{sessions_root}/{uuid}/`),
 /// created lazily at the first settle-time materialization. Session
 /// deletion removes the whole per-session directory, so `artifacts/` rides
 /// the existing cleanup semantics.
 const ARTIFACTS_DIR_NAME: &str = "artifacts";
 
 /// The per-session persistent artifacts directory (ADR-0124 Decision 2):
-/// `artifacts/` under the session directory (the bound `.duck`'s parent).
+/// `artifacts/` under the session directory (the bound `recipe.json`'s parent).
 /// `None` for an unbound session -- materialization degrades to keeping
 /// temp paths. One source for the settle computation and the command
 /// boundary's asset-scope grant, so the two cannot drift.
-pub(crate) fn artifacts_dir(duck_path: Option<&Path>) -> Option<PathBuf> {
-    duck_path
+pub(crate) fn artifacts_dir(recipe_path: Option<&Path>) -> Option<PathBuf> {
+    recipe_path
         .and_then(Path::parent)
         .map(|parent| parent.join(ARTIFACTS_DIR_NAME))
 }

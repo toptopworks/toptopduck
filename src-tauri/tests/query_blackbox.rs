@@ -1625,16 +1625,20 @@ fn ask_with_phase_records_the_tool_call_event_stream_on_a_result_turn() {
         vec![
             TurnPhase::Thinking { attempt: 1 },
             TurnPhase::ToolCallStarted {
+                id: None,
                 name: "materialize".into(),
                 operation_kind: OperationKind::Write,
                 summary: "SELECT 1 AS n".into(),
+                task: None,
             },
             TurnPhase::ToolCallCompleted(TraceEntryView {
+                id: None,
                 name: "materialize".into(),
                 operation_kind: OperationKind::Write,
                 summary: "SELECT 1 AS n".into(),
                 success: true,
                 result_excerpt: String::new(),
+                report: None,
                 sub_rounds: None,
             }),
             TurnPhase::Thinking { attempt: 2 },
@@ -1688,7 +1692,7 @@ fn ask_with_phase_records_only_thinking_on_a_textual_turn() {
 // Each progress event is addressed by a session_id so a multi-session frontend
 // filters the global Tauri broadcast down to the one SessionPane that owns the
 // turn / resume (ADR-0056). The command layer wraps each lib-phase / lib-event
-// with the ask's / open_duck's session_id before emitting; these seams drive
+// with the ask's / open_recipe's session_id before emitting; these seams drive
 // the SAME callback the command layer injects and assert one turn's / one
 // resume's whole event sequence is addressable by ONE id -- the precondition
 // for the frontend's sessionId filter. (The Tauri emit wrapping itself lives
@@ -1745,14 +1749,14 @@ fn turn_progress_events_for_one_turn_share_one_session_id() {
 fn resume_progress_events_carry_one_session_id_and_cover_the_resume_sequence() {
     // AC #76 (ADR-0034/0056/0059): resume emits a resume-progress event per
     // source verification + per replayed turn, and the whole sequence is
-    // addressable by the open_duck's single session_id. This seam also pins
+    // addressable by the open_recipe's single session_id. This seam also pins
     // that resume ACTUALLY fires Source + Replay events (ADR-0034 visible
     // progress). The command layer wraps each ResumeEvent with the session_id;
     // here we drive the same callback and assert one id addresses every event.
     let dir = tempfile::tempdir().expect("tempdir");
-    let duck = dir.path().join("resumed.duck");
+    let duck = dir.path().join("resumed.json");
 
-    // Build + persist a real .duck: one source + one productive turn.
+    // Build + persist a real recipe.json: one source + one productive turn.
     let cancel = Arc::new(CancelToken::new());
     let provider = FakeProvider::new().scripted_tool_turn_seq(
         "建结果",
@@ -1764,16 +1768,16 @@ fn resume_progress_events_carry_one_session_id_and_cover_the_resume_sequence() {
     load_source(&mut session, &fixture("people.csv"));
     session.ask("建结果"); // result_1
     session
-        .bind_duck(duck.clone(), "resumed".into())
+        .bind_recipe(duck.clone(), "resumed".into())
         .expect("bind");
     // Drop the building session so the canonical-writer key (ADR-0035
-    // single-writer) releases before open_duck re-acquires it.
+    // single-writer) releases before open_recipe re-acquires it.
     drop(session);
 
     const SID: &str = "550e8400-e29b-41d4-a716-446655440000";
     let sid = SessionId::parse(SID).expect("valid v4 UUID");
     let mut addressed: Vec<ResumeProgress> = Vec::new();
-    let resumed = Session::open_duck(
+    let resumed = Session::open_recipe(
         &duck,
         Arc::new(CancelToken::new()),
         Box::new(FakeProvider::new()),

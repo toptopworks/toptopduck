@@ -26,7 +26,7 @@ import { Label } from "@/components/ui/label";
 // menu species import from a neutral home (issue #1325).
 
 // Strong-confirm delete dialog (ADR-0060, issue #81): deletion is irreversible,
-// so the dialog names the .duck explicitly and requires an explicit confirm.
+// so the dialog names the recipe.json explicitly and requires an explicit confirm.
 // The shell is a Radix AlertDialog (issue #105): role="alertdialog" + focus-trap
 // + scroll-lock come from the primitive. AlertDialog blocks overlay-click
 // dismiss by default (destructive guard -- a stray pointer-down cannot drop the

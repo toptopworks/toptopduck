@@ -183,12 +183,12 @@ pub enum AuthMode {
 /// carries the label through to the event so the frontend renders the right
 /// badge without re-inferring.
 ///
-/// The serde form is a `.duck` persistence contract (issue #316): persisted
+/// The serde form is a `recipe.json` persistence contract (issue #316): persisted
 /// recipe traces reuse this enum (`RecipeTraceEntry.operation_kind`,
 /// ADR-0078), so the `rename_all = "snake_case"` variant spellings (`read` /
 /// `write` / `execute` / `network`) are part of the recipe wire format,
 /// frozen by the backward-compatibility constraint. Renaming a variant or
-/// reworking the case convention breaks historical `.duck` readability;
+/// reworking the case convention breaks historical `recipe.json` readability;
 /// appending a variant is append-only-safe (no historical file carries it).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
@@ -542,7 +542,7 @@ impl ApprovalState {
     /// set, returns the mode to [`AuthMode::PerCall`], and wakes any in-flight
     /// pending approval so its gate returns [`GateCancelled`] and clears its
     /// own slot (the slot is owned by the gate, not this fn). Called on a
-    /// successful resume by `open_duck` -- trust state is session-level and
+    /// successful resume by `open_recipe` -- trust state is session-level and
     /// must not survive a resume (it is not in the recipe, ADR-0080).
     ///
     /// Both fields are written under a single `policy` lock so a concurrent
@@ -913,7 +913,7 @@ mod tests {
 
     // --- wire format -------------------------------------------------------
 
-    /// The `.duck` persistence contract (issue #316, ADR-0078): persisted
+    /// The `recipe.json` persistence contract (issue #316, ADR-0078): persisted
     /// recipe traces reuse `OperationKind`, so the `rename_all =
     /// "snake_case"` variant spellings are frozen wire format. Migration
     /// fixtures lock only `write` indirectly; this pins all four so a

@@ -27,16 +27,16 @@ type SessionHeaderMenuProps = {
   /** Raw session name for the rename dialog prefill; resolveDisplayName derives
    *  the display name for the delete confirmation. */
   sessionName: string;
-  /** The bound `.duck` path (ADR-0089: always present since createSession). */
-  duckPath: string;
+  /** The bound `recipe.json` path (ADR-0089: always present since createSession). */
+  recipePath: string;
   /** Runtime session id (for close / rename / delete callbacks). */
   sessionId: string;
   /** Shell callback: rename this session's entry. */
-  onRename: (sessionId: string, duckPath: string, newName: string) => void;
+  onRename: (sessionId: string, recipePath: string, newName: string) => void;
   /** Shell callback: close this session (fires cancel + cleanup). */
   onClose: (sessionId: string) => void;
   /** Shell callback: delete this session permanently. */
-  onDelete: (duckPath: string, sessionId: string) => void;
+  onDelete: (recipePath: string, sessionId: string) => void;
   /** Shell-wide busy gate: disables the trigger during persistence / resume
    *  operations, matching the sidebar's disabled={busy} contract (H1 fix). */
   disabled?: boolean;
@@ -44,7 +44,7 @@ type SessionHeaderMenuProps = {
 
 export function SessionHeaderMenu({
   sessionName,
-  duckPath,
+  recipePath,
   sessionId,
   onRename,
   onClose,
@@ -111,7 +111,7 @@ export function SessionHeaderMenu({
           onCancel={() => setDialog(null)}
           onSubmit={(newName) => {
             setDialog(null);
-            onRename(sessionId, duckPath, newName);
+            onRename(sessionId, recipePath, newName);
           }}
         />
       )}
@@ -121,7 +121,7 @@ export function SessionHeaderMenu({
           onCancel={() => setDialog(null)}
           onConfirm={() => {
             setDialog(null);
-            onDelete(duckPath, sessionId);
+            onDelete(recipePath, sessionId);
           }}
         />
       )}

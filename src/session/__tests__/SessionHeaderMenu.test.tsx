@@ -82,7 +82,7 @@ function renderMenu(overrides: {
     <IntlProvider locale="en-US" messages={catalogFor("en-US")} defaultLocale="en-US">
       <SessionHeaderMenu
         sessionName="My Session"
-        duckPath="/test/session.duck"
+        recipePath="/test/recipe.json"
         sessionId="sess-1"
         onRename={onRename}
         onClose={onClose}
@@ -149,7 +149,7 @@ describe("SessionHeaderMenu (issue #512)", () => {
     fireEvent.change(input, { target: { value: "Renamed Session" } });
     fireEvent.click(screen.getByRole("button", { name: "Save" }));
 
-    expect(onRename).toHaveBeenCalledWith("sess-1", "/test/session.duck", "Renamed Session");
+    expect(onRename).toHaveBeenCalledWith("sess-1", "/test/recipe.json", "Renamed Session");
   });
 
   it("Delete opens the DeleteSessionDialog and calls onDelete on confirm", async () => {
@@ -160,7 +160,7 @@ describe("SessionHeaderMenu (issue #512)", () => {
     const confirmButton = await screen.findByRole("button", { name: "Delete permanently" });
     fireEvent.click(confirmButton);
 
-    expect(onDelete).toHaveBeenCalledWith("/test/session.duck", "sess-1");
+    expect(onDelete).toHaveBeenCalledWith("/test/recipe.json", "sess-1");
   });
 
   it("Rename dialog dismisses after submit (setDialog(null) fires)", async () => {

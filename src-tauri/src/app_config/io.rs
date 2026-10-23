@@ -1,15 +1,16 @@
 //! App-config atomic IO (ADR-0038): the second at-rest artifact, alongside the
-//! user-owned `.duck`. The on-disk file is small JSON in the OS app-data
+//! user-owned `recipe.json`. The on-disk file is small JSON in the OS app-data
 //! directory; this module owns its write + read semantics.
 //!
-//! **Write** mirrors [`crate::persistence::io::save_atomic`]: serialize to JSON,
-//! write `<target>.tmp` in the same directory, `fsync`, then rename over the
+//! **Write** rides the shared atomic-write core
+//! [`crate::persistence::io::write_str_atomic`] (issue #1348): serialize to
+//! JSON, `<target>.tmp` in the same directory, `fsync`, then rename over the
 //! target. The rename is intra-volume atomic; a crash mid-write leaves either
 //! the prior complete config or the next complete one -- never a half-file.
 //!
-//! **Read** uses a DIFFERENT policy from `.duck`: app-config honest-DEGRADES to
+//! **Read** uses a DIFFERENT policy from `recipe.json`: app-config honest-DEGRADES to
 //! built-in defaults on ANY failure (missing file, corrupt JSON, version
-//! mismatch, detected secret field). A `.duck` honest-REFUSES (the user's
+//! mismatch, detected secret field). A `recipe.json` honest-REFUSES (the user's
 //! analysis is at stake); app-config is just prefs, so "no crash, reset to
 //! defaults" is the right call (ADR-0038 / issue #53 AC: "损坏/缺失 -> 默认值,
 //! 不崩"). [`read_at`] therefore returns `AppConfig`, not `Result` -- every
@@ -24,17 +25,12 @@
 //! secrets-never enforceable and testable across both directions.
 
 use std::fs;
-use std::io::Write;
 use std::path::Path;
 
 use serde_json::Value;
 
 use crate::app_config::model::{AppConfig, APP_CONFIG_FORMAT_VERSION};
-
-/// Suffix appended to the target file name for the temp file. Same directory as
-/// the target so the `rename` is intra-volume (atomic on NTFS / POSIX). Mirrors
-/// [`crate::persistence::io::TMP_SUFFIX`].
-const TMP_SUFFIX: &str = ".tmp";
+use crate::persistence::io::{write_str_atomic, AtomicWriteError, WritePerms};
 
 /// Key names that must NEVER appear in an app-config file. A hand-edited file
 /// carrying any of these (at any object depth) is rejected to defaults: the file
@@ -181,39 +177,14 @@ impl std::fmt::Display for AppConfigReadError {
     }
 }
 
-/// The temp-file path for a target (same directory, name + TMP_SUFFIX). Public
-/// so a test can locate a stale temp after a simulated mid-write crash.
-pub fn temp_path_for(target: &Path) -> Option<std::path::PathBuf> {
-    let file_name = target.file_name()?.to_str()?;
-    Some(target.with_file_name(format!("{file_name}{TMP_SUFFIX}")))
-}
-
 /// Write a config atomically: serialize to pretty JSON (human-readable + git-
-/// friendly diffs), write to `<target>.tmp` in the same directory, `fsync`, then
-/// rename over the target. The rename is atomic on the same volume; a crash
-/// before rename leaves the prior target intact and a stale temp behind
-/// (overwritten on the next write). Mirrors the `.duck` atomic write.
+/// friendly diffs), then one ride on the shared atomic-write core (issue
+/// #1348). A crash before the rename leaves the prior target intact and a
+/// stale temp behind (overwritten on the next write).
 pub fn write_at(target: &Path, cfg: &AppConfig) -> Result<(), WriteError> {
     let json =
         serde_json::to_string_pretty(cfg).map_err(|e| WriteError::Serialize(e.to_string()))?;
-    let tmp = temp_path_for(target)
-        .ok_or_else(|| WriteError::Io("could not derive temp file path".into()))?;
-
-    {
-        let mut file = fs::File::create(&tmp).map_err(|e| WriteError::Io(e.to_string()))?;
-        file.write_all(json.as_bytes())
-            .map_err(|e| WriteError::Io(e.to_string()))?;
-        // fsync before the rename so a crash right after rename never leaves a
-        // 0-byte / partially-flushed target.
-        file.sync_all().map_err(|e| WriteError::Io(e.to_string()))?;
-    }
-
-    if let Err(e) = fs::rename(&tmp, target) {
-        // Clean up the temp so it doesn't pile up; the target is untouched.
-        let _ = fs::remove_file(&tmp);
-        return Err(WriteError::Rename(e.to_string()));
-    }
-    Ok(())
+    write_str_atomic(target, &json, WritePerms::Default).map_err(WriteError::from)
 }
 
 /// Why a write failed. Every failure leaves the target config file (if any)
@@ -250,6 +221,15 @@ impl std::fmt::Display for WriteError {
     }
 }
 impl std::error::Error for WriteError {}
+
+impl From<AtomicWriteError> for WriteError {
+    fn from(e: AtomicWriteError) -> Self {
+        match e {
+            AtomicWriteError::Io(d) => WriteError::Io(d),
+            AtomicWriteError::Rename(d) => WriteError::Rename(d),
+        }
+    }
+}
 
 /// Read the config, honest-degrading to [`AppConfig::defaults`] on ANY failure
 /// (ADR-0038 / issue #53 AC). Never returns an error and never panics: a missing
@@ -571,7 +551,7 @@ mod tests {
         // no `.tmp` litters the directory.
         let (_dir, path) = temp("config.json");
         write_at(&path, &AppConfig::defaults()).expect("write");
-        let tmp = temp_path_for(&path).expect("temp path");
+        let tmp = crate::persistence::io::temp_path_for(&path).expect("temp path");
         assert!(!tmp.exists(), "temp file must not linger");
         assert!(path.exists(), "target exists");
     }
@@ -608,7 +588,7 @@ mod tests {
     #[test]
     fn read_a_higher_version_degrades_to_defaults() {
         // A newer app's config must not be silently mis-parsed (mirror of the
-        // .duck honest-refuse, but app-config degrades because it is non-essential).
+        // recipe.json honest-refuse, but app-config degrades because it is non-essential).
         let (_dir, path) = temp("config.json");
         let future = format!(
             "{{\"format_version\":{future},\"theme\":\"dark\"}}",

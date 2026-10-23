@@ -24,7 +24,7 @@ function meta(
   opts: Partial<SessionMetadata> = {},
 ): SessionMetadata {
   return {
-    duck_path: path,
+    recipe_path: path,
     display_name: name,
     last_modified_at: NOW - ageDays * MS_PER_DAY,
     source_summary: {
@@ -52,10 +52,10 @@ describe("timeGroupKind", () => {
 
 describe("buildSidebarModel", () => {
   it("groups persisted sessions Chat-style and sorts last-modified descending", () => {
-    const today = meta("/a.duck", "alpha", 0);
-    const yesterday = meta("/b.duck", "beta", 1);
-    const last7 = meta("/c.duck", "gamma", 5);
-    const older = meta("/d.duck", "delta", 30);
+    const today = meta("/a.json", "alpha", 0);
+    const yesterday = meta("/b.json", "beta", 1);
+    const last7 = meta("/c.json", "gamma", 5);
+    const older = meta("/d.json", "delta", 30);
 
     const { groups } = buildSidebarModel([today, yesterday, last7, older], [], null, NOW, "time");
 
@@ -67,9 +67,9 @@ describe("buildSidebarModel", () => {
   });
 
   it("merges an open binding into its persisted row (sid set) and marks active", () => {
-    const persisted = [meta("/a.duck", "alpha", 0)];
+    const persisted = [meta("/a.json", "alpha", 0)];
     const open: OpenSession[] = [
-      { sid: "uuid-a", name: "alpha", path: "/a.duck", pendingIngestPaths: [], pendingQuestion: null, pendingSkillInvocations: [] },
+      { sid: "uuid-a", name: "alpha", path: "/a.json", pendingIngestPaths: [], pendingQuestion: null, pendingSkillInvocations: [] },
     ];
 
     const { groups } = buildSidebarModel(persisted, open, "uuid-a", NOW, "time");
@@ -77,17 +77,17 @@ describe("buildSidebarModel", () => {
     const entry = groups[0].entries[0];
     expect(entry.sid).toBe("uuid-a");
     expect(entry.active).toBe(true);
-    expect(entry.path).toBe("/a.duck");
+    expect(entry.path).toBe("/a.json");
   });
 
   it("maps sourceCount from source_summary.source_count (ADR-0093, issue #513)", () => {
     // The hover card needs the total source count alongside the first source
     // name. persistedEntry must carry it through from source_summary.
     const persisted = [
-      meta("/a.duck", "alpha", 0, {
+      meta("/a.json", "alpha", 0, {
         source_summary: { first_source_name: "alpha.csv", source_count: 3, turn_count: 5 },
       }),
-      meta("/b.duck", "beta", 0, {
+      meta("/b.json", "beta", 0, {
         source_summary: { first_source_name: null, source_count: 0, turn_count: 0 },
       }),
     ];
@@ -107,7 +107,7 @@ describe("buildSidebarModel", () => {
     // in the list_sessions result (async refetch). It becomes a standalone
     // entry stamped to `now` until the persisted list catches up.
     const open: OpenSession[] = [
-      { sid: "uuid-new", name: "", path: "/sessions/uuid-new/session.duck", pendingIngestPaths: [], pendingQuestion: null, pendingSkillInvocations: [] },
+      { sid: "uuid-new", name: "", path: "/sessions/uuid-new/recipe.json", pendingIngestPaths: [], pendingQuestion: null, pendingSkillInvocations: [] },
     ];
 
     const { groups } = buildSidebarModel([], open, "uuid-new", NOW, "time");
@@ -116,7 +116,7 @@ describe("buildSidebarModel", () => {
     expect(groups[0].kind).toBe("today");
     const entry = groups[0].entries[0];
     expect(entry.sid).toBe("uuid-new");
-    expect(entry.path).toBe("/sessions/uuid-new/session.duck");
+    expect(entry.path).toBe("/sessions/uuid-new/recipe.json");
     expect(entry.active).toBe(true);
     expect(entry.firstSourceName).toBeNull();
     expect(entry.sourceCount).toBe(0);
@@ -125,11 +125,11 @@ describe("buildSidebarModel", () => {
 
   it("marks only the active open row, leaving closed persisted rows inactive", () => {
     const persisted = [
-      meta("/a.duck", "alpha", 0),
-      meta("/b.duck", "beta", 0),
+      meta("/a.json", "alpha", 0),
+      meta("/b.json", "beta", 0),
     ];
     const open: OpenSession[] = [
-      { sid: "uuid-b", name: "beta", path: "/b.duck", pendingIngestPaths: [], pendingQuestion: null, pendingSkillInvocations: [] },
+      { sid: "uuid-b", name: "beta", path: "/b.json", pendingIngestPaths: [], pendingQuestion: null, pendingSkillInvocations: [] },
     ];
 
     const { groups } = buildSidebarModel(persisted, open, "uuid-b", NOW, "time");
@@ -147,10 +147,10 @@ describe("buildSidebarModel", () => {
     // The same input as the time-mode "groups Chat-style" test, but flat
     // yields ONE group whose kind is "recent" and whose entries preserve the
     // sorted-desc order across what would otherwise be the time buckets.
-    const today = meta("/a.duck", "alpha", 0);
-    const yesterday = meta("/b.duck", "beta", 1);
-    const last7 = meta("/c.duck", "gamma", 5);
-    const older = meta("/d.duck", "delta", 30);
+    const today = meta("/a.json", "alpha", 0);
+    const yesterday = meta("/b.json", "beta", 1);
+    const last7 = meta("/c.json", "gamma", 5);
+    const older = meta("/d.json", "delta", 30);
 
     const { groups } = buildSidebarModel(
       [today, yesterday, last7, older],
@@ -173,9 +173,9 @@ describe("buildSidebarModel", () => {
   it("flat mode still flags the active open row and merges the open binding", () => {
     // Flat mode is purely a presentation toggle over the same merge + sort: the
     // active/open semantics are identical to time mode.
-    const persisted = [meta("/a.duck", "alpha", 0), meta("/b.duck", "beta", 5)];
+    const persisted = [meta("/a.json", "alpha", 0), meta("/b.json", "beta", 5)];
     const open: OpenSession[] = [
-      { sid: "uuid-b", name: "beta", path: "/b.duck", pendingIngestPaths: [], pendingQuestion: null, pendingSkillInvocations: [] },
+      { sid: "uuid-b", name: "beta", path: "/b.json", pendingIngestPaths: [], pendingQuestion: null, pendingSkillInvocations: [] },
     ];
 
     const { groups } = buildSidebarModel(persisted, open, "uuid-b", NOW, "flat");
@@ -204,11 +204,11 @@ describe("buildSidebarModel", () => {
     // SidebarGroup is a discriminated union on `mode`; this pins the runtime
     // side so a future constructor drift (e.g. flat branch returning a time
     // kind) fails here too, not just at the type level.
-    const { groups: flatGroups } = buildSidebarModel([meta("/a.duck", "a", 0)], [], null, NOW, "flat");
+    const { groups: flatGroups } = buildSidebarModel([meta("/a.json", "a", 0)], [], null, NOW, "flat");
     expect(flatGroups[0].mode).toBe("flat");
     expect(flatGroups[0].kind).toBe("recent");
 
-    const { groups: timeGroups } = buildSidebarModel([meta("/a.duck", "a", 0)], [], null, NOW, "time");
+    const { groups: timeGroups } = buildSidebarModel([meta("/a.json", "a", 0)], [], null, NOW, "time");
     expect(timeGroups[0].mode).toBe("time");
     expect(timeGroups[0].kind).toBe("today");
   });
@@ -248,8 +248,8 @@ describe("buildSearchEntries (ADR-0072, issue #252)", () => {
   // src "beta_src").NOW = 2026-07-10; beta's mtime = 2026-07-07.
   function twoPersisted(): SessionMetadata[] {
     return [
-      meta("/a.duck", "alpha", 0, { source_summary: { first_source_name: "alpha_src", source_count: 1, turn_count: 4 } }),
-      meta("/b.duck", "beta", 3, { source_summary: { first_source_name: "beta_src", source_count: 2, turn_count: 12 } }),
+      meta("/a.json", "alpha", 0, { source_summary: { first_source_name: "alpha_src", source_count: 1, turn_count: 4 } }),
+      meta("/b.json", "beta", 3, { source_summary: { first_source_name: "beta_src", source_count: 2, turn_count: 12 } }),
     ];
   }
 
@@ -295,10 +295,10 @@ describe("buildSearchEntries (ADR-0072, issue #252)", () => {
     // running before the filter or the sort: eleven sessions match and exactly
     // the freshest nine (ageDays 0..8 = session-00 .. session-08) survive.
     const thirteen = [
-      meta("/hold.duck", "hold", 100),
+      meta("/hold.json", "hold", 100),
       ...Array.from({ length: 11 }, (_, i) => {
         const n = 10 - i;
-        return meta(`/s${n}.duck`, `session-${String(n).padStart(2, "0")}`, n);
+        return meta(`/s${n}.recipe.json`, `session-${String(n).padStart(2, "0")}`, n);
       }),
     ];
     const entries = buildSearchEntries(thirteen, [], null, "session");
@@ -318,10 +318,10 @@ describe("buildSearchEntries (ADR-0072, issue #252)", () => {
     // Eleven sessions match; the oldest (session-10) is the active session.
     const eleven = Array.from({ length: 11 }, (_, i) => {
       const n = 10 - i;
-      return meta(`/s${n}.duck`, `session-${String(n).padStart(2, "0")}`, n);
+      return meta(`/s${n}.recipe.json`, `session-${String(n).padStart(2, "0")}`, n);
     });
     const open: OpenSession[] = [
-      { sid: "uuid-active", name: "session-10", path: "/s10.duck", pendingIngestPaths: [], pendingQuestion: null, pendingSkillInvocations: [] },
+      { sid: "uuid-active", name: "session-10", path: "/s10.recipe.json", pendingIngestPaths: [], pendingQuestion: null, pendingSkillInvocations: [] },
     ];
     // The binding is live: queried alone, the stale row carries the active flag.
     const solo = buildSearchEntries(eleven, open, "uuid-active", "session-10");
@@ -345,7 +345,7 @@ describe("buildSearchEntries (ADR-0072, issue #252)", () => {
     // "dataset" and match a query the row must reject.
     const entries = buildSearchEntries(
       [
-        meta("/data.duck", "data", 0, {
+        meta("/data.json", "data", 0, {
           source_summary: { first_source_name: "set_one", source_count: 1, turn_count: 1 },
         }),
       ],
@@ -362,26 +362,26 @@ describe("buildSearchEntries (ADR-0072, issue #252)", () => {
     // activate-by-sid instead of re-resuming) and reflects the in-memory name
     // (a rename mid-flight lands without waiting for list_sessions to refresh).
     const open: OpenSession[] = [
-      { sid: "uuid-b", name: "beta renamed", path: "/b.duck", pendingIngestPaths: [], pendingQuestion: null, pendingSkillInvocations: [] },
+      { sid: "uuid-b", name: "beta renamed", path: "/b.json", pendingIngestPaths: [], pendingQuestion: null, pendingSkillInvocations: [] },
     ];
     const entries = buildSearchEntries(twoPersisted(), open, "uuid-b", "");
-    const beta = entries.find((e) => e.path === "/b.duck");
+    const beta = entries.find((e) => e.path === "/b.json");
     expect(beta?.sid).toBe("uuid-b");
     expect(beta?.name).toBe("beta renamed");
     expect(beta?.active).toBe(true);
     // alpha stays a cold row (sid null, not active).
-    const alpha = entries.find((e) => e.path === "/a.duck");
+    const alpha = entries.find((e) => e.path === "/a.json");
     expect(alpha?.sid).toBeNull();
     expect(alpha?.active).toBe(false);
   });
 
   it("excludes never-saved open sessions (search scope = list_sessions only)", () => {
     // ADR-0072: the ⌘K modal filters the list_sessions result -- an
-    // unsaved new session (no .duck) is not in list_sessions, so it never
+    // unsaved new session (no recipe.json) is not in list_sessions, so it never
     // appears here even when it is the active session. The sidebar still lists
     // it; the modal is a persisted-session jump surface.
     const open: OpenSession[] = [
-      { sid: "uuid-new", name: "unsaved", path: "/sessions/uuid-new/session.duck", pendingIngestPaths: [], pendingQuestion: null, pendingSkillInvocations: [] },
+      { sid: "uuid-new", name: "unsaved", path: "/sessions/uuid-new/recipe.json", pendingIngestPaths: [], pendingQuestion: null, pendingSkillInvocations: [] },
     ];
     const entries = buildSearchEntries(twoPersisted(), open, "uuid-new", "");
     expect(entries.map((e) => e.name)).toEqual(["alpha", "beta"]);
@@ -390,9 +390,9 @@ describe("buildSearchEntries (ADR-0072, issue #252)", () => {
   it("sorts mtime desc with a name tiebreaker for deterministic render", () => {
     // Same mtime -> alphabetical; matches buildSidebarModel' tiebreaker.
     const sameMtime: SessionMetadata[] = [
-      { ...meta("/z.duck", "zulu", 1), last_modified_at: 1000 },
-      { ...meta("/m.duck", "mike", 1), last_modified_at: 1000 },
-      { ...meta("/a.duck", "alpha", 1), last_modified_at: 1000 },
+      { ...meta("/z.json", "zulu", 1), last_modified_at: 1000 },
+      { ...meta("/m.json", "mike", 1), last_modified_at: 1000 },
+      { ...meta("/a.json", "alpha", 1), last_modified_at: 1000 },
     ];
     const entries = buildSearchEntries(sameMtime, [], null, "");
     expect(entries.map((e) => e.name)).toEqual(["alpha", "mike", "zulu"]);
@@ -407,10 +407,10 @@ describe("buildSidebarModel pinned section (ADR-0127, issue #1175)", () => {
     // head-insert, Decision 5), NOT mtime: p1 is OLDER than p2 yet renders
     // first. The mtime sort must not reorder the pinned block.
     const server = [
-      meta("/p1.duck", "pin-old", 30, { pinned: true }),
-      meta("/p2.duck", "pin-new", 1, { pinned: true }),
-      meta("/a.duck", "alpha", 0),
-      meta("/d.duck", "delta", 5),
+      meta("/p1.json", "pin-old", 30, { pinned: true }),
+      meta("/p2.json", "pin-new", 1, { pinned: true }),
+      meta("/a.json", "alpha", 0),
+      meta("/d.json", "delta", 5),
     ];
 
     for (const grouping of ["flat", "time"] as const) {
@@ -425,7 +425,7 @@ describe("buildSidebarModel pinned section (ADR-0127, issue #1175)", () => {
   it("keeps the pinned section when every session is pinned (empty groups)", () => {
     // The section-render plan keys off pinned.length, not groups.length --
     // an all-pinned sidebar still shows its rows above an empty body.
-    const server = [meta("/p1.duck", "pin-old", 30, { pinned: true })];
+    const server = [meta("/p1.json", "pin-old", 30, { pinned: true })];
     const model = buildSidebarModel(server, [], null, NOW, "time");
     expect(model.pinned.map((e) => e.name)).toEqual(["pin-old"]);
     expect(model.groups).toEqual([]);
@@ -435,7 +435,7 @@ describe("buildSidebarModel pinned section (ADR-0127, issue #1175)", () => {
     // The just-created entry is synthesized with pinned: false -- only the
     // server's organization join can pin a row.
     const open: OpenSession[] = [
-      { sid: "uuid-new", name: "new", path: "/sessions/uuid-new/session.duck", pendingIngestPaths: [], pendingQuestion: null, pendingSkillInvocations: [] },
+      { sid: "uuid-new", name: "new", path: "/sessions/uuid-new/recipe.json", pendingIngestPaths: [], pendingQuestion: null, pendingSkillInvocations: [] },
     ];
     const model = buildSidebarModel([], open, null, NOW, "flat");
     expect(model.pinned).toEqual([]);
@@ -448,8 +448,8 @@ describe("buildArchivedEntries (ADR-0127, issue #1175)", () => {
     // Open-is-unarchive (Decision 4) means an archived row can never carry a
     // runtime binding, so the model bakes sid: null / active: false in.
     const archived = [
-      meta("/x1.duck", "arch-old", 30, { archived: true }),
-      meta("/x2.duck", "arch-new", 1, { archived: true }),
+      meta("/x1.json", "arch-old", 30, { archived: true }),
+      meta("/x2.json", "arch-new", 1, { archived: true }),
     ];
 
     const entries = buildArchivedEntries(archived);

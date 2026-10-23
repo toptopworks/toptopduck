@@ -435,7 +435,8 @@ pub(super) fn run_claude_stream_json(
     );
     let mut child = match super::process::spawn_turn(
         binary,
-        adapter.argv,
+        &adapter.argv,
+        &adapter.env,
         &model_flags,
         &mcp_flags,
         &input.cwd,
@@ -858,9 +859,11 @@ impl ClaudePump {
                 let summary = truncate_trace_excerpt(&summary, TRACE_EXCERPT_MAX);
                 if gateway_bare.is_none() {
                     on_phase(TurnPhase::ToolCallStarted {
+                        id: None,
                         name: bare.to_string(),
                         operation_kind,
                         summary: summary.clone(),
+                        task: None,
                     });
                 }
                 self.pending.push(PendingClaudeCall {

@@ -1,8 +1,8 @@
 //! Session organization sidecar (ADR-0127, issue #1174): pin / archive state
 //! for the session list. Organization is shell-layer state, deliberately
-//! OUTSIDE the `.duck` content domain -- it lives in
+//! OUTSIDE the `recipe.json` content domain -- it lives in
 //! `sessions_root/index.json`, keyed by the session directory uuid
-//! (ADR-0089's `{uuid}/session.duck` layout). An organizational change
+//! (ADR-0089's `{uuid}/recipe.json` layout). An organizational change
 //! therefore never rewrites a recipe, never disturbs its mtime, and never
 //! crosses the single-writer gate (ADR-0035).
 //!
@@ -63,11 +63,11 @@ fn sidecar_path(root: &Path) -> PathBuf {
 }
 
 /// The sidecar key for a session: the `{uuid}` directory name of its
-/// `session.duck` path. The directory is the session's stable identity
+/// `recipe.json` path. The directory is the session's stable identity
 /// (ADR-0089), so the sidecar survives a sessions_root move that
-/// absolute duck_paths would not.
-pub fn session_dir_uuid(duck_path: &str) -> Option<String> {
-    Path::new(duck_path)
+/// absolute paths would not.
+pub fn session_dir_uuid(recipe_path: &str) -> Option<String> {
+    Path::new(recipe_path)
         .parent()?
         .file_name()?
         .to_str()
@@ -96,7 +96,7 @@ fn load(root: &Path) -> SessionOrganization {
     };
     match serde_json::from_str::<SessionOrganization>(&text) {
         // External input: keep the disjoint invariant honest at the parse
-        // boundary (read_duck's precedent). A hand-edited or partially
+        // boundary (read_recipe's precedent). A hand-edited or partially
         // corrupt-but-valid file can hold one key in both arrays, which the
         // includeArchived view would float into the pinned head -- and no
         // later mutation would heal it (set_pinned no-ops on archived
@@ -154,7 +154,7 @@ fn modify(
 /// logged, never fatal to the scan.
 pub fn load_and_sweep(root: &Path, known: &HashSet<String>) -> SessionOrganization {
     // The stale-snapshot guard: `known` is collected before the scan's
-    // per-.duck parse loop, so a directory created (and pinned) after the
+    // per-recipe.json parse loop, so a directory created (and pinned) after the
     // read_dir would otherwise be pruned as an orphan when the sweep finally
     // takes the lock -- exactly the lost-pin window Decision 3's
     // serialization exists to eliminate. Only keys absent from BOTH the
@@ -329,7 +329,7 @@ mod tests {
     fn unarchive_removes_the_member_and_leaves_non_members_alone() {
         // ADR-0127 Decision 4: open-is-unarchive -- a member leaves `archived`
         // (and only `archived`; pins are untouched by restore semantics).
-        // The restore face of `set_archived` is what open_duck calls.
+        // The restore face of `set_archived` is what open_recipe calls.
         let root = tempfile::tempdir().expect("tempdir");
         set_archived(root.path(), "a", true).expect("archive a");
         set_archived(root.path(), "b", true).expect("archive b");
@@ -360,7 +360,7 @@ mod tests {
 
     #[test]
     fn sweep_keeps_keys_whose_directories_exist_but_missed_the_snapshot() {
-        // The stale-snapshot guard: `known` predates the per-.duck parse
+        // The stale-snapshot guard: `known` predates the per-recipe.json parse
         // loop, so a directory created after the read_dir must not be pruned
         // as an orphan when the sweep takes the lock -- only keys absent
         // from BOTH the snapshot and the disk are orphans.
@@ -396,8 +396,8 @@ mod tests {
         // The sidecar key is the {uuid} directory (ADR-0089), not the duck
         // file name and not the full path.
         let sep = std::path::MAIN_SEPARATOR;
-        let duck = format!("C:{sep}sessions{sep}abc-123{sep}session.duck");
+        let duck = format!("C:{sep}sessions{sep}abc-123{sep}recipe.json");
         assert_eq!(session_dir_uuid(&duck).as_deref(), Some("abc-123"));
-        assert_eq!(session_dir_uuid("session.duck"), None);
+        assert_eq!(session_dir_uuid("recipe.json"), None);
     }
 }

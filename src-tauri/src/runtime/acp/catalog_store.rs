@@ -19,19 +19,15 @@
 //! the whole cache.
 
 use std::collections::HashMap;
-use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
+use crate::persistence::io::{write_str_atomic, WritePerms};
 use crate::runtime::acp::probe::{CatalogModel, ModelCatalogOutcome};
 use crate::session::loop_contract::DiscoveredRuntime;
 
 /// The file name under the OS app-data directory.
 pub const CATALOGS_FILE_NAME: &str = "adapter-catalogs.json";
-
-/// The temp-file suffix for the atomic write (same directory as the target
-/// so the rename is intra-volume -- mirrors `persistence::io`).
-const TMP_SUFFIX: &str = ".tmp";
 
 /// Which probe channel produced the cached catalog (ADR-0096 D2 -- the
 /// per-format dispatch dimension, not the CLI identity). Serialized as the
@@ -198,17 +194,11 @@ impl AdapterCatalogStore {
     /// the probe result still returns to the caller (the cache is an
     /// enhancement, never a dependency of the probe's own answer).
     pub fn store_entry(&self, adapter_id: &str, entry: AdapterCatalogEntry) {
-        // Poisoning only happens on a panic mid-write; treating the cache as
-        // unlockable (skip the write, keep serving reads) is the honest
-        // degrade for a pure-cache artifact.
-        let Ok(_guard) = self.write_lock.lock() else {
-            log::warn!(
-                target: "toptopduck::catalog_cache",
-                "catalog cache write lock poisoned; skipping cache write for `{adapter_id}`"
-            );
-            return;
-        };
-        if let Err(detail) = self.store_entry_locked(adapter_id, entry) {
+        // An insert always lands, so the op reports a hit unconditionally.
+        if let Err(detail) = self.mutate_locked(adapter_id, |catalogs| {
+            catalogs.insert(adapter_id.to_string(), entry);
+            true
+        }) {
             log::warn!(
                 target: "toptopduck::catalog_cache",
                 "adapter catalog cache write failed for `{adapter_id}` (probe result unaffected): {detail}"
@@ -216,18 +206,56 @@ impl AdapterCatalogStore {
         }
     }
 
-    /// The locked read-modify-write core, split out so the failure detail
-    /// reads as one typed Result.
-    fn store_entry_locked(
+    /// Remove ONE adapter's cache entry, leaving every other adapter's entry
+    /// untouched (issue #1341: deleting a user-defined adapter must not leave
+    /// a stale catalog behind its gone id). Same write posture as
+    /// [`Self::store_entry`]: read-modify-write under the in-process lock,
+    /// one atomic write, failures logged and swallowed (the cache is an
+    /// enhancement). A missing key is a no-op -- no write at all.
+    pub fn remove_entry(&self, adapter_id: &str) {
+        if let Err(detail) =
+            self.mutate_locked(adapter_id, |catalogs| catalogs.remove(adapter_id).is_some())
+        {
+            log::warn!(
+                target: "toptopduck::catalog_cache",
+                "adapter catalog cache remove failed for `{adapter_id}` (cache is an enhancement): {detail}"
+            );
+        }
+    }
+
+    /// The locked read-modify-write core both mutations ride (issues #1343
+    /// and #1348): take the write lock (poisoning degrades to a skip, not a
+    /// second failure log), load, let `op` mutate the map (`false` = nothing
+    /// hit, no write at all -- removing a missing key is a no-op), serialize,
+    /// one atomic write via the shared core, with the failure detail as one
+    /// typed Result.
+    fn mutate_locked(
         &self,
-        adapter_id: &str,
-        entry: AdapterCatalogEntry,
+        id: &str,
+        op: impl FnOnce(&mut AdapterCatalogs) -> bool,
     ) -> Result<(), String> {
+        // Poisoning only happens on a panic mid-write; treating the cache as
+        // unlockable (skip the write, keep serving reads) is the honest
+        // degrade for a pure-cache artifact.
+        let Ok(_guard) = self.write_lock.lock() else {
+            log::warn!(
+                target: "toptopduck::catalog_cache",
+                "catalog cache write lock poisoned; skipping cache mutation for `{id}`"
+            );
+            return Ok(());
+        };
         let mut catalogs = self.load();
-        catalogs.insert(adapter_id.to_string(), entry);
+        if !op(&mut catalogs) {
+            return Ok(());
+        }
+        // The cache sidecar's directory may not exist yet (first probe on a
+        // fresh install); the shared core deliberately does not create it.
+        if let Some(parent) = self.path.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| format!("create dir: {e}"))?;
+        }
         let json =
             serde_json::to_string_pretty(&catalogs).map_err(|e| format!("serialize: {e}"))?;
-        write_atomic(&self.path, &json)
+        write_str_atomic(&self.path, &json, WritePerms::Default).map_err(|e| e.to_string())
     }
 }
 
@@ -262,31 +290,6 @@ fn load_from_str(raw: &str) -> Result<AdapterCatalogs, String> {
         }
     }
     Ok(out)
-}
-
-/// Write a string payload atomically: `<target>.tmp` in the same directory,
-/// fsync, rename over the target (mirrors `persistence::io::save_atomic`;
-/// a crash before the rename leaves the prior target intact).
-fn write_atomic(target: &Path, json: &str) -> Result<(), String> {
-    let file_name = target
-        .file_name()
-        .and_then(|n| n.to_str())
-        .ok_or_else(|| "could not derive temp file path".to_string())?;
-    let tmp = target.with_file_name(format!("{file_name}{TMP_SUFFIX}"));
-    if let Some(parent) = target.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| format!("create dir: {e}"))?;
-    }
-    {
-        let mut file = std::fs::File::create(&tmp).map_err(|e| format!("create temp: {e}"))?;
-        file.write_all(json.as_bytes())
-            .map_err(|e| format!("write temp: {e}"))?;
-        file.sync_all().map_err(|e| format!("sync temp: {e}"))?;
-    }
-    if let Err(e) = std::fs::rename(&tmp, target) {
-        let _ = std::fs::remove_file(&tmp);
-        return Err(format!("rename: {e}"));
-    }
-    Ok(())
 }
 
 /// Now, wall-clock milliseconds since the Unix epoch (the entry stamp).
@@ -397,6 +400,58 @@ mod tests {
         assert_eq!(loaded.get("gemini-cli"), Some(&acp_entry("sonnet", 3_000)));
         assert_eq!(loaded.get("codex"), Some(&codex_entry(2_000)));
         assert_eq!(loaded.len(), 2);
+    }
+
+    /// Issue #1341: deleting a user-defined adapter removes exactly its own
+    /// cache entry; other adapters' entries survive, and removing a missing
+    /// key is a no-op.
+    #[test]
+    fn remove_entry_removes_only_that_adapter() {
+        let (_dir, store) = temp_store();
+        store.store_entry("gemini-cli", acp_entry("opus", 1_000));
+        store.store_entry("user:abcd1234", acp_entry("m1", 2_000));
+        store.remove_entry("user:abcd1234");
+        let loaded = store.load();
+        assert!(!loaded.contains_key("user:abcd1234"));
+        assert_eq!(
+            loaded.get("gemini-cli"),
+            Some(&acp_entry("opus", 1_000)),
+            "sibling entries survive the remove"
+        );
+        // Removing a key that is already gone is a no-op (no error, no
+        // rewrite that could disturb anything).
+        store.remove_entry("user:abcd1234");
+        assert_eq!(store.load().len(), 1);
+    }
+
+    /// Issue #1348: a miss must not rewrite the file AT ALL. The hazard: a
+    /// corrupt file degrades to an empty cache on load, so a miss that
+    /// still writes would clobber the file with `{}`. Asserting raw bytes
+    /// is what makes the miss-no-write guard load-bearing -- on a healthy
+    /// file the same writer round-trips byte-identical, so only a corrupt
+    /// fixture goes red if the early return is deleted.
+    #[test]
+    fn remove_missing_key_leaves_corrupt_file_bytes_untouched() {
+        let (dir, store) = temp_store();
+        let path = dir.path().join(CATALOGS_FILE_NAME);
+        let corrupt = b"{ not valid json";
+        std::fs::write(&path, corrupt).expect("seed corrupt file");
+        store.remove_entry("user:missing");
+        let after = std::fs::read(&path).expect("file still present");
+        assert_eq!(
+            after, corrupt,
+            "a miss must not rewrite the file (a corrupt file would become `{{}}`)"
+        );
+    }
+
+    /// Issue #1348: the store creates the sidecar's parent directory on
+    /// first write (fresh install) -- the shared core deliberately does not.
+    #[test]
+    fn store_entry_creates_missing_parent_directory() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = AdapterCatalogStore::new(dir.path().join("nested").join(CATALOGS_FILE_NAME));
+        store.store_entry("user:gemini-cli", acp_entry("gemini-2.5-pro", 0));
+        assert_eq!(store.load().len(), 1, "entry survives a reload");
     }
 
     #[test]

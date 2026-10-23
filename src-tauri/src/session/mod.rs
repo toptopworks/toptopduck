@@ -1,8 +1,12 @@
 //! Per-session state: an in-memory DuckDB parent (working-set metadata + future
-//! result_N) plus READ_ONLY-attached source snapshots (ADR-0004/0005/0012). The
-//! per-session temp dir holds the snapshot files and is cleared on drop (ADR-0012).
+//! result_N) plus READ_ONLY-attached source snapshots (ADR-0004/0005/0012).
+//! Snapshots live in the per-session tree's `snapshots/` dir, resident until
+//! session delete (ADR-0136); the temp dir is scratch space (swap files, sheet
+//! CSVs) cleared on drop (ADR-0012), and only unbound test sessions keep their
+//! snapshots there.
 
 pub mod artifacts;
+mod companion;
 pub mod derived_source;
 pub(crate) mod engine;
 pub mod ingest;
@@ -108,7 +112,7 @@ fn truncate_session_name(question: &str) -> String {
 ///
 /// Crosses IPC serde-structured (issue #120): `#[serde(tag = "kind", content =
 /// "data")]`, the adjacently-tagged shape the rest of the wire contract uses
-/// (the same as [`crate::session_store::SessionError`]). The `open_duck`
+/// (the same as [`crate::session_store::SessionError`]). The `open_recipe`
 /// command wraps this in [`SessionError::Resume`], so the frontend recurses
 /// `Resume.data.kind`
 /// and renders a locale message; the `Load` variant recurses into the nested
@@ -120,10 +124,10 @@ fn truncate_session_name(question: &str) -> String {
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "kind", content = "data")]
 pub enum ResumeError {
-    /// Reading or parsing the .duck failed (ADR-0036 version / parse / IO).
+    /// Reading or parsing the recipe.json failed (ADR-0036 version / parse / IO).
     Load(crate::persistence::io::LoadError),
     /// A source path was refused at the resume boundary for a non-recoverable
-    /// reason -- today, a relative_path that escapes the `.duck`'s directory
+    /// reason -- today, a relative_path that escapes the `recipe.json`'s directory
     /// subtree (path-traversal refusal, ADR-0036 trust boundary). Distinct
     /// from the interactive [`SourceIssue::Missing`]: a traversal is a hard
     /// engine refusal (re-linking to the same traversed path would not help),
@@ -141,6 +145,17 @@ pub enum ResumeError {
     /// state). This variant signals a logic bug or a hand-edited recipe whose
     /// history references a result the chain never produced.
     Replay {
+        reference_name: String,
+        detail: String,
+    },
+    /// Mounting a tree snapshot onto admin failed on the watermark-hit restore
+    /// path (ADR-0136 D3). The recipe.json itself read fine -- the failure is
+    /// the read-only ATTACH of an in-tree snapshot -- so this is NOT
+    /// [`Self::Load`] (whose frontend message blames the recipe file read).
+    /// `probe` already validated every snapshot before `restore_hit` ran, so
+    /// landing here means fresh corruption in the probe-to-attach window and
+    /// the replay fallback would re-fail on the same disk state.
+    Restore {
         reference_name: String,
         detail: String,
     },
@@ -165,7 +180,7 @@ pub enum ResumeError {
     /// [`Self::Cancelled`] (engine interrupt) and from Rebuild (which abandons
     /// ONE source and continues -- Abort abandons the whole resume).
     Aborted,
-    /// ADR-0035 Decision 3 / issue #50: the canonical `.duck` path is already held
+    /// ADR-0035 Decision 3 / issue #50: the canonical `recipe.json` path is already held
     /// open by another Session in this process (single-writer). Resume is
     /// refused BEFORE any source read or replay so the existing in-memory
     /// session's state is never diverged from disk by a second opener. The
@@ -187,11 +202,19 @@ impl std::fmt::Display for ResumeError {
                 reference_name,
                 detail,
             } => write!(f, "重放「{reference_name}」失败：{detail}"),
+            Self::Restore {
+                reference_name,
+                detail,
+            } => write!(f, "恢复树内快照「{reference_name}」失败：{detail}"),
             Self::ActiveMissing(name) => write!(f, "会话焦点指向未注册的源「{name}」"),
             Self::Cancelled => write!(f, "已取消恢复"),
             Self::Aborted => write!(f, "已中止恢复"),
             Self::AlreadyOpen(p) => {
-                write!(f, "该 .duck 已在本进程打开，不能重复打开：{}", p.display())
+                write!(
+                    f,
+                    "该 recipe.json 已在本进程打开，不能重复打开：{}",
+                    p.display()
+                )
             }
         }
     }
@@ -223,13 +246,13 @@ impl std::fmt::Display for RenameSessionError {
 impl std::error::Error for RenameSessionError {}
 
 /// Per-source integrity issue surfaced during resume (ADR-0035 honest degrade,
-/// issue #49). Passed to the caller's [`Session::open_duck`] `on_source_issue`
+/// issue #49). Passed to the caller's [`Session::open_recipe`] `on_source_issue`
 /// callback so the UI (or test) can drive the re-link / abort / rebuild
 /// decision -- the engine NEVER silently picks. Each variant names the source
 /// + the path/fingerprint context the decision needs.
 ///
 /// C1 (issue #121): `SourceIssue` does NOT yet cross IPC as a typed value --
-/// `open_duck`'s `on_source_issue` callback always aborts today (no re-link
+/// `open_recipe`'s `on_source_issue` callback always aborts today (no re-link
 /// UI), so it produces no user-facing wording. When #49 lands the re-link /
 /// rebuild dialogs this enum will follow the same typed-IPC pattern as the
 /// source-management errors (`#[serde(tag = "kind", content = "data")]` + a
@@ -280,6 +303,21 @@ pub enum SourceIssue {
         /// The fingerprint computed from the file currently at `path`.
         found: String,
     },
+}
+
+/// A non-blocking source status notice from the resume watermark HIT path
+/// (ADR-0136 D3). On a hit the working set IS the ingest-time snapshot, so a
+/// missing or drifted source file no longer blocks or re-links -- but the
+/// user deserves to know the on-disk file no longer backs the loaded data.
+/// Drained once by the frontend via the `take_source_notices` command.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "kind", content = "data")]
+pub enum SourceNotice {
+    /// The resolved source path no longer exists.
+    Missing { reference_name: String },
+    /// The file exists but its (mtime, size) differs from the settle-time
+    /// stamp -- a heuristic drift signal, not a content check.
+    Changed { reference_name: String },
 }
 
 /// The caller's resolution to a [`SourceIssue`] (ADR-0035). Returned from the
@@ -361,7 +399,7 @@ pub enum ResumeEvent {
 /// filters the global Tauri event broadcast down to the one SessionPane that
 /// owns the resume (ADR-0056/0059 -- v1 emitted a bare ResumeEvent, a
 /// single-session legacy; multi-session lands the sessionId here). `session_id`
-/// is the runtime id the `open_duck` command received (a typed UUID). The field
+/// is the runtime id the `open_recipe` command received (a typed UUID). The field
 /// is required -- resume progress without a session it belongs to is not
 /// addressable.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -440,7 +478,7 @@ pub struct Session {
     /// The store-minted session identity (#886): stamped by
     /// [`SessionStore::create`] right after the id is minted (the same
     /// post-construction wiring as the closing flag and the drop signal),
-    /// and re-stamped by the resume path (`commands::open_duck`) so a
+    /// and re-stamped by the resume path (`commands::open_recipe`) so a
     /// reopened session keeps its id -- the projection's no-progress kill
     /// log attributes the silenced turn to its session. `None` on
     /// store-less Sessions (tests, non-command paths); the warn omits the
@@ -513,7 +551,7 @@ pub struct Session {
     /// (review H2, issue #73) -- the prior `Arc<AtomicBool>` let any holder
     /// `store(false)` and revoke a close.
     closing: ClosingFlag,
-    /// The persistence concern (issue #415): `.duck` binding, projection,
+    /// The persistence concern (issue #415): `recipe.json` binding, projection,
     /// write loop, conflict detection, and the single-writer registry key.
     /// Extracted from the former inline fields so the projection + write
     /// state machine are testable without a DuckDB connection.
@@ -562,6 +600,11 @@ pub struct Session {
     /// activation folds stay live during the channel coexistence period --
     /// this field is the new assembly source, not a mirror of either.
     discovery_snapshot: Vec<String>,
+    /// Non-blocking source status notices collected on the resume watermark
+    /// hit path (ADR-0136 D3): a source file that is missing or drifted does
+    /// not block the hit, but the fact surfaces to the UI once via the
+    /// `take_source_notices` command. Empty on every non-hit resume.
+    source_notices: Vec<SourceNotice>,
     /// The session-INVOKED skill names (ADR-0119 Decision 4, issue #983): a
     /// live memoization of the timeline's turn-invocation fold
     /// ([`crate::persistence::recipe::Recipe::invoked_skills`]) -- monotonic
@@ -635,7 +678,7 @@ pub(super) struct TurnAudit {
     /// The turn's token usage (ADR-0129, issue #1270): the audit-face twin
     /// of [`TurnRecord::usage`] -- the same settle-frozen value on both
     /// halves of the timeline entry, persisted with the trace (Decision 4:
-    /// turn level, the .duck audit anchor).
+    /// turn level, the recipe.json audit anchor).
     usage: Option<crate::model::TurnUsage>,
     /// The turn's context-occupancy reading (ADR-0130): the audit-face twin
     /// of [`TurnRecord::occupancy`] -- the same settle-frozen reading on
@@ -645,7 +688,7 @@ pub(super) struct TurnAudit {
     occupancy: Option<crate::model::OccupancySnapshot>,
     /// The turn's runtime + skill provenance (ADR-0078/0081/0101). The
     /// PERSISTED shape (recipe::TurnProvenance, aliased here): the runtime
-    /// kind + the external adapter id + the mounted skills, for the .duck
+    /// kind + the external adapter id + the mounted skills, for the recipe.json
     /// audit anchor. The IPC TurnRecord mirrors the same attribution through
     /// [`crate::model::TurnRuntime`] (ADR-0101).
     provenance: PersistedTurnProvenance,
@@ -658,7 +701,7 @@ impl TurnAudit {
     /// the turn's skill provenance (each invoked `name` + its
     /// `content_hash` pinned at the name's last invocation of the turn,
     /// ADR-0119). `skills` is empty when no
-    /// skill was invoked (the field is default-omitted from the .duck
+    /// skill was invoked (the field is default-omitted from the recipe.json
     /// while empty); the projection onto the persisted pair (kind + the
     /// external adapter id) happens inside, so callers pass the one wire
     /// attribution.
@@ -669,9 +712,16 @@ impl TurnAudit {
         skills: Vec<SkillProvenance>,
         runtime: TurnRuntime,
     ) -> Self {
-        let (runtime_kind, adapter_id) = match &runtime {
-            TurnRuntime::BuiltIn => (RuntimeKind::BuiltIn, None),
-            TurnRuntime::External { adapter_id } => (RuntimeKind::External, adapter_id.clone()),
+        let (runtime_kind, adapter_id, adapter_display_name) = match &runtime {
+            TurnRuntime::BuiltIn => (RuntimeKind::BuiltIn, None, None),
+            TurnRuntime::External {
+                adapter_id,
+                display_name,
+            } => (
+                RuntimeKind::External,
+                adapter_id.clone(),
+                display_name.clone(),
+            ),
         };
         Self {
             trace: rounds
@@ -683,13 +733,14 @@ impl TurnAudit {
             provenance: PersistedTurnProvenance {
                 runtime: Some(runtime_kind),
                 adapter_id,
+                adapter_display_name,
                 skills,
             },
         }
     }
 
     /// The audit harvested from one persisted recipe turn (resume, ADR-0078):
-    /// a turn's trace + provenance round-trip verbatim from the .duck. Called
+    /// a turn's trace + provenance round-trip verbatim from the recipe.json. Called
     /// only for `RecipeEntry::Turn` -- source and skill lifecycle entries are
     /// not turns and never produce a [`TurnAudit`].
     fn from_recipe_turn(turn: &RecipeTurn) -> Self {
@@ -823,7 +874,7 @@ impl Session {
     /// [`Self::run_external_turn`] so the command layer can mirror it onto
     /// the SessionHandle (lock-light reads) without re-running a turn.
     /// `None` until the first ACP turn (and after a resume -- the recipe's
-    /// cached copy is restored onto the handle by open_duck). A
+    /// cached copy is restored onto the handle by open_recipe). A
     /// pre-handshake ACP failure yields no discovery and RETAINS the
     /// previous turn's catalog (issue #530); the `ask` mirror -- today's
     /// only reader -- re-writes the same value, so the retention is
@@ -934,6 +985,7 @@ impl Session {
             runtime_facts: SessionRuntimeFacts::default(),
             discovery_snapshot: Vec::new(),
             invoked_skills: Vec::new(),
+            source_notices: Vec::new(),
         })
     }
 
@@ -969,7 +1021,7 @@ impl Session {
 
     /// Attach the close-and-wait-release drop signal (ADR-0063). The store
     /// creates the `(sender, receiver)` pair, hands the sender here, and keeps
-    /// the receiver on the handle. On resume (`open_duck`), a FRESH pair is
+    /// the receiver on the handle. On resume (`open_recipe`), a FRESH pair is
     /// installed on both ends so the resumed session's Drop reaches the handle's
     /// current receiver (the old pair is orphaned -- the pre-replace session's
     /// Drop fires the old sender into a closed receiver, a harmless no-op).
@@ -979,7 +1031,7 @@ impl Session {
 
     /// Stamp the session identity (#886). Two production stampers:
     /// [`SessionStore::create`] (fresh sessions, before the handle becomes
-    /// reachable) and the resume path in `commands::open_duck` (a reopened
+    /// reachable) and the resume path in `commands::open_recipe` (a reopened
     /// session keeps the SAME id). A store-less Session keeps `None` and
     /// its no-progress kill log simply omits the session attribution.
     pub fn set_session_id(&mut self, id: SessionId) {
@@ -1017,7 +1069,7 @@ impl Session {
         self.cancel.is_in_flight()
     }
 
-    /// Bind this session to a `.duck` path (ADR-0034) and immediately persist
+    /// Bind this session to a `recipe.json` path (ADR-0034) and immediately persist
     /// one full recipe. After this, every terminal turn and source lifecycle
     /// event atomically rewrites the recipe (temp + rename). The session name
     /// rides the recipe header and is shown on resume. Returns the save error
@@ -1025,33 +1077,63 @@ impl Session {
     /// so in-memory state is correct even if the first write fails.
     ///
     /// ADR-0035 Decision 3 / issue #50 single-writer: the canonical path is acquired
-    /// in the process-global registry BEFORE the write. A second `bind_duck`
+    /// in the process-global registry BEFORE the write. A second `bind_recipe`
     /// of a path another Session already holds returns
     /// [`SaveError::AlreadyOpen`] without touching the file. Re-binding the
     /// SAME canonical path on the SAME session (e.g. a Save over the open
     /// file) is allowed -- it is an update, not a second opener. Moving from
-    /// one `.duck` to another releases the old canonical key so a different
+    /// one `recipe.json` to another releases the old canonical key so a different
     /// session can open it.
-    pub fn bind_duck(&mut self, path: PathBuf, session_name: String) -> Result<(), SaveError> {
-        // Migrate derived source files from temp staging to .duck-adjacent
+    pub fn bind_recipe(&mut self, path: PathBuf, session_name: String) -> Result<(), SaveError> {
+        // Migrate derived source files from temp staging to recipe.json-adjacent
         // (issue #433, ADR-0087 D2). Before the recipe is persisted, each
         // derived source's source_path is updated so SourceRef carries the
-        // portable (relative-to-.duck) location.
+        // portable (relative-to-recipe.json) location.
         migrate_derived_sources(&mut self.working_set, &self.temp_path, &path);
-        self.persister.bind(
+        let result = self.persister.bind(
             path,
             session_name,
             &self.working_set,
             &self.timeline,
             &self.runtime_facts,
-        )
+        );
+        // ADR-0136 D2: a bound session materializes onto the tree companion
+        // DB. Set only on a successful bind so a failed bind leaves the
+        // engine on its unbound (in-memory) footing.
+        if result.is_ok() {
+            self.point_engine_at_tree();
+        }
+        result
     }
 
-    /// The bound `.duck` path, if any (ADR-0034/0089). Since ADR-0089 every
+    /// Point the admin engine at the bound session tree's companion DB
+    /// (ADR-0136 D2) and expose the tree snapshot directory. No-op pieces for
+    /// an unbound session (test constructors) -- the engine stays in-memory
+    /// and copy-in keeps using the temp dir.
+    fn point_engine_at_tree(&mut self) {
+        if let Some(dir) = self.recipe_path().and_then(Path::parent) {
+            self.admin_engine
+                .set_db_path(dir.join(companion::COMPANION_FILE_NAME));
+        }
+    }
+
+    /// Where source copy-in drops `<ref>.duckdb` snapshots: the per-session
+    /// tree's `snapshots/` when bound (ADR-0136 D1 -- the snapshot survives
+    /// close and the resume hit path mounts it without re-reading the source
+    /// file), else the session temp dir (unbound sessions; the pre-0136
+    /// behavior).
+    fn snapshot_dir(&self) -> PathBuf {
+        match self.recipe_path().and_then(Path::parent) {
+            Some(tree) => companion::snapshots_dir(tree),
+            None => self.temp_path.clone(),
+        }
+    }
+
+    /// The bound `recipe.json` path, if any (ADR-0034/0089). Since ADR-0089 every
     /// production session is bound at `create_session`, so `None` is reachable
     /// only from test constructors (`Session::new`, `with_provider`).
-    pub fn duck_path(&self) -> Option<&Path> {
-        self.persister.duck_path()
+    pub fn recipe_path(&self) -> Option<&Path> {
+        self.persister.recipe_path()
     }
 
     /// The session's temp working directory (ADR-0012 RAII lifecycle): the
@@ -1070,7 +1152,7 @@ impl Session {
         self.timeline.is_empty()
     }
 
-    /// The user-facing session name, if bound to a `.duck` (ADR-0034).
+    /// The user-facing session name, if bound to a `recipe.json` (ADR-0034).
     pub fn session_name(&self) -> Option<&str> {
         self.persister.session_name()
     }
@@ -1113,6 +1195,17 @@ impl Session {
         self.working_set.get(reference_name).cloned()
     }
 
+    /// Auto-name the session from a question's bounded truncation (ADR-0089
+    /// Decision 4, calibrated by issue #1353): the shared naming core for
+    /// the turn-start push (`ask_with_phase_and_auto_name`, which emits) and
+    /// `record_turn`'s silent same-value fallback. Memory-only -- the disk
+    /// persists at the terminal turn's recipe save. Returns the landed name.
+    fn auto_name_from_question(&mut self, question: &str) -> String {
+        let name = truncate_session_name(question);
+        self.persister.set_session_name(name.clone());
+        name
+    }
+
     /// Rename a dataset's display label (ADR-0037): display-only -- the reference
     /// name is untouched, so every existing reference (SQL FROM, the recipe
     /// chain, the active pointer) stays valid and nothing is rewritten or
@@ -1130,9 +1223,9 @@ impl Session {
 
     /// Rename the session itself (ADR-0060, issue #81): set the user-facing
     /// [`Self::session_name`] carried in the recipe header, then rewrite the
-    /// bound `.duck` so the new name survives resume. Display-only at the
+    /// bound `recipe.json` so the new name survives resume. Display-only at the
     /// session level -- the bound path is untouched, so every external reference
-    /// (sidebar addressing, open_duck) stays valid; nothing else
+    /// (sidebar addressing, open_recipe) stays valid; nothing else
     /// is rewritten or propagated. Trims surrounding whitespace and rejects a
     /// blank name. The persist is best-effort (like every
     /// terminal turn): a write failure does not roll back the in-memory rename --
@@ -1181,7 +1274,9 @@ impl Session {
     /// Facade for callers without the command-layer approval wiring (tests):
     /// built-in tools classify Allow at the gateway without touching the sink,
     /// so a fresh [`ApprovalState`] + a no-op sink behaves identically to the
-    /// store-attached pair on the built-in tool table.
+    /// store-attached pair on the built-in tool table. The first question
+    /// also auto-names the session (ADR-0089 Decision 4) -- this routes
+    /// through [`Self::ask_with_phase_and_auto_name`].
     pub fn ask(&mut self, question: &str) -> TurnOutcome {
         let approval = ApprovalState::new();
         let sink = NullApprovalSink;
@@ -1193,7 +1288,7 @@ impl Session {
         // No discovery snapshot either: tests that need skill injection call
         // ask_with_phase directly with resolved fragments (issue #364).
         let inputs = TurnInputs::empty(&keychain);
-        self.ask_with_phase(question, &approval, &sink, |_| {}, &inputs)
+        self.ask_with_phase_and_auto_name(question, &approval, &sink, |_| {}, |_| {}, &inputs)
     }
 
     // Turn orchestration (ask_with_phase / run_external_turn /
@@ -1263,24 +1358,28 @@ impl Session {
             TurnRuntime::BuiltIn => Some(LastRuntime::BuiltIn),
             TurnRuntime::External {
                 adapter_id: Some(id),
+                ..
             } => Some(LastRuntime::External(id.clone())),
-            TurnRuntime::External { adapter_id: None } => self.runtime_facts.last_runtime.clone(),
+            TurnRuntime::External {
+                adapter_id: None, ..
+            } => self.runtime_facts.last_runtime.clone(),
         };
-        // ADR-0089 Decision 4: on the first terminal turn, auto-name the
-        // session from the first question's bounded truncation (ADR-0039
-        // same-kind rule: verbatim question cut at a char boundary, never an
-        // LLM summary). After this one-time trigger the name is never auto-
-        // changed -- subsequent turns leave it untouched, and a user rename
-        // sticks. Source/skill lifecycle events do not count as turns, so a
-        // session that loaded files or mounted skills before its first
-        // question still auto-names on that first question.
-        let is_first_turn = !self
-            .timeline
-            .iter()
-            .any(|e| matches!(e, TimelineEntry::Turn { .. }));
-        if is_first_turn {
-            self.persister
-                .set_session_name(truncate_session_name(question));
+        // ADR-0089 Decision 4 (calibrated by issue #1353): the first
+        // question's bounded truncation (ADR-0039 same-kind rule: verbatim
+        // question cut at a char boundary, never an LLM summary) auto-names
+        // the session at turn START (`ask_with_phase_and_auto_name`, before
+        // any runtime branch). This block is the silent same-value fallback:
+        // turn-start naming writes no timeline entry, so the predicate still
+        // holds here and the re-set is idempotent -- it exists for direct
+        // `record_turn` callers (tests) and adds nothing in production.
+        // After this one-time trigger the name is never auto-changed --
+        // subsequent turns leave it untouched, and a user rename sticks.
+        // One window excepted: a rename between acceptance and the first
+        // turn's record still meets this fallback and is overwritten.
+        // The no-turn test is the shared predicate's one definition (see
+        // `timeline_has_turn`).
+        if !self.timeline_has_turn() {
+            self.auto_name_from_question(question);
         }
         // ADR-0078 (issue #297): the DISPLAY view of the trace rides the
         // TurnRecord so the rail can expand a completed turn's tool-call chain
@@ -1301,7 +1400,7 @@ impl Session {
             &presented,
             artifacts::reply_body(&outcome),
             &self.temp_path,
-            artifacts::artifacts_dir(self.persister.duck_path()).as_deref(),
+            artifacts::artifacts_dir(self.persister.recipe_path()).as_deref(),
         );
         // Resume resilience for temp-referencing SQL: every read_* path
         // into the session temp dir is copied into the per-session assets/
@@ -1312,7 +1411,7 @@ impl Session {
         sql_assets::materialize_sql_references(
             &mut outcome,
             &self.temp_path,
-            self.persister.duck_path(),
+            self.persister.recipe_path(),
         );
         self.timeline.push(TimelineEntry::Turn {
             record: TurnRecord {
@@ -1352,14 +1451,14 @@ impl Session {
             // the turn's skill provenance (ADR-0119: each invoked name +
             // its content_hash pinned at the name's last invocation of the
             // turn). The
-            // PERSISTED form rides the Session (the recipe is its .duck
+            // PERSISTED form rides the Session (the recipe is its recipe.json
             // layer, read by build_recipe); the TurnRecord's display view
             // above is the same bounded shape.
             audit: TurnAudit::from_execution(rounds, usage, occupancy, skills, runtime),
             preserved: None,
         });
         // ADR-0034 per-terminal-turn atomic write: the recipe is rewritten
-        // whole-file at the bound path (temp + rename). No-op when no .duck
+        // whole-file at the bound path (temp + rename). No-op when no recipe.json
         // is bound; a failure is logged (the prior file is intact and the
         // next turn retries).
         self.persist_if_bound();
@@ -1377,7 +1476,9 @@ impl Session {
     /// delegate to [`RecipePersister::save_if_bound`](recipe_persister::RecipePersister::save_if_bound).
     /// Persist the recipe now (shared auto-write path). In addition to the
     /// per-turn write, the ADR-0095 set-commands call this so a selection
-    /// made without a following turn survives a close (Decision 6).
+    /// made without a following turn survives a close (Decision 6). A
+    /// successful write also stamps the companion watermark (ADR-0136 D3)
+    /// when the engine has materialized.
     pub fn persist_if_bound(&mut self) {
         persist_snapshot(
             &mut self.persister,
@@ -1386,12 +1487,63 @@ impl Session {
             &self.timeline,
             &self.runtime_facts,
         );
+        // Stamp only after a write actually landed: a suspended (conflict) or
+        // failed write leaves the recipe file behind while the in-memory
+        // working set moved on -- stamping then would desync the watermark
+        // from the persisted chain and force a needless replay. Unbound
+        // sessions and unmaterialized engines (no companion file yet,
+        // ADR-0136 D2 zero-file rule) skip -- stamping must not be what
+        // materializes a zero-instance session.
+        if self.persister.persist_outcome() == Ok(true) && self.admin_engine.is_materialized() {
+            self.stamp_companion();
+        }
+    }
+
+    /// Stamp the companion's `_meta` row with the current chain digest +
+    /// settled working-set shape (ADR-0136 D3). Best-effort + logged: a
+    /// failed stamp costs one replay on the next open, nothing more.
+    fn stamp_companion(&mut self) {
+        let Some(recipe_path) = self.recipe_path().map(PathBuf::from) else {
+            return;
+        };
+        let recipe = self.build_recipe();
+        // The source (mtime, size) heuristic snapshot, taken over the same
+        // hybrid resolution the resume hit path checks (relative-to-recipe
+        // first, absolute fallback) so a moved session tree does not
+        // false-positive a "changed" notice.
+        let mut source_stats = std::collections::HashMap::new();
+        for src in &recipe.sources {
+            if let Ok(path) = Self::resolve_source_path(&recipe_path, src) {
+                if let Some(stat) = companion::source_stat(&path) {
+                    source_stats.insert(src.reference_name.clone(), stat);
+                }
+            }
+        }
+        let Ok(conn) = self.admin_engine.acquire() else {
+            log::warn!(
+                target: "toptopduck::session",
+                "companion stamp skipped: engine acquire failed after materialization check"
+            );
+            return;
+        };
+        if let Err(e) = companion::stamp(conn, &recipe, &self.working_set, source_stats) {
+            log::warn!(
+                target: "toptopduck::session",
+                "companion watermark stamp failed (next open replays once): {e}"
+            );
+        }
     }
 
     /// Take (read + clear) the most recent per-turn persistence failure, if
     /// any (issue #120 typed error for IPC).
     pub fn take_persist_error(&mut self) -> Option<SaveError> {
         self.persister.take_persist_error()
+    }
+
+    /// Take (read + clear) the resume-hit path's source status notices
+    /// (ADR-0136 D3). Drained once by the `take_source_notices` command.
+    pub fn take_source_notices(&mut self) -> Vec<SourceNotice> {
+        std::mem::take(&mut self.source_notices)
     }
 
     /// Non-consuming snapshot of the persist outcome right after the
@@ -1597,8 +1749,12 @@ impl ApprovalSink for NullApprovalSink {
 
 impl Drop for Session {
     fn drop(&mut self) {
+        // ADR-0136 D3: fold the companion's WAL into the main file on a clean
+        // close so the tree holds one self-contained `analytics.duckdb` (a hard
+        // kill instead leaves the WAL, which DuckDB replays on next open).
+        self.admin_engine.checkpoint();
         // ADR-0035 Decision 3 / issue #50: release the single-writer registry key
-        // the persister holds for its bound `.duck`. Delegated to the persister
+        // the persister holds for its bound `recipe.json`. Delegated to the persister
         // (issue #415) so the key release is owned by the persistence concern.
         // Fired BEFORE the drop signal so the delete-path awaiter resolves
         // precisely when the single-writer gate will succeed.
@@ -1651,12 +1807,12 @@ fn persist_snapshot(
     runtime_facts: &SessionRuntimeFacts,
 ) {
     // Migrate derived sources before building the recipe so their
-    // source_path carries the portable (.duck-adjacent) location instead
+    // source_path carries the portable (recipe.json-adjacent) location instead
     // of the temp staging path (issue #433, ADR-0087 D2). Without this,
-    // derived sources created after the initial bind_duck would carry temp
+    // derived sources created after the initial bind_recipe would carry temp
     // paths in the recipe — wiped on session drop, breaking resume.
-    if let Some(duck_path) = persister.duck_path().map(PathBuf::from) {
-        migrate_derived_sources(working_set, temp_path, &duck_path);
+    if let Some(recipe_path) = persister.recipe_path().map(PathBuf::from) {
+        migrate_derived_sources(working_set, temp_path, &recipe_path);
     }
     persister.save_if_bound(working_set, timeline, runtime_facts);
 }
@@ -1664,20 +1820,20 @@ fn persist_snapshot(
 /// Migrate derived source files from temp staging (`temp_path/derived/`) to
 /// the per-session directory's `assets/` subdirectory (ADR-0089, issue #433,
 /// ADR-0087 D2) so they survive session close and are portable with the
-/// `.duck` file. Updates each descriptor's `source_path` in place so the
+/// `recipe.json` file. Updates each descriptor's `source_path` in place so the
 /// recipe's `SourceRef` carries the persistent location. Best-effort +
 /// logged: a copy failure leaves the staging path in place (the session temp
 /// dir is wiped on drop, but the recipe write still succeeds — a resume
 /// would surface the missing file as an interactive re-link).
-fn migrate_derived_sources(working_set: &mut WorkingSet, temp_path: &Path, duck_path: &Path) {
+fn migrate_derived_sources(working_set: &mut WorkingSet, temp_path: &Path, recipe_path: &Path) {
     let staging_dir = temp_path.join(derived_source::DERIVED_STAGING_DIR);
     // ADR-0089: derived sources live in the per-session directory's `assets/`
-    // subdirectory (previously `{duck_stem}.assets/` adjacent to a flat .duck).
-    let Some(session_dir) = duck_path.parent() else {
+    // subdirectory (previously `{duck_stem}.assets/` adjacent to a flat recipe.json).
+    let Some(session_dir) = recipe_path.parent() else {
         log::warn!(
             target: "toptopduck::session",
-            "skipped derived-source migration: duck_path has no parent: {}",
-            duck_path.display()
+            "skipped derived-source migration: recipe_path has no parent: {}",
+            recipe_path.display()
         );
         return;
     };
@@ -1892,20 +2048,20 @@ mod tests {
     }
 
     #[test]
-    fn bind_duck_writes_a_readable_recipe_at_the_path() {
-        // ADR-0034: bind_duck immediately persists one recipe at the bound
-        // path (temp + rename), so the .duck exists after the call even
+    fn bind_recipe_writes_a_readable_recipe_at_the_path() {
+        // ADR-0034: bind_recipe immediately persists one recipe at the bound
+        // path (temp + rename), so the recipe.json exists after the call even
         // before any turn. The file reads back as a v1 recipe carrying the
         // session name.
         let dir = tempfile::tempdir().expect("tempdir");
-        let path = dir.path().join("session.duck");
+        let path = dir.path().join("recipe.json");
         let mut session = Session::new().expect("session");
         session
-            .bind_duck(path.clone(), "我的分析".into())
+            .bind_recipe(path.clone(), "我的分析".into())
             .expect("bind");
-        assert_eq!(session.duck_path(), Some(path.as_path()));
+        assert_eq!(session.recipe_path(), Some(path.as_path()));
         assert_eq!(session.session_name(), Some("我的分析"));
-        let recipe = crate::persistence::read_duck(&path).expect("read back");
+        let recipe = crate::persistence::read_recipe(&path).expect("read back");
         assert_eq!(
             recipe.format_version(),
             crate::persistence::RECIPE_FORMAT_VERSION
@@ -1919,20 +2075,20 @@ mod tests {
 
     #[test]
     fn build_recipe_records_relative_path_for_in_subtree_sources() {
-        // ADR-0036 Decision 4 hybrid paths: a source inside the .duck file's directory
+        // ADR-0036 Decision 4 hybrid paths: a source inside the recipe.json file's directory
         // subtree is recorded with BOTH a relative path (the primary resolver,
         // which survives "move the folder" portability) and the absolute path
         // (the fallback). The out-of-subtree case (relative_path = None) is
         // covered by the black-box suite, whose fixture lives outside the
-        // .duck tempdir and resumes through the absolute fallback.
+        // recipe.json tempdir and resumes through the absolute fallback.
         let dir = tempfile::tempdir().expect("tempdir");
-        let duck = dir.path().join("session.duck");
+        let duck = dir.path().join("recipe.json");
         let in_subtree = dir.path().join("data.csv");
         std::fs::write(&in_subtree, "name,score\nAda,9\n").expect("write csv");
 
         let mut session = Session::new().expect("session");
         session
-            .bind_duck(duck.clone(), "混合路径".into())
+            .bind_recipe(duck.clone(), "混合路径".into())
             .expect("bind");
         let reference_name = match session.ingest(&in_subtree) {
             crate::model::LoadOutcome::Loaded(d) => d.reference_name,
@@ -1947,7 +2103,7 @@ mod tests {
         assert_eq!(
             src.relative_path.as_deref(),
             Some("data.csv"),
-            "in-subtree source carries a path relative to the .duck directory"
+            "in-subtree source carries a path relative to the recipe.json directory"
         );
         assert!(
             std::path::Path::new(&src.source_path).is_absolute(),
@@ -1962,7 +2118,7 @@ mod tests {
         // and records BuiltIn runtime provenance on every live turn. A fresh
         // ask that materializes a result carries one `materialize` trace entry
         // whose summary is the verbatim SQL and whose result excerpt stays
-        // empty (a successful call's payload is data-bearing -- the .duck
+        // empty (a successful call's payload is data-bearing -- the recipe.json
         // carries none of it, ADR-0036; the synthetic form is empty too);
         // provenance records `RuntimeKind::BuiltIn` (skills stay empty
         // -- skill tracking is unwired, ADR-0079). Pins the live path so a
@@ -1996,7 +2152,7 @@ mod tests {
         assert!(
             turn.trace[0].calls[0].result_excerpt.is_empty(),
             "a success payload is data-bearing (columns/sample/row_count) -- \
-             the .duck carries no materialized data (ADR-0036), so the \
+             the recipe.json carries no materialized data (ADR-0036), so the \
              persisted success excerpt stays empty"
         );
         assert_eq!(
@@ -2065,7 +2221,7 @@ mod tests {
         // ADR-0078 / ADR-0036 (issue #319): the persisted excerpt is the
         // FAILURE audit anchor -- a failed materialize (bad SQL) records its
         // error string so a reopened turn can show what went wrong, while the
-        // successful retry's data-bearing payload stays OUT of the .duck.
+        // successful retry's data-bearing payload stays OUT of the recipe.json.
         // Self-correction trajectory (ADR-0077): the error routes back to the
         // model, which retries with good SQL and converges.
         let provider = FakeProvider::new().scripted_tool_turn_seq(
@@ -2099,7 +2255,7 @@ mod tests {
         assert!(turn.trace[1].calls[0].success, "the retry succeeded");
         assert!(
             turn.trace[1].calls[0].result_excerpt.is_empty(),
-            "the success payload never enters the .duck (ADR-0036)"
+            "the success payload never enters the recipe.json (ADR-0036)"
         );
     }
 
@@ -2412,6 +2568,7 @@ mod tests {
         let harvested_provenance = PersistedTurnProvenance {
             runtime: Some(RuntimeKind::External),
             adapter_id: None,
+            adapter_display_name: None,
             skills: vec![],
         };
 
@@ -2496,7 +2653,7 @@ mod tests {
     fn record_turn_attribution_lands_on_record_and_audit() {
         // ADR-0101: the turn-top attribution snapshot lands on BOTH halves of
         // the timeline entry -- the IPC TurnRecord's provenance (the thread
-        // badge source) and the persisted TurnAudit (the .duck anchor). An
+        // badge source) and the persisted TurnAudit (the recipe.json anchor). An
         // external turn names its adapter id; a built-in turn records only
         // the kind and never an id.
         use super::PersistedTurnProvenance;
@@ -2519,6 +2676,9 @@ mod tests {
             Vec::new(),
             TurnRuntime::External {
                 adapter_id: Some("gemini-cli".into()),
+                // Issue #1351: a display name distinct from the id pins the
+                // passthrough (an equal pair could pass by coincidence).
+                display_name: Some("Gemini CLI".into()),
             },
             None,
             Vec::new(),
@@ -2564,7 +2724,8 @@ mod tests {
         assert_eq!(
             external.0.provenance.runtime,
             Some(TurnRuntime::External {
-                adapter_id: Some("gemini-cli".into())
+                adapter_id: Some("gemini-cli".into()),
+                display_name: Some("Gemini CLI".into()),
             }),
             "the external turn's wire provenance names the adapter"
         );
@@ -2573,7 +2734,7 @@ mod tests {
             Some(TurnRuntime::BuiltIn),
             "the built-in turn's wire provenance carries only the kind"
         );
-        // Persisted half: the .duck anchor.
+        // Persisted half: the recipe.json anchor.
         assert_eq!(external.1.provenance().runtime, Some(RuntimeKind::External));
         assert_eq!(
             external.1.provenance().adapter_id.as_deref(),
@@ -2586,7 +2747,7 @@ mod tests {
             None,
             "the built-in turn's audit never carries an adapter id"
         );
-        // And the projection round-trips both into the .duck recipe shape.
+        // And the projection round-trips both into the recipe.json recipe shape.
         let recipe = session.build_recipe();
         let mut turns = recipe.history.iter().filter_map(|e| match e {
             RecipeEntry::Turn(t) => Some(t.provenance.clone()),
@@ -2597,6 +2758,7 @@ mod tests {
             Some(PersistedTurnProvenance {
                 runtime: Some(RuntimeKind::External),
                 adapter_id: Some("gemini-cli".into()),
+                adapter_display_name: Some("Gemini CLI".into()),
                 skills: Vec::new(),
             })
         );
@@ -2605,6 +2767,7 @@ mod tests {
             Some(PersistedTurnProvenance {
                 runtime: Some(RuntimeKind::BuiltIn),
                 adapter_id: None,
+                adapter_display_name: None,
                 skills: Vec::new(),
             })
         );
@@ -2747,6 +2910,47 @@ mod tests {
         );
     }
 
+    /// ADR-0136 D2 zero-file rule for a BOUND session: the settle persists
+    /// the recipe, but the stamp gate refuses to be the thing that
+    /// materializes the engine -- no companion file may appear for a session
+    /// that never ran SQL. The unbound AC1 test above cannot see this: its
+    /// stamp path is a no-op.
+    #[test]
+    fn a_bound_text_only_session_never_gains_a_companion_file() {
+        let provider = FakeProvider::new().scripted_tool_turn_seq(
+            "你好",
+            vec![Ok(ToolTurnReply::Text("你好！有什么可以帮你的？".into()))],
+        );
+        let dir = tempfile::tempdir().expect("tempdir");
+        let recipe = dir.path().join("recipe.json");
+        let mut session = Session::with_provider(Box::new(provider)).expect("session");
+        session
+            .bind_recipe(recipe.clone(), "零文件".into())
+            .expect("bind");
+        match session.ask("你好") {
+            TurnOutcome::Textual { .. } => {}
+            other => panic!("expected a textual turn, got {other:?}"),
+        }
+        assert!(recipe.exists(), "the text turn settled the recipe");
+        assert!(
+            !session.admin_engine.is_materialized(),
+            "the stamp gate must not materialize a zero-instance session"
+        );
+        assert!(
+            !dir.path()
+                .join(super::companion::COMPANION_FILE_NAME)
+                .exists(),
+            "no companion file for a no-SQL session"
+        );
+        drop(session);
+        assert!(
+            !dir.path()
+                .join(super::companion::COMPANION_FILE_NAME)
+                .exists(),
+            "still no companion after close"
+        );
+    }
+
     /// AC2: a turn whose only tool call routes to an external (MCP) tool
     /// never touches the engine. Under the loop runtime (ADR-0116) the
     /// tool table rig was given does not carry the external server's entry
@@ -2826,7 +3030,7 @@ mod tests {
         );
         let mut session = Session::with_provider(Box::new(provider)).expect("session");
         session
-            .bind_duck(duck_dir.path().join("session.duck"), "s".into())
+            .bind_recipe(duck_dir.path().join("recipe.json"), "s".into())
             .expect("bind");
         let report = session.temp_path.join("page.html");
         std::fs::write(&report, "<html/>").expect("write temp report");
@@ -2847,7 +3051,7 @@ mod tests {
             "the manifest stores the materialized per-session path"
         );
         assert!(materialized.is_file(), "the copy exists");
-        // And the recipe persisted the same manifest (the `.duck` is the
+        // And the recipe persisted the same manifest (the `recipe.json` is the
         // reopen path -- the whole point of materialization).
         let recipe = session.build_recipe();
         let persisted = recipe
@@ -3009,10 +3213,10 @@ mod tests {
     // --- Derived source migration (issue #439 AC2) ----------------------------
 
     #[test]
-    fn bind_duck_migrates_derived_sources_to_assets_dir() {
+    fn bind_recipe_migrates_derived_sources_to_assets_dir() {
         // Stage a derived CSV in temp_path/derived/ (the staging area used by
-        // derived_source::process when no .duck is bound, ADR-0087 D4), register
-        // it in the working set with the staging path, then bind_duck. The
+        // derived_source::process when no recipe.json is bound, ADR-0087 D4), register
+        // it in the working set with the staging path, then bind_recipe. The
         // migration should copy the file to <duck_stem>.assets/ and update the
         // descriptor's source_path so the recipe carries the portable location.
         let mut session = Session::new().expect("session");
@@ -3043,13 +3247,13 @@ mod tests {
                 stale: None,
             });
 
-        // Use a temp dir for the .duck so .assets/ goes alongside it.
+        // Use a temp dir for the recipe.json so .assets/ goes alongside it.
         let duck_dir = tempfile::tempdir().expect("duck dir");
-        let duck_path = duck_dir.path().join("session.duck");
+        let recipe_path = duck_dir.path().join("recipe.json");
 
         session
-            .bind_duck(duck_path.clone(), "test session".into())
-            .expect("bind_duck");
+            .bind_recipe(recipe_path.clone(), "test session".into())
+            .expect("bind_recipe");
 
         // ADR-0089: derived sources migrate to the per-session directory's
         // `assets/` subdirectory (replacing the former `{duck_stem}.assets/`).
@@ -3078,7 +3282,7 @@ mod tests {
 
         // AC2c: recipe carries the portable (relative) path. ADR-0089: the
         // assets directory is now per-session `assets/` (not `{stem}.assets/`).
-        let recipe = crate::persistence::read_duck(&duck_path).expect("read recipe");
+        let recipe = crate::persistence::read_recipe(&recipe_path).expect("read recipe");
         let src = recipe
             .sources
             .iter()
@@ -3141,20 +3345,20 @@ mod tests {
         assert!(name.ends_with('…'));
     }
 
-    /// Bind a session to a temp .duck file so record_turn's persist path is
-    /// Some. Returns (session, _duck_file) — the caller holds the guard.
-    fn session_with_duck(name: &str) -> (Session, NamedTempFile) {
-        let duck = NamedTempFile::new().expect("temp .duck");
+    /// Bind a session to a temp recipe.json file so record_turn's persist path is
+    /// Some. Returns (session, _recipe_file) — the caller holds the guard.
+    fn session_with_recipe(name: &str) -> (Session, NamedTempFile) {
+        let duck = NamedTempFile::new().expect("temp recipe.json");
         let mut session = Session::new().expect("session");
         session
-            .bind_duck(duck.path().to_path_buf(), name.to_string())
+            .bind_recipe(duck.path().to_path_buf(), name.to_string())
             .expect("bind");
         (session, duck)
     }
 
     #[test]
     fn record_turn_auto_names_on_first_turn() {
-        let (mut session, _duck) = session_with_duck("");
+        let (mut session, _duck) = session_with_recipe("");
         assert_eq!(session.session_name(), Some(""));
 
         // Simulate a terminal turn reaching record_turn.
@@ -3177,13 +3381,102 @@ mod tests {
         assert_eq!(
             session.session_name(),
             Some("how many people?"),
-            "first terminal turn auto-names the session"
+            "first recorded turn auto-names the session (record_turn fallback)"
         );
+    }
+
+    /// Issue #1353 (ADR-0089 Decision 4 calibrated): the first question's
+    /// ACCEPTANCE names the session -- the push fires once, at turn start
+    /// before the turn settles, and `record_turn`'s fallback re-sets the
+    /// same value silently (no second event).
+    #[test]
+    fn ask_with_auto_name_fires_once_at_first_question_acceptance() {
+        let provider = crate::provider::fake::FakeProvider::new().scripted_tool_turn_seq(
+            "how many people?",
+            vec![Ok(ToolTurnReply::Text("42".into()))],
+        );
+        let mut session = Session::with_provider(Box::new(provider)).expect("session");
+        let approval = crate::approval::ApprovalState::new();
+        let keychain = super::KeychainStore::new();
+        let inputs = super::TurnInputs::empty(&keychain);
+        // The shared observation sequence pins the ORDERING contract: the
+        // name push lands before the turn emits its first phase event (i.e.
+        // ahead of everything the terminal state could race against).
+        #[derive(Debug, PartialEq)]
+        enum Obs {
+            Named(String),
+            Phase,
+        }
+        let obs: std::sync::Arc<std::sync::Mutex<Vec<Obs>>> = Default::default();
+        let obs_phase = std::sync::Arc::clone(&obs);
+        session.ask_with_phase_and_auto_name(
+            "how many people?",
+            &approval,
+            &super::NullApprovalSink,
+            move |phase| {
+                if matches!(phase, crate::model::TurnPhase::Thinking { .. }) {
+                    obs_phase.lock().expect("obs lock").push(Obs::Phase);
+                }
+            },
+            |name| {
+                obs.lock()
+                    .expect("obs lock")
+                    .push(Obs::Named(name.to_string()));
+            },
+            &inputs,
+        );
+        let obs = obs.lock().expect("obs lock");
+        // Exactly one push across the whole turn (the turn-start site fired
+        // it; the record_turn fallback re-set the same value silently) ...
+        assert_eq!(obs.iter().filter(|o| matches!(o, Obs::Named(_))).count(), 1);
+        // ... and it precedes the turn's first phase event.
+        assert_eq!(
+            obs.first(),
+            Some(&Obs::Named("how many people?".to_string()))
+        );
+        drop(obs);
+        assert_eq!(
+            session.session_name(),
+            Some("how many people?"),
+            "the turn-start push names the session before the turn settles"
+        );
+    }
+
+    /// Issue #1353: only the FIRST question names -- a session that already
+    /// holds a recorded turn never auto-names (or fires the push) again.
+    #[test]
+    fn ask_with_auto_name_does_not_fire_on_subsequent_questions() {
+        let provider = crate::provider::fake::FakeProvider::new()
+            .scripted_tool_turn_seq(
+                "first question",
+                vec![Ok(ToolTurnReply::Text("answer 1".into()))],
+            )
+            .scripted_tool_turn_seq(
+                "second question",
+                vec![Ok(ToolTurnReply::Text("answer 2".into()))],
+            );
+        let mut session = Session::with_provider(Box::new(provider)).expect("session");
+        let approval = crate::approval::ApprovalState::new();
+        let keychain = super::KeychainStore::new();
+        let inputs = super::TurnInputs::empty(&keychain);
+        let mut fires = 0u32;
+        for question in ["first question", "second question"] {
+            session.ask_with_phase_and_auto_name(
+                question,
+                &approval,
+                &super::NullApprovalSink,
+                |_| {},
+                |_| fires += 1,
+                &inputs,
+            );
+        }
+        assert_eq!(fires, 1, "only the first question's acceptance names");
+        assert_eq!(session.session_name(), Some("first question"));
     }
 
     #[test]
     fn record_turn_does_not_overwrite_on_second_turn() {
-        let (mut session, _duck) = session_with_duck("");
+        let (mut session, _duck) = session_with_recipe("");
         session.record_turn(
             "first question",
             TurnOutcome::Textual {
@@ -3225,7 +3518,7 @@ mod tests {
 
     #[test]
     fn record_turn_auto_name_truncates_long_question() {
-        let (mut session, _duck) = session_with_duck("");
+        let (mut session, _duck) = session_with_recipe("");
         let long_question = "a very long question that exceeds the session name cap".to_string();
         session.record_turn(
             &long_question,
@@ -3253,17 +3546,18 @@ mod tests {
 
     #[test]
     fn record_turn_first_turn_overwrites_then_subsequent_turns_preserve_rename() {
-        let (mut session, _duck) = session_with_duck("");
+        let (mut session, _duck) = session_with_recipe("");
         // User renames before the first turn.
         session.rename("My Analysis").expect("rename");
         assert_eq!(session.session_name(), Some("My Analysis"));
 
-        // First terminal turn: per ADR-0089 Decision 4, the auto-name fires
-        // unconditionally on the first turn (the ADR explicitly rejects a
-        // name_is_placeholder flag). The user rename before the first turn
-        // is overwritten -- but this is the designed behavior: the first
-        // question's truncation is more meaningful, and a user is unlikely
-        // to rename before asking.
+        // First recorded turn: the acceptance-time naming (ADR-0089
+        // Decision 4, calibrated by #1353) already fired, and record_turn's
+        // same-value fallback re-applies the truncation here (the ADR
+        // explicitly rejects a name_is_placeholder flag). The user rename
+        // before the first turn is overwritten -- designed behavior: the
+        // first question's truncation is more meaningful, and a user is
+        // unlikely to rename before asking.
         session.record_turn(
             "what is the total?",
             TurnOutcome::Textual {
@@ -3315,7 +3609,7 @@ mod tests {
         // ADR-0089: source/skill lifecycle events do not count as turns.
         // A session that loaded a source before its first question still
         // auto-names on that first question.
-        let (mut session, _duck) = session_with_duck("");
+        let (mut session, _duck) = session_with_recipe("");
         // Simulate a source lifecycle event in the timeline.
         session.timeline.push(super::TimelineEntry::Source(
             crate::model::SourceLifecycleEvent {
@@ -3349,12 +3643,13 @@ mod tests {
 
     #[test]
     fn record_turn_auto_names_on_failed_and_cancelled_first_turn() {
-        // ADR-0089 Decision 4: "first terminal turn" includes all terminal
-        // outcomes -- Failed / Cancelled / Materialized, not just Textual.
-        // The auto-name logic in record_turn is outcome-agnostic (no match on
-        // outcome before set_session_name). This test pins that contract so a
-        // future `match outcome` guard does not silently regress it.
-        let (mut session_a, _duck) = session_with_duck("");
+        // ADR-0089 Decision 4: naming is outcome-agnostic -- the
+        // acceptance-time trigger already fired before any outcome existed,
+        // and record_turn's fallback re-applies it for Failed / Cancelled /
+        // Materialized, not just Textual (no match on outcome before
+        // set_session_name). This test pins that contract so a future
+        // `match outcome` guard does not silently regress it.
+        let (mut session_a, _duck) = session_with_recipe("");
         session_a.record_turn(
             "why did it break?",
             TurnOutcome::Failed(crate::model::TurnFailure::Execute {
@@ -3374,7 +3669,7 @@ mod tests {
             "Failed first turn still auto-names"
         );
 
-        let (mut session_b, _duck) = session_with_duck("");
+        let (mut session_b, _duck) = session_with_recipe("");
         session_b.record_turn(
             "never finished",
             TurnOutcome::Cancelled(None),
@@ -3476,14 +3771,14 @@ mod tests {
         use crate::model::ThreadEntry;
 
         let dir = tempfile::tempdir().expect("session dir");
-        let duck = dir.path().join("session.duck");
+        let duck = dir.path().join("recipe.json");
 
         // Bind FIRST: the settle-time materialization derives the assets dir
         // from the bound duck path, and createSession binds from the start
         // (ADR-0089) -- an ask recorded before any binding has nothing to
         // materialize for.
         let mut session = Session::new().expect("session");
-        session.bind_duck(duck.clone(), "t".into()).expect("bind");
+        session.bind_recipe(duck.clone(), "t".into()).expect("bind");
 
         // The scripted SQL must name a path inside the session temp dir,
         // which only exists once the session is constructed.
@@ -3557,7 +3852,7 @@ mod tests {
             "SELECT COUNT(*) AS n FROM read_csv_auto('{}')",
             assets_csv.to_string_lossy()
         );
-        let mut resumed = Session::open_duck(
+        let mut resumed = Session::open_recipe(
             &duck,
             std::sync::Arc::new(crate::cancel::CancelToken::new()),
             Box::new(FakeProvider::new().scripted_tool_turn_seq(
@@ -3608,11 +3903,11 @@ mod tests {
         use crate::provider::UnwiredProvider;
 
         let dir = tempfile::tempdir().expect("session dir");
-        let duck = dir.path().join("session.duck");
+        let duck = dir.path().join("recipe.json");
         let assets = |name: &str| dir.path().join("assets").join(name);
 
         let mut session = Session::new().expect("session");
-        session.bind_duck(duck.clone(), "t".into()).expect("bind");
+        session.bind_recipe(duck.clone(), "t".into()).expect("bind");
         let csv = |name: &str, body: &str| {
             let p = session.temp_path.join(name);
             std::fs::write(&p, format!("v\n{body}\n")).expect("scratch csv");
@@ -3650,15 +3945,21 @@ mod tests {
         drop(session);
 
         // The persistent break cause: turn 2's materialized copy is gone, so
-        // every replay breaks at result_2 until the file is restored.
+        // every replay breaks at result_2 until the file is restored. The
+        // companion is removed too: with it present the open would HIT and
+        // restore the pre-degrade working set whole (ADR-0136 Why 3 -- the
+        // hit path's replay-break failure surface is gone); forcing the miss
+        // is what keeps the DEGRADE machinery under test (see the sibling
+        // test below for the hit-path counterpart).
         std::fs::remove_file(assets("kline2.csv")).expect("break cause");
+        std::fs::remove_file(dir.path().join("analytics.duckdb")).expect("drop companion");
 
         // Reopen 1: replay breaks at result_2 -> turns 2 and 3 degrade
         // (break Failed + not-attempted Failed), nothing drops. Then one new
         // turn -- the mint must take result_4 (the recorded result_2 /
         // result_3 are absent from the working set; only the ADR-0022
         // waterline keeps their numbers off the table).
-        let mut s1 = Session::open_duck(
+        let mut s1 = Session::open_recipe(
             &duck,
             std::sync::Arc::new(crate::cancel::CancelToken::new()),
             Box::new(FakeProvider::new().scripted_tool_turn_seq(
@@ -3695,7 +3996,7 @@ mod tests {
         // Reopen 2 with the cause STILL present: the same break recurs and
         // the turn added between the resumes must survive it -- the recorded
         // history is never re-truncated (the recurring-shredder regression).
-        let s2 = Session::open_duck(
+        let s2 = Session::open_recipe(
             &duck,
             std::sync::Arc::new(crate::cancel::CancelToken::new()),
             Box::new(UnwiredProvider),
@@ -3716,7 +4017,7 @@ mod tests {
         // Restore the dead reference: the next resume replays the whole
         // chain green and the entire conversation returns to Materialized.
         std::fs::write(assets("kline2.csv"), "v\n2\n").expect("restore");
-        let s3 = Session::open_duck(
+        let s3 = Session::open_recipe(
             &duck,
             std::sync::Arc::new(crate::cancel::CancelToken::new()),
             Box::new(UnwiredProvider),
@@ -3736,5 +4037,69 @@ mod tests {
         for name in ["result_1", "result_2", "result_3", "result_4"] {
             assert!(s3.get(name).is_some(), "{name} re-materialized on recovery");
         }
+    }
+
+    /// The ADR-0136 hit-path counterpart of the degrade test above: with the
+    /// companion intact, a replay ASSET deleted after settle does NOT degrade
+    /// the reopen -- the watermark hits, the working set restores whole, and
+    /// the replay-break failure surface simply never runs (ADR-0136 Why 3:
+    /// recovery determinism -- the settled data survives in the companion,
+    /// independent of the replay path's dead reference).
+    #[test]
+    fn a_deleted_replay_asset_does_not_degrade_a_watermark_hit_reopen() {
+        use crate::provider::UnwiredProvider;
+
+        let dir = tempfile::tempdir().expect("session dir");
+        let duck = dir.path().join("recipe.json");
+        let assets = |name: &str| dir.path().join("assets").join(name);
+
+        let mut session = Session::new().expect("session");
+        session
+            .bind_recipe(duck.clone(), "hit".into())
+            .expect("bind");
+        let k1 = session.temp_path.join("kline.csv");
+        std::fs::write(&k1, "v\n1\n").expect("scratch csv");
+
+        session.provider = std::sync::Arc::new(FakeProvider::new().scripted_tool_turn_seq(
+            "查",
+            vec![
+                Ok(materialize_call(&format!(
+                    "SELECT COUNT(*) AS n FROM read_csv_auto('{}')",
+                    k1.to_string_lossy()
+                ))),
+                Ok(ToolTurnReply::Text("done".into())),
+            ],
+        ));
+        assert!(matches!(
+            session.ask("查"),
+            TurnOutcome::Materialized { .. }
+        ));
+        drop(session);
+
+        // The replay asset dies, the companion stays -- the watermark still
+        // matches the settled chain.
+        std::fs::remove_file(assets("kline.csv")).expect("asset gone");
+
+        let resumed = Session::open_recipe(
+            &duck,
+            std::sync::Arc::new(crate::cancel::CancelToken::new()),
+            Box::new(UnwiredProvider),
+            Default::default(),
+            |_| panic!("the hit path fires no progress events"),
+            |_| panic!("no source issues expected"),
+            |_| panic!("no active-abandoned callback expected"),
+        )
+        .expect("hit resume");
+        assert!(
+            resumed.get("result_1").is_some(),
+            "the settled result survives in the companion; the dead asset is irrelevant on a hit"
+        );
+        let any_failed = resumed.conversation().iter().any(|e| {
+            matches!(
+                e,
+                ThreadEntry::Turn(t) if matches!(t.outcome, TurnOutcome::Failed(_))
+            )
+        });
+        assert!(!any_failed, "a hit reopen never degrades");
     }
 }

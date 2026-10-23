@@ -667,7 +667,7 @@ fn turn_outcome_cancelled_carries_optional_reason() {
 
 #[test]
 fn turn_outcome_cancelled_without_data_key_deserializes_as_manual() {
-    // Pre-#883 compat: live IPC peers and .duck recordings written before the
+    // Pre-#883 compat: live IPC peers and recipe.json recordings written before the
     // reason payload existed omit the `data` key entirely (then a unit
     // variant). The newtype-over-Option shape must deserialize such a
     // payload as a manual cancel -- losing the Option would break opening
@@ -722,9 +722,23 @@ fn turn_provenance_runtime_attribution_shapes() {
             skills: vec![],
             runtime: Some(TurnRuntime::External {
                 adapter_id: Some("gemini-cli".into()),
+                display_name: None,
             }),
         },
-        r#"{"skills":[],"runtime":{"kind":"external","data":{"adapter_id":"gemini-cli"}}}"#,
+        r#"{"skills":[],"runtime":{"kind":"external","data":{"adapter_id":"gemini-cli","display_name":null}}}"#,
+    );
+
+    // External with the stamp-time display name (issue #1351): the tombstone
+    // rides the wire alongside the id.
+    assert_wire(
+        &TurnProvenance {
+            skills: vec![],
+            runtime: Some(TurnRuntime::External {
+                adapter_id: Some("user:ba3b2de2".into()),
+                display_name: Some("My local CLI".into()),
+            }),
+        },
+        r#"{"skills":[],"runtime":{"kind":"external","data":{"adapter_id":"user:ba3b2de2","display_name":"My local CLI"}}}"#,
     );
 
     // External recorded before the adapter id existed: null, never omitted
@@ -733,9 +747,12 @@ fn turn_provenance_runtime_attribution_shapes() {
     assert_wire(
         &TurnProvenance {
             skills: vec![],
-            runtime: Some(TurnRuntime::External { adapter_id: None }),
+            runtime: Some(TurnRuntime::External {
+                adapter_id: None,
+                display_name: None,
+            }),
         },
-        r#"{"skills":[],"runtime":{"kind":"external","data":{"adapter_id":null}}}"#,
+        r#"{"skills":[],"runtime":{"kind":"external","data":{"adapter_id":null,"display_name":null}}}"#,
     );
 
     // Built-in: a unit kind, no data key (mirrors SessionRuntimeChoice).
@@ -772,11 +789,13 @@ fn trace_entry_view_is_a_flat_snake_case_object() {
     use toptopduck_lib::{OperationKind, TraceEntryView, TraceRound};
     assert_wire(
         &TraceEntryView {
+            id: None,
             name: "explore".into(),
             operation_kind: OperationKind::Read,
             summary: "SELECT count(*) FROM orders".into(),
             success: false,
             result_excerpt: "no such table".into(),
+            report: None,
             sub_rounds: None,
         },
         r#"{"name":"explore","operation_kind":"read","summary":"SELECT count(*) FROM orders","success":false,"result_excerpt":"no such table"}"#,
@@ -789,20 +808,24 @@ fn trace_entry_view_is_a_flat_snake_case_object() {
     // own flat shape).
     assert_wire(
         &TraceEntryView {
+            id: None,
             name: "analyst".into(),
             operation_kind: OperationKind::Execute,
             summary: "clean the sheet".into(),
             success: true,
             result_excerpt: String::new(),
+            report: None,
             sub_rounds: Some(vec![TraceRound {
                 thinking: None,
                 text: Some("child prose".into()),
                 calls: vec![TraceEntryView {
+                    id: None,
                     name: "explore".into(),
                     operation_kind: OperationKind::Read,
                     summary: "SELECT 1".into(),
                     success: true,
                     result_excerpt: String::new(),
+                    report: None,
                     sub_rounds: None,
                 }],
             }]),
@@ -987,8 +1010,8 @@ fn session_error_serializes_as_adjacently_tagged_kind_data() {
     use std::path::PathBuf;
     use toptopduck_lib::ResumeError;
     assert_wire(
-        &SessionError::Resume(ResumeError::AlreadyOpen(PathBuf::from("/x/a.duck"))),
-        r#"{"kind":"Resume","data":{"kind":"AlreadyOpen","data":"/x/a.duck"}}"#,
+        &SessionError::Resume(ResumeError::AlreadyOpen(PathBuf::from("/x/a.json"))),
+        r#"{"kind":"Resume","data":{"kind":"AlreadyOpen","data":"/x/a.json"}}"#,
     );
     // Issue #121: source-management domain errors wrap their typed sub-enums the
     // same way Resume wraps ResumeError -- the frontend recurses `<variant>.
@@ -1016,8 +1039,8 @@ fn session_error_serializes_as_adjacently_tagged_kind_data() {
 //
 // Pin the JSON shape of the four typed error enums that cross the Rust<->
 // frontend boundary as command rejects / return values: ResumeError (the
-// `open_duck` reject), SaveError (the `take_persist_error` returned value),
-// and the nested DuckLoadError + MigrationError (which ride inside
+// `open_recipe` reject), SaveError (the `take_persist_error` returned value),
+// and the nested RecipeLoadError + MigrationError (which ride inside
 // ResumeError::Load). All adjacently-tagged (`#[serde(tag="kind", content =
 // "data")]`), the same shape the rest of the wire contract uses, so the
 // frontend narrows on `kind` at every depth. src/types.ts mirrors the shapes
@@ -1043,28 +1066,28 @@ fn migration_error_serializes_adjacently_tagged() {
 }
 
 #[test]
-fn duck_load_error_serializes_adjacently_tagged() {
-    // The .duck load error (persistence::io::LoadError) -- distinct from the
+fn recipe_load_error_serializes_adjacently_tagged() {
+    // The recipe.json load error (persistence::io::LoadError) -- distinct from the
     // ingest model::LoadError. Nests MigrationError under data; the inner enum
     // keeps its own kind/data shape so the frontend recurses uniformly.
-    use toptopduck_lib::{DuckLoadError, MigrationError};
+    use toptopduck_lib::{MigrationError, RecipeLoadError};
     assert_wire(
-        &DuckLoadError::Io("io-fail".into()),
+        &RecipeLoadError::Io("io-fail".into()),
         r#"{"kind":"Io","data":"io-fail"}"#,
     );
     assert_wire(
-        &DuckLoadError::Parse("parse-fail".into()),
+        &RecipeLoadError::Parse("parse-fail".into()),
         r#"{"kind":"Parse","data":"parse-fail"}"#,
     );
     assert_wire(
-        &DuckLoadError::VersionMismatch {
+        &RecipeLoadError::VersionMismatch {
             found: 3,
             supported: 1,
         },
         r#"{"kind":"VersionMismatch","data":{"found":3,"supported":1}}"#,
     );
     assert_wire(
-        &DuckLoadError::Migration(MigrationError::Field("bad".into())),
+        &RecipeLoadError::Migration(MigrationError::Field("bad".into())),
         r#"{"kind":"Migration","data":{"kind":"Field","data":"bad"}}"#,
     );
 }
@@ -1072,7 +1095,7 @@ fn duck_load_error_serializes_adjacently_tagged() {
 #[test]
 fn save_error_serializes_adjacently_tagged() {
     // SaveError is the take_persist_error returned value (Option<SaveError>).
-    // AlreadyOpen carries the canonical .duck path (PathBuf -> a JSON string)
+    // AlreadyOpen carries the canonical recipe.json path (PathBuf -> a JSON string)
     // so the UI can name exactly which file is double-open.
     use std::path::PathBuf;
     use toptopduck_lib::SaveError;
@@ -1089,19 +1112,19 @@ fn save_error_serializes_adjacently_tagged() {
         r#"{"kind":"Rename","data":"rename-fail"}"#,
     );
     assert_wire(
-        &SaveError::AlreadyOpen(PathBuf::from("/x/a.duck")),
-        r#"{"kind":"AlreadyOpen","data":"/x/a.duck"}"#,
+        &SaveError::AlreadyOpen(PathBuf::from("/x/a.json")),
+        r#"{"kind":"AlreadyOpen","data":"/x/a.json"}"#,
     );
 }
 
 #[test]
 fn resume_error_serializes_adjacently_tagged() {
-    // ResumeError is the open_duck command's typed reject (no longer flattened
-    // to SessionError::Engine(string)). Load recurses into DuckLoadError.
+    // ResumeError is the open_recipe command's typed reject (no longer flattened
+    // to SessionError::Engine(string)). Load recurses into RecipeLoadError.
     use std::path::PathBuf;
-    use toptopduck_lib::{DuckLoadError, ResumeError};
+    use toptopduck_lib::{RecipeLoadError, ResumeError};
     assert_wire(
-        &ResumeError::Load(DuckLoadError::VersionMismatch {
+        &ResumeError::Load(RecipeLoadError::VersionMismatch {
             found: 3,
             supported: 1,
         }),
@@ -1131,8 +1154,17 @@ fn resume_error_serializes_adjacently_tagged() {
     assert_wire(&ResumeError::Aborted, r#"{"kind":"Aborted"}"#);
     // AlreadyOpen carries the canonical path (PathBuf -> JSON string).
     assert_wire(
-        &ResumeError::AlreadyOpen(PathBuf::from("/x/a.duck")),
-        r#"{"kind":"AlreadyOpen","data":"/x/a.duck"}"#,
+        &ResumeError::AlreadyOpen(PathBuf::from("/x/a.json")),
+        r#"{"kind":"AlreadyOpen","data":"/x/a.json"}"#,
+    );
+    // Restore names the snapshot whose read-only ATTACH failed on the
+    // watermark-hit path (ADR-0136 D3) -- not a recipe.json read failure.
+    assert_wire(
+        &ResumeError::Restore {
+            reference_name: "orders".into(),
+            detail: "attach failed".into(),
+        },
+        r#"{"kind":"Restore","data":{"reference_name":"orders","detail":"attach failed"}}"#,
     );
 }
 
@@ -1160,19 +1192,23 @@ fn turn_phase_serializes_externally_tagged() {
     );
     assert_wire(
         &TurnPhase::ToolCallStarted {
+            id: None,
             name: "materialize".into(),
             operation_kind: OperationKind::Write,
             summary: "SELECT 1".into(),
+            task: None,
         },
         r#"{"ToolCallStarted":{"name":"materialize","operation_kind":"write","summary":"SELECT 1"}}"#,
     );
     assert_wire(
         &TurnPhase::ToolCallCompleted(TraceEntryView {
+            id: None,
             name: "materialize".into(),
             operation_kind: OperationKind::Write,
             summary: "SELECT 1".into(),
             success: true,
             result_excerpt: String::new(),
+            report: None,
             sub_rounds: None,
         }),
         r#"{"ToolCallCompleted":{"name":"materialize","operation_kind":"write","summary":"SELECT 1","success":true,"result_excerpt":""}}"#,
@@ -1197,6 +1233,50 @@ fn turn_phase_serializes_externally_tagged() {
 }
 
 #[test]
+fn delegation_live_phases_carry_identity_and_full_text() {
+    // ADR-0135: the delegation's live surface. The started phase carries
+    // the execute-entry-minted id plus the task's FULL text (Decision 3 --
+    // the trace summary stays bounded, the task rides live-only); the
+    // completed entry carries the same id (the routing fact that pairs
+    // same-name parallel rows, Decision 2) plus the report's full text;
+    // and a forwarded sub-event rides wrapped in DelegationSubEvent with
+    // the owning delegation's id (Decision 1). All additive: the absent
+    // fields skip serialization, so the ordinary-call shapes pinned above
+    // are unchanged.
+    use toptopduck_lib::{OperationKind, TraceEntryView, TurnPhase};
+    assert_wire(
+        &TurnPhase::ToolCallStarted {
+            id: Some("gateway-1".into()),
+            name: "analyst".into(),
+            operation_kind: OperationKind::Execute,
+            summary: "clean the sheet".into(),
+            task: Some("Clean the whole sheet and report".into()),
+        },
+        r#"{"ToolCallStarted":{"id":"gateway-1","name":"analyst","operation_kind":"execute","summary":"clean the sheet","task":"Clean the whole sheet and report"}}"#,
+    );
+    assert_wire(
+        &TurnPhase::ToolCallCompleted(TraceEntryView {
+            id: Some("gateway-1".into()),
+            name: "analyst".into(),
+            operation_kind: OperationKind::Execute,
+            summary: "clean the sheet".into(),
+            success: true,
+            result_excerpt: String::new(),
+            report: Some("Done; 3 rows cleaned.".into()),
+            sub_rounds: None,
+        }),
+        r#"{"ToolCallCompleted":{"id":"gateway-1","name":"analyst","operation_kind":"execute","summary":"clean the sheet","success":true,"result_excerpt":"","report":"Done; 3 rows cleaned."}}"#,
+    );
+    assert_wire(
+        &TurnPhase::DelegationSubEvent {
+            delegation_id: "gateway-1".into(),
+            phase: Box::new(TurnPhase::Thinking { attempt: 2 }),
+        },
+        r#"{"DelegationSubEvent":{"delegation_id":"gateway-1","phase":{"Thinking":{"attempt":2}}}}"#,
+    );
+}
+
+#[test]
 fn turn_record_carries_round_grouped_trace_and_timestamps() {
     // ADR-0103 (issue #608): TurnRecord.trace is round-grouped -- each round
     // an optional thinking block + optional prose + its calls -- and the
@@ -1213,11 +1293,13 @@ fn turn_record_carries_round_grouped_trace_and_timestamps() {
         }),
         text: Some("先看一眼数据。".into()),
         calls: vec![TraceEntryView {
+            id: None,
             name: "explore".into(),
             operation_kind: OperationKind::Read,
             summary: "SELECT 1".into(),
             success: true,
             result_excerpt: String::new(),
+            report: None,
             sub_rounds: None,
         }],
     };
@@ -1268,6 +1350,24 @@ fn turn_progress_wraps_phase_with_session_id() {
             phase: TurnPhase::Thinking { attempt: 1 },
         },
         r#"{"session_id":"550e8400-e29b-41d4-a716-446655440000","phase":{"Thinking":{"attempt":1}}}"#,
+    );
+}
+
+#[test]
+fn session_named_payload_wire_shape() {
+    // ADR-0089 Decision 4 (calibrated by #1353): a session-named event is
+    // { session_id, name } -- the addressing id mirrors TurnProgress so the
+    // shell's mount-once listener can land the accepted name before the
+    // turn settles. Pin the wrapper so a field rename on either side is
+    // caught before types.ts drifts.
+    use toptopduck_lib::{SessionId, SessionNamedPayload};
+    const SID: &str = "550e8400-e29b-41d4-a716-446655440000";
+    assert_wire(
+        &SessionNamedPayload {
+            session_id: SessionId::parse(SID).expect("valid v4 UUID"),
+            name: "how many people?".to_string(),
+        },
+        r#"{"session_id":"550e8400-e29b-41d4-a716-446655440000","name":"how many people?"}"#,
     );
 }
 
@@ -1343,15 +1443,15 @@ fn source_summary_serializes_flat_snake_case() {
 #[test]
 fn session_metadata_serializes_flat_snake_case() {
     // ADR-0060/0061 (issue #76): SessionMetadata is the flat snake_case sidebar
-    // entry. duck_path is the .duck path (the stable identity, renamed from
+    // entry. recipe_path is the recipe.json path (the stable identity, renamed from
     // session_id in issue #462 to disambiguate from the runtime UUID). Pin the
     // full field order so a rename / reorder is caught before types.ts drifts.
     // ADR-0127 (issue #1174) appends the organization flags joined from the
     // sidecar; the frontend type follows in #1175.
-    use toptopduck_lib::{DuckPath, SessionMetadata, SourceSummary};
+    use toptopduck_lib::{RecipePath, SessionMetadata, SourceSummary};
     assert_wire(
         &SessionMetadata {
-            duck_path: DuckPath::new("/x/analysis.duck"),
+            recipe_path: RecipePath::new("/x/analysis.json"),
             display_name: "analysis".into(),
             last_modified_at: 1_700_000_000_000,
             source_summary: SourceSummary {
@@ -1363,7 +1463,7 @@ fn session_metadata_serializes_flat_snake_case() {
             pinned: false,
             archived: false,
         },
-        r#"{"duck_path":"/x/analysis.duck","display_name":"analysis","last_modified_at":1700000000000,"source_summary":{"first_source_name":"orders","source_count":1,"turn_count":2},"format_version":1,"pinned":false,"archived":false}"#,
+        r#"{"recipe_path":"/x/analysis.json","display_name":"analysis","last_modified_at":1700000000000,"source_summary":{"first_source_name":"orders","source_count":1,"turn_count":2},"format_version":1,"pinned":false,"archived":false}"#,
     );
 }
 
@@ -1673,6 +1773,30 @@ fn adapter_entry_wire_shape() {
     );
 }
 
+/// UserAdapterRow (issue #1341) crosses IPC as a flat snake_case struct --
+/// the shape `src/types/runtime.ts` mirrors. Every field serializes (the
+/// `#[serde(default)]` trio is a read-side default, never an omit), and the
+/// read side refuses unknown fields, so a serde attribute change fails here
+/// before the hand-mirror can drift.
+#[test]
+fn user_adapter_row_wire_shape() {
+    use std::collections::BTreeMap;
+    use toptopduck_lib::runtime::acp::adapter::StreamFormat;
+    use toptopduck_lib::runtime::acp::user_adapter_store::UserAdapterRow;
+    assert_wire(
+        &UserAdapterRow {
+            id: "user:11111111".into(),
+            name: "My CLI".into(),
+            command: "my-cli".into(),
+            args: vec!["--acp".into()],
+            env: BTreeMap::from([("MY_KEY".to_string(), "secret".to_string())]),
+            enabled: true,
+            stream_format: StreamFormat::Acp,
+        },
+        r#"{"id":"user:11111111","name":"My CLI","command":"my-cli","args":["--acp"],"env":{"MY_KEY":"secret"},"enabled":true,"stream_format":"acp"}"#,
+    );
+}
+
 /// SessionModelConfig (ADR-0095, issue #527) crosses IPC as a flat snake_case
 /// struct -- the shape `src/types/runtime.ts` mirrors. The None forms pin the
 /// "no selection / no discovery yet" honest defaults; the Some form pins the
@@ -1925,7 +2049,7 @@ fn live_session_entry_serializes_as_a_flat_snake_case_row() {
     let sid = SessionId::parse("d3b07384-d9a0-4c30-8e9b-5f3a7b2c1e10").expect("valid v4 id");
     let row = LiveSessionEntry {
         session_id: sid.clone(),
-        duck_path: Some("/sessions/a/session.duck".into()),
+        recipe_path: Some("/sessions/a/recipe.json".into()),
         session_name: Some("analysis".into()),
         in_flight: false,
     };
@@ -1933,7 +2057,7 @@ fn live_session_entry_serializes_as_a_flat_snake_case_row() {
         serde_json::to_value(&row).expect("serialize"),
         serde_json::json!({
             "session_id": "d3b07384-d9a0-4c30-8e9b-5f3a7b2c1e10",
-            "duck_path": "/sessions/a/session.duck",
+            "recipe_path": "/sessions/a/recipe.json",
             "session_name": "analysis",
             "in_flight": false,
         }),
@@ -1943,7 +2067,7 @@ fn live_session_entry_serializes_as_a_flat_snake_case_row() {
     // and null name must stay explicit nulls (not omitted, not defaulted).
     let degraded = LiveSessionEntry {
         session_id: sid,
-        duck_path: None,
+        recipe_path: None,
         session_name: None,
         in_flight: true,
     };
@@ -1951,7 +2075,7 @@ fn live_session_entry_serializes_as_a_flat_snake_case_row() {
         serde_json::to_value(&degraded).expect("serialize"),
         serde_json::json!({
             "session_id": "d3b07384-d9a0-4c30-8e9b-5f3a7b2c1e10",
-            "duck_path": null,
+            "recipe_path": null,
             "session_name": null,
             "in_flight": true,
         }),

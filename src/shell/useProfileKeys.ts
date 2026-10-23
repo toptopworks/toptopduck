@@ -20,7 +20,10 @@ import type { ProfileKeyStatus, ProviderConfig } from "../types/provider";
 // failure the prior snapshot is RETAINED (a refetch keeps the last-known
 // state); a FIRST-mount failure lands on the empty overlay, which yields
 // has_key=false -- the conservative direction ("don't pretend ready when
-// unconfigured"); Settings then surfaces the real key status.
+// unconfigured"); Settings then surfaces the real key status. The failure
+// itself is flagged (`keysFetchFault`, issue #1339) so consumers can tell a
+// failed read from a loaded no-key answer -- the cold-start banner stays out
+// of the way on it, mirroring the keychain-fault stay-out (issue #275).
 //
 // The effect keys on the profile COUNT rather than provider identity -- a
 // profile switch / model edit changes the provider reference but not the
@@ -41,6 +44,11 @@ export interface ProfileKeysSnapshot {
   /** Non-null when the keychain read itself faulted (locked / service down)
    *  -- distinct from a plain missing key (issue #275). */
   activeKeychainFault: string | null;
+  /** Non-null when the list_provider_profiles IPC itself rejected -- the
+   *  IPC-level counterpart of activeKeychainFault: the answer is absent, not
+   *  "no key" (issue #1339). A failed refetch keeps the prior keys and
+   *  refreshes this flag; a success clears it. */
+  keysFetchFault: string | null;
 }
 
 export function useProfileKeys(
@@ -54,7 +62,8 @@ export function useProfileKeys(
   const [snapshot, setSnapshot] = useState<{
     keys: Record<string, ProfileKeyStatus>;
     fetched: boolean;
-  }>({ keys: {}, fetched: false });
+    fetchFault: string | null;
+  }>({ keys: {}, fetched: false, fetchFault: null });
 
   // profilesLen drives the fetch decision: 0 (provider null OR no profiles)
   // -> skip; N -> fetch. See the file header for why the count, not the
@@ -70,15 +79,22 @@ export function useProfileKeys(
         if (cancelled) return;
         const keys: Record<string, ProfileKeyStatus> = {};
         for (const s of status) keys[s.profile_id] = s;
-        setSnapshot({ keys, fetched: true });
+        setSnapshot({ keys, fetched: true, fetchFault: null });
       })
       .catch((e: unknown) => {
         // Keep the prior snapshot; the gate's honesty note lives in the file
-        // header. The bar is a guidance surface, and the ask path surfaces a
-        // real missing-key failure if the user proceeds anyway.
+        // header. The flag marks the failed read so consumers can tell it
+        // from a loaded no-key answer; the bar is a guidance surface, and
+        // the ask path surfaces a real missing-key failure if the user
+        // proceeds anyway.
         log.warn("useProfileKeys", "list_provider_profiles failed", e);
         if (!cancelled) {
-          setSnapshot((prev) => ({ keys: prev.keys, fetched: true }));
+          const reason = e instanceof Error ? e.message : String(e);
+          setSnapshot((prev) => ({
+            keys: prev.keys,
+            fetched: true,
+            fetchFault: reason,
+          }));
         }
       });
     return () => {
@@ -98,5 +114,6 @@ export function useProfileKeys(
     activeProfileId: activeProfile?.id ?? null,
     activeHasKey: activeStatus?.has_key ?? false,
     activeKeychainFault: activeStatus?.keychain_fault ?? null,
+    keysFetchFault: snapshot.fetchFault,
   };
 }

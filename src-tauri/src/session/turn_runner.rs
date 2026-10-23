@@ -41,7 +41,7 @@ use crate::session::skills::SkillTurnState;
 use crate::skills::SkillPromptFragment;
 use crate::window;
 
-use super::{now_epoch_ms, ACP_BRIDGE_BIN_ENV, GATEWAY_SERVER_NAME};
+use super::{now_epoch_ms, TimelineEntry, ACP_BRIDGE_BIN_ENV, GATEWAY_SERVER_NAME};
 
 /// The per-turn borrowed data inputs for [`super::Session::ask_with_phase`] (issue
 /// #378): the effective MCP servers, the keychain for secret env resolution,
@@ -140,9 +140,50 @@ impl super::Session {
         }
     }
 
+    /// Issue #1353 (ADR-0089 Decision 4, calibrated): auto-name the session
+    /// when the FIRST question is accepted -- here, at the turn top, before
+    /// any runtime branch. The name's value (the question's bounded
+    /// truncation, ADR-0039) is fully determined at submit, so waiting for
+    /// the turn's terminal state bought no semantic distinction (a cancelled
+    /// or failed first turn names either way). Memory-only write: the disk
+    /// still persists at the terminal turn's recipe save, and `record_turn`
+    /// keeps its own naming as a silent same-value fallback (its direct
+    /// callers -- tests -- name exactly as before). `on_named` fires exactly
+    /// once, at this turn start, so the command layer can push a
+    /// `session-named` event ahead of the terminal state.
+    pub fn ask_with_phase_and_auto_name(
+        &mut self,
+        question: &str,
+        approval: &ApprovalState,
+        sink: &dyn ApprovalSink,
+        on_phase: impl FnMut(TurnPhase) + Send + 'static,
+        on_named: impl FnOnce(&str),
+        inputs: &TurnInputs<'_>,
+    ) -> TurnOutcome {
+        if !self.timeline_has_turn() {
+            let name = self.auto_name_from_question(question);
+            on_named(&name);
+        }
+        self.ask_with_phase(question, approval, sink, on_phase, inputs)
+    }
+
+    /// Whether the timeline already holds a recorded turn -- the auto-name
+    /// predicate (ADR-0089 Decision 4): source/skill lifecycle events do not
+    /// count as turns, so a session that loaded files or mounted skills
+    /// before its first question still auto-names on that first question.
+    /// `pub(super)`: `record_turn` (the fallback namer, session/mod.rs)
+    /// shares the one predicate.
+    pub(super) fn timeline_has_turn(&self) -> bool {
+        self.timeline
+            .iter()
+            .any(|e| matches!(e, TimelineEntry::Turn { .. }))
+    }
+
     /// Run one turn AND surface its discrete progress events (ADR-0059,
-    /// calibrated by ADR-0078). Same semantics as [`Self::ask`]; the
-    /// `on_phase` callback receives the [`TurnPhase`] event stream: Thinking
+    /// calibrated by ADR-0078). Same semantics as [`Self::ask`] except the
+    /// first-question auto-name (ADR-0089 Decision 4), which fires only on
+    /// [`Self::ask_with_phase_and_auto_name`]; the `on_phase` callback
+    /// receives the [`TurnPhase`] event stream: Thinking
     /// before each provider round-trip (carrying the 1-based step so a
     /// multi-step trajectory reads honestly, "step N") and the
     /// ToolCallStarted / ToolCallCompleted pair around each tool dispatch --
@@ -176,16 +217,17 @@ impl super::Session {
         let turns = self.turns();
         let locale = self.provider.response_locale();
         // ADR-0101: the turn's runtime attribution, snapshotted at the turn
-        // top -- the same dispatch the match below reads, taken BEFORE it so
-        // the recorded attribution is the turn's own even if the selector
-        // changes while the turn runs. An external turn names its adapter
-        // (the stable id, persisted + mirrored across IPC); a built-in turn
-        // records only the kind. Every outcome kind records it, including a
-        // failed external spawn -- the turn was still the external runtime's
-        // to run.
+        // top -- the same dispatch the match below reads, so the recorded
+        // attribution is the turn's own. An external turn names its adapter
+        // (the stable id, persisted + mirrored across IPC) and snapshots its
+        // display name (issue #1351 -- the id may outlive the registry row,
+        // the name rides the turn); a built-in turn records only the kind.
+        // Every outcome kind records it, including a failed external spawn
+        // -- the turn was still the external runtime's to run.
         let attribution = match &self.external_runtime {
             Some(spec) => TurnRuntime::External {
                 adapter_id: Some(spec.id.as_str().to_string()),
+                display_name: Some(spec.display_name.clone()),
             },
             None => TurnRuntime::BuiltIn,
         };
@@ -373,7 +415,8 @@ impl super::Session {
                     request
                         .tools
                         .push(crate::session::artifacts::present_files_definition());
-                    let assets_dir = crate::session::sql_assets::assets_dir(self.duck_path());
+                    let assets_dir = crate::session::sql_assets::assets_dir(self.recipe_path());
+                    let snapshot_dir = self.snapshot_dir();
                     let mut deps = TurnDeps {
                         engine: &self.admin_engine,
                         source_files: &mut self.source_files,
@@ -381,6 +424,7 @@ impl super::Session {
                         result_row_cap: self.result_row_cap,
                         result_count_cap: self.result_count_cap,
                         temp_path: &self.temp_path,
+                        snapshot_dir,
                         assets_dir,
                         tool_output_refs: &mut self.tool_output_refs,
                     };
@@ -667,7 +711,7 @@ impl super::Session {
         // (ADR-0085: serve borrows in place, engine drives in parallel).
         // The kill-log face (#886): captured before the engine takes
         // ownership of the spec below.
-        let runtime_face = adapter.id.as_str();
+        let runtime_face = adapter.id.to_string();
         // The shared phase tap (issue #1242): the engine thread's
         // fold-layer emissions and the gateway serve's authoritative
         // tool-call rows both ride the caller's ONE `on_phase` channel
@@ -745,7 +789,8 @@ impl super::Session {
             let mcp_turn_done = crate::mcp::aggregator::TurnDoneFlag::new();
             mcp.arm_cancel_teardown(Arc::clone(&self.cancel), mcp_turn_done.flag());
             mcp.connect_all(inputs.mcp_servers, inputs.keychain);
-            let assets_dir = crate::session::sql_assets::assets_dir(self.duck_path());
+            let assets_dir = crate::session::sql_assets::assets_dir(self.recipe_path());
+            let snapshot_dir = self.snapshot_dir();
             let deps = TurnDeps {
                 engine: &self.admin_engine,
                 source_files: &mut self.source_files,
@@ -753,6 +798,7 @@ impl super::Session {
                 result_row_cap: self.result_row_cap,
                 result_count_cap: self.result_count_cap,
                 temp_path: &self.temp_path,
+                snapshot_dir,
                 assets_dir,
                 tool_output_refs: &mut self.tool_output_refs,
             };
@@ -853,7 +899,7 @@ impl super::Session {
         let usage = std::mem::take(&mut merged.usage);
         let occupancy = merged.occupancy.take();
         (
-            turn_outcome_from_loop(merged, self.session_id.as_ref(), runtime_face),
+            turn_outcome_from_loop(merged, self.session_id.as_ref(), &runtime_face),
             trace,
             usage,
             occupancy,

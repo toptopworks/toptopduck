@@ -4,7 +4,7 @@
 // for the markup so the summary label and stack <pre> stay in sync across all
 // callers. The detail is a raw engine / provider string audited to carry no
 // API key (ADR-0029); null / undefined / empty omits the fold entirely.
-import { FormattedMessage } from "react-intl";
+import { FormattedMessage, useIntl } from "react-intl";
 
 export interface TechnicalDetailsFoldProps {
   /** Raw technical detail (engine error text, provider call detail). Falsy
@@ -23,6 +23,9 @@ export interface TechnicalDetailsFoldProps {
 }
 
 export function TechnicalDetailsFold({ detail, defaultOpen }: TechnicalDetailsFoldProps) {
+  // Before the null guard -- a hook must run on every render posture
+  // (rules of hooks), including the omitted-fold one.
+  const intl = useIntl();
   if (!detail) return null;
   return (
     // ADR-0067 (issue #172): the fold's visual rules used to live under
@@ -39,7 +42,19 @@ export function TechnicalDetailsFold({ detail, defaultOpen }: TechnicalDetailsFo
       <summary className="text-muted-foreground cursor-pointer text-[0.82rem]">
         <FormattedMessage id="errorBoundary.details" defaultMessage="Technical details" />
       </summary>
-      <pre className="error-stack mt-1.5 p-2 bg-muted rounded-md font-mono text-[13px] whitespace-pre-wrap break-words max-h-48 overflow-y-auto">
+      {/* Keyboard-reachable scroll region (#1363): the tabindex puts the
+          height-capped stack in the Tab order so arrow keys scroll it
+          instead of the page; the region label names it for assistive
+          tech. */}
+      <pre
+        className="error-stack mt-1.5 p-2 bg-muted rounded-md font-mono text-[13px] whitespace-pre-wrap break-words max-h-48 overflow-y-auto"
+        tabIndex={0}
+        role="region"
+        aria-label={intl.formatMessage({
+          id: "thread.trace.errorStackAria",
+          defaultMessage: "Error stack",
+        })}
+      >
         {detail}
       </pre>
     </details>

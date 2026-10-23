@@ -16,7 +16,7 @@
 //! [`StoreCommandError`] is serde-structured like [`SessionError`], so the
 //! frontend narrows on `kind` and renders a locale message -- the Chinese
 //! wording no longer crosses IPC. The cold-store subset covers `delete_session`
-//! / `rename_persisted_session` (a cross-session `.duck` file), the keychain
+//! / `rename_persisted_session` (a cross-session `recipe.json` file), the keychain
 //! commands, and `set_provider_config` / `set_app_config`. The remaining
 //! session-agnostic commands (read-only listing / has-key) cannot
 //! fail with a user-facing refusal and keep returning `Result<T, String>`.
@@ -37,17 +37,22 @@ use crate::mcp::McpClient;
 use crate::model::{
     DatasetDescriptor, DatasetPrivacy, DeleteImpactEntry, LoadOutcome, ProfileId, ProfileKeyStatus,
     ProfileTestOutcome, Protocol, ProviderConfig, ProviderConfigView, RemoveSourceError, RowPage,
-    SheetGuidance, ThreadEntry, TurnOutcome, TurnProgress,
+    SessionNamedPayload, SheetGuidance, ThreadEntry, TurnOutcome, TurnProgress,
 };
 use crate::persistence::recipe::LastRuntime;
 use crate::persistence::{
     default_sessions_root, scan_sessions_dir, scan_sessions_dir_including_archived,
-    validate_sessions_dir, SaveError, SessionMetadata, SessionsRoot,
+    validate_sessions_dir, SaveError, SessionMetadata, SessionsRoot, RECIPE_FILE_NAME,
 };
 use crate::provider::live_config::{ActiveKeyError, LiveProviderConfig};
-use crate::runtime::acp::adapter::{detect_adapter, v1_adapters, AdapterSpec, StreamFormat};
+use crate::runtime::acp::adapter::{
+    detect_adapter, v1_adapters, AdapterId, AdapterSpec, StreamFormat,
+};
 use crate::runtime::acp::catalog_store::{
     now_millis, AdapterCatalogEntry, AdapterCatalogStore, AdapterCatalogs, CachedOutcome,
+};
+use crate::runtime::acp::user_adapter_store::{
+    is_valid_command_token, mint_user_adapter_id, UserAdapterRow, UserAdapterStore,
 };
 use crate::session::loop_contract::DiscoveredRuntime;
 use crate::session::{
@@ -70,7 +75,7 @@ const CLOSE_WAIT_RELEASE_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// A session-AGNOSTIC cold-store command failed (issue #130). The cold-store
 /// commands -- `delete_session` / `rename_persisted_session` (a cross-session
-/// `.duck` file), `set_api_key` / `clear_api_key` (the OS keychain), and
+/// `recipe.json` file), `set_api_key` / `clear_api_key` (the OS keychain), and
 /// `set_provider_config` / `set_app_config` (an app-config write) -- reject with
 /// this typed enum instead of a free-text `String`, so the frontend renders each
 /// refusal through the locale catalog (ADR-0052 layer 2) and the Chinese wording
@@ -89,7 +94,7 @@ const CLOSE_WAIT_RELEASE_TIMEOUT: Duration = Duration::from_secs(120);
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "kind", content = "data")]
 pub enum StoreCommandError {
-    /// A delete / cold-rename targeted a `.duck` path an open in-memory session
+    /// A delete / cold-rename targeted a `recipe.json` path an open in-memory session
     /// owns. The single-writer canonical-key gate refused it (ADR-0035 Decision
     /// 3); the frontend closes the session first.
     #[error("session is open; close it first")]
@@ -153,7 +158,7 @@ impl From<crate::provider::live_config::CliToolWriteError> for StoreCommandError
 }
 
 /// Reject a mutating command while THIS session is resuming (ADR-0053, made
-/// per-session by ADR-0056). `open_duck(session_id, ...)` rebuilds that one
+/// per-session by ADR-0056). `open_recipe(session_id, ...)` rebuilds that one
 /// session's contents off-thread; a concurrent mutating command targeting the
 /// SAME session would silently operate on the stale pre-resume session and be
 /// overwritten when `*s = new_session` lands. The frontend's shared `loading`
@@ -186,19 +191,19 @@ fn reject_if_in_flight(handle: &SessionHandle) -> Result<(), SessionError> {
 }
 
 /// The wire reply from `create_session` (ADR-0089): the runtime session id +
-/// the bound `session.duck` path. The frontend stores both so every open
+/// the bound `recipe.json` path. The frontend stores both so every open
 /// session is known-persisted from creation.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct CreateSessionReply {
     pub session_id: SessionId,
-    pub duck_path: String,
+    pub recipe_path: String,
 }
 
 /// Create a new session (ADR-0056/0089): the backend builds an independent
 /// in-memory DuckDB instance (ADR-0012/0027), allocates a per-session cancel
 /// token (ADR-0021), binds them to a backend-generated id (UUID v4), and
 /// immediately persists by creating a per-session directory + initial
-/// `session.duck` under the managed sessions root (ADR-0089 Decision 1). The
+/// `recipe.json` under the managed sessions root (ADR-0089 Decision 1). The
 /// session is bound from creation -- no pure-memory phase, no manual first
 /// save. Returns the id + the bound path so the frontend tracks a
 /// known-persisted session.
@@ -208,6 +213,7 @@ pub fn create_session(
     live: State<'_, LiveProviderConfig>,
     sessions_root: State<'_, SessionsRoot>,
     skills_root: State<'_, SkillsRoot>,
+    user_store: State<'_, UserAdapterStore>,
 ) -> Result<CreateSessionReply, SessionError> {
     let cancel = Arc::new(CancelToken::new());
     // The real LLM provider (ADR-0007/0064): a LiveProvider router that reads
@@ -227,7 +233,7 @@ pub fn create_session(
     // resolution resume falls back to (`startup_runtime_choice`), so both
     // startup points share one degrade rule (undetected default -> built-in
     // for this session only, config field untouched).
-    let startup = startup_runtime_choice(live.inner());
+    let startup = startup_runtime_choice(live.inner(), &user_store);
     let handle = store.get(&id)?;
     // ADR-0100 Decision 1 (issue #581): the fresh session's startup model /
     // thought-level = the startup adapter's backfill entry -- SELECTED +
@@ -241,11 +247,13 @@ pub fn create_session(
     // session's own posture and never consults the backfill map.
     let posture = session_posture(segment_start_posture(startup.as_ref(), live.inner()));
     handle.set_runtime_choice(startup);
-    // ADR-0089: per-session directory `{sessions_root}/{uuid}/session.duck`.
-    // The UUID directory name is the stable identity; session.duck is the
-    // fixed recipe filename.
+    // ADR-0089: per-session directory `{sessions_root}/{uuid}/`. The UUID
+    // directory name is the stable identity; the fixed recipe filename is
+    // `recipe.json` (ADR-0136 D5 -- the recipe is JSON text and real database
+    // files now live beside it; the old `session.duck` name stays
+    // forever-readable, no in-place migration).
     let session_dir = sessions_root.path().join(id.to_string());
-    let duck_path = session_dir.join("session.duck");
+    let recipe_path = session_dir.join(RECIPE_FILE_NAME);
 
     // Rollback closure: if any step after store.create() fails, the handle is
     // already in the store map (with a live DuckDB instance + cancel token).
@@ -256,7 +264,8 @@ pub fn create_session(
         std::fs::create_dir_all(&session_dir)
             .map_err(|e| SessionError::Engine(format!("failed to create session dir: {e}")))?;
         // Bind immediately (ADR-0089 Decision 1): empty session_name is the
-        // placeholder; the first terminal turn's auto-naming overwrites it.
+        // placeholder; the first question's acceptance auto-names the session
+        // (ADR-0089 Decision 4).
         let handle = store.get(&id)?;
         // Seat the backfill posture BEFORE the bind so the initial recipe
         // persists it (ADR-0100 Decision 1; see the helper's doc).
@@ -279,11 +288,11 @@ pub fn create_session(
         let cfg = live.load();
         let seed = crate::skills::seed_from_config(&cfg, &live.cli_tools(), &skills_root.0);
         s.set_discovery_snapshot(seed);
-        s.bind_duck(duck_path.clone(), String::new())
+        s.bind_recipe(recipe_path.clone(), String::new())
             .map_err(|e| SessionError::Engine(e.to_string()))?;
         Ok(CreateSessionReply {
             session_id: id.clone(),
-            duck_path: duck_path.to_string_lossy().into_owned(),
+            recipe_path: recipe_path.to_string_lossy().into_owned(),
         })
     })();
 
@@ -304,7 +313,7 @@ pub fn create_session(
 /// <=120s, ADR-0021 soft-cancel) and the ask's post-turn check sees `closing`
 /// and discards the outcome (no thread append, no recipe persist). New commands
 /// targeting this id after close reject as unknown session. The DuckDB instance
-/// + the bound `.duck` canonical-writer key are released when the last
+/// + the bound `recipe.json` canonical-writer key are released when the last
 /// `Arc<SessionHandle>` drops (immediately if no ask is in flight, or when the
 /// in-flight ask's clone drops after its discard).
 ///
@@ -325,13 +334,13 @@ pub fn close_session(
 
 /// The wire row from `list_live_sessions` (issue #842): one live session the
 /// reloaded frontend can re-adopt (or, for `in_flight`, close and re-open
-/// from disk). Mirrors [`crate::LiveSessionSnapshot`] with the `.duck` path
+/// from disk). Mirrors [`crate::LiveSessionSnapshot`] with the `recipe.json` path
 /// flattened to a lossy string, the same conversion `create_session`'s reply
 /// uses.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct LiveSessionEntry {
     pub session_id: SessionId,
-    pub duck_path: Option<String>,
+    pub recipe_path: Option<String>,
     pub session_name: Option<String>,
     pub in_flight: bool,
 }
@@ -349,7 +358,7 @@ pub fn list_live_sessions(
         .into_iter()
         .map(|row| LiveSessionEntry {
             session_id: row.session_id,
-            duck_path: row.duck_path.map(|p| p.to_string_lossy().into_owned()),
+            recipe_path: row.recipe_path.map(|p| p.to_string_lossy().into_owned()),
             session_name: row.session_name,
             in_flight: row.in_flight,
         })
@@ -692,7 +701,7 @@ pub fn preview_delete_impact(
 /// session-lock failure (not a turn failure -- that is a `Failed` outcome).
 /// ADR-0055: if the session was closed while this turn was in flight, the
 /// outcome is discarded
-/// inside `Session::ask` (no thread append, no recipe persist).
+/// inside `ask_with_phase` (no thread append, no recipe persist).
 // Tauri command wiring keeps the per-command states + the IPC params flat;
 // the 8th param is the optional invocation list (ADR-0119). Same posture as
 // the dispatch core's `#[allow(clippy::too_many_arguments)]`.
@@ -753,6 +762,13 @@ pub async fn ask(
     // artifact is iframe-servable before the card can render.
     let app_for_scope = app.clone();
     let sid = id.clone();
+    // Issue #1353 (ADR-0089 Decision 4 calibrated): the same-boundary
+    // AppHandle clone emits the `session-named` push -- fired exactly once
+    // by `ask_with_phase_and_auto_name` when the session's first question is
+    // accepted, so the sidebar row + session header update without waiting
+    // for the terminal-state sync chain.
+    let app_for_named = app.clone();
+    let sid_for_named = id.clone();
     // Clone the skills-root path off the managed State so it can move into the
     // spawn_blocking closure (the State borrow does not cross the await). The
     // registry root is read below to resolve each mounted skill's SKILL.md body
@@ -787,7 +803,7 @@ pub async fn ask(
             skill_invocations.as_deref().unwrap_or(&[]),
         );
         let inputs = assembled.turn_inputs(&mcp_servers);
-        let outcome = s.ask_with_phase(
+        let outcome = s.ask_with_phase_and_auto_name(
             &question,
             &approval,
             &sink,
@@ -810,6 +826,25 @@ pub async fn ask(
                     );
                 }
             },
+            move |name| {
+                // Issue #1353: the turn-start auto-name push. Fire-and-forget
+                // like turn-progress above -- the name also lands through the
+                // terminal-state sync chain (syncSessionName), so a dropped
+                // event is a missed early update, not a lost one. Debug-level
+                // for the same reason (a torn-down webview fails every emit).
+                if let Err(e) = app_for_named.emit(
+                    "session-named",
+                    &SessionNamedPayload {
+                        session_id: sid_for_named.clone(),
+                        name: name.to_string(),
+                    },
+                ) {
+                    log::debug!(
+                        target: "toptopduck::commands",
+                        "session-named emit failed (likely a torn-down webview): {e}"
+                    );
+                }
+            },
             &inputs,
         );
         // ADR-0095: mirror the turn's discovered runtime catalog onto the
@@ -827,7 +862,7 @@ pub async fn ask(
         // the per-session `artifacts/` directory widens the asset protocol
         // scope to it right here, before any card can render -- the
         // artifacts dir may not have existed when the session opened.
-        grant_artifact_asset_scope(&app_for_scope, s.duck_path());
+        grant_artifact_asset_scope(&app_for_scope, s.recipe_path());
         Ok::<TurnOutcome, SessionError>(outcome)
     })
     .await
@@ -965,13 +1000,13 @@ pub fn conversation(
     let id = SessionId::parse(&session_id)?;
     let handle = store.get(&id)?;
     let s = handle.session_lock()?;
-    let duck_path = s.duck_path().map(PathBuf::from);
+    let recipe_path = s.recipe_path().map(PathBuf::from);
     let entries = s.conversation();
     // ADR-0124 (issue #1087): a reopened session's materialized artifacts
     // must be iframe-servable before a card can render -- grant the asset
     // protocol scope for the per-session artifacts directory on every
     // thread read (session open / remount; idempotent by pattern).
-    grant_artifact_asset_scope(&app, duck_path.as_deref());
+    grant_artifact_asset_scope(&app, recipe_path.as_deref());
     Ok(entries)
 }
 
@@ -990,8 +1025,8 @@ const ARTIFACT_TEXT_MAX_BYTES: u64 = 2 * 1024 * 1024;
 /// adds nothing. Failures log and degrade: the iframe render then fails
 /// honest (whether the card offers an external-open fallback is #1088's
 /// render-time concern, not a grant-time fact).
-fn grant_artifact_asset_scope(app: &tauri::AppHandle, duck_path: Option<&Path>) {
-    let Some(dir) = crate::session::artifacts::artifacts_dir(duck_path) else {
+fn grant_artifact_asset_scope(app: &tauri::AppHandle, recipe_path: Option<&Path>) {
+    let Some(dir) = crate::session::artifacts::artifacts_dir(recipe_path) else {
         return;
     };
     if let Err(e) = app.asset_protocol_scope().allow_directory(&dir, false) {
@@ -1637,7 +1672,7 @@ pub async fn test_profile(
 //
 // The second at-rest artifact: preferences, defaults, and the no-key endpoint
 // config. Lives in the OS app-data directory, orthogonal to the portable
-// `.duck`. Honest-degrades to defaults on any read failure (missing/corrupt ->
+// `recipe.json`. Honest-degrades to defaults on any read failure (missing/corrupt ->
 // built-in defaults, never a crash). The frontend loads it on startup (theme +
 // locale) and persists edits through `set_app_config`.
 
@@ -1666,7 +1701,7 @@ pub fn set_app_config(
 
 /// List every persisted session's metadata for the cold-start left sidebar
 /// (ADR-0060/0061/0089). Scans the managed sessions directory for per-session
-/// `*/session.duck` recipes (ADR-0089), replacing the former app-config
+/// `*/recipe.json` recipes (ADR-0089), replacing the former app-config
 /// `recent_files` approach. A recipe that is no longer readable is skipped
 /// (the listing never fabricates metadata). Runs the per-entry file reads off
 /// the async/UI thread (AC8): a cold start over slow or network-mounted
@@ -1692,7 +1727,7 @@ pub async fn list_sessions(
 
 /// Pin or unpin a persisted session (ADR-0127, issue #1174). Organization
 /// state lives in the `sessions_root/index.json` sidecar, keyed by the
-/// session-directory uuid -- never in the `.duck` (no recipe rewrite, no
+/// session-directory uuid -- never in the `recipe.json` (no recipe rewrite, no
 /// mtime disturbance, no single-writer gate). Path guard mirrors
 /// `delete_session` (canonicalize + under-root check); unknown uuids are
 /// idempotent no-ops. Pinning an archived session is a no-op (mutual
@@ -1734,7 +1769,7 @@ pub async fn set_session_archived(
     .map_err(|e| StoreCommandError::IoFailure(e.to_string()))?
 }
 
-/// Resolve a `.duck` path to its sidecar key (the `{uuid}` directory name,
+/// Resolve a `recipe.json` path to its sidecar key (the `{uuid}` directory name,
 /// ADR-0089) after the under-root guard. Mirrors `delete_session`'s approach:
 /// canonicalize the duck (parent-dir fallback), require the parent directory
 /// to sit under the canonicalized sessions root. Every sidecar write that can
@@ -1742,14 +1777,14 @@ pub async fn set_session_archived(
 /// path does not, but it only removes, so a key it fails to address is
 /// inert -- same posture as the unknown-uuid no-op.
 fn session_dir_uuid_under_root(root: &Path, duck: &str) -> Result<String, StoreCommandError> {
-    use crate::persistence::canonicalize_duck;
+    use crate::persistence::canonicalize_recipe;
     let trimmed = duck.trim();
     if trimmed.is_empty() {
         return Err(StoreCommandError::IoFailure(
             "empty session path; cannot resolve the sidecar key".into(),
         ));
     }
-    let canonical = canonicalize_duck(Path::new(trimmed)).map_err(|e| {
+    let canonical = canonicalize_recipe(Path::new(trimmed)).map_err(|e| {
         StoreCommandError::IoFailure(format!("cannot canonicalize session path {trimmed}: {e}"))
     })?;
     let canonical_root = std::fs::canonicalize(root).map_err(|e| {
@@ -1803,7 +1838,7 @@ fn unarchive_after_open(sessions_root: &Path, duck: &Path) {
     if let Err(e) = crate::persistence::organization::set_archived(sessions_root, &uuid, false) {
         log::warn!(
             target: "toptopduck::session",
-            "open_duck: failed to unarchive {uuid}: {e}"
+            "open_recipe: failed to unarchive {uuid}: {e}"
         );
     }
 }
@@ -1811,7 +1846,7 @@ fn unarchive_after_open(sessions_root: &Path, duck: &Path) {
 /// Delete a persisted session (ADR-0060/0089, issue #81). The frontend closes
 /// the session FIRST when it is open (so no canonical-writer key is held and
 /// the in-memory instance is gone), then calls this. Removes the entire
-/// per-session directory (`{uuid}/` containing `session.duck` + optional
+/// per-session directory (`{uuid}/` containing `recipe.json` + optional
 /// `assets/`) so the next `list_sessions` (directory scan) no longer lists it.
 /// Irreversible -- the frontend gates it behind a strong confirm.
 ///
@@ -1829,7 +1864,7 @@ pub async fn delete_session(
     sessions_root: State<'_, SessionsRoot>,
     path: String,
 ) -> Result<(), StoreCommandError> {
-    use crate::persistence::{canonicalize_duck, release, try_acquire};
+    use crate::persistence::{canonicalize_recipe, release, try_acquire};
     let trimmed = path.trim().to_string();
     let root = sessions_root.path();
     tauri::async_runtime::spawn_blocking(move || -> Result<(), StoreCommandError> {
@@ -1837,25 +1872,25 @@ pub async fn delete_session(
             return Ok(());
         }
         let path = PathBuf::from(&trimmed);
-        // Canonicalize the .duck for the single-writer gate. canonicalize_duck
+        // Canonicalize the recipe.json for the single-writer gate. canonicalize_recipe
         // succeeds even when the file itself is gone (it canonicalizes the
         // parent dir and rejoins the file name), so an Err means the parent is
         // gone too -- the session is definitely absent; idempotent success.
         // Log the error so a fabricated success (e.g. permission denied on the
         // parent) is diagnosable instead of silently lost.
-        let canonical = match canonicalize_duck(&path) {
+        let canonical = match canonicalize_recipe(&path) {
             Ok(c) => c,
             Err(e) => {
                 log::warn!(
                     target: "toptopduck::session",
-                    "delete_session: canonicalize_duck failed for {}: {e}",
+                    "delete_session: canonicalize_recipe failed for {}: {e}",
                     path.display()
                 );
                 return Ok(());
             }
         };
-        // ADR-0089: delete the per-session directory (session.duck + assets/),
-        // not just the .duck file. The .duck's parent is `{uuid}/`. Derive from
+        // ADR-0089: delete the per-session directory (recipe.json + assets/),
+        // not just the recipe.json file. The recipe.json's parent is `{uuid}/`. Derive from
         // the canonical path (not the raw input) so the starts_with check below
         // matches the also-canonicalized root — on Windows, canonicalize adds
         // the `\\?\` verbatim prefix, and a non-prefixed path would never
@@ -1867,7 +1902,7 @@ pub async fn delete_session(
         };
         // Guard against a path whose parent is not under the managed sessions
         // root (M2). Without this, a malformed or future caller passing
-        // `sessions_root/session.duck` would wipe the entire root. Propagate
+        // `sessions_root/recipe.json` would wipe the entire root. Propagate
         // canonicalize errors rather than falling back to the raw root — a
         // non-prefixed fallback would cause starts_with to fail against the
         // canonical session_dir on Windows.
@@ -1901,7 +1936,7 @@ pub async fn delete_session(
 }
 
 /// Rename the OPEN session bound to `session_id` (ADR-0060, issue #81). Sets the
-/// user-facing session_name and rewrites the bound `.duck` recipe header; the
+/// user-facing session_name and rewrites the bound `recipe.json` recipe header; the
 /// bound path is untouched, so sidebar addressing stays stable. Rejects a blank
 /// name. Delegates to [`Session::rename`].
 #[tauri::command]
@@ -1917,10 +1952,11 @@ pub fn rename_session(
     s.rename(&new_name).map_err(SessionError::RenameSession)
 }
 
-/// Read the OPEN session's current display name (ADR-0089 Decision 4). After
-/// the first terminal turn auto-names the session, the frontend uses this to
-/// refresh the sidebar entry + the session header without re-reading the
-/// `.duck` file from disk. Returns the name carried by the in-memory
+/// Read the OPEN session's current display name (ADR-0089 Decision 4). The
+/// first question's acceptance auto-names the session; the frontend uses
+/// this on the terminal-state chain to refresh the sidebar entry + the
+/// session header without re-reading the
+/// `recipe.json` file from disk. Returns the name carried by the in-memory
 /// persister (the same value the next atomic write will persist).
 #[tauri::command]
 pub fn get_session_name(
@@ -1939,13 +1975,13 @@ pub fn get_session_name(
 /// behavioral branch -- BlankName before canonicalize, the OpenConflict gate,
 /// and `release` on every post-acquire path -- lives here.
 fn rename_persisted_session_blocking(path: &Path, new_name: &str) -> Result<(), StoreCommandError> {
-    use crate::persistence::{canonicalize_duck, read_duck, release, save_atomic, try_acquire};
+    use crate::persistence::{canonicalize_recipe, read_recipe, release, save_atomic, try_acquire};
     let trimmed = new_name.trim();
     if trimmed.is_empty() {
         return Err(StoreCommandError::BlankName(RenameSessionError::EmptyName));
     }
     let canonical =
-        canonicalize_duck(path).map_err(|e| StoreCommandError::IoFailure(e.to_string()))?;
+        canonicalize_recipe(path).map_err(|e| StoreCommandError::IoFailure(e.to_string()))?;
     // Gate: try_acquire returns false when the canonical path is already
     // held -- an open session owns it. Refuse rather than race its writer.
     if !try_acquire(&canonical) {
@@ -1953,7 +1989,7 @@ fn rename_persisted_session_blocking(path: &Path, new_name: &str) -> Result<(), 
     }
     let outcome = (|| -> Result<(), StoreCommandError> {
         let mut recipe =
-            read_duck(path).map_err(|e| StoreCommandError::IoFailure(e.to_string()))?;
+            read_recipe(path).map_err(|e| StoreCommandError::IoFailure(e.to_string()))?;
         recipe.session_name = trimmed.to_string();
         save_atomic(path, &recipe).map_err(|e| StoreCommandError::IoFailure(e.to_string()))
     })();
@@ -1961,7 +1997,7 @@ fn rename_persisted_session_blocking(path: &Path, new_name: &str) -> Result<(), 
     outcome
 }
 
-/// Rename a CLOSED `.duck` recipe's session_name in place (ADR-0060, issue #81).
+/// Rename a CLOSED `recipe.json` recipe's session_name in place (ADR-0060, issue #81).
 /// For a session that is not currently open: read the recipe, rewrite the
 /// session_name header, atomic-save -- no DuckDB instance is built. The
 /// canonical-writer key doubles as the "is this path open in a running session"
@@ -1984,10 +2020,10 @@ pub async fn rename_persisted_session(
 
 // --- Cross-session persistence (issue #48, ADR-0034/0036) -------------------
 //
-// Save / open a `.duck` recipe document. Save binds the live session to a
+// Save / open a `recipe.json` recipe document. Save binds the live session to a
 // path (every subsequent terminal turn atomically rewrites it). Open resumes
 // the session across the restart boundary WITHIN THE SAME session_id
-// (ADR-0056: tab <-> sessionId binding is stable; open_duck reuses the id and
+// (ADR-0056: tab <-> sessionId binding is stable; open_recipe reuses the id and
 // replaces the session's contents, it does NOT mint a new id -- that is
 // create_session's job): each source is re-read + fingerprint-verified, the
 // productive SQL chain is eagerly re-executed LLM-free, and the conversation
@@ -1999,7 +2035,7 @@ pub async fn rename_persisted_session(
 /// under the app-config write-lock, and updates the in-memory
 /// `SessionsRoot` live — no restart needed. New sessions land in the new
 /// directory immediately; already-open sessions stay in place (their bound
-/// `duck_path` is unchanged). The sidebar re-scans the new directory on the
+/// `recipe_path` is unchanged). The sidebar re-scans the new directory on the
 /// frontend's next `list_sessions` call. Returns the updated `AppConfig`.
 ///
 /// `path = None` clears the override (falls back to the computed default).
@@ -2041,7 +2077,7 @@ pub fn get_sessions_dir(sessions_root: State<'_, SessionsRoot>) -> Result<String
 }
 
 /// Best-effort removal of the orphaned empty per-session directory left when
-/// `open_duck` rebinds a session from the `create_session`-generated path to
+/// `open_recipe` rebinds a session from the `create_session`-generated path to
 /// the resume target (ADR-0089 Decision 6 parity for the open path, matching
 /// `close_and_cleanup_empty` for the close path).
 ///
@@ -2057,7 +2093,7 @@ pub fn get_sessions_dir(sessions_root: State<'_, SessionsRoot>) -> Result<String
 ///   rather than risk deleting an equivalent path's parent.
 /// - `starts_with(sessions_root)`: skip if the stale directory is outside the
 ///   managed sessions root (defense-in-depth, matches `delete_session`'s M2
-///   guard at `commands.rs:1377-1395` — an external `.duck` rebind must never
+///   guard at `commands.rs:1377-1395` — an external `recipe.json` rebind must never
 ///   trigger deletion of a user-chosen parent directory).
 fn cleanup_orphaned_session_dir(
     stale_duck: Option<&Path>,
@@ -2093,7 +2129,7 @@ fn cleanup_orphaned_session_dir(
     let Some(stale_dir) = stale.parent() else {
         log::warn!(
             target: "toptopduck::session",
-            "cleanup_orphaned_session_dir: stale duck_path has no parent, skipping: {}",
+            "cleanup_orphaned_session_dir: stale recipe_path has no parent, skipping: {}",
             stale.display(),
         );
         return;
@@ -2143,7 +2179,7 @@ fn cleanup_orphaned_session_dir(
     }
 }
 
-/// Open a `.duck` and resume the named session across the restart boundary
+/// Open a `recipe.json` and resume the named session across the restart boundary
 /// (ADR-0034/0056). Runs off the async/UI thread (AC8): resume re-reads every
 /// source and re-executes the productive SQL chain, which can take seconds.
 /// Progress is emitted as a `resume-progress` event per source verification
@@ -2154,11 +2190,12 @@ fn cleanup_orphaned_session_dir(
 /// flag, so a `cancel` / `close_session` during or after resume still reaches
 /// the right session.
 #[tauri::command]
-pub async fn open_duck(
+pub async fn open_recipe(
     app: tauri::AppHandle,
     store: State<'_, Arc<SessionStore>>,
     live: State<'_, LiveProviderConfig>,
     sessions_root: State<'_, SessionsRoot>,
+    user_store: State<'_, UserAdapterStore>,
     session_id: String,
     path: String,
 ) -> Result<(), SessionError> {
@@ -2171,7 +2208,7 @@ pub async fn open_duck(
     // Symmetric with `ask` (which applies the same guard before entering a
     // turn): refuse resume while a turn is in flight. A turn blocked in the
     // approval gate still holds session_lock, so without this guard
-    // open_duck's spawn_blocking would block on session_lock with resuming
+    // open_recipe's spawn_blocking would block on session_lock with resuming
     // latched, freezing every mutating command via reject_if_resuming until
     // the turn is respond/cancel unstuck. The frontend `busy` flag is the
     // primary defense; this is the Rust-side backstop for a second window /
@@ -2205,8 +2242,13 @@ pub async fn open_duck(
     // State handle must not cross into the 'static blocking task; the
     // resolved spec is plain data) -- it is the fallback for a pre-#589
     // recipe whose header carries no `last_runtime` (the ADR-0098 Decision 2
-    // semantics, unchanged for old files).
-    let startup = startup_runtime_choice(live.inner());
+    // semantics, unchanged for old files). The merged adapter table is
+    // captured here for the same reason (issue #1341): plain data crossing
+    // into the task, so the resume resolution sees user-defined rows too.
+    let merged = merged_adapters(&user_store);
+    let startup = resolve_default_runtime(&live.load().default_runtime, &merged, |spec| {
+        detect_adapter(spec).is_some()
+    });
     // One config read feeds both the session-level engine-defaults snapshot
     // (issue #741: same source as create_session, resolved BEFORE the
     // blocking task -- the State handle must not cross into the 'static
@@ -2214,7 +2256,7 @@ pub async fn open_duck(
     let cfg = live.load();
     let engine_defaults = cfg.engine.clone();
     let inner = tauri::async_runtime::spawn_blocking(move || {
-        let mut new_session = Session::open_duck(
+        let mut new_session = Session::open_recipe(
             &path,
             cancel_token,
             provider,
@@ -2277,11 +2319,11 @@ pub async fn open_duck(
         let runtime_facts = new_session.runtime_facts().clone();
         let mut s = handle_for_task.session_lock()?;
         // Capture the pre-resume binding before the rebind. create_session
-        // bound a fresh empty session.duck in a new per-session directory;
-        // open_duck rebinds the session to `path` (the resume target),
+        // bound a fresh empty recipe.json in a new per-session directory;
+        // open_recipe rebinds the session to `path` (the resume target),
         // orphaning that directory. Without cleanup, list_sessions surfaces a
         // phantom empty sidebar entry that multiplies on each click.
-        let stale_duck = s.duck_path().map(|p| p.to_path_buf());
+        let stale_duck = s.recipe_path().map(|p| p.to_path_buf());
         let stale_was_empty = s.is_timeline_empty();
         *s = new_session;
         // Release the session lock before filesystem cleanup.
@@ -2292,11 +2334,11 @@ pub async fn open_duck(
         // restored after the resets so the restored values win. Extracted
         // into `apply_resumed_postures` so the wiring is testable without
         // an AppHandle.
-        apply_resumed_postures(&handle_for_task, runtime_facts, startup, |spec| {
+        apply_resumed_postures(&handle_for_task, runtime_facts, startup, &merged, |spec| {
             detect_adapter(spec).is_some()
         });
         // Remove the orphaned empty per-session directory create_session made
-        // when open_duck rebinds to a different resume target path. The old
+        // when open_recipe rebinds to a different resume target path. The old
         // Session::Drop (fired by the `*s = new_session` assignment above)
         // already released the canonical single-writer key, so remove_dir_all
         // cannot race a writer. Best-effort: a failure logs a warning (the
@@ -2343,10 +2385,29 @@ pub fn take_persist_error(
     Ok(s.take_persist_error())
 }
 
+/// Read + clear the named session's resume-hit source status notices
+/// (ADR-0136 D3): a watermark-hit resume opens even when a source file was
+/// moved/deleted/changed since settle -- the working set is the ingest-time
+/// snapshot -- and these notices are the honest "the file no longer backs
+/// the loaded data" signal for that path. The frontend drains them once
+/// after an open; every subsequent call returns an empty vec. Empty for
+/// every replay-path resume (the replay path's blocking semantics are
+/// unchanged, ADR-0035).
+#[tauri::command]
+pub fn take_source_notices(
+    store: State<'_, Arc<SessionStore>>,
+    session_id: String,
+) -> Result<Vec<crate::SourceNotice>, SessionError> {
+    let id = SessionId::parse(&session_id)?;
+    let handle = store.get(&id)?;
+    let mut s = handle.session_lock()?;
+    Ok(s.take_source_notices())
+}
+
 /// Read + clear the named session's pending external-change conflict, if any
 /// (ADR-0035 Decision 3 / issue #50). The frontend polls this after each turn /
 /// source event / resume: a non-`None` value means the auto-write was
-/// suspended because the `.duck` file's on-disk hash diverged from the
+/// suspended because the `recipe.json` file's on-disk hash diverged from the
 /// session's baseline (another window, a text editor, or a sync tool edited
 /// the file). The frontend surfaces a three-option conflict UI (reload / keep
 /// mine / save as new); the engine NEVER silently clobbers the externally-edited
@@ -2643,19 +2704,71 @@ pub struct AdapterEntry {
 /// detection state (ADR-0083). Detection is deliberately uncached -- the
 /// composer re-scans on demand (the user may install a CLI between scans) --
 /// so `list_adapters` and `rescan_adapters` share this one projection.
-fn scan_adapters() -> Vec<AdapterEntry> {
-    v1_adapters()
+fn scan_adapters(user: &UserAdapterStore) -> Vec<AdapterEntry> {
+    let specs: Vec<AdapterSpec> = v1_adapters()
+        .iter()
+        .cloned()
+        .chain(
+            user.load_for_picker()
+                .iter()
+                .filter(|row| row.enabled)
+                .map(user_row_to_spec),
+        )
+        .collect();
+    let mut entries: Vec<AdapterEntry> = specs
         .iter()
         .map(|spec| {
             let binary = detect_adapter(spec);
             AdapterEntry {
                 id: spec.id.as_str().to_string(),
-                display_name: spec.display_name.to_string(),
+                display_name: spec.display_name.clone(),
                 detected: binary.is_some(),
                 binary_path: binary,
                 stream_format: spec.stream_format,
             }
         })
+        .collect();
+    entries.sort_by(|a, b| cmp_display_order((&a.display_name, &a.id), (&b.display_name, &b.id)));
+    entries
+}
+
+/// Project a user-defined registry row onto the engine's spec (issue #1341):
+/// the command doubles as the single binary-name candidate (a bare name
+/// resolves through the PATH scan, an absolute path is used verbatim --
+/// `detect_adapter`), the row's args ride verbatim as the argv prefix, and
+/// no per-CLI injection surface exists (ADR-0081's zero per-CLI code
+/// preserved -- the row's env is data, not code).
+fn user_row_to_spec(row: &UserAdapterRow) -> AdapterSpec {
+    AdapterSpec {
+        id: AdapterId::new(row.id.clone()),
+        display_name: row.name.clone(),
+        binary_names: vec![row.command.clone()],
+        argv: row.args.clone(),
+        probe_argv: None,
+        stream_format: StreamFormat::Acp,
+        model_arg: None,
+        effort: None,
+        env: row.env.clone(),
+    }
+}
+
+/// The merged table's display order (issue #1341): alphabetical on the
+/// display name, the id as the stable tiebreaker. One comparator so the
+/// picker projection and the settings management list cannot drift; both
+/// frontends render the projections verbatim.
+fn cmp_display_order(a: (&str, &str), b: (&str, &str)) -> std::cmp::Ordering {
+    a.0.cmp(b.0).then_with(|| a.1.cmp(b.1))
+}
+
+/// The full merged table (the resolution face, issue #1341): every built-in
+/// spec ++ every user-defined row, enabled AND disabled -- the PICKER
+/// projection filters `enabled`; resolution keeps a disabled row resolvable
+/// for sessions / defaults that already name it.
+fn merged_adapters(user: &UserAdapterStore) -> Vec<AdapterSpec> {
+    v1_adapters()
+        .iter()
+        .cloned()
+        .chain(user.load_for_picker().iter().map(user_row_to_spec))
         .collect()
 }
 
@@ -2663,11 +2776,8 @@ fn scan_adapters() -> Vec<AdapterEntry> {
 /// to `None` and the command boundary rejects them -- the frontend only ever
 /// offers ids that `list_adapters` returned, so an unknown id is a stale /
 /// buggy client, not a user mistake.
-fn resolve_adapter(id: &str) -> Option<AdapterSpec> {
-    v1_adapters()
-        .iter()
-        .find(|spec| spec.id.as_str() == id)
-        .cloned()
+fn resolve_adapter(id: &str, merged: &[AdapterSpec]) -> Option<AdapterSpec> {
+    merged.iter().find(|spec| spec.id.as_str() == id).cloned()
 }
 
 /// Map the handle's storage form (`None` = built-in) onto the wire choice.
@@ -2684,11 +2794,12 @@ fn runtime_choice_to_wire(spec: Option<AdapterSpec>) -> SessionRuntimeChoice {
 /// as user-facing text).
 fn resolve_runtime_choice(
     runtime: SessionRuntimeChoice,
+    merged: &[AdapterSpec],
 ) -> Result<Option<AdapterSpec>, SessionError> {
     Ok(match runtime {
         SessionRuntimeChoice::BuiltIn => None,
         SessionRuntimeChoice::External(adapter_id) => {
-            Some(resolve_adapter(&adapter_id).ok_or_else(|| {
+            Some(resolve_adapter(&adapter_id, merged).ok_or_else(|| {
                 SessionError::Engine(format!("unknown adapter id `{adapter_id}`"))
             })?)
         }
@@ -2702,8 +2813,8 @@ fn resolve_runtime_choice(
 /// verbatim; adding a CLI upstream (`v1_adapters()`) grows the list with
 /// zero frontend change.
 #[tauri::command]
-pub fn list_adapters() -> Vec<AdapterEntry> {
-    scan_adapters()
+pub fn list_adapters(user_store: State<'_, UserAdapterStore>) -> Vec<AdapterEntry> {
+    scan_adapters(&user_store)
 }
 
 /// Re-run the adapter PATH scan on demand (issue #353, AC: rescan IPC) -- the
@@ -2712,8 +2823,166 @@ pub fn list_adapters() -> Vec<AdapterEntry> {
 /// re-detect is an explicit wire action (and a future cached scan has the
 /// invalidation seam already).
 #[tauri::command]
-pub fn rescan_adapters() -> Vec<AdapterEntry> {
-    scan_adapters()
+pub fn rescan_adapters(user_store: State<'_, UserAdapterStore>) -> Vec<AdapterEntry> {
+    scan_adapters(&user_store)
+}
+
+// --- User-defined adapter registry (issue #1341) ---------------------------
+
+/// The create/update wire payload: everything the user edits. The id and the
+/// enabled flag are store-owned (minted at create / flipped by its own
+/// command), and `stream_format` is not wire-settable at all -- this knife
+/// adds user rows on the ACP channel alone.
+#[derive(Debug, serde::Deserialize)]
+pub struct UserAdapterDraft {
+    pub name: String,
+    pub command: String,
+    #[serde(default)]
+    pub args: Vec<String>,
+    #[serde(default)]
+    pub env: std::collections::BTreeMap<String, String>,
+}
+
+/// Validate a draft at the backend boundary (the form validates first; this
+/// is the IPC backstop): a non-empty name and a single-token command.
+fn validate_user_adapter_draft(draft: &UserAdapterDraft) -> Result<(), String> {
+    if draft.name.trim().is_empty() {
+        return Err("name must not be empty".to_string());
+    }
+    if !is_valid_command_token(draft.command.trim()) {
+        return Err(format!(
+            "command must be one token without whitespace or quotes: `{}`",
+            draft.command
+        ));
+    }
+    Ok(())
+}
+
+/// Create a user-defined adapter (issue #1341): mint a fresh `user:` id,
+/// enabled by default, on the ACP channel. Returns the stored row.
+#[tauri::command]
+pub fn create_user_adapter(
+    user_store: State<'_, UserAdapterStore>,
+    draft: UserAdapterDraft,
+) -> Result<UserAdapterRow, String> {
+    validate_user_adapter_draft(&draft)?;
+    let name = draft.name.trim().to_string();
+    let command = draft.command.trim().to_string();
+    user_store.mutate(|rows| {
+        // Id minting re-rolls on collision with an existing row (a 8-hex
+        // space, so this loop virtually never iterates).
+        let id = loop {
+            let id = mint_user_adapter_id();
+            if !rows.iter().any(|r| r.id == id) {
+                break id;
+            }
+        };
+        let row = UserAdapterRow {
+            id,
+            name,
+            command,
+            args: draft.args,
+            env: draft.env,
+            enabled: true,
+            stream_format: StreamFormat::Acp,
+        };
+        rows.push(row.clone());
+        Ok(row)
+    })
+}
+
+/// Update a user-defined adapter's editable fields (issue #1341). The id,
+/// the enabled flag, and the stream format are store-owned and ride
+/// unchanged.
+#[tauri::command]
+pub fn update_user_adapter(
+    user_store: State<'_, UserAdapterStore>,
+    adapter_id: String,
+    draft: UserAdapterDraft,
+) -> Result<UserAdapterRow, String> {
+    validate_user_adapter_draft(&draft)?;
+    let name = draft.name.trim().to_string();
+    let command = draft.command.trim().to_string();
+    user_store.mutate(|rows| {
+        let row = rows
+            .iter_mut()
+            .find(|r| r.id == adapter_id)
+            .ok_or_else(|| format!("unknown user adapter id `{adapter_id}`"))?;
+        row.name = name;
+        row.command = command;
+        row.args = draft.args;
+        row.env = draft.env;
+        Ok(row.clone())
+    })
+}
+
+/// Delete a user-defined adapter (issue #1341) and its catalog-cache entry
+/// (no stale probe result outlives its id). A `default_runtime` naming the
+/// deleted row degrades per-start to built-in through the existing
+/// resolution -- the config field itself is never rewritten, so recreating
+/// the row with the same id restores the default (ADR-0098 Decision 3
+/// semantics).
+///
+/// The body lives in [`delete_user_adapter_impl`] (the `State` shell minus
+/// the shell) so the registry removal and the cache removal are testable as
+/// one unit over real stores.
+fn delete_user_adapter_impl(
+    user_store: &UserAdapterStore,
+    catalog_store: &AdapterCatalogStore,
+    adapter_id: &str,
+) -> Result<(), String> {
+    user_store.mutate(|rows| {
+        let before = rows.len();
+        rows.retain(|r| r.id != adapter_id);
+        if rows.len() == before {
+            return Err(format!("unknown user adapter id `{adapter_id}`"));
+        }
+        Ok(())
+    })?;
+    catalog_store.remove_entry(adapter_id);
+    Ok(())
+}
+
+#[tauri::command]
+pub fn delete_user_adapter(
+    user_store: State<'_, UserAdapterStore>,
+    catalog_store: State<'_, AdapterCatalogStore>,
+    adapter_id: String,
+) -> Result<(), String> {
+    delete_user_adapter_impl(&user_store, &catalog_store, &adapter_id)
+}
+
+/// Flip a user-defined adapter's enabled flag (issue #1341): `false` keeps
+/// the row out of the picker projection while it stays resolvable for
+/// sessions / defaults that already name it.
+#[tauri::command]
+pub fn set_user_adapter_enabled(
+    user_store: State<'_, UserAdapterStore>,
+    adapter_id: String,
+    enabled: bool,
+) -> Result<(), String> {
+    user_store.mutate(|rows| {
+        let row = rows
+            .iter_mut()
+            .find(|r| r.id == adapter_id)
+            .ok_or_else(|| format!("unknown user adapter id `{adapter_id}`"))?;
+        row.enabled = enabled;
+        Ok(())
+    })
+}
+
+/// The management-face list (issue #1341): every user row, disabled ones
+/// included, in the same alphabetical display order as the picker (the
+/// shared comparator -- the two faces cannot drift). A corrupt registry is
+/// an EXPLICIT error here: the settings tab surfaces it, and the file is
+/// never rewritten on a failed read.
+#[tauri::command]
+pub fn list_user_adapters(
+    user_store: State<'_, UserAdapterStore>,
+) -> Result<Vec<UserAdapterRow>, String> {
+    let mut rows = user_store.list()?;
+    rows.sort_by(|a, b| cmp_display_order((&a.name, &a.id), (&b.name, &b.id)));
+    Ok(rows)
 }
 
 /// Run the adapter diagnostic probe (ADR-0096, issues #534/#535): a session-
@@ -2743,11 +3012,12 @@ pub fn rescan_adapters() -> Vec<AdapterEntry> {
 #[tauri::command]
 pub async fn probe_adapter(
     catalog_store: State<'_, AdapterCatalogStore>,
+    user_store: State<'_, UserAdapterStore>,
     adapter_id: String,
 ) -> Result<crate::runtime::acp::probe::ProbeOk, crate::runtime::acp::probe::ProbeError> {
     use crate::runtime::acp::probe::{self, ProbeError, PROBE_TIMEOUT};
 
-    let spec = resolve_adapter(&adapter_id);
+    let spec = resolve_adapter(&adapter_id, &merged_adapters(&user_store));
     // Fresh detection, never the frontend's possibly-stale table state. An
     // unknown id (None) is a stale / buggy client (the settings tab only
     // offers `list_adapters` ids) -- same refusal shape as a vanished
@@ -2877,13 +3147,14 @@ pub fn get_session_runtime(
 pub fn set_session_runtime(
     store: State<'_, Arc<SessionStore>>,
     live: State<'_, LiveProviderConfig>,
+    user_store: State<'_, UserAdapterStore>,
     session_id: String,
     runtime: SessionRuntimeChoice,
 ) -> Result<(), SessionError> {
     let id = SessionId::parse(&session_id)?;
     let handle = store.get(&id)?;
     reject_if_resuming(&handle)?;
-    let spec = resolve_runtime_choice(runtime)?;
+    let spec = resolve_runtime_choice(runtime, &merged_adapters(&user_store))?;
     apply_runtime_switch(&handle, spec, live.inner());
     Ok(())
 }
@@ -2937,12 +3208,13 @@ fn apply_runtime_switch(
 /// has something to look at in the log dir.
 fn resolve_default_runtime(
     default: &DefaultRuntime,
+    merged: &[AdapterSpec],
     detected: impl Fn(&AdapterSpec) -> bool,
 ) -> Option<AdapterSpec> {
     match default {
         DefaultRuntime::BuiltIn => None,
         DefaultRuntime::External(id) => {
-            let Some(spec) = resolve_adapter(id) else {
+            let Some(spec) = resolve_adapter(id, merged) else {
                 // Only a hand-edited config reaches here (set_default_runtime
                 // rejects unknown ids), so warn on the config anomaly.
                 log::warn!(
@@ -2969,12 +3241,17 @@ fn resolve_default_runtime(
 
 /// The command-path resolution: an honest-degrade app-config read
 /// (lock-light -- [`LiveProviderConfig::load`] takes no lock) + a fresh PATH
-/// scan per candidate adapter. Shared by `create_session` and `open_duck` so
+/// scan per candidate adapter. Shared by `create_session` and `open_recipe` so
 /// both startup points apply ONE degrade rule.
-fn startup_runtime_choice(live: &LiveProviderConfig) -> Option<AdapterSpec> {
-    resolve_default_runtime(&live.load().default_runtime, |spec| {
-        detect_adapter(spec).is_some()
-    })
+fn startup_runtime_choice(
+    live: &LiveProviderConfig,
+    user: &UserAdapterStore,
+) -> Option<AdapterSpec> {
+    resolve_default_runtime(
+        &live.load().default_runtime,
+        &merged_adapters(user),
+        |spec| detect_adapter(spec).is_some(),
+    )
 }
 
 /// Resolve the recipe-header `last_runtime` into the resumed session's
@@ -2988,6 +3265,7 @@ fn startup_runtime_choice(live: &LiveProviderConfig) -> Option<AdapterSpec> {
 fn resume_runtime_choice(
     last: Option<&LastRuntime>,
     default: Option<AdapterSpec>,
+    merged: &[AdapterSpec],
     detected: impl Fn(&AdapterSpec) -> bool,
 ) -> Option<AdapterSpec> {
     match last {
@@ -2996,7 +3274,7 @@ fn resume_runtime_choice(
         None => default,
         Some(LastRuntime::BuiltIn) => None,
         Some(LastRuntime::External(id)) => {
-            let Some(spec) = resolve_adapter(id) else {
+            let Some(spec) = resolve_adapter(id, merged) else {
                 // Only a hand-edited recipe reaches here (the stamp records a
                 // v1-table id), so warn on the anomaly. The field is kept on
                 // disk -- resolution degrades, never rewrites.
@@ -3033,7 +3311,7 @@ fn stamp_resumed_identity(session: &mut Session, sid: &SessionId) {
 }
 
 /// Apply the resumed session's postures to the handle after the swap
-/// (`open_duck`). The whole reset + restore batch in one free function so
+/// (`open_recipe`). The whole reset + restore batch in one free function so
 /// the command-layer wiring is testable without an AppHandle: the
 /// security-plane resets fire first, then the execution-plane continuation,
 /// then the ADR-0095 trio -- restored last so the restored values win.
@@ -3043,6 +3321,7 @@ fn apply_resumed_postures(
     handle: &SessionHandle,
     runtime_facts: SessionRuntimeFacts,
     startup: Option<AdapterSpec>,
+    merged: &[AdapterSpec],
     detected: impl Fn(&AdapterSpec) -> bool,
 ) {
     // ADR-0080 (issue #294): resume zeroes trust. Trust state is
@@ -3059,11 +3338,12 @@ fn apply_resumed_postures(
     // keeps the old semantics (the resolved default runtime); an undetected
     // adapter degrades THIS resume to the built-in start while the persisted
     // value survives on the Session's recipe-header facts -- restored inside
-    // `Session::open_duck`, whose phase-5 rewrite already re-emitted it
+    // `Session::open_recipe`, whose phase-5 rewrite already re-emitted it
     // unchanged, so a re-detected CLI is honored by the next resume.
     handle.set_runtime_choice(resume_runtime_choice(
         runtime_facts.last_runtime.as_ref(),
         startup,
+        merged,
         detected,
     ));
     // ADR-0095 Decision 6: restore the model config AFTER the reset batch
@@ -3096,10 +3376,11 @@ fn apply_resumed_postures(
 #[tauri::command]
 pub fn set_default_runtime(
     live: State<'_, LiveProviderConfig>,
+    user_store: State<'_, UserAdapterStore>,
     runtime: DefaultRuntime,
 ) -> Result<AppConfig, StoreCommandError> {
     if let DefaultRuntime::External(id) = &runtime {
-        if resolve_adapter(id).is_none() {
+        if resolve_adapter(id, &merged_adapters(&user_store)).is_none() {
             return Err(StoreCommandError::UnknownAdapter(id.clone()));
         }
     }
@@ -3139,7 +3420,7 @@ fn session_posture(p: ModelPosture) -> PosturePair {
 /// Seat the resolved startup posture on a fresh session (ADR-0100 Decision 1,
 /// issue #581): the pair lands on BOTH slots at once -- the handle-held slot
 /// the lock-light reads serve and the Session storage the recipe persists.
-/// Called before the initial `bind_duck`, so the first recipe already carries
+/// Called before the initial `bind_recipe`, so the first recipe already carries
 /// the posture: without the Session-side half the injection would reach the
 /// recipe only at the first turn top (the `ask` mirror), and a restart
 /// before then would resume the session unselected even though the backfill
@@ -3182,9 +3463,10 @@ pub fn get_last_model_posture(
 #[tauri::command]
 pub fn clear_last_model_posture(
     live: State<'_, LiveProviderConfig>,
+    user_store: State<'_, UserAdapterStore>,
     adapter_id: String,
 ) -> Result<AppConfig, StoreCommandError> {
-    if resolve_adapter(&adapter_id).is_none() {
+    if resolve_adapter(&adapter_id, &merged_adapters(&user_store)).is_none() {
         return Err(StoreCommandError::UnknownAdapter(adapter_id));
     }
     live.set_last_model_posture(&adapter_id, ModelPosture::default())
@@ -3210,7 +3492,7 @@ pub struct SessionModelConfig {
 /// (no post-hoc shared-slot read racing the session banner poll).
 /// `persist_error` is the typed [`SaveError`] of a failed write;
 /// `persist_suspended` is true when the write was withheld because an
-/// ADR-0035 pending conflict (externally modified .duck) suspends the
+/// ADR-0035 pending conflict (externally modified recipe.json) suspends the
 /// auto-write. Both None/false = the write landed (or the session is
 /// unbound, in-memory-only, nothing to persist).
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -3833,7 +4115,7 @@ mod tests {
     #[test]
     fn session_dir_uuid_under_root_resolves_the_uuid_directory() {
         let root = tempfile::tempdir().expect("tempdir");
-        let duck = root.path().join("abc-123").join("session.duck");
+        let duck = root.path().join("abc-123").join("recipe.json");
         std::fs::create_dir_all(duck.parent().expect("parent")).expect("mkdir");
         std::fs::write(&duck, "").expect("write");
         let uuid = session_dir_uuid_under_root(root.path(), &duck.to_string_lossy())
@@ -3851,7 +4133,7 @@ mod tests {
     fn session_dir_uuid_under_root_refuses_paths_outside_the_root() {
         let root = tempfile::tempdir().expect("tempdir");
         let outside = tempfile::tempdir().expect("tempdir");
-        let duck = outside.path().join("abc-123").join("session.duck");
+        let duck = outside.path().join("abc-123").join("recipe.json");
         std::fs::create_dir_all(duck.parent().expect("parent")).expect("mkdir");
         std::fs::write(&duck, "").expect("write");
         let err = session_dir_uuid_under_root(root.path(), &duck.to_string_lossy())
@@ -3876,10 +4158,10 @@ mod tests {
         // pass such a prefix): an in-root ghost and a root-escape spelling
         // both refuse with the typed IO lane rather than resolve lexically.
         let root = tempfile::tempdir().expect("tempdir");
-        let ghost = root.path().join("ghost").join("session.duck");
+        let ghost = root.path().join("ghost").join("recipe.json");
         for path in [
             ghost.to_string_lossy().into_owned(),
-            format!("{}/../../elsewhere/session.duck", root.path().display()),
+            format!("{}/../../elsewhere/recipe.json", root.path().display()),
         ] {
             let err = session_dir_uuid_under_root(root.path(), &path)
                 .expect_err("an unresolvable path refuses");
@@ -3891,12 +4173,12 @@ mod tests {
     }
 
     // ADR-0127 Decision 4 wiring (review Important 1): the seam is what
-    // open_duck calls after a successful bind -- pinned here so deleting the
+    // open_recipe calls after a successful bind -- pinned here so deleting the
     // call can never again pass silently.
     #[test]
     fn unarchive_after_open_removes_archived_membership_under_the_root() {
         let root = tempfile::tempdir().expect("tempdir");
-        let duck = root.path().join("arch-1").join("session.duck");
+        let duck = root.path().join("arch-1").join("recipe.json");
         std::fs::create_dir_all(duck.parent().expect("parent")).expect("mkdir");
         std::fs::write(&duck, "").expect("write");
         std::fs::create_dir_all(root.path().join("pin-1")).expect("mkdir pin-1");
@@ -3937,7 +4219,7 @@ mod tests {
             r#"{"format":1,"pinned":[],"archived":["arch-1"]}"#,
         )
         .expect("write sidecar");
-        let foreign = elsewhere.path().join("arch-1").join("session.duck");
+        let foreign = elsewhere.path().join("arch-1").join("recipe.json");
         std::fs::create_dir_all(foreign.parent().expect("parent")).expect("mkdir foreign");
         std::fs::write(&foreign, "").expect("write foreign");
         unarchive_after_open(managed.path(), &foreign);
@@ -3952,7 +4234,7 @@ mod tests {
             "no cross-root unarchive on a uuid collision: {sidecar}"
         );
         let quiet = tempfile::tempdir().expect("tempdir");
-        let duck = quiet.path().join("plain").join("session.duck");
+        let duck = quiet.path().join("plain").join("recipe.json");
         std::fs::create_dir_all(duck.parent().expect("parent")).expect("mkdir");
         std::fs::write(&duck, "").expect("write");
         unarchive_after_open(quiet.path(), &duck);
@@ -3989,12 +4271,196 @@ mod tests {
         move |spec| ids.contains(&spec.id.as_str())
     }
 
+    /// A draft fixture (issue #1341): a valid single-token command + name.
+    fn valid_draft() -> UserAdapterDraft {
+        UserAdapterDraft {
+            name: "My CLI".to_string(),
+            command: "my-cli".to_string(),
+            args: vec!["--acp".to_string()],
+            env: Default::default(),
+        }
+    }
+
+    /// The backend boundary of the form's gating (issue #1341): an empty
+    /// name or a multi-token command rejects at the IPC backstop.
+    #[test]
+    fn user_adapter_draft_validation_rejects_empty_name_and_multi_token_commands() {
+        assert!(validate_user_adapter_draft(&valid_draft()).is_ok());
+        let mut spaced = valid_draft();
+        spaced.command = "my cli".into();
+        assert!(validate_user_adapter_draft(&spaced).is_err());
+        let mut quoted = valid_draft();
+        quoted.command = "\"my-cli\"".into();
+        assert!(validate_user_adapter_draft(&quoted).is_err());
+        let mut nameless = valid_draft();
+        nameless.name = "   ".into();
+        assert!(validate_user_adapter_draft(&nameless).is_err());
+    }
+
+    /// Issue #1341: deleting a user row a `default_runtime` names degrades
+    /// the start to built-in through the existing resolution (the config
+    /// value rides unchanged -- never rewritten), and recreating the same
+    /// id restores it.
+    #[test]
+    fn deleting_a_referenced_user_adapter_degrades_and_readding_restores() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let user = UserAdapterStore::new(dir.path().join("user-adapters.json"));
+        let seed = |user: &UserAdapterStore| {
+            user.mutate(|rows| {
+                rows.push(user_row_fixture("user:deadbeef", "beta-cli", true));
+                Ok(())
+            })
+            .expect("seed row");
+        };
+        seed(&user);
+        let default = DefaultRuntime::External("user:deadbeef".into());
+        let with_row = resolve_default_runtime(
+            &default,
+            &merged_adapters(&user),
+            detected_ids(&["user:deadbeef"]),
+        );
+        assert_eq!(
+            with_row.map(|spec| spec.id.as_str().to_string()),
+            Some("user:deadbeef".to_string()),
+            "a detected user row serves as the default runtime"
+        );
+        user.mutate(|rows| {
+            rows.retain(|r| r.id != "user:deadbeef");
+            Ok(())
+        })
+        .expect("delete row");
+        assert!(
+            resolve_default_runtime(
+                &default,
+                &merged_adapters(&user),
+                detected_ids(&["user:deadbeef"])
+            )
+            .is_none(),
+            "the deleted default degrades to built-in while the field stays as written"
+        );
+        seed(&user);
+        assert!(
+            resolve_default_runtime(
+                &default,
+                &merged_adapters(&user),
+                detected_ids(&["user:deadbeef"])
+            )
+            .is_some(),
+            "recreating the same id restores the default"
+        );
+    }
+
+    /// Issue #1341: the delete command frees the deleted row's catalog-cache
+    /// entry and ONLY that entry -- the command-level wiring (a store-level
+    /// remove alone does not prove the two travel together).
+    #[test]
+    fn delete_user_adapter_frees_exactly_the_deleted_catalog_entry() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let user = UserAdapterStore::new(dir.path().join("user-adapters.json"));
+        let catalog = AdapterCatalogStore::new(
+            dir.path()
+                .join(crate::runtime::acp::catalog_store::CATALOGS_FILE_NAME),
+        );
+        user.mutate(|rows| {
+            rows.push(user_row_fixture("user:deadbeef", "beta-cli", true));
+            Ok(())
+        })
+        .expect("seed row");
+        let entry = AdapterCatalogEntry {
+            probe_kind: crate::runtime::acp::catalog_store::ProbeKind::CodexEventStream,
+            outcome: CachedOutcome::CodexEventStream { models: Vec::new() },
+            probed_at_millis: now_millis(),
+        };
+        catalog.store_entry("user:deadbeef", entry.clone());
+        catalog.store_entry("user:11111111", entry);
+
+        delete_user_adapter_impl(&user, &catalog, "user:deadbeef").expect("delete");
+
+        assert!(user.list().expect("list").is_empty());
+        let catalogs = catalog.load();
+        assert!(
+            !catalogs.contains_key("user:deadbeef"),
+            "the deleted id's cache entry is gone"
+        );
+        assert!(
+            catalogs.contains_key("user:11111111"),
+            "the sibling entry stays"
+        );
+
+        // An unknown id refuses and touches neither store.
+        let err = delete_user_adapter_impl(&user, &catalog, "user:nosuch").expect_err("unknown id");
+        assert!(err.contains("unknown user adapter id"), "{err}");
+        assert!(
+            catalog.load().contains_key("user:11111111"),
+            "a refused delete leaves the cache untouched"
+        );
+    }
+
+    /// A user-registry row fixture (issue #1341) -- the command is a bare
+    /// name so the PATH scan decides detection, matching the fixture binary's
+    /// shape in the wiring suites.
+    fn user_row_fixture(id: &str, name: &str, enabled: bool) -> UserAdapterRow {
+        UserAdapterRow {
+            id: id.to_string(),
+            name: name.to_string(),
+            command: "acp-fake-cli".to_string(),
+            args: vec!["--acp".to_string()],
+            env: Default::default(),
+            enabled,
+            stream_format: StreamFormat::Acp,
+        }
+    }
+
+    /// Issue #1341: user-defined rows merge into the picker projection in
+    /// the shared alphabetical display order, and `enabled: false` keeps a
+    /// row out of the picker while staying resolvable (sessions / defaults
+    /// that already name it keep working).
+    #[test]
+    fn user_rows_merge_into_the_picker_in_display_order() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let user = UserAdapterStore::new(dir.path().join("user-adapters.json"));
+        user.mutate(|rows| {
+            rows.push(user_row_fixture("user:aaaaaaaa", "zeta-cli", true));
+            rows.push(user_row_fixture("user:bbbbbbbb", "alpha-cli", true));
+            rows.push(user_row_fixture("user:cccccccc", "hidden-cli", false));
+            Ok(())
+        })
+        .expect("seed user rows");
+        let entries = scan_adapters(&user);
+        let names: Vec<&str> = entries.iter().map(|e| e.display_name.as_str()).collect();
+        assert!(
+            !names.contains(&"hidden-cli"),
+            "disabled rows stay out of the picker"
+        );
+        let mut expected: Vec<&str> = v1_adapters()
+            .iter()
+            .map(|s| s.display_name.as_str())
+            .chain(["alpha-cli", "zeta-cli"])
+            .collect();
+        expected.sort();
+        assert_eq!(
+            names, expected,
+            "built-ins and user rows share one alphabetical order"
+        );
+        // Resolution sees BOTH enabled and disabled user rows.
+        let merged = merged_adapters(&user);
+        assert!(resolve_adapter("user:aaaaaaaa", &merged).is_some());
+        assert!(
+            resolve_adapter("user:cccccccc", &merged).is_some(),
+            "a disabled row stays resolvable"
+        );
+    }
+
     #[test]
     fn default_runtime_built_in_resolves_to_none() {
         // The fresh-install default keeps the pre-#569 start: built-in (None
         // on the handle). The detected signal is irrelevant for BuiltIn.
         assert_eq!(
-            resolve_default_runtime(&DefaultRuntime::BuiltIn, detected_ids(&["gemini-cli"])),
+            resolve_default_runtime(
+                &DefaultRuntime::BuiltIn,
+                v1_adapters(),
+                detected_ids(&["gemini-cli"])
+            ),
             None
         );
     }
@@ -4005,6 +4471,7 @@ mod tests {
         // exact CLI (issue #569 AC2).
         let spec = resolve_default_runtime(
             &DefaultRuntime::External("gemini-cli".into()),
+            v1_adapters(),
             detected_ids(&["gemini-cli"]),
         )
         .expect("detected default resolves external");
@@ -4018,11 +4485,11 @@ mod tests {
         // value resolve external again -- the field was never rewritten.
         let default = DefaultRuntime::External("gemini-cli".into());
         assert_eq!(
-            resolve_default_runtime(&default, detected_ids(&[])),
+            resolve_default_runtime(&default, v1_adapters(), detected_ids(&[])),
             None,
             "undetected default degrades to built-in for this start"
         );
-        let spec = resolve_default_runtime(&default, detected_ids(&["gemini-cli"]))
+        let spec = resolve_default_runtime(&default, v1_adapters(), detected_ids(&["gemini-cli"]))
             .expect("re-detected default resolves external again");
         assert_eq!(spec.id.as_str(), "gemini-cli");
     }
@@ -4035,6 +4502,7 @@ mod tests {
         assert_eq!(
             resolve_default_runtime(
                 &DefaultRuntime::External("gemini-cli".into()),
+                v1_adapters(),
                 detected_ids(&["codex"])
             ),
             None
@@ -4044,6 +4512,7 @@ mod tests {
         assert_eq!(
             resolve_default_runtime(
                 &DefaultRuntime::External("no-such-cli".into()),
+                v1_adapters(),
                 detected_ids(&["gemini-cli", "codex"])
             ),
             None
@@ -4060,6 +4529,7 @@ mod tests {
         let spec = resume_runtime_choice(
             Some(&LastRuntime::External("gemini-cli".into())),
             None,
+            v1_adapters(),
             detected_ids(&["gemini-cli"]),
         )
         .expect("a recorded detected runtime continues the session");
@@ -4068,6 +4538,7 @@ mod tests {
             resume_runtime_choice(
                 Some(&LastRuntime::BuiltIn),
                 Some(spec.clone()),
+                v1_adapters(),
                 detected_ids(&["gemini-cli"]),
             ),
             None,
@@ -4082,12 +4553,17 @@ mod tests {
         // semantics -- the RESOLVED default runtime, whatever it resolved to.
         let fallback = crate::runtime::acp::adapter::gemini_cli();
         assert_eq!(
-            resume_runtime_choice(None, Some(fallback.clone()), detected_ids(&[])),
+            resume_runtime_choice(
+                None,
+                Some(fallback.clone()),
+                v1_adapters(),
+                detected_ids(&[])
+            ),
             Some(fallback),
             "no recorded runtime -> the resolved default lands verbatim"
         );
         assert_eq!(
-            resume_runtime_choice(None, None, detected_ids(&["gemini-cli"])),
+            resume_runtime_choice(None, None, v1_adapters(), detected_ids(&["gemini-cli"])),
             None,
             "no recorded runtime + built-in default -> built-in"
         );
@@ -4101,17 +4577,22 @@ mod tests {
         // Resolution also never substitutes a different detected CLI.
         let last = LastRuntime::External("gemini-cli".into());
         assert_eq!(
-            resume_runtime_choice(Some(&last), None, detected_ids(&[])),
+            resume_runtime_choice(Some(&last), None, v1_adapters(), detected_ids(&[])),
             None,
             "undetected runtime degrades this resume to built-in"
         );
         assert_eq!(
-            resume_runtime_choice(Some(&last), None, detected_ids(&["codex"])),
+            resume_runtime_choice(Some(&last), None, v1_adapters(), detected_ids(&["codex"])),
             None,
             "a missing CLI never silently resumes on another detected adapter"
         );
-        let spec = resume_runtime_choice(Some(&last), None, detected_ids(&["gemini-cli"]))
-            .expect("re-detected runtime resolves external again");
+        let spec = resume_runtime_choice(
+            Some(&last),
+            None,
+            v1_adapters(),
+            detected_ids(&["gemini-cli"]),
+        )
+        .expect("re-detected runtime resolves external again");
         assert_eq!(spec.id.as_str(), "gemini-cli");
         // An id outside the v1 table (hand-edited recipe) degrades the same
         // way -- resolution is total, the persisted field stays as written.
@@ -4119,6 +4600,7 @@ mod tests {
             resume_runtime_choice(
                 Some(&LastRuntime::External("no-such-cli".into())),
                 None,
+                v1_adapters(),
                 detected_ids(&["gemini-cli", "codex"])
             ),
             None
@@ -4156,7 +4638,7 @@ mod tests {
 
     #[test]
     fn apply_resumed_postures_lands_the_resume_continuation_on_the_handle() {
-        // The open_duck wiring -- the command itself needs an AppHandle, so
+        // The open_recipe wiring -- the command itself needs an AppHandle, so
         // the batch lives in a free function (issue #589): the stale
         // pre-resume choice is OVERWRITTEN by the resume continuation, the
         // ADR-0095 trio restores after the resets, a pre-#589 recipe falls
@@ -4192,6 +4674,7 @@ mod tests {
                 ..Default::default()
             },
             Some(crate::runtime::acp::adapter::codex()),
+            v1_adapters(),
             detected_ids(&["gemini-cli"]),
         );
         assert_eq!(
@@ -4215,6 +4698,7 @@ mod tests {
             &handle,
             SessionRuntimeFacts::default(),
             Some(gemini.clone()),
+            v1_adapters(),
             detected_ids(&[]),
         );
         assert_eq!(
@@ -4237,6 +4721,7 @@ mod tests {
                 ..Default::default()
             },
             Some(gemini.clone()),
+            v1_adapters(),
             detected_ids(&[]),
         );
         assert!(
@@ -4260,15 +4745,16 @@ mod tests {
             crate::provider::keychain::KeychainStore::new(),
             dir.path().join("config.json"),
         );
+        let user = UserAdapterStore::new(dir.path().join("user-adapters.json"));
         assert_eq!(
-            startup_runtime_choice(&live),
+            startup_runtime_choice(&live, &user),
             None,
             "fresh-install config starts built-in (AC1)"
         );
         live.set_default_runtime(DefaultRuntime::External("no-such-cli".into()))
             .expect("the store persists the value verbatim");
         assert_eq!(
-            startup_runtime_choice(&live),
+            startup_runtime_choice(&live, &user),
             None,
             "an id outside the v1 table degrades to built-in at startup"
         );
@@ -4320,7 +4806,7 @@ mod tests {
             },
         )
         .expect("seed gemini-cli posture");
-        let gemini = resolve_adapter("gemini-cli").expect("v1 adapter");
+        let gemini = resolve_adapter("gemini-cli", v1_adapters()).expect("v1 adapter");
         assert_eq!(
             segment_start_posture(Some(&gemini), &live),
             ModelPosture {
@@ -4329,7 +4815,7 @@ mod tests {
             },
             "the segment-start adapter's entry injects"
         );
-        let codex = resolve_adapter("codex").expect("v1 adapter");
+        let codex = resolve_adapter("codex", v1_adapters()).expect("v1 adapter");
         assert_eq!(
             segment_start_posture(Some(&codex), &live),
             ModelPosture::default(),
@@ -4425,7 +4911,7 @@ mod tests {
             model: Some("claude-opus-4-5".into()),
             thought_level: Some("max".into()),
         });
-        let gemini = resolve_adapter("gemini-cli").expect("v1 adapter");
+        let gemini = resolve_adapter("gemini-cli", v1_adapters()).expect("v1 adapter");
         apply_runtime_switch(&handle, Some(gemini.clone()), &live);
         assert_eq!(handle.runtime_choice(), Some(gemini));
         assert_eq!(
@@ -4463,7 +4949,7 @@ mod tests {
             model: Some("gemini-2.5-pro".into()),
             thought_level: Some("high".into()),
         });
-        let codex = resolve_adapter("codex").expect("v1 adapter");
+        let codex = resolve_adapter("codex", v1_adapters()).expect("v1 adapter");
         apply_runtime_switch(&handle, Some(codex), &live);
         assert_eq!(
             handle.external_model_config(),
@@ -4489,8 +4975,8 @@ mod tests {
         // the last selection back.
         let (_dir, live) = posture_live();
         let (_store, handle) = posture_handle();
-        let gemini = resolve_adapter("gemini-cli").expect("v1 adapter");
-        let codex = resolve_adapter("codex").expect("v1 adapter");
+        let gemini = resolve_adapter("gemini-cli", v1_adapters()).expect("v1 adapter");
+        let codex = resolve_adapter("codex", v1_adapters()).expect("v1 adapter");
         apply_runtime_switch(&handle, Some(gemini.clone()), &live);
         // An explicit selection while on gemini lands on its entry (the
         // same helper the set command calls -- the write point stays ONE).
@@ -4532,7 +5018,7 @@ mod tests {
                 thought_level: Some("old-level".into()),
             });
         }
-        let gemini = resolve_adapter("gemini-cli").expect("v1 adapter");
+        let gemini = resolve_adapter("gemini-cli", v1_adapters()).expect("v1 adapter");
         apply_runtime_switch(&handle, Some(gemini), &live);
         let s = handle.session_lock().expect("session lock");
         assert_eq!(
@@ -4552,7 +5038,7 @@ mod tests {
         // The single write point: the post-set pair lands on the runtime
         // adapter's entry and survives a reload (issue #581 AC2).
         let (_dir, live) = posture_live();
-        let gemini = resolve_adapter("gemini-cli").expect("v1 adapter");
+        let gemini = resolve_adapter("gemini-cli", v1_adapters()).expect("v1 adapter");
         record_last_model_posture(
             &live,
             Some(gemini),
@@ -4601,7 +5087,7 @@ mod tests {
             crate::provider::keychain::KeychainStore::new(),
             dir.path().join("nonexistent").join("config.json"),
         );
-        let gemini = resolve_adapter("gemini-cli").expect("v1 adapter");
+        let gemini = resolve_adapter("gemini-cli", v1_adapters()).expect("v1 adapter");
         record_last_model_posture(
             &live,
             Some(gemini),
@@ -4630,7 +5116,7 @@ mod tests {
         // are the observable.
         let (_dir, live) = posture_live();
         let (_store, handle) = posture_handle();
-        let gemini = resolve_adapter("gemini-cli").expect("v1 adapter");
+        let gemini = resolve_adapter("gemini-cli", v1_adapters()).expect("v1 adapter");
         handle.set_runtime_and_posture(
             Some(gemini),
             PosturePair {
@@ -4743,8 +5229,8 @@ mod tests {
         // switch's segment while a matching runtime lets the write land.
         let (_dir, live) = posture_live();
         let (_store, handle) = posture_handle();
-        let gemini = resolve_adapter("gemini-cli").expect("v1 adapter");
-        let codex = resolve_adapter("codex").expect("v1 adapter");
+        let gemini = resolve_adapter("gemini-cli", v1_adapters()).expect("v1 adapter");
+        let codex = resolve_adapter("codex", v1_adapters()).expect("v1 adapter");
         handle.set_runtime_and_posture(
             Some(gemini),
             PosturePair {
@@ -4921,9 +5407,9 @@ mod tests {
     #[test]
     fn rename_persisted_session_blank_name_short_circuits_before_canonicalize() {
         let dir = tempfile::tempdir().expect("tempdir");
-        // `no_such_subdir` was never created -> canonicalize_duck (which
+        // `no_such_subdir` was never created -> canonicalize_recipe (which
         // canonicalizes the parent dir) would fail here.
-        let missing_parent = dir.path().join("no_such_subdir").join("file.duck");
+        let missing_parent = dir.path().join("no_such_subdir").join("file.json");
         let err = rename_persisted_session_blocking(&missing_parent, "   ")
             .expect_err("blank name rejects");
         assert_eq!(
@@ -4939,7 +5425,7 @@ mod tests {
     #[test]
     fn rename_persisted_session_nonblank_name_reaches_canonicalize() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let missing_parent = dir.path().join("no_such_subdir").join("file.duck");
+        let missing_parent = dir.path().join("no_such_subdir").join("file.json");
         let err = rename_persisted_session_blocking(&missing_parent, "new name")
             .expect_err("missing parent rejects");
         assert!(
@@ -4954,12 +5440,12 @@ mod tests {
     /// never acquired, and that the gate runs only after canonicalize succeeds.
     #[test]
     fn rename_persisted_session_held_key_yields_open_conflict() {
-        use crate::persistence::{canonicalize_duck, release, try_acquire};
+        use crate::persistence::{canonicalize_recipe, release, try_acquire};
         let dir = tempfile::tempdir().expect("tempdir");
-        // Parent (dir) exists, so canonicalize_duck succeeds even though the
+        // Parent (dir) exists, so canonicalize_recipe succeeds even though the
         // file itself is absent (it canonicalizes the parent + rejoins the name).
-        let file = dir.path().join("held.duck");
-        let canonical = canonicalize_duck(&file).expect("canonicalize (parent-based)");
+        let file = dir.path().join("held.json");
+        let canonical = canonicalize_recipe(&file).expect("canonicalize (parent-based)");
         assert!(try_acquire(&canonical), "test takes the canonical key");
         let err =
             rename_persisted_session_blocking(&file, "new name").expect_err("held key rejects");
@@ -4969,16 +5455,29 @@ mod tests {
 
     // --- Runtime selector helpers (issue #353) ------------------------------
 
-    /// scan_adapters projects exactly the v1 table (count-agnostic), each entry
+    /// scan_adapters projects the merged table (count-agnostic), each entry
     /// carrying its id + display name + a fresh PATH-scan detection flag + the
-    /// resolved binary path. The composer picker + the settings adapter panel
-    /// render this table verbatim -- a CLI added upstream never touches either.
+    /// resolved binary path, in the merged alphabetical display order (issue
+    /// #1341). The composer picker + the settings adapter panel render this
+    /// table verbatim -- a CLI added upstream never touches either.
     #[test]
     fn scan_adapters_projects_the_v1_table_with_detection_state() {
-        let entries = scan_adapters();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let user = UserAdapterStore::new(dir.path().join("user-adapters.json"));
+        let entries = scan_adapters(&user);
         let adapters = v1_adapters();
         assert_eq!(entries.len(), adapters.len(), "one entry per v1 adapter");
-        for (entry, spec) in entries.iter().zip(adapters.iter()) {
+        // The display order is the projection's alphabetical sort, not the
+        // registration array's order (issue #1341) -- sort the specs by the
+        // same comparator before zipping.
+        let mut sorted: Vec<&AdapterSpec> = adapters.iter().collect();
+        sorted.sort_by(|a, b| {
+            cmp_display_order(
+                (&a.display_name, a.id.as_str()),
+                (&b.display_name, b.id.as_str()),
+            )
+        });
+        for (entry, spec) in entries.iter().zip(sorted.iter()) {
             assert_eq!(entry.id, spec.id.as_str(), "id round-trips");
             assert_eq!(
                 entry.display_name, spec.display_name,
@@ -5004,11 +5503,12 @@ mod tests {
     #[test]
     fn resolve_adapter_round_trips_known_ids_and_rejects_unknown() {
         for spec in v1_adapters() {
-            let resolved = resolve_adapter(spec.id.as_str()).expect("known id resolves");
+            let resolved =
+                resolve_adapter(spec.id.as_str(), v1_adapters()).expect("known id resolves");
             assert_eq!(resolved.id, spec.id);
         }
         assert!(
-            resolve_adapter("definitely-not-an-adapter").is_none(),
+            resolve_adapter("definitely-not-an-adapter", v1_adapters()).is_none(),
             "unknown ids do not resolve"
         );
     }
@@ -5022,7 +5522,7 @@ mod tests {
         // None <-> BuiltIn.
         assert_eq!(runtime_choice_to_wire(None), SessionRuntimeChoice::BuiltIn);
         assert_eq!(
-            resolve_runtime_choice(SessionRuntimeChoice::BuiltIn).unwrap(),
+            resolve_runtime_choice(SessionRuntimeChoice::BuiltIn, v1_adapters()).unwrap(),
             None
         );
         // A known external id round-trips through both maps.
@@ -5031,14 +5531,18 @@ mod tests {
             runtime_choice_to_wire(Some(spec.clone())),
             SessionRuntimeChoice::External(spec.id.as_str().to_string())
         );
-        let back = resolve_runtime_choice(SessionRuntimeChoice::External(spec.id.as_str().into()))
-            .expect("known id resolves");
+        let back = resolve_runtime_choice(
+            SessionRuntimeChoice::External(spec.id.as_str().into()),
+            v1_adapters(),
+        )
+        .expect("known id resolves");
         assert_eq!(back.unwrap().id, spec.id);
         // An unknown external id rejects (Engine -- the frontend resync path
         // drives off the reject).
-        let err = resolve_runtime_choice(SessionRuntimeChoice::External(
-            "definitely-not-an-adapter".into(),
-        ))
+        let err = resolve_runtime_choice(
+            SessionRuntimeChoice::External("definitely-not-an-adapter".into()),
+            v1_adapters(),
+        )
         .expect_err("unknown id rejects");
         assert!(
             matches!(err, SessionError::Engine(_)),
@@ -5098,14 +5602,14 @@ mod tests {
         );
     }
 
-    // --- cleanup_orphaned_session_dir (ADR-0089 D6 parity for open_duck) ---
+    // --- cleanup_orphaned_session_dir (ADR-0089 D6 parity for open_recipe) ---
 
     /// Helper: create a sessions-root-like temp tree with a stale session
-    /// directory containing a `session.duck` placeholder.
+    /// directory containing a `recipe.json` placeholder.
     fn make_stale_session(root: &Path, uuid: &str) -> PathBuf {
         let dir = root.join(uuid);
         std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(dir.join("session.duck"), b"{}").unwrap();
+        std::fs::write(dir.join("recipe.json"), b"{}").unwrap();
         dir
     }
 
@@ -5116,8 +5620,8 @@ mod tests {
         let root = tmp.path().join("sessions");
         std::fs::create_dir_all(&root).unwrap();
         let stale_dir = make_stale_session(&root, "uuid-a");
-        let stale_duck = stale_dir.join("session.duck");
-        let resume_target = tmp.path().join("external.duck");
+        let stale_duck = stale_dir.join("recipe.json");
+        let resume_target = tmp.path().join("external.json");
         std::fs::write(&resume_target, b"{}").unwrap();
 
         cleanup_orphaned_session_dir(Some(&stale_duck), &resume_target, true, &root);
@@ -5131,8 +5635,8 @@ mod tests {
         let root = tmp.path().join("sessions");
         std::fs::create_dir_all(&root).unwrap();
         let stale_dir = make_stale_session(&root, "uuid-b");
-        let stale_duck = stale_dir.join("session.duck");
-        let resume_target = tmp.path().join("other.duck");
+        let stale_duck = stale_dir.join("recipe.json");
+        let resume_target = tmp.path().join("other.json");
         std::fs::write(&resume_target, b"{}").unwrap();
 
         cleanup_orphaned_session_dir(
@@ -5151,7 +5655,7 @@ mod tests {
         let root = tmp.path().join("sessions");
         std::fs::create_dir_all(&root).unwrap();
         let stale_dir = make_stale_session(&root, "uuid-c");
-        let stale_duck = stale_dir.join("session.duck");
+        let stale_duck = stale_dir.join("recipe.json");
 
         cleanup_orphaned_session_dir(
             Some(&stale_duck),
@@ -5170,9 +5674,9 @@ mod tests {
         std::fs::create_dir_all(&root).unwrap();
         let external_dir = tmp.path().join("external-session");
         std::fs::create_dir_all(&external_dir).unwrap();
-        let external_duck = external_dir.join("session.duck");
+        let external_duck = external_dir.join("recipe.json");
         std::fs::write(&external_duck, b"{}").unwrap();
-        let resume_target = tmp.path().join("other.duck");
+        let resume_target = tmp.path().join("other.json");
         std::fs::write(&resume_target, b"{}").unwrap();
 
         cleanup_orphaned_session_dir(Some(&external_duck), &resume_target, true, &root);
@@ -5189,7 +5693,7 @@ mod tests {
         std::fs::create_dir_all(&root).unwrap();
 
         // No stale_duck path → pure no-op, must not panic.
-        cleanup_orphaned_session_dir(None, &tmp.path().join("resume.duck"), true, &root);
+        cleanup_orphaned_session_dir(None, &tmp.path().join("resume.json"), true, &root);
     }
 
     #[test]
@@ -5200,9 +5704,9 @@ mod tests {
         std::fs::create_dir_all(&root).unwrap();
         // Create then manually delete to simulate "already gone".
         let stale_dir = make_stale_session(&root, "uuid-d");
-        let stale_duck = stale_dir.join("session.duck");
+        let stale_duck = stale_dir.join("recipe.json");
         std::fs::remove_dir_all(&stale_dir).unwrap();
-        let resume_target = tmp.path().join("other.duck");
+        let resume_target = tmp.path().join("other.json");
         std::fs::write(&resume_target, b"{}").unwrap();
 
         // stale_duck path still points to the gone dir; canonicalize of the
@@ -5224,8 +5728,8 @@ mod tests {
         // Two sessions under the same root, different uuid dirs.
         let stale_dir = make_stale_session(&root, "uuid-e");
         let target_dir = make_stale_session(&root, "uuid-f");
-        let stale_duck = stale_dir.join("session.duck");
-        let resume_target = target_dir.join("session.duck");
+        let stale_duck = stale_dir.join("recipe.json");
+        let resume_target = target_dir.join("recipe.json");
 
         cleanup_orphaned_session_dir(Some(&stale_duck), &resume_target, true, &root);
         assert!(!stale_dir.exists(), "stale orphan should be deleted");

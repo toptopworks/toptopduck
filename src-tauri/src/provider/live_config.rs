@@ -39,7 +39,7 @@ pub struct LiveProviderConfig {
     /// Serializes the in-process writers (`store` + MCP upsert + sessions-dir).
     /// All do read-modify-write on the config file; without coordination two writers
     /// interleave and lose an entire update (`T1 load -> T2 load -> T1 write ->
-    /// T2 write` drops T1). Mirrors the `.duck` single-writer (issue #50).
+    /// T2 write` drops T1). Mirrors the `recipe.json` single-writer (issue #50).
     /// Pure reads (`load`) do NOT take this lock -- they honest-degrade and
     /// tolerate reading a value that is about to be overwritten.
     write_lock: Arc<Mutex<()>>,
@@ -852,6 +852,23 @@ impl LiveProviderConfig {
         self.cli_tools()
             .into_iter()
             .filter(|tool| tool.enabled)
+            .filter(|tool| {
+                // The validate-side emptiness rule's read twin (the upsert
+                // rejects a blank `executable`): a hand-edited entry with
+                // one is dropped here rather than reaching the executor as
+                // a nameless miss.
+                if tool.executable.trim().is_empty() {
+                    log::warn!(
+                        "cli tool `{}` in the config file has a blank \
+                         executable; it is excluded from the tool surface \
+                         (set an executable path or name)",
+                        tool.name
+                    );
+                    false
+                } else {
+                    true
+                }
+            })
             .filter(|tool| {
                 // The validate-side legal-shape rule's read twin (issue
                 // #675): one predicate, `has_legal_shape`, serves both
