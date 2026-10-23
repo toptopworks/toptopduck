@@ -187,7 +187,7 @@ function renderPane() {
             sessionName=""
             onFirstTurnSettled={noop}
             approvalEvents={approvalEvents}
-            recipePath="C:/sessions/sid-1.duck"
+            recipePath="C:/sessions/sid-1.json"
             onRename={noop}
             onClose={noop}
             onDelete={noop}

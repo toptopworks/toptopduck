@@ -36,7 +36,7 @@ vi.mock("vega-embed", () => ({
   default: vi.fn().mockResolvedValue({ finalize: vi.fn(), view: { resize: vi.fn() } }),
 }));
 
-const DUCK = "C:/sessions/s1/session.duck";
+const DUCK = "C:/sessions/s1/recipe.json";
 
 function renderView(
   path: string,

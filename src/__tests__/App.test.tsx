@@ -155,7 +155,7 @@ import { flowFailedMessage } from "../lib/error-presentation";
 // flows, not the shell management actions). Collected here so the three render
 // sites share one source instead of repeating five identical lines each.
 const HEADER_MGMT_PROPS = {
-  recipePath: "/test/session.duck",
+  recipePath: "/test/recipe.json",
   onRename: () => {},
   onClose: () => {},
   onDelete: () => {},

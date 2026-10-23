@@ -81,25 +81,26 @@ const CATALOG_IDS: Readonly<Record<string, Readonly<Record<string, string | null
     Cancelled: "error.rowRead.cancelled",
   },
   ResumeError: {
-    Load: null, // recurses DuckLoadError
+    Load: null, // recurses RecipeLoadError
     SourceMissing: "error.resume.sourceMissing",
     Replay: "error.resume.replay",
+    Restore: "error.resume.restore",
     ActiveMissing: "error.resume.activeMissing",
     Cancelled: "error.resume.cancelled",
     Aborted: "error.resume.aborted",
-    AlreadyOpen: "error.duck.alreadyOpen",
+    AlreadyOpen: "error.recipe.alreadyOpen",
   },
   DuckLoadError: {
-    Io: "error.duck.loadIo",
-    Parse: "error.duck.loadParse",
-    VersionMismatch: "error.duck.versionMismatch",
-    Migration: "error.duck.migration",
+    Io: "error.recipe.loadIo",
+    Parse: "error.recipe.loadParse",
+    VersionMismatch: "error.recipe.versionMismatch",
+    Migration: "error.recipe.migration",
   },
   SaveError: {
     Serialize: "error.save.serialize",
     Io: "error.save.io",
     Rename: "error.save.rename",
-    AlreadyOpen: "error.duck.alreadyOpen",
+    AlreadyOpen: "error.recipe.alreadyOpen",
   },
   StoreCommandError: {
     OpenConflict: "error.store.openConflict",

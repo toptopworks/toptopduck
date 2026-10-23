@@ -132,6 +132,10 @@ fn resume_error() -> Vec<ResumeError> {
             reference_name: String::new(),
             detail: String::new(),
         },
+        ResumeError::Restore {
+            reference_name: String::new(),
+            detail: String::new(),
+        },
         ResumeError::ActiveMissing(String::new()),
         ResumeError::Cancelled,
         ResumeError::Aborted,

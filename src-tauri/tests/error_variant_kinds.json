@@ -30,6 +30,7 @@
     "Cancelled",
     "Load",
     "Replay",
+    "Restore",
     "SourceMissing"
   ],
   "RowReadError": [

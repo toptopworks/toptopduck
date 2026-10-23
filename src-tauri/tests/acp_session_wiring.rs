@@ -809,7 +809,7 @@ fn resumed_external_turn_without_invocations_records_empty_provenance() {
     );
 
     let duck_dir = tempfile::tempdir().unwrap();
-    let recipe_path = duck_dir.path().join("resume.duck");
+    let recipe_path = duck_dir.path().join("resume.json");
     let (mut session, old_path, _guard) = external_session("text_reply");
     session
         .bind_recipe(recipe_path.clone(), "resume".into())

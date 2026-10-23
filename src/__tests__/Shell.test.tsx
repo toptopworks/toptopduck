@@ -79,7 +79,7 @@ vi.mock("../api", async (importOriginal) => {
     listLiveSessions: vi.fn(async () => []),
     closeSession: vi.fn(async () => false),
     closeSessionAndWaitRelease: vi.fn(async () => {}),
-    createSession: vi.fn(async () => ({ session_id: "sess-1", recipe_path: "/sessions/sess-1/session.duck" })),
+    createSession: vi.fn(async () => ({ session_id: "sess-1", recipe_path: "/sessions/sess-1/recipe.json" })),
     deleteSession: vi.fn(async () => {}),
     listSessions: vi.fn(async () => []),
     renameSession: vi.fn(async () => ""),
@@ -1036,8 +1036,8 @@ describe("App multi-session shell (issue #81 ACs)", () => {
     // thread query is NOT re-issued -- conversation stays at one call per
     // session.
     vi.mocked(createSession)
-      .mockResolvedValueOnce({ session_id: "sess-1", recipe_path: "/sessions/sess-1/session.duck" })
-      .mockResolvedValueOnce({ session_id: "sess-2", recipe_path: "/sessions/sess-2/session.duck" });
+      .mockResolvedValueOnce({ session_id: "sess-1", recipe_path: "/sessions/sess-1/recipe.json" })
+      .mockResolvedValueOnce({ session_id: "sess-2", recipe_path: "/sessions/sess-2/recipe.json" });
     render(<App />);
     await openSession();
     await openSession();
@@ -1065,7 +1065,7 @@ describe("App multi-session shell (issue #81 ACs)", () => {
   // result). Asserts the createSession + ingestFile wiring at the shell
   // boundary.
   it("drop on the cold-start empty area mints a session and ingests the file (ADR-0061/0092, #81 A1, #501)", async () => {
-    vi.mocked(createSession).mockResolvedValueOnce({ session_id: "sess-drop", recipe_path: "/sessions/sess-drop/session.duck" });
+    vi.mocked(createSession).mockResolvedValueOnce({ session_id: "sess-drop", recipe_path: "/sessions/sess-drop/recipe.json" });
     vi.mocked(ingestFile).mockResolvedValue({ kind: "Loaded", data: src("dropped") });
     render(<App />);
     // Cold start: the centered bar + greeting are showing, no session yet.
@@ -1106,7 +1106,7 @@ describe("App multi-session shell (issue #81 ACs)", () => {
   // #501 AC: the drop-minted session appears in the sidebar list, and the bar
   // slot glides centered -> bottom once activeSessionId flips.
   it("a drop-minted session appears in the sidebar + the bar moves to the bottom (#501)", async () => {
-    vi.mocked(createSession).mockResolvedValueOnce({ session_id: "sess-drop", recipe_path: "/sessions/sess-drop/session.duck" });
+    vi.mocked(createSession).mockResolvedValueOnce({ session_id: "sess-drop", recipe_path: "/sessions/sess-drop/recipe.json" });
     vi.mocked(ingestFile).mockResolvedValue({ kind: "Loaded", data: src("dropped") });
     render(<App />);
     await waitFor(() => expect(dropEvent.handler).not.toBeNull());
@@ -1151,7 +1151,7 @@ describe("App turn-progress phase feedback (issue #82 / ADR-0059)", () => {
   });
 
   it("renders Thinking / tool-call phase labels during an in-flight ask", async () => {
-    vi.mocked(createSession).mockResolvedValue({ session_id: "sess-1", recipe_path: "/sessions/sess-1/session.duck" });
+    vi.mocked(createSession).mockResolvedValue({ session_id: "sess-1", recipe_path: "/sessions/sess-1/recipe.json" });
     const { resolve } = pendingAsk();
     render(<App />);
     await openSession();
@@ -1195,7 +1195,7 @@ describe("App turn-progress phase feedback (issue #82 / ADR-0059)", () => {
   });
 
   it("ignores turn-progress events addressed to a different session (ADR-0056 filter)", async () => {
-    vi.mocked(createSession).mockResolvedValue({ session_id: "sess-1", recipe_path: "/sessions/sess-1/session.duck" });
+    vi.mocked(createSession).mockResolvedValue({ session_id: "sess-1", recipe_path: "/sessions/sess-1/recipe.json" });
     const { resolve } = pendingAsk();
     render(<App />);
     await openSession();
@@ -1251,7 +1251,7 @@ describe("App single in-flight + cancel (issue #82 / ADR-0021/0028)", () => {
   });
 
   it("stop fires cancelQuery on the session (ADR-0021)", async () => {
-    vi.mocked(createSession).mockResolvedValue({ session_id: "sess-1", recipe_path: "/sessions/sess-1/session.duck" });
+    vi.mocked(createSession).mockResolvedValue({ session_id: "sess-1", recipe_path: "/sessions/sess-1/recipe.json" });
     const { resolve } = pendingAsk();
     render(<App />);
     await openSession();
@@ -1381,8 +1381,8 @@ describe("App error boundary partitioning (issue #82 / ADR-0058)", () => {
     // The L2 session-body boundary in sess-1 catches its crash; sess-2 is a
     // sibling pane and stays fully functional.
     vi.mocked(createSession)
-      .mockResolvedValueOnce({ session_id: "sess-1", recipe_path: "/sessions/sess-1/session.duck" })
-      .mockResolvedValueOnce({ session_id: "sess-2", recipe_path: "/sessions/sess-2/session.duck" });
+      .mockResolvedValueOnce({ session_id: "sess-1", recipe_path: "/sessions/sess-1/recipe.json" })
+      .mockResolvedValueOnce({ session_id: "sess-2", recipe_path: "/sessions/sess-2/recipe.json" });
     vi.mocked(conversation).mockImplementation(async (sid) => {
       if (sid === "sess-1") {
         return [
@@ -1436,7 +1436,7 @@ describe("App resume + close-in-flight seams (issue #83)", () => {
     // stage-stale disclosure banner (ADR-0047 honest wording).
     vi.mocked(listSessions).mockResolvedValue([
       {
-        recipe_path: "/x/persisted.duck",
+        recipe_path: "/x/persisted.json",
         display_name: "季报",
         last_modified_at: Date.now(),
         source_summary: { first_source_name: "people", source_count: 1, turn_count: 2 },
@@ -1450,7 +1450,7 @@ describe("App resume + close-in-flight seams (issue #83)", () => {
       ...src("result_2"),
       stale: { reference_name: "result_2", display_name: "result_2", reason: "Replaced" },
     };
-    vi.mocked(createSession).mockResolvedValue({ session_id: "sess-resume", recipe_path: "/sessions/sess-resume/session.duck" });
+    vi.mocked(createSession).mockResolvedValue({ session_id: "sess-resume", recipe_path: "/sessions/sess-resume/recipe.json" });
     vi.mocked(openRecipe).mockResolvedValue(undefined);
     vi.mocked(listWorkingSet).mockResolvedValue([r1, r2]);
     vi.mocked(activeDataset).mockResolvedValue(r2);
@@ -1473,7 +1473,7 @@ describe("App resume + close-in-flight seams (issue #83)", () => {
   it("filters resume-progress events by sessionId (ADR-0056 / #76, #83 R5)", async () => {
     vi.mocked(listSessions).mockResolvedValue([
       {
-        recipe_path: "/x/persisted.duck",
+        recipe_path: "/x/persisted.json",
         display_name: "季报",
         last_modified_at: Date.now(),
         source_summary: { first_source_name: "people", source_count: 1, turn_count: 1 },
@@ -1487,7 +1487,7 @@ describe("App resume + close-in-flight seams (issue #83)", () => {
     vi.mocked(openRecipe).mockImplementation(
       () => new Promise<void>((r) => { resolveOpenDuck = r; }),
     );
-    vi.mocked(createSession).mockResolvedValue({ session_id: "sess-resume", recipe_path: "/sessions/sess-resume/session.duck" });
+    vi.mocked(createSession).mockResolvedValue({ session_id: "sess-resume", recipe_path: "/sessions/sess-resume/recipe.json" });
 
     render(<App />);
     await waitFor(() => expect(screen.getByText("季报")).toBeInTheDocument());
@@ -1495,7 +1495,7 @@ describe("App resume + close-in-flight seams (issue #83)", () => {
     // openRecipe is called AFTER `targetSid = sid`, so once it fires the filter
     // is armed.
     await waitFor(() =>
-      expect(openRecipe).toHaveBeenCalledWith("sess-resume", "/x/persisted.duck"),
+      expect(openRecipe).toHaveBeenCalledWith("sess-resume", "/x/persisted.json"),
     );
 
     // Event for a DIFFERENT session: filtered -> status stays "正在打开…".
@@ -1602,7 +1602,7 @@ describe("App artifact presentation (issue #1088, ADR-0124 Decision 3/4)", () =>
     // artifacts dir and degrade the iframe to the fallback face.
     vi.mocked(createSession).mockResolvedValue({
       session_id: "sess-1",
-      recipe_path: "/sessions/sess-1/session.duck",
+      recipe_path: "/sessions/sess-1/recipe.json",
     });
     vi.stubGlobal("navigator", { language: "zh-CN" });
   });
@@ -1748,7 +1748,7 @@ describe("App viz stage presentation (issue #1093, ADR-0120 calibration)", () =>
     vi.mocked(conversation).mockImplementation(async () => state.thread);
     vi.mocked(createSession).mockResolvedValue({
       session_id: "sess-1",
-      recipe_path: "/sessions/sess-1/session.duck",
+      recipe_path: "/sessions/sess-1/recipe.json",
     });
     vi.mocked(embed).mockResolvedValue(embedOk());
     vi.stubGlobal("navigator", { language: "zh-CN" });
@@ -1860,8 +1860,8 @@ describe("App shell window collapse + drag-drop bisection (issue #84)", () => {
     // elements and asserts the forwarded (0, deltaY) pairs, not a scrollTop
     // change.
     vi.mocked(createSession)
-      .mockResolvedValueOnce({ session_id: "sess-1", recipe_path: "/sessions/sess-1/session.duck" })
-      .mockResolvedValueOnce({ session_id: "sess-2", recipe_path: "/sessions/sess-2/session.duck" });
+      .mockResolvedValueOnce({ session_id: "sess-1", recipe_path: "/sessions/sess-1/recipe.json" })
+      .mockResolvedValueOnce({ session_id: "sess-2", recipe_path: "/sessions/sess-2/recipe.json" });
     render(<App />);
     // Cold start: no pane layer exists yet (pinned), so the forward is a
     // structural no-op -- the centered bar has nothing to scroll.
@@ -2299,7 +2299,7 @@ describe("App shell window collapse + drag-drop bisection (issue #84)", () => {
     // the file to that session's working set (ADR-0022 source event) -- it does
     // NOT mint a new session. createSession is called once (for openSession),
     // never again for the drop.
-    vi.mocked(createSession).mockResolvedValueOnce({ session_id: "sess-1", recipe_path: "/sessions/sess-1/session.duck" });
+    vi.mocked(createSession).mockResolvedValueOnce({ session_id: "sess-1", recipe_path: "/sessions/sess-1/recipe.json" });
     vi.mocked(ingestFile).mockResolvedValue({ kind: "Loaded", data: src("dropped") });
     render(<App />);
     await openSession();
@@ -2369,7 +2369,7 @@ describe("App session soft-cap hint (ADR-0046/0050, issue #108)", () => {
     // getByRole would match many; the soft-cap Alert is the only status inside
     // the topbar.
     let n = 0;
-    vi.mocked(createSession).mockImplementation(async () => ({ session_id: `sess-${++n}`, recipe_path: `/sessions/sess-${n}/session.duck` }));
+    vi.mocked(createSession).mockImplementation(async () => ({ session_id: `sess-${++n}`, recipe_path: `/sessions/sess-${n}/recipe.json` }));
     render(<App />);
     for (let i = 0; i < 8; i++) {
       // ADR-0092: each openSession() clicks "+" (cold start), then types +
@@ -2442,7 +2442,7 @@ describe("App Ctrl/⌘+K session-search modal (ADR-0072, issue #252)", () => {
   function twoSessions() {
     return [
       {
-        recipe_path: "/x/alpha.duck",
+        recipe_path: "/x/alpha.json",
         display_name: "alpha session",
         last_modified_at: 2000,
         source_summary: { first_source_name: "alpha_src", source_count: 1, turn_count: 3 },
@@ -2451,7 +2451,7 @@ describe("App Ctrl/⌘+K session-search modal (ADR-0072, issue #252)", () => {
         archived: false,
       },
       {
-        recipe_path: "/x/beta.duck",
+        recipe_path: "/x/beta.json",
         display_name: "beta session",
         last_modified_at: 1000,
         source_summary: { first_source_name: "beta_src", source_count: 1, turn_count: 7 },
@@ -2535,7 +2535,7 @@ describe("App Ctrl/⌘+K session-search modal (ADR-0072, issue #252)", () => {
     // matters for this assertion (the sid is an internal correlation id).
     fireEvent.keyDown(input, { key: "Enter" });
     await waitFor(() =>
-      expect(openRecipe).toHaveBeenCalledWith(expect.any(String), "/x/alpha.duck"),
+      expect(openRecipe).toHaveBeenCalledWith(expect.any(String), "/x/alpha.json"),
     );
   });
 
@@ -2620,7 +2620,7 @@ describe("Composer control row (ADR-0083, issues #350/#351)", () => {
     // survive clearAllMocks, and this describe's ingest / badge assertions
     // depend on the exact sessionId + clean reads. Pin the factory behavior
     // back (mirrors the error-boundary describe's conversation reset).
-    vi.mocked(createSession).mockResolvedValue({ session_id: "sess-1", recipe_path: "/sessions/sess-1/session.duck" });
+    vi.mocked(createSession).mockResolvedValue({ session_id: "sess-1", recipe_path: "/sessions/sess-1/recipe.json" });
     vi.mocked(conversation).mockImplementation(async () => state.thread);
     vi.mocked(listWorkingSet).mockImplementation(async () => state.workingSet);
     vi.mocked(activeDataset).mockImplementation(async () => null);
@@ -2708,7 +2708,7 @@ describe("Composer control row (ADR-0083, issues #350/#351)", () => {
     // is per_call, which a hardcoded-default Select would also render).
     vi.mocked(listSessions).mockResolvedValue([
       {
-        recipe_path: "/x/persisted.duck",
+        recipe_path: "/x/persisted.json",
         display_name: "季报",
         last_modified_at: Date.now(),
         source_summary: { first_source_name: "people", source_count: 1, turn_count: 1 },
@@ -2717,7 +2717,7 @@ describe("Composer control row (ADR-0083, issues #350/#351)", () => {
         archived: false,
       },
     ]);
-    vi.mocked(createSession).mockResolvedValue({ session_id: "sess-resume", recipe_path: "/sessions/sess-resume/session.duck" });
+    vi.mocked(createSession).mockResolvedValue({ session_id: "sess-resume", recipe_path: "/sessions/sess-resume/recipe.json" });
     vi.mocked(openRecipe).mockResolvedValue(undefined);
     vi.mocked(getAuthorizationMode).mockResolvedValue("no_confirmation");
 
@@ -3163,8 +3163,8 @@ describe("Composer skill picker pre-activation (ADR-0112, issue #716)", () => {
 
   it("session-scope intents never leak into another session and restore on switch-back (issue #718)", async () => {
     vi.mocked(createSession)
-      .mockResolvedValueOnce({ session_id: "sess-1", recipe_path: "/sessions/sess-1/session.duck" })
-      .mockResolvedValueOnce({ session_id: "sess-2", recipe_path: "/sessions/sess-2/session.duck" });
+      .mockResolvedValueOnce({ session_id: "sess-1", recipe_path: "/sessions/sess-1/recipe.json" })
+      .mockResolvedValueOnce({ session_id: "sess-2", recipe_path: "/sessions/sess-2/recipe.json" });
     render(<App />);
     await openSession(); // sess-1
     const bar = screen.getByLabelText("提问");
@@ -3264,7 +3264,7 @@ describe("shell submit fire-path defensive log (#825)", () => {
     state.workingSet = [];
     vi.mocked(readRows).mockResolvedValue(ROW_PAGE);
     vi.mocked(getAppConfig).mockResolvedValue(baseAppConfig({ sidebar_collapsed: false }));
-    vi.mocked(createSession).mockResolvedValue({ session_id: "sess-1", recipe_path: "/sessions/sess-1/session.duck" });
+    vi.mocked(createSession).mockResolvedValue({ session_id: "sess-1", recipe_path: "/sessions/sess-1/recipe.json" });
     vi.mocked(conversation).mockImplementation(async () => state.thread);
     vi.mocked(listWorkingSet).mockImplementation(async () => state.workingSet);
     vi.mocked(activeDataset).mockImplementation(async () => null);

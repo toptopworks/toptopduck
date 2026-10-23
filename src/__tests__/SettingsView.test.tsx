@@ -41,7 +41,7 @@ vi.mock("../api", async (importOriginal) => {
     onTrayOpenSession: vi.fn(async () => () => {}),
     onTrayNewSession: vi.fn(async () => () => {}),
     closeSession: vi.fn(async () => false),
-    createSession: vi.fn(async () => ({ session_id: "sess-1", recipe_path: "/sessions/sess-1/session.duck" })),
+    createSession: vi.fn(async () => ({ session_id: "sess-1", recipe_path: "/sessions/sess-1/recipe.json" })),
     listSessions: vi.fn(async () => []),
     listWorkingSet: vi.fn(async () => []),
     activeDataset: vi.fn(async () => null),

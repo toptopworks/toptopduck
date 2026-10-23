@@ -33,7 +33,7 @@ import { usePersistedSessions } from "../usePersistedSessions";
 const intl = catalogIntl("en-US");
 
 const SESSION_A: SessionMetadata = {
-  recipe_path: "/x/a.duck",
+  recipe_path: "/x/a.json",
   display_name: "A",
   last_modified_at: 1000,
   source_summary: { first_source_name: null, source_count: 0, turn_count: 0 },
@@ -150,7 +150,7 @@ describe("usePersistedSessions archived fetch (ADR-0127, issue #1175)", () => {
     // reach setState -- asserting sessions right after the call-count wait
     // races the settle (CI flake).
     await waitFor(() =>
-      expect(result.current.sessions.map((m) => m.recipe_path)).toEqual(["/x/a.duck"]),
+      expect(result.current.sessions.map((m) => m.recipe_path)).toEqual(["/x/a.json"]),
     );
     expect(result.current.archivedSessions).toEqual([]);
     // A single unparameterized call -- the hidden view never pays for the
@@ -167,7 +167,7 @@ describe("usePersistedSessions archived fetch (ADR-0127, issue #1175)", () => {
     // sees an archived row.
     const ARCH: SessionMetadata = {
       ...SESSION_A,
-      recipe_path: "/x/arch.duck",
+      recipe_path: "/x/arch.json",
       archived: true,
     };
     vi.mocked(listSessions).mockResolvedValue([SESSION_A, ARCH]);
@@ -176,10 +176,10 @@ describe("usePersistedSessions archived fetch (ADR-0127, issue #1175)", () => {
     );
     await waitFor(() =>
       expect(result.current.archivedSessions.map((m) => m.recipe_path)).toEqual([
-        "/x/arch.duck",
+        "/x/arch.json",
       ]),
     );
-    expect(result.current.sessions.map((m) => m.recipe_path)).toEqual(["/x/a.duck"]);
+    expect(result.current.sessions.map((m) => m.recipe_path)).toEqual(["/x/a.json"]);
     // A single call, parameterized -- no second scan for the archived tail.
     expect(listSessions).toHaveBeenCalledTimes(1);
     expect(vi.mocked(listSessions).mock.calls[0][0]).toEqual({
@@ -194,7 +194,7 @@ describe("usePersistedSessions archived fetch (ADR-0127, issue #1175)", () => {
     // single shared error -- no second settle order to race a clear against.
     const ARCH: SessionMetadata = {
       ...SESSION_A,
-      recipe_path: "/x/arch.duck",
+      recipe_path: "/x/arch.json",
       archived: true,
     };
     vi.mocked(listSessions).mockResolvedValueOnce([SESSION_A, ARCH]);
@@ -203,16 +203,16 @@ describe("usePersistedSessions archived fetch (ADR-0127, issue #1175)", () => {
     );
     await waitFor(() =>
       expect(result.current.archivedSessions.map((m) => m.recipe_path)).toEqual([
-        "/x/arch.duck",
+        "/x/arch.json",
       ]),
     );
     vi.mocked(listSessions).mockRejectedValueOnce(new Error("boom"));
     act(() => result.current.refreshSessions());
     await waitFor(() => expect(result.current.sessionsError).not.toBeNull());
     // Both partitions survive the failed refresh untouched.
-    expect(result.current.sessions.map((m) => m.recipe_path)).toEqual(["/x/a.duck"]);
+    expect(result.current.sessions.map((m) => m.recipe_path)).toEqual(["/x/a.json"]);
     expect(result.current.archivedSessions.map((m) => m.recipe_path)).toEqual([
-      "/x/arch.duck",
+      "/x/arch.json",
     ]);
   });
 });

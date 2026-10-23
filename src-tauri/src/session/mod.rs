@@ -148,6 +148,17 @@ pub enum ResumeError {
         reference_name: String,
         detail: String,
     },
+    /// Mounting a tree snapshot onto admin failed on the watermark-hit restore
+    /// path (ADR-0136 D3). The recipe.json itself read fine -- the failure is
+    /// the read-only ATTACH of an in-tree snapshot -- so this is NOT
+    /// [`Self::Load`] (whose frontend message blames the recipe file read).
+    /// `probe` already validated every snapshot before `restore_hit` ran, so
+    /// landing here means fresh corruption in the probe-to-attach window and
+    /// the replay fallback would re-fail on the same disk state.
+    Restore {
+        reference_name: String,
+        detail: String,
+    },
     /// The recipe's active pointer does not resolve to a usable registered
     /// source. Two paths land here, both honest stops (the engine never
     /// silently picks a different active source): (1) a corrupt recipe whose
@@ -191,6 +202,10 @@ impl std::fmt::Display for ResumeError {
                 reference_name,
                 detail,
             } => write!(f, "重放「{reference_name}」失败：{detail}"),
+            Self::Restore {
+                reference_name,
+                detail,
+            } => write!(f, "恢复树内快照「{reference_name}」失败：{detail}"),
             Self::ActiveMissing(name) => write!(f, "会话焦点指向未注册的源「{name}」"),
             Self::Cancelled => write!(f, "已取消恢复"),
             Self::Aborted => write!(f, "已中止恢复"),
@@ -2039,7 +2054,7 @@ mod tests {
         // before any turn. The file reads back as a v1 recipe carrying the
         // session name.
         let dir = tempfile::tempdir().expect("tempdir");
-        let path = dir.path().join("session.duck");
+        let path = dir.path().join("recipe.json");
         let mut session = Session::new().expect("session");
         session
             .bind_recipe(path.clone(), "我的分析".into())
@@ -2067,7 +2082,7 @@ mod tests {
         // covered by the black-box suite, whose fixture lives outside the
         // recipe.json tempdir and resumes through the absolute fallback.
         let dir = tempfile::tempdir().expect("tempdir");
-        let duck = dir.path().join("session.duck");
+        let duck = dir.path().join("recipe.json");
         let in_subtree = dir.path().join("data.csv");
         std::fs::write(&in_subtree, "name,score\nAda,9\n").expect("write csv");
 
@@ -3015,7 +3030,7 @@ mod tests {
         );
         let mut session = Session::with_provider(Box::new(provider)).expect("session");
         session
-            .bind_recipe(duck_dir.path().join("session.duck"), "s".into())
+            .bind_recipe(duck_dir.path().join("recipe.json"), "s".into())
             .expect("bind");
         let report = session.temp_path.join("page.html");
         std::fs::write(&report, "<html/>").expect("write temp report");
@@ -3234,7 +3249,7 @@ mod tests {
 
         // Use a temp dir for the recipe.json so .assets/ goes alongside it.
         let duck_dir = tempfile::tempdir().expect("duck dir");
-        let recipe_path = duck_dir.path().join("session.duck");
+        let recipe_path = duck_dir.path().join("recipe.json");
 
         session
             .bind_recipe(recipe_path.clone(), "test session".into())
@@ -3331,8 +3346,8 @@ mod tests {
     }
 
     /// Bind a session to a temp recipe.json file so record_turn's persist path is
-    /// Some. Returns (session, _duck_file) — the caller holds the guard.
-    fn session_with_duck(name: &str) -> (Session, NamedTempFile) {
+    /// Some. Returns (session, _recipe_file) — the caller holds the guard.
+    fn session_with_recipe(name: &str) -> (Session, NamedTempFile) {
         let duck = NamedTempFile::new().expect("temp recipe.json");
         let mut session = Session::new().expect("session");
         session
@@ -3343,7 +3358,7 @@ mod tests {
 
     #[test]
     fn record_turn_auto_names_on_first_turn() {
-        let (mut session, _duck) = session_with_duck("");
+        let (mut session, _duck) = session_with_recipe("");
         assert_eq!(session.session_name(), Some(""));
 
         // Simulate a terminal turn reaching record_turn.
@@ -3461,7 +3476,7 @@ mod tests {
 
     #[test]
     fn record_turn_does_not_overwrite_on_second_turn() {
-        let (mut session, _duck) = session_with_duck("");
+        let (mut session, _duck) = session_with_recipe("");
         session.record_turn(
             "first question",
             TurnOutcome::Textual {
@@ -3503,7 +3518,7 @@ mod tests {
 
     #[test]
     fn record_turn_auto_name_truncates_long_question() {
-        let (mut session, _duck) = session_with_duck("");
+        let (mut session, _duck) = session_with_recipe("");
         let long_question = "a very long question that exceeds the session name cap".to_string();
         session.record_turn(
             &long_question,
@@ -3531,7 +3546,7 @@ mod tests {
 
     #[test]
     fn record_turn_first_turn_overwrites_then_subsequent_turns_preserve_rename() {
-        let (mut session, _duck) = session_with_duck("");
+        let (mut session, _duck) = session_with_recipe("");
         // User renames before the first turn.
         session.rename("My Analysis").expect("rename");
         assert_eq!(session.session_name(), Some("My Analysis"));
@@ -3594,7 +3609,7 @@ mod tests {
         // ADR-0089: source/skill lifecycle events do not count as turns.
         // A session that loaded a source before its first question still
         // auto-names on that first question.
-        let (mut session, _duck) = session_with_duck("");
+        let (mut session, _duck) = session_with_recipe("");
         // Simulate a source lifecycle event in the timeline.
         session.timeline.push(super::TimelineEntry::Source(
             crate::model::SourceLifecycleEvent {
@@ -3634,7 +3649,7 @@ mod tests {
         // Materialized, not just Textual (no match on outcome before
         // set_session_name). This test pins that contract so a future
         // `match outcome` guard does not silently regress it.
-        let (mut session_a, _duck) = session_with_duck("");
+        let (mut session_a, _duck) = session_with_recipe("");
         session_a.record_turn(
             "why did it break?",
             TurnOutcome::Failed(crate::model::TurnFailure::Execute {
@@ -3654,7 +3669,7 @@ mod tests {
             "Failed first turn still auto-names"
         );
 
-        let (mut session_b, _duck) = session_with_duck("");
+        let (mut session_b, _duck) = session_with_recipe("");
         session_b.record_turn(
             "never finished",
             TurnOutcome::Cancelled(None),
@@ -3756,7 +3771,7 @@ mod tests {
         use crate::model::ThreadEntry;
 
         let dir = tempfile::tempdir().expect("session dir");
-        let duck = dir.path().join("session.duck");
+        let duck = dir.path().join("recipe.json");
 
         // Bind FIRST: the settle-time materialization derives the assets dir
         // from the bound duck path, and createSession binds from the start
@@ -3888,7 +3903,7 @@ mod tests {
         use crate::provider::UnwiredProvider;
 
         let dir = tempfile::tempdir().expect("session dir");
-        let duck = dir.path().join("session.duck");
+        let duck = dir.path().join("recipe.json");
         let assets = |name: &str| dir.path().join("assets").join(name);
 
         let mut session = Session::new().expect("session");
@@ -4035,7 +4050,7 @@ mod tests {
         use crate::provider::UnwiredProvider;
 
         let dir = tempfile::tempdir().expect("session dir");
-        let duck = dir.path().join("session.duck");
+        let duck = dir.path().join("recipe.json");
         let assets = |name: &str| dir.path().join("assets").join(name);
 
         let mut session = Session::new().expect("session");

@@ -56,7 +56,7 @@ describe("fmtError — SessionError::Resume (open_recipe reject)", () => {
     const cases: Array<[ResumeError, string]> = [
       [{ kind: "Cancelled" }, en["error.resume.cancelled"]],
       [{ kind: "Aborted" }, en["error.resume.aborted"]],
-      [{ kind: "AlreadyOpen", data: "/x/a.duck" }, en["error.duck.alreadyOpen"]],
+      [{ kind: "AlreadyOpen", data: "/x/a.json" }, en["error.recipe.alreadyOpen"]],
       [
         { kind: "SourceMissing", data: { reference_name: "people", path: "/x", detail: "d" } },
         "Couldn't find the dataset \"people\"",
@@ -64,6 +64,12 @@ describe("fmtError — SessionError::Resume (open_recipe reject)", () => {
       [
         { kind: "Replay", data: { reference_name: "result_1", detail: "d" } },
         "Failed to restore \"result_1\"",
+      ],
+      // Restore names the SNAPSHOT mount, not the recipe.json read (ADR-0136 D3
+      // watermark-hit path) -- its message must not read as file-unreadable.
+      [
+        { kind: "Restore", data: { reference_name: "orders", detail: "attach failed" } },
+        "Failed to restore the snapshot \"orders\"",
       ],
       [
         { kind: "ActiveMissing", data: "ghost" },
@@ -75,7 +81,7 @@ describe("fmtError — SessionError::Resume (open_recipe reject)", () => {
     }
   });
 
-  it("recurses ResumeError::Load into the nested DuckLoadError kind", () => {
+  it("recurses ResumeError::Load into the nested RecipeLoadError kind", () => {
     // Load delegates to the nested recipe.json load error so the version-mismatch
     // "please upgrade" hint (with interpolated versions) surfaces, not a
     // generic "resume failed".
@@ -89,16 +95,16 @@ describe("fmtError — SessionError::Resume (open_recipe reject)", () => {
     );
     expect(
       fmtError(resume({ kind: "Load", data: { kind: "Io", data: "io-fail" } }), intl),
-    ).toBe(en["error.duck.loadIo"]);
+    ).toBe(en["error.recipe.loadIo"]);
     expect(
       fmtError(resume({ kind: "Load", data: { kind: "Parse", data: "parse-fail" } }), intl),
-    ).toBe(en["error.duck.loadParse"]);
+    ).toBe(en["error.recipe.loadParse"]);
     expect(
       fmtError(
         resume({ kind: "Load", data: { kind: "Migration", data: { kind: "Field", data: "bad" } } }),
         intl,
       ),
-    ).toBe(en["error.duck.migration"]);
+    ).toBe(en["error.recipe.migration"]);
   });
 
   it("does not leak the SourceMissing detail into the rendered message (ADR-0029)", () => {
@@ -185,13 +191,13 @@ describe("fmtError — SessionError source-management kinds (issue #121)", () =>
 describe("fmtError — SaveError", () => {
   it("renders each SaveError kind via the locale catalog (issue #120)", () => {
     // take_persist_error returns a typed SaveError; the banner renders the kind
-    // through the catalog. AlreadyOpen shares the merged error.duck.alreadyOpen
+    // through the catalog. AlreadyOpen shares the merged error.recipe.alreadyOpen
     // id with ResumeError::AlreadyOpen.
     const cases: Array<[SaveError, string]> = [
       [{ kind: "Serialize", data: "ser-fail" }, en["error.save.serialize"]],
       [{ kind: "Io", data: "io-fail" }, en["error.save.io"]],
       [{ kind: "Rename", data: "rename-fail" }, en["error.save.rename"]],
-      [{ kind: "AlreadyOpen", data: "/x/a.duck" }, en["error.duck.alreadyOpen"]],
+      [{ kind: "AlreadyOpen", data: "/x/a.json" }, en["error.recipe.alreadyOpen"]],
     ];
     for (const [err, expected] of cases) {
       expect(fmtError(err, intl)).toBe(expected);
@@ -307,7 +313,7 @@ describe("errorDetail", () => {
         }),
       ),
     ).toBe("traversal refused");
-    expect(errorDetail(resume({ kind: "AlreadyOpen", data: "/x/a.duck" }))).toBe("/x/a.duck");
+    expect(errorDetail(resume({ kind: "AlreadyOpen", data: "/x/a.json" }))).toBe("/x/a.json");
   });
 
   it("returns null for self-contained ResumeError kinds (via SessionError::Resume)", () => {
@@ -320,7 +326,7 @@ describe("errorDetail", () => {
     expect(errorDetail({ kind: "Serialize", data: "ser-fail" })).toBe("ser-fail");
     expect(errorDetail({ kind: "Io", data: "io-fail" })).toBe("io-fail");
     expect(errorDetail({ kind: "Rename", data: "rename-fail" })).toBe("rename-fail");
-    expect(errorDetail({ kind: "AlreadyOpen", data: "/x/a.duck" })).toBe("/x/a.duck");
+    expect(errorDetail({ kind: "AlreadyOpen", data: "/x/a.json" })).toBe("/x/a.json");
   });
 
   it("extracts StoreCommandError failure detail for the fold (issue #130)", () => {

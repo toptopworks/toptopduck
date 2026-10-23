@@ -6,7 +6,7 @@
 // preserved so fmtError / errorDetail never read an unverified field.
 
 import type {
-  DuckLoadError,
+  RecipeLoadError,
   ExportRowsError,
   MigrationError,
   RemoveSourceError,
@@ -85,10 +85,10 @@ export function isMigrationError(e: unknown): e is MigrationError {
   }
 }
 
-// Narrow an unknown value to a DuckLoadError -- the recipe.json load error
+// Narrow an unknown value to a RecipeLoadError -- the recipe.json load error
 // (persistence::io::LoadError), distinct from the ingest model::LoadError
 // (issue #120). Migration recurses into isMigrationError.
-export function isDuckLoadError(e: unknown): e is DuckLoadError {
+export function isRecipeLoadError(e: unknown): e is RecipeLoadError {
   if (typeof e !== "object" || e === null) return false;
   const kind = (e as { kind?: unknown }).kind;
   switch (kind) {
@@ -114,7 +114,7 @@ export function isDuckLoadError(e: unknown): e is DuckLoadError {
 // Narrow an unknown IPC reject to a ResumeError (issue #120). The `open_recipe`
 // command wraps its ResumeError in SessionError::Resume, so this guard is
 // reached via isSessionError's Resume branch. Load recurses into
-// isDuckLoadError; SourceMissing / Replay verify their struct fields;
+// isRecipeLoadError; SourceMissing / Replay / Restore verify their struct fields;
 // AlreadyOpen / ActiveMissing carry a string under data; Cancelled / Aborted
 // are unit.
 export function isResumeError(e: unknown): e is ResumeError {
@@ -122,7 +122,7 @@ export function isResumeError(e: unknown): e is ResumeError {
   const kind = (e as { kind?: unknown }).kind;
   switch (kind) {
     case "Load":
-      return isDuckLoadError((e as { data?: unknown }).data);
+      return isRecipeLoadError((e as { data?: unknown }).data);
     case "SourceMissing": {
       const d = (e as { data?: unknown }).data;
       return (
@@ -133,7 +133,8 @@ export function isResumeError(e: unknown): e is ResumeError {
         typeof (d as { detail?: unknown }).detail === "string"
       );
     }
-    case "Replay": {
+    case "Replay":
+    case "Restore": {
       const d = (e as { data?: unknown }).data;
       return (
         typeof d === "object" &&

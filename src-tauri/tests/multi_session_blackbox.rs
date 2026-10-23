@@ -208,7 +208,7 @@ fn close_with_inflight_ask_discards_turn_not_in_thread_or_recipe() {
     // persisted to the recipe. A prior successful turn survives in both.
     let store = SessionStore::new();
     let dir = tempfile::tempdir().expect("tempdir");
-    let duck = dir.path().join("session.duck");
+    let duck = dir.path().join("recipe.json");
 
     let cancel = Arc::new(CancelToken::new());
     let provider = FakeProvider::new()
@@ -317,7 +317,7 @@ fn close_wait_release_resolves_immediately_when_no_ask_in_flight() {
     // time recv_timeout returns Ok.
     let store = SessionStore::new();
     let dir = tempfile::tempdir().expect("tempdir");
-    let duck = dir.path().join("session.duck");
+    let duck = dir.path().join("recipe.json");
     let id = bound_session(&store, &duck);
 
     let canonical = toptopduck_lib::persistence::canonicalize_recipe(&duck).expect("canonicalize");
@@ -359,7 +359,7 @@ fn close_wait_release_waits_for_inflight_ask_then_releases_canonical_key() {
     // close (prior behavior), delete would race the ask and hit the gate.
     let store = SessionStore::new();
     let dir = tempfile::tempdir().expect("tempdir");
-    let duck = dir.path().join("session.duck");
+    let duck = dir.path().join("recipe.json");
 
     let cancel = Arc::new(CancelToken::new());
     let provider = FakeProvider::new()
@@ -436,7 +436,7 @@ fn close_wait_release_signal_does_not_fire_while_an_arc_clone_is_held() {
     // the mechanism level with a short window.
     let store = SessionStore::new();
     let dir = tempfile::tempdir().expect("tempdir");
-    let duck = dir.path().join("session.duck");
+    let duck = dir.path().join("recipe.json");
     let id = bound_session(&store, &duck);
 
     // Hold a clone that keeps the Session alive past detach (simulates an
@@ -477,7 +477,7 @@ fn pure_close_does_not_release_canonical_key_while_ask_in_flight() {
     // "close resolves == key released" is caught.
     let store = SessionStore::new();
     let dir = tempfile::tempdir().expect("tempdir");
-    let duck = dir.path().join("session.duck");
+    let duck = dir.path().join("recipe.json");
 
     let cancel = Arc::new(CancelToken::new());
     let provider = FakeProvider::new()
@@ -529,7 +529,7 @@ fn take_drop_signal_returns_none_on_second_take_concurrent_close_wait_defense() 
     // re-arms a stale receiver" or "second take panics" is caught.
     let store = SessionStore::new();
     let dir = tempfile::tempdir().expect("tempdir");
-    let duck = dir.path().join("session.duck");
+    let duck = dir.path().join("recipe.json");
     let id = bound_session(&store, &duck);
 
     let detached = store.detach(&id).expect("detach");
@@ -624,7 +624,7 @@ fn open_recipe_replaces_contents_in_place_other_sessions_unaffected() {
     // seam that still exercises Session::open_recipe end-to-end.
     let store = SessionStore::new();
     let dir = tempfile::tempdir().expect("tempdir");
-    let duck = dir.path().join("a.duck");
+    let duck = dir.path().join("a.json");
 
     // Producer session: bind + one source-free turn so the recipe.json recipe holds
     // result_1, then close it to release the registry key (held by the binding
@@ -722,7 +722,7 @@ fn close_after_resume_discards_inflight_turn_via_shared_closing_flag() {
     // private-field + accessor refactor guards; it had no integration coverage.
     let store = SessionStore::new();
     let dir = tempfile::tempdir().expect("tempdir");
-    let duck = dir.path().join("session.duck");
+    let duck = dir.path().join("recipe.json");
 
     // Producer: bind + one turn so the recipe.json recipe holds result_1, then close
     // to release the canonical-writer key so open_recipe can re-acquire the file.
@@ -839,7 +839,7 @@ fn empty_session_close_deletes_per_session_directory() {
 
     // Bind to a per-session directory (mirrors create_session's setup).
     let session_dir = root.path().join(id.to_string());
-    let recipe_path = session_dir.join("session.duck");
+    let recipe_path = session_dir.join("recipe.json");
     std::fs::create_dir_all(&session_dir).expect("create session dir");
     {
         let handle = store.get(&id).expect("handle");
@@ -847,7 +847,7 @@ fn empty_session_close_deletes_per_session_directory() {
         s.bind_recipe(recipe_path.clone(), String::new())
             .expect("bind");
     }
-    assert!(recipe_path.exists(), "session.duck was created");
+    assert!(recipe_path.exists(), "recipe.json was created");
     assert!(session_dir.exists(), "session dir exists");
 
     // Close + cleanup: the session has no timeline content.
@@ -866,7 +866,7 @@ fn non_empty_session_close_preserves_directory() {
     let id = fresh_session(&store);
 
     let session_dir = root.path().join(id.to_string());
-    let recipe_path = session_dir.join("session.duck");
+    let recipe_path = session_dir.join("recipe.json");
     std::fs::create_dir_all(&session_dir).expect("create session dir");
     {
         let handle = store.get(&id).expect("handle");
@@ -881,12 +881,12 @@ fn non_empty_session_close_preserves_directory() {
             other => panic!("ingest should load, got {other:?}"),
         }
     }
-    assert!(recipe_path.exists(), "session.duck exists before close");
+    assert!(recipe_path.exists(), "recipe.json exists before close");
 
     let cleaned = store.close_and_cleanup_empty(&id).expect("close + cleanup");
     assert!(!cleaned, "non-empty session should NOT report cleanup");
     assert!(session_dir.exists(), "per-session directory preserved");
-    assert!(recipe_path.exists(), "session.duck still on disk");
+    assert!(recipe_path.exists(), "recipe.json still on disk");
 }
 
 #[test]
@@ -899,7 +899,7 @@ fn empty_session_close_idempotent_when_dir_already_deleted() {
     let id = fresh_session(&store);
 
     let session_dir = root.path().join(id.to_string());
-    let recipe_path = session_dir.join("session.duck");
+    let recipe_path = session_dir.join("recipe.json");
     std::fs::create_dir_all(&session_dir).expect("create session dir");
     {
         let handle = store.get(&id).expect("handle");
@@ -935,8 +935,8 @@ fn list_live_reports_bound_sessions_and_close_releases_the_key() {
     // other path could do either.
     let store = SessionStore::new();
     let dir = tempfile::tempdir().expect("tempdir");
-    let duck_a = dir.path().join("a.duck");
-    let duck_b = dir.path().join("b.duck");
+    let duck_a = dir.path().join("a.json");
+    let duck_b = dir.path().join("b.json");
     let a = bound_session(&store, &duck_a);
     let b = bound_session(&store, &duck_b);
 
@@ -980,7 +980,7 @@ fn list_live_marks_an_in_flight_session_unadoptable() {
     // The lock-held fields degrade to None (the sweep never blocks on a turn).
     let store = SessionStore::new();
     let dir = tempfile::tempdir().expect("tempdir");
-    let duck = dir.path().join("session.duck");
+    let duck = dir.path().join("recipe.json");
 
     let cancel = Arc::new(CancelToken::new());
     let provider = FakeProvider::new()

@@ -16,7 +16,7 @@
 //! Hits that resolve INSIDE the session temp working directory (the
 //! external agent's cwd / the built-in tool output area -- wiped on session
 //! close) are materialized by copy into the per-session persistent
-//! `artifacts/` directory (beside `session.duck`, the same per-session
+//! `artifacts/` directory (beside `recipe.json`, the same per-session
 //! directory semantics as the derived-source `assets/` channel); the
 //! manifest stores the materialized path. User-directory absolute hits
 //! stay in place -- the app does not copy user files. File existence is a

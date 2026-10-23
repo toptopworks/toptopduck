@@ -195,7 +195,7 @@ fn resume_restores_working_set_history_and_active() {
     // the full history, and the active pointer are equal before close and
     // after resume. This is the tracer bullet's central end-to-end seam.
     let dir = tempfile::tempdir().expect("tempdir");
-    let duck = dir.path().join("s.duck");
+    let duck = dir.path().join("s.json");
     let session = build_session(&duck);
 
     let before_sources: Vec<(String, String)> = session
@@ -293,7 +293,7 @@ fn resume_restores_working_set_history_and_active() {
 #[test]
 fn resume_restores_the_header_last_runtime_and_the_rewrite_keeps_it() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let duck = dir.path().join("s.duck");
+    let duck = dir.path().join("s.json");
     let session = build_session(&duck);
     drop(session);
 
@@ -340,7 +340,7 @@ fn resume_restores_invocation_semantics_state() {
     // round-trip verbatim so the window replays their bodies ahead of the
     // questions on the next ask.
     let dir = tempfile::tempdir().expect("tempdir");
-    let duck = dir.path().join("invoked.duck");
+    let duck = dir.path().join("invoked.json");
     let v7 = json!({
         "format_version": 7,
         "session_name": "invoked",
@@ -404,7 +404,7 @@ fn open_recipe_accepts_a_v7_file_without_the_header_snapshot_key() {
     // resume still succeeds, the invoked fold still re-folds) went
     // unexercised.
     let dir = tempfile::tempdir().expect("tempdir");
-    let duck = dir.path().join("no-header-key.duck");
+    let duck = dir.path().join("no-header-key.json");
     let v7 = json!({
         "format_version": 7,
         "session_name": "no-header-key",
@@ -450,7 +450,7 @@ fn a_resumed_session_writes_the_header_snapshot_back_into_the_file() {
     // as empty (skip_serializing_if drops the key entirely) and the reopen
     // below would see the empty-snapshot default.
     let dir = tempfile::tempdir().expect("tempdir");
-    let duck = dir.path().join("snapshot-roundtrip.duck");
+    let duck = dir.path().join("snapshot-roundtrip.json");
     let v7 = json!({
         "format_version": 7,
         "session_name": "snapshot-roundtrip",
@@ -500,7 +500,7 @@ fn open_recipe_migrates_a_v6_file_to_v7_invocation_semantics() {
     // activated set retires (no v6 turn carries invocation records, so the
     // invoked fold starts empty).
     let dir = tempfile::tempdir().expect("tempdir");
-    let duck = dir.path().join("v6.duck");
+    let duck = dir.path().join("v6.json");
     let v6 = json!({
         "format_version": 6,
         "session_name": "coexistence era",
@@ -561,7 +561,7 @@ fn a_v6_skill_entry_without_data_fails_to_open() {
     // envelope deserialization (LoadError::Parse), never a fold-side
     // hard error (LoadError::Migration).
     let dir = tempfile::tempdir().expect("tempdir");
-    let duck = dir.path().join("v6-no-data.duck");
+    let duck = dir.path().join("v6-no-data.json");
     let v6 = json!({
         "format_version": 6,
         "session_name": "corrupt era",
@@ -595,7 +595,7 @@ fn duck_file_carries_no_secrets_or_materialized_data() {
     // materialized result columns / sample / row-count, and no viz spec
     // (ADR-0036 contents boundary + secrets-never).
     let dir = tempfile::tempdir().expect("tempdir");
-    let duck = dir.path().join("s.duck");
+    let duck = dir.path().join("s.json");
     let session = build_session(&duck);
     drop(session);
 
@@ -639,7 +639,7 @@ fn resume_round_trips_the_real_multi_call_trace_and_builtin_provenance() {
     }
 
     let dir = tempfile::tempdir().expect("tempdir");
-    let duck = dir.path().join("s.duck");
+    let duck = dir.path().join("s.json");
     let provider = FakeProvider::new().scripted_tool_turn_seq(
         "多少人",
         vec![
@@ -779,7 +779,7 @@ fn v6_recipe_without_body_key_reads_back_with_assumption_intact() {
     use toptopduck_lib::persistence::{read_recipe, save_atomic, Recipe};
 
     let dir = tempfile::tempdir().expect("tempdir");
-    let duck = dir.path().join("s.duck");
+    let duck = dir.path().join("s.json");
 
     let recipe = Recipe::build(
         "旧档".into(),
@@ -834,7 +834,7 @@ fn resume_does_not_replay_no_result_turns() {
     // re-asked (ADR-0034). Concretely: the refuse body reappears verbatim in
     // the post-resume history, produced without any provider reply.
     let dir = tempfile::tempdir().expect("tempdir");
-    let duck = dir.path().join("s.duck");
+    let duck = dir.path().join("s.json");
     let session = build_session(&duck);
     drop(session);
 
@@ -860,7 +860,7 @@ fn resume_emits_visible_progress_events() {
     // verification and per replayed productive turn -- here: 1 source + 2
     // productive turns = 3 events, in source-then-replay order.
     let dir = tempfile::tempdir().expect("tempdir");
-    let duck = dir.path().join("s.duck");
+    let duck = dir.path().join("s.json");
     let session = build_session(&duck);
     drop(session);
 
@@ -909,7 +909,7 @@ fn session_rename_persists_and_survives_resume() {
     // new name. The bound path is untouched (sidebar addressing stays stable),
     // and a blank name is rejected.
     let dir = tempfile::tempdir().expect("tempdir");
-    let duck = dir.path().join("s.duck");
+    let duck = dir.path().join("s.json");
     let mut session = build_session(&duck);
     assert_eq!(session.session_name(), Some("分析 A"));
 
@@ -933,7 +933,7 @@ fn rename_survives_resume_and_references_still_resolve() {
     // (SQL FROM / active pointer / recipe chain) still resolve to the same
     // dataset (ADR-0037: reference name is stable, display name is renamable).
     let dir = tempfile::tempdir().expect("tempdir");
-    let duck = dir.path().join("s.duck");
+    let duck = dir.path().join("s.json");
     let csv = fixture("people.csv");
     let provider = FakeProvider::new().scripted_tool_turn_seq(
         "多少人",
@@ -1001,7 +1001,7 @@ fn resume_refuses_a_relative_path_that_escapes_the_duck_dir() {
     // Put the recipe.json in a sub-dir so "../evil.csv" cleanly escapes it.
     let sub = dir.path().join("sub");
     fs::create_dir(&sub).expect("mkdir");
-    let duck = sub.join("session.duck");
+    let duck = sub.join("recipe.json");
     // Plant a sibling file in the recipe.json dir's PARENT -- canonicalize resolves
     // it to the parent, which does NOT start with the recipe.json dir.
     let outside = dir.path().join("evil.csv");
@@ -1049,7 +1049,7 @@ fn resume_is_cancellable_mid_replay() {
     use toptopduck_lib::ResumeError;
 
     let dir = tempfile::tempdir().expect("tempdir");
-    let duck = dir.path().join("session.duck");
+    let duck = dir.path().join("recipe.json");
     let session = build_session(&duck);
     drop(session);
 
@@ -1122,7 +1122,7 @@ fn resume_relinks_a_missing_source_and_updates_recipe_path() {
     use toptopduck_lib::persistence::read_recipe;
 
     let dir = tempfile::tempdir().expect("tempdir");
-    let duck = dir.path().join("s.duck");
+    let duck = dir.path().join("s.json");
     let original = plant_people(dir.path());
     let session = build_single_source_session(&duck, &original);
     let people_fp = session.get("people").expect("people").fingerprint.clone();
@@ -1189,7 +1189,7 @@ fn resume_abort_in_relink_dialog_stops_resume_and_leaves_recipe_untouched() {
     // AC2: user picks Abort in the re-link dialog -> session is NOT entered,
     // and the on-disk recipe is left byte-for-byte untouched ("原状保留").
     let dir = tempfile::tempdir().expect("tempdir");
-    let duck = dir.path().join("s.duck");
+    let duck = dir.path().join("s.json");
     let original = plant_people(dir.path());
     let session = build_single_source_session(&duck, &original);
     drop(session);
@@ -1228,7 +1228,7 @@ fn resume_reports_drift_without_silently_replaying() {
     // NEVER silently replays with the new data. User chooses Rebuild -> source
     // dropped, the chain's turn referencing it renders as Failed (not silent).
     let dir = tempfile::tempdir().expect("tempdir");
-    let duck = dir.path().join("s.duck");
+    let duck = dir.path().join("s.json");
     let original = plant_people(dir.path());
     let session = build_single_source_session(&duck, &original);
     drop(session);
@@ -1294,7 +1294,7 @@ fn resume_aborts_on_drift_without_replaying() {
     // byte-for-byte untouched. Mirrors AC2's Missing+Abort contract; the
     // Rebuild branch is covered by resume_reports_drift_without_silently_replaying.
     let dir = tempfile::tempdir().expect("tempdir");
-    let duck = dir.path().join("s.duck");
+    let duck = dir.path().join("s.json");
     let original = plant_people(dir.path());
     let session = build_single_source_session(&duck, &original);
     drop(session);
@@ -1348,7 +1348,7 @@ fn resume_handles_each_source_independently_multi_source() {
     // are intact. The missing source goes through re-link; the intact source
     // verifies normally. Each source is handled independently.
     let dir = tempfile::tempdir().expect("tempdir");
-    let duck = dir.path().join("s.duck");
+    let duck = dir.path().join("s.json");
     let people_p = plant_people(dir.path());
     let orders_p = dir.path().join("orders.csv");
     fs::copy(fixture("orders.csv"), &orders_p).expect("copy orders.csv");
@@ -1419,7 +1419,7 @@ fn resume_blocks_when_active_source_abandoned_until_user_picks() {
     use toptopduck_lib::persistence::read_recipe;
 
     let dir = tempfile::tempdir().expect("tempdir");
-    let duck = dir.path().join("s.duck");
+    let duck = dir.path().join("s.json");
     let people_p = plant_people(dir.path());
     let orders_p = dir.path().join("orders.csv");
     fs::copy(fixture("orders.csv"), &orders_p).expect("copy orders.csv");
@@ -1498,7 +1498,7 @@ fn resume_active_abandoned_no_sources_left_resumes_empty_without_callback() {
     use toptopduck_lib::persistence::read_recipe;
 
     let dir = tempfile::tempdir().expect("tempdir");
-    let duck = dir.path().join("s.duck");
+    let duck = dir.path().join("s.json");
     let people_p = plant_people(dir.path());
     let session = build_single_source_session(&duck, &people_p);
     drop(session);
@@ -1541,7 +1541,7 @@ fn replay_failure_marks_turn_failed_and_preserves_prior_results() {
     // Failed (ADR-0028 outcome C), replay STOPS at K, and the K-1 results
     // already materialized stay in the working set. Turns after K are dropped.
     let dir = tempfile::tempdir().expect("tempdir");
-    let duck = dir.path().join("s.duck");
+    let duck = dir.path().join("s.json");
     let people_p = plant_people(dir.path());
     let orders_p = dir.path().join("orders.csv");
     fs::copy(fixture("orders.csv"), &orders_p).expect("copy orders.csv");
@@ -1669,7 +1669,7 @@ fn replay_failure_marks_turn_failed_and_preserves_prior_results() {
 #[test]
 fn single_writer_rejects_opening_same_duck_twice() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let duck = dir.path().join("a.duck");
+    let duck = dir.path().join("a.json");
     let _session = build_session(&duck); // acquires the canonical path; held to end
 
     // open_recipe on the same path -> ResumeError::AlreadyOpen.
@@ -1701,7 +1701,7 @@ fn single_writer_rejects_opening_same_duck_twice() {
     }
     // The second session never bound: a subsequent different path works (the
     // failed acquire left no stray registry entry).
-    let other = dir.path().join("other.duck");
+    let other = dir.path().join("other.json");
     second
         .bind_recipe(other, "其它".into())
         .expect("bind to a different path after a refused duplicate");
@@ -1713,8 +1713,8 @@ fn single_writer_rejects_opening_same_duck_twice() {
 #[test]
 fn single_writer_allows_two_different_ducks_in_one_process() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let duck_a = dir.path().join("a.duck");
-    let duck_b = dir.path().join("b.duck");
+    let duck_a = dir.path().join("a.json");
+    let duck_b = dir.path().join("b.json");
     let session_a = build_session(&duck_a);
     let session_b = build_session(&duck_b);
     assert_eq!(session_a.recipe_path(), Some(duck_a.as_path()));
@@ -1729,7 +1729,7 @@ fn single_writer_allows_two_different_ducks_in_one_process() {
 #[test]
 fn single_writer_releases_on_drop_allowing_reopen() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let duck = dir.path().join("a.duck");
+    let duck = dir.path().join("a.json");
     let session = build_session(&duck);
     drop(session); // registry key released
 
@@ -1745,7 +1745,7 @@ fn single_writer_releases_on_drop_allowing_reopen() {
 #[test]
 fn single_writer_rebind_same_path_on_same_session_is_an_update() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let duck = dir.path().join("a.duck");
+    let duck = dir.path().join("a.json");
     let mut session = build_session(&duck);
     session
         .bind_recipe(duck.clone(), "改个名".into())
@@ -1760,7 +1760,7 @@ fn single_writer_rebind_same_path_on_same_session_is_an_update() {
 #[test]
 fn external_edit_suspends_next_write_and_surfaces_conflict() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let duck = dir.path().join("a.duck");
+    let duck = dir.path().join("a.json");
     let mut session = build_session(&duck);
 
     // Simulate an external edit: another window / text editor / sync tool
@@ -1809,7 +1809,7 @@ fn external_edit_suspends_next_write_and_surfaces_conflict() {
 #[test]
 fn conflict_keep_mine_overwrites_disk_with_inmemory_state() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let duck = dir.path().join("a.duck");
+    let duck = dir.path().join("a.json");
     let mut session = build_session(&duck);
 
     let original = fs::read_to_string(&duck).expect("read baseline");
@@ -1856,8 +1856,8 @@ fn conflict_keep_mine_overwrites_disk_with_inmemory_state() {
 #[test]
 fn conflict_save_as_new_preserves_original_and_rebinds() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let duck = dir.path().join("a.duck");
-    let new_duck = dir.path().join("saved.duck");
+    let duck = dir.path().join("a.json");
+    let new_duck = dir.path().join("saved.json");
     let mut session = build_session(&duck);
 
     let original = fs::read_to_string(&duck).expect("read baseline");
@@ -1913,7 +1913,7 @@ fn conflict_save_as_new_preserves_original_and_rebinds() {
 #[test]
 fn conflict_reload_via_drop_and_reopen_adopts_disk_state() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let duck = dir.path().join("a.duck");
+    let duck = dir.path().join("a.json");
     let mut session = build_session(&duck);
 
     let original = fs::read_to_string(&duck).expect("read baseline");
@@ -1953,7 +1953,7 @@ fn conflict_reload_via_drop_and_reopen_adopts_disk_state() {
 #[test]
 fn stable_file_across_resume_produces_no_false_conflict() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let duck = dir.path().join("a.duck");
+    let duck = dir.path().join("a.json");
     let session = build_session(&duck);
     drop(session); // write the baseline recipe + release the registry
 
@@ -1984,8 +1984,8 @@ fn stable_file_across_resume_produces_no_false_conflict() {
 #[test]
 fn conflict_save_as_new_releases_old_key_so_original_can_be_reopened() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let duck = dir.path().join("a.duck");
-    let new_duck = dir.path().join("saved.duck");
+    let duck = dir.path().join("a.json");
+    let new_duck = dir.path().join("saved.json");
     let mut session = build_session(&duck);
 
     let original = fs::read_to_string(&duck).expect("read baseline");
@@ -2025,7 +2025,7 @@ fn conflict_save_as_new_releases_old_key_so_original_can_be_reopened() {
 #[test]
 fn external_edit_during_resume_surfaces_conflict_at_post_resume_persist() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let duck = dir.path().join("a.duck");
+    let duck = dir.path().join("a.json");
     let session = build_session(&duck);
     drop(session); // write the baseline recipe + release the registry key
 
@@ -2079,7 +2079,7 @@ fn external_edit_during_resume_surfaces_conflict_at_post_resume_persist() {
 #[test]
 fn persist_if_bound_skips_detection_and_write_while_conflict_pending() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let duck = dir.path().join("a.duck");
+    let duck = dir.path().join("a.json");
     let mut session = build_session(&duck);
 
     // First external edit -> triggers persist_if_bound -> conflict surfaced.
@@ -2126,7 +2126,7 @@ fn persist_if_bound_skips_detection_and_write_while_conflict_pending() {
 #[test]
 fn bind_recipe_canonicalize_failure_returns_save_error_io_and_leaves_session_unbound() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let nonexistent_parent = dir.path().join("missing-dir").join("a.duck");
+    let nonexistent_parent = dir.path().join("missing-dir").join("a.json");
     assert!(
         !nonexistent_parent.parent().unwrap().exists(),
         "precondition: parent dir does not exist"
@@ -2149,7 +2149,7 @@ fn bind_recipe_canonicalize_failure_returns_save_error_io_and_leaves_session_unb
 
     // Registry hygiene: a fresh bind to a real path works (the failed
     // canonicalize never reached try_acquire, so no key leaked).
-    let real = dir.path().join("real.duck");
+    let real = dir.path().join("real.json");
     session
         .bind_recipe(real.clone(), "真实".into())
         .expect("bind to a real path after a canonicalize failure");
@@ -2177,7 +2177,7 @@ fn open_recipe_migrates_a_lower_version_recipe_and_persists_current_shape() {
     use toptopduck_lib::persistence::{read_recipe, RECIPE_FORMAT_VERSION};
 
     let dir = tempfile::tempdir().expect("tempdir");
-    let duck = dir.path().join("v0.duck");
+    let duck = dir.path().join("v0.json");
     let csv = fixture("people.csv");
 
     // Build a real v1 session first to capture the post-rectify fingerprint of
@@ -2264,7 +2264,7 @@ fn open_recipe_migrates_a_lower_version_recipe_and_persists_current_shape() {
             "analytics.duckdb".to_string(),
             "analytics.duckdb.wal".to_string(),
             "snapshots".to_string(),
-            "v0.duck".to_string(),
+            "v0.json".to_string(),
         ],
         "no backup produced by migration (the rewritten recipe.json + the ADR-0136 tree)",
     );
@@ -2281,7 +2281,7 @@ fn open_recipe_migrates_a_v1_recipe_to_v2_and_synthesizes_trace() {
     use toptopduck_lib::persistence::{read_recipe, RecipeEntry, RECIPE_FORMAT_VERSION};
 
     let dir = tempfile::tempdir().expect("tempdir");
-    let duck = dir.path().join("v1.duck");
+    let duck = dir.path().join("v1.json");
     let csv = fixture("people.csv");
 
     // Capture the post-rectify fingerprint under the same ingest path the v1
@@ -2430,7 +2430,7 @@ fn open_recipe_migrates_a_v4_real_recording_shape_into_one_round() {
     use toptopduck_lib::OperationKind;
 
     let dir = tempfile::tempdir().expect("tempdir");
-    let duck = dir.path().join("v4.duck");
+    let duck = dir.path().join("v4.json");
     let csv = fixture("people.csv");
 
     // Capture the post-rectify fingerprint under the same ingest path the v4
@@ -2573,7 +2573,7 @@ fn resume_resolves_relative_path_after_moving_the_folder() {
     fs::create_dir(&sub).expect("mkdir");
     let csv = sub.join("people.csv");
     fs::copy(fixture("people.csv"), &csv).expect("copy into subtree");
-    let duck = sub.join("s.duck");
+    let duck = sub.join("s.json");
 
     let session = build_single_source_session(&duck, &csv);
     // Precondition: in-subtree -> relative path recorded (boundary case where
@@ -2589,7 +2589,7 @@ fn resume_resolves_relative_path_after_moving_the_folder() {
     // Move the entire subtree (both recipe.json + source) to a sibling location.
     let moved = dir.path().join("moved");
     fs::rename(&sub, &moved).expect("move subtree");
-    let moved_duck = moved.join("s.duck");
+    let moved_duck = moved.join("s.json");
 
     // Resume on the moved recipe.json: resolve_source_path joins the relative path
     // against the recipe.json's NEW parent -> moved/people.csv exists -> match.
@@ -2615,7 +2615,7 @@ fn resume_falls_back_to_absolute_when_relative_path_is_missing() {
     use toptopduck_lib::RectifyProvenance;
 
     let dir = tempfile::tempdir().expect("tempdir");
-    let duck = dir.path().join("s.duck");
+    let duck = dir.path().join("s.json");
     // A real source whose absolute path is resolvable.
     let outside = dir.path().join("data.csv");
     fs::write(&outside, "name,score\nAda,9\n").expect("write source");
@@ -2663,7 +2663,7 @@ fn resume_relinks_when_both_relative_and_absolute_paths_fail() {
     fs::create_dir(&sub).expect("mkdir");
     let csv = sub.join("people.csv");
     fs::copy(fixture("people.csv"), &csv).expect("copy into subtree");
-    let duck = sub.join("s.duck");
+    let duck = sub.join("s.json");
 
     let session = build_single_source_session(&duck, &csv);
     // Precondition: boundary case -> relative + absolute both stored.
@@ -2729,7 +2729,7 @@ fn resume_prefers_relative_when_both_paths_stored_and_match_fingerprint() {
     let dir = tempfile::tempdir().expect("tempdir");
     let sub = dir.path().join("sub");
     fs::create_dir(&sub).expect("mkdir");
-    let duck = sub.join("s.duck");
+    let duck = sub.join("s.json");
 
     // The real in-subtree source the relative path will resolve to.
     let real = sub.join("data.csv");
@@ -2786,7 +2786,7 @@ fn open_recipe_refuses_a_higher_format_version_with_upgrade_prompt() {
     use toptopduck_lib::persistence::{LoadError, RECIPE_FORMAT_VERSION};
 
     let dir = tempfile::tempdir().expect("tempdir");
-    let duck = dir.path().join("future.duck");
+    let duck = dir.path().join("future.json");
     let future = serde_json::json!({
         "format_version": RECIPE_FORMAT_VERSION + 1,
         "session_name": "from-the-future",
@@ -2833,7 +2833,7 @@ fn add_source_atomically_rewrites_duck_with_source_and_added_event() {
     use toptopduck_lib::SourceLifecycleKind;
 
     let dir = tempfile::tempdir().expect("tempdir");
-    let duck = dir.path().join("s.duck");
+    let duck = dir.path().join("s.json");
     let csv = fixture("people.csv");
     let mut session = Session::with_provider(Box::new(FakeProvider::new())).expect("session");
     load_source(&mut session, &csv);
@@ -2886,7 +2886,7 @@ fn replace_source_atomically_rewrites_duck_with_stale_chain_and_replaced_event()
     use toptopduck_lib::{SourceLifecycleKind, StaleReason};
 
     let dir = tempfile::tempdir().expect("tempdir");
-    let duck = dir.path().join("s.duck");
+    let duck = dir.path().join("s.json");
     let people = fixture("people.csv");
     let orders = fixture("orders.csv");
 
@@ -2971,7 +2971,7 @@ fn remove_source_atomically_rewrites_duck_with_stale_chain_and_deleted_event() {
     use toptopduck_lib::{SourceLifecycleKind, StaleReason};
 
     let dir = tempfile::tempdir().expect("tempdir");
-    let duck = dir.path().join("s.duck");
+    let duck = dir.path().join("s.json");
     let people = fixture("people.csv");
     let orders = fixture("orders.csv");
 
@@ -3031,7 +3031,7 @@ fn resume_after_replace_excludes_stale_from_replay_but_keeps_marked_stale() {
     use toptopduck_lib::StaleReason;
 
     let dir = tempfile::tempdir().expect("tempdir");
-    let duck = dir.path().join("s.duck");
+    let duck = dir.path().join("s.json");
     let people = fixture("people.csv");
     let orders = fixture("orders.csv");
 
@@ -3124,7 +3124,7 @@ fn resume_after_remove_excludes_stale_from_replay_but_keeps_marked_stale() {
     use toptopduck_lib::StaleReason;
 
     let dir = tempfile::tempdir().expect("tempdir");
-    let duck = dir.path().join("s.duck");
+    let duck = dir.path().join("s.json");
     let people = fixture("people.csv");
     let orders = fixture("orders.csv");
 
@@ -3221,7 +3221,7 @@ impl Provider for CountingProvider {
 #[test]
 fn resume_does_not_call_the_cloud_llm() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let duck = dir.path().join("s.duck");
+    let duck = dir.path().join("s.json");
     let session = build_session(&duck); // 2 productive + 1 textual turn
     drop(session);
 
@@ -3263,7 +3263,7 @@ fn resume_rejects_a_recipe_whose_active_points_at_an_unregistered_source() {
     use toptopduck_lib::RectifyProvenance;
 
     let dir = tempfile::tempdir().expect("tempdir");
-    let duck = dir.path().join("s.duck");
+    let duck = dir.path().join("s.json");
     let csv = fixture("people.csv");
 
     // Capture a valid fingerprint so the source verifies and resume reaches
@@ -3318,7 +3318,7 @@ fn resume_renders_a_broken_sql_turn_as_failed_and_preserves_prior_results() {
     use toptopduck_lib::RectifyProvenance;
 
     let dir = tempfile::tempdir().expect("tempdir");
-    let duck = dir.path().join("s.duck");
+    let duck = dir.path().join("s.json");
     let csv = fixture("people.csv");
 
     let mut probe = Session::with_provider(Box::new(FakeProvider::new())).expect("session");
@@ -3421,7 +3421,7 @@ fn resume_renders_a_broken_sql_turn_as_failed_and_preserves_prior_results() {
 #[test]
 fn resume_drift_issue_reports_expected_and_found_in_correct_order() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let duck = dir.path().join("s.duck");
+    let duck = dir.path().join("s.json");
     let original = plant_people(dir.path());
     let session = build_single_source_session(&duck, &original);
     let people_fp = session.get("people").expect("people").fingerprint.clone();
@@ -3482,7 +3482,7 @@ fn resume_drift_issue_reports_expected_and_found_in_correct_order() {
 #[test]
 fn resume_missing_issue_carries_the_recorded_absolute_path() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let duck = dir.path().join("s.duck");
+    let duck = dir.path().join("s.json");
     let original = plant_people(dir.path());
     let session = build_single_source_session(&duck, &original);
     drop(session);
@@ -3533,7 +3533,7 @@ fn resume_missing_issue_carries_the_recorded_absolute_path() {
 #[test]
 fn is_resuming_flag_is_true_during_open_recipe_and_cleared_after() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let duck = dir.path().join("s.duck");
+    let duck = dir.path().join("s.json");
     let session = build_session(&duck);
     drop(session);
 
@@ -3576,7 +3576,7 @@ fn is_resuming_flag_is_cleared_on_a_resume_error_exit() {
     let csv = fixture("people.csv");
     let local = dir.path().join("people.csv");
     fs::copy(&csv, &local).expect("copy people into tempdir");
-    let single_duck = dir.path().join("single.duck");
+    let single_duck = dir.path().join("single.json");
     let single = build_single_source_session(&single_duck, &local);
     drop(single);
     fs::remove_file(&local).expect("remove local source");
@@ -3619,7 +3619,7 @@ fn save_atomic_returns_io_error_when_the_target_directory_does_not_exist() {
     use toptopduck_lib::RectifyProvenance;
 
     let dir = tempfile::tempdir().expect("tempdir");
-    let nonexistent = dir.path().join("missing-subdir").join("s.duck");
+    let nonexistent = dir.path().join("missing-subdir").join("s.json");
     assert!(
         !nonexistent.parent().unwrap().exists(),
         "precondition: parent dir absent"
@@ -3662,7 +3662,7 @@ fn save_atomic_failure_leaves_existing_recipe_bytes_unchanged() {
     use toptopduck_lib::RectifyProvenance;
 
     let dir = tempfile::tempdir().expect("tempdir");
-    let duck = dir.path().join("s.duck");
+    let duck = dir.path().join("s.json");
 
     let make_recipe = |name: &str| {
         Recipe::build(
@@ -3744,7 +3744,7 @@ impl Provider for WriteProbeProvider {
 #[test]
 fn cancelled_in_flight_turn_writes_recipe_once_at_terminal_not_mid_flight() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let duck = dir.path().join("s.duck");
+    let duck = dir.path().join("s.json");
     let csv = fixture("people.csv");
 
     let cancel = Arc::new(CancelToken::new());
@@ -3825,7 +3825,7 @@ fn cancelled_in_flight_turn_writes_recipe_once_at_terminal_not_mid_flight() {
 #[test]
 fn resume_backfills_persisted_artifacts_into_the_fresh_cwd() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let duck = dir.path().join("s.duck");
+    let duck = dir.path().join("s.json");
     let source = plant_people(dir.path());
     drop(build_single_source_session(&duck, &source));
 
@@ -3874,7 +3874,7 @@ fn resume_backfills_persisted_artifacts_into_the_fresh_cwd() {
 #[test]
 fn resumed_cwd_copy_survives_a_turn_and_a_re_delivery_forks_2() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let duck = dir.path().join("s.duck");
+    let duck = dir.path().join("s.json");
     let source = plant_people(dir.path());
     drop(build_single_source_session(&duck, &source));
 
@@ -3929,7 +3929,7 @@ fn resumed_cwd_copy_survives_a_turn_and_a_re_delivery_forks_2() {
 #[test]
 fn resume_without_artifacts_leaves_the_cwd_untouched() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let duck = dir.path().join("s.duck");
+    let duck = dir.path().join("s.json");
     let source = plant_people(dir.path());
     drop(build_single_source_session(&duck, &source));
 

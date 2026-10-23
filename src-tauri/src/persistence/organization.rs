@@ -2,7 +2,7 @@
 //! for the session list. Organization is shell-layer state, deliberately
 //! OUTSIDE the `recipe.json` content domain -- it lives in
 //! `sessions_root/index.json`, keyed by the session directory uuid
-//! (ADR-0089's `{uuid}/session.duck` layout). An organizational change
+//! (ADR-0089's `{uuid}/recipe.json` layout). An organizational change
 //! therefore never rewrites a recipe, never disturbs its mtime, and never
 //! crosses the single-writer gate (ADR-0035).
 //!
@@ -63,7 +63,7 @@ fn sidecar_path(root: &Path) -> PathBuf {
 }
 
 /// The sidecar key for a session: the `{uuid}` directory name of its
-/// `session.duck` path. The directory is the session's stable identity
+/// `recipe.json` path. The directory is the session's stable identity
 /// (ADR-0089), so the sidecar survives a sessions_root move that
 /// absolute paths would not.
 pub fn session_dir_uuid(recipe_path: &str) -> Option<String> {
@@ -396,8 +396,8 @@ mod tests {
         // The sidecar key is the {uuid} directory (ADR-0089), not the duck
         // file name and not the full path.
         let sep = std::path::MAIN_SEPARATOR;
-        let duck = format!("C:{sep}sessions{sep}abc-123{sep}session.duck");
+        let duck = format!("C:{sep}sessions{sep}abc-123{sep}recipe.json");
         assert_eq!(session_dir_uuid(&duck).as_deref(), Some("abc-123"));
-        assert_eq!(session_dir_uuid("session.duck"), None);
+        assert_eq!(session_dir_uuid("recipe.json"), None);
     }
 }

@@ -700,7 +700,7 @@ mod tests {
     #[test]
     fn build_recipe_records_relative_path_for_in_subtree_source() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let duck = dir.path().join("session.duck");
+        let duck = dir.path().join("recipe.json");
         let csv = dir.path().join("data.csv");
 
         let mut ws = WorkingSet::default();
@@ -726,7 +726,7 @@ mod tests {
     #[test]
     fn build_recipe_omits_relative_path_for_out_of_subtree_source() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let duck = dir.path().join("session.duck");
+        let duck = dir.path().join("recipe.json");
         // A source in a DIFFERENT tempdir (outside the recipe.json subtree).
         let other_dir = tempfile::tempdir().expect("other tempdir");
         let csv = other_dir.path().join("outside.csv");
@@ -1147,7 +1147,7 @@ mod tests {
     #[test]
     fn bind_writes_recipe_and_seeds_baseline() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let path = dir.path().join("test.duck");
+        let path = dir.path().join("test.json");
 
         let mut persister = RecipePersister::new();
         let ws = WorkingSet::default();
@@ -1172,7 +1172,7 @@ mod tests {
     #[test]
     fn save_if_bound_after_bind_writes_updated_recipe() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let path = dir.path().join("test.duck");
+        let path = dir.path().join("test.json");
 
         let mut persister = RecipePersister::new();
         let ws = WorkingSet::default();
@@ -1197,7 +1197,7 @@ mod tests {
     #[test]
     fn save_if_bound_detects_external_edit_and_stashes_conflict() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let path = dir.path().join("test.duck");
+        let path = dir.path().join("test.json");
 
         let mut persister = RecipePersister::new();
         let ws = WorkingSet::default();
@@ -1229,7 +1229,7 @@ mod tests {
     #[test]
     fn conflict_keep_mine_overwrites_and_clears_conflict() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let path = dir.path().join("test.duck");
+        let path = dir.path().join("test.json");
 
         let mut persister = RecipePersister::new();
         let ws = WorkingSet::default();
@@ -1268,8 +1268,8 @@ mod tests {
     #[test]
     fn conflict_save_as_new_writes_new_file_and_rebinds() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let old_path = dir.path().join("old.duck");
-        let new_path = dir.path().join("new.duck");
+        let old_path = dir.path().join("old.json");
+        let new_path = dir.path().join("new.json");
 
         let mut persister = RecipePersister::new();
         let ws = WorkingSet::default();
@@ -1316,14 +1316,14 @@ mod tests {
     fn adopt_resumed_sets_all_four_fields() {
         let mut persister = RecipePersister::new();
         persister.adopt_resumed(
-            PathBuf::from("/tmp/resumed.duck"),
-            PathBuf::from("/tmp/resumed.duck"),
+            PathBuf::from("/tmp/resumed.json"),
+            PathBuf::from("/tmp/resumed.json"),
             "resumed".into(),
             Some("abc123".into()),
         );
         assert_eq!(
             persister.recipe_path(),
-            Some(std::path::Path::new("/tmp/resumed.duck"))
+            Some(std::path::Path::new("/tmp/resumed.json"))
         );
         assert_eq!(persister.session_name(), Some("resumed"));
         assert_eq!(
@@ -1340,7 +1340,7 @@ mod tests {
         persister.release_key();
         // After bind -> releases; second call is a no-op.
         let dir = tempfile::tempdir().expect("tempdir");
-        let path = dir.path().join("gate.duck");
+        let path = dir.path().join("gate.json");
         let ws = WorkingSet::default();
         persister
             .bind(

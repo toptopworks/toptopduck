@@ -1320,10 +1320,12 @@ impl super::Session {
         recipe_path: &Path,
         meta: &companion::WorkingSetMeta,
     ) -> Result<Vec<SourceNotice>, ResumeError> {
-        let tree = recipe_path.parent().ok_or_else(|| {
-            ResumeError::Load(crate::persistence::io::LoadError::Io(
-                "recipe path has no parent directory; cannot locate the session tree".into(),
-            ))
+        let tree = recipe_path.parent().ok_or_else(|| ResumeError::Restore {
+            reference_name: recipe_path
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default(),
+            detail: "recipe path has no parent directory; cannot locate the session tree".into(),
         })?;
         // Mount each tree snapshot read-only + record the file so the
         // per-turn sandboxes re-attach it (the same source_files contract
@@ -1336,9 +1338,10 @@ impl super::Session {
                 quote_ident(&src.reference_name)
             );
             if let Err(e) = self.admin_engine.execute_batch(&attach_sql) {
-                return Err(ResumeError::Load(crate::persistence::io::LoadError::Io(
-                    format!("挂载树内快照失败（{}）：{e}", src.reference_name),
-                )));
+                return Err(ResumeError::Restore {
+                    reference_name: src.reference_name.clone(),
+                    detail: format!("挂载树内快照失败：{e}"),
+                });
             }
             self.source_files.insert(src.reference_name.clone(), file);
         }

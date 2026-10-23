@@ -1,7 +1,7 @@
 //! list_sessions black-box (issue #76, ADR-0060/0061): drive the session-list
 //! derivation through the crate's public API only -- the same pure
 //! `list_session_metadata` the `list_sessions` Tauri command wraps (a directory
-//! scan of per-session recipes -- `recipe.json` first, the legacy `session.duck`
+//! scan of per-session recipes -- `recipe.json` first, the legacy `recipe.json`
 //! accepted -- ADR-0089). Writes real
 //! `recipe.json` recipes via the invariant-validating `Recipe::build` + `save_atomic`,
 //! then asserts the LIST shape the cold-start sidebar consumes: every readable
@@ -67,9 +67,9 @@ fn list_sessions_addresses_each_readable_duck_by_path_and_skips_the_rest() {
     // entry that no longer resolves to a readable recipe is
     // dropped so the list never addresses a fabricated session (ADR-0017).
     let dir = tempfile::tempdir().expect("tempdir");
-    let alpha = write_recipe(dir.path(), "alpha.duck", "alpha", "alpha_src");
-    let beta = write_recipe(dir.path(), "beta.duck", "beta", "beta_src");
-    let missing = dir.path().join("gone.duck").to_string_lossy().into_owned();
+    let alpha = write_recipe(dir.path(), "alpha.json", "alpha", "alpha_src");
+    let beta = write_recipe(dir.path(), "beta.json", "beta", "beta_src");
+    let missing = dir.path().join("gone.json").to_string_lossy().into_owned();
 
     let list = list_session_metadata(&[missing, alpha.clone(), beta.clone()]);
     assert_eq!(list.len(), 2, "only the readable recipes are listed");
@@ -98,7 +98,7 @@ fn closed_rename_rewrites_only_the_session_name_header() {
     // then reflects the new name (the sidebar's source of truth).
     use toptopduck_lib::persistence::read_recipe;
     let dir = tempfile::tempdir().expect("tempdir");
-    let path = write_recipe(dir.path(), "s.duck", "原名", "src_a");
+    let path = write_recipe(dir.path(), "s.json", "原名", "src_a");
 
     // Round-trip rename: read, rewrite the header, atomic-save.
     let mut recipe = read_recipe(std::path::Path::new(&path)).expect("read");

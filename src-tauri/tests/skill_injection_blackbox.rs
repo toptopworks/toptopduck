@@ -634,7 +634,7 @@ fn agent_invocation_survives_a_failed_turn_and_a_restart() {
     put_skill(&skills_root, "sql-coach", "Coach SQL.", "Coach the SQL.\n");
 
     let duck_dir = tempfile::tempdir().unwrap();
-    let recipe_path = duck_dir.path().join("mid.duck");
+    let recipe_path = duck_dir.path().join("mid.json");
 
     let provider = InvokeThenFailProvider {
         calls: std::sync::atomic::AtomicUsize::new(0),
