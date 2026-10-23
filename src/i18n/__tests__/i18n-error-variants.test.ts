@@ -90,11 +90,10 @@ const CATALOG_IDS: Readonly<Record<string, Readonly<Record<string, string | null
     Aborted: "error.resume.aborted",
     AlreadyOpen: "error.recipe.alreadyOpen",
   },
-  // The key stays the Rust enum name: the key-set assertion compares against
-  // the golden error_variant_kinds.json, whose keys are the Rust enum names.
-  // The TS type renamed to RecipeLoadError; the Rust enum did not -- do not
-  // "fix" this key to match the TS name.
-  DuckLoadError: {
+  // Key = the Rust enum name re-exported at the crate root; the key-set
+  // assertion compares against the golden error_variant_kinds.json, so a
+  // future Rust-side rename must move this key in lockstep.
+  RecipeLoadError: {
     Io: "error.recipe.loadIo",
     Parse: "error.recipe.loadParse",
     VersionMismatch: "error.recipe.versionMismatch",
@@ -131,7 +130,7 @@ const CATALOG_IDS: Readonly<Record<string, Readonly<Record<string, string | null
     EmptyName: "error.session.renameEmpty",
   },
   MigrationError: {
-    // Both variants ride the parent DuckLoadError::Migration message; their data
+    // Both variants ride the parent RecipeLoadError::Migration message; their data
     // only feeds the technical-details fold, so they have no own catalog id.
     NoTransform: null,
     Field: null,

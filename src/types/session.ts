@@ -84,7 +84,7 @@ export type ExportRowsError =
     data: { step: "Create" | "Write" | "Flush" | "Rename"; path: string; detail: string };
   };
 
-// Why a forward migration step failed (issue #120). Rides DuckLoadError::
+// Why a forward migration step failed (issue #120). Rides RecipeLoadError::
 // Migration inside ResumeError::Load. Mirrors the Rust `MigrationError` (serde
 // adjacently-tagged). `Field` carries the missing/ill-typed field detail;
 // `NoTransform` names a gap in the migration chain (no registered step for the
@@ -94,10 +94,9 @@ export type MigrationError =
   | { kind: "Field"; data: string };
 
 // The recipe.json load error (persistence::io::LoadError, issue #120) -- DISTINCT
-// from the ingest `LoadError` above. The Rust enum is re-exported at the crate
-// root as `DuckLoadError` and keeps that name in the golden and the i18n
-// contract map; only the wire `kind` strings cross IPC, so the two names
-// intentionally differ. Nests MigrationError. Crosses IPC inside
+// from the ingest `LoadError` above. The Rust crate root re-exports the enum
+// under this same name (`RecipeLoadError`) to keep the two LoadErrors apart;
+// only the wire `kind` strings cross IPC. Nests MigrationError. Crosses IPC inside
 // ResumeError::Load (the open_recipe reject); the frontend recurses
 // ResumeError::Load.data.kind to render the version-mismatch "please upgrade"
 // hint or the io/parse/migration detail.

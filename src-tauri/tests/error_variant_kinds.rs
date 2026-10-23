@@ -29,8 +29,8 @@ use std::fs;
 use std::path::PathBuf;
 
 use toptopduck_lib::{
-    DuckLoadError, MigrationError, RemoveSourceError, RenameError, RenameSessionError, ResumeError,
-    RowReadError, SaveError, SessionError, SkillError, StoreCommandError, TurnFailure,
+    MigrationError, RecipeLoadError, RemoveSourceError, RenameError, RenameSessionError,
+    ResumeError, RowReadError, SaveError, SessionError, SkillError, StoreCommandError, TurnFailure,
 };
 
 /// Read the serde wire `kind` tag off one instance. Every enum here is
@@ -122,7 +122,7 @@ fn row_read_error() -> Vec<RowReadError> {
 
 fn resume_error() -> Vec<ResumeError> {
     vec![
-        ResumeError::Load(DuckLoadError::Io(String::new())),
+        ResumeError::Load(RecipeLoadError::Io(String::new())),
         ResumeError::SourceMissing {
             reference_name: String::new(),
             path: String::new(),
@@ -143,15 +143,15 @@ fn resume_error() -> Vec<ResumeError> {
     ]
 }
 
-fn duck_load_error() -> Vec<DuckLoadError> {
+fn recipe_load_error() -> Vec<RecipeLoadError> {
     vec![
-        DuckLoadError::Io(String::new()),
-        DuckLoadError::Parse(String::new()),
-        DuckLoadError::VersionMismatch {
+        RecipeLoadError::Io(String::new()),
+        RecipeLoadError::Parse(String::new()),
+        RecipeLoadError::VersionMismatch {
             found: 0,
             supported: 0,
         },
-        DuckLoadError::Migration(MigrationError::Field(String::new())),
+        RecipeLoadError::Migration(MigrationError::Field(String::new())),
     ]
 }
 
@@ -211,7 +211,7 @@ fn migration_error() -> Vec<MigrationError> {
 fn variant_kind_map() -> BTreeMap<&'static str, Vec<String>> {
     let mut map: BTreeMap<&'static str, Vec<String>> = BTreeMap::new();
     for (name, mut kinds) in [
-        ("DuckLoadError", to_kinds(&duck_load_error())),
+        ("RecipeLoadError", to_kinds(&recipe_load_error())),
         ("MigrationError", to_kinds(&migration_error())),
         ("RemoveSourceError", to_kinds(&remove_source_error())),
         ("RenameError", to_kinds(&rename_error())),
@@ -282,7 +282,7 @@ fn error_variant_kinds_match_golden() {
 /// comment to a CI gate.
 ///
 /// Scoped to the TOP-LEVEL reject enums only. Nested sub-errors legitimately
-/// reuse names (DuckLoadError::Io and SaveError::Io both exist) and never
+/// reuse names (RecipeLoadError::Io and SaveError::Io both exist) and never
 /// compete at the fmtError top level, so a full-enum disjoint check would
 /// false-positive on intentional reuse.
 #[test]

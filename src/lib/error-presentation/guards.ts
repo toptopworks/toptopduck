@@ -62,7 +62,7 @@ export function isSessionError(e: unknown): e is SessionError {
 }
 
 // Narrow an unknown value to a MigrationError (issue #120). Rides
-// DuckLoadError::Migration inside ResumeError::Load. Same L1 defensive shape
+// RecipeLoadError::Migration inside ResumeError::Load. Same L1 defensive shape
 // as isSessionError: a variant's `data` is verified before the guard promises
 // it, so fmtError / errorDetail never read an unverified field.
 export function isMigrationError(e: unknown): e is MigrationError {

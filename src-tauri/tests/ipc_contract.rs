@@ -1040,7 +1040,7 @@ fn session_error_serializes_as_adjacently_tagged_kind_data() {
 // Pin the JSON shape of the four typed error enums that cross the Rust<->
 // frontend boundary as command rejects / return values: ResumeError (the
 // `open_recipe` reject), SaveError (the `take_persist_error` returned value),
-// and the nested DuckLoadError + MigrationError (which ride inside
+// and the nested RecipeLoadError + MigrationError (which ride inside
 // ResumeError::Load). All adjacently-tagged (`#[serde(tag="kind", content =
 // "data")]`), the same shape the rest of the wire contract uses, so the
 // frontend narrows on `kind` at every depth. src/types.ts mirrors the shapes
@@ -1066,28 +1066,28 @@ fn migration_error_serializes_adjacently_tagged() {
 }
 
 #[test]
-fn duck_load_error_serializes_adjacently_tagged() {
+fn recipe_load_error_serializes_adjacently_tagged() {
     // The recipe.json load error (persistence::io::LoadError) -- distinct from the
     // ingest model::LoadError. Nests MigrationError under data; the inner enum
     // keeps its own kind/data shape so the frontend recurses uniformly.
-    use toptopduck_lib::{DuckLoadError, MigrationError};
+    use toptopduck_lib::{MigrationError, RecipeLoadError};
     assert_wire(
-        &DuckLoadError::Io("io-fail".into()),
+        &RecipeLoadError::Io("io-fail".into()),
         r#"{"kind":"Io","data":"io-fail"}"#,
     );
     assert_wire(
-        &DuckLoadError::Parse("parse-fail".into()),
+        &RecipeLoadError::Parse("parse-fail".into()),
         r#"{"kind":"Parse","data":"parse-fail"}"#,
     );
     assert_wire(
-        &DuckLoadError::VersionMismatch {
+        &RecipeLoadError::VersionMismatch {
             found: 3,
             supported: 1,
         },
         r#"{"kind":"VersionMismatch","data":{"found":3,"supported":1}}"#,
     );
     assert_wire(
-        &DuckLoadError::Migration(MigrationError::Field("bad".into())),
+        &RecipeLoadError::Migration(MigrationError::Field("bad".into())),
         r#"{"kind":"Migration","data":{"kind":"Field","data":"bad"}}"#,
     );
 }
@@ -1120,11 +1120,11 @@ fn save_error_serializes_adjacently_tagged() {
 #[test]
 fn resume_error_serializes_adjacently_tagged() {
     // ResumeError is the open_recipe command's typed reject (no longer flattened
-    // to SessionError::Engine(string)). Load recurses into DuckLoadError.
+    // to SessionError::Engine(string)). Load recurses into RecipeLoadError.
     use std::path::PathBuf;
-    use toptopduck_lib::{DuckLoadError, ResumeError};
+    use toptopduck_lib::{RecipeLoadError, ResumeError};
     assert_wire(
-        &ResumeError::Load(DuckLoadError::VersionMismatch {
+        &ResumeError::Load(RecipeLoadError::VersionMismatch {
             found: 3,
             supported: 1,
         }),
