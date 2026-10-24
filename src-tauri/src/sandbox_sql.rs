@@ -415,12 +415,13 @@ mod tests {
         assert_eq!(err, PreflightError::StaleReference("result_1".into()));
     }
 
-    /// A `read_*` path outside the session source set + temp dir is refused as
-    /// `FsAcl` when no stale reference is present. The message names the path
-    /// and the allowed area so the agent can self-correct (ADR-0077 / ADR-
-    /// 0080).
+    /// ADR-0137 D4: an ABSOLUTE `read_*` path outside the session's own
+    /// directories passes the preflight on the full-path face -- the refused
+    /// face is the relative spelling (pinned by the resolve()-against-CWD
+    /// behavior the fs_acl unit tests cover). No live member is referenced,
+    /// so the dependency set stays empty.
     #[test]
-    fn out_of_bounds_read_path_is_refused_as_fs_acl() {
+    fn absolute_out_of_bounds_read_path_passes_preflight() {
         let temp = TempDir::new().unwrap();
         let outside = TempDir::new().unwrap();
         let outside_file = outside.path().join("secret.csv");
@@ -430,14 +431,9 @@ mod tests {
             "SELECT * FROM read_csv_auto('{}')",
             outside_file.to_string_lossy()
         );
-        let err = preflight_read_sql(&sql, &ws, temp.path(), None).unwrap_err();
-        match err {
-            PreflightError::FsAcl(msg) => {
-                assert!(msg.contains("outside the allowed"), "{msg}");
-                assert!(msg.contains("secret.csv"), "{msg}");
-            }
-            other => panic!("expected FsAcl, got {other:?}"),
-        }
+        let analysis = preflight_read_sql(&sql, &ws, temp.path(), None)
+            .expect("absolute spelling passes on the full-path face");
+        assert!(analysis.refs.is_empty());
     }
 
     /// A clean SQL (no stale ref, no `read_*` path) returns the dependency set
@@ -480,13 +476,13 @@ y
         );
         let ws = WorkingSet::default();
 
-        // Without the assets root threaded in, the same SQL is refused --
-        // the old death shape a temp-referencing recipe hit on resume.
-        let refused = preflight_read_sql(&sql, &ws, temp.path(), None).unwrap_err();
-        assert!(
-            matches!(refused, PreflightError::FsAcl(_)),
-            "without the assets allowance the read is refused, got {refused:?}"
-        );
+        // Without the assets root threaded in, the same SQL now passes too:
+        // the absolute spelling carries the full-path face (ADR-0137 D4),
+        // which subsumes the assets read allowance outright. The assets
+        // root's residual value is the WRITE face: an absolute write into
+        // assets refuses as ReadOnlyRoot rather than OutsideAllowedArea.
+        preflight_read_sql(&sql, &ws, temp.path(), None)
+            .expect("absolute spelling passes without the assets root too");
 
         let analysis = preflight_read_sql(&sql, &ws, temp.path(), Some(&assets))
             .expect("assets read passes the preflight");

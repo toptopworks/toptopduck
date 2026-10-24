@@ -91,8 +91,9 @@ pub(crate) struct TurnDeps<'a> {
     /// threads; it lives inside the session lock for the turn's duration.
     pub engine: &'a AdminEngine,
     /// `&mut` so a materialize step can register derived sources (issue #433,
-    /// ADR-0087 D4): a `read_*` referencing a `tool_output` file triggers
-    /// copy_in + ATTACH, inserting a new snapshot path here.
+    /// ADR-0087 D4): a `read_*` referencing a `tool_output` file or a durable
+    /// full-path original (ADR-0137 D4) triggers copy_in + ATTACH, inserting
+    /// a new snapshot path here.
     pub source_files: &'a mut HashMap<String, std::path::PathBuf>,
     pub working_set: &'a mut WorkingSet,
     pub result_row_cap: u64,
@@ -122,13 +123,15 @@ pub(crate) struct TurnDeps<'a> {
     /// SQL to point here, and a live follow-up turn may reference a
     /// materialized copy. `None` for an unbound session.
     pub assets_dir: Option<PathBuf>,
-    /// Session-level ephemeral cache: `tool_output` file path to a cached
-    /// derived-source registration (issue #440). Prevents re-staging +
-    /// re-copy_in + re-ATTACH when the same tool_output file is referenced
-    /// across multiple materialize calls. Each entry stores the catalog ref
-    /// name plus a file fingerprint (mtime + size) for staleness detection.
-    /// Lives on Session, cleared on drop. Not persisted to recipe — resume
-    /// reconstructs refs from recipe SQL.
+    /// Session-level ephemeral cache: referenced file path to a cached
+    /// derived-source registration (issue #440; generalized to full-path
+    /// references by ADR-0137 D4 — tool_output keys are the literal path,
+    /// full-path keys the canonical one). Prevents re-staging + re-copy_in +
+    /// re-ATTACH when the same file is referenced across multiple materialize
+    /// calls. Each entry stores the catalog ref name plus a file fingerprint
+    /// (mtime + size) for staleness detection. Lives on Session, cleared on
+    /// drop. Not persisted to recipe — resume reconstructs refs from recipe
+    /// SQL.
     pub tool_output_refs: &'a mut HashMap<String, CachedDerivedRef>,
 }
 
@@ -147,6 +150,15 @@ impl<'a> TurnDeps<'a> {
             self.workspaces_root.as_deref(),
             self.temp_path,
         )
+    }
+
+    /// The bound workspace path, if the axis is connected AND a workspace is
+    /// bound (ADR-0137). Read-only view for SQL read-path resolution: the
+    /// derived-source faces absolutize relative `read_*` spellings against
+    /// it. A read never mints — minting stays a launch/write-moment act
+    /// (Decision 2).
+    pub(crate) fn bound_workspace(&self) -> Option<&Path> {
+        self.workspace.as_deref().and_then(|slot| slot.as_deref())
     }
 }
 
@@ -177,6 +189,24 @@ impl<'a> TurnDeps<'a> {
             assets_dir: None,
             tool_output_refs,
         }
+    }
+
+    /// [`Self::test_deps`] with the workspace axis connected and a bound
+    /// path (ADR-0137 D3) — for the relative read_* resolution faces.
+    pub(crate) fn test_deps_with_workspace<'b>(
+        engine: &'a AdminEngine,
+        ws: &'a mut WorkingSet,
+        source_files: &'a mut HashMap<String, std::path::PathBuf>,
+        temp_path: &'a Path,
+        tool_output_refs: &'a mut HashMap<String, CachedDerivedRef>,
+        workspace: &'b mut Option<std::path::PathBuf>,
+    ) -> Self
+    where
+        'b: 'a,
+    {
+        let mut deps = TurnDeps::test_deps(engine, ws, source_files, temp_path, tool_output_refs);
+        deps.workspace = Some(workspace);
+        deps
     }
 }
 
@@ -230,8 +260,9 @@ impl Materializer for RealMaterializer {
         // gap (e.g. result_1 dead, result_2 live) does not renumber the live
         // turn -- the chain recreates each result_N under its stable identity.
 
-        // Derived source persistence (issue #433, ADR-0087 D4): detect
-        // read_* calls referencing tool_output files, copy each into a
+        // Derived source persistence (issue #433, ADR-0087 D4; extended to
+        // full-path references by ADR-0137 D4): detect read_* calls
+        // referencing eligible files, copy each into a
         // persistent snapshot + ATTACH + register in the working set, and
         // rewrite the SQL to use catalog references ("ref".data). This MUST
         // run before preflight — provenance::analyze only tracks
