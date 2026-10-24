@@ -637,6 +637,7 @@ mod tests {
             // tray consumes already-trimmed scan output (ADR-0127).
             pinned: false,
             archived: false,
+            workspace: None,
         }
     }
 

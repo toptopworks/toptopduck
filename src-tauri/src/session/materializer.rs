@@ -98,6 +98,20 @@ pub(crate) struct TurnDeps<'a> {
     pub result_row_cap: u64,
     pub result_count_cap: usize,
     pub temp_path: &'a Path,
+    /// The session's workspace binding slot (ADR-0137, issue #1381):
+    /// borrowed `&mut` from the session's runtime facts so the FIRST
+    /// agent-process dispatch mints the default timestamped workspace through
+    /// the session's single storage (the mint then reaches the next recipe
+    /// persist). `None` (test constructors) disconnects the axis -- the
+    /// launch cwd then stays the session temp dir. Read by
+    /// [`TurnDeps::launch_dir`].
+    pub workspace: Option<&'a mut Option<PathBuf>>,
+    /// The lazy-mint source -- the fixed product-domain workspaces root,
+    /// the DEFAULT sessions root's sibling (ADR-0137, issue #1381); `None`
+    /// disables minting. Consulted only through [`TurnDeps::launch_dir`]:
+    /// a seated root is ignored while the `workspace` slot is disconnected
+    /// (test constructors).
+    pub workspaces_root: Option<PathBuf>,
     /// Where source copy-in drops `<ref>.duckdb` snapshots: the bound session
     /// tree's `snapshots/` (ADR-0136 D1) or the temp dir (unbound). Owned --
     /// computed once at deps assembly from the session's binding.
@@ -116,6 +130,24 @@ pub(crate) struct TurnDeps<'a> {
     /// Lives on Session, cleared on drop. Not persisted to recipe — resume
     /// reconstructs refs from recipe SQL.
     pub tool_output_refs: &'a mut HashMap<String, CachedDerivedRef>,
+}
+
+impl<'a> TurnDeps<'a> {
+    /// The cwd for an agent-authored process launch (ADR-0137, issue #1381):
+    /// the bound workspace, lazily minted at this first-launch moment when
+    /// the session was created without a directory. Falls back to the
+    /// session temp dir only while no workspace exists and minting is
+    /// unavailable (disconnected axis / test constructors). Facade over
+    /// [`crate::session::workspace::launch_cwd`] -- the CLI-tool dispatch arm
+    /// resolves its spawn cwd here so the built-in runtime's relative-path
+    /// base matches the external runtime's cwd.
+    pub(crate) fn launch_dir(&mut self) -> Result<PathBuf, String> {
+        crate::session::workspace::launch_cwd(
+            self.workspace.as_deref_mut(),
+            self.workspaces_root.as_deref(),
+            self.temp_path,
+        )
+    }
 }
 
 #[cfg(test)]
@@ -139,6 +171,8 @@ impl<'a> TurnDeps<'a> {
             result_row_cap: 1_000,
             result_count_cap: 100,
             temp_path,
+            workspace: None,
+            workspaces_root: None,
             snapshot_dir: temp_path.to_path_buf(),
             assets_dir: None,
             tool_output_refs,

@@ -1443,6 +1443,7 @@ describe("App resume + close-in-flight seams (issue #83)", () => {
         format_version: 1,
         pinned: false,
         archived: false,
+        workspace: null,
       },
     ]);
     const r1 = src("result_1");
@@ -1480,6 +1481,7 @@ describe("App resume + close-in-flight seams (issue #83)", () => {
         format_version: 1,
         pinned: false,
         archived: false,
+        workspace: null,
       },
     ]);
     // Hold openRecipe pending so resumeStatus stays visible for assertions.
@@ -2449,6 +2451,7 @@ describe("App Ctrl/⌘+K session-search modal (ADR-0072, issue #252)", () => {
         format_version: 2,
         pinned: false,
         archived: false,
+        workspace: null,
       },
       {
         recipe_path: "/x/beta.json",
@@ -2458,6 +2461,7 @@ describe("App Ctrl/⌘+K session-search modal (ADR-0072, issue #252)", () => {
         format_version: 2,
         pinned: false,
         archived: false,
+        workspace: null,
       },
     ];
   }
@@ -2715,6 +2719,7 @@ describe("Composer control row (ADR-0083, issues #350/#351)", () => {
         format_version: 1,
         pinned: false,
         archived: false,
+        workspace: null,
       },
     ]);
     vi.mocked(createSession).mockResolvedValue({ session_id: "sess-resume", recipe_path: "/sessions/sess-resume/recipe.json" });

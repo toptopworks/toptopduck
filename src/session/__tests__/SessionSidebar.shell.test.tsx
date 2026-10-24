@@ -266,6 +266,7 @@ describe("SessionSidebar shell-skeleton visuals (ADR-0067, issue #171)", () => {
       format_version: 1,
       pinned: false,
       archived: false,
+      workspace: null,
     };
     const { container } = renderShell(
       <SessionSidebar
@@ -306,6 +307,7 @@ describe("SessionSidebar shell-skeleton visuals (ADR-0067, issue #171)", () => {
       format_version: 1,
       pinned: false,
       archived: false,
+      workspace: null,
     };
     const { container } = renderShell(
       <SessionSidebar
@@ -508,6 +510,7 @@ describe("SessionSidebar grouping toggle (ADR-0072, issue #251)", () => {
       format_version: 1,
       pinned: false,
       archived: false,
+      workspace: null,
     };
   }
 
@@ -1042,6 +1045,7 @@ describe("SessionSidebar hover card content (ADR-0093, issue #513)", () => {
       format_version: 1,
       pinned: false,
       archived: false,
+      workspace: null,
     };
     vi.useFakeTimers();
     const { container } = renderShell(<SessionSidebar {...sidebarProps({ sessions: [persisted] })} />);
@@ -1068,6 +1072,7 @@ describe("SessionSidebar hover card content (ADR-0093, issue #513)", () => {
       format_version: 1,
       pinned: false,
       archived: false,
+      workspace: null,
     };
     vi.useFakeTimers();
     const { container } = renderShell(<SessionSidebar {...sidebarProps({ sessions: [persisted] })} />);
@@ -1097,6 +1102,7 @@ describe("SessionSidebar hover card content (ADR-0093, issue #513)", () => {
       format_version: 1,
       pinned: false,
       archived: false,
+      workspace: null,
     };
     vi.useFakeTimers();
     const { container } = renderShell(<SessionSidebar {...sidebarProps({ sessions: [persisted] })} />);
@@ -1139,6 +1145,7 @@ describe("SessionSidebar hover card content (ADR-0093, issue #513)", () => {
       format_version: 1,
       pinned: false,
       archived: false,
+      workspace: null,
     };
     vi.useFakeTimers();
     const { container } = renderShell(<SessionSidebar {...sidebarProps({ sessions: [persisted] })} />);
@@ -1170,6 +1177,7 @@ describe("SessionSidebar hover card content (ADR-0093, issue #513)", () => {
       format_version: 1,
       pinned: false,
       archived: false,
+      workspace: null,
     };
     vi.useFakeTimers();
     const { container } = renderShell(<SessionSidebar {...sidebarProps({ sessions: [persisted] })} />);
@@ -1197,6 +1205,7 @@ describe("SessionSidebar hover card content (ADR-0093, issue #513)", () => {
       format_version: 1,
       pinned: false,
       archived: false,
+      workspace: null,
     };
     vi.useFakeTimers();
     const { container } = renderShell(<SessionSidebar {...sidebarProps({ sessions: [persisted] })} />);
@@ -1234,6 +1243,7 @@ describe("SessionSidebar hover card content (ADR-0093, issue #513)", () => {
       format_version: 1,
       pinned: false,
       archived: false,
+      workspace: null,
     };
     const { container } = renderShell(
       <SessionSidebar {...sidebarProps({ sessions: [persisted] })} />,
@@ -1310,9 +1320,9 @@ describe("SessionSidebar organization (ADR-0127, issue #1175)", () => {
     // Server order: the pinned block rides first (array position = MRU), so
     // Pin Old (older mtime) precedes Pin New; the body follows mtime-desc.
     return [
-      { recipe_path: "/x/p1.json", display_name: "Pin Old", last_modified_at: Date.now() - 3 * 86_400_000, source_summary: { first_source_name: null, source_count: 0, turn_count: 1 }, format_version: 1, pinned: true, archived: false },
-      { recipe_path: "/x/p2.json", display_name: "Pin New", last_modified_at: Date.now() - 86_400_000, source_summary: { first_source_name: null, source_count: 0, turn_count: 1 }, format_version: 1, pinned: true, archived: false },
-      { recipe_path: "/x/plain.json", display_name: "Plain", last_modified_at: Date.now(), source_summary: { first_source_name: null, source_count: 0, turn_count: 1 }, format_version: 1, pinned: false, archived: false },
+      { recipe_path: "/x/p1.json", display_name: "Pin Old", last_modified_at: Date.now() - 3 * 86_400_000, source_summary: { first_source_name: null, source_count: 0, turn_count: 1 }, format_version: 1, pinned: true, archived: false, workspace: null },
+      { recipe_path: "/x/p2.json", display_name: "Pin New", last_modified_at: Date.now() - 86_400_000, source_summary: { first_source_name: null, source_count: 0, turn_count: 1 }, format_version: 1, pinned: true, archived: false, workspace: null },
+      { recipe_path: "/x/plain.json", display_name: "Plain", last_modified_at: Date.now(), source_summary: { first_source_name: null, source_count: 0, turn_count: 1 }, format_version: 1, pinned: false, archived: false, workspace: null },
     ];
   }
 
@@ -1347,7 +1357,7 @@ describe("SessionSidebar organization (ADR-0127, issue #1175)", () => {
 
   it("omits the pinned section when no rows are pinned (empty-collection rule)", () => {
     const sessions: SessionMetadata[] = [
-      { recipe_path: "/x/plain.json", display_name: "Plain", last_modified_at: Date.now(), source_summary: { first_source_name: null, source_count: 0, turn_count: 1 }, format_version: 1, pinned: false, archived: false },
+      { recipe_path: "/x/plain.json", display_name: "Plain", last_modified_at: Date.now(), source_summary: { first_source_name: null, source_count: 0, turn_count: 1 }, format_version: 1, pinned: false, archived: false, workspace: null },
     ];
     const { container } = renderShell(
       <SessionSidebar {...orgProps({ sessions })} />,
@@ -1445,7 +1455,7 @@ describe("SessionSidebar organization (ADR-0127, issue #1175)", () => {
     const onArchive = vi.fn();
     const onDelete = vi.fn();
     const archived: SessionMetadata[] = [
-      { recipe_path: "/x/arch.json", display_name: "Archived One", last_modified_at: Date.now() - 86_400_000, source_summary: { first_source_name: null, source_count: 0, turn_count: 2 }, format_version: 1, pinned: false, archived: true },
+      { recipe_path: "/x/arch.json", display_name: "Archived One", last_modified_at: Date.now() - 86_400_000, source_summary: { first_source_name: null, source_count: 0, turn_count: 2 }, format_version: 1, pinned: false, archived: true, workspace: null },
     ];
     const { container } = renderShell(
       <SessionSidebar
@@ -1524,8 +1534,8 @@ describe("SessionSidebar row actions menu (ADR-0133, issue #1319)", () => {
       // One open row (bound via openSessions) + one cold persisted row: the
       // item sets and the sid-bearing callbacks diverge between the two.
       sessions: [
-        { recipe_path: "/x/open.json", display_name: "Open One", last_modified_at: Date.now(), source_summary: { first_source_name: null, source_count: 1, turn_count: 2 }, format_version: 1, pinned: false, archived: false },
-        { recipe_path: "/x/cold.json", display_name: "Cold One", last_modified_at: Date.now() - 86_400_000, source_summary: { first_source_name: null, source_count: 0, turn_count: 1 }, format_version: 1, pinned: false, archived: false },
+        { recipe_path: "/x/open.json", display_name: "Open One", last_modified_at: Date.now(), source_summary: { first_source_name: null, source_count: 1, turn_count: 2 }, format_version: 1, pinned: false, archived: false, workspace: null },
+        { recipe_path: "/x/cold.json", display_name: "Cold One", last_modified_at: Date.now() - 86_400_000, source_summary: { first_source_name: null, source_count: 0, turn_count: 1 }, format_version: 1, pinned: false, archived: false, workspace: null },
       ],
       openSessions: [
         { sid: "sess-1", name: "Open One", path: "/x/open.json", pendingIngestPaths: [], pendingQuestion: null, pendingSkillInvocations: [] },
@@ -1594,7 +1604,7 @@ describe("SessionSidebar row actions menu (ADR-0133, issue #1319)", () => {
 
   it("archived row carries only Restore + Delete", () => {
     const archived: SessionMetadata[] = [
-      { recipe_path: "/x/arch.json", display_name: "Archived One", last_modified_at: Date.now() - 86_400_000, source_summary: { first_source_name: null, source_count: 0, turn_count: 2 }, format_version: 1, pinned: false, archived: true },
+      { recipe_path: "/x/arch.json", display_name: "Archived One", last_modified_at: Date.now() - 86_400_000, source_summary: { first_source_name: null, source_count: 0, turn_count: 2 }, format_version: 1, pinned: false, archived: true, workspace: null },
     ];
     const { container } = renderShell(
       <SessionSidebar
@@ -1727,6 +1737,7 @@ describe("SessionSidebar archived-view gating (issue #1175)", () => {
       format_version: 1,
       pinned: false,
       archived: true,
+      workspace: null,
     };
     const props = (showArchived: boolean) => ({
       collapsed: false,

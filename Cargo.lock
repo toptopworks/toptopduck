@@ -5888,6 +5888,7 @@ dependencies = [
  "anyhow",
  "bounded-line",
  "calamine",
+ "chrono",
  "csv",
  "duckdb",
  "futures",

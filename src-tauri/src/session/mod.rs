@@ -26,6 +26,7 @@ pub mod source_lifecycle;
 mod sql_assets;
 pub(crate) mod turn_dispatch;
 pub mod turn_runner;
+pub(crate) mod workspace;
 
 use std::collections::HashMap;
 use std::fs;
@@ -430,8 +431,9 @@ pub struct PosturePair {
 
 /// The recipe-header facts the persister layers onto every built recipe
 /// (ADR-0095, extended by ADR-0102 Decision 1): the model +
-/// thought-level selections, the discovered-catalog cache, and the last
-/// effective segment header's runtime. Plain data; mirrors the handle-held
+/// thought-level selections, the discovered-catalog cache, the last
+/// effective segment header's runtime, and the session's workspace
+/// binding (ADR-0137). Plain data; mirrors the handle-held
 /// user choices at every persist point -- the turn-top mirror, and the set
 /// commands' persist-now write, which stamps the runtime choice beside the
 /// pair it persists. At turn end `record_turn` re-stamps `last_runtime`
@@ -443,6 +445,14 @@ pub struct SessionRuntimeFacts {
     pub thought_level: Option<String>,
     pub cached_discovered: Option<crate::session::loop_contract::DiscoveredRuntime>,
     pub last_runtime: Option<LastRuntime>,
+    /// The session's workspace binding (ADR-0137, issue #1381): the canonical
+    /// directory agent-authored processes work in, fixed at creation
+    /// (user-selected) or at the first disk-need moment (lazily minted) and
+    /// immutable afterwards. Not a runtime fact semantically -- it rides this
+    /// struct because the struct is the recipe-header facts carrier, so the
+    /// binding persists + resumes through the same single storage as the
+    /// posture facts (no second copy to drift).
+    pub workspace: Option<std::path::PathBuf>,
 }
 
 pub struct Session {
@@ -453,6 +463,14 @@ pub struct Session {
     working_set: WorkingSet,
     _temp_dir: TempDir, // held to keep its dir alive; cleared on drop (ADR-0012)
     temp_path: PathBuf,
+    /// The lazy-mint source for the default workspace (ADR-0137, issue
+    /// #1381): the fixed product-domain workspaces root (the DEFAULT
+    /// sessions root's sibling), seated by the command layer at
+    /// creation / resume. The binding itself lives in
+    /// [`SessionRuntimeFacts::workspace`] -- the recipe-header facts carrier.
+    /// `None` (test constructors) disables minting; disk-need consumers then
+    /// keep the temp-dir cwd.
+    workspaces_root: Option<PathBuf>,
     /// The LLM provider (ADR-0007/0064), held behind `Arc<dyn>` (dyn, not
     /// generic) so this struct does not parameterize `commands.rs` / `lib.rs`.
     /// [`Self::ask_with_phase`] reads the live response locale off it for the
@@ -967,6 +985,7 @@ impl Session {
             working_set: WorkingSet::default(),
             _temp_dir: temp_dir,
             temp_path,
+            workspaces_root: None,
             provider,
             materializer: Box::new(RealMaterializer),
             session_id: None,
@@ -1391,11 +1410,14 @@ impl Session {
         // ONCE here at settle (non-streaming -- the full reply text and the
         // tool channel are both final): the `present_files` declarations
         // merged with the reply-text scan, resolved against the session
-        // working dir (the external agent cwd / built-in tool output area),
-        // deduped, capped, and -- for temp-dir hits -- materialized into
-        // the per-session `artifacts/` directory so the manifest survives a
-        // close/reopen. Frozen on the record; existence is a render-time
-        // fact.
+        // temp dir, deduped, capped, and -- for temp-dir hits --
+        // materialized into the per-session `artifacts/` directory so the
+        // manifest survives a close/reopen. Frozen on the record; existence
+        // is a render-time fact. TRANSITION (ADR-0137, issue #1381): the
+        // agent cwd is now the session WORKSPACE while this base stays the
+        // temp dir, so a workspace-relative path the agent declares or
+        // mentions resolves against the wrong directory -- the base joins
+        // the workspace with #1383's in-place manifest.
         let artifacts = artifacts::settle_manifest(
             &presented,
             artifacts::reply_body(&outcome),

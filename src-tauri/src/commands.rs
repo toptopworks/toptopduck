@@ -209,11 +209,13 @@ pub struct CreateSessionReply {
 /// known-persisted session.
 #[tauri::command]
 pub fn create_session(
+    app: tauri::AppHandle,
     store: State<'_, Arc<SessionStore>>,
     live: State<'_, LiveProviderConfig>,
     sessions_root: State<'_, SessionsRoot>,
     skills_root: State<'_, SkillsRoot>,
     user_store: State<'_, UserAdapterStore>,
+    workspace: Option<String>,
 ) -> Result<CreateSessionReply, SessionError> {
     let cancel = Arc::new(CancelToken::new());
     // The real LLM provider (ADR-0007/0064): a LiveProvider router that reads
@@ -288,6 +290,36 @@ pub fn create_session(
         let cfg = live.load();
         let seed = crate::skills::seed_from_config(&cfg, &live.cli_tools(), &skills_root.0);
         s.set_discovery_snapshot(seed);
+        // ADR-0137 (issue #1381): seat the workspace axis BEFORE the bind so
+        // the initial recipe carries the binding. An explicitly selected
+        // directory binds canonicalized (Windows 8.3 short paths would let
+        // one directory appear under two spellings, breaking path
+        // comparison + multi-session dedup); no selection seats only the
+        // lazy-mint source -- the first disk-need moment (external turn
+        // spawn / built-in CLI tool launch) mints the default timestamped
+        // workspace, and a pure-chat session stays dirless. The mint source
+        // is FIXED in the product's Documents domain (the default sessions
+        // root's sibling): workspaces are user assets and do not follow a
+        // user-overridden sessions dir.
+        s.set_workspaces_root(Some(crate::persistence::default_workspaces_root(&app)));
+        if let Some(dir) = &workspace {
+            let canonical = std::fs::canonicalize(dir).map_err(|e| {
+                // Distinct from launch_cwd's mkdir-failure wording: this is
+                // the create-time "the selected directory cannot be opened"
+                // verdict, not a mint/materialize fault. The io error's
+                // Display carries no path -- name the user's selection.
+                SessionError::Engine(format!("cannot open workspace directory {dir}: {e}"))
+            })?;
+            if !canonical.is_dir() {
+                // canonicalize succeeds on a file; binding one would fail
+                // at the first launch with the workspace-unavailable error
+                // -- reject it at this create-time verdict instead.
+                return Err(SessionError::Engine(format!(
+                    "workspace path is not a directory: {dir}"
+                )));
+            }
+            s.set_workspace(canonical);
+        }
         s.bind_recipe(recipe_path.clone(), String::new())
             .map_err(|e| SessionError::Engine(e.to_string()))?;
         Ok(CreateSessionReply {
@@ -2236,6 +2268,11 @@ pub async fn open_recipe(
     let app_for_cb = app.clone();
     let sid = id.clone();
     let sessions_root_path = sessions_root.path();
+    // ADR-0137 (issue #1381): the mint source resolves OUTSIDE the blocking
+    // task (plain data crossing, the sessions_root_path pattern) -- FIXED in
+    // the product's Documents domain, never derived from the (possibly
+    // user-overridden) sessions root.
+    let workspaces_root_path = crate::persistence::default_workspaces_root(&app);
     // ADR-0102 Decision 1/4 (issue #589): resume restores the session's LAST
     // runtime (segment continuation) instead of resetting to the default. The
     // default resolution is still computed here BEFORE the swap closure (the
@@ -2295,6 +2332,13 @@ pub async fn open_recipe(
         // reopens under the SAME id, so its no-progress kill log attributes
         // to the session the file belongs to.
         stamp_resumed_identity(&mut new_session, &sid);
+        // ADR-0137 (issue #1381): seat the lazy-mint source on the resumed
+        // session too, so a pre-#1381 recipe (no `workspace` header) behaves
+        // like a fresh directory-less session -- its next disk-need moment
+        // mints a default workspace. A recipe WITH a workspace restores the
+        // binding inside open_recipe; this root only ever mints. Same FIXED
+        // product-domain placement as create_session.
+        new_session.set_workspaces_root(Some(workspaces_root_path));
         // ADR-0063: re-arm the close-and-wait-release drop signal for the
         // resumed session. Install a fresh (sender, receiver) pair: the sender
         // goes into the NEW session (its Drop will fire it after the canonical

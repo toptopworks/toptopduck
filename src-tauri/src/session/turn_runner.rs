@@ -424,6 +424,8 @@ impl super::Session {
                         result_row_cap: self.result_row_cap,
                         result_count_cap: self.result_count_cap,
                         temp_path: &self.temp_path,
+                        workspace: Some(&mut self.runtime_facts.workspace),
+                        workspaces_root: self.workspaces_root.clone(),
                         snapshot_dir,
                         assets_dir,
                         tool_output_refs: &mut self.tool_output_refs,
@@ -679,8 +681,23 @@ impl super::Session {
             inputs.skills,
             inputs.user_invocations,
         );
+        // ADR-0137 (issue #1381): the external runtime's cwd is the session
+        // workspace -- THIS spawn is the lazy-mint disk-need moment for a
+        // directory-less session, so a pure-chat session never mints one.
+        // The temp-dir cwd survives only when minting is unavailable.
+        let cwd = match self.ensure_external_cwd() {
+            Ok(cwd) => cwd,
+            Err(detail) => {
+                return (
+                    TurnOutcome::Failed(TurnFailure::Runtime { detail }),
+                    Vec::new(),
+                    None,
+                    None,
+                );
+            }
+        };
         let input = AcpTurnInput {
-            cwd: self.temp_path.to_string_lossy().to_string(),
+            cwd,
             mcp_servers: vec![mcp_server],
             // ADR-0095: the session-level model / thought-level choices ride
             // the turn input (injected per-format inside the engine: ACP
@@ -798,6 +815,11 @@ impl super::Session {
                 result_row_cap: self.result_row_cap,
                 result_count_cap: self.result_count_cap,
                 temp_path: &self.temp_path,
+                // ADR-0137 (issue #1381): the gateway serves the SAME launch
+                // cwd seam to bridge-originated CLI tool calls -- one cwd
+                // semantics across both runtime surfaces.
+                workspace: Some(&mut self.runtime_facts.workspace),
+                workspaces_root: self.workspaces_root.clone(),
                 snapshot_dir,
                 assets_dir,
                 tool_output_refs: &mut self.tool_output_refs,

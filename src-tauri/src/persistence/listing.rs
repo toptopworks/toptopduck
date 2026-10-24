@@ -89,6 +89,16 @@ pub(crate) fn default_sessions_root(app: &tauri::AppHandle) -> PathBuf {
     }
 }
 
+/// The App-minted workspaces root (ADR-0137, issue #1381): the default
+/// sessions root's SIBLING in the product's Documents domain. Fixed -- it
+/// does NOT follow a user-overridden `set_sessions_dir` (workspaces are user
+/// assets; their home does not move with storage configuration). Takes the
+/// app handle directly so a caller cannot accidentally pass an overridden
+/// sessions root into the sibling derivation.
+pub(crate) fn default_workspaces_root(app: &tauri::AppHandle) -> PathBuf {
+    crate::session::workspace::resolve_workspaces_root(&default_sessions_root(app))
+}
+
 /// Typed recipe file path — the stable identity of a persisted session
 /// (ADR-0060/0061, issue #462). Distinct from the runtime [`SessionId`] (a
 /// UUID): this is the persisted path the frontend passes back to `open_recipe`.
@@ -151,6 +161,11 @@ pub struct SessionMetadata {
     /// search, which consume the same server-trimmed response). False when
     /// the sidecar has no entry.
     pub archived: bool,
+    /// The session's bound workspace directory, canonical path (ADR-0137,
+    /// issue #1381): `None` for a session that never reached a disk-need
+    /// moment and for recipes persisted before the field. Frontend grouping
+    /// by workspace derives from this read-only projection.
+    pub workspace: Option<String>,
 }
 
 /// A sidebar entry's working-set summary (ADR-0060): the first source's display
@@ -316,6 +331,10 @@ fn build_session_metadata(path: &Path) -> Option<SessionMetadata> {
         // false (ADR-0127).
         pinned: false,
         archived: false,
+        workspace: recipe
+            .workspace
+            .as_ref()
+            .map(|p| p.to_string_lossy().into_owned()),
     })
 }
 
@@ -435,7 +454,8 @@ mod tests {
                 ],
                 Some("orders".into()),
             )
-            .expect("build"),
+            .expect("build")
+            .with_workspace(Some("/w/proj".into())),
         );
 
         let list = list_session_metadata(std::slice::from_ref(&path));
@@ -455,6 +475,8 @@ mod tests {
         assert_eq!(m.source_summary.turn_count, 2);
         // format_version is the current recipe version.
         assert_eq!(m.format_version, crate::persistence::RECIPE_FORMAT_VERSION);
+        // workspace projects from the recipe header (ADR-0137, issue #1381).
+        assert_eq!(m.workspace.as_deref(), Some("/w/proj"));
         // mtime is the file's actual modification time in epoch millis -- pin
         // both the unit (millis, not micros/nanos) and the source (this recipe.json
         // path) by comparing against an independent stat, so a unit or source

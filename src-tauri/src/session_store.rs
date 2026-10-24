@@ -819,7 +819,12 @@ impl SessionStore {
 
     /// Close a session and, if its timeline is completely empty (ADR-0089
     /// Decision 6), delete the per-session directory so empty sessions do not
-    /// linger as sidebar "新会话" ghost entries.
+    /// linger as sidebar "新会话" ghost entries. Additionally reclaims a
+    /// still-EMPTY App-minted workspace (ADR-0137, issue #1381): a lazily
+    /// minted default workspace that never saw a file write leaves no
+    /// directory behind. A user-selected workspace and any non-empty
+    /// workspace are never touched; `delete_session` does not route here, so
+    /// deletion never reclaims a workspace.
     ///
     /// Uses [`SessionHandle::try_session_lock`] to avoid blocking on an
     /// in-flight ask: the `ask` command holds the session mutex for the entire
@@ -836,16 +841,40 @@ impl SessionStore {
     pub fn close_and_cleanup_empty(&self, id: &SessionId) -> Result<bool, SessionError> {
         let handle = self.get(id)?;
         // try_lock: never blocks. If the ask holds the lock, skip cleanup.
-        let session_dir = handle.try_session_lock().and_then(|s| {
-            if s.is_timeline_empty() {
-                s.recipe_path()
-                    .and_then(|p| p.parent())
-                    .map(std::path::PathBuf::from)
-            } else {
-                None
-            }
-        });
+        // The same read takes the workspace axis (ADR-0137, issue #1381): an
+        // App-minted workspace that is still EMPTY at close is reclaimed --
+        // a lazy mint that never saw a file write leaves no directory
+        // behind. Read under the lock (immutable once bound, so no TOCTOU on
+        // the binding itself; the emptiness check rides remove_dir).
+        let (session_dir, workspace_axis) = handle
+            .try_session_lock()
+            .map(|s| {
+                let dir = if s.is_timeline_empty() {
+                    s.recipe_path()
+                        .and_then(|p| p.parent())
+                        .map(std::path::PathBuf::from)
+                } else {
+                    None
+                };
+                let axis = s
+                    .workspace()
+                    .zip(s.workspaces_root())
+                    .map(|(ws, root)| (ws.to_path_buf(), root.to_path_buf()));
+                (dir, axis)
+            })
+            // Lock unavailable (an ask holds it): both cleanups skip, the
+            // ADR-0055 never-block contract.
+            .unwrap_or((None, None));
         self.close(id)?;
+        // ADR-0137 (issue #1381): the workspace reclaim runs regardless of
+        // the timeline -- a minted-but-untouched workspace is empty whether
+        // or not the session recorded chat turns. Files are user assets, so
+        // `reclaim_if_empty` itself refuses anything non-App-minted or
+        // non-empty; deleting a session never reclaims (delete_session does
+        // not route here).
+        if let Some((ws, root)) = workspace_axis {
+            crate::session::workspace::reclaim_if_empty(&ws, &root);
+        }
         if let Some(dir) = session_dir {
             match std::fs::remove_dir_all(&dir) {
                 Ok(()) => Ok(true),
@@ -906,6 +935,68 @@ mod tests {
             session.session_id(),
             Some(&id),
             "the Session carries the id the store returned"
+        );
+    }
+
+    /// ADR-0137 (issue #1381): close reclaims a still-EMPTY App-minted
+    /// workspace, and never touches an empty user-selected one.
+    #[test]
+    fn close_reclaims_an_empty_minted_workspace_but_not_a_user_directory() {
+        let store = SessionStore::new();
+        let root = tempfile::tempdir().expect("workspaces root");
+        let user = tempfile::tempdir().expect("user dir");
+
+        // Session A: a minted (empty) workspace under the managed root.
+        // The timeline is NON-empty (an ingested source): a mint only
+        // happens after a turn ran, so in production the close-time
+        // reclaim almost always runs regardless of the timeline -- pin
+        // that branch, not just the empty-timeline half.
+        let id_a = store
+            .create(
+                Arc::new(CancelToken::new()),
+                Box::new(crate::UnwiredProvider),
+                Default::default(),
+            )
+            .expect("create A");
+        let minted = crate::session::workspace::mint_workspace(root.path(), chrono::Local::now())
+            .expect("mint");
+        {
+            let handle_a = store.get(&id_a).expect("handle A");
+            let mut s = handle_a.session_lock().unwrap();
+            let csv = root.path().join("seed.csv");
+            std::fs::write(&csv, "name,score\nAda,9\n").expect("write csv");
+            match s.ingest(&csv) {
+                crate::model::LoadOutcome::Loaded(d) => {
+                    assert_eq!(d.reference_name, "seed");
+                }
+                other => panic!("ingest should load, got {other:?}"),
+            }
+            s.set_workspaces_root(Some(root.path().to_path_buf()));
+            s.set_workspace(minted.clone());
+        }
+
+        // Session B: an explicit user directory (empty, outside the root).
+        let id_b = store
+            .create(
+                Arc::new(CancelToken::new()),
+                Box::new(crate::UnwiredProvider),
+                Default::default(),
+            )
+            .expect("create B");
+        {
+            let handle_b = store.get(&id_b).expect("handle B");
+            let mut s = handle_b.session_lock().unwrap();
+            s.set_workspaces_root(Some(root.path().to_path_buf()));
+            s.set_workspace(user.path().to_path_buf());
+        }
+
+        store.close_and_cleanup_empty(&id_a).expect("close A");
+        assert!(!minted.exists(), "the empty minted workspace is reclaimed");
+
+        store.close_and_cleanup_empty(&id_b).expect("close B");
+        assert!(
+            user.path().exists(),
+            "an empty user-selected workspace is never reclaimed"
         );
     }
 

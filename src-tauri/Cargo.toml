@@ -147,6 +147,11 @@ tempfile = "3"
 # whitelist-constrained bare paths. Already in the tree transitively; used
 # directly here so the scan does not hand-roll a tokenizer.
 regex = "1"
+# Local-time formatting for the lazily-minted default workspace directory
+# name (ADR-0137, issue #1381): `YYYY-MM-DD-HH-MM-SS` in the user's local
+# zone. Already in the tree transitively; the `clock` feature alone adds
+# `Local::now` without pulling any of the default formatting/serde surface.
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
 # `calamine` reads .xlsx cell cached values (formulas resolved to their cached
 # result, never recomputed -- ADR-0015) fully offline. duckdb-rs's vendored
 # DuckDB amalgamation cannot statically link the `excel` loadable extension
