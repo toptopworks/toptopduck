@@ -2703,6 +2703,51 @@ fn resume_falls_back_to_absolute_when_relative_path_is_missing() {
     );
 }
 
+/// #1387 review F: a recipe carrying an unrecognized reader spelling
+/// (hand-edited corruption) must not refuse to resume or execute the
+/// string -- the replay falls back to extension dispatch through the same
+/// fn-name normalizer that bars non-tabular spellings from the copy-in
+/// template.
+#[test]
+fn resume_falls_back_to_extension_dispatch_for_an_unrecognized_reader() {
+    use toptopduck_lib::persistence::{save_atomic, Recipe, SourceRef};
+    use toptopduck_lib::RectifyProvenance;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let duck = dir.path().join("s.json");
+    let outside = dir.path().join("data.csv");
+    fs::write(&outside, "name,score\nAda,9\n").expect("write source");
+
+    // Capture the real fingerprint through one ingest.
+    let mut probe = Session::with_provider(Box::new(FakeProvider::new())).expect("session");
+    load_source(&mut probe, &outside);
+    let fingerprint = probe.get("data").expect("data").fingerprint.clone();
+    drop(probe);
+
+    let recipe = Recipe::build(
+        "tampered".into(),
+        vec![SourceRef {
+            reference_name: "data".into(),
+            display_name: "data".into(),
+            source_path: outside.to_string_lossy().to_string(),
+            relative_path: None,
+            rectify: RectifyProvenance::NotApplicable,
+            fingerprint,
+            reader: Some("read_evil".into()),
+        }],
+        vec![],
+        None,
+    )
+    .expect("build recipe");
+    save_atomic(&duck, &recipe).expect("save");
+
+    let resumed = resume_defaults(&duck, Arc::new(CancelToken::new()), |_| {}).expect("resume");
+    let page = resumed
+        .read_rows("data", 0, 10)
+        .expect("the extension fallback reads the source");
+    assert_eq!(page.rows.len(), 1, "the CSV rows came through");
+}
+
 /// AC4: a boundary-case source (relative + absolute both stored) whose file
 /// is gone entirely surfaces as Missing and goes through re-link (ADR-0035
 /// honest degrade). The boundary case must not silently pick one

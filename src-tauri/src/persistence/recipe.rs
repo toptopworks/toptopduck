@@ -176,7 +176,9 @@ pub struct SourceRef {
     /// source, `None` for manual-ingest sources and legacy recipes. A
     /// watermark-miss replay consults this BEFORE extension dispatch so a
     /// function-name / extension mismatch re-reads with the reader that
-    /// produced the snapshot.
+    /// produced the snapshot. The one corner that names no SQL fn: a
+    /// non-tabular call on a tool_output original records the staged
+    /// file's extension-dispatched reader (the #433 fallback posture).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reader: Option<String>,
 }

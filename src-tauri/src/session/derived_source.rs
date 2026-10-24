@@ -2114,6 +2114,7 @@ mod tests {
         let mut ws = WorkingSet::default();
         let mut sources = HashMap::new();
         let mut refs = HashMap::new();
+        let mut readers = HashMap::new();
 
         let sql = format!(
             "SELECT * FROM read_csv_auto('{}') UNION ALL SELECT * FROM read_text('{}')",
@@ -2122,6 +2123,7 @@ mod tests {
         );
 
         let mut deps = TurnDeps::test_deps(&engine, &mut ws, &mut sources, temp.path(), &mut refs);
+        deps.source_readers = Some(&mut readers);
         let result = process(&sql, &mut deps);
 
         assert!(result.is_err(), "process fails on unsupported format");
@@ -2140,6 +2142,11 @@ mod tests {
             refs.is_empty(),
             "session cache invalidated on rollback, got: {:?}",
             refs
+        );
+        assert!(
+            readers.is_empty(),
+            "recorded readers rolled back with the registration, got: {:?}",
+            readers
         );
         // Effect-level pin (PR #654 deferred note): the rollback DETACH is
         // silent (`let _`), so the physical effect must be probed -- the

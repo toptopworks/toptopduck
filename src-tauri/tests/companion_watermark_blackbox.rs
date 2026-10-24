@@ -449,6 +449,159 @@ fn a_watermark_miss_replays_a_reader_mismatch_source_by_the_recorded_reader() {
         page.rows.iter().flatten().any(|c| c.contains("PASSWORD")),
         "the mismatch source's rows survived the replay"
     );
+
+    // Refill pin (review I2): the post-resume rewrite (resume phase 5)
+    // rebuilds the recipe from the persister map, so the miss leg must
+    // have refilled the reader or the rewrite silently strips the field.
+    drop(resumed);
+    let disk = fs::read_to_string(&duck).expect("read recipe");
+    let v: serde_json::Value = serde_json::from_str(&disk).expect("recipe json");
+    assert_eq!(
+        v["sources"][0]["reader"],
+        json!("read_json_auto"),
+        "the miss-leg refill keeps the reader through the post-resume rewrite"
+    );
+}
+
+/// #1387 review I2: the hit leg never reads files, but the post-resume
+/// rewrite rebuilds the recipe from the persister map -- without the
+/// refill the rewrite would silently strip the recorded reader
+/// (skip_serializing_if) and the NEXT miss would fall back to extension
+/// dispatch and its refusals.
+#[test]
+fn a_watermark_hit_preserves_the_recorded_reader_through_the_rewrite() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let duck = dir.path().join("s.json");
+    // JSON bytes under a `.txt` spelling outside the session tree.
+    let notes = dir.path().join("notes.txt");
+    fs::write(&notes, r#"[{"secret":"PASSWORD"}]"#).expect("write notes");
+    let sql = format!(
+        "SELECT secret FROM read_json_auto('{}')",
+        notes.to_string_lossy()
+    );
+    let provider = FakeProvider::new().scripted_tool_turn_seq("笔记", productive(&sql));
+    let mut session = Session::with_provider(Box::new(provider)).expect("session");
+    session
+        .bind_recipe(duck.clone(), "分叉分析".into())
+        .expect("bind");
+    let _ = session.ask("笔记");
+    drop(session); // the snapshot stays -- the reopen hits
+
+    let (events, cb) = collect_events();
+    let resumed = resume_defaults(&duck, Arc::new(CancelToken::new()), cb).expect("hit reopen");
+    assert!(
+        events.borrow().is_empty(),
+        "the reopen hits (got {:?})",
+        events.borrow()
+    );
+    drop(resumed);
+
+    let disk = fs::read_to_string(&duck).expect("read recipe");
+    let v: serde_json::Value = serde_json::from_str(&disk).expect("recipe json");
+    assert_eq!(
+        v["sources"][0]["reader"],
+        json!("read_json_auto"),
+        "the hit-leg refill keeps the reader through the post-resume rewrite"
+    );
+}
+
+/// #1387 review I1: a replace re-bases the source on extension dispatch --
+/// the recipe must not carry the old registration's fn-named reader over
+/// the replacement file, or the next watermark miss would re-read the
+/// replacement with the WRONG reader.
+#[test]
+fn a_replace_clears_the_recorded_reader_for_the_replacement() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let duck = dir.path().join("s.json");
+    let notes = dir.path().join("notes.txt");
+    fs::write(&notes, r#"[{"secret":"PASSWORD"}]"#).expect("write notes");
+    let sql = format!(
+        "SELECT secret FROM read_json_auto('{}')",
+        notes.to_string_lossy()
+    );
+    let provider = FakeProvider::new().scripted_tool_turn_seq("笔记", productive(&sql));
+    let mut session = Session::with_provider(Box::new(provider)).expect("session");
+    session
+        .bind_recipe(duck.clone(), "分叉分析".into())
+        .expect("bind");
+    let _ = session.ask("笔记");
+    // A same-name replace onto a CSV: the replacement is read by ITS
+    // extension, so the recorded json reader must be gone.
+    let csv = dir.path().join("swap.csv");
+    fs::write(&csv, "id,secret\n1,PASSWORD\n").expect("write swap");
+    match session.replace_source("notes", &csv) {
+        LoadOutcome::Loaded(_) => {}
+        other => panic!("expected replace to load, got {other:?}"),
+    }
+    drop(session);
+
+    let disk = fs::read_to_string(&duck).expect("read recipe");
+    let v: serde_json::Value = serde_json::from_str(&disk).expect("recipe json");
+    let src = &v["sources"][0];
+    assert_eq!(
+        src["reference_name"],
+        json!("notes"),
+        "the swap kept the name"
+    );
+    assert!(
+        src.get("reader").is_none(),
+        "the replace cleared the old registration's reader, got {:?}",
+        src["reader"]
+    );
+}
+
+/// #1387 review E: the reader entry retires with the snapshot -- a manual
+/// re-registration under the freed name must not inherit the programmatic
+/// registration's reader (the recipe would pin json dispatch onto an
+/// extension-read file).
+#[test]
+fn a_removal_lets_a_same_name_manual_ingest_start_reader_clean() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let duck = dir.path().join("s.json");
+    let notes = dir.path().join("notes.txt");
+    fs::write(&notes, r#"[{"secret":"PASSWORD"}]"#).expect("write notes");
+    let sql = format!(
+        "SELECT secret FROM read_json_auto('{}')",
+        notes.to_string_lossy()
+    );
+    let provider = FakeProvider::new().scripted_tool_turn_seq("笔记", productive(&sql));
+    let mut session = Session::with_provider(Box::new(provider)).expect("session");
+    session
+        .bind_recipe(duck.clone(), "分叉分析".into())
+        .expect("bind");
+    let _ = session.ask("笔记");
+    assert!(
+        session.get("notes").is_some(),
+        "the programmatic source registered"
+    );
+
+    // A second source takes over the active-source pointer, so the plain
+    // removal path (not remove_active_source's explicit continuation)
+    // carries the delete (ADR-0035).
+    let other = dir.path().join("orders.csv");
+    fs::write(&other, "id,qty\n1,2\n").expect("write other");
+    load_source(&mut session, &other);
+    session.remove_source("notes").expect("remove");
+    // A manual ingest reclaims the freed name (same stem): CSV content,
+    // read by extension like every manual ingest.
+    let manual = dir.path().join("notes.csv");
+    fs::write(&manual, "id,secret\n1,PASSWORD\n").expect("write manual");
+    load_source(&mut session, &manual);
+    drop(session);
+
+    let disk = fs::read_to_string(&duck).expect("read recipe");
+    let v: serde_json::Value = serde_json::from_str(&disk).expect("recipe json");
+    let src = v["sources"]
+        .as_array()
+        .expect("sources array")
+        .iter()
+        .find(|s| s["reference_name"] == json!("notes"))
+        .expect("the manual ingest reclaimed the freed name");
+    assert!(
+        src.get("reader").is_none(),
+        "the removal retired the reader entry with the snapshot, got {:?}",
+        src["reader"]
+    );
 }
 
 /// A replace settles the REPLACEMENT into the tree: the retire step must

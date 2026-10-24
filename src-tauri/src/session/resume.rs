@@ -1268,8 +1268,17 @@ impl super::Session {
         // same fn-name normalizer, so only the three tabular spellings can
         // reach the copy-in template (a tampered recipe cannot smuggle
         // arbitrary SQL in through `reader`). `None` -- manual-ingest
-        // sources and legacy recipes -- dispatches by file extension,
-        // exactly as before.
+        // sources, legacy recipes, and a present-but-unrecognized spelling
+        // (recipe corruption until proven otherwise, logged below) --
+        // dispatches by file extension, exactly as before.
+        if let Some(spelling) = recorded_reader {
+            if super::derived_source::programmatic_reader(spelling).is_none() {
+                log::warn!(
+                    target: "toptopduck::session",
+                    "source {reference_name} carries an unrecognized reader spelling {spelling:?}; falling back to extension dispatch"
+                );
+            }
+        }
         let reader: &'static str =
             match recorded_reader.and_then(super::derived_source::programmatic_reader) {
                 Some(r) => r,
