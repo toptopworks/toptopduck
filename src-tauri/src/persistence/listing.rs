@@ -400,6 +400,7 @@ mod tests {
             relative_path: None,
             rectify: RectifyProvenance::NotApplicable,
             fingerprint: format!("fp-{name}"),
+            reader: None,
         }
     }
 

@@ -8,6 +8,7 @@
 //! Session (end-to-end coverage via the facade) while this module adds pure
 //! unit tests that need no DuckDB / provider / tempdir.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use crate::persistence::recipe::{
@@ -69,6 +70,14 @@ pub(super) fn hash_file(path: &Path) -> Result<Option<String>, std::io::Error> {
 /// this struct would introduce a second release path and break the explicit
 /// ordering guarantee.
 pub(super) struct RecipePersister {
+    /// The copy-in reader each programmatically registered source was read
+    /// with (ADR-0137 D4): the write-through state for the persisted
+    /// `SourceRef.reader` -- registration records here, `build_recipe`
+    /// reads here, and the removal / replace paths clear entries so a ref
+    /// name never inherits a stale reader from a prior registration.
+    /// Absent entries (manual-ingest sources) dispatch by extension on
+    /// replay, exactly as before.
+    pub(super) source_readers: HashMap<String, String>,
     /// The bound `recipe.json` path (ADR-0034). When `Some`, every terminal turn
     /// and source lifecycle event atomically rewrites the recipe at this path.
     recipe_path: Option<PathBuf>,
@@ -97,6 +106,7 @@ impl RecipePersister {
     /// A fresh, unbound persister -- no `recipe.json` path, no baseline, no errors.
     pub(super) fn new() -> Self {
         Self {
+            source_readers: HashMap::new(),
             recipe_path: None,
             session_name: None,
             persist_error: None,
@@ -180,6 +190,9 @@ impl RecipePersister {
                     relative_path,
                     rectify: d.rectify.clone(),
                     fingerprint: d.fingerprint.clone(),
+                    // The recorded fn-named reader (ADR-0137 D4): replay
+                    // re-reads by it. Absent for manual-ingest sources.
+                    reader: self.source_readers.get(&d.reference_name).cloned(),
                 }
             })
             .collect();

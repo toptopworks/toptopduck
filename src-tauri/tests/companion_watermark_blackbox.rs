@@ -412,6 +412,45 @@ fn a_watermark_miss_rebuilds_results_from_scratch() {
     assert_eq!(page.total, 1);
 }
 
+/// #1387: a programmatically referenced source whose SQL function name and
+/// file extension disagree (`read_json_auto` on a `.txt` original)
+/// snapshots fine on first production; a watermark-miss replay must re-read
+/// with the SAME reader (persisted on the recipe source ref) instead of
+/// extension dispatch (which would refuse `.txt` as unsupported).
+#[test]
+fn a_watermark_miss_replays_a_reader_mismatch_source_by_the_recorded_reader() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let duck = dir.path().join("s.json");
+    // JSON bytes under a `.txt` spelling outside the session tree.
+    let notes = dir.path().join("notes.txt");
+    fs::write(&notes, r#"[{"secret":"PASSWORD"}]"#).expect("write notes");
+    let sql = format!(
+        "SELECT secret FROM read_json_auto('{}')",
+        notes.to_string_lossy()
+    );
+    let provider = FakeProvider::new().scripted_tool_turn_seq("笔记", productive(&sql));
+    let mut session = Session::with_provider(Box::new(provider)).expect("session");
+    session
+        .bind_recipe(duck.clone(), "分叉分析".into())
+        .expect("bind");
+    let _ = session.ask("笔记");
+    assert!(session.get("notes").is_some(), "the mismatch registered");
+    drop(session);
+    // Force a miss by deleting the tree snapshot while keeping the companion.
+    fs::remove_file(dir.path().join("snapshots").join("notes.duckdb")).expect("drop snapshot");
+
+    let resumed = resume_defaults(&duck, Arc::new(CancelToken::new()), |_| {})
+        .expect("miss replays by the recorded reader");
+    let page = resumed
+        .read_rows("notes", 0, 10)
+        .expect("the rebuilt source is readable");
+    assert_eq!(page.rows.len(), 1, "re-read as json, not refused as .txt");
+    assert!(
+        page.rows.iter().flatten().any(|c| c.contains("PASSWORD")),
+        "the mismatch source's rows survived the replay"
+    );
+}
+
 /// A replace settles the REPLACEMENT into the tree: the retire step must
 /// remove the old snapshot and promote the swap inside `snapshots/` (a
 /// temp-dir formal path would strand the stale file in the tree while the

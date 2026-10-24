@@ -944,6 +944,7 @@ impl super::Session {
                 let mut deps = TurnDeps {
                     engine: &session.admin_engine,
                     source_files: &mut session.source_files,
+                    source_readers: Some(&mut session.persister.source_readers),
                     working_set: &mut session.working_set,
                     result_row_cap: session.result_row_cap,
                     result_count_cap: session.result_count_cap,
@@ -1146,7 +1147,12 @@ impl super::Session {
             loop {
                 let src = recipe.sources[i].clone();
                 let path = Self::resolve_source_path(recipe_path, &src)?;
-                match self.resume_ingest_at(&src.reference_name, &src.display_name, &path) {
+                match self.resume_ingest_at(
+                    &src.reference_name,
+                    &src.display_name,
+                    &path,
+                    src.reader.as_deref(),
+                ) {
                     Ok(descriptor) => {
                         if descriptor.fingerprint == src.fingerprint {
                             // Match -- restore the recipe's display label over
@@ -1255,26 +1261,40 @@ impl super::Session {
         reference_name: &str,
         display_name: &str,
         path: &Path,
+        recorded_reader: Option<&str>,
     ) -> Result<DatasetDescriptor, LoadError> {
-        let dispatched = crate::ingest::dispatch(path);
-        let reader = match dispatched {
-            crate::ingest::Dispatched::Xls => return Err(LoadError::LegacyExcel),
-            crate::ingest::Dispatched::Xlsx => {
-                return Err(LoadError::Other {
-                    detail: "resume 不支持 Excel 工作簿（多 sheet 语义）".into(),
-                });
-            }
-            _ => match crate::ingest::reader_for(&dispatched) {
+        // Reader authority is the fn name the SQL used at registration
+        // (ADR-0137 D4): the persisted spelling is re-validated through the
+        // same fn-name normalizer, so only the three tabular spellings can
+        // reach the copy-in template (a tampered recipe cannot smuggle
+        // arbitrary SQL in through `reader`). `None` -- manual-ingest
+        // sources and legacy recipes -- dispatches by file extension,
+        // exactly as before.
+        let reader: &'static str =
+            match recorded_reader.and_then(super::derived_source::programmatic_reader) {
                 Some(r) => r,
                 None => {
-                    let requested = match dispatched {
-                        crate::ingest::Dispatched::Unsupported(ext) => ext,
-                        _ => String::new(),
-                    };
-                    return Err(LoadError::UnsupportedFormat { requested });
+                    let dispatched = crate::ingest::dispatch(path);
+                    match dispatched {
+                        crate::ingest::Dispatched::Xls => return Err(LoadError::LegacyExcel),
+                        crate::ingest::Dispatched::Xlsx => {
+                            return Err(LoadError::Other {
+                                detail: "resume 不支持 Excel 工作簿（多 sheet 语义）".into(),
+                            });
+                        }
+                        _ => match crate::ingest::reader_for(&dispatched) {
+                            Some(r) => r,
+                            None => {
+                                let requested = match dispatched {
+                                    crate::ingest::Dispatched::Unsupported(ext) => ext,
+                                    _ => String::new(),
+                                };
+                                return Err(LoadError::UnsupportedFormat { requested });
+                            }
+                        },
+                    }
                 }
-            },
-        };
+            };
         // copy-in + attach under the explicit reference name (no de-conflict:
         // the recipe's name is already unique, ADR-0036 parse-time check).
         let snap =
@@ -1294,6 +1314,11 @@ impl super::Session {
         }
         self.source_files
             .insert(reference_name.to_string(), snap.file_path);
+        // Refill the reader-recording map (ADR-0137 D4): the post-resume
+        // persist rewrites the recipe, and the field must survive it.
+        self.persister
+            .source_readers
+            .insert(reference_name.to_string(), reader.to_string());
         let descriptor = DatasetDescriptor {
             reference_name: reference_name.to_string(),
             display_name: display_name.to_string(),
@@ -1348,6 +1373,14 @@ impl super::Session {
                 });
             }
             self.source_files.insert(src.reference_name.clone(), file);
+            // Reader provenance rides with the recipe (ADR-0137 D4): the
+            // hit leg never re-reads files, but the post-resume persist
+            // rewrites the recipe -- refill so the field survives it.
+            if let Some(reader) = &src.reader {
+                self.persister
+                    .source_readers
+                    .insert(src.reference_name.clone(), reader.clone());
+            }
         }
         // Restore the settled working-set shape verbatim: descriptors, result
         // membership, provenance edges, and the active source pointer. The
@@ -1470,6 +1503,7 @@ mod tests {
             relative_path: None,
             rectify: RectifyProvenance::NotApplicable,
             fingerprint: format!("fp_{name}"),
+            reader: None,
         }
     }
 

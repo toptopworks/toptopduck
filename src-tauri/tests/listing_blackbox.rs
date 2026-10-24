@@ -33,6 +33,7 @@ fn write_recipe(dir: &std::path::Path, file: &str, session_name: &str, src: &str
         relative_path: None,
         rectify: RectifyProvenance::NotApplicable,
         fingerprint: format!("fp-{src}"),
+        reader: None,
     };
     let recipe = Recipe::build(
         session_name.into(),

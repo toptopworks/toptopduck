@@ -398,6 +398,11 @@ impl super::Session {
         // when the rename fallback fired) for the sandbox re-attach path.
         self.source_files
             .insert(reference_name.to_string(), PathBuf::from(&attach_path));
+        // A replace re-bases the source on extension dispatch (the new file
+        // was read by ITS extension) -- drop any recorded reader so the
+        // recipe does not carry the old registration's fn-named reader over
+        // a different file shape (ADR-0137 D4).
+        self.persister.source_readers.remove(reference_name);
 
         // Capture the carried-over display label before the descriptor swap --
         // the Replaced event + cascade anchor name what was replaced, and a

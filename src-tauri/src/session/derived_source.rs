@@ -124,8 +124,17 @@ pub(crate) fn process(sql: &str, deps: &mut TurnDeps) -> Result<String, ExecErro
 
         // Canonicalized comparison prevents `..` traversal and symlink
         // escapes (ADR-0080 threat model) on the tool_output face.
+        let fn_name = extraction
+            .fn_names
+            .get(i)
+            .map(String::as_str)
+            .unwrap_or_default();
         let plan = if is_in_tool_output(path_str, &tool_output_dir) {
-            Plan::ToolOutput
+            // Reader authority is the fn the SQL named (ADR-0137 D4);
+            // a non-tabular call falls to extension dispatch below.
+            Plan::ToolOutput {
+                reader: programmatic_reader(fn_name),
+            }
         } else {
             // Full-path face (ADR-0137 D4): an absolute spelling with a
             // tabular reader. The reader comes from the function the SQL
@@ -133,11 +142,6 @@ pub(crate) fn process(sql: &str, deps: &mut TurnDeps) -> Result<String, ExecErro
             // whose extension names a different format. Non-tabular
             // functions and relative spellings without a workspace are left
             // for preflight.
-            let fn_name = extraction
-                .fn_names
-                .get(i)
-                .map(String::as_str)
-                .unwrap_or_default();
             let Some(reader) = programmatic_reader(fn_name) else {
                 continue;
             };
@@ -212,7 +216,7 @@ pub(crate) fn process(sql: &str, deps: &mut TurnDeps) -> Result<String, ExecErro
         //      overwrites the same path with new content invalidates the
         //      snapshot (review H1).
         let cache_key = match &plan {
-            Plan::ToolOutput => path_str.clone(),
+            Plan::ToolOutput { .. } => path_str.clone(),
             Plan::FullPath { canonical, .. } => canonical.to_string_lossy().into_owned(),
         };
         if let Some(cached) = deps.tool_output_refs.get(&cache_key).cloned() {
@@ -242,7 +246,7 @@ pub(crate) fn process(sql: &str, deps: &mut TurnDeps) -> Result<String, ExecErro
         // under the target's stem, matching its source_path and display
         // name.
         let ref_name = match &plan {
-            Plan::ToolOutput => ingest::derive_reference_name(Path::new(path_str)),
+            Plan::ToolOutput { .. } => ingest::derive_reference_name(Path::new(path_str)),
             Plan::FullPath { canonical, .. } => ingest::derive_reference_name(canonical),
         };
         let ref_name = match ref_name {
@@ -251,8 +255,8 @@ pub(crate) fn process(sql: &str, deps: &mut TurnDeps) -> Result<String, ExecErro
         };
 
         let outcome = match &plan {
-            Plan::ToolOutput => {
-                process_one_derived(Path::new(path_str), &ref_name, &staging_dir, deps)
+            Plan::ToolOutput { reader } => {
+                process_one_derived(Path::new(path_str), &ref_name, &staging_dir, *reader, deps)
             }
             Plan::FullPath { canonical, reader } => {
                 process_one_full_path(canonical, reader, &ref_name, deps)
@@ -279,6 +283,9 @@ pub(crate) fn process(sql: &str, deps: &mut TurnDeps) -> Result<String, ExecErro
                     if let Some(snapshot) = deps.source_files.remove(prev) {
                         let _ = std::fs::remove_file(&snapshot);
                     }
+                    if let Some(readers) = deps.source_readers.as_deref_mut() {
+                        readers.remove(prev);
+                    }
                     deps.working_set.remove(prev);
                     // Remove from session cache — the ref was just rolled back.
                     deps.tool_output_refs.retain(|_, v| v.ref_name != *prev);
@@ -301,8 +308,12 @@ pub(crate) fn process(sql: &str, deps: &mut TurnDeps) -> Result<String, ExecErro
 /// One registration plan per referenced file.
 enum Plan {
     /// An ephemeral `tool_output` original (issue #433): staged into the
-    /// persistent staging area before copy-in.
-    ToolOutput,
+    /// persistent staging area before copy-in. `reader` is the fn-named
+    /// reader when the call was tabular (the authority, ADR-0137 D4 --
+    /// extension dispatch would misroute a mismatched spelling); `None`
+    /// for a non-tabular function, where the staged file's extension
+    /// decides (the #433 posture, unchanged).
+    ToolOutput { reader: Option<&'static str> },
     /// A durable full-path original (ADR-0137 D4): copied in straight from
     /// the canonical path with the reader the SQL named.
     FullPath {
@@ -313,8 +324,11 @@ enum Plan {
 
 /// The copy-in reader for a SQL-named `read_*` function, or `None` for
 /// non-tabular functions (no snapshot pipeline — `read_text` and friends
-/// read in place). Mirrors [`crate::ingest::reader_for`]'s spellings.
-fn programmatic_reader(fn_name: &str) -> Option<&'static str> {
+/// read in place). Mirrors [`crate::ingest::reader_for`]'s spellings. The
+/// single reader authority: registration consults it on both faces, and
+/// the replay leg re-validates a recipe-persisted spelling through it, so
+/// only the three tabular spellings ever reach the copy-in template.
+pub(crate) fn programmatic_reader(fn_name: &str) -> Option<&'static str> {
     match fn_name {
         "read_csv_auto" | "read_csv" => Some("read_csv_auto"),
         "read_parquet" => Some("read_parquet"),
@@ -373,13 +387,17 @@ fn process_one_derived(
     src_path: &Path,
     ref_name: &str,
     staging_dir: &Path,
+    fn_reader: Option<&'static str>,
     deps: &mut TurnDeps,
 ) -> Result<(), ExecError> {
     let persistent_path = stage_derived_file(src_path, ref_name, staging_dir)?;
 
-    // Determine the DuckDB reader function from the file extension.
-    let dispatched = ingest::dispatch(&persistent_path);
-    let reader_fn = match ingest::reader_for(&dispatched) {
+    // Reader authority is the fn the SQL named (ADR-0137 D4); the staged
+    // file's extension decides only when the call was non-tabular.
+    let reader_fn = match fn_reader.or_else(|| {
+        let dispatched = ingest::dispatch(&persistent_path);
+        ingest::reader_for(&dispatched)
+    }) {
         Some(r) => r,
         None => {
             let _ = std::fs::remove_file(&persistent_path);
@@ -405,7 +423,14 @@ fn process_one_derived(
     // The display label mirrors the machine name (ADR-0087 D4): a derived
     // tool_output registration is a materialize side effect, not a user
     // action. On an attach failure the staged copy is ours to remove too.
-    match attach_and_register(snap, &persistent_path, ref_name, ref_name.to_string(), deps) {
+    match attach_and_register(
+        snap,
+        &persistent_path,
+        ref_name,
+        ref_name.to_string(),
+        reader_fn,
+        deps,
+    ) {
         Ok(()) => Ok(()),
         Err(e) => {
             let _ = std::fs::remove_file(&persistent_path);
@@ -422,7 +447,7 @@ fn process_one_derived(
 /// inherited verbatim).
 fn process_one_full_path(
     canonical: &Path,
-    reader: &str,
+    reader: &'static str,
     ref_name: &str,
     deps: &mut TurnDeps,
 ) -> Result<(), ExecError> {
@@ -436,7 +461,7 @@ fn process_one_full_path(
         .and_then(|s| s.to_str())
         .unwrap_or(ref_name);
     let display_name = deps.working_set.deconflict_display(raw_display);
-    attach_and_register(snap, canonical, ref_name, display_name, deps)
+    attach_and_register(snap, canonical, ref_name, display_name, reader, deps)
 }
 
 /// The shared tail of both derived-source flavors: ATTACH the fresh snapshot
@@ -449,6 +474,7 @@ fn attach_and_register(
     source_path: &Path,
     ref_name: &str,
     display_name: String,
+    reader: &'static str,
     deps: &mut TurnDeps,
 ) -> Result<(), ExecError> {
     // ATTACH the snapshot to admin as a read-only catalog (same as
@@ -480,6 +506,12 @@ fn attach_and_register(
         stale: None,
     };
     deps.working_set.register(descriptor);
+
+    // Record the reader for SourceRef persistence (ADR-0137 D4): the
+    // replay leg re-reads by it. Disconnected in test constructors.
+    if let Some(readers) = deps.source_readers.as_deref_mut() {
+        readers.insert(ref_name.to_string(), reader.to_string());
+    }
 
     Ok(())
 }
@@ -1627,6 +1659,75 @@ mod tests {
         assert_eq!(refs.len(), 1, "one cache entry keyed by the canonical path");
     }
 
+    /// #1387: the reader authority is the SQL function name on BOTH faces --
+    /// a `read_json_auto` on a `.txt` tool_output original snapshots with
+    /// the json reader (extension dispatch would refuse `.txt`), and the
+    /// registration records the reader for recipe persistence.
+    #[test]
+    fn process_snapshots_a_tool_output_reader_mismatch_by_the_fn_name() {
+        let temp = TempDir::new().unwrap();
+        let tool_output_dir = temp.path().join(TOOL_OUTPUT_DIR_NAME);
+        std::fs::create_dir_all(&tool_output_dir).unwrap();
+        // JSON bytes under a `.txt` spelling: fn name and extension disagree.
+        let notes = tool_output_dir.join("notes.txt");
+        std::fs::write(&notes, r#"[{"secret":"PASSWORD"}]"#).unwrap();
+
+        let engine = AdminEngine::materialized();
+        let mut ws = WorkingSet::default();
+        let mut sources = HashMap::new();
+        let mut refs = HashMap::new();
+        let mut readers = HashMap::new();
+
+        let sql = format!(
+            "SELECT secret FROM read_json_auto('{}')",
+            notes.to_string_lossy()
+        );
+        let mut deps = TurnDeps::test_deps(&engine, &mut ws, &mut sources, temp.path(), &mut refs);
+        deps.source_readers = Some(&mut readers);
+        let rewritten =
+            process(&sql, &mut deps).expect("mismatch snapshots by the fn-named reader");
+        assert!(rewritten.contains(r#""notes".data"#), "{rewritten}");
+        let d = ws.get("notes").expect("registered");
+        assert_eq!(d.row_count, 1, "read as json (1 row), not refused as .txt");
+        assert_eq!(
+            readers.get("notes").map(String::as_str),
+            Some("read_json_auto"),
+            "the fn-named reader is recorded for recipe persistence"
+        );
+    }
+
+    /// #1387: a full-path reader mismatch registers with the fn-named reader
+    /// AND records it, so the watermark-miss replay re-reads with the reader
+    /// that produced the snapshot instead of extension dispatch.
+    #[test]
+    fn process_records_the_fn_named_reader_for_a_full_path_mismatch() {
+        let temp = TempDir::new().unwrap();
+        let outside = TempDir::new().unwrap();
+        let notes = outside.path().join("notes.txt");
+        std::fs::write(&notes, r#"[{"secret":"PASSWORD"}]"#).unwrap();
+
+        let engine = AdminEngine::materialized();
+        let mut ws = WorkingSet::default();
+        let mut sources = HashMap::new();
+        let mut refs = HashMap::new();
+        let mut readers = HashMap::new();
+
+        let sql = format!(
+            "SELECT secret FROM read_json_auto('{}')",
+            notes.to_string_lossy()
+        );
+        let mut deps = TurnDeps::test_deps(&engine, &mut ws, &mut sources, temp.path(), &mut refs);
+        deps.source_readers = Some(&mut readers);
+        let rewritten = process(&sql, &mut deps).expect("process succeeds");
+        assert!(rewritten.contains(r#""notes".data"#), "{rewritten}");
+        assert_eq!(ws.get("notes").unwrap().row_count, 1);
+        assert_eq!(
+            readers.get("notes").map(String::as_str),
+            Some("read_json_auto"),
+            "the reader rides to settle for SourceRef persistence"
+        );
+    }
+
     /// ADR-0137 D3: relative read_* spellings are absolutized against the
     /// bound workspace -- the call shape is kept, only the path literal
     /// changes. Absolute spellings and SQL without reads pass through
@@ -2002,7 +2103,10 @@ mod tests {
         // First file: valid CSV.
         let csv_path = tool_output_dir.join("data.csv");
         std::fs::write(&csv_path, "id,name\n1,alice\n2,bob\n").unwrap();
-        // Second file: unsupported format (.foo).
+        // Second file: a non-tabular call on an unsupported extension --
+        // the fn name names no reader and the extension names none, so the
+        // extension fallback refuses it (the only refusal left under the
+        // fn-name reader authority, ADR-0137 D4).
         let foo_path = tool_output_dir.join("bad.foo");
         std::fs::write(&foo_path, "garbage").unwrap();
 
@@ -2012,7 +2116,7 @@ mod tests {
         let mut refs = HashMap::new();
 
         let sql = format!(
-            "SELECT * FROM read_csv_auto('{}') UNION ALL SELECT * FROM read_csv_auto('{}')",
+            "SELECT * FROM read_csv_auto('{}') UNION ALL SELECT * FROM read_text('{}')",
             csv_path.to_string_lossy(),
             foo_path.to_string_lossy()
         );

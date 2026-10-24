@@ -338,6 +338,7 @@ mod tests {
                 relative_path: None,
                 rectify: RectifyProvenance::NotApplicable,
                 fingerprint: "fp".into(),
+                reader: None,
             }],
             vec![RecipeEntry::Turn(RecipeTurn::without_audit(
                 "q",
