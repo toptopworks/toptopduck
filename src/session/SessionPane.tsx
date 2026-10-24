@@ -749,7 +749,6 @@ export function SessionPane({ sessionId, isActive, pendingIngestPaths, onIngestC
                 key={`result-${regionRetryEpoch}`}
                 content={s.workspaceContent}
                 sessionId={sessionId}
-                recipePath={recipePath}
                 hasData={s.datasets.length > 0}
                 onResetRegion={resetSessionCache}
                 onResetArtifact={resetArtifactCache}
@@ -827,7 +826,6 @@ export function SessionPane({ sessionId, isActive, pendingIngestPaths, onIngestC
 function WorkspaceResult({
   content,
   sessionId,
-  recipePath,
   hasData,
   onResetRegion,
   onResetArtifact,
@@ -837,9 +835,6 @@ function WorkspaceResult({
 }: {
   content: WorkspaceContent;
   sessionId: string;
-  /** The session's bound recipe.json path -- anchors the HTML branch's
-   *  artifacts-dir scope check (ADR-0124 Decision 4). */
-  recipePath: string;
   hasData: boolean;
   /** ADR-0058 L2 result-partition retry: remove the session slice so a
    *  remounted ResultView re-fetches fresh rows instead of re-throwing against
@@ -953,7 +948,6 @@ function WorkspaceResult({
           <ArtifactView
             artifact={{ path: content.path, file_name: content.fileName }}
             render={content.render}
-            recipePath={recipePath}
           />
         </ErrorBoundary>
       );

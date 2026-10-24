@@ -317,12 +317,13 @@ export interface SubagentUsage {
 // the Rust model::TurnArtifact. The primary is derived as the first entry
 // of the manifest, never a stored flag.
 export interface TurnArtifact {
-  // Absolute filesystem path, post-materialization.
+  // Absolute in-place filesystem path.
   path: string;
   // The entry's file name (display + external-open label).
   file_name: string;
-  // Whether the path is durable (a materialized copy or a user-directory
-  // original); false = a temp path openable until the session closes.
+  // Whether the path survives the session close (an in-place reference
+  // under a bound session); false = an unbound session's entry (its
+  // manifest has nowhere to outlive the close).
   durable: boolean;
 }
 

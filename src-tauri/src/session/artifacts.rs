@@ -13,14 +13,16 @@
 //! (a heuristic channel must not mint dead cards), deduplicated by resolved
 //! absolute path, capped at [`ARTIFACT_CAP`] entries.
 //!
-//! Hits that resolve INSIDE the session temp working directory (the
-//! external agent's cwd / the built-in tool output area -- wiped on session
-//! close) are materialized by copy into the per-session persistent
-//! `artifacts/` directory (beside `recipe.json`, the same per-session
-//! directory semantics as the derived-source `assets/` channel); the
-//! manifest stores the materialized path. User-directory absolute hits
-//! stay in place -- the app does not copy user files. File existence is a
-//! runtime fact checked at render time; the manifest never rewrites.
+//! Every entry references its file IN PLACE (ADR-0137 Decision 6, issue
+//! #1383): a resolved hit -- workspace or user-directory original alike --
+//! enters the manifest under its absolute path, nothing is copied into the
+//! session tree, and the app does not copy user files. The copy-into-
+//! `artifacts/` materialization face is retired (its temp-dir domain is
+//! permanently empty under the lazily minted workspace), and with no
+//! external users the resume-time backfill went with it; legacy manifest
+//! entries pointing there still render (the file-level preview grant names
+//! them like any other member). File existence is a runtime fact checked
+//! at render time; the manifest never rewrites.
 
 use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
@@ -28,29 +30,11 @@ use std::sync::LazyLock;
 use regex::Regex;
 use serde_json::{json, Value};
 
-use crate::model::TurnArtifact;
+use crate::model::{ThreadEntry, TurnArtifact};
 use crate::provider::tool_calling::{ToolDefinition, ToolUse};
 
 /// The canonical name of the deliverable-presentation meta-tool.
 pub(crate) const PRESENT_FILES: &str = "present_files";
-
-/// The per-session persistent artifacts directory name: a subdirectory of
-/// the session directory (the `recipe.json`'s parent, `{sessions_root}/{uuid}/`),
-/// created lazily at the first settle-time materialization. Session
-/// deletion removes the whole per-session directory, so `artifacts/` rides
-/// the existing cleanup semantics.
-const ARTIFACTS_DIR_NAME: &str = "artifacts";
-
-/// The per-session persistent artifacts directory (ADR-0124 Decision 2):
-/// `artifacts/` under the session directory (the bound `recipe.json`'s parent).
-/// `None` for an unbound session -- materialization degrades to keeping
-/// temp paths. One source for the settle computation and the command
-/// boundary's asset-scope grant, so the two cannot drift.
-pub(crate) fn artifacts_dir(recipe_path: Option<&Path>) -> Option<PathBuf> {
-    recipe_path
-        .and_then(Path::parent)
-        .map(|parent| parent.join(ARTIFACTS_DIR_NAME))
-}
 
 /// The per-turn manifest cap (ADR-0124 Decision 1): a turn's merged
 /// artifact manifest holds at most this many entries.
@@ -304,13 +288,11 @@ fn is_cjk(c: char) -> bool {
     ('\u{4e00}'..='\u{9fff}').contains(&c)
 }
 
-/// Resolve one raw candidate against the turn's working-directory basis
-/// (the session temp dir -- the built-in tool output area's parent).
-/// TRANSITION (ADR-0137, issue #1381): the external agent's cwd moved to
-/// the session workspace while this base stays the temp dir, so a
-/// workspace-relative candidate resolves against the wrong directory --
-/// the base joins the workspace with #1383's in-place manifest. A leading
-/// `./` is trimmed so the resolved string carries no redundant component.
+/// Resolve one raw candidate against the turn's working-directory basis:
+/// the session workspace when bound (ADR-0137 -- the agent's cwd for both
+/// the external and the built-in loop), the temp dir only for a
+/// workspace-less in-memory turn. A leading `./` is trimmed so the
+/// resolved string carries no redundant component.
 fn resolve(candidate: &str, cwd: &Path) -> PathBuf {
     let trimmed = candidate.trim();
     let cleaned = trimmed.strip_prefix("./").unwrap_or(trimmed);
@@ -329,9 +311,12 @@ fn resolve(candidate: &str, cwd: &Path) -> PathBuf {
 /// enters even if missing (an explicit contract the card degrades
 /// honestly). Channel 2 (the scan of `reply_text`) is
 /// existence-filtered. Deduplication is by resolved absolute path; the
-/// merged list truncates to [`ARTIFACT_CAP`]. Materialization (temp hits
-/// copied into `artifacts_dir`) rewrites entries in place; a `None`
-/// `artifacts_dir` (an unbound session) skips materialization entirely.
+/// merged list truncates to [`ARTIFACT_CAP`]. Every entry references its
+/// file in place (ADR-0137 Decision 6): nothing is copied, and the entry's
+/// [`TurnArtifact::durable`] is simply `session_bound` -- a bound
+/// session's references (workspace or user-directory originals) survive
+/// the close in place, while an unbound in-memory session's manifest has
+/// nowhere to outlive the close.
 /// The dedup key for [`settle_manifest`]: case-folded on Windows (the
 /// FS is case-insensitive), verbatim elsewhere.
 fn dedup_key(path: &Path) -> String {
@@ -350,7 +335,7 @@ pub(crate) fn settle_manifest(
     presented: &[String],
     reply_text: &str,
     cwd: &Path,
-    artifacts_dir: Option<&Path>,
+    session_bound: bool,
 ) -> Vec<TurnArtifact> {
     // Dedup keys: exact on case-sensitive filesystems, case-folded on
     // Windows -- one file reached from both channels under two spellings
@@ -374,10 +359,10 @@ pub(crate) fn settle_manifest(
         }
     }
     resolved.truncate(ARTIFACT_CAP);
+    let durable = session_bound;
     resolved
         .into_iter()
         .map(|path| {
-            let (path, durable) = materialize(path, cwd, artifacts_dir);
             let file_name = path
                 .file_name()
                 .map(|n| n.to_string_lossy().into_owned())
@@ -391,236 +376,27 @@ pub(crate) fn settle_manifest(
         .collect()
 }
 
-/// Whether `path` names something strictly inside `dir` (the session
-/// working directory -- the materialization trigger). When both sides
-/// resolve, the comparison runs on canonicalized spellings: filesystem
-/// aliasing -- a Windows 8.3 short name inherited from the process TMP
-/// (`ADMINI~1` vs `Administrator`, #1232), an extended-length `\\?\`
-/// prefix, a junction -- collapses to one form on both sides, while the
-/// lexical walk sees two different paths and misjudges the hit as a
-/// user-directory original. A side that does not resolve (a
-/// declared-but-missing entry) falls back to the lexical walk, logging the
-/// fallback when the entry exists so the aliasing residue stays diagnosable.
-fn is_within(path: &Path, dir: &Path) -> bool {
-    if let (Ok(path), Ok(dir)) = (std::fs::canonicalize(path), std::fs::canonicalize(dir)) {
-        return is_within_components(&path, &dir);
-    }
-    // An unresolvable-but-existing entry (an exclusive handle at settle
-    // time, a traverse denial): the lexical walk cannot see filesystem
-    // aliasing, so under an aliased cwd spelling the hit may be misjudged
-    // as a user-directory original -- #1232's failure shape, narrowed to
-    // this corner. Logged, not silent.
-    if path.is_file() {
-        log::warn!(
-            target: "toptopduck::session",
-            "artifact containment check fell back to the lexical walk \
-             (canonicalize failed): {}",
-            path.display()
-        );
-    }
-    is_within_components(path, dir)
-}
-
-/// The component walk behind [`is_within`]. `Path::starts_with` compares
-/// components byte-exactly, so on Windows -- where the FS is
-/// case-insensitive and a model may echo an absolute temp path with
-/// drifted casing -- the walk folds case through the same lens as
-/// [`dedup_key`], keeping the dedup and materialization decisions on one
-/// case semantics (PR #1089 review). Aliasing is NOT this lens's job
-/// (the canonical layer above owns it; [`dedup_key`] stays lexical, so
-/// one file under two spellings dedupes twice -- #1232 scope ruling).
-fn is_within_components(path: &Path, dir: &Path) -> bool {
-    let mut dir_comps = dir.components();
-    for comp in path.components() {
-        match dir_comps.next() {
-            Some(d) if component_eq(&comp, &d) => continue,
-            // `dir` exhausted: this component is a child below it.
-            None => return true,
-            Some(_) => return false,
-        }
-    }
-    false // `path` ended with `dir` components unconsumed (or equals it).
-}
-
-/// Component equality, case-folded on Windows (see [`is_within`]);
-/// component comparison already normalizes `/` vs `\`.
-#[cfg(windows)]
-fn component_eq(a: &std::path::Component, b: &std::path::Component) -> bool {
-    a.as_os_str()
-        .to_string_lossy()
-        .eq_ignore_ascii_case(&b.as_os_str().to_string_lossy())
-}
-
-#[cfg(not(windows))]
-fn component_eq(a: &std::path::Component, b: &std::path::Component) -> bool {
-    a == b
-}
-
-/// First copy target for `src` inside `dir`. An occupied target already
-/// holding `src`'s bytes IS the target: a re-mention of an
-/// already-materialized identical source reuses that copy instead of
-/// spilling `_2`, `_3`, ... (#1335 -- materialize is a COPY, so the temp
-/// source outlives the turn that first delivered it, and later replies
-/// re-mention it through the scan channel). Any other same-named
-/// collision disambiguates with the `_2` suffix loop. Collision-loop
-/// invariants hoisted (#1090): stem/ext are constant per attempt, and an
-/// empty extension formats without the separator dot (`LICENSE_2`, never
-/// `LICENSE_2.`). `None` when the file name is missing or not valid
-/// UTF-8.
-pub(super) fn first_free_target(src: &Path, dir: &Path) -> Option<PathBuf> {
-    let file_name = src.file_name()?.to_str()?;
-    // The file name is UTF-8, so its stem (a substring split at the last
-    // ASCII dot) always is too -- this cannot fire.
-    let stem = src
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .expect("stem of a UTF-8 file name");
-    let ext = src.extension().and_then(|e| e.to_str()).unwrap_or_default();
-    let mut target = dir.join(file_name);
-    let mut counter = 2u32;
-    while target.exists() {
-        if contents_match(src, &target) {
-            return Some(target);
-        }
-        target = dir.join(if ext.is_empty() {
-            format!("{stem}_{counter}")
-        } else {
-            format!("{stem}_{counter}.{ext}")
-        });
-        counter += 1;
-    }
-    Some(target)
-}
-
-/// Byte equality of two files, gated by size (a cheap mismatch signal
-/// before reading either file whole). The #1335 reuse predicate: any
-/// read/stat failure simply means "not a match", falling through to the
-/// next disambiguation candidate.
-pub(super) fn contents_match(a: &Path, b: &Path) -> bool {
-    let (Ok(ma), Ok(mb)) = (std::fs::metadata(a), std::fs::metadata(b)) else {
-        return false;
-    };
-    if ma.len() != mb.len() {
-        return false;
-    }
-    match (std::fs::read(a), std::fs::read(b)) {
-        (Ok(bytes_a), Ok(bytes_b)) => bytes_a == bytes_b,
-        _ => false,
-    }
-}
-
-/// Materialize one resolved hit (the persistence ruling, ADR-0124 Decision
-/// 2): a hit under the session temp working directory is COPIED into the
-/// per-session `artifacts/` directory (the temp dir dies with the session;
-/// the manifest must survive a close/reopen) and the copy's path is
-/// returned; anything else (a user-directory absolute hit) returns
-/// unchanged -- the app does not copy user files. Best-effort + logged: a
-/// copy failure leaves the temp path in place (the card degrades after
-/// close, honestly). A same-name collision with DIFFERENT bytes takes a
-/// `_2`, `_3`, ... suffix so two distinct same-named files never
-/// overwrite each other; identical bytes reuse the existing copy
-/// ([`first_free_target`], #1335). The
-/// returned flag is the entry's [`TurnArtifact::durable`] honest face:
-/// `true` for a materialized copy or a user-directory original, `false`
-/// for a temp path the copy could not move (openable until the session
-/// closes).
-fn materialize(path: PathBuf, cwd: &Path, artifacts_dir: Option<&Path>) -> (PathBuf, bool) {
-    let Some(dir) = artifacts_dir else {
-        return (path, false);
-    };
-    // A hit outside the session working dir is a user-directory original:
-    // durable in place -- the app does not copy user files.
-    if !is_within(&path, cwd) {
-        return (path, true);
-    }
-    // A declared-but-missing entry: nothing to copy. Durable stays `true`
-    // -- the flag answers "survives the session close", and deadness is
-    // the render-time existence fact's job, not this flag's.
-    if !path.is_file() {
-        return (path, true);
-    }
-    if let Err(e) = std::fs::create_dir_all(dir) {
-        log::warn!(
-            target: "toptopduck::session",
-            "artifact materialization skipped: cannot create {}: {e}",
-            dir.display()
-        );
-        return (path, false);
-    }
-    let Some(target) = first_free_target(&path, dir) else {
-        return (path, false);
-    };
-    // The loop's reuse exit hands back an occupied target that already
-    // holds `path`'s bytes (#1335): copying onto it would only rewrite
-    // identical bytes, and a locked or read-only destination would fail
-    // a materialization that has already succeeded.
-    if target.exists() && contents_match(&path, &target) {
-        return (target, true);
-    }
-    match std::fs::copy(&path, &target) {
-        Ok(_) => (target, true),
-        Err(e) => {
-            log::warn!(
-                target: "toptopduck::session",
-                "artifact materialization failed for {}: {e}",
-                path.display()
-            );
-            (path, false)
-        }
-    }
-}
-
-/// Resume-time backfill (#1202): copy every file under the per-session
-/// persistent `artifacts/` directory flat into the FRESH session cwd, so a
-/// resumed agent can reference past deliveries from its working directory
-/// instead of recomputing them (the replayed history still narrates them).
-/// Plain copies, never hardlinks: an in-place edit on the cwd copy stays
-/// local and never writes through to the persistent layer or bypasses
-/// [`first_free_target`]'s `_2` versioning. A missing or empty directory is a
-/// silent no-op; a per-file failure logs and continues (the `materialize`
-/// precedent).
-pub(crate) fn backfill_into_cwd(artifacts_dir: Option<&Path>, cwd: &Path) {
-    let Some(dir) = artifacts_dir else {
-        return;
-    };
-    let entries = match std::fs::read_dir(dir) {
-        Ok(entries) => entries,
-        // NotFound = the session never materialized an artifact: resume
-        // proceeds with an empty cwd, exactly like a brand-new session.
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return,
-        Err(e) => {
-            log::warn!(
-                target: "toptopduck::session",
-                "artifact backfill skipped: cannot read {}: {e}",
-                dir.display()
-            );
-            return;
-        }
-    };
-    for entry in entries.filter_map(|entry| match entry {
-        Ok(entry) => Some(entry),
-        Err(e) => {
-            log::warn!(
-                target: "toptopduck::session",
-                "artifact backfill entry skipped: {e}"
-            );
-            None
-        }
-    }) {
-        let path = entry.path();
-        // Flat copy: only files -- subdirectories are not part of the
-        // manifest model.
-        if !path.is_file() {
+/// The manifest-referenced file paths across a whole thread (ADR-0137
+/// Decision 6's preview whitelist source): the `TurnArtifact` paths of
+/// every turn record, first-seen order, deduplicated. The command boundary
+/// grants the asset protocol scope file-by-file from exactly this set --
+/// the workspace directory as a whole is deliberately NOT granted, so an
+/// arbitrary html sitting beside a deliverable never becomes
+/// iframe-renderable by proximity.
+pub(crate) fn referenced_paths(entries: &[ThreadEntry]) -> Vec<PathBuf> {
+    let mut seen: Vec<PathBuf> = Vec::new();
+    for entry in entries {
+        let ThreadEntry::Turn(record) = entry else {
             continue;
-        }
-        if let Err(e) = std::fs::copy(&path, cwd.join(entry.file_name())) {
-            log::warn!(
-                target: "toptopduck::session",
-                "artifact backfill skipped for {}: {e}",
-                path.display()
-            );
+        };
+        for artifact in &record.artifacts {
+            let path = PathBuf::from(&artifact.path);
+            if !seen.contains(&path) {
+                seen.push(path);
+            }
         }
     }
+    seen
 }
 
 #[cfg(test)]
@@ -780,7 +556,7 @@ mod tests {
             &["dup.pdf".to_string(), "other.pdf".to_string()],
             "见 dup.pdf（与已交付同一份）",
             cwd,
-            None,
+            false,
         );
         let dup_count = manifest.iter().filter(|a| a.file_name == "dup.pdf").count();
         assert_eq!(
@@ -801,78 +577,12 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let cwd = dir.path();
         std::fs::write(cwd.join("dup.pdf"), "x").expect("write");
-        let manifest = settle_manifest(&["Dup.pdf".to_string()], "见 dup.pdf", cwd, None);
+        let manifest = settle_manifest(&["Dup.pdf".to_string()], "见 dup.pdf", cwd, false);
         assert_eq!(manifest.len(), 1, "two spellings of one file merge");
         assert!(
             manifest[0].path.ends_with("Dup.pdf"),
             "the presented spelling wins"
         );
-    }
-
-    /// Windows case-insensitivity on the materialization trigger (PR
-    /// #1089 review Important 4): an echoed absolute temp path with
-    /// drifted casing is still a temp-dir member and materializes -- the
-    /// same fold lens the dedup key uses. (Unix keeps byte-exact
-    /// membership; pinned on Windows only.)
-    #[cfg(windows)]
-    #[test]
-    fn settle_manifest_materializes_case_drifted_temp_paths_on_windows() {
-        let work = tempfile::tempdir().expect("workdir");
-        let session = tempfile::tempdir().expect("session dir");
-        std::fs::write(work.path().join("page.html"), "x").expect("write");
-        let drifted = work
-            .path()
-            .join("page.html")
-            .to_string_lossy()
-            .to_ascii_uppercase();
-        let manifest = settle_manifest(
-            &[drifted],
-            "",
-            work.path(),
-            Some(&session.path().join(ARTIFACTS_DIR_NAME)),
-        );
-        assert_eq!(manifest.len(), 1);
-        assert!(
-            Path::new(&manifest[0].path).starts_with(session.path()),
-            "the drifted-casing temp hit still materializes: {}",
-            manifest[0].path
-        );
-        assert!(Path::new(&manifest[0].path).is_file(), "the copy exists");
-    }
-
-    /// Windows spelling aliasing (#1232): the cwd arrives in one spelling
-    /// (here the extended-length `\\?\` prefix -- the lexical stand-in for
-    /// a short-name TMP component like `ADMINI~1`) while the declared
-    /// absolute path echoes the normal spelling. A component walk sees two
-    /// different paths and misjudges the hit as a user-directory original;
-    /// the containment check must compare canonicalized spellings.
-    /// Deterministic: it leans on prefix semantics, not the volume's 8.3
-    /// name generation.
-    #[cfg(windows)]
-    #[test]
-    fn settle_manifest_materializes_across_windows_spelling_aliases() {
-        let work = tempfile::tempdir().expect("workdir");
-        let session = tempfile::tempdir().expect("session dir");
-        std::fs::write(work.path().join("page.html"), "x").expect("write");
-        // The SAME directory, re-spelled with the verbatim prefix: the walk
-        // sees a different prefix component; canonicalization resolves both
-        // spellings to one path.
-        let verbatim_cwd = PathBuf::from(format!("\\\\?\\{}", work.path().display()));
-        let declared = work.path().join("page.html").to_string_lossy().into_owned();
-        let manifest = settle_manifest(
-            &[declared],
-            "",
-            &verbatim_cwd,
-            Some(&session.path().join(ARTIFACTS_DIR_NAME)),
-        );
-        assert_eq!(manifest.len(), 1);
-        assert!(
-            Path::new(&manifest[0].path).starts_with(session.path()),
-            "the aliased-spelling temp hit still materializes: {}",
-            manifest[0].path
-        );
-        assert!(Path::new(&manifest[0].path).is_file(), "the copy exists");
-        assert!(manifest[0].durable, "the materialized copy is durable");
     }
 
     /// The manifest caps at [`ARTIFACT_CAP`] entries; the cap keeps the
@@ -885,7 +595,7 @@ mod tests {
         for i in 1..=10 {
             presented.push(format!("declared_{i}.pdf"));
         }
-        let manifest = settle_manifest(&presented, "", cwd, None);
+        let manifest = settle_manifest(&presented, "", cwd, false);
         assert_eq!(manifest.len(), ARTIFACT_CAP);
         assert_eq!(manifest[7].file_name, "declared_8.pdf");
     }
@@ -904,37 +614,35 @@ mod tests {
             &["b.pdf".to_string()],
             "the table is ready, see a.pdf for the full view",
             cwd,
-            None,
+            false,
         );
         assert_eq!(manifest.len(), 2);
         assert_eq!(manifest[0].file_name, "b.pdf", "the declaration leads");
         assert_eq!(manifest[1].file_name, "a.pdf", "the scan hit follows");
     }
 
-    /// The cap runs BEFORE materialization (#1090): ten real files against
-    /// a bound session leave exactly [`ARTIFACT_CAP`] copies on disk -- a
-    /// reorder that materializes first would orphan two copies no manifest
-    /// entry points at. Pins the order, not just the count.
+    /// In-place reference means nothing lands on disk no matter how many
+    /// files the manifest keeps: a capped bound-session settle leaves the
+    /// per-session `artifacts/` directory uncreated (ADR-0137 Decision 6
+    /// -- the materialization face is gone, so there are no copies to
+    /// orphan).
     #[test]
-    fn settle_manifest_caps_before_materializing_no_orphan_copies() {
+    fn settle_manifest_capped_settles_without_creating_the_artifacts_dir() {
         let work = tempfile::tempdir().expect("workdir");
         let session = tempfile::tempdir().expect("session dir");
         let cwd = work.path();
-        let artifacts_dir = session.path().join(ARTIFACTS_DIR_NAME);
+        let artifacts_dir = session.path().join("artifacts");
         let mut presented = Vec::new();
         for i in 1..=10 {
             let name = format!("declared_{i}.pdf");
             std::fs::write(cwd.join(&name), "x").expect("write");
             presented.push(name);
         }
-        let manifest = settle_manifest(&presented, "", cwd, Some(&artifacts_dir));
+        let manifest = settle_manifest(&presented, "", cwd, true);
         assert_eq!(manifest.len(), ARTIFACT_CAP);
-        let on_disk = std::fs::read_dir(&artifacts_dir)
-            .expect("artifacts dir")
-            .count();
-        assert_eq!(
-            on_disk, ARTIFACT_CAP,
-            "no orphan copies: what is on disk is what the manifest kept"
+        assert!(
+            !artifacts_dir.exists(),
+            "an in-place manifest writes nothing to the session tree"
         );
     }
 
@@ -967,9 +675,13 @@ mod tests {
 
     /// The `durable` honest face (#1090): a materialized temp hit, a
     /// user-directory original, and a declared-but-missing entry are
-    /// durable; an unbound session's temp path and a failed
-    /// materialization are not -- openable until the session closes,
-    /// gone after.
+    /// The `durable` honest face (#1090, recalibrated by ADR-0137 Decision
+    /// 6): every entry under a BOUND session -- a workspace hit, a
+    /// user-directory original, a declared-but-missing path -- is durable
+    /// (in-place references survive the close by nature); only an unbound
+    /// in-memory session's temp paths are not -- openable until the
+    /// session closes, gone after. Deadness stays the render-time
+    /// existence fact's job, not this flag's.
     #[test]
     fn settle_manifest_marks_the_saved_honest_face() {
         let work = tempfile::tempdir().expect("workdir");
@@ -980,93 +692,31 @@ mod tests {
         std::fs::write(&user_pdf, "pdf").expect("write");
 
         // Unbound session: nothing persists, the temp path is not durable.
-        let unbound = settle_manifest(&["page.html".to_string()], "", cwd, None);
+        let unbound = settle_manifest(&["page.html".to_string()], "", cwd, false);
         assert_eq!(unbound.len(), 1);
         assert!(!unbound[0].durable, "an unbound session saves nothing");
 
-        // Bound session: the temp hit materializes (durable), the
-        // user-directory original stays in place (durable -- the user's file
-        // is durable by nature).
-        let session = tempfile::tempdir().expect("session dir");
+        // Bound session: the workspace hit, the user-directory original,
+        // and a declared-but-missing entry are all durable in place.
         let bound = settle_manifest(
             &[
                 "page.html".to_string(),
                 user_pdf.to_string_lossy().into_owned(),
+                "ghost.pdf".to_string(),
             ],
             "",
             cwd,
-            Some(&session.path().join(ARTIFACTS_DIR_NAME)),
+            true,
         );
-        assert_eq!(bound.len(), 2);
-        assert!(bound[0].durable, "the materialized copy is durable");
+        assert_eq!(bound.len(), 3);
+        assert!(bound[0].durable, "a workspace hit is durable in place");
         assert!(
             bound[1].durable,
             "a user-directory original is durable in place"
         );
-
-        // A declared-but-missing entry against a bound session: nothing
-        // to copy, and durable stays true -- the flag answers "survives
-        // the session close", deadness is the render-time existence
-        // fact's job (#1090).
-        let ghost = settle_manifest(
-            &["ghost.pdf".to_string()],
-            "",
-            cwd,
-            Some(&session.path().join(ARTIFACTS_DIR_NAME)),
-        );
-        assert_eq!(ghost.len(), 1);
         assert!(
-            ghost[0].durable,
+            bound[2].durable,
             "a missing declaration is not this flag's job"
-        );
-
-        // A materialization that cannot even create the artifacts dir (its
-        // parent is a file) degrades to the temp path, unsaved.
-        let blocked = tempfile::tempdir().expect("blocked session dir");
-        let blocker = blocked.path().join("blocker");
-        std::fs::write(&blocker, "x").expect("write");
-        let failed = settle_manifest(
-            &["page.html".to_string()],
-            "",
-            cwd,
-            Some(&blocker.join(ARTIFACTS_DIR_NAME)),
-        );
-        assert_eq!(failed.len(), 1);
-        assert!(
-            !failed[0].durable,
-            "a failed materialization leaves the temp path unsaved"
-        );
-        assert!(
-            Path::new(&failed[0].path).starts_with(cwd),
-            "the entry keeps the temp path"
-        );
-    }
-
-    /// A copy that fails mid-materialization (the source is unreadable)
-    /// degrades to the temp path with durable false -- openable until
-    /// the session closes, gone after (#1091 review). Unix-only: the
-    /// permission denial is the portable trigger, and CI runs Linux.
-    #[cfg(unix)]
-    #[test]
-    fn settle_manifest_copy_failure_leaves_the_temp_path_unsaved() {
-        use std::os::unix::fs::PermissionsExt;
-        let work = tempfile::tempdir().expect("workdir");
-        let cwd = work.path();
-        let secret = cwd.join("secret.pdf");
-        std::fs::write(&secret, "pdf").expect("write");
-        std::fs::set_permissions(&secret, std::fs::Permissions::from_mode(0o000)).expect("chmod");
-        let session = tempfile::tempdir().expect("session dir");
-        let manifest = settle_manifest(
-            &["secret.pdf".to_string()],
-            "",
-            cwd,
-            Some(&session.path().join(ARTIFACTS_DIR_NAME)),
-        );
-        assert_eq!(manifest.len(), 1);
-        assert!(!manifest[0].durable, "a failed copy is unsaved");
-        assert!(
-            Path::new(&manifest[0].path).starts_with(cwd),
-            "the entry keeps the temp path"
         );
     }
 
@@ -1077,7 +727,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let cwd = dir.path();
         std::fs::write(cwd.join("notes.md"), "x").expect("write");
-        let manifest = settle_manifest(&[], "见 notes.md", cwd, None);
+        let manifest = settle_manifest(&[], "见 notes.md", cwd, false);
         assert_eq!(manifest.len(), 1);
         assert!(
             Path::new(&manifest[0].path).is_absolute(),
@@ -1097,21 +747,23 @@ mod tests {
             &["declared_but_missing.html".to_string()],
             "见 ghost.pdf（从未生成）",
             cwd,
-            None,
+            false,
         );
         assert_eq!(manifest.len(), 1);
         assert!(manifest[0].path.ends_with("declared_but_missing.html"));
     }
 
-    /// The persistence ruling: a temp-working-dir hit copies into the
-    /// per-session artifacts directory (the manifest carries the
-    /// materialized path); a user-directory hit stays in place.
+    /// The in-place ruling (ADR-0137 Decision 6): a workspace hit enters
+    /// the manifest under its own absolute path with nothing copied (the
+    /// per-session `artifacts/` directory is never created); a
+    /// user-directory hit behaves identically -- the app does not copy
+    /// user files.
     #[test]
-    fn settle_manifest_materializes_temp_hits_and_keeps_user_dir_hits() {
+    fn settle_manifest_references_workspace_and_user_dir_hits_in_place() {
         let work = tempfile::tempdir().expect("workdir");
         let session = tempfile::tempdir().expect("session dir");
         let cwd = work.path();
-        let artifacts_dir = session.path().join(ARTIFACTS_DIR_NAME);
+        let artifacts_dir = session.path().join("artifacts");
         std::fs::write(cwd.join("report.html"), "<html/>").expect("write");
         let user_dir = tempfile::tempdir().expect("user dir");
         let user_pdf = user_dir.path().join("external.pdf");
@@ -1124,273 +776,74 @@ mod tests {
             ],
             "",
             cwd,
-            Some(&artifacts_dir),
+            true,
         );
         assert_eq!(manifest.len(), 2);
-        assert!(
-            manifest[0]
-                .path
-                .starts_with(artifacts_dir.to_str().expect("utf8 path")),
-            "the temp hit's manifest path is the materialized copy: {}",
-            manifest[0].path
+        assert_eq!(
+            manifest[0].path,
+            cwd.join("report.html").to_string_lossy(),
+            "the workspace hit is referenced in place"
         );
-        assert!(Path::new(&manifest[0].path).is_file(), "the copy exists");
-        assert_eq!(manifest[0].file_name, "report.html");
         assert_eq!(
             manifest[1].path,
             user_pdf.to_string_lossy(),
             "a user-directory hit stays in place (no copy)"
         );
-        assert!(!manifest[1].path.contains(ARTIFACTS_DIR_NAME));
-    }
-
-    /// Two distinct same-named temp files never overwrite each other's
-    /// materialized copies (`_2` disambiguation).
-    #[test]
-    fn settle_manifest_disambiguates_same_named_materializations() {
-        let work = tempfile::tempdir().expect("workdir");
-        let session = tempfile::tempdir().expect("session dir");
-        let cwd = work.path();
-        let artifacts_dir = session.path().join(ARTIFACTS_DIR_NAME);
-        std::fs::create_dir_all(cwd.join("a")).expect("dirs");
-        std::fs::create_dir_all(cwd.join("b")).expect("dirs");
-        std::fs::write(cwd.join("a").join("report.md"), "one").expect("write");
-        std::fs::write(cwd.join("b").join("report.md"), "two").expect("write");
-
-        let manifest = settle_manifest(
-            &["a/report.md".to_string(), "b/report.md".to_string()],
-            "",
-            cwd,
-            Some(&artifacts_dir),
-        );
-        assert_eq!(manifest.len(), 2);
-        assert_eq!(manifest[0].file_name, "report.md");
-        assert_eq!(manifest[1].file_name, "report_2.md");
-        let first = std::fs::read_to_string(&manifest[0].path).expect("copy 1");
-        let second = std::fs::read_to_string(&manifest[1].path).expect("copy 2");
-        assert_eq!(first, "one");
-        assert_eq!(second, "two");
-    }
-
-    /// A re-mention of an identical, already-materialized source reuses
-    /// the existing copy: no `_2` spill, no extra manifest entry, no
-    /// second file on disk (#1335 -- materialize is a COPY, so the temp
-    /// source outlives the turn that first delivered it, and a later
-    /// reply mentioning it hits the scan channel again).
-    #[test]
-    fn settle_manifest_reuses_an_identical_remention_instead_of_spilling_2() {
-        let work = tempfile::tempdir().expect("workdir");
-        let session = tempfile::tempdir().expect("session dir");
-        let cwd = work.path();
-        let artifacts_dir = session.path().join(ARTIFACTS_DIR_NAME);
-        std::fs::write(cwd.join("report.html"), "one").expect("write");
-
-        let first = settle_manifest(&[], "报告在 `report.html`", cwd, Some(&artifacts_dir));
-        assert_eq!(first.len(), 1);
-        assert_eq!(first[0].file_name, "report.html");
-
-        let second = settle_manifest(
-            &[],
-            "在 `report.html` 基础上继续",
-            cwd,
-            Some(&artifacts_dir),
-        );
-        assert_eq!(second.len(), 1, "the manifest does not grow");
-        assert_eq!(second[0].path, first[0].path, "the same copy is reused");
-        assert_eq!(second[0].file_name, "report.html", "no _2 spill");
-        assert!(second[0].durable);
-        let on_disk = std::fs::read_dir(&artifacts_dir)
-            .expect("read artifacts dir")
-            .filter_map(|e| e.ok())
-            .count();
-        assert_eq!(on_disk, 1, "a single copy on disk");
-    }
-
-    /// After a divergent update takes `_2`, re-mentioning the updated
-    /// source reuses the `_2` copy: reuse is judged per collision-loop
-    /// candidate, not just on the plain name, so the sequence cannot
-    /// roll `_3` with bytes `_2` already holds (#1335).
-    #[test]
-    fn settle_manifest_reuses_a_remention_after_a_divergent_update() {
-        let work = tempfile::tempdir().expect("workdir");
-        let session = tempfile::tempdir().expect("session dir");
-        let cwd = work.path();
-        let artifacts_dir = session.path().join(ARTIFACTS_DIR_NAME);
-        std::fs::write(cwd.join("report.html"), "one").expect("write");
-
-        let first = settle_manifest(&[], "报告在 `report.html`", cwd, Some(&artifacts_dir));
-        assert_eq!(first.len(), 1);
-
-        std::fs::write(cwd.join("report.html"), "two").expect("rewrite");
-        let second = settle_manifest(
-            &[],
-            "更新后的报告在 `report.html`",
-            cwd,
-            Some(&artifacts_dir),
-        );
-        assert_eq!(second.len(), 1);
-        assert_eq!(second[0].file_name, "report_2.html", "divergent takes _2");
-
-        let third = settle_manifest(
-            &[],
-            "在 `report.html` 基础上继续",
-            cwd,
-            Some(&artifacts_dir),
-        );
-        assert_eq!(third.len(), 1);
-        assert_eq!(third[0].path, second[0].path, "the _2 copy is reused");
-        let mut names: Vec<String> = std::fs::read_dir(&artifacts_dir)
-            .expect("read artifacts dir")
-            .filter_map(|e| e.ok())
-            .map(|e| e.file_name().to_string_lossy().into_owned())
-            .collect();
-        names.sort();
-        assert_eq!(names, vec!["report.html", "report_2.html"]);
-    }
-
-    /// A reused target is handed back without re-copying: the loop
-    /// already proved the bytes identical, and rewriting them would let
-    /// a read-only (or locked) destination fail a materialization that
-    /// has already succeeded (#1335).
-    #[test]
-    fn settle_manifest_reuses_without_recopying_a_read_only_target() {
-        let work = tempfile::tempdir().expect("workdir");
-        let session = tempfile::tempdir().expect("session dir");
-        let cwd = work.path();
-        let artifacts_dir = session.path().join(ARTIFACTS_DIR_NAME);
-        std::fs::write(cwd.join("report.html"), "one").expect("write");
-
-        let first = settle_manifest(&[], "报告在 `report.html`", cwd, Some(&artifacts_dir));
-        assert_eq!(first.len(), 1);
-
-        let copy = artifacts_dir.join("report.html");
-        let mut perms = std::fs::metadata(&copy).expect("copy perms").permissions();
-        perms.set_readonly(true);
-        std::fs::set_permissions(&copy, perms).expect("read-only");
-
-        let second = settle_manifest(
-            &[],
-            "在 `report.html` 基础上继续",
-            cwd,
-            Some(&artifacts_dir),
-        );
-        assert_eq!(second.len(), 1);
-        assert_eq!(second[0].path, first[0].path, "the reused copy stands");
-        assert!(second[0].durable, "no rewrite means no read-only failure");
-    }
-
-    /// A collision on an extension-less name (`LICENSE`) disambiguates
-    /// without minting a trailing dot (`LICENSE_2.`, #1090).
-    #[test]
-    fn settle_manifest_collision_on_extensionless_names_has_no_trailing_dot() {
-        let work = tempfile::tempdir().expect("workdir");
-        let session = tempfile::tempdir().expect("session dir");
-        let cwd = work.path();
-        let artifacts_dir = session.path().join(ARTIFACTS_DIR_NAME);
-        std::fs::create_dir_all(cwd.join("a")).expect("dirs");
-        std::fs::create_dir_all(cwd.join("b")).expect("dirs");
-        std::fs::write(cwd.join("a").join("LICENSE"), "one").expect("write");
-        std::fs::write(cwd.join("b").join("LICENSE"), "two").expect("write");
-
-        let manifest = settle_manifest(
-            &["a/LICENSE".to_string(), "b/LICENSE".to_string()],
-            "",
-            cwd,
-            Some(&artifacts_dir),
-        );
-        assert_eq!(manifest.len(), 2);
-        assert_eq!(manifest[1].file_name, "LICENSE_2");
-        assert!(Path::new(&manifest[1].path).is_file(), "the copy exists");
-    }
-
-    /// An unbound session (no artifacts dir) keeps temp paths -- the
-    /// in-memory session degrades, nothing is written to disk.
-    #[test]
-    fn settle_manifest_without_an_artifacts_dir_keeps_temp_paths() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let cwd = dir.path();
-        std::fs::write(cwd.join("page.html"), "x").expect("write");
-        let manifest = settle_manifest(&["page.html".to_string()], "", cwd, None);
-        assert_eq!(manifest.len(), 1);
         assert!(
-            Path::new(&manifest[0].path).starts_with(cwd),
-            "no copy without a target"
+            !artifacts_dir.exists(),
+            "nothing is materialized into the session tree"
         );
     }
 
-    /// #1202 backfill: resume copies every persisted artifact (fork versions
-    /// included) flat into the fresh session cwd, and the cwd copy stays a
-    /// writable independent copy -- editing it never reaches the persistent
-    /// original (plain copy, never a hardlink).
+    /// The preview whitelist source (ADR-0137 Decision 6):
+    /// `referenced_paths` collects the `TurnArtifact` paths of every turn
+    /// record -- first-seen order, deduplicated -- and nothing from the
+    /// non-turn entry kinds.
     #[test]
-    fn backfill_copies_all_persisted_files_flat_into_the_cwd() {
-        let work = tempfile::tempdir().expect("workdir");
-        let session = tempfile::tempdir().expect("session dir");
-        let artifacts_dir = session.path().join(ARTIFACTS_DIR_NAME);
-        std::fs::create_dir_all(&artifacts_dir).expect("dirs");
-        std::fs::write(artifacts_dir.join("dashboard.html"), "html").expect("write");
-        std::fs::write(artifacts_dir.join("dashboard_2.html"), "html2").expect("write");
-
-        backfill_into_cwd(Some(&artifacts_dir), work.path());
-
+    fn referenced_paths_collects_turn_artifacts_first_seen_deduped() {
+        use crate::model::{
+            SourceLifecycleEvent, SourceLifecycleKind, TurnFailure, TurnOutcome, TurnProvenance,
+            TurnRecord,
+        };
+        let turn = |paths: &[&str]| {
+            ThreadEntry::Turn(TurnRecord {
+                question: "q".into(),
+                outcome: TurnOutcome::Failed(TurnFailure::NotWired),
+                trace: Vec::new(),
+                provenance: TurnProvenance::default(),
+                invocations: Vec::new(),
+                asked_at: None,
+                settled_at: None,
+                artifacts: paths
+                    .iter()
+                    .map(|p| TurnArtifact {
+                        path: (*p).to_string(),
+                        file_name: "f".into(),
+                        durable: true,
+                    })
+                    .collect(),
+                usage: None,
+                occupancy: None,
+            })
+        };
+        let entries = vec![
+            turn(&["C:/ws/report.pdf", "C:/ws/page.html"]),
+            ThreadEntry::Source(SourceLifecycleEvent {
+                kind: SourceLifecycleKind::Added,
+                reference_name: "src".into(),
+                display_name: "src".into(),
+            }),
+            turn(&["C:/ws/report.pdf", "C:/ws/other.md"]),
+        ];
+        let paths = referenced_paths(&entries);
         assert_eq!(
-            std::fs::read_to_string(work.path().join("dashboard.html")).expect("copy"),
-            "html",
-            "the flat copy lands in the cwd under the original name"
-        );
-        assert_eq!(
-            std::fs::read_to_string(work.path().join("dashboard_2.html")).expect("copy"),
-            "html2",
-            "a `_2` fork version backfills alongside its base"
-        );
-        std::fs::write(work.path().join("dashboard.html"), "edited").expect("edit copy");
-        assert_eq!(
-            std::fs::read_to_string(artifacts_dir.join("dashboard.html")).expect("original"),
-            "html",
-            "the cwd copy is independent of the persistent original"
-        );
-    }
-
-    /// A session that never materialized an artifact (missing dir) and an
-    /// unbound session (`None`) both resume with an empty cwd -- silent
-    /// no-ops, never an error.
-    #[test]
-    fn backfill_without_an_artifacts_dir_is_a_silent_noop() {
-        let work = tempfile::tempdir().expect("workdir");
-        let session = tempfile::tempdir().expect("session dir");
-        let missing = session.path().join(ARTIFACTS_DIR_NAME);
-        backfill_into_cwd(Some(&missing), work.path());
-        backfill_into_cwd(None, work.path());
-        assert!(
-            std::fs::read_dir(work.path())
-                .expect("read cwd")
-                .next()
-                .is_none(),
-            "neither call lands anything in the cwd"
-        );
-    }
-
-    /// A single uncopyable file (a directory squatting on the target name)
-    /// logs and is skipped; the remaining artifacts still backfill.
-    #[test]
-    fn backfill_skips_a_file_that_cannot_be_copied_and_continues() {
-        let work = tempfile::tempdir().expect("workdir");
-        let session = tempfile::tempdir().expect("session dir");
-        let artifacts_dir = session.path().join(ARTIFACTS_DIR_NAME);
-        std::fs::create_dir_all(&artifacts_dir).expect("dirs");
-        std::fs::write(artifacts_dir.join("good.html"), "html").expect("write");
-        std::fs::write(artifacts_dir.join("blocked.txt"), "txt").expect("write");
-        std::fs::create_dir_all(work.path().join("blocked.txt")).expect("block");
-
-        backfill_into_cwd(Some(&artifacts_dir), work.path());
-
-        assert!(
-            work.path().join("good.html").is_file(),
-            "the sibling artifact still backfills"
-        );
-        assert!(
-            work.path().join("blocked.txt").is_dir(),
-            "the failed target is left untouched (still the squatter)"
+            paths,
+            vec![
+                PathBuf::from("C:/ws/report.pdf"),
+                PathBuf::from("C:/ws/page.html"),
+                PathBuf::from("C:/ws/other.md"),
+            ],
+            "first-seen order, deduplicated, turns only"
         );
     }
 }

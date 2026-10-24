@@ -36,20 +36,13 @@ vi.mock("vega-embed", () => ({
   default: vi.fn().mockResolvedValue({ finalize: vi.fn(), view: { resize: vi.fn() } }),
 }));
 
-const DUCK = "C:/sessions/s1/recipe.json";
-
-function renderView(
-  path: string,
-  renderKind: "html" | "pdf" | "markdown" | "card",
-  recipePath = DUCK,
-) {
+function renderView(path: string, renderKind: "html" | "pdf" | "markdown" | "card") {
   return render(
     <QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
       <IntlProvider locale="zh-CN" messages={catalogFor("zh-CN")}>
         <ArtifactView
           artifact={{ path, file_name: path.split("/").pop() ?? path }}
           render={renderKind}
-          recipePath={recipePath}
         />
       </IntlProvider>
     </QueryClientProvider>,
@@ -146,14 +139,15 @@ describe("ArtifactView", () => {
       expect(frame.getAttribute("title")).toBe("page.html");
     });
 
-    it("degrades out-of-scope HTML (a user-directory original) to the face", async () => {
+    it("embeds a user-directory original (manifest membership, ADR-0137 D6)", async () => {
       vi.mocked(artifactExists).mockResolvedValue(true);
       renderView("C:/Users/me/report.html", "html");
-      // findBy waits out the exists query so the assertions land on the
-      // resolved state, not the optimistic pending render.
-      expect(await screen.findByTestId("artifact-face")).toBeInTheDocument();
-      expect(screen.queryByTestId("artifact-frame")).not.toBeInTheDocument();
-      // The degrade never eats the chrome: name + open stay in the header.
+      // Membership is the only gate: a manifest-named file outside the
+      // session tree renders in the iframe like any other (the scope grant
+      // behind the asset protocol names it file-by-file).
+      const frame = await screen.findByTestId("artifact-frame");
+      expect(frame.getAttribute("src")).toContain("report.html");
+      // The chrome stays: name + open hold above the frame.
       expect(screen.getByTestId("artifact-header")).toHaveTextContent("report.html");
       expect(await screen.findByRole("button", { name: /外部打开|externally/ })).toBeInTheDocument();
     });
@@ -182,11 +176,11 @@ describe("ArtifactView", () => {
       expect(frame.getAttribute("title")).toBe("report.pdf");
     });
 
-    it("degrades an out-of-scope pdf to the face", async () => {
+    it("embeds an out-of-session-tree pdf (manifest membership, ADR-0137 D6)", async () => {
       vi.mocked(artifactExists).mockResolvedValue(true);
       renderView("C:/Users/me/report.pdf", "pdf");
-      expect(await screen.findByTestId("artifact-face")).toBeInTheDocument();
-      expect(screen.queryByTestId("artifact-frame")).not.toBeInTheDocument();
+      const frame = await screen.findByTestId("artifact-frame");
+      expect(frame.getAttribute("src")).toContain("report.pdf");
     });
 
     it("degrades a missing pdf to the face, never an empty frame", async () => {
