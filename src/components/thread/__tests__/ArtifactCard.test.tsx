@@ -22,7 +22,6 @@ vi.mock("../../../api", () => ({
 const entry = (path: string, fileName: string): TurnArtifact => ({
   path,
   file_name: fileName,
-  durable: true,
 });
 
 function renderCard(

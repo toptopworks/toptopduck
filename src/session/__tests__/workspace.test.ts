@@ -5,7 +5,6 @@ import {
   findArtifact,
   findLatestMaterializedPrimary,
   findMaterializedPayload,
-  isWithinArtifactsDir,
   latestArtifactCandidate,
   resolveWorkingSetDetail,
 } from "../workspace";
@@ -307,27 +306,6 @@ describe("artifact derivation (ADR-0124, issue #1088)", () => {
       expect(artifactRenderKind("x/table.xlsx")).toBe("card");
       // Extension-less (unreachable via the whitelist) degrades to the card.
       expect(artifactRenderKind("x/README")).toBe("card");
-    });
-  });
-
-  describe("isWithinArtifactsDir (the HTML scope gate)", () => {
-    it("accepts paths under the recipe path's artifacts dir, both separators", () => {
-      expect(isWithinArtifactsDir(HTML, "C:/sessions/s1/recipe.json")).toBe(true);
-      expect(
-        isWithinArtifactsDir("C:\\sessions\\s1\\artifacts\\a.html", "C:\\sessions\\s1\\recipe.json"),
-      ).toBe(true);
-      expect(
-        isWithinArtifactsDir("/home/u/sessions/s1/artifacts/a.html", "/home/u/sessions/s1/recipe.json"),
-      ).toBe(true);
-    });
-
-    it("rejects user-directory originals, temp paths, and prefix lookalikes", () => {
-      const recipe = "C:/sessions/s1/recipe.json";
-      expect(isWithinArtifactsDir("C:/Users/me/report.html", recipe)).toBe(false);
-      // artifactsFoo is not the artifacts dir -- the trailing separator pins
-      // the boundary.
-      expect(isWithinArtifactsDir("C:/sessions/s1/artifactsFoo/x.html", recipe)).toBe(false);
-      expect(isWithinArtifactsDir("/tmp/work/page.html", recipe)).toBe(false);
     });
   });
 

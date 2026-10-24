@@ -860,17 +860,6 @@ impl super::Session {
             resume_baseline,
         );
 
-        // #1202: backfill the persisted artifacts into the fresh cwd before
-        // the resume phases -- the replayed history narrates past deliveries,
-        // and the next turn references them from the working directory
-        // instead of recomputing. The duck path is bound (adopt_resumed
-        // above), so the artifacts dir derives from the same source as the
-        // settle-time materialize.
-        super::artifacts::backfill_into_cwd(
-            super::artifacts::artifacts_dir(session.recipe_path()).as_deref(),
-            &session.temp_path,
-        );
-
         // ADR-0136 D3: the companion watermark decides the restore shape.
         // Point the engine at the tree companion FIRST (slot only -- the open
         // itself stays on-demand), then probe. A hit (companion present,
@@ -2069,7 +2058,6 @@ mod tests {
         turn.artifacts = vec![crate::model::TurnArtifact {
             path: "/sessions/abc/artifacts/report.pdf".into(),
             file_name: "report.pdf".into(),
-            durable: true,
         }];
         let recipe = recipe_with(vec![RecipeEntry::Turn(turn)], None);
         let mut ws = WorkingSet::default();
@@ -2085,7 +2073,6 @@ mod tests {
             vec![crate::model::TurnArtifact {
                 path: "/sessions/abc/artifacts/report.pdf".into(),
                 file_name: "report.pdf".into(),
-                durable: true,
             }],
             "the manifest round-trips verbatim across close/reopen"
         );

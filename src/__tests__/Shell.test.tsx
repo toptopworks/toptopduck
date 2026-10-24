@@ -1599,9 +1599,8 @@ describe("App artifact presentation (issue #1088, ADR-0124 Decision 3/4)", () =>
     // row after the mount's initial load).
     vi.mocked(conversation).mockImplementation(async () => state.thread);
     // Re-establish the createSession default: clearAllMocks clears calls,
-    // not implementations, and an earlier suite's persistent clobber (a
-    // different recipe_path) would route the html/pdf scope check off the
-    // artifacts dir and degrade the iframe to the fallback face.
+    // not implementations, and an earlier suite's persistent clobber would
+    // leak a stale recipe_path into downstream assertions.
     vi.mocked(createSession).mockResolvedValue({
       session_id: "sess-1",
       recipe_path: "/sessions/sess-1/recipe.json",
@@ -1614,7 +1613,7 @@ describe("App artifact presentation (issue #1088, ADR-0124 Decision 3/4)", () =>
     // recorded turn already carries the settle-computed manifest (ADR-0124
     // Decision 2), TurnCard's render gate mounts the ArtifactCard, the
     // exists-checked row is clickable, handleSelectFile moves viewedResult
-    // onto the file view AND expands the workspace, and the in-scope HTML
+    // onto the file view AND expands the workspace, and the manifest-member HTML
     // renders the sandboxed iframe stage.
     state.workingSet = [src("people")];
     state.thread = [artifactTurn(["/sessions/sess-1/artifacts/page.html"])];

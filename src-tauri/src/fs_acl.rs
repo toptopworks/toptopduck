@@ -126,9 +126,11 @@ impl FsAclError {
 ///   SQL still sees them READ_ONLY via catalog attach, independent of this ACL.
 /// - `assets_root`: the canonicalized per-session `assets/` dir (ADR-0089),
 ///   a READ-ONLY subtree. Unlike `source_roots` (exact per-file entries) this
-///   is a directory-tree rule: SQL-reference dead files land there under
-///   settle-time disambiguated names nobody enumerates in advance, so the
-///   allowance covers whatever the subtree holds.
+///   is a directory-tree rule: legacy recipes recorded settle-time
+///   materialized copies there under disambiguated names nobody enumerates
+///   in advance, so the allowance covers whatever the subtree holds (the
+///   production face is retired -- ADR-0137 Decision 6, #1383 -- so only
+///   pre-#1383 session trees hold content).
 pub(crate) struct FsAcl {
     source_roots: Vec<PathBuf>,
     temp_root: PathBuf,
@@ -137,10 +139,10 @@ pub(crate) struct FsAcl {
 
 impl FsAcl {
     /// Build the whitelist from the working set's source paths + the session
-    /// temp dir + the per-session assets/ dir (ADR-0089: SQL-reference dead
-    /// files live there so replay -- and a live follow-up referencing a
-    /// materialized copy -- can read_* them; read-only, the same immutable
-    /// rule as sources). A root whose original file no longer exists on disk
+    /// temp dir + the per-session assets/ dir (ADR-0089, legacy read-gate:
+    /// a pre-#1383 recipe's replayed SQL points at dead files there --
+    /// read-only, the same immutable rule as sources). A root whose
+    /// original file no longer exists on disk
     /// (canonicalization fails) is dropped from `source_roots` -- it cannot be
     /// read_* anyway, and carrying a phantom root would be dead policy.
     pub(crate) fn new(

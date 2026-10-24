@@ -890,11 +890,12 @@ pub async fn ask(
         if let Some(discovered) = s.last_discovered_runtime() {
             handle.set_cached_discovered(discovered);
         }
-        // ADR-0124 (issue #1087): a turn that materialized artifacts into
-        // the per-session `artifacts/` directory widens the asset protocol
-        // scope to it right here, before any card can render -- the
-        // artifacts dir may not have existed when the session opened.
-        grant_artifact_asset_scope(&app_for_scope, s.recipe_path());
+        // ADR-0124 (issue #1087), tightened to a file-level allowlist by
+        // ADR-0137 Decision 6 (#1383): the turn's manifest entries widen
+        // the asset protocol scope right here, before any card can render
+        // -- the files named this turn may not have existed when the
+        // session opened.
+        grant_artifact_asset_scope(&app_for_scope, &s.referenced_artifact_paths());
         Ok::<TurnOutcome, SessionError>(outcome)
     })
     .await
@@ -1032,13 +1033,13 @@ pub fn conversation(
     let id = SessionId::parse(&session_id)?;
     let handle = store.get(&id)?;
     let s = handle.session_lock()?;
-    let recipe_path = s.recipe_path().map(PathBuf::from);
     let entries = s.conversation();
-    // ADR-0124 (issue #1087): a reopened session's materialized artifacts
-    // must be iframe-servable before a card can render -- grant the asset
-    // protocol scope for the per-session artifacts directory on every
-    // thread read (session open / remount; idempotent by pattern).
-    grant_artifact_asset_scope(&app, recipe_path.as_deref());
+    // ADR-0124 (issue #1087), tightened to a file-level allowlist by
+    // ADR-0137 Decision 6 (#1383): every manifest-named file must be
+    // iframe-servable before a card can render -- the whitelist is
+    // re-granted on every thread read (session open / remount; idempotent
+    // by pattern).
+    grant_artifact_asset_scope(&app, &crate::session::artifacts::referenced_paths(&entries));
     Ok(entries)
 }
 
@@ -1049,24 +1050,32 @@ pub fn conversation(
 /// payload into the webview.
 const ARTIFACT_TEXT_MAX_BYTES: u64 = 2 * 1024 * 1024;
 
-/// Widen the asset protocol's runtime scope to the session's artifacts
-/// directory (ADR-0124 Decision 4: HTML artifacts render through
-/// `asset://` in a sandboxed iframe, so the scope anchors the per-session
-/// materialization directory -- NOT the whole sessions root and never the
-/// user's directories). Idempotent: the scope is a pattern set, re-granting
-/// adds nothing. Failures log and degrade: the iframe render then fails
-/// honest (whether the card offers an external-open fallback is #1088's
-/// render-time concern, not a grant-time fact).
-fn grant_artifact_asset_scope(app: &tauri::AppHandle, recipe_path: Option<&Path>) {
-    let Some(dir) = crate::session::artifacts::artifacts_dir(recipe_path) else {
-        return;
-    };
-    if let Err(e) = app.asset_protocol_scope().allow_directory(&dir, false) {
-        log::warn!(
-            target: "toptopduck::commands",
-            "failed to grant asset scope for {}: {e}",
-            dir.display()
-        );
+/// Widen the asset protocol's runtime scope to exactly the thread's
+/// manifest-referenced files (ADR-0137 Decision 6, tightening ADR-0124
+/// Decision 4: the file-level allowlist behind iframe embeds -- a
+/// manifest-named file becomes iframe-servable wherever it lives,
+/// including a user-directory original, while the workspace directory
+/// as a whole is deliberately NOT granted). Idempotent: the scope is a
+/// pattern set, re-granting adds nothing. Failures log and degrade: the
+/// iframe render then fails honest (whether the card offers an
+/// external-open fallback is #1088's render-time concern, not a
+/// grant-time fact).
+fn grant_artifact_asset_scope(app: &tauri::AppHandle, paths: &[PathBuf]) {
+    // ADR-0137 Decision 6 (issue #1383): file-level allowlist -- exactly
+    // the files the thread's artifact manifests have referenced. The
+    // session workspace directory as a whole is deliberately NOT granted
+    // (an arbitrary html beside a deliverable must not become
+    // iframe-renderable by proximity); a legacy manifest pointing into
+    // the per-session `artifacts/` directory names files like any other,
+    // so it stays servable unchanged.
+    for path in paths {
+        if let Err(e) = app.asset_protocol_scope().allow_file(path) {
+            log::warn!(
+                target: "toptopduck::commands",
+                "failed to grant asset scope for {}: {e}",
+                path.display()
+            );
+        }
     }
 }
 

@@ -250,9 +250,8 @@ export interface TurnRecord {
   settled_at?: number;
   // The turn's delivered artifacts (ADR-0124, #1087): the settle-frozen
   // dual-channel manifest — present_files declarations + reply-text scan
-  // hits, merged and deduped. Entries carry absolute paths (materialized
-  // into the per-session artifacts/ dir when the source lived in the
-  // session temp working dir); the first entry is the primary (declared
+  // hits, merged and deduped. Entries carry absolute in-place paths; the
+  // first entry is the primary (declared
   // order for a present_files-shaped manifest, first-seen order for a
   // scan-only one). Absent for turns that delivered nothing and turns
   // recorded before the field. Rendering rides #1088; existence is
@@ -317,13 +316,10 @@ export interface SubagentUsage {
 // the Rust model::TurnArtifact. The primary is derived as the first entry
 // of the manifest, never a stored flag.
 export interface TurnArtifact {
-  // Absolute filesystem path, post-materialization.
+  // Absolute in-place filesystem path.
   path: string;
   // The entry's file name (display + external-open label).
   file_name: string;
-  // Whether the path is durable (a materialized copy or a user-directory
-  // original); false = a temp path openable until the session closes.
-  durable: boolean;
 }
 
 // One skill invocation attached to a turn (ADR-0119, #983): the body expanded

@@ -124,10 +124,11 @@ pub(crate) struct TurnDeps<'a> {
     /// computed once at deps assembly from the session's binding.
     pub snapshot_dir: PathBuf,
     /// The session's persistent `assets/` dir (ADR-0089), derived from the
-    /// bound `recipe.json` path. `read_*` references into it pass the preflight
-    /// READ-ONLY: settle-time SQL-reference materialization rewrites replayed
-    /// SQL to point here, and a live follow-up turn may reference a
-    /// materialized copy. `None` for an unbound session.
+    /// bound `recipe.json` path. A legacy read-gate surface: the settle-time
+    /// materialization that minted dead files here is retired (ADR-0137
+    /// Decision 6, #1383), so this serves a legacy recipe's replay reads --
+    /// `read_*` references into it pass the preflight READ-ONLY -- and the
+    /// bind-time derived-source migration. `None` for an unbound session.
     pub assets_dir: Option<PathBuf>,
     /// Session-level ephemeral cache: referenced file path to a cached
     /// derived-source registration (issue #440; generalized to full-path
