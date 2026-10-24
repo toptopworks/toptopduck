@@ -170,6 +170,17 @@ pub struct SourceRef {
     #[serde(default)]
     pub rectify: RectifyProvenance,
     pub fingerprint: String,
+    /// The copy-in reader the registration-time SQL function named
+    /// (ADR-0137 D4): the normalized tabular spelling (`read_json_auto` /
+    /// `read_csv_auto` / `read_parquet`) for a programmatically registered
+    /// source, `None` for manual-ingest sources and legacy recipes. A
+    /// watermark-miss replay consults this BEFORE extension dispatch so a
+    /// function-name / extension mismatch re-reads with the reader that
+    /// produced the snapshot. The one corner that names no SQL fn: a
+    /// non-tabular call on a tool_output original records the staged
+    /// file's extension-dispatched reader (the #433 fallback posture).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reader: Option<String>,
 }
 
 /// One productive turn in the replayable chain (ADR-0034): the `result_N`
@@ -1016,6 +1027,7 @@ mod tests {
             relative_path: None,
             rectify: RectifyProvenance::NotApplicable,
             fingerprint: fp.to_string(),
+            reader: None,
         }
     }
 

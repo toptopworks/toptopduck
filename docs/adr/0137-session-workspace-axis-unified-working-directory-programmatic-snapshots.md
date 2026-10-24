@@ -8,7 +8,7 @@
 
 3. **内外轮 cwd 统一 = 会话工作区。** 外部轮的 `AcpTurnInput.cwd` 与内置轮的相对路径基准、scratch 落点全部取会话工作区；`temp_path` 退出工作文件域。多个会话可共享一个工作区（canonical 路径相同即视为同一个），续作与跨任务共享由「新会话选回既有工作区」表达。
 
-4. **SQL read 放行集放开为全路径，引用即程序化快照。** preflight 从「temp root」放开为 cwd 内与绝对路径全路径；被引用文件走与手动 ingest 同一条 copy-in 快照管道（`snapshots/<ref>.duckdb` 落盘、指纹、水印、resume 免重放、stale 语义全继承）——程序化 ingest 与手动 ingest 只差触发者。共享位置大文件的快照成本与现状手动 ingest 同款（会话树内落盘，不碰用户目录与共享位置）。
+4. **SQL read 放行集放开为全路径，引用即程序化快照。** preflight 从「temp root」放开为 cwd 内与绝对路径全路径；被引用文件走与手动 ingest 同一条 copy-in 快照管道（`snapshots/<ref>.duckdb` 落盘、指纹、水印、resume 免重放、stale 语义全继承）——程序化 ingest 与手动 ingest 只差触发者。reader 权威 = SQL 函数名：full-path 与 tool_output 两面首产同以函数名取 reader（tool_output 面非表格函数回落扩展名），函数名随 recipe 源引用持久化、水印 miss 重放按它重读——扩展名仅是无函数名信息时的兜底。共享位置大文件的快照成本与现状手动 ingest 同款（会话树内落盘，不碰用户目录与共享位置）。
 
 5. **会话创建选择器带最近工作区列表。** 可选用户目录、选回最近工作区（App 工作区与用户目录混排、canonical 去重置顶）或默认惰性创建；最近列表存 app-config（10 个——入口截断而非数据截断，更旧的工作区由目录浏览与全量搜索兜底）。
 

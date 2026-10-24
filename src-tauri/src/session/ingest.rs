@@ -110,6 +110,10 @@ impl super::Session {
             .source_files
             .remove(reference_name)
             .unwrap_or_else(|| self.snapshot_dir().join(format!("{reference_name}.duckdb")));
+        // The reader entry is registration provenance (ADR-0137 D4) -- it
+        // retires with the snapshot, so a later manual re-registration under
+        // the same name can never inherit a stale reader.
+        self.persister.source_readers.remove(reference_name);
         if let Err(e) = fs::remove_file(&snapshot_path) {
             log::warn!(
                 target: "toptopduck::session",

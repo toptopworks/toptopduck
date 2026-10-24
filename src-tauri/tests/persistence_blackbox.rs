@@ -1068,6 +1068,7 @@ fn resume_refuses_a_relative_path_that_escapes_the_duck_dir() {
             relative_path: Some("../evil.csv".into()),
             rectify: RectifyProvenance::NotApplicable,
             fingerprint: "any".into(),
+            reader: None,
         }],
         vec![],
         None,
@@ -2687,6 +2688,7 @@ fn resume_falls_back_to_absolute_when_relative_path_is_missing() {
             relative_path: Some("inner/missing.csv".into()),
             rectify: RectifyProvenance::NotApplicable,
             fingerprint,
+            reader: None,
         }],
         vec![],
         None,
@@ -2699,6 +2701,51 @@ fn resume_falls_back_to_absolute_when_relative_path_is_missing() {
         resumed.get("data").is_some(),
         "absolute fallback resolved (relative candidate missing)",
     );
+}
+
+/// #1387 review F: a recipe carrying an unrecognized reader spelling
+/// (hand-edited corruption) must not refuse to resume or execute the
+/// string -- the replay falls back to extension dispatch through the same
+/// fn-name normalizer that bars non-tabular spellings from the copy-in
+/// template.
+#[test]
+fn resume_falls_back_to_extension_dispatch_for_an_unrecognized_reader() {
+    use toptopduck_lib::persistence::{save_atomic, Recipe, SourceRef};
+    use toptopduck_lib::RectifyProvenance;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let duck = dir.path().join("s.json");
+    let outside = dir.path().join("data.csv");
+    fs::write(&outside, "name,score\nAda,9\n").expect("write source");
+
+    // Capture the real fingerprint through one ingest.
+    let mut probe = Session::with_provider(Box::new(FakeProvider::new())).expect("session");
+    load_source(&mut probe, &outside);
+    let fingerprint = probe.get("data").expect("data").fingerprint.clone();
+    drop(probe);
+
+    let recipe = Recipe::build(
+        "tampered".into(),
+        vec![SourceRef {
+            reference_name: "data".into(),
+            display_name: "data".into(),
+            source_path: outside.to_string_lossy().to_string(),
+            relative_path: None,
+            rectify: RectifyProvenance::NotApplicable,
+            fingerprint,
+            reader: Some("read_evil".into()),
+        }],
+        vec![],
+        None,
+    )
+    .expect("build recipe");
+    save_atomic(&duck, &recipe).expect("save");
+
+    let resumed = resume_defaults(&duck, Arc::new(CancelToken::new()), |_| {}).expect("resume");
+    let page = resumed
+        .read_rows("data", 0, 10)
+        .expect("the extension fallback reads the source");
+    assert_eq!(page.rows.len(), 1, "the CSV rows came through");
 }
 
 /// AC4: a boundary-case source (relative + absolute both stored) whose file
@@ -2806,6 +2853,7 @@ fn resume_prefers_relative_when_both_paths_stored_and_match_fingerprint() {
             relative_path: Some("data.csv".into()),
             rectify: RectifyProvenance::NotApplicable,
             fingerprint: fingerprint.clone(),
+            reader: None,
         }],
         vec![],
         None,
@@ -3335,6 +3383,7 @@ fn resume_rejects_a_recipe_whose_active_points_at_an_unregistered_source() {
             relative_path: None,
             rectify: RectifyProvenance::NotApplicable,
             fingerprint,
+            reader: None,
         }],
         vec![],
         Some("people".into()),
@@ -3387,6 +3436,7 @@ fn resume_renders_a_broken_sql_turn_as_failed_and_preserves_prior_results() {
             relative_path: None,
             rectify: RectifyProvenance::NotApplicable,
             fingerprint,
+            reader: None,
         }],
         vec![
             RecipeEntry::Turn(RecipeTurn::without_audit(
@@ -3683,6 +3733,7 @@ fn save_atomic_returns_io_error_when_the_target_directory_does_not_exist() {
             relative_path: None,
             rectify: RectifyProvenance::NotApplicable,
             fingerprint: "fp".into(),
+            reader: None,
         }],
         vec![],
         None,
@@ -3723,6 +3774,7 @@ fn save_atomic_failure_leaves_existing_recipe_bytes_unchanged() {
                 relative_path: None,
                 rectify: RectifyProvenance::NotApplicable,
                 fingerprint: "fp".into(),
+                reader: None,
             }],
             vec![],
             None,

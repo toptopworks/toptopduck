@@ -1004,6 +1004,7 @@ mod tests {
         let mut deps = crate::session::materializer::TurnDeps {
             engine: &engine,
             source_files: &mut sources,
+            source_readers: None,
             working_set: &mut ws,
             result_row_cap: 2,
             result_count_cap: 100,

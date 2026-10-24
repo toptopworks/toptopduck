@@ -95,6 +95,12 @@ pub(crate) struct TurnDeps<'a> {
     /// full-path original (ADR-0137 D4) triggers copy_in + ATTACH, inserting
     /// a new snapshot path here.
     pub source_files: &'a mut HashMap<String, std::path::PathBuf>,
+    /// The reader-recording carrier (ADR-0137 D4): `Some` borrows the
+    /// persister's `source_readers` map so a derived registration records
+    /// the fn-named reader and the resume legs refill it, for `SourceRef`
+    /// persistence at settle. `None` (test constructors) disconnects
+    /// recording, mirroring the workspace axis.
+    pub source_readers: Option<&'a mut HashMap<String, String>>,
     pub working_set: &'a mut WorkingSet,
     pub result_row_cap: u64,
     pub result_count_cap: usize,
@@ -179,6 +185,7 @@ impl<'a> TurnDeps<'a> {
         TurnDeps {
             engine,
             source_files,
+            source_readers: None,
             working_set: ws,
             result_row_cap: 1_000,
             result_count_cap: 100,

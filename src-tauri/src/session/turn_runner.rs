@@ -420,6 +420,7 @@ impl super::Session {
                     let mut deps = TurnDeps {
                         engine: &self.admin_engine,
                         source_files: &mut self.source_files,
+                        source_readers: Some(&mut self.persister.source_readers),
                         working_set: &mut self.working_set,
                         result_row_cap: self.result_row_cap,
                         result_count_cap: self.result_count_cap,
@@ -811,6 +812,7 @@ impl super::Session {
             let deps = TurnDeps {
                 engine: &self.admin_engine,
                 source_files: &mut self.source_files,
+                source_readers: Some(&mut self.persister.source_readers),
                 working_set: &mut self.working_set,
                 result_row_cap: self.result_row_cap,
                 result_count_cap: self.result_count_cap,
