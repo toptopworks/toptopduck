@@ -26,6 +26,7 @@ pub mod source_lifecycle;
 mod sql_assets;
 pub(crate) mod turn_dispatch;
 pub mod turn_runner;
+pub(crate) mod workspace;
 
 use std::collections::HashMap;
 use std::fs;
@@ -443,6 +444,14 @@ pub struct SessionRuntimeFacts {
     pub thought_level: Option<String>,
     pub cached_discovered: Option<crate::session::loop_contract::DiscoveredRuntime>,
     pub last_runtime: Option<LastRuntime>,
+    /// The session's workspace binding (ADR-0137, issue #1381): the canonical
+    /// directory agent-authored processes work in, fixed at creation
+    /// (user-selected) or at the first disk-need moment (lazily minted) and
+    /// immutable afterwards. Not a runtime fact semantically -- it rides this
+    /// struct because the struct is the recipe-header facts carrier, so the
+    /// binding persists + resumes through the same single storage as the
+    /// posture facts (no second copy to drift).
+    pub workspace: Option<std::path::PathBuf>,
 }
 
 pub struct Session {
@@ -453,6 +462,13 @@ pub struct Session {
     working_set: WorkingSet,
     _temp_dir: TempDir, // held to keep its dir alive; cleared on drop (ADR-0012)
     temp_path: PathBuf,
+    /// The lazy-mint source for the default workspace (ADR-0137, issue
+    /// #1381): `{sessions_root}/workspaces/`, seated by the command layer at
+    /// creation / resume. The binding itself lives in
+    /// [`SessionRuntimeFacts::workspace`] -- the recipe-header facts carrier.
+    /// `None` (test constructors) disables minting; disk-need consumers then
+    /// keep the temp-dir cwd.
+    workspaces_root: Option<PathBuf>,
     /// The LLM provider (ADR-0007/0064), held behind `Arc<dyn>` (dyn, not
     /// generic) so this struct does not parameterize `commands.rs` / `lib.rs`.
     /// [`Self::ask_with_phase`] reads the live response locale off it for the
@@ -967,6 +983,7 @@ impl Session {
             working_set: WorkingSet::default(),
             _temp_dir: temp_dir,
             temp_path,
+            workspaces_root: None,
             provider,
             materializer: Box::new(RealMaterializer),
             session_id: None,

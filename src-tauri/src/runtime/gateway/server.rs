@@ -1112,14 +1112,27 @@ fn handle_tools_call(msg: &Value, ctx: &mut GatewayCtx, outcome: &mut GatewayOut
                 // Decision 6): the same spawn engine, cwd, cancel, and
                 // output-cap discipline a built-in-initiated call gets -- one
                 // execution engine, two callers. CLI tools never promote, so
-                // no side-effect channel rides here.
-                let executed = crate::cli_tools::executor::execute(
-                    tool,
-                    call,
-                    ctx.deps.temp_path,
-                    ctx.cancel,
-                    None,
-                );
+                // no side-effect channel rides here. ADR-0137 (issue #1381):
+                // the spawn cwd resolves through the SAME launch-dir seam the
+                // built-in dispatch arm uses -- one cwd semantics across both
+                // runtime surfaces, and this launch is a lazy-mint disk-need
+                // moment for a directory-less session.
+                let executed = match ctx.deps.launch_dir() {
+                    Ok(cwd) => {
+                        crate::cli_tools::executor::execute(tool, call, &cwd, ctx.cancel, None)
+                    }
+                    // A call-time structured error (the ADR-0108 D2
+                    // posture), the same envelope shape the executor's own
+                    // failures take -- the CLI self-corrects or surfaces it.
+                    Err(detail) => ToolOutcome {
+                        result: ToolResult {
+                            tool_use_id: call.id.clone(),
+                            content: detail,
+                            is_error: true,
+                        },
+                        promotion: None,
+                    },
+                };
                 result_envelope(executed.result)
             } else {
                 // The builtin dispatch runs under the shared issue #321

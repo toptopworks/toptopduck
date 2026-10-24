@@ -35,6 +35,7 @@ function meta(
     format_version: opts.format_version ?? 2,
     pinned: opts.pinned ?? false,
     archived: opts.archived ?? false,
+    workspace: opts.workspace ?? null,
   };
 }
 

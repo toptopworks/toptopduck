@@ -948,6 +948,13 @@ impl super::Session {
                     result_row_cap: session.result_row_cap,
                     result_count_cap: session.result_count_cap,
                     temp_path: &session.temp_path,
+                    // ADR-0137 (issue #1381): the replay deps stay
+                    // disconnected from the workspace axis -- resume is
+                    // pure-state re-derivation, never a disk-need moment
+                    // (nothing launches; the SQL domain re-reads source
+                    // files only).
+                    workspace: None,
+                    workspaces_root: None,
                     snapshot_dir,
                     assets_dir,
                     tool_output_refs: &mut session.tool_output_refs,
@@ -1000,6 +1007,11 @@ impl super::Session {
             thought_level: recipe.thought_level.clone(),
             cached_discovered: recipe.cached_discovered.clone(),
             last_runtime: recipe.last_runtime.clone(),
+            // ADR-0137 (issue #1381): the workspace binding restores verbatim
+            // -- immutable by contract, `None` for a pre-#1381 recipe (the
+            // session then lazy-mints at its next disk-need moment like a
+            // fresh directory-less session).
+            workspace: recipe.workspace.clone(),
         };
 
         // Phase 5: persist the post-resume state. adopt_resumed already set

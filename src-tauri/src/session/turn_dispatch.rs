@@ -553,9 +553,39 @@ fn dispatch_gated_call_inner(
         route_external_call(call, mcp, deps.temp_path)
     } else if let Some(tool) = cli_tool {
         // The registered-CLI dispatch arm (issue #671, ADR-0108 Decision 3):
-        // direct argv spawn, cwd = the session's work temp dir, cancel = the
-        // turn's shared token (process-tree termination on round cancel).
-        crate::cli_tools::executor::execute(tool, call, deps.temp_path, gate.cancel, None)
+        // direct argv spawn, cancel = the turn's shared token (process-tree
+        // termination on round cancel). ADR-0137 (issue #1381): the spawn
+        // cwd is the session WORKSPACE -- the built-in runtime's
+        // relative-path base, matching the external runtime's cwd. THIS
+        // launch is the lazy-mint disk-need moment: a directory-less session
+        // mints its default timestamped workspace on the first CLI call, so
+        // a pure-chat session stays dirless.
+        match deps.launch_dir() {
+            Ok(cwd) => crate::cli_tools::executor::execute(tool, call, &cwd, gate.cancel, None),
+            // A call-time structured error (the ADR-0108 D2 posture): the
+            // model self-corrects or the failure surfaces to the user; the
+            // started event above already fired, so the completed event
+            // carries the failure like any errored call.
+            Err(detail) => {
+                let entry = TraceEntry::failed(
+                    call.id.clone(),
+                    call.name.clone(),
+                    operation_kind,
+                    summary.clone(),
+                    truncate_trace_excerpt(&detail, TRACE_EXCERPT_MAX),
+                );
+                on_phase(TurnPhase::ToolCallCompleted(TraceEntryView::from(&entry)));
+                return Ok((
+                    ToolResult {
+                        tool_use_id: call.id.clone(),
+                        content: detail,
+                        is_error: true,
+                    },
+                    Some(entry),
+                    None,
+                ));
+            }
+        }
     } else {
         tools::dispatch(call, deps, gate.cancel, materializer)
     };

@@ -16,6 +16,7 @@
 //! truth, not two.
 
 use std::collections::HashSet;
+use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
@@ -730,6 +731,18 @@ pub struct Recipe {
     /// recipe migrated with an empty mount fold.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub discovery_snapshot: Vec<String>,
+    /// The session's bound workspace directory (ADR-0137, issue #1381):
+    /// the canonical path agent-authored processes work in -- the external
+    /// runtime's `session/new` cwd and the built-in CLI tools' spawn cwd.
+    /// Fixed at creation (user-selected) or at the first disk-need moment
+    /// (the lazily-minted default workspace), immutable afterwards. `None`
+    /// for a session that never reached a disk-need moment (pure chat /
+    /// read-only queries) and for recipes persisted before the field; a
+    /// resume restores it verbatim. NOT a replay input. No format_version
+    /// bump -- strictly additive with a serde default, the `last_runtime`
+    /// precedent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace: Option<PathBuf>,
 }
 
 /// Why [`Recipe::build`] rejected a proposed recipe.
@@ -883,6 +896,7 @@ impl Recipe {
             thought_level: None,
             cached_discovered: None,
             last_runtime: None,
+            workspace: None,
         })
     }
 
@@ -912,6 +926,16 @@ impl Recipe {
     /// so the persisted file carries it.
     pub fn with_discovery_snapshot(mut self, names: Vec<String>) -> Recipe {
         self.discovery_snapshot = names;
+        self
+    }
+
+    /// Layer the session's workspace binding onto the recipe header
+    /// (ADR-0137, issue #1381). The same layering posture as
+    /// [`Self::with_discovery_snapshot`]: the session holds the single
+    /// truth, and the persister layers it at build time so a lazily-minted
+    /// binding reaches the next persist without a second storage to drift.
+    pub fn with_workspace(mut self, workspace: Option<PathBuf>) -> Recipe {
+        self.workspace = workspace;
         self
     }
 
@@ -1038,6 +1062,7 @@ mod tests {
             thought_level: None,
             cached_discovered: None,
             last_runtime: None,
+            workspace: None,
         }
     }
 
@@ -1141,6 +1166,7 @@ mod tests {
             thought_level: None,
             cached_discovered: None,
             last_runtime: None,
+            workspace: None,
         };
         let chain = recipe.productive_chain();
         assert_eq!(
@@ -1190,6 +1216,7 @@ mod tests {
             thought_level: None,
             cached_discovered: None,
             last_runtime: None,
+            workspace: None,
         };
         let json = serde_json::to_string(&recipe).expect("serialize");
         let back: Recipe = serde_json::from_str(&json).expect("deserialize");
@@ -1259,6 +1286,7 @@ mod tests {
             thought_level: None,
             cached_discovered: None,
             last_runtime: None,
+            workspace: None,
         };
         let chain = recipe.productive_chain();
         assert_eq!(
@@ -1404,6 +1432,7 @@ mod tests {
             thought_level: None,
             cached_discovered: None,
             last_runtime: None,
+            workspace: None,
         };
         let chain = recipe.productive_chain();
         assert_eq!(
@@ -2007,6 +2036,7 @@ mod tests {
             thought_level: None,
             cached_discovered: None,
             last_runtime: None,
+            workspace: None,
         };
         let json = serde_json::to_string(&recipe).expect("serialize");
         let back: Recipe = serde_json::from_str(&json).expect("deserialize");
@@ -2064,6 +2094,7 @@ mod tests {
             thought_level: None,
             cached_discovered: None,
             last_runtime: None,
+            workspace: None,
         };
         let json = serde_json::to_string(&recipe).expect("serialize");
         assert!(
@@ -2142,6 +2173,7 @@ mod tests {
             thought_level: None,
             cached_discovered: None,
             last_runtime: None,
+            workspace: None,
         };
         let chain = recipe.productive_chain();
         assert_eq!(chain.len(), 1);

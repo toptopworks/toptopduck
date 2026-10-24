@@ -981,6 +981,8 @@ mod tests {
             result_row_cap: 2,
             result_count_cap: 100,
             temp_path: std::path::Path::new("."),
+            workspace: None,
+            workspaces_root: None,
             snapshot_dir: std::path::PathBuf::from("."),
             assets_dir: None,
             tool_output_refs: &mut refs,

@@ -323,6 +323,11 @@ impl RecipePersister {
         // rides the header so resume restores it explicitly. Persister-held
         // (#987 F): set once at creation / resume adoption.
         .with_discovery_snapshot(self.discovery_snapshot.clone())
+        // ADR-0137 (issue #1381): the workspace binding rides the header
+        // from the SAME session-level facts the runtime selections use --
+        // one storage (SessionRuntimeFacts), so a lazily-minted binding
+        // reaches the next persist without a second copy to drift.
+        .with_workspace(config.workspace.clone())
     }
 
     // --- Write loop --------------------------------------------------------

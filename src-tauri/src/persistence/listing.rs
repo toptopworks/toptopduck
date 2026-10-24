@@ -151,6 +151,11 @@ pub struct SessionMetadata {
     /// search, which consume the same server-trimmed response). False when
     /// the sidecar has no entry.
     pub archived: bool,
+    /// The session's bound workspace directory, canonical path (ADR-0137,
+    /// issue #1381): `None` for a session that never reached a disk-need
+    /// moment and for recipes persisted before the field. Frontend grouping
+    /// by workspace derives from this read-only projection.
+    pub workspace: Option<String>,
 }
 
 /// A sidebar entry's working-set summary (ADR-0060): the first source's display
@@ -316,6 +321,10 @@ fn build_session_metadata(path: &Path) -> Option<SessionMetadata> {
         // false (ADR-0127).
         pinned: false,
         archived: false,
+        workspace: recipe
+            .workspace
+            .as_ref()
+            .map(|p| p.to_string_lossy().into_owned()),
     })
 }
 

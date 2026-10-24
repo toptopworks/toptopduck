@@ -304,4 +304,9 @@ export interface SessionMetadata {
   // default list_sessions response; only the archived view fetches it
   // (includeArchived). An archived session never carries a runtime sid.
   archived: boolean;
+  // The session's bound workspace directory, canonical path (ADR-0137, issue
+  // #1381): where agent-authored processes worked. null for a session that
+  // never reached a disk-need moment (pure chat) and for recipes persisted
+  // before the field.
+  workspace: string | null;
 }

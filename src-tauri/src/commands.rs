@@ -214,6 +214,7 @@ pub fn create_session(
     sessions_root: State<'_, SessionsRoot>,
     skills_root: State<'_, SkillsRoot>,
     user_store: State<'_, UserAdapterStore>,
+    workspace: Option<String>,
 ) -> Result<CreateSessionReply, SessionError> {
     let cancel = Arc::new(CancelToken::new());
     // The real LLM provider (ADR-0007/0064): a LiveProvider router that reads
@@ -288,6 +289,28 @@ pub fn create_session(
         let cfg = live.load();
         let seed = crate::skills::seed_from_config(&cfg, &live.cli_tools(), &skills_root.0);
         s.set_discovery_snapshot(seed);
+        // ADR-0137 (issue #1381): seat the workspace axis BEFORE the bind so
+        // the initial recipe carries the binding. An explicitly selected
+        // directory binds canonicalized (Windows 8.3 short paths would let
+        // one directory appear under two spellings, breaking path
+        // comparison + multi-session dedup); no selection seats only the
+        // lazy-mint source -- the first disk-need moment (external turn
+        // spawn / built-in CLI tool launch) mints the default timestamped
+        // workspace, and a pure-chat session stays dirless.
+        s.set_workspaces_root(Some(
+            sessions_root
+                .path()
+                .join(crate::session::workspace::WORKSPACES_DIR_NAME),
+        ));
+        if let Some(dir) = &workspace {
+            let canonical = std::fs::canonicalize(dir).map_err(|e| {
+                // Distinct from launch_cwd's mkdir-failure wording: this is
+                // the create-time "the selected directory cannot be opened"
+                // verdict, not a mint/materialize fault.
+                SessionError::Engine(format!("cannot open workspace directory: {e}"))
+            })?;
+            s.set_workspace(canonical);
+        }
         s.bind_recipe(recipe_path.clone(), String::new())
             .map_err(|e| SessionError::Engine(e.to_string()))?;
         Ok(CreateSessionReply {
@@ -2295,6 +2318,14 @@ pub async fn open_recipe(
         // reopens under the SAME id, so its no-progress kill log attributes
         // to the session the file belongs to.
         stamp_resumed_identity(&mut new_session, &sid);
+        // ADR-0137 (issue #1381): seat the lazy-mint source on the resumed
+        // session too, so a pre-#1381 recipe (no `workspace` header) behaves
+        // like a fresh directory-less session -- its next disk-need moment
+        // mints a default workspace. A recipe WITH a workspace restores the
+        // binding inside open_recipe; this root only ever mints.
+        new_session.set_workspaces_root(Some(
+            sessions_root_path.join(crate::session::workspace::WORKSPACES_DIR_NAME),
+        ));
         // ADR-0063: re-arm the close-and-wait-release drop signal for the
         // resumed session. Install a fresh (sender, receiver) pair: the sender
         // goes into the NEW session (its Drop will fire it after the canonical

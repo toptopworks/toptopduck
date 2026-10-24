@@ -333,6 +333,55 @@ fn resume_restores_the_header_last_runtime_and_the_rewrite_keeps_it() {
 }
 
 #[test]
+fn resume_restores_the_header_workspace_binding() {
+    // ADR-0137 (issue #1381): the workspace binding rides the recipe header
+    // and restores verbatim on resume -- immutable for the session's life.
+    // The pre-#1381 half (AC4): a header without the field resumes as None
+    // with everything else unchanged.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let duck = dir.path().join("s.json");
+    let session = build_session(&duck);
+    drop(session);
+
+    // Half 1: a header carrying the field restores the binding, and the
+    // post-resume rewrite keeps it for the next resume.
+    let disk = fs::read_to_string(&duck).expect("read duck");
+    let mut v: serde_json::Value = serde_json::from_str(&disk).expect("duck json");
+    assert!(
+        v.get("workspace").is_none(),
+        "a session that never reached a disk-need moment persists no workspace"
+    );
+    let bound = dir.path().join("user-project");
+    fs::create_dir(&bound).expect("seed workspace");
+    v["workspace"] = json!(bound.to_string_lossy());
+    fs::write(&duck, serde_json::to_string_pretty(&v).expect("serialize")).expect("write duck");
+
+    let resumed = resume_defaults(&duck, Arc::new(CancelToken::new()), |_| {}).expect("resume");
+    assert_eq!(
+        resumed.workspace(),
+        Some(bound.as_path()),
+        "the resumed Session restores the header's workspace binding"
+    );
+    drop(resumed);
+    let disk = fs::read_to_string(&duck).expect("read duck");
+    let v: serde_json::Value = serde_json::from_str(&disk).expect("duck json");
+    assert_eq!(
+        v["workspace"],
+        json!(bound.to_string_lossy().to_string()),
+        "the post-resume rewrite preserves the persisted binding"
+    );
+
+    // Half 2 (AC4): a pre-#1381 recipe (no workspace key) resumes as None.
+    let mut v: serde_json::Value = serde_json::from_str(&disk).expect("duck json");
+    v.as_object_mut()
+        .expect("recipe object")
+        .remove("workspace");
+    fs::write(&duck, serde_json::to_string_pretty(&v).expect("serialize")).expect("write duck");
+    let legacy = resume_defaults(&duck, Arc::new(CancelToken::new()), |_| {}).expect("resume");
+    assert_eq!(legacy.workspace(), None, "a pre-#1381 recipe reads as None");
+}
+
+#[test]
 fn resume_restores_invocation_semantics_state() {
     // ADR-0119 (issue #983): the v7 open path restores the discovery
     // snapshot from the header (explicit, never re-folded) and re-folds the
