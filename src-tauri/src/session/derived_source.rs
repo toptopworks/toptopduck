@@ -236,14 +236,24 @@ pub(crate) fn process(sql: &str, deps: &mut TurnDeps) -> Result<String, ExecErro
             deps.tool_output_refs.remove(&cache_key);
         }
 
-        let src_path = Path::new(path_str);
-        let ref_name = match ingest::derive_reference_name(src_path) {
+        // The ref name derives from the flavor's own original: the literal
+        // path for tool_output (the staged copy's name), the canonical
+        // target for a full-path reference -- a symlink spelling registers
+        // under the target's stem, matching its source_path and display
+        // name.
+        let ref_name = match &plan {
+            Plan::ToolOutput => ingest::derive_reference_name(Path::new(path_str)),
+            Plan::FullPath { canonical, .. } => ingest::derive_reference_name(canonical),
+        };
+        let ref_name = match ref_name {
             Some(base) => deps.working_set.deconflict(&base),
             None => deps.working_set.deconflict("derived"),
         };
 
         let outcome = match &plan {
-            Plan::ToolOutput => process_one_derived(src_path, &ref_name, &staging_dir, deps),
+            Plan::ToolOutput => {
+                process_one_derived(Path::new(path_str), &ref_name, &staging_dir, deps)
+            }
             Plan::FullPath { canonical, reader } => {
                 process_one_full_path(canonical, reader, &ref_name, deps)
             }
