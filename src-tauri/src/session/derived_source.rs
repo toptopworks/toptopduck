@@ -10,10 +10,13 @@
 //! 1. `provenance::analyze` tracks the derived source (it only follows
 //!    `TableFactor::Table`, not `TableFactor::Function` — ADR-0025/0041 stale
 //!    cascade would miss a `read_csv_auto('path')` reference).
-//! 2. The snapshot survives resume: the source's `source_path` lands in
+//! 2. The registration survives resume: the source's `source_path` lands in
 //!    `SourceRef.source_path` via the working set projection, and phase 1
 //!    re-ingests it via the standard `resume_ingest_at` path (zero special
-//!    code).
+//!    code). Resume re-reads the recorded original -- the staged copy for
+//!    `tool_output`, the live external file for a full-path reference (its
+//!    absence routes to the interactive source-missing path; the session-tree
+//!    snapshot itself is never consumed on resume).
 //!
 //! Two flavors share one pipeline (ADR-0137 D4: programmatic ingest differs
 //! from manual ingest only in the trigger):
@@ -22,11 +25,12 @@
 //!   into the session's persistent staging area first so the original's
 //!   death with the temp dir cannot orphan the reference.
 //! - full-path references (ADR-0137 D4): absolute-path files the SQL names
-//!   directly (workspace/cwd files arrive as relative spellings and are
-//!   absolutized first). The original is durable, so copy-in runs straight
-//!   from it — no staging — and the descriptor's `source_path` points at
-//!   the original, inheriting manual ingest's fingerprint / watermark /
-//!   stale semantics verbatim.
+//!   directly (workspace files arrive as relative spellings and are
+//!   absolutized first; cwd-relative spellings with no bound workspace are
+//!   neither absolutized nor claimed). The original is durable, so copy-in
+//!   runs straight from it — no staging — and the descriptor's
+//!   `source_path` points at the original, inheriting manual ingest's
+//!   fingerprint / watermark / stale semantics verbatim.
 //!
 //! Relative `read_*` spellings are absolutized against the session workspace
 //! (the unified agent cwd, ADR-0137 D3) before anything else — DuckDB would
@@ -67,10 +71,11 @@ pub(crate) const DERIVED_STAGING_DIR: &str = "derived";
 ///
 /// Called from `RealMaterializer::try_materialize` BEFORE preflight, so the
 /// rewritten SQL's catalog references flow through provenance analysis
-/// naturally. A `read_*` path that is neither eligible flavor (a relative
-/// spelling with no bound workspace, or a non-tabular function such as
-/// `read_text`) is left untouched — it still hits the FsAcl check in
-/// preflight.
+/// naturally. A `read_*` path that is neither eligible flavor is left
+/// untouched — it still hits the FsAcl check in preflight. That includes a
+/// relative spelling with no bound workspace, a non-tabular function such as
+/// `read_text`, a missing file, and the session-temp and assets exclusions
+/// (their faces own those references).
 pub(crate) fn process(sql: &str, deps: &mut TurnDeps) -> Result<String, ExecError> {
     // ADR-0137 D3: relative read_* spellings resolve against the session
     // workspace (the unified agent cwd), not the process CWD DuckDB would
@@ -78,8 +83,20 @@ pub(crate) fn process(sql: &str, deps: &mut TurnDeps) -> Result<String, ExecErro
     // one unambiguous absolute spelling.
     let sql = absolutize_workspace_reads(sql, deps.bound_workspace())?;
     let tool_output_dir = deps.temp_path.join(TOOL_OUTPUT_DIR_NAME);
-    let temp_root =
-        std::fs::canonicalize(deps.temp_path).unwrap_or_else(|_| deps.temp_path.to_path_buf());
+    let temp_root = match std::fs::canonicalize(deps.temp_path) {
+        Ok(c) => c,
+        Err(e) => {
+            // The fallback spelling cannot match the canonical (verbatim-
+            // prefixed on Windows) paths compared against it, so the temp
+            // exclusion would silently fail open -- log so the state is
+            // observable if it ever occurs.
+            log::debug!(
+                target: "toptopduck::session",
+                "session temp root canonicalization failed ({e}); temp exclusion compares a non-canonical spelling"
+            );
+            deps.temp_path.to_path_buf()
+        }
+    };
 
     // Reuse the same extractor preflight uses. A parse failure here is
     // handled by preflight's own Unparseable refusal — this function is
@@ -112,9 +129,10 @@ pub(crate) fn process(sql: &str, deps: &mut TurnDeps) -> Result<String, ExecErro
         } else {
             // Full-path face (ADR-0137 D4): an absolute spelling with a
             // tabular reader. The reader comes from the function the SQL
-            // named — extension dispatch would misroute a
-            // `read_csv_auto('notes.txt')`. Non-tabular functions and
-            // relative spellings without a workspace are left for preflight.
+            // named — extension dispatch would misroute a tabular file
+            // whose extension names a different format. Non-tabular
+            // functions and relative spellings without a workspace are left
+            // for preflight.
             let fn_name = extraction
                 .fn_names
                 .get(i)
@@ -123,6 +141,25 @@ pub(crate) fn process(sql: &str, deps: &mut TurnDeps) -> Result<String, ExecErro
             let Some(reader) = programmatic_reader(fn_name) else {
                 continue;
             };
+            // Options fidelity: a call carrying anything beyond the path
+            // (delim / header / all_varchar / ...) customizes the parse,
+            // but the snapshot pipeline reads with the bare default
+            // reader — claiming such a call would silently materialize
+            // default-sniffed data while discarding the requested
+            // semantics. Leave it in place: the original is durable,
+            // preflight's full-path read allowance passes it, and the
+            // engine honors the options at exec. (The tool_output face
+            // still claims regardless: its originals die with the temp
+            // dir, so there the snapshot priority inverts — pre-existing
+            // posture.)
+            if extraction
+                .paths_have_extra_args
+                .get(i)
+                .copied()
+                .unwrap_or(true)
+            {
+                continue;
+            }
             if !Path::new(path_str).is_absolute() {
                 continue;
             }
@@ -138,6 +175,27 @@ pub(crate) fn process(sql: &str, deps: &mut TurnDeps) -> Result<String, ExecErro
             // only durable originals outside the session's own directories.
             if canonical.starts_with(&temp_root) || under_assets(&canonical, deps) {
                 continue;
+            }
+            // Working-set dedup: re-referencing the original path of an
+            // already-registered source maps to the existing catalog ref
+            // instead of silently registering a deconflicted duplicate. The
+            // mapped snapshot's freshness follows the same frozen-snapshot
+            // domain as manual ingest (stale cascade), not a re-check here.
+            // Sources this pipeline itself registered are excluded -- they
+            // own the derived-cache path below, whose fingerprint
+            // invalidation (issue #440 review H1) must keep deciding their
+            // fate.
+            let canonical_key = canonical.to_string_lossy().into_owned();
+            if !deps.tool_output_refs.contains_key(&canonical_key) {
+                if let Some(existing) = deps
+                    .working_set
+                    .list()
+                    .iter()
+                    .find(|d| Path::new(&d.source_path) == canonical)
+                {
+                    path_to_ref.insert(path_str.clone(), Sub::Ref(existing.reference_name.clone()));
+                    continue;
+                }
             }
             Plan::FullPath { canonical, reader }
         };
@@ -205,7 +263,12 @@ pub(crate) fn process(sql: &str, deps: &mut TurnDeps) -> Result<String, ExecErro
                     let _ = deps
                         .engine
                         .execute_batch(&format!("DETACH {}", quote_ident(prev)));
-                    deps.source_files.remove(prev);
+                    // The snapshot file goes with the registration -- a
+                    // bound session's snapshot dir is the persistent tree,
+                    // and an orphaned copy-in is a silent disk leak.
+                    if let Some(snapshot) = deps.source_files.remove(prev) {
+                        let _ = std::fs::remove_file(&snapshot);
+                    }
                     deps.working_set.remove(prev);
                     // Remove from session cache — the ref was just rolled back.
                     deps.tool_output_refs.retain(|_, v| v.ref_name != *prev);
@@ -1578,15 +1641,19 @@ mod tests {
             "{rewritten}"
         );
 
-        // Absolute spellings are untouched.
+        // Absolute spellings are untouched. Built from a real absolute path
+        // so the leg holds on every platform -- a hardcoded drive-letter or
+        // root-relative spelling is absolute on only one OS family.
+        let elsewhere = std::env::temp_dir().join("elsewhere").join("data.csv");
+        let elsewhere_str = elsewhere.to_string_lossy();
         let absolute = absolutize_workspace_reads(
-            "SELECT * FROM read_csv_auto('C:/elsewhere/data.csv')",
+            &format!("SELECT * FROM read_csv_auto('{elsewhere_str}')"),
             Some(&workspace),
         )
         .unwrap();
         assert_eq!(
             absolute,
-            "SELECT * FROM read_csv_auto('C:/elsewhere/data.csv')"
+            format!("SELECT * FROM read_csv_auto('{elsewhere_str}')")
         );
 
         // No bound workspace: verbatim (the relative face stays preflight's).
@@ -1715,6 +1782,161 @@ mod tests {
 
         assert_eq!(rewritten, sql, "non-tabular read left in place");
         assert!(deps.working_set.list().is_empty(), "nothing registered");
+    }
+
+    /// Options fidelity: a full-path call carrying parse options
+    /// (delim / header / ...) is NOT claimed. The snapshot pipeline reads
+    /// with the bare default reader, so claiming would silently materialize
+    /// default-sniffed data while discarding the requested semantics; the
+    /// call stays in place for preflight + engine exec, which honor the
+    /// options. (The tool_output face still claims regardless -- its
+    /// originals die with the temp dir, so the snapshot priority inverts
+    /// there.)
+    #[test]
+    fn process_leaves_option_carrying_reads_in_place() {
+        let temp = TempDir::new().unwrap();
+        let outside = TempDir::new().unwrap();
+        let tsv = outside.path().join("table.tsv");
+        std::fs::write(&tsv, "a;b\n1;2\n").unwrap();
+
+        let engine = AdminEngine::materialized();
+        let mut ws = WorkingSet::default();
+        let mut sources = HashMap::new();
+        let mut refs = HashMap::new();
+
+        let sql = format!(
+            "SELECT * FROM read_csv('{}', delim = ';')",
+            tsv.to_string_lossy()
+        );
+
+        let mut deps = TurnDeps::test_deps(&engine, &mut ws, &mut sources, temp.path(), &mut refs);
+        let rewritten = process(&sql, &mut deps).expect("process succeeds");
+
+        assert_eq!(rewritten, sql, "option-carrying read left in place");
+        assert!(deps.working_set.list().is_empty(), "nothing registered");
+        assert!(sources.is_empty(), "no snapshots");
+        assert!(refs.is_empty(), "no cache entry");
+    }
+
+    /// The bare `read_csv` alias routes through the same copy-in pipeline
+    /// as `read_csv_auto`: the reader keys off the SQL-named function, not
+    /// the extension.
+    #[test]
+    fn process_registers_a_bare_read_csv_alias_reference() {
+        let temp = TempDir::new().unwrap();
+        let outside = TempDir::new().unwrap();
+        let csv = outside.path().join("aliasread.csv");
+        std::fs::write(&csv, "x\n1\n").unwrap();
+
+        let engine = AdminEngine::materialized();
+        let mut ws = WorkingSet::default();
+        let mut sources = HashMap::new();
+        let mut refs = HashMap::new();
+
+        let sql = format!("SELECT * FROM read_csv('{}')", csv.to_string_lossy());
+
+        let mut deps = TurnDeps::test_deps(&engine, &mut ws, &mut sources, temp.path(), &mut refs);
+        let rewritten = process(&sql, &mut deps).expect("process succeeds");
+
+        assert!(rewritten.contains("\"aliasread\".data"), "{rewritten}");
+        assert!(
+            deps.working_set.get("aliasread").is_some(),
+            "alias spelling registered"
+        );
+        assert!(
+            deps.snapshot_dir.join("aliasread.duckdb").is_file(),
+            "snapshot landed in the session tree"
+        );
+    }
+
+    /// The derived cache keys by the CANONICAL path: a second materialize
+    /// naming the same file by a different absolute spelling (a `.` segment
+    /// folded away by canonicalization) reuses the existing ref instead of
+    /// registering a duplicate.
+    #[test]
+    fn full_path_cache_dedupes_across_spellings() {
+        let temp = TempDir::new().unwrap();
+        let outside = TempDir::new().unwrap();
+        let plain = outside.path().join("dupe.csv");
+        let dotted = outside.path().join(".").join("dupe.csv");
+        std::fs::write(&plain, "x\n1\n").unwrap();
+
+        let engine = AdminEngine::materialized();
+        let mut ws = WorkingSet::default();
+        let mut sources = HashMap::new();
+        let mut refs = HashMap::new();
+
+        let mut deps = TurnDeps::test_deps(&engine, &mut ws, &mut sources, temp.path(), &mut refs);
+        let first = process(
+            &format!("SELECT * FROM read_csv_auto('{}')", plain.to_string_lossy()),
+            &mut deps,
+        )
+        .expect("first process succeeds");
+        let second = process(
+            &format!(
+                "SELECT * FROM read_csv_auto('{}')",
+                dotted.to_string_lossy()
+            ),
+            &mut deps,
+        )
+        .expect("second process succeeds");
+
+        assert!(first.contains("\"dupe\".data"), "{first}");
+        assert!(second.contains("\"dupe\".data"), "{second}");
+        assert_eq!(
+            deps.working_set.list().len(),
+            1,
+            "one source across spellings"
+        );
+        assert_eq!(refs.len(), 1, "one cache entry keyed by the canonical path");
+    }
+
+    /// Re-referencing the original path of an already-registered source maps
+    /// to the existing catalog ref -- no silent duplicate registration. The
+    /// manual-ingest shape is modeled by a working-set entry the derived
+    /// cache does not know (manual ingest never populates it).
+    #[test]
+    fn full_path_reference_maps_to_a_registered_source() {
+        let temp = TempDir::new().unwrap();
+        let outside = TempDir::new().unwrap();
+        let csv = outside.path().join("mapped.csv");
+        std::fs::write(&csv, "x\n1\n").unwrap();
+
+        let engine = AdminEngine::materialized();
+        let mut ws = WorkingSet::default();
+        let mut sources = HashMap::new();
+        let mut refs = HashMap::new();
+
+        {
+            let mut deps =
+                TurnDeps::test_deps(&engine, &mut ws, &mut sources, temp.path(), &mut refs);
+            process(
+                &format!("SELECT * FROM read_csv_auto('{}')", csv.to_string_lossy()),
+                &mut deps,
+            )
+            .expect("first process succeeds");
+            assert_eq!(deps.working_set.list().len(), 1);
+        }
+        // Simulate the manual-ingest shape: the source stays registered,
+        // the derived cache forgets it (session-level ephemeral state that
+        // manual ingest never fills).
+        refs.clear();
+
+        let mut deps = TurnDeps::test_deps(&engine, &mut ws, &mut sources, temp.path(), &mut refs);
+        let rewritten = process(
+            &format!("SELECT * FROM read_csv_auto('{}')", csv.to_string_lossy()),
+            &mut deps,
+        )
+        .expect("second process succeeds");
+
+        // Mapped to the EXISTING ref: still one source, no new cache entry.
+        assert!(rewritten.contains("\"mapped\".data"), "{rewritten}");
+        assert_eq!(
+            deps.working_set.list().len(),
+            1,
+            "no duplicate registration"
+        );
+        assert!(refs.is_empty(), "mapping does not mint a cache entry");
     }
 
     /// SQL with no read_* at all passes through unchanged.

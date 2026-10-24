@@ -755,7 +755,9 @@ mod tests {
             &mut materializer,
         )
         .expect("absolute symlink spelling materializes on the full-path face");
-        assert_eq!(payload.content["n"], 1);
+        // COUNT over the one data row lands in the descriptor shape
+        // (reference_name/display_name/columns/row_count).
+        assert_eq!(payload.content["row_count"], 1);
         assert!(
             deps.working_set.get("secret").is_some(),
             "the canonical target registered as the source"
@@ -800,7 +802,9 @@ mod tests {
             &mut materializer,
         )
         .expect("absolute symlink spelling materializes on the full-path face");
-        assert_eq!(payload.content["n"], 1);
+        // COUNT over the one data row lands in the descriptor shape
+        // (reference_name/display_name/columns/row_count).
+        assert_eq!(payload.content["row_count"], 1);
         assert!(
             deps.working_set.get("secret").is_some(),
             "the canonical target registered as the source"

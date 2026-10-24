@@ -49,8 +49,14 @@ pub(crate) struct ReadPathAnalysis {
     /// (`fn_names[i]` produced `paths[i]`). The derived-source programmatic
     /// ingest reads it to pick the copy-in reader from the function the SQL
     /// actually named (ADR-0137 D4) -- extension dispatch would misroute a
-    /// `read_csv_auto('notes.txt')`.
+    /// tabular file whose extension names a different format.
     pub fn_names: Vec<String>,
+    /// Whether each call passed anything beyond the path literal, parallel to
+    /// `paths` (`paths_have_extra_args[i]` describes `paths[i]`). A call with
+    /// extra arguments (`delim`, `header`, `all_varchar`, ...) customizes the
+    /// parse semantics; the derived-source full-path face leaves such calls
+    /// in place so the engine honors the options at exec.
+    pub paths_have_extra_args: Vec<bool>,
     pub non_literal_read_found: bool,
 }
 
@@ -67,6 +73,7 @@ pub(crate) fn extract_read_paths(sql: &str) -> Result<ReadPathAnalysis, ()> {
     let mut out = ReadPathAnalysis {
         paths: Vec::new(),
         fn_names: Vec::new(),
+        paths_have_extra_args: Vec::new(),
         non_literal_read_found: false,
     };
     for stmt in &statements {
@@ -158,14 +165,14 @@ fn walk_table_with_joins(twj: &sqlparser::ast::TableWithJoins, out: &mut ReadPat
 fn walk_table_factor(factor: &TableFactor, out: &mut ReadPathAnalysis) {
     match factor {
         TableFactor::Function { name, args, .. } => {
-            collect_if_read_function(&name.to_string(), args.iter(), out);
+            collect_if_read_function(&name.to_string(), args, out);
         }
         TableFactor::Table {
             name,
             args: Some(tvf),
             ..
         } => {
-            collect_if_read_function(&name.to_string(), tvf.args.iter(), out);
+            collect_if_read_function(&name.to_string(), &tvf.args, out);
         }
         TableFactor::TableFunction { expr, .. } => walk_expr(expr, out),
         TableFactor::Derived { subquery, .. } => walk_query(subquery.as_ref(), out),
@@ -188,7 +195,7 @@ fn walk_expr(expr: &Expr, out: &mut ReadPathAnalysis) {
 
         Expr::Function(func) => {
             let args = function_args(func);
-            collect_if_read_function(&func.name.to_string(), args.iter(), out);
+            collect_if_read_function(&func.name.to_string(), args, out);
             // Recurse into the call's own arguments so a nested read_* (e.g.
             // read_csv_auto(read_text('x'))) is still caught.
             for arg in args {
@@ -413,11 +420,7 @@ fn arg_arg(arg: &FunctionArg) -> &FunctionArgExpr {
 /// Decision 1). Do NOT keep scanning past the first positional: later named
 /// options' string values are not paths, and mis-reading one would feed the
 /// ACL a fabricated path (ADR-0077).
-fn collect_if_read_function<'a>(
-    name: &str,
-    args: impl Iterator<Item = &'a FunctionArg>,
-    out: &mut ReadPathAnalysis,
-) {
+fn collect_if_read_function(name: &str, args: &[FunctionArg], out: &mut ReadPathAnalysis) {
     if !is_file_function(name) {
         return;
     }
@@ -431,7 +434,10 @@ fn collect_if_read_function<'a>(
             ))) = arg_arg(arg)
             {
                 out.paths.push(s.clone());
-                out.fn_names.push(file_function_name(name).to_string());
+                out.fn_names.push(file_function_name(name));
+                // Anything beyond the path (or before it) customizes the
+                // call's parse semantics -- options, never paths.
+                out.paths_have_extra_args.push(args.len() > 1);
             } else {
                 out.non_literal_read_found = true;
             }
@@ -495,6 +501,16 @@ mod tests {
             result.fn_names,
             vec!["read_csv_auto".to_string(), "read_parquet".to_string()]
         );
+        assert_eq!(result.paths_have_extra_args, vec![false, false]);
+
+        // A call with options beyond the path flags the parse as
+        // customized -- the derived-source full-path face leaves such
+        // calls in place (options fidelity).
+        let optioned =
+            extract_read_paths("SELECT * FROM read_csv('/c.tsv', delim = ';', header = false)")
+                .unwrap();
+        assert_eq!(optioned.paths, vec!["/c.tsv".to_string()]);
+        assert_eq!(optioned.paths_have_extra_args, vec![true]);
     }
 
     /// A scalar read_* in the projection is also caught -- a read_text /

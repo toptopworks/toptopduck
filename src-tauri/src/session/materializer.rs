@@ -91,8 +91,9 @@ pub(crate) struct TurnDeps<'a> {
     /// threads; it lives inside the session lock for the turn's duration.
     pub engine: &'a AdminEngine,
     /// `&mut` so a materialize step can register derived sources (issue #433,
-    /// ADR-0087 D4): a `read_*` referencing a `tool_output` file triggers
-    /// copy_in + ATTACH, inserting a new snapshot path here.
+    /// ADR-0087 D4): a `read_*` referencing a `tool_output` file or a durable
+    /// full-path original (ADR-0137 D4) triggers copy_in + ATTACH, inserting
+    /// a new snapshot path here.
     pub source_files: &'a mut HashMap<String, std::path::PathBuf>,
     pub working_set: &'a mut WorkingSet,
     pub result_row_cap: u64,
@@ -259,8 +260,9 @@ impl Materializer for RealMaterializer {
         // gap (e.g. result_1 dead, result_2 live) does not renumber the live
         // turn -- the chain recreates each result_N under its stable identity.
 
-        // Derived source persistence (issue #433, ADR-0087 D4): detect
-        // read_* calls referencing tool_output files, copy each into a
+        // Derived source persistence (issue #433, ADR-0087 D4; extended to
+        // full-path references by ADR-0137 D4): detect read_* calls
+        // referencing eligible files, copy each into a
         // persistent snapshot + ATTACH + register in the working set, and
         // rewrite the SQL to use catalog references ("ref".data). This MUST
         // run before preflight — provenance::analyze only tracks

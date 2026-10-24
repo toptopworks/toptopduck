@@ -477,9 +477,10 @@ y
         let ws = WorkingSet::default();
 
         // Without the assets root threaded in, the same SQL now passes too:
-        // the absolute spelling carries the full-path face (ADR-0137 D4).
-        // The assets allowance keeps its own value only for recipes whose
-        // recorded spellings the full-path face cannot express.
+        // the absolute spelling carries the full-path face (ADR-0137 D4),
+        // which subsumes the assets read allowance outright. The assets
+        // root's residual value is the WRITE face: an absolute write into
+        // assets refuses as ReadOnlyRoot rather than OutsideAllowedArea.
         preflight_read_sql(&sql, &ws, temp.path(), None)
             .expect("absolute spelling passes without the assets root too");
 

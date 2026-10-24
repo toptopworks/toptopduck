@@ -469,7 +469,7 @@ mod tests {
     /// never persists -- the copy-in is the materialize face's act).
     #[test]
     fn explore_absolutizes_workspace_relative_read() {
-        use crate::tools::test_support::inert_deps_with_workspace;
+        use crate::session::materializer::TurnDeps;
         use std::fs;
         use tempfile::TempDir;
 
@@ -481,7 +481,7 @@ mod tests {
         let workspace = TempDir::new().unwrap();
         fs::write(workspace.path().join("data.csv"), "val\n1\n2\n").unwrap();
         let mut bound = Some(std::fs::canonicalize(workspace.path()).unwrap());
-        let mut deps = inert_deps_with_workspace(
+        let mut deps = TurnDeps::test_deps_with_workspace(
             &engine,
             &mut ws,
             &mut sources,
@@ -498,6 +498,55 @@ mod tests {
         .expect("workspace-relative spelling executes");
         assert_eq!(payload.content["row_count"], 1);
         assert_eq!(payload.content["sample"][0][0], "2");
+        assert_eq!(deps.working_set.len(), 0);
+    }
+
+    /// The combined posture under ADR-0137 D3+D4, pinned deliberately: with
+    /// a bound workspace a relative dotdot escape is ABSOLUTIZED FIRST and
+    /// rides the full-path read face -- it executes, reading the file
+    /// outside the workspace. Root confinement survives only for spellings
+    /// that reach the gateway as relative (no bound workspace; pinned by the
+    /// dotdot refusal tests), so this pin marks the design, not an accident.
+    #[test]
+    fn explore_absolutizes_a_dotdot_escape_on_the_full_path_face() {
+        use crate::session::materializer::TurnDeps;
+        use std::fs;
+        use tempfile::{NamedTempFile, TempDir};
+
+        let engine = AdminEngine::materialized();
+        let mut ws = crate::workingset::WorkingSet::default();
+        let mut sources = std::collections::HashMap::new();
+        let mut refs = std::collections::HashMap::new();
+        let temp = TempDir::new().unwrap();
+        let workspace = TempDir::new().unwrap();
+        // A real file in the workspace's parent: the literal `../<name>`
+        // resolves against the workspace to it, outside every session root.
+        let escape = NamedTempFile::new_in(workspace.path().parent().unwrap())
+            .expect("escape-target fixture: workspace parent must be writable");
+        fs::write(escape.path(), "val\n1\n").unwrap();
+        let name = escape
+            .path()
+            .file_name()
+            .and_then(|n| n.to_str())
+            .expect("escape-target filename is valid UTF-8");
+        let mut bound = Some(std::fs::canonicalize(workspace.path()).unwrap());
+        let mut deps = TurnDeps::test_deps_with_workspace(
+            &engine,
+            &mut ws,
+            &mut sources,
+            temp.path(),
+            &mut refs,
+            &mut bound,
+        );
+        let cancel = CancelToken::new();
+        let payload = dispatch(
+            &json!({"sql": format!("SELECT COUNT(*) AS n FROM read_csv_auto('../{name}')")}),
+            &mut deps,
+            &cancel,
+        )
+        .expect("dotdot escape absolutizes and rides the full-path face");
+        assert_eq!(payload.content["row_count"], 1);
+        assert_eq!(payload.content["sample"][0][0], "1");
         assert_eq!(deps.working_set.len(), 0);
     }
 
@@ -627,7 +676,10 @@ mod tests {
             &cancel,
         )
         .expect("absolute symlink spelling reads through on the full-path face");
-        assert_eq!(payload.content["n"], 1);
+        // COUNT over the one data row lands in the shape (explore returns
+        // columns/row_count/sample, not raw cells).
+        assert_eq!(payload.content["row_count"], 1);
+        assert_eq!(payload.content["sample"][0][0], "1");
         assert_eq!(deps.working_set.len(), 0);
     }
 
@@ -670,7 +722,10 @@ mod tests {
             &cancel,
         )
         .expect("absolute symlink spelling reads through on the full-path face");
-        assert_eq!(payload.content["n"], 1);
+        // COUNT over the one data row lands in the shape (explore returns
+        // columns/row_count/sample, not raw cells).
+        assert_eq!(payload.content["row_count"], 1);
+        assert_eq!(payload.content["sample"][0][0], "1");
         assert_eq!(deps.working_set.len(), 0);
     }
 
