@@ -89,6 +89,16 @@ pub(crate) fn default_sessions_root(app: &tauri::AppHandle) -> PathBuf {
     }
 }
 
+/// The App-minted workspaces root (ADR-0137, issue #1381): the default
+/// sessions root's SIBLING in the product's Documents domain. Fixed -- it
+/// does NOT follow a user-overridden `set_sessions_dir` (workspaces are user
+/// assets; their home does not move with storage configuration). Takes the
+/// app handle directly so a caller cannot accidentally pass an overridden
+/// sessions root into the sibling derivation.
+pub(crate) fn default_workspaces_root(app: &tauri::AppHandle) -> PathBuf {
+    crate::session::workspace::resolve_workspaces_root(&default_sessions_root(app))
+}
+
 /// Typed recipe file path — the stable identity of a persisted session
 /// (ADR-0060/0061, issue #462). Distinct from the runtime [`SessionId`] (a
 /// UUID): this is the persisted path the frontend passes back to `open_recipe`.

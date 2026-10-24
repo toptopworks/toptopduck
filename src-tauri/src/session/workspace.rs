@@ -11,8 +11,30 @@
 use std::io;
 use std::path::{Path, PathBuf};
 
-/// The directory under `sessions_root` holding App-minted default workspaces.
+/// The directory name holding App-minted default workspaces, placed BESIDE
+/// the DEFAULT sessions root in the product's Documents domain (see
+/// [`resolve_workspaces_root`]).
 pub(crate) const WORKSPACES_DIR_NAME: &str = "workspaces";
+
+/// Resolve the App-minted workspaces root: the SIBLING
+/// `<parent>/workspaces/` of the path passed in (ADR-0137, issue #1381).
+/// Workspace files are user assets -- the peer placement keeps them out of
+/// the session-tree domain the user never browses (a pile of UUID
+/// directories), matching the fully-separated precedent of the surveyed
+/// harnesses. The caller passes `default_sessions_root` -- NOT the
+/// user-overridden `set_sessions_dir` root: workspaces are fixed in the
+/// product's Documents domain and do NOT follow a sessions-dir relocation
+/// (assets keep their home when storage configuration moves; a bound
+/// workspace's absolute recipe path is unaffected either way). A sessions
+/// root with no parent (a volume root, e.g. `C:\`) falls back to
+/// `<root>/workspaces` -- the same location there (a volume root has no
+/// sibling).
+pub(crate) fn resolve_workspaces_root(default_sessions_root: &Path) -> PathBuf {
+    default_sessions_root
+        .parent()
+        .unwrap_or(default_sessions_root)
+        .join(WORKSPACES_DIR_NAME)
+}
 
 /// The workspace directory-name format (ADR-0137): local time, six dash-
 /// separated zero-padded numbers, e.g. `2026-09-30-10-30-28`.
@@ -187,6 +209,23 @@ mod tests {
             "the minted name is YYYY-MM-DD-HH-MM-SS"
         );
         assert!(dir.is_dir(), "the directory exists");
+    }
+
+    #[test]
+    fn workspaces_root_is_the_default_sessions_roots_sibling() {
+        // The fixed placement: beside the DEFAULT sessions root in the
+        // product's Documents domain -- not inside the UUID session-tree
+        // domain, and not derived from a user-overridden sessions dir.
+        assert_eq!(
+            resolve_workspaces_root(Path::new("/home/u/Documents/TOPTOPDuck/sessions")),
+            Path::new("/home/u/Documents/TOPTOPDuck/workspaces")
+        );
+        // A volume-root sessions root has no sibling -- the same volume root
+        // hosts the workspaces directory directly.
+        assert_eq!(
+            resolve_workspaces_root(Path::new("C:\\")),
+            Path::new("C:\\workspaces")
+        );
     }
 
     #[test]
