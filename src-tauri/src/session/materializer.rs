@@ -106,8 +106,11 @@ pub(crate) struct TurnDeps<'a> {
     /// launch cwd then stays the session temp dir. Read by
     /// [`TurnDeps::launch_dir`].
     pub workspace: Option<&'a mut Option<PathBuf>>,
-    /// The lazy-mint source `{sessions_root}/workspaces/` (ADR-0137, issue
-    /// #1381); `None` disables minting.
+    /// The lazy-mint source -- the fixed product-domain workspaces root,
+    /// the DEFAULT sessions root's sibling (ADR-0137, issue #1381); `None`
+    /// disables minting. Consulted only through [`TurnDeps::launch_dir`]:
+    /// a seated root is ignored while the `workspace` slot is disconnected
+    /// (test constructors).
     pub workspaces_root: Option<PathBuf>,
     /// Where source copy-in drops `<ref>.duckdb` snapshots: the bound session
     /// tree's `snapshots/` (ADR-0136 D1) or the temp dir (unbound). Owned --

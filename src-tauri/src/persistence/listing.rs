@@ -454,7 +454,8 @@ mod tests {
                 ],
                 Some("orders".into()),
             )
-            .expect("build"),
+            .expect("build")
+            .with_workspace(Some("/w/proj".into())),
         );
 
         let list = list_session_metadata(std::slice::from_ref(&path));
@@ -474,6 +475,8 @@ mod tests {
         assert_eq!(m.source_summary.turn_count, 2);
         // format_version is the current recipe version.
         assert_eq!(m.format_version, crate::persistence::RECIPE_FORMAT_VERSION);
+        // workspace projects from the recipe header (ADR-0137, issue #1381).
+        assert_eq!(m.workspace.as_deref(), Some("/w/proj"));
         // mtime is the file's actual modification time in epoch millis -- pin
         // both the unit (millis, not micros/nanos) and the source (this recipe.json
         // path) by comparing against an independent stat, so a unit or source

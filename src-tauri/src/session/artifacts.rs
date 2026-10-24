@@ -305,9 +305,12 @@ fn is_cjk(c: char) -> bool {
 }
 
 /// Resolve one raw candidate against the turn's working-directory basis
-/// (the session temp dir: the external agent's cwd, the built-in tool
-/// output area's parent). A leading `./` is trimmed so the resolved string
-/// carries no redundant component.
+/// (the session temp dir -- the built-in tool output area's parent).
+/// TRANSITION (ADR-0137, issue #1381): the external agent's cwd moved to
+/// the session workspace while this base stays the temp dir, so a
+/// workspace-relative candidate resolves against the wrong directory --
+/// the base joins the workspace with #1383's in-place manifest. A leading
+/// `./` is trimmed so the resolved string carries no redundant component.
 fn resolve(candidate: &str, cwd: &Path) -> PathBuf {
     let trimmed = candidate.trim();
     let cleaned = trimmed.strip_prefix("./").unwrap_or(trimmed);

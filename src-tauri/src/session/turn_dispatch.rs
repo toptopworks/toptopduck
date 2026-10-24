@@ -47,6 +47,7 @@ use crate::session::loop_contract::{
 use crate::session::materializer::{Materializer, TurnDeps};
 use crate::tools;
 use crate::tools::definitions;
+use crate::tools::ToolOutcome;
 
 /// Extract a human-readable message from a panic payload (the `Err` variant of
 /// `catch_unwind`, issue #321). Covers `&str` and `String` — the two common
@@ -563,28 +564,17 @@ fn dispatch_gated_call_inner(
         match deps.launch_dir() {
             Ok(cwd) => crate::cli_tools::executor::execute(tool, call, &cwd, gate.cancel, None),
             // A call-time structured error (the ADR-0108 D2 posture): the
-            // model self-corrects or the failure surfaces to the user; the
-            // started event above already fired, so the completed event
-            // carries the failure like any errored call.
-            Err(detail) => {
-                let entry = TraceEntry::failed(
-                    call.id.clone(),
-                    call.name.clone(),
-                    operation_kind,
-                    summary.clone(),
-                    truncate_trace_excerpt(&detail, TRACE_EXCERPT_MAX),
-                );
-                on_phase(TurnPhase::ToolCallCompleted(TraceEntryView::from(&entry)));
-                return Ok((
-                    ToolResult {
-                        tool_use_id: call.id.clone(),
-                        content: detail,
-                        is_error: true,
-                    },
-                    Some(entry),
-                    None,
-                ));
-            }
+            // shared tail below completes the started row and routes the
+            // failure back for self-correction, exactly like an errored
+            // executor call.
+            Err(detail) => ToolOutcome {
+                result: ToolResult {
+                    tool_use_id: call.id.clone(),
+                    content: detail,
+                    is_error: true,
+                },
+                promotion: None,
+            },
         }
     } else {
         tools::dispatch(call, deps, gate.cancel, materializer)

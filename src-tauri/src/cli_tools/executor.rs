@@ -2,8 +2,8 @@
 //!
 //! Executes one registered tool call by spawning the executable with a
 //! direct `argv` array -- never a shell. The working directory is the
-//! session's work temp dir (the `fs_acl` read-write region, so anything the
-//! tool writes lands where the agent can read it), the child env is the
+//! session's workspace (ADR-0137: the unified launch cwd; the session temp
+//! dir only on a disconnected axis), the child env is the
 //! inherited environment overlaid with the registration's literal values,
 //! and both output streams are byte-capped with an explicit truncation
 //! marker (over-cap is non-fatal). An over-cap stdout additionally spills
@@ -55,25 +55,20 @@ const READER_GRACE: Duration = Duration::from_secs(2);
 const KILL_GRACE: Duration = Duration::from_secs(2);
 
 /// Execute one CLI tool call (the `execute_call` dispatch arm's entry).
-/// `session_temp_dir` is the cwd; `cancel` is the turn's shared token.
-/// `path_env` follows the startup-scan injection idiom: `None` reads the
-/// process PATH, `Some` is a test's controlled PATH.
+/// `cwd` is the spawn working directory (ADR-0137: the session workspace,
+/// falling back to the session temp dir on a disconnected axis); `cancel`
+/// is the turn's shared token. `path_env` follows the startup-scan
+/// injection idiom: `None` reads the process PATH, `Some` is a test's
+/// controlled PATH.
 pub fn execute(
     tool: &CliToolConfig,
     call: &ToolUse,
-    session_temp_dir: &Path,
+    cwd: &Path,
     cancel: &CancelToken,
     path_env: Option<OsString>,
 ) -> ToolOutcome {
     let path_env = path_env.or_else(|| std::env::var_os("PATH"));
-    execute_capped(
-        tool,
-        call,
-        session_temp_dir,
-        cancel,
-        OUTPUT_CAP_BYTES,
-        path_env,
-    )
+    execute_capped(tool, call, cwd, cancel, OUTPUT_CAP_BYTES, path_env)
 }
 
 /// The testable core: `cap` is the per-stream byte cap (tests shrink it);
@@ -83,7 +78,7 @@ pub fn execute(
 fn execute_capped(
     tool: &CliToolConfig,
     call: &ToolUse,
-    session_temp_dir: &Path,
+    cwd: &Path,
     cancel: &CancelToken,
     cap: usize,
     path_env: Option<OsString>,
@@ -100,7 +95,7 @@ fn execute_capped(
     // mistyped value, or a delivery/template shape a hand-edited config broke
     // is the call's own structured error -- the model self-corrects
     // (ADR-0077).
-    let rendered = match render_call(tool, &call.input, session_temp_dir, &call.id) {
+    let rendered = match render_call(tool, &call.input, cwd, &call.id) {
         Ok(rendered) => rendered,
         Err(detail) => {
             return error(format!("invalid call to `{}`: {detail}", tool.name));
@@ -147,7 +142,7 @@ fn execute_capped(
     let mut command = Command::new(&spawn_target);
     command
         .args(&rendered.argv)
-        .current_dir(session_temp_dir)
+        .current_dir(cwd)
         .envs(&tool.env)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -199,7 +194,7 @@ fn execute_capped(
     // The stdout tee plan (issue #1215): resolved into a real file only at
     // the cap crossing, inside the reader. stderr takes none -- the
     // diagnostic stream keeps its in-cap truncation semantics.
-    let spill = SpillPlan::new(session_temp_dir, &tool.name, &call.id);
+    let spill = SpillPlan::new(cwd, &tool.name, &call.id);
     let stdout_thread = thread::spawn(move || read_capped(stdout_handle, cap, Some(&spill)));
     let stderr_thread = thread::spawn(move || read_capped(stderr_handle, cap, None));
     // Wait for the child while polling cancel. On cancel: terminate the
@@ -511,9 +506,9 @@ pub(crate) struct SpillPlan {
 }
 
 impl SpillPlan {
-    pub(crate) fn new(session_temp_dir: &Path, tool: &str, call_id: &str) -> Self {
+    pub(crate) fn new(cwd: &Path, tool: &str, call_id: &str) -> Self {
         Self {
-            dir: session_temp_dir.join(crate::session::TOOL_OUTPUT_DIR_NAME),
+            dir: cwd.join(crate::session::TOOL_OUTPUT_DIR_NAME),
             stem: format!(
                 "{}-{}",
                 sanitize_file_component(tool),

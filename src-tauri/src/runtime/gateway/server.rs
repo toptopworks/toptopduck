@@ -807,6 +807,19 @@ fn tool_to_mcp(def: &ToolDefinition) -> Value {
 /// The meta-tool trio dispatches FIRST (ADR-0105): `mcp_list_servers` /
 /// `mcp_search_tools` run locally against the aggregator's catalog (read-only,
 /// short of the gate -- the same trust shape as the built-in read tools);
+/// The ADR-0108 D2 call-time failure envelope: the same shape the
+/// executor's own failures take -- no promotion rides an error.
+fn failed_outcome(call: &ToolUse, detail: String) -> ToolOutcome {
+    ToolOutcome {
+        result: ToolResult {
+            tool_use_id: call.id.clone(),
+            content: detail,
+            is_error: true,
+        },
+        promotion: None,
+    }
+}
+
 /// `mcp_invoke` resolves its handle BEFORE the enforcement points so the
 /// gate / trace keep consuming the backend tool identity, and a resolution
 /// failure is the call's own failure (no gate suspension, no trace entry --
@@ -1124,14 +1137,7 @@ fn handle_tools_call(msg: &Value, ctx: &mut GatewayCtx, outcome: &mut GatewayOut
                     // A call-time structured error (the ADR-0108 D2
                     // posture), the same envelope shape the executor's own
                     // failures take -- the CLI self-corrects or surfaces it.
-                    Err(detail) => ToolOutcome {
-                        result: ToolResult {
-                            tool_use_id: call.id.clone(),
-                            content: detail,
-                            is_error: true,
-                        },
-                        promotion: None,
-                    },
+                    Err(detail) => failed_outcome(call, detail),
                 };
                 result_envelope(executed.result)
             } else {
@@ -1145,14 +1151,7 @@ fn handle_tools_call(msg: &Value, ctx: &mut GatewayCtx, outcome: &mut GatewayOut
                     dispatch(call, deps, ctx.cancel, ctx.materializer)
                 }) {
                     Ok(dispatched) => dispatched,
-                    Err(detail) => ToolOutcome {
-                        result: ToolResult {
-                            tool_use_id: call.id.clone(),
-                            content: detail,
-                            is_error: true,
-                        },
-                        promotion: None,
-                    },
+                    Err(detail) => failed_outcome(call, detail),
                 };
                 if let Some(promotion) = dispatched.promotion {
                     outcome.promotions.push(promotion);

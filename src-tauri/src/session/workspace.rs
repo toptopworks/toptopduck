@@ -72,9 +72,21 @@ pub(crate) fn mint_workspace(
 /// directly under the managed `workspaces/` root AND carrying the timestamp
 /// name shape. The shape check keeps a user-created directory inside the
 /// managed root from being mistaken for a reclaimable one; a workspace the
-/// App minted always satisfies both by construction.
+/// App minted always satisfies both by construction. The parent check
+/// accepts either spelling: the seated root verbatim, or the canonicalized
+/// pair -- a lazily-minted binding canonicalizes at mint time and the
+/// command layer canonicalizes user-selected bindings, so the bound
+/// spelling can differ from the seated root's.
 pub(crate) fn is_app_minted(workspace: &Path, root: &Path) -> bool {
-    workspace.parent() == Some(root) && is_timestamp_name(workspace)
+    is_timestamp_name(workspace)
+        && (workspace.parent() == Some(root)
+            || match (
+                std::fs::canonicalize(workspace),
+                std::fs::canonicalize(root),
+            ) {
+                (Ok(w), Ok(r)) => w.parent() == Some(&r),
+                _ => false,
+            })
 }
 
 /// Whether the final path component parses as the minted timestamp shape.
@@ -103,7 +115,7 @@ pub(crate) fn reclaim_if_empty(workspace: &Path, root: &Path) {
         // NotFound: already reclaimed or removed by the user; fine.
         Err(e) if e.kind() == io::ErrorKind::NotFound => {}
         Err(e) => {
-            log::debug!(
+            log::warn!(
                 target: "toptopduck::session",
                 "workspace reclaim skipped for {}: {e}",
                 workspace.display()
@@ -141,14 +153,22 @@ pub(crate) fn launch_cwd(
     };
     let minted = mint_workspace(root, chrono::Local::now())
         .map_err(|e| format!("failed to mint the default workspace: {e}"))?;
+    // Canonicalize at the bind (ADR-0137 Decision 1: one spelling per
+    // directory): the command layer canonicalizes user-selected bindings
+    // the same way, so the two producers cannot spell one directory
+    // differently. The directory exists (just created); a canonicalize
+    // failure degrades to the minted spelling rather than failing the
+    // launch.
+    let minted = std::fs::canonicalize(&minted).unwrap_or(minted);
     *workspace = Some(minted.clone());
     Ok(minted)
 }
 
 impl super::Session {
-    /// Seat the lazy-mint source `{sessions_root}/workspaces/` (ADR-0137,
-    /// issue #1381). Command-layer wiring at creation and resume; `None`
-    /// (the constructor default) disables minting.
+    /// Seat the lazy-mint source -- the fixed product-domain workspaces
+    /// root, the DEFAULT sessions root's sibling (ADR-0137, issue #1381).
+    /// Command-layer wiring at creation and resume; `None` (the constructor
+    /// default) disables minting.
     pub fn set_workspaces_root(&mut self, root: Option<PathBuf>) {
         self.workspaces_root = root;
     }
@@ -156,8 +176,13 @@ impl super::Session {
     /// Bind an explicit user-selected workspace at creation (ADR-0137, issue
     /// #1381). The caller canonicalizes first (Windows 8.3 short paths would
     /// let one directory appear under two spellings); the binding is
-    /// immutable afterwards.
+    /// immutable afterwards -- the guard fires if a second bind sneaks past
+    /// the creation-time call site.
     pub fn set_workspace(&mut self, canonical: PathBuf) {
+        debug_assert!(
+            self.runtime_facts.workspace.is_none(),
+            "workspace binding is immutable (ADR-0137)"
+        );
         self.runtime_facts.workspace = Some(canonical);
     }
 
@@ -220,11 +245,28 @@ mod tests {
             resolve_workspaces_root(Path::new("/home/u/Documents/TOPTOPDuck/sessions")),
             Path::new("/home/u/Documents/TOPTOPDuck/workspaces")
         );
-        // A volume-root sessions root has no sibling -- the same volume root
-        // hosts the workspaces directory directly.
+    }
+
+    // A volume-root sessions root has no sibling -- the same volume root
+    // hosts the workspaces directory directly. The root shape is per-OS:
+    // `C:\` on Windows, `/` on Unix (a backslash is not a separator there,
+    // so the Windows spelling is a one-component RELATIVE path on Unix and
+    // never exercises the no-parent fallback).
+    #[test]
+    #[cfg(windows)]
+    fn volume_root_sessions_root_hosts_workspaces_directly() {
         assert_eq!(
             resolve_workspaces_root(Path::new("C:\\")),
             Path::new("C:\\workspaces")
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn volume_root_sessions_root_hosts_workspaces_directly() {
+        assert_eq!(
+            resolve_workspaces_root(Path::new("/")),
+            Path::new("/workspaces")
         );
     }
 
@@ -267,6 +309,24 @@ mod tests {
             !is_app_minted(Path::new("/home/user/project"), root),
             "a directory outside the root is never App-minted"
         );
+        assert!(
+            !is_app_minted(Path::new("/home/user/2026-09-30-10-30-28"), root),
+            "a timestamp-named directory outside the root is not App-minted"
+        );
+    }
+
+    #[test]
+    fn is_app_minted_accepts_the_canonical_spelling_of_a_minted_directory() {
+        // A lazily-minted binding canonicalizes at mint time while the
+        // seated root keeps its raw spelling (an 8.3 temp root on Windows)
+        // -- reclaim must still recognize the directory.
+        let root = tempfile::tempdir().expect("tempdir");
+        let dir = mint_workspace(root.path(), chrono::Local::now()).expect("mint");
+        let canonical = std::fs::canonicalize(&dir).expect("canonicalize");
+        assert!(
+            is_app_minted(&canonical, root.path()),
+            "the canonical spelling of a minted directory stays reclaimable"
+        );
     }
 
     #[test]
@@ -301,8 +361,12 @@ mod tests {
         let root = tempfile::tempdir().expect("tempdir");
         let temp = tempfile::tempdir().expect("temp");
         let dir = launch_cwd(Some(&mut workspace), Some(root.path()), temp.path()).expect("launch");
+        // The mint binds canonicalized, which can differ from the seated
+        // root's spelling -- assert the containment canonically.
         assert!(
-            dir.starts_with(root.path()),
+            dir.canonicalize()
+                .expect("canonicalize")
+                .starts_with(root.path().canonicalize().expect("canonicalize root")),
             "the mint lands under the root"
         );
         assert!(dir.is_dir());
@@ -346,7 +410,23 @@ mod tests {
         let root = tempfile::tempdir().expect("tempdir");
         session.set_workspaces_root(Some(root.path().to_path_buf()));
         let cwd = session.ensure_external_cwd().expect("cwd");
-        assert!(cwd.starts_with(root.path().to_string_lossy().as_ref()));
+        // The mint binds canonicalized, which can differ from the seated
+        // root's spelling -- assert the containment canonically, not by
+        // string prefix (a sibling directory sharing the prefix would
+        // satisfy a string check).
+        assert_eq!(
+            Path::new(&cwd)
+                .canonicalize()
+                .expect("canonicalize cwd")
+                .parent(),
+            Some(
+                root.path()
+                    .canonicalize()
+                    .expect("canonicalize root")
+                    .as_path()
+            ),
+            "the mint lands under the seated root"
+        );
         assert_eq!(
             session.workspace(),
             Some(Path::new(&cwd)),

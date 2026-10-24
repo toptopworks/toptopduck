@@ -947,6 +947,10 @@ mod tests {
         let user = tempfile::tempdir().expect("user dir");
 
         // Session A: a minted (empty) workspace under the managed root.
+        // The timeline is NON-empty (an ingested source): a mint only
+        // happens after a turn ran, so in production the close-time
+        // reclaim almost always runs regardless of the timeline -- pin
+        // that branch, not just the empty-timeline half.
         let id_a = store
             .create(
                 Arc::new(CancelToken::new()),
@@ -959,6 +963,14 @@ mod tests {
         {
             let handle_a = store.get(&id_a).expect("handle A");
             let mut s = handle_a.session_lock().unwrap();
+            let csv = root.path().join("seed.csv");
+            std::fs::write(&csv, "name,score\nAda,9\n").expect("write csv");
+            match s.ingest(&csv) {
+                crate::model::LoadOutcome::Loaded(d) => {
+                    assert_eq!(d.reference_name, "seed");
+                }
+                other => panic!("ingest should load, got {other:?}"),
+            }
             s.set_workspaces_root(Some(root.path().to_path_buf()));
             s.set_workspace(minted.clone());
         }

@@ -306,9 +306,18 @@ pub fn create_session(
             let canonical = std::fs::canonicalize(dir).map_err(|e| {
                 // Distinct from launch_cwd's mkdir-failure wording: this is
                 // the create-time "the selected directory cannot be opened"
-                // verdict, not a mint/materialize fault.
-                SessionError::Engine(format!("cannot open workspace directory: {e}"))
+                // verdict, not a mint/materialize fault. The io error's
+                // Display carries no path -- name the user's selection.
+                SessionError::Engine(format!("cannot open workspace directory {dir}: {e}"))
             })?;
+            if !canonical.is_dir() {
+                // canonicalize succeeds on a file; binding one would fail
+                // at the first launch with the workspace-unavailable error
+                // -- reject it at this create-time verdict instead.
+                return Err(SessionError::Engine(format!(
+                    "workspace path is not a directory: {dir}"
+                )));
+            }
             s.set_workspace(canonical);
         }
         s.bind_recipe(recipe_path.clone(), String::new())
