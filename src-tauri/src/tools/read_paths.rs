@@ -45,6 +45,12 @@ use sqlparser::parser::Parser;
 /// unconstrained.
 pub(crate) struct ReadPathAnalysis {
     pub paths: Vec<String>,
+    /// The final-segment function name behind each path, parallel to `paths`
+    /// (`fn_names[i]` produced `paths[i]`). The derived-source programmatic
+    /// ingest reads it to pick the copy-in reader from the function the SQL
+    /// actually named (ADR-0137 D4) -- extension dispatch would misroute a
+    /// `read_csv_auto('notes.txt')`.
+    pub fn_names: Vec<String>,
     pub non_literal_read_found: bool,
 }
 
@@ -60,6 +66,7 @@ pub(crate) fn extract_read_paths(sql: &str) -> Result<ReadPathAnalysis, ()> {
     };
     let mut out = ReadPathAnalysis {
         paths: Vec::new(),
+        fn_names: Vec::new(),
         non_literal_read_found: false,
     };
     for stmt in &statements {
@@ -424,6 +431,7 @@ fn collect_if_read_function<'a>(
             ))) = arg_arg(arg)
             {
                 out.paths.push(s.clone());
+                out.fn_names.push(file_function_name(name).to_string());
             } else {
                 out.non_literal_read_found = true;
             }
@@ -440,14 +448,19 @@ fn collect_if_read_function<'a>(
 /// DuckDB file-reading function. Matches the final segment case-insensitively
 /// against the `read_*` family and `sniff_csv`.
 pub(crate) fn is_file_function(name: &str) -> bool {
-    // `name` renders as e.g. `read_csv_auto` or `catalog.read_csv_auto`; the
-    // final segment is the function itself.
-    let last = name
-        .rsplit_once('.')
+    let last = file_function_name(name);
+    last.starts_with("read_") || last == "sniff_csv"
+}
+
+/// The normalized final segment of a rendered function-call name: `catalog.
+/// read_csv_auto` yields `read_csv_auto` (lowercased -- SQL function names
+/// are case-insensitive in DuckDB). Shared by the matcher and the extractor's
+/// fn-name capture so the two cannot disagree on the spelling.
+fn file_function_name(name: &str) -> String {
+    name.rsplit_once('.')
         .map(|(_, last)| last)
         .unwrap_or(name)
-        .to_ascii_lowercase();
-    last.starts_with("read_") || last == "sniff_csv"
+        .to_ascii_lowercase()
 }
 
 #[cfg(test)]
@@ -461,6 +474,27 @@ mod tests {
         let result = extract_read_paths("SELECT * FROM read_csv_auto('/etc/passwd')").unwrap();
         assert_eq!(result.paths, vec!["/etc/passwd".to_string()]);
         assert!(!result.non_literal_read_found);
+    }
+
+    /// fn_names stays parallel to paths: each literal path carries the final
+    /// segment of the read function that produced it, normalized (dotted
+    /// catalog spellings and case fold to the bare lowercase name). The
+    /// programmatic-ingest reader mapping keys off this (ADR-0137 D4).
+    #[test]
+    fn extracts_the_function_name_alongside_each_path() {
+        let result = extract_read_paths(
+            "SELECT * FROM read_csv_auto('/a.csv') \
+             UNION ALL SELECT * FROM Sys.Read_Parquet('/b.parquet')",
+        )
+        .unwrap();
+        assert_eq!(
+            result.paths,
+            vec!["/a.csv".to_string(), "/b.parquet".to_string()]
+        );
+        assert_eq!(
+            result.fn_names,
+            vec!["read_csv_auto".to_string(), "read_parquet".to_string()]
+        );
     }
 
     /// A scalar read_* in the projection is also caught -- a read_text /

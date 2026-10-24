@@ -96,11 +96,19 @@ fn run_explore(
     deps: &mut TurnDeps,
     cancel: &CancelToken,
 ) -> Result<ExploreShape, String> {
+    // ADR-0137 D3: relative read_* spellings resolve against the session
+    // workspace (the unified agent cwd) — DuckDB would resolve them against
+    // the process CWD, so they are rewritten to absolute before preflight +
+    // exec. Explore reads in place (no copy-in: it never persists, mirroring
+    // the tool_output face); the copy-in is the materialize face's act.
+    let sql =
+        crate::session::derived_source::absolutize_workspace_reads(sql, deps.bound_workspace())
+            .map_err(|e| e.detail)?;
     // Gateway door (ADR-0013 stale-ref + ADR-0080 read_* whitelist), shared
     // with the materialize path. Explore ignores the dependency set -- it
     // never promotes, so it records no provenance.
     preflight_read_sql(
-        sql,
+        &sql,
         deps.working_set,
         deps.temp_path,
         deps.assets_dir.as_deref(),
@@ -124,7 +132,7 @@ fn run_explore(
     // path. The scratch table lives on the sandbox connection only (turn-local,
     // no naming, no working-set entry -- AC #1).
     let table = run_sandboxed_read(
-        sql,
+        &sql,
         SCRATCH_TABLE,
         &SandboxDeps {
             admin_conn,
@@ -455,14 +463,51 @@ mod tests {
         assert_eq!(deps.working_set.len(), 0);
     }
 
-    /// AC #2 / AC #4 (issue #293): a `read_*` call whose path resolves OUTSIDE
-    /// the session source set + working temp dir is refused by the gateway
-    /// whitelist BEFORE execution -- never reaching the engine, never failing
-    /// silently. The structured error names the path and the allowed area, so
-    /// the agent can self-correct (ADR-0077). The out-of-bounds file is real on
-    /// disk (so canonicalization resolves it), just outside the temp dir.
+    /// ADR-0137 D3+D4 end to end: a workspace-RELATIVE spelling is
+    /// absolutized against the bound workspace, passes the gateway, and
+    /// executes reading the file in place. Explore registers nothing (it
+    /// never persists -- the copy-in is the materialize face's act).
     #[test]
-    fn explore_refuses_out_of_bounds_read_path_at_gateway() {
+    fn explore_absolutizes_workspace_relative_read() {
+        use crate::tools::test_support::inert_deps_with_workspace;
+        use std::fs;
+        use tempfile::TempDir;
+
+        let engine = AdminEngine::materialized();
+        let mut ws = crate::workingset::WorkingSet::default();
+        let mut sources = std::collections::HashMap::new();
+        let mut refs = std::collections::HashMap::new();
+        let temp = TempDir::new().unwrap();
+        let workspace = TempDir::new().unwrap();
+        fs::write(workspace.path().join("data.csv"), "val\n1\n2\n").unwrap();
+        let mut bound = Some(std::fs::canonicalize(workspace.path()).unwrap());
+        let mut deps = inert_deps_with_workspace(
+            &engine,
+            &mut ws,
+            &mut sources,
+            temp.path(),
+            &mut refs,
+            &mut bound,
+        );
+        let cancel = CancelToken::new();
+        let payload = dispatch(
+            &json!({"sql": "SELECT COUNT(*) AS n FROM read_csv_auto('data.csv')"}),
+            &mut deps,
+            &cancel,
+        )
+        .expect("workspace-relative spelling executes");
+        assert_eq!(payload.content["row_count"], 1);
+        assert_eq!(payload.content["sample"][0][0], "2");
+        assert_eq!(deps.working_set.len(), 0);
+    }
+
+    /// ADR-0137 D4: an ABSOLUTE `read_*` path outside the session's own
+    /// directories passes the gateway on the full-path face and executes --
+    /// explore reads in place (no copy-in: it never persists, mirroring the
+    /// tool_output face). The refused face is the RELATIVE spelling (pinned
+    /// by `explore_refuses_relative_dotdot_read_escape_at_gateway`).
+    #[test]
+    fn explore_executes_absolute_out_of_bounds_read_path() {
         use crate::tools::test_support::inert_deps_with_temp;
         use std::fs;
         use tempfile::TempDir;
@@ -473,27 +518,23 @@ mod tests {
         let mut refs = std::collections::HashMap::new();
         let temp = TempDir::new().unwrap();
         // A file that exists on disk but lives outside the session temp dir --
-        // an absolute out-of-bounds target the canonicalizer can resolve.
+        // an absolute target the canonicalizer can resolve.
         let outside = TempDir::new().unwrap();
         let outside_file = outside.path().join("secret.csv");
-        fs::write(&outside_file, "x").unwrap();
+        fs::write(&outside_file, "val\n1\n2\n").unwrap();
         let mut deps = inert_deps_with_temp(&engine, &mut ws, &mut sources, temp.path(), &mut refs);
         let cancel = CancelToken::new();
-        let err = dispatch(
-            &json!({"sql": format!("SELECT * FROM read_csv_auto('{}')", outside_file.to_string_lossy())}),
+        let payload = dispatch(
+            &json!({"sql": format!("SELECT COUNT(*) AS n FROM read_csv_auto('{}')", outside_file.to_string_lossy())}),
             &mut deps,
             &cancel,
         )
-        .unwrap_err();
-        assert!(
-            err.contains("outside the allowed"),
-            "gateway names the out-of-bounds refusal: {err}"
-        );
-        assert!(
-            err.contains("secret.csv"),
-            "error names the offending path: {err}"
-        );
-        // No sandbox setup ran for a gateway refusal -> no working-set entry.
+        .expect("absolute spelling executes on the full-path face");
+        // COUNT over the two rows lands in the sample (explore returns a
+        // shape, not raw cells).
+        assert_eq!(payload.content["row_count"], 1);
+        assert_eq!(payload.content["sample"][0][0], "2");
+        // Explore never promotes -> no working-set mutation.
         assert_eq!(deps.working_set.len(), 0);
     }
 
@@ -556,7 +597,7 @@ mod tests {
     /// pipeline the agent actually drives).
     #[test]
     #[cfg(unix)]
-    fn explore_refuses_symlink_escape_at_gateway() {
+    fn explore_follows_symlink_on_the_full_path_face() {
         use crate::tools::test_support::inert_deps_with_temp;
         use std::fs;
         use std::os::unix::fs::symlink;
@@ -570,34 +611,28 @@ mod tests {
         // A file outside the session temp dir -- the symlink target.
         let outside = TempDir::new().unwrap();
         let outside_file = outside.path().join("secret.csv");
-        fs::write(&outside_file, "x").unwrap();
-        // A symlink INSIDE temp pointing at the outside file. Canonicalization
-        // follows the link, so the resolved path is outside temp_root.
+        fs::write(&outside_file, "val\n1\n").unwrap();
+        // A symlink INSIDE temp pointing at the outside file. The absolute
+        // spelling carries the full-path face (ADR-0137 D4) -- the engine
+        // follows the link and reads the outside original in place.
         let link = temp.path().join("alias.csv");
         symlink(&outside_file, &link).expect("symlink creation failed");
         let mut deps = inert_deps_with_temp(&engine, &mut ws, &mut sources, temp.path(), &mut refs);
         let cancel = CancelToken::new();
-        let err = dispatch(
+        let payload = dispatch(
             &json!({"sql": format!(
-                "SELECT * FROM read_csv_auto('{}')", link.to_string_lossy()
+                "SELECT COUNT(*) AS n FROM read_csv_auto('{}')", link.to_string_lossy()
             )}),
             &mut deps,
             &cancel,
         )
-        .unwrap_err();
-        assert!(
-            err.contains("outside the allowed"),
-            "symlink escape refused: {err}"
-        );
-        assert!(
-            err.contains("alias.csv"),
-            "error names the symlink path: {err}"
-        );
+        .expect("absolute symlink spelling reads through on the full-path face");
+        assert_eq!(payload.content["n"], 1);
         assert_eq!(deps.working_set.len(), 0);
     }
 
-    /// Windows variant of `explore_refuses_symlink_escape_at_gateway`. Uses
-    /// `symlink_dir` (mirrors `fs_acl::symlink_escape_is_refused_windows`).
+    /// Windows variant of `explore_follows_symlink_on_the_full_path_face`. Uses
+    /// `symlink_dir` (mirrors `fs_acl`'s Windows symlink test).
     /// Hard-panics if symlink creation fails (no Developer Mode) -- a silent
     /// skip would make this test a vacuous pass on local Windows environments
     /// without Developer Mode, with no signal (issue #402, consistent with
@@ -605,8 +640,9 @@ mod tests {
     #[test]
     #[cfg(windows)]
     #[ignore = "requires Windows Developer Mode / admin for symlink_dir (issue #402)"]
-    fn explore_refuses_symlink_escape_at_gateway_windows() {
+    fn explore_follows_symlink_on_the_full_path_face_windows() {
         use crate::tools::test_support::inert_deps_with_temp;
+        use std::fs;
         use std::os::windows::fs::symlink_dir;
         use tempfile::TempDir;
 
@@ -616,28 +652,25 @@ mod tests {
         let mut refs = std::collections::HashMap::new();
         let temp = TempDir::new().unwrap();
         let outside = TempDir::new().unwrap();
-        // A directory symlink INSIDE temp pointing at the outside dir.
+        let outside_file = outside.path().join("secret.csv");
+        fs::write(&outside_file, "val\n1\n").unwrap();
+        // A directory symlink INSIDE temp pointing at the outside dir. The
+        // absolute spelling carries the full-path face (ADR-0137 D4) -- the
+        // engine follows the link and reads the outside original in place.
         let link = temp.path().join("alias");
         symlink_dir(outside.path(), &link)
             .expect("Windows symlink creation needs Developer Mode / admin");
         let mut deps = inert_deps_with_temp(&engine, &mut ws, &mut sources, temp.path(), &mut refs);
         let cancel = CancelToken::new();
-        let err = dispatch(
+        let payload = dispatch(
             &json!({"sql": format!(
-                "SELECT * FROM read_csv_auto('{}')", link.to_string_lossy()
+                "SELECT COUNT(*) AS n FROM read_csv_auto('{}')", link.join("secret.csv").to_string_lossy()
             )}),
             &mut deps,
             &cancel,
         )
-        .unwrap_err();
-        assert!(
-            err.contains("outside the allowed"),
-            "symlink escape refused: {err}"
-        );
-        assert!(
-            err.contains("\\alias") || err.contains("/alias"),
-            "error names the symlink path: {err}"
-        );
+        .expect("absolute symlink spelling reads through on the full-path face");
+        assert_eq!(payload.content["n"], 1);
         assert_eq!(deps.working_set.len(), 0);
     }
 

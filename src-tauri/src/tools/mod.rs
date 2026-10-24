@@ -173,6 +173,30 @@ pub(crate) mod test_support {
     ) -> TurnDeps<'a> {
         TurnDeps::test_deps(engine, ws, sources, temp_path, tool_output_refs)
     }
+
+    /// [`inert_deps_with_temp`] with the workspace axis connected and a
+    /// bound path (ADR-0137 D3) — for the explore faces that resolve
+    /// relative `read_*` spellings against the workspace.
+    pub fn inert_deps_with_workspace<'a, 'b>(
+        engine: &'a AdminEngine,
+        ws: &'a mut WorkingSet,
+        sources: &'a mut HashMap<String, std::path::PathBuf>,
+        temp_path: &'a Path,
+        tool_output_refs: &'a mut HashMap<String, crate::session::materializer::CachedDerivedRef>,
+        workspace: &'b mut Option<std::path::PathBuf>,
+    ) -> TurnDeps<'a>
+    where
+        'b: 'a,
+    {
+        TurnDeps::test_deps_with_workspace(
+            engine,
+            ws,
+            sources,
+            temp_path,
+            tool_output_refs,
+            workspace,
+        )
+    }
 }
 
 #[cfg(test)]
