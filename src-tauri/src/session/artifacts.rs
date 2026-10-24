@@ -312,11 +312,9 @@ fn resolve(candidate: &str, cwd: &Path) -> PathBuf {
 /// honestly). Channel 2 (the scan of `reply_text`) is
 /// existence-filtered. Deduplication is by resolved absolute path; the
 /// merged list truncates to [`ARTIFACT_CAP`]. Every entry references its
-/// file in place (ADR-0137 Decision 6): nothing is copied, and the entry's
-/// [`TurnArtifact::durable`] is simply `session_bound` -- a bound
-/// session's references (workspace or user-directory originals) survive
-/// the close in place, while an unbound in-memory session's manifest has
-/// nowhere to outlive the close.
+/// file in place (ADR-0137 Decision 6): nothing is copied, and whether a
+/// reference survives the session close rides the session binding, not a
+/// per-entry fact.
 /// The dedup key for [`settle_manifest`]: case-folded on Windows (the
 /// FS is case-insensitive), verbatim elsewhere.
 fn dedup_key(path: &Path) -> String {
@@ -335,7 +333,6 @@ pub(crate) fn settle_manifest(
     presented: &[String],
     reply_text: &str,
     cwd: &Path,
-    session_bound: bool,
 ) -> Vec<TurnArtifact> {
     // Dedup keys: exact on case-sensitive filesystems, case-folded on
     // Windows -- one file reached from both channels under two spellings
@@ -359,7 +356,6 @@ pub(crate) fn settle_manifest(
         }
     }
     resolved.truncate(ARTIFACT_CAP);
-    let durable = session_bound;
     resolved
         .into_iter()
         .map(|path| {
@@ -370,7 +366,6 @@ pub(crate) fn settle_manifest(
             TurnArtifact {
                 path: path.to_string_lossy().into_owned(),
                 file_name,
-                durable,
             }
         })
         .collect()
@@ -378,25 +373,21 @@ pub(crate) fn settle_manifest(
 
 /// The manifest-referenced file paths across a whole thread (ADR-0137
 /// Decision 6's preview whitelist source): the `TurnArtifact` paths of
-/// every turn record, first-seen order, deduplicated. The command boundary
-/// grants the asset protocol scope file-by-file from exactly this set --
-/// the workspace directory as a whole is deliberately NOT granted, so an
-/// arbitrary html sitting beside a deliverable never becomes
-/// iframe-renderable by proximity.
+/// every turn record, in thread order -- duplicates pass through, since
+/// the grant's per-file allowances are idempotent by pattern. The command
+/// boundary grants the asset protocol scope file-by-file from exactly
+/// this list -- the workspace directory as a whole is deliberately NOT
+/// granted, so an arbitrary html sitting beside a deliverable never
+/// becomes iframe-renderable by proximity.
 pub(crate) fn referenced_paths(entries: &[ThreadEntry]) -> Vec<PathBuf> {
-    let mut seen: Vec<PathBuf> = Vec::new();
-    for entry in entries {
-        let ThreadEntry::Turn(record) = entry else {
-            continue;
-        };
-        for artifact in &record.artifacts {
-            let path = PathBuf::from(&artifact.path);
-            if !seen.contains(&path) {
-                seen.push(path);
-            }
-        }
-    }
-    seen
+    entries
+        .iter()
+        .filter_map(|entry| match entry {
+            ThreadEntry::Turn(record) => Some(record),
+            _ => None,
+        })
+        .flat_map(|record| record.artifacts.iter().map(|a| PathBuf::from(&a.path)))
+        .collect()
 }
 
 #[cfg(test)]
@@ -556,7 +547,6 @@ mod tests {
             &["dup.pdf".to_string(), "other.pdf".to_string()],
             "见 dup.pdf（与已交付同一份）",
             cwd,
-            false,
         );
         let dup_count = manifest.iter().filter(|a| a.file_name == "dup.pdf").count();
         assert_eq!(
@@ -577,7 +567,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let cwd = dir.path();
         std::fs::write(cwd.join("dup.pdf"), "x").expect("write");
-        let manifest = settle_manifest(&["Dup.pdf".to_string()], "见 dup.pdf", cwd, false);
+        let manifest = settle_manifest(&["Dup.pdf".to_string()], "见 dup.pdf", cwd);
         assert_eq!(manifest.len(), 1, "two spellings of one file merge");
         assert!(
             manifest[0].path.ends_with("Dup.pdf"),
@@ -595,7 +585,7 @@ mod tests {
         for i in 1..=10 {
             presented.push(format!("declared_{i}.pdf"));
         }
-        let manifest = settle_manifest(&presented, "", cwd, false);
+        let manifest = settle_manifest(&presented, "", cwd);
         assert_eq!(manifest.len(), ARTIFACT_CAP);
         assert_eq!(manifest[7].file_name, "declared_8.pdf");
     }
@@ -614,7 +604,6 @@ mod tests {
             &["b.pdf".to_string()],
             "the table is ready, see a.pdf for the full view",
             cwd,
-            false,
         );
         assert_eq!(manifest.len(), 2);
         assert_eq!(manifest[0].file_name, "b.pdf", "the declaration leads");
@@ -638,7 +627,7 @@ mod tests {
             std::fs::write(cwd.join(&name), "x").expect("write");
             presented.push(name);
         }
-        let manifest = settle_manifest(&presented, "", cwd, true);
+        let manifest = settle_manifest(&presented, "", cwd);
         assert_eq!(manifest.len(), ARTIFACT_CAP);
         assert!(
             !artifacts_dir.exists(),
@@ -673,53 +662,6 @@ mod tests {
         );
     }
 
-    /// The `durable` honest face (#1090): a materialized temp hit, a
-    /// user-directory original, and a declared-but-missing entry are
-    /// The `durable` honest face (#1090, recalibrated by ADR-0137 Decision
-    /// 6): every entry under a BOUND session -- a workspace hit, a
-    /// user-directory original, a declared-but-missing path -- is durable
-    /// (in-place references survive the close by nature); only an unbound
-    /// in-memory session's temp paths are not -- openable until the
-    /// session closes, gone after. Deadness stays the render-time
-    /// existence fact's job, not this flag's.
-    #[test]
-    fn settle_manifest_marks_the_saved_honest_face() {
-        let work = tempfile::tempdir().expect("workdir");
-        let cwd = work.path();
-        std::fs::write(cwd.join("page.html"), "x").expect("write");
-        let user_dir = tempfile::tempdir().expect("user dir");
-        let user_pdf = user_dir.path().join("external.pdf");
-        std::fs::write(&user_pdf, "pdf").expect("write");
-
-        // Unbound session: nothing persists, the temp path is not durable.
-        let unbound = settle_manifest(&["page.html".to_string()], "", cwd, false);
-        assert_eq!(unbound.len(), 1);
-        assert!(!unbound[0].durable, "an unbound session saves nothing");
-
-        // Bound session: the workspace hit, the user-directory original,
-        // and a declared-but-missing entry are all durable in place.
-        let bound = settle_manifest(
-            &[
-                "page.html".to_string(),
-                user_pdf.to_string_lossy().into_owned(),
-                "ghost.pdf".to_string(),
-            ],
-            "",
-            cwd,
-            true,
-        );
-        assert_eq!(bound.len(), 3);
-        assert!(bound[0].durable, "a workspace hit is durable in place");
-        assert!(
-            bound[1].durable,
-            "a user-directory original is durable in place"
-        );
-        assert!(
-            bound[2].durable,
-            "a missing declaration is not this flag's job"
-        );
-    }
-
     /// Relative candidates resolve against the cwd basis (the external
     /// agent's cwd / session working dir).
     #[test]
@@ -727,7 +669,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let cwd = dir.path();
         std::fs::write(cwd.join("notes.md"), "x").expect("write");
-        let manifest = settle_manifest(&[], "见 notes.md", cwd, false);
+        let manifest = settle_manifest(&[], "见 notes.md", cwd);
         assert_eq!(manifest.len(), 1);
         assert!(
             Path::new(&manifest[0].path).is_absolute(),
@@ -747,7 +689,6 @@ mod tests {
             &["declared_but_missing.html".to_string()],
             "见 ghost.pdf（从未生成）",
             cwd,
-            false,
         );
         assert_eq!(manifest.len(), 1);
         assert!(manifest[0].path.ends_with("declared_but_missing.html"));
@@ -776,7 +717,6 @@ mod tests {
             ],
             "",
             cwd,
-            true,
         );
         assert_eq!(manifest.len(), 2);
         assert_eq!(
@@ -797,10 +737,11 @@ mod tests {
 
     /// The preview whitelist source (ADR-0137 Decision 6):
     /// `referenced_paths` collects the `TurnArtifact` paths of every turn
-    /// record -- first-seen order, deduplicated -- and nothing from the
-    /// non-turn entry kinds.
+    /// record -- in thread order, duplicates passing through (the grant
+    /// is idempotent by pattern) -- and nothing from the non-turn entry
+    /// kinds.
     #[test]
-    fn referenced_paths_collects_turn_artifacts_first_seen_deduped() {
+    fn referenced_paths_collects_turn_artifact_paths_turns_only() {
         use crate::model::{
             SourceLifecycleEvent, SourceLifecycleKind, TurnFailure, TurnOutcome, TurnProvenance,
             TurnRecord,
@@ -819,7 +760,6 @@ mod tests {
                     .map(|p| TurnArtifact {
                         path: (*p).to_string(),
                         file_name: "f".into(),
-                        durable: true,
                     })
                     .collect(),
                 usage: None,
@@ -841,9 +781,10 @@ mod tests {
             vec![
                 PathBuf::from("C:/ws/report.pdf"),
                 PathBuf::from("C:/ws/page.html"),
+                PathBuf::from("C:/ws/report.pdf"),
                 PathBuf::from("C:/ws/other.md"),
             ],
-            "first-seen order, deduplicated, turns only"
+            "thread order, turns only; duplicates pass through for the idempotent grant"
         );
     }
 }

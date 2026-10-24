@@ -431,7 +431,7 @@ pub struct TurnRecord {
     /// The turn's delivered artifacts (ADR-0124, issue #1087): the merged
     /// dual-channel manifest -- the `present_files` tool's declared paths
     /// plus reply-text scan hits -- computed once at settle, frozen on the
-    /// record. Entries carry absolute (post-materialization) paths; the
+    /// record. Entries carry absolute in-place paths; the
     /// first entry is the primary (declared order for a
     /// `present_files`-shaped manifest, first-seen order for a scan-only
     /// one). Empty for turns that delivered nothing and for turns recorded
@@ -460,34 +460,17 @@ pub struct TurnRecord {
 /// One delivered artifact on a turn's manifest (ADR-0124, issue #1087):
 /// an in-place absolute path (ADR-0137 Decision 6 -- nothing is copied;
 /// a legacy manifest pointing into the per-session `artifacts/` directory
-/// still serves unchanged), its file name, and whether that path is
-/// durable. The manifest's primary is DERIVED as the first entry
+/// still serves unchanged), and its file name. The manifest's primary is DERIVED as the first entry
 /// (no stored flag, #1090): `present_files` declarations keep their
 /// declared order, a scan-only manifest's order is first-seen. File
 /// existence is a runtime fact checked at render time; the manifest is
 /// never rewritten.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TurnArtifact {
-    /// Absolute filesystem path, post-materialization.
+    /// Absolute in-place filesystem path.
     pub path: String,
     /// The entry's file name (display + external-open label).
     pub file_name: String,
-    /// Whether the path survives the session close: an in-place reference
-    /// under a bound session (a workspace file or a user-directory
-    /// original) is durable by nature. `false` marks an unbound in-memory
-    /// session's entry -- its manifest has nowhere to outlive the close.
-    /// Records persisted
-    /// before the field default to `true`: the only mislabeled pre-field
-    /// shape is a temp path a failed copy left in the recipe, and that
-    /// entry is dead on reopen regardless (existence is a render-time
-    /// fact), so the default never invents a live-but-unsaved entry.
-    #[serde(default = "default_durable")]
-    pub durable: bool,
-}
-
-/// The serde default for [`TurnArtifact::durable`] -- see its doc.
-fn default_durable() -> bool {
-    true
 }
 
 /// One round of a turn's execution trace (ADR-0103, calibrating ADR-0078):

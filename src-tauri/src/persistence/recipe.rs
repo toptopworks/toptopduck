@@ -108,10 +108,13 @@ use crate::model::{
 /// `artifacts` key) deserializes as the empty manifest -- the same
 /// no-op-widening posture as #847's `body` and #883's `Cancelled` reason.
 ///
-/// Still v7 (#1090): the manifest entry drops the stored `primary` flag
-/// (the primary is derived as the first entry; a pre-#1090 file's
-/// `primary` key is an ignored unknown field) and gains `durable`
-/// (`serde(default = "default_durable")`, same no-op-widening posture).
+/// Still v7 (#1090, recalibrated by ADR-0137 Decision 6 / #1383): the
+/// manifest entry drops the stored `primary` flag (the primary is
+/// derived as the first entry; a pre-#1090 file's `primary` key is an
+/// ignored unknown field) and later dropped `durable` (survival rides
+/// the session binding, not a per-entry fact; a between-#1090-and-#1383
+/// file's `durable` key is an ignored unknown field, same
+/// no-op-widening posture).
 /// Files written after #1090 no longer carry `primary`, which a
 /// pre-#1090 reader rejects at deserialize -- the unreleased-app posture
 /// the v1 `Failed` widening used, so no migration.
@@ -514,7 +517,7 @@ pub struct RecipeTurn {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub occupancy: Option<crate::model::OccupancySnapshot>,
     /// The turn's delivered-artifact manifest (ADR-0124, issue #1087):
-    /// absolute paths + file names + the durable flag, merged from the
+    /// absolute paths + file names, merged from the
     /// dual channels at settle and frozen here. Empty for turns that
     /// delivered nothing; absent-on-disk for turns recorded before the
     /// field (serde default -- strictly additive, no format_version bump,
@@ -1853,7 +1856,6 @@ mod tests {
         with_artifacts.artifacts = vec![crate::model::TurnArtifact {
             path: "/sessions/abc/artifacts/report.pdf".into(),
             file_name: "report.pdf".into(),
-            durable: true,
         }];
         let json = serde_json::to_string(&with_artifacts).expect("serialize");
         assert!(json.contains("\"artifacts\""), "artifacts key present");

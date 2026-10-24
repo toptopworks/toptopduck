@@ -1155,11 +1155,21 @@ impl Session {
         self.persister.recipe_path()
     }
 
-    /// The session's temp working directory (ADR-0012 RAII lifecycle): the
-    /// workspace-less in-memory turn's cwd and the built-in tool output
-    /// area's parent. Read access for the resume black-box pins.
-    pub fn temp_cwd(&self) -> &Path {
-        &self.temp_path
+    /// The manifest-referenced artifact paths across the held timeline
+    /// (ADR-0137 Decision 6's preview whitelist source, borrowed form):
+    /// the ask-path grant reads this instead of cloning the whole thread
+    /// through [`Self::conversation`]; the thread-read command uses the
+    /// projected [`crate::session::artifacts::referenced_paths`] on
+    /// entries it already owns.
+    pub fn referenced_artifact_paths(&self) -> Vec<PathBuf> {
+        self.timeline
+            .iter()
+            .filter_map(|entry| match entry {
+                TimelineEntry::Turn { record, .. } => Some(record),
+                _ => None,
+            })
+            .flat_map(|record| record.artifacts.iter().map(|a| PathBuf::from(&a.path)))
+            .collect()
     }
 
     /// Whether the timeline carries no content at all (ADR-0089 Decision 6):
@@ -1423,7 +1433,6 @@ impl Session {
                 .workspace
                 .as_deref()
                 .unwrap_or(&self.temp_path),
-            self.persister.recipe_path().is_some(),
         );
         self.timeline.push(TimelineEntry::Turn {
             record: TurnRecord {
@@ -3087,6 +3096,68 @@ mod tests {
         assert_eq!(persisted[0].path, entry.artifacts[0].path);
     }
 
+    /// ADR-0137 Decision 6's workspace leg (issue #1383): with a bound
+    /// workspace the settle base is the WORKSPACE -- a relative
+    /// declaration resolves against it and enters the manifest under its
+    /// own in-place absolute path, never against the session temp dir
+    /// (the #1381 TRANSITION window this closes). The sibling test above
+    /// pins the workspace-less fallback leg (the temp basis).
+    #[test]
+    fn present_files_turn_references_workspace_hits_under_the_workspace_base() {
+        let duck_dir = tempfile::tempdir().expect("duck dir");
+        let workspace_dir = tempfile::tempdir().expect("workspace dir");
+        let provider = FakeProvider::new().scripted_tool_turn_seq(
+            "生成网页",
+            vec![
+                Ok(ToolTurnReply::tool_calls(vec![ToolUse {
+                    id: "tu_pf".into(),
+                    name: "present_files".into(),
+                    input: json!({"files": ["page.html"]}),
+                }])),
+                Ok(ToolTurnReply::Text("done".into())),
+            ],
+        );
+        let mut session = Session::with_provider(Box::new(provider)).expect("session");
+        session.set_workspace(
+            workspace_dir
+                .path()
+                .canonicalize()
+                .expect("canonical workspace"),
+        );
+        session
+            .bind_recipe(duck_dir.path().join("recipe.json"), "s".into())
+            .expect("bind");
+        // The deliverable lives in the workspace; a same-named decoy in the
+        // temp dir must NOT win the resolution (the base is the workspace,
+        // not the temp dir).
+        std::fs::write(workspace_dir.path().join("page.html"), "<html/>")
+            .expect("write workspace report");
+        std::fs::write(session.temp_path.join("page.html"), "decoy").expect("write temp decoy");
+        let _ = session.ask("生成网页");
+        let entry = session
+            .conversation()
+            .into_iter()
+            .find_map(|e| match e {
+                ThreadEntry::Turn(r) if r.question == "生成网页" => Some(r),
+                _ => None,
+            })
+            .expect("the turn recorded");
+        assert_eq!(entry.artifacts.len(), 1);
+        assert_eq!(
+            Path::new(&entry.artifacts[0].path),
+            workspace_dir
+                .path()
+                .canonicalize()
+                .expect("canonical workspace")
+                .join("page.html"),
+            "a relative declaration resolves against the workspace, in place"
+        );
+        assert!(
+            !Path::new(&entry.artifacts[0].path).starts_with(&session.temp_path),
+            "the temp dir never enters the manifest while a workspace is bound"
+        );
+    }
+
     #[test]
     fn external_tool_only_turn_does_not_materialize_the_engine() {
         let provider = FakeProvider::new().scripted_tool_turn_seq(
@@ -3884,6 +3955,68 @@ mod tests {
             )
         });
         assert!(!any_failed, "no Failed turn after reopen");
+    }
+
+    /// A legacy recipe whose recorded SQL points into the per-session
+    /// `assets/` tree (a pre-#1383 settle's materialized copy) still
+    /// replays green on reopen (the retained legacy read-gate face,
+    /// ADR-0089/ADR-0137 Decision 6): the live turn's preflight allows
+    /// the read, and with the companion dropped the replay leg
+    /// re-executes the stored SQL against the copy and re-registers the
+    /// result.
+    #[test]
+    fn a_legacy_assets_reference_replays_green_on_reopen() {
+        let dir = tempfile::tempdir().expect("session dir");
+        let duck = dir.path().join("recipe.json");
+        // What a pre-#1383 settle would have left: a dead file under assets/.
+        let assets_csv = dir.path().join("assets").join("kline.csv");
+        std::fs::create_dir_all(assets_csv.parent().expect("assets parent")).expect("dirs");
+        std::fs::write(&assets_csv, "v\n1\n").expect("write assets copy");
+
+        let mut session = Session::new().expect("session");
+        session.bind_recipe(duck.clone(), "t".into()).expect("bind");
+        let sql = format!(
+            "SELECT COUNT(*) AS n FROM read_csv_auto('{}')",
+            assets_csv.to_string_lossy()
+        );
+        session.provider = std::sync::Arc::new(FakeProvider::new().scripted_tool_turn_seq(
+            "查",
+            vec![
+                Ok(materialize_call(&sql)),
+                Ok(ToolTurnReply::Text("done".into())),
+            ],
+        ));
+        let outcome = session.ask("查");
+        assert!(
+            matches!(outcome, TurnOutcome::Materialized { .. }),
+            "the live turn referencing the assets copy materialized, got {outcome:?}"
+        );
+        drop(session);
+
+        // Drop the companion so the watermark cannot hit: the replay leg
+        // must re-execute the stored assets-path SQL and stay green.
+        std::fs::remove_file(dir.path().join("analytics.duckdb")).expect("drop companion");
+        let resumed = Session::open_recipe(
+            &duck,
+            std::sync::Arc::new(crate::cancel::CancelToken::new()),
+            Box::new(crate::provider::UnwiredProvider),
+            Default::default(),
+            |_| {},
+            |_| panic!("no source issues expected"),
+            |_| panic!("no active-abandoned callback expected"),
+        )
+        .expect("resume");
+        assert!(
+            resumed.get("result_1").is_some(),
+            "the replay re-registered result_1 from the assets copy"
+        );
+        let any_failed = resumed.conversation().iter().any(|e| {
+            matches!(
+                e,
+                ThreadEntry::Turn(t) if matches!(t.outcome, TurnOutcome::Failed(_))
+            )
+        });
+        assert!(!any_failed, "the legacy assets replay stays green");
     }
 
     /// A persistent break cause degrades the conversation from the

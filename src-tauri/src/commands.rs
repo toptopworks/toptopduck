@@ -895,7 +895,7 @@ pub async fn ask(
         // the asset protocol scope right here, before any card can render
         // -- the files named this turn may not have existed when the
         // session opened.
-        grant_artifact_asset_scope(&app_for_scope, &s.conversation());
+        grant_artifact_asset_scope(&app_for_scope, &s.referenced_artifact_paths());
         Ok::<TurnOutcome, SessionError>(outcome)
     })
     .await
@@ -1039,7 +1039,7 @@ pub fn conversation(
     // iframe-servable before a card can render -- the whitelist is
     // re-granted on every thread read (session open / remount; idempotent
     // by pattern).
-    grant_artifact_asset_scope(&app, &entries);
+    grant_artifact_asset_scope(&app, &crate::session::artifacts::referenced_paths(&entries));
     Ok(entries)
 }
 
@@ -1050,15 +1050,17 @@ pub fn conversation(
 /// payload into the webview.
 const ARTIFACT_TEXT_MAX_BYTES: u64 = 2 * 1024 * 1024;
 
-/// Widen the asset protocol's runtime scope to the session's artifacts
-/// directory (ADR-0124 Decision 4: HTML artifacts render through
-/// `asset://` in a sandboxed iframe, so the scope anchors the per-session
-/// materialization directory -- NOT the whole sessions root and never the
-/// user's directories). Idempotent: the scope is a pattern set, re-granting
-/// adds nothing. Failures log and degrade: the iframe render then fails
-/// honest (whether the card offers an external-open fallback is #1088's
-/// render-time concern, not a grant-time fact).
-fn grant_artifact_asset_scope(app: &tauri::AppHandle, entries: &[ThreadEntry]) {
+/// Widen the asset protocol's runtime scope to exactly the thread's
+/// manifest-referenced files (ADR-0137 Decision 6, tightening ADR-0124
+/// Decision 4: the file-level allowlist behind iframe embeds -- a
+/// manifest-named file becomes iframe-servable wherever it lives,
+/// including a user-directory original, while the workspace directory
+/// as a whole is deliberately NOT granted). Idempotent: the scope is a
+/// pattern set, re-granting adds nothing. Failures log and degrade: the
+/// iframe render then fails honest (whether the card offers an
+/// external-open fallback is #1088's render-time concern, not a
+/// grant-time fact).
+fn grant_artifact_asset_scope(app: &tauri::AppHandle, paths: &[PathBuf]) {
     // ADR-0137 Decision 6 (issue #1383): file-level allowlist -- exactly
     // the files the thread's artifact manifests have referenced. The
     // session workspace directory as a whole is deliberately NOT granted
@@ -1066,8 +1068,8 @@ fn grant_artifact_asset_scope(app: &tauri::AppHandle, entries: &[ThreadEntry]) {
     // iframe-renderable by proximity); a legacy manifest pointing into
     // the per-session `artifacts/` directory names files like any other,
     // so it stays servable unchanged.
-    for path in crate::session::artifacts::referenced_paths(entries) {
-        if let Err(e) = app.asset_protocol_scope().allow_file(&path) {
+    for path in paths {
+        if let Err(e) = app.asset_protocol_scope().allow_file(path) {
             log::warn!(
                 target: "toptopduck::commands",
                 "failed to grant asset scope for {}: {e}",

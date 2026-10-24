@@ -56,7 +56,7 @@ export function artifactTurn(
       trace: [], provenance: { skills: [] },
       artifacts: paths.map((path) => {
         const name = path.split(/[\\/]/).pop() ?? path;
-        return { path, file_name: name, durable: true };
+        return { path, file_name: name };
       }),
     },
   };
