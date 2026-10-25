@@ -587,7 +587,7 @@ export function SessionPane({ sessionId, isActive, pendingIngestPaths, onIngestC
         {/* --- Workspace (ADR-0045/0062 R2) -------------------------------- */}
         <section
           className="session-workspace"
-          aria-label={intl.formatMessage({ id: "session.workspace.ariaLabel", defaultMessage: "Workspace" })}
+          aria-label={intl.formatMessage({ id: "session.workspace.ariaLabel", defaultMessage: "Right sidebar" })}
           inert={s.workspaceCollapsed}
         >
           {/* ADR-0067 (issue #173): the .workspace-tabs visual chrome (padding,

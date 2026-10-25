@@ -179,6 +179,7 @@ export function useShellSessions({
     skillInvocations: string[],
     posture: PendingComposerPosture,
     pendingFiles: string[],
+    workspace?: string | null,
   ) => Promise<boolean>;
   openPersisted: (path: string, name: string) => Promise<void>;
   dropFile: (path: string) => Promise<void>;
@@ -443,11 +444,17 @@ export function useShellSessions({
       pendingQuestion?: string | null;
       pendingSkillInvocations?: string[];
       posture?: PendingComposerPosture;
+      /** The workspace directory to bind at creation (ADR-0137/0138, issue
+       *  #1384): the selector pill's value rides here once, consumed by the
+       *  mint. Absent/null keeps the default lazy-mint behavior. */
+      workspace?: string | null;
     }): Promise<void> => {
       if (mintingRef.current) return;
       mintingRef.current = true;
       try {
-        const { session_id: sid, recipe_path: path } = await createSession();
+        const { session_id: sid, recipe_path: path } = await createSession(
+          opts.workspace ?? null,
+        );
         if (opts.posture) {
           const posture = opts.posture;
           // One write per posture facet, isolated: a rejected write logs +
@@ -562,6 +569,7 @@ export function useShellSessions({
       skillInvocations: string[],
       posture: PendingComposerPosture,
       pendingFiles: string[],
+      workspace: string | null = null,
     ): Promise<boolean> => {
       try {
         await mintAndRegister({
@@ -569,6 +577,7 @@ export function useShellSessions({
           pendingSkillInvocations: skillInvocations,
           pendingIngestPaths: pendingFiles,
           posture,
+          workspace,
         });
         return true;
       } catch (e) {

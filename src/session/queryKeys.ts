@@ -131,3 +131,12 @@ export const artifactKeys = {
   exists: (path: string) => ["artifact", "exists", path] as const,
   text: (path: string) => ["artifact", "text", path] as const,
 } as const;
+
+/** Session-AGNOSTIC workspace registry (ADR-0138, issue #1384) -- the
+ *  session-creation selector's recent list. NOT under the session prefix:
+ *  the registry is process-global like the adapter table. The records
+ *  change on every session bind/mint, so each popover open refetches (the
+ *  query is enabled only while open). */
+export const workspaceKeys = {
+  all: () => ["workspaces"] as const,
+} as const;

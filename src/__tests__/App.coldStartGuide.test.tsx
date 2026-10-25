@@ -247,7 +247,7 @@ describe("App cold-start guidance banner wiring (issue #1337)", () => {
     fireEvent.click(
       within(status).getByRole("button", { name: "Open Settings" }),
     );
-    await screen.findByText("Back to workspace");
+    await screen.findByText("Back to main view");
     expect(screen.getByRole("tab", { name: "API Access" })).toHaveAttribute(
       "aria-selected",
       "true",

@@ -945,6 +945,7 @@ impl super::Session {
                     // files only).
                     workspace: None,
                     workspaces_root: None,
+                    workspace_registry: None,
                     snapshot_dir,
                     assets_dir,
                     tool_output_refs: &mut session.tool_output_refs,

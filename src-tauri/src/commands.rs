@@ -207,6 +207,9 @@ pub struct CreateSessionReply {
 /// session is bound from creation -- no pure-memory phase, no manual first
 /// save. Returns the id + the bound path so the frontend tracks a
 /// known-persisted session.
+// Eight Tauri-injected params (the State bundle grew with the workspace
+// registry, issue #1384); the #774 allow is the precedent.
+#[allow(clippy::too_many_arguments)]
 #[tauri::command]
 pub fn create_session(
     app: tauri::AppHandle,
@@ -215,6 +218,7 @@ pub fn create_session(
     sessions_root: State<'_, SessionsRoot>,
     skills_root: State<'_, SkillsRoot>,
     user_store: State<'_, UserAdapterStore>,
+    registry: State<'_, Arc<crate::workspace::WorkspaceRegistry>>,
     workspace: Option<String>,
 ) -> Result<CreateSessionReply, SessionError> {
     let cancel = Arc::new(CancelToken::new());
@@ -302,6 +306,11 @@ pub fn create_session(
         // root's sibling): workspaces are user assets and do not follow a
         // user-overridden sessions dir.
         s.set_workspaces_root(Some(crate::persistence::default_workspaces_root(&app)));
+        // ADR-0138 (issue #1384): seat the registry before the bind below
+        // records the explicit selection, and for the close-time reclaim's
+        // record removal. Seated unconditionally -- the lazy-mint path
+        // records on the session's first disk need instead.
+        s.set_workspace_registry(Some(Arc::clone(registry.inner())));
         if let Some(dir) = &workspace {
             let canonical = std::fs::canonicalize(dir).map_err(|e| {
                 // Distinct from launch_cwd's mkdir-failure wording: this is
@@ -337,6 +346,34 @@ pub fn create_session(
     }
 
     result
+}
+
+/// One recent-workspace row for the session-creation selector (ADR-0138,
+/// issue #1384): the canonical path (the `create_session` binding value)
+/// and the display label (the record's title, defaulting to the directory
+/// tail -- a full path is never the display face).
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct RecentWorkspace {
+    pub path: String,
+    pub label: String,
+}
+
+/// The workspace registry's LRU view (ADR-0138, issue #1384): records whose
+/// directory still exists, most recently used first. The selector slices
+/// its top 10; older workspaces resurface through the folder browse.
+/// Read-only and tolerant -- an unreadable registry lists empty.
+#[tauri::command]
+pub fn list_workspaces(
+    registry: State<'_, Arc<crate::workspace::WorkspaceRegistry>>,
+) -> Vec<RecentWorkspace> {
+    registry
+        .recent()
+        .into_iter()
+        .map(|r| RecentWorkspace {
+            path: r.path.display().to_string(),
+            label: r.label(),
+        })
+        .collect()
 }
 
 /// Close a session (ADR-0055): mark closing, fire cancel, and remove the entry
@@ -2230,6 +2267,8 @@ fn cleanup_orphaned_session_dir(
 /// session). The resumed session inherits the handle's cancel token + closing
 /// flag, so a `cancel` / `close_session` during or after resume still reaches
 /// the right session.
+// Same State-bundle shape as create_session (the registry joined, #1384).
+#[allow(clippy::too_many_arguments)]
 #[tauri::command]
 pub async fn open_recipe(
     app: tauri::AppHandle,
@@ -2237,6 +2276,7 @@ pub async fn open_recipe(
     live: State<'_, LiveProviderConfig>,
     sessions_root: State<'_, SessionsRoot>,
     user_store: State<'_, UserAdapterStore>,
+    registry: State<'_, Arc<crate::workspace::WorkspaceRegistry>>,
     session_id: String,
     path: String,
 ) -> Result<(), SessionError> {
@@ -2282,6 +2322,9 @@ pub async fn open_recipe(
     // the product's Documents domain, never derived from the (possibly
     // user-overridden) sessions root.
     let workspaces_root_path = crate::persistence::default_workspaces_root(&app);
+    // Owned Arc: the spawn_blocking closure below is 'static, so the State
+    // borrow itself cannot cross (the registry is seated inside).
+    let workspace_registry = Arc::clone(registry.inner());
     // ADR-0102 Decision 1/4 (issue #589): resume restores the session's LAST
     // runtime (segment continuation) instead of resetting to the default. The
     // default resolution is still computed here BEFORE the swap closure (the
@@ -2348,6 +2391,11 @@ pub async fn open_recipe(
         // binding inside open_recipe; this root only ever mints. Same FIXED
         // product-domain placement as create_session.
         new_session.set_workspaces_root(Some(workspaces_root_path));
+        // ADR-0138 (issue #1384): seat the registry on the resumed session
+        // too -- a later first disk-need mint records, and the close-time
+        // reclaim removes. The restored binding itself never re-records
+        // (resume restores through the facts literal, not set_workspace).
+        new_session.set_workspace_registry(Some(workspace_registry));
         // ADR-0063: re-arm the close-and-wait-release drop signal for the
         // resumed session. Install a fresh (sender, receiver) pair: the sender
         // goes into the NEW session (its Drop will fire it after the canonical

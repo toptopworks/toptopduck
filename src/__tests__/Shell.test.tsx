@@ -1805,7 +1805,7 @@ describe("App shell window collapse + drag-drop bisection (issue #84)", () => {
     await openSession();
     const pane = document.querySelector(".session-pane");
     expect(pane?.classList.contains("workspace-collapsed")).toBe(true);
-    expect(screen.getByRole("button", { name: "展开工作区" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "展开右侧栏" })).toBeInTheDocument();
   });
 
   it("centers the thread content in a reading column when the workspace is folded (issue #833)", async () => {
@@ -1935,10 +1935,10 @@ describe("App shell window collapse + drag-drop bisection (issue #84)", () => {
   it("opens / closes the workspace via the header toggle (manual fold)", async () => {
     render(<App />);
     await openSession();
-    fireEvent.click(screen.getByRole("button", { name: "展开工作区" }));
+    fireEvent.click(screen.getByRole("button", { name: "展开右侧栏" }));
     expect(document.querySelector(".session-pane")?.classList.contains("workspace-collapsed")).toBe(false);
     // The toggle flips to its close label once open.
-    fireEvent.click(screen.getByRole("button", { name: "收起工作区" }));
+    fireEvent.click(screen.getByRole("button", { name: "收起右侧栏" }));
     expect(document.querySelector(".session-pane")?.classList.contains("workspace-collapsed")).toBe(true);
   });
 
@@ -2078,7 +2078,7 @@ describe("App shell window collapse + drag-drop bisection (issue #84)", () => {
       expect(document.querySelector(".session-pane")?.classList.contains("workspace-collapsed")).toBe(false),
     );
     // The user folds it back; the one-shot is spent.
-    fireEvent.click(screen.getByRole("button", { name: "收起工作区" }));
+    fireEvent.click(screen.getByRole("button", { name: "收起右侧栏" }));
     expect(document.querySelector(".session-pane")?.classList.contains("workspace-collapsed")).toBe(true);
     // A SECOND promotion must not steal focus -- the fold stays.
     fireEvent.change(screen.getByLabelText("提问"), { target: { value: "第二问" } });

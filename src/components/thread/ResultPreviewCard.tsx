@@ -60,7 +60,7 @@ export function ResultPreviewCard({
       aria-label={intl.formatMessage(
         {
           id: "thread.preview.aria",
-          defaultMessage: "Preview of {name} (first rows), open it in the workspace",
+          defaultMessage: "Preview of {name} (first rows), open it in the right sidebar",
         },
         { name: dataset.reference_name },
       )}

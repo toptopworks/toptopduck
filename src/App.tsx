@@ -27,6 +27,8 @@ import {
 import type { ComposerSessionFields } from "./session/useComposerState";
 import { COMPOSER_INPUT_ID, QuestionBar } from "./components/thread/QuestionBar";
 import { ComposerAuthModeChip } from "./components/thread/ComposerAuthModeChip";
+import { ComposerWorkspacePicker } from "./components/thread/ComposerWorkspacePicker";
+import type { PendingWorkspace } from "./components/thread/ComposerWorkspacePicker";
 import { ComposerOccupancy } from "./components/thread/OccupancyRing";
 import { ComposerContextPanel } from "./components/thread/ComposerContextPanel";
 import { ComposerSkillChips } from "./components/thread/ComposerSkillChips";
@@ -447,6 +449,12 @@ export default function App() {
   const [pendingAuthMode, setPendingAuthMode] =
     useState<AuthMode>(AUTH_MODE_DEFAULT);
   const [pendingFiles, setPendingFiles] = useState<string[]>([]);
+  // The session-creation workspace selector's pending value (ADR-0137/0138,
+  // issue #1384): the directory the NEXT minted session binds, consumed once
+  // by createSession's directory parameter and reset to unbound afterwards.
+  // null = the default lazy mint -- the pre-#1384 behavior.
+  const [pendingWorkspace, setPendingWorkspace] =
+    useState<PendingWorkspace | null>(null);
   // Skill invocation staging (ADR-0112 trigger-then-stage, calibrated by
   // ADR-0119: a pick stages THIS turn's user invocation), two facets with
   // different lifecycles: the cold-start list lives in shell memory (it
@@ -590,6 +598,7 @@ export default function App() {
         invocations,
         { runtime, modelPosture, authMode },
         files,
+        pendingWorkspace?.path ?? null,
       ).then((created) => {
         if (created) {
           // The question rode the pendingQuestion channel into the new
@@ -601,6 +610,9 @@ export default function App() {
           setPendingAuthMode(AUTH_MODE_DEFAULT);
           setColdInvocations([]);
           setPendingFiles([]);
+          // Issue #1384: the workspace selection is one-shot -- consumed by
+          // the mint, the pill returns to unbound for the next session.
+          setPendingWorkspace(null);
           // The mint-time set IPCs landed the explicit pair in the startup
           // backfill entry (record_last_model_posture, the single write
           // point). Invalidate so a later return to cold start refetches the
@@ -628,6 +640,7 @@ export default function App() {
       consumeColdStart,
       pendingAuthMode,
       pendingFiles,
+      pendingWorkspace,
       builtInGateOpen,
       profileKeys.activeProfileId,
       openSettings,
@@ -1349,6 +1362,25 @@ export default function App() {
                           onPendingModeChange={setPendingAuthMode}
                         />
                       </QuestionBar>
+                      {/* Cold-start only (issue #1384): the workspace
+                          selection binds the session the bar is about to
+                          mint; with a session active the binding is
+                          immutable, so the selector would be a dead
+                          control. The ChatGPT/WorkBuddy pedestal: a fully
+                          rounded strip, inset on both flanks, whose top
+                          slides BEHIND the card (negative margin; the card
+                          is positioned and paints above this unpositioned
+                          sibling) so only its lower half shows -- one
+                          composer block, no seam. pt compensates the
+                          hidden band so the row reads below the card. */}
+                      {isColdStart && (
+                        <div className="mx-3 -mt-3 flex items-center gap-1.5 rounded-lg bg-muted/70 px-1 pb-1 pt-4">
+                          <ComposerWorkspacePicker
+                            value={pendingWorkspace}
+                            onChange={setPendingWorkspace}
+                          />
+                        </div>
+                      )}
                     </div>
                   </div>
 

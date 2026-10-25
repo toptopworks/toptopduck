@@ -105,6 +105,12 @@ pub(crate) struct TurnDeps<'a> {
     pub result_row_cap: u64,
     pub result_count_cap: usize,
     pub temp_path: &'a Path,
+    /// The workspace registry's record face (ADR-0138, issue #1384):
+    /// `Some` borrows the session's seated ledger so a FRESH default mint
+    /// through [`Self::launch_dir`] records the workspace's first use;
+    /// `None` (test constructors, the resume replay) disconnects
+    /// recording, mirroring the workspace axis.
+    pub workspace_registry: Option<&'a crate::workspace::WorkspaceRegistry>,
     /// The session's workspace binding slot (ADR-0137, issue #1381):
     /// borrowed `&mut` from the session's runtime facts so the FIRST
     /// agent-process dispatch mints the default timestamped workspace through
@@ -156,6 +162,7 @@ impl<'a> TurnDeps<'a> {
             self.workspace.as_deref_mut(),
             self.workspaces_root.as_deref(),
             self.temp_path,
+            self.workspace_registry,
         )
     }
 
@@ -193,6 +200,7 @@ impl<'a> TurnDeps<'a> {
             temp_path,
             workspace: None,
             workspaces_root: None,
+            workspace_registry: None,
             snapshot_dir: temp_path.to_path_buf(),
             assets_dir: None,
             tool_output_refs,

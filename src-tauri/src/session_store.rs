@@ -846,7 +846,7 @@ impl SessionStore {
         // a lazy mint that never saw a file write leaves no directory
         // behind. Read under the lock (immutable once bound, so no TOCTOU on
         // the binding itself; the emptiness check rides remove_dir).
-        let (session_dir, workspace_axis) = handle
+        let (session_dir, workspace_axis, registry) = handle
             .try_session_lock()
             .map(|s| {
                 let dir = if s.is_timeline_empty() {
@@ -860,11 +860,12 @@ impl SessionStore {
                     .workspace()
                     .zip(s.workspaces_root())
                     .map(|(ws, root)| (ws.to_path_buf(), root.to_path_buf()));
-                (dir, axis)
+                let registry = s.workspace_registry().cloned();
+                (dir, axis, registry)
             })
             // Lock unavailable (an ask holds it): both cleanups skip, the
             // ADR-0055 never-block contract.
-            .unwrap_or((None, None));
+            .unwrap_or((None, None, None));
         self.close(id)?;
         // ADR-0137 (issue #1381): the workspace reclaim runs regardless of
         // the timeline -- a minted-but-untouched workspace is empty whether
@@ -873,7 +874,14 @@ impl SessionStore {
         // non-empty; deleting a session never reclaims (delete_session does
         // not route here).
         if let Some((ws, root)) = workspace_axis {
-            crate::session::workspace::reclaim_if_empty(&ws, &root);
+            if crate::session::workspace::reclaim_if_empty(&ws, &root) {
+                // ADR-0138 (issue #1384): the record goes with the directory
+                // the App's own hand removed. A user-deleted directory keeps
+                // its dangling record (read-time filtered).
+                if let Some(registry) = registry {
+                    registry.remove(&ws);
+                }
+            }
         }
         if let Some(dir) = session_dir {
             match std::fs::remove_dir_all(&dir) {
@@ -997,6 +1005,76 @@ mod tests {
         assert!(
             user.path().exists(),
             "an empty user-selected workspace is never reclaimed"
+        );
+    }
+
+    /// ADR-0138 (issue #1384): the record goes with the directory the App's
+    /// own hand removed -- a close that reclaims an empty minted workspace
+    /// also removes its registry record; a close that keeps the workspace
+    /// (non-empty) keeps the record.
+    #[test]
+    fn close_removes_the_registry_record_of_a_reclaimed_workspace() {
+        let store = SessionStore::new();
+        let root = tempfile::tempdir().expect("workspaces root");
+        let dir = tempfile::tempdir().expect("registry dir");
+        let registry = Arc::new(crate::workspace::WorkspaceRegistry::new(
+            dir.path().join(crate::workspace::WORKSPACES_FILE_NAME),
+        ));
+
+        // Session A: an empty minted workspace -- the close reclaims it and
+        // the record goes with it.
+        let id_a = store
+            .create(
+                Arc::new(CancelToken::new()),
+                Box::new(crate::UnwiredProvider),
+                Default::default(),
+            )
+            .expect("create A");
+        let minted = crate::session::workspace::mint_workspace(root.path(), chrono::Local::now())
+            .expect("mint");
+        {
+            let handle = store.get(&id_a).expect("handle A");
+            let mut s = handle.session_lock().unwrap();
+            s.set_workspace_registry(Some(Arc::clone(&registry)));
+            s.set_workspaces_root(Some(root.path().to_path_buf()));
+            s.set_workspace(std::fs::canonicalize(&minted).expect("canonicalize"));
+        }
+        assert_eq!(registry.recent().len(), 1, "the bind recorded");
+
+        // Session B: a NON-empty minted workspace -- the close keeps the
+        // directory and the record with it.
+        let id_b = store
+            .create(
+                Arc::new(CancelToken::new()),
+                Box::new(crate::UnwiredProvider),
+                Default::default(),
+            )
+            .expect("create B");
+        let held = crate::session::workspace::mint_workspace(root.path(), chrono::Local::now())
+            .expect("mint");
+        std::fs::write(held.join("analysis.py"), "print(1)").expect("seed file");
+        {
+            let handle = store.get(&id_b).expect("handle B");
+            let mut s = handle.session_lock().unwrap();
+            s.set_workspace_registry(Some(Arc::clone(&registry)));
+            s.set_workspaces_root(Some(root.path().to_path_buf()));
+            s.set_workspace(std::fs::canonicalize(&held).expect("canonicalize"));
+        }
+        assert_eq!(registry.recent().len(), 2, "both binds recorded");
+
+        store.close_and_cleanup_empty(&id_a).expect("close A");
+        assert!(!minted.exists(), "the empty workspace is reclaimed");
+        assert_eq!(
+            registry.recent().len(),
+            1,
+            "the reclaimed workspace's record went with the directory"
+        );
+        store.close_and_cleanup_empty(&id_b).expect("close B");
+        assert!(held.exists(), "the non-empty workspace is kept");
+        assert_eq!(
+            registry.recent().len(),
+            1,
+            "the kept workspace keeps its record"
         );
     }
 

@@ -471,6 +471,12 @@ pub struct Session {
     /// `None` (test constructors) disables minting; disk-need consumers then
     /// keep the temp-dir cwd.
     workspaces_root: Option<PathBuf>,
+    /// The workspace registry (ADR-0138, issue #1384): the organizational
+    /// ledger the bind + mint mount points record into and the close-time
+    /// reclaim deletes from. Seated by the command layer at creation /
+    /// resume, beside [`Self::workspaces_root`]; `None` (test constructors)
+    /// disconnects the ledger -- the session runs on, unrecorded.
+    workspace_registry: Option<std::sync::Arc<crate::workspace::WorkspaceRegistry>>,
     /// The LLM provider (ADR-0007/0064), held behind `Arc<dyn>` (dyn, not
     /// generic) so this struct does not parameterize `commands.rs` / `lib.rs`.
     /// [`Self::ask_with_phase`] reads the live response locale off it for the
@@ -986,6 +992,7 @@ impl Session {
             _temp_dir: temp_dir,
             temp_path,
             workspaces_root: None,
+            workspace_registry: None,
             provider,
             materializer: Box::new(RealMaterializer),
             session_id: None,

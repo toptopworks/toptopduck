@@ -104,22 +104,27 @@ fn is_timestamp_name(path: &Path) -> bool {
 /// so a workspace holding anything -- agent scratch, a file another session
 /// sharing the workspace wrote -- is left untouched by construction. Best
 /// effort: a failure (locked, permissions) is logged, never surfaced.
-pub(crate) fn reclaim_if_empty(workspace: &Path, root: &Path) {
+/// Returns `true` only when THIS call removed the directory -- the caller's
+/// signal to drop the registry record with it (ADR-0138, issue #1384: a
+/// record never outlives its directory through the App's own hand; a
+/// user-deleted directory keeps its dangling record, read-time filtered).
+pub(crate) fn reclaim_if_empty(workspace: &Path, root: &Path) -> bool {
     if !is_app_minted(workspace, root) {
-        return;
+        return false;
     }
     match std::fs::remove_dir(workspace) {
-        Ok(()) => {}
+        Ok(()) => true,
         // A non-empty directory is the normal "keep" case -- not worth a log.
-        Err(e) if e.kind() == io::ErrorKind::DirectoryNotEmpty => {}
+        Err(e) if e.kind() == io::ErrorKind::DirectoryNotEmpty => false,
         // NotFound: already reclaimed or removed by the user; fine.
-        Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+        Err(e) if e.kind() == io::ErrorKind::NotFound => false,
         Err(e) => {
             log::warn!(
                 target: "toptopduck::session",
                 "workspace reclaim skipped for {}: {e}",
                 workspace.display()
             );
+            false
         }
     }
 }
@@ -134,10 +139,17 @@ pub(crate) fn reclaim_if_empty(workspace: &Path, root: &Path) {
 /// single storage, so the mint reaches the next recipe persist). No root
 /// available (test constructors) keeps the temp-dir cwd -- the pure-memory
 /// fallback.
+///
+/// A FRESH mint also records into the seated registry (ADR-0138, issue
+/// #1384) -- the "session started using this workspace" moment, the one
+/// turn-side mount point shared by both launch surfaces (the external
+/// runtime's spawn cwd and the built-in CLI tool dispatch). `None` keeps the
+/// ledger axis disconnected; a bound-reuse launch never re-records.
 pub(crate) fn launch_cwd(
     workspace: Option<&mut Option<PathBuf>>,
     workspaces_root: Option<&Path>,
     temp: &Path,
+    registry: Option<&crate::workspace::WorkspaceRegistry>,
 ) -> Result<PathBuf, String> {
     let Some(workspace) = workspace else {
         // The axis is disconnected (test deps): keep the temp cwd.
@@ -160,6 +172,9 @@ pub(crate) fn launch_cwd(
     // failure degrades to the minted spelling rather than failing the
     // launch.
     let minted = std::fs::canonicalize(&minted).unwrap_or(minted);
+    if let Some(registry) = registry {
+        registry.record(&minted);
+    }
     *workspace = Some(minted.clone());
     Ok(minted)
 }
@@ -173,6 +188,26 @@ impl super::Session {
         self.workspaces_root = root;
     }
 
+    /// Seat the workspace registry (ADR-0138, issue #1384): the ledger the
+    /// bind + mint mount points record into and the close-time reclaim
+    /// deletes from. Command-layer wiring at creation and resume; `None`
+    /// (test constructors) disconnects recording, mirroring
+    /// [`Self::set_workspaces_root`].
+    pub fn set_workspace_registry(
+        &mut self,
+        registry: Option<std::sync::Arc<crate::workspace::WorkspaceRegistry>>,
+    ) {
+        self.workspace_registry = registry;
+    }
+
+    /// The seated registry, if the ledger axis is connected (ADR-0138). Read
+    /// by close-time record removal.
+    pub fn workspace_registry(
+        &self,
+    ) -> Option<&std::sync::Arc<crate::workspace::WorkspaceRegistry>> {
+        self.workspace_registry.as_ref()
+    }
+
     /// Bind an explicit user-selected workspace at creation (ADR-0137, issue
     /// #1381). The caller canonicalizes first (Windows 8.3 short paths would
     /// let one directory appear under two spellings); the binding is
@@ -183,6 +218,15 @@ impl super::Session {
             self.runtime_facts.workspace.is_none(),
             "workspace binding is immutable (ADR-0137)"
         );
+        // ADR-0138 (issue #1384): binding a session to a workspace is the
+        // "session started using it" moment -- the registry write for the
+        // create_session mount point (the only production caller; resume
+        // restores the binding through the facts literal, so a reopen never
+        // re-records). Best-effort inside the ledger: a failed record never
+        // fails the bind.
+        if let Some(registry) = &self.workspace_registry {
+            registry.record(&canonical);
+        }
         self.runtime_facts.workspace = Some(canonical);
     }
 
@@ -207,6 +251,7 @@ impl super::Session {
             Some(&mut self.runtime_facts.workspace),
             self.workspaces_root.as_deref(),
             &self.temp_path,
+            self.workspace_registry.as_deref(),
         )
         .map(|p| p.to_string_lossy().into_owned())
     }
@@ -360,7 +405,7 @@ mod tests {
         let mut workspace = None;
         let root = tempfile::tempdir().expect("tempdir");
         let temp = tempfile::tempdir().expect("temp");
-        let dir = launch_cwd(Some(&mut workspace), Some(root.path()), temp.path()).expect("launch");
+        let dir = launch_cwd(Some(&mut workspace), Some(root.path()), temp.path(), None).expect("launch");
         // The mint binds canonicalized, which can differ from the seated
         // root's spelling -- assert the containment canonically.
         assert!(
@@ -374,7 +419,7 @@ mod tests {
 
         // The second launch reuses the binding -- no second directory.
         let again =
-            launch_cwd(Some(&mut workspace), Some(root.path()), temp.path()).expect("launch");
+            launch_cwd(Some(&mut workspace), Some(root.path()), temp.path(), None).expect("launch");
         assert_eq!(again, dir);
         assert_eq!(
             std::fs::read_dir(root.path()).expect("read root").count(),
@@ -387,10 +432,10 @@ mod tests {
         let mut workspace = None;
         let root = tempfile::tempdir().expect("tempdir");
         let temp = tempfile::tempdir().expect("temp");
-        let dir = launch_cwd(Some(&mut workspace), Some(root.path()), temp.path()).expect("mint");
+        let dir = launch_cwd(Some(&mut workspace), Some(root.path()), temp.path(), None).expect("mint");
         std::fs::remove_dir(&dir).expect("reclaim seed"); // a close reclaimed it empty
         let again =
-            launch_cwd(Some(&mut workspace), Some(root.path()), temp.path()).expect("launch");
+            launch_cwd(Some(&mut workspace), Some(root.path()), temp.path(), None).expect("launch");
         assert_eq!(again, dir, "the immutable binding is reused, not re-minted");
         assert!(dir.is_dir(), "the directory is re-created on demand");
     }
@@ -399,7 +444,7 @@ mod tests {
     fn launch_cwd_keeps_the_temp_cwd_without_a_mint_source() {
         let mut workspace = None;
         let temp = tempfile::tempdir().expect("temp");
-        let dir = launch_cwd(Some(&mut workspace), None, temp.path()).expect("launch");
+        let dir = launch_cwd(Some(&mut workspace), None, temp.path(), None).expect("launch");
         assert_eq!(dir, temp.path(), "no root -> the temp cwd stays");
         assert!(workspace.is_none(), "nothing is bound");
     }
@@ -442,5 +487,108 @@ mod tests {
         assert_eq!(session.workspace(), Some(user.path()));
         let recipe = session.build_recipe();
         assert_eq!(recipe.workspace.as_deref(), Some(user.path()));
+    }
+
+    fn test_registry(dir: &std::path::Path) -> std::sync::Arc<crate::workspace::WorkspaceRegistry> {
+        std::sync::Arc::new(crate::workspace::WorkspaceRegistry::new(
+            dir.join(crate::workspace::WORKSPACES_FILE_NAME),
+        ))
+    }
+
+    #[test]
+    fn binding_a_workspace_records_into_the_seated_registry() {
+        // ADR-0138 (issue #1384): the create_session mount point. Two
+        // sessions sharing one registry bind the same canonical path: ONE
+        // record, the LRU stamp riding the second bind. An unseated registry
+        // (the pre-#1384 constructor default) records nothing.
+        let dir = tempfile::tempdir().expect("registry dir");
+        let registry = test_registry(dir.path());
+        let user = tempfile::tempdir().expect("user dir");
+        let canonical = std::fs::canonicalize(user.path()).expect("canonicalize");
+
+        let mut a = super::super::Session::new().expect("session a");
+        a.set_workspace_registry(Some(std::sync::Arc::clone(&registry)));
+        a.set_workspace(canonical.clone());
+
+        let mut b = super::super::Session::new().expect("session b");
+        b.set_workspace_registry(Some(std::sync::Arc::clone(&registry)));
+        b.set_workspace(canonical.clone());
+
+        let recent = registry.recent();
+        assert_eq!(
+            recent.len(),
+            1,
+            "canonical-equal binds collapse to one record"
+        );
+        assert_eq!(
+            recent[0].path, canonical,
+            "the record carries the canonical spelling"
+        );
+
+        let mut unseated = super::super::Session::new().expect("session");
+        let other = tempfile::tempdir().expect("other dir");
+        unseated.set_workspace(std::fs::canonicalize(other.path()).expect("canonicalize"));
+        assert_eq!(
+            registry.recent().len(),
+            1,
+            "an unseated registry records nothing"
+        );
+    }
+
+    #[test]
+    fn a_lazy_mint_records_into_the_seated_registry() {
+        // ADR-0138 (issue #1384): the turn mount point (external spawn arm).
+        // The first disk-need mint records; a later launch reuses the
+        // binding without a second record.
+        let dir = tempfile::tempdir().expect("registry dir");
+        let registry = test_registry(dir.path());
+        let mut session = super::super::Session::new().expect("session");
+        let root = tempfile::tempdir().expect("workspaces root");
+        session.set_workspaces_root(Some(root.path().to_path_buf()));
+        session.set_workspace_registry(Some(std::sync::Arc::clone(&registry)));
+        session.ensure_external_cwd().expect("cwd");
+        let recent = registry.recent();
+        assert_eq!(recent.len(), 1, "the fresh mint records");
+        assert_eq!(
+            Some(recent[0].path.as_path()),
+            session.workspace(),
+            "the record carries the canonical bound spelling"
+        );
+        session.ensure_external_cwd().expect("cwd again");
+        assert_eq!(registry.recent().len(), 1, "the reuse adds no record");
+    }
+
+    #[test]
+    fn a_cli_launch_mint_records_through_the_turn_deps() {
+        // ADR-0138 (issue #1384): the turn mount point's other arm -- the
+        // built-in CLI tool dispatch resolves its launch dir through
+        // TurnDeps, and a fresh mint records there too (the None axis stays
+        // disconnected for test deps).
+        use crate::session::materializer::TurnDeps;
+
+        let dir = tempfile::tempdir().expect("registry dir");
+        let registry = test_registry(dir.path());
+        let root = tempfile::tempdir().expect("workspaces root");
+        let temp = tempfile::tempdir().expect("temp");
+        let engine = crate::session::engine::AdminEngine::materialized();
+        let mut working_set = crate::workingset::WorkingSet::default();
+        let mut sources = std::collections::HashMap::new();
+        let mut refs = std::collections::HashMap::new();
+        let mut deps = TurnDeps::test_deps(
+            &engine,
+            &mut working_set,
+            &mut sources,
+            temp.path(),
+            &mut refs,
+        );
+        let mut slot: Option<std::path::PathBuf> = None;
+        deps.workspace = Some(&mut slot);
+        deps.workspaces_root = Some(root.path().to_path_buf());
+        deps.workspace_registry = Some(&registry);
+        deps.launch_dir().expect("launch");
+        let recent = registry.recent();
+        assert_eq!(recent.len(), 1, "the fresh mint records");
+        deps.launch_dir().expect("launch again");
+        assert_eq!(registry.recent().len(), 1, "the reuse adds no record");
     }
 }

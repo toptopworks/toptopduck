@@ -46,6 +46,7 @@ pub mod tray;
 pub mod util;
 pub mod window;
 pub mod workingset;
+pub mod workspace;
 
 pub use app_config::{
     AppConfig, EngineDefaults, ExportDefaults, PrivacyDefaults, Theme, Tunables,
@@ -427,6 +428,20 @@ pub fn run() {
                 ));
             app.manage(user_adapter_store);
 
+            // The workspace registry (ADR-0138, issue #1384):
+            // `workspaces.json` under the OS app-data dir, same resolution +
+            // honest temp-dir fallback. The domain ledger of workspaces as
+            // logical units over directories -- deliberately outside
+            // app-config (machine bookkeeping vs user preference: semantics,
+            // write frequency, and lifecycle all differ).
+            app.manage(Arc::new(crate::workspace::WorkspaceRegistry::new(
+                app_data_path(
+                    app.handle(),
+                    crate::workspace::WORKSPACES_FILE_NAME,
+                    "workspace registry",
+                ),
+            )));
+
             // System tray residency (ADR-0125, issue #1140). The tray is the
             // resident surface while the main window is hidden: closing the
             // window hides it instead of killing the process, because a
@@ -485,6 +500,7 @@ pub fn run() {
             commands::close_session,
             commands::close_session_and_wait_release,
             commands::list_live_sessions,
+            commands::list_workspaces,
             commands::ingest_file,
             commands::ingest_file_guided,
             commands::guidance_window,

@@ -403,7 +403,7 @@ describe("useIngestFlow", () => {
       expect(viewed.clearForNewSource).toHaveBeenCalledTimes(1);
       expect(result.current.guidance).toBeNull();
       // #748: one file (c.csv) remained past the Error halt -> the count is
-      // surfaced (the banner's screen-mate in the workspace).
+      // surfaced (the banner's screen-mate in the right sidebar).
       expect(result.current.haltedRemaining).toBe(1);
       // The skip is observable in logs too (operation semantics only), with
       // the halt reason discriminating Error / reject / cancelled paths.
