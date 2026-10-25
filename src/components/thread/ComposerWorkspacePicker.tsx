@@ -64,8 +64,11 @@ export function ComposerWorkspacePicker({
     queryKey: workspaceKeys.all(),
     queryFn: listWorkspaces,
     // Only the open popover needs the rows; every open refetches so the
-    // LRU order reflects the latest bind/mint.
+    // LRU order reflects the latest bind/mint. The app default is
+    // staleTime: Infinity (ADR-0051 -- invalidate after mutations); no
+    // mutation knows to invalidate this key, so the query opts out itself.
     enabled: openState,
+    staleTime: 0,
   });
   const recent = (data ?? []).slice(0, RECENT_LIMIT);
 

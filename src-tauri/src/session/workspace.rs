@@ -405,7 +405,8 @@ mod tests {
         let mut workspace = None;
         let root = tempfile::tempdir().expect("tempdir");
         let temp = tempfile::tempdir().expect("temp");
-        let dir = launch_cwd(Some(&mut workspace), Some(root.path()), temp.path(), None).expect("launch");
+        let dir =
+            launch_cwd(Some(&mut workspace), Some(root.path()), temp.path(), None).expect("launch");
         // The mint binds canonicalized, which can differ from the seated
         // root's spelling -- assert the containment canonically.
         assert!(
@@ -432,7 +433,8 @@ mod tests {
         let mut workspace = None;
         let root = tempfile::tempdir().expect("tempdir");
         let temp = tempfile::tempdir().expect("temp");
-        let dir = launch_cwd(Some(&mut workspace), Some(root.path()), temp.path(), None).expect("mint");
+        let dir =
+            launch_cwd(Some(&mut workspace), Some(root.path()), temp.path(), None).expect("mint");
         std::fs::remove_dir(&dir).expect("reclaim seed"); // a close reclaimed it empty
         let again =
             launch_cwd(Some(&mut workspace), Some(root.path()), temp.path(), None).expect("launch");

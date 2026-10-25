@@ -109,6 +109,13 @@ vi.mock("../api", async (importOriginal) => {
     listLiveSessions: vi.fn(async () => []),
     closeSession: vi.fn(async () => false),
     createSession: vi.fn(async () => "sess-1"),
+    // Issue #1384: the selector's popover fetch + the minted pane's first
+    // ask both stay off the real IPC.
+    listWorkspaces: vi.fn(async () => []),
+    askQuestion: vi.fn(async () => ({
+      kind: "Textual" as const,
+      data: { text_kind: "Clarify" as const, body: "ok", assumption: null },
+    })),
     listWorkingSet: vi.fn(async () => []),
     onTurnProgress: vi.fn(async () => () => {}),
     // Issue #1353: the shell-level session-named listener mounts with App;
@@ -153,7 +160,12 @@ vi.mock("../api", async (importOriginal) => {
 });
 
 import App from "../App";
-import { listLiveSessions, listProviderProfiles } from "../api";
+import {
+  createSession,
+  listLiveSessions,
+  listProviderProfiles,
+  listWorkspaces,
+} from "../api";
 import { adapterKeys } from "../session/queryKeys";
 import type { LiveSessionEntry } from "../api";
 
@@ -286,5 +298,77 @@ describe("App cold-start guidance banner wiring (issue #1337)", () => {
       await Promise.resolve();
     });
     expect(screen.queryByRole("status")).not.toBeInTheDocument();
+  });
+});
+
+describe("App cold-start workspace selector wiring (issue #1384)", () => {
+  // The picker's own two-state/popover behavior lives in
+  // ComposerWorkspacePicker.test.tsx; this is the App-level connection
+  // tissue: the pedestal renders cold-start only, the staged pick rides
+  // the mint's createSession exactly once, and the close-back-to-cold-start
+  // shows the pill reset (the one-shot contract's visible face).
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.mocked(listLiveSessions).mockResolvedValue([]);
+    vi.mocked(listWorkspaces).mockResolvedValue([
+      { path: "/w/demo", label: "demo" },
+    ]);
+    vi.mocked(createSession).mockResolvedValue({
+      session_id: "sess-1",
+      recipe_path: "/x/sess-1.recipe.json",
+    });
+    platformMock.mockReturnValue("windows");
+    mintedClients.current = [];
+    configHolder.current = { kind: "external", data: "qwen-code" };
+    vi.stubGlobal("navigator", { language: "en-US" });
+  });
+
+  it("stages the pick, hands it to the mint once, and resets when the session closes", async () => {
+    render(<App />);
+    // Cold start: the pedestal strip renders the unbound trigger.
+    expect(
+      screen.getByRole("button", { name: "Select workspace" }),
+    ).toBeInTheDocument();
+
+    // Stage the pick through the popover; the pill flips to the bound face.
+    fireEvent.click(screen.getByRole("button", { name: "Select workspace" }));
+    fireEvent.click(await screen.findByRole("button", { name: "demo" }));
+    await waitFor(() =>
+      expect(
+        screen.getByRole("button", { name: "Workspace: demo" }),
+      ).toBeInTheDocument(),
+    );
+
+    // Submitting the first question mints the session carrying the staged
+    // directory exactly once (the one-shot contract, issue #1384).
+    const input = screen.getByRole("textbox", { name: "Question" });
+    fireEvent.change(input, { target: { value: "first question" } });
+    fireEvent.keyDown(input, { key: "Enter" });
+    await waitFor(() => expect(createSession).toHaveBeenCalledTimes(1));
+    expect(createSession).toHaveBeenCalledWith("/w/demo");
+
+    // The selector is cold-start-only: with the minted session active the
+    // pedestal -- bound face and unbound prompt alike -- is gone entirely.
+    await waitFor(() =>
+      expect(
+        screen.queryByRole("button", { name: "Workspace: demo" }),
+      ).not.toBeInTheDocument(),
+    );
+    expect(
+      screen.queryByRole("button", { name: "Select workspace" }),
+    ).not.toBeInTheDocument();
+
+    // Closing the session returns to cold start with the pill RESET to
+    // the unbound prompt: the consumed directory does not ride the next
+    // mint.
+    fireEvent.pointerDown(
+      screen.getByRole("button", { name: "Session actions" }),
+    );
+    fireEvent.click(await screen.findByRole("menuitem", { name: "Close" }));
+    await waitFor(() =>
+      expect(
+        screen.getByRole("button", { name: "Select workspace" }),
+      ).toBeInTheDocument(),
+    );
   });
 });

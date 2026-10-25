@@ -27,9 +27,13 @@ vi.mock("@tauri-apps/plugin-dialog", () => ({ open: vi.fn() }));
 function renderPicker(
   value: PendingWorkspace | null,
   onChange: (next: PendingWorkspace | null) => void = vi.fn(),
+  // The production client pins staleTime: Infinity (ADR-0051 explicit
+  // invalidation); the refetch pin passes Infinity so the per-query opt-out
+  // is the thing under test, not the test client's default.
+  staleTime: number = 0,
 ) {
   const queryClient = new QueryClient({
-    defaultOptions: { queries: { retry: false } },
+    defaultOptions: { queries: { retry: false, staleTime } },
   });
   return render(
     <IntlProvider locale="en">
@@ -142,5 +146,27 @@ describe("ComposerWorkspacePicker (issue #1384)", () => {
     fireEvent.click(await screen.findByRole("button", { name: "Browse folders…" }));
     await waitFor(() => expect(dialogPlugin.open).toHaveBeenCalledTimes(2));
     expect(onChange).not.toHaveBeenCalled();
+  });
+
+  it("every popover open refetches under the production Infinity staleTime", async () => {
+    // No mutation path knows to invalidate this key, so the app client's
+    // ADR-0051 default (Infinity) would pin the first fetch for the rest
+    // of the run; the query opts out itself. Riding the same Infinity
+    // default here pins the opt-out: reopen must fetch again.
+    vi.mocked(listWorkspaces).mockResolvedValue([
+      { path: "/w/alpha", label: "alpha" },
+    ]);
+    renderPicker(null, vi.fn(), Infinity);
+    openPopover();
+    await waitFor(() => expect(listWorkspaces).toHaveBeenCalledTimes(1));
+    // Commit a row: the layer closes. Reopening must refetch.
+    fireEvent.click(await screen.findByRole("button", { name: "alpha" }));
+    await waitFor(() =>
+      expect(
+        screen.queryByRole("button", { name: "Browse folders…" }),
+      ).not.toBeInTheDocument(),
+    );
+    openPopover();
+    await waitFor(() => expect(listWorkspaces).toHaveBeenCalledTimes(2));
   });
 });

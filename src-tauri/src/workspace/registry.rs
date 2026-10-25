@@ -127,8 +127,8 @@ impl WorkspaceRegistry {
     /// The selector's LRU view: records whose directory still exists, sorted
     /// `last_used_at` descending (path ascending breaks ties so the order is
     /// deterministic). Dangling records are KEPT in the store and merely
-    /// hidden -- the directory may come back (a close reclaimed it empty;
-    /// the next mint re-creates the same path).
+    /// hidden -- a user-deleted directory may come back (a bound session's
+    /// next launch re-creates it on demand), so hiding beats deleting.
     pub fn recent(&self) -> Vec<WorkspaceRecord> {
         let mut records = self.load();
         records.retain(|r| r.path.exists());

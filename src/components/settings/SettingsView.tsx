@@ -58,7 +58,7 @@ import {
 //
 // CHROME (ADR-0075): the retired single settings header is split into a left
 // RAIL -- brand + "Back to main view" at the top, icon nav in the middle, and a
-// connection-status row + dual-state gear (back to workspace) at the bottom --
+// connection-status row + dual-state gear (back to main view) at the bottom --
 // while each pane owns its own hero title + description. There is NO global
 // Save/Cancel footer: every control persists itself (per-control persistence).
 //
