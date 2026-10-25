@@ -56,13 +56,18 @@ impl WorkspaceRecord {
     pub fn label(&self) -> String {
         match &self.title {
             Some(title) => title.clone(),
-            None => self
-                .path
-                .file_name()
-                .map(|n| n.to_string_lossy().into_owned())
-                .unwrap_or_else(|| self.path.display().to_string()),
+            None => directory_tail(&self.path),
         }
     }
+}
+
+/// The untitled display fallback: the directory tail, or the whole path
+/// when it has no final component. Shared by the record face and the
+/// registry's label lookup so the two cannot drift.
+fn directory_tail(path: &Path) -> String {
+    path.file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| path.display().to_string())
 }
 
 /// The persisted document. `version` self-managed (no app-config
@@ -102,13 +107,41 @@ impl WorkspaceRegistry {
     /// now). Best-effort: a failure logs and continues -- the ledger never
     /// fails the caller's session event.
     pub fn record(&self, canonical: &Path) {
-        if let Err(detail) = self.record_at(canonical, now_millis()) {
+        if let Err(detail) = self.record_at(canonical, None, now_millis()) {
             log::warn!(
                 target: "toptopduck::workspace_registry",
                 "workspace record for {} not written: {detail}",
                 canonical.display()
             );
         }
+    }
+
+    /// The named-workspace creation mount point (issue #1393): a fresh mint
+    /// records with the user's name as the `title`. On an existing record the
+    /// call degrades to [`Self::record`] -- the bump only, the title never
+    /// rewrites (identity is immutable, ADR-0138 Decision 3). Best-effort
+    /// like `record`.
+    pub fn record_titled(&self, canonical: &Path, title: &str) {
+        if let Err(detail) = self.record_at(canonical, Some(title), now_millis()) {
+            log::warn!(
+                target: "toptopduck::workspace_registry",
+                "workspace record for {} not written: {detail}",
+                canonical.display()
+            );
+        }
+    }
+
+    /// The display label for one canonical path (issue #1393): the record's
+    /// face when a record carries it, otherwise the directory-tail
+    /// derivation -- the SAME projection the recent list shows, for the
+    /// selector's existing-directory branch (a same-name mint that found a
+    /// never-recorded directory still needs a label).
+    pub fn label_of(&self, canonical: &Path) -> String {
+        self.load()
+            .into_iter()
+            .find(|r| r.path == canonical)
+            .map(|r| r.label())
+            .unwrap_or_else(|| directory_tail(canonical))
     }
 
     /// The reclaim-time counterpart (ADR-0138 Decision 4): a reclaimed empty
@@ -140,20 +173,27 @@ impl WorkspaceRegistry {
         records
     }
 
-    /// [`Self::record`] with an injectable clock for tests.
-    pub(crate) fn record_at(&self, canonical: &Path, now: u64) -> Result<(), String> {
+    /// [`Self::record`] with an injectable clock and title for tests. The
+    /// title lands only on a NEW record -- an existing one takes the LRU bump
+    /// alone (a titled call on a known path degrades to the plain record).
+    pub(crate) fn record_at(
+        &self,
+        canonical: &Path,
+        title: Option<&str>,
+        now: u64,
+    ) -> Result<(), String> {
         let Ok(_guard) = self.write_lock.lock() else {
             return Err("workspace registry write lock poisoned".to_string());
         };
         let mut records = self.load_for_write()?;
         match records.iter_mut().find(|r| r.path == canonical) {
-            // Same canonical path: one record, LRU bump only (created_at and
-            // id are identity and never rewrite).
+            // Same canonical path: one record, LRU bump only (created_at, id,
+            // and title are identity and never rewrite).
             Some(existing) => existing.last_used_at = now,
             None => records.push(WorkspaceRecord {
                 id: Uuid::new_v4(),
                 path: canonical.to_path_buf(),
-                title: None,
+                title: title.map(str::to_string),
                 created_at: now,
                 last_used_at: now,
             }),
@@ -258,10 +298,10 @@ mod tests {
         let reg = registry(&root);
         let a = dir_under(root.path(), "alpha");
         let b = dir_under(root.path(), "beta");
-        reg.record_at(&a, 1_000).expect("record a");
-        reg.record_at(&b, 2_000).expect("record b");
+        reg.record_at(&a, None, 1_000).expect("record a");
+        reg.record_at(&b, None, 2_000).expect("record b");
         // The SAME path again: no second record, only the LRU bump.
-        reg.record_at(&a, 3_000).expect("record a again");
+        reg.record_at(&a, None, 3_000).expect("record a again");
 
         let mut recent = reg.recent();
         assert_eq!(
@@ -286,9 +326,9 @@ mod tests {
         let old = dir_under(root.path(), "old");
         let fresh = dir_under(root.path(), "fresh");
         let gone = dir_under(root.path(), "gone");
-        reg.record_at(&old, 1_000).expect("record old");
-        reg.record_at(&fresh, 9_000).expect("record fresh");
-        reg.record_at(&gone, 5_000).expect("record gone");
+        reg.record_at(&old, None, 1_000).expect("record old");
+        reg.record_at(&fresh, None, 9_000).expect("record fresh");
+        reg.record_at(&gone, None, 5_000).expect("record gone");
         std::fs::remove_dir(&gone).expect("the directory disappears");
 
         let recent = reg.recent();
@@ -309,8 +349,8 @@ mod tests {
         let reg = registry(&root);
         let a = dir_under(root.path(), "alpha");
         let b = dir_under(root.path(), "beta");
-        reg.record_at(&a, 1_000).expect("record a");
-        reg.record_at(&b, 2_000).expect("record b");
+        reg.record_at(&a, None, 1_000).expect("record a");
+        reg.record_at(&b, None, 2_000).expect("record b");
         reg.remove(&a);
         let recent = reg.recent();
         assert_eq!(recent.len(), 1);
@@ -370,7 +410,7 @@ mod tests {
         let dir = dir_under(root.path(), "alpha");
         // The write onto a corrupt file refuses (the app-config
         // read-for-write rule): the file is left untouched.
-        assert!(reg.record_at(&dir, 1_000).is_err());
+        assert!(reg.record_at(&dir, None, 1_000).is_err());
         assert_eq!(
             std::fs::read_to_string(root.path().join(WORKSPACES_FILE_NAME)).expect("read"),
             "{ not json",
@@ -403,7 +443,7 @@ mod tests {
         let root = tempfile::tempdir().expect("tempdir");
         let reg = registry(&root);
         let dir = dir_under(root.path(), "my-project");
-        reg.record_at(&dir, 1_000).expect("record");
+        reg.record_at(&dir, None, 1_000).expect("record");
         let recent = reg.recent();
         assert_eq!(recent[0].label(), "my-project", "no title -> the tail");
         let mut titled = recent[0].clone();
@@ -421,5 +461,50 @@ mod tests {
         .expect("seed");
         let reg = registry(&root);
         assert!(reg.recent().is_empty(), "a future version honest-degrades");
+    }
+
+    #[test]
+    fn label_of_projects_the_record_face_and_falls_back_to_the_tail() {
+        // Issue #1393: the selector's existing-directory branch asks for one
+        // path's label -- the same projection the recent list shows, with
+        // the tail derivation for a never-recorded directory.
+        let root = tempfile::tempdir().expect("tempdir");
+        let reg = registry(&root);
+        let dir = dir_under(root.path(), "alpha");
+        reg.record_at(&dir, None, 1_000).expect("record");
+        assert_eq!(reg.label_of(&dir), "alpha", "no title -> the tail");
+        let other = dir_under(root.path(), "never-recorded");
+        assert_eq!(reg.label_of(&other), "never-recorded");
+    }
+
+    #[test]
+    fn a_titled_record_carries_the_title_and_never_rewrites_on_an_existing_one() {
+        // Issue #1393: the named-workspace mint records with the user's name
+        // as the title; the same path again -- titled or not -- takes the LRU
+        // bump alone (identity is immutable).
+        let root = tempfile::tempdir().expect("tempdir");
+        let reg = registry(&root);
+        let dir = dir_under(root.path(), "alpha");
+        reg.record_at(&dir, Some("My Analysis"), 1_000)
+            .expect("titled");
+        let recent = reg.recent();
+        assert_eq!(recent[0].title.as_deref(), Some("My Analysis"));
+        assert_eq!(recent[0].label(), "My Analysis");
+
+        // A titled call on the known path: bump only, no title rewrite.
+        reg.record_at(&dir, Some("Sneaky Rename"), 2_000)
+            .expect("again");
+        let recent = reg.recent();
+        assert_eq!(
+            recent[0].title.as_deref(),
+            Some("My Analysis"),
+            "an existing record keeps its title"
+        );
+        assert_eq!(recent[0].last_used_at, 2_000, "the bump still lands");
+        assert_eq!(
+            recent.len(),
+            1,
+            "the titled call does not fork a second record"
+        );
     }
 }

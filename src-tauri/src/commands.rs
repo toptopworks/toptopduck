@@ -376,6 +376,36 @@ pub fn list_workspaces(
         .collect()
 }
 
+/// Mint a NAMED workspace for the session-creation selector (issue #1393):
+/// `{workspaces root}/<name>/`, recorded with the name as the record's
+/// `title`. The name is re-validated here (the frontend guard is not a trust
+/// boundary) and rejected -- never rewritten. A same-name directory that
+/// already exists selects it instead (the "pick the existing one" ruling):
+/// no new title, the existing record's label is returned (falling back to
+/// the directory tail for a never-recorded directory), and only the LRU bump
+/// lands. The reply is the same projection the recent list uses, so the
+/// frontend seats it as the pending selection unchanged.
+#[tauri::command]
+pub fn create_workspace(
+    app: tauri::AppHandle,
+    registry: State<'_, Arc<crate::workspace::WorkspaceRegistry>>,
+    name: String,
+) -> Result<RecentWorkspace, String> {
+    let root = crate::persistence::default_workspaces_root(&app);
+    let (canonical, created) = crate::session::workspace::mint_named_workspace(&root, &name)?;
+    let label = if created {
+        registry.record_titled(&canonical, name.trim());
+        name.trim().to_string()
+    } else {
+        registry.record(&canonical);
+        registry.label_of(&canonical)
+    };
+    Ok(RecentWorkspace {
+        path: canonical.display().to_string(),
+        label,
+    })
+}
+
 /// Close a session (ADR-0055): mark closing, fire cancel, and remove the entry
 /// from the store. Returns immediately -- it does NOT wait for an in-flight
 /// ask. If a turn is in flight, cancel fires (HTTP still runs to completion
