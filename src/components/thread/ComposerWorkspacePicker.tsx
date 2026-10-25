@@ -8,6 +8,13 @@ import { cn } from "@/lib/utils";
 import { createWorkspace, listWorkspaces } from "../../api";
 import { workspaceKeys } from "../../session/queryKeys";
 import { Button } from "../ui/button";
+import {
+  Dialog,
+  DialogContent,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "../ui/dialog";
 import { Input } from "../ui/input";
 import { Popover, PopoverContent, PopoverTrigger } from "../ui/popover";
 import { LABEL_HIDE_NARROW } from "./composer-visual";
@@ -35,10 +42,12 @@ import { LABEL_HIDE_NARROW } from "./composer-visual";
 // -- the second recall channel for older workspaces; the untyped view keeps
 // the top 10 cap), row faces aligned to the reference product (folder icon
 // leading, accent check trailing, the selected row on the accent pair), and
-// a "New workspace" entry that swaps the layer to a naming subview: creating
-// mints the named directory immediately (backend command) and seats it as
-// the pending selection; an existing same-name directory selects it. The
-// search term and naming state reset on every layer close.
+// a "New workspace" entry that closes the layer and opens a naming MODAL
+// (the reference product's create flow): creating mints the named directory
+// immediately (backend command) and seats it as the pending selection; an
+// existing same-name directory selects it. The search term resets on every
+// layer close; the modal owns its name/error state and resets on its own
+// close.
 
 /** The popover's display cap (issue #1384): the registry stores everything,
  *  the floating layer shows the freshest 10. */
@@ -112,7 +121,7 @@ export function ComposerWorkspacePicker({
   const intl = useIntl();
   const [openState, setOpenState] = useState(false);
   const [query, setQuery] = useState("");
-  const [naming, setNaming] = useState(false);
+  const [modalOpen, setModalOpen] = useState(false);
   const [nameInput, setNameInput] = useState("");
   const [createError, setCreateError] = useState<string | null>(null);
 
@@ -149,12 +158,21 @@ export function ComposerWorkspacePicker({
     hasIllegalNameChar(trimmedName);
 
   // A layer close resets the transient faces (issue #1393): the search term
-  // and the naming subview never survive into the next open.
+  // never survives into the next open. The naming modal owns its name/error
+  // state separately and resets on its own close.
   function handleOpenChange(next: boolean) {
     setOpenState(next);
     if (!next) {
       setQuery("");
-      setNaming(false);
+    }
+  }
+
+  // The naming modal's close (cancel, escape, overlay, or a successful
+  // create) clears the draft and the backend refusal -- a reopen starts
+  // clean.
+  function handleModalOpenChange(next: boolean) {
+    setModalOpen(next);
+    if (!next) {
       setNameInput("");
       setCreateError(null);
     }
@@ -174,7 +192,7 @@ export function ComposerWorkspacePicker({
     try {
       const w = await createWorkspace(trimmedName);
       onChange(w);
-      handleOpenChange(false);
+      handleModalOpenChange(false);
     } catch (e) {
       // The guard above already rejects the frontend-checkable shapes; this
       // is the backend's refusal (the trust boundary), surfaced inline.
@@ -183,112 +201,52 @@ export function ComposerWorkspacePicker({
   }
 
   return (
-    <Popover open={openState} onOpenChange={handleOpenChange}>
-      <PopoverTrigger asChild>
-        <button
-          type="button"
-          aria-label={value
-            ? intl.formatMessage(
-                {
-                  id: "composer.workspace.triggerAria",
-                  defaultMessage: "Workspace: {label}",
-                },
-                { label: value.label },
-              )
-            : intl.formatMessage({
-                id: "composer.workspace.select",
-                defaultMessage: "Select workspace",
-              })}
-          // One ghost face for BOTH states (issue #1393 follow-up, user
-          // 2026-10-25): muted text, no border or surface -- the quiet
-          // footer-entry family. The bound state carries no accent surface;
-          // the workspace's label itself (vs the "Select workspace"
-          // prompt) marks that the selection is set.
-          className={cn(
-            "inline-flex h-8 items-center gap-1.5 rounded-md px-2 text-sm text-muted-foreground transition-colors cursor-pointer hover:text-foreground",
-            LABEL_HIDE_NARROW,
-          )}
-        >
-          <FolderOpen className="size-4 shrink-0" aria-hidden />
-          <span className="truncate">
-            {value
-              ? value.label
+    <>
+      <Popover open={openState} onOpenChange={handleOpenChange}>
+        <PopoverTrigger asChild>
+          <button
+            type="button"
+            aria-label={value
+              ? intl.formatMessage(
+                  {
+                    id: "composer.workspace.triggerAria",
+                    defaultMessage: "Workspace: {label}",
+                  },
+                  { label: value.label },
+                )
               : intl.formatMessage({
                   id: "composer.workspace.select",
                   defaultMessage: "Select workspace",
                 })}
-          </span>
-          <ChevronDown className="size-3.5 shrink-0 opacity-70" aria-hidden />
-        </button>
-      </PopoverTrigger>
-      <PopoverContent
-        align="start"
-        className="w-64 p-1"
-        // An open must NOT drop the focus into the search box (user
-        // 2026-10-25): the ring stays on the trigger; the naming subview's
-        // input takes its own focus at mount, which this open-time default
-        // would fight anyway.
-        onOpenAutoFocus={(e) => e.preventDefault()}
-      >
-        {naming ? (
-          <div className="flex flex-col gap-2 p-1">
-            <Input
-              autoFocus
-              value={nameInput}
-              onChange={(e) => {
-                setNameInput(e.target.value);
-                setCreateError(null);
-              }}
-              placeholder={intl.formatMessage({
-                id: "composer.workspace.namePlaceholder",
-                defaultMessage: "Workspace name",
-              })}
-              aria-label={intl.formatMessage({
-                id: "composer.workspace.namePlaceholder",
-                defaultMessage: "Workspace name",
-              })}
-              aria-invalid={nameInvalid && trimmedName.length > 0}
-            />
-            {nameInvalid && trimmedName.length > 0 && (
-              <p className="text-xs text-destructive">
-                {intl.formatMessage(
-                  {
-                    id: "composer.workspace.invalidName",
-                    defaultMessage:
-                      "Must be 1-64 characters, no \\ / : * ? \" < > |",
-                  },
-                )}
-              </p>
+            // One ghost face for BOTH states (issue #1393 follow-up, user
+            // 2026-10-25): muted text, no border or surface -- the quiet
+            // footer-entry family. The bound state carries no accent surface;
+            // the workspace's label itself (vs the "Select workspace"
+            // prompt) marks that the selection is set.
+            className={cn(
+              "inline-flex h-8 items-center gap-1.5 rounded-md px-2 text-sm text-muted-foreground transition-colors cursor-pointer hover:text-foreground",
+              LABEL_HIDE_NARROW,
             )}
-            {createError !== null && (
-              <p className="text-xs text-destructive">{createError}</p>
-            )}
-            <div className="flex justify-end gap-1">
-              <Button
-                type="button"
-                variant="ghost"
-                size="sm"
-                onClick={() => setNaming(false)}
-              >
-                {intl.formatMessage({
-                  id: "composer.workspace.cancel",
-                  defaultMessage: "Cancel",
-                })}
-              </Button>
-              <Button
-                type="button"
-                size="sm"
-                disabled={nameInvalid}
-                onClick={() => void createNamed()}
-              >
-                {intl.formatMessage({
-                  id: "composer.workspace.create",
-                  defaultMessage: "Create",
-                })}
-              </Button>
-            </div>
-          </div>
-        ) : (
+          >
+            <FolderOpen className="size-4 shrink-0" aria-hidden />
+            <span className="truncate">
+              {value
+                ? value.label
+                : intl.formatMessage({
+                    id: "composer.workspace.select",
+                    defaultMessage: "Select workspace",
+                  })}
+            </span>
+            <ChevronDown className="size-3.5 shrink-0 opacity-70" aria-hidden />
+          </button>
+        </PopoverTrigger>
+        <PopoverContent
+          align="start"
+          className="w-64 p-1"
+          // An open must NOT drop the focus into the search box (the
+          // post-delivery ruling): the ring stays on the trigger.
+          onOpenAutoFocus={(e) => e.preventDefault()}
+        >
           <>
             {recent.length > 0 && (
               // One scroll band for the search box + the list (issue #1393):
@@ -369,7 +327,13 @@ export function ComposerWorkspacePicker({
             {recent.length > 0 && <div className="my-1 border-t border-border" />}
             <button
               type="button"
-              onClick={() => setNaming(true)}
+              // The naming face is a modal, not a layer subview (the
+              // reference product's create flow): the layer closes and the
+              // modal takes over.
+              onClick={() => {
+                handleOpenChange(false);
+                setModalOpen(true);
+              }}
               className={ENTRY_CLASS}
             >
               <Plus className="size-4 shrink-0" aria-hidden />
@@ -409,8 +373,81 @@ export function ComposerWorkspacePicker({
               </button>
             )}
           </>
-        )}
-      </PopoverContent>
-    </Popover>
+        </PopoverContent>
+      </Popover>
+      {/* The naming face (issue #1393): a modal, not a layer subview (the
+          reference product's create flow). The input autofocuses at mount
+          and Enter submits the guarded name; cancel, escape, and the
+          overlay take the same clean close. */}
+      <Dialog open={modalOpen} onOpenChange={handleModalOpenChange}>
+        <DialogContent className="sm:max-w-sm">
+          <DialogHeader>
+            <DialogTitle>
+              {intl.formatMessage({
+                id: "composer.workspace.newWorkspace",
+                defaultMessage: "New workspace",
+              })}
+            </DialogTitle>
+          </DialogHeader>
+          <form
+            className="flex flex-col gap-2"
+            onSubmit={(e) => {
+              e.preventDefault();
+              if (!nameInvalid) void createNamed();
+            }}
+          >
+            <Input
+              autoFocus
+              value={nameInput}
+              onChange={(e) => {
+                setNameInput(e.target.value);
+                setCreateError(null);
+              }}
+              placeholder={intl.formatMessage({
+                id: "composer.workspace.namePlaceholder",
+                defaultMessage: "Workspace name",
+              })}
+              aria-label={intl.formatMessage({
+                id: "composer.workspace.namePlaceholder",
+                defaultMessage: "Workspace name",
+              })}
+              aria-invalid={nameInvalid && trimmedName.length > 0}
+            />
+            {nameInvalid && trimmedName.length > 0 && (
+              <p className="text-xs text-destructive">
+                {intl.formatMessage(
+                  {
+                    id: "composer.workspace.invalidName",
+                    defaultMessage:
+                      "Must be 1-64 characters, no \\ / : * ? \" < > |, and must not end with a dot",
+                  },
+                )}
+              </p>
+            )}
+            {createError !== null && (
+              <p className="text-xs text-destructive">{createError}</p>
+            )}
+            <DialogFooter className="mt-2">
+              <Button
+                type="button"
+                variant="outline"
+                onClick={() => handleModalOpenChange(false)}
+              >
+                {intl.formatMessage({
+                  id: "common.cancel",
+                  defaultMessage: "Cancel",
+                })}
+              </Button>
+              <Button type="submit" disabled={nameInvalid}>
+                {intl.formatMessage({
+                  id: "composer.workspace.create",
+                  defaultMessage: "Create",
+                })}
+              </Button>
+            </DialogFooter>
+          </form>
+        </DialogContent>
+      </Dialog>
+    </>
   );
 }

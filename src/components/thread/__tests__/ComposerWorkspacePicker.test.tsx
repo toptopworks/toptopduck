@@ -287,15 +287,19 @@ describe("search, row faces, and the naming subview (issue #1393)", () => {
     expect(beta.children.length).toBe(2);
   });
 
-  it("the naming subview guards the name and cancels back without invoking", async () => {
+  it("the naming modal guards the name and cancels without invoking", async () => {
     vi.mocked(listWorkspaces).mockResolvedValue([
       { path: "/w/alpha", label: "alpha" },
     ]);
     renderPicker(null);
     openPopover();
+    // The entry closes the layer and hands over to the naming modal.
     fireEvent.click(
       await screen.findByRole("button", { name: "New workspace" }),
     );
+    expect(
+      await screen.findByRole("dialog", { name: "New workspace" }),
+    ).toBeInTheDocument();
     const input = await screen.findByPlaceholderText("Workspace name");
     const create = screen.getByRole("button", { name: "Create" });
     // Empty after trimming: disabled, and no hint until something is typed.
@@ -314,17 +318,19 @@ describe("search, row faces, and the naming subview (issue #1393)", () => {
     expect(create).toBeDisabled();
     fireEvent.change(input, { target: { value: "my.report" } });
     expect(create).toBeEnabled();
-    // A legal name enables; cancel returns to the list with nothing invoked.
+    // A legal name enables; cancel closes the modal with nothing invoked.
     fireEvent.change(input, { target: { value: "My Analysis" } });
     expect(create).toBeEnabled();
     fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
-    expect(
-      await screen.findByRole("button", { name: "Browse folders…" }),
-    ).toBeInTheDocument();
+    await waitFor(() =>
+      expect(
+        screen.queryByPlaceholderText("Workspace name"),
+      ).not.toBeInTheDocument(),
+    );
     expect(createWorkspace).not.toHaveBeenCalled();
   });
 
-  it("creating mints immediately and seats the reply as the pending selection", async () => {
+  it("creating from the modal mints immediately and seats the reply as the pending selection", async () => {
     vi.mocked(listWorkspaces).mockResolvedValue([
       { path: "/w/alpha", label: "alpha" },
     ]);
@@ -338,26 +344,26 @@ describe("search, row faces, and the naming subview (issue #1393)", () => {
     fireEvent.click(
       await screen.findByRole("button", { name: "New workspace" }),
     );
-    fireEvent.change(await screen.findByPlaceholderText("Workspace name"), {
-      target: { value: "  my-analysis " },
-    });
-    fireEvent.click(screen.getByRole("button", { name: "Create" }));
+    const input = await screen.findByPlaceholderText("Workspace name");
+    fireEvent.change(input, { target: { value: "  my-analysis " } });
+    // Enter rides the form's submit path -- the modal's commit gesture.
+    fireEvent.submit(input.closest("form")!);
     await waitFor(() =>
       expect(onChange).toHaveBeenCalledWith({
         path: "/w/my-analysis",
         label: "my-analysis",
       }),
     );
-    // The trimmed spelling crosses IPC; the layer closes on the commit.
+    // The trimmed spelling crosses IPC; the modal closes on the commit.
     expect(createWorkspace).toHaveBeenCalledWith("my-analysis");
     await waitFor(() =>
       expect(
-        screen.queryByRole("button", { name: "Create" }),
+        screen.queryByPlaceholderText("Workspace name"),
       ).not.toBeInTheDocument(),
     );
   });
 
-  it("a backend refusal surfaces inline and keeps the layer open", async () => {
+  it("a backend refusal surfaces inline and keeps the modal open", async () => {
     vi.mocked(listWorkspaces).mockResolvedValue([
       { path: "/w/alpha", label: "alpha" },
     ]);
@@ -379,7 +385,7 @@ describe("search, row faces, and the naming subview (issue #1393)", () => {
         "workspace name contains a path-illegal character",
       ),
     ).toBeInTheDocument();
-    // The layer stays open for a retry; nothing was committed.
+    // The modal stays open for a retry; nothing was committed.
     expect(screen.getByRole("button", { name: "Create" })).toBeInTheDocument();
     expect(onChange).not.toHaveBeenCalled();
   });
