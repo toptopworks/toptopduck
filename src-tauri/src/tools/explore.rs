@@ -445,6 +445,7 @@ mod tests {
             temp_path: std::path::Path::new("."),
             workspace: None,
             workspaces_root: None,
+            workspace_registry: None,
             snapshot_dir: std::path::PathBuf::from("."),
             assets_dir: None,
             tool_output_refs: &mut refs,

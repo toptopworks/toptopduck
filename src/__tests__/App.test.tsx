@@ -485,8 +485,8 @@ describe("App rename flow", () => {
     );
     // The fold toggle's label flips with the collapsed state (cold start is
     // collapsed, ADR-0083), so match either form -- any fold change re-fires
-    // the registry.
-    fireEvent.click(screen.getByRole("button", { name: /工作区/ }));
+    // the registry. (#1384: the panel placeholder reads 「右侧栏」.)
+    fireEvent.click(screen.getByRole("button", { name: /右侧栏/ }));
     expect(capturedComposerFields?.loading).toBe(false);
 
     release({ ...guidedDataset, display_name: "员工表" });
@@ -715,7 +715,7 @@ describe("App ask flow", () => {
     state.thread = [recordedTurn("哪个名字", outcome23)];
     await submitQuestion("哪个名字");
 
-    // The clarify body is visible in the thread AND now also in the workspace
+    // The clarify body is visible in the thread AND now also in the right sidebar
     // textual card, so assert at least one match rather than a unique one.
     await waitFor(() =>
       expect(

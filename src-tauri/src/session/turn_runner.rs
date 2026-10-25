@@ -427,6 +427,7 @@ impl super::Session {
                         temp_path: &self.temp_path,
                         workspace: Some(&mut self.runtime_facts.workspace),
                         workspaces_root: self.workspaces_root.clone(),
+                        workspace_registry: self.workspace_registry.as_deref(),
                         snapshot_dir,
                         assets_dir,
                         tool_output_refs: &mut self.tool_output_refs,
@@ -822,6 +823,7 @@ impl super::Session {
                 // semantics across both runtime surfaces.
                 workspace: Some(&mut self.runtime_facts.workspace),
                 workspaces_root: self.workspaces_root.clone(),
+                workspace_registry: self.workspace_registry.as_deref(),
                 snapshot_dir,
                 assets_dir,
                 tool_output_refs: &mut self.tool_output_refs,

@@ -73,12 +73,34 @@ export interface CreateSessionReply {
   recipe_path: string;
 }
 
+// One recent-workspace row from the registry's LRU view (ADR-0138, issue
+// #1384): the canonical path (the create_session binding value) + the
+// display label (the record's title, defaulting to the directory tail -- a
+// full path is never the display face). Mirrors `commands::RecentWorkspace`.
+export interface RecentWorkspace {
+  path: string;
+  label: string;
+}
+
+// The workspace registry's LRU view (ADR-0138, issue #1384): records whose
+// directory still exists, most recently used first. The selector slices its
+// top 10; older workspaces resurface through the folder browse. Tolerant --
+// an unreadable registry lists empty.
+export async function listWorkspaces(): Promise<RecentWorkspace[]> {
+  return invoke<RecentWorkspace[]>("list_workspaces");
+}
+
 // Create a new session (ADR-0056/0089): the backend builds an independent
 // in-memory DuckDB instance + per-session cancel token, binds them to a
 // backend-generated id (UUID), AND immediately persists by creating a
 // per-session directory + initial recipe.json. This is the `+ tab` action.
-export async function createSession(): Promise<CreateSessionReply> {
-  return invoke<CreateSessionReply>("create_session");
+// `workspace` (ADR-0137/0138, issue #1384): the directory to bind as the
+// session's workspace; null keeps the default lazy-mint behavior (the first
+// disk-need moment mints a timestamped workspace).
+export async function createSession(
+  workspace?: string | null,
+): Promise<CreateSessionReply> {
+  return invoke<CreateSessionReply>("create_session", { workspace: workspace ?? null });
 }
 
 // Close a session (ADR-0055): fire cancel + mark closing + remove from the

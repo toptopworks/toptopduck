@@ -145,7 +145,7 @@ export function GeneralSection({
         description={(
           <FormattedMessage
             id="settings.general.description"
-            defaultMessage="Appearance and language for the workspace."
+            defaultMessage="Appearance and language for the app."
           />
         )}
       />

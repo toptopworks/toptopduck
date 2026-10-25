@@ -20,8 +20,8 @@ export function WorkspaceToggle({
 }) {
   const intl = useIntl();
   const label = collapsed
-    ? intl.formatMessage({ id: "workspace.expand", defaultMessage: "Open workspace" })
-    : intl.formatMessage({ id: "workspace.collapse", defaultMessage: "Close workspace" });
+    ? intl.formatMessage({ id: "workspace.expand", defaultMessage: "Expand right sidebar" })
+    : intl.formatMessage({ id: "workspace.collapse", defaultMessage: "Collapse right sidebar" });
   return (
     <button
       type="button"

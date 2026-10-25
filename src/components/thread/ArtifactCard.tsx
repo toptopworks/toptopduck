@@ -104,7 +104,7 @@ function ArtifactRow({
       )}
       aria-current={active ? "true" : undefined}
       aria-label={intl.formatMessage(
-        { id: "thread.artifacts.open", defaultMessage: "Open {name} in the workspace" },
+        { id: "thread.artifacts.open", defaultMessage: "Open {name} in the right sidebar" },
         { name: artifact.file_name },
       )}
       onClick={() => onSelectFile?.(artifact.path)}

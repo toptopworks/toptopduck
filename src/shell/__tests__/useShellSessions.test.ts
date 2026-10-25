@@ -1050,4 +1050,31 @@ describe("useShellSessions startup re-adoption sweep (issue #842)", () => {
     await act(async () => {});
     expect(listLiveSessions).toHaveBeenCalledTimes(2);
   });
+
+  // Issue #1384 (ADR-0137/0138): the selector pill's directory rides the
+  // mint ONCE through createSession's directory parameter; an absent value
+  // passes an explicit null -- the default lazy-mint behavior.
+  it("createSessionWithQuestion carries the workspace directory to createSession", async () => {
+    vi.mocked(createSession).mockResolvedValue(reply("s1"));
+    const { result } = renderSessions();
+    await act(async () => {
+      await result.current.createSessionWithQuestion(
+        "how many rows?",
+        [],
+        DEFAULT_POSTURE,
+        [],
+        "/w/demo",
+      );
+    });
+    expect(createSession).toHaveBeenCalledWith("/w/demo");
+    await act(async () => {
+      await result.current.createSessionWithQuestion(
+        "again?",
+        [],
+        DEFAULT_POSTURE,
+        [],
+      );
+    });
+    expect(createSession).toHaveBeenLastCalledWith(null);
+  });
 });
