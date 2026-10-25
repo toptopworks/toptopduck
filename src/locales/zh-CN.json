@@ -87,7 +87,7 @@
   "composer.workspace.browse": "浏览文件夹…",
   "composer.workspace.cancel": "取消",
   "composer.workspace.create": "创建",
-  "composer.workspace.invalidName": "工作区名称须为 1-64 个字符，不能包含 \\ / : * ? \" < > | 等字符",
+  "composer.workspace.invalidName": "工作区名称须为 1-64 个字符，不能包含 \\ / : * ? \" < > | 等字符，且不能以点结尾",
   "composer.workspace.namePlaceholder": "工作区名称",
   "composer.workspace.newWorkspace": "新建工作区",
   "composer.workspace.noMatches": "未找到匹配的工作区",

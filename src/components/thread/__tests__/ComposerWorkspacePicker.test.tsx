@@ -229,6 +229,7 @@ describe("search, row faces, and the naming subview (issue #1393)", () => {
   it("a layer close resets the search term for the next open", async () => {
     vi.mocked(listWorkspaces).mockResolvedValue([
       { path: "/w/alpha", label: "alpha" },
+      { path: "/w/beta", label: "beta" },
     ]);
     renderPicker(null);
     openPopover();
@@ -237,7 +238,8 @@ describe("search, row faces, and the naming subview (issue #1393)", () => {
     expect(
       await screen.findByText("No matching workspaces"),
     ).toBeInTheDocument();
-    // Commit a row: the layer closes. Reopening starts unfiltered.
+    // Commit a row: the layer closes. Reopening starts unfiltered -- a
+    // stale "alpha" term would keep beta hidden.
     fireEvent.change(search, { target: { value: "alpha" } });
     fireEvent.click(await screen.findByRole("button", { name: "alpha" }));
     await waitFor(() =>
@@ -248,6 +250,9 @@ describe("search, row faces, and the naming subview (issue #1393)", () => {
     openPopover();
     expect(
       await screen.findByRole("button", { name: "alpha" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "beta" }),
     ).toBeInTheDocument();
   });
 
@@ -303,6 +308,12 @@ describe("search, row faces, and the naming subview (issue #1393)", () => {
     // Over the cap: disabled too.
     fireEvent.change(input, { target: { value: "x".repeat(65) } });
     expect(create).toBeDisabled();
+    // A trailing dot: disabled (dot-only names resolve to an ancestor, and
+    // Win32 strips the dot at create time); an interior dot stays legal.
+    fireEvent.change(input, { target: { value: "report." } });
+    expect(create).toBeDisabled();
+    fireEvent.change(input, { target: { value: "my.report" } });
+    expect(create).toBeEnabled();
     // A legal name enables; cancel returns to the list with nothing invoked.
     fireEvent.change(input, { target: { value: "My Analysis" } });
     expect(create).toBeEnabled();

@@ -75,7 +75,10 @@ pub(crate) const NAMED_WORKSPACE_MAX_CHARS: usize = 64;
 /// Validate a NAMED workspace's directory name (issue #1393): non-empty after
 /// trimming, at most [`NAMED_WORKSPACE_MAX_CHARS`] characters, and free of the
 /// path-illegal set (separators plus the Windows-reserved punctuation) and
-/// control characters. The caller validates the TRIMMED spelling; the input is
+/// control characters. A trailing dot is rejected as well: a dot-only name
+/// resolves to the root itself or its parent (`.`/`..`), and Win32 strips a
+/// trailing dot at create time, so the disk would disagree with the recorded
+/// title. The caller validates the TRIMMED spelling; the input is
 /// rejected, never silently rewritten -- a rewritten directory name would not
 /// match what the user expects to find later.
 pub(crate) fn validate_workspace_name(name: &str) -> Result<(), String> {
@@ -91,6 +94,9 @@ pub(crate) fn validate_workspace_name(name: &str) -> Result<(), String> {
         matches!(c, '\\' | '/' | ':' | '*' | '?' | '"' | '<' | '>' | '|') || c.is_control()
     }) {
         return Err("workspace name contains a path-illegal or control character".to_string());
+    }
+    if name.ends_with('.') {
+        return Err("workspace name must not end with a dot".to_string());
     }
     Ok(())
 }
@@ -447,6 +453,16 @@ mod tests {
         assert!(
             mint_named_workspace(root.path(), "ok name").is_ok(),
             "spaces are legal"
+        );
+        for name in [".", "..", "...", "report."] {
+            assert!(
+                mint_named_workspace(root.path(), name).is_err(),
+                "dot-suffixed names are rejected: {name:?}"
+            );
+        }
+        assert!(
+            mint_named_workspace(root.path(), "my.report").is_ok(),
+            "an interior dot is legal"
         );
     }
 

@@ -383,7 +383,10 @@ pub fn list_workspaces(
 /// already exists selects it instead (the "pick the existing one" ruling):
 /// no new title, the existing record's label is returned (falling back to
 /// the directory tail for a never-recorded directory), and only the LRU bump
-/// lands. The reply is the same projection the recent list uses, so the
+/// lands. On a fresh mint the titled record is part of the command, so a
+/// refused write fails the reply (the directory stays minted; a retry of the
+/// same name takes the existing-directory branch). The reply is the same
+/// projection the recent list uses, so the
 /// frontend seats it as the pending selection unchanged.
 #[tauri::command]
 pub fn create_workspace(
@@ -394,7 +397,14 @@ pub fn create_workspace(
     let root = crate::persistence::default_workspaces_root(&app);
     let (canonical, created) = crate::session::workspace::mint_named_workspace(&root, &name)?;
     let label = if created {
-        registry.record_titled(&canonical, name.trim());
+        // The record IS the command the user asked for (ADR-0138's
+        // best-effort stance covers the session-event mounts only): a
+        // refused write surfaces instead of reporting a successful create
+        // the registry cannot show. The minted directory stays; retrying
+        // the same name takes the existing-directory branch.
+        registry
+            .record_titled(&canonical, name.trim())
+            .map_err(|detail| format!("workspace created but the record failed: {detail}"))?;
         name.trim().to_string()
     } else {
         registry.record(&canonical);

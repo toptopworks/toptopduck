@@ -135,13 +135,17 @@ export function ComposerWorkspacePicker({
     : recent.slice(0, RECENT_LIMIT);
 
   // The naming guard, mirrored from the backend (which re-validates as the
-  // trust boundary): empty after trimming, over the cap, or carrying a
-  // path-illegal/control character.
+  // trust boundary): empty after trimming, over the cap, ending in a dot, or
+  // carrying a path-illegal/control character.
   const trimmedName = nameInput.trim();
   const nameInvalid =
     trimmedName.length === 0 ||
     // Code points, matching the backend's chars().count().
     [...trimmedName].length > NAME_MAX_CHARS ||
+    // A trailing dot mirrors the backend's guard: dot-only names resolve to
+    // the root or its parent, and Win32 strips a trailing dot at create
+    // time (the disk would disagree with the recorded title).
+    trimmedName.endsWith(".") ||
     hasIllegalNameChar(trimmedName);
 
   // A layer close resets the transient faces (issue #1393): the search term
