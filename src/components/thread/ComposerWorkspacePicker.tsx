@@ -5,6 +5,7 @@ import { open } from "@tauri-apps/plugin-dialog";
 import { Check, ChevronDown, FolderOpen, FolderX, Plus, Search } from "lucide-react";
 
 import { cn } from "@/lib/utils";
+import { isInvalidWorkspaceName } from "@/lib/workspaceName";
 import { createWorkspace, listWorkspaces } from "../../api";
 import { workspaceKeys } from "../../session/queryKeys";
 import { Button } from "../ui/button";
@@ -62,31 +63,6 @@ const RECENT_LIMIT = 10;
 const ENTRY_CLASS =
   "flex w-full cursor-pointer items-center gap-2 rounded-sm px-2 py-1.5 text-sm outline-none hover:bg-accent/50 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring";
 
-/** The name cap and illegal-character set for a named workspace (issue
- *  #1393): the backend re-validates, this guard only keeps the create button
- *  honest. Rejecting beats rewriting -- a renamed directory would not match
- *  what the user expects to find later. */
-const NAME_MAX_CHARS = 64;
-
-/** Whether a name carries a control or path-illegal character (issue
- *  #1393): a charCode walk, not a regex -- the control range is a linted
- *  pattern face better kept explicit. */
-function hasIllegalNameChar(name: string): boolean {
-  for (const c of name) {
-    const code = c.codePointAt(0)!;
-    // The control set mirrors Rust's char::is_control(): C0, DEL, and C1.
-    if (
-      code <= 0x1f ||
-      code === 0x7f ||
-      (code >= 0x80 && code <= 0x9f) ||
-      "\\/:*?\"<>|".includes(c)
-    ) {
-      return true;
-    }
-  }
-  return false;
-}
-
 /** The shell-held pending selection: the directory to bind at the next
  *  mint, plus its display label (the browse face derives the tail here --
  *  the backend projects the same derivation for list rows). */
@@ -138,7 +114,7 @@ export function ComposerWorkspacePicker({
     enabled: openState,
     staleTime: 0,
   });
-  const recent = data ?? [];
+  const recent = (data ?? []).filter((w) => w.exists);
   // The typed view widens to the full registry (issue #1393's second recall
   // channel); the untyped view keeps the top-10 cap.
   const trimmedQuery = query.trim().toLowerCase();
@@ -147,18 +123,10 @@ export function ComposerWorkspacePicker({
     : recent.slice(0, RECENT_LIMIT);
 
   // The naming guard, mirrored from the backend (which re-validates as the
-  // trust boundary): empty after trimming, over the cap, ending in a dot, or
-  // carrying a path-illegal/control character.
+  // trust boundary): the shared guard (issue #1392 -- one copy for the
+  // selector's create modal and the sidebar's rename modal).
   const trimmedName = nameInput.trim();
-  const nameInvalid =
-    trimmedName.length === 0 ||
-    // Code points, matching the backend's chars().count().
-    [...trimmedName].length > NAME_MAX_CHARS ||
-    // A trailing dot mirrors the backend's guard: dot-only names resolve to
-    // the root or its parent, and Win32 strips a trailing dot at create
-    // time (the disk would disagree with the recorded title).
-    trimmedName.endsWith(".") ||
-    hasIllegalNameChar(trimmedName);
+  const nameInvalid = isInvalidWorkspaceName(trimmedName);
 
   // A layer close resets the transient faces (issue #1393): the search term
   // never survives into the next open. The naming modal owns its name/error

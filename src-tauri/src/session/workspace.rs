@@ -280,10 +280,11 @@ impl super::Session {
         // "session started using it" moment -- the registry write for the
         // create_session mount point (the only production caller; resume
         // restores the binding through the facts literal, so a reopen never
-        // re-records). Best-effort inside the ledger: a failed record never
-        // fails the bind.
+        // re-records). The bind is an explicit user choice (issue #1392), so
+        // the record joins the sidebar's workspace section. Best-effort
+        // inside the ledger: a failed record never fails the bind.
         if let Some(registry) = &self.workspace_registry {
-            registry.record(&canonical);
+            registry.record_selected(&canonical);
         }
         self.runtime_facts.workspace = Some(canonical);
     }

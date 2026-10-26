@@ -1,5 +1,12 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { act, fireEvent, render, screen, within } from "@testing-library/react";
+import {
+  act,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+  within,
+} from "@testing-library/react";
 import { IntlProvider } from "react-intl";
 import {
   createContext,
@@ -14,6 +21,23 @@ import type { OpenSession } from "../sidebarModel";
 import type { SessionMetadata } from "../../types/session";
 import type { ProviderConfig } from "../../types/provider";
 import { TooltipProvider } from "@/components/ui/tooltip";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+
+// The sidebar's workspace section queries the registry listing (issue
+// #1392) and its menu fires the rename/remove/create IPCs; the shell tests
+// are display-contract tests, so the listing is an empty registry and the
+// mutations resolve unless a test overrides them.
+vi.mock("../../api", () => ({
+  listWorkspaces: vi.fn().mockResolvedValue([]),
+  renameWorkspace: vi.fn().mockResolvedValue(undefined),
+  removeWorkspace: vi.fn().mockResolvedValue(undefined),
+  createWorkspace: vi.fn().mockResolvedValue(undefined),
+}));
+vi.mock("@tauri-apps/plugin-opener", () => ({
+  openPath: vi.fn().mockResolvedValue(undefined),
+}));
+import { openPath } from "@tauri-apps/plugin-opener";
+import { listWorkspaces, removeWorkspace } from "../../api";
 
 // Radix DropdownMenu's pointer-event handling recurses under jsdom (the
 // SessionHeaderMenu suite's known limitation), so the dropdown-menu module is
@@ -117,12 +141,24 @@ vi.mock("@/components/ui/dropdown-menu", () => {
 // renderSettings) to avoid a cross-domain name clash with the settings
 // domain's renderSettings helper. TooltipProvider mirrors the App ancestor
 // (the connection footer's dual-state gear carries a Tooltip, issue #282).
-function renderShell(ui: ReactElement) {
-  return render(
-    <TooltipProvider>
-      <IntlProvider locale="en" messages={{}} onError={() => {}}>{ui}</IntlProvider>
-    </TooltipProvider>,
+// The full provider stack, shared by renderShell AND the rerender calls:
+// RTL's rerender replaces the WHOLE tree, so the wrappers (the QueryClient
+// included -- the workspace listing query reads it, issue #1392) must ride
+// along. A fresh client per tree keeps the query cache test-local.
+function shellTree(ui: ReactElement) {
+  return (
+    <QueryClientProvider
+      client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}
+    >
+      <TooltipProvider>
+        <IntlProvider locale="en" messages={{}} onError={() => {}}>{ui}</IntlProvider>
+      </TooltipProvider>
+    </QueryClientProvider>
   );
+}
+
+function renderShell(ui: ReactElement) {
+  return render(shellTree(ui));
 }
 
 // Two never-saved open sessions: the active one carries .active.open; the other
@@ -146,6 +182,7 @@ describe("SessionSidebar shell-skeleton visuals (ADR-0067, issue #171)", () => {
         disabled={false}
         loadError={null}
         onNew={() => {}}
+        onNewInWorkspace={() => {}}
         onActivate={() => {}}
         onOpenPersisted={() => {}}
         grouping="flat"
@@ -188,6 +225,7 @@ describe("SessionSidebar shell-skeleton visuals (ADR-0067, issue #171)", () => {
         disabled={false}
         loadError={null}
         onNew={() => {}}
+        onNewInWorkspace={() => {}}
         onActivate={() => {}}
         onOpenPersisted={() => {}}
         grouping="flat"
@@ -226,6 +264,7 @@ describe("SessionSidebar shell-skeleton visuals (ADR-0067, issue #171)", () => {
         disabled={false}
         loadError={null}
         onNew={() => {}}
+        onNewInWorkspace={() => {}}
         onActivate={() => {}}
         onOpenPersisted={() => {}}
         grouping="flat"
@@ -277,6 +316,7 @@ describe("SessionSidebar shell-skeleton visuals (ADR-0067, issue #171)", () => {
         disabled={false}
         loadError={null}
         onNew={() => {}}
+        onNewInWorkspace={() => {}}
         onActivate={() => {}}
         onOpenPersisted={() => {}}
         grouping="flat"
@@ -318,6 +358,7 @@ describe("SessionSidebar shell-skeleton visuals (ADR-0067, issue #171)", () => {
         disabled={false}
         loadError={null}
         onNew={() => {}}
+        onNewInWorkspace={() => {}}
         onActivate={() => {}}
         onOpenPersisted={() => {}}
         grouping="flat"
@@ -376,6 +417,7 @@ describe("SessionSidebar shell-skeleton visuals (ADR-0067, issue #171)", () => {
         disabled={false}
         loadError={null}
         onNew={() => {}}
+        onNewInWorkspace={() => {}}
         onActivate={() => {}}
         onOpenPersisted={() => {}}
         grouping="flat"
@@ -429,6 +471,7 @@ describe("SessionSidebar shell-skeleton visuals (ADR-0067, issue #171)", () => {
         disabled={true}
         loadError={null}
         onNew={() => {}}
+        onNewInWorkspace={() => {}}
         onActivate={() => {}}
         onOpenPersisted={() => {}}
         grouping="flat"
@@ -462,6 +505,7 @@ describe("SessionSidebar shell-skeleton visuals (ADR-0067, issue #171)", () => {
         disabled={false}
         loadError={null}
         onNew={() => {}}
+        onNewInWorkspace={() => {}}
         onActivate={() => {}}
         onOpenPersisted={() => {}}
         grouping="flat"
@@ -529,6 +573,7 @@ describe("SessionSidebar grouping toggle (ADR-0072, issue #251)", () => {
         loadError={null}
         grouping="flat"
         onNew={() => {}}
+        onNewInWorkspace={() => {}}
         onActivate={() => {}}
         onOpenPersisted={() => {}}
         onSwitchGrouping={() => {}}
@@ -560,6 +605,7 @@ describe("SessionSidebar grouping toggle (ADR-0072, issue #251)", () => {
         loadError={null}
         grouping="flat"
         onNew={() => {}}
+        onNewInWorkspace={() => {}}
         onActivate={() => {}}
         onOpenPersisted={() => {}}
         onSwitchGrouping={onSwitchGrouping}
@@ -611,6 +657,7 @@ describe("SessionSidebar grouping toggle (ADR-0072, issue #251)", () => {
         loadError={null}
         grouping="time"
         onNew={() => {}}
+        onNewInWorkspace={() => {}}
         onActivate={() => {}}
         onOpenPersisted={() => {}}
         onSwitchGrouping={() => {}}
@@ -650,6 +697,7 @@ describe("SessionSidebar grouping toggle (ADR-0072, issue #251)", () => {
         loadError={null}
         grouping="flat"
         onNew={() => {}}
+        onNewInWorkspace={() => {}}
         onActivate={() => {}}
         onOpenPersisted={() => {}}
         onSwitchGrouping={() => {}}
@@ -690,6 +738,7 @@ describe("SessionSidebar grouping toggle (ADR-0072, issue #251)", () => {
         loadError={null}
         grouping="flat"
         onNew={() => {}}
+        onNewInWorkspace={() => {}}
         onActivate={() => {}}
         onOpenPersisted={() => {}}
         onSwitchGrouping={onSwitchGrouping}
@@ -727,6 +776,7 @@ describe("SessionSidebar grouping toggle (ADR-0072, issue #251)", () => {
         loadError={null}
         grouping="flat"
         onNew={() => {}}
+        onNewInWorkspace={() => {}}
         onActivate={() => {}}
         onOpenPersisted={() => {}}
         onSwitchGrouping={() => {}}
@@ -789,6 +839,7 @@ describe("SessionSidebar settings footer (issue #282)", () => {
         disabled={false}
         loadError={null}
         onNew={() => {}}
+        onNewInWorkspace={() => {}}
         onActivate={() => {}}
         onOpenPersisted={() => {}}
         grouping="flat"
@@ -844,6 +895,7 @@ describe("SessionSidebar pending-approval coloring (ADR-0083, issue #297)", () =
       disabled: false,
       loadError: null,
       onNew: () => {},
+      onNewInWorkspace: () => {},
       onActivate: () => {},
       onOpenPersisted: () => {},
       grouping: "flat" as const,
@@ -905,6 +957,7 @@ describe("SessionSidebar turn-failed coloring (issue #1005)", () => {
       disabled: false,
       loadError: null,
       onNew: () => {},
+      onNewInWorkspace: () => {},
       onActivate: () => {},
       onOpenPersisted: () => {},
       grouping: "flat" as const,
@@ -983,13 +1036,7 @@ describe("SessionSidebar turn-failed coloring (issue #1005)", () => {
       <SessionSidebar {...baseProps()} turnFailedSids={new Set(["sess-bg"])} />,
     );
     expect(view.container.querySelector(".session-entry[data-turn-failed]")).not.toBeNull();
-    view.rerender(
-      <TooltipProvider>
-        <IntlProvider locale="en" messages={{}} onError={() => {}}>
-          <SessionSidebar {...baseProps()} />
-        </IntlProvider>
-      </TooltipProvider>,
-    );
+    view.rerender(shellTree(<SessionSidebar {...baseProps()} />));
     expect(view.container.querySelector("[data-turn-failed]")).toBeNull();
     expect(view.container.querySelector(".turn-failed")).toBeNull();
     expect(view.container.querySelector(".bg-destructive")).toBeNull();
@@ -1017,6 +1064,7 @@ describe("SessionSidebar hover card content (ADR-0093, issue #513)", () => {
       disabled: false,
       loadError: null,
       onNew: () => {},
+      onNewInWorkspace: () => {},
       onActivate: () => {},
       onOpenPersisted: () => {},
       grouping: "flat" as const,
@@ -1298,6 +1346,7 @@ describe("SessionSidebar organization (ADR-0127, issue #1175)", () => {
       loadError: null,
       grouping: "flat" as const,
       onNew: () => {},
+      onNewInWorkspace: () => {},
       onActivate: () => {},
       onOpenPersisted: () => {},
       onSwitchGrouping: () => {},
@@ -1438,11 +1487,9 @@ describe("SessionSidebar organization (ADR-0127, issue #1175)", () => {
     fireEvent.click(toggle);
     expect(onToggleArchived).toHaveBeenCalledTimes(1);
     rerender(
-      <TooltipProvider>
-        <IntlProvider locale="en" messages={{}} onError={() => {}}>
-          <SessionSidebar {...orgProps({ showArchived: true, onToggleArchived })} />
-        </IntlProvider>
-      </TooltipProvider>,
+      shellTree(
+        <SessionSidebar {...orgProps({ showArchived: true, onToggleArchived })} />,
+      ),
     );
     expect(
       screen.getByRole("button", { name: "Show archived sessions" }),
@@ -1545,6 +1592,7 @@ describe("SessionSidebar row actions menu (ADR-0133, issue #1319)", () => {
       loadError: null,
       grouping: "flat" as const,
       onNew: () => {},
+      onNewInWorkspace: () => {},
       onActivate: () => {},
       onOpenPersisted: () => {},
       onSwitchGrouping: () => {},
@@ -1748,6 +1796,7 @@ describe("SessionSidebar archived-view gating (issue #1175)", () => {
       loadError: null,
       grouping: "flat" as const,
       onNew: () => {},
+      onNewInWorkspace: () => {},
       onActivate: () => {},
       onOpenPersisted: () => {},
       onSwitchGrouping: () => {},
@@ -1769,14 +1818,192 @@ describe("SessionSidebar archived-view gating (issue #1175)", () => {
     expect(screen.queryByText("Archived One")).toBeNull();
     // Flipping the toggle alone surfaces them (also pins the non-empty
     // collection's section rule).
-    view.rerender(
-      <TooltipProvider>
-        <IntlProvider locale="en" messages={{}} onError={() => {}}>
-          <SessionSidebar {...props(true)} />
-        </IntlProvider>
-      </TooltipProvider>,
-    );
+    view.rerender(shellTree(<SessionSidebar {...props(true)} />));
     expect(view.container.querySelector("[data-section=\"archived\"]")).not.toBeNull();
     expect(screen.getByText("Archived One")).toBeInTheDocument();
+  });
+});
+
+describe("SessionSidebar workspace section (issue #1392)", () => {
+  function metaRow(
+    path: string,
+    name: string,
+    workspace: string | null = null,
+  ): SessionMetadata {
+    return {
+      recipe_path: path,
+      display_name: name,
+      last_modified_at: Date.now(),
+      source_summary: { first_source_name: null, source_count: 0, turn_count: 0 },
+      format_version: 1,
+      pinned: false,
+      archived: false,
+      workspace,
+    };
+  }
+
+  function wsProps(
+    overrides: Record<string, unknown> = {},
+  ): ComponentProps<typeof SessionSidebar> {
+    return {
+      collapsed: false,
+      sessions: [],
+      openSessions: [],
+      activeSessionId: null,
+      disabled: false,
+      loadError: null,
+      grouping: "flat",
+      archivedSessions: [],
+      showArchived: false,
+      onNew: () => {},
+      onNewInWorkspace: vi.fn(),
+      onActivate: () => {},
+      onOpenPersisted: () => {},
+      onSwitchGrouping: () => {},
+      onToggleArchived: () => {},
+      onSetPinned: () => {},
+      onArchive: () => {},
+      onDelete: () => {},
+      onRename: () => {},
+      onClose: () => {},
+      onOpenSearch: () => {},
+      provider: null,
+      onOpenSettings: () => {},
+      ...overrides,
+    } as ComponentProps<typeof SessionSidebar>;
+  }
+
+  it("renders explicit groups under a counted section head; implicit records never surface", async () => {
+    vi.mocked(listWorkspaces).mockResolvedValue([
+      { path: "/w/explicit", label: "explicit", explicit: true, exists: true },
+      { path: "/w/implicit", label: "implicit", explicit: false, exists: true },
+    ]);
+    const { container } = renderShell(
+      <SessionSidebar {...wsProps()} />,
+    );
+    const section = await waitFor(() => {
+      const el = container.querySelector("[data-section=\"workspaces\"]");
+      expect(el).not.toBeNull();
+      return el as HTMLElement;
+    });
+    expect(section.textContent).toContain("explicit");
+    expect(section.textContent).toContain("1");
+    expect(section.textContent).not.toContain("implicit");
+  });
+
+  it("keeps a missing-directory group with the not-found hint", async () => {
+    vi.mocked(listWorkspaces).mockResolvedValue([
+      { path: "/w/gone", label: "gone", explicit: true, exists: false },
+    ]);
+    const { container } = renderShell(
+      <SessionSidebar {...wsProps()} />,
+    );
+    await waitFor(() =>
+      expect(
+        container.querySelector("[data-workspace-group=\"/w/gone\"]"),
+      ).not.toBeNull(),
+    );
+    expect(container.querySelector("[data-section=\"workspaces\"]")?.textContent).toContain(
+      "Folder not found",
+    );
+  });
+
+  it("expands the subtree into the SAME session rows the recent body renders", async () => {
+    vi.mocked(listWorkspaces).mockResolvedValue([
+      { path: "/w/explicit", label: "explicit", explicit: true, exists: true },
+    ]);
+    const { container } = renderShell(
+      <SessionSidebar
+        {...wsProps({ sessions: [metaRow("/a.json", "alpha", "/w/explicit")] })}
+      />,
+    );
+    // The listing lands async: before it does, the row rides the recent
+    // body; after, the bound row leaves the recent body entirely (the
+    // subtree is its only face).
+    const group = await waitFor(() => {
+      const el = container.querySelector(
+        "[data-workspace-group=\"/w/explicit\"] [aria-expanded]",
+      );
+      expect(el).not.toBeNull();
+      return el as HTMLElement;
+    });
+    // Collapsed by default: the member row is absent until the group row
+    // (aria-expanded) toggles it open.
+    expect(container.querySelector(".session-entry-main")).toBeNull();
+    fireEvent.click(group);
+    const row = container.querySelector(".session-entry-main .session-name");
+    expect(row?.textContent).toContain("alpha");
+  });
+
+  it("caps the subtree preview at 5 and expands the rest via Show more (N)", async () => {
+    vi.mocked(listWorkspaces).mockResolvedValue([
+      { path: "/w/big", label: "big", explicit: true, exists: true },
+    ]);
+    const members = Array.from({ length: 7 }, (_, i) =>
+      metaRow(`/m${i}.json`, `m${i}`, "/w/big"),
+    );
+    const { container } = renderShell(
+      <SessionSidebar {...wsProps({ sessions: members })} />,
+    );
+    const group = await waitFor(() => {
+      const el = container.querySelector(
+        "[data-workspace-group=\"/w/big\"] [aria-expanded]",
+      );
+      expect(el).not.toBeNull();
+      return el as HTMLElement;
+    });
+    fireEvent.click(group);
+    expect(container.querySelectorAll(".session-entry-main")).toHaveLength(5);
+    fireEvent.click(screen.getByText("Show more (2)"));
+    expect(container.querySelectorAll(".session-entry-main")).toHaveLength(7);
+  });
+
+  it("caps each recent-body group at 5 with the Show more tail", async () => {
+    const members = Array.from({ length: 7 }, (_, i) =>
+      metaRow(`/r${i}.json`, `r${i}`),
+    );
+    const { container } = renderShell(
+      <SessionSidebar {...wsProps({ sessions: members })} />,
+    );
+    expect(container.querySelectorAll(".session-entry-main")).toHaveLength(5);
+    fireEvent.click(screen.getByText("Show more (2)"));
+    expect(container.querySelectorAll(".session-entry-main")).toHaveLength(7);
+  });
+
+  it("wires the menu three-piece and the same-workspace new-session shortcut", async () => {
+    vi.mocked(listWorkspaces).mockResolvedValue([
+      { path: "/w/explicit", label: "explicit", explicit: true, exists: true },
+    ]);
+    const onNewInWorkspace = vi.fn();
+    const { container } = renderShell(
+      <SessionSidebar {...wsProps({ onNewInWorkspace })} />,
+    );
+    await waitFor(() =>
+      expect(
+        container.querySelector("[data-workspace-group=\"/w/explicit\"]"),
+      ).not.toBeNull(),
+    );
+    // The menu rides the row-end pill; the mocked dropdown renders its
+    // items inline, so the three pieces are queryable directly. The rename
+    // modal goes LAST: an open Radix dialog hides the outside tree from
+    // accessible queries (the portaled content is the only face).
+    fireEvent.click(screen.getByRole("menuitem", { name: "Open folder" }));
+    expect(openPath).toHaveBeenCalledWith("/w/explicit");
+    vi.mocked(removeWorkspace).mockClear();
+    fireEvent.click(screen.getByRole("menuitem", { name: "Remove from list" }));
+    await waitFor(() =>
+      expect(removeWorkspace).toHaveBeenCalledWith("/w/explicit"),
+    );
+    // The pill's plus stages the binding on the shell channel.
+    fireEvent.click(
+      screen.getByRole("button", { name: "New session in this workspace" }),
+    );
+    expect(onNewInWorkspace).toHaveBeenCalledWith("/w/explicit", "explicit");
+    // Rename opens the modal pre-filled with the current label.
+    fireEvent.click(screen.getByRole("menuitem", { name: "Rename" }));
+    const input = await screen.findByRole("textbox", {
+      name: "Workspace name",
+    });
+    expect(input).toHaveValue("explicit");
   });
 });

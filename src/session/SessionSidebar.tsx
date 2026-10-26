@@ -1,16 +1,26 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { FormattedMessage, useIntl } from "react-intl";
+import { useQuery } from "@tanstack/react-query";
 import { Archive, Check, Pencil, Search, Settings } from "lucide-react";
 import {
   buildArchivedEntries,
   buildSidebarModel,
+  buildWorkspaceGroups,
+  SIDEBAR_PREVIEW_CAP,
   type OpenSession,
   type SidebarEntry,
   type SidebarGroupKind,
 } from "./sidebarModel";
 import { formatRelativeTime } from "./lastModifiedText";
 import { resolveDisplayName } from "./displayName";
+import { listWorkspaces } from "../api";
+import { workspaceKeys } from "./queryKeys";
 import { RowActionsMenu } from "./RowActionsMenu";
+import {
+  SHOW_MORE_CLASS,
+  SectionCollapseButton,
+  WorkspaceSidebarSection,
+} from "./WorkspaceSidebarSection";
 import {
   useSidebarHoverCard,
   useSidebarHoverCardBridge,
@@ -105,6 +115,10 @@ interface SessionSidebarProps {
    *  semantics reset it to hidden on every startup). */
   showArchived: boolean;
   onNew: () => void;
+  /** The workspace section's ⊕ shortcut (issue #1392): the shell stages
+   *  the workspace binding (pendingWorkspace) and returns to the cold-start
+   *  bar -- the next minted session binds it (the one-shot contract). */
+  onNewInWorkspace: (path: string, label: string) => void;
   onActivate: (sid: string) => void;
   onOpenPersisted: (path: string, name: string) => void;
   onSwitchGrouping: (mode: SidebarGrouping) => void;
@@ -159,6 +173,7 @@ export function SessionSidebar({
   archivedSessions,
   showArchived,
   onNew,
+  onNewInWorkspace,
   onActivate,
   onOpenPersisted,
   onSwitchGrouping,
@@ -189,8 +204,34 @@ export function SessionSidebar({
   // row -- the full transition contract lives in the module's header.
   const hover = useSidebarHoverCard();
 
-  const model = buildSidebarModel(
+  // The workspace listing (issue #1392): the section's data face. The
+  // query opts out of the app's staleTime: Infinity (ADR-0051) the same
+  // way the selector does -- no mutation invalidates this key, so every
+  // mount + invalidation drives the refetch. The picker rides the same
+  // cache, so a rename / remove in either face lands in both.
+  const { data: workspaceList } = useQuery({
+    queryKey: workspaceKeys.all(),
+    queryFn: listWorkspaces,
+    staleTime: 0,
+  });
+  const workspaceGroups = buildWorkspaceGroups(
+    workspaceList ?? [],
     sessions,
+    openSessions,
+    activeSessionId,
+  );
+  // A bound session shows in ITS workspace subtree only (issue #1392): the
+  // recent body holds the unbound remainder -- "remove from list" drops the
+  // record and the group's sessions fall back to this body. Open-not-yet-
+  // persisted rows carry no workspace on the wire, so they stay here until
+  // the persisted scan catches up.
+  const explicitPaths = new Set(workspaceGroups.map((g) => g.path));
+  const recentSessions = sessions.filter(
+    (m) => m.workspace === null || !explicitPaths.has(m.workspace),
+  );
+
+  const model = buildSidebarModel(
+    recentSessions,
     openSessions,
     activeSessionId,
     now,
@@ -198,30 +239,43 @@ export function SessionSidebar({
   );
   const archivedEntries = showArchived ? buildArchivedEntries(archivedSessions) : [];
 
-  // The section render plan (ADR-0127, issue #1175): the pinned section rides
-  // above the grouped body in BOTH grouping modes (server order), then the
-  // grouped body, then the archived section (only while the view is visible).
-  // The chrome pair (GroupingToggle + the archived-visibility toggle) rides
-  // the FIRST rendered section's title row; with zero sections (an empty
-  // sidebar) it still renders on a bare title row so the archived view stays
-  // reachable when every session is archived (the default list is empty then,
-  // and without an entry point the archived rows would be unreachable).
-  const sections: Array<{
-    key: string;
-    title: ReactNode;
-    entries: SidebarEntry[];
-    variant: "main" | "archived";
-  }> = [];
+  // Section-level folds + preview expansion (issue #1392): per-session
+  // state, deliberately NOT persisted -- every startup renders all three
+  // sections expanded with the 5-row previews.
+  const [collapsedSections, setCollapsedSections] = useState<ReadonlySet<string>>(new Set());
+  const [showAllSections, setShowAllSections] = useState<ReadonlySet<string>>(new Set());
+  const toggleSection = (key: string) =>
+    setCollapsedSections((prev) => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      return next;
+    });
+
+  // The section render plan (ADR-0127, issue #1175; the three-section
+  // navigation rides issue #1392): pinned → workspaces → the grouped body
+  // → archived, each section present only when it has content. The chrome
+  // pair (GroupingToggle + the archived-visibility toggle) rides the FIRST
+  // rendered section's title row; with zero sections (an empty sidebar) it
+  // still renders on a bare title row so the archived view stays reachable.
+  type SidebarSection =
+    | { key: string; title: ReactNode; entries: SidebarEntry[]; variant: "main" | "archived"; capped: boolean }
+    | { key: "workspaces"; variant: "workspaces" };
+  const sections: SidebarSection[] = [];
   if (model.pinned.length > 0) {
     sections.push({
       key: "pinned",
       title: <FormattedMessage id="sidebar.group.pinned" defaultMessage="Pinned" />,
       entries: model.pinned,
       variant: "main",
+      capped: false,
     });
   }
+  if (workspaceGroups.length > 0) {
+    sections.push({ key: "workspaces", variant: "workspaces" });
+  }
   for (const g of model.groups) {
-    sections.push({ key: g.kind, title: <GroupTitle kind={g.kind} />, entries: g.entries, variant: "main" });
+    sections.push({ key: g.kind, title: <GroupTitle kind={g.kind} />, entries: g.entries, variant: "main", capped: true });
   }
   if (archivedEntries.length > 0) {
     sections.push({
@@ -229,6 +283,7 @@ export function SessionSidebar({
       title: <FormattedMessage id="sidebar.group.archived" defaultMessage="Archived" />,
       entries: archivedEntries,
       variant: "archived",
+      capped: false,
     });
   }
 
@@ -252,61 +307,121 @@ export function SessionSidebar({
     </div>
   );
 
+  // One row-render channel for every section body (issue #1392: the
+  // workspace subtrees render the EXACT same rows as the recent body --
+  // same SidebarRow, same actions menu, same hover-card machine).
+  const renderRows = (entries: SidebarEntry[], archived: boolean) =>
+    entries.map((entry) => (
+      <SidebarRow
+        key={entry.key}
+        entry={entry}
+        displayName={resolveDisplayName(entry.name, intl)}
+        now={now}
+        hasPendingApproval={
+          entry.sid !== null && pendingApprovalSids.has(entry.sid)
+        }
+        hasTurnFailed={
+          entry.sid !== null && turnFailedSids.has(entry.sid)
+        }
+        disabled={disabled}
+        archived={archived}
+        hover={hover}
+        onActivate={() => {
+          if (entry.sid) onActivate(entry.sid);
+          else onOpenPersisted(entry.path, entry.name);
+        }}
+        menu={(
+          <RowActionsMenu
+            entry={entry}
+            displayName={resolveDisplayName(entry.name, intl)}
+            disabled={disabled}
+            archived={archived}
+            onSetPinned={onSetPinned}
+            onArchive={onArchive}
+            onRename={onRename}
+            onClose={onClose}
+            onDelete={onDelete}
+            onMenuOpenChange={(open) => hover.menuOpenChange(entry.key, open)}
+          />
+        )}
+      />
+    ));
+
   const renderSection = (
     section: (typeof sections)[number],
     showChrome: boolean,
-  ) => (
-    <li key={section.key} className="session-group mt-1.5 mb-0.5" data-section={section.key}>
-      {/* ADR-0072 (#251): the grouping toggle rides the FIRST rendered
-          section's title row -- one entry point regardless of mode. The
-          archived-visibility toggle (ADR-0127) sits beside it. The triggers
-          are hover-revealed (group-hover) but stay focus-visible for AT
-          users; the open popover also pins it visible via data-[state=open]. */}
-      <div className="session-group-title-row group relative mb-0.5 flex items-center justify-between px-1">
-        <h3 className="session-group-title text-xs uppercase tracking-wider text-muted-foreground">
-          {section.title}
-        </h3>
-        {showChrome && sectionChrome}
-      </div>
-      <ul className="session-group-list list-none m-0 p-0">
-        {section.entries.map((entry) => (
-          <SidebarRow
-            key={entry.key}
-            entry={entry}
-            displayName={resolveDisplayName(entry.name, intl)}
-            now={now}
-            hasPendingApproval={
-              entry.sid !== null && pendingApprovalSids.has(entry.sid)
-            }
-            hasTurnFailed={
-              entry.sid !== null && turnFailedSids.has(entry.sid)
-            }
-            disabled={disabled}
-            archived={section.variant === "archived"}
-            hover={hover}
-            onActivate={() => {
-              if (entry.sid) onActivate(entry.sid);
-              else onOpenPersisted(entry.path, entry.name);
-            }}
-            menu={(
-              <RowActionsMenu
-                entry={entry}
-                displayName={resolveDisplayName(entry.name, intl)}
-                disabled={disabled}
-                archived={section.variant === "archived"}
-                onSetPinned={onSetPinned}
-                onArchive={onArchive}
-                onRename={onRename}
-                onClose={onClose}
-                onDelete={onDelete}
-                onMenuOpenChange={(open) => hover.menuOpenChange(entry.key, open)}
-              />
+  ) => {
+    if (section.variant === "workspaces") {
+      return (
+        <WorkspaceSidebarSection
+          key={section.key}
+          groups={workspaceGroups}
+          disabled={disabled}
+          collapsed={collapsedSections.has(section.key)}
+          onToggleCollapsed={() => toggleSection(section.key)}
+          renderRows={(entries) => renderRows(entries, false)}
+          onNewInWorkspace={onNewInWorkspace}
+          chrome={showChrome ? sectionChrome : undefined}
+        />
+      );
+    }
+    // The section preview cap (issue #1392): the recent body's groups show
+    // their freshest 5 rows, a "Show more (N)" tail expands the rest. The
+    // pinned / archived sections are uncapped.
+    const collapsed = collapsedSections.has(section.key);
+    const capped =
+      section.capped &&
+      !showAllSections.has(section.key) &&
+      section.entries.length > SIDEBAR_PREVIEW_CAP;
+    const shown = capped
+      ? section.entries.slice(0, SIDEBAR_PREVIEW_CAP)
+      : section.entries;
+    return (
+      <li key={section.key} className="session-group mt-1.5 mb-0.5" data-section={section.key}>
+        {/* ADR-0072 (#251): the grouping toggle rides the FIRST rendered
+            section's title row -- one entry point regardless of mode. The
+            archived-visibility toggle (ADR-0127) sits beside it. The triggers
+            are hover-revealed (group-hover) but stay focus-visible for AT
+            users; the open popover also pins it visible via data-[state=open]. */}
+        <div className="session-group-title-row group relative mb-0.5 flex items-center justify-between px-1">
+          <div className="flex min-w-0 items-center gap-0.5">
+            <SectionCollapseButton
+              collapsed={collapsed}
+              onToggle={() => toggleSection(section.key)}
+            />
+            <h3 className="session-group-title text-xs uppercase tracking-wider text-muted-foreground">
+              {section.title}
+            </h3>
+            <span className="text-xs tabular-nums text-muted-foreground">
+              {section.entries.length}
+            </span>
+          </div>
+          {showChrome && sectionChrome}
+        </div>
+        {!collapsed && (
+          <ul className="session-group-list list-none m-0 p-0">
+            {renderRows(shown, section.variant === "archived")}
+            {capped && (
+              <li className="my-0.5">
+                <button
+                  type="button"
+                  className={SHOW_MORE_CLASS}
+                  onClick={() =>
+                    setShowAllSections((prev) => new Set(prev).add(section.key))}
+                >
+                  <FormattedMessage
+                    id="sidebar.showMore"
+                    defaultMessage="Show more ({count})"
+                    values={{ count: section.entries.length - SIDEBAR_PREVIEW_CAP }}
+                  />
+                </button>
+              </li>
             )}
-          />
-        ))}
-      </ul>
-    </li>
-  );
+          </ul>
+        )}
+      </li>
+    );
+  };
 
   // One read feeds both the gear's aria-label and its tooltip -- the last
   // remaining aria-and-tooltip descriptor double-write in the tree collapses
