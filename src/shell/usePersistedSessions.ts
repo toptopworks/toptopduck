@@ -43,6 +43,13 @@ export function usePersistedSessions({
    *  search consumers stay blind to the organization state. */
   archivedSessions: SessionMetadata[];
   sessionsError: string | null;
+  /** True once the first listSessions scan has RESOLVED: the list starts
+   *  empty and fills after mount, so "empty" is ambiguous until this flips
+   *  -- consumers that diff sessions across renders (the workspace
+   *  section's landing reveal) wait on it so a cold start's empty-to-full
+   *  transition is not mistaken for new content. A first-load failure
+   *  leaves it false: no diff baseline until a later scan succeeds. */
+  sessionsLoaded: boolean;
   refreshSessions: () => void;
 } {
   // Bumped to re-fetch list_sessions after a save/delete/rename (the persisted
@@ -52,6 +59,7 @@ export function usePersistedSessions({
   const [sessions, setSessions] = useState<SessionMetadata[]>([]);
   const [archivedSessions, setArchivedSessions] = useState<SessionMetadata[]>([]);
   const [sessionsError, setSessionsError] = useState<string | null>(null);
+  const [sessionsLoaded, setSessionsLoaded] = useState(false);
 
   // ADR-0061 cold start: load list_sessions on mount (and after a save/delete/
   // rename bumps sessionsEpoch). NOT createSession -- zero instances until the
@@ -70,6 +78,7 @@ export function usePersistedSessions({
         if (cancelled) return;
         setSessions(list.filter((m) => !m.archived));
         setArchivedSessions(list.filter((m) => m.archived));
+        setSessionsLoaded(true);
         setSessionsError(null);
       })
       .catch((e) => {
@@ -91,5 +100,5 @@ export function usePersistedSessions({
 
   const refreshSessions = useCallback(() => setSessionsEpoch((e) => e + 1), []);
 
-  return { sessions, archivedSessions, sessionsError, refreshSessions };
+  return { sessions, archivedSessions, sessionsError, sessionsLoaded, refreshSessions };
 }

@@ -69,8 +69,20 @@ describe("ComposerWorkspacePicker (issue #1384)", () => {
       expect(screen.getByRole("button", { name: "beta" })).toBeInTheDocument(),
     );
     expect(
-      screen.getByRole("button", { name: "Browse folders…" }),
+      screen.getByRole("button", { name: "Open local folder" }),
     ).toBeInTheDocument();
+    // The unified collapsed-directory glyph rides the row and the browse
+    // action (#1398's FolderClosed unification).
+    expect(
+      screen
+        .getByRole("button", { name: "beta" })
+        .querySelector(".lucide-folder-closed"),
+    ).not.toBeNull();
+    expect(
+      screen
+        .getByRole("button", { name: "Open local folder" })
+        .querySelector(".lucide-folder-closed"),
+    ).not.toBeNull();
     // The undo row is bound-state-only.
     expect(
       screen.queryByRole("button", { name: "No workspace" }),
@@ -102,7 +114,7 @@ describe("ComposerWorkspacePicker (issue #1384)", () => {
     expect(onChange).toHaveBeenCalledWith({ path: "/w/beta", label: "beta", explicit: false, exists: true });
     await waitFor(() =>
       expect(
-        screen.queryByRole("button", { name: "Browse folders…" }),
+        screen.queryByRole("button", { name: "Open local folder" }),
       ).not.toBeInTheDocument(),
     );
   });
@@ -137,7 +149,7 @@ describe("ComposerWorkspacePicker (issue #1384)", () => {
     vi.mocked(dialogPlugin.open).mockResolvedValue(
       "C:\\Users\\me\\Projects\\demo",
     );
-    fireEvent.click(await screen.findByRole("button", { name: "Browse folders…" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Open local folder" }));
     await waitFor(() => expect(onChange).toHaveBeenCalled());
     expect(onChange).toHaveBeenCalledWith({
       path: "C:\\Users\\me\\Projects\\demo",
@@ -147,7 +159,7 @@ describe("ComposerWorkspacePicker (issue #1384)", () => {
     onChange.mockClear();
     openPopover();
     vi.mocked(dialogPlugin.open).mockResolvedValue(null);
-    fireEvent.click(await screen.findByRole("button", { name: "Browse folders…" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Open local folder" }));
     await waitFor(() => expect(dialogPlugin.open).toHaveBeenCalledTimes(2));
     expect(onChange).not.toHaveBeenCalled();
   });
@@ -167,7 +179,7 @@ describe("ComposerWorkspacePicker (issue #1384)", () => {
     fireEvent.click(await screen.findByRole("button", { name: "alpha" }));
     await waitFor(() =>
       expect(
-        screen.queryByRole("button", { name: "Browse folders…" }),
+        screen.queryByRole("button", { name: "Open local folder" }),
       ).not.toBeInTheDocument(),
     );
     openPopover();

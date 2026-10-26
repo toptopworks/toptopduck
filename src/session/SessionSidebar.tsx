@@ -93,6 +93,10 @@ interface SessionSidebarProps {
   // <aside> shell; the opacity fade + grid-column animation stay in CSS.
   collapsed: boolean;
   sessions: SessionMetadata[];
+  /** True once the first listSessions scan resolved (the hook's signal):
+   *  rides down to the workspace section, whose landing diff must not read
+   *  the scan's own arrival as new content. */
+  sessionsLoaded: boolean;
   openSessions: OpenSession[];
   activeSessionId: string | null;
   disabled: boolean;
@@ -172,6 +176,7 @@ interface SessionSidebarProps {
 
 export function SessionSidebar({
   sessions,
+  sessionsLoaded,
   openSessions,
   activeSessionId,
   disabled,
@@ -388,6 +393,8 @@ export function SessionSidebar({
         <WorkspaceSidebarSection
           key={section.key}
           groups={workspaceGroups}
+          sessions={sessions}
+          sessionsLoaded={sessionsLoaded}
           disabled={disabled}
           collapsed={collapsedSections.has(section.key)}
           onToggleCollapsed={() => toggleSection(section.key)}

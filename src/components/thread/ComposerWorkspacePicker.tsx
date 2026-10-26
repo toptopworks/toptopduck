@@ -2,7 +2,7 @@ import { useState } from "react";
 import { useIntl } from "react-intl";
 import { useQuery } from "@tanstack/react-query";
 import { open } from "@tauri-apps/plugin-dialog";
-import { Check, ChevronDown, FolderOpen, FolderX, Plus, Search } from "lucide-react";
+import { Check, ChevronDown, FolderClosed, FolderX, Plus, Search } from "lucide-react";
 
 import { cn } from "@/lib/utils";
 import { isInvalidWorkspaceName } from "@/lib/workspaceName";
@@ -202,7 +202,7 @@ export function ComposerWorkspacePicker({
               LABEL_HIDE_NARROW,
             )}
           >
-            <FolderOpen className="size-4 shrink-0" aria-hidden />
+            <FolderClosed className="size-4 shrink-0" aria-hidden />
             <span className="truncate">
               {value
                 ? value.label
@@ -281,7 +281,7 @@ export function ComposerWorkspacePicker({
                               selected && "bg-accent text-accent-foreground",
                             )}
                           >
-                            <FolderOpen
+                            <FolderClosed
                               className={cn(
                                 "size-4 shrink-0",
                                 !selected && "text-muted-foreground",
@@ -336,10 +336,10 @@ export function ComposerWorkspacePicker({
                 onClick={() => void browse()}
                 className={ENTRY_CLASS}
               >
-                <FolderOpen className="size-4 shrink-0" aria-hidden />
+                <FolderClosed className="size-4 shrink-0" aria-hidden />
                 {intl.formatMessage({
                   id: "composer.workspace.browse",
-                  defaultMessage: "Browse folders…",
+                  defaultMessage: "Open local folder",
                 })}
               </button>
               {value !== null && (
