@@ -237,13 +237,25 @@ export function SessionSidebar({
   // persisted rows carry no workspace on the wire, so they stay here until
   // the persisted scan catches up.
   const explicitPaths = new Set(workspaceGroups.map((g) => g.path));
-  const recentSessions = sessions.filter(
-    (m) => m.workspace === null || !explicitPaths.has(m.workspace),
+  const isWorkspaceBound = (m: SessionMetadata) =>
+    m.workspace !== null && explicitPaths.has(m.workspace);
+  const recentSessions = sessions.filter((m) => !isWorkspaceBound(m));
+  // The open side of the same partition: an open session whose persisted row
+  // is bound already renders in its workspace group -- passing the full open
+  // list would let the model's not-yet-persisted loop resurrect it in the
+  // recent body until restart. Open rows whose persisted scan hasn't landed
+  // yet stay here (their wire row carries no workspace), so a just-minted
+  // session is visible during the refetch window.
+  const workspaceBoundPaths = new Set(
+    sessions.filter(isWorkspaceBound).map((m) => m.recipe_path),
+  );
+  const recentOpenSessions = openSessions.filter(
+    (o) => !workspaceBoundPaths.has(o.path),
   );
 
   const model = buildSidebarModel(
     recentSessions,
-    openSessions,
+    recentOpenSessions,
     activeSessionId,
     now,
     grouping,
