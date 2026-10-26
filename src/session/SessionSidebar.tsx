@@ -1,7 +1,15 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { FormattedMessage, useIntl } from "react-intl";
 import { useQuery } from "@tanstack/react-query";
-import { Archive, Check, Pencil, Search, Settings } from "lucide-react";
+import {
+  Archive,
+  Check,
+  ChevronDown,
+  ChevronRight,
+  Pencil,
+  Search,
+  Settings,
+} from "lucide-react";
 import {
   buildArchivedEntries,
   buildSidebarModel,
@@ -16,11 +24,7 @@ import { resolveDisplayName } from "./displayName";
 import { listWorkspaces } from "../api";
 import { workspaceKeys } from "./queryKeys";
 import { RowActionsMenu } from "./RowActionsMenu";
-import {
-  SHOW_MORE_CLASS,
-  SectionCollapseButton,
-  WorkspaceSidebarSection,
-} from "./WorkspaceSidebarSection";
+import { SHOW_MORE_CLASS, WorkspaceSidebarSection } from "./WorkspaceSidebarSection";
 import {
   useSidebarHoverCard,
   useSidebarHoverCardBridge,
@@ -244,20 +248,30 @@ export function SessionSidebar({
   // sections expanded with the 5-row previews.
   const [collapsedSections, setCollapsedSections] = useState<ReadonlySet<string>>(new Set());
   const [showAllSections, setShowAllSections] = useState<ReadonlySet<string>>(new Set());
-  const toggleSection = (key: string) =>
+  // Collapsing a section resets its preview, same rule as the workspace
+  // groups: "Show more" is a per-expansion choice, not a sticky one.
+  const toggleSection = (key: string) => {
+    if (!collapsedSections.has(key)) {
+      setShowAllSections((prev) => {
+        const next = new Set(prev);
+        next.delete(key);
+        return next;
+      });
+    }
     setCollapsedSections((prev) => {
       const next = new Set(prev);
       if (next.has(key)) next.delete(key);
       else next.add(key);
       return next;
     });
+  };
 
   // The section render plan (ADR-0127, issue #1175; the three-section
-  // navigation rides issue #1392): pinned → workspaces → the grouped body
-  // → archived, each section present only when it has content. The chrome
-  // pair (GroupingToggle + the archived-visibility toggle) rides the FIRST
-  // rendered section's title row; with zero sections (an empty sidebar) it
-  // still renders on a bare title row so the archived view stays reachable.
+  // navigation rides issue #1392): pinned → workspaces (always present) →
+  // the grouped body → archived, the rest only when they have content. The
+  // chrome pair (GroupingToggle + the archived-visibility toggle) rides the
+  // FIRST rendered section's title row -- the permanent workspaces head
+  // keeps it reachable even on an otherwise-empty sidebar.
   type SidebarSection =
     | { key: string; title: ReactNode; entries: SidebarEntry[]; variant: "main" | "archived"; capped: boolean }
     | { key: "workspaces"; variant: "workspaces" };
@@ -271,9 +285,10 @@ export function SessionSidebar({
       capped: false,
     });
   }
-  if (workspaceGroups.length > 0) {
-    sections.push({ key: "workspaces", variant: "workspaces" });
-  }
+  // The workspaces section is PERMANENT: zero groups still renders the head
+  // (with the count) + the empty hint, so the three-section order and the
+  // chrome anchor stay stable on an otherwise-empty sidebar.
+  sections.push({ key: "workspaces", variant: "workspaces" });
   for (const g of model.groups) {
     sections.push({ key: g.kind, title: <GroupTitle kind={g.kind} />, entries: g.entries, variant: "main", capped: true });
   }
@@ -377,29 +392,42 @@ export function SessionSidebar({
       ? section.entries.slice(0, SIDEBAR_PREVIEW_CAP)
       : section.entries;
     return (
-      <li key={section.key} className="session-group mt-1.5 mb-0.5" data-section={section.key}>
+      <li key={section.key} className="session-group mt-3 mb-1" data-section={section.key}>
         {/* ADR-0072 (#251): the grouping toggle rides the FIRST rendered
             section's title row -- one entry point regardless of mode. The
             archived-visibility toggle (ADR-0127) sits beside it. The triggers
             are hover-revealed (group-hover) but stay focus-visible for AT
             users; the open popover also pins it visible via data-[state=open]. */}
         <div className="session-group-title-row group relative mb-0.5 flex items-center justify-between px-1">
-          <div className="flex min-w-0 items-center gap-0.5">
-            <SectionCollapseButton
-              collapsed={collapsed}
-              onToggle={() => toggleSection(section.key)}
-            />
-            <h3 className="session-group-title text-xs uppercase tracking-wider text-muted-foreground">
-              {section.title}
-            </h3>
-            <span className="text-xs tabular-nums text-muted-foreground">
-              {section.entries.length}
-            </span>
-          </div>
+          {/* The title row itself is the fold toggle (the whole row clicks):
+              the button sits inside the h3 (legal phrasing nesting) and
+              stretches full-width; the chevron rides the label's tail,
+              hover/focus-revealed -- at rest the row is just the label. */}
+          <h3 className="session-group-title min-w-0 flex-1 text-xs uppercase tracking-wider text-muted-foreground">
+            <button
+              type="button"
+              aria-expanded={!collapsed}
+              onClick={() => toggleSection(section.key)}
+              className="flex w-full cursor-pointer items-center gap-0.5 rounded text-left focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring"
+            >
+              <span className="truncate">{section.title}</span>
+              <span className="shrink-0 tabular-nums">({section.entries.length})</span>
+              <span
+                aria-hidden
+                className="shrink-0 opacity-0 transition-opacity group-hover:opacity-100 group-has-[:focus-visible]:opacity-100"
+              >
+                {collapsed ? (
+                  <ChevronRight className="size-3.5" />
+                ) : (
+                  <ChevronDown className="size-3.5" />
+                )}
+              </span>
+            </button>
+          </h3>
           {showChrome && sectionChrome}
         </div>
         {!collapsed && (
-          <ul className="session-group-list list-none m-0 p-0">
+          <ul className="session-group-list list-none m-0 pb-2 pt-1">
             {renderRows(shown, section.variant === "archived")}
             {capped && (
               <li className="my-0.5">
@@ -487,26 +515,6 @@ export function SessionSidebar({
 
       <ul className="session-list" onPointerLeave={hover.listLeave}>
         {sections.map((section, i) => renderSection(section, i === 0))}
-        {sections.length === 0 && (
-          <>
-            {/* Zero sections still gets the chrome row (see the sections
-                plan above): an all-archived sidebar must keep the archived
-                toggle reachable, or the hidden rows would be stranded. */}
-            <li className="session-group mt-1.5 mb-0.5">
-              <div className="session-group-title-row group relative mb-0.5 flex items-center justify-end px-1">
-                {sectionChrome}
-              </div>
-            </li>
-            {!loadError && (
-              <li className="session-empty text-muted-foreground text-sm p-2">
-                <FormattedMessage
-                  id="sidebar.empty"
-                  defaultMessage="No saved sessions yet."
-                />
-              </li>
-            )}
-          </>
-        )}
       </ul>
 
       {/* Footer: the settings gear (issue #282). The .session-list flex:1
@@ -543,10 +551,9 @@ export function SessionSidebar({
 // hook routes through commitShellPrefs, same immediate-persist contract as the
 // collapse toggles).
 //
-// a11y (issue #251 review):
-// - The trigger rides opacity-60 by default (not opacity-0 + hover-only) so
-//   keyboard, touch, and AT users can discover it without hovering; it
-//   brightens on hover/focus/open.
+// a11y (issue #251 review, posture revised: hover-revealed):
+// - The trigger is hidden by default (opacity-0) and revealed on the title
+//   row's hover; keyboard users keep the focus-visible indicator.
 // - bareButtonReset on the trigger/options strips native chrome including the
 //   focus ring, so focus-visible:outline-ring re-adds one (the --ring token
 //   is the project focus-indicator standard).
@@ -598,10 +605,10 @@ function GroupingToggle({
           })}
           className={cn(
             `sidebar-grouping-toggle ${bareButtonReset} cursor-pointer rounded-md px-1.5 text-base leading-none text-muted-foreground`,
-            // Weakly visible by default (opacity-60) so keyboard / touch / AT
-            // users can discover the entry point without hovering; brightens on
-            // hover, focus, or while the popover is open.
-            "opacity-60 transition-opacity group-hover:opacity-100 focus-visible:opacity-100 data-[state=open]:opacity-100",
+            // Hidden by default (opacity-0), revealed on the title row's
+            // hover; stays visible on keyboard focus or while the popover
+            // is open.
+            "opacity-0 transition-opacity group-hover:opacity-100 focus-visible:opacity-100 data-[state=open]:opacity-100",
             "hover:bg-accent hover:text-foreground",
             "focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring",
             "disabled:cursor-progress disabled:opacity-50",
@@ -652,10 +659,11 @@ function GroupingToggle({
 }
 
 // The archived-view visibility toggle (ADR-0127 Decision 7, issue #1175): an
-// icon-only aria-pressed button beside the grouping toggle. Same weak-visible
-// posture as GroupingToggle (opacity-60, brightens on hover/focus/pressed) so
-// keyboard / touch / AT users can discover it without hovering. The state is
-// NEVER persisted -- every startup resets the archived view to hidden.
+// icon-only aria-pressed button beside the grouping toggle. Same hover-
+// revealed posture as GroupingToggle (opacity-0; visible on hover / focus /
+// pressed, the pressed state keeping the active view's entry point findable).
+// The state is NEVER persisted -- every startup resets the archived view to
+// hidden.
 function ArchivedToggle({
   visible,
   disabled,
@@ -677,7 +685,7 @@ function ArchivedToggle({
           type="button"
           className={cn(
             `sidebar-archived-toggle ${bareButtonReset} cursor-pointer rounded-md p-1 text-muted-foreground`,
-            "opacity-60 transition-opacity group-hover:opacity-100 focus-visible:opacity-100",
+            "opacity-0 transition-opacity group-hover:opacity-100 focus-visible:opacity-100",
             "aria-pressed:opacity-100 aria-pressed:text-foreground",
             "hover:bg-accent hover:text-foreground",
             "focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring",

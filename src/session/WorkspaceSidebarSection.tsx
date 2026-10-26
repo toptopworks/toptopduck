@@ -20,6 +20,7 @@ import {
   ChevronsUpDown,
   ChevronDown,
   ChevronRight,
+  Folder,
   FolderOpen,
   FolderX,
   MoreHorizontal,
@@ -73,49 +74,6 @@ const PILL_TRIGGER_CLASS = `session-row-action ${bareButtonReset} flex size-7 it
 export const SHOW_MORE_CLASS =
   "flex w-full cursor-pointer items-center rounded-sm px-2 py-1.5 text-left text-xs text-muted-foreground hover:text-foreground focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring";
 
-/** The section head's collapse toggle, shared with the parent's section
- *  renderer (the pinned / recent sections mount their own instance). The
- *  collapsed state lives in the parent's per-session Set. */
-export function SectionCollapseButton({
-  collapsed,
-  onToggle,
-}: {
-  collapsed: boolean;
-  onToggle: () => void;
-}) {
-  const intl = useIntl();
-  // Two STATIC branches per arm (the RowActionsMenu pin/unpin precedent):
-  // a ternary id string would break the i18n:check extract gate.
-  const label = collapsed
-    ? intl.formatMessage({
-        id: "sidebar.section.expandAria",
-        defaultMessage: "Expand section",
-      })
-    : intl.formatMessage({
-        id: "sidebar.section.collapseAria",
-        defaultMessage: "Collapse section",
-      });
-  return (
-    <button
-      type="button"
-      aria-expanded={!collapsed}
-      aria-label={label}
-      className={cn(
-        bareButtonReset,
-        "flex size-5 shrink-0 cursor-pointer items-center justify-center rounded text-muted-foreground hover:text-foreground",
-        "focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring",
-      )}
-      onClick={onToggle}
-    >
-      {collapsed ? (
-        <ChevronRight className="size-3.5" aria-hidden />
-      ) : (
-        <ChevronDown className="size-3.5" aria-hidden />
-      )}
-    </button>
-  );
-}
-
 export type WorkspaceSidebarSectionProps = {
   /** The explicit registry groups, server (LRU) order. */
   groups: WorkspaceGroup[];
@@ -163,6 +121,15 @@ export function WorkspaceSidebarSection({
   const [createError, setCreateError] = useState<string | null>(null);
 
   function toggleGroup(path: string) {
+    // Collapsing resets the preview: re-expanding starts at the cap again
+    // ("Show more" is a per-expansion choice, not a sticky one).
+    if (expanded.has(path)) {
+      setShowAll((prev) => {
+        const next = new Set(prev);
+        next.delete(path);
+        return next;
+      });
+    }
     setExpanded((prev) => {
       const next = new Set(prev);
       if (next.has(path)) next.delete(path);
@@ -242,15 +209,34 @@ export function WorkspaceSidebarSection({
         });
 
   return (
-    <li className="session-group mt-1.5 mb-0.5" data-section="workspaces">
+    <li className="session-group mt-3 mb-1" data-section="workspaces">
       <div className="session-group-title-row group relative mb-0.5 flex items-center justify-between px-1">
-        <div className="flex min-w-0 items-center gap-0.5">
-          <SectionCollapseButton collapsed={collapsed} onToggle={onToggleCollapsed} />
-          <h3 className="session-group-title text-xs uppercase tracking-wider text-muted-foreground">
-            <FormattedMessage id="sidebar.group.workspaces" defaultMessage="Workspaces" />
-          </h3>
-          <span className="text-xs tabular-nums text-muted-foreground">{groups.length}</span>
-        </div>
+        {/* The title row itself is the section fold toggle (the whole row
+            clicks); the chevron rides the label's tail, hover/focus-revealed
+            -- the same posture as the parent's section heads. */}
+        <h3 className="session-group-title min-w-0 flex-1 text-xs uppercase tracking-wider text-muted-foreground">
+          <button
+            type="button"
+            aria-expanded={!collapsed}
+            onClick={onToggleCollapsed}
+            className="flex w-full cursor-pointer items-center gap-0.5 rounded text-left focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring"
+          >
+            <span className="truncate">
+              <FormattedMessage id="sidebar.group.workspaces" defaultMessage="Workspaces" />
+            </span>
+            <span className="shrink-0 tabular-nums">({groups.length})</span>
+            <span
+              aria-hidden
+              className="shrink-0 opacity-0 transition-opacity group-hover:opacity-100 group-has-[:focus-visible]:opacity-100"
+            >
+              {collapsed ? (
+                <ChevronRight className="size-3.5" />
+              ) : (
+                <ChevronDown className="size-3.5" />
+              )}
+            </span>
+          </button>
+        </h3>
         <div className="flex items-center gap-0.5">
           {chrome}
           {/* The head actions (issue #1392): bulk expand/collapse of every
@@ -263,7 +249,7 @@ export function WorkspaceSidebarSection({
             disabled={disabled}
             className={cn(
               `sidebar-archived-toggle ${bareButtonReset} cursor-pointer rounded-md p-1 text-muted-foreground`,
-              "opacity-60 transition-opacity group-hover:opacity-100 focus-visible:opacity-100",
+              "opacity-0 transition-opacity group-hover:opacity-100 focus-visible:opacity-100",
               "hover:bg-accent hover:text-foreground",
               "focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring",
               "disabled:cursor-progress disabled:opacity-50",
@@ -285,7 +271,7 @@ export function WorkspaceSidebarSection({
             disabled={disabled}
             className={cn(
               `sidebar-archived-toggle ${bareButtonReset} cursor-pointer rounded-md p-1 text-muted-foreground`,
-              "opacity-60 transition-opacity group-hover:opacity-100 focus-visible:opacity-100",
+              "opacity-0 transition-opacity group-hover:opacity-100 focus-visible:opacity-100",
               "hover:bg-accent hover:text-foreground",
               "focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring",
               "disabled:cursor-progress disabled:opacity-50",
@@ -297,7 +283,15 @@ export function WorkspaceSidebarSection({
         </div>
       </div>
       {!collapsed && (
-        <ul className="session-group-list list-none m-0 p-0">
+        <ul className="session-group-list list-none m-0 pb-2 pt-1">
+          {groups.length === 0 && (
+            <li className="session-empty py-1 pl-7 text-xs text-muted-foreground">
+              <FormattedMessage
+                id="sidebar.workspace.empty"
+                defaultMessage="No workspaces"
+              />
+            </li>
+          )}
           {groups.map((g) => {
             const open = expanded.has(g.path);
             const capped =
@@ -313,11 +307,10 @@ export function WorkspaceSidebarSection({
                     className="flex min-w-0 flex-1 cursor-pointer items-center gap-1.5 py-1.5 pl-1.5 pr-2 text-left text-sm text-foreground"
                   >
                     {open ? (
-                      <ChevronDown className="size-3.5 shrink-0 text-muted-foreground" aria-hidden />
+                      <FolderOpen className="size-4 shrink-0 text-muted-foreground" aria-hidden />
                     ) : (
-                      <ChevronRight className="size-3.5 shrink-0 text-muted-foreground" aria-hidden />
+                      <Folder className="size-4 shrink-0 text-muted-foreground" aria-hidden />
                     )}
-                    <FolderOpen className="size-4 shrink-0 text-muted-foreground" aria-hidden />
                     <span className="truncate">{g.label}</span>
                     {g.missing && (
                       <span className="shrink-0 text-xs text-muted-foreground">
@@ -327,6 +320,19 @@ export function WorkspaceSidebarSection({
                         />
                       </span>
                     )}
+                    {/* The fold chevron rides the label's tail (not the row
+                        edge, which the hover pill owns), revealed on row
+                        hover / focus -- the whole row button toggles. */}
+                    <span
+                      aria-hidden
+                      className="shrink-0 text-muted-foreground opacity-0 transition-opacity group-has-[:focus-visible]/row:opacity-100 group-hover/row:opacity-100"
+                    >
+                      {open ? (
+                        <ChevronDown className="size-3.5" />
+                      ) : (
+                        <ChevronRight className="size-3.5" />
+                      )}
+                    </span>
                   </button>
                   {/* The row-end pill: the same-workspace new-session
                       shortcut (the one-step continuation) + the actions

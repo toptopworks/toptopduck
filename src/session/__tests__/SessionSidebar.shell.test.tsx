@@ -716,11 +716,12 @@ describe("SessionSidebar grouping toggle (ADR-0072, issue #251)", () => {
     );
     const trigger = container.querySelector(".sidebar-grouping-toggle") as HTMLButtonElement;
     const classes = trigger.className.split(/\s+/);
-    expect(classes).toContain("opacity-60");
+    // Hover-revealed posture: hidden at rest, visible on keyboard focus.
+    expect(classes).toContain("opacity-0");
+    expect(classes).toContain("group-hover:opacity-100");
     expect(classes).toContain("focus-visible:outline-2");
     expect(classes).toContain("focus-visible:outline-ring");
     expect(classes).toContain("focus-visible:outline-offset-2");
-    expect(classes).not.toContain("opacity-0");
   });
 
   it("disables the trigger and refuses to open the popover when the shell is busy (issue #251 review)", () => {
@@ -1395,10 +1396,12 @@ describe("SessionSidebar organization (ADR-0127, issue #1175)", () => {
         sections[0].querySelectorAll(".session-name"),
       ).map((n) => n.textContent);
       expect(names).toEqual(["Pin Old", "Pin New"]);
+      // The permanent workspaces head sits between pinned and the body.
+      expect(sections[1].dataset.section).toBe("workspaces");
       // The body keeps its own first section; the pinned rows are gone from it.
-      expect(sections[1].dataset.section).not.toBe("pinned");
+      expect(sections[2].dataset.section).not.toBe("pinned");
       const bodyNames = Array.from(
-        sections[1].querySelectorAll(".session-name"),
+        sections[2].querySelectorAll(".session-name"),
       ).map((n) => n.textContent);
       expect(bodyNames).toEqual(["Plain"]);
     }
@@ -1411,7 +1414,7 @@ describe("SessionSidebar organization (ADR-0127, issue #1175)", () => {
     const { container } = renderShell(
       <SessionSidebar {...orgProps({ sessions })} />,
     );
-    expect(sectionNames(container)).toEqual(["recent"]);
+    expect(sectionNames(container)).toEqual(["workspaces", "recent"]);
   });
 
   it("row-menu actions fire their callbacks WITHOUT activating the row (sibling trigger)", () => {
@@ -1881,13 +1884,18 @@ describe("SessionSidebar workspace section (issue #1392)", () => {
     const { container } = renderShell(
       <SessionSidebar {...wsProps()} />,
     );
-    const section = await waitFor(() => {
-      const el = container.querySelector("[data-section=\"workspaces\"]");
-      expect(el).not.toBeNull();
-      return el as HTMLElement;
-    });
+    // The section head is permanent now, so waiting on IT would race the
+    // listing query -- wait on the group row the record produces.
+    await waitFor(() =>
+      expect(
+        container.querySelector("[data-workspace-group=\"/w/explicit\"]"),
+      ).not.toBeNull(),
+    );
+    const section = container.querySelector(
+      "[data-section=\"workspaces\"]",
+    ) as HTMLElement;
     expect(section.textContent).toContain("explicit");
-    expect(section.textContent).toContain("1");
+    expect(section.textContent).toContain("(1)");
     expect(section.textContent).not.toContain("implicit");
   });
 
@@ -1956,6 +1964,31 @@ describe("SessionSidebar workspace section (issue #1392)", () => {
     expect(container.querySelectorAll(".session-entry-main")).toHaveLength(5);
     fireEvent.click(screen.getByText("Show more (2)"));
     expect(container.querySelectorAll(".session-entry-main")).toHaveLength(7);
+  });
+
+  it("collapse resets the preview: re-expanding shows the cap again", async () => {
+    vi.mocked(listWorkspaces).mockResolvedValue([
+      { path: "/w/big", label: "big", explicit: true, exists: true },
+    ]);
+    const members = Array.from({ length: 7 }, (_, i) =>
+      metaRow(`/m${i}.json`, `m${i}`, "/w/big"),
+    );
+    const { container } = renderShell(
+      <SessionSidebar {...wsProps({ sessions: members })} />,
+    );
+    const toggle = await waitFor(() => {
+      const el = container.querySelector(
+        "[data-workspace-group=\"/w/big\"] [aria-expanded]",
+      );
+      expect(el).not.toBeNull();
+      return el as HTMLElement;
+    });
+    fireEvent.click(toggle); // expand -> preview
+    fireEvent.click(screen.getByText("Show more (2)")); // full list
+    fireEvent.click(toggle); // collapse
+    fireEvent.click(toggle); // expand again -> the preview, NOT the full list
+    expect(container.querySelectorAll(".session-entry-main")).toHaveLength(5);
+    expect(screen.getByText("Show more (2)")).toBeInTheDocument();
   });
 
   it("caps each recent-body group at 5 with the Show more tail", async () => {
