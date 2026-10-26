@@ -1948,6 +1948,115 @@ describe("SessionSidebar workspace section (issue #1392)", () => {
     expect(row?.textContent).toContain("alpha");
   });
 
+  it("keeps a session bound to a non-explicit workspace in the recent body", async () => {
+    vi.mocked(listWorkspaces).mockResolvedValue([
+      { path: "/w/explicit", label: "explicit", explicit: true, exists: true },
+      { path: "/w/implicit", label: "implicit", explicit: false, exists: true },
+    ]);
+    const { container } = renderShell(
+      <SessionSidebar
+        {...wsProps({
+          sessions: [
+            metaRow("/a.json", "alpha", "/w/explicit"),
+            metaRow("/i.json", "impl-row", "/w/implicit"),
+          ],
+        })}
+      />,
+    );
+    // Waiting on the explicit group row means the listing query has landed:
+    // the bound-to-explicit row left the recent body for its group, while
+    // the non-explicit binding keeps its recent face (the partition's
+    // implicit-workspace clause -- no group buckets it, ever).
+    await waitFor(() => {
+      const el = container.querySelector(
+        "[data-workspace-group=\"/w/explicit\"] [aria-expanded]",
+      );
+      expect(el).not.toBeNull();
+    });
+    const recent = container.querySelector(
+      "[data-section=\"recent\"]",
+    ) as HTMLElement;
+    expect(recent.textContent).not.toContain("alpha");
+    expect(recent.textContent).toContain("impl-row");
+    expect(container.textContent).not.toContain("implicit");
+  });
+
+  it("an open bound session rides its group only; the refetch-window open stays recent", async () => {
+    vi.mocked(listWorkspaces).mockResolvedValue([
+      { path: "/w/explicit", label: "explicit", explicit: true, exists: true },
+    ]);
+    const openRow = (sid: string, name: string, path: string) => ({
+      sid,
+      name,
+      path,
+      pendingIngestPaths: [],
+      pendingQuestion: null,
+      pendingSkillInvocations: [],
+    });
+    const view = renderShell(
+      <SessionSidebar
+        {...wsProps({
+          sessions: [metaRow("/a.json", "alpha", "/w/explicit")],
+          openSessions: [
+            openRow("sid-a", "alpha", "/a.json"),
+            openRow("sid-b", "freshie", "/fresh.json"),
+          ],
+        })}
+      />,
+    );
+    const { container } = view;
+    const group = await waitFor(() => {
+      const el = container.querySelector(
+        "[data-workspace-group=\"/w/explicit\"] [aria-expanded]",
+      );
+      expect(el).not.toBeNull();
+      return el as HTMLElement;
+    });
+    // The bound open session's ONLY face is its workspace group: the recent
+    // body must not resurrect it via the not-yet-persisted open loop (the
+    // open-lifetime duplicate bug).
+    const recent = container.querySelector(
+      "[data-section=\"recent\"]",
+    ) as HTMLElement;
+    expect(recent.textContent).not.toContain("alpha");
+    // The refetch-window open (its persisted scan hasn't landed) stays recent.
+    expect(recent.textContent).toContain("freshie");
+    // Collapsed by default: toggling reveals the group's face of alpha.
+    fireEvent.click(group);
+    expect(container.textContent).toContain("alpha");
+    // The persisted scan lands with freshie bound: it leaves the recent
+    // body for its group (the partition's transition half).
+    view.rerender(
+      shellTree(
+        <SessionSidebar
+          {...wsProps({
+            sessions: [
+              metaRow("/a.json", "alpha", "/w/explicit"),
+              metaRow("/fresh.json", "freshie", "/w/explicit"),
+            ],
+            openSessions: [
+              openRow("sid-a", "alpha", "/a.json"),
+              openRow("sid-b", "freshie", "/fresh.json"),
+            ],
+          })}
+        />,
+      ),
+    );
+    await waitFor(() => {
+      // The recent body is now empty: its content-driven section is gone
+      // entirely (freshie left it for the group -- the departure half), and
+      // the landed row arrived on its group face (the arrival half).
+      expect(
+        view.container.querySelector("[data-section=\"recent\"]"),
+      ).toBeNull();
+      expect(
+        view.container.querySelector(
+          "[data-workspace-group=\"/w/explicit\"]",
+        )?.textContent,
+      ).toContain("freshie");
+    });
+  });
+
   it("caps the subtree preview at 5 and expands the rest via Show more (N)", async () => {
     vi.mocked(listWorkspaces).mockResolvedValue([
       { path: "/w/big", label: "big", explicit: true, exists: true },
