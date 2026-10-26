@@ -57,8 +57,8 @@ describe("ComposerWorkspacePicker (issue #1384)", () => {
 
   it("the unbound face prompts and the popover offers recent + browse only", async () => {
     vi.mocked(listWorkspaces).mockResolvedValue([
-      { path: "/w/alpha", label: "alpha" },
-      { path: "/w/beta", label: "beta" },
+      { path: "/w/alpha", label: "alpha", explicit: false, exists: true },
+      { path: "/w/beta", label: "beta", explicit: false, exists: true },
     ]);
     renderPicker(null);
     expect(
@@ -91,15 +91,15 @@ describe("ComposerWorkspacePicker (issue #1384)", () => {
 
   it("a recent row commits once and closes the popover", async () => {
     vi.mocked(listWorkspaces).mockResolvedValue([
-      { path: "/w/alpha", label: "alpha" },
-      { path: "/w/beta", label: "beta" },
+      { path: "/w/alpha", label: "alpha", explicit: false, exists: true },
+      { path: "/w/beta", label: "beta", explicit: false, exists: true },
     ]);
     const onChange = vi.fn();
     renderPicker(null, onChange);
     openPopover();
     fireEvent.click(await screen.findByRole("button", { name: "beta" }));
     expect(onChange).toHaveBeenCalledTimes(1);
-    expect(onChange).toHaveBeenCalledWith({ path: "/w/beta", label: "beta" });
+    expect(onChange).toHaveBeenCalledWith({ path: "/w/beta", label: "beta", explicit: false, exists: true });
     await waitFor(() =>
       expect(
         screen.queryByRole("button", { name: "Browse folders…" }),
@@ -112,6 +112,8 @@ describe("ComposerWorkspacePicker (issue #1384)", () => {
       Array.from({ length: 12 }, (_, i) => ({
         path: `/w/ws-${i + 1}`,
         label: `ws-${i + 1}`,
+        explicit: false,
+        exists: true,
       })),
     );
     renderPicker(null);
@@ -156,7 +158,7 @@ describe("ComposerWorkspacePicker (issue #1384)", () => {
     // of the run; the query opts out itself. Riding the same Infinity
     // default here pins the opt-out: reopen must fetch again.
     vi.mocked(listWorkspaces).mockResolvedValue([
-      { path: "/w/alpha", label: "alpha" },
+      { path: "/w/alpha", label: "alpha", explicit: false, exists: true },
     ]);
     renderPicker(null, vi.fn(), Infinity);
     openPopover();
@@ -183,9 +185,11 @@ describe("search, row faces, and the naming subview (issue #1393)", () => {
       ...Array.from({ length: 12 }, (_, i) => ({
         path: `/w/ws-${i + 1}`,
         label: `ws-${i + 1}`,
+        explicit: false,
+        exists: true,
       })),
       // A row whose label does not carry the term but whose path tail does.
-      { path: "/w/somewhere/tail-hit", label: "Different Label" },
+      { path: "/w/somewhere/tail-hit", label: "Different Label", explicit: false, exists: true },
     ]);
     renderPicker(null);
     openPopover();
@@ -208,7 +212,7 @@ describe("search, row faces, and the naming subview (issue #1393)", () => {
 
   it("a zero-match term shows the empty state; clearing restores the cap", async () => {
     vi.mocked(listWorkspaces).mockResolvedValue([
-      { path: "/w/alpha", label: "alpha" },
+      { path: "/w/alpha", label: "alpha", explicit: false, exists: true },
     ]);
     renderPicker(null);
     openPopover();
@@ -226,10 +230,37 @@ describe("search, row faces, and the naming subview (issue #1393)", () => {
     ).toBeInTheDocument();
   });
 
+  it("dangling records never surface in the capped or the typed view (issue #1392)", async () => {
+    vi.mocked(listWorkspaces).mockResolvedValue([
+      { path: "/w/alpha", label: "alpha", explicit: false, exists: true },
+      { path: "/w/gone", label: "gone", explicit: false, exists: false },
+    ]);
+    renderPicker(null);
+    openPopover();
+    expect(
+      await screen.findByRole("button", { name: "alpha" }),
+    ).toBeInTheDocument();
+    // The client-side exists filter (the backend listing is unfiltered
+    // since #1392) keeps the dangling row out of the capped view...
+    expect(
+      screen.queryByRole("button", { name: "gone" }),
+    ).not.toBeInTheDocument();
+    // ...and out of the typed view (the recall channel widens to the full
+    // registry, not to missing directories).
+    const search = screen.getByPlaceholderText("Search workspaces");
+    fireEvent.change(search, { target: { value: "gon" } });
+    expect(
+      await screen.findByText("No matching workspaces"),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "gone" }),
+    ).not.toBeInTheDocument();
+  });
+
   it("a layer close resets the search term for the next open", async () => {
     vi.mocked(listWorkspaces).mockResolvedValue([
-      { path: "/w/alpha", label: "alpha" },
-      { path: "/w/beta", label: "beta" },
+      { path: "/w/alpha", label: "alpha", explicit: false, exists: true },
+      { path: "/w/beta", label: "beta", explicit: false, exists: true },
     ]);
     renderPicker(null);
     openPopover();
@@ -270,8 +301,8 @@ describe("search, row faces, and the naming subview (issue #1393)", () => {
 
   it("the selected row rides the accent pair with the folder icon leading and the check trailing", async () => {
     vi.mocked(listWorkspaces).mockResolvedValue([
-      { path: "/w/alpha", label: "alpha" },
-      { path: "/w/beta", label: "beta" },
+      { path: "/w/alpha", label: "alpha", explicit: false, exists: true },
+      { path: "/w/beta", label: "beta", explicit: false, exists: true },
     ]);
     renderPicker({ path: "/w/alpha", label: "alpha" });
     openPopover();
@@ -289,7 +320,7 @@ describe("search, row faces, and the naming subview (issue #1393)", () => {
 
   it("the naming modal guards the name and cancels without invoking", async () => {
     vi.mocked(listWorkspaces).mockResolvedValue([
-      { path: "/w/alpha", label: "alpha" },
+      { path: "/w/alpha", label: "alpha", explicit: false, exists: true },
     ]);
     renderPicker(null);
     openPopover();
@@ -332,11 +363,13 @@ describe("search, row faces, and the naming subview (issue #1393)", () => {
 
   it("creating from the modal mints immediately and seats the reply as the pending selection", async () => {
     vi.mocked(listWorkspaces).mockResolvedValue([
-      { path: "/w/alpha", label: "alpha" },
+      { path: "/w/alpha", label: "alpha", explicit: false, exists: true },
     ]);
     vi.mocked(createWorkspace).mockResolvedValue({
       path: "/w/my-analysis",
       label: "my-analysis",
+      explicit: true,
+      exists: true,
     });
     const onChange = vi.fn();
     renderPicker(null, onChange);
@@ -352,6 +385,8 @@ describe("search, row faces, and the naming subview (issue #1393)", () => {
       expect(onChange).toHaveBeenCalledWith({
         path: "/w/my-analysis",
         label: "my-analysis",
+        explicit: true,
+        exists: true,
       }),
     );
     // The trimmed spelling crosses IPC; the modal closes on the commit.
@@ -365,7 +400,7 @@ describe("search, row faces, and the naming subview (issue #1393)", () => {
 
   it("a backend refusal surfaces inline and keeps the modal open", async () => {
     vi.mocked(listWorkspaces).mockResolvedValue([
-      { path: "/w/alpha", label: "alpha" },
+      { path: "/w/alpha", label: "alpha", explicit: false, exists: true },
     ]);
     vi.mocked(createWorkspace).mockRejectedValueOnce(
       new Error("workspace name contains a path-illegal character"),

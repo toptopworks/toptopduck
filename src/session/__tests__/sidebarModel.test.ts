@@ -3,11 +3,13 @@ import {
   buildArchivedEntries,
   buildSearchEntries,
   buildSidebarModel,
+  buildWorkspaceGroups,
   formatLastModified,
   MAX_SEARCH_RESULTS,
   timeGroupKind,
   type OpenSession,
 } from "../sidebarModel";
+import type { RecentWorkspace } from "../../api";
 import type { SessionMetadata } from "../../types/session";
 
 // Pure sidebar-model tests (ADR-0060/0061, issue #81): the merge + Chat-style
@@ -463,5 +465,76 @@ describe("buildArchivedEntries (ADR-0127, issue #1175)", () => {
       expect(e.sourceCount).toBe(1);
       expect(e.turnCount).toBe(1);
     }
+  });
+});
+
+describe("buildWorkspaceGroups", () => {
+  const OPEN: OpenSession[] = [
+    { sid: "uuid-a", name: "alpha", path: "/a.json", pendingIngestPaths: [], pendingQuestion: null, pendingSkillInvocations: [] },
+  ];
+  const ws = (
+    path: string,
+    label: string,
+    opts: { explicit?: boolean; exists?: boolean } = {},
+  ): RecentWorkspace => ({
+    path,
+    label,
+    explicit: opts.explicit ?? false,
+    exists: opts.exists ?? true,
+  });
+
+  it("keeps only explicit records, in server order, empty groups included", () => {
+    const groups = buildWorkspaceGroups(
+      [ws("/w/first", "first", { explicit: true }), ws("/w/implicit", "implicit"), ws("/w/second", "second", { explicit: true })],
+      [],
+      [],
+      null,
+    );
+    expect(groups.map((g) => g.path)).toEqual(["/w/first", "/w/second"]);
+    expect(groups.map((g) => g.entries)).toEqual([[], []]);
+  });
+
+  it("derives membership from the session header's workspace field", () => {
+    const persisted = [
+      meta("/a.json", "alpha", 0, { workspace: "/w/first" }),
+      meta("/b.json", "beta", 1, { workspace: "/w/second" }),
+      meta("/c.json", "gamma", 2),
+    ];
+    const groups = buildWorkspaceGroups(
+      [ws("/w/first", "first", { explicit: true }), ws("/w/second", "second", { explicit: true })],
+      persisted,
+      [],
+      null,
+    );
+    expect(groups[0].entries.map((e) => e.name)).toEqual(["alpha"]);
+    expect(groups[1].entries.map((e) => e.name)).toEqual(["beta"]);
+  });
+
+  it("sorts members freshest first and upgrades the open binding", () => {
+    const persisted = [
+      meta("/a.json", "alpha", 0, { workspace: "/w/first" }),
+      meta("/b.json", "beta", 1, { workspace: "/w/first" }),
+    ];
+    const groups = buildWorkspaceGroups(
+      [ws("/w/first", "first", { explicit: true })],
+      persisted,
+      OPEN,
+      "uuid-a",
+    );
+    expect(groups[0].entries.map((e) => e.name)).toEqual(["alpha", "beta"]);
+    expect(groups[0].entries[0].sid).toBe("uuid-a");
+    expect(groups[0].entries[0].active).toBe(true);
+    expect(groups[0].entries[1].sid).toBeNull();
+  });
+
+  it("marks a missing directory but keeps the group", () => {
+    const groups = buildWorkspaceGroups(
+      [ws("/w/gone", "gone", { explicit: true, exists: false })],
+      [],
+      [],
+      null,
+    );
+    expect(groups[0].missing).toBe(true);
+    expect(groups[0].entries).toEqual([]);
   });
 });

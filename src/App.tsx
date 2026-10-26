@@ -57,7 +57,7 @@ import { log } from "./lib/log";
 import { createQueryClient } from "./lib/queryClient";
 import { catalogFor } from "./i18n";
 import { useTheme } from "./theme/useTheme";
-import { adapterKeys } from "./session/queryKeys";
+import { adapterKeys, workspaceKeys } from "./session/queryKeys";
 import { useTurnFailureSids } from "./session/useTurnFailureSids";
 
 // WheelEvent deltaMode values (spec constants, inlined so the handler does
@@ -613,6 +613,10 @@ export default function App() {
           // Issue #1384: the workspace selection is one-shot -- consumed by
           // the mint, the pill returns to unbound for the next session.
           setPendingWorkspace(null);
+          // Issue #1392: the mint's explicit bind just made (or freshened) a
+          // registry record -- the sidebar's workspace section must not wait
+          // for the next popover open to show the group.
+          void queryClient.invalidateQueries({ queryKey: workspaceKeys.all() });
           // The mint-time set IPCs landed the explicit pair in the startup
           // backfill entry (record_last_model_posture, the single write
           // point). Invalidate so a later return to cold start refetches the
@@ -1031,6 +1035,15 @@ export default function App() {
                   pendingApprovalSids={approvalEvents.pendingApprovalSids}
                   turnFailedSids={turnFailureSids}
                   onNew={goToEmptyState}
+                  onNewInWorkspace={(path, label) => {
+                    // Issue #1392: the workspace section's ⊕ shortcut -- the
+                    // same staged pendingWorkspace channel the composer pill
+                    // uses (one-shot, consumed by the next mint), landing on
+                    // the cold-start bar where the pill shows the staged
+                    // selection.
+                    setPendingWorkspace({ path, label });
+                    goToEmptyState();
+                  }}
                   onActivate={activateSession}
                   onOpenPersisted={(path, name) =>
                     void openPersisted(path, name)}

@@ -351,29 +351,39 @@ pub fn create_session(
 /// One recent-workspace row for the session-creation selector (ADR-0138,
 /// issue #1384): the canonical path (the `create_session` binding value)
 /// and the display label (the record's title, defaulting to the directory
-/// tail -- a full path is never the display face).
+/// tail -- a full path is never the display face). `explicit` marks the
+/// sidebar section's members (issue #1392); `exists` lets the frontend keep
+/// the selector's existence filter on the now-unfiltered listing.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct RecentWorkspace {
     pub path: String,
     pub label: String,
+    pub explicit: bool,
+    pub exists: bool,
 }
 
-/// The workspace registry's LRU view (ADR-0138, issue #1384): records whose
-/// directory still exists, most recently used first. The selector slices
+/// The wire projection of one registry record (the listing's row; the
+/// create command inlines its reply).
+fn workspace_row(r: &crate::workspace::WorkspaceRecord) -> RecentWorkspace {
+    RecentWorkspace {
+        path: r.path.display().to_string(),
+        label: r.label(),
+        explicit: r.explicit,
+        exists: r.path.exists(),
+    }
+}
+
+/// The workspace registry's LRU view (ADR-0138, issue #1384): EVERY record,
+/// most recently used first -- dangling directories included, so the
+/// sidebar's workspace section can keep a missing-directory group with a
+/// state hint (issue #1392). The selector filters on `exists` and slices
 /// its top 10; older workspaces resurface through the folder browse.
 /// Read-only and tolerant -- an unreadable registry lists empty.
 #[tauri::command]
 pub fn list_workspaces(
     registry: State<'_, Arc<crate::workspace::WorkspaceRegistry>>,
 ) -> Vec<RecentWorkspace> {
-    registry
-        .recent()
-        .into_iter()
-        .map(|r| RecentWorkspace {
-            path: r.path.display().to_string(),
-            label: r.label(),
-        })
-        .collect()
+    registry.all().iter().map(workspace_row).collect()
 }
 
 /// Mint a NAMED workspace for the session-creation selector (issue #1393):
@@ -407,13 +417,99 @@ pub fn create_workspace(
             .map_err(|detail| format!("workspace created but the record failed: {detail}"))?;
         name.trim().to_string()
     } else {
-        registry.record(&canonical);
+        // Selecting the existing directory is an explicit choice too
+        // (issue #1392): the record joins the sidebar's workspace section.
+        registry.record_selected(&canonical);
         registry.label_of(&canonical)
     };
     Ok(RecentWorkspace {
         path: canonical.display().to_string(),
         label,
+        explicit: true,
+        exists: true,
     })
+}
+
+/// Resolve the registry key for a path the frontend echoes back from a
+/// listing projection: canonicalize when the directory exists (the bound
+/// spelling rule), fall back to the verbatim string for a dangling record
+/// -- a missing directory cannot canonicalize, but its record stays
+/// renameable and removable (issue #1392).
+fn resolve_registry_key(path: &str) -> std::path::PathBuf {
+    std::fs::canonicalize(path).unwrap_or_else(|_| std::path::PathBuf::from(path))
+}
+
+/// Rename a workspace record (issue #1392): overwrites the display `title`
+/// only -- the directory and its path are never touched, duplicate titles
+/// are allowed, and the pill / popover / sidebar faces all re-derive from
+/// the registry on the next fetch. Strict: a missing record or a refused
+/// write surfaces to the user.
+/// The rename face's server-side guard: trim + non-empty only. The full
+/// naming rule (length cap, illegal characters, trailing dot) is the mint
+/// path's contract -- there the name becomes a directory; a rename writes
+/// the display title only, so the shared frontend guard is that rule's
+/// only enforcer on this face (issue #1392 review).
+fn rename_title(title: &str) -> Result<&str, String> {
+    let title = title.trim();
+    if title.is_empty() {
+        return Err("workspace title must not be empty".to_string());
+    }
+    Ok(title)
+}
+
+/// Apply the rename for a path the frontend echoes back from a listing
+/// projection. The echo is the recorded spelling by construction, but a
+/// directory re-created in a different case (or a junction swapped under
+/// the path) canonicalizes AWAY from the stored key -- on a canonical-key
+/// miss, retry the verbatim echo before surfacing the refusal (issue
+/// #1392 review).
+fn rename_registry_record(
+    registry: &crate::workspace::WorkspaceRegistry,
+    path: &str,
+    title: &str,
+) -> Result<(), String> {
+    let key = resolve_registry_key(path);
+    let attempt = registry.rename(&key, title);
+    if attempt.is_err() && key != std::path::Path::new(path) {
+        return registry.rename(std::path::Path::new(path), title);
+    }
+    attempt
+}
+
+/// Apply the remove-from-list for an echoed path: the same dual-spelling
+/// rule as the rename -- the idempotent miss would otherwise report
+/// success for a record the re-canonicalized key never found, leaving the
+/// group standing in the section (issue #1392 review).
+fn remove_registry_record(
+    registry: &crate::workspace::WorkspaceRegistry,
+    path: &str,
+) -> Result<(), String> {
+    let key = resolve_registry_key(path);
+    if !registry.remove_record(&key)? && key != std::path::Path::new(path) {
+        registry.remove_record(std::path::Path::new(path))?;
+    }
+    Ok(())
+}
+
+#[tauri::command]
+pub fn rename_workspace(
+    registry: State<'_, Arc<crate::workspace::WorkspaceRegistry>>,
+    path: String,
+    title: String,
+) -> Result<(), String> {
+    rename_registry_record(&registry, &path, rename_title(&title)?)
+}
+
+/// Remove a workspace record (issue #1392): a ledger edit, not a filesystem
+/// delete -- the directory stays and the sessions bound to it fall back to
+/// the sidebar's recent list (membership derives from the session header).
+/// Idempotent on an unknown path.
+#[tauri::command]
+pub fn remove_workspace(
+    registry: State<'_, Arc<crate::workspace::WorkspaceRegistry>>,
+    path: String,
+) -> Result<(), String> {
+    remove_registry_record(&registry, &path)
 }
 
 /// Close a session (ADR-0055): mark closing, fire cancel, and remove the entry
@@ -6057,5 +6153,64 @@ You are a focused analyst.
         );
         assert_eq!(inputs.cli_tools[0].name, "pandoc-guide");
         assert!(inputs.mcp_servers.is_empty());
+    }
+
+    // ---- workspace record commands (issue #1392 review) ----
+
+    #[test]
+    fn resolve_registry_key_canonicalizes_live_paths_and_keeps_dangling_verbatim() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let live = root.path().join("live");
+        std::fs::create_dir(&live).expect("mkdir");
+        assert_eq!(
+            resolve_registry_key(live.to_str().expect("utf8")),
+            std::fs::canonicalize(&live).expect("canonicalize"),
+            "an existing directory resolves to its canonical spelling"
+        );
+        let gone = root.path().join("gone");
+        assert_eq!(
+            resolve_registry_key(gone.to_str().expect("utf8")),
+            gone,
+            "a dangling echo stays verbatim (the recorded spelling)"
+        );
+    }
+
+    #[test]
+    fn rename_title_trims_and_refuses_empty() {
+        assert_eq!(rename_title("  New  "), Ok("New"));
+        assert!(rename_title("   ").is_err());
+        assert!(rename_title("").is_err());
+    }
+
+    #[test]
+    fn echoed_renames_and_removes_survive_a_canonical_drift_between_key_and_disk() {
+        // The listing echoes the RECORDED spelling; a spelling that
+        // canonicalizes to something OTHER than the stored key (a
+        // junction swapped under the path, or a record whose stored
+        // spelling predates the filesystem's final form -- on Windows the
+        // canonical form carries the verbatim prefix) must not strand the
+        // user action: the rename and the remove both retry the verbatim
+        // echo on a canonical-key miss.
+        let root = tempfile::tempdir().expect("registry dir");
+        let registry = crate::workspace::WorkspaceRegistry::new(
+            root.path().join(crate::workspace::WORKSPACES_FILE_NAME),
+        );
+        let dir = root.path().join("Real");
+        std::fs::create_dir(&dir).expect("mkdir");
+        // A record whose stored spelling is NOT the directory's canonical
+        // form (canonicalize below returns a different spelling than the
+        // plain one stored here).
+        registry
+            .record_at(&dir, Some("Seed"), true, 1_000)
+            .expect("record");
+
+        let echo = dir.to_string_lossy().into_owned();
+        rename_registry_record(&registry, &echo, "T").expect("rename lands");
+        assert_eq!(registry.all()[0].title.as_deref(), Some("T"));
+        remove_registry_record(&registry, &echo).expect("remove lands");
+        assert!(
+            registry.all().is_empty(),
+            "the record is gone despite the drift"
+        );
     }
 }

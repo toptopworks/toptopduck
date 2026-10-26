@@ -1,16 +1,35 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { FormattedMessage, useIntl } from "react-intl";
-import { Archive, Check, Pencil, Search, Settings } from "lucide-react";
+import { useQuery } from "@tanstack/react-query";
+import {
+  Archive,
+  Check,
+  ChevronDown,
+  ChevronRight,
+  Pencil,
+  Search,
+  Settings,
+} from "lucide-react";
 import {
   buildArchivedEntries,
   buildSidebarModel,
+  buildWorkspaceGroups,
+  SIDEBAR_PREVIEW_CAP,
   type OpenSession,
   type SidebarEntry,
   type SidebarGroupKind,
 } from "./sidebarModel";
 import { formatRelativeTime } from "./lastModifiedText";
 import { resolveDisplayName } from "./displayName";
+import { listWorkspaces } from "../api";
+import { workspaceKeys } from "./queryKeys";
 import { RowActionsMenu } from "./RowActionsMenu";
+import {
+  PILL_CLASS,
+  ROW_SHELL_CLASS,
+  SHOW_MORE_CLASS,
+  WorkspaceSidebarSection,
+} from "./WorkspaceSidebarSection";
 import {
   useSidebarHoverCard,
   useSidebarHoverCardBridge,
@@ -105,6 +124,10 @@ interface SessionSidebarProps {
    *  semantics reset it to hidden on every startup). */
   showArchived: boolean;
   onNew: () => void;
+  /** The workspace section's ⊕ shortcut (issue #1392): the shell stages
+   *  the workspace binding (pendingWorkspace) and returns to the cold-start
+   *  bar -- the next minted session binds it (the one-shot contract). */
+  onNewInWorkspace: (path: string, label: string) => void;
   onActivate: (sid: string) => void;
   onOpenPersisted: (path: string, name: string) => void;
   onSwitchGrouping: (mode: SidebarGrouping) => void;
@@ -159,6 +182,7 @@ export function SessionSidebar({
   archivedSessions,
   showArchived,
   onNew,
+  onNewInWorkspace,
   onActivate,
   onOpenPersisted,
   onSwitchGrouping,
@@ -189,8 +213,36 @@ export function SessionSidebar({
   // row -- the full transition contract lives in the module's header.
   const hover = useSidebarHoverCard();
 
-  const model = buildSidebarModel(
+  // The workspace listing (issue #1392): the section's data face. The
+  // query opts out of the app's staleTime: Infinity (ADR-0051) the same
+  // way the selector does: this section's mutations and the App's mint
+  // path invalidate this key explicitly (rename / remove / create / the
+  // post-mint refresh), and staleTime 0 keeps every mount fresh besides.
+  // The picker rides the same cache, so a rename / remove in either face
+  // lands in both.
+  const { data: workspaceList } = useQuery({
+    queryKey: workspaceKeys.all(),
+    queryFn: listWorkspaces,
+    staleTime: 0,
+  });
+  const workspaceGroups = buildWorkspaceGroups(
+    workspaceList ?? [],
     sessions,
+    openSessions,
+    activeSessionId,
+  );
+  // A bound session shows in ITS workspace subtree only (issue #1392): the
+  // recent body holds the unbound remainder -- "remove from list" drops the
+  // record and the group's sessions fall back to this body. Open-not-yet-
+  // persisted rows carry no workspace on the wire, so they stay here until
+  // the persisted scan catches up.
+  const explicitPaths = new Set(workspaceGroups.map((g) => g.path));
+  const recentSessions = sessions.filter(
+    (m) => m.workspace === null || !explicitPaths.has(m.workspace),
+  );
+
+  const model = buildSidebarModel(
+    recentSessions,
     openSessions,
     activeSessionId,
     now,
@@ -198,30 +250,54 @@ export function SessionSidebar({
   );
   const archivedEntries = showArchived ? buildArchivedEntries(archivedSessions) : [];
 
-  // The section render plan (ADR-0127, issue #1175): the pinned section rides
-  // above the grouped body in BOTH grouping modes (server order), then the
-  // grouped body, then the archived section (only while the view is visible).
-  // The chrome pair (GroupingToggle + the archived-visibility toggle) rides
-  // the FIRST rendered section's title row; with zero sections (an empty
-  // sidebar) it still renders on a bare title row so the archived view stays
-  // reachable when every session is archived (the default list is empty then,
-  // and without an entry point the archived rows would be unreachable).
-  const sections: Array<{
-    key: string;
-    title: ReactNode;
-    entries: SidebarEntry[];
-    variant: "main" | "archived";
-  }> = [];
+  // Section-level folds + preview expansion (issue #1392): per-session
+  // state, deliberately NOT persisted -- every startup renders all three
+  // sections expanded with the 5-row previews.
+  const [collapsedSections, setCollapsedSections] = useState<ReadonlySet<string>>(new Set());
+  const [showAllSections, setShowAllSections] = useState<ReadonlySet<string>>(new Set());
+  // Collapsing a section resets its preview, same rule as the workspace
+  // groups: "Show more" is a per-expansion choice, not a sticky one.
+  const toggleSection = (key: string) => {
+    if (!collapsedSections.has(key)) {
+      setShowAllSections((prev) => {
+        const next = new Set(prev);
+        next.delete(key);
+        return next;
+      });
+    }
+    setCollapsedSections((prev) => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      return next;
+    });
+  };
+
+  // The section render plan (ADR-0127, issue #1175; the three-section
+  // navigation rides issue #1392): pinned → workspaces (always present) →
+  // the grouped body → archived, the rest only when they have content. The
+  // chrome pair (GroupingToggle + the archived-visibility toggle) rides the
+  // FIRST rendered section's title row -- the permanent workspaces head
+  // keeps it reachable even on an otherwise-empty sidebar.
+  type SidebarSection =
+    | { key: string; title: ReactNode; entries: SidebarEntry[]; variant: "main" | "archived"; capped: boolean }
+    | { key: "workspaces"; variant: "workspaces" };
+  const sections: SidebarSection[] = [];
   if (model.pinned.length > 0) {
     sections.push({
       key: "pinned",
       title: <FormattedMessage id="sidebar.group.pinned" defaultMessage="Pinned" />,
       entries: model.pinned,
       variant: "main",
+      capped: false,
     });
   }
+  // The workspaces section is PERMANENT: zero groups still renders the head
+  // (with the count) + the empty hint, so the three-section order and the
+  // chrome anchor stay stable on an otherwise-empty sidebar.
+  sections.push({ key: "workspaces", variant: "workspaces" });
   for (const g of model.groups) {
-    sections.push({ key: g.kind, title: <GroupTitle kind={g.kind} />, entries: g.entries, variant: "main" });
+    sections.push({ key: g.kind, title: <GroupTitle kind={g.kind} />, entries: g.entries, variant: "main", capped: true });
   }
   if (archivedEntries.length > 0) {
     sections.push({
@@ -229,14 +305,14 @@ export function SessionSidebar({
       title: <FormattedMessage id="sidebar.group.archived" defaultMessage="Archived" />,
       entries: archivedEntries,
       variant: "archived",
+      capped: false,
     });
   }
 
-  // One chrome pair, two anchors (issue #1175): the grouping toggle rides
-  // the FIRST rendered section's title row; on a zero-section sidebar it
-  // renders on the bare fallback row instead. A single element instance is
-  // safe to reuse -- the two anchors are mutually exclusive branches, so
-  // only one GroupingToggle/ArchivedToggle instance ever mounts.
+  // One chrome pair, one anchor (issue #1175): the grouping toggle rides
+  // the FIRST rendered section's title row. The permanent workspaces
+  // section guarantees that row always exists, so a single element
+  // instance serves every sidebar state.
   const sectionChrome = (
     <div className="flex items-center gap-0.5">
       <GroupingToggle
@@ -252,61 +328,134 @@ export function SessionSidebar({
     </div>
   );
 
+  // One row-render channel for every section body (issue #1392: the
+  // workspace subtrees render the EXACT same rows as the recent body --
+  // same SidebarRow, same actions menu, same hover-card machine).
+  const renderRows = (entries: SidebarEntry[], archived: boolean) =>
+    entries.map((entry) => (
+      <SidebarRow
+        key={entry.key}
+        entry={entry}
+        displayName={resolveDisplayName(entry.name, intl)}
+        now={now}
+        hasPendingApproval={
+          entry.sid !== null && pendingApprovalSids.has(entry.sid)
+        }
+        hasTurnFailed={
+          entry.sid !== null && turnFailedSids.has(entry.sid)
+        }
+        disabled={disabled}
+        archived={archived}
+        hover={hover}
+        onActivate={() => {
+          if (entry.sid) onActivate(entry.sid);
+          else onOpenPersisted(entry.path, entry.name);
+        }}
+        menu={(
+          <RowActionsMenu
+            entry={entry}
+            displayName={resolveDisplayName(entry.name, intl)}
+            disabled={disabled}
+            archived={archived}
+            onSetPinned={onSetPinned}
+            onArchive={onArchive}
+            onRename={onRename}
+            onClose={onClose}
+            onDelete={onDelete}
+            onMenuOpenChange={(open) => hover.menuOpenChange(entry.key, open)}
+          />
+        )}
+      />
+    ));
+
   const renderSection = (
     section: (typeof sections)[number],
     showChrome: boolean,
-  ) => (
-    <li key={section.key} className="session-group mt-1.5 mb-0.5" data-section={section.key}>
-      {/* ADR-0072 (#251): the grouping toggle rides the FIRST rendered
-          section's title row -- one entry point regardless of mode. The
-          archived-visibility toggle (ADR-0127) sits beside it. The triggers
-          are hover-revealed (group-hover) but stay focus-visible for AT
-          users; the open popover also pins it visible via data-[state=open]. */}
-      <div className="session-group-title-row group relative mb-0.5 flex items-center justify-between px-1">
-        <h3 className="session-group-title text-xs uppercase tracking-wider text-muted-foreground">
-          {section.title}
-        </h3>
-        {showChrome && sectionChrome}
-      </div>
-      <ul className="session-group-list list-none m-0 p-0">
-        {section.entries.map((entry) => (
-          <SidebarRow
-            key={entry.key}
-            entry={entry}
-            displayName={resolveDisplayName(entry.name, intl)}
-            now={now}
-            hasPendingApproval={
-              entry.sid !== null && pendingApprovalSids.has(entry.sid)
-            }
-            hasTurnFailed={
-              entry.sid !== null && turnFailedSids.has(entry.sid)
-            }
-            disabled={disabled}
-            archived={section.variant === "archived"}
-            hover={hover}
-            onActivate={() => {
-              if (entry.sid) onActivate(entry.sid);
-              else onOpenPersisted(entry.path, entry.name);
-            }}
-            menu={(
-              <RowActionsMenu
-                entry={entry}
-                displayName={resolveDisplayName(entry.name, intl)}
-                disabled={disabled}
-                archived={section.variant === "archived"}
-                onSetPinned={onSetPinned}
-                onArchive={onArchive}
-                onRename={onRename}
-                onClose={onClose}
-                onDelete={onDelete}
-                onMenuOpenChange={(open) => hover.menuOpenChange(entry.key, open)}
-              />
+  ) => {
+    if (section.variant === "workspaces") {
+      return (
+        <WorkspaceSidebarSection
+          key={section.key}
+          groups={workspaceGroups}
+          disabled={disabled}
+          collapsed={collapsedSections.has(section.key)}
+          onToggleCollapsed={() => toggleSection(section.key)}
+          renderRows={(entries) => renderRows(entries, false)}
+          onNewInWorkspace={onNewInWorkspace}
+          chrome={showChrome ? sectionChrome : undefined}
+        />
+      );
+    }
+    // The section preview cap (issue #1392): the recent body's groups show
+    // their freshest 5 rows, a "Show more (N)" tail expands the rest. The
+    // pinned / archived sections are uncapped.
+    const collapsed = collapsedSections.has(section.key);
+    const capped =
+      section.capped &&
+      !showAllSections.has(section.key) &&
+      section.entries.length > SIDEBAR_PREVIEW_CAP;
+    const shown = capped
+      ? section.entries.slice(0, SIDEBAR_PREVIEW_CAP)
+      : section.entries;
+    return (
+      <li key={section.key} className="session-group mt-3 mb-1" data-section={section.key}>
+        {/* ADR-0072 (#251): the grouping toggle rides the FIRST rendered
+            section's title row -- one entry point regardless of mode. The
+            archived-visibility toggle (ADR-0127) sits beside it. The triggers
+            are hover-revealed (group-hover) but stay focus-visible for AT
+            users; the open popover also pins it visible via data-[state=open]. */}
+        <div className="session-group-title-row group relative mb-0.5 flex items-center justify-between px-1">
+          {/* The title row itself is the fold toggle (the whole row clicks):
+              the button sits inside the h3 (legal phrasing nesting) and
+              stretches full-width; the chevron rides the label's tail,
+              hover/focus-revealed -- at rest the row is just the label. */}
+          <h3 className="session-group-title min-w-0 flex-1 text-xs uppercase tracking-wider text-muted-foreground">
+            <button
+              type="button"
+              aria-expanded={!collapsed}
+              onClick={() => toggleSection(section.key)}
+              className="flex w-full cursor-pointer items-center gap-0.5 rounded text-left focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring"
+            >
+              <span className="truncate">{section.title}</span>
+              <span className="shrink-0 tabular-nums">({section.entries.length})</span>
+              <span
+                aria-hidden
+                className="shrink-0 opacity-0 transition-opacity group-hover:opacity-100 group-has-[:focus-visible]:opacity-100"
+              >
+                {collapsed ? (
+                  <ChevronRight className="size-3.5" />
+                ) : (
+                  <ChevronDown className="size-3.5" />
+                )}
+              </span>
+            </button>
+          </h3>
+          {showChrome && sectionChrome}
+        </div>
+        {!collapsed && (
+          <ul className="session-group-list list-none m-0 pb-2 pt-1">
+            {renderRows(shown, section.variant === "archived")}
+            {capped && (
+              <li className="my-0.5">
+                <button
+                  type="button"
+                  className={SHOW_MORE_CLASS}
+                  onClick={() =>
+                    setShowAllSections((prev) => new Set(prev).add(section.key))}
+                >
+                  <FormattedMessage
+                    id="sidebar.showMore"
+                    defaultMessage="Show more ({count})"
+                    values={{ count: section.entries.length - SIDEBAR_PREVIEW_CAP }}
+                  />
+                </button>
+              </li>
             )}
-          />
-        ))}
-      </ul>
-    </li>
-  );
+          </ul>
+        )}
+      </li>
+    );
+  };
 
   // One read feeds both the gear's aria-label and its tooltip -- the last
   // remaining aria-and-tooltip descriptor double-write in the tree collapses
@@ -372,26 +521,6 @@ export function SessionSidebar({
 
       <ul className="session-list" onPointerLeave={hover.listLeave}>
         {sections.map((section, i) => renderSection(section, i === 0))}
-        {sections.length === 0 && (
-          <>
-            {/* Zero sections still gets the chrome row (see the sections
-                plan above): an all-archived sidebar must keep the archived
-                toggle reachable, or the hidden rows would be stranded. */}
-            <li className="session-group mt-1.5 mb-0.5">
-              <div className="session-group-title-row group relative mb-0.5 flex items-center justify-end px-1">
-                {sectionChrome}
-              </div>
-            </li>
-            {!loadError && (
-              <li className="session-empty text-muted-foreground text-sm p-2">
-                <FormattedMessage
-                  id="sidebar.empty"
-                  defaultMessage="No saved sessions yet."
-                />
-              </li>
-            )}
-          </>
-        )}
       </ul>
 
       {/* Footer: the settings gear (issue #282). The .session-list flex:1
@@ -420,18 +549,18 @@ export function SessionSidebar({
   );
 }
 
-// The flat/time grouping toggle (ADR-0072, issue #251). Triggered by a weakly-
-// visible `⋯` on the first group-title row (one entry point regardless of
-// mode, hidden on an empty sidebar). The Popover offers the two modes as a
+// The flat/time grouping toggle (ADR-0072, issue #251). Triggered by a
+// hover-revealed `⋯` on the first section's title row (one entry point
+// regardless of mode; the permanent workspaces section keeps a first row
+// always present). The Popover offers the two modes as a
 // radio group (mutually exclusive -> radio semantics, not menu); the selected
 // mode carries a trailing Check. A pick commits immediately via onSwitch (the
 // hook routes through commitShellPrefs, same immediate-persist contract as the
 // collapse toggles).
 //
-// a11y (issue #251 review):
-// - The trigger rides opacity-60 by default (not opacity-0 + hover-only) so
-//   keyboard, touch, and AT users can discover it without hovering; it
-//   brightens on hover/focus/open.
+// a11y (issue #251 review, posture revised: hover-revealed):
+// - The trigger is hidden by default (opacity-0) and revealed on the title
+//   row's hover; keyboard users keep the focus-visible indicator.
 // - bareButtonReset on the trigger/options strips native chrome including the
 //   focus ring, so focus-visible:outline-ring re-adds one (the --ring token
 //   is the project focus-indicator standard).
@@ -483,10 +612,10 @@ function GroupingToggle({
           })}
           className={cn(
             `sidebar-grouping-toggle ${bareButtonReset} cursor-pointer rounded-md px-1.5 text-base leading-none text-muted-foreground`,
-            // Weakly visible by default (opacity-60) so keyboard / touch / AT
-            // users can discover the entry point without hovering; brightens on
-            // hover, focus, or while the popover is open.
-            "opacity-60 transition-opacity group-hover:opacity-100 focus-visible:opacity-100 data-[state=open]:opacity-100",
+            // Hidden by default (opacity-0), revealed on the title row's
+            // hover; stays visible on keyboard focus or while the popover
+            // is open.
+            "opacity-0 transition-opacity group-hover:opacity-100 focus-visible:opacity-100 data-[state=open]:opacity-100",
             "hover:bg-accent hover:text-foreground",
             "focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring",
             "disabled:cursor-progress disabled:opacity-50",
@@ -537,10 +666,11 @@ function GroupingToggle({
 }
 
 // The archived-view visibility toggle (ADR-0127 Decision 7, issue #1175): an
-// icon-only aria-pressed button beside the grouping toggle. Same weak-visible
-// posture as GroupingToggle (opacity-60, brightens on hover/focus/pressed) so
-// keyboard / touch / AT users can discover it without hovering. The state is
-// NEVER persisted -- every startup resets the archived view to hidden.
+// icon-only aria-pressed button beside the grouping toggle. Same hover-
+// revealed posture as GroupingToggle (opacity-0; visible on hover / focus /
+// pressed, the pressed state keeping the active view's entry point findable).
+// The state is NEVER persisted -- every startup resets the archived view to
+// hidden.
 function ArchivedToggle({
   visible,
   disabled,
@@ -562,7 +692,7 @@ function ArchivedToggle({
           type="button"
           className={cn(
             `sidebar-archived-toggle ${bareButtonReset} cursor-pointer rounded-md p-1 text-muted-foreground`,
-            "opacity-60 transition-opacity group-hover:opacity-100 focus-visible:opacity-100",
+            "opacity-0 transition-opacity group-hover:opacity-100 focus-visible:opacity-100",
             "aria-pressed:opacity-100 aria-pressed:text-foreground",
             "hover:bg-accent hover:text-foreground",
             "focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring",
@@ -671,7 +801,7 @@ function SidebarRow({
           ref={liRef}
           {...bridge.liProps}
           className={cn(
-            "session-entry group/row relative my-0.5 flex items-stretch rounded-md hover:bg-accent",
+            ROW_SHELL_CLASS,
             entry.active && "active bg-accent",
             entry.sid && "open",
             hasPendingApproval && "pending-approval",
@@ -753,7 +883,7 @@ function SidebarRow({
               {formatRelativeTime(entry.lastModifiedAt, now, intl.locale)}
             </span>
           </button>
-          <div className="session-entry-actions absolute inset-y-0 right-1 z-10 flex items-center gap-0 rounded-md bg-accent opacity-0 pointer-events-none group-hover/row:opacity-100 group-hover/row:pointer-events-auto has-[:focus-visible]:opacity-100 has-[:focus-visible]:pointer-events-auto">
+          <div className={PILL_CLASS}>
             {menu}
           </div>
         </li>

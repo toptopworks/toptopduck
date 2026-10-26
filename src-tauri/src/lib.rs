@@ -502,6 +502,8 @@ pub fn run() {
             commands::list_live_sessions,
             commands::list_workspaces,
             commands::create_workspace,
+            commands::rename_workspace,
+            commands::remove_workspace,
             commands::ingest_file,
             commands::ingest_file_guided,
             commands::guidance_window,

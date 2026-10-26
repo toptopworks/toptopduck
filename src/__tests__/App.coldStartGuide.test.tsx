@@ -311,7 +311,7 @@ describe("App cold-start workspace selector wiring (issue #1384)", () => {
     vi.clearAllMocks();
     vi.mocked(listLiveSessions).mockResolvedValue([]);
     vi.mocked(listWorkspaces).mockResolvedValue([
-      { path: "/w/demo", label: "demo" },
+      { path: "/w/demo", label: "demo", explicit: false, exists: true },
     ]);
     vi.mocked(createSession).mockResolvedValue({
       session_id: "sess-1",
@@ -370,5 +370,49 @@ describe("App cold-start workspace selector wiring (issue #1384)", () => {
         screen.getByRole("button", { name: "Select workspace" }),
       ).toBeInTheDocument(),
     );
+  });
+});
+
+describe("App cold-start workspace-section shortcut wiring (issue #1392)", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.mocked(listLiveSessions).mockResolvedValue([]);
+    vi.mocked(listWorkspaces).mockResolvedValue([
+      { path: "/w/demo", label: "demo", explicit: true, exists: true },
+    ]);
+    vi.mocked(createSession).mockResolvedValue({
+      session_id: "sess-1",
+      recipe_path: "/x/sess-1.recipe.json",
+    });
+    platformMock.mockReturnValue("windows");
+    mintedClients.current = [];
+    configHolder.current = { kind: "external", data: "qwen-code" };
+    vi.stubGlobal("navigator", { language: "en-US" });
+  });
+
+  it("the sidebar group's plus stages the workspace onto the next mint", async () => {
+    render(<App />);
+    // The sidebar's workspace section lists the explicit group; the pill
+    // shortcut stages the binding on the same pendingWorkspace channel the
+    // composer picker uses (the one-shot contract's second face).
+    fireEvent.click(
+      await screen.findByRole("button", {
+        name: "New session in this workspace",
+      }),
+    );
+    await waitFor(() =>
+      expect(
+        screen.getByRole("button", { name: "Workspace: demo" }),
+      ).toBeInTheDocument(),
+    );
+    const input = screen.getByRole("textbox", { name: "Question" });
+    fireEvent.change(input, { target: { value: "q" } });
+    fireEvent.keyDown(input, { key: "Enter" });
+    await waitFor(() => expect(createSession).toHaveBeenCalledTimes(1));
+    expect(createSession).toHaveBeenCalledWith("/w/demo");
+    // The mint's explicit bind refreshed the registry listing -- the
+    // invalidation is the sidebar's only refetch trigger (window-focus
+    // and reconnect refetches are off), so pin it: mount fetch + mint.
+    await waitFor(() => expect(listWorkspaces).toHaveBeenCalledTimes(2));
   });
 });

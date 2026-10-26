@@ -16,6 +16,7 @@
 // rides the shell-chrome prefs; buildSidebarModel takes it as a parameter so
 // the component is a thin caller.
 
+import type { RecentWorkspace } from "../api";
 import type { SessionMetadata } from "../types/session";
 import type { SidebarGrouping } from "../types/app-config";
 import { searchMatcher } from "../lib/searchMatcher";
@@ -116,6 +117,11 @@ const MS_PER_DAY = 86_400_000;
  *  single-line rows, so the list truncates to the freshest matches instead of
  *  growing unbounded. */
 export const MAX_SEARCH_RESULTS = 9;
+
+/** The section preview cap (issue #1392, the WorkBuddy precedent): the
+ *  recent body's groups and a workspace subtree show their freshest 5 rows
+ *  by default; a "Show more (N)" tail expands the rest. */
+export const SIDEBAR_PREVIEW_CAP = 5;
 
 function startOfCalendarDay(ms: number): number {
   const d = new Date(ms);
@@ -357,4 +363,47 @@ export function buildSidebarModel(
   // branch (mirrors the loadErrorDisplay/api.ts default:never+throw pattern).
   const _exhaustive: never = grouping;
   return _exhaustive;
+}
+
+/** One workspace-section group (issue #1392): an explicit registry record
+ *  plus the session rows bound to its directory. */
+export interface WorkspaceGroup {
+  /** The bound canonical directory path (the registry key). */
+  path: string;
+  /** The registry display face (the title, else the directory tail). */
+  label: string;
+  /** The directory is missing on disk; the group stays with a hint. */
+  missing: boolean;
+  /** The bound session rows -- the same row shape the recent body renders,
+   *  freshest first. */
+  entries: SidebarEntry[];
+}
+
+/** Build the workspace section's groups (issue #1392): the registry's
+ *  `explicit` records in server (LRU) order, each carrying the persisted
+ *  sessions whose header binds its directory -- membership derives from the
+ *  session header's `workspace` field; the registry carries no session
+ *  ledger. An explicit record with zero sessions still lists (the "New
+ *  workspace" flow creates the group before any session binds it). Rows
+ *  not bound to an explicit record stay the recent body's business. */
+export function buildWorkspaceGroups(
+  workspaces: RecentWorkspace[],
+  persisted: SessionMetadata[],
+  open: OpenSession[],
+  activeSessionId: string | null,
+): WorkspaceGroup[] {
+  const explicit = workspaces.filter((w) => w.explicit);
+  if (explicit.length === 0) return [];
+  const openByPath = indexOpenByPath(open);
+  const members = new Map<string, SidebarEntry[]>(explicit.map((w) => [w.path, []]));
+  for (const m of persisted) {
+    const bucket = m.workspace === null ? undefined : members.get(m.workspace);
+    if (bucket === undefined) continue;
+    bucket.push(persistedEntry(m, openByPath.get(m.recipe_path) ?? null, activeSessionId));
+  }
+  return explicit.map((w) => {
+    const entries = members.get(w.path) ?? [];
+    entries.sort(BY_MTIME_DESC);
+    return { path: w.path, label: w.label, missing: !w.exists, entries };
+  });
 }
