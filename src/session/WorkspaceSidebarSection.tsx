@@ -13,17 +13,17 @@
 // workspace listing so the pill / popover / sidebar faces re-derive from
 // the registry (issue #1392's three-faces rule).
 
-import { useState, type ReactNode } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import { FormattedMessage, useIntl } from "react-intl";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import {
-  ChevronsDownUp,
-  ChevronsUpDown,
   ChevronDown,
   ChevronRight,
-  Folder,
+  FolderClosed,
   FolderOpen,
   FolderX,
+  Maximize2,
+  Minimize2,
   MoreHorizontal,
   Pencil,
   Plus,
@@ -31,6 +31,17 @@ import {
 import { openPath } from "@tauri-apps/plugin-opener";
 
 import { Button } from "@/components/ui/button";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
+import { buttonVariants } from "@/components/ui/button-variants";
 import {
   Dialog,
   DialogContent,
@@ -46,6 +57,7 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { Input } from "@/components/ui/input";
+import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { bareButtonReset } from "@/lib/buttonReset";
 import { log } from "@/lib/log";
 import { usePointerCloseIntent } from "@/lib/usePointerCloseIntent";
@@ -54,6 +66,7 @@ import { createWorkspace, removeWorkspace, renameWorkspace } from "../api";
 import { workspaceKeys } from "./queryKeys";
 import { SIDEBAR_PREVIEW_CAP as PREVIEW_CAP } from "./sidebarModel";
 import type { SidebarEntry, WorkspaceGroup } from "./sidebarModel";
+import type { SessionMetadata } from "../types/session";
 
 /** The session-row li shell (the .session-entry marker + the hover ground),
  *  shared VERBATIM with the recent body's rows -- one constant, not two
@@ -85,6 +98,10 @@ export const SHOW_MORE_CLASS =
 export type WorkspaceSidebarSectionProps = {
   /** The explicit registry groups, server (LRU) order. */
   groups: WorkspaceGroup[];
+  /** The full persisted scan (the groups' upstream): the landing diff runs
+   *  on it -- complete from the first render, unlike the late-assembled
+   *  group buckets. */
+  sessions: SessionMetadata[];
   disabled: boolean;
   /** The section-level fold, owned by the parent (per-session state). */
   collapsed: boolean;
@@ -102,6 +119,7 @@ export type WorkspaceSidebarSectionProps = {
 
 export function WorkspaceSidebarSection({
   groups,
+  sessions,
   disabled,
   collapsed,
   onToggleCollapsed,
@@ -128,6 +146,10 @@ export function WorkspaceSidebarSection({
   const [createOpen, setCreateOpen] = useState(false);
   const [createInput, setCreateInput] = useState("");
   const [createError, setCreateError] = useState<string | null>(null);
+  // The remove-from-list strong-confirm target (the DeleteSessionDialog
+  // staging posture): the menu item stages the group, the dialog's confirm
+  // fires the mutation.
+  const [removing, setRemoving] = useState<WorkspaceGroup | null>(null);
 
   function toggleGroup(path: string) {
     // Collapsing resets the preview: re-expanding starts at the cap again
@@ -154,6 +176,43 @@ export function WorkspaceSidebarSection({
     if (!open) setShowAll(new Set());
     setExpanded(open ? new Set(groups.map((g) => g.path)) : new Set());
   }
+
+  // A session landing in a workspace reveals its group (the mint's tail).
+  // The diff runs on the `sessions` prop's bound paths -- NOT the groups:
+  // the groups are a bucket view that assembles late (the workspaces
+  // listing is its own query), and diffing them would mistake the late
+  // bucket assembly for a landing, fanning every group open on a cold
+  // start. `sessions` is complete from the first render, so the first
+  // sighting records the baseline and only a GROWTH afterwards -- a real
+  // mint through any binding path (the ⊕ shortcut, the picker, the
+  // popover) -- opens the group holding the new row. Manual folds are
+  // honored -- only the landed workspaces flip.
+  const prevBoundRef = useRef<Set<string> | null>(null);
+  useEffect(() => {
+    const prev = prevBoundRef.current;
+    prevBoundRef.current = new Set(
+      sessions.filter((m) => m.workspace !== null).map((m) => m.recipe_path),
+    );
+    if (prev === null) return;
+    const landed = new Set(
+      sessions
+        .filter((m) => m.workspace !== null && !prev.has(m.recipe_path))
+        .map((m) => m.workspace)
+        .filter((w): w is string => w !== null),
+    );
+    if (landed.size === 0) return;
+    setExpanded((existing) => {
+      const next = new Set(existing);
+      let changed = false;
+      for (const path of landed) {
+        if (!next.has(path)) {
+          next.add(path);
+          changed = true;
+        }
+      }
+      return changed ? next : existing;
+    });
+  }, [sessions]);
 
   function openRename(group: WorkspaceGroup) {
     setRenaming(group);
@@ -258,31 +317,46 @@ export function WorkspaceSidebarSection({
               subtree + the #1393-shaped create modal. The triggers are
               hover-revealed but stay focus-visible for AT users (the
               ArchivedToggle posture). */}
-          <button
-            type="button"
-            aria-label={headToggleLabel}
-            disabled={disabled}
-            className={HEAD_ACTION_CLASS}
-            onClick={() => setAllExpanded(expanded.size === 0)}
-          >
-            {expanded.size > 0 ? (
-              <ChevronsDownUp className="size-3.5" aria-hidden />
-            ) : (
-              <ChevronsUpDown className="size-3.5" aria-hidden />
-            )}
-          </button>
-          <button
-            type="button"
-            aria-label={intl.formatMessage({
-              id: "composer.workspace.newWorkspace",
-              defaultMessage: "New workspace",
-            })}
-            disabled={disabled}
-            className={HEAD_ACTION_CLASS}
-            onClick={() => setCreateOpen(true)}
-          >
-            <Plus className="size-3.5" aria-hidden />
-          </button>
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <button
+                type="button"
+                aria-label={headToggleLabel}
+                disabled={disabled}
+                className={HEAD_ACTION_CLASS}
+                onClick={() => setAllExpanded(expanded.size === 0)}
+              >
+                {expanded.size > 0 ? (
+                  <Minimize2 className="size-3.5" aria-hidden />
+                ) : (
+                  <Maximize2 className="size-3.5" aria-hidden />
+                )}
+              </button>
+            </TooltipTrigger>
+            <TooltipContent>{headToggleLabel}</TooltipContent>
+          </Tooltip>
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <button
+                type="button"
+                aria-label={intl.formatMessage({
+                  id: "composer.workspace.newWorkspace",
+                  defaultMessage: "New workspace",
+                })}
+                disabled={disabled}
+                className={HEAD_ACTION_CLASS}
+                onClick={() => setCreateOpen(true)}
+              >
+                <Plus className="size-3.5" aria-hidden />
+              </button>
+            </TooltipTrigger>
+            <TooltipContent>
+              <FormattedMessage
+                id="composer.workspace.newWorkspace"
+                defaultMessage="New workspace"
+              />
+            </TooltipContent>
+          </Tooltip>
         </div>
       </div>
       {!collapsed && (
@@ -312,7 +386,7 @@ export function WorkspaceSidebarSection({
                     {open ? (
                       <FolderOpen className="size-4 shrink-0 text-muted-foreground" aria-hidden />
                     ) : (
-                      <Folder className="size-4 shrink-0 text-muted-foreground" aria-hidden />
+                      <FolderClosed className="size-4 shrink-0 text-muted-foreground" aria-hidden />
                     )}
                     <span className="truncate">{g.label}</span>
                     {g.missing && (
@@ -357,7 +431,7 @@ export function WorkspaceSidebarSection({
                       group={g}
                       disabled={disabled}
                       onRename={() => openRename(g)}
-                      onRemove={() => remove.mutate(g.path)}
+                      onRemove={() => setRemoving(g)}
                     />
                   </div>
                 </div>
@@ -386,6 +460,21 @@ export function WorkspaceSidebarSection({
             );
           })}
         </ul>
+      )}
+
+      {/* The remove confirm: names the ledger-only consequence (the folder
+          and its bound sessions stay), Cancel auto-focused (the safe
+          escape), the destructive Action fires the registry mutation. */}
+      {removing && (
+        <RemoveWorkspaceDialog
+          name={removing.label}
+          onCancel={() => setRemoving(null)}
+          onConfirm={() => {
+            const path = removing.path;
+            setRemoving(null);
+            remove.mutate(path);
+          }}
+        />
       )}
 
       {/* The rename modal (issue #1392): the #1393 modal shape -- the
@@ -585,5 +674,58 @@ function WorkspaceGroupMenu({
         </DropdownMenuItem>
       </DropdownMenuContent>
     </DropdownMenu>
+  );
+}
+
+// The remove-from-list strong-confirm: removing is a ledger edit -- the
+// directory and its bound sessions stay on disk, only the registry record
+// (and with it the sidebar group) goes, and the dialog says so before the
+// destructive Action fires. The DeleteSessionDialog shell posture: a
+// mounted-open AlertDialog, ESC routes to onCancel, the Cancel trigger
+// renders first (Radix auto-focuses it, the safe escape), the Action wears
+// the destructive buttonVariants via the cn override.
+function RemoveWorkspaceDialog({
+  name,
+  onCancel,
+  onConfirm,
+}: {
+  name: string;
+  onCancel: () => void;
+  onConfirm: () => void;
+}) {
+  return (
+    <AlertDialog defaultOpen>
+      <AlertDialogContent onEscapeKeyDown={() => onCancel()}>
+        <AlertDialogHeader>
+          <AlertDialogTitle>
+            <FormattedMessage
+              id="sidebar.workspace.removeConfirm.title"
+              defaultMessage="Remove {name}?"
+              values={{ name }}
+            />
+          </AlertDialogTitle>
+          <AlertDialogDescription>
+            <FormattedMessage
+              id="sidebar.workspace.removeConfirm.body"
+              defaultMessage="This only removes the workspace from the app. The folder and its sessions on your computer are not deleted."
+            />
+          </AlertDialogDescription>
+        </AlertDialogHeader>
+        <AlertDialogFooter>
+          <AlertDialogCancel onClick={onCancel}>
+            <FormattedMessage id="common.cancel" defaultMessage="Cancel" />
+          </AlertDialogCancel>
+          <AlertDialogAction
+            className={buttonVariants({ variant: "destructive" })}
+            onClick={onConfirm}
+          >
+            <FormattedMessage
+              id="sidebar.workspace.removeConfirm.confirm"
+              defaultMessage="Remove"
+            />
+          </AlertDialogAction>
+        </AlertDialogFooter>
+      </AlertDialogContent>
+    </AlertDialog>
   );
 }

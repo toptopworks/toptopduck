@@ -388,6 +388,7 @@ export function SessionSidebar({
         <WorkspaceSidebarSection
           key={section.key}
           groups={workspaceGroups}
+          sessions={sessions}
           disabled={disabled}
           collapsed={collapsedSections.has(section.key)}
           onToggleCollapsed={() => toggleSection(section.key)}

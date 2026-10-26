@@ -2057,6 +2057,71 @@ describe("SessionSidebar workspace section (issue #1392)", () => {
     });
   });
 
+  it("a session landing in a workspace opens its group", async () => {
+    vi.mocked(listWorkspaces).mockResolvedValue([
+      { path: "/w/explicit", label: "explicit", explicit: true, exists: true },
+    ]);
+    const view = renderShell(<SessionSidebar {...wsProps()} />);
+    const group = await waitFor(() => {
+      const el = view.container.querySelector(
+        "[data-workspace-group=\"/w/explicit\"] [aria-expanded]",
+      );
+      expect(el).not.toBeNull();
+      return el as HTMLElement;
+    });
+    expect(group).toHaveAttribute("aria-expanded", "false");
+    // The listing lands with a new bound member: the group fans open on its
+    // own -- the landed row visible without a manual toggle.
+    view.rerender(
+      shellTree(
+        <SessionSidebar
+          {...wsProps({ sessions: [metaRow("/a.json", "alpha", "/w/explicit")] })}
+        />,
+      ),
+    );
+    await waitFor(() =>
+      expect(
+        view.container.querySelector(
+          "[data-workspace-group=\"/w/explicit\"] [aria-expanded]",
+        ),
+      ).toHaveAttribute("aria-expanded", "true"),
+    );
+    expect(
+      view.container.querySelector(
+        "[data-workspace-group=\"/w/explicit\"] .session-entry-main",
+      ),
+    ).not.toBeNull();
+  });
+
+  it("heads the action buttons with tooltips and the diagonal expand glyphs", async () => {
+    vi.mocked(listWorkspaces).mockResolvedValue([
+      { path: "/w/explicit", label: "explicit", explicit: true, exists: true },
+    ]);
+    const { container } = renderShell(<SessionSidebar {...wsProps()} />);
+    await waitFor(() =>
+      expect(
+        container.querySelector("[data-workspace-group=\"/w/explicit\"]"),
+      ).not.toBeNull(),
+    );
+    // Collapsed face: the outward 45° diagonal (Maximize2). The tooltip reuses
+    // the aria-label entry -- the hover channel is the Radix pointer pair
+    // (jsdom needs pointerType set explicitly; bare mouseEnter does not
+    // trigger it -- the LocalCliTab pattern).
+    const toggle = screen.getByRole("button", { name: "Expand all workspaces" });
+    expect(toggle.querySelector(".lucide-maximize-2")).not.toBeNull();
+    fireEvent.pointerEnter(toggle, { pointerType: "mouse" });
+    fireEvent.pointerMove(toggle, { pointerType: "mouse" });
+    expect(await screen.findByRole("tooltip")).toHaveTextContent(
+      "Expand all workspaces",
+    );
+    // Expand-all flips both faces: the inward diagonal (Minimize2) rides the
+    // button and the tooltip re-labels to the collapse entry.
+    fireEvent.click(toggle);
+    const expanded = screen.getByRole("button", { name: "Collapse all workspaces" });
+    expect(expanded.querySelector(".lucide-minimize-2")).not.toBeNull();
+    expect(expanded.querySelector(".lucide-maximize-2")).toBeNull();
+  });
+
   it("caps the subtree preview at 5 and expands the rest via Show more (N)", async () => {
     vi.mocked(listWorkspaces).mockResolvedValue([
       { path: "/w/big", label: "big", explicit: true, exists: true },
@@ -2138,6 +2203,12 @@ describe("SessionSidebar workspace section (issue #1392)", () => {
     expect(openPath).toHaveBeenCalledWith("/w/explicit");
     vi.mocked(removeWorkspace).mockClear();
     fireEvent.click(screen.getByRole("menuitem", { name: "Remove from list" }));
+    // The staged confirm: the mutation waits for the dialog's Action.
+    expect(
+      await screen.findByText("Remove explicit?"),
+    ).toBeInTheDocument();
+    expect(removeWorkspace).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "Remove" }));
     await waitFor(() =>
       expect(removeWorkspace).toHaveBeenCalledWith("/w/explicit"),
     );
@@ -2152,6 +2223,36 @@ describe("SessionSidebar workspace section (issue #1392)", () => {
       name: "Workspace name",
     });
     expect(input).toHaveValue("explicit");
+  });
+
+  it("remove stages the strong-confirm; cancel keeps the record", async () => {
+    vi.mocked(listWorkspaces).mockResolvedValue([
+      { path: "/w/explicit", label: "explicit", explicit: true, exists: true },
+    ]);
+    vi.mocked(removeWorkspace).mockClear();
+    const { container } = renderShell(
+      <SessionSidebar {...wsProps()} />,
+    );
+    await waitFor(() =>
+      expect(
+        container.querySelector("[data-workspace-group=\"/w/explicit\"]"),
+      ).not.toBeNull(),
+    );
+    fireEvent.click(screen.getByRole("menuitem", { name: "Remove from list" }));
+    expect(await screen.findByText("Remove explicit?")).toBeInTheDocument();
+    // Cancel (Radix auto-focuses it): the dialog drops, the record stays.
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    expect(removeWorkspace).not.toHaveBeenCalled();
+    await waitFor(() =>
+      expect(screen.queryByText("Remove explicit?")).toBeNull(),
+    );
+    // Re-opening the menu re-stages the confirm and the Action fires it.
+    fireEvent.click(screen.getByRole("menuitem", { name: "Remove from list" }));
+    await screen.findByText("Remove explicit?");
+    fireEvent.click(screen.getByRole("button", { name: "Remove" }));
+    await waitFor(() =>
+      expect(removeWorkspace).toHaveBeenCalledWith("/w/explicit"),
+    );
   });
 
   it("folds the section from its head; the zero-group face shows the empty hint", async () => {
