@@ -4,7 +4,8 @@
 // parent's renderRows channel), the row-end pill carries the same-workspace
 // new-session shortcut (⊕) plus the actions menu (open folder / rename /
 // remove from list), and the section head carries the expand/collapse-all
-// toggle plus the shared #1393 naming modal as the "New workspace" entry.
+// toggle plus the #1393 naming modal's shape (mirrored locally; the guard
+// and locale keys are the shared parts) as the "New workspace" entry.
 //
 // Mutation stance: rename / remove are explicit user actions served by
 // strict IPC commands; a refusal surfaces inline in the rename modal or as
@@ -46,28 +47,35 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { Input } from "@/components/ui/input";
 import { bareButtonReset } from "@/lib/buttonReset";
+import { log } from "@/lib/log";
 import { usePointerCloseIntent } from "@/lib/usePointerCloseIntent";
-import { cn } from "@/lib/utils";
 import { isInvalidWorkspaceName } from "@/lib/workspaceName";
 import { createWorkspace, removeWorkspace, renameWorkspace } from "../api";
 import { workspaceKeys } from "./queryKeys";
 import { SIDEBAR_PREVIEW_CAP as PREVIEW_CAP } from "./sidebarModel";
 import type { SidebarEntry, WorkspaceGroup } from "./sidebarModel";
 
-/** The group row's shell classes: the SAME li-shell posture the session
- *  rows use (the shared .session-entry / .session-entry-actions hooks keep
- *  the row visuals and the hover pill aligned across the two row kinds). */
-const GROUP_ROW_CLASS =
+/** The session-row li shell (the .session-entry marker + the hover ground),
+ *  shared VERBATIM with the recent body's rows -- one constant, not two
+ *  hand-synced copies (the marker names carry no CSS of their own; this
+ *  string IS the style). */
+export const ROW_SHELL_CLASS =
   "session-entry group/row relative my-0.5 flex items-stretch rounded-md hover:bg-accent";
 
-/** The row-end pill: the session rows' exact container face (the opacity +
- *  pointer-events reveal pair keyed on the row hover / focus-inside). */
-const PILL_CLASS =
+/** The row-end pill container, shared VERBATIM with the recent body's
+ *  rows: the opacity + pointer-events reveal pair keyed on the row hover
+ *  / focus-inside. */
+export const PILL_CLASS =
   "session-entry-actions absolute inset-y-0 right-1 z-10 flex items-center gap-0 rounded-md bg-accent opacity-0 pointer-events-none group-hover/row:opacity-100 group-hover/row:pointer-events-auto has-[:focus-visible]:opacity-100 has-[:focus-visible]:pointer-events-auto";
 
 /** The pill's trigger face: the RowActionsMenu trigger posture (the bare
- *  reset + the size-7 hit area + the focus ring). */
-const PILL_TRIGGER_CLASS = `session-row-action ${bareButtonReset} flex size-7 items-center justify-center rounded-md text-muted-foreground transition-colors hover:text-foreground focus-visible:text-foreground focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring`;
+ *  reset + the size-7 hit area + the focus ring + the busy dim). */
+const PILL_TRIGGER_CLASS = `session-row-action ${bareButtonReset} flex size-7 items-center justify-center rounded-md text-muted-foreground transition-colors hover:text-foreground focus-visible:text-foreground focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring disabled:cursor-progress disabled:opacity-50`;
+
+/** The section head's action buttons (expand/collapse-all + the create
+ *  entry): the ArchivedToggle posture -- hover-revealed, focus-visible
+ *  kept, busy-dimmed. */
+const HEAD_ACTION_CLASS = `sidebar-archived-toggle ${bareButtonReset} cursor-pointer rounded-md p-1 text-muted-foreground opacity-0 transition-opacity group-hover:opacity-100 focus-visible:opacity-100 hover:bg-accent hover:text-foreground focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring disabled:cursor-progress disabled:opacity-50`;
 
 /** The "Show more (N)" tail button, shared with the parent's section
  *  renderer (the recent body mounts its own instances). */
@@ -108,7 +116,8 @@ export function WorkspaceSidebarSection({
   // section family). Default collapsed -- the expand-all head action is
   // the bulk reveal.
   const [expanded, setExpanded] = useState<ReadonlySet<string>>(new Set());
-  // The per-group "Show more" state: once revealed, stays revealed.
+  // The per-group "Show more" state: per-expansion -- collapsing the
+  // group (or the bulk collapse-all) resets it.
   const [showAll, setShowAll] = useState<ReadonlySet<string>>(new Set());
   // The rename modal's draft (the #1393 modal shape: the draft + the
   // backend refusal clear together on close).
@@ -139,6 +148,10 @@ export function WorkspaceSidebarSection({
   }
 
   function setAllExpanded(open: boolean) {
+    // Collapsing resets every group's preview -- the same
+    // collapse-resets-preview rule the single toggle applies, at bulk
+    // scale ("Show more" is a per-expansion choice, not a sticky one).
+    if (!open) setShowAll(new Set());
     setExpanded(open ? new Set(groups.map((g) => g.path)) : new Set());
   }
 
@@ -176,7 +189,9 @@ export function WorkspaceSidebarSection({
       invalidate();
       closeRename();
     },
-    // The backend's refusal (the trust boundary), surfaced inline.
+    // A refusal surfaces inline and keeps the modal open (the backend's
+    // rename guard is trim + non-empty only -- the shared name guard is
+    // the full rule's only enforcer on this face).
     onError: (e) =>
       setRenameError(e instanceof Error ? e.message : String(e)),
   });
@@ -240,20 +255,14 @@ export function WorkspaceSidebarSection({
         <div className="flex items-center gap-0.5">
           {chrome}
           {/* The head actions (issue #1392): bulk expand/collapse of every
-              subtree + the shared naming modal as the create entry. The
-              triggers are hover-revealed but stay focus-visible for AT
-              users (the ArchivedToggle posture). */}
+              subtree + the #1393-shaped create modal. The triggers are
+              hover-revealed but stay focus-visible for AT users (the
+              ArchivedToggle posture). */}
           <button
             type="button"
             aria-label={headToggleLabel}
             disabled={disabled}
-            className={cn(
-              `sidebar-archived-toggle ${bareButtonReset} cursor-pointer rounded-md p-1 text-muted-foreground`,
-              "opacity-0 transition-opacity group-hover:opacity-100 focus-visible:opacity-100",
-              "hover:bg-accent hover:text-foreground",
-              "focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring",
-              "disabled:cursor-progress disabled:opacity-50",
-            )}
+            className={HEAD_ACTION_CLASS}
             onClick={() => setAllExpanded(expanded.size === 0)}
           >
             {expanded.size > 0 ? (
@@ -269,13 +278,7 @@ export function WorkspaceSidebarSection({
               defaultMessage: "New workspace",
             })}
             disabled={disabled}
-            className={cn(
-              `sidebar-archived-toggle ${bareButtonReset} cursor-pointer rounded-md p-1 text-muted-foreground`,
-              "opacity-0 transition-opacity group-hover:opacity-100 focus-visible:opacity-100",
-              "hover:bg-accent hover:text-foreground",
-              "focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring",
-              "disabled:cursor-progress disabled:opacity-50",
-            )}
+            className={HEAD_ACTION_CLASS}
             onClick={() => setCreateOpen(true)}
           >
             <Plus className="size-3.5" aria-hidden />
@@ -288,7 +291,7 @@ export function WorkspaceSidebarSection({
             <li className="session-empty py-1 pl-7 text-xs text-muted-foreground">
               <FormattedMessage
                 id="sidebar.workspace.empty"
-                defaultMessage="No workspaces"
+                defaultMessage="No sessions"
               />
             </li>
           )}
@@ -299,7 +302,7 @@ export function WorkspaceSidebarSection({
             const shown = capped ? g.entries.slice(0, PREVIEW_CAP) : g.entries;
             return (
               <li key={g.path} data-workspace-group={g.path}>
-                <div className={GROUP_ROW_CLASS}>
+                <div className={ROW_SHELL_CLASS}>
                   <button
                     type="button"
                     aria-expanded={open}
@@ -358,7 +361,7 @@ export function WorkspaceSidebarSection({
                     />
                   </div>
                 </div>
-                {open && (shown.length > 0 || capped) && (
+                {open && shown.length > 0 && (
                   <ul className="ml-4 border-l border-border pl-0.5">
                     {renderRows(shown)}
                     {capped && (
@@ -386,9 +389,10 @@ export function WorkspaceSidebarSection({
       )}
 
       {/* The rename modal (issue #1392): the #1393 modal shape -- the
-          input pre-fills the current title, the shared guard keeps the
-          Save button honest, Enter submits, and every close path clears
-          the draft. The title is the only write; the path never moves. */}
+          input pre-fills the current label (the title, else the directory
+          tail), the shared guard keeps the Save button honest, Enter
+          submits, and every close path clears the draft. The title is the
+          only write; the path never moves. */}
       <Dialog open={renaming !== null} onOpenChange={(next) => !next && closeRename()}>
         <DialogContent className="sm:max-w-sm">
           <DialogHeader>
@@ -558,7 +562,14 @@ function WorkspaceGroupMenu({
             disabled face echoes the row's missing hint. */}
         <DropdownMenuItem
           disabled={group.missing}
-          onSelect={() => void openPath(group.path)}
+          onSelect={() => {
+            // The opener can refuse (a folder deleted after the listing
+            // snapshot): log it -- the ArtifactHeader posture. The menu is
+            // closed by then, so the log is the honest surface.
+            openPath(group.path).catch((e: unknown) =>
+              log.warn("WorkspaceSidebarSection", "openPath failed", e),
+            );
+          }}
         >
           <FolderOpen aria-hidden />
           <FormattedMessage id="sidebar.workspace.openFolder" defaultMessage="Open folder" />

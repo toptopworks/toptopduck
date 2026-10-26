@@ -199,8 +199,10 @@ impl WorkspaceRegistry {
     /// directory -- the sidebar's "remove from list" is a ledger edit, not
     /// a filesystem delete, and the section's sessions fall back to the
     /// recent list. Strict like [`Self::rename`]: an explicit user action
-    /// reports a refused write. Idempotent on an unknown path.
-    pub fn remove_record(&self, canonical: &Path) -> Result<(), String> {
+    /// reports a refused write. Returns whether a record was deleted; an
+    /// unknown path is a miss (false), never a refusal -- the command
+    /// layer retries the echoed spelling on that miss.
+    pub fn remove_record(&self, canonical: &Path) -> Result<bool, String> {
         self.remove_inner(canonical)
     }
 
@@ -266,7 +268,9 @@ impl WorkspaceRegistry {
         self.save(&records)
     }
 
-    fn remove_inner(&self, canonical: &Path) -> Result<(), String> {
+    /// Returns whether a record was deleted (false = never recorded /
+    /// already gone -- the idempotent miss the callers branch on).
+    fn remove_inner(&self, canonical: &Path) -> Result<bool, String> {
         let Ok(_guard) = self.write_lock.lock() else {
             return Err("workspace registry write lock poisoned".to_string());
         };
@@ -274,9 +278,10 @@ impl WorkspaceRegistry {
         let before = records.len();
         records.retain(|r| r.path != canonical);
         if records.len() == before {
-            return Ok(()); // nothing to remove (never recorded / already gone)
+            return Ok(false); // nothing to remove (never recorded / already gone)
         }
-        self.save(&records)
+        self.save(&records)?;
+        Ok(true)
     }
 
     /// The tolerant read (both faces): a missing file is the first-run
@@ -684,11 +689,14 @@ mod tests {
         let reg = registry(&root);
         let dir = dir_under(root.path(), "alpha");
         reg.record_at(&dir, None, true, 1_000).expect("record");
-        reg.remove_record(&dir).expect("remove");
+        assert!(
+            reg.remove_record(&dir).expect("remove"),
+            "the recorded path deletes its record"
+        );
         assert!(dir.exists(), "the directory stays");
         assert!(reg.all().is_empty());
-        // Removing an unknown path is an idempotent Ok.
-        reg.remove_record(&dir).expect("remove again");
+        // Removing an unknown path is an idempotent Ok -- a miss, not a write.
+        assert!(!reg.remove_record(&dir).expect("remove again"));
     }
 
     #[test]

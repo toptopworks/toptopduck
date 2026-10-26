@@ -37,7 +37,12 @@ vi.mock("@tauri-apps/plugin-opener", () => ({
   openPath: vi.fn().mockResolvedValue(undefined),
 }));
 import { openPath } from "@tauri-apps/plugin-opener";
-import { listWorkspaces, removeWorkspace } from "../../api";
+import {
+  createWorkspace,
+  listWorkspaces,
+  removeWorkspace,
+  renameWorkspace,
+} from "../../api";
 
 // Radix DropdownMenu's pointer-event handling recurses under jsdom (the
 // SessionHeaderMenu suite's known limitation), so the dropdown-menu module is
@@ -2038,5 +2043,153 @@ describe("SessionSidebar workspace section (issue #1392)", () => {
       name: "Workspace name",
     });
     expect(input).toHaveValue("explicit");
+  });
+
+  it("folds the section from its head; the zero-group face shows the empty hint", async () => {
+    vi.mocked(listWorkspaces).mockResolvedValue([
+      { path: "/w/explicit", label: "explicit", explicit: true, exists: true },
+    ]);
+    const { container } = renderShell(
+      <SessionSidebar {...wsProps()} />,
+    );
+    const head = await screen.findByRole("button", { name: "Workspaces(1)" });
+    fireEvent.click(head);
+    expect(head).toHaveAttribute("aria-expanded", "false");
+    expect(
+      container.querySelector("[data-workspace-group=\"/w/explicit\"]"),
+    ).toBeNull();
+    fireEvent.click(head);
+    expect(
+      container.querySelector("[data-workspace-group=\"/w/explicit\"]"),
+    ).not.toBeNull();
+  });
+
+  it("a zero-group section still renders the head with the empty hint", () => {
+    vi.mocked(listWorkspaces).mockResolvedValue([]);
+    renderShell(<SessionSidebar {...wsProps()} />);
+    expect(
+      screen.getByRole("button", { name: "Workspaces(0)" }),
+    ).toBeInTheDocument();
+    expect(screen.getByText("No sessions")).toBeInTheDocument();
+  });
+
+  it("collapsing the recent section resets its Show-more preview", () => {
+    const members = Array.from({ length: 7 }, (_, i) =>
+      metaRow(`/r${i}.json`, `r${i}`),
+    );
+    const { container } = renderShell(
+      <SessionSidebar {...wsProps({ sessions: members })} />,
+    );
+    expect(container.querySelectorAll(".session-entry-main")).toHaveLength(5);
+    fireEvent.click(screen.getByText("Show more (2)"));
+    expect(container.querySelectorAll(".session-entry-main")).toHaveLength(7);
+    const head = screen.getByRole("button", { name: "Recent(7)" });
+    fireEvent.click(head); // collapse
+    expect(container.querySelectorAll(".session-entry-main")).toHaveLength(0);
+    fireEvent.click(head); // expand again -> the cap, NOT the full list
+    expect(container.querySelectorAll(".session-entry-main")).toHaveLength(5);
+    expect(screen.getByText("Show more (2)")).toBeInTheDocument();
+  });
+
+  it("collapse-all resets every group's Show-more preview", async () => {
+    vi.mocked(listWorkspaces).mockResolvedValue([
+      { path: "/w/big", label: "big", explicit: true, exists: true },
+    ]);
+    const members = Array.from({ length: 7 }, (_, i) =>
+      metaRow(`/m${i}.json`, `m${i}`, "/w/big"),
+    );
+    const { container } = renderShell(
+      <SessionSidebar {...wsProps({ sessions: members })} />,
+    );
+    const group = await waitFor(() => {
+      const el = container.querySelector(
+        "[data-workspace-group=\"/w/big\"] [aria-expanded]",
+      );
+      expect(el).not.toBeNull();
+      return el as HTMLElement;
+    });
+    fireEvent.click(group);
+    fireEvent.click(screen.getByText("Show more (2)"));
+    expect(container.querySelectorAll(".session-entry-main")).toHaveLength(7);
+    // The bulk collapse must apply the same reset the single toggle does.
+    fireEvent.click(
+      screen.getByRole("button", { name: "Collapse all workspaces" }),
+    );
+    fireEvent.click(group);
+    expect(container.querySelectorAll(".session-entry-main")).toHaveLength(5);
+    expect(screen.getByText("Show more (2)")).toBeInTheDocument();
+  });
+
+  it("the rename modal surfaces a refusal, guards Save, and submits the trimmed title", async () => {
+    vi.mocked(listWorkspaces).mockResolvedValue([
+      { path: "/w/explicit", label: "explicit", explicit: true, exists: true },
+    ]);
+    const { container } = renderShell(
+      <SessionSidebar {...wsProps()} />,
+    );
+    await waitFor(() =>
+      expect(
+        container.querySelector("[data-workspace-group=\"/w/explicit\"]"),
+      ).not.toBeNull(),
+    );
+    fireEvent.click(screen.getByRole("menuitem", { name: "Rename" }));
+    const input = await screen.findByRole("textbox", {
+      name: "Workspace name",
+    });
+    // A backend refusal lands inline and keeps the modal open.
+    vi.mocked(renameWorkspace).mockRejectedValueOnce(
+      new Error("no workspace record for /w/explicit"),
+    );
+    fireEvent.change(input, { target: { value: "  renamed  " } });
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    expect(
+      await screen.findByText("no workspace record for /w/explicit"),
+    ).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Save" })).toBeInTheDocument();
+    // The shared guard keeps the Save button honest.
+    fireEvent.change(input, { target: { value: "a/b" } });
+    expect(screen.getByRole("button", { name: "Save" })).toBeDisabled();
+    // Back to a valid name: the retry (now resolving) submits the TRIMMED
+    // title and the success closes the modal.
+    fireEvent.change(input, { target: { value: "  renamed  " } });
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() =>
+      expect(renameWorkspace).toHaveBeenCalledWith("/w/explicit", "renamed"),
+    );
+    expect(
+      screen.queryByRole("button", { name: "Save" }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("the head's New workspace modal creates with the trimmed name and the group lands via the listing", async () => {
+    vi.mocked(listWorkspaces).mockResolvedValue([
+      { path: "/w/explicit", label: "explicit", explicit: true, exists: true },
+    ]);
+    const { container } = renderShell(
+      <SessionSidebar {...wsProps()} />,
+    );
+    await waitFor(() =>
+      expect(
+        container.querySelector("[data-workspace-group=\"/w/explicit\"]"),
+      ).not.toBeNull(),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "New workspace" }));
+    const input = await screen.findByRole("textbox", {
+      name: "Workspace name",
+    });
+    fireEvent.change(input, { target: { value: "  fresh  " } });
+    // The post-create refetch returns the grown registry -- the group must
+    // arrive through the invalidation channel, not local state.
+    vi.mocked(listWorkspaces).mockResolvedValue([
+      { path: "/w/explicit", label: "explicit", explicit: true, exists: true },
+      { path: "/w/fresh", label: "fresh", explicit: true, exists: true },
+    ]);
+    fireEvent.click(screen.getByRole("button", { name: "Create" }));
+    await waitFor(() => expect(createWorkspace).toHaveBeenCalledWith("fresh"));
+    await waitFor(() =>
+      expect(
+        container.querySelector("[data-workspace-group=\"/w/fresh\"]"),
+      ).not.toBeNull(),
+    );
   });
 });

@@ -410,5 +410,9 @@ describe("App cold-start workspace-section shortcut wiring (issue #1392)", () =>
     fireEvent.keyDown(input, { key: "Enter" });
     await waitFor(() => expect(createSession).toHaveBeenCalledTimes(1));
     expect(createSession).toHaveBeenCalledWith("/w/demo");
+    // The mint's explicit bind refreshed the registry listing -- the
+    // invalidation is the sidebar's only refetch trigger (window-focus
+    // and reconnect refetches are off), so pin it: mount fetch + mint.
+    await waitFor(() => expect(listWorkspaces).toHaveBeenCalledTimes(2));
   });
 });

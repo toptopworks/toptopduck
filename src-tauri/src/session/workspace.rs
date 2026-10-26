@@ -661,6 +661,10 @@ mod tests {
             recent[0].path, canonical,
             "the record carries the canonical spelling"
         );
+        assert!(
+            recent[0].explicit,
+            "the create-session bind is an explicit choice (issue #1392)"
+        );
 
         let mut unseated = super::super::Session::new().expect("session");
         let other = tempfile::tempdir().expect("other dir");

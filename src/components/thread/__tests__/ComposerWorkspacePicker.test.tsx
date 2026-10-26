@@ -230,6 +230,33 @@ describe("search, row faces, and the naming subview (issue #1393)", () => {
     ).toBeInTheDocument();
   });
 
+  it("dangling records never surface in the capped or the typed view (issue #1392)", async () => {
+    vi.mocked(listWorkspaces).mockResolvedValue([
+      { path: "/w/alpha", label: "alpha", explicit: false, exists: true },
+      { path: "/w/gone", label: "gone", explicit: false, exists: false },
+    ]);
+    renderPicker(null);
+    openPopover();
+    expect(
+      await screen.findByRole("button", { name: "alpha" }),
+    ).toBeInTheDocument();
+    // The client-side exists filter (the backend listing is unfiltered
+    // since #1392) keeps the dangling row out of the capped view...
+    expect(
+      screen.queryByRole("button", { name: "gone" }),
+    ).not.toBeInTheDocument();
+    // ...and out of the typed view (the recall channel widens to the full
+    // registry, not to missing directories).
+    const search = screen.getByPlaceholderText("Search workspaces");
+    fireEvent.change(search, { target: { value: "gon" } });
+    expect(
+      await screen.findByText("No matching workspaces"),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "gone" }),
+    ).not.toBeInTheDocument();
+  });
+
   it("a layer close resets the search term for the next open", async () => {
     vi.mocked(listWorkspaces).mockResolvedValue([
       { path: "/w/alpha", label: "alpha", explicit: false, exists: true },

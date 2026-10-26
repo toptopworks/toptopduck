@@ -1,17 +1,21 @@
 // The workspace-name guard shared by the two naming faces (issue #1393's
 // create modal in the selector, issue #1392's rename modal in the sidebar):
-// the frontend mirror of the backend's mint_named_workspace validation,
-// which re-validates as the trust boundary. Rejecting beats rewriting -- a
-// rewritten name would not match the directory the user expects to find.
+// the frontend mirror of the backend's mint_named_workspace validation.
+// The trust boundary splits by face: the MINT path re-validates the full
+// rule server-side (the name becomes a directory); rename_workspace
+// re-validates trim + non-empty only (the title is display-only), so on
+// the rename face THIS guard is the full rule's only enforcer. Rejecting
+// beats rewriting -- a rewritten name would not match the directory the
+// user expects to find.
 
 /** The name cap for a named workspace (issue #1393). */
-export const WORKSPACE_NAME_MAX_CHARS = 64;
+const WORKSPACE_NAME_MAX_CHARS = 64;
 
 /** Whether a name carries a control or path-illegal character (issue
  *  #1393): a code-point walk, not a regex -- the control range is a linted
  *  pattern face better kept explicit. The control set mirrors Rust's
  *  char::is_control(): C0, DEL, and C1. */
-export function hasIllegalWorkspaceNameChar(name: string): boolean {
+function hasIllegalWorkspaceNameChar(name: string): boolean {
   for (const c of name) {
     const code = c.codePointAt(0)!;
     if (

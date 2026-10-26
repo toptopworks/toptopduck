@@ -33,8 +33,9 @@ import { LABEL_HIDE_NARROW } from "./composer-visual";
 // need). Same-den continuation rides the recent list's first row -- the
 // registry's LRU head.
 //
-// The recent list is the registry's LRU view (backend-filtered for existing
-// directories); unfiltered this surface slices the top 10 (older workspaces
+// The recent list is the registry's LRU view, client-filtered on `exists`
+// (the backend listing is unfiltered since issue #1392); unfiltered this
+// surface slices the top 10 (older workspaces
 // resurface through the browse). Each popover open refetches -- every session
 // bind or mint changes the LRU order.
 //
@@ -109,8 +110,10 @@ export function ComposerWorkspacePicker({
     queryFn: listWorkspaces,
     // Only the open popover needs the rows; every open refetches so the
     // LRU order reflects the latest bind/mint. The app default is
-    // staleTime: Infinity (ADR-0051 -- invalidate after mutations); no
-    // mutation knows to invalidate this key, so the query opts out itself.
+    // staleTime: Infinity (ADR-0051 -- invalidate after mutations); the
+    // sidebar section's mutations and the App's mint path invalidate this
+    // key explicitly (issue #1392), but the query still opts itself out so
+    // every mount is fresh regardless.
     enabled: openState,
     staleTime: 0,
   });

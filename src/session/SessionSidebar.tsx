@@ -24,7 +24,12 @@ import { resolveDisplayName } from "./displayName";
 import { listWorkspaces } from "../api";
 import { workspaceKeys } from "./queryKeys";
 import { RowActionsMenu } from "./RowActionsMenu";
-import { SHOW_MORE_CLASS, WorkspaceSidebarSection } from "./WorkspaceSidebarSection";
+import {
+  PILL_CLASS,
+  ROW_SHELL_CLASS,
+  SHOW_MORE_CLASS,
+  WorkspaceSidebarSection,
+} from "./WorkspaceSidebarSection";
 import {
   useSidebarHoverCard,
   useSidebarHoverCardBridge,
@@ -210,9 +215,11 @@ export function SessionSidebar({
 
   // The workspace listing (issue #1392): the section's data face. The
   // query opts out of the app's staleTime: Infinity (ADR-0051) the same
-  // way the selector does -- no mutation invalidates this key, so every
-  // mount + invalidation drives the refetch. The picker rides the same
-  // cache, so a rename / remove in either face lands in both.
+  // way the selector does: this section's mutations and the App's mint
+  // path invalidate this key explicitly (rename / remove / create / the
+  // post-mint refresh), and staleTime 0 keeps every mount fresh besides.
+  // The picker rides the same cache, so a rename / remove in either face
+  // lands in both.
   const { data: workspaceList } = useQuery({
     queryKey: workspaceKeys.all(),
     queryFn: listWorkspaces,
@@ -302,11 +309,10 @@ export function SessionSidebar({
     });
   }
 
-  // One chrome pair, two anchors (issue #1175): the grouping toggle rides
-  // the FIRST rendered section's title row; on a zero-section sidebar it
-  // renders on the bare fallback row instead. A single element instance is
-  // safe to reuse -- the two anchors are mutually exclusive branches, so
-  // only one GroupingToggle/ArchivedToggle instance ever mounts.
+  // One chrome pair, one anchor (issue #1175): the grouping toggle rides
+  // the FIRST rendered section's title row. The permanent workspaces
+  // section guarantees that row always exists, so a single element
+  // instance serves every sidebar state.
   const sectionChrome = (
     <div className="flex items-center gap-0.5">
       <GroupingToggle
@@ -543,9 +549,10 @@ export function SessionSidebar({
   );
 }
 
-// The flat/time grouping toggle (ADR-0072, issue #251). Triggered by a weakly-
-// visible `⋯` on the first group-title row (one entry point regardless of
-// mode, hidden on an empty sidebar). The Popover offers the two modes as a
+// The flat/time grouping toggle (ADR-0072, issue #251). Triggered by a
+// hover-revealed `⋯` on the first section's title row (one entry point
+// regardless of mode; the permanent workspaces section keeps a first row
+// always present). The Popover offers the two modes as a
 // radio group (mutually exclusive -> radio semantics, not menu); the selected
 // mode carries a trailing Check. A pick commits immediately via onSwitch (the
 // hook routes through commitShellPrefs, same immediate-persist contract as the
@@ -794,7 +801,7 @@ function SidebarRow({
           ref={liRef}
           {...bridge.liProps}
           className={cn(
-            "session-entry group/row relative my-0.5 flex items-stretch rounded-md hover:bg-accent",
+            ROW_SHELL_CLASS,
             entry.active && "active bg-accent",
             entry.sid && "open",
             hasPendingApproval && "pending-approval",
@@ -876,7 +883,7 @@ function SidebarRow({
               {formatRelativeTime(entry.lastModifiedAt, now, intl.locale)}
             </span>
           </button>
-          <div className="session-entry-actions absolute inset-y-0 right-1 z-10 flex items-center gap-0 rounded-md bg-accent opacity-0 pointer-events-none group-hover/row:opacity-100 group-hover/row:pointer-events-auto has-[:focus-visible]:opacity-100 has-[:focus-visible]:pointer-events-auto">
+          <div className={PILL_CLASS}>
             {menu}
           </div>
         </li>
