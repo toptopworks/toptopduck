@@ -56,19 +56,30 @@
 }
 ::-webkit-scrollbar-corner { background: transparent; }
 
-/* The workspace selector's popover scroll band (issue #1393): the search box
-   and the recent list scroll as ONE area; the thumb stays transparent until
-   the pointer is anywhere over the popover panel, restoring the global
-   muted-foreground mix on reveal (hovering the thumb itself deepens it, the
-   global behavior). Scoped to this band -- the global thin-scrollbar face is
-   untouched. */
+/* The workspace selector's popover scroll band (issue #1393): the scrollbar
+   must never shift the content -- scrollbar-gutter: stable reserves the
+   band's width permanently, so the rows keep the same left/right spacing
+   with and without a thumb. The band narrows to 6px (a 1px inset leaves a
+   4px visible thumb) and stays docked on the panel rim. The thumb shows
+   only while the pointer is over the band itself (the search box + list
+   region) and hides again on leave -- post-delivery ruling narrowing the
+   panel-wide reveal. The reveal rides a custom property flipped by the
+   HOST's :hover (composing :hover directly onto the scrollbar pseudo-
+   element does not fire in WebView2); color/radius/hover-deepen otherwise
+   ride the global rules. */
+.ws-picker-scroll {
+  scrollbar-gutter: stable;
+  --ws-thumb: transparent;
+}
+.ws-picker-scroll:hover {
+  --ws-thumb: color-mix(in srgb, var(--muted-foreground) 40%, transparent);
+}
+.ws-picker-scroll::-webkit-scrollbar { width: 6px; }
 .ws-picker-scroll::-webkit-scrollbar-thumb {
-  background-color: transparent;
+  border: 1px solid transparent;
+  background-color: var(--ws-thumb);
 }
-[data-slot="popover-content"]:hover .ws-picker-scroll::-webkit-scrollbar-thumb {
-  background-color: color-mix(in srgb, var(--muted-foreground) 40%, transparent);
-}
-[data-slot="popover-content"]:hover .ws-picker-scroll::-webkit-scrollbar-thumb:hover {
+.ws-picker-scroll::-webkit-scrollbar-thumb:hover {
   background-color: color-mix(in srgb, var(--muted-foreground) 65%, transparent);
 }
 

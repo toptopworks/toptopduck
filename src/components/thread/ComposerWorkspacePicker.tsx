@@ -55,9 +55,12 @@ const RECENT_LIMIT = 10;
 
 /** The shared face of the layer's full-width entries -- the list rows and
  *  the fixed actions (new workspace, browse, no workspace); the rows add
- *  the selected accent pair on top. */
+ *  the selected accent pair on top. The hover/selected block lines up with
+ *  the search box -- 8px off the rim on both sides: the list (ul) and the
+ *  fixed-actions wrapper inset it, with the permanent gutter completing the
+ *  right side inside the band. */
 const ENTRY_CLASS =
-  "flex w-full cursor-pointer items-center gap-2 rounded-sm px-2 py-1.5 text-sm outline-none hover:bg-accent focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring";
+  "flex w-full cursor-pointer items-center gap-2 rounded-sm px-2 py-1.5 text-sm outline-none hover:bg-accent/50 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring";
 
 /** The name cap and illegal-character set for a named workspace (issue
  *  #1393): the backend re-validates, this guard only keeps the create button
@@ -242,7 +245,12 @@ export function ComposerWorkspacePicker({
         </PopoverTrigger>
         <PopoverContent
           align="start"
-          className="w-64 p-1"
+          // No horizontal panel padding (the reference product's shape): the
+          // scroll band spans to the panel edges so the scrollbar docks on
+          // the rim like the session pane's edge-docked containers, and the
+          // rows/search box carry their own px-2 -- the breathing room sits
+          // inside the scrollbar.
+          className="w-64 px-0 py-2"
           // An open must NOT drop the focus into the search box (the
           // post-delivery ruling): the ring stays on the trigger.
           onOpenAutoFocus={(e) => e.preventDefault()}
@@ -250,13 +258,17 @@ export function ComposerWorkspacePicker({
           <>
             {recent.length > 0 && (
               // One scroll band for the search box + the list (issue #1393):
-              // the cap leaves the search box plus about six rows; the thumb
-              // stays transparent until the pointer is anywhere over the
-              // panel (the styles.css reveal keyed on this element).
+              // the cap leaves the search box plus about six rows. The band
+              // docks on the panel rim with a PERMANENT gutter (styles.css
+              // -- scrollbar-gutter: stable), so the content keeps the same
+              // spacing whether or not a thumb is showing.
               <div className="ws-picker-scroll max-h-56 overflow-y-auto">
-                <div className="relative mb-1">
+                {/* The search box insets 8px on both sides of the panel; the
+                    right padding is 2px because the permanent 6px gutter
+                    completes the visual 8px. */}
+                <div className="relative mb-1 pl-2 pr-0.5">
                   <Search
-                    className="pointer-events-none absolute left-2 top-1/2 size-4 -translate-y-1/2 text-muted-foreground"
+                    className="pointer-events-none absolute left-4 top-1/2 size-4 -translate-y-1/2 text-muted-foreground"
                     aria-hidden
                   />
                   <Input
@@ -275,7 +287,7 @@ export function ComposerWorkspacePicker({
                   />
                 </div>
                 {visible.length > 0 ? (
-                  <ul>
+                  <ul className="pl-2 pr-0.5">
                     {visible.map((w) => {
                       const selected = value?.path === w.path;
                       return (
@@ -307,7 +319,7 @@ export function ComposerWorkspacePicker({
                             />
                             <span className="truncate">{w.label}</span>
                             {selected && (
-                              <Check className="ml-auto size-4 shrink-0" aria-hidden />
+                              <Check className="ml-auto mr-1 size-4 shrink-0" aria-hidden />
                             )}
                           </button>
                         </li>
@@ -315,7 +327,7 @@ export function ComposerWorkspacePicker({
                     })}
                   </ul>
                 ) : (
-                  <p className="px-2 py-1.5 text-sm text-muted-foreground">
+                  <p className="pl-4 pr-2.5 py-1.5 text-sm text-muted-foreground">
                     {intl.formatMessage({
                       id: "composer.workspace.noMatches",
                       defaultMessage: "No matching workspaces",
@@ -324,54 +336,61 @@ export function ComposerWorkspacePicker({
                 )}
               </div>
             )}
-            {recent.length > 0 && <div className="my-1 border-t border-border" />}
-            <button
-              type="button"
-              // The naming face is a modal, not a layer subview (the
-              // reference product's create flow): the layer closes and the
-              // modal takes over.
-              onClick={() => {
-                handleOpenChange(false);
-                setModalOpen(true);
-              }}
-              className={ENTRY_CLASS}
-            >
-              <Plus className="size-4 shrink-0" aria-hidden />
-              {intl.formatMessage({
-                id: "composer.workspace.newWorkspace",
-                defaultMessage: "New workspace",
-              })}
-            </button>
-            <button
-              type="button"
-              onClick={() => void browse()}
-              className={ENTRY_CLASS}
-            >
-              <FolderOpen className="size-4 shrink-0" aria-hidden />
-              {intl.formatMessage({
-                id: "composer.workspace.browse",
-                defaultMessage: "Browse folders…",
-              })}
-            </button>
-            {value !== null && (
+            {/* The fixed actions share the rows' 8px rim gap: this wrapper
+                sits outside the scroll band (no gutter to lean on), so its
+                px-2 carries the inset on both sides. */}
+            <div className="px-2">
+              {recent.length > 0 && (
+                <div className="-mx-0.5 my-2 border-t border-border" />
+              )}
               <button
                 type="button"
+                // The naming face is a modal, not a layer subview (the
+                // reference product's create flow): the layer closes and the
+                // modal takes over.
                 onClick={() => {
-                  onChange(null);
                   handleOpenChange(false);
+                  setModalOpen(true);
                 }}
-                className={cn(
-                  ENTRY_CLASS,
-                  "text-muted-foreground hover:text-foreground",
-                )}
+                className={ENTRY_CLASS}
               >
-                <FolderX className="size-4 shrink-0" aria-hidden />
+                <Plus className="size-4 shrink-0" aria-hidden />
                 {intl.formatMessage({
-                  id: "composer.workspace.none",
-                  defaultMessage: "No workspace",
+                  id: "composer.workspace.newWorkspace",
+                  defaultMessage: "New workspace",
                 })}
               </button>
-            )}
+              <button
+                type="button"
+                onClick={() => void browse()}
+                className={ENTRY_CLASS}
+              >
+                <FolderOpen className="size-4 shrink-0" aria-hidden />
+                {intl.formatMessage({
+                  id: "composer.workspace.browse",
+                  defaultMessage: "Browse folders…",
+                })}
+              </button>
+              {value !== null && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    onChange(null);
+                    handleOpenChange(false);
+                  }}
+                  className={cn(
+                    ENTRY_CLASS,
+                    "text-muted-foreground hover:text-foreground",
+                  )}
+                >
+                  <FolderX className="size-4 shrink-0" aria-hidden />
+                  {intl.formatMessage({
+                    id: "composer.workspace.none",
+                    defaultMessage: "No workspace",
+                  })}
+                </button>
+              )}
+            </div>
           </>
         </PopoverContent>
       </Popover>
