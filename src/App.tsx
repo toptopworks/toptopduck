@@ -280,7 +280,7 @@ export default function App() {
   // visibility. Deliberately NOT persisted -- every startup resets the
   // archived view to hidden (the peek semantics), so plain useState.
   const [showArchived, setShowArchived] = useState(false);
-  const { sessions, archivedSessions, sessionsError, refreshSessions } =
+  const { sessions, archivedSessions, sessionsError, sessionsLoaded, refreshSessions } =
     usePersistedSessions({ intl, includeArchived: showArchived });
   const {
     openSessions,
@@ -1027,6 +1027,7 @@ export default function App() {
                 <SessionSidebar
                   collapsed={sidebarCollapsed}
                   sessions={sessions}
+                  sessionsLoaded={sessionsLoaded}
                   openSessions={openSessions}
                   activeSessionId={activeSessionId}
                   disabled={busy}

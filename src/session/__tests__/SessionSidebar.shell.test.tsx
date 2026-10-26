@@ -182,6 +182,7 @@ describe("SessionSidebar shell-skeleton visuals (ADR-0067, issue #171)", () => {
       <SessionSidebar
         collapsed={false}
         sessions={[]}
+        sessionsLoaded={true}
         openSessions={twoOpenSessions()}
         activeSessionId="sess-active"
         disabled={false}
@@ -225,6 +226,7 @@ describe("SessionSidebar shell-skeleton visuals (ADR-0067, issue #171)", () => {
       <SessionSidebar
         collapsed={false}
         sessions={[]}
+        sessionsLoaded={true}
         openSessions={twoOpenSessions()}
         activeSessionId="sess-active"
         disabled={false}
@@ -264,6 +266,7 @@ describe("SessionSidebar shell-skeleton visuals (ADR-0067, issue #171)", () => {
       <SessionSidebar
         collapsed={false}
         sessions={[]}
+        sessionsLoaded={true}
         openSessions={twoOpenSessions()}
         activeSessionId="sess-active"
         disabled={false}
@@ -316,6 +319,7 @@ describe("SessionSidebar shell-skeleton visuals (ADR-0067, issue #171)", () => {
       <SessionSidebar
         collapsed={false}
         sessions={[persisted]}
+        sessionsLoaded={true}
         openSessions={[]}
         activeSessionId={null}
         disabled={false}
@@ -358,6 +362,7 @@ describe("SessionSidebar shell-skeleton visuals (ADR-0067, issue #171)", () => {
       <SessionSidebar
         collapsed={false}
         sessions={[persisted]}
+        sessionsLoaded={true}
         openSessions={[]}
         activeSessionId={null}
         disabled={false}
@@ -417,6 +422,7 @@ describe("SessionSidebar shell-skeleton visuals (ADR-0067, issue #171)", () => {
       <SessionSidebar
         collapsed={false}
         sessions={[]}
+        sessionsLoaded={true}
         openSessions={[]}
         activeSessionId={null}
         disabled={false}
@@ -471,6 +477,7 @@ describe("SessionSidebar shell-skeleton visuals (ADR-0067, issue #171)", () => {
       <SessionSidebar
         collapsed={false}
         sessions={[]}
+        sessionsLoaded={true}
         openSessions={[]}
         activeSessionId={null}
         disabled={true}
@@ -505,6 +512,7 @@ describe("SessionSidebar shell-skeleton visuals (ADR-0067, issue #171)", () => {
       <SessionSidebar
         collapsed={false}
         sessions={[]}
+        sessionsLoaded={true}
         openSessions={[]}
         activeSessionId={null}
         disabled={false}
@@ -572,6 +580,7 @@ describe("SessionSidebar grouping toggle (ADR-0072, issue #251)", () => {
       <SessionSidebar
         collapsed={false}
         sessions={[]}
+        sessionsLoaded={true}
         openSessions={[]}
         activeSessionId={null}
         disabled={false}
@@ -604,6 +613,7 @@ describe("SessionSidebar grouping toggle (ADR-0072, issue #251)", () => {
       <SessionSidebar
         collapsed={false}
         sessions={[onePersisted()]}
+        sessionsLoaded={true}
         openSessions={[]}
         activeSessionId={null}
         disabled={false}
@@ -656,6 +666,7 @@ describe("SessionSidebar grouping toggle (ADR-0072, issue #251)", () => {
       <SessionSidebar
         collapsed={false}
         sessions={[onePersisted()]}
+        sessionsLoaded={true}
         openSessions={[]}
         activeSessionId={null}
         disabled={false}
@@ -696,6 +707,7 @@ describe("SessionSidebar grouping toggle (ADR-0072, issue #251)", () => {
       <SessionSidebar
         collapsed={false}
         sessions={[onePersisted()]}
+        sessionsLoaded={true}
         openSessions={[]}
         activeSessionId={null}
         disabled={false}
@@ -738,6 +750,7 @@ describe("SessionSidebar grouping toggle (ADR-0072, issue #251)", () => {
       <SessionSidebar
         collapsed={false}
         sessions={[onePersisted()]}
+        sessionsLoaded={true}
         openSessions={[]}
         activeSessionId={null}
         disabled={true}
@@ -776,6 +789,7 @@ describe("SessionSidebar grouping toggle (ADR-0072, issue #251)", () => {
       <SessionSidebar
         collapsed={false}
         sessions={[onePersisted()]}
+        sessionsLoaded={true}
         openSessions={[]}
         activeSessionId={null}
         disabled={false}
@@ -840,6 +854,7 @@ describe("SessionSidebar settings footer (issue #282)", () => {
       <SessionSidebar
         collapsed={false}
         sessions={[]}
+        sessionsLoaded={true}
         openSessions={[]}
         activeSessionId={null}
         disabled={false}
@@ -896,6 +911,7 @@ describe("SessionSidebar pending-approval coloring (ADR-0083, issue #297)", () =
     return {
       collapsed: false,
       sessions: [] as SessionMetadata[],
+      sessionsLoaded: true,
       openSessions: twoOpenSessions(),
       activeSessionId: "sess-active",
       disabled: false,
@@ -958,6 +974,7 @@ describe("SessionSidebar turn-failed coloring (issue #1005)", () => {
     return {
       collapsed: false,
       sessions: [] as SessionMetadata[],
+      sessionsLoaded: true,
       openSessions: twoOpenSessions(),
       activeSessionId: "sess-active",
       disabled: false,
@@ -1065,6 +1082,7 @@ describe("SessionSidebar hover card content (ADR-0093, issue #513)", () => {
     return {
       collapsed: false,
       sessions: [] as SessionMetadata[],
+      sessionsLoaded: true,
       openSessions: [] as OpenSession[],
       activeSessionId: null,
       disabled: false,
@@ -1346,6 +1364,7 @@ describe("SessionSidebar organization (ADR-0127, issue #1175)", () => {
     return {
       collapsed: false,
       sessions: [],
+      sessionsLoaded: true,
       openSessions: [],
       activeSessionId: null,
       disabled: false,
@@ -1431,6 +1450,7 @@ describe("SessionSidebar organization (ADR-0127, issue #1175)", () => {
       <SessionSidebar
         {...orgProps({
           sessions: pinnedMeta(),
+          sessionsLoaded: true,
           onActivate,
           onOpenPersisted,
           onSetPinned,
@@ -1516,6 +1536,7 @@ describe("SessionSidebar organization (ADR-0127, issue #1175)", () => {
       <SessionSidebar
         {...orgProps({
           sessions: pinnedMeta(),
+          sessionsLoaded: true,
           archivedSessions: archived,
           showArchived: true,
           onOpenPersisted,
@@ -1586,6 +1607,7 @@ describe("SessionSidebar row actions menu (ADR-0133, issue #1319)", () => {
   function menuProps(overrides: Record<string, unknown> = {}) {
     return {
       collapsed: false,
+      sessionsLoaded: true,
       // One open row (bound via openSessions) + one cold persisted row: the
       // item sets and the sid-bearing callbacks diverge between the two.
       sessions: [
@@ -1798,6 +1820,7 @@ describe("SessionSidebar archived-view gating (issue #1175)", () => {
     const props = (showArchived: boolean) => ({
       collapsed: false,
       sessions: [] as SessionMetadata[],
+      sessionsLoaded: true,
       openSessions: [] as OpenSession[],
       activeSessionId: null,
       disabled: false,
@@ -1856,6 +1879,7 @@ describe("SessionSidebar workspace section (issue #1392)", () => {
     return {
       collapsed: false,
       sessions: [],
+      sessionsLoaded: true,
       openSessions: [],
       activeSessionId: null,
       disabled: false,
@@ -1997,6 +2021,7 @@ describe("SessionSidebar workspace section (issue #1392)", () => {
       <SessionSidebar
         {...wsProps({
           sessions: [metaRow("/a.json", "alpha", "/w/explicit")],
+          sessionsLoaded: true,
           openSessions: [
             openRow("sid-a", "alpha", "/a.json"),
             openRow("sid-b", "freshie", "/fresh.json"),
@@ -2070,6 +2095,7 @@ describe("SessionSidebar workspace section (issue #1392)", () => {
       return el as HTMLElement;
     });
     expect(group).toHaveAttribute("aria-expanded", "false");
+    expect(group.querySelector(".lucide-folder-closed")).not.toBeNull();
     // The listing lands with a new bound member: the group fans open on its
     // own -- the landed row visible without a manual toggle.
     view.rerender(
@@ -2091,6 +2117,121 @@ describe("SessionSidebar workspace section (issue #1392)", () => {
         "[data-workspace-group=\"/w/explicit\"] .session-entry-main",
       ),
     ).not.toBeNull();
+    expect(group.querySelector(".lucide-folder-open")).not.toBeNull();
+  });
+
+  it("a cold start's scan arrival keeps the groups collapsed", async () => {
+    vi.mocked(listWorkspaces).mockResolvedValue([
+      { path: "/w/explicit", label: "explicit", explicit: true, exists: true },
+    ]);
+    // Pre-scan: the persisted list is still empty and not yet loaded.
+    const view = renderShell(
+      <SessionSidebar {...wsProps({ sessionsLoaded: false })} />,
+    );
+    const group = await waitFor(() => {
+      const el = view.container.querySelector(
+        "[data-workspace-group=\"/w/explicit\"] [aria-expanded]",
+      );
+      expect(el).not.toBeNull();
+      return el as HTMLElement;
+    });
+    expect(group).toHaveAttribute("aria-expanded", "false");
+    // The scan lands with the persisted rows: a baseline, not a landing --
+    // every group stays collapsed and no row renders.
+    view.rerender(
+      shellTree(
+        <SessionSidebar
+          {...wsProps({
+            sessionsLoaded: true,
+            sessions: [metaRow("/a.json", "alpha", "/w/explicit")],
+          })}
+        />,
+      ),
+    );
+    await waitFor(() =>
+      expect(
+        view.container.querySelector(
+          "[data-workspace-group=\"/w/explicit\"] [aria-expanded]",
+        ),
+      ).toHaveAttribute("aria-expanded", "false"),
+    );
+    expect(
+      view.container.querySelector(
+        "[data-workspace-group=\"/w/explicit\"] .session-entry-main",
+      ),
+    ).toBeNull();
+  });
+
+  it("a landing fans its landed groups; a manual fold holds", async () => {
+    vi.mocked(listWorkspaces).mockResolvedValue([
+      { path: "/w/one", label: "one", explicit: true, exists: true },
+      { path: "/w/two", label: "two", explicit: true, exists: true },
+      { path: "/w/three", label: "three", explicit: true, exists: true },
+    ]);
+    const view = renderShell(<SessionSidebar {...wsProps()} />);
+    const head = (path: string) =>
+      view.container.querySelector(
+        `[data-workspace-group="${path}"] [aria-expanded]`,
+      );
+    await waitFor(() => expect(head("/w/two")).not.toBeNull());
+    // A real manual fold: open two, then close it.
+    fireEvent.click(head("/w/two") as HTMLElement);
+    await waitFor(() =>
+      expect(head("/w/two")).toHaveAttribute("aria-expanded", "true"),
+    );
+    fireEvent.click(head("/w/two") as HTMLElement);
+    await waitFor(() =>
+      expect(head("/w/two")).toHaveAttribute("aria-expanded", "false"),
+    );
+    // Two rows land in one pass: one and three fan open on their own;
+    // the manually folded two stays folded.
+    view.rerender(
+      shellTree(
+        <SessionSidebar
+          {...wsProps({
+            sessions: [
+              metaRow("/a.json", "alpha", "/w/one"),
+              metaRow("/c.json", "gamma", "/w/three"),
+            ],
+          })}
+        />,
+      ),
+    );
+    await waitFor(() =>
+      expect(head("/w/one")).toHaveAttribute("aria-expanded", "true"),
+    );
+    expect(head("/w/three")).toHaveAttribute("aria-expanded", "true");
+    expect(head("/w/two")).toHaveAttribute("aria-expanded", "false");
+  });
+
+  it("a row archived away and returning does not re-fan its group", async () => {
+    vi.mocked(listWorkspaces).mockResolvedValue([
+      { path: "/w/one", label: "one", explicit: true, exists: true },
+    ]);
+    const view = renderShell(<SessionSidebar {...wsProps()} />);
+    const head = () =>
+      view.container.querySelector(
+        "[data-workspace-group=\"/w/one\"] [aria-expanded]",
+      );
+    await waitFor(() => expect(head()).not.toBeNull());
+    const alpha = [metaRow("/a.json", "alpha", "/w/one")];
+    view.rerender(
+      shellTree(<SessionSidebar {...wsProps({ sessions: alpha })} />),
+    );
+    await waitFor(() =>
+      expect(head()).toHaveAttribute("aria-expanded", "true"),
+    );
+    // Fold it back; the row archives away, then returns -- a seen path is
+    // not a second landing, so the fold holds.
+    fireEvent.click(head() as HTMLElement);
+    await waitFor(() =>
+      expect(head()).toHaveAttribute("aria-expanded", "false"),
+    );
+    view.rerender(shellTree(<SessionSidebar {...wsProps()} />));
+    view.rerender(
+      shellTree(<SessionSidebar {...wsProps({ sessions: alpha })} />),
+    );
+    expect(head()).toHaveAttribute("aria-expanded", "false");
   });
 
   it("heads the action buttons with tooltips and the diagonal expand glyphs", async () => {
@@ -2120,6 +2261,24 @@ describe("SessionSidebar workspace section (issue #1392)", () => {
     const expanded = screen.getByRole("button", { name: "Collapse all workspaces" });
     expect(expanded.querySelector(".lucide-minimize-2")).not.toBeNull();
     expect(expanded.querySelector(".lucide-maximize-2")).toBeNull();
+    // The tooltip re-labels with the flipped face (leave first: the click
+    // left the old one open on focus).
+    fireEvent.pointerLeave(expanded, { pointerType: "mouse" });
+    await waitFor(() => expect(screen.queryByRole("tooltip")).toBeNull());
+    fireEvent.pointerEnter(expanded, { pointerType: "mouse" });
+    fireEvent.pointerMove(expanded, { pointerType: "mouse" });
+    expect(await screen.findByRole("tooltip")).toHaveTextContent(
+      "Collapse all workspaces",
+    );
+    // The New workspace head button carries its own tooltip on the same
+    // channel -- opening it hands the slot over (the provider's peers
+    // self-close on the broadcast), so the content swaps in place.
+    const newWorkspace = screen.getByRole("button", { name: "New workspace" });
+    fireEvent.pointerEnter(newWorkspace, { pointerType: "mouse" });
+    fireEvent.pointerMove(newWorkspace, { pointerType: "mouse" });
+    await waitFor(() =>
+      expect(screen.getByRole("tooltip")).toHaveTextContent("New workspace"),
+    );
   });
 
   it("caps the subtree preview at 5 and expands the rest via Show more (N)", async () => {
@@ -2203,9 +2362,15 @@ describe("SessionSidebar workspace section (issue #1392)", () => {
     expect(openPath).toHaveBeenCalledWith("/w/explicit");
     vi.mocked(removeWorkspace).mockClear();
     fireEvent.click(screen.getByRole("menuitem", { name: "Remove from list" }));
-    // The staged confirm: the mutation waits for the dialog's Action.
+    // The staged confirm: the mutation waits for the dialog's Action, and
+    // the body names the ledger-only consequence.
     expect(
       await screen.findByText("Remove explicit?"),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        "This only removes the workspace from the app. The folder and its sessions on your computer are not deleted.",
+      ),
     ).toBeInTheDocument();
     expect(removeWorkspace).not.toHaveBeenCalled();
     fireEvent.click(screen.getByRole("button", { name: "Remove" }));

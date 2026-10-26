@@ -99,9 +99,13 @@ export type WorkspaceSidebarSectionProps = {
   /** The explicit registry groups, server (LRU) order. */
   groups: WorkspaceGroup[];
   /** The full persisted scan (the groups' upstream): the landing diff runs
-   *  on it -- complete from the first render, unlike the late-assembled
-   *  group buckets. */
+   *  on it rather than the late-assembled group buckets. The list itself
+   *  starts empty and fills after mount -- gate on sessionsLoaded. */
   sessions: SessionMetadata[];
+  /** True once the first listSessions scan resolved: the landing diff's
+   *  baseline waits on it, so a cold start's empty-to-full transition is
+   *  not mistaken for a landing. */
+  sessionsLoaded: boolean;
   disabled: boolean;
   /** The section-level fold, owned by the parent (per-session state). */
   collapsed: boolean;
@@ -120,6 +124,7 @@ export type WorkspaceSidebarSectionProps = {
 export function WorkspaceSidebarSection({
   groups,
   sessions,
+  sessionsLoaded,
   disabled,
   collapsed,
   onToggleCollapsed,
@@ -181,38 +186,40 @@ export function WorkspaceSidebarSection({
   // The diff runs on the `sessions` prop's bound paths -- NOT the groups:
   // the groups are a bucket view that assembles late (the workspaces
   // listing is its own query), and diffing them would mistake the late
-  // bucket assembly for a landing, fanning every group open on a cold
-  // start. `sessions` is complete from the first render, so the first
-  // sighting records the baseline and only a GROWTH afterwards -- a real
-  // mint through any binding path (the ⊕ shortcut, the picker, the
-  // popover) -- opens the group holding the new row. Manual folds are
-  // honored -- only the landed workspaces flip.
-  const prevBoundRef = useRef<Set<string> | null>(null);
+  // bucket assembly for a landing. But the list itself is ALSO async --
+  // empty until the first listSessions scan resolves -- so the baseline
+  // waits for `sessionsLoaded`: recorded on the scan's first completion,
+  // it already holds every persisted bound row, and only a NEW recipe
+  // path afterwards -- a real mint through any binding path (the ⊕
+  // shortcut, the picker, the popover) -- flips its group open. Seen
+  // paths are remembered, never re-fanned: a row that leaves and returns
+  // (the archive / unarchive cycle) is not a second landing, so a group
+  // the user folded stays folded. Manual folds are otherwise honored --
+  // only the landed workspaces flip.
+  const seenBoundRef = useRef<Set<string> | null>(null);
   useEffect(() => {
-    const prev = prevBoundRef.current;
-    prevBoundRef.current = new Set(
-      sessions.filter((m) => m.workspace !== null).map((m) => m.recipe_path),
-    );
-    if (prev === null) return;
+    if (!sessionsLoaded) return;
+    const seen = seenBoundRef.current;
+    const bound = sessions.filter((m) => m.workspace !== null);
+    if (seen === null) {
+      seenBoundRef.current = new Set(bound.map((m) => m.recipe_path));
+      return;
+    }
     const landed = new Set(
-      sessions
-        .filter((m) => m.workspace !== null && !prev.has(m.recipe_path))
+      bound
+        .filter((m) => !seen.has(m.recipe_path))
         .map((m) => m.workspace)
         .filter((w): w is string => w !== null),
     );
+    for (const m of bound) seen.add(m.recipe_path);
     if (landed.size === 0) return;
     setExpanded((existing) => {
-      const next = new Set(existing);
-      let changed = false;
-      for (const path of landed) {
-        if (!next.has(path)) {
-          next.add(path);
-          changed = true;
-        }
-      }
-      return changed ? next : existing;
+      const next = new Set([...existing, ...landed]);
+      // No growth means no state change: keep the old reference so the
+      // effect never re-renders on its own.
+      return next.size === existing.size ? existing : next;
     });
-  }, [sessions]);
+  }, [sessions, sessionsLoaded]);
 
   function openRename(group: WorkspaceGroup) {
     setRenaming(group);
@@ -239,6 +246,11 @@ export function WorkspaceSidebarSection({
   const remove = useMutation({
     mutationFn: (path: string) => removeWorkspace(path),
     onSuccess: invalidate,
+    // The confirm dialog is already gone when the mutation runs, so a
+    // refusal has no modal to surface in: log it -- the ArtifactHeader
+    // posture (the record stays, the action is simply retryable).
+    onError: (e) =>
+      log.warn("WorkspaceSidebarSection", "removeWorkspace failed", e),
   });
 
   const rename = useMutation({
@@ -269,10 +281,14 @@ export function WorkspaceSidebarSection({
   const renameInvalid = isInvalidWorkspaceName(renameTrimmed);
   const createTrimmed = createInput.trim();
   const createInvalid = isInvalidWorkspaceName(createTrimmed);
+  // The head face keys on groups that actually render: stale expanded
+  // entries for gone groups must not distort the toggle (an all-collapsed
+  // list would otherwise wear the collapse face and eat a click).
+  const anyGroupOpen = groups.some((g) => expanded.has(g.path));
   // The head toggle's label, two STATIC branches (the extract gate reads
   // call sites at statement level, not inside a JSX attribute ternary).
   const headToggleLabel =
-    expanded.size > 0
+    anyGroupOpen
       ? intl.formatMessage({
           id: "sidebar.workspace.collapseAllAria",
           defaultMessage: "Collapse all workspaces",
@@ -324,9 +340,9 @@ export function WorkspaceSidebarSection({
                 aria-label={headToggleLabel}
                 disabled={disabled}
                 className={HEAD_ACTION_CLASS}
-                onClick={() => setAllExpanded(expanded.size === 0)}
+                onClick={() => setAllExpanded(!anyGroupOpen)}
               >
-                {expanded.size > 0 ? (
+                {anyGroupOpen ? (
                   <Minimize2 className="size-3.5" aria-hidden />
                 ) : (
                   <Maximize2 className="size-3.5" aria-hidden />

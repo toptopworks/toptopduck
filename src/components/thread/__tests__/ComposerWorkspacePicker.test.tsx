@@ -71,6 +71,18 @@ describe("ComposerWorkspacePicker (issue #1384)", () => {
     expect(
       screen.getByRole("button", { name: "Open local folder" }),
     ).toBeInTheDocument();
+    // The unified collapsed-directory glyph rides the row and the browse
+    // action (#1398's FolderClosed unification).
+    expect(
+      screen
+        .getByRole("button", { name: "beta" })
+        .querySelector(".lucide-folder-closed"),
+    ).not.toBeNull();
+    expect(
+      screen
+        .getByRole("button", { name: "Open local folder" })
+        .querySelector(".lucide-folder-closed"),
+    ).not.toBeNull();
     // The undo row is bound-state-only.
     expect(
       screen.queryByRole("button", { name: "No workspace" }),
