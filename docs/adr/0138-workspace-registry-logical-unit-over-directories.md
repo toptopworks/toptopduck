@@ -40,4 +40,4 @@ ADR-0137 Decision 5 将最近工作区列表记为 app-config 存储——随工
 - **校准 ADR-0137**：Decision 5 的最近列表存储由 app-config 改为工作区注册表（`workspaces.json`），选择器三态语义不变，执行语义零改动。
 - 侧栏分组票的地基：`title` 写路径、`session_ids` 账本、分组过滤的来源判据、行内新建，全部 serde additive 演进。
 - 工作区搜索与侧栏分组的账本真源分歧（记录 `session_ids` 账本 vs 扫会话头派生）留后续裁决。
-- 非目标：归档、`updated_at` 审计位、改名入口（侧栏分组票）、手动新建工作区入口。
+- 非目标：归档、`updated_at` 审计位、改名入口（侧栏分组票）。

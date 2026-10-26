@@ -90,6 +90,15 @@ export async function listWorkspaces(): Promise<RecentWorkspace[]> {
   return invoke<RecentWorkspace[]>("list_workspaces");
 }
 
+// Mint a named workspace (issue #1393): the backend re-validates the name
+// (trim, 1-64 chars, no path-illegal characters) as the trust boundary,
+// creates `{workspaces root}/<name>/`, and records it titled. An existing
+// same-name directory comes back as-is with its existing label -- the
+// "select the existing one" ruling.
+export async function createWorkspace(name: string): Promise<RecentWorkspace> {
+  return invoke<RecentWorkspace>("create_workspace", { name });
+}
+
 // Create a new session (ADR-0056/0089): the backend builds an independent
 // in-memory DuckDB instance + per-session cancel token, binds them to a
 // backend-generated id (UUID), AND immediately persists by creating a

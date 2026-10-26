@@ -68,6 +68,64 @@ pub(crate) fn mint_workspace(
     }
 }
 
+/// The directory-name cap for a named workspace (issue #1393): the UI guard
+/// and the backend check share this bound.
+pub(crate) const NAMED_WORKSPACE_MAX_CHARS: usize = 64;
+
+/// Validate a NAMED workspace's directory name (issue #1393): non-empty after
+/// trimming, at most [`NAMED_WORKSPACE_MAX_CHARS`] characters, and free of the
+/// path-illegal set (separators plus the Windows-reserved punctuation) and
+/// control characters. A trailing dot is rejected as well: a dot-only name
+/// resolves to the root itself or its parent (`.`/`..`), and Win32 strips a
+/// trailing dot at create time, so the disk would disagree with the recorded
+/// title. The caller validates the TRIMMED spelling; the input is
+/// rejected, never silently rewritten -- a rewritten directory name would not
+/// match what the user expects to find later.
+pub(crate) fn validate_workspace_name(name: &str) -> Result<(), String> {
+    if name.is_empty() {
+        return Err("workspace name is empty".to_string());
+    }
+    if name.chars().count() > NAMED_WORKSPACE_MAX_CHARS {
+        return Err(format!(
+            "workspace name exceeds {NAMED_WORKSPACE_MAX_CHARS} characters"
+        ));
+    }
+    if name.chars().any(|c| {
+        matches!(c, '\\' | '/' | ':' | '*' | '?' | '"' | '<' | '>' | '|') || c.is_control()
+    }) {
+        return Err("workspace name contains a path-illegal or control character".to_string());
+    }
+    if name.ends_with('.') {
+        return Err("workspace name must not end with a dot".to_string());
+    }
+    Ok(())
+}
+
+/// Mint a NAMED workspace (issue #1393): `{root}/<trimmed name>/`. Unlike the
+/// timestamp mint this is an EXPLICIT user asset -- the name is the user's,
+/// taken verbatim (validated, never rewritten), and the directory is exempt
+/// from the close-time empty reclaim by construction: [`is_app_minted`]
+/// requires the timestamp name shape, which a named directory never carries.
+/// A same-name directory that already EXISTS is not an error -- the caller's
+/// "select the existing one" semantics: the path returns with
+/// `created == false` so the caller records the LRU bump without touching the
+/// existing record's title. The returned path is canonicalized like the other
+/// mints (one spelling per directory, ADR-0137 Decision 1), degrading to the
+/// joined spelling if canonicalize fails.
+pub(crate) fn mint_named_workspace(root: &Path, name: &str) -> Result<(PathBuf, bool), String> {
+    let trimmed = name.trim();
+    validate_workspace_name(trimmed)?;
+    std::fs::create_dir_all(root).map_err(|e| format!("workspaces root unavailable: {e}"))?;
+    let dir = root.join(trimmed);
+    if dir.is_dir() {
+        let canonical = std::fs::canonicalize(&dir).unwrap_or(dir);
+        return Ok((canonical, false));
+    }
+    std::fs::create_dir(&dir).map_err(|e| format!("failed to mint the workspace: {e}"))?;
+    let canonical = std::fs::canonicalize(&dir).unwrap_or(dir);
+    Ok((canonical, true))
+}
+
 /// Whether a bound workspace path is App-minted (ADR-0137, issue #1381):
 /// directly under the managed `workspaces/` root AND carrying the timestamp
 /// name shape. The shape check keeps a user-created directory inside the
@@ -340,6 +398,82 @@ mod tests {
             root.path().join("2026-09-30-10-30-31"),
             "the mint walks +1s until the directory is free"
         );
+    }
+
+    #[test]
+    fn mint_named_takes_the_trimmed_name_verbatim_and_marks_it_created() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let (dir, created) = mint_named_workspace(root.path(), "  my analysis ").expect("mint");
+        assert!(created, "a fresh name mints");
+        assert_eq!(
+            dir.canonicalize().expect("canonicalize"),
+            root.path()
+                .join("my analysis")
+                .canonicalize()
+                .expect("canonicalize joined"),
+            "the trimmed name is the directory name, verbatim (spaces included)"
+        );
+    }
+
+    #[test]
+    fn mint_named_returns_an_existing_directory_uncreated() {
+        let root = tempfile::tempdir().expect("tempdir");
+        std::fs::create_dir(root.path().join("alpha")).expect("seed");
+        let (dir, created) = mint_named_workspace(root.path(), "alpha").expect("mint");
+        assert!(
+            !created,
+            "an existing same-name directory selects, no error"
+        );
+        assert!(dir.ends_with("alpha"));
+    }
+
+    #[test]
+    fn mint_named_rejects_empty_overlong_and_illegal_names() {
+        let root = tempfile::tempdir().expect("tempdir");
+        assert!(
+            mint_named_workspace(root.path(), "   ").is_err(),
+            "whitespace-only trims to empty"
+        );
+        assert!(
+            mint_named_workspace(root.path(), "a/b").is_err(),
+            "a separator is rejected"
+        );
+        assert!(
+            mint_named_workspace(root.path(), "a:b").is_err(),
+            "the Windows-reserved colon is rejected"
+        );
+        assert!(
+            mint_named_workspace(root.path(), &"x".repeat(NAMED_WORKSPACE_MAX_CHARS + 1)).is_err(),
+            "over the cap"
+        );
+        assert!(
+            mint_named_workspace(root.path(), &"x".repeat(NAMED_WORKSPACE_MAX_CHARS)).is_ok(),
+            "at the cap mints"
+        );
+        assert!(
+            mint_named_workspace(root.path(), "ok name").is_ok(),
+            "spaces are legal"
+        );
+        for name in [".", "..", "...", "report."] {
+            assert!(
+                mint_named_workspace(root.path(), name).is_err(),
+                "dot-suffixed names are rejected: {name:?}"
+            );
+        }
+        assert!(
+            mint_named_workspace(root.path(), "my.report").is_ok(),
+            "an interior dot is legal"
+        );
+    }
+
+    #[test]
+    fn reclaim_never_takes_a_named_workspace_even_empty() {
+        // The shape check IS the exemption: a named directory inside the
+        // managed root is a user asset, never a reclaimable App-minted one.
+        let root = tempfile::tempdir().expect("tempdir");
+        let (dir, _) = mint_named_workspace(root.path(), "keep-me").expect("mint");
+        assert!(!reclaim_if_empty(&dir, root.path()));
+        assert!(dir.exists(), "an empty named workspace is kept");
     }
 
     #[test]

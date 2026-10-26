@@ -8,18 +8,20 @@ import {
   ComposerWorkspacePicker,
   type PendingWorkspace,
 } from "../ComposerWorkspacePicker";
-import { listWorkspaces } from "../../../api";
+import { createWorkspace, listWorkspaces } from "../../../api";
 
-// ComposerWorkspacePicker tests (issue #1384): the session-creation
+// ComposerWorkspacePicker tests (issues #1384 + #1393): the session-creation
 // selector's two-state pill + popover (recent list top 10, folder browse,
-// the bound-only "No workspace" undo). Rendered inside an English
-// IntlProvider so assertions anchor on stable English strings; the IPC
-// surface (listWorkspaces) and the system dialog are mocked so the view
-// never hits Tauri.
+// the bound-only "No workspace" undo), then the floating layer's content
+// expansion -- the search filter (full-registry hits while typing), the
+// aligned row faces, and the naming subview for a new workspace. Rendered
+// inside an English IntlProvider so assertions anchor on stable English
+// strings; the IPC surfaces (listWorkspaces, createWorkspace) and the system
+// dialog are mocked so the view never hits Tauri.
 
 vi.mock("../../../api", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../../../api")>();
-  return { ...actual, listWorkspaces: vi.fn() };
+  return { ...actual, listWorkspaces: vi.fn(), createWorkspace: vi.fn() };
 });
 
 vi.mock("@tauri-apps/plugin-dialog", () => ({ open: vi.fn() }));
@@ -168,5 +170,223 @@ describe("ComposerWorkspacePicker (issue #1384)", () => {
     );
     openPopover();
     await waitFor(() => expect(listWorkspaces).toHaveBeenCalledTimes(2));
+  });
+});
+
+describe("search, row faces, and the naming subview (issue #1393)", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("typing widens to the full registry, matching label or path tail case-insensitively", async () => {
+    vi.mocked(listWorkspaces).mockResolvedValue([
+      ...Array.from({ length: 12 }, (_, i) => ({
+        path: `/w/ws-${i + 1}`,
+        label: `ws-${i + 1}`,
+      })),
+      // A row whose label does not carry the term but whose path tail does.
+      { path: "/w/somewhere/tail-hit", label: "Different Label" },
+    ]);
+    renderPicker(null);
+    openPopover();
+    await screen.findByRole("button", { name: "ws-1" });
+    const search = screen.getByPlaceholderText("Search workspaces");
+    // Beyond the top-10 cap and off-case: the typed view hits it anyway.
+    fireEvent.change(search, { target: { value: "WS-11" } });
+    expect(
+      await screen.findByRole("button", { name: "ws-11" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "ws-1" }),
+    ).not.toBeInTheDocument();
+    // The path tail is a second match face when the label misses.
+    fireEvent.change(search, { target: { value: "tail-hit" } });
+    expect(
+      await screen.findByRole("button", { name: "Different Label" }),
+    ).toBeInTheDocument();
+  });
+
+  it("a zero-match term shows the empty state; clearing restores the cap", async () => {
+    vi.mocked(listWorkspaces).mockResolvedValue([
+      { path: "/w/alpha", label: "alpha" },
+    ]);
+    renderPicker(null);
+    openPopover();
+    const search = await screen.findByPlaceholderText("Search workspaces");
+    fireEvent.change(search, { target: { value: "zzz" } });
+    expect(
+      await screen.findByText("No matching workspaces"),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "alpha" }),
+    ).not.toBeInTheDocument();
+    fireEvent.change(search, { target: { value: "" } });
+    expect(
+      await screen.findByRole("button", { name: "alpha" }),
+    ).toBeInTheDocument();
+  });
+
+  it("a layer close resets the search term for the next open", async () => {
+    vi.mocked(listWorkspaces).mockResolvedValue([
+      { path: "/w/alpha", label: "alpha" },
+      { path: "/w/beta", label: "beta" },
+    ]);
+    renderPicker(null);
+    openPopover();
+    const search = await screen.findByPlaceholderText("Search workspaces");
+    fireEvent.change(search, { target: { value: "zzz" } });
+    expect(
+      await screen.findByText("No matching workspaces"),
+    ).toBeInTheDocument();
+    // Commit a row: the layer closes. Reopening starts unfiltered -- a
+    // stale "alpha" term would keep beta hidden.
+    fireEvent.change(search, { target: { value: "alpha" } });
+    fireEvent.click(await screen.findByRole("button", { name: "alpha" }));
+    await waitFor(() =>
+      expect(
+        screen.queryByPlaceholderText("Search workspaces"),
+      ).not.toBeInTheDocument(),
+    );
+    openPopover();
+    expect(
+      await screen.findByRole("button", { name: "alpha" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "beta" }),
+    ).toBeInTheDocument();
+  });
+
+  it("an empty registry hides the search box but keeps the new-workspace entry", async () => {
+    vi.mocked(listWorkspaces).mockResolvedValue([]);
+    renderPicker(null);
+    openPopover();
+    expect(
+      await screen.findByRole("button", { name: "New workspace" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByPlaceholderText("Search workspaces"),
+    ).not.toBeInTheDocument();
+  });
+
+  it("the selected row rides the accent pair with the folder icon leading and the check trailing", async () => {
+    vi.mocked(listWorkspaces).mockResolvedValue([
+      { path: "/w/alpha", label: "alpha" },
+      { path: "/w/beta", label: "beta" },
+    ]);
+    renderPicker({ path: "/w/alpha", label: "alpha" });
+    openPopover();
+    const alpha = await screen.findByRole("button", { name: "alpha" });
+    expect(alpha.className.split(/\s+/)).toContain("bg-accent");
+    const kids = alpha.children;
+    expect(kids.length).toBe(3);
+    expect(kids[0]!.tagName.toLowerCase()).toBe("svg");
+    expect(kids[1]!.textContent).toBe("alpha");
+    expect(kids[2]!.tagName.toLowerCase()).toBe("svg");
+    const beta = screen.getByRole("button", { name: "beta" });
+    expect(beta.className.split(/\s+/)).not.toContain("bg-accent");
+    expect(beta.children.length).toBe(2);
+  });
+
+  it("the naming modal guards the name and cancels without invoking", async () => {
+    vi.mocked(listWorkspaces).mockResolvedValue([
+      { path: "/w/alpha", label: "alpha" },
+    ]);
+    renderPicker(null);
+    openPopover();
+    // The entry closes the layer and hands over to the naming modal.
+    fireEvent.click(
+      await screen.findByRole("button", { name: "New workspace" }),
+    );
+    expect(
+      await screen.findByRole("dialog", { name: "New workspace" }),
+    ).toBeInTheDocument();
+    const input = await screen.findByPlaceholderText("Workspace name");
+    const create = screen.getByRole("button", { name: "Create" });
+    // Empty after trimming: disabled, and no hint until something is typed.
+    expect(create).toBeDisabled();
+    expect(screen.queryByText(/1-64 characters/)).not.toBeInTheDocument();
+    // An illegal character: still disabled, now with the inline hint.
+    fireEvent.change(input, { target: { value: "a/b" } });
+    expect(create).toBeDisabled();
+    expect(screen.getByText(/1-64 characters/)).toBeInTheDocument();
+    // Over the cap: disabled too.
+    fireEvent.change(input, { target: { value: "x".repeat(65) } });
+    expect(create).toBeDisabled();
+    // A trailing dot: disabled (dot-only names resolve to an ancestor, and
+    // Win32 strips the dot at create time); an interior dot stays legal.
+    fireEvent.change(input, { target: { value: "report." } });
+    expect(create).toBeDisabled();
+    fireEvent.change(input, { target: { value: "my.report" } });
+    expect(create).toBeEnabled();
+    // A legal name enables; cancel closes the modal with nothing invoked.
+    fireEvent.change(input, { target: { value: "My Analysis" } });
+    expect(create).toBeEnabled();
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    await waitFor(() =>
+      expect(
+        screen.queryByPlaceholderText("Workspace name"),
+      ).not.toBeInTheDocument(),
+    );
+    expect(createWorkspace).not.toHaveBeenCalled();
+  });
+
+  it("creating from the modal mints immediately and seats the reply as the pending selection", async () => {
+    vi.mocked(listWorkspaces).mockResolvedValue([
+      { path: "/w/alpha", label: "alpha" },
+    ]);
+    vi.mocked(createWorkspace).mockResolvedValue({
+      path: "/w/my-analysis",
+      label: "my-analysis",
+    });
+    const onChange = vi.fn();
+    renderPicker(null, onChange);
+    openPopover();
+    fireEvent.click(
+      await screen.findByRole("button", { name: "New workspace" }),
+    );
+    const input = await screen.findByPlaceholderText("Workspace name");
+    fireEvent.change(input, { target: { value: "  my-analysis " } });
+    // Enter rides the form's submit path -- the modal's commit gesture.
+    fireEvent.submit(input.closest("form")!);
+    await waitFor(() =>
+      expect(onChange).toHaveBeenCalledWith({
+        path: "/w/my-analysis",
+        label: "my-analysis",
+      }),
+    );
+    // The trimmed spelling crosses IPC; the modal closes on the commit.
+    expect(createWorkspace).toHaveBeenCalledWith("my-analysis");
+    await waitFor(() =>
+      expect(
+        screen.queryByPlaceholderText("Workspace name"),
+      ).not.toBeInTheDocument(),
+    );
+  });
+
+  it("a backend refusal surfaces inline and keeps the modal open", async () => {
+    vi.mocked(listWorkspaces).mockResolvedValue([
+      { path: "/w/alpha", label: "alpha" },
+    ]);
+    vi.mocked(createWorkspace).mockRejectedValueOnce(
+      new Error("workspace name contains a path-illegal character"),
+    );
+    const onChange = vi.fn();
+    renderPicker(null, onChange);
+    openPopover();
+    fireEvent.click(
+      await screen.findByRole("button", { name: "New workspace" }),
+    );
+    fireEvent.change(await screen.findByPlaceholderText("Workspace name"), {
+      target: { value: "valid" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Create" }));
+    expect(
+      await screen.findByText(
+        "workspace name contains a path-illegal character",
+      ),
+    ).toBeInTheDocument();
+    // The modal stays open for a retry; nothing was committed.
+    expect(screen.getByRole("button", { name: "Create" })).toBeInTheDocument();
+    expect(onChange).not.toHaveBeenCalled();
   });
 });
