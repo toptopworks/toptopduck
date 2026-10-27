@@ -2479,6 +2479,59 @@ describe("SessionSidebar workspace section (issue #1392)", () => {
         "/old.json",
         "/new.json",
       ]);
+      // The fan-out is informational: the persisted expansion stays empty
+      // (the no-write-back ruling, pinned).
+      expect(storedDocument().expandedWorkspaces).toEqual([]);
+    });
+
+    it("the head bulk toggle persists the resolved group set", async () => {
+      const second = {
+        path: "/w/second",
+        label: "second",
+        explicit: true,
+        exists: true,
+      };
+      vi.mocked(listWorkspaces).mockResolvedValue([explicitGroup, second]);
+      const { container } = renderShell(
+        <SessionSidebar
+          {...wsProps({ sessions: [metaRow("/a.json", "alpha", "/w/explicit")] })}
+        />,
+      );
+      // Wait for the listing before clicking: the head action renders on
+      // the always-mounted section, so its presence alone does not mean
+      // the groups resolved (the pending-window guard would rightly eat
+      // an early click).
+      await waitFor(() =>
+        expect(
+          container.querySelector("[data-workspace-group=\"/w/explicit\"]"),
+        ).not.toBeNull(),
+      );
+      const toggle = await screen.findByRole("button", {
+        name: "Expand all workspaces",
+      });
+      fireEvent.click(toggle);
+      expect(storedDocument().expandedWorkspaces).toEqual([
+        "/w/explicit",
+        "/w/second",
+      ]);
+      fireEvent.click(
+        screen.getByRole("button", { name: "Collapse all workspaces" }),
+      );
+      expect(storedDocument().expandedWorkspaces).toEqual([]);
+    });
+
+    it("an expand-all while the listing is pending leaves the persisted expansion alone", () => {
+      // The head action is busy-gated only; the listing's in-flight window
+      // is clickable and an empty groups array must not wipe the store.
+      vi.mocked(listWorkspaces).mockImplementation(
+        () => new Promise<Awaited<ReturnType<typeof listWorkspaces>>>(() => {}),
+      );
+      seedStore({ expandedWorkspaces: ["/w/explicit"] });
+      renderShell(<SessionSidebar {...wsProps()} />);
+      fireEvent.click(
+        screen.getByRole("button", { name: "Expand all workspaces" }),
+      );
+      expect(storedDocument().expandedWorkspaces).toEqual(["/w/explicit"]);
     });
   });
 });

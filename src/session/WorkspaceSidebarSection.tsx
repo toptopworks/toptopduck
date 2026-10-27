@@ -108,7 +108,7 @@ export type WorkspaceSidebarSectionProps = {
    *  not mistaken for a landing. */
   sessionsLoaded: boolean;
   disabled: boolean;
-  /** The section-level fold, owned by the parent (per-session state). */
+  /** The section-level fold, owned by the parent (persists across restarts). */
   collapsed: boolean;
   onToggleCollapsed: () => void;
   /** The session rows' renderer from the parent (the recent body's exact
@@ -177,6 +177,12 @@ export function WorkspaceSidebarSection({
   }
 
   function setAllExpanded(open: boolean) {
+    // Guard: an expand-all before the listing resolves builds the empty
+    // set and would wipe the persisted expansion -- the head action is
+    // busy-gated only, so the listing's in-flight (or rejected) window
+    // is clickable. The collapse-all half needs no guard: the empty set
+    // is the collapsed face it promises.
+    if (open && groups.length === 0) return;
     const next = open ? new Set(groups.map((g) => g.path)) : new Set<string>();
     setExpanded(next);
     saveSidebarExpansion({ expandedWorkspaces: next });

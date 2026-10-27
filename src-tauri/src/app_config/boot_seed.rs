@@ -40,9 +40,9 @@ pub(crate) fn boot_seed_payload(cfg: &AppConfig) -> BootSeedPayload {
     }
 }
 
-/// The initialization script text. `serde_json` output over enum-only
-/// fields is always a safe JSON literal (no free-form strings), so plain
-/// `format!` carries no script-injection surface.
+/// The initialization script text. `serde_json` output over the enum and
+/// boolean fields is always a safe JSON literal (no free-form strings),
+/// so plain `format!` carries no script-injection surface.
 pub(crate) fn boot_seed_script(cfg: &AppConfig) -> String {
     let json = serde_json::to_string(&boot_seed_payload(cfg))
         .expect("serializing the narrow payload to JSON cannot fail");

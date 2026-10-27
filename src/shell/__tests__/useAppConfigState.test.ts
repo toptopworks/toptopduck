@@ -264,6 +264,26 @@ describe("useAppConfigState", () => {
       expect(result.current.effectiveLocale).toBe("en-US");
     });
 
+    it("the IPC full config overwrites a seeded collapse value once it resolves", async () => {
+      // Only the collapse field differs between the seed and the config:
+      // the IPC's authority over the fold is pinned on its own, not as a
+      // side effect of the locale overwrite.
+      vi.stubGlobal(BOOT_SEED_GLOBAL, {
+        theme: "dark",
+        locale: "zh-CN",
+        sidebar_collapsed: true,
+      });
+      const cfg: AppConfig = {
+        ...baseAppConfig({ sidebar_collapsed: false }),
+        locale: "zh-CN",
+      };
+      vi.mocked(getAppConfig).mockResolvedValue(cfg);
+      const { result } = renderAppConfigState();
+      expect(result.current.sidebarCollapsed).toBe(true);
+      await waitFor(() => expect(result.current.appConfig).toBe(cfg));
+      expect(result.current.sidebarCollapsed).toBe(false);
+    });
+
     it("drops an invalid seed wholesale (whitelist) and keeps the null behavior", () => {
       // Both halves invalid ("DARK" is case-illegal, "klingon" out of enum):
       // the composition seam pins the wholesale drop for either half.
