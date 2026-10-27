@@ -1,15 +1,14 @@
 // App-level config state (issue #196). Owns the AppConfig advisory state +
 // every action that mutates it (ADR-0038): commitAppConfig (the single
 // persistence write), switchActiveProfile (top-bar quick switcher, issue
-// #154 / ADR-0065), commitShellPrefs + toggleSidebarCollapse /
-// toggleRailCollapse (ADR-0054 shell collapse), and the one-shot restore of
-// collapse prefs on first resolve (ADR-0054). Window geometry persistence
-// moved to tauri_plugin_window_state (issue #268); this hook no longer
-// restores or persists geometry.
+// #154 / ADR-0065), toggleSidebarCollapse (ADR-0054 shell collapse), and the
+// one-shot restore of collapse prefs on first resolve (ADR-0054). Window
+// geometry persistence moved to tauri_plugin_window_state (issue #268); this
+// hook no longer restores or persists geometry.
 //
 // ADR-0068: this is advisory state held in React (NOT TanStack Query) -- the
 // app-config blob is the persistence layer for shell prefs (theme / locale /
-// sidebar + rail collapse / active profile),
+// sidebar collapse / active profile),
 // read once on mount and re-written on each mutation. The optimistic +
 // no-rollback contract on every mutating action lives on commitAppConfig
 // below (the single persistence write all actions route through).
@@ -32,7 +31,6 @@ import { catalogFor, coerceLocalePreference, useLocale } from "../i18n";
 import type { EffectiveLocale } from "../i18n";
 import { log } from "../lib/log";
 import type { AppConfig } from "../types/app-config";
-import type { SidebarGrouping } from "../types/app-config";
 import type { AppError } from "../types/error";
 import { readBootSeed } from "./bootSeed";
 import type { BootSeed } from "./bootSeed";
@@ -45,8 +43,8 @@ export interface UseAppConfigStateDeps {
 
 /** The AppConfig advisory state + every mutating action + the restore
  *  effects + the locale / intl derived from the owned appConfig.locale.
- *  sidebarCollapsed / railCollapsed are public (the shell className reads
- *  them); appConfigRef / collapseRestoredRef stay internal (the restore
+ *  sidebarCollapsed is public (the shell className reads it);
+ *  appConfigRef / collapseRestoredRef stay internal (the restore
  *  effects' one-shot guards). effectiveLocale + intl are
  *  returned so App can feed <IntlProvider> + the downstream shell hooks
  *  (usePersistedSessions / useShellSessions) from a single locale resolution.
@@ -66,8 +64,6 @@ export function useAppConfigState({
   switchActiveProfile: (id: string) => Promise<void>;
   sidebarCollapsed: boolean;
   toggleSidebarCollapse: () => void;
-  sidebarGrouping: SidebarGrouping;
-  switchSidebarGrouping: (mode: SidebarGrouping) => void;
   /** The parsed first-paint seed (issue #814, ADR-0113): theme/locale-only
    * initial values injected by the main window's initialization script
    * before any frontend script runs. Null when the channel did not run or
@@ -98,15 +94,10 @@ export function useAppConfigState({
     [effectiveLocale],
   );
 
-  // ADR-0054 shell collapse (issue #84): two independent manual levels --
-  // session sidebar (full hide + topbar call-out) and thread rail (workspace
-  // goes full-width). Both default expanded; both restore from app-config once
-  // on the first resolve (ADR-0038) and persist on every toggle.
-  // ADR-0072 (#251): the sidebar's flat/time grouping mode rides the same
-  // shell-chrome surface -- restores with the two collapse prefs, persists on
-  // every switch via commitShellPrefs's single IPC write.
+  // ADR-0054 shell collapse (issue #84): the session sidebar (full hide +
+  // topbar call-out). Defaults expanded; restores from app-config once on the
+  // first resolve (ADR-0038) and persists on every toggle.
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
-  const [sidebarGrouping, setSidebarGroupingState] = useState<SidebarGrouping>("flat");
   const collapseRestoredRef = useRef(false);
 
   // Load app-config once on mount (theme/locale).
@@ -133,8 +124,8 @@ export function useAppConfigState({
   // back (live_config reads disk truth on the next turn, so a failed write
   // leaves the next ask on the OLD value). Mirrors SettingsView Save. Callers
   // install their own surfacing: switchActiveProfile wraps in try/catch ->
-  // setShellError; commitShellPrefs attaches .catch -> log.warn (the visible
-  // effect already landed optimistically).
+  // setShellError; toggleSidebarCollapse attaches .catch -> log.warn (the
+  // visible effect already landed optimistically).
   const commitAppConfig = useCallback(async (cfg: AppConfig): Promise<void> => {
     appConfigRef.current = cfg;
     setAppConfigState(cfg);
@@ -178,62 +169,39 @@ export function useAppConfigState({
     [appConfig, commitAppConfig, intl, setShellError],
   );
 
-  // Commit the three shell prefs (two collapses + the sidebar grouping mode) as
-  // ONE app-config write (ADR-0038/0054, issue #84; ADR-0072, issue #251).
-  // A single IPC write keeps the three shell-chrome prefs atomic against any
-  // sibling commitAppConfig caller (e.g. switchActiveProfile). No-op before
-  // app-config resolves (appConfigRef null) -- the restore effect's one-shot
-  // then applies the persisted value on first load.
-  const commitShellPrefs = useCallback(
-    (next: { sidebar: boolean; grouping: SidebarGrouping }): void => {
-      const base = appConfigRef.current;
-      if (!base) return;
-      void commitAppConfig({
-        ...base,
-        shell: {
-          sidebar_collapsed: next.sidebar,
-          sidebar_grouping: next.grouping,
-        },
-      }).catch((e) => {
-        // IPC write failed -- the UI already flipped optimistically (state is
-        // set before the commit), so the only consequence is the pref not
-        // surviving a restart. Log to devtools, not a user toast (the toggle's
-        // visible effect already landed).
-        log.warn("shell", "collapse persist failed", e);
-      });
-    },
-    [commitAppConfig],
-  );
-
+  // Toggle the sidebar collapse pref + commit it as ONE app-config write
+  // (ADR-0038/0054, issue #84). A single IPC write keeps the shell-chrome pref
+  // atomic against any sibling commitAppConfig caller (e.g.
+  // switchActiveProfile). No-op persist before app-config resolves
+  // (appConfigRef null) -- the restore effect's one-shot then applies the
+  // persisted value on first load.
   const toggleSidebarCollapse = useCallback(() => {
     const next = !sidebarCollapsed;
     setSidebarCollapsed(next);
-    commitShellPrefs({ sidebar: next, grouping: sidebarGrouping });
-  }, [sidebarCollapsed, sidebarGrouping, commitShellPrefs]);
+    const base = appConfigRef.current;
+    if (!base) return;
+    void commitAppConfig({
+      ...base,
+      shell: {
+        sidebar_collapsed: next,
+      },
+    }).catch((e) => {
+      // IPC write failed -- the UI already flipped optimistically (state is
+      // set before the commit), so the only consequence is the pref not
+      // surviving a restart. Log to devtools, not a user toast (the toggle's
+      // visible effect already landed).
+      log.warn("shell", "collapse persist failed", e);
+    });
+  }, [sidebarCollapsed, commitAppConfig]);
 
-  // Switch the sidebar's flat/time grouping mode (ADR-0072, issue #251). Sibling
-  // to the sidebar collapse toggle: a one-mode swap that commits immediately via
-  // commitShellPrefs (no debounce -- a low-frequency discrete action, mirroring
-  // the toggle's immediate commit contract). The optimistic + no-
-  // rollback contract is commitAppConfig's; a reject lands in the .catch log.
-  const switchSidebarGrouping = useCallback(
-    (mode: SidebarGrouping) => {
-      if (mode === sidebarGrouping) return;
-      setSidebarGroupingState(mode);
-      commitShellPrefs({ sidebar: sidebarCollapsed, grouping: mode });
-    },
-    [sidebarCollapsed, sidebarGrouping, commitShellPrefs],
-  );
-
-  // Restore shell collapse prefs + the sidebar grouping mode ONCE on the first
-  // app-config load (ADR-0038 / 0054, issue #84; ADR-0072, issue #251). A
-  // one-shot so a later app-config write (e.g. a toggle's own commit) does not
-  // re-clobber the user's in-session state with the persisted value.
+  // Restore the shell collapse pref ONCE on the first app-config load
+  // (ADR-0038 / 0054, issue #84). A one-shot so a later app-config write
+  // (e.g. a toggle's own commit) does not re-clobber the user's in-session
+  // state with the persisted value.
   useEffect(() => {
     if (!appConfig || collapseRestoredRef.current) return;
     collapseRestoredRef.current = true;
     setSidebarCollapsed(appConfig.shell.sidebar_collapsed);
-    setSidebarGroupingState(appConfig.shell.sidebar_grouping);
   }, [appConfig]);
 
   return {
@@ -245,8 +213,6 @@ export function useAppConfigState({
     switchActiveProfile,
     sidebarCollapsed,
     toggleSidebarCollapse,
-    sidebarGrouping,
-    switchSidebarGrouping,
     bootSeed,
   };
 }

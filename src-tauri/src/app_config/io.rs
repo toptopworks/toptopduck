@@ -465,10 +465,9 @@ mod tests {
             active.base_url = "https://gateway.example.test".into();
             active.model = "claude-opus-4-8".into();
         }
-        // Issue #84 / #251: non-default shell prefs exercise every shell field's
+        // Issue #84: a non-default shell pref exercises the shell field's
         // full io round-trip (a default-equal shell would pass == trivially).
         cfg.shell.sidebar_collapsed = true;
-        cfg.shell.sidebar_grouping = crate::app_config::model::SidebarGrouping::Time;
         cfg
     }
 

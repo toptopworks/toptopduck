@@ -3,7 +3,6 @@ import { FormattedMessage, useIntl } from "react-intl";
 import { useQuery } from "@tanstack/react-query";
 import {
   Archive,
-  Check,
   ChevronDown,
   ChevronRight,
   Pencil,
@@ -17,7 +16,6 @@ import {
   SIDEBAR_PREVIEW_CAP,
   type OpenSession,
   type SidebarEntry,
-  type SidebarGroupKind,
 } from "./sidebarModel";
 import { formatRelativeTime } from "./lastModifiedText";
 import { resolveDisplayName } from "./displayName";
@@ -36,14 +34,8 @@ import {
   type SidebarHoverCardMachine,
 } from "./sidebarHoverCard";
 import type { SessionMetadata } from "../types/session";
-import type { SidebarGrouping } from "../types/app-config";
 import type { ProviderConfig } from "../types/provider";
 import { Button } from "@/components/ui/button";
-import {
-  Popover,
-  PopoverContent,
-  PopoverTrigger,
-} from "@/components/ui/popover";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import {
   HoverCard,
@@ -53,28 +45,10 @@ import {
 import { bareButtonReset } from "@/lib/buttonReset";
 import { cn } from "@/lib/utils";
 
-// Group heading (ADR-0060 Chat-style Today/Yesterday/Previous-7-days/Older, or
-// `recent` for ADR-0072's flat mode). Each branch is a STATIC-literal
-// <FormattedMessage> call site so @formatjs/cli extract resolves the id (a
-// template-literal id would break the i18n:check CI gate).
-function GroupTitle({ kind }: { kind: SidebarGroupKind }) {
-  switch (kind) {
-    case "recent":
-      return <FormattedMessage id="sidebar.group.recent" defaultMessage="Recent" />;
-    case "today":
-      return <FormattedMessage id="sidebar.group.today" defaultMessage="Today" />;
-    case "yesterday":
-      return <FormattedMessage id="sidebar.group.yesterday" defaultMessage="Yesterday" />;
-    case "last7":
-      return <FormattedMessage id="sidebar.group.last7" defaultMessage="Previous 7 days" />;
-    case "older":
-      return <FormattedMessage id="sidebar.group.older" defaultMessage="Older" />;
-  }
-}
-
 // The Chat-style session sidebar (ADR-0060, issue #81). Col 1 of the shell:
 // lists every persisted recipe.json (ADR-0061 cold start) merged with the open
-// keep-alive sessions, Chat-style time-grouped and last-modified descending.
+// keep-alive sessions, last-modified descending (#1401 retired the ADR-0060
+// Chat-style time buckets -- the body is the single "Recent" section).
 // ADR-0093 (issue #511): each row is pure navigation (title + conditional
 // status dot), management actions moved to .session-header (slice 2, #512);
 // ADR-0133 (issue #1319) returns the row-level actions to the row-end actions
@@ -101,7 +75,6 @@ interface SessionSidebarProps {
   activeSessionId: string | null;
   disabled: boolean;
   loadError: string | null;
-  grouping: SidebarGrouping;
   /** Runtime sids with one or more UNANSWERED approvals (ADR-0083, issue
    *  #297): the matching entry rows carry the attention tint + dot so a
    *  suspended turn is visible from anywhere in the shell (the "unanswered
@@ -134,7 +107,6 @@ interface SessionSidebarProps {
   onNewInWorkspace: (path: string, label: string) => void;
   onActivate: (sid: string) => void;
   onOpenPersisted: (path: string, name: string) => void;
-  onSwitchGrouping: (mode: SidebarGrouping) => void;
   /** Toggle the archived view's visibility (ADR-0127, issue #1175). */
   onToggleArchived: () => void;
   /** Pin/unpin (ADR-0127, issue #1175): mutation contract in
@@ -181,7 +153,6 @@ export function SessionSidebar({
   activeSessionId,
   disabled,
   loadError,
-  grouping,
   pendingApprovalSids = NO_PENDING_APPROVALS,
   turnFailedSids = NO_TURN_FAILURES,
   archivedSessions,
@@ -190,7 +161,6 @@ export function SessionSidebar({
   onNewInWorkspace,
   onActivate,
   onOpenPersisted,
-  onSwitchGrouping,
   onToggleArchived,
   onSetPinned,
   onArchive,
@@ -205,8 +175,7 @@ export function SessionSidebar({
   const intl = useIntl();
   // Capture "now" and refresh every 60 s so the sidebar row relative-time
   // display (issue #513) stays current without calling Date.now in render
-  // (react-hooks/purity). The calendar-day buckets are also stable enough at
-  // this granularity; a cross-midnight drift refreshes on the next tick.
+  // (react-hooks/purity); a cross-midnight drift refreshes on the next tick.
   const [now, setNow] = useState(() => Date.now());
   useEffect(() => {
     const id = setInterval(() => setNow(Date.now()), 60_000);
@@ -257,13 +226,7 @@ export function SessionSidebar({
     (o) => !workspaceBoundPaths.has(o.path),
   );
 
-  const model = buildSidebarModel(
-    recentSessions,
-    recentOpenSessions,
-    activeSessionId,
-    now,
-    grouping,
-  );
+  const model = buildSidebarModel(recentSessions, recentOpenSessions, activeSessionId, now);
   const archivedEntries = showArchived ? buildArchivedEntries(archivedSessions) : [];
 
   // Section-level folds + preview expansion (issue #1392): per-session
@@ -291,10 +254,11 @@ export function SessionSidebar({
 
   // The section render plan (ADR-0127, issue #1175; the three-section
   // navigation rides issue #1392): pinned → workspaces (always present) →
-  // the grouped body → archived, the rest only when they have content. The
-  // chrome pair (GroupingToggle + the archived-visibility toggle) rides the
-  // FIRST rendered section's title row -- the permanent workspaces head
-  // keeps it reachable even on an otherwise-empty sidebar.
+  // the recent body → archived, the rest only when they have content. The
+  // chrome (the archived-visibility toggle; #1401 retired the grouping
+  // toggle with the time buckets) rides the FIRST rendered section's title
+  // row -- the permanent workspaces head keeps it reachable even on an
+  // otherwise-empty sidebar.
   type SidebarSection =
     | { key: string; title: ReactNode; entries: SidebarEntry[]; variant: "main" | "archived"; capped: boolean }
     | { key: "workspaces"; variant: "workspaces" };
@@ -312,8 +276,14 @@ export function SessionSidebar({
   // (with the count) + the empty hint, so the three-section order and the
   // chrome anchor stay stable on an otherwise-empty sidebar.
   sections.push({ key: "workspaces", variant: "workspaces" });
-  for (const g of model.groups) {
-    sections.push({ key: g.kind, title: <GroupTitle kind={g.kind} />, entries: g.entries, variant: "main", capped: true });
+  if (model.recent.length > 0) {
+    sections.push({
+      key: "recent",
+      title: <FormattedMessage id="sidebar.group.recent" defaultMessage="Recent" />,
+      entries: model.recent,
+      variant: "main",
+      capped: true,
+    });
   }
   if (archivedEntries.length > 0) {
     sections.push({
@@ -325,23 +295,16 @@ export function SessionSidebar({
     });
   }
 
-  // One chrome pair, one anchor (issue #1175): the grouping toggle rides
-  // the FIRST rendered section's title row. The permanent workspaces
-  // section guarantees that row always exists, so a single element
-  // instance serves every sidebar state.
+  // One chrome element, one anchor (issue #1175): the archived-visibility
+  // toggle rides the FIRST rendered section's title row. The permanent
+  // workspaces section guarantees that row always exists, so a single
+  // element instance serves every sidebar state.
   const sectionChrome = (
-    <div className="flex items-center gap-0.5">
-      <GroupingToggle
-        grouping={grouping}
-        disabled={disabled}
-        onSwitch={onSwitchGrouping}
-      />
-      <ArchivedToggle
-        visible={showArchived}
-        disabled={disabled}
-        onToggle={onToggleArchived}
-      />
-    </div>
+    <ArchivedToggle
+      visible={showArchived}
+      disabled={disabled}
+      onToggle={onToggleArchived}
+    />
   );
 
   // One row-render channel for every section body (issue #1392: the
@@ -404,8 +367,8 @@ export function SessionSidebar({
         />
       );
     }
-    // The section preview cap (issue #1392): the recent body's groups show
-    // their freshest 5 rows, a "Show more (N)" tail expands the rest. The
+    // The section preview cap (issue #1392): the recent body shows its
+    // freshest 5 rows, a "Show more (N)" tail expands the rest. The
     // pinned / archived sections are uncapped.
     const collapsed = collapsedSections.has(section.key);
     const capped =
@@ -417,11 +380,11 @@ export function SessionSidebar({
       : section.entries;
     return (
       <li key={section.key} className="session-group mt-3 mb-1" data-section={section.key}>
-        {/* ADR-0072 (#251): the grouping toggle rides the FIRST rendered
-            section's title row -- one entry point regardless of mode. The
-            archived-visibility toggle (ADR-0127) sits beside it. The triggers
-            are hover-revealed (group-hover) but stay focus-visible for AT
-            users; the open popover also pins it visible via data-[state=open]. */}
+        {/* The chrome (the archived-visibility toggle, ADR-0127) rides the
+            FIRST rendered section's title row -- one entry point for every
+            sidebar state. The trigger is hover-revealed (group-hover) but
+            stays focus-visible for AT users; the pressed state also pins it
+            visible via aria-pressed. */}
         <div className="session-group-title-row group relative mb-0.5 flex items-center justify-between px-1">
           {/* The title row itself is the fold toggle (the whole row clicks):
               the button sits inside the h3 (legal phrasing nesting) and
@@ -567,128 +530,11 @@ export function SessionSidebar({
   );
 }
 
-// The flat/time grouping toggle (ADR-0072, issue #251). Triggered by a
-// hover-revealed `⋯` on the first section's title row (one entry point
-// regardless of mode; the permanent workspaces section keeps a first row
-// always present). The Popover offers the two modes as a
-// radio group (mutually exclusive -> radio semantics, not menu); the selected
-// mode carries a trailing Check. A pick commits immediately via onSwitch (the
-// hook routes through commitShellPrefs, same immediate-persist contract as the
-// collapse toggles).
-//
-// a11y (issue #251 review, posture revised: hover-revealed):
-// - The trigger is hidden by default (opacity-0) and revealed on the title
-//   row's hover; keyboard users keep the focus-visible indicator.
-// - bareButtonReset on the trigger/options strips native chrome including the
-//   focus ring, so focus-visible:outline-ring re-adds one (the --ring token
-//   is the project focus-indicator standard).
-// - `disabled` propagates to both radio options, not just the trigger: a busy
-//   shell must block a pick mid-popover (New button / context-menu parity).
-function GroupingToggle({
-  grouping,
-  disabled,
-  onSwitch,
-}: {
-  grouping: SidebarGrouping;
-  disabled: boolean;
-  onSwitch: (mode: SidebarGrouping) => void;
-}) {
-  const intl = useIntl();
-  const [open, setOpen] = useState(false);
-
-  // One resolution, two slots: the popover heading and the radiogroup's
-  // accessible name read the same label variable (issue #964).
-  const groupingLabel = intl.formatMessage({
-    id: "sidebar.grouping.label",
-    defaultMessage: "Group by",
-  });
-
-  const pick = (mode: SidebarGrouping) => {
-    setOpen(false);
-    onSwitch(mode);
-  };
-
-  // Shared option styling. bareButtonReset strips native button chrome; the
-  // focus-visible outline is re-added explicitly (the reset would otherwise
-  // leave keyboard users without a focus indicator on the radio options).
-  const optionClass = cn(
-    `${bareButtonReset} cursor-pointer flex w-full items-center justify-between gap-2 rounded-md py-1 pl-2 pr-1.5 text-sm text-foreground`,
-    "hover:bg-accent",
-    "focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring",
-    "disabled:cursor-progress disabled:opacity-50",
-  );
-
-  return (
-    <Popover open={open} onOpenChange={setOpen}>
-      <PopoverTrigger asChild>
-        <button
-          type="button"
-          disabled={disabled}
-          aria-label={intl.formatMessage({
-            id: "sidebar.grouping.toggle.ariaLabel",
-            defaultMessage: "Change session grouping",
-          })}
-          className={cn(
-            `sidebar-grouping-toggle ${bareButtonReset} cursor-pointer rounded-md px-1.5 text-base leading-none text-muted-foreground`,
-            // Hidden by default (opacity-0), revealed on the title row's
-            // hover; stays visible on keyboard focus or while the popover
-            // is open.
-            "opacity-0 transition-opacity group-hover:opacity-100 focus-visible:opacity-100 data-[state=open]:opacity-100",
-            "hover:bg-accent hover:text-foreground",
-            "focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring",
-            "disabled:cursor-progress disabled:opacity-50",
-          )}
-        >
-          ⋯
-        </button>
-      </PopoverTrigger>
-      <PopoverContent
-        align="end"
-        sideOffset={4}
-        className="sidebar-grouping-menu w-44 p-1"
-      >
-        <div className="px-2 py-1 text-xs text-muted-foreground">
-          {groupingLabel}
-        </div>
-        {/* Mutually-exclusive modes -> radio semantics. Tab cycles between the
-            two options (a legal radiogroup keyboard model); arrow-key roving
-            is not required. aria-checked carries the selected state; a trailing
-            Check mirrors the selection visually. */}
-        <div role="radiogroup" aria-label={groupingLabel}>
-          <button
-            type="button"
-            role="radio"
-            aria-checked={grouping === "flat"}
-            disabled={disabled}
-            onClick={() => pick("flat")}
-            className={optionClass}
-          >
-            <FormattedMessage id="sidebar.grouping.flat" defaultMessage="In a list" />
-            {grouping === "flat" && <Check className="size-4 shrink-0" aria-hidden />}
-          </button>
-          <button
-            type="button"
-            role="radio"
-            aria-checked={grouping === "time"}
-            disabled={disabled}
-            onClick={() => pick("time")}
-            className={optionClass}
-          >
-            <FormattedMessage id="sidebar.grouping.time" defaultMessage="By time" />
-            {grouping === "time" && <Check className="size-4 shrink-0" aria-hidden />}
-          </button>
-        </div>
-      </PopoverContent>
-    </Popover>
-  );
-}
-
 // The archived-view visibility toggle (ADR-0127 Decision 7, issue #1175): an
-// icon-only aria-pressed button beside the grouping toggle. Same hover-
-// revealed posture as GroupingToggle (opacity-0; visible on hover / focus /
-// pressed, the pressed state keeping the active view's entry point findable).
-// The state is NEVER persisted -- every startup resets the archived view to
-// hidden.
+// icon-only aria-pressed button. Hover-revealed posture (opacity-0; visible
+// on hover / focus / pressed, the pressed state keeping the active view's
+// entry point findable). The state is NEVER persisted -- every startup resets
+// the archived view to hidden.
 function ArchivedToggle({
   visible,
   disabled,

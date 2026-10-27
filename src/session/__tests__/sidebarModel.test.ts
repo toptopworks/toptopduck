@@ -6,15 +6,14 @@ import {
   buildWorkspaceGroups,
   formatLastModified,
   MAX_SEARCH_RESULTS,
-  timeGroupKind,
   type OpenSession,
 } from "../sidebarModel";
 import type { RecentWorkspace } from "../../api";
 import type { SessionMetadata } from "../../types/session";
 
-// Pure sidebar-model tests (ADR-0060/0061, issue #81): the merge + Chat-style
-// time grouping + last-modified-descending order, with a fixed `now` so the
-// calendar-day buckets are deterministic. No React.
+// Pure sidebar-model tests (ADR-0060/0061, issue #81; #1401 retired the
+// Chat-style time buckets -- the body is the single mtime-descending "Recent"
+// section), with a fixed `now` so the row stamps are deterministic. No React.
 
 const NOW = new Date("2026-07-10T12:00:00").getTime();
 const MS_PER_DAY = 86_400_000;
@@ -41,43 +40,16 @@ function meta(
   };
 }
 
-describe("timeGroupKind", () => {
-  it("buckets by local calendar day, not a rolling 24h window", () => {
-    // 11:59pm "today" and 12:01am "today" are both Today; just-before-midnight
-    // yesterday is Yesterday.
-    expect(timeGroupKind(NOW, NOW)).toBe("today");
-    expect(timeGroupKind(NOW - 2 * 3600_000, NOW)).toBe("today");
-    expect(timeGroupKind(NOW - 26 * 3600_000, NOW)).toBe("yesterday");
-    expect(timeGroupKind(NOW - 3 * MS_PER_DAY, NOW)).toBe("last7");
-    expect(timeGroupKind(NOW - 30 * MS_PER_DAY, NOW)).toBe("older");
-  });
-});
-
 describe("buildSidebarModel", () => {
-  it("groups persisted sessions Chat-style and sorts last-modified descending", () => {
-    const today = meta("/a.json", "alpha", 0);
-    const yesterday = meta("/b.json", "beta", 1);
-    const last7 = meta("/c.json", "gamma", 5);
-    const older = meta("/d.json", "delta", 30);
-
-    const { groups } = buildSidebarModel([today, yesterday, last7, older], [], null, NOW, "time");
-
-    expect(groups.map((g) => g.kind)).toEqual(["today", "yesterday", "last7", "older"]);
-    // Within a group the freshest is first; cross-group order is the bucket order.
-    expect(groups[0].entries[0].name).toBe("alpha");
-    expect(groups[1].entries[0].name).toBe("beta");
-    expect(groups[3].entries[0].name).toBe("delta");
-  });
-
   it("merges an open binding into its persisted row (sid set) and marks active", () => {
     const persisted = [meta("/a.json", "alpha", 0)];
     const open: OpenSession[] = [
       { sid: "uuid-a", name: "alpha", path: "/a.json", pendingIngestPaths: [], pendingQuestion: null, pendingSkillInvocations: [] },
     ];
 
-    const { groups } = buildSidebarModel(persisted, open, "uuid-a", NOW, "time");
+    const { recent } = buildSidebarModel(persisted, open, "uuid-a", NOW);
 
-    const entry = groups[0].entries[0];
+    const entry = recent[0];
     expect(entry.sid).toBe("uuid-a");
     expect(entry.active).toBe(true);
     expect(entry.path).toBe("/a.json");
@@ -95,17 +67,17 @@ describe("buildSidebarModel", () => {
       }),
     ];
 
-    const { groups } = buildSidebarModel(persisted, [], null, NOW, "time");
+    const { recent } = buildSidebarModel(persisted, [], null, NOW);
 
-    const alpha = groups[0].entries.find((e) => e.name === "alpha")!;
+    const alpha = recent.find((e) => e.name === "alpha")!;
     expect(alpha.sourceCount).toBe(3);
     expect(alpha.firstSourceName).toBe("alpha.csv");
 
-    const beta = groups[0].entries.find((e) => e.name === "beta")!;
+    const beta = recent.find((e) => e.name === "beta")!;
     expect(beta.sourceCount).toBe(0);
   });
 
-  it("renders an open session not yet in the persisted list as its own row under Today (ADR-0089)", () => {
+  it("renders an open session not yet in the persisted list as its own row (ADR-0089)", () => {
     // A just-created session (ADR-0089) carries a real path but may not yet be
     // in the list_sessions result (async refetch). It becomes a standalone
     // entry stamped to `now` until the persisted list catches up.
@@ -113,11 +85,10 @@ describe("buildSidebarModel", () => {
       { sid: "uuid-new", name: "", path: "/sessions/uuid-new/recipe.json", pendingIngestPaths: [], pendingQuestion: null, pendingSkillInvocations: [] },
     ];
 
-    const { groups } = buildSidebarModel([], open, "uuid-new", NOW, "time");
+    const { recent } = buildSidebarModel([], open, "uuid-new", NOW);
 
-    expect(groups).toHaveLength(1);
-    expect(groups[0].kind).toBe("today");
-    const entry = groups[0].entries[0];
+    expect(recent).toHaveLength(1);
+    const entry = recent[0];
     expect(entry.sid).toBe("uuid-new");
     expect(entry.path).toBe("/sessions/uuid-new/recipe.json");
     expect(entry.active).toBe(true);
@@ -135,37 +106,34 @@ describe("buildSidebarModel", () => {
       { sid: "uuid-b", name: "beta", path: "/b.json", pendingIngestPaths: [], pendingQuestion: null, pendingSkillInvocations: [] },
     ];
 
-    const { groups } = buildSidebarModel(persisted, open, "uuid-b", NOW, "time");
-    const active = groups[0].entries.find((e) => e.active);
+    const { recent } = buildSidebarModel(persisted, open, "uuid-b", NOW);
+    const active = recent.find((e) => e.active);
     expect(active?.name).toBe("beta");
     // alpha is closed (sid null), not active.
-    const alpha = groups[0].entries.find((e) => e.name === "alpha");
+    const alpha = recent.find((e) => e.name === "alpha");
     expect(alpha?.sid).toBeNull();
     expect(alpha?.active).toBe(false);
   });
 
-  // --- ADR-0072 (issue #251): flat mode -------------------------------------
+  // --- the single "Recent" section (#1401: the ADR-0060 time buckets are
+  // --- retired; ADR-0072's flat mode is the only rendering) ------------------
 
-  it("flat mode collapses every entry into a single Recent group, mtime-desc", () => {
-    // The same input as the time-mode "groups Chat-style" test, but flat
-    // yields ONE group whose kind is "recent" and whose entries preserve the
-    // sorted-desc order across what would otherwise be the time buckets.
+  it("collapses every entry into a single Recent section, mtime-desc across bucket boundaries", () => {
+    // Entries of every former time bucket land in ONE mtime-desc list -- the
+    // sort runs across what used to be the bucket order (#1401).
     const today = meta("/a.json", "alpha", 0);
     const yesterday = meta("/b.json", "beta", 1);
     const last7 = meta("/c.json", "gamma", 5);
     const older = meta("/d.json", "delta", 30);
 
-    const { groups } = buildSidebarModel(
+    const { recent } = buildSidebarModel(
       [today, yesterday, last7, older],
       [],
       null,
       NOW,
-      "flat",
     );
 
-    expect(groups).toHaveLength(1);
-    expect(groups[0].kind).toBe("recent");
-    expect(groups[0].entries.map((e) => e.name)).toEqual([
+    expect(recent.map((e) => e.name)).toEqual([
       "alpha",
       "beta",
       "gamma",
@@ -173,53 +141,33 @@ describe("buildSidebarModel", () => {
     ]);
   });
 
-  it("flat mode still flags the active open row and merges the open binding", () => {
-    // Flat mode is purely a presentation toggle over the same merge + sort: the
-    // active/open semantics are identical to time mode.
+  it("still flags the active open row and merges the open binding", () => {
     const persisted = [meta("/a.json", "alpha", 0), meta("/b.json", "beta", 5)];
     const open: OpenSession[] = [
       { sid: "uuid-b", name: "beta", path: "/b.json", pendingIngestPaths: [], pendingQuestion: null, pendingSkillInvocations: [] },
     ];
 
-    const { groups } = buildSidebarModel(persisted, open, "uuid-b", NOW, "flat");
+    const { recent } = buildSidebarModel(persisted, open, "uuid-b", NOW);
 
-    expect(groups).toHaveLength(1);
-    const active = groups[0].entries.find((e) => e.active);
+    const active = recent.find((e) => e.active);
     expect(active?.name).toBe("beta");
     expect(active?.sid).toBe("uuid-b");
   });
 
-  it("flat and time modes both render zero groups for an empty sidebar", () => {
-    // ADR-0072: an empty sidebar renders no group title -- so the grouping
-    // toggle's hover affordance has no anchor (the empty-state row renders
-    // instead). Both modes return [] here.
-    expect(buildSidebarModel([], [], null, NOW, "flat")).toEqual({
+  it("renders zero sections for an empty sidebar", () => {
+    // An empty sidebar renders no section -- so the archived toggle's hover
+    // affordance anchors on the permanent workspaces head (the empty-state
+    // row renders instead).
+    expect(buildSidebarModel([], [], null, NOW)).toEqual({
       pinned: [],
-      groups: [],
+      recent: [],
     });
-    expect(buildSidebarModel([], [], null, NOW, "time")).toEqual({
-      pinned: [],
-      groups: [],
-    });
-  });
-
-  it("flat/time groups carry their mode discriminant (SidebarGroup invariant pin)", () => {
-    // SidebarGroup is a discriminated union on `mode`; this pins the runtime
-    // side so a future constructor drift (e.g. flat branch returning a time
-    // kind) fails here too, not just at the type level.
-    const { groups: flatGroups } = buildSidebarModel([meta("/a.json", "a", 0)], [], null, NOW, "flat");
-    expect(flatGroups[0].mode).toBe("flat");
-    expect(flatGroups[0].kind).toBe("recent");
-
-    const { groups: timeGroups } = buildSidebarModel([meta("/a.json", "a", 0)], [], null, NOW, "time");
-    expect(timeGroups[0].mode).toBe("time");
-    expect(timeGroups[0].kind).toBe("today");
   });
 });
 
 describe("formatLastModified (ADR-0072, issue #251)", () => {
   it("classifies today / yesterday by local calendar day, else returns the date", () => {
-    // Same calendar-day bucketing as timeGroupKind for the past two days; older
+    // Same calendar-day bucketing as the row labels for the past two days; older
     // timestamps fall through to the date arm carrying the Date for the caller
     // to format with Intl.DateTimeFormat.
     expect(formatLastModified(NOW, NOW)).toEqual({ kind: "today" });
@@ -235,9 +183,8 @@ describe("formatLastModified (ADR-0072, issue #251)", () => {
 
   it("uses local-midnight boundaries, not a rolling 24h window", () => {
     // 11:59pm "today" and 12:01am "today" are both today; just-before-midnight
-    // yesterday is yesterday. The bucket matches timeGroupKind so the search
-    // row's time label and the (optional) time-mode group heading agree on the
-    // day boundary.
+    // yesterday is yesterday. The label rides the same startOfCalendarDay
+    // boundary the sidebar rows' day stamping uses.
     const lateToday = new Date("2026-07-10T23:59:00").getTime();
     expect(formatLastModified(lateToday, NOW)).toEqual({ kind: "today" });
     const earlyYesterday = new Date("2026-07-09T00:01:00").getTime();
@@ -405,7 +352,7 @@ describe("buildSearchEntries (ADR-0072, issue #252)", () => {
 // --- ADR-0127 (issue #1175): the pinned section + the archived rows ---------
 
 describe("buildSidebarModel pinned section (ADR-0127, issue #1175)", () => {
-  it("splits pinned rows out of the grouped body in BOTH modes, server order", () => {
+  it("splits pinned rows out of the recent body, server order", () => {
     // Server order = the response's pinned block (sidecar array position, MRU
     // head-insert, Decision 5), NOT mtime: p1 is OLDER than p2 yet renders
     // first. The mtime sort must not reorder the pinned block.
@@ -416,22 +363,19 @@ describe("buildSidebarModel pinned section (ADR-0127, issue #1175)", () => {
       meta("/d.json", "delta", 5),
     ];
 
-    for (const grouping of ["flat", "time"] as const) {
-      const { pinned, groups } = buildSidebarModel(server, [], null, NOW, grouping);
-      expect(pinned.map((e) => e.name)).toEqual(["pin-old", "pin-new"]);
-      // The grouped body excludes the pinned rows but keeps its own order.
-      const body = groups.flatMap((g) => g.entries.map((e) => e.name));
-      expect(body).toEqual(["alpha", "delta"]);
-    }
+    const { pinned, recent } = buildSidebarModel(server, [], null, NOW);
+    expect(pinned.map((e) => e.name)).toEqual(["pin-old", "pin-new"]);
+    // The recent body excludes the pinned rows but keeps its own order.
+    expect(recent.map((e) => e.name)).toEqual(["alpha", "delta"]);
   });
 
-  it("keeps the pinned section when every session is pinned (empty groups)", () => {
-    // The section-render plan keys off pinned.length, not groups.length --
+  it("keeps the pinned section when every session is pinned (empty body)", () => {
+    // The section-render plan keys off pinned.length, not recent.length --
     // an all-pinned sidebar still shows its rows above an empty body.
     const server = [meta("/p1.json", "pin-old", 30, { pinned: true })];
-    const model = buildSidebarModel(server, [], null, NOW, "time");
+    const model = buildSidebarModel(server, [], null, NOW);
     expect(model.pinned.map((e) => e.name)).toEqual(["pin-old"]);
-    expect(model.groups).toEqual([]);
+    expect(model.recent).toEqual([]);
   });
 
   it("lands an open session absent from the persisted list in the body, never pinned", () => {
@@ -440,9 +384,9 @@ describe("buildSidebarModel pinned section (ADR-0127, issue #1175)", () => {
     const open: OpenSession[] = [
       { sid: "uuid-new", name: "new", path: "/sessions/uuid-new/recipe.json", pendingIngestPaths: [], pendingQuestion: null, pendingSkillInvocations: [] },
     ];
-    const model = buildSidebarModel([], open, null, NOW, "flat");
+    const model = buildSidebarModel([], open, null, NOW);
     expect(model.pinned).toEqual([]);
-    expect(model.groups[0].entries.map((e) => e.name)).toEqual(["new"]);
+    expect(model.recent.map((e) => e.name)).toEqual(["new"]);
   });
 });
 

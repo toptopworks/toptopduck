@@ -40,7 +40,6 @@ describe("test-fixtures factory contract (issue #967)", () => {
     expect(cfg.enabled_agents).toEqual([]);
     expect(cfg.shell).toEqual({
       sidebar_collapsed: false,
-      sidebar_grouping: "flat",
     });
   });
 
