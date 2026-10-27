@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   act,
   fireEvent,
@@ -43,6 +43,7 @@ import {
   removeWorkspace,
   renameWorkspace,
 } from "../../api";
+import { SIDEBAR_EXPANSION_KEY } from "../sidebarExpansion";
 
 // Radix DropdownMenu's pointer-event handling recurses under jsdom (the
 // SessionHeaderMenu suite's known limitation), so the dropdown-menu module is
@@ -1552,6 +1553,17 @@ describe("SessionSidebar archived-view gating (issue #1175)", () => {
 });
 
 describe("SessionSidebar workspace section (issue #1392)", () => {
+  // The section folds + subtree expansion persist to localStorage now
+  // (issue #1404): every test starts from -- and leaves behind -- an empty
+  // store, so one test's toggles cannot leak into the next mount's
+  // initial state (jsdom storage survives across tests).
+  beforeEach(() => {
+    localStorage.removeItem(SIDEBAR_EXPANSION_KEY);
+  });
+  afterEach(() => {
+    localStorage.removeItem(SIDEBAR_EXPANSION_KEY);
+  });
+
   function metaRow(
     path: string,
     name: string,
@@ -2267,5 +2279,259 @@ describe("SessionSidebar workspace section (issue #1392)", () => {
         container.querySelector("[data-workspace-group=\"/w/fresh\"]"),
       ).not.toBeNull(),
     );
+  });
+  describe("sidebar expansion persistence (issue #1404)", () => {
+    // The store cleanup rides the host describe's beforeEach/afterEach.
+    // Seed the persisted document with a partial patch: the missing faces
+    // default to empty arrays (the read validates the whole document, so the
+    // fixtures always carry all three fields).
+    function seedStore(patch: {
+      collapsedSections?: string[];
+      expandedWorkspaces?: string[];
+      seenWorkspaces?: string[];
+    }) {
+      localStorage.setItem(
+        SIDEBAR_EXPANSION_KEY,
+        JSON.stringify({
+          collapsedSections: [],
+          expandedWorkspaces: [],
+          seenWorkspaces: [],
+          ...patch,
+        }),
+      );
+    }
+
+    function storedDocument(): {
+      collapsedSections: string[];
+      expandedWorkspaces: string[];
+      seenWorkspaces: string[];
+    } {
+      return JSON.parse(localStorage.getItem(SIDEBAR_EXPANSION_KEY) as string);
+    }
+
+    const explicitGroup = {
+      path: "/w/explicit",
+      label: "explicit",
+      explicit: true,
+      exists: true,
+    };
+    const groupHead = (container: HTMLElement) =>
+      container.querySelector(
+        "[data-workspace-group=\"/w/explicit\"] [aria-expanded]",
+      ) as HTMLElement;
+
+    it("restores a persisted section fold on mount", async () => {
+      vi.mocked(listWorkspaces).mockResolvedValue([explicitGroup]);
+      seedStore({ collapsedSections: ["workspaces"] });
+      const { container } = renderShell(
+        <SessionSidebar {...wsProps()} />,
+      );
+      // findByRole: the head's count needs the listing to resolve first.
+      expect(
+        await screen.findByRole("button", { name: "Workspaces(1)" }),
+      ).toHaveAttribute("aria-expanded", "false");
+      // The fold holds after the listing resolves: the group row never
+      // renders while its section is folded.
+      expect(
+        container.querySelector("[data-workspace-group]"),
+      ).toBeNull();
+    });
+
+    it("writes a section fold back to the persisted document", () => {
+      vi.mocked(listWorkspaces).mockResolvedValue([]);
+      renderShell(<SessionSidebar {...wsProps()} />);
+      fireEvent.click(screen.getByRole("button", { name: "Workspaces(0)" }));
+      expect(storedDocument().collapsedSections).toEqual(["workspaces"]);
+    });
+
+    it("falls back to the expanded default on a corrupt document", () => {
+      vi.mocked(listWorkspaces).mockResolvedValue([]);
+      localStorage.setItem(SIDEBAR_EXPANSION_KEY, "{corrupt");
+      renderShell(<SessionSidebar {...wsProps()} />);
+      expect(
+        screen.getByRole("button", { name: "Workspaces(0)" }),
+      ).toHaveAttribute("aria-expanded", "true");
+    });
+
+    it("restores a persisted subtree expansion", async () => {
+      vi.mocked(listWorkspaces).mockResolvedValue([explicitGroup]);
+      seedStore({ expandedWorkspaces: ["/w/explicit"] });
+      const { container } = renderShell(
+        <SessionSidebar
+          {...wsProps({ sessions: [metaRow("/a.json", "alpha", "/w/explicit")] })}
+        />,
+      );
+      await waitFor(() =>
+        expect(groupHead(container)).toHaveAttribute("aria-expanded", "true"),
+      );
+      // The bound row renders without a manual toggle.
+      expect(container.textContent).toContain("alpha");
+    });
+
+    it("writes a subtree toggle back to the persisted document", async () => {
+      vi.mocked(listWorkspaces).mockResolvedValue([explicitGroup]);
+      const { container } = renderShell(
+        <SessionSidebar
+          {...wsProps({ sessions: [metaRow("/a.json", "alpha", "/w/explicit")] })}
+        />,
+      );
+      const head = await waitFor(() => {
+        const el = groupHead(container);
+        expect(el).not.toBeNull();
+        return el;
+      });
+      fireEvent.click(head); // expand
+      expect(storedDocument().expandedWorkspaces).toEqual(["/w/explicit"]);
+      fireEvent.click(head); // fold again
+      expect(storedDocument().expandedWorkspaces).toEqual([]);
+    });
+
+    it("the persisted seen baseline keeps existing rows from fanning on a cold start", async () => {
+      vi.mocked(listWorkspaces).mockResolvedValue([explicitGroup]);
+      seedStore({ seenWorkspaces: ["/a.json"] });
+      const view = renderShell(
+        <SessionSidebar {...wsProps({ sessionsLoaded: false })} />,
+      );
+      const head = await waitFor(() => {
+        const el = groupHead(view.container);
+        expect(el).not.toBeNull();
+        return el;
+      });
+      // The scan lands with a row the baseline already knows: a baseline, not
+      // a landing -- the group stays folded and no row renders.
+      view.rerender(
+        shellTree(
+          <SessionSidebar
+            {...wsProps({
+              sessionsLoaded: true,
+              sessions: [metaRow("/a.json", "alpha", "/w/explicit")],
+            })}
+          />,
+        ),
+      );
+      await waitFor(() =>
+        expect(groupHead(view.container)).toBe(head),
+      );
+      expect(head).toHaveAttribute("aria-expanded", "false");
+      expect(
+        view.container.querySelector(
+          "[data-workspace-group=\"/w/explicit\"] .session-entry-main",
+        ),
+      ).toBeNull();
+    });
+
+    it("a fresh store folds the first scan's bound rows into the seen baseline (upgrade face)", async () => {
+      vi.mocked(listWorkspaces).mockResolvedValue([explicitGroup]);
+      const view = renderShell(
+        <SessionSidebar {...wsProps({ sessionsLoaded: false })} />,
+      );
+      await waitFor(() => expect(groupHead(view.container)).not.toBeNull());
+      // No store on this first launch: the scan's bound rows join the
+      // baseline instead of fanning (the existing rows never fan), and the
+      // baseline is persisted for the next start.
+      view.rerender(
+        shellTree(
+          <SessionSidebar
+            {...wsProps({
+              sessionsLoaded: true,
+              sessions: [metaRow("/a.json", "alpha", "/w/explicit")],
+            })}
+          />,
+        ),
+      );
+      await waitFor(() =>
+        expect(storedDocument().seenWorkspaces).toEqual(["/a.json"]),
+      );
+      expect(groupHead(view.container)).toHaveAttribute("aria-expanded", "false");
+    });
+
+    it("fans a newly landed session once and records it in the persisted baseline", async () => {
+      vi.mocked(listWorkspaces).mockResolvedValue([explicitGroup]);
+      seedStore({ seenWorkspaces: ["/old.json"] });
+      const view = renderShell(
+        <SessionSidebar {...wsProps({ sessionsLoaded: false })} />,
+      );
+      await waitFor(() => expect(groupHead(view.container)).not.toBeNull());
+      // The first loaded scan records the baseline (the stored memory only):
+      // an empty bound set lands nothing.
+      view.rerender(
+        shellTree(<SessionSidebar {...wsProps({ sessionsLoaded: true })} />),
+      );
+      // A session minted AFTER that scan is a real landing: the group fans
+      // once and the baseline grows for the next start.
+      view.rerender(
+        shellTree(
+          <SessionSidebar
+            {...wsProps({
+              sessionsLoaded: true,
+              sessions: [
+                metaRow("/new.json", "newbie", "/w/explicit"),
+              ],
+            })}
+          />,
+        ),
+      );
+      await waitFor(() =>
+        expect(groupHead(view.container)).toHaveAttribute("aria-expanded", "true"),
+      );
+      expect(view.container.textContent).toContain("newbie");
+      expect(storedDocument().seenWorkspaces).toEqual([
+        "/old.json",
+        "/new.json",
+      ]);
+      // The fan-out is informational: the persisted expansion stays empty
+      // (the no-write-back ruling, pinned).
+      expect(storedDocument().expandedWorkspaces).toEqual([]);
+    });
+
+    it("the head bulk toggle persists the resolved group set", async () => {
+      const second = {
+        path: "/w/second",
+        label: "second",
+        explicit: true,
+        exists: true,
+      };
+      vi.mocked(listWorkspaces).mockResolvedValue([explicitGroup, second]);
+      const { container } = renderShell(
+        <SessionSidebar
+          {...wsProps({ sessions: [metaRow("/a.json", "alpha", "/w/explicit")] })}
+        />,
+      );
+      // Wait for the listing before clicking: the head action renders on
+      // the always-mounted section, so its presence alone does not mean
+      // the groups resolved (the pending-window guard would rightly eat
+      // an early click).
+      await waitFor(() =>
+        expect(
+          container.querySelector("[data-workspace-group=\"/w/explicit\"]"),
+        ).not.toBeNull(),
+      );
+      const toggle = await screen.findByRole("button", {
+        name: "Expand all workspaces",
+      });
+      fireEvent.click(toggle);
+      expect(storedDocument().expandedWorkspaces).toEqual([
+        "/w/explicit",
+        "/w/second",
+      ]);
+      fireEvent.click(
+        screen.getByRole("button", { name: "Collapse all workspaces" }),
+      );
+      expect(storedDocument().expandedWorkspaces).toEqual([]);
+    });
+
+    it("an expand-all while the listing is pending leaves the persisted expansion alone", () => {
+      // The head action is busy-gated only; the listing's in-flight window
+      // is clickable and an empty groups array must not wipe the store.
+      vi.mocked(listWorkspaces).mockImplementation(
+        () => new Promise<Awaited<ReturnType<typeof listWorkspaces>>>(() => {}),
+      );
+      seedStore({ expandedWorkspaces: ["/w/explicit"] });
+      renderShell(<SessionSidebar {...wsProps()} />);
+      fireEvent.click(
+        screen.getByRole("button", { name: "Expand all workspaces" }),
+      );
+      expect(storedDocument().expandedWorkspaces).toEqual(["/w/explicit"]);
+    });
   });
 });

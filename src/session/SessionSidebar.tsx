@@ -20,6 +20,7 @@ import {
 import { formatRelativeTime } from "./lastModifiedText";
 import { resolveDisplayName } from "./displayName";
 import { listWorkspaces } from "../api";
+import { readSidebarExpansion, saveSidebarExpansion } from "./sidebarExpansion";
 import { workspaceKeys } from "./queryKeys";
 import { RowActionsMenu } from "./RowActionsMenu";
 import {
@@ -229,27 +230,26 @@ export function SessionSidebar({
   const model = buildSidebarModel(recentSessions, recentOpenSessions, activeSessionId, now);
   const archivedEntries = showArchived ? buildArchivedEntries(archivedSessions) : [];
 
-  // Section-level folds + preview expansion (issue #1392): per-session
-  // state, deliberately NOT persisted -- every startup renders all three
-  // sections expanded with the 5-row previews.
-  const [collapsedSections, setCollapsedSections] = useState<ReadonlySet<string>>(new Set());
+  // Section-level folds + preview expansion (issue #1392): the folds persist
+  // across restarts (issue #1404 -- the #1392 "session-only" ruling flips
+  // here); the preview expansion stays per-expansion and is never written.
+  const [collapsedSections, setCollapsedSections] = useState<ReadonlySet<string>>(
+    () => readSidebarExpansion().collapsedSections,
+  );
   const [showAllSections, setShowAllSections] = useState<ReadonlySet<string>>(new Set());
   // Collapsing a section resets its preview, same rule as the workspace
   // groups: "Show more" is a per-expansion choice, not a sticky one.
   const toggleSection = (key: string) => {
+    const next = new Set(collapsedSections);
+    if (next.has(key)) next.delete(key);
+    else next.add(key);
+    setCollapsedSections(next);
+    saveSidebarExpansion({ collapsedSections: next });
     if (!collapsedSections.has(key)) {
-      setShowAllSections((prev) => {
-        const next = new Set(prev);
-        next.delete(key);
-        return next;
-      });
+      const rest = new Set(showAllSections);
+      rest.delete(key);
+      setShowAllSections(rest);
     }
-    setCollapsedSections((prev) => {
-      const next = new Set(prev);
-      if (next.has(key)) next.delete(key);
-      else next.add(key);
-      return next;
-    });
   };
 
   // The section render plan (ADR-0127, issue #1175; the three-section
