@@ -15,8 +15,10 @@
 //! ADR-0080 Decision 1 zero-approval builtin pass -- a read inside the
 //! workspace has no approval surface, so unlike the gated `write` pair the
 //! dispatch arm below never touches the gate -- and refuses on a
-//! malformed / out-of-domain call with a self-correctable error, exactly
-//! like the write pair ahead of its card.
+//! malformed / out-of-domain call with the same self-correctable error
+//! shape the write pair refuses with. The posture differs where the write
+//! pair's pre-gate refusal records nothing: a readonly refusal fires the
+//! phase pair and records a failed trace entry (the `explore` posture).
 //!
 //! Traversal core (shared by `glob` and `grep`): a fixed exclusion list
 //! (build/VCS directories -- no `.gitignore` parsing, v1), hidden entries
@@ -69,9 +71,21 @@ const GLOB_RESULT_CAP: usize = 100;
 /// `files_with_matches`/`count`, matched lines in `content`).
 const GREP_RESULT_CAP: usize = 100;
 
-/// A text file over this size is skipped by `grep` and counted in the
-/// footnote -- the search face, not the bulk reader.
-const GREP_FILE_MAX_BYTES: u64 = 10 * 1024 * 1024;
+/// The largest file the discovery channel will load: `grep` skips bigger
+/// candidates with a counted footnote, `read` refuses bigger targets up
+/// front with a pointer at manual ingest / the SQL reference channel
+/// (issue #1385's 10 MB landed scale).
+const FILE_MAX_BYTES: u64 = 10 * 1024 * 1024;
+
+/// Glob matching stays within one path segment: `*` / `?` never cross a
+/// separator, so `**` is the only recursive form. The crate's own
+/// traversal interface forces this option on; its `Pattern::matches`
+/// default does not, which made `*.csv` silently behave as `**/*.csv`.
+const MATCH_OPTIONS: glob::MatchOptions = glob::MatchOptions {
+    case_sensitive: true,
+    require_literal_separator: true,
+    require_literal_leading_dot: false,
+};
 
 /// `read` page size: the default AND the maximum `limit`.
 const READ_LINE_CAP: usize = 2000;
@@ -90,18 +104,46 @@ pub(crate) fn is_discovery_tool(name: &str) -> bool {
     name == GLOB_TOOL || name == GREP_TOOL || name == READ_TOOL
 }
 
+/// grep's output shape. The schema-level string stays as landed; this is
+/// the internal total representation (`InlineFormat` /
+/// `WorkspaceToolOutcome` precedent), so validation and rendering cannot
+/// drift apart -- a new mode must extend the render match to compile.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum GrepMode {
+    FilesWithMatches,
+    Content,
+    Count,
+}
+
+impl GrepMode {
+    fn parse(spelling: Option<&str>) -> Result<Self, String> {
+        Ok(match spelling {
+            None | Some("files_with_matches") => Self::FilesWithMatches,
+            Some("content") => Self::Content,
+            Some("count") => Self::Count,
+            Some(other) => {
+                return Err(format!(
+                    "{GREP_TOOL}: output_mode must be files_with_matches, content, or \
+                     count (got `{other}`)"
+                ));
+            }
+        })
+    }
+}
+
 /// Build the [`ToolDefinition`] for the `glob` tool: file-name pattern
 /// discovery inside the session workspace.
 pub(crate) fn glob_definition() -> ToolDefinition {
     ToolDefinition {
         name: GLOB_TOOL.to_string(),
         description: "Find files in the session workspace by glob pattern. `pattern` uses \
-                      standard glob syntax (`*`, `?`, `[...]`, and `**` for recursive \
-                      segments) matched against paths relative to `path` (default: the \
-                      workspace root). Hidden files and common build/VCS directories are \
-                      skipped unless named explicitly. Returns matching file paths sorted \
-                      by modification time (newest first), capped at 100 results with a \
-                      truncation note."
+                      standard glob syntax (`*`, `?`, `[...]` stay within one path \
+                      segment; `**` is the recursive form) matched against paths \
+                      relative to `path` (default: the workspace root). Hidden files \
+                      and common build/VCS directories are skipped by the walk; a \
+                      wildcard-free pattern that names one explicitly still reaches \
+                      it. Returns matching file paths sorted by modification time \
+                      (newest first), capped at 100 results with a truncation note."
             .to_string(),
         input_schema: json!({
             "type": "object",
@@ -128,11 +170,15 @@ pub(crate) fn grep_definition() -> ToolDefinition {
         name: GREP_TOOL.to_string(),
         description: "Search file contents in the session workspace with a regular \
                       expression. `path` defaults to the workspace root; a specific \
-                      file path searches that file alone. `glob` filters candidate \
-                      files by name (e.g. `*.py`). `output_mode` is `files_with_matches` \
-                      (default), `content` (`path:line:text` per matched line), or \
-                      `count` (`path:N` per file). Binary files and files over 10 MB \
-                      are skipped and counted."
+                      file path searches that file alone, a directory path searches \
+                      that tree (results stay workspace-relative). `glob` filters \
+                      candidate files by name (e.g. `*.py`; file names only, no path \
+                      separators). `output_mode` is `files_with_matches` (default), \
+                      `content` (`path:line:text` per matched line, long lines \
+                      truncated at 2000 characters), or `count` (`path:N` per file). \
+                      Hidden entries and common build/VCS directories are pruned from \
+                      the walk. Binary files and files over 10 MB are skipped and \
+                      counted."
             .to_string(),
         input_schema: json!({
             "type": "object",
@@ -171,9 +217,9 @@ pub(crate) fn read_definition() -> ToolDefinition {
                       line numbers. `offset` is the first line to return (default 1); \
                       `limit` is the number of lines (default and maximum 2000). Lines \
                       longer than 2000 characters are truncated; the output is capped \
-                      at 50 KiB. Binary files are refused. Paths outside the session \
-                      workspace are refused -- bring outside files in through manual \
-                      ingest."
+                      at 50 KiB. Files over 10 MB are refused -- bring bigger data in \
+                      through manual ingest or a SQL reference. Binary files are \
+                      refused. Paths outside the session workspace are refused."
             .to_string(),
         input_schema: json!({
             "type": "object",
@@ -214,11 +260,9 @@ pub(crate) fn dispatch_readonly(
 ) -> (ToolResult, Option<TraceEntry>) {
     let workspace = deps.bound_workspace();
     let summary = call_summary(call);
-    let resolved = match call.name.as_str() {
-        GLOB_TOOL => resolve_glob(call, workspace),
-        GREP_TOOL => resolve_grep(call, workspace),
-        _ => resolve_read(call, workspace),
-    };
+    // Started before the work, so the pair brackets the resolve (the walk,
+    // the scan, the file read) like every sibling posture -- the core
+    // defers Started only past the gate, and this arm never gates.
     on_phase(TurnPhase::ToolCallStarted {
         id: None,
         name: call.name.clone(),
@@ -226,6 +270,11 @@ pub(crate) fn dispatch_readonly(
         summary: summary.clone(),
         task: None,
     });
+    let resolved = match call.name.as_str() {
+        GLOB_TOOL => resolve_glob(call, workspace),
+        GREP_TOOL => resolve_grep(call, workspace),
+        _ => resolve_read(call, workspace),
+    };
     let (content, is_error) = match resolved {
         Ok(output) => (output, false),
         Err(message) => (message, true),
@@ -298,42 +347,72 @@ fn resolve_glob(call: &ToolUse, workspace: Option<&Path>) -> Result<String, Stri
     // replaces the walk, so a hidden or excluded entry the walk would
     // prune is reachable (the "explicit naming wins" carve-out). An
     // out-of-domain spelling still refuses, never silently matches empty.
-    let mut matches: Vec<(String, SystemTime)> = if !pattern_has_wildcard(&pattern) {
-        let spelling = match &base_req {
-            Some(base) => format!("{base}/{pattern}"),
-            None => pattern.clone(),
-        };
-        let target = resolve_entity_in_workspace(workspace, &spelling)
-            .map_err(|reason| format!("{GLOB_TOOL}: {reason}"))?;
-        if target.is_file() {
-            vec![(rel_from(&base, &target), mtime_of(&target))]
+    let (mut matches, dirs_failed): (Vec<(String, SystemTime)>, usize) =
+        if !pattern_has_wildcard(&pattern) {
+            let spelling = match &base_req {
+                Some(base) => format!("{base}/{pattern}"),
+                None => pattern.clone(),
+            };
+            let target = resolve_entity_in_workspace(workspace, &spelling)
+                .map_err(|reason| format!("{GLOB_TOOL}: {reason}"))?;
+            // One stat serves the file check and the mtime; a directory
+            // names itself instead of folding into "no files matched".
+            match std::fs::metadata(&target) {
+                Ok(metadata) if metadata.is_file() => {
+                    // The target is in-domain but a `..` pattern can fold
+                    // it back outside `base`: re-base the spelling on the
+                    // workspace so the output stays relative instead of
+                    // leaking an absolute path.
+                    let rel = match target.strip_prefix(&base) {
+                        Ok(_) => rel_from(&base, &target),
+                        Err(_) => rel_from(workspace, &target),
+                    };
+                    (vec![(rel, modified_of(&metadata))], 0)
+                }
+                Ok(metadata) if metadata.is_dir() => {
+                    return Err(format!(
+                        "{GLOB_TOOL}: `{pattern}` is a directory; patterns name files"
+                    ));
+                }
+                _ => (Vec::new(), 0),
+            }
         } else {
-            Vec::new()
-        }
-    } else {
-        let mut hits: Vec<(String, SystemTime)> = walk_visible_files(&base)
-            .into_iter()
-            .filter(|file| matcher.matches(&file.rel))
-            .map(|file| (file.rel, file.mtime))
-            .collect();
-        // Newest first; the rel path tie-break keeps the order deterministic
-        // for same-moment writes.
-        hits.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
-        hits
-    };
+            // `*` / `?` stay within one path segment (MATCH_OPTIONS), so
+            // `**` keeps its meaning as the only recursive form.
+            let (walked, dirs_failed) = walk_visible_files(&base, &base)
+                .map_err(|reason| format!("{GLOB_TOOL}: {reason}"))?;
+            let mut hits: Vec<(String, SystemTime)> = walked
+                .into_iter()
+                .filter(|file| matcher.matches_with(&file.rel, MATCH_OPTIONS))
+                .map(|file| (file.rel, file.mtime))
+                .collect();
+            // Newest first; the rel path tie-break keeps the order
+            // deterministic for same-moment writes.
+            hits.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+            (hits, dirs_failed)
+        };
     let truncated = matches.len() > GLOB_RESULT_CAP;
     matches.truncate(GLOB_RESULT_CAP);
-    if matches.is_empty() {
+    if matches.is_empty() && dirs_failed == 0 {
         return Ok(format!("no files matched `{pattern}`"));
     }
     let mut out = String::new();
-    for (rel, _) in &matches {
-        out.push_str(rel);
-        out.push('\n');
+    if matches.is_empty() {
+        out.push_str(&format!("no files matched `{pattern}`\n"));
+    } else {
+        for (rel, _) in &matches {
+            out.push_str(rel);
+            out.push('\n');
+        }
+        if truncated {
+            out.push_str(&format!(
+                "[list truncated at {GLOB_RESULT_CAP} entries; narrow the pattern]\n"
+            ));
+        }
     }
-    if truncated {
+    if dirs_failed > 0 {
         out.push_str(&format!(
-            "[list truncated at {GLOB_RESULT_CAP} entries; narrow the pattern]\n"
+            "[{dirs_failed} directories skipped: unreadable]\n"
         ));
     }
     Ok(out)
@@ -344,19 +423,19 @@ fn resolve_grep(call: &ToolUse, workspace: Option<&Path>) -> Result<String, Stri
     let pattern = get_str(&call.input, "pattern").map_err(|e| format!("{GREP_TOOL}: {e}"))?;
     let regex =
         Regex::new(&pattern).map_err(|e| format!("{GREP_TOOL}: invalid regex `{pattern}`: {e}"))?;
-    let mode_req = opt_str(&call.input, "output_mode")?;
-    let mode = match mode_req.as_deref() {
-        None | Some("files_with_matches") => "files_with_matches",
-        Some("content") | Some("count") => mode_req.as_deref().unwrap(),
-        Some(other) => {
-            return Err(format!(
-                "{GREP_TOOL}: output_mode must be files_with_matches, content, or \
-                 count (got `{other}`)"
-            ));
-        }
-    };
+    let mode = GrepMode::parse(opt_str(&call.input, "output_mode")?.as_deref())?;
     let name_filter = opt_str(&call.input, "glob")?
         .map(|spelling| {
+            // The filter matches file names only; a path-shaped spelling
+            // would silently match nothing, so it is refused with the
+            // scoping hint instead.
+            if spelling.contains('/') || spelling.contains('\\') {
+                return Err(format!(
+                    "{GREP_TOOL}: the glob filter matches file names only (no \
+                     path separators); scope directories with `path` instead \
+                     (got `{spelling}`)"
+                ));
+            }
             glob::Pattern::new(&spelling)
                 .map_err(|e| format!("{GREP_TOOL}: invalid glob filter `{spelling}`: {e}"))
         })
@@ -364,8 +443,10 @@ fn resolve_grep(call: &ToolUse, workspace: Option<&Path>) -> Result<String, Stri
     let path_req = opt_str(&call.input, "path")?;
     let workspace = require_workspace(GREP_TOOL, workspace)?;
     // The candidate set: one explicitly-named file searched alone, or the
-    // walk over an explicitly-named directory / the workspace root.
-    let candidates: Vec<WalkedFile> = match &path_req {
+    // walk over an explicitly-named directory / the workspace root. Walk
+    // spellings stay workspace-relative even under a directory path, so a
+    // hit remains directly consumable by `read`.
+    let (candidates, dirs_failed) = match &path_req {
         Some(spelling) => {
             let target = resolve_entity_in_workspace(workspace, spelling)
                 .map_err(|reason| format!("{GREP_TOOL}: {reason}"))?;
@@ -373,22 +454,27 @@ fn resolve_grep(call: &ToolUse, workspace: Option<&Path>) -> Result<String, Stri
                 let rel = rel_from(workspace, &target);
                 let metadata = std::fs::metadata(&target)
                     .map_err(|e| format!("{GREP_TOOL}: cannot stat {rel}: {e}"))?;
-                vec![WalkedFile {
-                    rel,
-                    mtime: modified_of(&metadata),
-                    size: metadata.len(),
-                    abs: target,
-                }]
+                (
+                    vec![WalkedFile {
+                        rel,
+                        mtime: modified_of(&metadata),
+                        size: metadata.len(),
+                        abs: target,
+                    }],
+                    0,
+                )
             } else {
-                walk_visible_files(&target)
+                walk_visible_files(&target, workspace)
+                    .map_err(|reason| format!("{GREP_TOOL}: {reason}"))?
             }
         }
-        None => walk_visible_files(workspace),
+        None => walk_visible_files(workspace, workspace)
+            .map_err(|reason| format!("{GREP_TOOL}: {reason}"))?,
     };
-    let mut files: Vec<String> = Vec::new();
     let mut content_hits: Vec<String> = Vec::new();
     let mut counts: Vec<(String, usize)> = Vec::new();
     let mut skipped = 0usize;
+    let mut truncated_hits = 0usize;
     for file in &candidates {
         if let Some(filter) = &name_filter {
             let base = Path::new(&file.rel)
@@ -399,12 +485,11 @@ fn resolve_grep(call: &ToolUse, workspace: Option<&Path>) -> Result<String, Stri
                 continue;
             }
         }
-        if file.size > GREP_FILE_MAX_BYTES {
+        if file.size > FILE_MAX_BYTES {
             skipped += 1;
             continue;
         }
-        let bytes = std::fs::read(&file.abs);
-        let Ok(bytes) = bytes else {
+        let Ok(bytes) = std::fs::read(&file.abs) else {
             skipped += 1;
             continue;
         };
@@ -420,27 +505,33 @@ fn resolve_grep(call: &ToolUse, workspace: Option<&Path>) -> Result<String, Stri
         for (index, line) in text.lines().enumerate() {
             if regex.is_match(line) {
                 count += 1;
-                if mode == "content" && content_hits.len() < GREP_RESULT_CAP {
-                    content_hits.push(format!("{}:{}:{}", file.rel, index + 1, line));
+                if mode == GrepMode::Content && content_hits.len() < GREP_RESULT_CAP {
+                    // The content face's flood guard: a matched line off a
+                    // long-line file is clamped like `read` clamps its
+                    // lines, not pasted whole into the conversation.
+                    if line.chars().count() > READ_LINE_CHAR_CAP {
+                        truncated_hits += 1;
+                    }
+                    let clamped: String = line.chars().take(READ_LINE_CHAR_CAP).collect();
+                    content_hits.push(format!("{}:{}:{}", file.rel, index + 1, clamped));
                 }
             }
         }
         if count > 0 {
-            files.push(file.rel.clone());
             counts.push((file.rel.clone(), count));
         }
     }
     let mut out = match mode {
-        "files_with_matches" => {
-            let truncated = files.len() > GREP_RESULT_CAP;
-            files.truncate(GREP_RESULT_CAP);
-            render_lines(files.into_iter(), truncated)
+        GrepMode::FilesWithMatches => {
+            let truncated = counts.len() > GREP_RESULT_CAP;
+            counts.truncate(GREP_RESULT_CAP);
+            render_lines(counts.iter().map(|(rel, _)| rel.clone()), truncated)
         }
-        "content" => {
+        GrepMode::Content => {
             let truncated = total_match_lines(&counts) > content_hits.len();
             render_lines(content_hits.into_iter(), truncated)
         }
-        _ => {
+        GrepMode::Count => {
             let truncated = counts.len() > GREP_RESULT_CAP;
             counts.truncate(GREP_RESULT_CAP);
             render_lines(
@@ -452,9 +543,20 @@ fn resolve_grep(call: &ToolUse, workspace: Option<&Path>) -> Result<String, Stri
     if out.is_empty() {
         out = format!("no matches for `{pattern}`");
     }
+    if mode == GrepMode::Content && truncated_hits > 0 {
+        out.push_str(&format!(
+            "[{truncated_hits} matched lines truncated at {READ_LINE_CHAR_CAP} \
+             characters]\n"
+        ));
+    }
     if skipped > 0 {
         out.push_str(&format!(
             "[{skipped} files skipped: binary, oversized, or unreadable]\n"
+        ));
+    }
+    if dirs_failed > 0 {
+        out.push_str(&format!(
+            "[{dirs_failed} directories skipped: unreadable]\n"
         ));
     }
     Ok(out)
@@ -479,6 +581,19 @@ fn resolve_read(call: &ToolUse, workspace: Option<&Path>) -> Result<String, Stri
              glob/grep"
         ));
     }
+    // The input gate: the whole file is loaded before any output cap
+    // applies, so the size is checked up front and bigger data is pointed
+    // at the ingestion channels instead of ballooning the process.
+    let size = std::fs::metadata(&target)
+        .map_err(|e| format!("{READ_TOOL}: cannot stat `{path}`: {e}"))?
+        .len();
+    if size > FILE_MAX_BYTES {
+        return Err(format!(
+            "{READ_TOOL}: `{path}` is {} MiB; the read tool caps at 10 MiB -- \
+             bring bigger data in through manual ingest or a SQL reference",
+            size / (1024 * 1024)
+        ));
+    }
     let bytes =
         std::fs::read(&target).map_err(|e| format!("{READ_TOOL}: cannot read `{path}`: {e}"))?;
     if bytes.contains(&0) {
@@ -489,27 +604,29 @@ fn resolve_read(call: &ToolUse, workspace: Option<&Path>) -> Result<String, Stri
     }
     let text = String::from_utf8(bytes)
         .map_err(|_| format!("{READ_TOOL}: `{path}` is not valid UTF-8 text"))?;
-    let lines: Vec<&str> = text.lines().collect();
-    let total = lines.len();
+    // Two passes over the line iterator (count, then the window): a
+    // whole-file line vector was pure waste next to the capped window.
+    let total = text.lines().count();
     if offset > total {
         return Ok(format!(
             "[`{path}` has {total} lines; offset {offset} is past the end]"
         ));
     }
-    let window: Vec<&str> = lines.iter().skip(offset - 1).take(limit).copied().collect();
     let mut out = String::new();
     let mut shown = 0usize;
     let mut budget_truncated = false;
     let mut truncated_lines = 0usize;
-    for (index, line) in window.iter().enumerate() {
-        if line.chars().count() > READ_LINE_CHAR_CAP {
-            truncated_lines += 1;
-        }
+    for (index, line) in text.lines().enumerate().skip(offset - 1).take(limit) {
         let truncated_line: String = line.chars().take(READ_LINE_CHAR_CAP).collect();
-        let rendered = format!("{}\t{}\n", offset + index, truncated_line);
+        let rendered = format!("{}\t{}\n", index + 1, truncated_line);
         if out.len() + rendered.len() > READ_OUTPUT_MAX_BYTES && shown > 0 {
             budget_truncated = true;
             break;
+        }
+        // Counted after the budget break: the footnote only announces
+        // truncations of lines the model actually saw.
+        if line.chars().count() > READ_LINE_CHAR_CAP {
+            truncated_lines += 1;
         }
         out.push_str(&rendered);
         shown += 1;
@@ -536,8 +653,9 @@ fn resolve_read(call: &ToolUse, workspace: Option<&Path>) -> Result<String, Stri
 
 // --- traversal core ---------------------------------------------------------
 
-/// One walk product: an in-workspace regular file with its workspace-
-/// relative `/`-joined path, modification time, and size.
+/// One walk product: an in-workspace regular file with its `/`-joined
+/// path relative to the walk's rel base (the workspace, so a hit stays
+/// `read`-consumable), its modification time, and size.
 struct WalkedFile {
     rel: String,
     mtime: SystemTime,
@@ -548,10 +666,18 @@ struct WalkedFile {
 /// Walk `root` for visible regular files: symlinked entries pruned (a
 /// followed link could list or read outside the workspace), hidden entries
 /// and the fixed exclusion list skipped below the root (the root itself is
-/// the explicit naming and always honored).
-fn walk_visible_files(root: &Path) -> Vec<WalkedFile> {
-    fn visit(dir: &Path, prefix: &str, out: &mut Vec<WalkedFile>) {
+/// the explicit naming and always honored). Rel spellings are built
+/// relative to `rel_base` -- the walk root itself, or the workspace when
+/// `grep` scopes a directory. The root must open: a deleted or
+/// permission-denied root is an error, never an empty result that reads
+/// as "nothing here"; a subdirectory that fails to open is counted in the
+/// returned failure tally for the caller's footnote. Output is
+/// rel-lexicographic so every consumer renders the same sequence on every
+/// filesystem (read_dir order is hash-based on ext4, name-based on NTFS).
+fn walk_visible_files(root: &Path, rel_base: &Path) -> Result<(Vec<WalkedFile>, usize), String> {
+    fn visit(dir: &Path, prefix: &str, out: &mut Vec<WalkedFile>, dirs_failed: &mut usize) {
         let Ok(entries) = std::fs::read_dir(dir) else {
+            *dirs_failed += 1;
             return;
         };
         for entry in entries.flatten() {
@@ -571,7 +697,7 @@ fn walk_visible_files(root: &Path) -> Vec<WalkedFile> {
                 if is_hidden(&name) || EXCLUDED_DIRS.contains(&name.as_str()) {
                     continue;
                 }
-                visit(&entry.path(), &rel, out);
+                visit(&entry.path(), &rel, out, dirs_failed);
             } else {
                 if is_hidden(&name) {
                     continue;
@@ -588,9 +714,13 @@ fn walk_visible_files(root: &Path) -> Vec<WalkedFile> {
             }
         }
     }
+    std::fs::read_dir(root)
+        .map_err(|e| format!("cannot read the search root `{}`: {e}", root.display()))?;
     let mut out = Vec::new();
-    visit(root, "", &mut out);
-    out
+    let mut dirs_failed = 0usize;
+    visit(root, &rel_from(rel_base, root), &mut out, &mut dirs_failed);
+    out.sort_by(|a, b| a.rel.cmp(&b.rel));
+    Ok((out, dirs_failed))
 }
 
 fn is_hidden(name: &str) -> bool {
@@ -601,15 +731,10 @@ fn modified_of(metadata: &std::fs::Metadata) -> SystemTime {
     metadata.modified().unwrap_or(SystemTime::UNIX_EPOCH)
 }
 
-fn mtime_of(target: &Path) -> SystemTime {
-    std::fs::metadata(target)
-        .map(|m| modified_of(&m))
-        .unwrap_or(SystemTime::UNIX_EPOCH)
-}
-
 /// `target` rendered relative to `base` with `/` separators (the model-
-/// facing spelling; `base` is canonical so the strip is prefix-clean on
-/// every platform).
+/// facing spelling). Every caller guarantees `base` is a canonical
+/// ancestor of `target` -- the domain check put it there -- so the strip
+/// succeeds; the as-is fallback is unreachable in practice.
 fn rel_from(base: &Path, target: &Path) -> String {
     target
         .strip_prefix(base)
@@ -769,21 +894,14 @@ mod tests {
     #[test]
     fn glob_prunes_excluded_and_hidden_by_default() {
         let (_dir, ws) = ws_dir();
-        for excluded in [
-            ".git",
-            "node_modules",
-            "target",
-            "dist",
-            "build",
-            "__pycache__",
-            ".venv",
-        ] {
+        for excluded in EXCLUDED_DIRS {
             std::fs::create_dir(ws.join(excluded)).unwrap();
             std::fs::write(ws.join(excluded).join("inside.txt"), "x").unwrap();
         }
         std::fs::write(ws.join(".secret.txt"), "x").unwrap();
+        // The empty-walk return carries no trailing newline.
         let out = resolve_glob(&glob_call("**/*"), Some(&ws)).unwrap();
-        assert_eq!(out, "no files matched `**/*`\n".trim_end().to_string());
+        assert_eq!(out, "no files matched `**/*`");
     }
 
     #[test]
@@ -833,8 +951,8 @@ mod tests {
     /// (Unix) A symlink planted inside the workspace pointing outside: the
     /// shared resolver follows the link on read and the bounds compare
     /// refuses -- the walk never lists links, but the direct path must not
-    /// smuggle either (issue #1385's AC on folded-tail escapes, pinned for
-    /// the read channel).
+    /// smuggle either (issue #1385's out-of-domain refusal AC; the
+    /// folded-tail escape pins live in the #1406 resolver tests).
     #[test]
     #[cfg(unix)]
     fn read_refuses_a_symlink_escape() {
@@ -869,6 +987,49 @@ mod tests {
         let (_dir, ws) = ws_dir();
         let err = resolve_glob(&glob_call("[unclosed"), Some(&ws)).unwrap_err();
         assert!(err.contains("invalid glob pattern"), "{err}");
+    }
+
+    #[test]
+    fn glob_star_stays_within_one_segment() {
+        let (_dir, ws) = ws_dir();
+        std::fs::write(ws.join("a.csv"), "x").unwrap();
+        std::fs::create_dir(ws.join("sub")).unwrap();
+        std::fs::write(ws.join("sub/b.csv"), "x").unwrap();
+        // `*` does not cross separators: only `**/*.csv` reaches into sub.
+        let out = resolve_glob(&glob_call("*.csv"), Some(&ws)).unwrap();
+        assert_eq!(out, "a.csv\n", "{out}");
+        let recursive = resolve_glob(&glob_call("**/*.csv"), Some(&ws)).unwrap();
+        assert!(recursive.contains("sub/b.csv"), "{recursive}");
+    }
+
+    #[test]
+    fn glob_directly_names_a_directory_as_such() {
+        let (_dir, ws) = ws_dir();
+        std::fs::create_dir(ws.join("adir")).unwrap();
+        let err = resolve_glob(&glob_call("adir"), Some(&ws)).unwrap_err();
+        assert!(err.contains("is a directory"), "{err}");
+    }
+
+    #[test]
+    fn glob_rebases_a_dotdot_pattern_on_the_workspace() {
+        let (_dir, ws) = ws_dir();
+        std::fs::create_dir(ws.join("sub")).unwrap();
+        std::fs::write(ws.join("notes.txt"), "x").unwrap();
+        let call = tool_use(GLOB_TOOL, json!({"pattern": "../notes.txt", "path": "sub"}));
+        let out = resolve_glob(&call, Some(&ws)).unwrap();
+        // In-domain fold back toward the root: workspace-relative, never
+        // an absolute spelling.
+        assert_eq!(out, "notes.txt\n", "{out}");
+    }
+
+    #[test]
+    fn glob_reaches_a_directly_named_entry_under_a_path_base() {
+        let (_dir, ws) = ws_dir();
+        std::fs::create_dir(ws.join("data")).unwrap();
+        std::fs::write(ws.join("data/notes.txt"), "x").unwrap();
+        let call = tool_use(GLOB_TOOL, json!({"pattern": "notes.txt", "path": "data"}));
+        let out = resolve_glob(&call, Some(&ws)).unwrap();
+        assert_eq!(out, "notes.txt\n", "{out}");
     }
 
     // --- grep -----------------------------------------------------------------
@@ -921,7 +1082,7 @@ mod tests {
         std::fs::write(ws.join("bin.dat"), "a\0b").unwrap();
         std::fs::write(
             ws.join("big.log"),
-            vec![b'x'; (GREP_FILE_MAX_BYTES as usize) + 1],
+            vec![b'x'; (FILE_MAX_BYTES as usize) + 1],
         )
         .unwrap();
         std::fs::write(ws.join("ok.txt"), "needle\n").unwrap();
@@ -956,6 +1117,97 @@ mod tests {
         let call = tool_use(GREP_TOOL, json!({"pattern": "x", "path": "../../etc"}));
         let err = resolve_grep(&call, Some(&ws)).unwrap_err();
         assert!(err.contains("outside the session workspace"), "{err}");
+        assert!(err.contains("ingest"), "{err}");
+    }
+
+    #[test]
+    fn grep_reports_workspace_relative_hits_under_a_directory_path() {
+        let (_dir, ws) = ws_dir();
+        std::fs::create_dir(ws.join("sub")).unwrap();
+        std::fs::write(ws.join("sub/a.py"), "needle\n").unwrap();
+        std::fs::write(ws.join("root.py"), "needle\n").unwrap();
+        let call = tool_use(GREP_TOOL, json!({"pattern": "needle", "path": "sub"}));
+        let out = resolve_grep(&call, Some(&ws)).unwrap();
+        // The directory leg keeps workspace-relative spellings so the hit
+        // is directly consumable by read.
+        assert_eq!(out, "sub/a.py\n", "{out}");
+        let read_back =
+            resolve_read(&tool_use(READ_TOOL, json!({"path": "sub/a.py"})), Some(&ws)).unwrap();
+        assert!(read_back.starts_with("1\tneedle"), "{read_back}");
+    }
+
+    #[test]
+    fn grep_refuses_a_separator_bearing_name_filter() {
+        let (_dir, ws) = ws_dir();
+        let call = tool_use(GREP_TOOL, json!({"pattern": "x", "glob": "src/*.py"}));
+        let err = resolve_grep(&call, Some(&ws)).unwrap_err();
+        assert!(err.contains("file names only"), "{err}");
+    }
+
+    #[test]
+    fn grep_content_truncates_long_matched_lines() {
+        let (_dir, ws) = ws_dir();
+        let long = format!("needle{}", "x".repeat(READ_LINE_CHAR_CAP));
+        std::fs::write(ws.join("log.txt"), format!("{long}\nshort needle\n")).unwrap();
+        let call = tool_use(
+            GREP_TOOL,
+            json!({"pattern": "needle", "output_mode": "content"}),
+        );
+        let out = resolve_grep(&call, Some(&ws)).unwrap();
+        // The payload is clamped to the shared per-line cap after the
+        // `path:line:` prefix, and the footnote announces it.
+        let first = out.lines().next().unwrap();
+        assert_eq!(
+            first.chars().count(),
+            "log.txt:1:".len() + READ_LINE_CHAR_CAP
+        );
+        assert!(
+            out.contains(&format!(
+                "[1 matched lines truncated at {READ_LINE_CHAR_CAP} characters]"
+            )),
+            "{out}"
+        );
+    }
+
+    #[test]
+    fn grep_caps_content_hits_at_one_hundred_with_a_footnote() {
+        let (_dir, ws) = ws_dir();
+        let body: String = (0..105).map(|k| format!("hit {k}\n")).collect();
+        std::fs::write(ws.join("many.txt"), body).unwrap();
+        let call = tool_use(
+            GREP_TOOL,
+            json!({"pattern": "hit", "output_mode": "content"}),
+        );
+        let out = resolve_grep(&call, Some(&ws)).unwrap();
+        let lines: Vec<&str> = out.lines().collect();
+        assert_eq!(lines.len(), GREP_RESULT_CAP + 1, "{out}");
+        assert_eq!(
+            *lines.last().unwrap(),
+            format!("[truncated at {GREP_RESULT_CAP} matches; narrow the pattern or path]")
+        );
+    }
+
+    #[test]
+    fn a_missing_search_root_is_an_error_not_an_empty_workspace() {
+        // A named directory removed before the walk: the root error
+        // surfaces instead of a silent "no matches".
+        let (_dir, ws) = ws_dir();
+        std::fs::create_dir(ws.join("gone")).unwrap();
+        std::fs::remove_dir(ws.join("gone")).unwrap();
+        let call = tool_use(GREP_TOOL, json!({"pattern": "x", "path": "gone"}));
+        let err = resolve_grep(&call, Some(&ws)).unwrap_err();
+        assert!(err.contains("cannot read the search root"), "{err}");
+        // A deleted workspace root: glob's default leg never pre-checks,
+        // and the walk must not report the workspace as empty.
+        let (dir, ws2) = ws_dir();
+        std::fs::remove_dir_all(dir.path()).unwrap();
+        let result = resolve_glob(&glob_call("*"), Some(&ws2));
+        assert!(
+            result
+                .as_ref()
+                .is_err_and(|e| e.contains("cannot read the search root")),
+            "{result:?}"
+        );
     }
 
     // --- read -----------------------------------------------------------------
@@ -1006,7 +1258,10 @@ mod tests {
         let out =
             resolve_read(&tool_use(READ_TOOL, json!({"path": "fat.txt"})), Some(&ws)).unwrap();
         assert!(out.contains("[output truncated at 50 KiB"), "{out}");
-        assert!(out.contains("continue with offset"), "{out}");
+        // 42 rendered lines fit the 50 KiB budget; the 43rd is the first
+        // unseen line, exact-pinned so the continue-offset arithmetic
+        // cannot drift (the budget break happens before the append).
+        assert!(out.contains("continue with offset 43"), "{out}");
     }
 
     #[test]
@@ -1048,6 +1303,7 @@ mod tests {
         )
         .unwrap_err();
         assert!(escape.contains("outside the session workspace"), "{escape}");
+        assert!(escape.contains("ingest"), "{escape}");
     }
 
     #[test]
@@ -1058,6 +1314,32 @@ mod tests {
         assert!(resolve_read(&call, Some(&ws))
             .unwrap_err()
             .contains("positive"));
+    }
+
+    #[test]
+    fn read_refuses_a_file_over_the_size_cap() {
+        let (_dir, ws) = ws_dir();
+        std::fs::write(
+            ws.join("big.txt"),
+            vec![b'x'; (FILE_MAX_BYTES as usize) + 1],
+        )
+        .unwrap();
+        let err =
+            resolve_read(&tool_use(READ_TOOL, json!({"path": "big.txt"})), Some(&ws)).unwrap_err();
+        assert!(err.contains("the read tool caps at 10 MiB"), "{err}");
+        assert!(err.contains("ingest"), "{err}");
+    }
+
+    #[test]
+    fn read_reports_an_offset_past_the_end() {
+        let (_dir, ws) = ws_dir();
+        std::fs::write(ws.join("n.txt"), "a\nb\n").unwrap();
+        let out = resolve_read(
+            &tool_use(READ_TOOL, json!({"path": "n.txt", "offset": 9})),
+            Some(&ws),
+        )
+        .unwrap();
+        assert_eq!(out, "[`n.txt` has 2 lines; offset 9 is past the end]");
     }
 
     // --- family + dispatch ------------------------------------------------------

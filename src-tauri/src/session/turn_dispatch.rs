@@ -2082,6 +2082,76 @@ mod tests {
         assert!(!entry.success);
     }
 
+    /// The positive leg of the same routing: a discovery call under a
+    /// bound workspace flows through the full interception arm and
+    /// resolves without a card -- the refusal pin above covers the
+    /// no-workspace leg only, and the below-arm unit test never passes
+    /// through this arm at all.
+    #[test]
+    fn dispatch_routes_a_discovery_tool_success_without_a_card() {
+        let engine = Engine::new();
+        let mut ws = WorkingSet::default();
+        let mut sources = HashMap::new();
+        let mut refs = HashMap::new();
+        let ws_path = engine.temp.path().join("ws");
+        std::fs::create_dir(&ws_path).unwrap();
+        std::fs::write(ws_path.join("a.txt"), "hello\n").unwrap();
+        let mut slot = Some(std::fs::canonicalize(&ws_path).unwrap());
+        let mut d = TurnDeps::test_deps_with_workspace(
+            &engine.admin_engine,
+            &mut ws,
+            &mut sources,
+            engine.temp.path(),
+            &mut refs,
+            &mut slot,
+        );
+        let cancel = CancelToken::new();
+        let approval = Arc::new(ApprovalState::new());
+        let sink = Arc::new(RecordingSink::default());
+        // The defensive deny responder again: if a regression ever unwires
+        // the arm, the parked gate would hang instead of the assert below.
+        let approval_c = Arc::clone(&approval);
+        let sink_c = Arc::clone(&sink);
+        let responder = std::thread::spawn(move || {
+            if let Some(request_id) = poll_request_id(&sink_c, std::time::Duration::from_secs(2)) {
+                let _ = approval_c.respond(request_id, ApprovalResponse::Deny);
+            }
+        });
+        let gate = GateCtx {
+            approval: &approval,
+            sink: &*sink,
+            cancel: &cancel,
+        };
+        let call = ToolUse {
+            id: "g2".into(),
+            name: "glob".into(),
+            input: json!({"pattern": "*.txt"}),
+        };
+        let mut invocations: Vec<crate::model::SkillInvocation> = Vec::new();
+        let (result, entry, _) = dispatch_gated_call(
+            &call,
+            &mut d,
+            &mut RealMaterializer,
+            &mut McpAggregator::empty(),
+            &[],
+            &mut crate::skills::invocation::test_ctx(&mut invocations),
+            &mut Vec::new(),
+            &crate::skills::read::SkillReadGate::inert(),
+            &crate::skills::create::SkillCreateGate::inert(),
+            &gate,
+            &mut |_| {},
+            None,
+        )
+        .expect("a discovery resolution is a tool result, not an abort");
+        responder.join().expect("responder exits");
+        assert!(!result.is_error, "{}", result.content);
+        assert_eq!(result.content, "a.txt\n");
+        assert_eq!(sink.requests.lock().unwrap().len(), 0, "no card is emitted");
+        let entry = entry.expect("the readonly arm records its successes");
+        assert!(entry.success);
+        assert_eq!(entry.name, "glob");
+    }
+
     /// The create arm's denied envelope (ADR-0078's shape on this channel):
     /// a gate denial completes as the tool-level error + one denied trace
     /// row with NO started phase -- and the refusal never mints, so nothing
