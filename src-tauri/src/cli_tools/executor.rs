@@ -5,8 +5,8 @@
 //! touches stay split (issue #1408): the spawn's working directory is the
 //! session's workspace (ADR-0137: the unified launch cwd; the session temp
 //! dir only on a disconnected axis), while the pipeline artifacts -- the
-//! file-delivery temp files and the over-cap stdout tee -- land under the
-//! session temp dir (ADR-0108 Decision 4's domain), never in the workspace.
+//! file-delivery temp files (ADR-0108 Decision 4's domain) and the over-cap
+//! stdout tee -- land under the session temp dir, never in the workspace.
 //! The child env is the inherited environment overlaid with the
 //! registration's literal values, and both output streams are byte-capped
 //! with an explicit truncation marker (over-cap is non-fatal). An over-cap
@@ -76,32 +76,11 @@ pub fn execute(
     cancel: &CancelToken,
     path_env: Option<OsString>,
 ) -> ToolOutcome {
+    // `path_env` is the PATH the bare-name resolution searches -- a `None`
+    // after the fold means no PATH to search, and a bare name degrades to
+    // the spawn's own lookup.
     let path_env = path_env.or_else(|| std::env::var_os("PATH"));
-    execute_capped(
-        tool,
-        call,
-        cwd,
-        work_dir,
-        cancel,
-        OUTPUT_CAP_BYTES,
-        path_env,
-    )
-}
-
-/// The testable core: `cap` is the per-stream byte cap (tests shrink it);
-/// `path_env` is the PATH the bare-name resolution searches -- a `None` at
-/// this layer means no PATH to search, and a bare name degrades to the
-/// spawn's own lookup. The `cwd`/`work_dir` split is [`execute`]'s (the
-/// spawn's working directory vs the pipeline domain).
-fn execute_capped(
-    tool: &CliToolConfig,
-    call: &ToolUse,
-    cwd: &Path,
-    work_dir: &Path,
-    cancel: &CancelToken,
-    cap: usize,
-    path_env: Option<OsString>,
-) -> ToolOutcome {
+    let cap = OUTPUT_CAP_BYTES;
     let error = |content: String| ToolOutcome {
         result: ToolResult {
             tool_use_id: call.id.clone(),
@@ -337,7 +316,7 @@ fn spawn_route(executable: &str, path_env: Option<&OsStr>) -> SpawnRoute {
 
 /// RAII cleaner for the file-channel temp files (issue #672): writes them
 /// before the spawn, deletes them on drop -- which every return path of
-/// [`execute_capped`] passes through (success, non-zero exit, cancel,
+/// [`execute`] passes through (success, non-zero exit, cancel,
 /// post-spawn errors). ADR-0108 Decision 4: the temp file is deleted when
 /// the call ends, succeeded or not.
 struct TempFileGuard(Vec<std::path::PathBuf>);
@@ -351,7 +330,11 @@ impl TempFileGuard {
         for file in files {
             if let Err(e) = std::fs::write(&file.path, &file.content) {
                 drop(Self(written));
-                return Err(format!("parameter `{}`: {e}", file.param));
+                return Err(format!(
+                    "parameter `{}` at {}: {e}",
+                    file.param,
+                    file.path.display()
+                ));
             }
             written.push(file.path.clone());
         }

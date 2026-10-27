@@ -593,16 +593,8 @@ fn stdin_delivery_pipes_the_value_and_closes_stdin() {
     // The child echoes stdin to EOF: the value arrives, and the pipe close
     // (not a timeout) terminates its read -- the executor writes the single
     // declared value then drops the pipe.
-    let temp = TempDir::new().unwrap();
     let tool = template_tool("stdin-tool", &["--stdin"], vec![stdin_param("payload")]);
-    let outcome = execute(
-        &tool,
-        &call(json!({"payload": "piped body"})),
-        temp.path(),
-        temp.path(),
-        &CancelToken::new(),
-        None,
-    );
+    let outcome = run(&tool, json!({"payload": "piped body"}));
     assert!(!outcome.result.is_error, "{}", outcome.result.content);
     assert_eq!(outcome.result.content, "piped body");
 }
@@ -636,20 +628,12 @@ fn a_child_that_never_reads_stdin_still_succeeds_without_a_marker() {
     // without touching stdin): the value fits the pipe buffer, the write
     // completes while the child sleeps, and the call resolves clean -- no
     // incomplete-delivery marker.
-    let temp = TempDir::new().unwrap();
     let tool = template_tool(
         "stdin-tool",
         &["--sleep", "500", "--exit", "0"],
         vec![stdin_param("payload")],
     );
-    let outcome = execute(
-        &tool,
-        &call(json!({"payload": "uninspected body"})),
-        temp.path(),
-        temp.path(),
-        &CancelToken::new(),
-        None,
-    );
+    let outcome = run(&tool, json!({"payload": "uninspected body"}));
     assert!(!outcome.result.is_error, "{}", outcome.result.content);
     assert!(
         !outcome.result.content.contains("stdin delivery incomplete"),
@@ -664,17 +648,9 @@ fn a_broken_stdin_pipe_marks_the_delivery_incomplete() {
     // reading: the write breaks partway (EPIPE), and the outcome carries
     // the explicit marker -- partial delivery never masquerades as complete
     // (the write-side twin of the read side's decorate doctrine).
-    let temp = TempDir::new().unwrap();
     let tool = template_tool("stdin-tool", &["--exit", "0"], vec![stdin_param("payload")]);
     let big = "x".repeat(1024 * 1024);
-    let outcome = execute(
-        &tool,
-        &call(json!({"payload": big})),
-        temp.path(),
-        temp.path(),
-        &CancelToken::new(),
-        None,
-    );
+    let outcome = run(&tool, json!({"payload": big}));
     assert!(
         !outcome.result.is_error,
         "exit 0 stays a success: {}",
