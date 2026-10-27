@@ -1129,11 +1129,18 @@ fn handle_tools_call(msg: &Value, ctx: &mut GatewayCtx, outcome: &mut GatewayOut
                 // the spawn cwd resolves through the SAME launch-dir seam the
                 // built-in dispatch arm uses -- one cwd semantics across both
                 // runtime surfaces, and this launch is a lazy-mint disk-need
-                // moment for a directory-less session.
+                // moment for a directory-less session. The pipeline artifacts
+                // stay in the session temp (issue #1408), the same domain the
+                // approval classify renders against.
                 let executed = match ctx.deps.launch_dir() {
-                    Ok(cwd) => {
-                        crate::cli_tools::executor::execute(tool, call, &cwd, ctx.cancel, None)
-                    }
+                    Ok(cwd) => crate::cli_tools::executor::execute(
+                        tool,
+                        call,
+                        &cwd,
+                        ctx.deps.temp_path,
+                        ctx.cancel,
+                        None,
+                    ),
                     // A call-time structured error (the ADR-0108 D2
                     // posture), the same envelope shape the executor's own
                     // failures take -- the CLI self-corrects or surfaces it.
@@ -4949,6 +4956,58 @@ mod tests {
         assert_eq!(body.file_attachments.len(), 1);
         assert_eq!(body.file_attachments[0].param, "doc");
         assert_eq!(body.file_attachments[0].content, "hello body");
+    }
+
+    /// Issue #1408's wiring pin on the bridge arm: the CLI execute arm's
+    /// pipeline artifacts ride `deps.temp_path`, never the launch cwd. The
+    /// deps are made distinguishable here (a bound workspace that exists
+    /// and a session temp that does not), so the file-delivery write fails
+    /// in the missing temp with the structured error; a wiring that wrongly
+    /// rode the cwd would write into the surviving workspace and fail at
+    /// the spawn instead, naming the executable.
+    #[test]
+    fn handle_tools_call_routes_file_delivery_to_the_session_temp() {
+        let approval: &'static ApprovalState = Box::leak(Box::new(ApprovalState::new()));
+        let sink: &'static AnsweringSink = Box::leak(Box::new(AnsweringSink::new(
+            approval,
+            ApprovalResponse::AllowOnce,
+        )));
+        let mut ctx = gate_ctx(vec![cli_fixture()], approval, sink);
+        let workspace_dir = TempDir::new().unwrap();
+        let gone = TempDir::new().unwrap();
+        let missing_temp = gone.path().to_path_buf();
+        drop(gone);
+        // Connect the workspace axis with a bound path (ADR-0137): the
+        // launch cwd is the workspace, disjoint from the deleted temp.
+        ctx.deps.workspace = Some(Box::leak(Box::new(Some(
+            workspace_dir.path().to_path_buf(),
+        ))));
+        ctx.deps.temp_path = Box::leak(missing_temp.into_boxed_path());
+        let mut outcome = GatewayOutcome::default();
+        let msg = json!({
+            "jsonrpc": "2.0",
+            "id": 10,
+            "method": "tools/call",
+            "params": {
+                "name": "doc-convert",
+                "arguments": {"value": "yes", "doc": "hello body"}
+            }
+        });
+        match handle_tools_call(&msg, &mut ctx, &mut outcome) {
+            Response::Result(v) => {
+                assert_eq!(
+                    v["isError"], true,
+                    "the missing write base is a tool-level error, not a JSON-RPC error"
+                );
+                let text = v["content"][0]["text"].as_str().unwrap();
+                assert!(
+                    text.contains("failed to write a file-delivery"),
+                    "the write fails in the missing session temp, not the workspace: {text}"
+                );
+            }
+            Response::Error(code, m) => panic!("CLI call must be a tool result, got {code}: {m}"),
+            Response::None => panic!("CLI call must return a result"),
+        }
     }
 
     /// A denial is the call's own `isError` envelope + one trace row naming

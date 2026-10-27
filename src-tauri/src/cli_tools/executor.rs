@@ -1,17 +1,21 @@
 //! The CLI tool spawn engine (ADR-0108 Decision 3/5).
 //!
 //! Executes one registered tool call by spawning the executable with a
-//! direct `argv` array -- never a shell. The working directory is the
+//! direct `argv` array -- never a shell. The two directories the call
+//! touches stay split (issue #1408): the spawn's working directory is the
 //! session's workspace (ADR-0137: the unified launch cwd; the session temp
-//! dir only on a disconnected axis), the child env is the
-//! inherited environment overlaid with the registration's literal values,
-//! and both output streams are byte-capped with an explicit truncation
-//! marker (over-cap is non-fatal). An over-cap stdout additionally spills
-//! its FULL byte range to a deterministic file under the session temp's
-//! `tool_output/` directory (issue #1215) -- truncation stops losing data;
-//! stderr keeps plain in-cap truncation. A non-zero exit is a structured tool
-//! error the model self-corrects from (ADR-0077); a zero exit's result is
-//! stdout, with a non-empty stderr appended under a marker.
+//! dir only on a disconnected axis), while the pipeline artifacts -- the
+//! file-delivery temp files (ADR-0108 Decision 4's domain) and the over-cap
+//! stdout tee -- land under the session temp dir, never in the workspace.
+//! The child env is the inherited environment overlaid with the
+//! registration's literal values, and both output streams are byte-capped
+//! with an explicit truncation marker (over-cap is non-fatal). An over-cap
+//! stdout additionally spills its FULL byte range to a deterministic file
+//! under the temp dir's `tool_output/` directory (issue #1215) --
+//! truncation stops losing data; stderr keeps plain in-cap truncation. A
+//! non-zero exit is a structured tool error the model self-corrects from
+//! (ADR-0077); a zero exit's result is stdout, with a non-empty stderr
+//! appended under a marker.
 //!
 //! Cancellation: there is no per-call timeout (the call eats the turn's
 //! wall-clock budget); round-level cancel maps to process-tree termination
@@ -56,33 +60,27 @@ const KILL_GRACE: Duration = Duration::from_secs(2);
 
 /// Execute one CLI tool call (the `execute_call` dispatch arm's entry).
 /// `cwd` is the spawn working directory (ADR-0137: the session workspace,
-/// falling back to the session temp dir on a disconnected axis); `cancel`
-/// is the turn's shared token. `path_env` follows the startup-scan
-/// injection idiom: `None` reads the process PATH, `Some` is a test's
-/// controlled PATH.
+/// falling back to the session temp dir on a disconnected axis); `work_dir`
+/// is the pipeline domain (issue #1408: the session temp dir) -- the
+/// file-delivery temp files and the over-cap spill tee land there, so the
+/// approval card's rendered paths and the execution's writes stay one
+/// domain while the child still runs in the workspace. `cancel` is the
+/// turn's shared token. `path_env` follows the startup-scan injection
+/// idiom: `None` reads the process PATH, `Some` is a test's controlled
+/// PATH.
 pub fn execute(
     tool: &CliToolConfig,
     call: &ToolUse,
     cwd: &Path,
+    work_dir: &Path,
     cancel: &CancelToken,
     path_env: Option<OsString>,
 ) -> ToolOutcome {
+    // `path_env` is the PATH the bare-name resolution searches -- a `None`
+    // after the fold means no PATH to search, and a bare name degrades to
+    // the spawn's own lookup.
     let path_env = path_env.or_else(|| std::env::var_os("PATH"));
-    execute_capped(tool, call, cwd, cancel, OUTPUT_CAP_BYTES, path_env)
-}
-
-/// The testable core: `cap` is the per-stream byte cap (tests shrink it);
-/// `path_env` is the PATH the bare-name resolution searches -- a `None` at
-/// this layer means no PATH to search, and a bare name degrades to the
-/// spawn's own lookup.
-fn execute_capped(
-    tool: &CliToolConfig,
-    call: &ToolUse,
-    cwd: &Path,
-    cancel: &CancelToken,
-    cap: usize,
-    path_env: Option<OsString>,
-) -> ToolOutcome {
+    let cap = OUTPUT_CAP_BYTES;
     let error = |content: String| ToolOutcome {
         result: ToolResult {
             tool_use_id: call.id.clone(),
@@ -95,7 +93,7 @@ fn execute_capped(
     // mistyped value, or a delivery/template shape a hand-edited config broke
     // is the call's own structured error -- the model self-corrects
     // (ADR-0077).
-    let rendered = match render_call(tool, &call.input, cwd, &call.id) {
+    let rendered = match render_call(tool, &call.input, work_dir, &call.id) {
         Ok(rendered) => rendered,
         Err(detail) => {
             return error(format!("invalid call to `{}`: {detail}", tool.name));
@@ -105,7 +103,7 @@ fn execute_capped(
     // on disk BEFORE the spawn, so the child reads exactly what the approval
     // card's path promised. The guard deletes them on every exit path --
     // success, non-zero, cancel -- a temp file that outlived its call would
-    // pile up in the session's work dir.
+    // pile up in the session's temp dir.
     let _temp_files = match TempFileGuard::write_all(&rendered.files) {
         Ok(guard) => guard,
         Err(e) => {
@@ -194,7 +192,7 @@ fn execute_capped(
     // The stdout tee plan (issue #1215): resolved into a real file only at
     // the cap crossing, inside the reader. stderr takes none -- the
     // diagnostic stream keeps its in-cap truncation semantics.
-    let spill = SpillPlan::new(cwd, &tool.name, &call.id);
+    let spill = SpillPlan::new(work_dir, &tool.name, &call.id);
     let stdout_thread = thread::spawn(move || read_capped(stdout_handle, cap, Some(&spill)));
     let stderr_thread = thread::spawn(move || read_capped(stderr_handle, cap, None));
     // Wait for the child while polling cancel. On cancel: terminate the
@@ -318,7 +316,7 @@ fn spawn_route(executable: &str, path_env: Option<&OsStr>) -> SpawnRoute {
 
 /// RAII cleaner for the file-channel temp files (issue #672): writes them
 /// before the spawn, deletes them on drop -- which every return path of
-/// [`execute_capped`] passes through (success, non-zero exit, cancel,
+/// [`execute`] passes through (success, non-zero exit, cancel,
 /// post-spawn errors). ADR-0108 Decision 4: the temp file is deleted when
 /// the call ends, succeeded or not.
 struct TempFileGuard(Vec<std::path::PathBuf>);
@@ -332,7 +330,11 @@ impl TempFileGuard {
         for file in files {
             if let Err(e) = std::fs::write(&file.path, &file.content) {
                 drop(Self(written));
-                return Err(format!("parameter `{}`: {e}", file.param));
+                return Err(format!(
+                    "parameter `{}` at {}: {e}",
+                    file.param,
+                    file.path.display()
+                ));
             }
             written.push(file.path.clone());
         }
@@ -506,9 +508,11 @@ pub(crate) struct SpillPlan {
 }
 
 impl SpillPlan {
-    pub(crate) fn new(cwd: &Path, tool: &str, call_id: &str) -> Self {
+    /// `base` is the pipeline domain (the session temp dir, issue #1408) --
+    /// never the spawn cwd.
+    pub(crate) fn new(base: &Path, tool: &str, call_id: &str) -> Self {
         Self {
-            dir: cwd.join(crate::session::TOOL_OUTPUT_DIR_NAME),
+            dir: base.join(crate::session::TOOL_OUTPUT_DIR_NAME),
             stem: format!(
                 "{}-{}",
                 sanitize_file_component(tool),

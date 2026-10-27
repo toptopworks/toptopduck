@@ -54,7 +54,14 @@ fn call(input: Value) -> ToolUse {
 
 fn run(tool: &CliToolConfig, input: Value) -> toptopduck_lib::tools::ToolOutcome {
     let temp = TempDir::new().unwrap();
-    execute(tool, &call(input), temp.path(), &CancelToken::new(), None)
+    execute(
+        tool,
+        &call(input),
+        temp.path(),
+        temp.path(),
+        &CancelToken::new(),
+        None,
+    )
 }
 
 #[test]
@@ -141,6 +148,7 @@ fn a_missing_bare_name_is_a_call_time_error_with_the_probe_copy() {
         &t,
         &call(json!({"args": []})),
         temp.path(),
+        temp.path(),
         &CancelToken::new(),
         Some(path_env),
     );
@@ -213,11 +221,12 @@ fn undeclared_call_key_errors_before_spawning() {
 }
 
 #[test]
-fn cwd_is_the_session_work_temp_dir() {
+fn the_child_runs_in_the_passed_cwd() {
     let temp = TempDir::new().unwrap();
     let outcome = execute(
         &tool("fake"),
         &call(json!({"args": ["--pwd"]})),
+        temp.path(),
         temp.path(),
         &CancelToken::new(),
         None,
@@ -226,7 +235,7 @@ fn cwd_is_the_session_work_temp_dir() {
     assert_eq!(
         outcome.result.content.trim_end(),
         temp.path().display().to_string(),
-        "the child runs in the session work temp dir (fs_acl read-write region)"
+        "the child runs in the cwd argument verbatim"
     );
 }
 
@@ -284,6 +293,7 @@ fn round_cancel_kills_the_child_and_surfaces_a_tool_error() {
     let outcome = execute(
         &tool("fake"),
         &call(json!({"args": ["--sleep", "10000", "--exit", "0"]})),
+        temp.path(),
         temp.path(),
         &cancel,
         None,
@@ -413,6 +423,7 @@ fn file_delivery_writes_the_temp_file_and_the_argv_receives_the_path() {
         &tool,
         &call(json!({"code": "print('hello')"})),
         temp.path(),
+        temp.path(),
         &CancelToken::new(),
         None,
     );
@@ -421,6 +432,108 @@ fn file_delivery_writes_the_temp_file_and_the_argv_receives_the_path() {
     assert!(
         no_temp_files_left(&temp),
         "the file-delivery temp file is deleted after the call"
+    );
+}
+
+#[test]
+fn the_child_runs_in_the_cwd_while_file_delivery_follows_the_work_dir() {
+    // Issue #1408: the two directories split. The healthy leg proves the
+    // child runs in the cwd dir (`--pwd`) and still reads the
+    // file-delivery value rendered under the work dir (`--cat`). The
+    // failing leg pins the write domain to `work_dir` itself: with the
+    // work dir gone the file-delivery write fails as a structured error
+    // -- a render domain wrongly riding the cwd would succeed here, the
+    // cwd dir exists.
+    let cwd_dir = TempDir::new().unwrap();
+    let work_dir = TempDir::new().unwrap();
+    let tool = template_tool(
+        "code-runner",
+        &["--cat", "{code}", "--pwd"],
+        vec![file_param("code")],
+    );
+    let outcome = execute(
+        &tool,
+        &call(json!({"code": "print('hello')"})),
+        cwd_dir.path(),
+        work_dir.path(),
+        &CancelToken::new(),
+        None,
+    );
+    assert!(!outcome.result.is_error, "{}", outcome.result.content);
+    assert!(
+        outcome.result.content.contains("print('hello')"),
+        "the cat reads the rendered file: {}",
+        outcome.result.content
+    );
+    assert!(
+        outcome
+            .result
+            .content
+            .contains(cwd_dir.path().to_string_lossy().as_ref()),
+        "the child's cwd is the cwd dir, not the work dir: {}",
+        outcome.result.content
+    );
+    let gone = TempDir::new().unwrap();
+    let missing = gone.path().to_path_buf();
+    drop(gone);
+    let failed = execute(
+        &tool,
+        &call(json!({"code": "print('hello')"})),
+        cwd_dir.path(),
+        &missing,
+        &CancelToken::new(),
+        None,
+    );
+    assert!(failed.result.is_error);
+    assert!(
+        failed
+            .result
+            .content
+            .contains("failed to write a file-delivery"),
+        "the write domain is the work dir: {}",
+        failed.result.content
+    );
+}
+
+#[test]
+fn over_cap_spill_lands_in_the_work_dir_not_the_cwd() {
+    // Issue #1408's spill half: the tee belongs to the pipeline domain.
+    // The spill file lands under the work dir's `tool_output/` and the
+    // cwd dir never grows the directory at all.
+    let cwd_dir = TempDir::new().unwrap();
+    let work_dir = TempDir::new().unwrap();
+    let cap = 8 * 1024 * 1024;
+    let outcome = execute(
+        &tool("fake"),
+        &call_with_id(
+            "tu_split",
+            json!({"args": ["--flood", (cap + 8192).to_string()]}),
+        ),
+        cwd_dir.path(),
+        work_dir.path(),
+        &CancelToken::new(),
+        None,
+    );
+    assert!(!outcome.result.is_error, "{}", outcome.result.content);
+    let spilled = work_dir
+        .path()
+        .join("tool_output")
+        .join("fake-tu_split.csv");
+    assert!(
+        std::fs::metadata(&spilled).is_ok(),
+        "the spill lands under the work dir"
+    );
+    assert!(
+        !cwd_dir.path().join("tool_output").exists(),
+        "the cwd dir never grows the spill directory"
+    );
+    assert!(
+        outcome
+            .result
+            .content
+            .contains(spilled.to_string_lossy().as_ref()),
+        "the result names the spill path: {}",
+        outcome.result.content
     );
 }
 
@@ -435,6 +548,7 @@ fn file_delivery_temp_files_are_deleted_on_a_nonzero_exit() {
     let outcome = execute(
         &tool,
         &call(json!({"code": "x"})),
+        temp.path(),
         temp.path(),
         &CancelToken::new(),
         None,
@@ -463,6 +577,7 @@ fn file_delivery_temp_files_are_deleted_on_cancel() {
         &tool,
         &call(json!({"code": "x"})),
         temp.path(),
+        temp.path(),
         &cancel,
         None,
     );
@@ -478,15 +593,8 @@ fn stdin_delivery_pipes_the_value_and_closes_stdin() {
     // The child echoes stdin to EOF: the value arrives, and the pipe close
     // (not a timeout) terminates its read -- the executor writes the single
     // declared value then drops the pipe.
-    let temp = TempDir::new().unwrap();
     let tool = template_tool("stdin-tool", &["--stdin"], vec![stdin_param("payload")]);
-    let outcome = execute(
-        &tool,
-        &call(json!({"payload": "piped body"})),
-        temp.path(),
-        &CancelToken::new(),
-        None,
-    );
+    let outcome = run(&tool, json!({"payload": "piped body"}));
     assert!(!outcome.result.is_error, "{}", outcome.result.content);
     assert_eq!(outcome.result.content, "piped body");
 }
@@ -505,6 +613,7 @@ fn stdin_and_file_channels_combine_in_one_registration() {
         &tool,
         &call(json!({"code": "CODE", "input": "DATA"})),
         temp.path(),
+        temp.path(),
         &CancelToken::new(),
         None,
     );
@@ -519,19 +628,12 @@ fn a_child_that_never_reads_stdin_still_succeeds_without_a_marker() {
     // without touching stdin): the value fits the pipe buffer, the write
     // completes while the child sleeps, and the call resolves clean -- no
     // incomplete-delivery marker.
-    let temp = TempDir::new().unwrap();
     let tool = template_tool(
         "stdin-tool",
         &["--sleep", "500", "--exit", "0"],
         vec![stdin_param("payload")],
     );
-    let outcome = execute(
-        &tool,
-        &call(json!({"payload": "uninspected body"})),
-        temp.path(),
-        &CancelToken::new(),
-        None,
-    );
+    let outcome = run(&tool, json!({"payload": "uninspected body"}));
     assert!(!outcome.result.is_error, "{}", outcome.result.content);
     assert!(
         !outcome.result.content.contains("stdin delivery incomplete"),
@@ -546,16 +648,9 @@ fn a_broken_stdin_pipe_marks_the_delivery_incomplete() {
     // reading: the write breaks partway (EPIPE), and the outcome carries
     // the explicit marker -- partial delivery never masquerades as complete
     // (the write-side twin of the read side's decorate doctrine).
-    let temp = TempDir::new().unwrap();
     let tool = template_tool("stdin-tool", &["--exit", "0"], vec![stdin_param("payload")]);
     let big = "x".repeat(1024 * 1024);
-    let outcome = execute(
-        &tool,
-        &call(json!({"payload": big})),
-        temp.path(),
-        &CancelToken::new(),
-        None,
-    );
+    let outcome = run(&tool, json!({"payload": big}));
     assert!(
         !outcome.result.is_error,
         "exit 0 stays a success: {}",
@@ -580,6 +675,7 @@ fn run_keep_temp(
     let outcome = execute(
         tool,
         &call_with_id(call_id, input),
+        temp.path(),
         temp.path(),
         &CancelToken::new(),
         None,
@@ -727,7 +823,14 @@ fn distinct_call_ids_keep_distinct_spill_files() {
     let temp = TempDir::new().unwrap();
     for id in ["tu_a", "tu_b"] {
         let call = call_with_id(id, json!({"args": ["--flood", (cap + 8192).to_string()]}));
-        let outcome = execute(&tool("fake"), &call, temp.path(), &CancelToken::new(), None);
+        let outcome = execute(
+            &tool("fake"),
+            &call,
+            temp.path(),
+            temp.path(),
+            &CancelToken::new(),
+            None,
+        );
         assert!(!outcome.result.is_error);
     }
     let names: Vec<String> = std::fs::read_dir(temp.path().join("tool_output"))
@@ -801,6 +904,7 @@ fn a_bare_name_spawns_the_cmd_shim_installed_by_npm_style_clis() {
         &t,
         &call(json!({"args": []})),
         work.path(),
+        work.path(),
         &CancelToken::new(),
         Some(path_env),
     );
@@ -831,6 +935,7 @@ fn a_resolved_but_unspawnable_bare_name_keeps_the_registered_string() {
     let outcome = execute(
         &t,
         &call(json!({"args": []})),
+        work.path(),
         work.path(),
         &CancelToken::new(),
         Some(path_env),

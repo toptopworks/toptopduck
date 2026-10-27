@@ -577,9 +577,19 @@ fn dispatch_gated_call_inner(
         // relative-path base, matching the external runtime's cwd. THIS
         // launch is the lazy-mint disk-need moment: a directory-less session
         // mints its default timestamped workspace on the first CLI call, so
-        // a pure-chat session stays dirless.
+        // a pure-chat session stays dirless. The pipeline artifacts stay in
+        // the session temp (issue #1408): the work-dir argument below keeps
+        // file-delivery and the spill tee out of the workspace and in the
+        // domain the approval classify renders against.
         match deps.launch_dir() {
-            Ok(cwd) => crate::cli_tools::executor::execute(tool, call, &cwd, gate.cancel, None),
+            Ok(cwd) => crate::cli_tools::executor::execute(
+                tool,
+                call,
+                &cwd,
+                deps.temp_path,
+                gate.cancel,
+                None,
+            ),
             // A call-time structured error (the ADR-0108 D2 posture): the
             // shared tail below completes the started row and routes the
             // failure back for self-correction, exactly like an errored
@@ -2443,6 +2453,88 @@ mod tests {
             }
             other => panic!("expected ToolCallCompleted, got {other:?}"),
         }
+    }
+
+    /// Issue #1408's wiring pin: the dispatch arm's pipeline artifacts ride
+    /// `deps.temp_path`, never the launch cwd. The deps here are
+    /// distinguishable -- a bound workspace that exists and a session temp
+    /// that does not -- so the file-delivery write fails in the missing temp
+    /// with the structured error; a wiring that wrongly rode the cwd would
+    /// write into the surviving workspace and fail at the spawn instead,
+    /// naming the executable, which the assert discriminates against.
+    #[test]
+    fn dispatch_gated_call_routes_file_delivery_to_the_session_temp() {
+        let engine = Engine::new();
+        let workspace_dir = TempDir::new().unwrap();
+        let gone = TempDir::new().unwrap();
+        let missing_temp = gone.path().to_path_buf();
+        drop(gone);
+        let mut ws = WorkingSet::default();
+        let mut sources = HashMap::new();
+        let mut refs = HashMap::new();
+        let mut bound = Some(workspace_dir.path().to_path_buf());
+        let mut d = TurnDeps::test_deps_with_workspace(
+            &engine.admin_engine,
+            &mut ws,
+            &mut sources,
+            &missing_temp,
+            &mut refs,
+            &mut bound,
+        );
+        let cancel = CancelToken::new();
+        let approval = ApprovalState::new();
+        approval.seed_trust(&ToolKey::external(ToolKey::CLI_SERVER, "doc-convert"));
+        let sink = RecordingSink::default();
+        let gate = GateCtx {
+            approval: &approval,
+            sink: &sink,
+            cancel: &cancel,
+        };
+        let call = ToolUse {
+            id: "tu_1".into(),
+            name: "doc-convert".into(),
+            input: json!({"doc": "hello body"}),
+        };
+        let registration = crate::cli_tools::config::CliToolConfig {
+            name: "doc-convert".into(),
+            description: "convert a document".into(),
+            executable: "/no/such/cli-fixture-exe".into(),
+            argv_template: vec!["--doc".into(), "{doc}".into()],
+            params: vec![crate::cli_tools::config::CliToolParam {
+                name: "doc".into(),
+                description: "the document body".into(),
+                delivery: crate::cli_tools::config::CliParamDelivery::File,
+                varargs: false,
+            }],
+            env: Default::default(),
+            enabled: true,
+            source: crate::cli_tools::config::CliToolSource::User,
+            baseline: None,
+        };
+        let phases = std::sync::Mutex::new(Vec::new());
+        let mut on_phase = |p: TurnPhase| phases.lock().unwrap().push(p);
+        let mut invocations: Vec<crate::model::SkillInvocation> = Vec::new();
+        let (result, _entry, _promotion) = dispatch_gated_call(
+            &call,
+            &mut d,
+            &mut RealMaterializer,
+            &mut McpAggregator::empty(),
+            std::slice::from_ref(&registration),
+            &mut crate::skills::invocation::test_ctx(&mut invocations),
+            &mut Vec::new(),
+            &crate::skills::read::SkillReadGate::inert(),
+            &crate::skills::create::SkillCreateGate::inert(),
+            &gate,
+            &mut on_phase,
+            None,
+        )
+        .expect("the CLI call dispatches");
+        assert!(result.is_error);
+        assert!(
+            result.content.contains("failed to write a file-delivery"),
+            "the write fails in the missing session temp, not the workspace: {}",
+            result.content
+        );
     }
 
     /// The denial variant on the CLI arm: a registered tool the gate denies
