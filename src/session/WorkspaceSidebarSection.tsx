@@ -63,6 +63,7 @@ import { log } from "@/lib/log";
 import { usePointerCloseIntent } from "@/lib/usePointerCloseIntent";
 import { isInvalidWorkspaceName } from "@/lib/workspaceName";
 import { createWorkspace, removeWorkspace, renameWorkspace } from "../api";
+import { readSidebarExpansion, saveSidebarExpansion } from "./sidebarExpansion";
 import { workspaceKeys } from "./queryKeys";
 import { SIDEBAR_PREVIEW_CAP as PREVIEW_CAP } from "./sidebarModel";
 import type { SidebarEntry, WorkspaceGroup } from "./sidebarModel";
@@ -134,13 +135,17 @@ export function WorkspaceSidebarSection({
 }: WorkspaceSidebarSectionProps) {
   const intl = useIntl();
   const queryClient = useQueryClient();
-  // The subtree expansion state: per-session, not persisted (the AC's
-  // "collapse state is valid within a session" applies to the whole
-  // section family). Default collapsed -- the expand-all head action is
-  // the bulk reveal.
-  const [expanded, setExpanded] = useState<ReadonlySet<string>>(new Set());
-  // The per-group "Show more" state: per-expansion -- collapsing the
-  // group (or the bulk collapse-all) resets it.
+  // The subtree expansion state persists across restarts (issue #1404 -- the
+  // #1398 "per-session" ruling flips here). The landing seen baseline joins
+  // the same persisted document ON PURPOSE: persisting the expansion without
+  // the baseline would replay the cold-start fan-out on every launch (an
+  // empty seen set reads every persisted bound row as newly landed). The
+  // per-group "Show more" state stays per-expansion -- collapsing the group
+  // (or the bulk collapse-all) resets it, and it is never written.
+  const [persisted] = useState(readSidebarExpansion);
+  const [expanded, setExpanded] = useState<ReadonlySet<string>>(
+    () => persisted.expandedWorkspaces,
+  );
   const [showAll, setShowAll] = useState<ReadonlySet<string>>(new Set());
   // The rename modal's draft (the #1393 modal shape: the draft + the
   // backend refusal clear together on close).
@@ -157,29 +162,28 @@ export function WorkspaceSidebarSection({
   const [removing, setRemoving] = useState<WorkspaceGroup | null>(null);
 
   function toggleGroup(path: string) {
+    const next = new Set(expanded);
+    if (next.has(path)) next.delete(path);
+    else next.add(path);
+    setExpanded(next);
+    saveSidebarExpansion({ expandedWorkspaces: next });
     // Collapsing resets the preview: re-expanding starts at the cap again
     // ("Show more" is a per-expansion choice, not a sticky one).
     if (expanded.has(path)) {
-      setShowAll((prev) => {
-        const next = new Set(prev);
-        next.delete(path);
-        return next;
-      });
+      const rest = new Set(showAll);
+      rest.delete(path);
+      setShowAll(rest);
     }
-    setExpanded((prev) => {
-      const next = new Set(prev);
-      if (next.has(path)) next.delete(path);
-      else next.add(path);
-      return next;
-    });
   }
 
   function setAllExpanded(open: boolean) {
+    const next = open ? new Set(groups.map((g) => g.path)) : new Set<string>();
+    setExpanded(next);
+    saveSidebarExpansion({ expandedWorkspaces: next });
     // Collapsing resets every group's preview -- the same
     // collapse-resets-preview rule the single toggle applies, at bulk
     // scale ("Show more" is a per-expansion choice, not a sticky one).
     if (!open) setShowAll(new Set());
-    setExpanded(open ? new Set(groups.map((g) => g.path)) : new Set());
   }
 
   // A session landing in a workspace reveals its group (the mint's tail).
@@ -191,18 +195,27 @@ export function WorkspaceSidebarSection({
   // waits for `sessionsLoaded`: recorded on the scan's first completion,
   // it already holds every persisted bound row, and only a NEW recipe
   // path afterwards -- a real mint through any binding path (the ⊕
-  // shortcut, the picker, the popover) -- flips its group open. Seen
-  // paths are remembered, never re-fanned: a row that leaves and returns
-  // (the archive / unarchive cycle) is not a second landing, so a group
-  // the user folded stays folded. Manual folds are otherwise honored --
-  // only the landed workspaces flip.
+  // shortcut, the picker, the popover) -- flips its group open. The null
+  // sentinel stays: the persisted seen memory (issue #1404) merges INTO the
+  // baseline -- it must not become the baseline itself, or a first launch
+  // with no store would read every persisted bound row as newly landed.
+  // Seen paths are remembered, never re-fanned (across restarts too, now
+  // that the memory persists): a row that leaves and returns (the archive /
+  // unarchive cycle) is not a second landing, so a group the user folded
+  // stays folded. Manual folds are otherwise honored -- only the landed
+  // workspaces flip.
   const seenBoundRef = useRef<Set<string> | null>(null);
   useEffect(() => {
     if (!sessionsLoaded) return;
     const seen = seenBoundRef.current;
     const bound = sessions.filter((m) => m.workspace !== null);
     if (seen === null) {
-      seenBoundRef.current = new Set(bound.map((m) => m.recipe_path));
+      const baseline = new Set([
+        ...persisted.seenWorkspaces,
+        ...bound.map((m) => m.recipe_path),
+      ]);
+      seenBoundRef.current = baseline;
+      if (bound.length > 0) saveSidebarExpansion({ seenWorkspaces: baseline });
       return;
     }
     const landed = new Set(
@@ -211,15 +224,27 @@ export function WorkspaceSidebarSection({
         .map((m) => m.workspace)
         .filter((w): w is string => w !== null),
     );
-    for (const m of bound) seen.add(m.recipe_path);
+    let grew = false;
+    for (const m of bound) {
+      if (!seen.has(m.recipe_path)) {
+        seen.add(m.recipe_path);
+        grew = true;
+      }
+    }
+    if (grew) saveSidebarExpansion({ seenWorkspaces: seen });
     if (landed.size === 0) return;
+    // The landing fan-out is deliberately NOT written back to the persisted
+    // expansion: it is the mint's notification reveal (#1398), not a layout
+    // choice -- the same non-sticky family as the "Show more" previews. The
+    // persisted face changes only under a user action (a toggle, the head
+    // bulk toggle); after a restart a landed group reads as folded again.
     setExpanded((existing) => {
       const next = new Set([...existing, ...landed]);
       // No growth means no state change: keep the old reference so the
       // effect never re-renders on its own.
       return next.size === existing.size ? existing : next;
     });
-  }, [sessions, sessionsLoaded]);
+  }, [sessions, sessionsLoaded, persisted]);
 
   function openRename(group: WorkspaceGroup) {
     setRenaming(group);

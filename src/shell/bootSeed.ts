@@ -1,10 +1,12 @@
-// First-paint boot seed (issue #814, ADR-0113): the Rust setup hook injects
-// `window.__TOPTOPDUCK_BOOT_SEED__` via the main window's initialization
-// script BEFORE any frontend script runs, so the persisted theme / locale
-// paint immediately instead of flashing through the OS-resolved defaults
-// while the full getAppConfig IPC is in flight. This module is the consuming
-// boundary: parseBootSeed whitelists the two enum fields, readBootSeed is
-// the thin reader useAppConfigState calls once per mount.
+// First-paint boot seed (issue #814, ADR-0113; the shell-collapse field rides
+// issue #1404): the Rust setup hook injects `window.__TOPTOPDUCK_BOOT_SEED__`
+// via the main window's initialization script BEFORE any frontend script
+// runs, so the persisted theme / locale paint immediately and the sidebar
+// collapse preference holds its folded state on the first frame, instead of
+// flashing through the OS-resolved defaults while the full getAppConfig IPC
+// is in flight. This module is the consuming boundary: parseBootSeed
+// whitelists the seeded fields, readBootSeed is the thin reader
+// useAppConfigState calls once per mount.
 import { isLocalePreference } from "../i18n";
 import type { LocalePreference, Theme } from "../types/app-config";
 
@@ -14,6 +16,7 @@ export const BOOT_SEED_GLOBAL = "__TOPTOPDUCK_BOOT_SEED__";
 export interface BootSeed {
   theme: Theme;
   locale: LocalePreference;
+  sidebar_collapsed: boolean;
 }
 
 // The satisfies clause keeps the list in lockstep with the Theme union --
@@ -29,7 +32,7 @@ function isTheme(value: unknown): value is Theme {
   return typeof value === "string" && THEMES.includes(value);
 }
 
-/** Whitelist the seed global: BOTH enum fields must validate or the whole
+/** Whitelist the seed global: EVERY seeded field must validate or the whole
  * seed is dropped. Rust serializes typed enums, so an invalid variant can
  * only mean the global is not ours -- a dropped seed reproduces the
  * pre-#814 null behavior (the IPC full config stays the only authority).
@@ -37,12 +40,13 @@ function isTheme(value: unknown): value is Theme {
  * (no deny_unknown_fields). */
 export function parseBootSeed(raw: unknown): BootSeed | null {
   if (typeof raw !== "object" || raw === null) return null;
-  const { theme, locale } = raw as Record<string, unknown>;
+  const { theme, locale, sidebar_collapsed } = raw as Record<string, unknown>;
   if (!isTheme(theme)) return null;
   // The locale half reuses the IPC boundary guard so the seed whitelist and
   // the persisted-value whitelist can never drift apart (ADR-0113 Decision 3).
   if (!isLocalePreference(locale)) return null;
-  return { theme, locale };
+  if (typeof sidebar_collapsed !== "boolean") return null;
+  return { theme, locale, sidebar_collapsed };
 }
 
 /** Read + validate the injected global. Null when the initialization script

@@ -218,17 +218,42 @@ describe("useAppConfigState", () => {
     });
 
     it("seeds the locale while appConfig is null and exposes the parsed seed", () => {
-      vi.stubGlobal(BOOT_SEED_GLOBAL, { theme: "dark", locale: "zh-CN" });
+      vi.stubGlobal(BOOT_SEED_GLOBAL, {
+        theme: "dark",
+        locale: "zh-CN",
+        sidebar_collapsed: false,
+      });
       const { result } = renderAppConfigState();
       // IPC still pending: the seed wins over the OS-locale resolution --
       // the first paint renders the persisted catalog, not the system one.
       expect(result.current.appConfig).toBeNull();
-      expect(result.current.bootSeed).toEqual({ theme: "dark", locale: "zh-CN" });
+      expect(result.current.bootSeed).toEqual({
+        theme: "dark",
+        locale: "zh-CN",
+        sidebar_collapsed: false,
+      });
       expect(result.current.effectiveLocale).toBe("zh-CN");
     });
 
+    it("seeds the sidebar collapse initial value while appConfig is null", () => {
+      vi.stubGlobal(BOOT_SEED_GLOBAL, {
+        theme: "dark",
+        locale: "zh-CN",
+        sidebar_collapsed: true,
+      });
+      const { result } = renderAppConfigState();
+      // IPC still pending: the first frame already carries the persisted
+      // fold -- no expand-then-collapse flash (issue #1404).
+      expect(result.current.appConfig).toBeNull();
+      expect(result.current.sidebarCollapsed).toBe(true);
+    });
+
     it("the IPC full config overwrites the seed once it resolves", async () => {
-      vi.stubGlobal(BOOT_SEED_GLOBAL, { theme: "dark", locale: "zh-CN" });
+      vi.stubGlobal(BOOT_SEED_GLOBAL, {
+        theme: "dark",
+        locale: "zh-CN",
+        sidebar_collapsed: false,
+      });
       const cfg: AppConfig = {
         ...baseAppConfig({ sidebar_collapsed: false }),
         locale: "en-US",
@@ -242,7 +267,11 @@ describe("useAppConfigState", () => {
     it("drops an invalid seed wholesale (whitelist) and keeps the null behavior", () => {
       // Both halves invalid ("DARK" is case-illegal, "klingon" out of enum):
       // the composition seam pins the wholesale drop for either half.
-      vi.stubGlobal(BOOT_SEED_GLOBAL, { theme: "DARK", locale: "klingon" });
+      vi.stubGlobal(BOOT_SEED_GLOBAL, {
+        theme: "DARK",
+        locale: "klingon",
+        sidebar_collapsed: false,
+      });
       const { result } = renderAppConfigState();
       expect(result.current.bootSeed).toBeNull();
       expect(result.current.appConfig).toBeNull();

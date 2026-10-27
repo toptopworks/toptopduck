@@ -64,11 +64,12 @@ export function useAppConfigState({
   switchActiveProfile: (id: string) => Promise<void>;
   sidebarCollapsed: boolean;
   toggleSidebarCollapse: () => void;
-  /** The parsed first-paint seed (issue #814, ADR-0113): theme/locale-only
-   * initial values injected by the main window's initialization script
-   * before any frontend script runs. Null when the channel did not run or
-   * its payload failed the whitelist; the IPC full appConfig stays the
-   * authority once it resolves. */
+  /** The parsed first-paint seed (issue #814, ADR-0113; the collapse field
+   * rides issue #1404): theme / locale / shell-collapse initial values
+   * injected by the main window's initialization script before any frontend
+   * script runs. Null when the channel did not run or its payload failed
+   * the whitelist; the IPC full appConfig stays the authority once it
+   * resolves. */
   bootSeed: BootSeed | null;
 } {
   const [appConfig, setAppConfigState] = useState<AppConfig | null>(null);
@@ -76,8 +77,9 @@ export function useAppConfigState({
 
   // First-paint seed (issue #814, ADR-0113): read once per mount from the
   // global the initialization script assigned pre-paint. It only ever acts
-  // as the null-period fallback for the locale chain below and the theme
-  // chain in App -- never a second source of truth.
+  // as the null-period fallback for the locale chain below, the theme chain
+  // in App, and the collapse initial value -- never a second source of
+  // truth.
   const [bootSeed] = useState<BootSeed | null>(() => readBootSeed());
 
   // Locale (ADR-0052): resolved once from the persisted three-state preference
@@ -95,9 +97,14 @@ export function useAppConfigState({
   );
 
   // ADR-0054 shell collapse (issue #84): the session sidebar (full hide +
-  // topbar call-out). Defaults expanded; restores from app-config once on the
-  // first resolve (ADR-0038) and persists on every toggle.
-  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+  // topbar call-out). The initial value rides the boot seed (issue #1404) --
+  // the seed and the app-config read share one disk truth, so the first
+  // frame already renders the persisted fold and the one-shot restore below
+  // writes the same value back (no expand-then-collapse flash). Defaults
+  // expanded without a seed; persists on every toggle.
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(
+    bootSeed?.sidebar_collapsed ?? false,
+  );
   const collapseRestoredRef = useRef(false);
 
   // Load app-config once on mount (theme/locale).
@@ -112,7 +119,7 @@ export function useAppConfigState({
       })
       .catch(() => {
         // Keep null: the boot seed (if any) keeps carrying the persisted
-        // theme/locale; with no seed the system defaults apply.
+        // theme/locale/collapse; with no seed the system defaults apply.
       });
     return () => {
       cancelled = true;

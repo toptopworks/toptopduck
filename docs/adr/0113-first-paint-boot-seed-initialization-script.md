@@ -33,4 +33,5 @@ Rust 侧 `setup` 启动时已读 app-config（ADR-0038 honest-degrade 读路径�
 - setup 内 `live.load()` 收敛为一次（单调读，sessions_dir 解析与种子脚本共享；`startup_register` 的注册扫描走其自身的读取路径）。
 - 前端 `useAppConfigState` 返回面新增 `bootSeed` 字段（null 期为种子或 null——白名单裁决；IPC 到达后字段值不变，仅角色让位）；`theme` 派生链变为「IPC 全量 > 种子 > system」三级，locale 链同形。
 - 首绘时序（脚本注入 → 首帧）在 jsdom 与单测面不可观测；外观首绘、目录语言、window-state 几何恢复的验收面在真机。
+- **校准（shell 折叠偏好）**：Decision 2 的「值为扁平 JSON `{theme, locale}`」读作三字段 `{theme, locale, sidebar_collapsed}`（`ShellPrefs` 布尔，字段名与 wire 字面量同 `get_app_config` IPC 的 `shell.sidebar_collapsed` 构造性同构）；Decision 3 的「种子仅作 `theme` / `locale` 的 null 期初值」读作三值均含——`sidebar_collapsed` 进白名单校验（非法仍整种子弃用），IPC 全量覆盖契约不变（seed 与磁盘真相同源，恢复写同值零跳变）。
 - CONTEXT.md 不动：boot seed 是投递通道，非领域概念，无领域词增减。
