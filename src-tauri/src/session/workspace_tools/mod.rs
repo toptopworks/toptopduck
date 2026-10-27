@@ -24,6 +24,10 @@
 //! refused with a pointer to the other channels. A session with no bound
 //! workspace (the temp-fallback domain) refuses both tools -- no lazy mint
 //! from a write, no temp writes.
+//!
+//! The sibling [`discovery`] module (issue #1385) carries the read-only
+//! discovery channel (`glob` / `grep` / `read`) over the same domain
+//! checks; the family predicate below routes both channels in one place.
 
 use std::path::{Component, Path, PathBuf};
 
@@ -42,17 +46,21 @@ use crate::session::materializer::TurnDeps;
 use crate::session::turn_dispatch::GateCtx;
 use crate::tools::definitions::get_str;
 
+pub(crate) mod discovery;
+
 /// The `write` tool name (bare, snake_case params -- the Claude Code prior).
 pub(crate) const WRITE_TOOL: &str = "write";
 
 /// The `edit` tool name.
 pub(crate) const EDIT_TOOL: &str = "edit";
 
-/// Whether `name` is one of the workspace write tools -- the routing
-/// predicate for the shared dispatch core's interception arm, so the arm
-/// and the module agree on the family membership in one place.
+/// Whether `name` is one of the workspace tools -- the routing predicate
+/// for the shared dispatch core's interception arm, so the arm and the
+/// module agree on the family membership in one place. Covers both
+/// channels: the gated write pair and the read-only discovery trio
+/// (issue #1385).
 pub(crate) fn is_workspace_tool(name: &str) -> bool {
-    name == WRITE_TOOL || name == EDIT_TOOL
+    name == WRITE_TOOL || name == EDIT_TOOL || discovery::is_discovery_tool(name)
 }
 
 /// Cap on one model-emitted text payload (`content`, `old_string`,
@@ -256,10 +264,13 @@ fn resolve_edit(call: &ToolUse, workspace: Option<&Path>) -> WorkspaceToolOutcom
     to_outcome(inner())
 }
 
-/// The gated dispatch arm behind both tools (the `create_skill` ritual,
-/// ADR-0122 Decision 3): refuse ahead of the card, gate per call, then
-/// execute the already-resolved plan. Emits the ADR-0078 phase pair through
-/// `on_phase` and records the trace entry like every dispatched call.
+/// The gated dispatch arm behind the write pair (the `create_skill`
+/// ritual, ADR-0122 Decision 3): refuse ahead of the card, gate per call,
+/// then execute the already-resolved plan. Emits the ADR-0078 phase pair
+/// through `on_phase` and records the trace entry like every dispatched
+/// call. The read-only discovery trio (issue #1385) never gates -- an
+/// in-domain read carries no approval surface -- so those names split to
+/// the sibling arm before the gate machinery starts.
 pub(crate) fn dispatch_workspace_tool(
     call: &ToolUse,
     deps: &TurnDeps,
@@ -267,6 +278,10 @@ pub(crate) fn dispatch_workspace_tool(
     on_phase: &mut impl FnMut(TurnPhase),
     origin: Option<&str>,
 ) -> Result<(ToolResult, Option<TraceEntry>, Option<Promotion>), GateCancelled> {
+    if discovery::is_discovery_tool(&call.name) {
+        let (result, entry) = discovery::dispatch_readonly(call, deps, on_phase, origin);
+        return Ok((result, entry, None));
+    }
     let workspace = deps.bound_workspace();
     let resolved = if call.name == WRITE_TOOL {
         resolve_write(call, workspace)
@@ -406,13 +421,14 @@ fn execute(plan: &WritePlan, workspace: Option<&Path>) -> Result<Value, String> 
 }
 
 /// The no-workspace refusal (issue #1406 triage): with no bound workspace
-/// (the temp-fallback domain) both tools refuse -- a write never mints the
-/// default workspace and never writes into the temp dir.
+/// (the temp-fallback domain) the workspace tools refuse -- a write never
+/// mints the default workspace and nothing reads or writes into the temp
+/// dir.
 fn require_workspace<'a>(tool: &str, workspace: Option<&'a Path>) -> Result<&'a Path, String> {
     workspace.ok_or_else(|| {
         format!(
-            "{tool}: no session workspace is bound; the write tools operate \
-                 inside the session workspace only"
+            "{tool}: no session workspace is bound; the workspace tools \
+                 operate inside the session workspace only"
         )
     })
 }
@@ -464,13 +480,21 @@ fn read_text_file(target: &Path) -> Result<String, String> {
 /// `sub/../../escape.txt` spelling normalizes out of the workspace and fails
 /// the compare instead of passing it lexically.
 fn resolve_in_workspace(workspace: &Path, requested: &str) -> Result<PathBuf, String> {
+    let target = resolve_entity_in_workspace(workspace, requested)?;
+    leaf_check(workspace, target, requested)
+}
+
+/// The path-only core both channels share (issue #1385): resolve `requested`
+/// to an in-workspace path WITHOUT the file-only leaf check -- the discovery
+/// tools accept a directory (a search root) as readily as a file.
+fn resolve_entity_in_workspace(workspace: &Path, requested: &str) -> Result<PathBuf, String> {
     let candidate = if Path::new(requested).is_absolute() {
         PathBuf::from(requested)
     } else {
         workspace.join(requested)
     };
     if let Ok(existing) = std::fs::canonicalize(&candidate) {
-        return leaf_check(workspace, existing, requested);
+        return in_bounds(workspace, existing, requested);
     }
     let Some((ancestor, tail)) = nearest_existing_ancestor(&candidate) else {
         return Err(format!(
@@ -484,7 +508,7 @@ fn resolve_in_workspace(workspace: &Path, requested: &str) -> Result<PathBuf, St
     // resolves whole, exactly like an existing leaf, so the compare follows
     // the link instead of the spelling (issue #1406's escape AC).
     if let Ok(existing) = std::fs::canonicalize(&joined) {
-        return leaf_check(workspace, existing, requested);
+        return in_bounds(workspace, existing, requested);
     }
     // Or a not-yet-existing tail over such a link: re-anchor on the folded
     // path's own nearest existing ancestor (canonical, symlinks resolved)
@@ -497,7 +521,7 @@ fn resolve_in_workspace(workspace: &Path, requested: &str) -> Result<PathBuf, St
         ));
     };
     let target = join_normalized(&reanchor, &retail);
-    leaf_check(workspace, target, requested)
+    in_bounds(workspace, target, requested)
 }
 
 /// The shared final check for an existing (or fully re-anchored) target: a
@@ -938,13 +962,19 @@ mod tests {
             message.contains("outside the session workspace"),
             "{message}"
         );
-        // The fold landing ON the junction: a directory target, refused
-        // as one.
+        // The fold landing ON the junction: an outside DIRECTORY, so the
+        // bounds compare fires first (issue #1385's resolver split moved
+        // the compare ahead of the leaf check) -- refusing it as
+        // out-of-domain names the actual problem; the in-workspace
+        // directory refusal keeps its own pin above.
         let message = refused(resolve_write(
             &write_call("missing/../alias_dir", "x"),
             Some(&ws),
         ));
-        assert!(message.contains("directory"), "{message}");
+        assert!(
+            message.contains("outside the session workspace"),
+            "{message}"
+        );
     }
 
     /// (Windows) A junction planted during the approval window under the

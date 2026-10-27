@@ -419,15 +419,27 @@ impl super::Session {
                     // mounted unconditionally on the built-in runtime's
                     // table -- the sedimentation channel (write/edit) splits
                     // from the python execution medium, so every session
-                    // carries the pair. Bridge face never lists them
-                    // (external runtimes bring their own file tools with
-                    // full authority).
+                    // carries the pair. The read-only discovery trio (issue
+                    // #1385) rides the same mount so the sediment is
+                    // discoverable: glob/grep find it, read judges it, the
+                    // next turn runs it. Bridge face never lists either
+                    // channel (external runtimes bring their own file tools
+                    // with full authority).
                     request
                         .tools
                         .push(crate::session::workspace_tools::write_definition());
                     request
                         .tools
                         .push(crate::session::workspace_tools::edit_definition());
+                    request
+                        .tools
+                        .push(crate::session::workspace_tools::discovery::glob_definition());
+                    request
+                        .tools
+                        .push(crate::session::workspace_tools::discovery::grep_definition());
+                    request
+                        .tools
+                        .push(crate::session::workspace_tools::discovery::read_definition());
                     let assets_dir = crate::session::sql_assets::assets_dir(self.recipe_path());
                     let snapshot_dir = self.snapshot_dir();
                     let mut deps = TurnDeps {

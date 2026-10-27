@@ -3801,14 +3801,15 @@ mod tests {
         );
     }
 
-    /// The workspace write tools (issue #1406) are built-in-runtime-only:
-    /// external runtimes bring their own file tools with full authority, so
-    /// the bridge face never advertises `write` / `edit` however the
-    /// conditionals mount, and a bare-name `tools/call` spoof has no
-    /// landing (`tools::dispatch` answers with the unknown-tool error after
-    /// the gate card, the present_files posture).
+    /// The workspace write tools (issue #1406) and the read-only discovery
+    /// trio (issue #1385) are built-in-runtime-only: external runtimes
+    /// bring their own file tools with full authority, so the bridge face
+    /// never advertises either channel however the conditionals mount, and
+    /// a bare-name `tools/call` spoof has no landing (`tools::dispatch`
+    /// answers with the unknown-tool error after the gate card, the
+    /// present_files posture).
     #[test]
-    fn tools_list_never_lists_the_workspace_write_tools() {
+    fn tools_list_never_lists_the_workspace_tools() {
         for ctx in [fresh_ctx(), skill_ctx(vec!["sql-coach".to_string()])] {
             let mut ctx = ctx;
             match handle_method(
@@ -3826,8 +3827,14 @@ mod tests {
                         .collect();
                     assert!(
                         !names.contains(&crate::session::workspace_tools::WRITE_TOOL)
-                            && !names.contains(&crate::session::workspace_tools::EDIT_TOOL),
-                        "the bridge face never advertises the workspace write tools"
+                            && !names.contains(&crate::session::workspace_tools::EDIT_TOOL)
+                            && !names
+                                .contains(&crate::session::workspace_tools::discovery::GLOB_TOOL)
+                            && !names
+                                .contains(&crate::session::workspace_tools::discovery::GREP_TOOL)
+                            && !names
+                                .contains(&crate::session::workspace_tools::discovery::READ_TOOL),
+                        "the bridge face never advertises the workspace tools"
                     );
                 }
                 _ => panic!("tools/list must return Result"),

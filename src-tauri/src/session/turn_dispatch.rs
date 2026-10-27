@@ -473,18 +473,22 @@ fn dispatch_gated_call_inner(
             },
         );
     }
-    // The workspace write tools (ADR-0137, issue #1406): `write` / `edit`
-    // persist model-authored text files into the session workspace -- the
-    // sedimentation channel, deliberately split from the python execution
-    // medium (ADR-0108 D4). Like `create_skill` above, the effect outlives
-    // the turn, so the pair GATES per call (Write badge; the write payload
-    // rides the card as attachments); a resolution failure (an
-    // out-of-workspace path, an over-cap or binary payload, an unresolvable
-    // edit target, no bound workspace) is refused AHEAD of the card -- the
-    // model's error, never the approver's. The whole arm lives in the
-    // module so the pair owns its ritual end to end. Built-in runtime only:
-    // the bridge face never lists the names and `tools::dispatch` has no
-    // arm for them, so a spoofed bridge call dies at the unknown-tool error.
+    // The workspace tools (ADR-0137): the gated write pair (`write` /
+    // `edit`, issue #1406) persists model-authored text files into the
+    // session workspace -- the sedimentation channel, deliberately split
+    // from the python execution medium (ADR-0108 D4). Like `create_skill`
+    // above, the effect outlives the turn, so the pair GATES per call
+    // (Write badge; the write payload rides the card as attachments); a
+    // resolution failure (an out-of-workspace path, an over-cap or binary
+    // payload, an unresolvable edit target, no bound workspace) is refused
+    // AHEAD of the card -- the model's error, never the approver's. The
+    // read-only discovery trio (`glob` / `grep` / `read`, issue #1385)
+    // rides the same predicate but splits inside the module to an ungated
+    // arm: an in-workspace read has no approval surface (ADR-0080
+    // Decision 1). The whole arm family lives in the module so it owns its
+    // ritual end to end. Built-in runtime only: the bridge face never
+    // lists the names and `tools::dispatch` has no arm for them, so a
+    // spoofed bridge call dies at the unknown-tool error.
     if crate::session::workspace_tools::is_workspace_tool(&call.name) {
         return crate::session::workspace_tools::dispatch_workspace_tool(
             call, deps, gate, on_phase, origin,
@@ -2003,6 +2007,79 @@ mod tests {
         assert!(entry.is_none(), "a pre-gate refusal records no trace entry");
         assert_eq!(sink.requests.lock().unwrap().len(), 0, "no card is emitted");
         let _ = phases.into_inner().unwrap();
+    }
+
+    /// The discovery trio's routing through the same interception arm
+    /// (issue #1385): an ungated read-only call with no bound workspace
+    /// refuses as a tool result (never a card -- an unwired arm would fall
+    /// to the unknown-name external classification and suspend), and the
+    /// readonly arm records a failed trace entry for the refusal (the
+    /// `explore` posture, unlike the write pair's pre-gate refusal). The
+    /// responder thread denies any card that DOES appear: if a regression
+    /// ever unwires the arm, the parked gate would hang the test forever
+    /// (the over-cap precedent) -- the denial converts that regression
+    /// into the clean assertion failure below.
+    #[test]
+    fn dispatch_routes_a_discovery_tool_without_a_card() {
+        let engine = Engine::new();
+        let mut ws = WorkingSet::default();
+        let mut sources = HashMap::new();
+        let mut refs = HashMap::new();
+        let mut slot = None;
+        let mut d = TurnDeps::test_deps_with_workspace(
+            &engine.admin_engine,
+            &mut ws,
+            &mut sources,
+            engine.temp.path(),
+            &mut refs,
+            &mut slot,
+        );
+        let cancel = CancelToken::new();
+        let approval = Arc::new(ApprovalState::new());
+        let sink = Arc::new(RecordingSink::default());
+        let approval_c = Arc::clone(&approval);
+        let sink_c = Arc::clone(&sink);
+        let responder = std::thread::spawn(move || {
+            if let Some(request_id) = poll_request_id(&sink_c, std::time::Duration::from_secs(2)) {
+                let _ = approval_c.respond(request_id, ApprovalResponse::Deny);
+            }
+        });
+        let gate = GateCtx {
+            approval: &approval,
+            sink: &*sink,
+            cancel: &cancel,
+        };
+        let call = ToolUse {
+            id: "g1".into(),
+            name: "grep".into(),
+            input: json!({"pattern": "needle"}),
+        };
+        let mut invocations: Vec<crate::model::SkillInvocation> = Vec::new();
+        let (result, entry, _) = dispatch_gated_call(
+            &call,
+            &mut d,
+            &mut RealMaterializer,
+            &mut McpAggregator::empty(),
+            &[],
+            &mut crate::skills::invocation::test_ctx(&mut invocations),
+            &mut Vec::new(),
+            &crate::skills::read::SkillReadGate::inert(),
+            &crate::skills::create::SkillCreateGate::inert(),
+            &gate,
+            &mut |_| {},
+            None,
+        )
+        .expect("a refusal is a tool result, not an abort");
+        responder.join().expect("responder exits");
+        assert!(result.is_error);
+        assert!(
+            result.content.contains("no session workspace"),
+            "{}",
+            result.content
+        );
+        assert_eq!(sink.requests.lock().unwrap().len(), 0, "no card is emitted");
+        let entry = entry.expect("the readonly arm records its refusals");
+        assert!(!entry.success);
     }
 
     /// The create arm's denied envelope (ADR-0078's shape on this channel):
