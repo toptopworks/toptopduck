@@ -1559,15 +1559,13 @@ describe("App resume + close-in-flight seams (issue #83)", () => {
 // moved to .session-header (slice 2, #512).
 
 // A minimal valid AppConfig for the #84 persistence tests (the shell prefs are
-// the only field under test; the rest are just-shape defaults). The helper fills
-// `sidebar_grouping: "flat"` (the serde default) so callers stay focused on the
-// collapse prefs they actually exercise (#251 added the grouping field).
+// the only field under test; the rest are just-shape defaults).
 function baseAppConfig(
   shell: Pick<AppConfig["shell"], "sidebar_collapsed">,
 ): AppConfig {
   return sharedBaseAppConfig({
     format_version: 1,
-    shell: { ...shell, sidebar_grouping: "flat" },
+    shell: { ...shell },
   });
 }
 
@@ -2233,8 +2231,6 @@ describe("App shell window collapse + drag-drop bisection (issue #84)", () => {
     // setAppConfig receives a config whose shell reflects the toggle.
     await waitFor(() =>
       expect(setAppConfig).toHaveBeenCalledWith(
-        // Nested objectContaining: the commit also carries sidebar_grouping
-        // (#251), which this collapse-only test stays agnostic to.
         expect.objectContaining({
           shell: expect.objectContaining({ sidebar_collapsed: true }),
         }),

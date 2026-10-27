@@ -32,7 +32,6 @@ import { catalogFor, coerceLocalePreference, useLocale } from "../i18n";
 import type { EffectiveLocale } from "../i18n";
 import { log } from "../lib/log";
 import type { AppConfig } from "../types/app-config";
-import type { SidebarGrouping } from "../types/app-config";
 import type { AppError } from "../types/error";
 import { readBootSeed } from "./bootSeed";
 import type { BootSeed } from "./bootSeed";
@@ -66,8 +65,6 @@ export function useAppConfigState({
   switchActiveProfile: (id: string) => Promise<void>;
   sidebarCollapsed: boolean;
   toggleSidebarCollapse: () => void;
-  sidebarGrouping: SidebarGrouping;
-  switchSidebarGrouping: (mode: SidebarGrouping) => void;
   /** The parsed first-paint seed (issue #814, ADR-0113): theme/locale-only
    * initial values injected by the main window's initialization script
    * before any frontend script runs. Null when the channel did not run or
@@ -102,11 +99,7 @@ export function useAppConfigState({
   // session sidebar (full hide + topbar call-out) and thread rail (workspace
   // goes full-width). Both default expanded; both restore from app-config once
   // on the first resolve (ADR-0038) and persist on every toggle.
-  // ADR-0072 (#251): the sidebar's flat/time grouping mode rides the same
-  // shell-chrome surface -- restores with the two collapse prefs, persists on
-  // every switch via commitShellPrefs's single IPC write.
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
-  const [sidebarGrouping, setSidebarGroupingState] = useState<SidebarGrouping>("flat");
   const collapseRestoredRef = useRef(false);
 
   // Load app-config once on mount (theme/locale).
@@ -178,21 +171,19 @@ export function useAppConfigState({
     [appConfig, commitAppConfig, intl, setShellError],
   );
 
-  // Commit the three shell prefs (two collapses + the sidebar grouping mode) as
-  // ONE app-config write (ADR-0038/0054, issue #84; ADR-0072, issue #251).
-  // A single IPC write keeps the three shell-chrome prefs atomic against any
-  // sibling commitAppConfig caller (e.g. switchActiveProfile). No-op before
-  // app-config resolves (appConfigRef null) -- the restore effect's one-shot
-  // then applies the persisted value on first load.
+  // Commit the sidebar collapse pref as ONE app-config write (ADR-0038/0054,
+  // issue #84). A single IPC write keeps the shell-chrome pref atomic against
+  // any sibling commitAppConfig caller (e.g. switchActiveProfile). No-op
+  // before app-config resolves (appConfigRef null) -- the restore effect's
+  // one-shot then applies the persisted value on first load.
   const commitShellPrefs = useCallback(
-    (next: { sidebar: boolean; grouping: SidebarGrouping }): void => {
+    (sidebar: boolean): void => {
       const base = appConfigRef.current;
       if (!base) return;
       void commitAppConfig({
         ...base,
         shell: {
-          sidebar_collapsed: next.sidebar,
-          sidebar_grouping: next.grouping,
+          sidebar_collapsed: sidebar,
         },
       }).catch((e) => {
         // IPC write failed -- the UI already flipped optimistically (state is
@@ -208,32 +199,17 @@ export function useAppConfigState({
   const toggleSidebarCollapse = useCallback(() => {
     const next = !sidebarCollapsed;
     setSidebarCollapsed(next);
-    commitShellPrefs({ sidebar: next, grouping: sidebarGrouping });
-  }, [sidebarCollapsed, sidebarGrouping, commitShellPrefs]);
+    commitShellPrefs(next);
+  }, [sidebarCollapsed, commitShellPrefs]);
 
-  // Switch the sidebar's flat/time grouping mode (ADR-0072, issue #251). Sibling
-  // to the sidebar collapse toggle: a one-mode swap that commits immediately via
-  // commitShellPrefs (no debounce -- a low-frequency discrete action, mirroring
-  // the toggle's immediate commit contract). The optimistic + no-
-  // rollback contract is commitAppConfig's; a reject lands in the .catch log.
-  const switchSidebarGrouping = useCallback(
-    (mode: SidebarGrouping) => {
-      if (mode === sidebarGrouping) return;
-      setSidebarGroupingState(mode);
-      commitShellPrefs({ sidebar: sidebarCollapsed, grouping: mode });
-    },
-    [sidebarCollapsed, sidebarGrouping, commitShellPrefs],
-  );
-
-  // Restore shell collapse prefs + the sidebar grouping mode ONCE on the first
-  // app-config load (ADR-0038 / 0054, issue #84; ADR-0072, issue #251). A
-  // one-shot so a later app-config write (e.g. a toggle's own commit) does not
-  // re-clobber the user's in-session state with the persisted value.
+  // Restore the shell collapse pref ONCE on the first app-config load
+  // (ADR-0038 / 0054, issue #84). A one-shot so a later app-config write
+  // (e.g. a toggle's own commit) does not re-clobber the user's in-session
+  // state with the persisted value.
   useEffect(() => {
     if (!appConfig || collapseRestoredRef.current) return;
     collapseRestoredRef.current = true;
     setSidebarCollapsed(appConfig.shell.sidebar_collapsed);
-    setSidebarGroupingState(appConfig.shell.sidebar_grouping);
   }, [appConfig]);
 
   return {
@@ -245,8 +221,6 @@ export function useAppConfigState({
     switchActiveProfile,
     sidebarCollapsed,
     toggleSidebarCollapse,
-    sidebarGrouping,
-    switchSidebarGrouping,
     bootSeed,
   };
 }

@@ -50,3 +50,4 @@ ADR-0054 的 `ShellPrefs` 已持久化 `sidebar_collapsed` / `rail_collapsed`;�
 - **CONTEXT.md 不动**:分组模式 / 搜索是 UI 偏好与导航实现,非领域术语(遵循 ADR-0060 行 70 先例);领域术语「会话」「源」「首源名」已有定义,不受影响。`recent_files` 的 `recent`(MRU 路径)与 mode `flat`(渲染)内部值解耦,无领域语言污染。
 - **视觉一致性**:active 态不再整条实心 + New 按钮不再实心 + 品牌标题 + 聊气泡行首,整体 sidebar 视觉语言从 ADR-0060 的「teal 实心强调」转向「muted/accent」;ADR-0050 的 teal `--primary` 仍用于左 2px 条 + 搜索按钮图标等次级强调(不变更 token,仅调整使用密度)。
 - **被 ADR-0127 校准**:搜索结果集合的外延收窄——归档是侧栏组织态(ADR-0127 侧车裁剪),`list_sessions` 默认不返回归档行,「空查询显示全部」中的集合随之不含归档会话;搜索字段与截断窗口机制不变,归档会话不可经搜索到达,恢复入口为侧栏归档开关。
+- **校准（分组模式退役）**:会话栏恒按 `flat` 渲染——单一「Recent」段、`last_modified_at` 倒序;`SidebarGrouping` 类型(TS union 与 Rust enum)与 `AppConfig.shell.sidebar_grouping` 字段删除,旧配置文件中的遗留值解析时忽略、下次写盘自然丢弃。搜索行与侧栏行内时间标签的「今天/昨天」词条(`formatLastModified` 域)不受影响。

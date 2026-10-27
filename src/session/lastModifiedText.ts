@@ -17,10 +17,10 @@ export function formatLastModifiedText(
 ): string {
   switch (label.kind) {
     case "today":
-      return intl.formatMessage({ id: "sidebar.group.today", defaultMessage: "Today" });
+      return intl.formatMessage({ id: "sidebar.time.today", defaultMessage: "Today" });
     case "yesterday":
       return intl.formatMessage({
-        id: "sidebar.group.yesterday",
+        id: "sidebar.time.yesterday",
         defaultMessage: "Yesterday",
       });
     case "date": {

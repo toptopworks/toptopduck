@@ -191,8 +191,6 @@ describe("SessionSidebar shell-skeleton visuals (ADR-0067, issue #171)", () => {
         onNewInWorkspace={() => {}}
         onActivate={() => {}}
         onOpenPersisted={() => {}}
-        grouping="flat"
-        onSwitchGrouping={() => {}}
         archivedSessions={[]}
         showArchived={false}
         onToggleArchived={() => {}}
@@ -235,8 +233,6 @@ describe("SessionSidebar shell-skeleton visuals (ADR-0067, issue #171)", () => {
         onNewInWorkspace={() => {}}
         onActivate={() => {}}
         onOpenPersisted={() => {}}
-        grouping="flat"
-        onSwitchGrouping={() => {}}
         archivedSessions={[]}
         showArchived={false}
         onToggleArchived={() => {}}
@@ -275,8 +271,6 @@ describe("SessionSidebar shell-skeleton visuals (ADR-0067, issue #171)", () => {
         onNewInWorkspace={() => {}}
         onActivate={() => {}}
         onOpenPersisted={() => {}}
-        grouping="flat"
-        onSwitchGrouping={() => {}}
         archivedSessions={[]}
         showArchived={false}
         onToggleArchived={() => {}}
@@ -328,8 +322,6 @@ describe("SessionSidebar shell-skeleton visuals (ADR-0067, issue #171)", () => {
         onNewInWorkspace={() => {}}
         onActivate={() => {}}
         onOpenPersisted={() => {}}
-        grouping="flat"
-        onSwitchGrouping={() => {}}
         archivedSessions={[]}
         showArchived={false}
         onToggleArchived={() => {}}
@@ -371,8 +363,6 @@ describe("SessionSidebar shell-skeleton visuals (ADR-0067, issue #171)", () => {
         onNewInWorkspace={() => {}}
         onActivate={() => {}}
         onOpenPersisted={() => {}}
-        grouping="flat"
-        onSwitchGrouping={() => {}}
         archivedSessions={[]}
         showArchived={false}
         onToggleArchived={() => {}}
@@ -431,8 +421,6 @@ describe("SessionSidebar shell-skeleton visuals (ADR-0067, issue #171)", () => {
         onNewInWorkspace={() => {}}
         onActivate={() => {}}
         onOpenPersisted={() => {}}
-        grouping="flat"
-        onSwitchGrouping={() => {}}
         archivedSessions={[]}
         showArchived={false}
         onToggleArchived={() => {}}
@@ -470,7 +458,7 @@ describe("SessionSidebar shell-skeleton visuals (ADR-0067, issue #171)", () => {
 
   it("sidebar-search-button is disabled when the shell is busy (issue #250)", () => {
     // busy shell -> disabled propagates to the search button (parity with the
-    // New button / context-menu / grouping toggle): the modal must not open
+    // New button / context-menu): the modal must not open
     // mid-resume / mid-save.
     const onOpenSearch = vi.fn();
     const { container } = renderShell(
@@ -486,8 +474,6 @@ describe("SessionSidebar shell-skeleton visuals (ADR-0067, issue #171)", () => {
         onNewInWorkspace={() => {}}
         onActivate={() => {}}
         onOpenPersisted={() => {}}
-        grouping="flat"
-        onSwitchGrouping={() => {}}
         archivedSessions={[]}
         showArchived={false}
         onToggleArchived={() => {}}
@@ -521,8 +507,6 @@ describe("SessionSidebar shell-skeleton visuals (ADR-0067, issue #171)", () => {
         onNewInWorkspace={() => {}}
         onActivate={() => {}}
         onOpenPersisted={() => {}}
-        grouping="flat"
-        onSwitchGrouping={() => {}}
         archivedSessions={[]}
         showArchived={false}
         onToggleArchived={() => {}}
@@ -553,278 +537,6 @@ describe("SessionSidebar shell-skeleton visuals (ADR-0067, issue #171)", () => {
     expect(icon).toHaveAttribute("aria-hidden", "true");
     expect(newBtn).toHaveTextContent("New session");
   });
-});
-
-describe("SessionSidebar grouping toggle (ADR-0072, issue #251)", () => {
-  // One persisted session so a group renders and the toggle's hover affordance
-  // has an anchor (the first group-title row).
-  function onePersisted(): SessionMetadata {
-    return {
-      recipe_path: "/x/solo.json",
-      display_name: "Solo",
-      last_modified_at: Date.now(),
-      source_summary: { first_source_name: null, source_count: 0, turn_count: 0 },
-      format_version: 1,
-      pinned: false,
-      archived: false,
-      workspace: null,
-    };
-  }
-
-  it("keeps the chrome row on an empty sidebar (ADR-0127 all-archived escape)", () => {
-    // ADR-0072 -> ADR-0127 recalibration: an empty sidebar renders no group
-    // title, but the chrome row (grouping + archived toggles) still renders
-    // on a bare title row -- an all-archived sidebar must keep the archived
-    // view reachable, or the hidden rows would be stranded forever.
-    const { container } = renderShell(
-      <SessionSidebar
-        collapsed={false}
-        sessions={[]}
-        sessionsLoaded={true}
-        openSessions={[]}
-        activeSessionId={null}
-        disabled={false}
-        loadError={null}
-        grouping="flat"
-        onNew={() => {}}
-        onNewInWorkspace={() => {}}
-        onActivate={() => {}}
-        onOpenPersisted={() => {}}
-        onSwitchGrouping={() => {}}
-        archivedSessions={[]}
-        showArchived={false}
-        onToggleArchived={() => {}}
-        onSetPinned={() => {}}
-        onArchive={() => {}}
-        onDelete={() => {}}
-        onRename={() => {}}
-        onClose={() => {}}
-        onOpenSearch={() => {}}
-        provider={null}
-        onOpenSettings={() => {}}
-      />,
-    );
-    expect(container.querySelector(".sidebar-grouping-toggle")).not.toBeNull();
-  });
-
-  it("reveals the toggle on the first group-title row and opens the popover on click", () => {
-    const onSwitchGrouping = vi.fn();
-    const { container } = renderShell(
-      <SessionSidebar
-        collapsed={false}
-        sessions={[onePersisted()]}
-        sessionsLoaded={true}
-        openSessions={[]}
-        activeSessionId={null}
-        disabled={false}
-        loadError={null}
-        grouping="flat"
-        onNew={() => {}}
-        onNewInWorkspace={() => {}}
-        onActivate={() => {}}
-        onOpenPersisted={() => {}}
-        onSwitchGrouping={onSwitchGrouping}
-        archivedSessions={[]}
-        showArchived={false}
-        onToggleArchived={() => {}}
-        onSetPinned={() => {}}
-        onArchive={() => {}}
-        onDelete={() => {}}
-        onRename={() => {}}
-        onClose={() => {}}
-        onOpenSearch={() => {}}
-        provider={null}
-        onOpenSettings={() => {}}
-      />,
-    );
-    // Exactly one toggle (on the first group title); flat mode renders one
-    // "Recent" group, so the toggle sits on that row.
-    const toggles = container.querySelectorAll(".sidebar-grouping-toggle");
-    expect(toggles).toHaveLength(1);
-
-    fireEvent.click(toggles[0] as HTMLButtonElement);
-
-    // Two radio options render in the Radix Popover portal (mutually-exclusive
-    // modes -> radio semantics). The flat option carries aria-checked=true (the
-    // current mode) and the trailing Check glyph; the time option is unchecked.
-    const flat = screen.getByRole("radio", { name: /In a list/i });
-    const time = screen.getByRole("radio", { name: /By time/i });
-    expect(flat).toHaveAttribute("aria-checked", "true");
-    expect(time).toHaveAttribute("aria-checked", "false");
-    expect(flat.querySelector("svg.lucide-check")).not.toBeNull();
-    expect(time.querySelector("svg.lucide-check")).toBeNull();
-
-    // Picking "By time" fires onSwitchGrouping("time") (the App wires the hook
-    // that persists the change). pick() also closes the popover, so the second
-    // option is asserted from a fresh render in the next test.
-    fireEvent.click(time);
-    expect(onSwitchGrouping).toHaveBeenCalledWith("time");
-  });
-
-  it("marks By time checked when grouping is time", () => {
-    const { container } = renderShell(
-      <SessionSidebar
-        collapsed={false}
-        sessions={[onePersisted()]}
-        sessionsLoaded={true}
-        openSessions={[]}
-        activeSessionId={null}
-        disabled={false}
-        loadError={null}
-        grouping="time"
-        onNew={() => {}}
-        onNewInWorkspace={() => {}}
-        onActivate={() => {}}
-        onOpenPersisted={() => {}}
-        onSwitchGrouping={() => {}}
-        archivedSessions={[]}
-        showArchived={false}
-        onToggleArchived={() => {}}
-        onSetPinned={() => {}}
-        onArchive={() => {}}
-        onDelete={() => {}}
-        onRename={() => {}}
-        onClose={() => {}}
-        onOpenSearch={() => {}}
-        provider={null}
-        onOpenSettings={() => {}}
-      />,
-    );
-    fireEvent.click(container.querySelector(".sidebar-grouping-toggle") as HTMLButtonElement);
-    const flat = screen.getByRole("radio", { name: /In a list/i });
-    const time = screen.getByRole("radio", { name: /By time/i });
-    expect(flat).toHaveAttribute("aria-checked", "false");
-    expect(time).toHaveAttribute("aria-checked", "true");
-    expect(time.querySelector("svg.lucide-check")).not.toBeNull();
-  });
-
-  it("carries a focus-visible outline + weak default opacity so keyboard/touch users can discover it (issue #251 review)", () => {
-    // The prior opacity-0 + group-hover-only pattern hid the trigger from
-    // non-mouse users; opacity-60 keeps it weakly visible. bareButtonReset strips
-    // the native focus ring, so focus-visible:outline-ring re-adds one (the
-    // --ring token is the project focus-indicator standard).
-    const { container } = renderShell(
-      <SessionSidebar
-        collapsed={false}
-        sessions={[onePersisted()]}
-        sessionsLoaded={true}
-        openSessions={[]}
-        activeSessionId={null}
-        disabled={false}
-        loadError={null}
-        grouping="flat"
-        onNew={() => {}}
-        onNewInWorkspace={() => {}}
-        onActivate={() => {}}
-        onOpenPersisted={() => {}}
-        onSwitchGrouping={() => {}}
-        archivedSessions={[]}
-        showArchived={false}
-        onToggleArchived={() => {}}
-        onSetPinned={() => {}}
-        onArchive={() => {}}
-        onDelete={() => {}}
-        onRename={() => {}}
-        onClose={() => {}}
-        onOpenSearch={() => {}}
-        provider={null}
-        onOpenSettings={() => {}}
-      />,
-    );
-    const trigger = container.querySelector(".sidebar-grouping-toggle") as HTMLButtonElement;
-    const classes = trigger.className.split(/\s+/);
-    // Hover-revealed posture: hidden at rest, visible on keyboard focus.
-    expect(classes).toContain("opacity-0");
-    expect(classes).toContain("group-hover:opacity-100");
-    expect(classes).toContain("focus-visible:outline-2");
-    expect(classes).toContain("focus-visible:outline-ring");
-    expect(classes).toContain("focus-visible:outline-offset-2");
-  });
-
-  it("disables the trigger and refuses to open the popover when the shell is busy (issue #251 review)", () => {
-    // busy shell -> disabled propagates to the trigger (button disabled) AND
-    // the popover must not open (Radix does not activate a disabled trigger).
-    // Matches the New button / context-menu disabled contract.
-    const onSwitchGrouping = vi.fn();
-    const { container } = renderShell(
-      <SessionSidebar
-        collapsed={false}
-        sessions={[onePersisted()]}
-        sessionsLoaded={true}
-        openSessions={[]}
-        activeSessionId={null}
-        disabled={true}
-        loadError={null}
-        grouping="flat"
-        onNew={() => {}}
-        onNewInWorkspace={() => {}}
-        onActivate={() => {}}
-        onOpenPersisted={() => {}}
-        onSwitchGrouping={onSwitchGrouping}
-        archivedSessions={[]}
-        showArchived={false}
-        onToggleArchived={() => {}}
-        onSetPinned={() => {}}
-        onArchive={() => {}}
-        onDelete={() => {}}
-        onRename={() => {}}
-        onClose={() => {}}
-        onOpenSearch={() => {}}
-        provider={null}
-        onOpenSettings={() => {}}
-      />,
-    );
-    const trigger = container.querySelector(".sidebar-grouping-toggle") as HTMLButtonElement;
-    expect(trigger).toBeDisabled();
-    fireEvent.click(trigger);
-    expect(screen.queryByRole("radio", { name: /In a list/i })).toBeNull();
-    expect(onSwitchGrouping).not.toHaveBeenCalled();
-  });
-
-  it("closes the popover on Escape (keyboard dismiss, issue #251 review)", () => {
-    // Radix Popover's onOpenChange(false) fires on Escape; this is the keyboard
-    // dismiss path for AT users. fireEvent.keyDown mirrors the alert-dialog
-    // Escape precedent (userEvent is not installed in this repo).
-    const { container } = renderShell(
-      <SessionSidebar
-        collapsed={false}
-        sessions={[onePersisted()]}
-        sessionsLoaded={true}
-        openSessions={[]}
-        activeSessionId={null}
-        disabled={false}
-        loadError={null}
-        grouping="flat"
-        onNew={() => {}}
-        onNewInWorkspace={() => {}}
-        onActivate={() => {}}
-        onOpenPersisted={() => {}}
-        onSwitchGrouping={() => {}}
-        archivedSessions={[]}
-        showArchived={false}
-        onToggleArchived={() => {}}
-        onSetPinned={() => {}}
-        onArchive={() => {}}
-        onDelete={() => {}}
-        onRename={() => {}}
-        onClose={() => {}}
-        onOpenSearch={() => {}}
-        provider={null}
-        onOpenSettings={() => {}}
-      />,
-    );
-    const trigger = container.querySelector(".sidebar-grouping-toggle") as HTMLButtonElement;
-    fireEvent.click(trigger);
-    const flat = screen.getByRole("radio", { name: /In a list/i });
-    expect(flat).toBeInTheDocument();
-
-    fireEvent.keyDown(flat, { key: "Escape" });
-    expect(screen.queryByRole("radio", { name: /In a list/i })).toBeNull();
-  });
-
-  // ADR-0093 (issue #511): the context-menu click-away + Escape tests are
-  // retired — the ⋯ context menu + its hand-positioned dismissal logic moved
-  // to .session-header (slice 2, #512).
 });
 
 describe("SessionSidebar settings footer (issue #282)", () => {
@@ -863,8 +575,6 @@ describe("SessionSidebar settings footer (issue #282)", () => {
         onNewInWorkspace={() => {}}
         onActivate={() => {}}
         onOpenPersisted={() => {}}
-        grouping="flat"
-        onSwitchGrouping={() => {}}
         archivedSessions={[]}
         showArchived={false}
         onToggleArchived={() => {}}
@@ -920,8 +630,6 @@ describe("SessionSidebar pending-approval coloring (ADR-0083, issue #297)", () =
       onNewInWorkspace: () => {},
       onActivate: () => {},
       onOpenPersisted: () => {},
-      grouping: "flat" as const,
-      onSwitchGrouping: () => {},
       archivedSessions: [],
       showArchived: false,
       onToggleArchived: () => {},
@@ -983,8 +691,6 @@ describe("SessionSidebar turn-failed coloring (issue #1005)", () => {
       onNewInWorkspace: () => {},
       onActivate: () => {},
       onOpenPersisted: () => {},
-      grouping: "flat" as const,
-      onSwitchGrouping: () => {},
       archivedSessions: [],
       showArchived: false,
       onToggleArchived: () => {},
@@ -1091,8 +797,6 @@ describe("SessionSidebar hover card content (ADR-0093, issue #513)", () => {
       onNewInWorkspace: () => {},
       onActivate: () => {},
       onOpenPersisted: () => {},
-      grouping: "flat" as const,
-      onSwitchGrouping: () => {},
       archivedSessions: [],
       showArchived: false,
       onToggleArchived: () => {},
@@ -1369,12 +1073,10 @@ describe("SessionSidebar organization (ADR-0127, issue #1175)", () => {
       activeSessionId: null,
       disabled: false,
       loadError: null,
-      grouping: "flat" as const,
       onNew: () => {},
       onNewInWorkspace: () => {},
       onActivate: () => {},
       onOpenPersisted: () => {},
-      onSwitchGrouping: () => {},
       archivedSessions: [],
       showArchived: false,
       onToggleArchived: () => {},
@@ -1406,29 +1108,27 @@ describe("SessionSidebar organization (ADR-0127, issue #1175)", () => {
     ).map((li) => li.dataset.section ?? "");
   }
 
-  it("renders the pinned section above the grouped body in BOTH modes, server order (ADR-0127 Decision 5)", () => {
-    for (const grouping of ["flat", "time"] as const) {
-      const { container } = renderShell(
-        <SessionSidebar {...orgProps({ sessions: pinnedMeta(), grouping })} />,
-      );
-      const sections = container.querySelectorAll<HTMLElement>(
-        ".session-list > .session-group",
-      );
-      expect(sections[0].dataset.section).toBe("pinned");
-      // Array order (Pin Old before Pin New), NOT mtime order.
-      const names = Array.from(
-        sections[0].querySelectorAll(".session-name"),
-      ).map((n) => n.textContent);
-      expect(names).toEqual(["Pin Old", "Pin New"]);
-      // The permanent workspaces head sits between pinned and the body.
-      expect(sections[1].dataset.section).toBe("workspaces");
-      // The body keeps its own first section; the pinned rows are gone from it.
-      expect(sections[2].dataset.section).not.toBe("pinned");
-      const bodyNames = Array.from(
-        sections[2].querySelectorAll(".session-name"),
-      ).map((n) => n.textContent);
-      expect(bodyNames).toEqual(["Plain"]);
-    }
+  it("renders the pinned section above the recent body, server order (ADR-0127 Decision 5)", () => {
+    const { container } = renderShell(
+      <SessionSidebar {...orgProps({ sessions: pinnedMeta() })} />,
+    );
+    const sections = container.querySelectorAll<HTMLElement>(
+      ".session-list > .session-group",
+    );
+    expect(sections[0].dataset.section).toBe("pinned");
+    // Array order (Pin Old before Pin New), NOT mtime order.
+    const names = Array.from(
+      sections[0].querySelectorAll(".session-name"),
+    ).map((n) => n.textContent);
+    expect(names).toEqual(["Pin Old", "Pin New"]);
+    // The permanent workspaces head sits between pinned and the body.
+    expect(sections[1].dataset.section).toBe("workspaces");
+    // The body keeps its own first section; the pinned rows are gone from it.
+    expect(sections[2].dataset.section).not.toBe("pinned");
+    const bodyNames = Array.from(
+      sections[2].querySelectorAll(".session-name"),
+    ).map((n) => n.textContent);
+    expect(bodyNames).toEqual(["Plain"]);
   });
 
   it("omits the pinned section when no rows are pinned (empty-collection rule)", () => {
@@ -1620,12 +1320,10 @@ describe("SessionSidebar row actions menu (ADR-0133, issue #1319)", () => {
       activeSessionId: null,
       disabled: false,
       loadError: null,
-      grouping: "flat" as const,
       onNew: () => {},
       onNewInWorkspace: () => {},
       onActivate: () => {},
       onOpenPersisted: () => {},
-      onSwitchGrouping: () => {},
       archivedSessions: [],
       showArchived: false,
       onToggleArchived: () => {},
@@ -1825,12 +1523,10 @@ describe("SessionSidebar archived-view gating (issue #1175)", () => {
       activeSessionId: null,
       disabled: false,
       loadError: null,
-      grouping: "flat" as const,
       onNew: () => {},
       onNewInWorkspace: () => {},
       onActivate: () => {},
       onOpenPersisted: () => {},
-      onSwitchGrouping: () => {},
       archivedSessions: [archived],
       showArchived,
       onToggleArchived: () => {},
@@ -1884,14 +1580,12 @@ describe("SessionSidebar workspace section (issue #1392)", () => {
       activeSessionId: null,
       disabled: false,
       loadError: null,
-      grouping: "flat",
       archivedSessions: [],
       showArchived: false,
       onNew: () => {},
       onNewInWorkspace: vi.fn(),
       onActivate: () => {},
       onOpenPersisted: () => {},
-      onSwitchGrouping: () => {},
       onToggleArchived: () => {},
       onSetPinned: () => {},
       onArchive: () => {},

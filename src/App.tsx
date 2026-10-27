@@ -208,8 +208,6 @@ export default function App() {
     switchActiveProfile,
     sidebarCollapsed,
     toggleSidebarCollapse,
-    sidebarGrouping,
-    switchSidebarGrouping,
     bootSeed,
   } = useAppConfigState({ setShellError });
 
@@ -1032,7 +1030,6 @@ export default function App() {
                   activeSessionId={activeSessionId}
                   disabled={busy}
                   loadError={sessionsError}
-                  grouping={sidebarGrouping}
                   pendingApprovalSids={approvalEvents.pendingApprovalSids}
                   turnFailedSids={turnFailureSids}
                   onNew={goToEmptyState}
@@ -1048,7 +1045,6 @@ export default function App() {
                   onActivate={activateSession}
                   onOpenPersisted={(path, name) =>
                     void openPersisted(path, name)}
-                  onSwitchGrouping={switchSidebarGrouping}
                   archivedSessions={archivedSessions}
                   showArchived={showArchived}
                   onToggleArchived={() => setShowArchived((v) => !v)}
