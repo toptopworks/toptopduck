@@ -77,7 +77,7 @@ export interface SidebarEntry {
   /** Productive turn count, surfaced in the sidebar row's HoverCard. */
   turnCount: number;
   /** last_modified_at, ms since epoch. A never-saved session has no mtime, so
-   *  the caller stamps it at creation to land under "Today" at the top. */
+   *  the caller stamps it at creation to land at the top of the Recent list. */
   lastModifiedAt: number;
 }
 
@@ -93,9 +93,9 @@ const MS_PER_DAY = 86_400_000;
  *  growing unbounded. */
 export const MAX_SEARCH_RESULTS = 9;
 
-/** The section preview cap (issue #1392, the WorkBuddy precedent): the
- *  recent body's groups and a workspace subtree show their freshest 5 rows
- *  by default; a "Show more (N)" tail expands the rest. */
+/** The section preview cap (issue #1392, the WorkBuddy precedent): the recent
+ *  body and a workspace subtree show their freshest 5 rows by default; a
+ *  "Show more (N)" tail expands the rest. */
 export const SIDEBAR_PREVIEW_CAP = 5;
 
 function startOfCalendarDay(ms: number): number {

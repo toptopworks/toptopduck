@@ -490,7 +490,7 @@ describe("SessionSearchDialog (ADR-0072, issue #252)", () => {
   });
 
   it("formats today / yesterday time labels via the localized heading words", () => {
-    // The today / yesterday arms of formatLastModifiedText reuse the sidebar-group
+    // The today / yesterday arms of formatLastModifiedText reuse the sidebar-time
     // locale message ids; with the empty test catalog the en defaultMessage
     // ("Today" / "Yesterday") surfaces. Pins the relative-day half of the
     // time label so a regression on the message id or the classification

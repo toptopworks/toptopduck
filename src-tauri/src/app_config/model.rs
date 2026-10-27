@@ -215,13 +215,11 @@ fn default_export_format() -> String {
     "csv".to_string()
 }
 
-/// Shell collapse preferences (ADR-0054, issue #84). The two manual collapse
-/// levels that are UI state (NOT the third -- Tauri minWidth/minHeight, which is
-/// a native window config, not a preference): the session sidebar (full hide +
-/// topbar call-out) and the thread rail (workspace goes full-width). Both
-/// default expanded; both persist across restarts via app-config (ADR-0038),
-/// alongside theme / locale. The two stack -- a user may
-/// collapse either, both, or neither independently.
+/// Shell collapse preferences (ADR-0054, issue #84). The manual collapse level
+/// that is UI state (NOT Tauri minWidth/minHeight, which is a native window
+/// config, not a preference): the session sidebar (full hide + topbar
+/// call-out). Defaults expanded; persists across restarts via app-config
+/// (ADR-0038), alongside theme / locale.
 ///
 /// The sidebar's flat/time grouping mode (ADR-0072, issue #251) was retired
 /// with #1401 (the sidebar always renders the mtime-descending "Recent" list,
@@ -956,11 +954,13 @@ mod tests {
         // including ones that were never legal -- is ignored at parse and
         // dropped on the next write (the `statement_timeout_ms` precedent).
         // Pin the full ignore -> rewrite-drops cycle so the retirement stays
-        // zero-migration.
+        // zero-migration. The companion collapse value is non-default so a
+        // regression that swallows the whole shell block into defaults also
+        // trips this pin.
         let json =
-            r#"{"format_version":2,"shell":{"sidebar_collapsed":false,"sidebar_grouping":"time"}}"#;
+            r#"{"format_version":2,"shell":{"sidebar_collapsed":true,"sidebar_grouping":"time"}}"#;
         let cfg: AppConfig = serde_json::from_str(json).expect("legacy key is ignored");
-        assert_eq!(cfg.shell, ShellPrefs::default());
+        assert!(cfg.shell.sidebar_collapsed);
         let rewritten = serde_json::to_string(&cfg).expect("serialize");
         assert!(
             !rewritten.contains("sidebar_grouping"),
@@ -993,11 +993,11 @@ mod tests {
     }
 
     #[test]
-    fn shell_prefs_partial_deserialize_fills_missing_collapse() {
+    fn shell_prefs_partial_deserialize_accepts_empty_object() {
         // A partial `shell` object (the key present but collapsed absent) must
-        // fill the missing field from default, not reject. The field carries
-        // its own #[serde(default)], so a future addition to ShellPrefs is also
-        // forward-compat at the field level.
+        // be accepted, filling the missing field from default rather than
+        // rejecting. The field carries its own #[serde(default)], so a future
+        // addition to ShellPrefs is also forward-compat at the field level.
         let json = r#"{"format_version":1,"shell":{}}"#;
         let cfg: AppConfig = serde_json::from_str(json).expect("partial shell deserialize");
         assert_eq!(cfg.shell, ShellPrefs::default());

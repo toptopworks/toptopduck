@@ -57,10 +57,10 @@ export interface Tunables {
   far_window: number;
 }
 
-// Shell collapse preferences (ADR-0054, issue #84). The two MANUAL collapse
-// levels that are UI state (not the third -- Tauri minWidth/minHeight, a native
-// window config not a preference): session sidebar + thread rail. Both default
-// expanded; both persist via app-config (ADR-0038) and stack independently.
+// Shell collapse preferences (ADR-0054, issue #84). The MANUAL collapse level
+// that is UI state (not Tauri minWidth/minHeight, a native window config not a
+// preference): the session sidebar. Defaults expanded; persists via app-config
+// (ADR-0038).
 // The sidebar's flat/time grouping mode (ADR-0072, issue #251) was retired
 // with #1401 (the sidebar always renders the mtime-descending "Recent" list,
 // ADR-0060 recalibration): a legacy `sidebar_grouping` key in an older config

@@ -175,8 +175,7 @@ export function SessionSidebar({
   const intl = useIntl();
   // Capture "now" and refresh every 60 s so the sidebar row relative-time
   // display (issue #513) stays current without calling Date.now in render
-  // (react-hooks/purity). The calendar-day buckets are also stable enough at
-  // this granularity; a cross-midnight drift refreshes on the next tick.
+  // (react-hooks/purity); a cross-midnight drift refreshes on the next tick.
   const [now, setNow] = useState(() => Date.now());
   useEffect(() => {
     const id = setInterval(() => setNow(Date.now()), 60_000);
@@ -368,8 +367,8 @@ export function SessionSidebar({
         />
       );
     }
-    // The section preview cap (issue #1392): the recent body's groups show
-    // their freshest 5 rows, a "Show more (N)" tail expands the rest. The
+    // The section preview cap (issue #1392): the recent body shows its
+    // freshest 5 rows, a "Show more (N)" tail expands the rest. The
     // pinned / archived sections are uncapped.
     const collapsed = collapsedSections.has(section.key);
     const capped =

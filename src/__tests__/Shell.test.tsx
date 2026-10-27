@@ -2222,7 +2222,8 @@ describe("App shell window collapse + drag-drop bisection (issue #84)", () => {
     );
     render(<App />);
     // Wait for getAppConfig to resolve AND the mount effect's .then to set
-    // appConfigRef.current (commitShellPrefs is a no-op until the ref lands).
+    // appConfigRef.current (the collapse persist is a no-op until the ref
+    // lands).
     await waitFor(() => expect(getAppConfig).toHaveBeenCalled());
     await act(async () => {
       await new Promise((r) => setTimeout(r, 0));
@@ -2232,7 +2233,7 @@ describe("App shell window collapse + drag-drop bisection (issue #84)", () => {
     await waitFor(() =>
       expect(setAppConfig).toHaveBeenCalledWith(
         expect.objectContaining({
-          shell: expect.objectContaining({ sidebar_collapsed: true }),
+          shell: { sidebar_collapsed: true },
         }),
       ),
     );

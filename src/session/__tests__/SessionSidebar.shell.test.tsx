@@ -167,8 +167,8 @@ function renderShell(ui: ReactElement) {
 }
 
 // Two never-saved open sessions: the active one carries .active.open; the other
-// carries .open:not(.active). Both land in the Today group (buildSidebarModel
-// stamps `now` for unsaved sessions).
+// carries .open:not(.active). Both land at the top of the Recent list
+// (buildSidebarModel stamps `now` for unsaved sessions).
 function twoOpenSessions(): OpenSession[] {
   return [
     { sid: "sess-active", name: "Active", path: "/sessions/sess-active/recipe.json", pendingIngestPaths: [], pendingQuestion: null, pendingSkillInvocations: [] },
@@ -2023,14 +2023,21 @@ describe("SessionSidebar workspace section (issue #1392)", () => {
     expect(screen.getByText("Show more (2)")).toBeInTheDocument();
   });
 
-  it("caps each recent-body group at 5 with the Show more tail", async () => {
-    const members = Array.from({ length: 7 }, (_, i) =>
-      metaRow(`/r${i}.json`, `r${i}`),
-    );
+  it("caps the recent-body preview at 5 with the Show more tail, freshest first", async () => {
+    // Descending mtimes (r0 freshest) pin the flat Recent body's row order
+    // under the cap; the model test pins the sort itself.
+    const members = Array.from({ length: 7 }, (_, i) => ({
+      ...metaRow(`/r${i}.json`, `r${i}`),
+      last_modified_at: Date.now() - i * 60_000,
+    }));
     const { container } = renderShell(
       <SessionSidebar {...wsProps({ sessions: members })} />,
     );
-    expect(container.querySelectorAll(".session-entry-main")).toHaveLength(5);
+    const cappedRows = [...container.querySelectorAll(".session-entry-main")];
+    expect(cappedRows).toHaveLength(5);
+    ["r0", "r1", "r2", "r3", "r4"].forEach((name, i) => {
+      expect(cappedRows[i].textContent).toContain(name);
+    });
     fireEvent.click(screen.getByText("Show more (2)"));
     expect(container.querySelectorAll(".session-entry-main")).toHaveLength(7);
   });

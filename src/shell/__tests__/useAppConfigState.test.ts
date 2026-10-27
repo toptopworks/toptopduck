@@ -170,7 +170,7 @@ describe("useAppConfigState", () => {
     expect(result.current.appConfig?.provider.active_profile).toBe("other");
   });
 
-  it("toggleSidebarCollapse flips sidebar state + persists both shell prefs (ADR-0054)", async () => {
+  it("toggleSidebarCollapse flips sidebar state + persists the shell pref (ADR-0054)", async () => {
     const cfg = baseAppConfig({ sidebar_collapsed: false });
     vi.mocked(getAppConfig).mockResolvedValue(cfg);
     const { result } = renderAppConfigState();
@@ -183,7 +183,7 @@ describe("useAppConfigState", () => {
     expect(result.current.sidebarCollapsed).toBe(true);
     expect(setAppConfig).toHaveBeenCalledWith(
       expect.objectContaining({
-        shell: expect.objectContaining({ sidebar_collapsed: true }),
+        shell: { sidebar_collapsed: true },
       }),
     );
   });
