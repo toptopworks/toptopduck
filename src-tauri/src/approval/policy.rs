@@ -56,10 +56,16 @@ pub fn classify(key: &ToolKey, mode: AuthMode, trust: &HashSet<ToolKey>) -> Clas
 
 /// The built-in tools that gate anyway (ADR-0122 Decision 3): their writes
 /// outlive the session, so they never ride ADR-0080 Decision 1's
-/// zero-approval builtin pass. An explicit enumerated family, not a naming
-/// convention.
+/// zero-approval builtin pass. The workspace write tools (`write` / `edit`,
+/// issue #1406) join the family -- a file written into the session
+/// workspace persists across sessions exactly like a minted skill. An
+/// explicit enumerated family, not a naming convention.
 fn is_gated_builtin(key: &ToolKey) -> bool {
-    key == &ToolKey::builtin(crate::skills::create::CREATE_SKILL)
+    if key == &ToolKey::builtin(crate::skills::create::CREATE_SKILL) {
+        return true;
+    }
+    key == &ToolKey::builtin(crate::session::workspace_tools::WRITE_TOOL)
+        || key == &ToolKey::builtin(crate::session::workspace_tools::EDIT_TOOL)
 }
 
 #[cfg(test)]
@@ -123,6 +129,36 @@ mod tests {
             Classification::NeedsApproval,
             "trust is per server::tool, not per tool name"
         );
+    }
+
+    /// The workspace write tools (issue #1406) ride the same gated-builtin
+    /// family as create_skill: their writes persist across sessions (a file
+    /// in the session workspace), so the builtin zero-approval pass never
+    /// covers them -- per-call card, session trust, no-confirmation posture.
+    #[test]
+    fn classify_gates_the_workspace_write_tools_despite_the_builtin_pass() {
+        for name in [
+            crate::session::workspace_tools::WRITE_TOOL,
+            crate::session::workspace_tools::EDIT_TOOL,
+        ] {
+            let key = ToolKey::builtin(name);
+            assert_eq!(
+                classify(&key, AuthMode::PerCall, &HashSet::new()),
+                Classification::NeedsApproval,
+                "an untrusted {name} gates"
+            );
+            let trust = HashSet::from([key.clone()]);
+            assert_eq!(
+                classify(&key, AuthMode::PerCall, &trust),
+                Classification::Allow,
+                "an always-allowed {name} passes"
+            );
+            assert_eq!(
+                classify(&key, AuthMode::NoConfirmation, &HashSet::new()),
+                Classification::Allow,
+                "the no-confirmation posture keeps its universal auto-pass"
+            );
+        }
     }
 
     #[test]

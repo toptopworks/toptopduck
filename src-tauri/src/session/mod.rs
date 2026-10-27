@@ -27,6 +27,7 @@ mod sql_assets;
 pub(crate) mod turn_dispatch;
 pub mod turn_runner;
 pub(crate) mod workspace;
+pub(crate) mod workspace_tools;
 
 use std::collections::HashMap;
 use std::fs;
