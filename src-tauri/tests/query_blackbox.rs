@@ -864,7 +864,8 @@ fn every_turn_is_recorded_in_the_conversation_thread_in_order() {
 // fake provider captures -- the highest seam (PRD testing philosophy: assert
 // the payload shape). The windowed context rides the system prompt's schema
 // block (datasets + samples + active pointer) and the message array (history
-// turns + the asking question); the tool table advertises the four built-ins.
+// turns + the asking question); the tool table advertises the built-in
+// family.
 
 #[test]
 fn window_assembler_windows_history_and_samples_via_fake_provider() {
@@ -890,8 +891,8 @@ fn window_assembler_windows_history_and_samples_via_fake_provider() {
     let buf = captured.lock().expect("capture lock");
     let payload = request_for(&buf, "probe");
 
-    // The built-in tool table (ADR-0076) is advertised every turn,
-    // closing with the artifact-delivery meta-tool (ADR-0124).
+    // The built-in tool table (ADR-0076) is advertised every turn, closing
+    // with the workspace write pair (issue #1406).
     let tool_names: Vec<&str> = payload.tools.iter().map(|t| t.name.as_str()).collect();
     assert_eq!(
         tool_names,
@@ -900,7 +901,9 @@ fn window_assembler_windows_history_and_samples_via_fake_provider() {
             "materialize",
             "describe",
             "sample",
-            "present_files"
+            "present_files",
+            "write",
+            "edit"
         ]
     );
 

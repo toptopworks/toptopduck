@@ -56,9 +56,9 @@ pub(crate) fn is_workspace_tool(name: &str) -> bool {
 }
 
 /// Cap on one model-emitted text payload (`content`, `old_string`,
-/// `new_string`), issue #1406: aligned with the read family's 50 KiB scale so
-/// a tool result riding the LLM context stays model-sized.
-pub(crate) const CONTENT_MAX_BYTES: usize = 50 * 1024;
+/// `new_string`), the issue #1406 landed value: keeps one model-emitted
+/// body model-sized.
+const CONTENT_MAX_BYTES: usize = 50 * 1024;
 
 /// Build the [`ToolDefinition`] for the `write` tool: whole-file replacement
 /// (or creation) inside the session workspace.
@@ -325,7 +325,7 @@ pub(crate) fn dispatch_workspace_tool(
                 summary: plan.summary.clone(),
                 task: None,
             });
-            let (result, excerpt) = match execute(&plan) {
+            let (result, excerpt) = match execute(&plan, workspace) {
                 Ok(payload) => (
                     ToolResult {
                         tool_use_id: call.id.clone(),
@@ -376,10 +376,23 @@ pub(crate) fn dispatch_workspace_tool(
 /// a workspace and writing the SAME file concurrently race the temp like any
 /// last-writer-wins file edit outside the app; the app's own single-writer
 /// domains (recipe / app-config) keep their dedicated guards.
-fn execute(plan: &WritePlan) -> Result<Value, String> {
+///
+/// The parent is re-verified against the workspace under the approval
+/// window: a symlink planted between resolve and execute must not carry
+/// the temp file outside (the same escape AC, raced).
+fn execute(plan: &WritePlan, workspace: Option<&Path>) -> Result<Value, String> {
     if let Some(parent) = plan.target.parent() {
         std::fs::create_dir_all(parent)
             .map_err(|e| format!("creating the parent directory failed: {e}"))?;
+        if let (Some(workspace), Ok(resolved)) = (workspace, std::fs::canonicalize(parent)) {
+            if !resolved.starts_with(workspace) {
+                return Err(format!(
+                    "the target's directory {} resolved outside the session \
+                     workspace during approval; re-run the call",
+                    resolved.display()
+                ));
+            }
+        }
     }
     write_str_atomic(&plan.target, &plan.content, WritePerms::Default)
         .map_err(|e| format!("writing {} failed: {e}", plan.target.display()))?;
@@ -457,12 +470,7 @@ fn resolve_in_workspace(workspace: &Path, requested: &str) -> Result<PathBuf, St
         workspace.join(requested)
     };
     if let Ok(existing) = std::fs::canonicalize(&candidate) {
-        if existing.is_dir() {
-            return Err(format!(
-                "`{requested}` resolves to a directory; name a file"
-            ));
-        }
-        return in_bounds(workspace, existing, requested);
+        return leaf_check(workspace, existing, requested);
     }
     let Some((ancestor, tail)) = nearest_existing_ancestor(&candidate) else {
         return Err(format!(
@@ -470,17 +478,37 @@ fn resolve_in_workspace(workspace: &Path, requested: &str) -> Result<PathBuf, St
              use a path inside the workspace"
         ));
     };
-    let Some(joined) = join_normalized(&ancestor, &tail) else {
+    let joined = join_normalized(&ancestor, &tail);
+    // The folded spelling can itself name an existing entity: a tail whose
+    // `..` components folded down to a symlink planted inside the workspace
+    // resolves whole, exactly like an existing leaf, so the compare follows
+    // the link instead of the spelling (issue #1406's escape AC).
+    if let Ok(existing) = std::fs::canonicalize(&joined) {
+        return leaf_check(workspace, existing, requested);
+    }
+    // Or a not-yet-existing tail over such a link: re-anchor on the folded
+    // path's own nearest existing ancestor (canonical, symlinks resolved)
+    // before the compare -- the tail's normal components are links the
+    // first anchor walk never saw.
+    let Some((reanchor, retail)) = nearest_existing_ancestor(&joined) else {
         return Err(format!(
-            "`{requested}` escapes its root; use a path inside the workspace"
+            "`{requested}` cannot be resolved to an existing location; \
+             use a path inside the workspace"
         ));
     };
-    if joined.is_dir() {
+    let target = join_normalized(&reanchor, &retail);
+    leaf_check(workspace, target, requested)
+}
+
+/// The shared final check for an existing (or fully re-anchored) target: a
+/// file, and inside the workspace by the resolved spelling.
+fn leaf_check(workspace: &Path, target: PathBuf, requested: &str) -> Result<PathBuf, String> {
+    if target.is_dir() {
         return Err(format!(
             "`{requested}` resolves to a directory; name a file"
         ));
     }
-    in_bounds(workspace, joined, requested)
+    in_bounds(workspace, target, requested)
 }
 
 /// The domain check proper: component-wise containment in the canonical
@@ -500,8 +528,7 @@ fn in_bounds(workspace: &Path, resolved: PathBuf, requested: &str) -> Result<Pat
 
 /// Walk up from `candidate` to the nearest EXISTING ancestor, returning its
 /// canonical spelling plus the not-yet-existing tail to rejoin. `None` when
-/// no ancestor resolves at all (an unmounted volume, a verbatim spelling
-/// whose case no longer matches the disk).
+/// no ancestor resolves at all (an unmounted volume).
 fn nearest_existing_ancestor(candidate: &Path) -> Option<(PathBuf, PathBuf)> {
     let total = candidate.components().count();
     let mut ancestor = candidate.parent()?;
@@ -517,10 +544,12 @@ fn nearest_existing_ancestor(candidate: &Path) -> Option<(PathBuf, PathBuf)> {
 }
 
 /// Rejoin `tail` onto the canonical `ancestor` with `.` / `..` lexically
-/// resolved. `None` when a `..` pops past the anchor (an escape). A `..` at
+/// resolved: `.` dropped, a `..` pops one normal component, and a `..` at
 /// the anchor's root is a no-op (the filesystem treats a root's parent as
-/// itself), matching POSIX.
-fn join_normalized(ancestor: &Path, tail: &Path) -> Option<PathBuf> {
+/// itself), matching POSIX. This is pure lexical folding -- whether the
+/// result sits inside the workspace is decided by the component-wise
+/// compare in `in_bounds`, never here.
+fn join_normalized(ancestor: &Path, tail: &Path) -> PathBuf {
     let mut out: Vec<Component<'_>> = ancestor.components().collect();
     for component in tail.components() {
         match component {
@@ -533,7 +562,7 @@ fn join_normalized(ancestor: &Path, tail: &Path) -> Option<PathBuf> {
             other => out.push(other),
         }
     }
-    Some(out.into_iter().collect())
+    out.into_iter().collect()
 }
 
 /// The bool twin of [`get_str`]: absent or null means the parameter's
@@ -799,12 +828,13 @@ mod tests {
         assert_eq!(plan.target, absolute);
     }
 
-    /// The workspace itself (or any directory) is not a writable target.
+    /// The workspace itself (or any directory) is not a writable target --
+    /// including a spelling whose missing prefix folds down to one.
     #[test]
     fn resolve_write_refuses_a_directory_target() {
         let (dir, ws) = ws_dir();
         std::fs::create_dir_all(dir.path().join("sub")).unwrap();
-        for path in [".", "sub"] {
+        for path in [".", "sub", "missing/../sub"] {
             let message = refused(resolve_write(&write_call(path, "x"), Some(&ws)));
             assert!(message.contains("directory"), "`{path}`: {message}");
         }
@@ -827,6 +857,164 @@ mod tests {
             message.contains("outside the session workspace"),
             "{message}"
         );
+    }
+
+    /// The same planted link reached through a folded spelling: a missing
+    /// prefix plus a `..` folds down to the link name, and the folded
+    /// spelling -- whether it lands ON the link or a not-yet-existing tail
+    /// UNDER it -- must resolve through the link and fail the compare, not
+    /// pass it lexically (the review-found bypass).
+    #[test]
+    #[cfg(unix)]
+    fn resolve_write_refuses_a_symlink_escape_through_a_folded_tail() {
+        use std::os::unix::fs::symlink;
+        let outside = TempDir::new().unwrap();
+        let outside_file = outside.path().join("secret.txt");
+        std::fs::write(&outside_file, "secret").unwrap();
+        let (dir, ws) = ws_dir();
+        symlink(&outside_file, dir.path().join("alias.txt")).unwrap();
+        for path in ["missing/../alias.txt", "missing/../alias.txt/new.txt"] {
+            let message = refused(resolve_write(&write_call(path, "x"), Some(&ws)));
+            assert!(
+                message.contains("outside the session workspace"),
+                "`{path}`: {message}"
+            );
+        }
+    }
+
+    /// (Windows) Create a junction (no privilege needed, unlike a true
+    /// symlink) via the shell's `mklink /J` -- the test-only local analog
+    /// of the unix symlink pins.
+    #[cfg(windows)]
+    fn mklink_junction(link: &std::path::Path, target: &std::path::Path) -> std::io::Result<()> {
+        let output = std::process::Command::new("cmd")
+            .args(["/C", "mklink", "/J"])
+            .arg(link)
+            .arg(target)
+            .output()?;
+        if output.status.success() {
+            Ok(())
+        } else {
+            Err(std::io::Error::other(format!(
+                "mklink /J failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            )))
+        }
+    }
+
+    /// (Windows) The folded-tail escape on the junction analog of a
+    /// symlink: a missing prefix plus a `..` folds down to a junction
+    /// planted inside the workspace, and whether the folded spelling lands
+    /// ON the link or a not-yet-existing tail UNDER it, the resolve must
+    /// follow the junction and fail the compare -- not pass it lexically
+    /// (the review-found bypass; junctions need no privilege to create, so
+    /// this leg pins the fix locally, not only on CI).
+    #[test]
+    #[cfg(windows)]
+    fn resolve_write_refuses_a_junction_escape_through_a_folded_tail() {
+        let outside = TempDir::new().unwrap();
+        std::fs::write(outside.path().join("secret.txt"), "secret").unwrap();
+        let (dir, ws) = ws_dir();
+        mklink_junction(&dir.path().join("alias_dir"), outside.path()).unwrap();
+        // A not-yet-existing tail under the folded-down junction: the
+        // folded spelling resolves through the junction and the compare
+        // fails. A RELATIVE spelling gets pre-folded by `Path::join`
+        // itself (probe-verified: join lexically folds `missing/..`), so
+        // the tail-folding leg is only reachable through an ABSOLUTE
+        // spelling that keeps its `..` components verbatim.
+        let absolute = format!("{}\\missing\\..\\alias_dir\\new.txt", ws.to_string_lossy());
+        let message = refused(resolve_write(&write_call(&absolute, "x"), Some(&ws)));
+        assert!(
+            message.contains("outside the session workspace"),
+            "{message}"
+        );
+        // The relative spelling still names the junction's tail: the
+        // direct candidate leg resolves the junction too.
+        let message = refused(resolve_write(
+            &write_call("alias_dir/new.txt", "x"),
+            Some(&ws),
+        ));
+        assert!(
+            message.contains("outside the session workspace"),
+            "{message}"
+        );
+        // The fold landing ON the junction: a directory target, refused
+        // as one.
+        let message = refused(resolve_write(
+            &write_call("missing/../alias_dir", "x"),
+            Some(&ws),
+        ));
+        assert!(message.contains("directory"), "{message}");
+    }
+
+    /// (Windows) A junction planted during the approval window under the
+    /// target's parent directory: execute re-verifies the parent against
+    /// the workspace and refuses -- the race cannot carry the temp file
+    /// outside.
+    #[test]
+    #[cfg(windows)]
+    fn dispatch_refuses_when_a_parent_becomes_a_junction_during_approval() {
+        let mut fixture = DepsFixture::new();
+        std::fs::create_dir(fixture.workspace_dir.path().join("pkg")).unwrap();
+        let outside = TempDir::new().unwrap();
+        let ws_root = fixture.workspace_dir.path().to_path_buf();
+        let outside_root = outside.path().to_path_buf();
+        let approval = Arc::new(ApprovalState::new());
+        let sink = Arc::new(RecordingSink::default());
+        let cancel = CancelToken::new();
+        let approval_c = Arc::clone(&approval);
+        let sink_c = Arc::clone(&sink);
+        let responder = std::thread::spawn(move || {
+            let body = poll_body(&sink_c, std::time::Duration::from_secs(2))
+                .expect("the gate emitted an approval request");
+            // The approval window: swap the target's parent directory for
+            // a junction pointing outside. Any swap failure still answers
+            // (deny) so the parked gate never deadlocks; the assertions
+            // below then fail on the wrong outcome instead of hanging.
+            let swapped = (|| {
+                std::fs::rename(ws_root.join("pkg"), outside_root.join("pkg"))?;
+                mklink_junction(&ws_root.join("pkg"), &outside_root.join("pkg"))
+            })();
+            if swapped.is_err() {
+                eprintln!("junction swap failed: {swapped:?}");
+            }
+            let id = uuid::Uuid::parse_str(&body.request_id).expect("request id parses");
+            let answer = if swapped.is_ok() {
+                ApprovalResponse::AllowOnce
+            } else {
+                ApprovalResponse::Deny
+            };
+            approval_c.respond(id, answer).expect("respond ok");
+        });
+        let gate = GateCtx {
+            approval: &approval,
+            sink: &*sink,
+            cancel: &cancel,
+        };
+        let phases = Mutex::new(Vec::new());
+        let mut on_phase = |p: TurnPhase| phases.lock().unwrap().push(p);
+        let outcome = dispatch_workspace_tool(
+            &write_call("pkg/script.py", "print('ok')"),
+            &fixture.deps(),
+            &gate,
+            &mut on_phase,
+            None,
+        );
+        responder.join().expect("responder thread");
+        let (result, entry, _) = outcome.expect("the dispatch completes");
+        assert!(result.is_error, "{}", result.content);
+        assert!(
+            result
+                .content
+                .contains("outside the session workspace during approval"),
+            "{}",
+            result.content
+        );
+        assert!(
+            !outside.path().join("pkg/script.py").exists(),
+            "nothing landed outside the workspace"
+        );
+        assert!(!entry.expect("a failed execute records an entry").success);
     }
 
     /// (Windows) A verbatim `\\?\` spelling of an in-workspace path -- the
@@ -1123,6 +1311,38 @@ mod tests {
         assert_eq!(body.tool, WRITE_TOOL);
         assert_eq!(body.server, "builtin");
         assert_eq!(body.operation_kind, OperationKind::Write);
+        // The card carries the whole `content` as its attachment (the
+        // approver sees the exact bytes that will land).
+        let attachment = body
+            .file_attachments
+            .iter()
+            .find(|a| a.param == "content")
+            .expect("a content attachment");
+        assert_eq!(attachment.content, "print('ok')");
+    }
+
+    /// `write` over an existing file replaces it whole: the prior body is
+    /// gone, not appended to (the tool's one-line contract).
+    #[test]
+    fn dispatch_replaces_a_whole_existing_file() {
+        let mut fixture = DepsFixture::new();
+        let target = fixture.workspace_dir.path().join("draft.py");
+        std::fs::write(&target, "old line one\nold line two\n").unwrap();
+        let (result, entry, _, _) = run_dispatch(
+            &write_call("draft.py", "print('new')"),
+            &mut fixture,
+            ApprovalResponse::AllowOnce,
+        );
+        assert!(!result.is_error, "{}", result.content);
+        assert_eq!(
+            std::fs::read_to_string(&target).unwrap(),
+            "print('new')",
+            "the write replaces the whole prior body"
+        );
+        assert!(!std::fs::read_to_string(&target)
+            .unwrap()
+            .contains("old line"));
+        assert!(entry.expect("an approved write records an entry").success);
     }
 
     /// A denial never writes: the file stays absent, the result is the
