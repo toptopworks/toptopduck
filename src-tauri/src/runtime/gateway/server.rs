@@ -3794,6 +3794,40 @@ mod tests {
         );
     }
 
+    /// The workspace write tools (issue #1406) are built-in-runtime-only:
+    /// external runtimes bring their own file tools with full authority, so
+    /// the bridge face never advertises `write` / `edit` however the
+    /// conditionals mount, and a bare-name `tools/call` spoof has no
+    /// landing (`tools::dispatch` answers with the unknown-tool error after
+    /// the gate card, the present_files posture).
+    #[test]
+    fn tools_list_never_lists_the_workspace_write_tools() {
+        for ctx in [fresh_ctx(), skill_ctx(vec!["sql-coach".to_string()])] {
+            let mut ctx = ctx;
+            match handle_method(
+                "tools/list",
+                &json!({"jsonrpc": "2.0", "id": 1, "method": "tools/list"}),
+                &mut ctx,
+                &mut GatewayOutcome::default(),
+            ) {
+                Response::Result(v) => {
+                    let names: Vec<&str> = v["tools"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .map(|t| t["name"].as_str().unwrap())
+                        .collect();
+                    assert!(
+                        !names.contains(&crate::session::workspace_tools::WRITE_TOOL)
+                            && !names.contains(&crate::session::workspace_tools::EDIT_TOOL),
+                        "the bridge face never advertises the workspace write tools"
+                    );
+                }
+                _ => panic!("tools/list must return Result"),
+            }
+        }
+    }
+
     /// ADR-0124 (issue #1087): `present_files` is the BUILT-IN runtime's
     /// injection (mounted in `ask_with_phase`'s table); the bridge face
     /// never lists it -- an external CLI has no injection point and no

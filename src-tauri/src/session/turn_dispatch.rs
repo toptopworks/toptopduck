@@ -473,6 +473,23 @@ fn dispatch_gated_call_inner(
             },
         );
     }
+    // The workspace write tools (ADR-0137, issue #1406): `write` / `edit`
+    // persist model-authored text files into the session workspace -- the
+    // sedimentation channel, deliberately split from the python execution
+    // medium (ADR-0108 D4). Like `create_skill` above, the effect outlives
+    // the turn, so the pair GATES per call (Write badge; the write payload
+    // rides the card as attachments); a resolution failure (an
+    // out-of-workspace path, an over-cap or binary payload, an unresolvable
+    // edit target, no bound workspace) is refused AHEAD of the card -- the
+    // model's error, never the approver's. The whole arm lives in the
+    // module so the pair owns its ritual end to end. Built-in runtime only:
+    // the bridge face never lists the names and `tools::dispatch` has no
+    // arm for them, so a spoofed bridge call dies at the unknown-tool error.
+    if crate::session::workspace_tools::is_workspace_tool(&call.name) {
+        return crate::session::workspace_tools::dispatch_workspace_tool(
+            call, deps, gate, on_phase, origin,
+        );
+    }
     // A registered CLI tool classifies under its own reserved server
     // (ADR-0108 Decision 7): the trust key is the registration name, the
     // badge is Execute, and the summary renders the full argv the approval
@@ -1911,6 +1928,71 @@ mod tests {
             !live.load().disabled_skills.contains("sql-coach"),
             "the mint lands enabled"
         );
+    }
+
+    /// The workspace write tools' interception arm (issue #1406): a call
+    /// with no bound workspace is refused through the shared core AHEAD of
+    /// the gate -- the model's error, no card, no trace entry. The returned
+    /// message also proves the arm routed the name (an unwired arm would
+    /// fall to the unknown-name external classification and suspend on a
+    /// card instead of returning).
+    #[test]
+    fn dispatch_refuses_a_workspace_write_without_a_workspace() {
+        let engine = Engine::new();
+        let mut ws = WorkingSet::default();
+        let mut sources = HashMap::new();
+        let mut refs = HashMap::new();
+        // The workspace axis connected but unbound -- the production
+        // temp-fallback shape the #1406 triage locked the refusal against.
+        let mut slot = None;
+        let mut d = TurnDeps::test_deps_with_workspace(
+            &engine.admin_engine,
+            &mut ws,
+            &mut sources,
+            engine.temp.path(),
+            &mut refs,
+            &mut slot,
+        );
+        let cancel = CancelToken::new();
+        let approval = ApprovalState::new();
+        let sink = RecordingSink::default();
+        let gate = GateCtx {
+            approval: &approval,
+            sink: &sink,
+            cancel: &cancel,
+        };
+        let call = ToolUse {
+            id: "w1".into(),
+            name: "write".into(),
+            input: json!({"file_path": "a.txt", "content": "x"}),
+        };
+        let phases = std::sync::Mutex::new(Vec::new());
+        let mut on_phase = |p: TurnPhase| phases.lock().unwrap().push(p);
+        let mut invocations: Vec<crate::model::SkillInvocation> = Vec::new();
+        let (result, entry, _) = dispatch_gated_call(
+            &call,
+            &mut d,
+            &mut RealMaterializer,
+            &mut McpAggregator::empty(),
+            &[],
+            &mut crate::skills::invocation::test_ctx(&mut invocations),
+            &mut Vec::new(),
+            &crate::skills::read::SkillReadGate::inert(),
+            &crate::skills::create::SkillCreateGate::inert(),
+            &gate,
+            &mut on_phase,
+            None,
+        )
+        .expect("a refusal is a tool result, not an abort");
+        assert!(result.is_error);
+        assert!(
+            result.content.contains("no session workspace"),
+            "{}",
+            result.content
+        );
+        assert!(entry.is_none(), "a pre-gate refusal records no trace entry");
+        assert_eq!(sink.requests.lock().unwrap().len(), 0, "no card is emitted");
+        let _ = phases.into_inner().unwrap();
     }
 
     /// The create arm's denied envelope (ADR-0078's shape on this channel):

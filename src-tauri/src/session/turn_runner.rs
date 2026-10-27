@@ -415,6 +415,19 @@ impl super::Session {
                     request
                         .tools
                         .push(crate::session::artifacts::present_files_definition());
+                    // The workspace write tools (ADR-0137, issue #1406):
+                    // mounted unconditionally on the built-in runtime's
+                    // table -- the sedimentation channel (write/edit) splits
+                    // from the python execution medium, so every session
+                    // carries the pair. Bridge face never lists them
+                    // (external runtimes bring their own file tools with
+                    // full authority).
+                    request
+                        .tools
+                        .push(crate::session::workspace_tools::write_definition());
+                    request
+                        .tools
+                        .push(crate::session::workspace_tools::edit_definition());
                     let assets_dir = crate::session::sql_assets::assets_dir(self.recipe_path());
                     let snapshot_dir = self.snapshot_dir();
                     let mut deps = TurnDeps {
