@@ -577,9 +577,19 @@ fn dispatch_gated_call_inner(
         // relative-path base, matching the external runtime's cwd. THIS
         // launch is the lazy-mint disk-need moment: a directory-less session
         // mints its default timestamped workspace on the first CLI call, so
-        // a pure-chat session stays dirless.
+        // a pure-chat session stays dirless. The pipeline artifacts stay in
+        // the session temp (issue #1408): the work-dir argument below keeps
+        // file-delivery and the spill tee out of the workspace and in the
+        // domain the approval classify renders against.
         match deps.launch_dir() {
-            Ok(cwd) => crate::cli_tools::executor::execute(tool, call, &cwd, gate.cancel, None),
+            Ok(cwd) => crate::cli_tools::executor::execute(
+                tool,
+                call,
+                &cwd,
+                deps.temp_path,
+                gate.cancel,
+                None,
+            ),
             // A call-time structured error (the ADR-0108 D2 posture): the
             // shared tail below completes the started row and routes the
             // failure back for self-correction, exactly like an errored

@@ -1129,11 +1129,18 @@ fn handle_tools_call(msg: &Value, ctx: &mut GatewayCtx, outcome: &mut GatewayOut
                 // the spawn cwd resolves through the SAME launch-dir seam the
                 // built-in dispatch arm uses -- one cwd semantics across both
                 // runtime surfaces, and this launch is a lazy-mint disk-need
-                // moment for a directory-less session.
+                // moment for a directory-less session. The pipeline artifacts
+                // stay in the session temp (issue #1408), the same domain the
+                // approval classify renders against.
                 let executed = match ctx.deps.launch_dir() {
-                    Ok(cwd) => {
-                        crate::cli_tools::executor::execute(tool, call, &cwd, ctx.cancel, None)
-                    }
+                    Ok(cwd) => crate::cli_tools::executor::execute(
+                        tool,
+                        call,
+                        &cwd,
+                        ctx.deps.temp_path,
+                        ctx.cancel,
+                        None,
+                    ),
                     // A call-time structured error (the ADR-0108 D2
                     // posture), the same envelope shape the executor's own
                     // failures take -- the CLI self-corrects or surfaces it.
