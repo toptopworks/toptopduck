@@ -427,22 +427,10 @@ mod tests {
         let mut sources = std::collections::HashMap::new();
         let mut refs = std::collections::HashMap::new();
         // cap = 2; the query yields 3 rows -> cap+1 rows land on the scratch
-        // sandbox, COUNT (3) > cap (2) -> refused. The cap is below the helper's
-        // default, so this test hand-builds TurnDeps for the one-off bound.
-        let mut deps = crate::session::materializer::TurnDeps {
-            engine: &engine,
-            source_files: &mut sources,
-            source_readers: None,
-            working_set: &mut ws,
-            result_row_cap: 2,
-            result_count_cap: 100,
-            temp_path: std::path::Path::new("."),
-            workspace: None,
-            workspaces_root: None,
-            workspace_registry: None,
-            snapshot_dir: std::path::PathBuf::from("."),
-            tool_output_refs: &mut refs,
-        };
+        // sandbox, COUNT (3) > cap (2) -> refused. The one-off bound is set
+        // on top of the helper's defaults.
+        let mut deps = inert_deps(&engine, &mut ws, &mut sources, &mut refs);
+        deps.result_row_cap = 2;
         let cancel = CancelToken::new();
         let err = dispatch(
             &json!({"sql": "SELECT 1 FROM range(3)"}),

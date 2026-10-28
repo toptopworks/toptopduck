@@ -3902,6 +3902,138 @@ mod tests {
         );
     }
 
+    /// The retired bind-time migration (issue #1390): a derived source
+    /// staged in the temp dir stays put across bind_recipe -- no `assets/`
+    /// directory is minted beside the recipe, and both the descriptor and
+    /// the persisted recipe keep the staging source_path. Persistence
+    /// rides the copy-in snapshot pipeline; a staging path that dies with
+    /// the temp dir degrades on resume through the source-missing face.
+    #[test]
+    fn bind_recipe_mints_no_assets_dir_for_staged_derived_sources() {
+        let mut session = Session::new().expect("session");
+        let staging_dir = session
+            .temp_path
+            .join(super::derived_source::DERIVED_STAGING_DIR);
+        std::fs::create_dir_all(&staging_dir).unwrap();
+        let staging_csv = staging_dir.join("data.csv");
+        std::fs::write(&staging_csv, "id,name\n1,alice\n").unwrap();
+        session
+            .working_set
+            .register(crate::model::DatasetDescriptor {
+                reference_name: "data".to_string(),
+                display_name: "data".to_string(),
+                source_path: staging_csv.to_string_lossy().to_string(),
+                columns: vec![crate::model::ColumnSchema {
+                    name: "id".into(),
+                    canonical_type: "BIGINT".into(),
+                }],
+                row_count: 1,
+                sample: vec![vec!["1".into(), "alice".into()]],
+                fingerprint: "abc".into(),
+                rectify: crate::model::RectifyProvenance::NotApplicable,
+                privacy: crate::model::DatasetPrivacy::default(),
+                stale: None,
+            });
+
+        let duck_dir = tempfile::tempdir().expect("duck dir");
+        let recipe_path = duck_dir.path().join("recipe.json");
+        session
+            .bind_recipe(recipe_path.clone(), "t".into())
+            .expect("bind_recipe");
+
+        assert!(
+            !duck_dir.path().join("assets").exists(),
+            "no assets/ minted beside the recipe"
+        );
+        let d = session.working_set.get("data").expect("data registered");
+        assert!(
+            d.source_path.contains("derived"),
+            "the staging source_path is untouched: {}",
+            d.source_path
+        );
+        let recipe = crate::persistence::read_recipe(&recipe_path).expect("read recipe");
+        let src = recipe
+            .sources
+            .iter()
+            .find(|s| s.reference_name == "data")
+            .expect("data in recipe sources");
+        assert!(
+            src.source_path.contains("derived"),
+            "the recipe keeps the staging path: {}",
+            src.source_path
+        );
+    }
+
+    /// The temp-staging spelling of the missing face: a derived source
+    /// whose descriptor still points into the session's wiped temp staging
+    /// dir (the pre-#1383 legacy recipe shape) degrades at a companion-less
+    /// reopen exactly like a dead assets copy -- one Missing issue, an
+    /// Abort, the on-disk recipe untouched. Live sessions snapshot into
+    /// the session tree; this pins the staging spelling onto the same
+    /// source-missing leg (issue #1390 review).
+    #[test]
+    fn a_wiped_staging_reference_surfaces_the_source_missing_face() {
+        use crate::session::{SourceIssue, SourceResolution};
+
+        let dir = tempfile::tempdir().expect("session dir");
+        let duck = dir.path().join("recipe.json");
+        let mut session = Session::new().expect("session");
+        session.bind_recipe(duck.clone(), "t".into()).expect("bind");
+        // Stage + register the legacy shape: source_path inside
+        // temp_path/derived/. No materialized turn runs, so no companion is
+        // minted -- the reopen takes the watermark-miss leg.
+        let staging_csv = session
+            .temp_path
+            .join(super::derived_source::DERIVED_STAGING_DIR)
+            .join("data.csv");
+        std::fs::create_dir_all(staging_csv.parent().expect("staging parent")).expect("dirs");
+        std::fs::write(&staging_csv, "id\n1\n").expect("write staging file");
+        session
+            .working_set
+            .register(crate::model::DatasetDescriptor {
+                reference_name: "data".to_string(),
+                display_name: "data".to_string(),
+                source_path: staging_csv.to_string_lossy().to_string(),
+                columns: vec![crate::model::ColumnSchema {
+                    name: "id".into(),
+                    canonical_type: "BIGINT".into(),
+                }],
+                row_count: 1,
+                sample: vec![vec!["1".into()]],
+                fingerprint: "abc".into(),
+                rectify: crate::model::RectifyProvenance::NotApplicable,
+                privacy: crate::model::DatasetPrivacy::default(),
+                stale: None,
+            });
+        session.persist_if_bound();
+        drop(session); // the TempDir wipe kills the staging file
+
+        let issues = std::cell::RefCell::new(Vec::new());
+        let outcome = Session::open_recipe(
+            &duck,
+            std::sync::Arc::new(crate::cancel::CancelToken::new()),
+            Box::new(crate::provider::UnwiredProvider),
+            Default::default(),
+            |_| {},
+            |issue| {
+                issues.borrow_mut().push(issue);
+                SourceResolution::Abort
+            },
+            |_| panic!("no active-abandoned callback expected"),
+        );
+        assert!(outcome.is_err(), "the wiped staging path aborts the resume");
+        assert_eq!(issues.borrow().len(), 1, "exactly one source issue");
+        assert!(
+            matches!(&issues.borrow()[0], SourceIssue::Missing { .. }),
+            "the issue is the missing-file face: {:?}",
+            issues.borrow()[0]
+        );
+        assert!(
+            duck.exists(),
+            "the on-disk recipe is untouched by the abort"
+        );
+    }
+
     /// A persistent break cause degrades the conversation from the
     /// breakpoint on without ever dropping a recorded turn: repeated
     /// close/reopen cycles keep every turn the intervening sessions added

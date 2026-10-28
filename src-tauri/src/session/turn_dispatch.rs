@@ -582,7 +582,7 @@ fn dispatch_gated_call_inner(
         // launch is the lazy-mint disk-need moment: a directory-less session
         // mints its default timestamped workspace on the first CLI call, so
         // a pure-chat session stays dirless. The pipeline artifacts stay in
-        // the session temp (issue #1408): the work-dir argument below keeps
+        // the session temp (issue #1408): the temp-dir argument below keeps
         // file-delivery and the spill tee out of the workspace and in the
         // domain the approval classify renders against.
         match deps.launch_dir() {
