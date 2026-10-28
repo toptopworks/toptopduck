@@ -1,5 +1,5 @@
 //! The turn entry species (issue #1414): the session-side turn entry
-//! [`SessionHandle::run_turn`], in the domain-method + injected-callback
+//! [`SessionHandle::run_turn`], in the domain-side + injected-callback
 //! shape `open_recipe` already validated. The `ask` command handler builds
 //! the transport-bound halves -- the pure data ([`TurnDeps`]) and the
 //! ports ([`TurnPorts`], approval + the three Tauri closures) -- and calls
@@ -25,12 +25,13 @@ use crate::skills::{resolve_prompt_fragments, SkillPromptFragment};
 use super::{turn_runner::TurnInputs, Session};
 
 /// The command-boundary pure data [`SessionHandle::run_turn`] consumes
-/// (issue #1414): everything resolved BEFORE the turn rather than injected
-/// per transport -- the live provider config (skill/CLI/agent enablement +
-/// the keychain), the per-turn MCP enablement snapshot (ADR-0106), and the
-/// two registry roots. Owned plain data, built at the command boundary and
-/// moved into the blocking window, so the entry borrows it under the held
-/// session lock without re-reading any config there.
+/// (issue #1414): the live provider config handle (skill/CLI/agent
+/// enablement + the keychain), the per-turn MCP enablement snapshot
+/// (ADR-0106), and the two registry roots. Owned plain data, built at the
+/// command boundary and moved into the blocking window. The snapshot and
+/// the roots are resolved before the window; the enablement itself is
+/// loaded by the entry's assembly under the held session lock, as the
+/// former command body did (ADR-0086 reads both session sets there).
 pub struct TurnDeps {
     pub live: LiveProviderConfig,
     pub mcp_servers: Vec<McpServerConfig>,
@@ -55,7 +56,7 @@ pub type GrantScopeFn = Box<dyn Fn(&[PathBuf]) + Send>;
 pub struct TurnPorts<'a> {
     pub approval: &'a ApprovalState,
     pub sink: &'a dyn ApprovalSink,
-    pub on_phase: Box<dyn FnMut(TurnPhase) + Send + 'static>,
+    pub on_phase: Box<dyn FnMut(TurnPhase) + Send>,
     pub on_named: Box<dyn FnOnce(&str) + Send>,
     pub grant_scope: GrantScopeFn,
 }
@@ -429,7 +430,10 @@ mod tests {
     /// The grant-port pin (ADR-0124 / ADR-0137 Decision 6): the asset-scope
     /// grant rides the same lock window at the turn's settle, exactly once,
     /// with the thread's referenced paths -- for a no-artifact built-in turn
-    /// that is ONE call over an EMPTY list, never zero calls.
+    /// that is ONE call over an EMPTY list, never zero calls. The position
+    /// half: while the grant runs, the non-blocking lock attempt fails, so
+    /// a grant hoisted out of the held window (or moved before the turn)
+    /// reddens here.
     #[test]
     fn run_turn_grants_asset_scope_exactly_once() {
         let handle = handle_with(Box::new(UnwiredProvider));
@@ -439,6 +443,7 @@ mod tests {
         let sink = NoopSink;
         let grants: Arc<Mutex<Vec<Vec<PathBuf>>>> = Arc::new(Mutex::new(Vec::new()));
         let sink_grants = Arc::clone(&grants);
+        let handle_for_pin = Arc::clone(&handle);
         let _ = handle
             .run_turn(
                 "one question",
@@ -450,6 +455,10 @@ mod tests {
                     on_phase: Box::new(|_| {}),
                     on_named: Box::new(|_| {}),
                     grant_scope: Box::new(move |paths| {
+                        assert!(
+                            handle_for_pin.try_session_lock().is_none(),
+                            "the grant fires inside the held session lock window"
+                        );
                         sink_grants.lock().unwrap().push(paths.to_vec())
                     }),
                 },
@@ -589,7 +598,7 @@ You are a focused analyst.
         let inputs = assembled.turn_inputs(&[]);
         // An empty staging projects zero user invocations; both wire
         // forms (absent, empty) converge on this slice upstream, at
-        // the ask entry's Option fold (#992).
+        // the ask command's Option fold upstream (#992).
         assert!(
             inputs.user_invocations.is_empty(),
             "an empty staging materializes no user invocation records"

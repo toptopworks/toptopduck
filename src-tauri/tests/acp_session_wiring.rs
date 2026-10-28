@@ -558,7 +558,7 @@ fn run_turn_success_arc_names_grants_and_mirrors_back() {
     // missing-config keychain path), an empty MCP snapshot, fresh roots.
     let cfg_dir = tempfile::tempdir().unwrap();
     let live = LiveProviderConfig::new(common::keychain(), cfg_dir.path().join("config.json"));
-    live.upsert_cli_tool(cli_registration(false))
+    live.upsert_cli_tool(cli_registration())
         .expect("write config");
     let deps = TurnDeps {
         live,
@@ -624,7 +624,7 @@ fn run_turn_success_arc_names_grants_and_mirrors_back() {
 
 /// One disabled CLI registration, just to make the live config file exist
 /// (see the test above): local to this suite like the sink/skill helpers.
-fn cli_registration(enabled: bool) -> CliToolConfig {
+fn cli_registration() -> CliToolConfig {
     CliToolConfig {
         name: "pin".into(),
         description: "config-existence pin".into(),
@@ -632,7 +632,7 @@ fn cli_registration(enabled: bool) -> CliToolConfig {
         argv_template: Vec::new(),
         params: Vec::new(),
         env: Default::default(),
-        enabled,
+        enabled: false,
         source: CliToolSource::User,
         baseline: None,
     }
