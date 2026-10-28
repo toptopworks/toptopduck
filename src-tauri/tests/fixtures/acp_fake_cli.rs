@@ -421,6 +421,16 @@ fn play_scenario(
             notify(out, agent_message("the answer is 42"));
             respond_prompt(out, &id, StopReason::EndTurn);
         }
+        // Issue #1414 (the run_turn wiring rig): the text_reply shape plus
+        // one deliverable-file mention, so the turn's settle manifest -- and
+        // with it the entry's grant port -- carries a non-empty list. The
+        // integration test pre-creates `report.html` in the session's
+        // seated workspace; the reply-text scan resolves the mention
+        // against it.
+        "text_reply_artifact" => {
+            notify(out, agent_message("the answer is 42, see report.html"));
+            respond_prompt(out, &id, StopReason::EndTurn);
+        }
         // ADR-0129 (issue #1270): the spec's usage_update is a
         // context-occupancy snapshot -- modeled in its REAL shape
         // (`used`/`size`; no input/output split exists at this boundary).

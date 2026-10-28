@@ -24,6 +24,7 @@ pub mod skills;
 pub mod snapshot;
 pub mod source_lifecycle;
 pub(crate) mod turn_dispatch;
+pub mod turn_entry;
 pub mod turn_runner;
 pub(crate) mod workspace;
 pub(crate) mod workspace_tools;
@@ -74,6 +75,7 @@ pub use resume::{is_resuming, resuming_count};
 // takes it, so the parameter type rides the same public path -- the
 // pub-module-plus-re-export dual path `resume` already rides, keeping
 // `session::TurnInputs` stable for its existing consumers.
+pub use turn_entry::{TurnDeps, TurnPorts};
 pub use turn_runner::TurnInputs;
 
 /// The subdirectory name under the session temp dir where external MCP tools
