@@ -121,7 +121,7 @@ pub(crate) fn preflight_read_sql(
 // =========================== sandboxed runner ===========================
 
 /// The read-only view of the sandbox-execution dependencies, projected from
-/// [`crate::session::materializer::TurnDeps`]. The runner touches neither the
+/// [`crate::session::materializer::DispatchDeps`]. The runner touches neither the
 /// mutable working set nor the temp path -- promotion / shape derivation /
 /// GC are the caller's tail -- so this carries only what the sandbox
 /// lifecycle + cap need.

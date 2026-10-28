@@ -52,7 +52,7 @@ use crate::guardrail::{ExecError, ExecErrorKind};
 use crate::ingest::schema::{attach_sql, quote_ident};
 use crate::ingest::{self, loader};
 use crate::model::{DatasetDescriptor, DatasetPrivacy, RectifyProvenance};
-use crate::session::materializer::{CachedDerivedRef, TurnDeps};
+use crate::session::materializer::{CachedDerivedRef, DispatchDeps};
 use crate::session::snapshot::Snapshot;
 use crate::session::TOOL_OUTPUT_DIR_NAME;
 use crate::tools::read_paths::{extract_read_paths, is_file_function};
@@ -78,7 +78,7 @@ pub(crate) const DERIVED_STAGING_DIR: &str = "derived";
 /// relative spelling with no bound workspace, a non-tabular function such as
 /// `read_text`, a missing file, and the session-temp exclusion (the temp dir
 /// keeps its own read-write face).
-pub(crate) fn process(sql: &str, deps: &mut TurnDeps) -> Result<String, ExecError> {
+pub(crate) fn process(sql: &str, deps: &mut DispatchDeps) -> Result<String, ExecError> {
     // ADR-0137 D3: relative read_* spellings resolve against the session
     // workspace (the unified agent cwd), not the process CWD DuckDB would
     // use — absolutize first so eligibility, FsAcl, and engine exec all see
@@ -382,7 +382,7 @@ fn process_one_derived(
     ref_name: &str,
     staging_dir: &Path,
     fn_reader: Option<&'static str>,
-    deps: &mut TurnDeps,
+    deps: &mut DispatchDeps,
 ) -> Result<(), ExecError> {
     let persistent_path = stage_derived_file(src_path, ref_name, staging_dir)?;
 
@@ -443,7 +443,7 @@ fn process_one_full_path(
     canonical: &Path,
     reader: &'static str,
     ref_name: &str,
-    deps: &mut TurnDeps,
+    deps: &mut DispatchDeps,
 ) -> Result<(), ExecError> {
     let snap = loader::copy_in(canonical, &deps.snapshot_dir, ref_name, reader)
         .map_err(|e| ExecError::new(ExecErrorKind::Runtime, e.to_string()))?;
@@ -469,7 +469,7 @@ fn attach_and_register(
     ref_name: &str,
     display_name: String,
     reader: &'static str,
-    deps: &mut TurnDeps,
+    deps: &mut DispatchDeps,
 ) -> Result<(), ExecError> {
     // ATTACH the snapshot to admin as a read-only catalog (same as
     // uploaded sources — `"ref".data` resolves identically).
@@ -1531,7 +1531,7 @@ mod tests {
     // --- Integration: process() with real DuckDB + filesystem ----------
 
     use crate::session::engine::AdminEngine;
-    use crate::session::materializer::TurnDeps;
+    use crate::session::materializer::DispatchDeps;
     use crate::workingset::WorkingSet;
     use std::collections::HashMap;
     use tempfile::TempDir;
@@ -1561,7 +1561,7 @@ mod tests {
 
         {
             let mut deps =
-                TurnDeps::test_deps(&engine, &mut ws, &mut sources, temp.path(), &mut refs);
+                DispatchDeps::test_deps(&engine, &mut ws, &mut sources, temp.path(), &mut refs);
             let rewritten = process(&sql, &mut deps).expect("process succeeds");
 
             // SQL was rewritten to a catalog reference.
@@ -1626,7 +1626,8 @@ mod tests {
             outside_csv.to_string_lossy()
         );
 
-        let mut deps = TurnDeps::test_deps(&engine, &mut ws, &mut sources, temp.path(), &mut refs);
+        let mut deps =
+            DispatchDeps::test_deps(&engine, &mut ws, &mut sources, temp.path(), &mut refs);
         let rewritten = process(&sql, &mut deps).expect("process succeeds");
 
         // SQL rewritten to the catalog reference; the source registered.
@@ -1676,7 +1677,8 @@ mod tests {
             "SELECT secret FROM read_json_auto('{}')",
             notes.to_string_lossy()
         );
-        let mut deps = TurnDeps::test_deps(&engine, &mut ws, &mut sources, temp.path(), &mut refs);
+        let mut deps =
+            DispatchDeps::test_deps(&engine, &mut ws, &mut sources, temp.path(), &mut refs);
         deps.source_readers = Some(&mut readers);
         let rewritten =
             process(&sql, &mut deps).expect("mismatch snapshots by the fn-named reader");
@@ -1710,7 +1712,8 @@ mod tests {
             "SELECT secret FROM read_json_auto('{}')",
             notes.to_string_lossy()
         );
-        let mut deps = TurnDeps::test_deps(&engine, &mut ws, &mut sources, temp.path(), &mut refs);
+        let mut deps =
+            DispatchDeps::test_deps(&engine, &mut ws, &mut sources, temp.path(), &mut refs);
         deps.source_readers = Some(&mut readers);
         let rewritten = process(&sql, &mut deps).expect("process succeeds");
         assert!(rewritten.contains(r#""notes".data"#), "{rewritten}");
@@ -1784,7 +1787,7 @@ mod tests {
         let mut sources = HashMap::new();
         let mut refs = HashMap::new();
 
-        let mut deps = TurnDeps::test_deps_with_workspace(
+        let mut deps = DispatchDeps::test_deps_with_workspace(
             &engine,
             &mut ws,
             &mut sources,
@@ -1826,7 +1829,8 @@ mod tests {
             scratch.to_string_lossy()
         );
 
-        let mut deps = TurnDeps::test_deps(&engine, &mut ws, &mut sources, temp.path(), &mut refs);
+        let mut deps =
+            DispatchDeps::test_deps(&engine, &mut ws, &mut sources, temp.path(), &mut refs);
         let rewritten = process(&sql, &mut deps).expect("process succeeds");
 
         assert_eq!(
@@ -1861,7 +1865,8 @@ mod tests {
         let mut refs = HashMap::new();
 
         let sql = format!("SELECT * FROM read_csv_auto('{}')", dead.to_string_lossy());
-        let mut deps = TurnDeps::test_deps(&engine, &mut ws, &mut sources, temp.path(), &mut refs);
+        let mut deps =
+            DispatchDeps::test_deps(&engine, &mut ws, &mut sources, temp.path(), &mut refs);
         let rewritten = process(&sql, &mut deps).expect("process succeeds");
 
         assert_ne!(rewritten, sql, "assets SQL rewritten to a catalog ref");
@@ -1889,7 +1894,8 @@ mod tests {
 
         let sql = format!("SELECT read_text('{}')", note.to_string_lossy());
 
-        let mut deps = TurnDeps::test_deps(&engine, &mut ws, &mut sources, temp.path(), &mut refs);
+        let mut deps =
+            DispatchDeps::test_deps(&engine, &mut ws, &mut sources, temp.path(), &mut refs);
         let rewritten = process(&sql, &mut deps).expect("process succeeds");
 
         assert_eq!(rewritten, sql, "non-tabular read left in place");
@@ -1921,7 +1927,8 @@ mod tests {
             tsv.to_string_lossy()
         );
 
-        let mut deps = TurnDeps::test_deps(&engine, &mut ws, &mut sources, temp.path(), &mut refs);
+        let mut deps =
+            DispatchDeps::test_deps(&engine, &mut ws, &mut sources, temp.path(), &mut refs);
         let rewritten = process(&sql, &mut deps).expect("process succeeds");
 
         assert_eq!(rewritten, sql, "option-carrying read left in place");
@@ -1947,7 +1954,8 @@ mod tests {
 
         let sql = format!("SELECT * FROM read_csv('{}')", csv.to_string_lossy());
 
-        let mut deps = TurnDeps::test_deps(&engine, &mut ws, &mut sources, temp.path(), &mut refs);
+        let mut deps =
+            DispatchDeps::test_deps(&engine, &mut ws, &mut sources, temp.path(), &mut refs);
         let rewritten = process(&sql, &mut deps).expect("process succeeds");
 
         assert!(rewritten.contains("\"aliasread\".data"), "{rewritten}");
@@ -1978,7 +1986,8 @@ mod tests {
         let mut sources = HashMap::new();
         let mut refs = HashMap::new();
 
-        let mut deps = TurnDeps::test_deps(&engine, &mut ws, &mut sources, temp.path(), &mut refs);
+        let mut deps =
+            DispatchDeps::test_deps(&engine, &mut ws, &mut sources, temp.path(), &mut refs);
         let first = process(
             &format!("SELECT * FROM read_csv_auto('{}')", plain.to_string_lossy()),
             &mut deps,
@@ -2021,7 +2030,7 @@ mod tests {
 
         {
             let mut deps =
-                TurnDeps::test_deps(&engine, &mut ws, &mut sources, temp.path(), &mut refs);
+                DispatchDeps::test_deps(&engine, &mut ws, &mut sources, temp.path(), &mut refs);
             process(
                 &format!("SELECT * FROM read_csv_auto('{}')", csv.to_string_lossy()),
                 &mut deps,
@@ -2034,7 +2043,8 @@ mod tests {
         // manual ingest never fills).
         refs.clear();
 
-        let mut deps = TurnDeps::test_deps(&engine, &mut ws, &mut sources, temp.path(), &mut refs);
+        let mut deps =
+            DispatchDeps::test_deps(&engine, &mut ws, &mut sources, temp.path(), &mut refs);
         let rewritten = process(
             &format!("SELECT * FROM read_csv_auto('{}')", csv.to_string_lossy()),
             &mut deps,
@@ -2061,7 +2071,8 @@ mod tests {
         let mut refs = HashMap::new();
 
         let sql = "SELECT 1 AS x";
-        let mut deps = TurnDeps::test_deps(&engine, &mut ws, &mut sources, temp.path(), &mut refs);
+        let mut deps =
+            DispatchDeps::test_deps(&engine, &mut ws, &mut sources, temp.path(), &mut refs);
         let rewritten = process(sql, &mut deps).expect("process succeeds");
         assert_eq!(rewritten, "SELECT 1 AS x");
     }
@@ -2085,7 +2096,8 @@ mod tests {
         let mut refs = HashMap::new();
 
         let sql = format!("SELECT * FROM read_csv_auto('{traversal}')");
-        let mut deps = TurnDeps::test_deps(&engine, &mut ws, &mut sources, temp.path(), &mut refs);
+        let mut deps =
+            DispatchDeps::test_deps(&engine, &mut ws, &mut sources, temp.path(), &mut refs);
         let rewritten = process(&sql, &mut deps).expect("process succeeds");
 
         // SQL unchanged — traversal path rejected by is_in_tool_output.
@@ -2123,7 +2135,8 @@ mod tests {
             foo_path.to_string_lossy()
         );
 
-        let mut deps = TurnDeps::test_deps(&engine, &mut ws, &mut sources, temp.path(), &mut refs);
+        let mut deps =
+            DispatchDeps::test_deps(&engine, &mut ws, &mut sources, temp.path(), &mut refs);
         deps.source_readers = Some(&mut readers);
         let result = process(&sql, &mut deps);
 
@@ -2192,7 +2205,7 @@ mod tests {
         // First call: registers "data", populates session cache.
         {
             let mut deps =
-                TurnDeps::test_deps(&engine, &mut ws, &mut sources, temp.path(), &mut refs);
+                DispatchDeps::test_deps(&engine, &mut ws, &mut sources, temp.path(), &mut refs);
             let rewritten = process(&sql, &mut deps).expect("first process succeeds");
             assert!(
                 rewritten.contains(r#""data".data"#),
@@ -2203,7 +2216,7 @@ mod tests {
         // Second call: must reuse "data", NOT create "data_2".
         {
             let mut deps =
-                TurnDeps::test_deps(&engine, &mut ws, &mut sources, temp.path(), &mut refs);
+                DispatchDeps::test_deps(&engine, &mut ws, &mut sources, temp.path(), &mut refs);
             let rewritten = process(&sql, &mut deps).expect("second process succeeds");
             assert!(
                 rewritten.contains(r#""data".data"#),
@@ -2257,7 +2270,7 @@ mod tests {
         {
             let sql = format!("SELECT * FROM read_csv_auto('{}')", csv_a.to_string_lossy());
             let mut deps =
-                TurnDeps::test_deps(&engine, &mut ws, &mut sources, temp.path(), &mut refs);
+                DispatchDeps::test_deps(&engine, &mut ws, &mut sources, temp.path(), &mut refs);
             let rewritten = process(&sql, &mut deps).expect("first process succeeds");
             assert!(rewritten.contains(r#""a".data"#), "first: {rewritten}");
         }
@@ -2266,7 +2279,7 @@ mod tests {
         {
             let sql = format!("SELECT * FROM read_csv_auto('{}')", csv_b.to_string_lossy());
             let mut deps =
-                TurnDeps::test_deps(&engine, &mut ws, &mut sources, temp.path(), &mut refs);
+                DispatchDeps::test_deps(&engine, &mut ws, &mut sources, temp.path(), &mut refs);
             let rewritten = process(&sql, &mut deps).expect("second process succeeds");
             assert!(rewritten.contains(r#""b".data"#), "second: {rewritten}");
         }
@@ -2302,7 +2315,7 @@ mod tests {
         // First call stages + ATTACHes "data".
         {
             let mut deps =
-                TurnDeps::test_deps(&engine, &mut ws, &mut sources, temp.path(), &mut refs);
+                DispatchDeps::test_deps(&engine, &mut ws, &mut sources, temp.path(), &mut refs);
             let rewritten = process(&sql, &mut deps).expect("first process succeeds");
             // Execute the rewritten SQL to confirm ATTACH landed.
             let count: i64 = engine
@@ -2320,7 +2333,7 @@ mod tests {
         // because the existing ATTACH is reused.
         {
             let mut deps =
-                TurnDeps::test_deps(&engine, &mut ws, &mut sources, temp.path(), &mut refs);
+                DispatchDeps::test_deps(&engine, &mut ws, &mut sources, temp.path(), &mut refs);
             let rewritten = process(&sql, &mut deps).expect("second process succeeds");
             let count: i64 = engine
                 .conn()
@@ -2360,7 +2373,7 @@ mod tests {
         // First call registers "data".
         {
             let mut deps =
-                TurnDeps::test_deps(&engine, &mut ws, &mut sources, temp.path(), &mut refs);
+                DispatchDeps::test_deps(&engine, &mut ws, &mut sources, temp.path(), &mut refs);
             process(&sql, &mut deps).expect("first process succeeds");
         }
         assert_eq!(refs.len(), 1, "cache populated");
@@ -2377,7 +2390,7 @@ mod tests {
         // Second call: re-registers "data" (not a dangling reuse).
         {
             let mut deps =
-                TurnDeps::test_deps(&engine, &mut ws, &mut sources, temp.path(), &mut refs);
+                DispatchDeps::test_deps(&engine, &mut ws, &mut sources, temp.path(), &mut refs);
             let rewritten = process(&sql, &mut deps).expect("second process succeeds");
             assert!(
                 rewritten.contains(r#""data".data"#),
@@ -2427,7 +2440,7 @@ mod tests {
         // First call: registers "data" with 2 rows.
         {
             let mut deps =
-                TurnDeps::test_deps(&engine, &mut ws, &mut sources, temp.path(), &mut refs);
+                DispatchDeps::test_deps(&engine, &mut ws, &mut sources, temp.path(), &mut refs);
             let rewritten = process(&sql, &mut deps).expect("first process succeeds");
             let count: i64 = engine
                 .conn()
@@ -2448,7 +2461,7 @@ mod tests {
         // stale snapshot. The rewritten SQL must return the NEW row count.
         {
             let mut deps =
-                TurnDeps::test_deps(&engine, &mut ws, &mut sources, temp.path(), &mut refs);
+                DispatchDeps::test_deps(&engine, &mut ws, &mut sources, temp.path(), &mut refs);
             let rewritten = process(&sql, &mut deps).expect("second process succeeds");
             let count: i64 = engine
                 .conn()

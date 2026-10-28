@@ -15,7 +15,7 @@
 //! holds `Box<dyn Materializer>` -- dyn, not generic, so it does not
 //! parameterize `commands.rs` / `lib.rs` (ADR-0053 Decision 4). Live state
 //! (admin engine, source paths, working set, caps) is aggregated in the
-//! Session root and borrowed per turn via [`TurnDeps`]; the materializer owns
+//! Session root and borrowed per turn via [`DispatchDeps`]; the materializer owns
 //! none of it (ADR-0053 Decision 4 -- stateless, owned by none).
 
 use std::collections::HashMap;
@@ -73,17 +73,20 @@ impl CachedDerivedRef {
     }
 }
 
-/// The shared session state a materialize step borrows (ADR-0053 Decision 4):
-/// the on-demand admin engine source, the source snapshot paths, the mutable
-/// working set, and the two resource caps. Aggregated in the Session root and
-/// borrowed per turn -- the materializer is stateless and owns none of this.
+/// The shared session state a tool dispatch borrows (ADR-0053 Decision 4):
+/// the on-demand admin engine source, the source snapshot paths and
+/// reader-recording carrier, the mutable working set and resource caps, the
+/// temp path and snapshot drop dir, the workspace axis (registry record,
+/// binding slot, lazy-mint root), and the tool-output reference cache.
+/// Aggregated in the Session root and borrowed per turn -- the materializer
+/// is stateless and owns none of this.
 ///
 /// Disjoint borrows via a struct let one call site hand a materializer
 /// `&mut working_set` alongside `&engine` / `&mut source_files` / `&temp_path`
 /// without widening to `&mut Session`. The `&mut source_files` lets a
 /// materialize step register derived sources mid-turn (issue #433,
 /// ADR-0087 D4).
-pub(crate) struct TurnDeps<'a> {
+pub(crate) struct DispatchDeps<'a> {
     /// The on-demand admin engine source (ADR-0104 Decision 2): turn assembly
     /// borrows the unit WITHOUT resolving the connection -- only the actual
     /// consumers (built-in tools, derived-source attach, ghost rollback)
@@ -117,11 +120,11 @@ pub(crate) struct TurnDeps<'a> {
     /// the session's single storage (the mint then reaches the next recipe
     /// persist). `None` (test constructors) disconnects the axis -- the
     /// launch cwd then stays the session temp dir. Read by
-    /// [`TurnDeps::launch_dir`].
+    /// [`DispatchDeps::launch_dir`].
     pub workspace: Option<&'a mut Option<PathBuf>>,
     /// The lazy-mint source -- the fixed product-domain workspaces root,
     /// the DEFAULT sessions root's sibling (ADR-0137, issue #1381); `None`
-    /// disables minting. Consulted only through [`TurnDeps::launch_dir`]:
+    /// disables minting. Consulted only through [`DispatchDeps::launch_dir`]:
     /// a seated root is ignored while the `workspace` slot is disconnected
     /// (test constructors).
     pub workspaces_root: Option<PathBuf>,
@@ -141,7 +144,7 @@ pub(crate) struct TurnDeps<'a> {
     pub tool_output_refs: &'a mut HashMap<String, CachedDerivedRef>,
 }
 
-impl<'a> TurnDeps<'a> {
+impl<'a> DispatchDeps<'a> {
     /// The cwd for an agent-authored process launch (ADR-0137, issue #1381):
     /// the bound workspace, lazily minted at this first-launch moment when
     /// the session was created without a directory. Falls back to the
@@ -170,9 +173,9 @@ impl<'a> TurnDeps<'a> {
 }
 
 #[cfg(test)]
-impl<'a> TurnDeps<'a> {
-    /// Build `TurnDeps` with default caps (1 000 rows / 100 results) over a
-    /// materialized in-memory engine + real temp dir. The one TurnDeps
+impl<'a> DispatchDeps<'a> {
+    /// Build `DispatchDeps` with default caps (1 000 rows / 100 results) over a
+    /// materialized in-memory engine + real temp dir. The one DispatchDeps
     /// constructor carrying the cap literals; every other fixture (the tools
     /// `test_support` wrappers, resume, gateway) delegates here so the field
     /// list stays in one place.
@@ -183,7 +186,7 @@ impl<'a> TurnDeps<'a> {
         temp_path: &'a Path,
         tool_output_refs: &'a mut HashMap<String, CachedDerivedRef>,
     ) -> Self {
-        TurnDeps {
+        DispatchDeps {
             engine,
             source_files,
             source_readers: None,
@@ -212,7 +215,8 @@ impl<'a> TurnDeps<'a> {
     where
         'b: 'a,
     {
-        let mut deps = TurnDeps::test_deps(engine, ws, source_files, temp_path, tool_output_refs);
+        let mut deps =
+            DispatchDeps::test_deps(engine, ws, source_files, temp_path, tool_output_refs);
         deps.workspace = Some(workspace);
         deps
     }
@@ -239,7 +243,7 @@ pub(crate) trait Materializer: Send {
         sql: &str,
         cancel: &CancelToken,
         result_name: String,
-        deps: &mut TurnDeps,
+        deps: &mut DispatchDeps,
     ) -> Result<DatasetDescriptor, ExecError>;
 }
 
@@ -259,7 +263,7 @@ impl Materializer for RealMaterializer {
         sql: &str,
         cancel: &CancelToken,
         result_name: String,
-        deps: &mut TurnDeps,
+        deps: &mut DispatchDeps,
     ) -> Result<DatasetDescriptor, ExecError> {
         // result_N is max+1, never reused (ADR-0022). The caller computes the
         // name: the live turn path derives next_result_number per attempt (a
@@ -401,7 +405,7 @@ impl Materializer for RealMaterializer {
 /// scans only registered results, so a GC'd number becomes a permanent hole
 /// (ADR-0022). Returns the reclaimed names so the caller can log the
 /// reclaim's reach.
-fn gc_stale_results(deps: &mut TurnDeps) -> Vec<String> {
+fn gc_stale_results(deps: &mut DispatchDeps) -> Vec<String> {
     let candidates = deps.working_set.gc_stale_candidates(deps.result_count_cap);
     for name in &candidates {
         let drop_sql = format!("DROP TABLE {}", quote_ident(name));
@@ -465,7 +469,7 @@ mod fake {
     //! injects a precise `ExecErrorKind` (or a canned `DatasetDescriptor` on
     //! success) per call, with no DuckDB and no filesystem.
 
-    use super::{Materializer, TurnDeps};
+    use super::{DispatchDeps, Materializer};
     use crate::cancel::CancelToken;
     use crate::guardrail::{ExecError, ExecErrorKind};
     use crate::model::DatasetDescriptor;
@@ -496,7 +500,7 @@ mod fake {
             _sql: &str,
             _cancel: &CancelToken,
             _result_name: String,
-            deps: &mut TurnDeps,
+            deps: &mut DispatchDeps,
         ) -> Result<DatasetDescriptor, ExecError> {
             let n = self.calls.get();
             self.calls.set(n + 1);
@@ -524,7 +528,7 @@ mod fake {
 /// [`FakeMaterializer`] and never exercise the derived-source branch.
 #[cfg(test)]
 mod real_tests {
-    use super::{Materializer, RealMaterializer, TurnDeps};
+    use super::{DispatchDeps, Materializer, RealMaterializer};
     use crate::cancel::CancelToken;
     use crate::model::{StaleAnchor, StaleReason};
     use crate::session::engine::AdminEngine;
@@ -559,7 +563,8 @@ mod real_tests {
         let cancel = CancelToken::new();
         let mat = RealMaterializer;
 
-        let mut deps = TurnDeps::test_deps(&engine, &mut ws, &mut sources, temp.path(), &mut refs);
+        let mut deps =
+            DispatchDeps::test_deps(&engine, &mut ws, &mut sources, temp.path(), &mut refs);
         let descriptor = mat
             .try_materialize(&sql, &cancel, "result_1".to_string(), &mut deps)
             .expect("materialize succeeds");
@@ -631,7 +636,8 @@ mod real_tests {
         let cancel = CancelToken::new();
         let mat = RealMaterializer;
 
-        let mut deps = TurnDeps::test_deps(&engine, &mut ws, &mut sources, temp.path(), &mut refs);
+        let mut deps =
+            DispatchDeps::test_deps(&engine, &mut ws, &mut sources, temp.path(), &mut refs);
         let descriptor = mat
             .try_materialize(&sql, &cancel, "result_1".to_string(), &mut deps)
             .expect("materialize succeeds");

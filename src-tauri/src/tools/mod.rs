@@ -29,7 +29,7 @@ pub mod sample;
 use crate::cancel::CancelToken;
 use crate::model::Promotion;
 use crate::provider::tool_calling::{ToolDefinition, ToolResult, ToolUse};
-use crate::session::materializer::{Materializer, TurnDeps};
+use crate::session::materializer::{DispatchDeps, Materializer};
 use serde_json::Value;
 
 /// The per-session tool table (ADR-0076): the built-in DuckDB tool definitions
@@ -95,13 +95,13 @@ pub struct ToolOutcome {
 /// error rather than the turn blindly retrying). An unknown tool name is itself a
 /// tool error so the model can stop calling it.
 ///
-/// `pub(crate)` because the signature borrows [`TurnDeps`] and [`Materializer`]
+/// `pub(crate)` because the signature borrows [`DispatchDeps`] and [`Materializer`]
 /// (both `pub(crate)`) -- the only consumer today is the in-crate agent loop
 /// (#295), which shares the session's materializer through here so a
 /// `materialize` call inherits numbering + caps from the legacy single-SQL path.
 pub(crate) fn dispatch(
     call: &ToolUse,
-    deps: &mut TurnDeps,
+    deps: &mut DispatchDeps,
     cancel: &CancelToken,
     materializer: &mut dyn Materializer,
 ) -> ToolOutcome {
@@ -138,12 +138,12 @@ pub(crate) fn dispatch(
 #[cfg(test)]
 pub(crate) mod test_support {
     use crate::session::engine::AdminEngine;
-    use crate::session::materializer::TurnDeps;
+    use crate::session::materializer::DispatchDeps;
     use crate::workingset::WorkingSet;
     use std::collections::HashMap;
     use std::path::Path;
 
-    /// A throwaway [`TurnDeps`] over a locally-owned materialized engine +
+    /// A throwaway [`DispatchDeps`] over a locally-owned materialized engine +
     /// sources + working set, with inert cap defaults and `temp_path = "."`.
     /// Suitable for tool executors that never touch the filesystem (explore /
     /// describe / sample). Centralized so the four-tool dispatch tests cannot
@@ -155,8 +155,8 @@ pub(crate) mod test_support {
         ws: &'a mut WorkingSet,
         sources: &'a mut HashMap<String, std::path::PathBuf>,
         tool_output_refs: &'a mut HashMap<String, crate::session::materializer::CachedDerivedRef>,
-    ) -> TurnDeps<'a> {
-        TurnDeps::test_deps(engine, ws, sources, Path::new("."), tool_output_refs)
+    ) -> DispatchDeps<'a> {
+        DispatchDeps::test_deps(engine, ws, sources, Path::new("."), tool_output_refs)
     }
 
     /// Same inert cap defaults as [`inert_deps`] but with a caller-owned
@@ -170,8 +170,8 @@ pub(crate) mod test_support {
         sources: &'a mut HashMap<String, std::path::PathBuf>,
         temp_path: &'a Path,
         tool_output_refs: &'a mut HashMap<String, crate::session::materializer::CachedDerivedRef>,
-    ) -> TurnDeps<'a> {
-        TurnDeps::test_deps(engine, ws, sources, temp_path, tool_output_refs)
+    ) -> DispatchDeps<'a> {
+        DispatchDeps::test_deps(engine, ws, sources, temp_path, tool_output_refs)
     }
 }
 

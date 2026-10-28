@@ -5,7 +5,7 @@
 //! the working set + recipe), productive-SQL-chain replay (driving the shared
 //! [`Materializer`] trait), and conversation timeline rebuild (pure logic).
 //! It does NOT hold the [`super::Session`] -- phase methods borrow `working_set` /
-//! [`TurnDeps`] and return structured results.
+//! [`DispatchDeps`] and return structured results.
 //!
 //! [`super::Session::open_recipe`] is the entry point that owns the full 5-phase
 //! orchestration: phase 1 (source re-ingest via [`super::Session::resume_sources`] +
@@ -31,7 +31,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use super::companion;
-use super::materializer::{Materializer, TurnDeps};
+use super::materializer::{DispatchDeps, Materializer};
 use super::{
     ActiveAbandoned, ActiveResolution, ResumeError, ResumeEvent, SourceIssue, SourceNotice,
     SourceResolution, TimelineEntry, TurnAudit,
@@ -189,7 +189,7 @@ pub(crate) struct ReplayBreak {
 /// the shared cancel token, the [`Materializer`] (the same trait object the
 /// live-turn agent loop drives through the `materialize` tool), and the
 /// recipe -- never the `Session`. Each phase method borrows `working_set` /
-/// [`TurnDeps`] and returns a structured result; `Session::open_recipe` applies
+/// [`DispatchDeps`] and returns a structured result; `Session::open_recipe` applies
 /// it.
 ///
 /// Why a deep module (ADR-0053 Why 1/3): reading resume means reading this file
@@ -316,7 +316,7 @@ impl<'a> Resumer<'a> {
     /// `None` means the whole chain replayed.
     pub(crate) fn replay(
         &mut self,
-        deps: &mut TurnDeps<'_>,
+        deps: &mut DispatchDeps<'_>,
         on_progress: &mut impl FnMut(ResumeEvent),
     ) -> Result<Option<ReplayBreak>, ResumeError> {
         let chain = self.recipe.productive_chain();
@@ -336,7 +336,7 @@ impl<'a> Resumer<'a> {
                 reference_name: turn.reference_name.clone(),
             });
             // Re-materialize via the shared materializer (ADR-0053): resume is
-            // LLM-free -- it re-executes stored SQL. TurnDeps borrows the same
+            // LLM-free -- it re-executes stored SQL. DispatchDeps borrows the same
             // shared state the live turn path borrows; the block scope releases
             // those borrows before rename_display takes its own &mut.
             // self.cancel is &Arc<CancelToken>; deref coercion hands the
@@ -904,7 +904,7 @@ impl super::Session {
         // Phase 2/3/4 via the Resumer deep module (ADR-0053 Decision 3): the
         // Resumer borrows the shared cancel + the SAME Materializer trait
         // object the live-turn agent loop drives + the recipe. It does NOT
-        // hold the Session -- each phase method borrows working_set / TurnDeps
+        // hold the Session -- each phase method borrows working_set / DispatchDeps
         // and returns a structured result, which open_recipe applies. Scoped so
         // the Resumer (and its disjoint-field borrows of session.cancel /
         // session.materializer) drops before phase 5's &mut session persist.
@@ -929,7 +929,7 @@ impl super::Session {
                 // Phase 3: replay the productive SQL chain (partial on
                 // failure -- K-1 results preserved, K rendered as Failed,
                 // AC6).
-                let mut deps = TurnDeps {
+                let mut deps = DispatchDeps {
                     engine: &session.admin_engine,
                     source_files: &mut session.source_files,
                     source_readers: Some(&mut session.persister.source_readers),
@@ -1595,17 +1595,17 @@ mod tests {
             .expect("test recipe builds")
     }
 
-    /// A throwaway `TurnDeps` for phase 3. `FakeMaterializer` never touches
+    /// A throwaway `DispatchDeps` for phase 3. `FakeMaterializer` never touches
     /// DuckDB / the working set / the temp dir, so the contents are inert --
-    /// the struct only needs to satisfy the `&mut TurnDeps` parameter so the
+    /// the struct only needs to satisfy the `&mut DispatchDeps` parameter so the
     /// live signature is tested, not a parallel test-only one.
     fn inert_deps<'a>(
         engine: &'a AdminEngine,
         ws: &'a mut WorkingSet,
         sources: &'a mut HashMap<String, std::path::PathBuf>,
         tool_output_refs: &'a mut HashMap<String, crate::session::materializer::CachedDerivedRef>,
-    ) -> TurnDeps<'a> {
-        TurnDeps::test_deps(engine, ws, sources, Path::new("."), tool_output_refs)
+    ) -> DispatchDeps<'a> {
+        DispatchDeps::test_deps(engine, ws, sources, Path::new("."), tool_output_refs)
     }
 
     // --- phase 2: resolve_active --------------------------------------------

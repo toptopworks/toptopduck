@@ -34,7 +34,7 @@ use crate::session::loop_contract::Termination;
 /// One dispatch request crossing from the driver thread to the caller
 /// thread's dispatch server: the call to route, plus the response channel
 /// for its outcome. Owned data only -- the session's borrowed collaborators
-/// (`TurnDeps` / materializer / aggregator) never cross threads (they are
+/// (`DispatchDeps` / materializer / aggregator) never cross threads (they are
 /// not `Sync`; ADR-0104's `OnceLock<Connection>` engine among them), which
 /// is why the dispatch server runs on the caller's thread and only these
 /// messages move.

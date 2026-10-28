@@ -41,7 +41,7 @@ use crate::provider::tool_calling::{ToolDefinition, ToolResult, ToolUse};
 use crate::session::loop_contract::{
     truncate_trace_excerpt, TraceEntry, DENIED_BY_GATEWAY_CONTENT, TRACE_EXCERPT_MAX,
 };
-use crate::session::materializer::{Materializer, TurnDeps};
+use crate::session::materializer::{DispatchDeps, Materializer};
 use crate::session::turn_dispatch::{
     classify_with_cli_tool, guarded_dispatch, ResolvedClassification,
 };
@@ -89,7 +89,7 @@ pub fn bind_gateway() -> io::Result<GatewayHandle> {
 pub struct GatewayCtx<'a> {
     /// The per-turn DuckDB + working-set borrows `tools::dispatch` reads +
     /// mutates.
-    pub deps: TurnDeps<'a>,
+    pub deps: DispatchDeps<'a>,
     /// The mid-turn skill-invocation channel (ADR-0119 Decision 4, issue
     /// #983): serves the `invoke_skill` meta-tool's interception below --
     /// the bridge face lands invocations on the SAME turn record by
@@ -1458,7 +1458,7 @@ mod tests {
 
     /// In-memory DuckDB + temp dir -- the same shape the agent-loop tests use.
     /// `handle_method`'s initialize / tools-list / unknown / notification paths
-    /// do not touch DuckDB; the engine exists only to satisfy TurnDeps's borrows
+    /// do not touch DuckDB; the engine exists only to satisfy DispatchDeps's borrows
     /// so the same scaffolding serves the serve-connection end-to-end case too.
     struct Engine {
         admin_engine: AdminEngine,
@@ -1567,7 +1567,8 @@ mod tests {
             Box::leak(Box::new(HashMap::new()));
         let cancel: &'static CancelToken = Box::leak(Box::new(CancelToken::new()));
         let events: &'static NoopPhaseSink = Box::leak(Box::new(NoopPhaseSink));
-        let deps = TurnDeps::test_deps(&engine.admin_engine, ws, sources, engine.temp.path(), refs);
+        let deps =
+            DispatchDeps::test_deps(&engine.admin_engine, ws, sources, engine.temp.path(), refs);
         GatewayCtx {
             deps,
             // Inert by default (the invocation-surface tests overwrite this
@@ -1602,7 +1603,7 @@ mod tests {
             _sql: &str,
             _cancel: &CancelToken,
             result_name: String,
-            deps: &mut TurnDeps,
+            deps: &mut DispatchDeps,
         ) -> Result<DatasetDescriptor, ExecError> {
             // Create the physical table first (mirrors RealMaterializer's
             // install_result step) so the ghost rollback exercises the DROP
@@ -1646,7 +1647,7 @@ mod tests {
             _sql: &str,
             _cancel: &CancelToken,
             result_name: String,
-            _deps: &mut TurnDeps,
+            _deps: &mut DispatchDeps,
         ) -> Result<DatasetDescriptor, ExecError> {
             thread::sleep(Duration::from_millis(self.ms));
             Ok(DatasetDescriptor {

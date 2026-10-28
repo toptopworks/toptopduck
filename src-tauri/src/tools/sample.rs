@@ -17,7 +17,7 @@ use serde_json::{json, Value};
 
 use crate::ingest::schema::quote_ident;
 use crate::model::ColumnSchema;
-use crate::session::materializer::TurnDeps;
+use crate::session::materializer::DispatchDeps;
 use crate::tools::definitions::{self, SAMPLE_DEFAULT_LIMIT, SAMPLE_MAX_LIMIT};
 use crate::tools::ToolPayload;
 
@@ -27,7 +27,7 @@ use crate::tools::ToolPayload;
 /// success, or a tool-level error string. The `limit` is clamped to the
 /// schema-declared cap so a hostile or over-eager caller cannot pull an
 /// unbounded payload into the LLM context.
-pub(crate) fn dispatch(input: &Value, deps: &mut TurnDeps) -> Result<ToolPayload, String> {
+pub(crate) fn dispatch(input: &Value, deps: &mut DispatchDeps) -> Result<ToolPayload, String> {
     let reference_name = definitions::get_str(input, "reference_name")?;
     let offset = offset_param(input)?;
     let limit = limit_param(input)?;
@@ -92,7 +92,7 @@ fn offset_param(input: &Value) -> Result<i64, String> {
 /// reference name / quoted columns / clamped integers), so the interpolation is
 /// safe -- no provider SQL flows through here.
 fn read_page(
-    deps: &mut TurnDeps,
+    deps: &mut DispatchDeps,
     columns: &[ColumnSchema],
     from: &str,
     limit: i64,

@@ -11,7 +11,7 @@
 //! built with.
 //!
 //! Threading: the session's dispatch
-//! collaborators (`TurnDeps`, materializer, `McpAggregator`) are not `Sync`
+//! collaborators (`DispatchDeps`, materializer, `McpAggregator`) are not `Sync`
 //! and never leave the caller's thread, so `run` serves dispatch requests
 //! on the caller's thread (through the shared `dispatch_gated_call` core)
 //! while a scoped driver thread runs the rig loop on a dedicated
@@ -61,7 +61,7 @@ use crate::session::loop_contract::{
     TraceEntry, DEFAULT_NO_PROGRESS_CAP, DEFAULT_STEP_CAP, MAX_WINDOW_RESUMES, TRACE_EXCERPT_MAX,
     WINDOW_CONVERGENCE_NUDGE,
 };
-use crate::session::materializer::{Materializer, TurnDeps};
+use crate::session::materializer::{DispatchDeps, Materializer};
 use crate::session::progress::ProgressClock;
 use crate::session::turn_dispatch::{
     classify_call, dispatch_gated_call, panic_to_transient, DispatchAbort, GateCtx,
@@ -181,7 +181,7 @@ impl LoopRuntime {
     pub(crate) fn run(
         &self,
         request: &ToolTurnRequest,
-        deps: &mut TurnDeps,
+        deps: &mut DispatchDeps,
         materializer: &mut dyn Materializer,
         mcp: &mut McpAggregator,
         cli: &[crate::cli_tools::config::CliToolConfig],

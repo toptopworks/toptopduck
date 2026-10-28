@@ -23,7 +23,7 @@ use serde_json::{json, Value};
 use crate::cancel::CancelToken;
 use crate::guardrail::{ExecError, ExecErrorKind};
 use crate::model::{DatasetDescriptor, Promotion, RenameError};
-use crate::session::materializer::{Materializer, TurnDeps};
+use crate::session::materializer::{DispatchDeps, Materializer};
 use crate::tools::definitions;
 use crate::tools::ToolPayload;
 
@@ -36,7 +36,7 @@ use crate::tools::ToolPayload;
 /// retry).
 pub(crate) fn dispatch(
     input: &Value,
-    deps: &mut TurnDeps,
+    deps: &mut DispatchDeps,
     cancel: &CancelToken,
     materializer: &mut dyn Materializer,
 ) -> Result<ToolPayload, String> {
@@ -111,7 +111,7 @@ pub(crate) fn dispatch(
 /// can surface it to the agent -- the promotion already succeeded, so the error
 /// is NOT fatal; the caller turns it into a `label_warning` field.
 fn apply_display_label(
-    deps: &mut TurnDeps,
+    deps: &mut DispatchDeps,
     reference_name: &str,
     label: &str,
 ) -> Result<String, RenameError> {
@@ -273,7 +273,7 @@ mod tests {
             _sql: &str,
             _cancel: &CancelToken,
             _result_name: String,
-            _deps: &mut TurnDeps,
+            _deps: &mut DispatchDeps,
         ) -> Result<DatasetDescriptor, ExecError> {
             unreachable!("materializer must not be called when sql is missing")
         }

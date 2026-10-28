@@ -41,3 +41,4 @@ ADR-0137 Decision 5 将最近工作区列表记为 app-config 存储——随工
 - 侧栏分组票的地基：`title` 写路径、`session_ids` 账本、分组过滤的来源判据、行内新建，全部 serde additive 演进。
 - 工作区搜索与侧栏分组的账本真源分歧（记录 `session_ids` 账本 vs 扫会话头派生）留后续裁决。
 - 非目标：归档、`updated_at` 审计位、改名入口（侧栏分组票）。
+- **校准（DispatchDeps 改名）**：Decision 4 的 `TurnDeps` 注入槽经同名命令边界束消歧，现名 `DispatchDeps`——`Option<&WorkspaceRegistry>` 注入语义不变。
