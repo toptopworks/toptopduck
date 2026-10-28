@@ -29,23 +29,21 @@ use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
 
-use crate::approval::{
-    ApprovalRequest, ApprovalSink, ApprovalState, GateCancelled, GateOutcome, OperationKind,
-};
+use crate::approval::{ApprovalSink, ApprovalState};
 use crate::bounded_line::{BoundedLineReader, LineRead, LINE_MAX_BYTES};
 use crate::cancel::CancelToken;
-use crate::mcp::aggregator::{self, McpAggregator};
-use crate::mcp::meta_tools;
+use crate::mcp::aggregator::McpAggregator;
 use crate::model::{Promotion, TraceEntryView, TurnPhase, TurnPhaseSink};
 use crate::provider::tool_calling::{ToolDefinition, ToolResult, ToolUse};
 use crate::session::loop_contract::{
-    truncate_trace_excerpt, TraceEntry, DENIED_BY_GATEWAY_CONTENT, TRACE_EXCERPT_MAX,
+    truncate_trace_excerpt, Termination, TraceEntry, TRACE_EXCERPT_MAX,
 };
 use crate::session::materializer::{DispatchDeps, Materializer};
 use crate::session::turn_dispatch::{
-    classify_with_cli_tool, guarded_dispatch, ResolvedClassification,
+    classify_with_cli_tool, dispatch_gated_call, CallFace, DispatchAbort, GateCtx,
+    ResolvedClassification,
 };
-use crate::tools::{builtin_table, dispatch, ToolOutcome};
+use crate::tools::builtin_table;
 
 use super::framing;
 
@@ -799,33 +797,14 @@ fn tool_to_mcp(def: &ToolDefinition) -> Value {
     })
 }
 
-/// Drive one `tools/call` through the approval gate + dispatch, mirroring the
-/// built-in loop's `execute_call`. A gate denial is a tool-level error the
-/// agent self-corrects from (ADR-0077); a gate cancel ends the serve loop
-/// (surfaced as a JSON-RPC error so the bridge does not hang on a reply).
-///
-/// The meta-tool trio dispatches FIRST (ADR-0105): `mcp_list_servers` /
-/// `mcp_search_tools` run locally against the aggregator's catalog (read-only,
-/// short of the gate -- the same trust shape as the built-in read tools);
-/// The ADR-0108 D2 call-time failure envelope: the same shape the
-/// executor's own failures take -- no promotion rides an error.
-fn failed_outcome(call: &ToolUse, detail: String) -> ToolOutcome {
-    ToolOutcome {
-        result: ToolResult {
-            tool_use_id: call.id.clone(),
-            content: detail,
-            is_error: true,
-        },
-        promotion: None,
-    }
-}
-
-/// `mcp_invoke` resolves its handle BEFORE the enforcement points so the
-/// gate / trace keep consuming the backend tool identity, and a resolution
-/// failure is the call's own failure (no gate suspension, no trace entry --
-/// the same semantics as a call that never reached a tool). A namespaced
-/// handle emitted directly as a tool name is refused the same way: the trio
-/// is the one addressing surface.
+/// The bridge face's `tools/call` transport shell: parse the JSON-RPC
+/// request, hand it to the shared dispatch core (`dispatch_gated_call`,
+/// `CallFace::Bridge`), and map the returned product back onto the wire --
+/// JSON-RPC parsing on the way in, response mapping on the way out. Every
+/// dispatch decision (the interception family, the gate, the routing arms,
+/// the freeze window, the trace assembly) lives in the core; this arm is a
+/// pure transport, the same shape the built-in loop's mpsc dispatch server
+/// takes around the same core (issue #696's mid-term item).
 fn handle_tools_call(msg: &Value, ctx: &mut GatewayCtx, outcome: &mut GatewayOutcome) -> Response {
     let params = msg.get("params").unwrap_or(&Value::Null);
     let name = match params.get("name").and_then(|v| v.as_str()) {
@@ -849,403 +828,92 @@ fn handle_tools_call(msg: &Value, ctx: &mut GatewayCtx, outcome: &mut GatewayOut
         name,
         input: arguments,
     };
-    // The shared dispatch classification (issue #663 review): the trio match,
-    // the parse-first invoke resolution, and the direct-handle refusal all
-    // live in `meta_tools::resolve_meta_call` -- this site maps each variant
-    // onto the gateway envelope. `Resolved` is an owned replacement call that
-    // outlives the match through `resolved`; `Fallthrough` borrows the
-    // original; both take the shared classify -> gate -> dispatch path below.
-    let resolved;
-    let call: &ToolUse = match meta_tools::resolve_meta_call(&ctx.mcp, &call) {
-        meta_tools::MetaDispatch::Local { summary, payload } => {
-            return local_meta_result(&call, &summary, payload, outcome, ctx.events);
-        }
-        meta_tools::MetaDispatch::Refused(message) => return resolution_failure(message),
-        meta_tools::MetaDispatch::Resolved(replacement) => {
-            resolved = replacement;
-            &resolved
-        }
-        meta_tools::MetaDispatch::Fallthrough(call) => call,
+    // The core's interception family discriminates on the face; the bridge
+    // face never reaches the `present_files` arm, so the presented-channel
+    // placeholder is never written.
+    let mut presented = Vec::new();
+    let gate = GateCtx {
+        approval: ctx.approval,
+        sink: ctx.sink,
+        cancel: ctx.cancel,
     };
-    // The skill-invocation meta-tool (ADR-0119 Decision 4, issue #983):
-    // intercepted beside the trio match, ahead of any classification /
-    // gate -- invocation is approval-free by design (the gate is the
-    // machine-level enable axis). The resolver appends the
-    // agent-actor record to the turn's pending invocations; this site maps
-    // its two variants exactly as the trio's (a Local call gets a trace
-    // row, a Refused call is the bare isError envelope with no trace
-    // entry).
-    if call.name == crate::skills::invocation::INVOKE_SKILL {
-        return match crate::skills::invocation::resolve_skill_invocation(call, &mut ctx.invocations)
-        {
-            crate::skills::invocation::SkillInvocationOutcome::Local { summary, payload } => {
-                local_meta_result(call, &summary, payload, outcome, ctx.events)
-            }
-            crate::skills::invocation::SkillInvocationOutcome::Refused(message) => {
-                resolution_failure(message)
-            }
-        };
-    }
-    // The skill-attachment read surface (ADR-0111, issue #714): intercepted
-    // beside the invocation arm, equally ahead of any classification / gate
-    // (reading rides the live invoked set -- ADR-0111 calibrated by
-    // ADR-0119 Decision 4; the resolver unions the turn's pending
-    // invocations, issue #1260). A served read gets a trace row through the
-    // shared local-meta mapper; a refused read is the bare isError
-    // envelope with no trace entry.
-    if call.name == crate::skills::read::READ_SKILL_FILE {
-        return match crate::skills::read::resolve_skill_read(
-            call,
-            &ctx.read,
-            ctx.invocations.pending.as_slice(),
-        ) {
-            crate::skills::read::SkillReadOutcome::Local { summary, payload } => {
-                local_meta_result(call, &summary, payload, outcome, ctx.events)
-            }
-            crate::skills::read::SkillReadOutcome::Refused(message) => resolution_failure(message),
-        };
-    }
-    // The skill-creation meta-tool (ADR-0122 Decisions 1 + 3): unlike the
-    // two read-shaped skill meta-tools above, the mint PERSISTS across
-    // sessions and its body is a future prompt-injection source, so it
-    // GATES -- the resolver validates + pre-checks ahead of the card (a
-    // refusal is the model's, never the approver's), and only an approved
-    // call executes the live-config composite (mint + stale-entry clear).
-    // The discovery snapshot is untouched (ADR-0119's session-immutable
-    // posture): the new skill is invocable by name this session and seeded
-    // into the next -- except a session that started with no skills never
-    // mounts `invoke_skill`, so invocability defers to the next session.
-    if call.name == crate::skills::create::CREATE_SKILL {
-        return match crate::skills::create::resolve_skill_creation(call, ctx.create.root) {
-            crate::skills::create::SkillCreateOutcome::Refused(message) => {
-                resolution_failure(message)
-            }
-            crate::skills::create::SkillCreateOutcome::Gated { summary, markdown } => {
-                let Some(live) = ctx.create.live else {
-                    return resolution_failure(
-                        crate::skills::create::UNAVAILABLE_FAILURE.to_string(),
-                    );
-                };
-                // Freeze across the gate + mint (ADR-0115): the approval
-                // pending and the filesystem write are waits on an external
-                // principal -- never billed to the turn's generation cap.
-                // The shared dispatch freeze below never runs for this
-                // intercept (it sits ahead of that site).
-                let _create_freeze = ctx.cancel.progress_clock().map(|c| c.freeze());
-                let gate_req = ApprovalRequest {
-                    key: crate::approval::ToolKey::builtin(crate::skills::create::CREATE_SKILL),
-                    operation_kind: OperationKind::Write,
-                    summary: summary.clone(),
-                    file_attachments: vec![crate::skills::create::skill_markdown_attachment(
-                        &markdown,
-                    )],
-                    // An external runtime's bridge-originated call carries
-                    // no sub-agent originator (delegation is built-in-only,
-                    // ADR-0117's v1 calibration).
-                    origin_agent: None,
-                    call_id: Some(call.id.clone()),
-                };
-                match ctx.approval.gate(gate_req, ctx.sink, ctx.cancel) {
-                    Err(GateCancelled) => Response::Error(-32000, "turn cancelled".into()),
-                    Ok(GateOutcome::Denied) => {
-                        let entry = TraceEntry::denied(
-                            call.id.clone(),
-                            call.name.clone(),
-                            OperationKind::Write,
-                            summary,
-                        );
-                        // Only the completed phase (issue #1242): the card was
-                        // the call's pending face, the resolved denial
-                        // replaces it -- the dispatch core's contract.
-                        land_completed(ctx.events, outcome, entry);
-                        Response::Result(json!({
-                            "content": [{"type": "text", "text": DENIED_BY_GATEWAY_CONTENT}],
-                            "isError": true,
-                        }))
-                    }
-                    Ok(GateOutcome::Allow) => {
-                        // Post-gate start (issue #1242): the card (if any)
-                        // resolved, so the running row can exist.
-                        ctx.events.emit(TurnPhase::ToolCallStarted {
-                            id: None,
-                            name: call.name.clone(),
-                            operation_kind: OperationKind::Write,
-                            summary: summary.clone(),
-                            task: None,
-                        });
-                        // The gate-pending window can race a same-name mint
-                        // -- the typed error rides the result so the model
-                        // self-corrects.
-                        match crate::skills::create::execute_skill_creation(
-                            live,
-                            ctx.create.root,
-                            &markdown,
-                        ) {
-                            Ok(entry) => {
-                                let text = crate::skills::create::created_skill_result(&entry);
-                                let trace_entry = TraceEntry::succeeded(
-                                    call.id.clone(),
-                                    call.name.clone(),
-                                    OperationKind::Write,
-                                    summary,
-                                    String::new(),
-                                );
-                                land_completed(ctx.events, outcome, trace_entry);
-                                Response::Result(json!({
-                                    "content": [{"type": "text", "text": text}],
-                                    "isError": false,
-                                }))
-                            }
-                            Err(e) => {
-                                let message = format!("create_skill: {e}");
-                                let excerpt = truncate_trace_excerpt(&message, TRACE_EXCERPT_MAX);
-                                let trace_entry = TraceEntry::failed(
-                                    call.id.clone(),
-                                    call.name.clone(),
-                                    OperationKind::Write,
-                                    summary,
-                                    excerpt,
-                                );
-                                land_completed(ctx.events, outcome, trace_entry);
-                                Response::Result(json!({
-                                    "content": [{"type": "text", "text": message}],
-                                    "isError": true,
-                                }))
-                            }
-                        }
-                    }
-                }
-            }
-        };
-    }
-    // The gate consumes the RESOLVED identity (ADR-0105 Decision 4), so an
-    // approval card names the backend server + handle, never "mcp_invoke".
-    // A registered CLI tool classifies under its own reserved server
-    // (issue #673, ADR-0108 Decision 7) -- the trust key is the registration
-    // name, the badge is Execute, and the summary renders the full argv +
-    // file values the approval card shows, identically to a
-    // built-in-loop-initiated call. The shared helper keeps the trust key
-    // and card identical to `execute_call`'s (one trust axis, two callers).
-    let ResolvedClassification {
-        key,
-        operation_kind,
-        summary,
-        file_attachments,
-        cli_tool,
-    } = classify_with_cli_tool(ctx.cli, call, ctx.deps.temp_path);
-    // Freeze across the gate + dispatch (ADR-0115): an approval pending on
-    // the condvar, a CLI tool's run, and a builtin dispatch are waits on an
-    // external principal -- never billed to the turn's generation cap. The
-    // clock rides the shared token (None between turns: no freeze).
-    let _dispatch_freeze = ctx.cancel.progress_clock().map(|c| c.freeze());
-    let gate_req = ApprovalRequest {
-        key,
-        operation_kind,
-        summary: summary.clone(),
-        file_attachments,
+    // The live rail (issue #1242): the core emits the authoritative phase
+    // pair through here; the authoritative trace entry rides the return
+    // value onto the outcome below -- one entry, two rails, never two
+    // constructions.
+    let mut on_phase = |phase: TurnPhase| ctx.events.emit(phase);
+    match dispatch_gated_call(
+        &call,
+        CallFace::Bridge,
+        &mut ctx.deps,
+        ctx.materializer,
+        &mut ctx.mcp,
+        ctx.cli,
+        &mut ctx.invocations,
+        &mut presented,
+        &ctx.read,
+        &ctx.create,
+        &gate,
+        &mut on_phase,
         // An external runtime's bridge-originated call carries no sub-agent
-        // originator (delegation is built-in-only -- ADR-0117's v1
-        // calibration scopes the delegation family to the built-in runtime;
-        // external bridge faces carry none).
-        origin_agent: None,
-        call_id: Some(call.id.clone()),
-    };
-    match ctx.approval.gate(gate_req, ctx.sink, ctx.cancel) {
-        Err(GateCancelled) => Response::Error(-32000, "turn cancelled".into()),
-        Ok(GateOutcome::Denied) => {
-            let entry =
-                TraceEntry::denied(call.id.clone(), call.name.clone(), operation_kind, summary);
-            // Only the completed phase (issue #1242): the card was the call's
-            // pending face, the resolved denial replaces it -- no started row
-            // ever exists (the dispatch core's contract).
-            land_completed(ctx.events, outcome, entry);
+        // originator (delegation is built-in-only, ADR-0117's v1
+        // calibration).
+        None,
+    ) {
+        Err(DispatchAbort::Gate) => Response::Error(-32000, "turn cancelled".into()),
+        Err(DispatchAbort::Panic(termination)) => {
+            // The bridge face's panic mapping (the #321 guard surfaces as
+            // the call's own error result, never an unwound serve): the
+            // core returns the pre-derived detail; the classification is
+            // pure, so recomputing it here reproduces the row fields the
+            // pre-retirement arm carried when the dispatch panicked. One
+            // known deviation: that arm classified the wire-RESOLVED
+            // identity (an mcp_invoke passthrough already resolved), this
+            // reclassifies the wire call -- a panicking passthrough names
+            // the shell, not the backend tool.
+            let detail = match termination {
+                Termination::Transient(detail) => detail,
+                _ => unreachable!("dispatch panics always surface as Transient"),
+            };
+            let ResolvedClassification {
+                operation_kind,
+                summary,
+                ..
+            } = classify_with_cli_tool(ctx.cli, &call, ctx.deps.temp_path);
+            let excerpt = truncate_trace_excerpt(&detail, TRACE_EXCERPT_MAX);
+            let entry = TraceEntry::failed(
+                call.id.clone(),
+                call.name.clone(),
+                operation_kind,
+                summary,
+                excerpt,
+            );
+            ctx.events
+                .emit(TurnPhase::ToolCallCompleted(TraceEntryView::from(&entry)));
+            outcome.trace.push(entry);
             Response::Result(json!({
-                "content": [{"type": "text", "text": DENIED_BY_GATEWAY_CONTENT}],
+                "content": [{"type": "text", "text": detail}],
                 "isError": true,
             }))
         }
-        Ok(GateOutcome::Allow) => {
-            // The gateway's own authoritative start (issue #1242): this
-            // emission is the row's ONLY live source (the external lines'
-            // echoes are silenced at their fold layers), firing post-gate so
-            // the pending card is never doubled by a running row. The name is
-            // the call's final identity (an `mcp_invoke` fall-through already
-            // resolved), the summary the real argument summary -- the same
-            // facts the settle trace row carries.
-            ctx.events.emit(TurnPhase::ToolCallStarted {
-                id: None,
-                name: call.name.clone(),
-                operation_kind,
-                summary: summary.clone(),
-                task: None,
-            });
-            // Route by name shape (ADR-0076 gateway routing + ADR-0105
-            // Decision 4 + ADR-0108 Decision 6): a namespaced name (an
-            // `mcp_invoke` fall-through) routes to the external server and
-            // the server's envelope is relayed VERBATIM via
-            // [`external_call_outcome`]; a registered CLI tool's name routes
-            // to the shared spawn engine; anything else is a built-in
-            // dispatch whose promotion rides the side-effect channel. Either
-            // way exactly one trace row lands, naming the call's final
-            // identity.
-            // The routing + trace assembly in this arm is the gateway-side
-            // counterpart the dispatch core's module doc calls out as the
-            // documented per-side divergence (envelope relayed verbatim here
-            // vs flattened to the first text block on the core path, issue
-            // #696): the shared pieces are the classification, the meta-tool
-            // resolution, the `result_N` numbering, and the #321 panic
-            // guard (`guarded_dispatch`).
-            // NOTE: the namespaced check here re-reads `call.name` rather
-            // than hoisting one `is_external` above the trio match -- the
-            // `mcp_invoke` fall-through REPLACES the name with the resolved
-            // handle between the two sites, so the guard above judges the
-            // EMITTED name while this judges the final identity (a hoisted
-            // bool would be stale for exactly the invoke path).
-            let (response, is_error, excerpt) = if aggregator::is_namespaced(&call.name) {
-                let route_result = ctx.mcp.route(&call.name, &call.input);
-                // The over-cap spill plan (issue #1218): the `mcp__` prefix
-                // is stripped so `mcp__<slug>__<tool>` spills as
-                // `<slug>__<tool>-<call-id>` -- the CLI channel's naming
-                // family, one data-plane switch across both transports.
-                let stem = call
-                    .name
-                    .strip_prefix(aggregator::NAMESPACED_PREFIX)
-                    .unwrap_or(&call.name);
-                let spill =
-                    crate::cli_tools::executor::SpillPlan::new(ctx.deps.temp_path, stem, &call.id);
-                let (envelope, is_error, excerpt) = external_call_outcome(
-                    &call.name,
-                    route_result,
-                    &spill,
-                    crate::cli_tools::executor::OUTPUT_CAP_BYTES,
-                );
-                (Response::Result(envelope), is_error, excerpt)
-            } else if let Some(tool) = cli_tool {
-                // The registered-CLI dispatch arm (issue #673, ADR-0108
-                // Decision 6): the same spawn engine, cwd, cancel, and
-                // output-cap discipline a built-in-initiated call gets -- one
-                // execution engine, two callers. CLI tools never promote, so
-                // no side-effect channel rides here. ADR-0137 (issue #1381):
-                // the spawn cwd resolves through the SAME launch-dir seam the
-                // built-in dispatch arm uses -- one cwd semantics across both
-                // runtime surfaces, and this launch is a lazy-mint disk-need
-                // moment for a directory-less session. The pipeline artifacts
-                // stay in the session temp (issue #1408), the same domain the
-                // approval classify renders against.
-                let executed = match ctx.deps.launch_dir() {
-                    Ok(cwd) => crate::cli_tools::executor::execute(
-                        tool,
-                        call,
-                        &cwd,
-                        ctx.deps.temp_path,
-                        ctx.cancel,
-                        None,
-                    ),
-                    // A call-time structured error (the ADR-0108 D2
-                    // posture), the same envelope shape the executor's own
-                    // failures take -- the CLI self-corrects or surfaces it.
-                    Err(detail) => failed_outcome(call, detail),
-                };
-                result_envelope(executed.result)
+        Ok((result, entry, promotion, envelope)) => {
+            if let Some(promotion) = promotion {
+                outcome.promotions.push(promotion);
+            }
+            if let Some(entry) = entry {
+                outcome.trace.push(entry);
+            }
+            // The external envelope rides the return value (one decision,
+            // two renderings): present means relay verbatim -- the server's
+            // own shape, cap-spilled by the core -- absent means map the
+            // flattened result.
+            if let Some(envelope) = envelope {
+                Response::Result(envelope)
             } else {
-                // The builtin dispatch runs under the shared issue #321
-                // guard (snapshot + ghost rollback, the same ritual the
-                // dispatch core path gets) -- a panic mid-dispatch rolls its
-                // orphan `result_N` back and surfaces as this call's error
-                // result instead of unwinding the server task.
-                let site = format!("tool dispatch `{}`", call.name);
-                let dispatched = match guarded_dispatch(&mut ctx.deps, &site, |deps| {
-                    dispatch(call, deps, ctx.cancel, ctx.materializer)
-                }) {
-                    Ok(dispatched) => dispatched,
-                    Err(detail) => failed_outcome(call, detail),
-                };
-                if let Some(promotion) = dispatched.promotion {
-                    outcome.promotions.push(promotion);
-                }
-                result_envelope(dispatched.result)
-            };
-            let excerpt = truncate_trace_excerpt(&excerpt, TRACE_EXCERPT_MAX);
-            let entry = if is_error {
-                TraceEntry::failed(
-                    call.id.clone(),
-                    call.name.clone(),
-                    operation_kind,
-                    summary,
-                    excerpt,
-                )
-            } else {
-                TraceEntry::succeeded(
-                    call.id.clone(),
-                    call.name.clone(),
-                    operation_kind,
-                    summary,
-                    excerpt,
-                )
-            };
-            // The completed phase is the trace row itself (issue #1242): the
-            // same entry the settle merge later pairs, so the live row and
-            // the settled row are one construction, never two.
-            land_completed(ctx.events, outcome, entry);
-            response
+                result_envelope(result).0
+            }
         }
     }
-}
-
-/// Emit the row's completed phase and land it on the outcome (issue #1242):
-/// one construction feeds both the live rail and the settle trace, in that
-/// order -- the live row and the settled row are the same entry, never two.
-fn land_completed(events: &dyn TurnPhaseSink, outcome: &mut GatewayOutcome, entry: TraceEntry) {
-    events.emit(TurnPhase::ToolCallCompleted(TraceEntryView::from(&entry)));
-    outcome.trace.push(entry);
-}
-
-/// Serve one locally-executed meta-tool (`mcp_list_servers` /
-/// `mcp_search_tools`): wrap the catalog payload as a success tool result +
-/// record a trace entry. These never touch a backend server, so there is no
-/// gate suspension (catalog reads carry the built-in read tools' trust
-/// shape) and no envelope relay -- the payload is the gateway's own JSON.
-/// Emits the standard live pair (issue #1242), mirroring the built-in path's
-/// `local_meta_call`, so a locally-served call renders like any other call.
-fn local_meta_result(
-    call: &ToolUse,
-    summary: &str,
-    payload: Value,
-    outcome: &mut GatewayOutcome,
-    events: &dyn TurnPhaseSink,
-) -> Response {
-    events.emit(TurnPhase::ToolCallStarted {
-        id: None,
-        name: call.name.clone(),
-        operation_kind: OperationKind::Read,
-        summary: summary.to_string(),
-        task: None,
-    });
-    let excerpt = crate::mcp::meta_tools::meta_payload_text(payload);
-    let entry = TraceEntry::succeeded(
-        call.id.clone(),
-        call.name.clone(),
-        OperationKind::Read,
-        summary.to_string(),
-        truncate_trace_excerpt(&excerpt, TRACE_EXCERPT_MAX),
-    );
-    land_completed(events, outcome, entry);
-    Response::Result(json!({
-        "content": [{"type": "text", "text": excerpt}],
-        "isError": false,
-    }))
-}
-
-/// An addressing failure on the discovery surface (a malformed meta-tool
-/// input, an unresolvable `mcp_invoke` handle, or a handle emitted directly
-/// as a tool name): the call's own error result, surfaced as a tool-level
-/// failure the agent self-corrects from (ADR-0077/0105). No gate suspension
-/// and NO trace entry -- the call never reached a tool.
-fn resolution_failure(message: String) -> Response {
-    Response::Result(json!({
-        "content": [{"type": "text", "text": message}],
-        "isError": true,
-    }))
 }
 
 /// One dispatched call's [`ToolResult`] → (bridge envelope, is_error,
@@ -1267,164 +935,6 @@ fn result_envelope(result: ToolResult) -> (Response, bool, String) {
     )
 }
 
-/// Resolve a routed external MCP call into the response envelope + the trace
-/// inputs (slice C-gw). Pure over the aggregator: takes the route result so
-/// the verbatim-relay + excerpt shape is unit-testable without a live server.
-///
-/// On success the server's envelope is returned VERBATIM -- the server's own
-/// `{content, isError}` shape, so structured content blocks (multi-block /
-/// non-text) survive. Re-wrapping it into a single text block would
-/// double-encode the content array and drop every non-text block the server
-/// emitted. Over the result cap the relay stops being verbatim BY DESIGN
-/// (issue #1218): the data spills whole to `tool_output/` and the envelope
-/// carries the preview trio instead (see [`spill_external_over_cap`]). On a
-/// route error the gateway builds an `isError` envelope naming the tool so
-/// the agent can self-correct (ADR-0077). Returns
-/// `(envelope, is_error, excerpt)` so the caller pushes one trace row and
-/// returns the envelope.
-fn external_call_outcome(
-    name: &str,
-    route_result: Result<Value, aggregator::RouteError>,
-    spill: &crate::cli_tools::executor::SpillPlan,
-    cap: usize,
-) -> (Value, bool, String) {
-    let envelope = route_result.unwrap_or_else(|e| {
-        json!({
-            "content": [{
-                "type": "text",
-                "text": format!("external tool `{name}` failed: {e}"),
-            }],
-            "isError": true,
-        })
-    });
-    let is_error = envelope
-        .get("isError")
-        .and_then(Value::as_bool)
-        .unwrap_or(false);
-    let envelope = spill_external_over_cap(envelope, name, spill, cap);
-    let excerpt = aggregator::first_text_block(&envelope);
-    (envelope, is_error, excerpt)
-}
-
-/// The over-cap external-result spill arm (issue #1218): the MCP twin of
-/// the CLI stdout tee -- the cap is the data-plane switching point, so an
-/// over-cap result's data lands whole under `tool_output/` (readable by
-/// `read_*` into the working set through the derived-source chain) and the
-/// model context gets the capped head + marker + path instead of the full
-/// bytes. The spill bytes are the `content[]` text blocks concatenated in
-/// order (non-text blocks are skipped -- they are not the engine's data
-/// plane); a result with no text bytes falls back to the
-/// `structuredContent` serialization, else the file would be empty.
-/// Under the cap the envelope passes through untouched (the verbatim
-/// contract). `isError` is orthogonal: an error envelope's text is as
-/// much the data egress as a success's (the CLI channel's non-zero-exit
-/// twin), so it spills the same way. A failed spill withdraws the path
-/// and removes the partial bytes, and the preview carries the truncation
-/// and write-error markers -- a half-trusted file reference is worse than
-/// none (the CLI reader's doctrine).
-fn spill_external_over_cap(
-    mut envelope: Value,
-    name: &str,
-    spill: &crate::cli_tools::executor::SpillPlan,
-    cap: usize,
-) -> Value {
-    // Measure first, spill later: the under-cap path assembles no data
-    // buffer (the verbatim relay stays copy-free; the zero-text fallback
-    // still pays one serialization probe); only a crossing pays for
-    // assembly. The measured data plane is the text blocks only: a
-    // non-empty text keeps `structuredContent` out of the measurement
-    // entirely (ADR-0105 Decision 5's calibration -- the fallback below
-    // is the no-text escape hatch, not a second plane).
-    let texts: Vec<&str> = envelope
-        .get("content")
-        .and_then(Value::as_array)
-        .map(|blocks| {
-            blocks
-                .iter()
-                .filter(|b| b.get("type").and_then(Value::as_str) == Some("text"))
-                .filter_map(|b| b.get("text").and_then(Value::as_str))
-                .collect()
-        })
-        .unwrap_or_default();
-    let total: usize = texts.iter().map(|t| t.len()).sum();
-    let fallback: Option<String> = if total == 0 {
-        envelope
-            .get("structuredContent")
-            .and_then(|sc| serde_json::to_string(sc).ok())
-    } else {
-        None
-    };
-    let data_len = fallback.as_ref().map_or(total, String::len);
-    if data_len <= cap {
-        return envelope;
-    }
-    let data: Vec<u8> = match &fallback {
-        Some(serialized) => serialized.as_bytes().to_vec(),
-        None => texts.concat().into_bytes(),
-    };
-    let head = String::from_utf8_lossy(&data[..cap]).into_owned();
-    let extension = crate::cli_tools::executor::spill_extension(data.iter().copied());
-    let spilled: Result<std::path::PathBuf, String> = (|| {
-        let (mut file, path) = spill.open(extension).map_err(|e| e.to_string())?;
-        if let Err(e) = file.write_all(&data) {
-            // The half-written file cannot be a data reference: drop the
-            // handle (Windows refuses to delete an open file), then remove
-            // the partial bytes -- the CLI spill's cleanup doctrine.
-            drop(file);
-            let _ = std::fs::remove_file(&path);
-            return Err(e.to_string());
-        }
-        Ok(path)
-    })();
-    // Logged at warn, not debug: release builds filter debug, and a failed
-    // spill is an abnormal actionable event -- the model sees the marker,
-    // but the trace excerpt keeps only the preview head, so the operator
-    // would otherwise have no persistent trace of a sustained disk-full.
-    if let Err(detail) = &spilled {
-        log::warn!(
-            target: "toptopduck::gateway",
-            "external tool spill write failed for `{name}`: {detail}"
-        );
-    }
-    let preview = crate::cli_tools::executor::spill_preview(&head, cap, &spilled);
-    let preview_block = json!({"type": "text", "text": preview});
-    // Collapse the text blocks into the preview block at the first text
-    // block's position; non-text blocks keep theirs (they were never part
-    // of the measured data plane). A missing content array is CREATED --
-    // the structuredContent fallback can cross the cap with no array at
-    // all, and a spilled file the model has no pointer to would be an
-    // orphan.
-    let mut rebuilt = Vec::new();
-    let mut placed = false;
-    if let Some(Value::Array(blocks)) = envelope.get_mut("content") {
-        rebuilt.reserve(blocks.len());
-        for block in blocks.drain(..) {
-            let is_text = block.get("type").and_then(Value::as_str) == Some("text");
-            if !is_text {
-                rebuilt.push(block);
-            } else if !placed {
-                rebuilt.push(preview_block.clone());
-                placed = true;
-            }
-        }
-    }
-    if !placed {
-        // No text block existed (or no content array at all): the preview
-        // opens the content.
-        rebuilt.insert(0, preview_block);
-    }
-    if let Some(object) = envelope.as_object_mut() {
-        object.insert("content".to_string(), Value::Array(rebuilt));
-        // The spilled data must not also ride the envelope: the fallback's
-        // structuredContent is the bypassed bytes (kept verbatim otherwise --
-        // the text plane spilled, not it, and a FAILED spill bypassed nothing).
-        if spilled.is_ok() && fallback.is_some() {
-            object.remove("structuredContent");
-        }
-    }
-    envelope
-}
-
 /// Generate a 64-hex auth token (244-bit entropy). Two uuid v4 values (122
 /// random bits each -- v4 carries 6 fixed version/variant bits) concatenated;
 /// uuid is already a dependency (session ids), so this adds none.
@@ -1437,9 +947,11 @@ fn generate_token() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::approval::OperationKind;
     use crate::approval::{ApprovalRequestBody, ApprovalResponse, ApprovalSink, ToolKey};
     use crate::guardrail::ExecError;
     use crate::ingest::schema::quote_ident;
+    use crate::mcp::meta_tools;
     use crate::model::{DatasetDescriptor, DatasetPrivacy, RectifyProvenance};
     use crate::provider::keychain::KeychainStore;
     use crate::session::engine::AdminEngine;
@@ -3802,6 +3314,92 @@ mod tests {
         );
     }
 
+    /// A spoofed bridge call for a built-in-only interception tool (ADR-0124:
+    /// the bridge never lists `present_files`): the call falls through the
+    /// face-gated interception, surfaces the unknown-external approval card,
+    /// and once allowed dies at the executor's unknown-tool error -- the
+    /// call's own failed trace row. The `CallFace` fall-through contract
+    /// pinned on the wire (issue #1418).
+    #[test]
+    fn handle_tools_call_spoofed_present_files_dies_at_the_unknown_tool() {
+        let approval: &'static ApprovalState = Box::leak(Box::new(ApprovalState::new()));
+        let sink: &'static AnsweringSink = Box::leak(Box::new(AnsweringSink::new(
+            approval,
+            ApprovalResponse::AllowOnce,
+        )));
+        let mut ctx = gate_ctx(Vec::new(), approval, sink);
+        let mut outcome = GatewayOutcome::default();
+        let msg = json!({
+            "jsonrpc": "2.0",
+            "id": 7,
+            "method": "tools/call",
+            "params": {"name": "present_files", "arguments": {"paths": ["a.txt"]}}
+        });
+        match handle_tools_call(&msg, &mut ctx, &mut outcome) {
+            Response::Result(v) => {
+                assert_eq!(v["isError"], true, "a spoofed call is an error result");
+                let text = v["content"][0]["text"].as_str().unwrap_or_default();
+                assert!(
+                    text.contains("unknown tool"),
+                    "the executor refuses it: {text}"
+                );
+                assert!(
+                    text.contains("present_files"),
+                    "the refusal names the tool: {text}"
+                );
+            }
+            _ => panic!("the spoofed call must return a Result"),
+        }
+        assert_eq!(
+            outcome.trace.len(),
+            1,
+            "the failed call keeps one honest row"
+        );
+        assert!(!outcome.trace[0].success, "the row records the failure");
+        assert_eq!(
+            sink.cards().len(),
+            1,
+            "the unknown-external card surfaced first"
+        );
+    }
+
+    /// The workspace-tool twin of the spoof pin above (ADR-0137: the bridge
+    /// never lists the gated write pair): the same fall-through death shape.
+    #[test]
+    fn handle_tools_call_spoofed_workspace_write_dies_at_the_unknown_tool() {
+        let approval: &'static ApprovalState = Box::leak(Box::new(ApprovalState::new()));
+        let sink: &'static AnsweringSink = Box::leak(Box::new(AnsweringSink::new(
+            approval,
+            ApprovalResponse::AllowOnce,
+        )));
+        let mut ctx = gate_ctx(Vec::new(), approval, sink);
+        let mut outcome = GatewayOutcome::default();
+        let msg = json!({
+            "jsonrpc": "2.0",
+            "id": 8,
+            "method": "tools/call",
+            "params": {"name": "write", "arguments": {"path": "a.txt", "content": "x"}}
+        });
+        match handle_tools_call(&msg, &mut ctx, &mut outcome) {
+            Response::Result(v) => {
+                assert_eq!(v["isError"], true, "a spoofed call is an error result");
+                let text = v["content"][0]["text"].as_str().unwrap_or_default();
+                assert!(
+                    text.contains("unknown tool"),
+                    "the executor refuses it: {text}"
+                );
+                assert!(text.contains("write"), "the refusal names the tool: {text}");
+            }
+            _ => panic!("the spoofed call must return a Result"),
+        }
+        assert_eq!(
+            outcome.trace.len(),
+            1,
+            "the failed call keeps one honest row"
+        );
+        assert!(!outcome.trace[0].success, "the row records the failure");
+    }
+
     /// The workspace write tools (issue #1406) and the read-only discovery
     /// trio (issue #1385) are built-in-runtime-only: external runtimes
     /// bring their own file tools with full authority, so the bridge face
@@ -4016,205 +3614,6 @@ mod tests {
         }
     }
 
-    /// The bridge face's `create_skill` arm (ADR-0122 Decisions 1+3): a
-    /// malformed document refuses as the bare error with no trace row; a
-    /// trusted (always-allowed) call mints through the live composite --
-    /// the bytes verbatim, one Write-badged trace row, and no card
-    /// surfaced for the trusted call.
-    #[test]
-    fn handle_tools_call_create_skill_refuses_and_serves_a_trusted_mint() {
-        let approval: &'static ApprovalState = Box::leak(Box::new(ApprovalState::new()));
-        approval.seed_trust(&crate::approval::ToolKey::builtin(
-            crate::skills::create::CREATE_SKILL,
-        ));
-        let sink: &'static RecSink = Box::leak(Box::new(RecSink {
-            requests: std::sync::Mutex::new(Vec::new()),
-        }));
-        let fake: &'static mut FakeMaterializer =
-            Box::leak(Box::new(FakeMaterializer::new(vec![])));
-        let mut ctx = gate_ctx_with_materializer(fake, Vec::new(), approval, sink);
-        let tmp: &'static tempfile::TempDir = Box::leak(Box::new(tempfile::tempdir().unwrap()));
-        let live: &'static crate::LiveProviderConfig =
-            Box::leak(Box::new(crate::LiveProviderConfig::new(
-                crate::provider::keychain::KeychainStore,
-                tmp.path().join("config.json"),
-            )));
-        ctx.create = crate::skills::create::SkillCreateGate {
-            root: tmp.path(),
-            live: Some(live),
-        };
-        let mut outcome = GatewayOutcome::default();
-
-        // (a) A malformed document: the bare typed error, no trace row.
-        let bad = json!({
-            "jsonrpc": "2.0",
-            "id": 21,
-            "method": "tools/call",
-            "params": {"name": "create_skill", "arguments": {
-                "skillMarkdown": "no frontmatter at all"
-            }}
-        });
-        match handle_tools_call(&bad, &mut ctx, &mut outcome) {
-            Response::Result(v) => {
-                assert_eq!(
-                    v["isError"], true,
-                    "a malformed document is the call's error"
-                );
-                let text = v["content"][0]["text"].as_str().unwrap_or_default();
-                assert!(text.starts_with("create_skill"), "{text}");
-            }
-            Response::Error(code, m) => {
-                panic!("create_skill must return Result, got error {code}: {m}")
-            }
-            Response::None => panic!("create_skill must return Result, got None"),
-        }
-        assert!(outcome.trace.is_empty(), "a refusal records no trace row");
-
-        // (b) A trusted mint: verbatim bytes + one Write-badged trace row.
-        let markdown = "---\nname: sql-coach\ndescription: Coach SQL.\nlicense: MIT\n\
-             ---\nCoach the body.\n";
-        let good = json!({
-            "jsonrpc": "2.0",
-            "id": 22,
-            "method": "tools/call",
-            "params": {"name": "create_skill", "arguments": {
-                "skillMarkdown": markdown
-            }}
-        });
-        match handle_tools_call(&good, &mut ctx, &mut outcome) {
-            Response::Result(v) => {
-                assert_eq!(v["isError"], false, "the trusted mint succeeds");
-                let text = v["content"][0]["text"].as_str().unwrap_or_default();
-                assert!(text.contains("sql-coach"), "{text}");
-            }
-            Response::Error(code, m) => {
-                panic!("create_skill must return Result, got error {code}: {m}")
-            }
-            Response::None => panic!("create_skill must return Result, got None"),
-        }
-        assert_eq!(outcome.trace.len(), 1, "one mint -> one trace row");
-        let row = &outcome.trace[0];
-        assert_eq!(row.name, "create_skill");
-        assert!(row.success);
-        assert_eq!(row.operation_kind, crate::approval::OperationKind::Write);
-        let on_disk = std::fs::read_to_string(tmp.path().join("sql-coach/SKILL.md")).unwrap();
-        assert_eq!(on_disk, markdown, "the bytes land verbatim");
-        assert!(
-            sink.requests.lock().unwrap().is_empty(),
-            "a trusted mint surfaces no card"
-        );
-    }
-
-    /// The bridge face's create arm denial: the tool-level `isError` result
-    /// and one denied trace row -- and the refusal never mints, so nothing
-    /// lands on disk.
-    #[test]
-    fn handle_tools_call_create_skill_denial_is_tool_level_error() {
-        let approval: &'static ApprovalState = Box::leak(Box::new(ApprovalState::new()));
-        let sink: &'static AnsweringSink = Box::leak(Box::new(AnsweringSink::new(
-            approval,
-            ApprovalResponse::Deny,
-        )));
-        let fake: &'static mut FakeMaterializer =
-            Box::leak(Box::new(FakeMaterializer::new(vec![])));
-        let mut ctx = gate_ctx_with_materializer(fake, Vec::new(), approval, sink);
-        let tmp: &'static tempfile::TempDir = Box::leak(Box::new(tempfile::tempdir().unwrap()));
-        let live: &'static crate::LiveProviderConfig =
-            Box::leak(Box::new(crate::LiveProviderConfig::new(
-                crate::provider::keychain::KeychainStore,
-                tmp.path().join("config.json"),
-            )));
-        ctx.create = crate::skills::create::SkillCreateGate {
-            root: tmp.path(),
-            live: Some(live),
-        };
-        let mut outcome = GatewayOutcome::default();
-        let msg = json!({
-            "jsonrpc": "2.0",
-            "id": 23,
-            "method": "tools/call",
-            "params": {"name": "create_skill", "arguments": {
-                "skillMarkdown": "---\nname: sql-coach\ndescription: Coach SQL.\n---\nBody.\n"
-            }}
-        });
-        match handle_tools_call(&msg, &mut ctx, &mut outcome) {
-            Response::Result(v) => {
-                assert_eq!(v["isError"], true, "the denial is the call's error");
-                let text = v["content"][0]["text"].as_str().unwrap_or_default();
-                assert!(
-                    text.contains("denied by the approval gateway"),
-                    "denial surfaces as the tool result: {text}"
-                );
-            }
-            _ => panic!("denial must return a tool result, not an error"),
-        }
-        assert_eq!(outcome.trace.len(), 1, "one denial -> one trace row");
-        let row = &outcome.trace[0];
-        assert!(!row.success);
-        assert_eq!(row.name, "create_skill");
-        assert_eq!(row.operation_kind, crate::approval::OperationKind::Write);
-        assert_eq!(row.result_excerpt, "denied by approval gateway");
-        assert!(
-            !tmp.path().join("sql-coach").exists(),
-            "the denial never mints"
-        );
-    }
-
-    /// The bridge face's post-race failure envelope: a same-name mint
-    /// landing inside the gate-pending window races the approved write --
-    /// the typed NameTaken error rides the `isError` result with a failed
-    /// trace row, so the model self-corrects from the message alone.
-    #[test]
-    fn handle_tools_call_create_skill_post_race_failure_is_the_calls_error() {
-        let approval: &'static ApprovalState = Box::leak(Box::new(ApprovalState::new()));
-        let tmp: &'static tempfile::TempDir = Box::leak(Box::new(tempfile::tempdir().unwrap()));
-        let sink: &'static OccupyingSink = Box::leak(Box::new(OccupyingSink {
-            state: approval,
-            occupy: tmp.path().join("sql-coach"),
-        }));
-        let fake: &'static mut FakeMaterializer =
-            Box::leak(Box::new(FakeMaterializer::new(vec![])));
-        let mut ctx = gate_ctx_with_materializer(fake, Vec::new(), approval, sink);
-        let live: &'static crate::LiveProviderConfig =
-            Box::leak(Box::new(crate::LiveProviderConfig::new(
-                crate::provider::keychain::KeychainStore,
-                tmp.path().join("config.json"),
-            )));
-        ctx.create = crate::skills::create::SkillCreateGate {
-            root: tmp.path(),
-            live: Some(live),
-        };
-        let mut outcome = GatewayOutcome::default();
-        let msg = json!({
-            "jsonrpc": "2.0",
-            "id": 24,
-            "method": "tools/call",
-            "params": {"name": "create_skill", "arguments": {
-                "skillMarkdown": "---\nname: sql-coach\ndescription: Coach SQL.\n---\nBody.\n"
-            }}
-        });
-        match handle_tools_call(&msg, &mut ctx, &mut outcome) {
-            Response::Result(v) => {
-                assert_eq!(v["isError"], true, "the raced write is the call's error");
-                let text = v["content"][0]["text"].as_str().unwrap_or_default();
-                assert!(
-                    text.starts_with("create_skill") && text.contains("already taken"),
-                    "the typed error rides the result: {text}"
-                );
-            }
-            _ => panic!("the raced create must return a tool result, not an error"),
-        }
-        assert_eq!(outcome.trace.len(), 1, "one raced failure -> one trace row");
-        let row = &outcome.trace[0];
-        assert!(!row.success);
-        assert_eq!(row.name, "create_skill");
-        assert!(
-            tmp.path().join("sql-coach").exists()
-                && !tmp.path().join("sql-coach/SKILL.md").exists(),
-            "the incumbent stays and no mint landed into it"
-        );
-    }
-
     /// The read surface's mount condition (issue #1260, ADR-0111 Decision 1
     /// calibrated by ADR-0119 Decision 4): mounted iff the turn's discovery
     /// snapshot is non-empty -- the SAME gate as `invoke_skill`, so a
@@ -4282,54 +3681,6 @@ mod tests {
             }
             Response::None => panic!("tools/list must return Result, got None"),
         }
-    }
-
-    /// The bridge face's `read_skill_file` Local arm (issue #714): the file
-    /// text rides the result verbatim, one trace row lands under the tool
-    /// name with "skill: path" as its summary, and the call is approval-free
-    /// (the intercept sits ahead of the gate, like the activation arm).
-    #[test]
-    fn handle_tools_call_read_skill_file_serves_text_and_traces() {
-        let approval: &'static ApprovalState = Box::leak(Box::new(ApprovalState::new()));
-        let sink: &'static RecSink = Box::leak(Box::new(RecSink {
-            requests: std::sync::Mutex::new(Vec::new()),
-        }));
-        let fake: &'static mut FakeMaterializer =
-            Box::leak(Box::new(FakeMaterializer::new(vec![])));
-        let mut ctx = gate_ctx_with_materializer(fake, Vec::new(), approval, sink);
-        let tmp = tempfile::tempdir().unwrap();
-        ctx.read = leaked_read_gate(&tmp);
-        let mut outcome = GatewayOutcome::default();
-        let msg = json!({
-            "jsonrpc": "2.0",
-            "id": 11,
-            "method": "tools/call",
-            "params": {"name": "read_skill_file", "arguments": {
-                "name": "sql-coach", "path": "references/notes.md"
-            }}
-        });
-        match handle_tools_call(&msg, &mut ctx, &mut outcome) {
-            Response::Result(v) => {
-                assert_eq!(v["isError"], false, "a served read is a success");
-                assert_eq!(
-                    v["content"][0]["text"], "Use CTEs.\n",
-                    "the file text rides the result verbatim"
-                );
-            }
-            Response::Error(code, m) => {
-                panic!("read_skill_file must return Result, got error {code}: {m}")
-            }
-            Response::None => panic!("read_skill_file must return Result, got None"),
-        }
-        assert_eq!(outcome.trace.len(), 1, "one read -> one trace row");
-        let row = &outcome.trace[0];
-        assert_eq!(row.name, "read_skill_file");
-        assert!(row.success);
-        assert_eq!(row.summary, "sql-coach: references/notes.md");
-        assert!(
-            sink.requests.lock().unwrap().is_empty(),
-            "reading is approval-free on the bridge face too -- the intercept sits ahead of the gate"
-        );
     }
 
     /// The bridge face's same-turn closed loop (issue #1260): the mid-turn
@@ -4636,105 +3987,6 @@ mod tests {
         assert_eq!(outcome.trace[0].operation_kind, OperationKind::Read);
     }
 
-    /// `mcp_search_tools` carries the query into the trace summary and serves
-    /// the catalog payload locally (empty catalog on this fixture -- the
-    /// aggregator-level integration tests pin the match semantics).
-    #[test]
-    fn handle_tools_call_search_tools_carries_query_in_summary() {
-        let mut ctx = fresh_ctx();
-        let mut outcome = GatewayOutcome::default();
-        let msg = json!({
-            "jsonrpc": "2.0",
-            "id": 8,
-            "method": "tools/call",
-            "params": {"name": "mcp_search_tools", "arguments": {"query": "github issues"}}
-        });
-        match handle_tools_call(&msg, &mut ctx, &mut outcome) {
-            Response::Result(v) => {
-                assert_eq!(v["isError"], false);
-                let text = v["content"][0]["text"].as_str().unwrap();
-                assert!(text.contains("\"total_matched\""));
-            }
-            _ => panic!("search_tools must return Result"),
-        }
-        assert_eq!(outcome.trace.len(), 1);
-        assert_eq!(outcome.trace[0].name, "mcp_search_tools");
-        assert_eq!(outcome.trace[0].summary, "query \"github issues\"");
-    }
-
-    /// A namespaced handle emitted DIRECTLY as a tool name is refused before
-    /// the gate (ADR-0105 Consequences): the trio is the one addressing
-    /// surface, so the hallucinated direct call gets a tool-level error
-    /// pointing at `mcp_invoke` -- no approval card, no trace entry.
-    #[test]
-    fn handle_tools_call_direct_handle_emission_is_refused_pregate() {
-        let mut ctx = fresh_ctx();
-        let mut outcome = GatewayOutcome::default();
-        let msg = json!({
-            "jsonrpc": "2.0",
-            "id": 11,
-            "method": "tools/call",
-            "params": {"name": "mcp__fakemcp__add", "arguments": {"a": 1, "b": 2}}
-        });
-        match handle_tools_call(&msg, &mut ctx, &mut outcome) {
-            Response::Result(v) => {
-                assert_eq!(v["isError"], true);
-                let text = v["content"][0]["text"].as_str().unwrap();
-                assert!(
-                    text.contains("mcp__fakemcp__add"),
-                    "error names the handle: {text}"
-                );
-                assert!(
-                    text.contains("mcp_invoke"),
-                    "error points at the addressing path: {text}"
-                );
-            }
-            _ => panic!("direct emission must return Result"),
-        }
-        assert!(
-            outcome.trace.is_empty(),
-            "direct emission produces no trace entry"
-        );
-    }
-
-    /// An `mcp_invoke` whose handle does not resolve (not namespaced, unknown
-    /// server, or a malformed input) is the call's own failure (ADR-0105
-    /// Decision 4): a tool-level isError result that NAMES the handle, with
-    /// NO trace entry and no `mcp_invoke` shell row -- the call never reached
-    /// a tool.
-    #[test]
-    fn handle_tools_call_invoke_resolution_failure_is_traceless() {
-        for (args, expect_named) in [
-            (json!({"tool": "explore"}), "explore"),
-            (json!({"tool": "mcp__ghost__echo"}), "mcp__ghost__echo"),
-            (json!({}), "parameter `tool`"),
-        ] {
-            let mut ctx = fresh_ctx();
-            let mut outcome = GatewayOutcome::default();
-            let msg = json!({
-                "jsonrpc": "2.0",
-                "id": 9,
-                "method": "tools/call",
-                "params": {"name": "mcp_invoke", "arguments": args}
-            });
-            match handle_tools_call(&msg, &mut ctx, &mut outcome) {
-                Response::Result(v) => {
-                    assert_eq!(v["isError"], true, "resolution failure is isError");
-                    let text = v["content"][0]["text"].as_str().unwrap();
-                    assert!(
-                        text.contains(expect_named),
-                        "failure names the offending handle/param: {text}"
-                    );
-                }
-                _ => panic!("resolution failure must return Result"),
-            }
-            assert!(
-                outcome.trace.is_empty(),
-                "resolution failure produces no trace entry"
-            );
-        }
-    }
-
     /// A string JSON-RPC id round-trips into the trace without serde quoting
     /// (PR #339 review A1: `Value::to_string()` would have wrapped it in
     /// literal quotes).
@@ -4966,58 +4218,6 @@ mod tests {
         assert_eq!(body.file_attachments[0].content, "hello body");
     }
 
-    /// Issue #1408's wiring pin on the bridge arm: the CLI execute arm's
-    /// pipeline artifacts ride `deps.temp_path`, never the launch cwd. The
-    /// deps are made distinguishable here (a bound workspace that exists
-    /// and a session temp that does not), so the file-delivery write fails
-    /// in the missing temp with the structured error; a wiring that wrongly
-    /// rode the cwd would write into the surviving workspace and fail at
-    /// the spawn instead, naming the executable.
-    #[test]
-    fn handle_tools_call_routes_file_delivery_to_the_session_temp() {
-        let approval: &'static ApprovalState = Box::leak(Box::new(ApprovalState::new()));
-        let sink: &'static AnsweringSink = Box::leak(Box::new(AnsweringSink::new(
-            approval,
-            ApprovalResponse::AllowOnce,
-        )));
-        let mut ctx = gate_ctx(vec![cli_fixture()], approval, sink);
-        let workspace_dir = TempDir::new().unwrap();
-        let gone = TempDir::new().unwrap();
-        let missing_temp = gone.path().to_path_buf();
-        drop(gone);
-        // Connect the workspace axis with a bound path (ADR-0137): the
-        // launch cwd is the workspace, disjoint from the deleted temp.
-        ctx.deps.workspace = Some(Box::leak(Box::new(Some(
-            workspace_dir.path().to_path_buf(),
-        ))));
-        ctx.deps.temp_path = Box::leak(missing_temp.into_boxed_path());
-        let mut outcome = GatewayOutcome::default();
-        let msg = json!({
-            "jsonrpc": "2.0",
-            "id": 10,
-            "method": "tools/call",
-            "params": {
-                "name": "doc-convert",
-                "arguments": {"value": "yes", "doc": "hello body"}
-            }
-        });
-        match handle_tools_call(&msg, &mut ctx, &mut outcome) {
-            Response::Result(v) => {
-                assert_eq!(
-                    v["isError"], true,
-                    "the missing write base is a tool-level error, not a JSON-RPC error"
-                );
-                let text = v["content"][0]["text"].as_str().unwrap();
-                assert!(
-                    text.contains("failed to write a file-delivery"),
-                    "the write fails in the missing session temp, not the workspace: {text}"
-                );
-            }
-            Response::Error(code, m) => panic!("CLI call must be a tool result, got {code}: {m}"),
-            Response::None => panic!("CLI call must return a result"),
-        }
-    }
-
     /// A denial is the call's own `isError` envelope + one trace row naming
     /// the denial -- the same self-correctable tool-level failure the
     /// built-in loop feeds its model (ADR-0077), never a JSON-RPC error and
@@ -5056,47 +4256,6 @@ mod tests {
         assert!(!row.success);
         assert_eq!(row.name, "doc-convert");
         assert_eq!(row.result_excerpt, "denied by approval gateway");
-    }
-
-    /// Session trust is per `ToolKey`, not per caller: a key seeded by a
-    /// prior always-allow bypasses the card for a bridge-originated call too
-    /// -- the single plane's payoff (one trust axis, two callers).
-    #[test]
-    fn handle_tools_call_cli_tool_trust_key_bypasses_the_card() {
-        let approval: &'static ApprovalState = Box::leak(Box::new(ApprovalState::new()));
-        approval.seed_trust(&ToolKey::external(ToolKey::CLI_SERVER, "doc-convert"));
-        let sink: &'static AnsweringSink = Box::leak(Box::new(AnsweringSink::new(
-            approval,
-            ApprovalResponse::Deny,
-        )));
-        let mut ctx = gate_ctx(vec![cli_fixture()], approval, sink);
-        let mut outcome = GatewayOutcome::default();
-        let msg = json!({
-            "jsonrpc": "2.0",
-            "id": 5,
-            "method": "tools/call",
-            "params": {
-                "name": "doc-convert",
-                "arguments": {"value": "yes", "doc": "hello body"}
-            }
-        });
-        match handle_tools_call(&msg, &mut ctx, &mut outcome) {
-            Response::Result(v) => {
-                // Trusted, so the call DISPATCHED -- the failure is the
-                // spawn's, not a denial.
-                let text = v["content"][0]["text"].as_str().unwrap();
-                assert!(
-                    !text.contains("denied"),
-                    "a trusted key dispatches without a card: {text}"
-                );
-            }
-            _ => panic!("trusted CLI call must return a tool result"),
-        }
-        assert!(
-            sink.cards().is_empty(),
-            "a trusted key never surfaces a card"
-        );
-        assert_eq!(outcome.trace.len(), 1);
     }
 
     /// A cancel arriving while the gate is suspended on a CLI card ends the
@@ -5149,405 +4308,7 @@ mod tests {
         );
     }
 
-    // --- external_call_outcome (I1: verbatim-relay + excerpt contract; ----
-    // --- issue #1218: over-cap spill arm) ----------------------------------
-
-    /// The external outcome over the production cap against a fresh temp
-    /// dir -- the under-cap path every pre-#1218 test takes (the spill
-    /// plan is inert there).
-    fn relayed(name: &str, result: Result<Value, aggregator::RouteError>) -> (Value, bool, String) {
-        let temp = TempDir::new().unwrap();
-        let spill = crate::cli_tools::executor::SpillPlan::new(temp.path(), name, "call-1");
-        external_call_outcome(
-            name,
-            result,
-            &spill,
-            crate::cli_tools::executor::OUTPUT_CAP_BYTES,
-        )
-    }
-
-    /// A successful route relays the server's envelope VERBATIM -- the content
-    /// array + isError flag survive untouched, not re-wrapped into a text
-    /// block (which would double-encode). The excerpt is the first text block.
-    /// Pins the contract `handle_tools_call`'s external arm relies on.
-    #[test]
-    fn external_call_outcome_relays_envelope_verbatim_on_success() {
-        let envelope = json!({
-            "content": [{"type": "text", "text": "5"}],
-            "isError": false,
-        });
-        let (out, is_error, excerpt) = relayed("mcp__fakemcp__add", Ok(envelope.clone()));
-        assert_eq!(out, envelope, "envelope relayed verbatim, not re-wrapped");
-        assert!(!is_error);
-        assert_eq!(excerpt, "5");
-    }
-
-    /// A multi-block envelope (image + text) is relayed verbatim; the excerpt
-    /// is the first TEXT block -- the leading image is skipped, not serialized
-    /// into the excerpt.
-    #[test]
-    fn external_call_outcome_preserves_non_text_blocks_and_excerpts_first_text() {
-        let envelope = json!({
-            "content": [
-                {"type": "image", "data": "..."},
-                {"type": "text", "text": "first text"},
-                {"type": "text", "text": "second text"},
-            ],
-            "isError": false,
-        });
-        let (out, is_error, excerpt) = relayed("mcp__fakemcp__tool", Ok(envelope.clone()));
-        assert_eq!(out, envelope, "multi-block envelope relayed verbatim");
-        assert!(!is_error);
-        assert_eq!(excerpt, "first text");
-    }
-
-    /// A server-reported `isError` envelope is relayed verbatim (the gateway
-    /// does not mask the server's error); `is_error` tracks the flag so the
-    /// trace row records the failure.
-    #[test]
-    fn external_call_outcome_propagates_the_is_error_flag() {
-        let envelope = json!({
-            "content": [{"type": "text", "text": "tool blew up"}],
-            "isError": true,
-        });
-        let (out, is_error, excerpt) = relayed("mcp__fakemcp__tool", Ok(envelope.clone()));
-        assert_eq!(out, envelope);
-        assert!(is_error);
-        assert_eq!(excerpt, "tool blew up");
-    }
-
-    /// A route error (unknown slug / client fault) builds an `isError` envelope
-    /// naming the tool so the agent can self-correct (ADR-0077); `is_error` is
-    /// true and the excerpt carries the failure text.
-    #[test]
-    fn external_call_outcome_builds_an_error_envelope_on_route_failure() {
-        let (out, is_error, excerpt) = relayed(
-            "mcp__ghost__echo",
-            Err(aggregator::RouteError::UnknownServer("ghost".into())),
-        );
-        assert!(is_error);
-        assert_eq!(out["isError"], true);
-        let text = out["content"][0]["text"]
-            .as_str()
-            .expect("error envelope has a text block");
-        assert!(
-            text.contains("mcp__ghost__echo"),
-            "error names the tool: {text}"
-        );
-        assert!(
-            text.contains("ghost"),
-            "error carries the route failure: {text}"
-        );
-        assert_eq!(excerpt, text, "excerpt is the error text");
-    }
-
-    /// The over-cap arm (issue #1218): the concatenated text blocks spill
-    /// WHOLE to `tool_output/<slug>__<tool>-<call-id>.<ext>`, and the
-    /// relayed envelope carries the preview trio -- capped head, truncation
-    /// marker, spill path -- in place of the text blocks; the non-text
-    /// block keeps its position and `structuredContent` rides verbatim
-    /// (the text plane spilled, not it).
-    #[test]
-    fn external_call_outcome_spills_over_cap_text_blocks_whole() {
-        let temp = TempDir::new().unwrap();
-        let spill =
-            crate::cli_tools::executor::SpillPlan::new(temp.path(), "fakesrv__query", "call-9");
-        let envelope = json!({
-            "content": [
-                {"type": "text", "text": "AAAA"},
-                {"type": "image", "data": "..."},
-                {"type": "text", "text": "BBBBBBBB"},
-            ],
-            "isError": false,
-            "structuredContent": {"row_count": 2},
-        });
-        let (out, is_error, excerpt) =
-            external_call_outcome("mcp__fakesrv__query", Ok(envelope), &spill, 8);
-        assert!(!is_error);
-        let path = temp
-            .path()
-            .join("tool_output")
-            .join("fakesrv__query-call-9.csv");
-        let spilled =
-            std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("spill file {path:?}: {e}"));
-        assert_eq!(
-            spilled, "AAAABBBBBBBB",
-            "text blocks concatenate in order, whole (not truncated)"
-        );
-        let blocks = out["content"].as_array().unwrap();
-        assert_eq!(blocks.len(), 2, "text blocks collapse into the preview");
-        let preview = blocks[0]["text"].as_str().unwrap();
-        assert!(preview.starts_with("AAAABBBB"), "head preview: {preview}");
-        assert!(
-            preview.contains(
-                "[tool output truncated: exceeded the 8-byte cap; \
-                 full output spilled to: "
-            ),
-            "marker + path: {preview}"
-        );
-        assert!(
-            preview.ends_with(&format!("{}]", path.display())),
-            "marker names the spill file: {preview}"
-        );
-        assert_eq!(blocks[1]["type"], "image", "non-text block keeps its slot");
-        assert_eq!(
-            out["structuredContent"]["row_count"], 2,
-            "structuredContent rides verbatim"
-        );
-        assert!(
-            excerpt.starts_with("AAAABBBB"),
-            "excerpt is the preview head"
-        );
-    }
-
-    /// A JSON-shaped head routes the spill to `.json` -- the extension is
-    /// the derived-source dispatcher's only routing signal, so the sniff
-    /// is shared with the CLI channel's spill.
-    #[test]
-    fn external_call_outcome_sniffs_a_json_head_to_the_json_extension() {
-        let temp = TempDir::new().unwrap();
-        let spill = crate::cli_tools::executor::SpillPlan::new(temp.path(), "fakesrv__query", "c1");
-        let body = r#"{"rows":[1,2,3,4,5,6,7,8,9,10,11,12]}"#;
-        let envelope = json!({
-            "content": [{"type": "text", "text": body}],
-            "isError": false,
-        });
-        let (out, _, _) = external_call_outcome("mcp__fakesrv__query", Ok(envelope), &spill, 8);
-        let path = temp
-            .path()
-            .join("tool_output")
-            .join("fakesrv__query-c1.json");
-        let spilled =
-            std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("spill file {path:?}: {e}"));
-        assert_eq!(spilled, body);
-        assert!(
-            out["content"][0]["text"]
-                .as_str()
-                .unwrap()
-                .contains(&path.display().to_string()),
-            "preview names the .json spill"
-        );
-    }
-
-    /// A result with no text bytes spills the `structuredContent`
-    /// serialization instead (else the file would be empty), and the
-    /// bypassed bytes do not ALSO ride the envelope -- the field is
-    /// removed once the file landed.
-    #[test]
-    fn external_call_outcome_spills_structured_content_when_text_is_empty() {
-        let temp = TempDir::new().unwrap();
-        let spill = crate::cli_tools::executor::SpillPlan::new(temp.path(), "fakesrv__read", "c2");
-        let envelope = json!({
-            "content": [{"type": "resource", "uri": "file:///x"}],
-            "structuredContent": {"big": "0123456789ABCDEF"},
-            "isError": false,
-        });
-        let (out, is_error, _) =
-            external_call_outcome("mcp__fakesrv__read", Ok(envelope), &spill, 8);
-        assert!(!is_error);
-        let path = temp
-            .path()
-            .join("tool_output")
-            .join("fakesrv__read-c2.json");
-        let spilled =
-            std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("spill file {path:?}: {e}"));
-        assert_eq!(spilled, r#"{"big":"0123456789ABCDEF"}"#);
-        let blocks = out["content"].as_array().unwrap();
-        assert_eq!(
-            blocks.len(),
-            2,
-            "preview opens, resource block keeps its slot"
-        );
-        assert_eq!(blocks[0]["type"], "text");
-        assert_eq!(blocks[1]["type"], "resource");
-        assert!(
-            out.get("structuredContent").is_none(),
-            "the bypassed bytes do not ride the envelope twice"
-        );
-    }
-
-    /// A contentless envelope (no content array at all) whose
-    /// structuredContent crosses the cap still spills AND gets a content
-    /// array holding the preview -- a spilled file the model has no
-    /// pointer to would be an orphan.
-    #[test]
-    fn external_call_outcome_creates_content_for_a_contentless_spill() {
-        let temp = TempDir::new().unwrap();
-        let spill = crate::cli_tools::executor::SpillPlan::new(temp.path(), "fakesrv__read", "c5");
-        let envelope = json!({
-            "structuredContent": {"big": "0123456789ABCDEF"},
-            "isError": false,
-        });
-        let (out, is_error, _) =
-            external_call_outcome("mcp__fakesrv__read", Ok(envelope), &spill, 8);
-        assert!(!is_error);
-        let path = temp
-            .path()
-            .join("tool_output")
-            .join("fakesrv__read-c5.json");
-        assert!(
-            std::fs::read_to_string(&path).is_ok(),
-            "the structuredContent fallback spills with no content array"
-        );
-        let blocks = out["content"]
-            .as_array()
-            .expect("a content array is created for the preview");
-        assert_eq!(blocks.len(), 1);
-        let preview = blocks[0]["text"].as_str().unwrap();
-        assert!(
-            preview.contains("spilled to:"),
-            "the model gets the pointer: {preview}"
-        );
-        assert!(
-            out.get("structuredContent").is_none(),
-            "the bypassed bytes do not ride the envelope twice"
-        );
-    }
-
-    /// `isError` is orthogonal to the cap: an error envelope's text is as
-    /// much the data egress as a success's (the CLI channel's non-zero-exit
-    /// twin), so it spills the same way with its flag preserved.
-    #[test]
-    fn external_call_outcome_spills_is_error_envelopes_orthogonally() {
-        let temp = TempDir::new().unwrap();
-        let spill = crate::cli_tools::executor::SpillPlan::new(temp.path(), "fakesrv__fail", "c3");
-        let envelope = json!({
-            "content": [{"type": "text", "text": "ERRORDETAIL-0123456789"}],
-            "isError": true,
-        });
-        let (out, is_error, _) =
-            external_call_outcome("mcp__fakesrv__fail", Ok(envelope), &spill, 8);
-        assert!(is_error, "the error flag survives the spill");
-        assert_eq!(out["isError"], true);
-        let path = temp.path().join("tool_output").join("fakesrv__fail-c3.csv");
-        let spilled =
-            std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("spill file {path:?}: {e}"));
-        assert_eq!(spilled, "ERRORDETAIL-0123456789");
-    }
-
-    /// A failed spill (the `tool_output` path is blocked by a same-named
-    /// file) withdraws the path: no file lands, and the preview carries
-    /// the truncation + write-error markers instead of a half-trusted
-    /// reference. `structuredContent` stays -- nothing was bypassed.
-    #[test]
-    fn external_call_outcome_marks_a_failed_spill_and_keeps_the_envelope() {
-        let temp = TempDir::new().unwrap();
-        // A same-named FILE makes create_dir_all fail -- the blocked-path
-        // stand-in for an un-writable spill directory.
-        std::fs::write(temp.path().join("tool_output"), b"not a dir").unwrap();
-        let spill = crate::cli_tools::executor::SpillPlan::new(temp.path(), "fakesrv__query", "c4");
-        let envelope = json!({
-            "content": [{"type": "text", "text": "0123456789ABCDEF"}],
-            "structuredContent": {"small": true},
-            "isError": false,
-        });
-        let (out, is_error, _) =
-            external_call_outcome("mcp__fakesrv__query", Ok(envelope), &spill, 8);
-        assert!(!is_error);
-        assert!(
-            std::fs::read_dir(temp.path().join("tool_output")).is_err(),
-            "no spill directory was created past the block"
-        );
-        let preview = out["content"][0]["text"].as_str().unwrap();
-        assert!(
-            preview.starts_with("01234567"),
-            "the capped head still rides: {preview}"
-        );
-        assert!(
-            preview.contains(
-                "[tool output truncated: exceeded the 8-byte cap]\n\
-                              [tool output spill write error:"
-            ),
-            "truncation + write-error markers, no path: {preview}"
-        );
-        assert!(
-            !preview.contains("spilled to:"),
-            "no half-trusted path reference: {preview}"
-        );
-        assert_eq!(
-            out["structuredContent"]["small"], true,
-            "nothing was bypassed -- structuredContent stays"
-        );
-    }
-
-    /// Exactly `cap` bytes never cross: the envelope relays byte-identical
-    /// and no spill directory is even created -- the MCP twin of the CLI
-    /// channel's `exactly_cap_does_not_spill`. Pins the boundary against
-    /// `<=` degrading to `<`.
-    #[test]
-    fn external_call_outcome_at_exactly_cap_relays_verbatim() {
-        let temp = TempDir::new().unwrap();
-        let spill = crate::cli_tools::executor::SpillPlan::new(temp.path(), "fakesrv__query", "cx");
-        let envelope = json!({
-            "content": [{"type": "text", "text": "01234567"}],
-            "isError": false,
-        });
-        let (out, is_error, excerpt) =
-            external_call_outcome("mcp__fakesrv__query", Ok(envelope.clone()), &spill, 8);
-        assert!(!is_error);
-        assert_eq!(out, envelope, "exactly cap stays verbatim");
-        assert_eq!(excerpt, "01234567");
-        assert!(
-            !temp.path().join("tool_output").exists(),
-            "the tool_output dir is not even created"
-        );
-    }
-
-    /// The measured data plane is the text blocks only (ADR-0105 Decision
-    /// 5's calibration): a non-empty text block keeps a byte-heavy
-    /// `structuredContent` OUT of the measurement -- it rides verbatim.
-    /// Pins the deliberate asymmetry against accidental widening (the
-    /// same envelope with the text block removed would spill).
-    #[test]
-    fn external_call_outcome_does_not_measure_structured_content_when_text_exists() {
-        let temp = TempDir::new().unwrap();
-        let spill = crate::cli_tools::executor::SpillPlan::new(temp.path(), "fakesrv__read", "cy");
-        let envelope = json!({
-            "content": [{"type": "text", "text": "see data"}],
-            "structuredContent": {"big": "0123456789ABCDEF0123456789ABCDEF"},
-            "isError": false,
-        });
-        let (out, is_error, _) =
-            external_call_outcome("mcp__fakesrv__read", Ok(envelope.clone()), &spill, 8);
-        assert!(!is_error);
-        assert_eq!(
-            out, envelope,
-            "text present -> structuredContent unmeasured, verbatim relay"
-        );
-        assert!(!temp.path().join("tool_output").exists(), "nothing spilled");
-    }
-
     // --- wire-level pins over a live server (issue #661) -------------------
-
-    /// A `mcp_search_tools` call without a usable query fails with the SHARED
-    /// message (the same `meta_tools` source the built-in loop consumes), as
-    /// a tool-level error with no trace entry.
-    #[test]
-    fn handle_tools_call_search_tools_without_a_query_fails_with_the_shared_message() {
-        for args in [json!({}), json!({"query": 7})] {
-            let mut ctx = fresh_ctx();
-            let mut outcome = GatewayOutcome::default();
-            let msg = json!({
-                "jsonrpc": "2.0", "id": 21, "method": "tools/call",
-                "params": {"name": "mcp_search_tools", "arguments": args}
-            });
-            match handle_tools_call(&msg, &mut ctx, &mut outcome) {
-                Response::Result(v) => {
-                    assert_eq!(v["isError"], true, "malformed search is isError");
-                    assert_eq!(
-                        v["content"][0]["text"].as_str().unwrap(),
-                        meta_tools::missing_query_failure(),
-                        "the failure message comes from the shared source"
-                    );
-                }
-                _ => panic!("malformed search must return Result"),
-            }
-            assert!(
-                outcome.trace.is_empty(),
-                "a malformed search never reached a tool -> no trace row"
-            );
-        }
-    }
 
     /// The gateway-level `mcp_invoke` success chain (issue #661):
     /// invoke -> resolve -> gate -> route -> verbatim envelope, over a live

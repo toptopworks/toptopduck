@@ -64,7 +64,7 @@ use crate::session::loop_contract::{
 use crate::session::materializer::{DispatchDeps, Materializer};
 use crate::session::progress::ProgressClock;
 use crate::session::turn_dispatch::{
-    classify_call, dispatch_gated_call, panic_to_transient, DispatchAbort, GateCtx,
+    classify_call, dispatch_gated_call, panic_to_transient, CallFace, DispatchAbort, GateCtx,
 };
 
 use adapter::{DispatchOutcome, DispatchRequest, PhaseSink, SharedTurnState};
@@ -386,13 +386,9 @@ impl LoopRuntime {
                 // choice is a local per-iteration decision.
                 let phases = forward_sink_for(&phases, delegation_id.as_deref());
                 let mut forward = |phase: TurnPhase| adapter::emit_phase(&phases, phase);
-                // Freeze across the dispatch (ADR-0115): a gateway tool
-                // execution, a CLI tool's run, or an approval pending on the
-                // condvar is a wait on an external principal -- never billed
-                // to the generation cap.
-                let _frozen = clock.as_ref().map(|c| c.freeze());
                 let outcome = match dispatch_gated_call(
                     &call,
+                    CallFace::Builtin,
                     deps,
                     materializer,
                     mcp,
@@ -407,7 +403,7 @@ impl LoopRuntime {
                 ) {
                     Err(DispatchAbort::Gate) => DispatchOutcome::GateCancelled,
                     Err(DispatchAbort::Panic(termination)) => DispatchOutcome::Aborted(termination),
-                    Ok((result, entry, promotion)) => {
+                    Ok((result, entry, promotion, _envelope)) => {
                         // Record-before-send (#921): the executed
                         // call's trace entry and promotion land on the
                         // shared state HERE, on the executing thread, before

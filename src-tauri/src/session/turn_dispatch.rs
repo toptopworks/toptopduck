@@ -1,19 +1,31 @@
 //! The shared gated-dispatch core + execution safety net (ADR-0080 / ADR-0107).
 //!
 //! [`dispatch_gated_call`] routes one model-emitted tool call through the
-//! approval gateway and the executor. What lives HERE, and therefore cannot
-//! drift between the runtimes that dispatch tools, is the meta-tool trio
-//! resolution, the skill-activation interception beside it (issue #701),
-//! the gate classification ([`classify_with_cli_tool`], which
-//! the gateway's `tools/call` arm also consumes), the `result_N` numbering,
-//! and the dispatch panic guard (issue #321, sunk into the core so every
-//! runtime gets the snapshot + ghost-rollback ritual by construction). The
-//! routing arms and the trace-entry assembly are NOT single-sourced: the
-//! gateway's `tools/call` arm rebuilds them beside this core on the same
-//! shared helpers, with one documented divergence (the gateway relays the
-//! JSON-RPC envelope verbatim; this core path flattens to the first text
-//! block) -- the cannot-drift claim covers the classification / resolution
-//! / numbering, not those two per-side shapes (issue #696).
+//! approval gateway and the executor, and is the SINGLE SOURCE for every
+//! dispatch decision: the meta-tool trio resolution, the skill /
+//! artifact-delivery / workspace interception family, the gate
+//! classification ([`classify_with_cli_tool`]), the freeze window
+//! (ADR-0115), the routing arms, the trace-entry assembly, and the
+//! `result_N` numbering with its panic guard (issue #321, sunk into the
+//! core so every runtime gets the snapshot + ghost-rollback ritual by
+//! construction). The two runtime surfaces are pure transports around it:
+//! the loop runtime's mpsc dispatch server and the gateway's `tools/call`
+//! arm each parse their own wire shape, call this core with their
+//! [`CallFace`], and map the returned product onto their own response
+//! shape (issue #696's mid-term item; the gateway arm-side rebuild is
+//! retired).
+//!
+//! The face discriminates the built-in-only interception points
+//! (`present_files`, the workspace tools): a [`CallFace::Bridge`] call
+//! falls through them to the unknown-tool refusal -- the bridge never
+//! lists those names, so a spoofed call dies at the executor (ADR-0124's
+//! not-listed-not-served posture). The one documented per-side divergence
+//! is the external envelope: the core renders the routed server envelope
+//! ONCE (verbatim under the cap, spilled over it -- see
+//! [`external_call_outcome`]) alongside the flattened `ToolResult`, and
+//! each face picks its rendering (the bridge relays the envelope verbatim;
+//! the loop face consumes the flattened result) -- one decision, two
+//! renderings.
 //!
 //! The panic-detail helpers are runtime-agnostic (ADR-0107's replaceability
 //! review): they hold no loop-specific state and survive a runtime swap
@@ -28,7 +40,7 @@ use std::io::Write;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::Path;
 
-use serde_json::Value;
+use serde_json::{json, Value};
 
 use crate::approval::{
     ApprovalRequest, ApprovalSink, ApprovalState, GateCancelled, GateOutcome, OperationKind,
@@ -168,6 +180,38 @@ pub(crate) struct GateCtx<'a> {
     pub(crate) cancel: &'a CancelToken,
 }
 
+/// Which runtime face a dispatch entered through (the per-face
+/// discriminator [`dispatch_gated_call`] takes): the loop runtime's mpsc
+/// dispatch server (`Builtin`) or the gateway's bridge arm (`Bridge`). The
+/// face gates the built-in-only interception points -- `present_files`
+/// (ADR-0124) and the workspace tools (ADR-0137): a `Bridge` call falls
+/// through them to the unknown-tool refusal (the bridge never lists the
+/// names; not listed, not served), and derives the approval card's
+/// `call_id` (external fold alignment: the bridge echoes the JSON-RPC id,
+/// a built-in call has none).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CallFace {
+    /// The loop runtime's mpsc dispatch server -- every interception point
+    /// live, `call_id: None`.
+    Builtin,
+    /// The gateway's bridge arm -- built-in-only tools fall through, and
+    /// the call's wire id rides the approval card.
+    Bridge,
+}
+
+impl CallFace {
+    /// The approval card's `call_id` for a call on this face: the bridge
+    /// carries the call's wire id (external fold alignment), a built-in
+    /// call has none. One definition for every `ApprovalRequest`
+    /// construction in the core.
+    fn approval_call_id(self, id: &str) -> Option<String> {
+        match self {
+            CallFace::Builtin => None,
+            CallFace::Bridge => Some(id.to_string()),
+        }
+    }
+}
+
 /// Why a shared-core dispatch aborted (the error side of
 /// [`dispatch_gated_call`]): the approval gate cancelled mid-call (the whole
 /// turn aborts, every runtime's semantics), or the dispatch panicked (the
@@ -181,17 +225,37 @@ pub(crate) enum DispatchAbort {
     Panic(Termination),
 }
 
+/// The gated dispatch's product: the flattened model-facing result, the
+/// call's trace entry (`None` for a meta-tool resolution failure that never
+/// reached a tool, ADR-0105 Decision 4), any promotion, and -- on the
+/// external routing arm -- the server envelope the bridge face relays
+/// verbatim (`None` everywhere else; the loop face ignores it).
+pub(crate) type DispatchProduct = (
+    ToolResult,
+    Option<TraceEntry>,
+    Option<Promotion>,
+    Option<Value>,
+);
+
 /// Route one tool call through the approval gateway + dispatch (ADR-0080 /
-/// ADR-0076): the shared dispatch core behind the loop runtime's gateway
-/// tool adapter (ADR-0116). The gate classification,
-/// meta-tool resolution, and `result_N` numbering cannot drift between the
-/// runtimes -- the adapter calls THIS, never a re-assembly -- while the
-/// routing arms and the trace-entry assembly stay per-side (the gateway's
-/// `tools/call` arm rebuilds them on the same shared helpers; see the module
-/// doc for the documented envelope asymmetry, issue #696). Returns the
-/// model-facing result, the call's trace entry (`None` for a meta-tool
-/// resolution failure that never reached a tool, ADR-0105 Decision 4), and
-/// any promotion. Emits the ADR-0078 phase pair through `on_phase`.
+/// ADR-0076): the single-source dispatch core behind both runtime faces
+/// (the loop runtime's mpsc dispatch server, ADR-0116, and the gateway's
+/// bridge arm). Every decision -- the interception family, the gate
+/// classification, the routing arms, the trace-entry assembly, and the
+/// `result_N` numbering -- lives HERE, so it cannot drift between the
+/// runtimes; each face is a pure transport around it. Returns the
+/// flattened model-facing result, the call's trace entry (`None` for a
+/// meta-tool resolution failure that never reached a tool, ADR-0105
+/// Decision 4), any promotion, and -- on the external routing arm only --
+/// the server envelope the bridge face relays verbatim (see the module
+/// doc's one-decision-two-renderings note; the loop face ignores it).
+/// Emits the ADR-0078 phase pair through `on_phase`.
+///
+/// The freeze (ADR-0115) is held HERE, across the whole gated window: the
+/// interception resolvers, an approval pending on the condvar, a CLI
+/// tool's run, and a builtin dispatch are waits on an external principal,
+/// never billed to the turn's generation cap. This is the single freeze
+/// point for both faces -- it retired the three per-side manual freezes.
 ///
 /// The issue #321 dispatch panic guard lives HERE: the `result_N` snapshot +
 /// ghost rollback runs for every dispatch by construction, and a panic
@@ -200,6 +264,7 @@ pub(crate) enum DispatchAbort {
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn dispatch_gated_call(
     call: &ToolUse,
+    face: CallFace,
     deps: &mut DispatchDeps,
     materializer: &mut dyn Materializer,
     mcp: &mut McpAggregator,
@@ -211,7 +276,11 @@ pub(crate) fn dispatch_gated_call(
     gate: &GateCtx<'_>,
     on_phase: &mut impl FnMut(TurnPhase),
     origin: Option<&str>,
-) -> Result<(ToolResult, Option<TraceEntry>, Option<Promotion>), DispatchAbort> {
+) -> Result<DispatchProduct, DispatchAbort> {
+    // The ADR-0115 freeze window (see the doc above): held for the whole
+    // gated window, dropped at every exit. The clock rides the gate's token
+    // (None between turns: no freeze).
+    let _frozen = gate.cancel.progress_clock().map(|c| c.freeze());
     // Issue #321: guard the dispatch against a panic. The materialize path
     // registers result_N partway through try_materialize; a panic in any
     // subsequent step (record_provenance, gc_stale_results,
@@ -223,6 +292,7 @@ pub(crate) fn dispatch_gated_call(
     match guarded_dispatch(deps, &site, |deps| {
         dispatch_gated_call_inner(
             call,
+            face,
             deps,
             materializer,
             mcp,
@@ -245,6 +315,7 @@ pub(crate) fn dispatch_gated_call(
 #[allow(clippy::too_many_arguments)]
 fn dispatch_gated_call_inner(
     call: &ToolUse,
+    face: CallFace,
     deps: &mut DispatchDeps,
     materializer: &mut dyn Materializer,
     mcp: &mut McpAggregator,
@@ -256,7 +327,7 @@ fn dispatch_gated_call_inner(
     gate: &GateCtx<'_>,
     on_phase: &mut impl FnMut(TurnPhase),
     origin: Option<&str>,
-) -> Result<(ToolResult, Option<TraceEntry>, Option<Promotion>), GateCancelled> {
+) -> Result<DispatchProduct, GateCancelled> {
     // Meta-tool trio dispatch (ADR-0105): the classification -- list / search
     // run locally against the aggregator's catalog (read-only, short of the
     // gate -- the built-in read tools' trust shape); mcp_invoke resolves its
@@ -271,10 +342,10 @@ fn dispatch_gated_call_inner(
     let call: &ToolUse = match meta_tools::resolve_meta_call(mcp, call) {
         meta_tools::MetaDispatch::Local { summary, payload } => {
             let (result, entry) = local_meta_call(call, &summary, payload, on_phase);
-            return Ok((result, Some(entry), None));
+            return Ok((result, Some(entry), None, None));
         }
         meta_tools::MetaDispatch::Refused(message) => {
-            return Ok((meta_failure(call, &message), None, None))
+            return Ok((meta_failure(call, &message), None, None, None))
         }
         meta_tools::MetaDispatch::Resolved(replacement) => {
             resolved = replacement;
@@ -295,10 +366,10 @@ fn dispatch_gated_call_inner(
             match crate::skills::invocation::resolve_skill_invocation(call, invocations) {
                 crate::skills::invocation::SkillInvocationOutcome::Local { summary, payload } => {
                     let (result, entry) = local_meta_call(call, &summary, payload, on_phase);
-                    (result, Some(entry), None)
+                    (result, Some(entry), None, None)
                 }
                 crate::skills::invocation::SkillInvocationOutcome::Refused(message) => {
-                    (meta_failure(call, &message), None, None)
+                    (meta_failure(call, &message), None, None, None)
                 }
             },
         );
@@ -309,18 +380,19 @@ fn dispatch_gated_call_inner(
     // design (no machine axis is enabled). The resolver appends the
     // declared paths to the turn's channel; validation, resolution, and
     // materialization are SETTLE concerns, one place for both channels.
-    // Loop-runtime face only: the gateway's bridge arm never lists the
-    // tool, so an external CLI's spoofed call falls to the unknown-tool
-    // refusal (ADR-0124 -- injection into external CLIs was rejected).
-    if call.name == crate::session::artifacts::PRESENT_FILES {
+    // Builtin face only (the face discriminator): the gateway's bridge arm
+    // never lists the tool, so a spoofed bridge call falls through to the
+    // unknown-tool refusal (ADR-0124 -- injection into external CLIs was
+    // rejected).
+    if face == CallFace::Builtin && call.name == crate::session::artifacts::PRESENT_FILES {
         return Ok(
             match crate::session::artifacts::resolve_present_files(call, presented) {
                 crate::session::artifacts::PresentFilesOutcome::Local { summary, payload } => {
                     let (result, entry) = local_meta_call(call, &summary, payload, on_phase);
-                    (result, Some(entry), None)
+                    (result, Some(entry), None, None)
                 }
                 crate::session::artifacts::PresentFilesOutcome::Refused(message) => {
-                    (meta_failure(call, &message), None, None)
+                    (meta_failure(call, &message), None, None, None)
                 }
             },
         );
@@ -344,10 +416,10 @@ fn dispatch_gated_call_inner(
             ) {
                 crate::skills::read::SkillReadOutcome::Local { summary, payload } => {
                     let (result, entry) = local_meta_call(call, &summary, payload, on_phase);
-                    (result, Some(entry), None)
+                    (result, Some(entry), None, None)
                 }
                 crate::skills::read::SkillReadOutcome::Refused(message) => {
-                    (meta_failure(call, &message), None, None)
+                    (meta_failure(call, &message), None, None, None)
                 }
             },
         );
@@ -366,12 +438,13 @@ fn dispatch_gated_call_inner(
         return Ok(
             match crate::skills::create::resolve_skill_creation(call, create.root) {
                 crate::skills::create::SkillCreateOutcome::Refused(message) => {
-                    (meta_failure(call, &message), None, None)
+                    (meta_failure(call, &message), None, None, None)
                 }
                 crate::skills::create::SkillCreateOutcome::Gated { summary, markdown } => {
                     let Some(live) = create.live else {
                         return Ok((
                             meta_failure(call, crate::skills::create::UNAVAILABLE_FAILURE),
+                            None,
                             None,
                             None,
                         ));
@@ -384,9 +457,11 @@ fn dispatch_gated_call_inner(
                             &markdown,
                         )],
                         // The originator annotation rides the gate like every
-                        // other call's (issue #934).
+                        // other call's (issue #934); the card's call id is
+                        // face-derived (the bridge echoes the wire id, a
+                        // built-in call has none).
                         origin_agent: origin.map(str::to_string),
-                        call_id: None,
+                        call_id: face.approval_call_id(&call.id),
                     };
                     match gate.approval.gate(gate_req, gate.sink, gate.cancel) {
                         Err(GateCancelled) => return Err(GateCancelled),
@@ -405,6 +480,7 @@ fn dispatch_gated_call_inner(
                                     is_error: true,
                                 },
                                 Some(entry),
+                                None,
                                 None,
                             )
                         }
@@ -439,7 +515,7 @@ fn dispatch_gated_call_inner(
                                     on_phase(TurnPhase::ToolCallCompleted(TraceEntryView::from(
                                         &entry,
                                     )));
-                                    (result, Some(entry), None)
+                                    (result, Some(entry), None, None)
                                 }
                                 Err(e) => {
                                     // The gate-pending window can race a
@@ -464,6 +540,7 @@ fn dispatch_gated_call_inner(
                                         },
                                         Some(entry),
                                         None,
+                                        None,
                                     )
                                 }
                             }
@@ -486,10 +563,10 @@ fn dispatch_gated_call_inner(
     // rides the same predicate but splits inside the module to an ungated
     // arm: an in-workspace read has no approval surface (ADR-0080
     // Decision 1). The whole arm family lives in the module so it owns its
-    // ritual end to end. Built-in runtime only: the bridge face never
-    // lists the names and `tools::dispatch` has no arm for them, so a
-    // spoofed bridge call dies at the unknown-tool error.
-    if crate::session::workspace_tools::is_workspace_tool(&call.name) {
+    // ritual end to end. Builtin face only (the face discriminator): the
+    // bridge face never lists the names and `tools::dispatch` has no arm
+    // for them, so a spoofed bridge call dies at the unknown-tool error.
+    if face == CallFace::Builtin && crate::session::workspace_tools::is_workspace_tool(&call.name) {
         return crate::session::workspace_tools::dispatch_workspace_tool(
             call, deps, gate, on_phase, origin,
         );
@@ -513,9 +590,11 @@ fn dispatch_gated_call_inner(
         file_attachments,
         // The originator annotation (issue #934): the delegating sub-agent's
         // name rides the gate so the approval card reads "sub-agent X wants
-        // to call Y"; a main-loop call carries none.
+        // to call Y"; a main-loop call carries none. The card's call id is
+        // face-derived (the bridge echoes the wire id, a built-in call has
+        // none).
         origin_agent: origin.map(str::to_string),
-        call_id: None,
+        call_id: face.approval_call_id(&call.id),
     };
     // ADR-0080: every tool call passes the gate before dispatch. Built-in tools
     // classify Allow (zero approval); external tools would suspend here.
@@ -540,6 +619,7 @@ fn dispatch_gated_call_inner(
                     is_error: true,
                 },
                 Some(entry),
+                None,
                 None,
             ));
         }
@@ -571,8 +651,8 @@ fn dispatch_gated_call_inner(
     // error) plus the side effect the executor reported. The external path
     // never promotes (external tools do not materialize a working-set
     // result), so `promotion` is always `None` there.
-    let outcome = if aggregator::is_namespaced(&call.name) {
-        route_external_call(call, mcp, deps.temp_path)
+    let (outcome, envelope) = if aggregator::is_namespaced(&call.name) {
+        route_external_dual(call, face, mcp, deps.temp_path)
     } else if let Some(tool) = cli_tool {
         // The registered-CLI dispatch arm (issue #671, ADR-0108 Decision 3):
         // direct argv spawn, cancel = the turn's shared token (process-tree
@@ -585,30 +665,33 @@ fn dispatch_gated_call_inner(
         // the session temp (issue #1408): the temp-dir argument below keeps
         // file-delivery and the spill tee out of the workspace and in the
         // domain the approval classify renders against.
-        match deps.launch_dir() {
-            Ok(cwd) => crate::cli_tools::executor::execute(
-                tool,
-                call,
-                &cwd,
-                deps.temp_path,
-                gate.cancel,
-                None,
-            ),
-            // A call-time structured error (the ADR-0108 D2 posture): the
-            // shared tail below completes the started row and routes the
-            // failure back for self-correction, exactly like an errored
-            // executor call.
-            Err(detail) => ToolOutcome {
-                result: ToolResult {
-                    tool_use_id: call.id.clone(),
-                    content: detail,
-                    is_error: true,
+        (
+            match deps.launch_dir() {
+                Ok(cwd) => crate::cli_tools::executor::execute(
+                    tool,
+                    call,
+                    &cwd,
+                    deps.temp_path,
+                    gate.cancel,
+                    None,
+                ),
+                // A call-time structured error (the ADR-0108 D2 posture): the
+                // shared tail below completes the started row and routes the
+                // failure back for self-correction, exactly like an errored
+                // executor call.
+                Err(detail) => ToolOutcome {
+                    result: ToolResult {
+                        tool_use_id: call.id.clone(),
+                        content: detail,
+                        is_error: true,
+                    },
+                    promotion: None,
                 },
-                promotion: None,
             },
-        }
+            None,
+        )
     } else {
-        tools::dispatch(call, deps, gate.cancel, materializer)
+        (tools::dispatch(call, deps, gate.cancel, materializer), None)
     };
     let result = outcome.result;
     // ADR-0077: a tool-level error routes back to the model. Log it so a
@@ -652,7 +735,7 @@ fn dispatch_gated_call_inner(
     // excerpt emptied -- see TraceEntryView's mapping below), paired with the
     // ToolCallStarted emitted pre-dispatch.
     on_phase(TurnPhase::ToolCallCompleted(TraceEntryView::from(&entry)));
-    Ok((result, Some(entry), promotion))
+    Ok((result, Some(entry), promotion, envelope))
 }
 
 /// Serve one locally-executed meta-tool (`mcp_list_servers` /
@@ -709,29 +792,91 @@ fn meta_failure(call: &ToolUse, message: &str) -> ToolResult {
     }
 }
 
-/// Route a namespaced external MCP call through the aggregator and shape the
-/// outcome the runtime consumes (issue #301 slice C-loop; unlike the gateway's
-/// `external_call_outcome`, this path flattens the envelope -- see
-/// `aggregator::first_text_block` for the asymmetry). The aggregator strips
-/// the `mcp__<slug>__` prefix and forwards the native tool name + arguments
-/// to the matching server; the server's envelope is relayed as the
-/// model-facing `content` string (the first text block --
-/// `ToolResult.content` is a flat string on this path, so a multi-block or
-/// non-text result reduces to its first text block, with a placeholder when
-/// there is none). A route failure (UnknownServer / Client fault) becomes a
-/// tool error the agent self-corrects from (ADR-0077). No promotion:
-/// external tools never materialize a working-set result.
-fn route_external_call(
+/// Route a namespaced external MCP call through the aggregator ONCE and
+/// render the face's outcome (issue #696's divergence downgraded to one
+/// decision point, two renderings): the route happens here and nowhere
+/// else, and each face consumes its own rendering of it. The loop face
+/// (`Builtin`) takes the flattened `ToolResult` ([`shape_external_outcome`]
+/// -- the trace / numbering single source, the inline-materialize hint
+/// included); the bridge face (`Bridge`) takes the server's envelope
+/// ([`external_call_outcome`]: the server's own shape relayed verbatim
+/// under the cap, spilled over it) with a `ToolResult` flattened from the
+/// final envelope's first text block -- the pre-retirement gateway row's
+/// excerpt source, so the trace row is byte-identical. A route failure
+/// renders once into the shared failure text and feeds both faces. No
+/// promotion in any branch (external tools never materialize a
+/// working-set result).
+fn route_external_dual(
     call: &ToolUse,
+    face: CallFace,
     mcp: &mut McpAggregator,
     session_temp_dir: &Path,
-) -> tools::ToolOutcome {
-    shape_external_outcome(
-        mcp.route(&call.name, &call.input),
-        call,
-        session_temp_dir,
-        crate::cli_tools::executor::OUTPUT_CAP_BYTES,
-    )
+) -> (tools::ToolOutcome, Option<Value>) {
+    let route_result = mcp.route(&call.name, &call.input);
+    // The over-cap spill stem (issue #1218): the `mcp__` prefix is
+    // stripped so `mcp__<slug>__<tool>` spills as `<slug>__<tool>-<call-id>`
+    // -- the CLI channel's naming family, one data-plane switch across both
+    // transports.
+    let stem = call
+        .name
+        .strip_prefix(aggregator::NAMESPACED_PREFIX)
+        .unwrap_or(&call.name);
+    let spill = crate::cli_tools::executor::SpillPlan::new(session_temp_dir, stem, &call.id);
+    match route_result {
+        Ok(envelope_value) => match face {
+            CallFace::Builtin => (
+                shape_external_outcome(
+                    Ok(envelope_value),
+                    call,
+                    session_temp_dir,
+                    crate::cli_tools::executor::OUTPUT_CAP_BYTES,
+                ),
+                None,
+            ),
+            CallFace::Bridge => {
+                let (envelope, is_error, content) = external_call_outcome(
+                    &call.name,
+                    Ok(envelope_value),
+                    &spill,
+                    crate::cli_tools::executor::OUTPUT_CAP_BYTES,
+                );
+                (
+                    tools::ToolOutcome {
+                        result: ToolResult {
+                            tool_use_id: call.id.clone(),
+                            content,
+                            is_error,
+                        },
+                        promotion: None,
+                    },
+                    Some(envelope),
+                )
+            }
+        },
+        Err(e) => {
+            // The failure envelope renders through the same single source
+            // (the pre-retirement gateway arm ran Err results through the
+            // over-cap spill too -- a transport-fault text is as much the
+            // data plane as a success's).
+            let (envelope, _, detail) = external_call_outcome(
+                &call.name,
+                Err(e),
+                &spill,
+                crate::cli_tools::executor::OUTPUT_CAP_BYTES,
+            );
+            (
+                tools::ToolOutcome {
+                    result: ToolResult {
+                        tool_use_id: call.id.clone(),
+                        content: detail,
+                        is_error: true,
+                    },
+                    promotion: None,
+                },
+                Some(envelope),
+            )
+        }
+    }
 }
 
 /// Reduce a routed external MCP call's `Result` to the runtime's `ToolOutcome`
@@ -789,6 +934,164 @@ fn shape_external_outcome(
         },
         promotion: None,
     }
+}
+
+/// Resolve a routed external MCP call into the response envelope + the trace
+/// inputs (slice C-gw). Pure over the aggregator: takes the route result so
+/// the verbatim-relay + excerpt shape is unit-testable without a live server.
+///
+/// On success the server's envelope is returned VERBATIM -- the server's own
+/// `{content, isError}` shape, so structured content blocks (multi-block /
+/// non-text) survive. Re-wrapping it into a single text block would
+/// double-encode the content array and drop every non-text block the server
+/// emitted. Over the result cap the relay stops being verbatim BY DESIGN
+/// (issue #1218): the data spills whole to `tool_output/` and the envelope
+/// carries the preview trio instead (see [`spill_external_over_cap`]). On a
+/// route error the gateway builds an `isError` envelope naming the tool so
+/// the agent can self-correct (ADR-0077). Returns
+/// `(envelope, is_error, excerpt)` so the caller pushes one trace row and
+/// returns the envelope.
+fn external_call_outcome(
+    name: &str,
+    route_result: Result<Value, aggregator::RouteError>,
+    spill: &crate::cli_tools::executor::SpillPlan,
+    cap: usize,
+) -> (Value, bool, String) {
+    let envelope = route_result.unwrap_or_else(|e| {
+        json!({
+            "content": [{
+                "type": "text",
+                "text": format!("external tool `{name}` failed: {e}"),
+            }],
+            "isError": true,
+        })
+    });
+    let is_error = envelope
+        .get("isError")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let envelope = spill_external_over_cap(envelope, name, spill, cap);
+    let excerpt = aggregator::first_text_block(&envelope);
+    (envelope, is_error, excerpt)
+}
+
+/// The over-cap external-result spill arm (issue #1218): the MCP twin of
+/// the CLI stdout tee -- the cap is the data-plane switching point, so an
+/// over-cap result's data lands whole under `tool_output/` (readable by
+/// `read_*` into the working set through the derived-source chain) and the
+/// model context gets the capped head + marker + path instead of the full
+/// bytes. The spill bytes are the `content[]` text blocks concatenated in
+/// order (non-text blocks are skipped -- they are not the engine's data
+/// plane); a result with no text bytes falls back to the
+/// `structuredContent` serialization, else the file would be empty.
+/// Under the cap the envelope passes through untouched (the verbatim
+/// contract). `isError` is orthogonal: an error envelope's text is as
+/// much the data egress as a success's (the CLI channel's non-zero-exit
+/// twin), so it spills the same way. A failed spill withdraws the path
+/// and removes the partial bytes, and the preview carries the truncation
+/// and write-error markers -- a half-trusted file reference is worse than
+/// none (the CLI reader's doctrine).
+fn spill_external_over_cap(
+    mut envelope: Value,
+    name: &str,
+    spill: &crate::cli_tools::executor::SpillPlan,
+    cap: usize,
+) -> Value {
+    // Measure first, spill later: the under-cap path assembles no data
+    // buffer (the verbatim relay stays copy-free; the zero-text fallback
+    // still pays one serialization probe); only a crossing pays for
+    // assembly. The measured data plane is the text blocks only: a
+    // non-empty text keeps `structuredContent` out of the measurement
+    // entirely (ADR-0105 Decision 5's calibration -- the fallback below
+    // is the no-text escape hatch, not a second plane).
+    let texts: Vec<&str> = envelope
+        .get("content")
+        .and_then(Value::as_array)
+        .map(|blocks| {
+            blocks
+                .iter()
+                .filter(|b| b.get("type").and_then(Value::as_str) == Some("text"))
+                .filter_map(|b| b.get("text").and_then(Value::as_str))
+                .collect()
+        })
+        .unwrap_or_default();
+    let total: usize = texts.iter().map(|t| t.len()).sum();
+    let fallback: Option<String> = if total == 0 {
+        envelope
+            .get("structuredContent")
+            .and_then(|sc| serde_json::to_string(sc).ok())
+    } else {
+        None
+    };
+    let data_len = fallback.as_ref().map_or(total, String::len);
+    if data_len <= cap {
+        return envelope;
+    }
+    let data: Vec<u8> = match &fallback {
+        Some(serialized) => serialized.as_bytes().to_vec(),
+        None => texts.concat().into_bytes(),
+    };
+    let head = String::from_utf8_lossy(&data[..cap]).into_owned();
+    let extension = crate::cli_tools::executor::spill_extension(data.iter().copied());
+    let spilled: Result<std::path::PathBuf, String> = (|| {
+        let (mut file, path) = spill.open(extension).map_err(|e| e.to_string())?;
+        if let Err(e) = file.write_all(&data) {
+            // The half-written file cannot be a data reference: drop the
+            // handle (Windows refuses to delete an open file), then remove
+            // the partial bytes -- the CLI spill's cleanup doctrine.
+            drop(file);
+            let _ = std::fs::remove_file(&path);
+            return Err(e.to_string());
+        }
+        Ok(path)
+    })();
+    // Logged at warn, not debug: release builds filter debug, and a failed
+    // spill is an abnormal actionable event -- the model sees the marker,
+    // but the trace excerpt keeps only the preview head, so the operator
+    // would otherwise have no persistent trace of a sustained disk-full.
+    if let Err(detail) = &spilled {
+        log::warn!(
+            target: "toptopduck::gateway",
+            "external tool spill write failed for `{name}`: {detail}"
+        );
+    }
+    let preview = crate::cli_tools::executor::spill_preview(&head, cap, &spilled);
+    let preview_block = json!({"type": "text", "text": preview});
+    // Collapse the text blocks into the preview block at the first text
+    // block's position; non-text blocks keep theirs (they were never part
+    // of the measured data plane). A missing content array is CREATED --
+    // the structuredContent fallback can cross the cap with no array at
+    // all, and a spilled file the model has no pointer to would be an
+    // orphan.
+    let mut rebuilt = Vec::new();
+    let mut placed = false;
+    if let Some(Value::Array(blocks)) = envelope.get_mut("content") {
+        rebuilt.reserve(blocks.len());
+        for block in blocks.drain(..) {
+            let is_text = block.get("type").and_then(Value::as_str) == Some("text");
+            if !is_text {
+                rebuilt.push(block);
+            } else if !placed {
+                rebuilt.push(preview_block.clone());
+                placed = true;
+            }
+        }
+    }
+    if !placed {
+        // No text block existed (or no content array at all): the preview
+        // opens the content.
+        rebuilt.insert(0, preview_block);
+    }
+    if let Some(object) = envelope.as_object_mut() {
+        object.insert("content".to_string(), Value::Array(rebuilt));
+        // The spilled data must not also ride the envelope: the fallback's
+        // structuredContent is the bypassed bytes (kept verbatim otherwise --
+        // the text plane spilled, not it, and a FAILED spill bypassed nothing).
+        if spilled.is_ok() && fallback.is_some() {
+            object.remove("structuredContent");
+        }
+    }
+    envelope
 }
 
 /// The over-cap spill for the built-in dispatch path (issue #1218): the
@@ -1346,7 +1649,12 @@ mod tests {
             name: "mcp__ghost__echo".into(),
             input: serde_json::json!({}),
         };
-        let outcome = route_external_call(&call, &mut mcp, dir.path());
+        let (outcome, envelope) =
+            route_external_dual(&call, CallFace::Builtin, &mut mcp, dir.path());
+        assert!(
+            envelope.is_some(),
+            "a route failure renders the shared error envelope"
+        );
         assert!(outcome.result.is_error, "unknown slug is a tool error");
         assert!(
             outcome.result.content.contains("ghost"),
@@ -1708,8 +2016,9 @@ mod tests {
         let phases = std::sync::Mutex::new(Vec::new());
         let mut on_phase = |p: TurnPhase| phases.lock().unwrap().push(p);
         let mut invocations: Vec<crate::model::SkillInvocation> = Vec::new();
-        let (result, entry, _) = dispatch_gated_call(
+        let (result, entry, _, _) = dispatch_gated_call(
             &failing,
+            CallFace::Builtin,
             &mut d,
             &mut RealMaterializer,
             &mut McpAggregator::empty(),
@@ -1762,8 +2071,9 @@ mod tests {
         let phases = std::sync::Mutex::new(Vec::new());
         let mut on_phase = |p: TurnPhase| phases.lock().unwrap().push(p);
         let mut invocations: Vec<crate::model::SkillInvocation> = Vec::new();
-        let (_, entry, promotion) = dispatch_gated_call(
+        let (_, entry, promotion, _) = dispatch_gated_call(
             &landing,
+            CallFace::Builtin,
             &mut d,
             &mut RealMaterializer,
             &mut McpAggregator::empty(),
@@ -1854,8 +2164,9 @@ mod tests {
         let phases = std::sync::Mutex::new(Vec::new());
         let mut on_phase = |p: TurnPhase| phases.lock().unwrap().push(p);
         let mut invocations: Vec<crate::model::SkillInvocation> = Vec::new();
-        let (result, entry, _) = dispatch_gated_call(
+        let (result, entry, _, _) = dispatch_gated_call(
             &bad,
+            CallFace::Builtin,
             &mut d,
             &mut RealMaterializer,
             &mut McpAggregator::empty(),
@@ -1899,8 +2210,9 @@ mod tests {
         };
         let phases = std::sync::Mutex::new(Vec::new());
         let mut on_phase = |p: TurnPhase| phases.lock().unwrap().push(p);
-        let (result, entry, _) = dispatch_gated_call(
+        let (result, entry, _, _) = dispatch_gated_call(
             &good,
+            CallFace::Builtin,
             &mut d,
             &mut RealMaterializer,
             &mut McpAggregator::empty(),
@@ -1983,8 +2295,9 @@ mod tests {
         let phases = std::sync::Mutex::new(Vec::new());
         let mut on_phase = |p: TurnPhase| phases.lock().unwrap().push(p);
         let mut invocations: Vec<crate::model::SkillInvocation> = Vec::new();
-        let (result, entry, _) = dispatch_gated_call(
+        let (result, entry, _, _) = dispatch_gated_call(
             &call,
+            CallFace::Builtin,
             &mut d,
             &mut RealMaterializer,
             &mut McpAggregator::empty(),
@@ -2055,8 +2368,9 @@ mod tests {
             input: json!({"pattern": "needle"}),
         };
         let mut invocations: Vec<crate::model::SkillInvocation> = Vec::new();
-        let (result, entry, _) = dispatch_gated_call(
+        let (result, entry, _, _) = dispatch_gated_call(
             &call,
+            CallFace::Builtin,
             &mut d,
             &mut RealMaterializer,
             &mut McpAggregator::empty(),
@@ -2128,8 +2442,9 @@ mod tests {
             input: json!({"pattern": "*.txt"}),
         };
         let mut invocations: Vec<crate::model::SkillInvocation> = Vec::new();
-        let (result, entry, _) = dispatch_gated_call(
+        let (result, entry, _, _) = dispatch_gated_call(
             &call,
+            CallFace::Builtin,
             &mut d,
             &mut RealMaterializer,
             &mut McpAggregator::empty(),
@@ -2207,8 +2522,9 @@ mod tests {
             cancel: &cancel,
         };
         let mut invocations: Vec<crate::model::SkillInvocation> = Vec::new();
-        let (result, entry, _) = dispatch_gated_call(
+        let (result, entry, _, _) = dispatch_gated_call(
             &call,
+            CallFace::Builtin,
             &mut d,
             &mut RealMaterializer,
             &mut McpAggregator::empty(),
@@ -2306,8 +2622,9 @@ mod tests {
             cancel: &cancel,
         };
         let mut invocations: Vec<crate::model::SkillInvocation> = Vec::new();
-        let (result, entry, _) = dispatch_gated_call(
+        let (result, entry, _, _) = dispatch_gated_call(
             &call,
+            CallFace::Builtin,
             &mut d,
             &mut RealMaterializer,
             &mut McpAggregator::empty(),
@@ -2390,8 +2707,9 @@ mod tests {
         let shared = Arc::clone(&phases);
         let mut forward = move |p: TurnPhase| shared.lock().unwrap().push(p);
         let mut invocations: Vec<crate::model::SkillInvocation> = Vec::new();
-        let (result, entry, promotion) = dispatch_gated_call(
+        let (result, entry, promotion, _) = dispatch_gated_call(
             &call,
+            CallFace::Builtin,
             &mut d,
             &mut RealMaterializer,
             &mut McpAggregator::empty(),
@@ -2460,8 +2778,9 @@ mod tests {
         let mut on_phase = |p: TurnPhase| phases.lock().unwrap().push(p);
         let mut invocations: Vec<crate::model::SkillInvocation> = Vec::new();
         let mut presented: Vec<String> = Vec::new();
-        let (result, entry, promotion) = dispatch_gated_call(
+        let (result, entry, promotion, _) = dispatch_gated_call(
             &call,
+            CallFace::Builtin,
             &mut d,
             &mut RealMaterializer,
             &mut McpAggregator::empty(),
@@ -2543,8 +2862,9 @@ mod tests {
         let phases = std::sync::Mutex::new(Vec::new());
         let mut on_phase = |p: TurnPhase| phases.lock().unwrap().push(p);
         let mut invocations: Vec<crate::model::SkillInvocation> = Vec::new();
-        let (result, entry, promotion) = dispatch_gated_call(
+        let (result, entry, promotion, _) = dispatch_gated_call(
             &call,
+            CallFace::Builtin,
             &mut d,
             &mut RealMaterializer,
             &mut McpAggregator::empty(),
@@ -2661,8 +2981,9 @@ mod tests {
         let phases = std::sync::Mutex::new(Vec::new());
         let mut on_phase = |p: TurnPhase| phases.lock().unwrap().push(p);
         let mut invocations: Vec<crate::model::SkillInvocation> = Vec::new();
-        let (result, _entry, _promotion) = dispatch_gated_call(
+        let (result, _entry, _promotion, _) = dispatch_gated_call(
             &call,
+            CallFace::Builtin,
             &mut d,
             &mut RealMaterializer,
             &mut McpAggregator::empty(),
@@ -2744,8 +3065,9 @@ mod tests {
             cancel: &cancel,
         };
         let mut invocations: Vec<crate::model::SkillInvocation> = Vec::new();
-        let (result, entry, _) = dispatch_gated_call(
+        let (result, entry, _, _) = dispatch_gated_call(
             &call,
+            CallFace::Builtin,
             &mut d,
             &mut RealMaterializer,
             &mut McpAggregator::empty(),
@@ -2830,8 +3152,9 @@ mod tests {
         let shared = Arc::clone(&phases);
         let mut forward = move |p: TurnPhase| shared.lock().unwrap().push(p);
         let mut invocations: Vec<crate::model::SkillInvocation> = Vec::new();
-        let (_, entry, _) = dispatch_gated_call(
+        let (_, entry, _, _) = dispatch_gated_call(
             &call,
+            CallFace::Builtin,
             &mut d,
             &mut RealMaterializer,
             &mut mcp,
@@ -2920,8 +3243,9 @@ mod tests {
         let phases = std::sync::Mutex::new(Vec::new());
         let mut on_phase = |p: TurnPhase| phases.lock().unwrap().push(p);
         let mut invocations: Vec<crate::model::SkillInvocation> = Vec::new();
-        let (result, entry, promotion) = dispatch_gated_call(
+        let (result, entry, promotion, _) = dispatch_gated_call(
             &call,
+            CallFace::Builtin,
             &mut d,
             &mut RealMaterializer,
             &mut mcp,
@@ -3054,6 +3378,7 @@ mod tests {
         let mut invocations: Vec<crate::model::SkillInvocation> = Vec::new();
         let abort = dispatch_gated_call(
             &call,
+            CallFace::Builtin,
             &mut d,
             &mut materializer,
             &mut McpAggregator::empty(),
@@ -3302,8 +3627,9 @@ mod tests {
         let phases = std::sync::Mutex::new(Vec::new());
         let mut on_phase = |p: TurnPhase| phases.lock().unwrap().push(p);
         let mut invocations: Vec<crate::model::SkillInvocation> = Vec::new();
-        let (result, entry, promotion) = dispatch_gated_call(
+        let (result, entry, promotion, _) = dispatch_gated_call(
             &call,
+            CallFace::Builtin,
             &mut d,
             &mut RealMaterializer,
             &mut mcp,
@@ -3371,8 +3697,9 @@ mod tests {
         let phases = std::sync::Mutex::new(Vec::new());
         let mut on_phase = |p: TurnPhase| phases.lock().unwrap().push(p);
         let mut invocations: Vec<crate::model::SkillInvocation> = Vec::new();
-        let (result, entry, promotion) = dispatch_gated_call(
+        let (result, entry, promotion, _) = dispatch_gated_call(
             &call,
+            CallFace::Builtin,
             &mut d,
             &mut RealMaterializer,
             &mut mcp,
@@ -3398,5 +3725,373 @@ mod tests {
             phases.into_inner().unwrap().is_empty(),
             "no phase events -- the call never reached a tool"
         );
+    }
+
+    // --- external_call_outcome (I1: verbatim-relay + excerpt contract; ----
+    // --- issue #1218: over-cap spill arm) ----------------------------------
+
+    /// The external outcome over the production cap against a fresh temp
+    /// dir -- the under-cap path every pre-#1218 test takes (the spill
+    /// plan is inert there).
+    fn relayed(name: &str, result: Result<Value, aggregator::RouteError>) -> (Value, bool, String) {
+        let temp = TempDir::new().unwrap();
+        let spill = crate::cli_tools::executor::SpillPlan::new(temp.path(), name, "call-1");
+        external_call_outcome(
+            name,
+            result,
+            &spill,
+            crate::cli_tools::executor::OUTPUT_CAP_BYTES,
+        )
+    }
+
+    /// A successful route relays the server's envelope VERBATIM -- the content
+    /// array + isError flag survive untouched, not re-wrapped into a text
+    /// block (which would double-encode). The excerpt is the first text block.
+    /// Pins the contract `handle_tools_call`'s external arm relies on.
+    #[test]
+    fn external_call_outcome_relays_envelope_verbatim_on_success() {
+        let envelope = json!({
+            "content": [{"type": "text", "text": "5"}],
+            "isError": false,
+        });
+        let (out, is_error, excerpt) = relayed("mcp__fakemcp__add", Ok(envelope.clone()));
+        assert_eq!(out, envelope, "envelope relayed verbatim, not re-wrapped");
+        assert!(!is_error);
+        assert_eq!(excerpt, "5");
+    }
+
+    /// A multi-block envelope (image + text) is relayed verbatim; the excerpt
+    /// is the first TEXT block -- the leading image is skipped, not serialized
+    /// into the excerpt.
+    #[test]
+    fn external_call_outcome_preserves_non_text_blocks_and_excerpts_first_text() {
+        let envelope = json!({
+            "content": [
+                {"type": "image", "data": "..."},
+                {"type": "text", "text": "first text"},
+                {"type": "text", "text": "second text"},
+            ],
+            "isError": false,
+        });
+        let (out, is_error, excerpt) = relayed("mcp__fakemcp__tool", Ok(envelope.clone()));
+        assert_eq!(out, envelope, "multi-block envelope relayed verbatim");
+        assert!(!is_error);
+        assert_eq!(excerpt, "first text");
+    }
+
+    /// A server-reported `isError` envelope is relayed verbatim (the gateway
+    /// does not mask the server's error); `is_error` tracks the flag so the
+    /// trace row records the failure.
+    #[test]
+    fn external_call_outcome_propagates_the_is_error_flag() {
+        let envelope = json!({
+            "content": [{"type": "text", "text": "tool blew up"}],
+            "isError": true,
+        });
+        let (out, is_error, excerpt) = relayed("mcp__fakemcp__tool", Ok(envelope.clone()));
+        assert_eq!(out, envelope);
+        assert!(is_error);
+        assert_eq!(excerpt, "tool blew up");
+    }
+
+    /// A route error (unknown slug / client fault) builds an `isError` envelope
+    /// naming the tool so the agent can self-correct (ADR-0077); `is_error` is
+    /// true and the excerpt carries the failure text.
+    #[test]
+    fn external_call_outcome_builds_an_error_envelope_on_route_failure() {
+        let (out, is_error, excerpt) = relayed(
+            "mcp__ghost__echo",
+            Err(aggregator::RouteError::UnknownServer("ghost".into())),
+        );
+        assert!(is_error);
+        assert_eq!(out["isError"], true);
+        let text = out["content"][0]["text"]
+            .as_str()
+            .expect("error envelope has a text block");
+        assert!(
+            text.contains("mcp__ghost__echo"),
+            "error names the tool: {text}"
+        );
+        assert!(
+            text.contains("ghost"),
+            "error carries the route failure: {text}"
+        );
+        assert_eq!(excerpt, text, "excerpt is the error text");
+    }
+
+    /// The over-cap arm (issue #1218): the concatenated text blocks spill
+    /// WHOLE to `tool_output/<slug>__<tool>-<call-id>.<ext>`, and the
+    /// relayed envelope carries the preview trio -- capped head, truncation
+    /// marker, spill path -- in place of the text blocks; the non-text
+    /// block keeps its position and `structuredContent` rides verbatim
+    /// (the text plane spilled, not it).
+    #[test]
+    fn external_call_outcome_spills_over_cap_text_blocks_whole() {
+        let temp = TempDir::new().unwrap();
+        let spill =
+            crate::cli_tools::executor::SpillPlan::new(temp.path(), "fakesrv__query", "call-9");
+        let envelope = json!({
+            "content": [
+                {"type": "text", "text": "AAAA"},
+                {"type": "image", "data": "..."},
+                {"type": "text", "text": "BBBBBBBB"},
+            ],
+            "isError": false,
+            "structuredContent": {"row_count": 2},
+        });
+        let (out, is_error, excerpt) =
+            external_call_outcome("mcp__fakesrv__query", Ok(envelope), &spill, 8);
+        assert!(!is_error);
+        let path = temp
+            .path()
+            .join("tool_output")
+            .join("fakesrv__query-call-9.csv");
+        let spilled =
+            std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("spill file {path:?}: {e}"));
+        assert_eq!(
+            spilled, "AAAABBBBBBBB",
+            "text blocks concatenate in order, whole (not truncated)"
+        );
+        let blocks = out["content"].as_array().unwrap();
+        assert_eq!(blocks.len(), 2, "text blocks collapse into the preview");
+        let preview = blocks[0]["text"].as_str().unwrap();
+        assert!(preview.starts_with("AAAABBBB"), "head preview: {preview}");
+        assert!(
+            preview.contains(
+                "[tool output truncated: exceeded the 8-byte cap; \
+                 full output spilled to: "
+            ),
+            "marker + path: {preview}"
+        );
+        assert!(
+            preview.ends_with(&format!("{}]", path.display())),
+            "marker names the spill file: {preview}"
+        );
+        assert_eq!(blocks[1]["type"], "image", "non-text block keeps its slot");
+        assert_eq!(
+            out["structuredContent"]["row_count"], 2,
+            "structuredContent rides verbatim"
+        );
+        assert!(
+            excerpt.starts_with("AAAABBBB"),
+            "excerpt is the preview head"
+        );
+    }
+
+    /// A JSON-shaped head routes the spill to `.json` -- the extension is
+    /// the derived-source dispatcher's only routing signal, so the sniff
+    /// is shared with the CLI channel's spill.
+    #[test]
+    fn external_call_outcome_sniffs_a_json_head_to_the_json_extension() {
+        let temp = TempDir::new().unwrap();
+        let spill = crate::cli_tools::executor::SpillPlan::new(temp.path(), "fakesrv__query", "c1");
+        let body = r#"{"rows":[1,2,3,4,5,6,7,8,9,10,11,12]}"#;
+        let envelope = json!({
+            "content": [{"type": "text", "text": body}],
+            "isError": false,
+        });
+        let (out, _, _) = external_call_outcome("mcp__fakesrv__query", Ok(envelope), &spill, 8);
+        let path = temp
+            .path()
+            .join("tool_output")
+            .join("fakesrv__query-c1.json");
+        let spilled =
+            std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("spill file {path:?}: {e}"));
+        assert_eq!(spilled, body);
+        assert!(
+            out["content"][0]["text"]
+                .as_str()
+                .unwrap()
+                .contains(&path.display().to_string()),
+            "preview names the .json spill"
+        );
+    }
+
+    /// A result with no text bytes spills the `structuredContent`
+    /// serialization instead (else the file would be empty), and the
+    /// bypassed bytes do not ALSO ride the envelope -- the field is
+    /// removed once the file landed.
+    #[test]
+    fn external_call_outcome_spills_structured_content_when_text_is_empty() {
+        let temp = TempDir::new().unwrap();
+        let spill = crate::cli_tools::executor::SpillPlan::new(temp.path(), "fakesrv__read", "c2");
+        let envelope = json!({
+            "content": [{"type": "resource", "uri": "file:///x"}],
+            "structuredContent": {"big": "0123456789ABCDEF"},
+            "isError": false,
+        });
+        let (out, is_error, _) =
+            external_call_outcome("mcp__fakesrv__read", Ok(envelope), &spill, 8);
+        assert!(!is_error);
+        let path = temp
+            .path()
+            .join("tool_output")
+            .join("fakesrv__read-c2.json");
+        let spilled =
+            std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("spill file {path:?}: {e}"));
+        assert_eq!(spilled, r#"{"big":"0123456789ABCDEF"}"#);
+        let blocks = out["content"].as_array().unwrap();
+        assert_eq!(
+            blocks.len(),
+            2,
+            "preview opens, resource block keeps its slot"
+        );
+        assert_eq!(blocks[0]["type"], "text");
+        assert_eq!(blocks[1]["type"], "resource");
+        assert!(
+            out.get("structuredContent").is_none(),
+            "the bypassed bytes do not ride the envelope twice"
+        );
+    }
+
+    /// A contentless envelope (no content array at all) whose
+    /// structuredContent crosses the cap still spills AND gets a content
+    /// array holding the preview -- a spilled file the model has no
+    /// pointer to would be an orphan.
+    #[test]
+    fn external_call_outcome_creates_content_for_a_contentless_spill() {
+        let temp = TempDir::new().unwrap();
+        let spill = crate::cli_tools::executor::SpillPlan::new(temp.path(), "fakesrv__read", "c5");
+        let envelope = json!({
+            "structuredContent": {"big": "0123456789ABCDEF"},
+            "isError": false,
+        });
+        let (out, is_error, _) =
+            external_call_outcome("mcp__fakesrv__read", Ok(envelope), &spill, 8);
+        assert!(!is_error);
+        let path = temp
+            .path()
+            .join("tool_output")
+            .join("fakesrv__read-c5.json");
+        assert!(
+            std::fs::read_to_string(&path).is_ok(),
+            "the structuredContent fallback spills with no content array"
+        );
+        let blocks = out["content"]
+            .as_array()
+            .expect("a content array is created for the preview");
+        assert_eq!(blocks.len(), 1);
+        let preview = blocks[0]["text"].as_str().unwrap();
+        assert!(
+            preview.contains("spilled to:"),
+            "the model gets the pointer: {preview}"
+        );
+        assert!(
+            out.get("structuredContent").is_none(),
+            "the bypassed bytes do not ride the envelope twice"
+        );
+    }
+
+    /// `isError` is orthogonal to the cap: an error envelope's text is as
+    /// much the data egress as a success's (the CLI channel's non-zero-exit
+    /// twin), so it spills the same way with its flag preserved.
+    #[test]
+    fn external_call_outcome_spills_is_error_envelopes_orthogonally() {
+        let temp = TempDir::new().unwrap();
+        let spill = crate::cli_tools::executor::SpillPlan::new(temp.path(), "fakesrv__fail", "c3");
+        let envelope = json!({
+            "content": [{"type": "text", "text": "ERRORDETAIL-0123456789"}],
+            "isError": true,
+        });
+        let (out, is_error, _) =
+            external_call_outcome("mcp__fakesrv__fail", Ok(envelope), &spill, 8);
+        assert!(is_error, "the error flag survives the spill");
+        assert_eq!(out["isError"], true);
+        let path = temp.path().join("tool_output").join("fakesrv__fail-c3.csv");
+        let spilled =
+            std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("spill file {path:?}: {e}"));
+        assert_eq!(spilled, "ERRORDETAIL-0123456789");
+    }
+
+    /// A failed spill (the `tool_output` path is blocked by a same-named
+    /// file) withdraws the path: no file lands, and the preview carries
+    /// the truncation + write-error markers instead of a half-trusted
+    /// reference. `structuredContent` stays -- nothing was bypassed.
+    #[test]
+    fn external_call_outcome_marks_a_failed_spill_and_keeps_the_envelope() {
+        let temp = TempDir::new().unwrap();
+        // A same-named FILE makes create_dir_all fail -- the blocked-path
+        // stand-in for an un-writable spill directory.
+        std::fs::write(temp.path().join("tool_output"), b"not a dir").unwrap();
+        let spill = crate::cli_tools::executor::SpillPlan::new(temp.path(), "fakesrv__query", "c4");
+        let envelope = json!({
+            "content": [{"type": "text", "text": "0123456789ABCDEF"}],
+            "structuredContent": {"small": true},
+            "isError": false,
+        });
+        let (out, is_error, _) =
+            external_call_outcome("mcp__fakesrv__query", Ok(envelope), &spill, 8);
+        assert!(!is_error);
+        assert!(
+            std::fs::read_dir(temp.path().join("tool_output")).is_err(),
+            "no spill directory was created past the block"
+        );
+        let preview = out["content"][0]["text"].as_str().unwrap();
+        assert!(
+            preview.starts_with("01234567"),
+            "the capped head still rides: {preview}"
+        );
+        assert!(
+            preview.contains(
+                "[tool output truncated: exceeded the 8-byte cap]\n\
+                              [tool output spill write error:"
+            ),
+            "truncation + write-error markers, no path: {preview}"
+        );
+        assert!(
+            !preview.contains("spilled to:"),
+            "no half-trusted path reference: {preview}"
+        );
+        assert_eq!(
+            out["structuredContent"]["small"], true,
+            "nothing was bypassed -- structuredContent stays"
+        );
+    }
+
+    /// Exactly `cap` bytes never cross: the envelope relays byte-identical
+    /// and no spill directory is even created -- the MCP twin of the CLI
+    /// channel's `exactly_cap_does_not_spill`. Pins the boundary against
+    /// `<=` degrading to `<`.
+    #[test]
+    fn external_call_outcome_at_exactly_cap_relays_verbatim() {
+        let temp = TempDir::new().unwrap();
+        let spill = crate::cli_tools::executor::SpillPlan::new(temp.path(), "fakesrv__query", "cx");
+        let envelope = json!({
+            "content": [{"type": "text", "text": "01234567"}],
+            "isError": false,
+        });
+        let (out, is_error, excerpt) =
+            external_call_outcome("mcp__fakesrv__query", Ok(envelope.clone()), &spill, 8);
+        assert!(!is_error);
+        assert_eq!(out, envelope, "exactly cap stays verbatim");
+        assert_eq!(excerpt, "01234567");
+        assert!(
+            !temp.path().join("tool_output").exists(),
+            "the tool_output dir is not even created"
+        );
+    }
+
+    /// The measured data plane is the text blocks only (ADR-0105 Decision
+    /// 5's calibration): a non-empty text block keeps a byte-heavy
+    /// `structuredContent` OUT of the measurement -- it rides verbatim.
+    /// Pins the deliberate asymmetry against accidental widening (the
+    /// same envelope with the text block removed would spill).
+    #[test]
+    fn external_call_outcome_does_not_measure_structured_content_when_text_exists() {
+        let temp = TempDir::new().unwrap();
+        let spill = crate::cli_tools::executor::SpillPlan::new(temp.path(), "fakesrv__read", "cy");
+        let envelope = json!({
+            "content": [{"type": "text", "text": "see data"}],
+            "structuredContent": {"big": "0123456789ABCDEF0123456789ABCDEF"},
+            "isError": false,
+        });
+        let (out, is_error, _) =
+            external_call_outcome("mcp__fakesrv__read", Ok(envelope.clone()), &spill, 8);
+        assert!(!is_error);
+        assert_eq!(
+            out, envelope,
+            "text present -> structuredContent unmeasured, verbatim relay"
+        );
+        assert!(!temp.path().join("tool_output").exists(), "nothing spilled");
     }
 }
