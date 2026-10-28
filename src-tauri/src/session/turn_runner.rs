@@ -17,7 +17,7 @@
 //! The shape is an `impl super::Session` block, not the standalone TurnRunner
 //! struct ADR-0053 Decision 1 drew: that struct's roles evolved into the
 //! materializer / loop_runtime / outcome_merge species with the session
-//! state borrowed per turn through `TurnDeps` (Decision 2/4) -- the
+//! state borrowed per turn through `DispatchDeps` (Decision 2/4) -- the
 //! boundary, not the struct, is what this file holds.
 
 use std::collections::BTreeMap;
@@ -35,7 +35,7 @@ use crate::runtime::acp::wire::McpServer;
 use crate::runtime::gateway::server::{bind_gateway, serve_connection, GatewayCtx};
 use crate::session::loop_contract::{LoopOutcome, LoopRound};
 use crate::session::loop_runtime;
-use crate::session::materializer::TurnDeps;
+use crate::session::materializer::DispatchDeps;
 use crate::session::outcome_merge::{merge_outcomes, turn_outcome_from_loop};
 use crate::session::skills::SkillTurnState;
 use crate::skills::SkillPromptFragment;
@@ -209,7 +209,7 @@ impl super::Session {
         // Facade over the agent loop (ADR-0081, issue #318): assemble the
         // windowed tool-calling request (system prompt + tool table + windowed
         // history, via the window assembler), drive the loop with the shared
-        // session state borrowed via TurnDeps + the session's own
+        // session state borrowed via DispatchDeps + the session's own
         // materializer, map the structured LoopOutcome onto the four-way
         // TurnOutcome, then record it. `record_turn` stays on the facade (the
         // conversation timeline + persistence are session concerns, not turn
@@ -312,7 +312,7 @@ impl super::Session {
                 // API-invalid interleaving). `None` leaves the request
                 // thinking-disabled, byte-identical to the status quo.
                 request.thought_level = self.runtime_facts.thought_level.clone();
-                // Disjoint field borrows: `TurnDeps` borrows
+                // Disjoint field borrows: `DispatchDeps` borrows
                 // `&self.admin_engine` / `&mut self.source_files` /
                 // `&mut self.working_set` / `&self.temp_path` and the loop
                 // takes `&mut *self.materializer` (the provider crosses into
@@ -441,7 +441,7 @@ impl super::Session {
                         .tools
                         .push(crate::session::workspace_tools::discovery::read_definition());
                     let snapshot_dir = self.snapshot_dir();
-                    let mut deps = TurnDeps {
+                    let mut deps = DispatchDeps {
                         engine: &self.admin_engine,
                         source_files: &mut self.source_files,
                         source_readers: Some(&mut self.persister.source_readers),
@@ -832,7 +832,7 @@ impl super::Session {
             mcp.arm_cancel_teardown(Arc::clone(&self.cancel), mcp_turn_done.flag());
             mcp.connect_all(inputs.mcp_servers, inputs.keychain);
             let snapshot_dir = self.snapshot_dir();
-            let deps = TurnDeps {
+            let deps = DispatchDeps {
                 engine: &self.admin_engine,
                 source_files: &mut self.source_files,
                 source_readers: Some(&mut self.persister.source_readers),

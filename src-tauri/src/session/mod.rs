@@ -502,7 +502,7 @@ pub struct Session {
     /// materializer injected for a `Resumer` unit test exercises the replay
     /// branch without DuckDB / a filesystem. Stateless (`RealMaterializer`);
     /// the admin connection / source_files / working_set it borrows live on
-    /// this Session and are passed per turn via [`materializer::TurnDeps`]. Held on the
+    /// this Session and are passed per turn via [`materializer::DispatchDeps`]. Held on the
     /// Session itself (not inside the loop, which is built per turn) so the
     /// resume borrow and the live-turn borrow share one object.
     materializer: Box<dyn Materializer>,
@@ -992,7 +992,7 @@ impl Session {
         // both per turn; the resume path borrows the same materializer for
         // the recipe replay. The materializer is stateless (RealMaterializer);
         // the admin connection / source_files / working_set it borrows live
-        // on this Session and are passed per turn via TurnDeps.
+        // on this Session and are passed per turn via DispatchDeps.
         Ok(Self {
             admin_engine,
             working_set: WorkingSet::default(),

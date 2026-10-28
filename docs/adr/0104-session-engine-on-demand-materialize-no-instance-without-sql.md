@@ -44,3 +44,4 @@ ADR-0087 将 DuckDB 从唯一引擎降为默认工具——「一个会话可能
 - **CONTEXT.md 不变**：「会话」词条的「打开时其工作集在内存中物化」对非空工作集仍成立，空工作集平凡成立；引擎是实现实体，不进 glossary。
 - **留实现期**：按需访问器的具体形态、TurnDeps 按需引擎源的载体形状、「纯聊天会话全程零引擎」的回归钉。
 - **被 ADR-0136 校准**：按需物化三决策与 Decision 4 的「resume 时物化」语义不动；Decision 4 的急切重放在伴生库水印命中路径豁免；Considered 末条的重命名否决（`session.duck` → `recipe.json`）失效。见 ADR-0136。
+- **校准（DispatchDeps 改名）**：本文所指 `TurnDeps`（工具派发借入束）经轮次入口同名命令边界束消歧，现名 `DispatchDeps`——按需引擎源载体形状与 Decision 2 语义不变。

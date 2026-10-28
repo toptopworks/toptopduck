@@ -13,7 +13,7 @@
 
 use serde_json::{json, Value};
 
-use crate::session::materializer::TurnDeps;
+use crate::session::materializer::DispatchDeps;
 use crate::tools::definitions;
 use crate::tools::ToolPayload;
 
@@ -21,7 +21,7 @@ use crate::tools::ToolPayload;
 ///
 /// Returns `{ reference_name, columns, row_count }` on success, or a tool-level
 /// error string for an unknown or stale reference. No DuckDB query runs.
-pub(crate) fn dispatch(input: &Value, deps: &mut TurnDeps) -> Result<ToolPayload, String> {
+pub(crate) fn dispatch(input: &Value, deps: &mut DispatchDeps) -> Result<ToolPayload, String> {
     let reference_name = definitions::get_str(input, "reference_name")?;
     let descriptor = deps
         .working_set

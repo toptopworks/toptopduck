@@ -28,7 +28,7 @@ use crate::model::ColumnSchema;
 use crate::sandbox_sql::{
     preflight_read_sql, run_sandboxed_read, PreflightError, SandboxDeps, SandboxExecError,
 };
-use crate::session::materializer::TurnDeps;
+use crate::session::materializer::DispatchDeps;
 use crate::tools::definitions::{self, EXPLORE_DEFAULT_SAMPLE_ROWS, EXPLORE_MAX_SAMPLE_ROWS};
 use crate::tools::ToolPayload;
 
@@ -44,7 +44,7 @@ const SCRATCH_TABLE: &str = "_explore_scratch";
 /// a cancel -- each surfaces a descriptive reason, never a silent failure.
 pub(crate) fn dispatch(
     input: &Value,
-    deps: &mut TurnDeps,
+    deps: &mut DispatchDeps,
     cancel: &CancelToken,
 ) -> Result<ToolPayload, String> {
     let sql = definitions::get_str(input, "sql")?;
@@ -93,7 +93,7 @@ struct ExploreShape {
 fn run_explore(
     sql: &str,
     sample_rows: i64,
-    deps: &mut TurnDeps,
+    deps: &mut DispatchDeps,
     cancel: &CancelToken,
 ) -> Result<ExploreShape, String> {
     // ADR-0137 D3: relative read_* spellings resolve against the session
@@ -452,7 +452,7 @@ mod tests {
     /// never persists -- the copy-in is the materialize face's act).
     #[test]
     fn explore_absolutizes_workspace_relative_read() {
-        use crate::session::materializer::TurnDeps;
+        use crate::session::materializer::DispatchDeps;
         use std::fs;
         use tempfile::TempDir;
 
@@ -464,7 +464,7 @@ mod tests {
         let workspace = TempDir::new().unwrap();
         fs::write(workspace.path().join("data.csv"), "val\n1\n2\n").unwrap();
         let mut bound = Some(std::fs::canonicalize(workspace.path()).unwrap());
-        let mut deps = TurnDeps::test_deps_with_workspace(
+        let mut deps = DispatchDeps::test_deps_with_workspace(
             &engine,
             &mut ws,
             &mut sources,
@@ -492,7 +492,7 @@ mod tests {
     /// dotdot refusal tests), so this pin marks the design, not an accident.
     #[test]
     fn explore_absolutizes_a_dotdot_escape_on_the_full_path_face() {
-        use crate::session::materializer::TurnDeps;
+        use crate::session::materializer::DispatchDeps;
         use std::fs;
         use tempfile::{NamedTempFile, TempDir};
 
@@ -513,7 +513,7 @@ mod tests {
             .and_then(|n| n.to_str())
             .expect("escape-target filename is valid UTF-8");
         let mut bound = Some(std::fs::canonicalize(workspace.path()).unwrap());
-        let mut deps = TurnDeps::test_deps_with_workspace(
+        let mut deps = DispatchDeps::test_deps_with_workspace(
             &engine,
             &mut ws,
             &mut sources,

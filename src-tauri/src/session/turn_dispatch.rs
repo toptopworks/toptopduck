@@ -44,7 +44,7 @@ use crate::provider::tool_calling::{ToolResult, ToolUse};
 use crate::session::loop_contract::{
     truncate_trace_excerpt, Termination, TraceEntry, DENIED_BY_GATEWAY_CONTENT, TRACE_EXCERPT_MAX,
 };
-use crate::session::materializer::{Materializer, TurnDeps};
+use crate::session::materializer::{DispatchDeps, Materializer};
 use crate::tools;
 use crate::tools::definitions;
 use crate::tools::ToolOutcome;
@@ -92,7 +92,7 @@ struct GhostSnapshot {
 impl GhostSnapshot {
     /// Capture the working set's current `next_result_number` -- the value
     /// the ghost detection diffs against after a panicked dispatch.
-    fn take(deps: &TurnDeps) -> Self {
+    fn take(deps: &DispatchDeps) -> Self {
         Self {
             next: deps.working_set.next_result_number(),
         }
@@ -113,7 +113,7 @@ impl GhostSnapshot {
 /// safer than rewinding the number and clashing on reuse. The ghost was never
 /// user-visible, so ADR-0022's no-reuse constraint does not apply to the
 /// rollback itself.
-fn rollback_ghost_result(deps: &mut TurnDeps, snapshot: GhostSnapshot) {
+fn rollback_ghost_result(deps: &mut DispatchDeps, snapshot: GhostSnapshot) {
     let prev_next = snapshot.next;
     let curr_next = deps.working_set.next_result_number();
     if curr_next <= prev_next {
@@ -144,9 +144,9 @@ fn rollback_ghost_result(deps: &mut TurnDeps, snapshot: GhostSnapshot) {
 /// `tools/call` builtin arm -- so every runtime gets the ritual by
 /// construction.
 pub(crate) fn guarded_dispatch<R>(
-    deps: &mut TurnDeps,
+    deps: &mut DispatchDeps,
     site: &str,
-    body: impl FnOnce(&mut TurnDeps) -> R,
+    body: impl FnOnce(&mut DispatchDeps) -> R,
 ) -> Result<R, String> {
     let snapshot = GhostSnapshot::take(deps);
     match catch_unwind(AssertUnwindSafe(|| body(deps))) {
@@ -200,7 +200,7 @@ pub(crate) enum DispatchAbort {
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn dispatch_gated_call(
     call: &ToolUse,
-    deps: &mut TurnDeps,
+    deps: &mut DispatchDeps,
     materializer: &mut dyn Materializer,
     mcp: &mut McpAggregator,
     cli: &[crate::cli_tools::config::CliToolConfig],
@@ -245,7 +245,7 @@ pub(crate) fn dispatch_gated_call(
 #[allow(clippy::too_many_arguments)]
 fn dispatch_gated_call_inner(
     call: &ToolUse,
-    deps: &mut TurnDeps,
+    deps: &mut DispatchDeps,
     materializer: &mut dyn Materializer,
     mcp: &mut McpAggregator,
     cli: &[crate::cli_tools::config::CliToolConfig],
@@ -1683,7 +1683,7 @@ mod tests {
         let mut ws = WorkingSet::default();
         let mut sources = HashMap::new();
         let mut refs = HashMap::new();
-        let mut d = TurnDeps::test_deps(
+        let mut d = DispatchDeps::test_deps(
             &engine.admin_engine,
             &mut ws,
             &mut sources,
@@ -1815,7 +1815,7 @@ mod tests {
         let mut ws = WorkingSet::default();
         let mut sources = HashMap::new();
         let mut refs = HashMap::new();
-        let mut d = TurnDeps::test_deps(
+        let mut d = DispatchDeps::test_deps(
             &engine.admin_engine,
             &mut ws,
             &mut sources,
@@ -1959,7 +1959,7 @@ mod tests {
         // The workspace axis connected but unbound -- the production
         // temp-fallback shape the #1406 triage locked the refusal against.
         let mut slot = None;
-        let mut d = TurnDeps::test_deps_with_workspace(
+        let mut d = DispatchDeps::test_deps_with_workspace(
             &engine.admin_engine,
             &mut ws,
             &mut sources,
@@ -2026,7 +2026,7 @@ mod tests {
         let mut sources = HashMap::new();
         let mut refs = HashMap::new();
         let mut slot = None;
-        let mut d = TurnDeps::test_deps_with_workspace(
+        let mut d = DispatchDeps::test_deps_with_workspace(
             &engine.admin_engine,
             &mut ws,
             &mut sources,
@@ -2097,7 +2097,7 @@ mod tests {
         std::fs::create_dir(&ws_path).unwrap();
         std::fs::write(ws_path.join("a.txt"), "hello\n").unwrap();
         let mut slot = Some(std::fs::canonicalize(&ws_path).unwrap());
-        let mut d = TurnDeps::test_deps_with_workspace(
+        let mut d = DispatchDeps::test_deps_with_workspace(
             &engine.admin_engine,
             &mut ws,
             &mut sources,
@@ -2162,7 +2162,7 @@ mod tests {
         let mut ws = WorkingSet::default();
         let mut sources = HashMap::new();
         let mut refs = HashMap::new();
-        let mut d = TurnDeps::test_deps(
+        let mut d = DispatchDeps::test_deps(
             &engine.admin_engine,
             &mut ws,
             &mut sources,
@@ -2259,7 +2259,7 @@ mod tests {
         let mut ws = WorkingSet::default();
         let mut sources = HashMap::new();
         let mut refs = HashMap::new();
-        let mut d = TurnDeps::test_deps(
+        let mut d = DispatchDeps::test_deps(
             &engine.admin_engine,
             &mut ws,
             &mut sources,
@@ -2353,7 +2353,7 @@ mod tests {
         let mut ws = WorkingSet::default();
         let mut sources = HashMap::new();
         let mut refs = HashMap::new();
-        let mut d = TurnDeps::test_deps(
+        let mut d = DispatchDeps::test_deps(
             &engine.admin_engine,
             &mut ws,
             &mut sources,
@@ -2436,7 +2436,7 @@ mod tests {
         let mut ws = WorkingSet::default();
         let mut sources = HashMap::new();
         let mut refs = HashMap::new();
-        let mut d = TurnDeps::test_deps(
+        let mut d = DispatchDeps::test_deps(
             &engine.admin_engine,
             &mut ws,
             &mut sources,
@@ -2501,7 +2501,7 @@ mod tests {
         let mut ws = WorkingSet::default();
         let mut sources = HashMap::new();
         let mut refs = HashMap::new();
-        let mut d = TurnDeps::test_deps(
+        let mut d = DispatchDeps::test_deps(
             &engine.admin_engine,
             &mut ws,
             &mut sources,
@@ -2620,7 +2620,7 @@ mod tests {
         let mut sources = HashMap::new();
         let mut refs = HashMap::new();
         let mut bound = Some(workspace_dir.path().to_path_buf());
-        let mut d = TurnDeps::test_deps_with_workspace(
+        let mut d = DispatchDeps::test_deps_with_workspace(
             &engine.admin_engine,
             &mut ws,
             &mut sources,
@@ -2694,7 +2694,7 @@ mod tests {
         let mut ws = WorkingSet::default();
         let mut sources = HashMap::new();
         let mut refs = HashMap::new();
-        let mut d = TurnDeps::test_deps(
+        let mut d = DispatchDeps::test_deps(
             &engine.admin_engine,
             &mut ws,
             &mut sources,
@@ -2788,7 +2788,7 @@ mod tests {
         let mut ws = WorkingSet::default();
         let mut sources = HashMap::new();
         let mut refs = HashMap::new();
-        let mut d = TurnDeps::test_deps(
+        let mut d = DispatchDeps::test_deps(
             &engine.admin_engine,
             &mut ws,
             &mut sources,
@@ -2886,7 +2886,7 @@ mod tests {
         let mut ws = WorkingSet::default();
         let mut sources = HashMap::new();
         let mut refs = HashMap::new();
-        let mut d = TurnDeps::test_deps(
+        let mut d = DispatchDeps::test_deps(
             &engine.admin_engine,
             &mut ws,
             &mut sources,
@@ -2989,7 +2989,7 @@ mod tests {
             _sql: &str,
             _cancel: &CancelToken,
             result_name: String,
-            deps: &mut TurnDeps,
+            deps: &mut DispatchDeps,
         ) -> Result<DatasetDescriptor, ExecError> {
             // Create the physical table first (mirrors RealMaterializer's
             // install_result step) so the ghost rollback exercises the DROP
@@ -3028,7 +3028,7 @@ mod tests {
         let mut ws = WorkingSet::default();
         let mut sources = HashMap::new();
         let mut refs = HashMap::new();
-        let mut d = TurnDeps::test_deps(
+        let mut d = DispatchDeps::test_deps(
             &engine.admin_engine,
             &mut ws,
             &mut sources,
@@ -3273,7 +3273,7 @@ mod tests {
         let mut ws = WorkingSet::default();
         let mut sources = HashMap::new();
         let mut refs = HashMap::new();
-        let mut d = TurnDeps::test_deps(
+        let mut d = DispatchDeps::test_deps(
             &engine.admin_engine,
             &mut ws,
             &mut sources,
@@ -3342,7 +3342,7 @@ mod tests {
         let mut ws = WorkingSet::default();
         let mut sources = HashMap::new();
         let mut refs = HashMap::new();
-        let mut d = TurnDeps::test_deps(
+        let mut d = DispatchDeps::test_deps(
             &engine.admin_engine,
             &mut ws,
             &mut sources,

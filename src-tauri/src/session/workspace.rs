@@ -700,12 +700,12 @@ mod tests {
     }
 
     #[test]
-    fn a_cli_launch_mint_records_through_the_turn_deps() {
+    fn a_cli_launch_mint_records_through_the_dispatch_deps() {
         // ADR-0138 (issue #1384): the turn mount point's other arm -- the
         // built-in CLI tool dispatch resolves its launch dir through
-        // TurnDeps, and a fresh mint records there too (the None axis stays
+        // DispatchDeps, and a fresh mint records there too (the None axis stays
         // disconnected for test deps).
-        use crate::session::materializer::TurnDeps;
+        use crate::session::materializer::DispatchDeps;
 
         let dir = tempfile::tempdir().expect("registry dir");
         let registry = test_registry(dir.path());
@@ -715,7 +715,7 @@ mod tests {
         let mut working_set = crate::workingset::WorkingSet::default();
         let mut sources = std::collections::HashMap::new();
         let mut refs = std::collections::HashMap::new();
-        let mut deps = TurnDeps::test_deps(
+        let mut deps = DispatchDeps::test_deps(
             &engine,
             &mut working_set,
             &mut sources,

@@ -42,7 +42,7 @@ use crate::provider::tool_calling::{ToolDefinition, ToolResult, ToolUse};
 use crate::session::loop_contract::{
     truncate_trace_excerpt, TraceEntry, DENIED_BY_GATEWAY_CONTENT, TRACE_EXCERPT_MAX,
 };
-use crate::session::materializer::TurnDeps;
+use crate::session::materializer::DispatchDeps;
 use crate::session::turn_dispatch::GateCtx;
 use crate::tools::definitions::get_str;
 
@@ -273,7 +273,7 @@ fn resolve_edit(call: &ToolUse, workspace: Option<&Path>) -> WorkspaceToolOutcom
 /// the sibling arm before the gate machinery starts.
 pub(crate) fn dispatch_workspace_tool(
     call: &ToolUse,
-    deps: &TurnDeps,
+    deps: &DispatchDeps,
     gate: &GateCtx<'_>,
     on_phase: &mut impl FnMut(TurnPhase),
     origin: Option<&str>,
@@ -605,7 +605,7 @@ mod tests {
     use crate::approval::{ApprovalRequestBody, ApprovalResponse, ApprovalSink, ApprovalState};
     use crate::cancel::CancelToken;
     use crate::session::engine::AdminEngine;
-    use crate::session::materializer::{CachedDerivedRef, TurnDeps};
+    use crate::session::materializer::{CachedDerivedRef, DispatchDeps};
     use crate::session::turn_dispatch::GateCtx;
     use crate::workingset::WorkingSet;
     use std::collections::HashMap;
@@ -1207,7 +1207,7 @@ mod tests {
 
     // --- dispatch: gate + execution -----------------------------------------
 
-    /// A TurnDeps with the workspace axis connected, mirroring the
+    /// A DispatchDeps with the workspace axis connected, mirroring the
     /// production shape the dispatch arm reads.
     struct DepsFixture {
         engine: AdminEngine,
@@ -1234,8 +1234,8 @@ mod tests {
             }
         }
 
-        fn deps(&mut self) -> TurnDeps<'_> {
-            TurnDeps::test_deps_with_workspace(
+        fn deps(&mut self) -> DispatchDeps<'_> {
+            DispatchDeps::test_deps_with_workspace(
                 &self.engine,
                 &mut self.working_set,
                 &mut self.sources,

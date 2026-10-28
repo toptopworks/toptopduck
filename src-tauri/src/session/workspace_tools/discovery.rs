@@ -36,7 +36,7 @@ use serde_json::{json, Value};
 use crate::model::{TraceEntryView, TurnPhase};
 use crate::provider::tool_calling::{ToolDefinition, ToolResult, ToolUse};
 use crate::session::loop_contract::{truncate_trace_excerpt, TraceEntry, TRACE_EXCERPT_MAX};
-use crate::session::materializer::TurnDeps;
+use crate::session::materializer::DispatchDeps;
 use crate::tools::definitions::get_str;
 
 use super::{require_workspace, resolve_entity_in_workspace};
@@ -254,7 +254,7 @@ pub(crate) fn read_definition() -> ToolDefinition {
 /// too).
 pub(crate) fn dispatch_readonly(
     call: &ToolUse,
-    deps: &TurnDeps,
+    deps: &DispatchDeps,
     on_phase: &mut impl FnMut(TurnPhase),
     _origin: Option<&str>,
 ) -> (ToolResult, Option<TraceEntry>) {
@@ -823,7 +823,7 @@ mod tests {
         tool_use(GLOB_TOOL, json!({ "pattern": pattern }))
     }
 
-    /// The TurnDeps fixture (the write pair's shape): owners live on the
+    /// The DispatchDeps fixture (the write pair's shape): owners live on the
     /// struct, `deps` borrows them per call.
     struct DepsFixture {
         engine: crate::session::engine::AdminEngine,
@@ -846,8 +846,8 @@ mod tests {
             }
         }
 
-        fn deps(&mut self) -> TurnDeps<'_> {
-            TurnDeps::test_deps_with_workspace(
+        fn deps(&mut self) -> DispatchDeps<'_> {
+            DispatchDeps::test_deps_with_workspace(
                 &self.engine,
                 &mut self.working_set,
                 &mut self.sources,

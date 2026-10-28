@@ -4,7 +4,7 @@
 //! through the one-line delegations on `Session` in `mod.rs`. Every function
 //! here is a free function over the session's borrowed state
 //! (`&WorkingSet`, `&AdminEngine`, `&CancelToken`) -- the same per-call
-//! borrow shape as the materializer's `TurnDeps` seam (ADR-0053) -- so the
+//! borrow shape as the materializer's `DispatchDeps` seam (ADR-0053) -- so the
 //! module's unit tests drive the seam on a `:memory:` engine plus a minimal
 //! working set instead of a full scripted session (ADR-0053 Decision 6:
 //! module-local tests, blackbox slimming). The e2e properties that need the

@@ -115,7 +115,7 @@ impl FsAclError {
 
 /// The session's allowed filesystem roots, built per call from the live source
 /// set + the session temp dir. Cheap to build (a handful of canonicalized
-/// paths); a tool constructs one per call from [`crate::session::materializer::TurnDeps`].
+/// paths); a tool constructs one per call from [`crate::session::materializer::DispatchDeps`].
 ///
 /// - `source_roots`: the canonicalized ORIGINAL source file paths (the files
 ///   the user handed the session). Read-only -- the agent may re-read a raw
