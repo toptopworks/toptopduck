@@ -233,7 +233,7 @@ impl LoopRuntime {
             }
             // No-progress watchdog (ADR-0115): the cap times ONLY the
             // generation segment -- the fold's stream activity re-arms it
-            // (touch), and the dispatch server below freezes it across
+            // (touch), and the dispatch core freezes it across
             // gateway tool executions / CLI tool runs / approval pendings.
             // The watcher hook reads the latched clock to fork the stop
             // reason, and the termination derivation below lands the turn

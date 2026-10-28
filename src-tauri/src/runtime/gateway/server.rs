@@ -910,29 +910,21 @@ fn handle_tools_call(msg: &Value, ctx: &mut GatewayCtx, outcome: &mut GatewayOut
             if let Some(envelope) = envelope {
                 Response::Result(envelope)
             } else {
-                result_envelope(result).0
+                result_envelope(result)
             }
         }
     }
 }
 
-/// One dispatched call's [`ToolResult`] → (bridge envelope, is_error,
-/// excerpt): the shared tail of the CLI-spawn and builtin-dispatch arms.
-/// The excerpt truncates via borrow BEFORE the move into the envelope -- a
-/// full-content clone would double peak memory per call (issue #663
-/// review); the trace-side re-truncation in the caller's push is
-/// idempotent on the truncated string.
-fn result_envelope(result: ToolResult) -> (Response, bool, String) {
-    let is_error = result.is_error;
-    let excerpt = truncate_trace_excerpt(&result.content, TRACE_EXCERPT_MAX);
-    (
-        Response::Result(json!({
-            "content": [{"type": "text", "text": result.content}],
-            "isError": is_error,
-        })),
-        is_error,
-        excerpt,
-    )
+/// One dispatched call's [`ToolResult`] → the bridge's JSON-RPC result
+/// envelope: the flattened fallback when the core returned no verbatim
+/// external envelope to relay. The trace row rides the core's
+/// `DispatchProduct` -- nothing here feeds the trace.
+fn result_envelope(result: ToolResult) -> Response {
+    Response::Result(json!({
+        "content": [{"type": "text", "text": result.content}],
+        "isError": result.is_error,
+    }))
 }
 
 /// Generate a 64-hex auth token (244-bit entropy). Two uuid v4 values (122
@@ -3398,6 +3390,51 @@ mod tests {
             "the failed call keeps one honest row"
         );
         assert!(!outcome.trace[0].success, "the row records the failure");
+    }
+
+    /// A materialize call through the bridge lands its promotion on the
+    /// outcome -- the rewritten Ok arm's push, pinned positively (every
+    /// other `promotions` assertion in this file is an `is_empty`).
+    #[test]
+    fn handle_tools_call_lands_a_materialize_promotion_on_the_outcome() {
+        let approval: &'static ApprovalState = Box::leak(Box::new(ApprovalState::new()));
+        let sink: &'static RecSink = Box::leak(Box::new(RecSink {
+            requests: std::sync::Mutex::new(Vec::new()),
+        }));
+        let fake: &'static mut FakeMaterializer =
+            Box::leak(Box::new(FakeMaterializer::new(vec![Ok(
+                DatasetDescriptor {
+                    reference_name: "result_1".into(),
+                    display_name: "result_1".into(),
+                    source_path: String::new(),
+                    columns: Vec::new(),
+                    row_count: 0,
+                    sample: Vec::new(),
+                    fingerprint: String::new(),
+                    rectify: RectifyProvenance::NotApplicable,
+                    privacy: DatasetPrivacy::default(),
+                    stale: None,
+                },
+            )])));
+        let mut ctx = gate_ctx_with_materializer(fake, Vec::new(), approval, sink);
+        let mut outcome = GatewayOutcome::default();
+        let msg = json!({
+            "jsonrpc": "2.0",
+            "id": 9,
+            "method": "tools/call",
+            "params": {"name": "materialize", "arguments": {"sql": "SELECT 1 AS x"}}
+        });
+        match handle_tools_call(&msg, &mut ctx, &mut outcome) {
+            Response::Result(v) => {
+                assert_eq!(v["isError"], false, "the fake materialize succeeds: {v}");
+            }
+            _ => panic!("materialize must return a result"),
+        }
+        assert_eq!(
+            outcome.promotions.len(),
+            1,
+            "the rewritten Ok arm lands the promotion on the outcome"
+        );
     }
 
     /// The workspace write tools (issue #1406) and the read-only discovery

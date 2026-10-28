@@ -151,10 +151,9 @@ fn rollback_ghost_result(deps: &mut DispatchDeps, snapshot: GhostSnapshot) {
 /// The issue #321 snapshot + ghost-rollback ritual as one reusable guard:
 /// capture the `result_N` numbering, run `body` under `catch_unwind`, and on
 /// a panic roll any orphan `result_N` back before returning the
-/// "panicked in ..." detail. Both routing faces wrap their builtin executor
-/// in this -- the dispatch core ([`dispatch_gated_call`]) and the gateway's
-/// `tools/call` builtin arm -- so every runtime gets the ritual by
-/// construction.
+/// "panicked in ..." detail. The dispatch core ([`dispatch_gated_call`])
+/// wraps the builtin executor in this -- both routing faces dispatch
+/// through the core, so every runtime gets the ritual by construction.
 pub(crate) fn guarded_dispatch<R>(
     deps: &mut DispatchDeps,
     site: &str,
@@ -803,9 +802,9 @@ fn meta_failure(call: &ToolUse, message: &str) -> ToolResult {
 /// under the cap, spilled over it) with a `ToolResult` flattened from the
 /// final envelope's first text block -- the pre-retirement gateway row's
 /// excerpt source, so the trace row is byte-identical. A route failure
-/// renders once into the shared failure text and feeds both faces. No
-/// promotion in any branch (external tools never materialize a
-/// working-set result).
+/// flattens to the same failure text on both faces (each callee's Err arm
+/// owns its rendering). No promotion in any branch (external tools never
+/// materialize a working-set result).
 fn route_external_dual(
     call: &ToolUse,
     face: CallFace,
@@ -813,54 +812,39 @@ fn route_external_dual(
     session_temp_dir: &Path,
 ) -> (tools::ToolOutcome, Option<Value>) {
     let route_result = mcp.route(&call.name, &call.input);
-    // The over-cap spill stem (issue #1218): the `mcp__` prefix is
-    // stripped so `mcp__<slug>__<tool>` spills as `<slug>__<tool>-<call-id>`
-    // -- the CLI channel's naming family, one data-plane switch across both
-    // transports.
-    let stem = call
-        .name
-        .strip_prefix(aggregator::NAMESPACED_PREFIX)
-        .unwrap_or(&call.name);
-    let spill = crate::cli_tools::executor::SpillPlan::new(session_temp_dir, stem, &call.id);
-    match route_result {
-        Ok(envelope_value) => match face {
-            CallFace::Builtin => (
-                shape_external_outcome(
-                    Ok(envelope_value),
-                    call,
-                    session_temp_dir,
-                    crate::cli_tools::executor::OUTPUT_CAP_BYTES,
-                ),
-                None,
+    match face {
+        // The flattened rendering: the trace / numbering single source,
+        // the inline-materialize hint included. A route failure flattens
+        // through the same callee's Err arm -- the loop face never relays
+        // an envelope, so the envelope half is `None` on every exit.
+        CallFace::Builtin => (
+            shape_external_outcome(
+                route_result,
+                call,
+                session_temp_dir,
+                crate::cli_tools::executor::OUTPUT_CAP_BYTES,
             ),
-            CallFace::Bridge => {
-                let (envelope, is_error, content) = external_call_outcome(
-                    &call.name,
-                    Ok(envelope_value),
-                    &spill,
-                    crate::cli_tools::executor::OUTPUT_CAP_BYTES,
-                );
-                (
-                    tools::ToolOutcome {
-                        result: ToolResult {
-                            tool_use_id: call.id.clone(),
-                            content,
-                            is_error,
-                        },
-                        promotion: None,
-                    },
-                    Some(envelope),
-                )
-            }
-        },
-        Err(e) => {
-            // The failure envelope renders through the same single source
-            // (the pre-retirement gateway arm ran Err results through the
-            // over-cap spill too -- a transport-fault text is as much the
-            // data plane as a success's).
-            let (envelope, _, detail) = external_call_outcome(
+            None,
+        ),
+        // The verbatim rendering: the server's own envelope (route
+        // failures included -- a transport-fault text is as much the data
+        // plane as a success's), with a `ToolResult` flattened from the
+        // final envelope's first text block -- the pre-retirement gateway
+        // row's excerpt source, so the trace row is byte-identical.
+        CallFace::Bridge => {
+            // The over-cap spill stem (issue #1218): the `mcp__` prefix is
+            // stripped so `mcp__<slug>__<tool>` spills as
+            // `<slug>__<tool>-<call-id>` -- the CLI channel's naming
+            // family, one data-plane switch across both transports.
+            let stem = call
+                .name
+                .strip_prefix(aggregator::NAMESPACED_PREFIX)
+                .unwrap_or(&call.name);
+            let spill =
+                crate::cli_tools::executor::SpillPlan::new(session_temp_dir, stem, &call.id);
+            let (envelope, is_error, content) = external_call_outcome(
                 &call.name,
-                Err(e),
+                route_result,
                 &spill,
                 crate::cli_tools::executor::OUTPUT_CAP_BYTES,
             );
@@ -868,8 +852,8 @@ fn route_external_dual(
                 tools::ToolOutcome {
                     result: ToolResult {
                         tool_use_id: call.id.clone(),
-                        content: detail,
-                        is_error: true,
+                        content,
+                        is_error,
                     },
                     promotion: None,
                 },
@@ -880,7 +864,7 @@ fn route_external_dual(
 }
 
 /// Reduce a routed external MCP call's `Result` to the runtime's `ToolOutcome`
-/// (issue #301 slice C-loop). Split from [`route_external_call`] so the
+/// (issue #301 slice C-loop). Split from [`route_external_dual`] so the
 /// envelope-shaping contract is unit-testable without a live server: a
 /// successful envelope flattens to its first text block + the server's
 /// `isError` flag (defaulting to `false` per the MCP spec -- a conformant
@@ -888,9 +872,9 @@ fn route_external_dual(
 /// (the model self-corrects, ADR-0077) but marks `is_error = true`; a route
 /// failure becomes a tool error naming the tool. Over the output cap the
 /// flattened text spills whole to tool_output/ and the content becomes the
-/// preview trio instead (issue #1218 -- the built-in dispatch's twin of the
-/// gateway's `spill_external_over_cap`; the cap parameter follows the
-/// gateway's `external_call_outcome` testing seam). No promotion in any
+/// preview trio instead (issue #1218 -- the same-module twin
+/// [`spill_external_over_cap`]; the cap parameter follows
+/// [`external_call_outcome`]'s testing seam). No promotion in any
 /// branch (external tools never materialize a working-set result).
 fn shape_external_outcome(
     route_result: Result<Value, RouteError>,
@@ -936,9 +920,10 @@ fn shape_external_outcome(
     }
 }
 
-/// Resolve a routed external MCP call into the response envelope + the trace
-/// inputs (slice C-gw). Pure over the aggregator: takes the route result so
-/// the verbatim-relay + excerpt shape is unit-testable without a live server.
+/// Resolve a routed external MCP call into the bridge face's response
+/// envelope + the trace inputs. Pure over the aggregator: takes the route
+/// result so the verbatim-relay + excerpt shape is unit-testable without a
+/// live server.
 ///
 /// On success the server's envelope is returned VERBATIM -- the server's own
 /// `{content, isError}` shape, so structured content blocks (multi-block /
@@ -947,10 +932,9 @@ fn shape_external_outcome(
 /// emitted. Over the result cap the relay stops being verbatim BY DESIGN
 /// (issue #1218): the data spills whole to `tool_output/` and the envelope
 /// carries the preview trio instead (see [`spill_external_over_cap`]). On a
-/// route error the gateway builds an `isError` envelope naming the tool so
+/// route error this builds an `isError` envelope naming the tool so
 /// the agent can self-correct (ADR-0077). Returns
-/// `(envelope, is_error, excerpt)` so the caller pushes one trace row and
-/// returns the envelope.
+/// `(envelope, is_error, excerpt)` for the caller to relay and flatten.
 fn external_call_outcome(
     name: &str,
     route_result: Result<Value, aggregator::RouteError>,
@@ -1051,7 +1035,7 @@ fn spill_external_over_cap(
     // would otherwise have no persistent trace of a sustained disk-full.
     if let Err(detail) = &spilled {
         log::warn!(
-            target: "toptopduck::gateway",
+            target: "toptopduck::turn_dispatch",
             "external tool spill write failed for `{name}`: {detail}"
         );
     }
@@ -1095,10 +1079,10 @@ fn spill_external_over_cap(
 }
 
 /// The over-cap spill for the built-in dispatch path (issue #1218): the
-/// gateway twin of this arm lives in the gateway server
-/// (`spill_external_over_cap`, covering external runtimes through the
-/// bridge); this one caps the same results on the built-in loop's own
-/// dispatch. The whole flattened text spills under `tool_output/` as
+/// bridge face's twin of this arm ([`spill_external_over_cap`] above)
+/// relays the whole envelope for external runtimes; this one caps the same
+/// results on the built-in loop's own dispatch. The whole flattened text
+/// spills under `tool_output/` as
 /// `<slug>__<tool>-<call-id>` (the `mcp__` prefix stripped -- the CLI
 /// channel's naming family, shared with the gateway arm), and the
 /// model-facing content becomes the capped head + truncation marker +
@@ -1651,10 +1635,7 @@ mod tests {
         };
         let (outcome, envelope) =
             route_external_dual(&call, CallFace::Builtin, &mut mcp, dir.path());
-        assert!(
-            envelope.is_some(),
-            "a route failure renders the shared error envelope"
-        );
+        assert!(envelope.is_none(), "the loop face never relays an envelope");
         assert!(outcome.result.is_error, "unknown slug is a tool error");
         assert!(
             outcome.result.content.contains("ghost"),
@@ -2561,6 +2542,136 @@ mod tests {
         assert!(
             !skills_root.path().join("sql-coach").exists(),
             "the denial never mints"
+        );
+    }
+
+    /// The parked gate record carries the face-derived call id (the #1267
+    /// terminal-echo abandonment aligns on `parked_call_id`): a Bridge
+    /// call parks under the call's wire id, a Builtin call parks with
+    /// `None` -- both branches of the discriminator pinned through the
+    /// real dispatch, so a swapped or regressed arm reddens here.
+    #[test]
+    fn the_parked_gate_record_carries_the_face_derived_call_id() {
+        let engine = Engine::new();
+        let mut ws = WorkingSet::default();
+        let mut sources = HashMap::new();
+        let mut refs = HashMap::new();
+        let mut d = DispatchDeps::test_deps(
+            &engine.admin_engine,
+            &mut ws,
+            &mut sources,
+            engine.temp.path(),
+            &mut refs,
+        );
+        let cancel = CancelToken::new();
+        let live = crate::LiveProviderConfig::new(
+            crate::provider::keychain::KeychainStore,
+            engine.temp.path().join("config.json"),
+        );
+        let skills_root = tempfile::tempdir().expect("skills root");
+        let create = crate::skills::create::SkillCreateGate {
+            root: skills_root.path(),
+            live: Some(&live),
+        };
+        let read = crate::skills::read::SkillReadGate::inert();
+
+        // (a) The Bridge face: a built-in-only name falls through the face
+        // gate to the unknown-external card, parking under the wire id.
+        let approval = Arc::new(ApprovalState::new());
+        let sink = Arc::new(RecordingSink::default());
+        let gate = GateCtx {
+            approval: &approval,
+            sink: &*sink,
+            cancel: &cancel,
+        };
+        let call = ToolUse {
+            id: "rpc-7".into(),
+            name: "present_files".into(),
+            input: json!({}),
+        };
+        let approval_c = Arc::clone(&approval);
+        let sink_c = Arc::clone(&sink);
+        let watcher = std::thread::spawn(move || {
+            poll_request_id(&sink_c, std::time::Duration::from_secs(2))
+                .expect("the gate emitted the unknown-external card");
+            let parked = approval_c.parked_call_id();
+            approval_c.abandon_pending();
+            parked
+        });
+        let mut invocations: Vec<crate::model::SkillInvocation> = Vec::new();
+        let outcome = dispatch_gated_call(
+            &call,
+            CallFace::Bridge,
+            &mut d,
+            &mut RealMaterializer,
+            &mut McpAggregator::empty(),
+            &[],
+            &mut crate::skills::invocation::test_ctx(&mut invocations),
+            &mut Vec::new(),
+            &read,
+            &create,
+            &gate,
+            &mut |_| {},
+            None,
+        );
+        let parked = watcher.join().expect("watcher thread");
+        assert!(
+            matches!(outcome, Err(DispatchAbort::Gate)),
+            "the abandonment ends the bridge call as a gate abort"
+        );
+        assert_eq!(
+            parked,
+            Some("rpc-7".into()),
+            "the bridge card parks under the call's wire id (#1267 echo alignment)"
+        );
+
+        // (b) The Builtin face: an unlisted name parks with `None` -- a
+        // built-in call has no wire id.
+        let approval = Arc::new(ApprovalState::new());
+        let sink = Arc::new(RecordingSink::default());
+        let gate = GateCtx {
+            approval: &approval,
+            sink: &*sink,
+            cancel: &cancel,
+        };
+        let call = ToolUse {
+            id: "tu_9".into(),
+            name: "never_listed_tool".into(),
+            input: json!({}),
+        };
+        let approval_c = Arc::clone(&approval);
+        let sink_c = Arc::clone(&sink);
+        let watcher = std::thread::spawn(move || {
+            poll_request_id(&sink_c, std::time::Duration::from_secs(2))
+                .expect("the gate emitted the unknown-external card");
+            let parked = approval_c.parked_call_id();
+            approval_c.abandon_pending();
+            parked
+        });
+        let mut invocations: Vec<crate::model::SkillInvocation> = Vec::new();
+        let outcome = dispatch_gated_call(
+            &call,
+            CallFace::Builtin,
+            &mut d,
+            &mut RealMaterializer,
+            &mut McpAggregator::empty(),
+            &[],
+            &mut crate::skills::invocation::test_ctx(&mut invocations),
+            &mut Vec::new(),
+            &read,
+            &create,
+            &gate,
+            &mut |_| {},
+            None,
+        );
+        let parked = watcher.join().expect("watcher thread");
+        assert!(
+            matches!(outcome, Err(DispatchAbort::Gate)),
+            "the abandonment ends the built-in call as a gate abort"
+        );
+        assert_eq!(
+            parked, None,
+            "a built-in call parks with no wire id for the echo alignment"
         );
     }
 

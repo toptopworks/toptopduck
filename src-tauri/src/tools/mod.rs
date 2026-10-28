@@ -96,9 +96,13 @@ pub struct ToolOutcome {
 /// tool error so the model can stop calling it.
 ///
 /// `pub(crate)` because the signature borrows [`DispatchDeps`] and [`Materializer`]
-/// (both `pub(crate)`) -- the only consumer today is the in-crate agent loop
-/// (#295), which shares the session's materializer through here so a
-/// `materialize` call inherits numbering + caps from the legacy single-SQL path.
+/// (both `pub(crate)`) -- the only consumer today is the dispatch core
+/// (`session::turn_dispatch`, #295's agent loop routes through it), which
+/// shares the session's materializer through here so a `materialize` call
+/// inherits numbering + caps from the legacy single-SQL path. Core-only by
+/// contract: every call must ride `dispatch_gated_call`, which owns the
+/// approval gate, the ADR-0115 freeze, the #321 panic guard, and the trace
+/// assembly around this.
 pub(crate) fn dispatch(
     call: &ToolUse,
     deps: &mut DispatchDeps,
