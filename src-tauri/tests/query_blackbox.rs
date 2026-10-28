@@ -892,7 +892,8 @@ fn window_assembler_windows_history_and_samples_via_fake_provider() {
     let payload = request_for(&buf, "probe");
 
     // The built-in tool table (ADR-0076) is advertised every turn, closing
-    // with the workspace write pair (issue #1406).
+    // with the workspace write pair (issue #1406) and the read-only
+    // discovery trio (issue #1385).
     let tool_names: Vec<&str> = payload.tools.iter().map(|t| t.name.as_str()).collect();
     assert_eq!(
         tool_names,
@@ -903,7 +904,10 @@ fn window_assembler_windows_history_and_samples_via_fake_provider() {
             "sample",
             "present_files",
             "write",
-            "edit"
+            "edit",
+            "glob",
+            "grep",
+            "read"
         ]
     );
 

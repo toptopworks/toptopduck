@@ -5892,6 +5892,7 @@ dependencies = [
  "csv",
  "duckdb",
  "futures",
+ "glob",
  "http",
  "include_dir",
  "keyring",

@@ -147,6 +147,11 @@ tempfile = "3"
 # whitelist-constrained bare paths. Already in the tree transitively; used
 # directly here so the scan does not hand-roll a tokenizer.
 regex = "1"
+# `glob` backs the workspace discovery tools' pattern matching (ADR-0137,
+# issue #1385): standard glob semantics including `**` recursive segments.
+# Already in the tree transitively (tauri's scope matcher); used directly
+# here so the traversal core does not hand-roll a matcher.
+glob = "0.3"
 # Local-time formatting for the lazily-minted default workspace directory
 # name (ADR-0137, issue #1381): `YYYY-MM-DD-HH-MM-SS` in the user's local
 # zone. Already in the tree transitively; the `clock` feature alone adds
