@@ -190,6 +190,41 @@ fn reject_if_in_flight(handle: &SessionHandle) -> Result<(), SessionError> {
     Ok(())
 }
 
+/// Resolve a session id string to its live session handle in one step
+/// (issue #1412): parse the id (a malformed string surfaces as
+/// [`SessionError::InvalidId`], distinct from a closed session's
+/// [`SessionError::NotFound`] -- issue #73) then look it up in the store,
+/// which releases the store lock before returning (the ADR-0056 brief-lock
+/// invariant: the calling command uses the cloned handle within this one
+/// invocation and must drop it before returning).
+fn resolve_session(
+    store: &SessionStore,
+    session_id: &str,
+) -> Result<Arc<SessionHandle>, SessionError> {
+    let id = SessionId::parse(session_id)?;
+    store.get(&id)
+}
+
+/// Run `op` against the locked [`Session`] (issue #1412): take the
+/// per-session single-flight gate (ADR-0021; a poisoned mutex surfaces as
+/// [`SessionError::Engine`]), hand the guard to `op`, and return `op`'s
+/// result. The guard drops when `op` returns, so the lock never outlives the
+/// closure. The closure must not re-enter the session gate through the
+/// captured handle -- the mutex is non-reentrant, so a nested
+/// [`SessionHandle::session_lock`] deadlocks rather than erroring (locking a
+/// different mutex on the handle, such as the runtime-posture slot, stays
+/// fine). Deliberately the sync-command shape only: issue #1412 keeps the
+/// `spawn_blocking` task bodies on their hand-written lock, and a blocking
+/// task that ever adopts this helper must clone the `Arc<SessionHandle>`
+/// and call it inside the task (the guard is `!Send`).
+fn with_session_lock<T>(
+    handle: &SessionHandle,
+    op: impl FnOnce(&mut Session) -> Result<T, SessionError>,
+) -> Result<T, SessionError> {
+    let mut s = handle.session_lock()?;
+    op(&mut s)
+}
+
 /// The wire reply from `create_session` (ADR-0089): the runtime session id +
 /// the bound `recipe.json` path. The frontend stores both so every open
 /// session is known-persisted from creation.
@@ -276,64 +311,65 @@ pub fn create_session(
         // Seat the backfill posture BEFORE the bind so the initial recipe
         // persists it (ADR-0100 Decision 1; see the helper's doc).
         apply_startup_posture(&handle, &posture)?;
-        let mut s = handle.session_lock()?;
-        // Discovery snapshot (issue #961, ADR-0118 Decision 1; the #677
-        // builtin auto-include generalized; ADR-0119 Decision 3, issue
-        // #983): the registry INTERSECT the enablement axis materializes
-        // the session's discovery snapshot -- the enabled set at creation,
-        // immutable within the session, persisted explicitly in the recipe
-        // header. A CLI-companion builtin additionally requires its
-        // companion CLI entry detected + enabled (the #677 two-axis
-        // conjunction); a knowledge-only skill (ADR-0120 Decision 7) rides
-        // the app version and takes no CLI conjunct. The builtin gate rides
-        // the BUILTIN arm only (ADR-0121: the reserved-subtree row,
-        // location-derived): a local fork owning the name shadows the
-        // builtin -- it reads `acquired: local` and rides the user arm,
-        // discoverable like any user skill unless disabled (ADR-0118
-        // Decision 1).
-        let cfg = live.load();
-        let seed = crate::skills::seed_from_config(&cfg, &live.cli_tools(), &skills_root.0);
-        s.set_discovery_snapshot(seed);
-        // ADR-0137 (issue #1381): seat the workspace axis BEFORE the bind so
-        // the initial recipe carries the binding. An explicitly selected
-        // directory binds canonicalized (Windows 8.3 short paths would let
-        // one directory appear under two spellings, breaking path
-        // comparison + multi-session dedup); no selection seats only the
-        // lazy-mint source -- the first disk-need moment (external turn
-        // spawn / built-in CLI tool launch) mints the default timestamped
-        // workspace, and a pure-chat session stays dirless. The mint source
-        // is FIXED in the product's Documents domain (the default sessions
-        // root's sibling): workspaces are user assets and do not follow a
-        // user-overridden sessions dir.
-        s.set_workspaces_root(Some(crate::persistence::default_workspaces_root(&app)));
-        // ADR-0138 (issue #1384): seat the registry before the bind below
-        // records the explicit selection, and for the close-time reclaim's
-        // record removal. Seated unconditionally -- the lazy-mint path
-        // records on the session's first disk need instead.
-        s.set_workspace_registry(Some(Arc::clone(registry.inner())));
-        if let Some(dir) = &workspace {
-            let canonical = std::fs::canonicalize(dir).map_err(|e| {
-                // Distinct from launch_cwd's mkdir-failure wording: this is
-                // the create-time "the selected directory cannot be opened"
-                // verdict, not a mint/materialize fault. The io error's
-                // Display carries no path -- name the user's selection.
-                SessionError::Engine(format!("cannot open workspace directory {dir}: {e}"))
-            })?;
-            if !canonical.is_dir() {
-                // canonicalize succeeds on a file; binding one would fail
-                // at the first launch with the workspace-unavailable error
-                // -- reject it at this create-time verdict instead.
-                return Err(SessionError::Engine(format!(
-                    "workspace path is not a directory: {dir}"
-                )));
+        with_session_lock(&handle, |s| {
+            // Discovery snapshot (issue #961, ADR-0118 Decision 1; the #677
+            // builtin auto-include generalized; ADR-0119 Decision 3, issue
+            // #983): the registry INTERSECT the enablement axis materializes
+            // the session's discovery snapshot -- the enabled set at creation,
+            // immutable within the session, persisted explicitly in the recipe
+            // header. A CLI-companion builtin additionally requires its
+            // companion CLI entry detected + enabled (the #677 two-axis
+            // conjunction); a knowledge-only skill (ADR-0120 Decision 7) rides
+            // the app version and takes no CLI conjunct. The builtin gate rides
+            // the BUILTIN arm only (ADR-0121: the reserved-subtree row,
+            // location-derived): a local fork owning the name shadows the
+            // builtin -- it reads `acquired: local` and rides the user arm,
+            // discoverable like any user skill unless disabled (ADR-0118
+            // Decision 1).
+            let cfg = live.load();
+            let seed = crate::skills::seed_from_config(&cfg, &live.cli_tools(), &skills_root.0);
+            s.set_discovery_snapshot(seed);
+            // ADR-0137 (issue #1381): seat the workspace axis BEFORE the bind so
+            // the initial recipe carries the binding. An explicitly selected
+            // directory binds canonicalized (Windows 8.3 short paths would let
+            // one directory appear under two spellings, breaking path
+            // comparison + multi-session dedup); no selection seats only the
+            // lazy-mint source -- the first disk-need moment (external turn
+            // spawn / built-in CLI tool launch) mints the default timestamped
+            // workspace, and a pure-chat session stays dirless. The mint source
+            // is FIXED in the product's Documents domain (the default sessions
+            // root's sibling): workspaces are user assets and do not follow a
+            // user-overridden sessions dir.
+            s.set_workspaces_root(Some(crate::persistence::default_workspaces_root(&app)));
+            // ADR-0138 (issue #1384): seat the registry before the bind below
+            // records the explicit selection, and for the close-time reclaim's
+            // record removal. Seated unconditionally -- the lazy-mint path
+            // records on the session's first disk need instead.
+            s.set_workspace_registry(Some(Arc::clone(registry.inner())));
+            if let Some(dir) = &workspace {
+                let canonical = std::fs::canonicalize(dir).map_err(|e| {
+                    // Distinct from launch_cwd's mkdir-failure wording: this is
+                    // the create-time "the selected directory cannot be opened"
+                    // verdict, not a mint/materialize fault. The io error's
+                    // Display carries no path -- name the user's selection.
+                    SessionError::Engine(format!("cannot open workspace directory {dir}: {e}"))
+                })?;
+                if !canonical.is_dir() {
+                    // canonicalize succeeds on a file; binding one would fail
+                    // at the first launch with the workspace-unavailable error
+                    // -- reject it at this create-time verdict instead.
+                    return Err(SessionError::Engine(format!(
+                        "workspace path is not a directory: {dir}"
+                    )));
+                }
+                s.set_workspace(canonical);
             }
-            s.set_workspace(canonical);
-        }
-        s.bind_recipe(recipe_path.clone(), String::new())
-            .map_err(|e| SessionError::Engine(e.to_string()))?;
-        Ok(CreateSessionReply {
-            session_id: id.clone(),
-            recipe_path: recipe_path.to_string_lossy().into_owned(),
+            s.bind_recipe(recipe_path.clone(), String::new())
+                .map_err(|e| SessionError::Engine(e.to_string()))?;
+            Ok(CreateSessionReply {
+                session_id: id.clone(),
+                recipe_path: recipe_path.to_string_lossy().into_owned(),
+            })
         })
     })();
 
@@ -533,6 +569,8 @@ pub fn close_session(
     store: State<'_, Arc<SessionStore>>,
     session_id: String,
 ) -> Result<bool, SessionError> {
+    // Exempt from resolve_session (issue #1412): the typed id keys into
+    // close_and_cleanup_empty, which addresses by id, not by handle.
     let id = SessionId::parse(&session_id)?;
     store.close_and_cleanup_empty(&id)
 }
@@ -587,6 +625,8 @@ pub async fn close_session_and_wait_release(
     store: State<'_, Arc<SessionStore>>,
     session_id: String,
 ) -> Result<(), SessionError> {
+    // Exempt from resolve_session (issue #1412): the typed id keys into
+    // detach, which addresses by id, not by handle.
     let id = SessionId::parse(&session_id)?;
     // Detach: mark closing + fire cancel + remove from the map + return the
     // handle. After this, no new commands can target the id (get -> NotFound).
@@ -633,8 +673,7 @@ pub async fn ingest_file(
     session_id: String,
     path: String,
 ) -> Result<LoadOutcome, SessionError> {
-    let id = SessionId::parse(&session_id)?;
-    let handle = store.get(&id)?;
+    let handle = resolve_session(&store, &session_id)?;
     reject_if_resuming(&handle)?;
     let handle = Arc::clone(&handle);
     let outcome = tauri::async_runtime::spawn_blocking(move || {
@@ -657,8 +696,7 @@ pub async fn ingest_file_guided(
     path: String,
     guidance: Vec<SheetGuidance>,
 ) -> Result<LoadOutcome, SessionError> {
-    let id = SessionId::parse(&session_id)?;
-    let handle = store.get(&id)?;
+    let handle = resolve_session(&store, &session_id)?;
     reject_if_resuming(&handle)?;
     let handle = Arc::clone(&handle);
     let outcome = tauri::async_runtime::spawn_blocking(move || {
@@ -687,15 +725,14 @@ pub fn guidance_window(
     offset: usize,
     limit: usize,
 ) -> Result<Vec<Vec<String>>, SessionError> {
-    let id = SessionId::parse(&session_id)?;
-    let handle = store.get(&id)?;
-    let s = handle.session_lock()?;
-    s.guidance_window(&path, &sheet_name, offset, limit)
-        .ok_or_else(|| {
+    let handle = resolve_session(&store, &session_id)?;
+    with_session_lock(&handle, |s| {
+        s.guidance_window(&path, &sheet_name, offset, limit).ok_or_else(|| {
             SessionError::Engine(format!(
                 "no retained guidance for sheet \"{sheet_name}\" of {path} (already committed, discarded, or superseded)"
             ))
         })
+    })
 }
 
 /// Drop the session's retained guided-load parse (issue #750): the dialog's
@@ -706,11 +743,11 @@ pub fn discard_guided_retention(
     store: State<'_, Arc<SessionStore>>,
     session_id: String,
 ) -> Result<(), SessionError> {
-    let id = SessionId::parse(&session_id)?;
-    let handle = store.get(&id)?;
-    let mut s = handle.session_lock()?;
-    s.discard_guidance_retention();
-    Ok(())
+    let handle = resolve_session(&store, &session_id)?;
+    with_session_lock(&handle, |s| {
+        s.discard_guidance_retention();
+        Ok(())
+    })
 }
 
 #[tauri::command]
@@ -718,10 +755,8 @@ pub fn list_working_set(
     store: State<'_, Arc<SessionStore>>,
     session_id: String,
 ) -> Result<Vec<DatasetDescriptor>, SessionError> {
-    let id = SessionId::parse(&session_id)?;
-    let handle = store.get(&id)?;
-    let s = handle.session_lock()?;
-    Ok(s.list())
+    let handle = resolve_session(&store, &session_id)?;
+    with_session_lock(&handle, |s| Ok(s.list()))
 }
 
 #[tauri::command]
@@ -729,10 +764,8 @@ pub fn active_dataset(
     store: State<'_, Arc<SessionStore>>,
     session_id: String,
 ) -> Result<Option<DatasetDescriptor>, SessionError> {
-    let id = SessionId::parse(&session_id)?;
-    let handle = store.get(&id)?;
-    let s = handle.session_lock()?;
-    Ok(s.active())
+    let handle = resolve_session(&store, &session_id)?;
+    with_session_lock(&handle, |s| Ok(s.active()))
 }
 
 #[tauri::command]
@@ -741,10 +774,8 @@ pub fn get_dataset(
     session_id: String,
     reference_name: String,
 ) -> Result<Option<DatasetDescriptor>, SessionError> {
-    let id = SessionId::parse(&session_id)?;
-    let handle = store.get(&id)?;
-    let s = handle.session_lock()?;
-    Ok(s.get(&reference_name))
+    let handle = resolve_session(&store, &session_id)?;
+    with_session_lock(&handle, |s| Ok(s.get(&reference_name)))
 }
 
 /// Rename a dataset's display label (ADR-0037, slice 4a issue #8): display-only
@@ -758,12 +789,12 @@ pub fn rename_dataset(
     reference_name: String,
     new_display: String,
 ) -> Result<DatasetDescriptor, SessionError> {
-    let id = SessionId::parse(&session_id)?;
-    let handle = store.get(&id)?;
+    let handle = resolve_session(&store, &session_id)?;
     reject_if_resuming(&handle)?;
-    let mut s = handle.session_lock()?;
-    s.rename_display(&reference_name, &new_display)
-        .map_err(SessionError::RenameDataset)
+    with_session_lock(&handle, |s| {
+        s.rename_display(&reference_name, &new_display)
+            .map_err(SessionError::RenameDataset)
+    })
 }
 
 /// Re-upload a file onto an existing dataset's reference name (ADR-0042, issue
@@ -777,8 +808,7 @@ pub async fn replace_source(
     reference_name: String,
     path: String,
 ) -> Result<LoadOutcome, SessionError> {
-    let id = SessionId::parse(&session_id)?;
-    let handle = store.get(&id)?;
+    let handle = resolve_session(&store, &session_id)?;
     reject_if_resuming(&handle)?;
     let handle = Arc::clone(&handle);
     let outcome = tauri::async_runtime::spawn_blocking(move || {
@@ -820,11 +850,11 @@ pub fn set_dataset_privacy(
     reference_name: String,
     privacy: DatasetPrivacy,
 ) -> Result<DatasetDescriptor, SessionError> {
-    let id = SessionId::parse(&session_id)?;
-    let handle = store.get(&id)?;
+    let handle = resolve_session(&store, &session_id)?;
     reject_if_resuming(&handle)?;
-    let mut s = handle.session_lock()?;
-    privacy_update_to_result(s.set_privacy(&reference_name, privacy), &reference_name)
+    with_session_lock(&handle, |s| {
+        privacy_update_to_result(s.set_privacy(&reference_name, privacy), &reference_name)
+    })
 }
 
 /// Remove a source Dataset from the working set (issue #38/#39, ADR-0040).
@@ -845,12 +875,12 @@ pub fn remove_source(
     session_id: String,
     reference_name: String,
 ) -> Result<(), SessionError> {
-    let id = SessionId::parse(&session_id)?;
-    let handle = store.get(&id)?;
+    let handle = resolve_session(&store, &session_id)?;
     reject_if_resuming(&handle)?;
-    let mut s = handle.session_lock()?;
-    s.remove_source(&reference_name)
-        .map_err(SessionError::RemoveSource)
+    with_session_lock(&handle, |s| {
+        s.remove_source(&reference_name)
+            .map_err(SessionError::RemoveSource)
+    })
 }
 
 /// Remove the ACTIVE source and repoint focus at an explicit continuation
@@ -870,12 +900,12 @@ pub fn remove_active_source(
     reference_name: String,
     continue_with: String,
 ) -> Result<(), SessionError> {
-    let id = SessionId::parse(&session_id)?;
-    let handle = store.get(&id)?;
+    let handle = resolve_session(&store, &session_id)?;
     reject_if_resuming(&handle)?;
-    let mut s = handle.session_lock()?;
-    s.remove_active_source(&reference_name, &continue_with)
-        .map_err(SessionError::RemoveSource)
+    with_session_lock(&handle, |s| {
+        s.remove_active_source(&reference_name, &continue_with)
+            .map_err(SessionError::RemoveSource)
+    })
 }
 
 /// Preview the delete impact of one source (issue #1063): the live results a
@@ -891,10 +921,8 @@ pub fn preview_delete_impact(
     session_id: String,
     reference_name: String,
 ) -> Result<Vec<DeleteImpactEntry>, SessionError> {
-    let id = SessionId::parse(&session_id)?;
-    let handle = store.get(&id)?;
-    let s = handle.session_lock()?;
-    Ok(s.delete_impact_preview(&reference_name))
+    let handle = resolve_session(&store, &session_id)?;
+    with_session_lock(&handle, |s| Ok(s.delete_impact_preview(&reference_name)))
 }
 
 /// Ask one question (PRD #1) against the named session: run one agent turn
@@ -927,6 +955,9 @@ pub async fn ask(
     // (issue #992).
     skill_invocations: Option<Vec<String>>,
 ) -> Result<TurnOutcome, SessionError> {
+    // The id outlives the addressing ritual (the sink / turn-progress /
+    // session-named emits below address by it), so this handler keeps the
+    // hand-written parse + lookup instead of [`resolve_session`].
     let id = SessionId::parse(&session_id)?;
     let handle = store.get(&id)?;
     reject_if_resuming(&handle)?;
@@ -1185,8 +1216,7 @@ impl AssembledTurnInputs<'_> {
 /// is a best-effort signal, not a transaction.
 #[tauri::command]
 pub fn cancel(store: State<'_, Arc<SessionStore>>, session_id: String) -> Result<(), SessionError> {
-    let id = SessionId::parse(&session_id)?;
-    let handle = store.get(&id)?;
+    let handle = resolve_session(&store, &session_id)?;
     handle.fire_cancel();
     Ok(())
 }
@@ -1203,15 +1233,16 @@ pub fn conversation(
     store: State<'_, Arc<SessionStore>>,
     session_id: String,
 ) -> Result<Vec<ThreadEntry>, SessionError> {
-    let id = SessionId::parse(&session_id)?;
-    let handle = store.get(&id)?;
-    let s = handle.session_lock()?;
-    let entries = s.conversation();
+    let handle = resolve_session(&store, &session_id)?;
+    let entries = with_session_lock(&handle, |s| Ok(s.conversation()))?;
     // ADR-0124 (issue #1087), tightened to a file-level allowlist by
     // ADR-0137 Decision 6 (#1383): every manifest-named file must be
     // iframe-servable before a card can render -- the whitelist is
     // re-granted on every thread read (session open / remount; idempotent
-    // by pattern).
+    // by pattern). Deliberately post-lock (issue #1412's one reordering):
+    // the grant derives from the owned snapshot above and takes no lock the
+    // session gate orders against, so holding the guard across the
+    // app-handle call would only widen ADR-0056's window.
     grant_artifact_asset_scope(&app, &crate::session::artifacts::referenced_paths(&entries));
     Ok(entries)
 }
@@ -1336,8 +1367,7 @@ pub async fn read_rows(
     offset: u64,
     limit: u64,
 ) -> Result<RowPage, SessionError> {
-    let id = SessionId::parse(&session_id)?;
-    let handle = store.get(&id)?;
+    let handle = resolve_session(&store, &session_id)?;
     let handle = Arc::clone(&handle);
     tauri::async_runtime::spawn_blocking(move || {
         let s = handle.session_lock()?;
@@ -1369,8 +1399,7 @@ pub async fn export_rows_csv(
     path: String,
     confirmed: bool,
 ) -> Result<(), SessionError> {
-    let id = SessionId::parse(&session_id)?;
-    let handle = store.get(&id)?;
+    let handle = resolve_session(&store, &session_id)?;
     let handle = Arc::clone(&handle);
     tauri::async_runtime::spawn_blocking(move || {
         let s = handle.session_lock()?;
@@ -1395,8 +1424,7 @@ pub async fn read_rows_tsv(
     reference_name: String,
     confirmed: bool,
 ) -> Result<String, SessionError> {
-    let id = SessionId::parse(&session_id)?;
-    let handle = store.get(&id)?;
+    let handle = resolve_session(&store, &session_id)?;
     let handle = Arc::clone(&handle);
     tauri::async_runtime::spawn_blocking(move || {
         let s = handle.session_lock()?;
@@ -2159,11 +2187,11 @@ pub fn rename_session(
     session_id: String,
     new_name: String,
 ) -> Result<String, SessionError> {
-    let id = SessionId::parse(&session_id)?;
-    let handle = store.get(&id)?;
+    let handle = resolve_session(&store, &session_id)?;
     reject_if_resuming(&handle)?;
-    let mut s = handle.session_lock()?;
-    s.rename(&new_name).map_err(SessionError::RenameSession)
+    with_session_lock(&handle, |s| {
+        s.rename(&new_name).map_err(SessionError::RenameSession)
+    })
 }
 
 /// Read the OPEN session's current display name (ADR-0089 Decision 4). The
@@ -2177,10 +2205,10 @@ pub fn get_session_name(
     store: State<'_, Arc<SessionStore>>,
     session_id: String,
 ) -> Result<String, SessionError> {
-    let id = SessionId::parse(&session_id)?;
-    let handle = store.get(&id)?;
-    let s = handle.session_lock()?;
-    Ok(s.session_name().unwrap_or_default().to_string())
+    let handle = resolve_session(&store, &session_id)?;
+    with_session_lock(&handle, |s| {
+        Ok(s.session_name().unwrap_or_default().to_string())
+    })
 }
 
 /// The cold-rename file operation, extracted so the blank-name short-circuit
@@ -2418,7 +2446,10 @@ pub async fn open_recipe(
 ) -> Result<(), SessionError> {
     // Addressing failures (invalid id / unknown session / resuming) stay typed
     // as SessionError variants; the resume-domain failure rides SessionError::
-    // Resume (issue #120) -- both stay serde-structured across IPC.
+    // Resume (issue #120) -- both stay serde-structured across IPC. The id
+    // outlives the addressing ritual (the resume-progress emit + the resumed
+    // identity stamp below address by it), so this handler keeps the
+    // hand-written parse + lookup instead of [`resolve_session`].
     let id = SessionId::parse(&session_id)?;
     let handle = store.get(&id)?;
     reject_if_resuming(&handle)?;
@@ -2616,10 +2647,8 @@ pub fn take_persist_error(
     store: State<'_, Arc<SessionStore>>,
     session_id: String,
 ) -> Result<Option<SaveError>, SessionError> {
-    let id = SessionId::parse(&session_id)?;
-    let handle = store.get(&id)?;
-    let mut s = handle.session_lock()?;
-    Ok(s.take_persist_error())
+    let handle = resolve_session(&store, &session_id)?;
+    with_session_lock(&handle, |s| Ok(s.take_persist_error()))
 }
 
 /// Read + clear the named session's resume-hit source status notices
@@ -2635,10 +2664,8 @@ pub fn take_source_notices(
     store: State<'_, Arc<SessionStore>>,
     session_id: String,
 ) -> Result<Vec<crate::SourceNotice>, SessionError> {
-    let id = SessionId::parse(&session_id)?;
-    let handle = store.get(&id)?;
-    let mut s = handle.session_lock()?;
-    Ok(s.take_source_notices())
+    let handle = resolve_session(&store, &session_id)?;
+    with_session_lock(&handle, |s| Ok(s.take_source_notices()))
 }
 
 /// Read + clear the named session's pending external-change conflict, if any
@@ -2655,10 +2682,8 @@ pub fn take_pending_conflict(
     store: State<'_, Arc<SessionStore>>,
     session_id: String,
 ) -> Result<Option<crate::PendingConflict>, SessionError> {
-    let id = SessionId::parse(&session_id)?;
-    let handle = store.get(&id)?;
-    let mut s = handle.session_lock()?;
-    Ok(s.take_pending_conflict())
+    let handle = resolve_session(&store, &session_id)?;
+    with_session_lock(&handle, |s| Ok(s.take_pending_conflict()))
 }
 
 // --- Tiered tool approval (ADR-0080, issue #294) -------------------------
@@ -2781,8 +2806,7 @@ pub fn respond_tool_approval(
     request_id: String,
     response: ApprovalResponse,
 ) -> Result<(), SessionError> {
-    let id = SessionId::parse(&session_id)?;
-    let handle = store.get(&id)?;
+    let handle = resolve_session(&store, &session_id)?;
     reject_if_resuming(&handle)?;
     let request_uuid = uuid::Uuid::parse_str(&request_id)
         .map_err(|_| SessionError::Engine("approval request id malformed".into()))?;
@@ -2809,8 +2833,7 @@ pub fn get_approval_attachments(
     session_id: String,
     request_id: String,
 ) -> Result<Vec<FileAttachment>, SessionError> {
-    let id = SessionId::parse(&session_id)?;
-    let handle = store.get(&id)?;
+    let handle = resolve_session(&store, &session_id)?;
     let request_uuid = uuid::Uuid::parse_str(&request_id)
         .map_err(|_| SessionError::Engine("approval request id malformed".into()))?;
     handle
@@ -2828,8 +2851,7 @@ pub fn get_authorization_mode(
     store: State<'_, Arc<SessionStore>>,
     session_id: String,
 ) -> Result<AuthMode, SessionError> {
-    let id = SessionId::parse(&session_id)?;
-    let handle = store.get(&id)?;
+    let handle = resolve_session(&store, &session_id)?;
     Ok(handle.approval_state().auth_mode())
 }
 
@@ -2842,8 +2864,7 @@ pub fn set_authorization_mode(
     session_id: String,
     mode: AuthMode,
 ) -> Result<(), SessionError> {
-    let id = SessionId::parse(&session_id)?;
-    let handle = store.get(&id)?;
+    let handle = resolve_session(&store, &session_id)?;
     reject_if_resuming(&handle)?;
     handle.approval_state().set_auth_mode(mode);
     Ok(())
@@ -2857,8 +2878,7 @@ pub fn list_session_trust(
     store: State<'_, Arc<SessionStore>>,
     session_id: String,
 ) -> Result<Vec<ToolKey>, SessionError> {
-    let id = SessionId::parse(&session_id)?;
-    let handle = store.get(&id)?;
+    let handle = resolve_session(&store, &session_id)?;
     Ok(handle.approval_state().trust_list())
 }
 
@@ -2871,8 +2891,7 @@ pub fn revoke_session_trust(
     server: String,
     tool: String,
 ) -> Result<(), SessionError> {
-    let id = SessionId::parse(&session_id)?;
-    let handle = store.get(&id)?;
+    let handle = resolve_session(&store, &session_id)?;
     reject_if_resuming(&handle)?;
     handle.approval_state().revoke(&ToolKey { server, tool });
     Ok(())
@@ -3364,8 +3383,7 @@ pub fn get_session_runtime(
     store: State<'_, Arc<SessionStore>>,
     session_id: String,
 ) -> Result<SessionRuntimeChoice, SessionError> {
-    let id = SessionId::parse(&session_id)?;
-    let handle = store.get(&id)?;
+    let handle = resolve_session(&store, &session_id)?;
     Ok(runtime_choice_to_wire(handle.runtime_choice()))
 }
 
@@ -3388,8 +3406,7 @@ pub fn set_session_runtime(
     session_id: String,
     runtime: SessionRuntimeChoice,
 ) -> Result<(), SessionError> {
-    let id = SessionId::parse(&session_id)?;
-    let handle = store.get(&id)?;
+    let handle = resolve_session(&store, &session_id)?;
     reject_if_resuming(&handle)?;
     let spec = resolve_runtime_choice(runtime, &merged_adapters(&user_store))?;
     apply_runtime_switch(&handle, spec, live.inner());
@@ -3670,9 +3687,10 @@ fn apply_startup_posture(
     posture: &PosturePair,
 ) -> Result<(), SessionError> {
     handle.set_external_model_config(posture.clone());
-    let mut s = handle.session_lock()?;
-    s.set_external_model_config(posture.clone());
-    Ok(())
+    with_session_lock(handle, |s| {
+        s.set_external_model_config(posture.clone());
+        Ok(())
+    })
 }
 
 /// Read one adapter's backfill posture entry (ADR-0100, issue #581): the
@@ -3770,8 +3788,7 @@ pub fn get_session_model_config(
     store: State<'_, Arc<SessionStore>>,
     session_id: String,
 ) -> Result<SessionModelConfig, SessionError> {
-    let id = SessionId::parse(&session_id)?;
-    let handle = store.get(&id)?;
+    let handle = resolve_session(&store, &session_id)?;
     // The pair read takes the slot lock once: a concurrent set lands entirely
     // before or after this read, never as a torn (old, new) mix.
     let posture = handle.external_model_config();
@@ -3830,7 +3847,7 @@ pub fn set_session_posture(
     session_id: String,
     posture: PosturePair,
 ) -> Result<SetPosturePersistOutcome, SessionError> {
-    let handle = store.get(&SessionId::parse(&session_id)?)?;
+    let handle = resolve_session(&store, &session_id)?;
     apply_posture_set(&handle, live.inner(), posture)
 }
 
@@ -3859,28 +3876,29 @@ fn apply_posture_set(
     // write: the pair comes whole off the wire (issue #603), unmixed with
     // the slot's held value.
     let (runtime, _) = handle.runtime_and_posture();
-    let mut s = handle.session_lock()?;
-    s.set_external_model_config(posture.clone());
-    // Segment-header stamp (ADR-0102 Decision 1): same batch as the pair +
-    // the persist below.
-    s.stamp_last_runtime(runtime.clone());
-    // Persist now (via the shared auto-write path) so a selection made
-    // without a following turn survives a close (ADR-0095 Decision 6).
-    s.persist_if_bound();
-    // Snapshot the persist verdict BEFORE releasing the lock (issue #529):
-    // in-process, non-consuming -- the banner's take_persist_error channel
-    // is untouched.
-    let outcome = persist_outcome(&s);
-    // The handle write-back is conditional: a switch landing between the
-    // atomic read above and this write has already re-seeded the slot with
-    // the target adapter's posture -- dropping the stale-namespace write
-    // keeps the slot on the switch's segment (the #590 seeding semantics).
-    handle.set_posture_if_runtime(&runtime, posture.clone());
-    // ADR-0100 Decision 3 (issue #581): record the post-set pair as the
-    // adapter's startup backfill entry (the single write point shared with
-    // the cold-start pre-selection) -- best-effort, never fails the set.
-    record_last_model_posture(live, runtime, posture);
-    Ok(outcome)
+    with_session_lock(handle, |s| {
+        s.set_external_model_config(posture.clone());
+        // Segment-header stamp (ADR-0102 Decision 1): same batch as the pair +
+        // the persist below.
+        s.stamp_last_runtime(runtime.clone());
+        // Persist now (via the shared auto-write path) so a selection made
+        // without a following turn survives a close (ADR-0095 Decision 6).
+        s.persist_if_bound();
+        // Snapshot the persist verdict BEFORE releasing the lock (issue #529):
+        // in-process, non-consuming -- the banner's take_persist_error channel
+        // is untouched.
+        let outcome = persist_outcome(s);
+        // The handle write-back is conditional: a switch landing between the
+        // atomic read above and this write has already re-seeded the slot with
+        // the target adapter's posture -- dropping the stale-namespace write
+        // keeps the slot on the switch's segment (the #590 seeding semantics).
+        handle.set_posture_if_runtime(&runtime, posture.clone());
+        // ADR-0100 Decision 3 (issue #581): record the post-set pair as the
+        // adapter's startup backfill entry (the single write point shared with
+        // the cold-start pre-selection) -- best-effort, never fails the set.
+        record_last_model_posture(live, runtime, posture);
+        Ok(outcome)
+    })
 }
 
 /// The single backfill write point (ADR-0100 Decision 3, issue #581): every
@@ -5601,6 +5619,56 @@ mod tests {
         let err = SessionId::parse("not-a-uuid").expect_err("malformed id rejects");
         assert_eq!(err, SessionError::InvalidId);
         assert_ne!(err, SessionError::NotFound);
+    }
+
+    /// The two-piece session ritual composes (issue #1412): resolve_session
+    /// parses + looks up in one step, with_session_lock runs the closure
+    /// under the gate, and the closure's return value crosses both layers
+    /// unchanged -- the happy path every migrated sync handler rides. The
+    /// error arms pin the mappings: a malformed id is InvalidId before the
+    /// store is touched, a well-formed unknown id is NotFound, and the
+    /// closure's typed Err crosses with_session_lock whole.
+    #[test]
+    fn resolve_and_lock_round_trip_carries_closure_value() {
+        let store = SessionStore::new();
+        let id = store
+            .create(
+                Arc::new(CancelToken::new()),
+                Box::new(crate::UnwiredProvider),
+                Default::default(),
+            )
+            .expect("create session");
+        let handle = resolve_session(&store, &id.to_string()).expect("resolve");
+        // The write side: the closure's Result crosses with_session_lock whole.
+        with_session_lock(&handle, |s| {
+            s.rename("combo").map_err(SessionError::RenameSession)
+        })
+        .expect("lock + rename");
+        // The read side: the same two-piece path returns the closure's value.
+        let name = with_session_lock(&handle, |s| Ok(s.session_name().map(str::to_string)))
+            .expect("lock + read");
+        assert_eq!(name.as_deref(), Some("combo"));
+        // The closure's typed Err crosses with_session_lock whole, not
+        // flattened into Engine: the rename refusal keeps its variant.
+        let err = with_session_lock(&handle, |s| {
+            s.rename("   ").map_err(SessionError::RenameSession)
+        })
+        .expect_err("blank rename rejects");
+        assert_eq!(
+            err,
+            SessionError::RenameSession(RenameSessionError::EmptyName)
+        );
+        // A well-formed unknown id reaches the store and surfaces NotFound
+        // -- the #73 invalid-vs-closed distinction the helper standardizes.
+        match resolve_session(&store, "550e8400-e29b-41d4-a716-446655440000") {
+            Err(e) => assert_eq!(e, SessionError::NotFound),
+            Ok(_) => panic!("unknown id must reject"),
+        }
+        // The parse step's refusal surfaces as InvalidId through the helper.
+        match resolve_session(&store, "not-a-uuid") {
+            Err(e) => assert_eq!(e, SessionError::InvalidId),
+            Ok(_) => panic!("malformed id must reject"),
+        }
     }
 
     /// set_dataset_privacy rejects an unknown reference name as the typed
