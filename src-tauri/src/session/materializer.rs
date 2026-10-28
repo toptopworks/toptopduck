@@ -73,10 +73,13 @@ impl CachedDerivedRef {
     }
 }
 
-/// The shared session state a materialize step borrows (ADR-0053 Decision 4):
-/// the on-demand admin engine source, the source snapshot paths, the mutable
-/// working set, and the two resource caps. Aggregated in the Session root and
-/// borrowed per turn -- the materializer is stateless and owns none of this.
+/// The shared session state a tool dispatch borrows (ADR-0053 Decision 4):
+/// the on-demand admin engine source, the source snapshot paths and
+/// reader-recording carrier, the mutable working set and resource caps, the
+/// temp path and snapshot drop dir, the workspace axis (registry record,
+/// binding slot, lazy-mint root), and the tool-output reference cache.
+/// Aggregated in the Session root and borrowed per turn -- the materializer
+/// is stateless and owns none of this.
 ///
 /// Disjoint borrows via a struct let one call site hand a materializer
 /// `&mut working_set` alongside `&engine` / `&mut source_files` / `&temp_path`
