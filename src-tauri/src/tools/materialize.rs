@@ -946,9 +946,9 @@ mod tests {
         let cols = payload.content["columns"].as_array().unwrap();
         assert_eq!(cols.len(), 1);
         assert_eq!(cols[0]["name"], "val");
-        // The temp-root file is NOT claimed by the full-path face (ADR-0089's
-        // settle face owns session-temp references) -- the working set holds
-        // only the result.
+        // The temp-root file is NOT claimed by the full-path face (the
+        // temp dir keeps its read-write face for scratch) -- the working
+        // set holds only the result.
         assert_eq!(deps.working_set.len(), 1);
         assert_eq!(deps.working_set.next_result_number(), 2);
     }
@@ -1013,7 +1013,6 @@ mod tests {
             workspaces_root: None,
             workspace_registry: None,
             snapshot_dir: std::path::PathBuf::from("."),
-            assets_dir: None,
             tool_output_refs: &mut refs,
         };
         let cancel = CancelToken::new();

@@ -57,10 +57,12 @@ use crate::session::snapshot::Snapshot;
 use crate::session::TOOL_OUTPUT_DIR_NAME;
 use crate::tools::read_paths::{extract_read_paths, is_file_function};
 
-/// Subdirectory under `temp_path` for staging derived source files when no
-/// `recipe.json` is bound (ADR-0087 D4). Files here are migrated to the per-session
-/// directory's `assets/` subdirectory on `bind_recipe` (ADR-0089). Lifecycle
-/// follows the TempDir RAII (cleaned on session drop).
+/// Subdirectory under `temp_path` for staging derived source files (ADR-0087
+/// D4): the copy-in jump-off for `tool_output` originals whose death with the
+/// temp dir must not orphan the reference. Lifecycle follows the TempDir RAII
+/// (cleaned on session drop) -- the legacy `bind_recipe` migration into the
+/// per-session `assets/` dir is retired (issue #1390), so a descriptor left
+/// pointing here degrades on resume through the source-missing path.
 pub(crate) const DERIVED_STAGING_DIR: &str = "derived";
 
 /// Detect `read_*` calls referencing files — `tool_output` outputs or
@@ -74,8 +76,8 @@ pub(crate) const DERIVED_STAGING_DIR: &str = "derived";
 /// naturally. A `read_*` path that is neither eligible flavor is left
 /// untouched — it still hits the FsAcl check in preflight. That includes a
 /// relative spelling with no bound workspace, a non-tabular function such as
-/// `read_text`, a missing file, and the session-temp and assets exclusions
-/// (their faces own those references).
+/// `read_text`, a missing file, and the session-temp exclusion (the temp dir
+/// keeps its own read-write face).
 pub(crate) fn process(sql: &str, deps: &mut TurnDeps) -> Result<String, ExecError> {
     // ADR-0137 D3: relative read_* spellings resolve against the session
     // workspace (the unified agent cwd), not the process CWD DuckDB would
@@ -172,12 +174,13 @@ pub(crate) fn process(sql: &str, deps: &mut TurnDeps) -> Result<String, ExecErro
                 // copy-in error.
                 continue;
             };
-            // The session-temp and assets subtrees keep their existing
-            // faces: other temp files settle into `assets/` dead files that
-            // deliberately never register as datasets (ADR-0089), and assets
-            // copies are read-only replay inputs. The full-path face claims
-            // only durable originals outside the session's own directories.
-            if canonical.starts_with(&temp_root) || under_assets(&canonical, deps) {
+            // The session-temp subtree keeps its read-write face -- the
+            // full-path copy-in claims only durable originals outside the
+            // session's own directories. (The legacy `assets/` read-gate is
+            // retired, issue #1390: a still-on-disk assets file from a
+            // pre-#1383 recipe now rides this copy-in like any other
+            // durable original.)
+            if canonical.starts_with(&temp_root) {
                 continue;
             }
             // Working-set dedup: re-referencing the original path of an
@@ -335,15 +338,6 @@ pub(crate) fn programmatic_reader(fn_name: &str) -> Option<&'static str> {
         "read_json_auto" | "read_json" => Some("read_json_auto"),
         _ => None,
     }
-}
-
-/// Whether `canonical` falls inside the session's read-only `assets/`
-/// subtree (ADR-0089) — replay inputs, never full-path claim targets.
-fn under_assets(canonical: &Path, deps: &TurnDeps) -> bool {
-    deps.assets_dir
-        .as_deref()
-        .and_then(|dir| std::fs::canonicalize(dir).ok())
-        .is_some_and(|root| canonical.starts_with(&root))
 }
 
 /// Absolutize relative literal `read_*` paths against the session workspace
@@ -1813,11 +1807,11 @@ mod tests {
     }
 
     /// The full-path face does NOT claim the session's own temp root (outside
-    /// tool_output): ADR-0089's settle face owns session-temp references as
-    /// dead-file assets, so process() leaves the path untouched and registers
-    /// nothing.
+    /// tool_output): the temp dir keeps its read-write face -- scratch files
+    /// are agent working space, not copy-in material -- so process() leaves
+    /// the path untouched and registers nothing.
     #[test]
-    fn process_leaves_plain_temp_paths_to_the_settle_face() {
+    fn process_leaves_plain_temp_paths_to_the_temp_rw_face() {
         let temp = TempDir::new().unwrap();
         let scratch = temp.path().join("scratch.csv");
         std::fs::write(&scratch, "x\n1\n").unwrap();
@@ -1837,24 +1831,29 @@ mod tests {
 
         assert_eq!(
             rewritten, sql,
-            "session-temp SQL unchanged for the settle face"
+            "session-temp SQL unchanged for the temp read-write face"
         );
         assert!(ws.list().is_empty(), "nothing registered");
         assert!(sources.is_empty(), "no snapshots");
     }
 
-    /// The full-path face does NOT claim the session's read-only `assets/`
-    /// subtree (ADR-0089): assets copies are replay inputs the preflight
-    /// already allows reading in place -- copy-in'ing them would register
-    /// dead files as datasets and duplicate the settle face's job.
+    /// The retired `assets/` read-gate (issue #1390): a legacy recipe's
+    /// still-on-disk assets file is no longer excluded from the full-path
+    /// copy-in -- it snapshots and registers like any other durable original,
+    /// so the replay reads a live catalog ref instead of the dead file.
     #[test]
-    fn process_leaves_assets_paths_to_the_replay_face() {
+    fn process_claims_assets_paths_on_the_full_path_face() {
         let temp = TempDir::new().unwrap();
         let session_dir = TempDir::new().unwrap();
         let assets = session_dir.path().join("assets");
         std::fs::create_dir_all(&assets).unwrap();
         let dead = assets.join("kline.csv");
-        std::fs::write(&dead, "x\n1\n").unwrap();
+        std::fs::write(
+            &dead, "x
+1
+",
+        )
+        .unwrap();
 
         let engine = AdminEngine::materialized();
         let mut ws = WorkingSet::default();
@@ -1863,12 +1862,14 @@ mod tests {
 
         let sql = format!("SELECT * FROM read_csv_auto('{}')", dead.to_string_lossy());
         let mut deps = TurnDeps::test_deps(&engine, &mut ws, &mut sources, temp.path(), &mut refs);
-        deps.assets_dir = Some(assets);
         let rewritten = process(&sql, &mut deps).expect("process succeeds");
 
-        assert_eq!(rewritten, sql, "assets SQL unchanged for the replay face");
-        assert!(deps.working_set.list().is_empty(), "nothing registered");
-        assert!(sources.is_empty(), "no snapshots");
+        assert_ne!(rewritten, sql, "assets SQL rewritten to a catalog ref");
+        assert_eq!(
+            deps.working_set.list().len(),
+            1,
+            "the assets file registers"
+        );
     }
 
     /// Non-tabular read_* functions (read_text) have no copy-in pipeline --

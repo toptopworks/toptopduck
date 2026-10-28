@@ -440,7 +440,6 @@ impl super::Session {
                     request
                         .tools
                         .push(crate::session::workspace_tools::discovery::read_definition());
-                    let assets_dir = crate::session::sql_assets::assets_dir(self.recipe_path());
                     let snapshot_dir = self.snapshot_dir();
                     let mut deps = TurnDeps {
                         engine: &self.admin_engine,
@@ -454,7 +453,6 @@ impl super::Session {
                         workspaces_root: self.workspaces_root.clone(),
                         workspace_registry: self.workspace_registry.as_deref(),
                         snapshot_dir,
-                        assets_dir,
                         tool_output_refs: &mut self.tool_output_refs,
                     };
                     // The attachment read gate (ADR-0111, calibrated by
@@ -833,7 +831,6 @@ impl super::Session {
             let mcp_turn_done = crate::mcp::aggregator::TurnDoneFlag::new();
             mcp.arm_cancel_teardown(Arc::clone(&self.cancel), mcp_turn_done.flag());
             mcp.connect_all(inputs.mcp_servers, inputs.keychain);
-            let assets_dir = crate::session::sql_assets::assets_dir(self.recipe_path());
             let snapshot_dir = self.snapshot_dir();
             let deps = TurnDeps {
                 engine: &self.admin_engine,
@@ -850,7 +847,6 @@ impl super::Session {
                 workspaces_root: self.workspaces_root.clone(),
                 workspace_registry: self.workspace_registry.as_deref(),
                 snapshot_dir,
-                assets_dir,
                 tool_output_refs: &mut self.tool_output_refs,
             };
             // The bridge face's read gate (issue #714; calibrated by

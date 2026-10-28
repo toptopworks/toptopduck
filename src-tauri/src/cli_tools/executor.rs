@@ -60,7 +60,7 @@ const KILL_GRACE: Duration = Duration::from_secs(2);
 
 /// Execute one CLI tool call (the `execute_call` dispatch arm's entry).
 /// `cwd` is the spawn working directory (ADR-0137: the session workspace,
-/// falling back to the session temp dir on a disconnected axis); `work_dir`
+/// falling back to the session temp dir on a disconnected axis); `temp_dir`
 /// is the pipeline domain (issue #1408: the session temp dir) -- the
 /// file-delivery temp files and the over-cap spill tee land there, so the
 /// approval card's rendered paths and the execution's writes stay one
@@ -72,7 +72,7 @@ pub fn execute(
     tool: &CliToolConfig,
     call: &ToolUse,
     cwd: &Path,
-    work_dir: &Path,
+    temp_dir: &Path,
     cancel: &CancelToken,
     path_env: Option<OsString>,
 ) -> ToolOutcome {
@@ -93,7 +93,7 @@ pub fn execute(
     // mistyped value, or a delivery/template shape a hand-edited config broke
     // is the call's own structured error -- the model self-corrects
     // (ADR-0077).
-    let rendered = match render_call(tool, &call.input, work_dir, &call.id) {
+    let rendered = match render_call(tool, &call.input, temp_dir, &call.id) {
         Ok(rendered) => rendered,
         Err(detail) => {
             return error(format!("invalid call to `{}`: {detail}", tool.name));
@@ -192,7 +192,7 @@ pub fn execute(
     // The stdout tee plan (issue #1215): resolved into a real file only at
     // the cap crossing, inside the reader. stderr takes none -- the
     // diagnostic stream keeps its in-cap truncation semantics.
-    let spill = SpillPlan::new(work_dir, &tool.name, &call.id);
+    let spill = SpillPlan::new(temp_dir, &tool.name, &call.id);
     let stdout_thread = thread::spawn(move || read_capped(stdout_handle, cap, Some(&spill)));
     let stderr_thread = thread::spawn(move || read_capped(stderr_handle, cap, None));
     // Wait for the child while polling cancel. On cancel: terminate the

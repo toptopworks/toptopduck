@@ -129,13 +129,6 @@ pub(crate) struct TurnDeps<'a> {
     /// tree's `snapshots/` (ADR-0136 D1) or the temp dir (unbound). Owned --
     /// computed once at deps assembly from the session's binding.
     pub snapshot_dir: PathBuf,
-    /// The session's persistent `assets/` dir (ADR-0089), derived from the
-    /// bound `recipe.json` path. A legacy read-gate surface: the settle-time
-    /// materialization that minted dead files here is retired (ADR-0137
-    /// Decision 6, #1383), so this serves a legacy recipe's replay reads --
-    /// `read_*` references into it pass the preflight READ-ONLY -- and the
-    /// bind-time derived-source migration. `None` for an unbound session.
-    pub assets_dir: Option<PathBuf>,
     /// Session-level ephemeral cache: referenced file path to a cached
     /// derived-source registration (issue #440; generalized to full-path
     /// references by ADR-0137 D4 — tool_output keys are the literal path,
@@ -202,7 +195,6 @@ impl<'a> TurnDeps<'a> {
             workspaces_root: None,
             workspace_registry: None,
             snapshot_dir: temp_path.to_path_buf(),
-            assets_dir: None,
             tool_output_refs,
         }
     }
@@ -293,18 +285,15 @@ impl Materializer for RealMaterializer {
         // whitelist (issue #334) so an out-of-bounds read_* becomes a
         // structured "outside the allowed area" error.
         // refs are held for the post-install provenance record (issue #40).
-        let analysis = preflight_read_sql(
-            &sql,
-            deps.working_set,
-            deps.temp_path,
-            deps.assets_dir.as_deref(),
-        )
-        .map_err(|e| match e {
-            PreflightError::StaleReference(s) => ExecError::new(ExecErrorKind::StaleReference, s),
-            PreflightError::FsAcl(s)
-            | PreflightError::NonLiteralPath(s)
-            | PreflightError::Unparseable(s) => ExecError::new(ExecErrorKind::Runtime, s),
-        })?;
+        let analysis =
+            preflight_read_sql(&sql, deps.working_set, deps.temp_path).map_err(|e| match e {
+                PreflightError::StaleReference(s) => {
+                    ExecError::new(ExecErrorKind::StaleReference, s)
+                }
+                PreflightError::FsAcl(s)
+                | PreflightError::NonLiteralPath(s)
+                | PreflightError::Unparseable(s) => ExecError::new(ExecErrorKind::Runtime, s),
+            })?;
 
         // Acquire the admin connection once at this execution point (ADR-0104
         // Decision 2): this is the materialization point when the turn's SQL
