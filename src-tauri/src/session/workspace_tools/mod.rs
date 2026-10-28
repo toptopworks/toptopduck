@@ -36,14 +36,14 @@ use serde_json::{json, Value};
 use crate::approval::{
     ApprovalRequest, FileAttachment, GateCancelled, GateOutcome, OperationKind, ToolKey,
 };
-use crate::model::{Promotion, TraceEntryView, TurnPhase};
+use crate::model::{TraceEntryView, TurnPhase};
 use crate::persistence::io::{write_str_atomic, WritePerms};
 use crate::provider::tool_calling::{ToolDefinition, ToolResult, ToolUse};
 use crate::session::loop_contract::{
     truncate_trace_excerpt, TraceEntry, DENIED_BY_GATEWAY_CONTENT, TRACE_EXCERPT_MAX,
 };
 use crate::session::materializer::DispatchDeps;
-use crate::session::turn_dispatch::GateCtx;
+use crate::session::turn_dispatch::{DispatchProduct, GateCtx};
 use crate::tools::definitions::get_str;
 
 pub(crate) mod discovery;
@@ -277,10 +277,10 @@ pub(crate) fn dispatch_workspace_tool(
     gate: &GateCtx<'_>,
     on_phase: &mut impl FnMut(TurnPhase),
     origin: Option<&str>,
-) -> Result<(ToolResult, Option<TraceEntry>, Option<Promotion>), GateCancelled> {
+) -> Result<DispatchProduct, GateCancelled> {
     if discovery::is_discovery_tool(&call.name) {
         let (result, entry) = discovery::dispatch_readonly(call, deps, on_phase, origin);
-        return Ok((result, entry, None));
+        return Ok((result, entry, None, None));
     }
     let workspace = deps.bound_workspace();
     let resolved = if call.name == WRITE_TOOL {
@@ -298,6 +298,7 @@ pub(crate) fn dispatch_workspace_tool(
                 },
                 None,
                 None,
+                None,
             ));
         }
         WorkspaceToolOutcome::Gated(plan) => plan,
@@ -308,7 +309,10 @@ pub(crate) fn dispatch_workspace_tool(
         summary: plan.summary.clone(),
         file_attachments: std::mem::take(&mut plan.attachments),
         // The originator annotation rides the gate like every other call's
-        // (issue #934).
+        // (issue #934). The call_id stays a literal None: this arm is only
+        // reachable on the Builtin face (the core's face discriminator
+        // guards the entry), so the face-derived value is definitionally
+        // None.
         origin_agent: origin.map(str::to_string),
         call_id: None,
     };
@@ -329,6 +333,7 @@ pub(crate) fn dispatch_workspace_tool(
                     is_error: true,
                 },
                 Some(entry),
+                None,
                 None,
             ))
         }
@@ -379,7 +384,7 @@ pub(crate) fn dispatch_workspace_tool(
                 )
             };
             on_phase(TurnPhase::ToolCallCompleted(TraceEntryView::from(&entry)));
-            Ok((result, Some(entry), None))
+            Ok((result, Some(entry), None, None))
         }
     }
 }
@@ -1031,7 +1036,7 @@ mod tests {
             None,
         );
         responder.join().expect("responder thread");
-        let (result, entry, _) = outcome.expect("the dispatch completes");
+        let (result, entry, _, _) = outcome.expect("the dispatch completes");
         assert!(result.is_error, "{}", result.content);
         assert!(
             result
@@ -1305,7 +1310,7 @@ mod tests {
         let mut on_phase = |p: TurnPhase| phases.lock().unwrap().push(p);
         let outcome = dispatch_workspace_tool(call, &fixture.deps(), &gate, &mut on_phase, None);
         responder.join().expect("responder thread");
-        let (result, entry, promotion) = outcome.expect("the dispatch completes");
+        let (result, entry, promotion, _) = outcome.expect("the dispatch completes");
         assert!(promotion.is_none(), "the write tools never promote");
         let phases = phases.into_inner().unwrap();
         let body = sink.bodies.lock().unwrap().first().cloned();
@@ -1444,7 +1449,7 @@ mod tests {
         };
         let phases = Mutex::new(Vec::new());
         let mut on_phase = |p: TurnPhase| phases.lock().unwrap().push(p);
-        let (result, entry, promotion) = dispatch_workspace_tool(
+        let (result, entry, promotion, _) = dispatch_workspace_tool(
             &write_call("a.txt", "x"),
             &fixture.deps(),
             &gate,
@@ -1524,7 +1529,7 @@ mod tests {
         };
         let phases = Mutex::new(Vec::new());
         let mut on_phase = |p: TurnPhase| phases.lock().unwrap().push(p);
-        let (result, _, _) = dispatch_workspace_tool(
+        let (result, _, _, _) = dispatch_workspace_tool(
             &write_call("big.txt", &payload),
             &fixture.deps(),
             &gate,

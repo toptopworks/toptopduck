@@ -620,8 +620,9 @@ pub(crate) fn spill_extension<I: IntoIterator<Item = u8>>(head: I) -> &'static s
 /// head plus the truncation marker, and -- when the spill landed -- the
 /// path the full bytes live at. A failed spill withdraws the path and
 /// names the write error instead (a half-trusted file reference is worse
-/// than none). Shared by the gateway's envelope arm
-/// (`spill_external_over_cap`) and the built-in dispatch's text arm
+/// than none). Shared by the dispatch core's two spill arms in
+/// `session::turn_dispatch` -- the bridge envelope spill
+/// (`spill_external_over_cap`) and the built-in text spill
 /// (`shape_external_outcome`); the CLI channel's stream markers stay
 /// separate (they carry the stream name and no head).
 pub(crate) fn spill_preview(
