@@ -188,10 +188,8 @@ export function useSessionState(
    *  settles, so the shell can sync the auto-generated name into the sidebar
    *  + open-session header. Fires only when the thread had zero turns before
    *  this ask. Takes the sessionId so the shell can pass a useCallback-stable
-   *  handler (an inline per-session arrow would rebuild handleAskWithAutoName
-   *  on every App render -- ADR-0092's composer-fields report effect compares
-   *  the reported handleAsk by reference, so an unstable identity loops the
-   *  shell-level bar's fields registry). */
+   *  handler -- the composer registry's identity contract compares reported
+   *  handlers by reference (see composerRegistry.ts). */
   onFirstTurnSettled?: (sessionId: string) => void,
 ): UseSessionState {
   const queryClient = useQueryClient();
