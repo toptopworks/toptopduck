@@ -350,7 +350,7 @@ fn stdin_param(name: &str) -> CliToolParam {
     }
 }
 
-/// No `cli-*.tmp` remains in the work dir after the call (deleted on every
+/// No `cli-*.tmp` remains in the temp dir after the call (deleted on every
 /// exit path -- success, failure, cancel alike).
 fn no_temp_files_left(temp: &TempDir) -> bool {
     std::fs::read_dir(temp.path())
@@ -436,16 +436,16 @@ fn file_delivery_writes_the_temp_file_and_the_argv_receives_the_path() {
 }
 
 #[test]
-fn the_child_runs_in_the_cwd_while_file_delivery_follows_the_work_dir() {
+fn the_child_runs_in_the_cwd_while_file_delivery_follows_the_temp_dir() {
     // Issue #1408: the two directories split. The healthy leg proves the
     // child runs in the cwd dir (`--pwd`) and still reads the
-    // file-delivery value rendered under the work dir (`--cat`). The
-    // failing leg pins the write domain to `work_dir` itself: with the
-    // work dir gone the file-delivery write fails as a structured error
+    // file-delivery value rendered under the temp dir (`--cat`). The
+    // failing leg pins the write domain to `temp_dir` itself: with the
+    // temp dir gone the file-delivery write fails as a structured error
     // -- a render domain wrongly riding the cwd would succeed here, the
     // cwd dir exists.
     let cwd_dir = TempDir::new().unwrap();
-    let work_dir = TempDir::new().unwrap();
+    let temp_dir = TempDir::new().unwrap();
     let tool = template_tool(
         "code-runner",
         &["--cat", "{code}", "--pwd"],
@@ -455,7 +455,7 @@ fn the_child_runs_in_the_cwd_while_file_delivery_follows_the_work_dir() {
         &tool,
         &call(json!({"code": "print('hello')"})),
         cwd_dir.path(),
-        work_dir.path(),
+        temp_dir.path(),
         &CancelToken::new(),
         None,
     );
@@ -470,7 +470,7 @@ fn the_child_runs_in_the_cwd_while_file_delivery_follows_the_work_dir() {
             .result
             .content
             .contains(cwd_dir.path().to_string_lossy().as_ref()),
-        "the child's cwd is the cwd dir, not the work dir: {}",
+        "the child's cwd is the cwd dir, not the temp dir: {}",
         outcome.result.content
     );
     let gone = TempDir::new().unwrap();
@@ -490,18 +490,18 @@ fn the_child_runs_in_the_cwd_while_file_delivery_follows_the_work_dir() {
             .result
             .content
             .contains("failed to write a file-delivery"),
-        "the write domain is the work dir: {}",
+        "the write domain is the temp dir: {}",
         failed.result.content
     );
 }
 
 #[test]
-fn over_cap_spill_lands_in_the_work_dir_not_the_cwd() {
+fn over_cap_spill_lands_in_the_temp_dir_not_the_cwd() {
     // Issue #1408's spill half: the tee belongs to the pipeline domain.
-    // The spill file lands under the work dir's `tool_output/` and the
+    // The spill file lands under the temp dir's `tool_output/` and the
     // cwd dir never grows the directory at all.
     let cwd_dir = TempDir::new().unwrap();
-    let work_dir = TempDir::new().unwrap();
+    let temp_dir = TempDir::new().unwrap();
     let cap = 8 * 1024 * 1024;
     let outcome = execute(
         &tool("fake"),
@@ -510,18 +510,18 @@ fn over_cap_spill_lands_in_the_work_dir_not_the_cwd() {
             json!({"args": ["--flood", (cap + 8192).to_string()]}),
         ),
         cwd_dir.path(),
-        work_dir.path(),
+        temp_dir.path(),
         &CancelToken::new(),
         None,
     );
     assert!(!outcome.result.is_error, "{}", outcome.result.content);
-    let spilled = work_dir
+    let spilled = temp_dir
         .path()
         .join("tool_output")
         .join("fake-tu_split.csv");
     assert!(
         std::fs::metadata(&spilled).is_ok(),
-        "the spill lands under the work dir"
+        "the spill lands under the temp dir"
     );
     assert!(
         !cwd_dir.path().join("tool_output").exists(),

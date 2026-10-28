@@ -23,7 +23,6 @@ pub mod sandbox;
 pub mod skills;
 pub mod snapshot;
 pub mod source_lifecycle;
-mod sql_assets;
 pub(crate) mod turn_dispatch;
 pub mod turn_runner;
 pub(crate) mod workspace;
@@ -1112,11 +1111,6 @@ impl Session {
     /// one `recipe.json` to another releases the old canonical key so a different
     /// session can open it.
     pub fn bind_recipe(&mut self, path: PathBuf, session_name: String) -> Result<(), SaveError> {
-        // Migrate derived source files from temp staging to recipe.json-adjacent
-        // (issue #433, ADR-0087 D2). Before the recipe is persisted, each
-        // derived source's source_path is updated so SourceRef carries the
-        // portable (relative-to-recipe.json) location.
-        migrate_derived_sources(&mut self.working_set, &self.temp_path, &path);
         let result = self.persister.bind(
             path,
             session_name,
@@ -1509,13 +1503,8 @@ impl Session {
     /// successful write also stamps the companion watermark (ADR-0136 D3)
     /// when the engine has materialized.
     pub fn persist_if_bound(&mut self) {
-        persist_snapshot(
-            &mut self.persister,
-            &mut self.working_set,
-            &self.temp_path,
-            &self.timeline,
-            &self.runtime_facts,
-        );
+        self.persister
+            .save_if_bound(&self.working_set, &self.timeline, &self.runtime_facts);
         // Stamp only after a write actually landed: a suspended (conflict) or
         // failed write leaves the recipe file behind while the in-memory
         // working set moved on -- stamping then would desync the watermark
@@ -1818,99 +1807,6 @@ fn fold_skill_provenance(invocations: &[crate::model::SkillInvocation]) -> Vec<S
         }
     }
     skills
-}
-
-/// The single recipe-save body behind [`Session::persist_if_bound`] and the
-/// mid-turn skill-activation channel's land-and-persist (ADR-0110 Decision 3,
-/// issue #701): migrate any staged derived sources to their portable
-/// location, then save the recipe atomically. Field-split (not a method)
-/// because the mid-turn caller holds the working set + temp path inside
-/// [`materializer::TurnDeps`] while the activation channel holds the
-/// timeline + persister -- disjoint session borrows that cannot re-widen to
-/// `&mut Session`.
-fn persist_snapshot(
-    persister: &mut recipe_persister::RecipePersister,
-    working_set: &mut WorkingSet,
-    temp_path: &Path,
-    timeline: &[TimelineEntry],
-    runtime_facts: &SessionRuntimeFacts,
-) {
-    // Migrate derived sources before building the recipe so their
-    // source_path carries the portable (recipe.json-adjacent) location instead
-    // of the temp staging path (issue #433, ADR-0087 D2). Without this,
-    // derived sources created after the initial bind_recipe would carry temp
-    // paths in the recipe — wiped on session drop, breaking resume.
-    if let Some(recipe_path) = persister.recipe_path().map(PathBuf::from) {
-        migrate_derived_sources(working_set, temp_path, &recipe_path);
-    }
-    persister.save_if_bound(working_set, timeline, runtime_facts);
-}
-
-/// Migrate derived source files from temp staging (`temp_path/derived/`) to
-/// the per-session directory's `assets/` subdirectory (ADR-0089, issue #433,
-/// ADR-0087 D2) so they survive session close and are portable with the
-/// `recipe.json` file. Updates each descriptor's `source_path` in place so the
-/// recipe's `SourceRef` carries the persistent location. Best-effort +
-/// logged: a copy failure leaves the staging path in place (the session temp
-/// dir is wiped on drop, but the recipe write still succeeds — a resume
-/// would surface the missing file as an interactive re-link).
-fn migrate_derived_sources(working_set: &mut WorkingSet, temp_path: &Path, recipe_path: &Path) {
-    let staging_dir = temp_path.join(derived_source::DERIVED_STAGING_DIR);
-    // ADR-0089: derived sources live in the per-session directory's `assets/`
-    // subdirectory (previously `{duck_stem}.assets/` adjacent to a flat recipe.json).
-    let Some(session_dir) = recipe_path.parent() else {
-        log::warn!(
-            target: "toptopduck::session",
-            "skipped derived-source migration: recipe_path has no parent: {}",
-            recipe_path.display()
-        );
-        return;
-    };
-    let assets_dir = session_dir.join(sql_assets::ASSETS_DIR_NAME);
-
-    // Collect (ref_name, old_path, new_path) for sources staged in
-    // temp_path/derived/. Iterating the working set immutably first, then
-    // applying updates mutably (borrow split).
-    let staging_prefix = staging_dir.to_string_lossy().to_string();
-    let to_migrate: Vec<(String, PathBuf, PathBuf)> = working_set
-        .list()
-        .iter()
-        .filter(|d| !working_set.is_result(&d.reference_name))
-        .filter(|d| d.source_path.starts_with(&staging_prefix))
-        .filter_map(|d| {
-            let old_path = PathBuf::from(&d.source_path);
-            let filename = PathBuf::from(old_path.file_name()?);
-            Some((
-                d.reference_name.clone(),
-                old_path,
-                assets_dir.join(filename),
-            ))
-        })
-        .collect();
-
-    if to_migrate.is_empty() {
-        return;
-    }
-
-    if let Err(e) = fs::create_dir_all(&assets_dir) {
-        log::warn!(
-            target: "toptopduck::session",
-            "failed to create derived assets dir {}: {e}",
-            assets_dir.display()
-        );
-        return;
-    }
-
-    for (ref_name, old_path, new_path) in &to_migrate {
-        if let Err(e) = fs::copy(old_path, new_path) {
-            log::warn!(
-                target: "toptopduck::session",
-                "failed to migrate derived source {ref_name}: {e}"
-            );
-            continue;
-        }
-        working_set.update_source_path(ref_name, &new_path.to_string_lossy());
-    }
 }
 
 #[cfg(test)]
@@ -3308,99 +3204,6 @@ mod tests {
         );
     }
 
-    // --- Derived source migration (issue #439 AC2) ----------------------------
-
-    #[test]
-    fn bind_recipe_migrates_derived_sources_to_assets_dir() {
-        // Stage a derived CSV in temp_path/derived/ (the staging area used by
-        // derived_source::process when no recipe.json is bound, ADR-0087 D4), register
-        // it in the working set with the staging path, then bind_recipe. The
-        // migration should copy the file to <duck_stem>.assets/ and update the
-        // descriptor's source_path so the recipe carries the portable location.
-        let mut session = Session::new().expect("session");
-
-        let staging_dir = session
-            .temp_path
-            .join(super::derived_source::DERIVED_STAGING_DIR);
-        std::fs::create_dir_all(&staging_dir).unwrap();
-        let staging_csv = staging_dir.join("data.csv");
-        std::fs::write(&staging_csv, "id,name\n1,alice\n").unwrap();
-
-        // Register as a non-result source pointing at the staging path.
-        session
-            .working_set
-            .register(crate::model::DatasetDescriptor {
-                reference_name: "data".to_string(),
-                display_name: "data".to_string(),
-                source_path: staging_csv.to_string_lossy().to_string(),
-                columns: vec![crate::model::ColumnSchema {
-                    name: "id".into(),
-                    canonical_type: "BIGINT".into(),
-                }],
-                row_count: 1,
-                sample: vec![vec!["1".into(), "alice".into()]],
-                fingerprint: "abc".into(),
-                rectify: crate::model::RectifyProvenance::NotApplicable,
-                privacy: crate::model::DatasetPrivacy::default(),
-                stale: None,
-            });
-
-        // Use a temp dir for the recipe.json so .assets/ goes alongside it.
-        let duck_dir = tempfile::tempdir().expect("duck dir");
-        let recipe_path = duck_dir.path().join("recipe.json");
-
-        session
-            .bind_recipe(recipe_path.clone(), "test session".into())
-            .expect("bind_recipe");
-
-        // ADR-0089: derived sources migrate to the per-session directory's
-        // `assets/` subdirectory (replacing the former `{duck_stem}.assets/`).
-        let assets_csv = duck_dir.path().join("assets").join("data.csv");
-        assert!(
-            assets_csv.exists(),
-            "derived file migrated to assets/: {assets_csv:?}"
-        );
-
-        // AC2b: descriptor source_path updated to the assets/ path.
-        let d = session
-            .working_set
-            .get("data")
-            .expect("data still registered");
-        assert!(
-            d.source_path.ends_with("assets\\data.csv")
-                || d.source_path.ends_with("assets/data.csv"),
-            "source_path updated to assets/: {}",
-            d.source_path
-        );
-        assert!(
-            !d.source_path.contains("derived"),
-            "staging path replaced: {}",
-            d.source_path
-        );
-
-        // AC2c: recipe carries the portable (relative) path. ADR-0089: the
-        // assets directory is now per-session `assets/` (not `{stem}.assets/`).
-        let recipe = crate::persistence::read_recipe(&recipe_path).expect("read recipe");
-        let src = recipe
-            .sources
-            .iter()
-            .find(|s| s.reference_name == "data")
-            .expect("data in recipe sources");
-        assert!(
-            src.source_path.ends_with("assets\\data.csv")
-                || src.source_path.ends_with("assets/data.csv"),
-            "recipe source_path is assets/: {}",
-            src.source_path
-        );
-        assert!(
-            src.relative_path
-                .as_ref()
-                .is_some_and(|p| p == "assets/data.csv" || p == "assets\\data.csv"),
-            "recipe relative_path is assets/: {:?}",
-            src.relative_path
-        );
-    }
-
     // --- ADR-0089 Decision 4: first-turn auto-naming -----------------------
 
     #[test]
@@ -3872,10 +3675,10 @@ mod tests {
         let dir = tempfile::tempdir().expect("session dir");
         let duck = dir.path().join("recipe.json");
 
-        // Bind FIRST: the settle-time materialization derives the assets dir
+        // Bind FIRST: the snapshot pipeline derives its tree destination
         // from the bound duck path, and createSession binds from the start
-        // (ADR-0089) -- an ask recorded before any binding has nothing to
-        // materialize for.
+        // (ADR-0089) -- an ask recorded before any binding has nowhere
+        // durable to snapshot into.
         let mut session = Session::new().expect("session");
         session.bind_recipe(duck.clone(), "t".into()).expect("bind");
 
@@ -3967,11 +3770,12 @@ mod tests {
 
     /// A legacy recipe whose recorded SQL points into the per-session
     /// `assets/` tree (a pre-#1383 settle's materialized copy) still
-    /// replays green on reopen (the retained legacy read-gate face,
-    /// ADR-0089/ADR-0137 Decision 6): the live turn's preflight allows
-    /// the read, and with the companion dropped the replay leg
-    /// re-executes the stored SQL against the copy and re-registers the
-    /// result.
+    /// replays green on reopen while the copy is on disk: the absolute
+    /// spelling rides ADR-0137 D4's full-path face (the legacy read-gate
+    /// is retired), so the live turn's preflight allows the read, and
+    /// with the companion dropped the replay leg re-executes the stored
+    /// SQL against the copy and re-registers the result; a dead copy
+    /// degrades per ADR-0035 instead.
     #[test]
     fn a_legacy_assets_reference_replays_green_on_reopen() {
         let dir = tempfile::tempdir().expect("session dir");
@@ -4025,6 +3829,209 @@ mod tests {
             )
         });
         assert!(!any_failed, "the legacy assets replay stays green");
+    }
+
+    /// The dead-file leg of the retired assets read-gate: when the legacy
+    /// recipe's assets copy no longer exists at reopen, resume surfaces it
+    /// through the source-missing face (the claim-time registration points
+    /// at the dead copy), and an Abort leaves the on-disk recipe untouched
+    /// -- the honest ADR-0035 degrade, no silent fallback, no dropped
+    /// record.
+    #[test]
+    fn a_dead_assets_reference_surfaces_the_source_missing_face() {
+        use crate::session::{SourceIssue, SourceResolution};
+
+        let dir = tempfile::tempdir().expect("session dir");
+        let duck = dir.path().join("recipe.json");
+        // The copy exists for the live ask (the turn materializes off it),
+        // then dies before the reopen.
+        let assets_csv = dir.path().join("assets").join("kline.csv");
+        std::fs::create_dir_all(assets_csv.parent().expect("assets parent")).expect("dirs");
+        std::fs::write(
+            &assets_csv,
+            "v
+1
+",
+        )
+        .expect("write assets copy");
+
+        let mut session = Session::new().expect("session");
+        session.bind_recipe(duck.clone(), "t".into()).expect("bind");
+        let sql = format!(
+            "SELECT COUNT(*) AS n FROM read_csv_auto('{}')",
+            assets_csv.to_string_lossy()
+        );
+        session.provider = std::sync::Arc::new(FakeProvider::new().scripted_tool_turn_seq(
+            "查",
+            vec![
+                Ok(materialize_call(&sql)),
+                Ok(ToolTurnReply::Text("done".into())),
+            ],
+        ));
+        assert!(matches!(
+            session.ask("查"),
+            TurnOutcome::Materialized { .. }
+        ));
+        drop(session);
+
+        std::fs::remove_file(&assets_csv).expect("kill the assets copy");
+        std::fs::remove_file(dir.path().join("analytics.duckdb")).expect("drop companion");
+        let issues = std::cell::RefCell::new(Vec::new());
+        let outcome = Session::open_recipe(
+            &duck,
+            std::sync::Arc::new(crate::cancel::CancelToken::new()),
+            Box::new(crate::provider::UnwiredProvider),
+            Default::default(),
+            |_| {},
+            |issue| {
+                issues.borrow_mut().push(issue);
+                SourceResolution::Abort
+            },
+            |_| panic!("no active-abandoned callback expected"),
+        );
+        assert!(outcome.is_err(), "the dead assets copy aborts the resume");
+        assert_eq!(issues.borrow().len(), 1, "exactly one source issue");
+        assert!(
+            matches!(&issues.borrow()[0], SourceIssue::Missing { .. }),
+            "the issue is the missing-file face: {:?}",
+            issues.borrow()[0]
+        );
+        assert!(
+            duck.exists(),
+            "the on-disk recipe is untouched by the abort"
+        );
+    }
+
+    /// The retired bind-time migration (issue #1390): a derived source
+    /// staged in the temp dir stays put across bind_recipe -- no `assets/`
+    /// directory is minted beside the recipe, and both the descriptor and
+    /// the persisted recipe keep the staging source_path. Persistence
+    /// rides the copy-in snapshot pipeline; a staging path that dies with
+    /// the temp dir degrades on resume through the source-missing face.
+    #[test]
+    fn bind_recipe_mints_no_assets_dir_for_staged_derived_sources() {
+        let mut session = Session::new().expect("session");
+        let staging_dir = session
+            .temp_path
+            .join(super::derived_source::DERIVED_STAGING_DIR);
+        std::fs::create_dir_all(&staging_dir).unwrap();
+        let staging_csv = staging_dir.join("data.csv");
+        std::fs::write(&staging_csv, "id,name\n1,alice\n").unwrap();
+        session
+            .working_set
+            .register(crate::model::DatasetDescriptor {
+                reference_name: "data".to_string(),
+                display_name: "data".to_string(),
+                source_path: staging_csv.to_string_lossy().to_string(),
+                columns: vec![crate::model::ColumnSchema {
+                    name: "id".into(),
+                    canonical_type: "BIGINT".into(),
+                }],
+                row_count: 1,
+                sample: vec![vec!["1".into(), "alice".into()]],
+                fingerprint: "abc".into(),
+                rectify: crate::model::RectifyProvenance::NotApplicable,
+                privacy: crate::model::DatasetPrivacy::default(),
+                stale: None,
+            });
+
+        let duck_dir = tempfile::tempdir().expect("duck dir");
+        let recipe_path = duck_dir.path().join("recipe.json");
+        session
+            .bind_recipe(recipe_path.clone(), "t".into())
+            .expect("bind_recipe");
+
+        assert!(
+            !duck_dir.path().join("assets").exists(),
+            "no assets/ minted beside the recipe"
+        );
+        let d = session.working_set.get("data").expect("data registered");
+        assert!(
+            d.source_path.contains("derived"),
+            "the staging source_path is untouched: {}",
+            d.source_path
+        );
+        let recipe = crate::persistence::read_recipe(&recipe_path).expect("read recipe");
+        let src = recipe
+            .sources
+            .iter()
+            .find(|s| s.reference_name == "data")
+            .expect("data in recipe sources");
+        assert!(
+            src.source_path.contains("derived"),
+            "the recipe keeps the staging path: {}",
+            src.source_path
+        );
+    }
+
+    /// The temp-staging spelling of the missing face: a derived source
+    /// whose descriptor still points into the session's wiped temp staging
+    /// dir (the pre-#1383 legacy recipe shape) degrades at a companion-less
+    /// reopen exactly like a dead assets copy -- one Missing issue, an
+    /// Abort, the on-disk recipe untouched. Live sessions snapshot into
+    /// the session tree; this pins the staging spelling onto the same
+    /// source-missing leg (issue #1390 review).
+    #[test]
+    fn a_wiped_staging_reference_surfaces_the_source_missing_face() {
+        use crate::session::{SourceIssue, SourceResolution};
+
+        let dir = tempfile::tempdir().expect("session dir");
+        let duck = dir.path().join("recipe.json");
+        let mut session = Session::new().expect("session");
+        session.bind_recipe(duck.clone(), "t".into()).expect("bind");
+        // Stage + register the legacy shape: source_path inside
+        // temp_path/derived/. No materialized turn runs, so no companion is
+        // minted -- the reopen takes the watermark-miss leg.
+        let staging_csv = session
+            .temp_path
+            .join(super::derived_source::DERIVED_STAGING_DIR)
+            .join("data.csv");
+        std::fs::create_dir_all(staging_csv.parent().expect("staging parent")).expect("dirs");
+        std::fs::write(&staging_csv, "id\n1\n").expect("write staging file");
+        session
+            .working_set
+            .register(crate::model::DatasetDescriptor {
+                reference_name: "data".to_string(),
+                display_name: "data".to_string(),
+                source_path: staging_csv.to_string_lossy().to_string(),
+                columns: vec![crate::model::ColumnSchema {
+                    name: "id".into(),
+                    canonical_type: "BIGINT".into(),
+                }],
+                row_count: 1,
+                sample: vec![vec!["1".into()]],
+                fingerprint: "abc".into(),
+                rectify: crate::model::RectifyProvenance::NotApplicable,
+                privacy: crate::model::DatasetPrivacy::default(),
+                stale: None,
+            });
+        session.persist_if_bound();
+        drop(session); // the TempDir wipe kills the staging file
+
+        let issues = std::cell::RefCell::new(Vec::new());
+        let outcome = Session::open_recipe(
+            &duck,
+            std::sync::Arc::new(crate::cancel::CancelToken::new()),
+            Box::new(crate::provider::UnwiredProvider),
+            Default::default(),
+            |_| {},
+            |issue| {
+                issues.borrow_mut().push(issue);
+                SourceResolution::Abort
+            },
+            |_| panic!("no active-abandoned callback expected"),
+        );
+        assert!(outcome.is_err(), "the wiped staging path aborts the resume");
+        assert_eq!(issues.borrow().len(), 1, "exactly one source issue");
+        assert!(
+            matches!(&issues.borrow()[0], SourceIssue::Missing { .. }),
+            "the issue is the missing-file face: {:?}",
+            issues.borrow()[0]
+        );
+        assert!(
+            duck.exists(),
+            "the on-disk recipe is untouched by the abort"
+        );
     }
 
     /// A persistent break cause degrades the conversation from the

@@ -61,4 +61,4 @@ ADR-0034 Decision 5 定「每轮终态自动追加 + 原子写」，但未覆盖
 - **`assets/` 哑文件不走派生源通道**：派生源是注册进工作集的产品语义（描述符、指纹、UI 可见）；哑文件只是重放兜底——agent 直接写临时目录、SQL 裸路径引用的产物不取得数据集语义。两者同名消歧同构（`_2` 后缀环）但职责分离。
 - **被 ADR-0095 校准**：session 持久化结构新增 `model` / `thought_level` / `cached_discovered` 三个可选字段，随会话一并持久化与恢复；旧会话文件缺字段按 `None` 反序列化（向后兼容）。
 - **被 ADR-0136 校准**：per-session 目录内容扩为 `recipe.json`（或旧名 `session.duck`）+ 源快照 `<ref>.duckdb` + 伴生库与 WAL + `assets/` + `artifacts/`；「复制目录 = 完整会话」从携引用升级为携数据（应用内导入导出入口仍不设）。见 ADR-0136。
-- **被 ADR-0137 校准**：Decision 3 的 turn SQL 引用文件哑副本物化（SQL 路径同步重写为 assets 路径）域收窄至存量会话——工作区惰性创建后会话临时目录永无工作文件，新会话不再产生哑文件与路径重写；存量 recipe 指向 `assets/` 绝对路径的重放照常，消费面不动。见 ADR-0137。
+- **被 ADR-0137 校准**：Decision 3 的 turn SQL 引用文件哑副本物化（SQL 路径同步重写为 assets 路径）域收窄至存量会话——工作区惰性创建后会话临时目录永无工作文件，新会话不再产生哑文件与路径重写；存量兼容随无外部用户一并退役（ADR-0137 Decision 6）——`fs_acl` 撤 `assets/` 放行、`bind_recipe` 派生源迁移面删除，在盘 assets 文件经全路径面 copy-in 快照存活、死引用断链按 ADR-0035 降级。见 ADR-0137。

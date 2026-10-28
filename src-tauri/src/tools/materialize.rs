@@ -946,9 +946,9 @@ mod tests {
         let cols = payload.content["columns"].as_array().unwrap();
         assert_eq!(cols.len(), 1);
         assert_eq!(cols[0]["name"], "val");
-        // The temp-root file is NOT claimed by the full-path face (ADR-0089's
-        // settle face owns session-temp references) -- the working set holds
-        // only the result.
+        // The temp-root file is NOT claimed by the full-path face (the
+        // temp dir keeps its read-write face for scratch) -- the working
+        // set holds only the result.
         assert_eq!(deps.working_set.len(), 1);
         assert_eq!(deps.working_set.next_result_number(), 2);
     }
@@ -990,7 +990,8 @@ mod tests {
     /// Resource error naming the cap (ADR-0005/0030). Symmetric with explore's
     /// `explore_refuses_result_exceeding_row_cap`; pins the
     /// `SandboxExecError::Resource => ExecErrorKind::Resource` mapping on the
-    /// materialize dispatch path. Hand-builds TurnDeps for the one-off cap.
+    /// materialize dispatch path. The one-off cap is set on top of the
+    /// helper's defaults.
     #[test]
     fn materialize_refuses_result_exceeding_row_cap() {
         use crate::session::materializer::RealMaterializer;
@@ -1000,22 +1001,9 @@ mod tests {
         let mut sources = std::collections::HashMap::new();
         let mut refs = std::collections::HashMap::new();
         // cap = 2; range(3) yields 3 rows -> cap+1 land on the sandbox, COUNT
-        // (3) > cap (2) -> refused. Hand-built for the one-off bound.
-        let mut deps = crate::session::materializer::TurnDeps {
-            engine: &engine,
-            source_files: &mut sources,
-            source_readers: None,
-            working_set: &mut ws,
-            result_row_cap: 2,
-            result_count_cap: 100,
-            temp_path: std::path::Path::new("."),
-            workspace: None,
-            workspaces_root: None,
-            workspace_registry: None,
-            snapshot_dir: std::path::PathBuf::from("."),
-            assets_dir: None,
-            tool_output_refs: &mut refs,
-        };
+        // (3) > cap (2) -> refused.
+        let mut deps = inert_deps(&engine, &mut ws, &mut sources, &mut refs);
+        deps.result_row_cap = 2;
         let cancel = CancelToken::new();
         let mut materializer = RealMaterializer;
         let err = dispatch(

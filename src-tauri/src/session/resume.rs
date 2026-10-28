@@ -912,7 +912,6 @@ impl super::Session {
             // Computed before the Resumer's disjoint-field borrows of session
             // begin -- recipe_path() takes &session, which the mutable
             // materializer borrow inside Resumer::new excludes.
-            let assets_dir = super::sql_assets::assets_dir(session.recipe_path());
             let snapshot_dir = session.snapshot_dir();
             let mut resumer = Resumer::new(&session.cancel, &mut *session.materializer, &recipe);
             let replay_break = if restored {
@@ -947,7 +946,6 @@ impl super::Session {
                     workspaces_root: None,
                     workspace_registry: None,
                     snapshot_dir,
-                    assets_dir,
                     tool_output_refs: &mut session.tool_output_refs,
                 };
                 resumer.replay(&mut deps, &mut on_progress)?
