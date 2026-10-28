@@ -195,8 +195,8 @@ fn reject_if_in_flight(handle: &SessionHandle) -> Result<(), SessionError> {
 /// [`SessionError::InvalidId`], distinct from a closed session's
 /// [`SessionError::NotFound`] -- issue #73) then look it up in the store,
 /// which releases the store lock before returning (the ADR-0056 brief-lock
-/// invariant: the cloned handle is used within this one invocation and
-/// dropped before returning).
+/// invariant: the calling command uses the cloned handle within this one
+/// invocation and must drop it before returning).
 fn resolve_session(
     store: &SessionStore,
     session_id: &str,
@@ -209,7 +209,11 @@ fn resolve_session(
 /// per-session single-flight gate (ADR-0021; a poisoned mutex surfaces as
 /// [`SessionError::Engine`]), hand the guard to `op`, and return `op`'s
 /// result. The guard drops when `op` returns, so the lock never outlives the
-/// closure. Deliberately the sync-command shape only: issue #1412 keeps the
+/// closure. The closure must not re-enter the session gate through the
+/// captured handle -- the mutex is non-reentrant, so a nested
+/// [`SessionHandle::session_lock`] deadlocks rather than erroring (locking a
+/// different mutex on the handle, such as the runtime-posture slot, stays
+/// fine). Deliberately the sync-command shape only: issue #1412 keeps the
 /// `spawn_blocking` task bodies on their hand-written lock, and a blocking
 /// task that ever adopts this helper must clone the `Arc<SessionHandle>`
 /// and call it inside the task (the guard is `!Send`).
@@ -565,6 +569,8 @@ pub fn close_session(
     store: State<'_, Arc<SessionStore>>,
     session_id: String,
 ) -> Result<bool, SessionError> {
+    // Exempt from resolve_session (issue #1412): the typed id keys into
+    // close_and_cleanup_empty, which addresses by id, not by handle.
     let id = SessionId::parse(&session_id)?;
     store.close_and_cleanup_empty(&id)
 }
@@ -619,6 +625,8 @@ pub async fn close_session_and_wait_release(
     store: State<'_, Arc<SessionStore>>,
     session_id: String,
 ) -> Result<(), SessionError> {
+    // Exempt from resolve_session (issue #1412): the typed id keys into
+    // detach, which addresses by id, not by handle.
     let id = SessionId::parse(&session_id)?;
     // Detach: mark closing + fire cancel + remove from the map + return the
     // handle. After this, no new commands can target the id (get -> NotFound).
@@ -1231,7 +1239,10 @@ pub fn conversation(
     // ADR-0137 Decision 6 (#1383): every manifest-named file must be
     // iframe-servable before a card can render -- the whitelist is
     // re-granted on every thread read (session open / remount; idempotent
-    // by pattern).
+    // by pattern). Deliberately post-lock (issue #1412's one reordering):
+    // the grant derives from the owned snapshot above and takes no lock the
+    // session gate orders against, so holding the guard across the
+    // app-handle call would only widen ADR-0056's window.
     grant_artifact_asset_scope(&app, &crate::session::artifacts::referenced_paths(&entries));
     Ok(entries)
 }
@@ -5614,8 +5625,9 @@ mod tests {
     /// parses + looks up in one step, with_session_lock runs the closure
     /// under the gate, and the closure's return value crosses both layers
     /// unchanged -- the happy path every migrated sync handler rides. The
-    /// malformed-id arm pins resolve_session's error mapping (parse rejects
-    /// before the store is touched).
+    /// error arms pin the mappings: a malformed id is InvalidId before the
+    /// store is touched, a well-formed unknown id is NotFound, and the
+    /// closure's typed Err crosses with_session_lock whole.
     #[test]
     fn resolve_and_lock_round_trip_carries_closure_value() {
         let store = SessionStore::new();
@@ -5636,6 +5648,22 @@ mod tests {
         let name = with_session_lock(&handle, |s| Ok(s.session_name().map(str::to_string)))
             .expect("lock + read");
         assert_eq!(name.as_deref(), Some("combo"));
+        // The closure's typed Err crosses with_session_lock whole, not
+        // flattened into Engine: the rename refusal keeps its variant.
+        let err = with_session_lock(&handle, |s| {
+            s.rename("   ").map_err(SessionError::RenameSession)
+        })
+        .expect_err("blank rename rejects");
+        assert_eq!(
+            err,
+            SessionError::RenameSession(RenameSessionError::EmptyName)
+        );
+        // A well-formed unknown id reaches the store and surfaces NotFound
+        // -- the #73 invalid-vs-closed distinction the helper standardizes.
+        match resolve_session(&store, "550e8400-e29b-41d4-a716-446655440000") {
+            Err(e) => assert_eq!(e, SessionError::NotFound),
+            Ok(_) => panic!("unknown id must reject"),
+        }
         // The parse step's refusal surfaces as InvalidId through the helper.
         match resolve_session(&store, "not-a-uuid") {
             Err(e) => assert_eq!(e, SessionError::InvalidId),
