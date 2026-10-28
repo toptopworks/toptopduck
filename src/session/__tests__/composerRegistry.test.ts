@@ -64,6 +64,18 @@ describe("useComposerRegistry (shell-level composer registry)", () => {
     expect(result.current.activeSessionFields).toBe(FIELDS_B);
   });
 
+  it("keeps each session's entry when another session reports", () => {
+    const { result, rerender } = renderSeam("sess-1");
+    act(() => result.current.report("sess-1", FIELDS_A));
+    act(() => result.current.report("sess-2", FIELDS_B));
+    expect(result.current.readFields("sess-1")).toBe(FIELDS_A);
+    expect(result.current.readFields("sess-2")).toBe(FIELDS_B);
+    // The active read still tracks the active id, not the last report.
+    expect(result.current.activeSessionFields).toBe(FIELDS_A);
+    rerender({ sid: "sess-2" });
+    expect(result.current.activeSessionFields).toBe(FIELDS_B);
+  });
+
   it("readFields reads by explicit sid for the submit / cancel / ingest paths", () => {
     const { result } = renderSeam("sess-1");
     act(() => result.current.report("sess-1", FIELDS_A));
@@ -186,7 +198,11 @@ describe("useComposerRegistry (scoped invocation staging)", () => {
 
   it("stage with an empty list is a no-op (the seed channel guards empties)", () => {
     const { result } = renderSeam("sess-1");
-    act(() => result.current.stage("sess-1", []));
-    expect(result.current.readInvocations("sess-1")).toEqual([]);
+    act(() => result.current.stage("sess-1", ["x"]));
+    // An empty stage onto a NEW scope must not fire the single-slot
+    // replacement (the guard is what keeps the live sibling alive).
+    act(() => result.current.stage("sess-2", []));
+    expect(result.current.readInvocations("sess-1")).toEqual(["x"]);
+    expect(result.current.readInvocations("sess-2")).toEqual([]);
   });
 });

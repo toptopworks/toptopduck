@@ -12,14 +12,16 @@ import { IDLE_SESSION_FIELDS } from "./useComposerState";
 // the prose that used to live next to every call site retired into this
 // block): every handler inside a reported ComposerSessionFields payload
 // (handleAsk / handleCancel / handleIngestFiles) MUST be useCallback-stable
-// across renders, because the shell compares reported payloads BY REFERENCE
-// when it folds them into the bar's state. The recorded failure
+// across renders: the pane's report effect lists them in its dependency
+// array, so an unstable identity re-fires the report on every render, and
+// each report re-renders the shell. The recorded failure
 // (handleIntlError): react-intl shallow-compares ALL IntlProvider props to
 // decide whether to rebuild the `intl` context object, so an inline-arrow
 // onError there rebuilds `intl` every render, handing every session handler
-// that lists `intl` in its useCallback deps a fresh identity -- which the
-// report chain compares by reference, looping the bar's fields registry
-// forever. Never "fix" a stale-looking payload by ignoring handler identity:
+// that lists `intl` in its useCallback deps a fresh identity -- which
+// re-fires the pane's report effect on every render, looping the bar's
+// fields registry forever. Never "fix" a stale-looking payload by ignoring
+// handler identity:
 // the identity IS semantic (the closures capture `intl` / setError state),
 // and snapshotting handlers by value would pin stale closures. The
 // module-level `handleIntlError` in App and the stable handlers inside
@@ -96,6 +98,12 @@ export interface ComposerRegistry {
    *  the live session set. */
   dropSession: (sessionId: string) => void;
 }
+
+// The shared empty read: readInvocations hands out this one instance for
+// scopes with no staging, so the empty case stays reference-stable across
+// renders (a fresh [] per call would churn every consumer's deps arrays).
+// Module-private and never mutated -- treat it as read-only.
+const EMPTY_INVOCATIONS: string[] = [];
 
 export function useComposerRegistry(activeSessionId: string | null): ComposerRegistry {
   // --- The bar-fields registry (ADR-0092) ----------------------------------
@@ -183,10 +191,6 @@ export function useComposerRegistry(activeSessionId: string | null): ComposerReg
     });
   }, []);
 
-  // The old submit cleared THE single cell -- rebound it to the submitting
-  // sid and emptied it -- so any other session's unsubmitted staging died
-  // with the submit. Wiping the whole session face is that behavior on the
-  // unified map, bit for bit.
   const consumeView = useCallback(() => {
     setInvocations((prev) => {
       let changed = false;
@@ -216,7 +220,7 @@ export function useComposerRegistry(activeSessionId: string | null): ComposerReg
     readFields,
     activeSessionFields,
     readInvocations: useCallback(
-      (scope: ComposerScope) => invocations.get(scope) ?? [],
+      (scope: ComposerScope) => invocations.get(scope) ?? EMPTY_INVOCATIONS,
       [invocations],
     ),
     stage,

@@ -3143,8 +3143,8 @@ describe("Composer skill picker pre-activation (ADR-0112, issue #716)", () => {
     await waitFor(() =>
       expect(screen.getByRole("button", { name: "提问" })).toBeInTheDocument(),
     );
-    // A second picker pick lands the in-session chip (the viewInvocations
-    // list is the whole intent -- this surface has no mount facet).
+    // A second picker pick lands the in-session chip (the session-scope
+    // staging list is the whole intent -- this surface has no mount facet).
     fireEvent.change(bar, { target: { value: "/", selectionStart: 1 } });
     await screen.findByRole("option");
     fireEvent.keyDown(bar, { key: "Enter" });

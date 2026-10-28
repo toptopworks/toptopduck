@@ -89,11 +89,8 @@ type SettingsEntry = {
 };
 
 // Module-level so the IntlProvider `onError` prop is a STABLE reference across
-// App renders (react-intl shallow-compares ALL provider props to decide
-// whether to rebuild the `intl` context object; an inline arrow would rebuild
-// it -- and every handler listing `intl` in its useCallback deps -- on every
-// render). Why that identity matters is the composer registry's identity
-// contract; see composerRegistry.ts.
+// App renders. Why that identity matters is the composer registry's identity
+// contract (the recorded react-intl failure); see composerRegistry.ts.
 function handleIntlError(err: Error): void {
   log.warn("i18n", err.message);
 }
@@ -360,8 +357,8 @@ export default function App() {
   // --- ADR-0092: Shell-level composer registry -----------------------------
   // The registry owns the per-session fields registry + the scoped
   // invocation staging (identity contract + lifecycle semantics live in its
-  // module doc); App only wires the pane report face and reads the merged
-  // view.
+  // module doc); App keeps only the call + render wiring -- the report face,
+  // the staging mutators, and the merged reads.
   const composerRegistry = useComposerRegistry(activeSessionId);
   const {
     report,
