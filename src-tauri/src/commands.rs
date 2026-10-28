@@ -57,13 +57,12 @@ use crate::runtime::acp::user_adapter_store::{
 use crate::session::loop_contract::DiscoveredRuntime;
 use crate::session::{
     PosturePair, RenameSessionError, ResumeEvent, ResumeProgress, Session, SessionRuntimeFacts,
-    TurnInputs,
+    TurnDeps, TurnPorts,
 };
 use crate::session_store::{SessionError, SessionHandle, SessionId, SessionStore};
 use crate::skills::{
-    discover_skill_sources, import_skills as import_skills_impl, resolve_prompt_fragments,
-    ImportItem, ImportMode, ImportOutcome, SkillError, SkillListing, SkillPromptFragment,
-    SkillSource, SkillSourceCandidate, SkillsRoot,
+    discover_skill_sources, import_skills as import_skills_impl, ImportItem, ImportMode,
+    ImportOutcome, SkillError, SkillListing, SkillSource, SkillSourceCandidate, SkillsRoot,
 };
 
 /// ADR-0063: the close-and-wait-release variant's wait ceiling. Aligned to
@@ -1014,196 +1013,77 @@ pub async fn ask(
     // delegation assembly scans the agent-definitions registry under the
     // held session lock below, next to the skills + CLI reads.
     let agents_root = agents_root.0.clone();
+    // Issue #1414: the pure-data half of the session-side turn entry's
+    // inputs, assembled here at the boundary (the MCP snapshot read before
+    // the blocking window -- ADR-0106's fresh-per-turn read) and moved in
+    // as one bundle.
+    let deps = TurnDeps {
+        live,
+        mcp_servers,
+        skills_root,
+        agents_root,
+    };
     let outcome = tauri::async_runtime::spawn_blocking(move || {
-        let mut s = handle.session_lock()?;
-        // Issue #353 + ADR-0095: feed the session's runtime choice and the
-        // session-level model + thought-level pair into the turn's dispatch
-        // at the turn boundary. Both live on the handle (lock-light writes
-        // via set_session_runtime / set_session_posture); the Session consumes
-        // them for THIS turn only -- a switch lands between turns, never
-        // mid-turn, and a resumed Session reads the restored choice. The
-        // combined read takes the one slot lock (issue #600), so the pair
-        // the turn consumes is namespaced by the runtime it runs on.
-        let (external_runtime, external_posture) = handle.runtime_and_posture();
-        s.set_external_runtime(external_runtime);
-        s.set_external_model_config(external_posture);
-        // Issue #364 (ADR-0086) + #707: the skill + CLI assembly reads both
-        // session sets under this held lock (neither can change between the
-        // read and the turn) and wires `TurnInputs` in one seam -- see
-        // [`assemble_turn_inputs`].
-        let assembled = assemble_turn_inputs(
-            &s,
-            &skills_root,
-            &agents_root,
-            &live,
-            skill_invocations.as_deref().unwrap_or(&[]),
-        );
-        let inputs = assembled.turn_inputs(&mcp_servers);
-        let outcome = s.ask_with_phase_and_auto_name(
+        // Issue #1414: the domain-side turn entry consumes the transport-
+        // built ports (the approval gateway halves plus the three boundary
+        // closures), so the orchestration -- mirror pair, assembly, turn,
+        // mirror-back, grant -- runs testable without an AppHandle. The
+        // `skill_invocations` fold here stays the single normalization
+        // point (issue #992).
+        handle.run_turn(
             &question,
-            &approval,
-            &sink,
-            move |phase| {
-                // Fire-and-forget by design: the turn result rides the command
-                // reply, not this channel. But a failing sink must not be
-                // invisible -- a stuck live card with no trail is undiagnosable,
-                // so log the emit error (ADR-0029 honest-degrade; debug, since a
-                // torn-down webview fails every emit and is the expected case).
-                if let Err(e) = app_for_cb.emit(
-                    "turn-progress",
-                    &TurnProgress {
-                        session_id: sid.clone(),
-                        phase,
-                    },
-                ) {
-                    log::debug!(
-                        target: "toptopduck::commands",
-                        "turn-progress emit failed (likely a torn-down webview): {e}"
-                    );
-                }
+            skill_invocations.as_deref().unwrap_or(&[]),
+            &deps,
+            TurnPorts {
+                approval: &approval,
+                sink: &sink,
+                on_phase: Box::new(move |phase| {
+                    // Fire-and-forget by design: the turn result rides the command
+                    // reply, not this channel. But a failing sink must not be
+                    // invisible -- a stuck live card with no trail is undiagnosable,
+                    // so log the emit error (ADR-0029 honest-degrade; debug, since a
+                    // torn-down webview fails every emit and is the expected case).
+                    if let Err(e) = app_for_cb.emit(
+                        "turn-progress",
+                        &TurnProgress {
+                            session_id: sid.clone(),
+                            phase,
+                        },
+                    ) {
+                        log::debug!(
+                            target: "toptopduck::commands",
+                            "turn-progress emit failed (likely a torn-down webview): {e}"
+                        );
+                    }
+                }),
+                on_named: Box::new(move |name| {
+                    // Issue #1353: the turn-start auto-name push. Fire-and-forget
+                    // like turn-progress above -- the name also lands through the
+                    // terminal-state sync chain (syncSessionName), so a dropped
+                    // event is a missed early update, not a lost one. Debug-level
+                    // for the same reason (a torn-down webview fails every emit).
+                    if let Err(e) = app_for_named.emit(
+                        "session-named",
+                        &SessionNamedPayload {
+                            session_id: sid_for_named.clone(),
+                            name: name.to_string(),
+                        },
+                    ) {
+                        log::debug!(
+                            target: "toptopduck::commands",
+                            "session-named emit failed (likely a torn-down webview): {e}"
+                        );
+                    }
+                }),
+                grant_scope: Box::new(move |paths| {
+                    grant_artifact_asset_scope(&app_for_scope, paths)
+                }),
             },
-            move |name| {
-                // Issue #1353: the turn-start auto-name push. Fire-and-forget
-                // like turn-progress above -- the name also lands through the
-                // terminal-state sync chain (syncSessionName), so a dropped
-                // event is a missed early update, not a lost one. Debug-level
-                // for the same reason (a torn-down webview fails every emit).
-                if let Err(e) = app_for_named.emit(
-                    "session-named",
-                    &SessionNamedPayload {
-                        session_id: sid_for_named.clone(),
-                        name: name.to_string(),
-                    },
-                ) {
-                    log::debug!(
-                        target: "toptopduck::commands",
-                        "session-named emit failed (likely a torn-down webview): {e}"
-                    );
-                }
-            },
-            &inputs,
-        );
-        // ADR-0095: mirror the turn's discovered runtime catalog onto the
-        // handle (lock-light reads for the selector). An ACP turn reports
-        // the handshake catalog and a ClaudeStreamJson turn reports the
-        // `system{init}` current model (ADR-0097 Decision 5 honest
-        // rendering); the built-in / CodexEventStream `None` means "no
-        // discovery", so the mirror is skipped and the previous cache
-        // survives (issue #530 made the None arm unrepresentable at the
-        // setter).
-        if let Some(discovered) = s.last_discovered_runtime() {
-            handle.set_cached_discovered(discovered);
-        }
-        // ADR-0124 (issue #1087), tightened to a file-level allowlist by
-        // ADR-0137 Decision 6 (#1383): the turn's manifest entries widen
-        // the asset protocol scope right here, before any card can render
-        // -- the files named this turn may not have existed when the
-        // session opened.
-        grant_artifact_asset_scope(&app_for_scope, &s.referenced_artifact_paths());
-        Ok::<TurnOutcome, SessionError>(outcome)
+        )
     })
     .await
     .map_err(|e| SessionError::Engine(e.to_string()))??;
     Ok(outcome)
-}
-
-/// The turn-boundary skill + CLI assembly's owning buffers (issue #364/
-/// ADR-0086; the seam itself is issue #707): the data behind `TurnInputs`'s
-/// borrowed fields. `commands::ask` calls [`assemble_turn_inputs`] under the
-/// held session lock, then borrows through [`Self::turn_inputs`] -- the
-/// two-step shape exists because a `TurnInputs` borrows its buffers, so the
-/// owning values must be built first and outlive the borrowed view: no Rust
-/// signature can return a value and a borrow of that value as one tuple.
-/// The keychain rides here as a borrowed field (taken from `live` at
-/// assembly time) so the projection carries no source-config re-passes.
-struct AssembledTurnInputs<'a> {
-    skills: Vec<SkillPromptFragment>,
-    /// The user's submit-time invocations (ADR-0119, issue #983), resolved
-    /// under the held session lock so the bodies + hashes pin the submit-time
-    /// bytes.
-    user_invocations: Vec<crate::model::SkillInvocation>,
-    /// The machine-level disabled skill names (ADR-0118 enable axis): the
-    /// `invoke_skill` gate reads them mid-turn.
-    disabled_skills: Vec<String>,
-    /// The registry root borrow (ADR-0111, issue #714): the turn's read
-    /// surface resolves skill names against it live, mid-turn.
-    skills_root: &'a Path,
-    /// The live-config handle (ADR-0122 Decision 1): the `create_skill`
-    /// mint's composite needs the config write. Always `Some` from the
-    /// command boundary; the turn-input view keeps the `None` escape for
-    /// config-less test sessions.
-    live_config: Option<&'a LiveProviderConfig>,
-    cli_tools: Vec<crate::cli_tools::config::CliToolConfig>,
-    /// The turn's delegation snapshot (issue #933, ADR-0117): the enabled
-    /// agent definitions with their bound skill bodies resolved. One scan
-    /// alongside the skills + CLI reads; the guarantee is the snapshot
-    /// itself -- the turn consumes this one consistent family, while the
-    /// on-disk registry and the enablement store may change freely
-    /// afterwards (the next turn re-reads).
-    delegations: Vec<crate::agents::DelegationSpec>,
-    keychain: &'a crate::provider::keychain::KeychainStore,
-}
-
-/// Read the session's discovery snapshot (ADR-0119 Decision 3) and resolve
-/// its names into prompt fragments (name + description + verbatim body +
-/// whole-file SHA-256) against the registry root, here at the command
-/// boundary where the root lives, so the session stays I/O-free for skill
-/// content (it consumes fragments, mirroring the mcp_servers "data passed in"
-/// pattern). The user's staged invocation names materialize here too
-/// (ADR-0119 Decision 1: the body + hash pin the invocation-time bytes at
-/// the submit boundary). The caller must hold the session lock, so the
-/// snapshot cannot change between this read and the turn. One seam so
-/// neither snapshot read nor the `TurnInputs` field wiring can silently pass
-/// the wrong set (issue #707's wiring pin) -- the black-box tests
-/// hand-assemble their inputs, which left the command body itself
-/// uncovered.
-fn assemble_turn_inputs<'a>(
-    session: &Session,
-    skills_root: &'a Path,
-    agents_root: &'a Path,
-    live: &'a LiveProviderConfig,
-    user_invocation_names: &[String],
-) -> AssembledTurnInputs<'a> {
-    // ADR-0119 Decision 3 (issue #983): the assembly's skill set is the
-    // discovery SNAPSHOT, not the legacy mount fold -- the index lists the
-    // creation-time enabled set wholesale, every turn.
-    let snapshot = session.discovery_snapshot();
-    let skills = resolve_prompt_fragments(skills_root, &snapshot);
-    let disabled_skills: Vec<String> = live.load().disabled_skills.iter().cloned().collect();
-    // The enable axis gates BOTH invocation actors (ADR-0119 Decision 3), so
-    // the user channel filters disabled names at materialization time.
-    let user_invocations =
-        session.materialize_user_invocations(user_invocation_names, skills_root, &disabled_skills);
-    let cli_tools = live.enabled_cli_tools();
-    let delegations = live.delegation_specs(agents_root, skills_root);
-    AssembledTurnInputs {
-        skills,
-        user_invocations,
-        disabled_skills,
-        skills_root,
-        live_config: Some(live),
-        cli_tools,
-        delegations,
-        keychain: live.keychain(),
-    }
-}
-
-impl AssembledTurnInputs<'_> {
-    /// Project the owning buffers (plus the caller's command-level MCP
-    /// servers) into the turn's borrowed input view.
-    fn turn_inputs<'b>(&'b self, mcp_servers: &'b [McpServerConfig]) -> TurnInputs<'b> {
-        TurnInputs {
-            mcp_servers,
-            keychain: self.keychain,
-            skills: &self.skills,
-            user_invocations: &self.user_invocations,
-            disabled_skills: &self.disabled_skills,
-            skills_root: self.skills_root,
-            live_config: self.live_config,
-            cli_tools: &self.cli_tools,
-            delegations: &self.delegations,
-        }
-    }
 }
 
 /// Cancel the named session's in-flight turn (ADR-0021, issue #28). Fires THAT
@@ -4502,22 +4382,6 @@ mod tests {
         );
     }
 
-    /// A minimal CliToolConfig for the turn-assembly projection tests: only
-    /// `name` and `enabled` matter to the assembly seam.
-    fn cli_tool(name: &str, enabled: bool) -> crate::cli_tools::config::CliToolConfig {
-        crate::cli_tools::config::CliToolConfig {
-            name: name.to_string(),
-            description: "does a thing".to_string(),
-            executable: "/bin/tool".to_string(),
-            argv_template: Vec::new(),
-            params: Vec::new(),
-            env: Default::default(),
-            enabled,
-            source: Default::default(),
-            baseline: None,
-        }
-    }
-
     // --- default runtime startup resolution (issue #569, ADR-0098 D2/D3) ----
 
     /// A detected-fn keyed by adapter id: the pure-seam stand-in for the PATH
@@ -6040,189 +5904,6 @@ mod tests {
         assert!(!stale_dir.exists(), "stale orphan should be deleted");
         assert!(target_dir.exists(), "resume target dir must be preserved");
     }
-
-    // --- turn-boundary skill assembly seam (issue #707) -------------------
-
-    /// Write one spec-valid skill directory under `root/<name>/` (the same
-    /// shape the black-box suite writes, kept local to this module).
-    fn put_skill(root: &Path, name: &str, description: &str, body: &str) {
-        let dir = root.join(name);
-        std::fs::create_dir_all(&dir).unwrap();
-        let content = format!("---\nname: {name}\ndescription: {description}\n---\n{body}");
-        std::fs::write(dir.join("SKILL.md"), content).unwrap();
-    }
-
-    /// The wiring pin issue #707 adds (calibrated by ADR-0119, issue #983):
-    /// the seam reads the session's discovery snapshot and wires
-    /// `TurnInputs`'s fields correctly. The black-box tests hand-assemble
-    /// their inputs, so a wrong-set field (e.g. resolving the legacy mount
-    /// fold instead of the snapshot) or `&[]` survived every test before
-    /// this pin.
-    #[test]
-    fn assemble_turn_inputs_pins_the_snapshot_and_field_wiring() {
-        let tmp = tempfile::tempdir().unwrap();
-        let root = tmp.path().to_path_buf();
-        put_skill(&root, "alpha", "Alpha description.", "Alpha body.\n");
-        put_skill(&root, "beta", "Beta description.", "Beta body.\n");
-        put_skill(&root, "gamma", "Gamma description.", "Gamma body.\n");
-
-        let mut session =
-            Session::with_provider(Box::new(crate::UnwiredProvider)).expect("session");
-        // The snapshot is the assembly source (ADR-0119 Decision 3):
-        // materialized at creation, immutable -- here it names two of the
-        // three registry skills (gamma stays out) so a wrong-set wiring
-        // (the full registry, an ad-hoc name list) fails the pin.
-        session.set_discovery_snapshot(vec!["alpha".to_string(), "beta".to_string()]);
-
-        let live = LiveProviderConfig::new(
-            crate::provider::keychain::KeychainStore::new(),
-            tmp.path().join("config.json"),
-        );
-        // The non-empty direction of the CLI wiring (review I1, issue #707):
-        // one enabled registration upserted through the real config path, so
-        // the projection is pinned against `cli_tools: &[]` too -- an
-        // empty-only assert is vacuously satisfied by a missing config. This
-        // also makes `load()` read the temp config file instead of the
-        // missing-config path that would query the OS keychain for the
-        // legacy blob (review C).
-        live.upsert_cli_tool(cli_tool("pandoc-guide", true))
-            .expect("upsert one enabled CLI tool");
-        // The enable axis feeds the turn inputs (review Importants 1-2,
-        // issue #983): gamma is machine-disabled through the real config
-        // path, so the staged set exercises all three halves at once -- the
-        // disabled name rides `disabled_skills`, a disabled stage lands no
-        // record, and a duplicated stage collapses to one.
-        live.set_skill_enabled("gamma", false)
-            .expect("disable gamma on the enable axis");
-        // An empty agents root (issue #933): the delegation scan reads an
-        // absent registry as the legitimate never-created state and lists
-        // nothing, pinning the empty-family projection here too.
-        let agents_tmp = tempfile::tempdir().unwrap();
-        let staged = ["beta".to_string(), "gamma".to_string(), "beta".to_string()];
-        let assembled = assemble_turn_inputs(&session, &root, agents_tmp.path(), &live, &staged);
-        let inputs = assembled.turn_inputs(&[]);
-
-        // The assembly's skill set is the discovery SNAPSHOT, wholesale --
-        // neither the legacy mount fold (gamma absent) nor the activation
-        // subset (beta absent).
-        let names: Vec<&str> = inputs.skills.iter().map(|f| f.name.as_str()).collect();
-        assert_eq!(
-            names,
-            vec!["alpha", "beta"],
-            "skills resolve from the discovery snapshot, not the mount fold or activation subset"
-        );
-        assert_eq!(
-            inputs.skills[0].description, "Alpha description.",
-            "the snapshot's rows carry the frontmatter description"
-        );
-        // The field-wiring half the pin exists for (the #707 mirror-drift
-        // class, restored -- review Important 1): both new fields are
-        // observed, so a seam that wires either one to an empty slice
-        // reddens here, and the disabled stage's empty-body degrade
-        // (review Important 2, #991) reddens on gamma's record shape.
-        assert_eq!(
-            inputs.disabled_skills,
-            &["gamma".to_string()],
-            "the machine-level disabled names ride the turn inputs"
-        );
-        assert_eq!(
-            inputs.user_invocations.len(),
-            2,
-            "one enabled staged name materializes one record (duplicates collapse) and \
-             the disabled stage lands the empty-body degrade (review Important 2, #991)"
-        );
-        assert_eq!(inputs.user_invocations[0].name, "beta");
-        assert_eq!(
-            inputs.user_invocations[0].actor,
-            crate::model::SkillLifecycleActor::User
-        );
-        assert!(
-            !inputs.user_invocations[0].content_hash.is_empty(),
-            "the record pins the invocation-time whole-file hash"
-        );
-        // The disabled stage's honest-degrade record: the name lands (the
-        // badge reads the attempt), the body and hash stay empty -- nothing
-        // enters the context, no drift anchor, no read surface.
-        assert_eq!(inputs.user_invocations[1].name, "gamma");
-        assert_eq!(inputs.user_invocations[1].body, "");
-        assert_eq!(inputs.user_invocations[1].content_hash, "");
-        assert_eq!(
-            inputs.user_invocations[1].actor,
-            crate::model::SkillLifecycleActor::User
-        );
-        // The empty agents registry projects the empty delegation family
-        // (issue #933): a never-created registry is the legitimate state.
-        assert_eq!(
-            inputs.delegations,
-            &[],
-            "an empty agents root lists no delegation specs"
-        );
-
-        // The non-empty direction: one spec-valid definition on disk plus
-        // its enablement set entry project exactly one spec (the enabled
-        // filter and the file scan both have to pass), so an empty-only
-        // assert cannot be vacuously satisfied by a broken scan.
-        std::fs::write(
-            agents_tmp.path().join("analyst.md"),
-            "---
-name: analyst
-description: Open-ended analysis.
----
-You are a focused analyst.
-",
-        )
-        .expect("write agent definition");
-        live.set_agent_enabled("analyst", true)
-            .expect("enable analyst");
-        let assembled = assemble_turn_inputs(&session, &root, agents_tmp.path(), &live, &[]);
-        let inputs = assembled.turn_inputs(&[]);
-        // An empty staging projects zero user invocations; both wire
-        // forms (absent, empty) converge on this slice upstream, at
-        // the ask entry's Option fold (#992).
-        assert!(
-            inputs.user_invocations.is_empty(),
-            "an empty staging materializes no user invocation records"
-        );
-        assert_eq!(inputs.delegations.len(), 1, "the enabled entry projects");
-        assert_eq!(inputs.delegations[0].name, "analyst");
-        assert_eq!(
-            inputs.delegations[0].preamble,
-            "You are a focused analyst.
-"
-        );
-        // Every mounted skill resolves with its description + body verbatim.
-        assert_eq!(inputs.skills.len(), 2, "every mounted skill resolves");
-        let alpha = inputs
-            .skills
-            .iter()
-            .find(|f| f.name == "alpha")
-            .expect("alpha fragment");
-        assert_eq!(alpha.description, "Alpha description.");
-        assert_eq!(alpha.body, "Alpha body.\n");
-        assert!(
-            !alpha.content_hash.is_empty(),
-            "the whole-file hash is recorded"
-        );
-        let beta = inputs
-            .skills
-            .iter()
-            .find(|f| f.name == "beta")
-            .expect("beta fragment");
-        assert_eq!(beta.description, "Beta description.");
-        assert_eq!(beta.body, "Beta body.\n");
-        // The command-level wiring rides the same projection: the enabled
-        // CLI registration flows through (an empty-direction assert alone
-        // could not catch `cli_tools: &[]`), and the empty MCP set
-        // contributes nothing.
-        assert_eq!(
-            inputs.cli_tools.len(),
-            1,
-            "the enabled CLI tool rides the seam"
-        );
-        assert_eq!(inputs.cli_tools[0].name, "pandoc-guide");
-        assert!(inputs.mcp_servers.is_empty());
-    }
-
     // ---- workspace record commands (issue #1392 review) ----
 
     #[test]

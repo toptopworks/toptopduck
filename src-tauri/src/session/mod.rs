@@ -24,6 +24,7 @@ pub mod skills;
 pub mod snapshot;
 pub mod source_lifecycle;
 pub(crate) mod turn_dispatch;
+pub mod turn_entry;
 pub mod turn_runner;
 pub(crate) mod workspace;
 pub(crate) mod workspace_tools;
@@ -75,6 +76,12 @@ pub use resume::{is_resuming, resuming_count};
 // pub-module-plus-re-export dual path `resume` already rides, keeping
 // `session::TurnInputs` stable for its existing consumers.
 pub use turn_runner::TurnInputs;
+
+// Re-export the turn entry's parameter pair (issue #1414) on the same
+// pub-module-plus-re-export dual path `resume` and `turn_runner` above
+// already ride, keeping `session::TurnDeps` / `session::TurnPorts`
+// stable for the rig that consumes them.
+pub use turn_entry::{TurnDeps, TurnPorts};
 
 /// The subdirectory name under the session temp dir where external MCP tools
 /// write their output files (ADR-0087 Decision 3), and where the CLI executor

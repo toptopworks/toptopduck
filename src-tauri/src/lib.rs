@@ -82,7 +82,7 @@ pub use provider::{LiveProvider, Provider, ProviderError, UnwiredProvider};
 pub use session::{
     is_resuming, ActiveAbandoned, ActiveResolution, PendingConflict, RenameSessionError,
     ResumeError, ResumeEvent, ResumeProgress, Session, SourceIssue, SourceNotice, SourceResolution,
-    TurnInputs,
+    TurnDeps, TurnInputs, TurnPorts,
 };
 pub use session_store::{
     ClosingFlag, LiveSessionSnapshot, SessionError, SessionHandle, SessionId, SessionStore,
