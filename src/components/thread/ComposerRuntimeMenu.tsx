@@ -268,7 +268,7 @@ export function ComposerRuntimeMenu({
       <button
         type="button"
         onClick={onManageRuntimes}
-        className="inline-flex items-center gap-0.5 justify-self-end text-xs text-muted-foreground hover:text-foreground transition-colors cursor-pointer"
+        className="inline-flex items-center gap-0.5 justify-self-end text-xs text-muted-foreground hover:text-foreground transition-colors"
       >
         <FormattedMessage
           id="composer.runtimePicker.manageRuntimes"
@@ -300,7 +300,7 @@ function RuntimeGroupRow({
       disabled={disabled}
       onClick={onClick}
       aria-pressed={selected}
-      className="flex items-center gap-2 rounded-md px-2 py-1.5 text-sm font-medium cursor-pointer hover:bg-muted disabled:pointer-events-none disabled:opacity-50"
+      className="flex items-center gap-2 rounded-md px-2 py-1.5 text-sm font-medium hover:bg-muted disabled:pointer-events-none disabled:opacity-50"
     >
       <RuntimeDot selected={selected} />
       {children}

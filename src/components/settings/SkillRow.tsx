@@ -84,7 +84,7 @@ export function SkillRow({
             onOpen();
           }
         }}
-        className="min-w-0 flex-1 cursor-pointer outline-none focus-visible:outline-ring focus-visible:outline-2 focus-visible:outline-offset-2"
+        className="min-w-0 flex-1 outline-none focus-visible:outline-ring focus-visible:outline-2 focus-visible:outline-offset-2"
       >
         <div className="flex items-center gap-2">
           <span className="truncate text-sm font-medium">{skill.name}</span>

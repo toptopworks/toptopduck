@@ -97,6 +97,7 @@ export function PrivacyControls({ dataset, loading, onPrivacyChange }: PrivacyCo
       <label className="privacy-samples flex items-center gap-1.5 text-sm">
         <input
           type="checkbox"
+          className="cursor-pointer"
           checked={privacy.send_samples}
           disabled={loading}
           onChange={toggleSamples}
@@ -142,6 +143,7 @@ export function PrivacyControls({ dataset, loading, onPrivacyChange }: PrivacyCo
               <TableCell className="w-[1%] whitespace-nowrap text-center">
                 <input
                   type="checkbox"
+                  className="cursor-pointer"
                   checked={typeOnly.has(c.name)}
                   disabled={loading}
                   onChange={() => toggleColumn(c.name)}

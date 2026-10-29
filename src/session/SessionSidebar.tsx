@@ -395,7 +395,7 @@ export function SessionSidebar({
               type="button"
               aria-expanded={!collapsed}
               onClick={() => toggleSection(section.key)}
-              className="flex w-full cursor-pointer items-center gap-0.5 rounded text-left focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring"
+              className="flex w-full items-center gap-0.5 rounded text-left focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring"
             >
               <span className="truncate">{section.title}</span>
               <span className="shrink-0 tabular-nums">({section.entries.length})</span>
@@ -472,7 +472,7 @@ export function SessionSidebar({
           type="button"
           disabled={disabled}
           onClick={onOpenSearch}
-          className="sidebar-search-button inline-flex size-7 cursor-pointer items-center justify-center rounded-full text-muted-foreground hover:bg-accent hover:text-foreground focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring disabled:cursor-progress disabled:opacity-50"
+          className="sidebar-search-button inline-flex size-7 items-center justify-center rounded-full text-muted-foreground hover:bg-accent hover:text-foreground focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring disabled:cursor-progress disabled:opacity-50"
           aria-label={intl.formatMessage({
             id: "sidebar.search.ariaLabel",
             defaultMessage: "Search sessions",
@@ -483,7 +483,7 @@ export function SessionSidebar({
       </header>
       <button
         type="button"
-        className="sidebar-new-button mb-2 flex w-full cursor-pointer items-center gap-1.5 rounded-md bg-secondary p-2 text-sm text-secondary-foreground hover:bg-accent disabled:opacity-60 disabled:cursor-progress"
+        className="sidebar-new-button mb-2 flex w-full items-center gap-1.5 rounded-md bg-secondary p-2 text-sm text-secondary-foreground hover:bg-accent disabled:opacity-60 disabled:cursor-progress"
         disabled={disabled}
         onClick={onNew}
       >
@@ -555,7 +555,7 @@ function ArchivedToggle({
         <button
           type="button"
           className={cn(
-            `sidebar-archived-toggle ${bareButtonReset} cursor-pointer rounded-md p-1 text-muted-foreground`,
+            `sidebar-archived-toggle ${bareButtonReset} rounded-md p-1 text-muted-foreground`,
             "opacity-0 transition-opacity group-hover:opacity-100 focus-visible:opacity-100",
             "aria-pressed:opacity-100 aria-pressed:text-foreground",
             "hover:bg-accent hover:text-foreground",
@@ -685,7 +685,7 @@ function SidebarRow({
               // tail, so a button-level :hover would drop the background the
               // moment the cursor reaches the pill (same posture as
               // WorkingSetList's row-level hover:bg-accent).
-              !archived && "cursor-pointer disabled:cursor-progress",
+              !archived && "disabled:cursor-progress",
               archived && "cursor-default text-muted-foreground",
               entry.active && "text-accent-foreground",
             )}

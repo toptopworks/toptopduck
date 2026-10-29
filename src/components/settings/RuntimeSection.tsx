@@ -206,7 +206,7 @@ function TabButton({
       onClick={onClick}
       className={cn(
         bareButtonReset,
-        "rounded-md px-3 py-1.5 text-sm font-medium transition-colors cursor-pointer",
+        "rounded-md px-3 py-1.5 text-sm font-medium transition-colors",
         "focus-visible:outline-ring focus-visible:outline-2 focus-visible:outline-offset-2",
         active
           ? "bg-background text-foreground shadow-sm"

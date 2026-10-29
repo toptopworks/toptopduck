@@ -89,12 +89,12 @@ const PILL_TRIGGER_CLASS = `session-row-action ${bareButtonReset} flex size-7 it
 /** The section head's action buttons (expand/collapse-all + the create
  *  entry): the ArchivedToggle posture -- hover-revealed, focus-visible
  *  kept, busy-dimmed. */
-const HEAD_ACTION_CLASS = `sidebar-archived-toggle ${bareButtonReset} cursor-pointer rounded-md p-1 text-muted-foreground opacity-0 transition-opacity group-hover:opacity-100 focus-visible:opacity-100 hover:bg-accent hover:text-foreground focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring disabled:cursor-progress disabled:opacity-50`;
+const HEAD_ACTION_CLASS = `sidebar-archived-toggle ${bareButtonReset} rounded-md p-1 text-muted-foreground opacity-0 transition-opacity group-hover:opacity-100 focus-visible:opacity-100 hover:bg-accent hover:text-foreground focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring disabled:cursor-progress disabled:opacity-50`;
 
 /** The "Show more (N)" tail button, shared with the parent's section
  *  renderer (the recent body mounts its own instances). */
 export const SHOW_MORE_CLASS =
-  "flex w-full cursor-pointer items-center rounded-sm px-2 py-1.5 text-left text-xs text-muted-foreground hover:text-foreground focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring";
+  "flex w-full items-center rounded-sm px-2 py-1.5 text-left text-xs text-muted-foreground hover:text-foreground focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring";
 
 export type WorkspaceSidebarSectionProps = {
   /** The explicit registry groups, server (LRU) order. */
@@ -340,7 +340,7 @@ export function WorkspaceSidebarSection({
             type="button"
             aria-expanded={!collapsed}
             onClick={onToggleCollapsed}
-            className="flex w-full cursor-pointer items-center gap-0.5 rounded text-left focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring"
+            className="flex w-full items-center gap-0.5 rounded text-left focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring"
           >
             <span className="truncate">
               <FormattedMessage id="sidebar.group.workspaces" defaultMessage="Workspaces" />
@@ -428,7 +428,7 @@ export function WorkspaceSidebarSection({
                     type="button"
                     aria-expanded={open}
                     onClick={() => toggleGroup(g.path)}
-                    className="flex min-w-0 flex-1 cursor-pointer items-center gap-1.5 py-1.5 pl-1.5 pr-2 text-left text-sm text-foreground"
+                    className="flex min-w-0 flex-1 items-center gap-1.5 py-1.5 pl-1.5 pr-2 text-left text-sm text-foreground"
                   >
                     {open ? (
                       <FolderOpen className="size-4 shrink-0 text-muted-foreground" aria-hidden />

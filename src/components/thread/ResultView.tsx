@@ -31,7 +31,7 @@ const DEFAULT_PAGE_SIZE = 100;
 // padding / font snap to the Tailwind scale per ADR-0067 (2), matching the
 // workspace tab buttons.
 const PAGE_BTN =
-  "px-3 py-1.5 cursor-pointer text-sm border border-border bg-card rounded-md disabled:opacity-50 disabled:cursor-progress";
+  "px-3 py-1.5 text-sm border border-border bg-card rounded-md disabled:opacity-50 disabled:cursor-progress";
 
 // Numeric column header + cell chrome (issue #222): the .num hook stays for
 // selector / test stability; text-right right-aligns per ADR-0057; tabular-nums

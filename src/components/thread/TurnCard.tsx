@@ -503,7 +503,7 @@ function TurnBody({
             <button
               type="button"
               className={cn(
-                "result-link appearance-none bg-transparent cursor-pointer inline-block max-w-full text-primary",
+                "result-link appearance-none bg-transparent inline-block max-w-full text-primary",
                 "px-1.5 py-0.5 rounded-md border border-transparent",
                 "hover:bg-accent",
                 active && "active font-semibold border-primary",
