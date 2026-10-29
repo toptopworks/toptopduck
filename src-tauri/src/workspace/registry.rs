@@ -71,10 +71,9 @@ impl WorkspaceRecord {
 }
 
 /// The untitled display fallback: the directory tail, or the whole path
-/// when it has no final component. Shared by the record face, the
-/// registry's label lookup, and the tray's no-registry fallback (issue
-/// #1430) so the faces cannot drift.
-pub(crate) fn directory_tail(path: &Path) -> String {
+/// when it has no final component. Shared by the record face and the
+/// registry's label lookup so the faces cannot drift.
+fn directory_tail(path: &Path) -> String {
     path.file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_else(|| path.display().to_string())
@@ -163,6 +162,19 @@ impl WorkspaceRegistry {
             .find(|r| r.path == canonical)
             .map(|r| r.label())
             .unwrap_or_else(|| directory_tail(canonical))
+    }
+
+    /// The tray-suffix projection (issue #1432): `Some(label)` only for an
+    /// EXPLICIT record -- the same records the sidebar's workspace section
+    /// shows (issue #1392's filter), so the two faces cannot drift. A
+    /// lazily-minted default workspace (implicit, untitled) and an unrecorded
+    /// directory return `None`: their directory tail is a machine timestamp
+    /// (or a path the user never bound), not a face worth showing.
+    pub fn explicit_label_of(&self, canonical: &Path) -> Option<String> {
+        self.load()
+            .into_iter()
+            .find(|r| r.path == canonical && r.explicit)
+            .map(|r| r.label())
     }
 
     /// The rename surface (issue #1392): overwrites the record's `title` in
@@ -541,9 +553,50 @@ mod tests {
         assert_eq!(titled.label(), "Renamed", "an explicit title wins");
     }
 
+    #[test]
+    fn explicit_label_of_returns_the_section_face_for_explicit_records() {
+        // The tray-suffix projection (issue #1432): an explicit record
+        // carries the section's face -- the title when set, the directory
+        // tail when the user selected a directory without naming it.
+        let root = tempfile::tempdir().expect("tempdir");
+        let reg = registry(&root);
+        let named = dir_under(root.path(), "alpha");
+        reg.record_titled(&named, "Alpha").expect("record");
+        let selected = dir_under(root.path(), "my-project");
+        reg.record_selected(&selected);
+        assert_eq!(reg.explicit_label_of(&named), Some("Alpha".into()));
+        assert_eq!(
+            reg.explicit_label_of(&selected),
+            Some("my-project".into()),
+            "an explicit selection without a title falls back to the tail"
+        );
+    }
+
+    #[test]
+    fn explicit_label_of_is_none_for_implicit_and_unrecorded_paths() {
+        // The bug this pins (issue #1432): a lazily-minted workspace
+        // (implicit, untitled -- a machine-stamped directory) and a never-
+        // recorded directory carry no tray suffix; `label_of`'s unconditional
+        // tail fallback showed the timestamp as if it were a face.
+        let root = tempfile::tempdir().expect("tempdir");
+        let reg = registry(&root);
+        let minted = dir_under(root.path(), "2026-10-29-15-48-00");
+        reg.record_at(&minted, None, false, 1_000).expect("record");
+        assert_eq!(
+            reg.explicit_label_of(&minted),
+            None,
+            "an implicit lazily-minted workspace has no face"
+        );
+        assert_eq!(
+            reg.explicit_label_of(&dir_under(root.path(), "never-recorded")),
+            None,
+            "an unrecorded directory has no face"
+        );
+    }
+
     /// A path with no final component (a root, or a degenerate empty
-    /// string) falls back to the whole path -- never an empty label. The
-    /// tray's no-registry fallback reaches this arm (issue #1430).
+    /// string) falls back to the whole path -- never an empty label.
+    /// `label_of`'s unrecorded-directory miss reaches this arm.
     #[test]
     fn the_tail_falls_back_to_the_whole_path_without_a_final_component() {
         assert_eq!(directory_tail(Path::new("/")), "/");
