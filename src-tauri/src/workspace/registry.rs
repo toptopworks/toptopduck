@@ -71,9 +71,10 @@ impl WorkspaceRecord {
 }
 
 /// The untitled display fallback: the directory tail, or the whole path
-/// when it has no final component. Shared by the record face and the
-/// registry's label lookup so the two cannot drift.
-fn directory_tail(path: &Path) -> String {
+/// when it has no final component. Shared by the record face, the
+/// registry's label lookup, and the tray's no-registry fallback (issue
+/// #1430) so the faces cannot drift.
+pub(crate) fn directory_tail(path: &Path) -> String {
     path.file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_else(|| path.display().to_string())

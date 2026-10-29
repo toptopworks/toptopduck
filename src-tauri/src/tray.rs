@@ -47,6 +47,7 @@
 //! sys-locale exactly like the Rust-side response-locale directive (the
 //! frontend never pushes locale over IPC).
 
+use std::path::Path;
 use std::time::{Duration, Instant};
 
 use tauri::menu::IsMenuItem;
@@ -57,6 +58,7 @@ use crate::persistence::{scan_sessions_dir, SessionMetadata, SessionsRoot};
 use crate::provider::keychain::ProviderConfigSource;
 use crate::provider::live_config::LiveProviderConfig;
 use crate::provider::prompt::ResponseLocale;
+use crate::workspace::{directory_tail, WorkspaceRegistry};
 
 /// The tray's registered id; the rebuild path re-resolves the tray by it.
 const TRAY_ID: &str = "main-tray";
@@ -174,6 +176,18 @@ fn session_label<'a>(m: &'a SessionMetadata, texts: &'a TrayTexts) -> &'a str {
     }
 }
 
+/// The workspace suffix for one session row (issue #1430): the registry's
+/// `label_of` projection when the state is live -- title first, directory
+/// tail fallback, the SAME face the sidebar's workspace section shows --
+/// and the tail alone when no registry is managed. The tray never fails to
+/// build over a label, and never copies the derivation.
+fn workspace_label(registry: Option<&WorkspaceRegistry>, workspace: &str) -> String {
+    match registry {
+        Some(reg) => reg.label_of(Path::new(workspace)),
+        None => directory_tail(Path::new(workspace)),
+    }
+}
+
 /// What a tray menu click asks for, parsed back out of the menu item id.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum TrayAction {
@@ -234,10 +248,16 @@ enum MenuEntry {
 /// sessions, window actions, and the exit -- so the eye can parse the
 /// groups without reading every label. The submenu is omitted entirely when
 /// there is nothing to hold (Decision 3: an empty submenu renders as a
-/// dead-end item on some platforms). Pure so the assembly -- order,
-/// omission, disabled header, separators, fixed entries -- is pinnable
-/// without an app handle.
-fn plan_menu(metas: &[SessionMetadata], texts: &TrayTexts) -> Vec<MenuEntry> {
+/// dead-end item on some platforms). A bound workspace suffixes its row
+/// `name - workspace` (issue #1430); the workspace label projection rides
+/// in as a closure so the plan stays pure -- pinnable without an app
+/// handle or a registry -- while the assembly (order, omission, disabled
+/// header, separators, fixed entries) stays in ONE place.
+fn plan_menu(
+    metas: &[SessionMetadata],
+    texts: &TrayTexts,
+    ws_label: &dyn Fn(&str) -> String,
+) -> Vec<MenuEntry> {
     fn row(id: String, text: &str, enabled: bool) -> MenuRow {
         MenuRow {
             id,
@@ -245,10 +265,21 @@ fn plan_menu(metas: &[SessionMetadata], texts: &TrayTexts) -> Vec<MenuEntry> {
             enabled,
         }
     }
-    fn session_row(m: &SessionMetadata, texts: &TrayTexts) -> MenuRow {
+    fn session_row(
+        m: &SessionMetadata,
+        texts: &TrayTexts,
+        ws_label: &dyn Fn(&str) -> String,
+    ) -> MenuRow {
+        let name = session_label(m, texts);
+        // The separator is a literal, not a catalog entry: it is
+        // punctuation, not words (issue #1430).
+        let text = match &m.workspace {
+            Some(ws) => format!("{name} - {}", ws_label(ws)),
+            None => name.to_string(),
+        };
         row(
             format!("{ID_SESSION_PREFIX}{}", m.recipe_path.as_str()),
-            session_label(m, texts),
+            &text,
             true,
         )
     }
@@ -260,11 +291,18 @@ fn plan_menu(metas: &[SessionMetadata], texts: &TrayTexts) -> Vec<MenuEntry> {
         texts.recent_header,
         false,
     )));
-    entries.extend(recent.iter().map(|m| MenuEntry::Row(session_row(m, texts))));
+    entries.extend(
+        recent
+            .iter()
+            .map(|m| MenuEntry::Row(session_row(m, texts, ws_label))),
+    );
     if !more.is_empty() {
         entries.push(MenuEntry::More {
             title: texts.more.to_string(),
-            children: more.iter().map(|m| session_row(m, texts)).collect(),
+            children: more
+                .iter()
+                .map(|m| session_row(m, texts, ws_label))
+                .collect(),
         });
     }
     entries.push(MenuEntry::Separator);
@@ -291,6 +329,14 @@ fn build_menu(
     metas: &[SessionMetadata],
     texts: &TrayTexts,
 ) -> tauri::Result<tauri::menu::Menu<tauri::Wry>> {
+    // Resolve the registry ONCE per build: every session row consults the
+    // projection, and one Arc clone beats a per-row state lookup (issue
+    // #1430). A missing state degrades to the tail-only fallback inside
+    // [`workspace_label`] -- the menu still builds.
+    let registry: Option<std::sync::Arc<WorkspaceRegistry>> = app
+        .try_state::<std::sync::Arc<WorkspaceRegistry>>()
+        .map(|s| s.inner().clone());
+    let ws_label = move |ws: &str| workspace_label(registry.as_deref(), ws);
     let materialize = |rows: &[MenuRow]| -> tauri::Result<Vec<Box<dyn IsMenuItem<tauri::Wry>>>> {
         let mut out: Vec<Box<dyn IsMenuItem<tauri::Wry>>> = Vec::with_capacity(rows.len());
         for r in rows {
@@ -301,7 +347,7 @@ fn build_menu(
         Ok(out)
     };
     let mut items: Vec<Box<dyn IsMenuItem<tauri::Wry>>> = Vec::new();
-    for entry in &plan_menu(metas, texts) {
+    for entry in &plan_menu(metas, texts, &ws_label) {
         match entry {
             MenuEntry::Row(r) => items.extend(materialize(std::slice::from_ref(r))?),
             MenuEntry::Separator => {
@@ -648,6 +694,14 @@ mod tests {
     /// Test-only token for a separator slot in the plan kind assertions.
     const SEP: &str = "--";
 
+    /// Test workspace projection: echoes its input so an assertion also pins
+    /// WHICH workspace string the plan handed it. Unbound rows never consult
+    /// it -- an accidental unconditional consult surfaces as a visible
+    /// ` - ws#...` suffix and fails the plain-name assertions.
+    fn ws_echo(ws: &str) -> String {
+        format!("ws#{ws}")
+    }
+
     // --- texts_for (whole-table per locale, issue #1144) --------------------
 
     /// Whole-table equality against independently spelled expectations, not a
@@ -900,7 +954,7 @@ mod tests {
         let metas: Vec<_> = (0..4)
             .map(|i| meta(&format!("s{i}.recipe.json"), "n"))
             .collect();
-        let plan = plan_menu(&metas, &texts_for(ResponseLocale::EnUS));
+        let plan = plan_menu(&metas, &texts_for(ResponseLocale::EnUS), &ws_echo);
         let rows: Vec<(&str, &str, bool)> = plan
             .iter()
             .filter_map(|e| match e {
@@ -940,13 +994,13 @@ mod tests {
         let metas: Vec<_> = (0..3)
             .map(|i| meta(&format!("s{i}.recipe.json"), "n"))
             .collect();
-        let plan = plan_menu(&metas, &texts_for(ResponseLocale::ZhCN));
+        let plan = plan_menu(&metas, &texts_for(ResponseLocale::ZhCN), &ws_echo);
         assert!(plan.iter().all(|e| !matches!(e, MenuEntry::More { .. })));
         // With no sessions at all the header + the three fixed actions
         // plus the two zone separators remain, in layout order -- the
         // empty tray still offers new/open/quit, with no doubled
         // separator anywhere.
-        let plan = plan_menu(&[], &texts_for(ResponseLocale::ZhCN));
+        let plan = plan_menu(&[], &texts_for(ResponseLocale::ZhCN), &ws_echo);
         let kinds: Vec<&str> = plan
             .iter()
             .map(|e| match e {
@@ -975,7 +1029,7 @@ mod tests {
         let metas: Vec<_> = (0..4)
             .map(|i| meta(&format!("s{i}.recipe.json"), "n"))
             .collect();
-        let plan = plan_menu(&metas, &texts_for(ResponseLocale::EnUS));
+        let plan = plan_menu(&metas, &texts_for(ResponseLocale::EnUS), &ws_echo);
         let kinds: Vec<&str> = plan
             .iter()
             .map(|e| match e {
@@ -999,6 +1053,86 @@ mod tests {
                 ID_QUIT,
             ]
         );
+    }
+
+    // --- workspace suffix (issue #1430) --------------------------------------
+
+    #[test]
+    fn plan_suffixes_workspace_bound_rows_top_level_and_more() {
+        // Both menu faces carry the SAME `name - workspace` shape: the
+        // top-level recent rows and the "more" submenu children.
+        let bound = |path: &str, ws: &str| SessionMetadata {
+            workspace: Some(ws.into()),
+            ..meta(path, "n")
+        };
+        let metas = vec![
+            bound("s0.recipe.json", "C:\\ws\\alpha"),
+            meta("s1.recipe.json", "n"),
+            meta("s2.recipe.json", "n"),
+            bound("s3.recipe.json", "C:\\ws\\beta"),
+        ];
+        let plan = plan_menu(&metas, &texts_for(ResponseLocale::EnUS), &ws_echo);
+        match &plan[1] {
+            MenuEntry::Row(r) => assert_eq!(r.text, "n - ws#C:\\ws\\alpha"),
+            other => panic!("expected a row at index 1, got {other:?}"),
+        }
+        match &plan[4] {
+            MenuEntry::More { children, .. } => assert_eq!(
+                children.iter().map(|c| c.text.as_str()).collect::<Vec<_>>(),
+                vec!["n - ws#C:\\ws\\beta"]
+            ),
+            other => panic!("expected the more submenu at index 4, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn plan_leaves_unbound_rows_untouched() {
+        // `workspace: None` (never a disk-need moment, or a pre-field
+        // recipe): the row is the plain session name -- no suffix, no
+        // separator.
+        let metas: Vec<_> = (0..3)
+            .map(|i| meta(&format!("s{i}.recipe.json"), "n"))
+            .collect();
+        let plan = plan_menu(&metas, &texts_for(ResponseLocale::EnUS), &ws_echo);
+        let texts: Vec<&str> = plan
+            .iter()
+            .filter_map(|e| match e {
+                MenuEntry::Row(r) if r.id.starts_with(ID_SESSION_PREFIX) => Some(r.text.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(texts, vec!["n", "n", "n"]);
+    }
+
+    #[test]
+    fn plan_suffixes_the_unnamed_fallback() {
+        // A blank display name does not dodge the join: the localized
+        // "unnamed" string participates like any name.
+        let metas = vec![SessionMetadata {
+            workspace: Some("C:\\ws\\alpha".into()),
+            ..meta("a.recipe.json", "")
+        }];
+        let plan = plan_menu(&metas, &texts_for(ResponseLocale::ZhCN), &|_| "甲".into());
+        match &plan[1] {
+            MenuEntry::Row(r) => assert_eq!(r.text, "未命名会话 - 甲"),
+            other => panic!("expected a row at index 1, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn workspace_label_uses_the_registry_projection_when_present() {
+        // Registry live: the suffix is the record's title -- the sidebar's
+        // same title-first face -- reached through the real write path.
+        // `tempdir` (the registry tests' fixture) cleans up even on a
+        // failed assertion -- no hand-rolled pid-stitched path.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let reg = WorkspaceRegistry::new(dir.path().join(crate::workspace::WORKSPACES_FILE_NAME));
+        reg.record_titled(Path::new("C:\\ws\\alpha"), "Alpha")
+            .expect("record");
+        assert_eq!(workspace_label(Some(&reg), "C:\\ws\\alpha"), "Alpha");
+        // No registry managed: the directory tail alone carries the row --
+        // the tray never fails to build over a label.
+        assert_eq!(workspace_label(None, "C:\\ws\\alpha"), "alpha");
     }
 
     // --- plan_tray_event (rebuild trigger stays off the right click) ------
