@@ -248,7 +248,8 @@ enum MenuEntry {
 /// groups without reading every label. The submenu is omitted entirely when
 /// there is nothing to hold (Decision 3: an empty submenu renders as a
 /// dead-end item on some platforms). A bound workspace suffixes its row
-/// `name - workspace` (issue #1430); the workspace label projection rides
+/// `name - workspace` only when the projection yields a face (issues
+/// #1430 and #1432); the label projection rides
 /// in as a closure so the plan stays pure -- pinnable without an app
 /// handle or a registry -- while the assembly (order, omission, disabled
 /// header, separators, fixed entries) stays in ONE place.
@@ -332,8 +333,8 @@ fn build_menu(
 ) -> tauri::Result<tauri::menu::Menu<tauri::Wry>> {
     // Resolve the registry ONCE per build: every session row consults the
     // projection, and one Arc clone beats a per-row state lookup (issue
-    // #1430). A missing state degrades to the tail-only fallback inside
-    // [`workspace_label`] -- the menu still builds.
+    // #1430). A missing state yields no suffix inside [`workspace_label`]
+    // -- the menu still builds.
     let registry: Option<std::sync::Arc<WorkspaceRegistry>> = app
         .try_state::<std::sync::Arc<WorkspaceRegistry>>()
         .map(|s| s.inner().clone());
@@ -1146,9 +1147,10 @@ mod tests {
         // Registry live: the suffix is the EXPLICIT record's label -- the
         // sidebar section's same face -- reached through the real write
         // paths. A lazily-minted record (implicit, untitled) and an
-        // unrecorded directory carry no suffix: their directory tail is a
-        // machine timestamp, not a face (issue #1432). `tempdir` (the
-        // registry tests' fixture) cleans up even on a failed assertion.
+        // unrecorded directory carry no suffix: the minted tail is a
+        // machine timestamp, and the unbound path is one the user never
+        // chose as a face (issue #1432). `tempdir` (the registry tests'
+        // fixture) cleans up even on a failed assertion.
         let dir = tempfile::tempdir().expect("tempdir");
         let reg = WorkspaceRegistry::new(dir.path().join(crate::workspace::WORKSPACES_FILE_NAME));
         // Slash spellings keep Path::file_name platform-neutral: the suite
