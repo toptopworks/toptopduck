@@ -101,10 +101,8 @@ export function RowActionsMenu({
             e.stopPropagation();
           }}
           className={cn(
-            // No cursor-pointer: the pill's icons keep the default arrow
-            // (the WorkingSetList ICON_BUTTON_BASE posture, mirrored inline
-            // -- the constant is not exported; on the accent pill, color
-            // alone marks the hot icon).
+            // The hand rides the app.css base rule (button:not(:disabled));
+            // no per-site cursor class -- the arrow is the declared exception.
             `session-row-action ${bareButtonReset} flex size-7 items-center justify-center rounded-md text-muted-foreground`,
             "transition-colors hover:text-foreground focus-visible:text-foreground",
             "focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring",

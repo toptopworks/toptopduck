@@ -610,7 +610,7 @@ export function SessionPane({ sessionId, isActive, pendingIngestPaths, onIngestC
               aria-controls={resultPanelId}
               tabIndex={tab === "result" ? 0 : -1}
               className={cn(
-                "px-3 py-1.5 cursor-pointer text-sm border-b-2 border-b-transparent text-muted-foreground",
+                "px-3 py-1.5 text-sm border-b-2 border-b-transparent text-muted-foreground",
                 tab === "result" && "active text-primary border-b-primary font-semibold",
               )}
               onClick={() => setTab("result")}
@@ -625,7 +625,7 @@ export function SessionPane({ sessionId, isActive, pendingIngestPaths, onIngestC
               aria-controls={workingSetPanelId}
               tabIndex={tab === "workingSet" ? 0 : -1}
               className={cn(
-                "px-3 py-1.5 cursor-pointer text-sm border-b-2 border-b-transparent text-muted-foreground",
+                "px-3 py-1.5 text-sm border-b-2 border-b-transparent text-muted-foreground",
                 tab === "workingSet" && "active text-primary border-b-primary font-semibold",
               )}
               onClick={() => setTab("workingSet")}
@@ -792,7 +792,7 @@ export function SessionPane({ sessionId, isActive, pendingIngestPaths, onIngestC
             type="button"
             variant="outline"
             size="icon"
-            className="rail-follow-pill size-8 cursor-pointer rounded-full shadow-md"
+            className="rail-follow-pill size-8 rounded-full shadow-md"
             aria-label="Jump to latest"
             onClick={scrollToBottom}
           >

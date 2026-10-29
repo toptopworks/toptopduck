@@ -62,7 +62,7 @@ const RECENT_LIMIT = 10;
  *  fixed-actions wrapper inset it, with the permanent gutter completing the
  *  right side inside the band. */
 const ENTRY_CLASS =
-  "flex w-full cursor-pointer items-center gap-2 rounded-sm px-2 py-1.5 text-sm outline-none hover:bg-accent/50 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring";
+  "flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-sm outline-none hover:bg-accent/50 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring";
 
 /** The shell-held pending selection: the directory to bind at the next
  *  mint, plus its display label (the browse face derives the tail here --
@@ -198,7 +198,7 @@ export function ComposerWorkspacePicker({
             // the workspace's label itself (vs the "Select workspace"
             // prompt) marks that the selection is set.
             className={cn(
-              "inline-flex h-8 items-center gap-1.5 rounded-md px-2 text-sm text-muted-foreground transition-colors cursor-pointer hover:text-foreground",
+              "inline-flex h-8 items-center gap-1.5 rounded-md px-2 text-sm text-muted-foreground transition-colors hover:text-foreground",
               LABEL_HIDE_NARROW,
             )}
           >

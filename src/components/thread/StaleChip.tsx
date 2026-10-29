@@ -37,7 +37,7 @@ export function StaleChip({
       variant="secondary"
       asChild
       className={cn(
-        "stale-chip ml-1 cursor-pointer",
+        "stale-chip ml-1 ",
         "enabled:hover:bg-muted disabled:cursor-not-allowed disabled:opacity-[0.55]",
       )}
     >

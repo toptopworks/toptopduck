@@ -40,7 +40,7 @@ const PANEL_CLASS =
   "absolute bottom-full left-0 z-40 mb-2 grid w-full gap-0.5 overflow-hidden rounded-md border border-border bg-popover p-1 shadow-md";
 const LIST_CLASS = "grid max-h-60 min-h-0 gap-0.5 overflow-y-auto pr-0.5";
 const ROW_CLASS =
-  "flex min-w-0 cursor-pointer items-center gap-2 rounded-md px-2 py-1.5 text-sm outline-none";
+  "flex min-w-0 items-center gap-2 rounded-md px-2 py-1.5 text-sm outline-none";
 const NOTE_CLASS = "text-muted-foreground px-2 py-2 text-xs";
 
 export type SkillPickerPanelProps = {

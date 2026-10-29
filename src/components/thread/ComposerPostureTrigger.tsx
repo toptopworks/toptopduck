@@ -204,7 +204,7 @@ export function ComposerPostureTrigger({
       type="button"
       disabled={disabled}
       aria-label={ariaLabel}
-      className="composer-posture-trigger inline-flex h-9 max-w-52 min-w-0 items-center gap-1 rounded-md border border-border bg-card px-2.5 text-sm text-foreground transition-colors hover:bg-muted cursor-pointer disabled:pointer-events-none disabled:opacity-50"
+      className="composer-posture-trigger inline-flex h-9 max-w-52 min-w-0 items-center gap-1 rounded-md border border-border bg-card px-2.5 text-sm text-foreground transition-colors hover:bg-muted disabled:pointer-events-none disabled:opacity-50"
     >
       {/* Hides the posture label when the question-bar @container
           drops below the narrow-rail threshold, leaving the
@@ -308,7 +308,7 @@ function ProbeCatalogInfoIcon() {
             id: "composer.runtimePicker.catalogFromProbeAria",
             defaultMessage: "Catalog source explanation",
           })}
-          className="text-muted-foreground mr-1 flex shrink-0 cursor-default"
+          className="text-muted-foreground mr-1 flex shrink-0"
         >
           <Info className="size-3.5" aria-hidden />
         </button>

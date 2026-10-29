@@ -37,13 +37,9 @@ import type { DatasetDescriptor } from "../../types/dataset";
 // residual visual contract is re-stated here: strip the native border +
 // appearance and set the var(--radius) corner. Issue #790 splits the former
 // single full-width constant into the two row shapes below (select + icon).
-// The cursor splits with them: the select button carries the hand (its click
-// IS the row's selection -- the honest affordance), while the icon strip
-// keeps the default arrow (the #790 decision: the pill's glyphs signal by
-// color, not cursor). The pointer does switch cursors where the pill meets
-// the button's tail -- accepted with the hand ruling; the button's body is
-// one continuous hand either side of that edge (the label's native title
-// never touches the cursor, so the old text-vs-everywhere flip is gone).
+// Both shapes take the app.css base hand (button:not(:disabled)) with no
+// per-shape cursor class -- the hand is the default, and where the pill
+// overlaps the select button's tail the cursor stays one continuous hand.
 const BUTTON_CHROME = "appearance-none border-0 rounded-md";
 // The select button: fills the row's leftover width (flex-1 + min-w-0 so the
 // label can truncate inside), compact padding, left alignment (UA button text
@@ -51,7 +47,7 @@ const BUTTON_CHROME = "appearance-none border-0 rounded-md";
 // cn() at the call site. The selection band and the hover tint are NOT here:
 // both live on the row <li> (see DatasetRow) so the pointer anywhere on the
 // row -- the action pill included -- lights the same full-height band.
-const SELECT_BUTTON_BASE = `${BUTTON_CHROME} p-[0.4rem_0.5rem] flex-1 min-w-0 flex items-center gap-1 text-left cursor-pointer`;
+const SELECT_BUTTON_BASE = `${BUTTON_CHROME} p-[0.4rem_0.5rem] flex-1 min-w-0 flex items-center gap-1 text-left`;
 // The row-actions overlay: the rename/replace/delete actions sit in an
 // absolutely-positioned pill anchored inside the label-tail wrapper (the
 // flow child holding the select button, see DatasetRow), floating ABOVE the
@@ -91,8 +87,8 @@ const ROW_ACTIONS_OVERLAY = `absolute inset-y-0 right-1 z-10 flex items-center g
 // the per-icon emphasis: the glyph rests muted and highlights to foreground
 // on hover / keyboard focus -- on the pill's accent ground there is no
 // further background tint to layer (a hover:bg-accent would be invisible
-// against it), so color alone marks the hot icon. The cursor stays the
-// default arrow (see BUTTON_CHROME); the loading state dims like every
+// against it), so color alone marks the hot icon. The hand rides the
+// app.css base rule; the loading state dims like every
 // other action surface (disabled:opacity-50, the sidebar / result forms) --
 // the pill container owns visibility, so the dim only marks the one hovered
 // row's mid-load state.

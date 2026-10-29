@@ -255,7 +255,7 @@ function SearchRow({
       onClick={onClick}
       onMouseEnter={onMouseEnter}
       className={cn(
-        "session-search-option flex cursor-pointer items-center gap-2 rounded-md px-2 py-1.5 text-sm",
+        "session-search-option flex items-center gap-2 rounded-md px-2 py-1.5 text-sm",
         "hover:bg-accent",
         // The selected (keyboard-highlighted) row carries the accent tint; a
         // hovered row gets it via hover:bg-accent. Mouse-enter syncs `selected`

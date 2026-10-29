@@ -284,7 +284,7 @@ export function GeneralSection({
             </p>
             <button
               type="button"
-              className="text-muted-foreground hover:text-foreground focus-visible:outline-ring focus-visible:outline-2 focus-visible:outline-offset-2 shrink-0 cursor-pointer text-xs underline-offset-2 hover:underline"
+              className="text-muted-foreground hover:text-foreground focus-visible:outline-ring focus-visible:outline-2 focus-visible:outline-offset-2 shrink-0 text-xs underline-offset-2 hover:underline"
               onClick={() => void revealSessionsDir()}
             >
               <FormattedMessage
