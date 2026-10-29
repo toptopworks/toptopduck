@@ -32,9 +32,9 @@ use std::time::{Duration, Instant};
 
 use super::builtin::which_in;
 use super::config::{render_call, CliToolConfig, RenderedFileValue};
+use crate::analysis_tools::ToolOutcome;
 use crate::cancel::CancelToken;
 use crate::provider::tool_calling::{ToolResult, ToolUse};
-use crate::tools::ToolOutcome;
 
 /// Byte cap on each of the child's output streams (stdout and stderr each),
 /// aligned with the existing tool-result content cap family (the ACP

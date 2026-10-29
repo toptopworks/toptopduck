@@ -48,6 +48,7 @@ use sqlparser::ast::{
 use sqlparser::dialect::DuckDbDialect;
 use sqlparser::parser::Parser;
 
+use crate::analysis_tools::read_paths::{extract_read_paths, is_file_function};
 use crate::guardrail::{ExecError, ExecErrorKind};
 use crate::ingest::schema::{attach_sql, quote_ident};
 use crate::ingest::{self, loader};
@@ -55,7 +56,6 @@ use crate::model::{DatasetDescriptor, DatasetPrivacy, RectifyProvenance};
 use crate::session::materializer::{CachedDerivedRef, DispatchDeps};
 use crate::session::snapshot::Snapshot;
 use crate::session::TOOL_OUTPUT_DIR_NAME;
-use crate::tools::read_paths::{extract_read_paths, is_file_function};
 
 /// Subdirectory under `temp_path` for staging derived source files (ADR-0087
 /// D4): the copy-in jump-off for `tool_output` originals whose death with the

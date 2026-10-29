@@ -1,12 +1,16 @@
-//! The built-in DuckDB tool server (ADR-0076 gateway skeleton, issue #292).
+//! The built-in analysis tool family (ADR-0076 gateway skeleton, issue #292).
 //!
 //! This module is the app-side MCP gateway's built-in tool source: the four
 //! DuckDB tools (`explore` / `materialize` / `describe` / `sample`) the gateway
 //! advertises to a runtime, plus the dispatch that routes a model-emitted
 //! [`ToolUse`] to the matching executor. The per-session tool table
-//! ([`builtin_table`]) carries exactly these four definitions today; user-
-//! configured MCP servers (#301) and skill-declared tools join the same table
-//! at the gateway aggregation layer in a later slice.
+//! ([`builtin_table`]) carries exactly these four definitions and feeds
+//! both faces: the built-in loop's turn assembly and the bridge face's
+//! `tools/list`. The later builtin families (skills, workspace write +
+//! discovery, artifact delivery) live in their own domain modules and mount
+//! per-family at turn assembly -- never on this table, never bridged (external
+//! runtimes bring their own equivalents); external MCP tools surface through
+//! the fixed meta-tool trio (ADR-0105).
 //!
 //! The [`Materializer`] trait the `materialize` tool delegates to is the SAME
 //! trait the turn runtimes' shared dispatch core ([`crate::session::turn_dispatch`],
@@ -49,7 +53,7 @@ pub fn builtin_table() -> Vec<ToolDefinition> {
 /// `dataset` + `sql`); the read-shaped tools set `promotion: None`. The dispatch
 /// wrapper assembles this into a [`ToolOutcome`] for the orchestration layer.
 ///
-/// `pub(super)` because this is the tools-module-internal seam between an
+/// `pub(super)` because this is the module-internal seam between an
 /// executor and [`dispatch`]; the orchestration layer consumes [`ToolOutcome`],
 /// not this struct. The field names (`content` / `promotion`) intentionally
 /// mirror [`ToolOutcome`] so the wrapper is a plain re-pack.
@@ -182,11 +186,11 @@ pub(crate) mod test_support {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::analysis_tools::test_support::inert_deps;
     use crate::model::DatasetDescriptor;
     use crate::provider::tool_calling::ToolUse;
     use crate::session::engine::AdminEngine;
     use crate::session::materializer::FakeMaterializer;
-    use crate::tools::test_support::inert_deps;
     use crate::workingset::WorkingSet;
     use serde_json::json;
     use std::collections::HashMap;
@@ -324,9 +328,9 @@ mod tests {
     /// stale name cannot silently break routing at the gateway boundary.
     #[test]
     fn dispatch_routes_explore_sample_and_materialize() {
+        use crate::analysis_tools::test_support::inert_deps_with_temp;
         use crate::model::{ColumnSchema, DatasetPrivacy, RectifyProvenance};
         use crate::session::materializer::RealMaterializer;
-        use crate::tools::test_support::inert_deps_with_temp;
         use tempfile::TempDir;
 
         let engine = AdminEngine::materialized();

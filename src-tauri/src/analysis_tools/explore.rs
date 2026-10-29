@@ -22,6 +22,10 @@
 use duckdb::Connection;
 use serde_json::{json, Value};
 
+use crate::analysis_tools::definitions::{
+    self, EXPLORE_DEFAULT_SAMPLE_ROWS, EXPLORE_MAX_SAMPLE_ROWS,
+};
+use crate::analysis_tools::ToolPayload;
 use crate::cancel::CancelToken;
 use crate::ingest::schema::{canonical_type, quote_ident};
 use crate::model::ColumnSchema;
@@ -29,8 +33,6 @@ use crate::sandbox_sql::{
     preflight_read_sql, run_sandboxed_read, PreflightError, SandboxDeps, SandboxExecError,
 };
 use crate::session::materializer::DispatchDeps;
-use crate::tools::definitions::{self, EXPLORE_DEFAULT_SAMPLE_ROWS, EXPLORE_MAX_SAMPLE_ROWS};
-use crate::tools::ToolPayload;
 
 /// The scratch table name on the explore sandbox. The sandbox is single-use
 /// (per-turn isolation, ADR-0027), so a fixed name cannot collide across calls.
@@ -226,8 +228,8 @@ fn tool_err(detail: impl std::fmt::Display) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::analysis_tools::test_support::inert_deps;
     use crate::session::engine::AdminEngine;
-    use crate::tools::test_support::inert_deps;
 
     /// `sample_rows` defaults to 10 when omitted, clamps to [0, 50] when
     /// out of range, and passes through in-range values. Pinning the default +
@@ -540,7 +542,7 @@ mod tests {
     /// by `explore_refuses_relative_dotdot_read_escape_at_gateway`).
     #[test]
     fn explore_executes_absolute_out_of_bounds_read_path() {
-        use crate::tools::test_support::inert_deps_with_temp;
+        use crate::analysis_tools::test_support::inert_deps_with_temp;
         use std::fs;
         use tempfile::TempDir;
 
@@ -576,7 +578,7 @@ mod tests {
     /// resolve()'s CWD branch is exercised end to end through the gateway.
     #[test]
     fn explore_refuses_relative_dotdot_read_escape_at_gateway() {
-        use crate::tools::test_support::inert_deps_with_temp;
+        use crate::analysis_tools::test_support::inert_deps_with_temp;
         use std::fs;
         use tempfile::{NamedTempFile, TempDir};
 
@@ -630,7 +632,7 @@ mod tests {
     #[test]
     #[cfg(unix)]
     fn explore_follows_symlink_on_the_full_path_face() {
-        use crate::tools::test_support::inert_deps_with_temp;
+        use crate::analysis_tools::test_support::inert_deps_with_temp;
         use std::fs;
         use std::os::unix::fs::symlink;
         use tempfile::TempDir;
@@ -676,7 +678,7 @@ mod tests {
     #[cfg(windows)]
     #[ignore = "requires Windows Developer Mode / admin for symlink_dir (issue #402)"]
     fn explore_follows_symlink_on_the_full_path_face_windows() {
-        use crate::tools::test_support::inert_deps_with_temp;
+        use crate::analysis_tools::test_support::inert_deps_with_temp;
         use std::fs;
         use std::os::windows::fs::symlink_dir;
         use tempfile::TempDir;
@@ -720,7 +722,7 @@ mod tests {
     /// `materialize_executes_in_bounds_read_path`.
     #[test]
     fn explore_executes_in_bounds_read_path() {
-        use crate::tools::test_support::inert_deps_with_temp;
+        use crate::analysis_tools::test_support::inert_deps_with_temp;
         use std::fs;
         use tempfile::TempDir;
 

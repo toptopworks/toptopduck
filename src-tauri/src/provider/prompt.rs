@@ -203,7 +203,7 @@ pub fn render_skill_block(skills: &[SkillPromptFragment]) -> String {
 /// persona; our capability boundary is enforced at the tool / gateway surface
 /// (ADR-0086 Consequence: external downgrades to tool-surface boundary). The
 /// M-contract (`result_N` naming) rides the gateway tool descriptions
-/// ([`crate::tools::builtin_table`]), not this block. Skill fragments are
+/// ([`crate::analysis_tools::builtin_table`]), not this block. Skill fragments are
 /// injected as a separate text block by the caller
 /// ([`crate::window::assemble_acp_turn`]).
 pub fn build_acp_context_block(request: &ProviderRequest, locale: ResponseLocale) -> String {

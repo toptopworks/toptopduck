@@ -42,6 +42,9 @@ use std::path::Path;
 
 use serde_json::{json, Value};
 
+use crate::analysis_tools;
+use crate::analysis_tools::definitions;
+use crate::analysis_tools::ToolOutcome;
 use crate::approval::{
     ApprovalRequest, ApprovalSink, ApprovalState, GateCancelled, GateOutcome, OperationKind,
     ToolKey,
@@ -57,9 +60,6 @@ use crate::session::loop_contract::{
     truncate_trace_excerpt, Termination, TraceEntry, DENIED_BY_GATEWAY_CONTENT, TRACE_EXCERPT_MAX,
 };
 use crate::session::materializer::{DispatchDeps, Materializer};
-use crate::tools;
-use crate::tools::definitions;
-use crate::tools::ToolOutcome;
 
 /// Extract a human-readable message from a panic payload (the `Err` variant of
 /// `catch_unwind`, issue #321). Covers `&str` and `String` — the two common
@@ -563,7 +563,7 @@ fn dispatch_gated_call_inner(
     // arm: an in-workspace read has no approval surface (ADR-0080
     // Decision 1). The whole arm family lives in the module so it owns its
     // ritual end to end. Builtin face only (the face discriminator): the
-    // bridge face never lists the names and `tools::dispatch` has no arm
+    // bridge face never lists the names and `analysis_tools::dispatch` has no arm
     // for them, so a spoofed bridge call dies at the unknown-tool error.
     if face == CallFace::Builtin && crate::session::workspace_tools::is_workspace_tool(&call.name) {
         return crate::session::workspace_tools::dispatch_workspace_tool(
@@ -690,7 +690,10 @@ fn dispatch_gated_call_inner(
             None,
         )
     } else {
-        (tools::dispatch(call, deps, gate.cancel, materializer), None)
+        (
+            analysis_tools::dispatch(call, deps, gate.cancel, materializer),
+            None,
+        )
     };
     let result = outcome.result;
     // ADR-0077: a tool-level error routes back to the model. Log it so a
@@ -810,7 +813,7 @@ fn route_external_dual(
     face: CallFace,
     mcp: &mut McpAggregator,
     session_temp_dir: &Path,
-) -> (tools::ToolOutcome, Option<Value>) {
+) -> (analysis_tools::ToolOutcome, Option<Value>) {
     let route_result = mcp.route(&call.name, &call.input);
     match face {
         // The flattened rendering: the trace / numbering single source,
@@ -849,7 +852,7 @@ fn route_external_dual(
                 crate::cli_tools::executor::OUTPUT_CAP_BYTES,
             );
             (
-                tools::ToolOutcome {
+                analysis_tools::ToolOutcome {
                     result: ToolResult {
                         tool_use_id: call.id.clone(),
                         content,
@@ -881,7 +884,7 @@ fn shape_external_outcome(
     call: &ToolUse,
     session_temp_dir: &Path,
     cap: usize,
-) -> tools::ToolOutcome {
+) -> analysis_tools::ToolOutcome {
     let (content, is_error) = match route_result {
         Ok(envelope) => {
             let is_error = envelope
@@ -910,7 +913,7 @@ fn shape_external_outcome(
         }
         Err(e) => (format!("external tool `{}` failed: {}", call.name, e), true),
     };
-    tools::ToolOutcome {
+    analysis_tools::ToolOutcome {
         result: ToolResult {
             tool_use_id: call.id.clone(),
             content,

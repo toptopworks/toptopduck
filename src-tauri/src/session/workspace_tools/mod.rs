@@ -10,7 +10,7 @@
 //!
 //! The pair follows the gated-builtin family shape (`create_skill`,
 //! ADR-0122 Decision 3): mounted on the built-in runtime's table only (the
-//! bridge face never lists the names and `tools::dispatch` has no arm for
+//! bridge face never lists the names and `analysis_tools::dispatch` has no arm for
 //! them -- external runtimes bring their own file tools with full
 //! authority), intercepted in the shared dispatch core AHEAD of
 //! classification, refused on a malformed / out-of-domain / over-cap call
@@ -33,6 +33,7 @@ use std::path::{Component, Path, PathBuf};
 
 use serde_json::{json, Value};
 
+use crate::analysis_tools::definitions::get_str;
 use crate::approval::{
     ApprovalRequest, FileAttachment, GateCancelled, GateOutcome, OperationKind, ToolKey,
 };
@@ -44,7 +45,6 @@ use crate::session::loop_contract::{
 };
 use crate::session::materializer::DispatchDeps;
 use crate::session::turn_dispatch::{DispatchProduct, GateCtx};
-use crate::tools::definitions::get_str;
 
 pub(crate) mod discovery;
 

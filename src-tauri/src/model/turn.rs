@@ -591,7 +591,7 @@ pub enum TurnPhase {
     /// `generate_tool_turn`.
     Thinking { attempt: u32 },
     /// A tool call passed the approval gate (ADR-0080) and is about to
-    /// dispatch. Fired right before `tools::dispatch` -- AFTER the gate, so a
+    /// dispatch. Fired right before `analysis_tools::dispatch` -- AFTER the gate, so a
     /// gated call surfaces as an `approval-request` event first and only
     /// starts once allowed. The frontend renders the in-flight row (spinner);
     /// `summary` matches the approval card's so the two merge into one row.

@@ -88,7 +88,7 @@ pub fn assemble_tool_turn(
     ToolTurnRequest {
         system: build_tool_system_prompt(&request, locale, skills),
         messages: tool_turn_messages(&request),
-        tools: crate::tools::builtin_table(),
+        tools: crate::analysis_tools::builtin_table(),
         // The window knows nothing of the serving model either (issue
         // #1001): this is the model-blind default, and the dispatch seam
         // stamps the model-keyed catalog cap onto the request after

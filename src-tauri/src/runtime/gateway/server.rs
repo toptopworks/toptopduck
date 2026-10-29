@@ -16,7 +16,7 @@
 //! meta-tool discovery trio (`mcp_list_servers` / `mcp_search_tools` /
 //! `mcp_invoke`, ADR-0105) -- external tools surface by handle through
 //! discovery, not one-by-one. `tools/call` routes through the approval gate +
-//! [`crate::tools::dispatch`] or the shared CLI spawn engine, mirroring the
+//! [`crate::analysis_tools::dispatch`] or the shared CLI spawn engine, mirroring the
 //! built-in agent loop's `execute_call` -- built-in tools classify `Allow`
 //! (zero approval, ADR-0080 Decision 1), unknown names fall through to the
 //! external arm and surface the gate's pending card.
@@ -29,6 +29,7 @@ use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
 
+use crate::analysis_tools::builtin_table;
 use crate::approval::{ApprovalSink, ApprovalState};
 use crate::bounded_line::{BoundedLineReader, LineRead, LINE_MAX_BYTES};
 use crate::cancel::CancelToken;
@@ -43,7 +44,6 @@ use crate::session::turn_dispatch::{
     classify_with_cli_tool, dispatch_gated_call, CallFace, DispatchAbort, GateCtx,
     ResolvedClassification,
 };
-use crate::tools::builtin_table;
 
 use super::framing;
 
@@ -85,7 +85,7 @@ pub fn bind_gateway() -> io::Result<GatewayHandle> {
 /// Bundled so [`serve_connection`] stays under clippy's argument-count threshold
 /// and the always-coupled borrows move together into the scoped serve thread.
 pub struct GatewayCtx<'a> {
-    /// The per-turn DuckDB + working-set borrows `tools::dispatch` reads +
+    /// The per-turn DuckDB + working-set borrows `analysis_tools::dispatch` reads +
     /// mutates.
     pub deps: DispatchDeps<'a>,
     /// The mid-turn skill-invocation channel (ADR-0119 Decision 4, issue
@@ -105,7 +105,7 @@ pub struct GatewayCtx<'a> {
     /// the built-in loop's dispatch core gets (#987's one-contract
     /// posture).
     pub create: crate::skills::create::SkillCreateGate<'a>,
-    /// The materializer `tools::dispatch` delegates `materialize` to (the same
+    /// The materializer `analysis_tools::dispatch` delegates `materialize` to (the same
     /// trait the built-in loop drives, so numbering + caps inherit verbatim).
     pub materializer: &'a mut dyn Materializer,
     /// The session's approval state -- the gate's classify + pending machinery.
@@ -3441,7 +3441,7 @@ mod tests {
     /// trio (issue #1385) are built-in-runtime-only: external runtimes
     /// bring their own file tools with full authority, so the bridge face
     /// never advertises either channel however the conditionals mount, and
-    /// a bare-name `tools/call` spoof has no landing (`tools::dispatch`
+    /// a bare-name `tools/call` spoof has no landing (`analysis_tools::dispatch`
     /// answers with the unknown-tool error after the gate card, the
     /// present_files posture).
     #[test]
@@ -3487,7 +3487,7 @@ mod tests {
     /// the bridge face: the bare name classifies under the unknown-server
     /// external arm (the gate's pending card surfaces, as this module's
     /// routing doc notes), and only post-Allow routing reaches
-    /// `tools::dispatch`, which answers with the unknown-tool error.
+    /// `analysis_tools::dispatch`, which answers with the unknown-tool error.
     #[test]
     fn tools_list_never_lists_present_files() {
         for ctx in [fresh_ctx(), skill_ctx(vec!["sql-coach".to_string()])] {

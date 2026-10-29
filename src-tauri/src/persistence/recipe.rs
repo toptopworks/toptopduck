@@ -426,7 +426,7 @@ const TRACE_SUMMARY_MAX: usize = 512;
 /// truncated to [`TRACE_SUMMARY_MAX`].
 pub(crate) fn synthetic_materialize_trace(sql: &str) -> Vec<RecipeTraceEntry> {
     let entry = RecipeTraceEntry {
-        name: crate::tools::definitions::TOOL_MATERIALIZE.to_string(),
+        name: crate::analysis_tools::definitions::TOOL_MATERIALIZE.to_string(),
         operation_kind: OperationKind::Write,
         summary: truncate_trace_summary(sql),
         success: true,

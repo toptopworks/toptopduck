@@ -31,7 +31,7 @@
 //!
 //! Promotions are always empty here: a `materialize` promotion is created
 //! gateway-side (the bridge → the app's MCP gateway →
-//! [`crate::tools::dispatch`]) and observed there. The engine owns only the
+//! [`crate::analysis_tools::dispatch`]) and observed there. The engine owns only the
 //! ACP-driving half of the turn.
 
 use std::collections::HashSet;
@@ -514,7 +514,7 @@ impl AcpEngine {
         LoopOutcome {
             termination,
             // Always empty: a materialize promotion is gateway-side
-            // (bridge -> MCP gateway -> tools::dispatch), observed there.
+            // (bridge -> MCP gateway -> analysis_tools::dispatch), observed there.
             // The ACP engine drives only the ACP half of the turn.
             promotions: Vec::new(),
             // ADR-0103 (issue #611): rounds grouped at the tool-call batch
@@ -1531,7 +1531,7 @@ fn strip_gateway_rename(title: &str) -> Option<&str> {
 /// layer (the gateway itself classifies bare unknown names Network). Shared
 /// by this engine's fold layer and the codex line's `mcp_tool_call_display`.
 pub(super) fn gateway_tool_badge(name: &str) -> OperationKind {
-    if let Some(spec) = crate::tools::definitions::builtin_metadata(name) {
+    if let Some(spec) = crate::analysis_tools::definitions::builtin_metadata(name) {
         spec.operation_kind
     } else if crate::mcp::aggregator::is_namespaced(name) {
         OperationKind::Network
