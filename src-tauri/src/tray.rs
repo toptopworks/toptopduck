@@ -58,7 +58,7 @@ use crate::persistence::{scan_sessions_dir, SessionMetadata, SessionsRoot};
 use crate::provider::keychain::ProviderConfigSource;
 use crate::provider::live_config::LiveProviderConfig;
 use crate::provider::prompt::ResponseLocale;
-use crate::workspace::{directory_tail, WorkspaceRegistry};
+use crate::workspace::WorkspaceRegistry;
 
 /// The tray's registered id; the rebuild path re-resolves the tray by it.
 const TRAY_ID: &str = "main-tray";
@@ -177,15 +177,14 @@ fn session_label<'a>(m: &'a SessionMetadata, texts: &'a TrayTexts) -> &'a str {
 }
 
 /// The workspace suffix for one session row (issue #1430): the registry's
-/// `label_of` projection when the state is live -- title first, directory
-/// tail fallback, the SAME face the sidebar's workspace section shows --
-/// and the tail alone when no registry is managed. The tray never fails to
-/// build over a label, and never copies the derivation.
-fn workspace_label(registry: Option<&WorkspaceRegistry>, workspace: &str) -> String {
-    match registry {
-        Some(reg) => reg.label_of(Path::new(workspace)),
-        None => directory_tail(Path::new(workspace)),
-    }
+/// explicit-record projection when the state is live -- the SAME face the
+/// sidebar's workspace section shows (issue #1392's filter; #1432). `None`
+/// (no suffix) for a lazily-minted default workspace, whose directory tail
+/// is a machine timestamp, for an unrecorded directory, and when no
+/// registry is managed -- the tray never shows a face it cannot verify, and
+/// never copies the derivation.
+fn workspace_label(registry: Option<&WorkspaceRegistry>, workspace: &str) -> Option<String> {
+    registry?.explicit_label_of(Path::new(workspace))
 }
 
 /// What a tray menu click asks for, parsed back out of the menu item id.
@@ -256,7 +255,7 @@ enum MenuEntry {
 fn plan_menu(
     metas: &[SessionMetadata],
     texts: &TrayTexts,
-    ws_label: &dyn Fn(&str) -> String,
+    ws_label: &dyn Fn(&str) -> Option<String>,
 ) -> Vec<MenuEntry> {
     fn row(id: String, text: &str, enabled: bool) -> MenuRow {
         MenuRow {
@@ -268,13 +267,15 @@ fn plan_menu(
     fn session_row(
         m: &SessionMetadata,
         texts: &TrayTexts,
-        ws_label: &dyn Fn(&str) -> String,
+        ws_label: &dyn Fn(&str) -> Option<String>,
     ) -> MenuRow {
         let name = session_label(m, texts);
         // The separator is a literal, not a catalog entry: it is
-        // punctuation, not words (issue #1430).
-        let text = match &m.workspace {
-            Some(ws) => format!("{name} - {}", ws_label(ws)),
+        // punctuation, not words (issue #1430). A `None` projection (a
+        // lazily-minted workspace, issue #1432) falls back to the plain
+        // name -- no separator either.
+        let text = match m.workspace.as_deref().and_then(ws_label) {
+            Some(label) => format!("{name} - {label}"),
             None => name.to_string(),
         };
         row(
@@ -698,8 +699,8 @@ mod tests {
     /// WHICH workspace string the plan handed it. Unbound rows never consult
     /// it -- an accidental unconditional consult surfaces as a visible
     /// ` - ws#...` suffix and fails the plain-name assertions.
-    fn ws_echo(ws: &str) -> String {
-        format!("ws#{ws}")
+    fn ws_echo(ws: &str) -> Option<String> {
+        Some(format!("ws#{ws}"))
     }
 
     // --- texts_for (whole-table per locale, issue #1144) --------------------
@@ -1112,7 +1113,9 @@ mod tests {
             workspace: Some("C:\\ws\\alpha".into()),
             ..meta("a.recipe.json", "")
         }];
-        let plan = plan_menu(&metas, &texts_for(ResponseLocale::ZhCN), &|_| "甲".into());
+        let plan = plan_menu(&metas, &texts_for(ResponseLocale::ZhCN), &|_| {
+            Some("甲".into())
+        });
         match &plan[1] {
             MenuEntry::Row(r) => assert_eq!(r.text, "未命名会话 - 甲"),
             other => panic!("expected a row at index 1, got {other:?}"),
@@ -1120,21 +1123,57 @@ mod tests {
     }
 
     #[test]
-    fn workspace_label_uses_the_registry_projection_when_present() {
-        // Registry live: the suffix is the record's title -- the sidebar's
-        // same title-first face -- reached through the real write path.
-        // `tempdir` (the registry tests' fixture) cleans up even on a
-        // failed assertion -- no hand-rolled pid-stitched path.
+    fn plan_drops_the_suffix_when_the_projection_is_none() {
+        // The lazy-mint face (issue #1432): `workspace` is bound but the
+        // projection returns None (an implicit record / an unrecorded
+        // directory) -- the row is the plain session name, no separator.
+        // Distinct from the unbound case: the workspace IS set on the row.
+        let bound = SessionMetadata {
+            workspace: Some("C:\\ws\\2026-10-29-15-48-00".into()),
+            ..meta("s0.recipe.json", "n")
+        };
+        let plan = plan_menu(&[bound], &texts_for(ResponseLocale::EnUS), &|_| {
+            None::<String>
+        });
+        match &plan[1] {
+            MenuEntry::Row(r) => assert_eq!(r.text, "n"),
+            other => panic!("expected a row at index 1, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn workspace_label_suffixed_only_for_explicit_records() {
+        // Registry live: the suffix is the EXPLICIT record's label -- the
+        // sidebar section's same face -- reached through the real write
+        // paths. A lazily-minted record (implicit, untitled) and an
+        // unrecorded directory carry no suffix: their directory tail is a
+        // machine timestamp, not a face (issue #1432). `tempdir` (the
+        // registry tests' fixture) cleans up even on a failed assertion.
         let dir = tempfile::tempdir().expect("tempdir");
         let reg = WorkspaceRegistry::new(dir.path().join(crate::workspace::WORKSPACES_FILE_NAME));
         // Slash spellings keep Path::file_name platform-neutral: the suite
         // runs on the Linux CI leg, where a backslash is not a separator.
         reg.record_titled(Path::new("C:/ws/alpha"), "Alpha")
             .expect("record");
-        assert_eq!(workspace_label(Some(&reg), "C:/ws/alpha"), "Alpha");
-        // No registry managed: the directory tail alone carries the row --
-        // the tray never fails to build over a label.
-        assert_eq!(workspace_label(None, "C:/ws/alpha"), "alpha");
+        reg.record_at(Path::new("C:/ws/2026-10-29-15-48-00"), None, false, 1_000)
+            .expect("record");
+        assert_eq!(
+            workspace_label(Some(&reg), "C:/ws/alpha"),
+            Some("Alpha".to_string())
+        );
+        assert_eq!(
+            workspace_label(Some(&reg), "C:/ws/2026-10-29-15-48-00"),
+            None,
+            "a lazily-minted (implicit) workspace carries no suffix"
+        );
+        assert_eq!(
+            workspace_label(Some(&reg), "C:/ws/never-recorded"),
+            None,
+            "an unrecorded directory carries no suffix"
+        );
+        // No registry managed: no face the tray could verify -- no suffix.
+        // The tray never fails to build over a label.
+        assert_eq!(workspace_label(None, "C:/ws/alpha"), None);
     }
 
     // --- plan_tray_event (rebuild trigger stays off the right click) ------
