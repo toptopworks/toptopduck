@@ -541,6 +541,15 @@ mod tests {
         assert_eq!(titled.label(), "Renamed", "an explicit title wins");
     }
 
+    /// A path with no final component (a root, or a degenerate empty
+    /// string) falls back to the whole path -- never an empty label. The
+    /// tray's no-registry fallback reaches this arm (issue #1430).
+    #[test]
+    fn the_tail_falls_back_to_the_whole_path_without_a_final_component() {
+        assert_eq!(directory_tail(Path::new("/")), "/");
+        assert_eq!(directory_tail(Path::new("")), "");
+    }
+
     #[test]
     fn a_newer_version_file_reads_empty() {
         let root = tempfile::tempdir().expect("tempdir");

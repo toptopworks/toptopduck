@@ -1127,12 +1127,14 @@ mod tests {
         // failed assertion -- no hand-rolled pid-stitched path.
         let dir = tempfile::tempdir().expect("tempdir");
         let reg = WorkspaceRegistry::new(dir.path().join(crate::workspace::WORKSPACES_FILE_NAME));
-        reg.record_titled(Path::new("C:\\ws\\alpha"), "Alpha")
+        // Slash spellings keep Path::file_name platform-neutral: the suite
+        // runs on the Linux CI leg, where a backslash is not a separator.
+        reg.record_titled(Path::new("C:/ws/alpha"), "Alpha")
             .expect("record");
-        assert_eq!(workspace_label(Some(&reg), "C:\\ws\\alpha"), "Alpha");
+        assert_eq!(workspace_label(Some(&reg), "C:/ws/alpha"), "Alpha");
         // No registry managed: the directory tail alone carries the row --
         // the tray never fails to build over a label.
-        assert_eq!(workspace_label(None, "C:\\ws\\alpha"), "alpha");
+        assert_eq!(workspace_label(None, "C:/ws/alpha"), "alpha");
     }
 
     // --- plan_tray_event (rebuild trigger stays off the right click) ------
