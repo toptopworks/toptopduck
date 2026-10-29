@@ -137,10 +137,11 @@ impl LoopRuntime {
         }
     }
 
-    /// Override the caps (the test seam). Test-only at the call sites: the
-    /// production wiring always runs the ADR-0081 defaults.
-    #[allow(dead_code)]
-    pub(crate) fn with_caps(mut self, step_cap: u32, no_progress_cap: Option<Duration>) -> Self {
+    /// Override the caps (the test seam). `#[cfg(test)]`: every call site
+    /// lives in this module's suite, and the production wiring always runs
+    /// the ADR-0081 defaults.
+    #[cfg(test)]
+    fn with_caps(mut self, step_cap: u32, no_progress_cap: Option<Duration>) -> Self {
         self.step_cap = step_cap;
         self.no_progress_cap = no_progress_cap;
         self
@@ -149,10 +150,10 @@ impl LoopRuntime {
     /// Stamp an output cap onto the bridged face (the test seam for the
     /// dispatch-stamp pin, issue #1001): production reaches the stamp only
     /// through the live factory, so this exists for the module suite to
-    /// drive a stamped runtime against the scripted bridge. Test-only at
-    /// the call sites; mirrors [`Self::with_caps`]'s posture.
-    #[allow(dead_code)]
-    pub(crate) fn with_output_cap(mut self, output_cap: u32) -> Self {
+    /// drive a stamped runtime against the scripted bridge. `#[cfg(test)]`,
+    /// mirroring [`Self::with_caps`]'s posture.
+    #[cfg(test)]
+    fn with_output_cap(mut self, output_cap: u32) -> Self {
         self.output_cap = Some(output_cap);
         self
     }
