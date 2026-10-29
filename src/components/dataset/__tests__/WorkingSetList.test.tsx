@@ -1188,6 +1188,10 @@ describe("WorkingSetList", () => {
       expect(classes).toContain("disabled:cursor-progress");
       expect(classes).toContain("disabled:opacity-50");
       expect(classes).not.toContain("cursor-pointer");
+      // Pin the arrow channel too: restoring the pre-#1434 icon-strip posture
+      // would be a per-site cursor-default class, so absence is pinned both
+      // ways (the base rule is the hand, not any local class).
+      expect(classes).not.toContain("cursor-default");
       expect(classes).not.toContain("hover:bg-accent");
     }
     // The select button takes the same base hand as the strip -- its click

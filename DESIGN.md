@@ -486,7 +486,7 @@ These ride the Tailwind shadow scale directly (no custom `--shadow-*` token per 
 - **Light mode relies on hairline contrast + shadow-sm.** Cards share the same white as the canvas — the 1px `{colors.border}` plus `shadow-sm` defines the visual edge.
 - **Dark mode uses brightness steps.** Canvas (#0f1410) → Card (#181b18) is a subtle but perceptible luminance step. The green undertone in both values is visually consistent with the teal brand.
 - **Focus rings use teal.** `{colors.primary}` at 2px outline-offset. Not a shadow — a color ring.
-- **The pointer hand is the default.** Native buttons and the ARIA interactive roles (`role="button"`, `menuitem`, `menuitemradio`, `menuitemcheckbox`, `option`) carry the hand via one base-layer rule in `app.css`; the arrow is the declared exception — non-interactive rows, and hosts the rule cannot reach (`summary` / `label` / bare checkboxes / clickable `div`/`span`). The disabled channels stay out: busy keeps `progress`, disabled keeps `not-allowed`.
+- **The pointer hand is the default.** Native buttons and the ARIA interactive roles (`role="button"`, `menuitem`, `menuitemradio`, `menuitemcheckbox`, `option`) carry the hand via one base-layer rule in `app.css`; hosts the rule cannot reach — `summary` / `label` / bare checkboxes / clickable `div`/`span` — are interactive and declare the hand explicitly. The arrow is the declared exception for non-interactive hosts only (the archived sidebar row, the hover-only info glyph). The disabled channels stay out: busy keeps `progress`, disabled keeps `not-allowed`.
 
 ## Shapes
 

@@ -15,8 +15,9 @@ function Input({ className, type, ...props }: ComponentProps<"input">) {
         "file:text-foreground placeholder:text-muted-foreground selection:bg-primary selection:text-primary-foreground border-input flex h-9 w-full min-w-0 rounded-md border bg-transparent px-3 py-1 text-base shadow-xs transition-[color,box-shadow] outline-none file:inline-flex file:h-7 file:border-0 file:bg-transparent file:text-sm file:font-medium disabled:pointer-events-none disabled:cursor-not-allowed disabled:opacity-50 md:text-sm dark:bg-input/30",
         // No focus-visible ring/border: the caret is the focus indicator (the
         // composer textarea's border-0 posture); the aria-invalid error ring
-        // below stays.
-        "aria-invalid:ring-destructive/20 dark:aria-invalid:ring-destructive/40 aria-invalid:border-destructive",
+        // below stays -- width and color ride the same variant, since a v4
+        // ring-color utility alone emits no box-shadow.
+        "aria-invalid:ring-[3px] aria-invalid:ring-destructive/20 dark:aria-invalid:ring-destructive/40 aria-invalid:border-destructive",
         className,
       )}
       {...props}

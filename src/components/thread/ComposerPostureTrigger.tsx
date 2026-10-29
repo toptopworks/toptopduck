@@ -308,7 +308,7 @@ function ProbeCatalogInfoIcon() {
             id: "composer.runtimePicker.catalogFromProbeAria",
             defaultMessage: "Catalog source explanation",
           })}
-          className="text-muted-foreground mr-1 flex shrink-0"
+          className="text-muted-foreground mr-1 flex shrink-0 cursor-default"
         >
           <Info className="size-3.5" aria-hidden />
         </button>
