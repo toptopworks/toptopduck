@@ -8,3 +8,5 @@
 pub mod registry;
 
 pub use registry::{WorkspaceRecord, WorkspaceRegistry, WORKSPACES_FILE_NAME};
+
+pub(crate) use registry::directory_tail;
