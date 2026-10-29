@@ -13,6 +13,8 @@ import { openPath, revealItemInDir } from "@tauri-apps/plugin-opener";
 import { save as saveDialog } from "@tauri-apps/plugin-dialog";
 import { catalogFor } from "../../../i18n";
 import { copyArtifactFile } from "../../../api";
+import { TooltipProvider } from "../../ui/tooltip";
+import { MENU_REENTRY_GRACE_MS } from "../../../session/sidebarHoverCard";
 import { ArtifactHeader } from "../ArtifactHeader";
 
 vi.mock("../../../api", () => ({
@@ -30,11 +32,13 @@ function renderHeader(path: string, exists: boolean) {
   const onRefresh = vi.fn();
   render(
     <IntlProvider locale="zh-CN" messages={catalogFor("zh-CN")}>
-      <ArtifactHeader
-        artifact={{ path, file_name: path.split("/").pop() ?? path }}
-        exists={exists}
-        onRefresh={onRefresh}
-      />
+      <TooltipProvider>
+        <ArtifactHeader
+          artifact={{ path, file_name: path.split("/").pop() ?? path }}
+          exists={exists}
+          onRefresh={onRefresh}
+        />
+      </TooltipProvider>
     </IntlProvider>,
   );
   return { onRefresh };
@@ -108,6 +112,68 @@ describe("ArtifactHeader", () => {
   });
 
   describe("file header more menu (issue #1317)", () => {
+    it("refuses the menu-close focus restore's tooltip open, then restores real hover", async () => {
+      renderHeader("C:/sessions/s1/artifacts/report.pdf", true);
+      const trigger = screen.getByRole("button", { name: "更多操作" });
+      // Hover opens the tooltip (delay 0). Radix's open gesture keys on
+      // pointermove, not pointerenter; the enter rides along first, the
+      // same order a real pointer produces.
+      fireEvent.pointerEnter(trigger);
+      fireEvent.pointerMove(trigger, { pointerType: "mouse" });
+      await screen.findByText("更多操作");
+      // The pointerdown opens the menu and retires the tooltip; the trailing
+      // pointerup clears Radix's pointer-down guard so the menu-close focus
+      // restore reaches the trigger's onFocus (the phantom-open channel).
+      fireEvent.pointerDown(trigger, { button: 0, pointerType: "mouse" });
+      fireEvent.pointerUp(trigger);
+      await screen.findByRole("menu");
+      await waitFor(() =>
+        expect(screen.queryByText("更多操作")).not.toBeInTheDocument(),
+      );
+      // Esc closes the menu. Radix restores focus to the trigger and the
+      // trigger treats that programmatic focus as an open intent -- the
+      // close grace must refuse it or the tooltip resurrects itself.
+      fireEvent.keyDown(screen.getByRole("menu"), { key: "Escape" });
+      await waitFor(() =>
+        expect(screen.queryByRole("menu")).not.toBeInTheDocument(),
+      );
+      expect(screen.queryByText("更多操作")).not.toBeInTheDocument();
+      // Past the grace a genuine hover (leave + re-enter) opens as usual.
+      fireEvent.pointerLeave(trigger);
+      await new Promise((r) => setTimeout(r, MENU_REENTRY_GRACE_MS + 50));
+      fireEvent.pointerEnter(trigger);
+      fireEvent.pointerMove(trigger, { pointerType: "mouse" });
+      await screen.findByText("更多操作");
+    });
+
+    it("refuses the late focus return (the OS-dialog detour) via the pointer leg", async () => {
+      renderHeader("C:/sessions/s1/artifacts/report.pdf", true);
+      const trigger = screen.getByRole("button", { name: "更多操作" });
+      // The pointer travels to the menu (leave) and opens it.
+      fireEvent.pointerEnter(trigger);
+      fireEvent.pointerMove(trigger, { pointerType: "mouse" });
+      fireEvent.pointerLeave(trigger);
+      fireEvent.pointerDown(trigger, { button: 0, pointerType: "mouse" });
+      fireEvent.pointerUp(trigger);
+      await screen.findByRole("menu");
+      // The item activates, the menu closes, and the native dialog detours
+      // the focus for longer than the close grace ("Save as…" on the real
+      // app). When focus finally lands back on the trigger the pointer is
+      // still away -- the pointer leg, not the expired grace, must refuse.
+      activateItem(screen.getByRole("menuitem", { name: "刷新" }));
+      await waitFor(() =>
+        expect(screen.queryByRole("menu")).not.toBeInTheDocument(),
+      );
+      await new Promise((r) => setTimeout(r, MENU_REENTRY_GRACE_MS + 50));
+      fireEvent.focus(trigger);
+      await waitFor(() => {});
+      expect(screen.queryByText("更多操作")).not.toBeInTheDocument();
+      // A genuine hover (the pointer re-entering) still opens.
+      fireEvent.pointerEnter(trigger);
+      fireEvent.pointerMove(trigger, { pointerType: "mouse" });
+      await screen.findByText("更多操作");
+    });
+
     it("exposes refresh / show-in-folder / save-as for an existing file", async () => {
       renderHeader("C:/sessions/s1/artifacts/report.pdf", true);
       await openMoreMenu();

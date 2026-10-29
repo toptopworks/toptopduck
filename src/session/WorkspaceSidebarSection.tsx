@@ -27,6 +27,7 @@ import {
   MoreHorizontal,
   Pencil,
   Plus,
+  SquarePen,
 } from "lucide-react";
 import { openPath } from "@tauri-apps/plugin-opener";
 
@@ -88,8 +89,9 @@ const PILL_TRIGGER_CLASS = `session-row-action ${bareButtonReset} flex size-7 it
 
 /** The section head's action buttons (expand/collapse-all + the create
  *  entry): the ArchivedToggle posture -- hover-revealed, focus-visible
- *  kept, busy-dimmed. */
-const HEAD_ACTION_CLASS = `sidebar-archived-toggle ${bareButtonReset} rounded-md p-1 text-muted-foreground opacity-0 transition-opacity group-hover:opacity-100 focus-visible:opacity-100 hover:bg-accent hover:text-foreground focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring disabled:cursor-progress disabled:opacity-50`;
+ *  kept, busy-dimmed. Show/hide snaps (no transition): a fade lags fast
+ *  pointer sweeps, the same ruling the working-set row pill carries. */
+const HEAD_ACTION_CLASS = `sidebar-archived-toggle ${bareButtonReset} rounded-md p-1 text-muted-foreground opacity-0 group-hover:opacity-100 focus-visible:opacity-100 hover:bg-accent hover:text-foreground focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring disabled:cursor-progress disabled:opacity-50`;
 
 /** The "Show more (N)" tail button, shared with the parent's section
  *  renderer (the recent body mounts its own instances). */
@@ -348,7 +350,7 @@ export function WorkspaceSidebarSection({
             <span className="shrink-0 tabular-nums">({groups.length})</span>
             <span
               aria-hidden
-              className="shrink-0 opacity-0 transition-opacity group-hover:opacity-100 group-has-[:focus-visible]:opacity-100"
+              className="shrink-0 opacity-0 group-hover:opacity-100 group-has-[:focus-visible]:opacity-100"
             >
               {collapsed ? (
                 <ChevronRight className="size-3.5" />
@@ -449,7 +451,7 @@ export function WorkspaceSidebarSection({
                         hover / focus -- the whole row button toggles. */}
                     <span
                       aria-hidden
-                      className="shrink-0 text-muted-foreground opacity-0 transition-opacity group-has-[:focus-visible]/row:opacity-100 group-hover/row:opacity-100"
+                      className="shrink-0 text-muted-foreground opacity-0 group-has-[:focus-visible]/row:opacity-100 group-hover/row:opacity-100"
                     >
                       {open ? (
                         <ChevronDown className="size-3.5" />
@@ -462,18 +464,28 @@ export function WorkspaceSidebarSection({
                       shortcut (the one-step continuation) + the actions
                       menu, on the session rows' exact pill face. */}
                   <div className={PILL_CLASS}>
-                    <button
-                      type="button"
-                      aria-label={intl.formatMessage({
-                        id: "sidebar.workspace.newSessionAria",
-                        defaultMessage: "New session in this workspace",
-                      })}
-                      disabled={disabled}
-                      className={PILL_TRIGGER_CLASS}
-                      onClick={() => onNewInWorkspace(g.path, g.label)}
-                    >
-                      <Plus className="h-3.5 w-3.5" aria-hidden strokeWidth={2.5} />
-                    </button>
+                    <Tooltip>
+                      <TooltipTrigger asChild>
+                        <button
+                          type="button"
+                          aria-label={intl.formatMessage({
+                            id: "sidebar.workspace.newSessionAria",
+                            defaultMessage: "New session in this workspace",
+                          })}
+                          disabled={disabled}
+                          className={PILL_TRIGGER_CLASS}
+                          onClick={() => onNewInWorkspace(g.path, g.label)}
+                        >
+                          <SquarePen className="h-3.5 w-3.5" aria-hidden />
+                        </button>
+                      </TooltipTrigger>
+                      <TooltipContent>
+                        {intl.formatMessage({
+                          id: "sidebar.newSession",
+                          defaultMessage: "New session",
+                        })}
+                      </TooltipContent>
+                    </Tooltip>
                     <WorkspaceGroupMenu
                       group={g}
                       disabled={disabled}

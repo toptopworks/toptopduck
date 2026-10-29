@@ -156,7 +156,7 @@ export function VizExportFrame({
           precedent). */}
       <div
         className={cn(
-          "absolute top-1 right-1 z-10 transition-opacity duration-150",
+          "absolute top-1 right-1 z-10",
           menuOpen
             ? "opacity-100"
             : "opacity-0 hover:opacity-100 [&:has(:focus-visible)]:opacity-100 [.viz-chart:hover_~&]:opacity-100",
@@ -167,7 +167,7 @@ export function VizExportFrame({
             <Button
               type="button"
               variant="ghost"
-              className="size-7 text-foreground/70 hover:bg-accent hover:text-foreground dark:hover:bg-accent"
+              className="size-7 text-foreground/70 dark:hover:bg-accent"
             >
               <Download aria-hidden="true" className="size-3.5" />
               <span className="sr-only">{menuLabel}</span>

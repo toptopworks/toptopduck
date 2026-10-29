@@ -15,6 +15,7 @@ import { openPath } from "@tauri-apps/plugin-opener";
 import embed from "vega-embed";
 import { catalogFor } from "../../../i18n";
 import { artifactExists, readArtifactText } from "../../../api";
+import { TooltipProvider } from "../../ui/tooltip";
 import { ArtifactView } from "../ArtifactView";
 
 vi.mock("../../../api", () => ({
@@ -40,10 +41,12 @@ function renderView(path: string, renderKind: "html" | "pdf" | "markdown" | "car
   return render(
     <QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
       <IntlProvider locale="zh-CN" messages={catalogFor("zh-CN")}>
-        <ArtifactView
-          artifact={{ path, file_name: path.split("/").pop() ?? path }}
-          render={renderKind}
-        />
+        <TooltipProvider>
+          <ArtifactView
+            artifact={{ path, file_name: path.split("/").pop() ?? path }}
+            render={renderKind}
+          />
+        </TooltipProvider>
       </IntlProvider>
     </QueryClientProvider>,
   );

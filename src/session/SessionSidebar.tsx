@@ -5,7 +5,7 @@ import {
   Archive,
   ChevronDown,
   ChevronRight,
-  Pencil,
+  SquarePen,
   Search,
   Settings,
 } from "lucide-react";
@@ -256,9 +256,9 @@ export function SessionSidebar({
   // navigation rides issue #1392): pinned → workspaces (always present) →
   // the recent body → archived, the rest only when they have content. The
   // chrome (the archived-visibility toggle; #1401 retired the grouping
-  // toggle with the time buckets) rides the FIRST rendered section's title
-  // row -- the permanent workspaces head keeps it reachable even on an
-  // otherwise-empty sidebar.
+  // toggle with the time buckets) rides the RECENT section's title row --
+  // the first section keeps it reachable even on an otherwise-empty
+  // sidebar.
   type SidebarSection =
     | { key: string; title: ReactNode; entries: SidebarEntry[]; variant: "main" | "archived"; capped: boolean }
     | { key: "workspaces"; variant: "workspaces" };
@@ -295,10 +295,11 @@ export function SessionSidebar({
     });
   }
 
-  // One chrome element, one anchor (issue #1175): the archived-visibility
-  // toggle rides the FIRST rendered section's title row. The permanent
-  // workspaces section guarantees that row always exists, so a single
-  // element instance serves every sidebar state.
+  // One chrome element, one anchor (issue #1175, re-anchored): the
+  // archived-visibility toggle rides the RECENT section's title row -- the
+  // visibility it controls is the recent body's, so the control lives
+  // there; the first section takes it only when recent is absent (the
+  // empty-sidebar state), keeping the single instance alive in every state.
   const sectionChrome = (
     <ArchivedToggle
       visible={showArchived}
@@ -306,6 +307,8 @@ export function SessionSidebar({
       onToggle={onToggleArchived}
     />
   );
+  const chromeIndex = sections.findIndex((s) => s.key === "recent");
+  const chromeAnchorIndex = chromeIndex === -1 ? 0 : chromeIndex;
 
   // One row-render channel for every section body (issue #1392: the
   // workspace subtrees render the EXACT same rows as the recent body --
@@ -381,8 +384,8 @@ export function SessionSidebar({
     return (
       <li key={section.key} className="session-group mt-3 mb-1" data-section={section.key}>
         {/* The chrome (the archived-visibility toggle, ADR-0127) rides the
-            FIRST rendered section's title row -- one entry point for every
-            sidebar state. The trigger is hover-revealed (group-hover) but
+            RECENT section's title row -- one entry point for every sidebar
+            state. The trigger is hover-revealed (group-hover) but
             stays focus-visible for AT users; the pressed state also pins it
             visible via aria-pressed. */}
         <div className="session-group-title-row group relative mb-0.5 flex items-center justify-between px-1">
@@ -401,7 +404,7 @@ export function SessionSidebar({
               <span className="shrink-0 tabular-nums">({section.entries.length})</span>
               <span
                 aria-hidden
-                className="shrink-0 opacity-0 transition-opacity group-hover:opacity-100 group-has-[:focus-visible]:opacity-100"
+                className="shrink-0 opacity-0 group-hover:opacity-100 group-has-[:focus-visible]:opacity-100"
               >
                 {collapsed ? (
                   <ChevronRight className="size-3.5" />
@@ -483,11 +486,11 @@ export function SessionSidebar({
       </header>
       <button
         type="button"
-        className="sidebar-new-button mb-2 flex w-full items-center gap-1.5 rounded-md bg-secondary p-2 text-sm text-secondary-foreground hover:bg-accent disabled:opacity-60 disabled:cursor-progress"
+        className="sidebar-new-button mb-2 flex w-full items-center gap-1.5 rounded-md bg-secondary px-2 py-1 text-sm text-secondary-foreground hover:bg-accent disabled:opacity-60 disabled:cursor-progress"
         disabled={disabled}
         onClick={onNew}
       >
-        <Pencil className="size-4 shrink-0" aria-hidden />
+        <SquarePen className="size-3.5 shrink-0" aria-hidden />
         <FormattedMessage id="sidebar.newSession" defaultMessage="New session" />
       </button>
 
@@ -501,7 +504,7 @@ export function SessionSidebar({
       )}
 
       <ul className="session-list" onPointerLeave={hover.listLeave}>
-        {sections.map((section, i) => renderSection(section, i === 0))}
+        {sections.map((section, i) => renderSection(section, i === chromeAnchorIndex))}
       </ul>
 
       {/* Footer: the settings gear (issue #282). The .session-list flex:1
@@ -556,7 +559,7 @@ function ArchivedToggle({
           type="button"
           className={cn(
             `sidebar-archived-toggle ${bareButtonReset} rounded-md p-1 text-muted-foreground`,
-            "opacity-0 transition-opacity group-hover:opacity-100 focus-visible:opacity-100",
+            "opacity-0 group-hover:opacity-100 focus-visible:opacity-100",
             "aria-pressed:opacity-100 aria-pressed:text-foreground",
             "hover:bg-accent hover:text-foreground",
             "focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring",

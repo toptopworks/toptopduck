@@ -21,7 +21,11 @@ export const buttonVariants = cva(
         secondary:
           "bg-secondary text-secondary-foreground shadow-xs hover:bg-secondary/80",
         ghost:
-          "hover:bg-accent hover:text-accent-foreground dark:hover:bg-accent/50",
+          // Hover lifts the glyph to the foreground (the brightness axis) --
+          // the codebase-wide posture every call site used to re-declare.
+          // teal (accent-foreground) stays the SELECTED/ACTIVE hue, not the
+          // hover hue; a hover-teal intent overrides explicitly.
+          "hover:bg-accent hover:text-foreground dark:hover:bg-accent/50",
         link: "text-primary underline-offset-4 hover:underline",
       },
       size: {

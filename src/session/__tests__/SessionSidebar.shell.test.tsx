@@ -494,7 +494,7 @@ describe("SessionSidebar shell-skeleton visuals (ADR-0067, issue #171)", () => {
     expect(onOpenSearch).not.toHaveBeenCalled();
   });
 
-  it("sidebar-new-button is a fused bg-secondary Pencil + text button, not solid primary (ADR-0072, issue #250)", () => {
+  it("sidebar-new-button is a fused bg-secondary SquarePen + text button, not solid primary (ADR-0072, issue #250)", () => {
     const { container } = renderShell(
       <SessionSidebar
         collapsed={false}
@@ -531,10 +531,10 @@ describe("SessionSidebar shell-skeleton visuals (ADR-0067, issue #171)", () => {
     expect(classes).not.toContain("bg-primary");
     expect(classes).not.toContain("text-primary-foreground");
     expect(classes).not.toContain("border-primary");
-    // Pencil leading icon + the "New session" label text.
+    // SquarePen leading icon + the "New session" label text.
     const icon = newBtn?.querySelector("svg");
     expect(icon).not.toBeNull();
-    expect(icon).toHaveClass("lucide-pencil");
+    expect(icon).toHaveClass("lucide-square-pen");
     expect(icon).toHaveAttribute("aria-hidden", "true");
     expect(newBtn).toHaveTextContent("New session");
   });
