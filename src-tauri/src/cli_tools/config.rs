@@ -337,7 +337,7 @@ impl CliToolConfig {
 pub(crate) fn is_reserved_name(name: &str) -> bool {
     name.starts_with("mcp__")
         || crate::cli_tools::builtin::is_builtin_name(name)
-        || crate::tools::definitions::builtin_metadata(name).is_some()
+        || crate::analysis_tools::definitions::builtin_metadata(name).is_some()
         || name == crate::mcp::meta_tools::META_LIST_SERVERS
         || name == crate::mcp::meta_tools::META_SEARCH_TOOLS
         || name == crate::mcp::meta_tools::META_INVOKE

@@ -821,7 +821,7 @@ fn play_scenario(
         }
         "gateway_tool_call" => {
             // Drive one tools/call through the spawned bridge -> the app's
-            // gateway -> tools::dispatch, then report it via session/update so
+            // gateway -> analysis_tools::dispatch, then report it via session/update so
             // the engine pump folds the call into the ACP trace. Exercises the
             // full wiring: the bridge connects back, the gateway serves the
             // MCP subset, and the dispatch lands in the gateway's trace (the

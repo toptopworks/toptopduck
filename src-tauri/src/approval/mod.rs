@@ -2,7 +2,7 @@
 //!
 //! The gateway is the single enforcement point for tool-call trust
 //! (ADR-0076). Every model-emitted tool call passes through [`classify`]
-//! before it reaches [`crate::tools::dispatch`]:
+//! before it reaches [`crate::analysis_tools::dispatch`]:
 //!
 //! 1. **Built-in read-only + materialize pass through** (ADR-0080 Decision 1):
 //!    explore / describe / sample are in-DB with no egress; materialize is
@@ -371,7 +371,7 @@ pub trait ApprovalSink: Send + Sync {
 /// The decision the gate returns to the agent loop (ADR-0080).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GateOutcome {
-    /// The call proceeds -- the agent loop runs [`crate::tools::dispatch`] (or
+    /// The call proceeds -- the agent loop runs [`crate::analysis_tools::dispatch`] (or
     /// the external bridge forwards the call).
     Allow,
     /// The user refused the call (via the approval card's deny button). The

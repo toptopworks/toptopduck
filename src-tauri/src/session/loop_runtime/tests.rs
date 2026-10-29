@@ -25,6 +25,8 @@ use rig_core::test_utils::{MockCompletionModel, MockStreamEvent};
 
 use serde_json::{json, Value as JsonValue};
 
+use crate::analysis_tools::builtin_table;
+use crate::analysis_tools::test_support::inert_deps_with_temp;
 use crate::approval::{ApprovalResponse, ApprovalSink, ApprovalState};
 use crate::cancel::CancelToken;
 use crate::mcp::aggregator::McpAggregator;
@@ -37,8 +39,6 @@ use crate::session::engine::AdminEngine;
 use crate::session::loop_contract::{LoopOutcome, Termination, MAX_WINDOW_RESUMES};
 use crate::session::loop_runtime::LoopRuntime;
 use crate::session::materializer::RealMaterializer;
-use crate::tools::builtin_table;
-use crate::tools::test_support::inert_deps_with_temp;
 use crate::util::ACCUM_MAX_BYTES;
 use crate::workingset::WorkingSet;
 

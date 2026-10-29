@@ -25,7 +25,7 @@
 //! execution, and non-literal read_* paths are refused outright. An out-of-
 //! bounds path becomes a structured, path-naming tool error the agent self-
 //! corrects from (ADR-0077). See [`crate::fs_acl`] +
-//! [`crate::tools::read_paths`].
+//! [`crate::analysis_tools::read_paths`].
 
 use duckdb::Connection;
 

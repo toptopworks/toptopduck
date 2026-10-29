@@ -52,7 +52,7 @@ fn call(input: Value) -> ToolUse {
     call_with_id("tu_1", input)
 }
 
-fn run(tool: &CliToolConfig, input: Value) -> toptopduck_lib::tools::ToolOutcome {
+fn run(tool: &CliToolConfig, input: Value) -> toptopduck_lib::analysis_tools::ToolOutcome {
     let temp = TempDir::new().unwrap();
     execute(
         tool,
@@ -670,7 +670,7 @@ fn run_keep_temp(
     tool: &CliToolConfig,
     input: Value,
     call_id: &str,
-) -> (toptopduck_lib::tools::ToolOutcome, TempDir) {
+) -> (toptopduck_lib::analysis_tools::ToolOutcome, TempDir) {
     let temp = TempDir::new().unwrap();
     let outcome = execute(
         tool,

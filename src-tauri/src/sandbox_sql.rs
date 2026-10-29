@@ -28,13 +28,13 @@ use std::path::{Path, PathBuf};
 
 use duckdb::Connection;
 
+use crate::analysis_tools::read_paths::extract_read_paths;
 use crate::cancel::CancelToken;
 use crate::fs_acl::{AccessMode, FsAcl};
 use crate::guardrail::{classify_duckdb_error, ExecError, ExecErrorKind};
 use crate::ingest::schema::quote_ident;
 use crate::provenance;
 use crate::session::sandbox;
-use crate::tools::read_paths::extract_read_paths;
 use crate::workingset::WorkingSet;
 
 // ============================== preflight ==============================

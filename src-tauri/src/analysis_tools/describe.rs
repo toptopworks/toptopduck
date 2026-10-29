@@ -13,9 +13,9 @@
 
 use serde_json::{json, Value};
 
+use crate::analysis_tools::definitions;
+use crate::analysis_tools::ToolPayload;
 use crate::session::materializer::DispatchDeps;
-use crate::tools::definitions;
-use crate::tools::ToolPayload;
 
 /// Parse the tool input + return the dataset's cached shape.
 ///
@@ -41,12 +41,12 @@ pub(crate) fn dispatch(input: &Value, deps: &mut DispatchDeps) -> Result<ToolPay
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::analysis_tools::test_support::inert_deps;
     use crate::model::{
         ColumnSchema, DatasetDescriptor, DatasetPrivacy, RectifyProvenance, StaleAnchor,
         StaleReason,
     };
     use crate::session::engine::AdminEngine;
-    use crate::tools::test_support::inert_deps;
     use crate::workingset::WorkingSet;
     use std::collections::HashMap;
 

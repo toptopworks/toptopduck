@@ -110,7 +110,7 @@ pub(crate) const EMPTY_CATALOG_NOTE: &str =
 /// a zero-server turn pays no standing trio cost) -- the caller checks the
 /// catalog and skips the extend when empty. Unlike the built-in DuckDB tools,
 /// these are conditionally mounted, so they do not live in
-/// [`crate::tools::definitions`]' always-on table.
+/// [`crate::analysis_tools::definitions`]' always-on table.
 pub(crate) fn meta_tool_definitions() -> Vec<ToolDefinition> {
     vec![
         ToolDefinition {

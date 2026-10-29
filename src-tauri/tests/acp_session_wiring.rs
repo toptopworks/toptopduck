@@ -1,11 +1,11 @@
 //! Session external-runtime wiring integration (issue #299 slice 9c).
 //!
 //! Drives the full Session -> AcpEngine -> fake-CLI -> bridge -> gateway ->
-//! tools::dispatch chain in CI. The fake-CLI's `gateway_tool_call` scenario
+//! analysis_tools::dispatch chain in CI. The fake-CLI's `gateway_tool_call` scenario
 //! spawns the real bridge binary (its path injected via the `session/new` MCP
 //! descriptor); the bridge connects back to the per-turn gateway, which serves
 //! the MCP subset and routes `tools/call` (explore, or a registered CLI tool
-//! via `cli_gateway_tool_call` -- issue #673) through `tools::dispatch` or the
+//! via `cli_gateway_tool_call` -- issue #673) through `analysis_tools::dispatch` or the
 //! shared spawn engine against the session's live resources. Real CLI E2E is
 //! manual (the #299 AC, not in CI); #300 covers the other ACP CLIs against the
 //! same engine. The trace-merge dedup is unit-tested at the merge function;
@@ -257,7 +257,7 @@ fn a_connect_phase_token_fire_bounds_the_external_turn_with_a_hung_server() {
 
 /// The full chain: the fake-CLI's `gateway_tool_call` scenario drives one MCP
 /// `tools/call` (explore) through the spawned bridge -> the per-turn gateway
-/// -> `tools::dispatch`, then emits a terminal agent message. The turn must
+/// -> `analysis_tools::dispatch`, then emits a terminal agent message. The turn must
 /// complete `Textual` -- proving the bridge spawns + connects, the gateway
 /// serves the MCP subset, dispatch runs against the live session resources,
 /// and the scoped-thread serve rejoins the parallel engine drive without

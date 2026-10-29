@@ -33,11 +33,11 @@ use std::time::SystemTime;
 use regex::Regex;
 use serde_json::{json, Value};
 
+use crate::analysis_tools::definitions::get_str;
 use crate::model::{TraceEntryView, TurnPhase};
 use crate::provider::tool_calling::{ToolDefinition, ToolResult, ToolUse};
 use crate::session::loop_contract::{truncate_trace_excerpt, TraceEntry, TRACE_EXCERPT_MAX};
 use crate::session::materializer::DispatchDeps;
-use crate::tools::definitions::get_str;
 
 use super::{require_workspace, resolve_entity_in_workspace};
 

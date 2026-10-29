@@ -15,11 +15,11 @@
 
 use serde_json::{json, Value};
 
+use crate::analysis_tools::definitions::{self, SAMPLE_DEFAULT_LIMIT, SAMPLE_MAX_LIMIT};
+use crate::analysis_tools::ToolPayload;
 use crate::ingest::schema::quote_ident;
 use crate::model::ColumnSchema;
 use crate::session::materializer::DispatchDeps;
-use crate::tools::definitions::{self, SAMPLE_DEFAULT_LIMIT, SAMPLE_MAX_LIMIT};
-use crate::tools::ToolPayload;
 
 /// Parse the tool input + read a bounded page of rows from the dataset.
 ///
@@ -133,12 +133,12 @@ fn read_page(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::analysis_tools::test_support::inert_deps;
     use crate::model::{
         ColumnSchema, DatasetDescriptor, DatasetPrivacy, RectifyProvenance, StaleAnchor,
         StaleReason,
     };
     use crate::session::engine::AdminEngine;
-    use crate::tools::test_support::inert_deps;
     use crate::workingset::WorkingSet;
     use std::collections::HashMap;
 

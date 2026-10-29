@@ -20,12 +20,12 @@
 
 use serde_json::{json, Value};
 
+use crate::analysis_tools::definitions;
+use crate::analysis_tools::ToolPayload;
 use crate::cancel::CancelToken;
 use crate::guardrail::{ExecError, ExecErrorKind};
 use crate::model::{DatasetDescriptor, Promotion, RenameError};
 use crate::session::materializer::{DispatchDeps, Materializer};
-use crate::tools::definitions;
-use crate::tools::ToolPayload;
 
 /// Parse the tool input + drive the materializer to promote the SQL's result.
 ///
@@ -190,9 +190,9 @@ fn err_message(result_name: &str, e: ExecError) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::analysis_tools::test_support::{inert_deps, inert_deps_with_temp};
     use crate::model::{ColumnSchema, DatasetPrivacy, RectifyProvenance};
     use crate::session::engine::AdminEngine;
-    use crate::tools::test_support::{inert_deps, inert_deps_with_temp};
 
     /// A descriptor factory for the payload-shape test.
     fn descriptor(reference_name: &str) -> DatasetDescriptor {
@@ -826,8 +826,8 @@ mod tests {
     /// wording, one of the `contains` assertions fails.
     #[test]
     fn explore_and_materialize_return_symmetric_fs_acl_error() {
+        use crate::analysis_tools::explore;
         use crate::session::materializer::RealMaterializer;
-        use crate::tools::explore;
         use std::fs;
         use tempfile::{NamedTempFile, TempDir};
 

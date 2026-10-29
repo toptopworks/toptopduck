@@ -612,7 +612,7 @@ impl super::Session {
     /// descriptor at `session/new`; the CLI launches the bridge, the bridge
     /// connects back to a per-bridge gateway, and the gateway serves the
     /// built-in tool table + routes every `tools/call` through the approval
-    /// gate + [`crate::tools::dispatch`] -- the same path the built-in loop
+    /// gate + [`crate::analysis_tools::dispatch`] -- the same path the built-in loop
     /// takes (ADR-0076 single enforcement point). The gateway serve loop and
     /// the ACP engine run on two scoped threads (ADR-0085); this method joins
     /// both, merges their outcomes (trace de-duplicated: gateway authoritative

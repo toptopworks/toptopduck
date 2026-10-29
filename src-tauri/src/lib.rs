@@ -22,6 +22,7 @@ pub mod approval;
 // same crate without linking this one (ADR-0085: the bridge links no app
 // crate).
 pub(crate) use bounded_line::bounded_line;
+pub mod analysis_tools;
 pub mod cancel;
 pub mod cli_tools;
 pub mod commands;
@@ -38,7 +39,6 @@ pub mod sandbox_sql;
 pub mod session;
 pub mod session_store;
 pub mod skills;
-pub mod tools;
 // cfg(desktop) mirrors the tauri `tray-icon` feature's own desktop gate --
 // mobile builds neither compile the tray surface nor register it.
 #[cfg(desktop)]
