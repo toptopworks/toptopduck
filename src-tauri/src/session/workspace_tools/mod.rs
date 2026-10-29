@@ -55,8 +55,9 @@ pub(crate) const WRITE_TOOL: &str = "write";
 pub(crate) const EDIT_TOOL: &str = "edit";
 
 /// Whether `name` is one of the workspace tools -- the routing predicate
-/// for the shared dispatch core's interception arm, so the arm and the
-/// module agree on the family membership in one place. Covers both
+/// for the shared dispatch core's interception arm and the cli_tools
+/// registration fence, so the arm, the fence, and the module agree on
+/// the family membership in one place. Covers both
 /// channels: the gated write pair and the read-only discovery trio
 /// (issue #1385).
 pub(crate) fn is_workspace_tool(name: &str) -> bool {

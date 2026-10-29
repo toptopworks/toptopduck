@@ -176,15 +176,16 @@ impl CliToolConfig {
         // builtin entry a builtin-CLI name plus a declared baseline. Every
         // other combination rejects -- including a hand-edited or IPC-
         // claimed `source: "builtin"` entry named after a built-in DuckDB
-        // tool, an `mcp__` handle, a meta tool, or any foreign name, and a
-        // builtin claim with no baseline. `has_legal_shape` is the one
-        // source; the read-side filter keeps the same scoping.
+        // tool, an `mcp__` handle, a meta tool, a gated builtin, or any
+        // foreign name, and a builtin claim with no baseline.
+        // `has_legal_shape` is the one source; the read-side filter keeps
+        // the same scoping.
         if !has_legal_shape(self) {
             return Err(format!(
                 "name `{}` collides with a reserved tool name (built-in tool, \
-                 `mcp__` handle prefix, meta tool, or builtin CLI entry), the \
-                 entry claims builtin provenance for a foreign name, or a \
-                 builtin entry carries no baseline",
+                 `mcp__` handle prefix, meta tool, builtin CLI entry, or gated \
+                 builtin), the entry claims builtin provenance for a foreign \
+                 name, or a builtin entry carries no baseline",
                 self.name
             ));
         }
@@ -327,22 +328,29 @@ impl CliToolConfig {
 
 /// The reserved-name check (ADR-0108 Decision 2 + ADR-0109 Decision 7): a
 /// USER registration name may not collide with a built-in DuckDB tool
-/// name, the `mcp__` namespaced handle prefix, a meta-tool name, or a
-/// builtin CLI entry name (static full-set membership -- installed or
-/// not). Checks the live tables (not literal copies) so a future built-in
-/// / meta tool extends the reservation for free. Also the read-side
-/// filter's authority: `enabled_cli_tools` drops a reserved-named USER
-/// entry a hand-edited file smuggled past the upsert boundary (builtin
-/// entries legitimately carry their own reserved name).
+/// name, the `mcp__` namespaced handle prefix, a builtin CLI entry name
+/// (static full-set membership -- installed or not), a meta-tool /
+/// skill-injection name, or a gated builtin name -- the workspace family,
+/// `present_files`, `create_skill` (issue #1426: a same-name user entry
+/// would double-define the name on the builtin face's tool table while
+/// the shared dispatch core's interception arm shadows it). Checks the
+/// live tables (not literal copies) so a future built-in / meta tool
+/// extends the reservation for free. Also the read-side filter's
+/// authority: `enabled_cli_tools` drops a reserved-named USER entry a
+/// hand-edited file smuggled past the upsert boundary (builtin entries
+/// legitimately carry their own reserved name).
 pub(crate) fn is_reserved_name(name: &str) -> bool {
     name.starts_with("mcp__")
         || crate::cli_tools::builtin::is_builtin_name(name)
         || crate::analysis_tools::definitions::builtin_metadata(name).is_some()
+        || crate::session::workspace_tools::is_workspace_tool(name)
+        || name == crate::session::artifacts::PRESENT_FILES
         || name == crate::mcp::meta_tools::META_LIST_SERVERS
         || name == crate::mcp::meta_tools::META_SEARCH_TOOLS
         || name == crate::mcp::meta_tools::META_INVOKE
         || name == crate::skills::invocation::INVOKE_SKILL
         || name == crate::skills::read::READ_SKILL_FILE
+        || name == crate::skills::create::CREATE_SKILL
 }
 
 /// The legal-shape rule in one place (ADR-0109 Decision 7, issue #675
@@ -832,6 +840,33 @@ mod tests {
             "dbx",
             "read_skill_file",
         ] {
+            let mut t = tool("my-pandoc");
+            t.name = reserved.to_string();
+            assert!(t.validate().is_err(), "`{reserved}` must be reserved");
+        }
+    }
+
+    #[test]
+    fn validate_rejects_gated_builtin_names() {
+        // The gated-builtin family (issue #1426): a user registration on one
+        // of these names would double-define the name on the builtin face's
+        // tool table while the shared dispatch core's interception arm
+        // shadows the CLI entry -- registered but never reachable. The names
+        // come from the owning modules' constants, not copies. The direct
+        // predicate assert pins the reservation line itself: for the two
+        // underscore names validate()'s earlier kebab-case rule would mask
+        // it (the same rejection either way, but only one of them is the
+        // rule under test).
+        for reserved in [
+            crate::session::workspace_tools::WRITE_TOOL,
+            crate::session::workspace_tools::EDIT_TOOL,
+            crate::session::workspace_tools::discovery::GLOB_TOOL,
+            crate::session::workspace_tools::discovery::GREP_TOOL,
+            crate::session::workspace_tools::discovery::READ_TOOL,
+            crate::session::artifacts::PRESENT_FILES,
+            crate::skills::create::CREATE_SKILL,
+        ] {
+            assert!(is_reserved_name(reserved), "`{reserved}` must be reserved");
             let mut t = tool("my-pandoc");
             t.name = reserved.to_string();
             assert!(t.validate().is_err(), "`{reserved}` must be reserved");
