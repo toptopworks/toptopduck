@@ -141,7 +141,7 @@ impl LoopRuntime {
     /// lives in this module's suite, and the production wiring always runs
     /// the ADR-0081 defaults.
     #[cfg(test)]
-    pub(crate) fn with_caps(mut self, step_cap: u32, no_progress_cap: Option<Duration>) -> Self {
+    fn with_caps(mut self, step_cap: u32, no_progress_cap: Option<Duration>) -> Self {
         self.step_cap = step_cap;
         self.no_progress_cap = no_progress_cap;
         self
@@ -153,7 +153,7 @@ impl LoopRuntime {
     /// drive a stamped runtime against the scripted bridge. `#[cfg(test)]`,
     /// mirroring [`Self::with_caps`]'s posture.
     #[cfg(test)]
-    pub(crate) fn with_output_cap(mut self, output_cap: u32) -> Self {
+    fn with_output_cap(mut self, output_cap: u32) -> Self {
         self.output_cap = Some(output_cap);
         self
     }

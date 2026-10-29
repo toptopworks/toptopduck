@@ -16,10 +16,10 @@ import {
   takeSourceNotices,
 } from "../../api";
 import { TooltipProvider } from "../../components/ui/tooltip";
-import { textual } from "./fixtures";
+import { artifactTurn } from "./fixtures";
 import type { ComposerSessionFields } from "../useComposerState";
 import type { ApprovalEntry } from "../useApprovalEvents";
-import type { ThreadEntry, TurnRecord } from "../../types/thread";
+import type { ThreadEntry } from "../../types/thread";
 
 // The pane-level approval wiring pins (issue #1009 review, PR #1010): both
 // approval callbacks live ONLY on the pane -- the respond callback binds the
@@ -106,25 +106,6 @@ function pendingApprovalEntry(): ApprovalEntry {
   };
 }
 
-// A recorded turn whose outcome delivered an artifact manifest entry per
-// file (ADR-0124): the rail renders one clickable artifact card per entry,
-// and a click moves the real viewedResult onto the file view through the
-// pane's handleSelectFile -- the same path a user takes.
-function artifactThread(
-  files: { path: string; fileName: string }[],
-): ThreadEntry[] {
-  const record = textual("files").data as TurnRecord;
-  return [
-    {
-      entry: "Turn",
-      data: {
-        ...record,
-        artifacts: files.map((f) => ({ path: f.path, file_name: f.fileName })),
-      },
-    },
-  ];
-}
-
 const noop = () => {};
 
 // The default session-api posture every describe re-stamps: an empty session
@@ -136,8 +117,13 @@ function stubSessionApis() {
   vi.mocked(listWorkingSet).mockResolvedValue([]);
   vi.mocked(activeDataset).mockResolvedValue(null);
   vi.mocked(takeSourceNotices).mockResolvedValue([]);
-  vi.mocked(listSkills).mockResolvedValue({ skills: [] } as never);
+  vi.mocked(listSkills).mockResolvedValue({
+    skills: [],
+    ignored: [],
+    root_error: null,
+  });
   vi.mocked(artifactExists).mockResolvedValue(true);
+  vi.mocked(getApprovalAttachments).mockResolvedValue([]);
   vi.mocked(askQuestion).mockImplementation(() => new Promise(() => {}));
 }
 
@@ -255,7 +241,7 @@ describe("SessionPane artifact stage boundary", () => {
 
   it("degrades only the artifact face when its render crashes -- the thread rail keeps rendering", async () => {
     renderPane({
-      thread: artifactThread([{ path: BAD_ARTIFACT_PATH, fileName: "bad.md" }]),
+      thread: [artifactTurn([BAD_ARTIFACT_PATH])],
     });
     await openArtifact("bad.md");
 
@@ -269,10 +255,7 @@ describe("SessionPane artifact stage boundary", () => {
 
   it("renders another artifact normally after a crash -- the path key resets the boundary", async () => {
     renderPane({
-      thread: artifactThread([
-        { path: BAD_ARTIFACT_PATH, fileName: "bad.md" },
-        { path: "C:/artifacts/out/good.md", fileName: "good.md" },
-      ]),
+      thread: [artifactTurn([BAD_ARTIFACT_PATH, "C:/artifacts/out/good.md"])],
     });
     await openArtifact("bad.md");
     expect(screen.getByRole("alert")).toHaveAttribute("data-region", "artifact");
@@ -289,7 +272,7 @@ describe("SessionPane artifact stage boundary", () => {
 
   it("drops the file's exists/text cache entries on retry and remounts clean", async () => {
     const { queryClient } = renderPane({
-      thread: artifactThread([{ path: BAD_ARTIFACT_PATH, fileName: "bad.md" }]),
+      thread: [artifactTurn([BAD_ARTIFACT_PATH])],
     });
     await openArtifact("bad.md");
     // Seed both per-path entries so the drop assertion discriminates: an
@@ -328,9 +311,7 @@ describe("SessionPane workspace panel postures", () => {
   // rendered-DOM utility convention, not the rejected CSS-rule seam.
   it("gives the file stage the overflow-hidden breakout posture", async () => {
     renderPane({
-      thread: artifactThread([
-        { path: "C:/artifacts/out/report.md", fileName: "report.md" },
-      ]),
+      thread: [artifactTurn(["C:/artifacts/out/report.md"])],
     });
     await openArtifact("report.md");
 
