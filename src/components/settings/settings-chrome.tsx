@@ -107,7 +107,7 @@ export function HeaderActionButton({
           type="button"
           size="icon"
           variant="ghost"
-          className="text-muted-foreground hover:text-foreground size-7"
+          className="text-muted-foreground size-7"
           aria-label={label}
           disabled={disabled}
           onClick={onClick}
