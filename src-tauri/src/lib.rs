@@ -41,10 +41,10 @@ pub mod session_store;
 pub mod skills;
 // cfg(desktop) mirrors the tauri `tray-icon` feature's own desktop gate --
 // mobile builds neither compile the tray surface nor register it.
+pub mod turn_window;
 #[cfg(desktop)]
 pub mod tray;
 pub mod util;
-pub mod window;
 pub mod workingset;
 pub mod workspace;
 

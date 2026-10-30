@@ -696,7 +696,7 @@ pub struct Recipe {
     /// The active-SOURCE pointer as a reference name (ADR-0035/0037): the
     /// source the user last focused on at the source layer, stable across
     /// renames. This is distinct from `Session::active()` -- the user's
-    /// current focus, derived by `window::resolve_active` as the latest result
+    /// current focus, derived by `turn_window::resolve_active` as the latest result
     /// if any, else the active source. Resume rebuilds the working set + turn
     /// timeline deterministically, so `resolve_active` reproduces the same
     /// focus without persisting it. The source pointer is persisted because it

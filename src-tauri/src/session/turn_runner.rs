@@ -25,6 +25,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use crate::approval::{ApprovalSink, ApprovalState};
+use crate::turn_window;
 use crate::mcp::config::McpServerConfig;
 use crate::model::{TurnFailure, TurnOutcome, TurnPhase, TurnPhaseSink, TurnRecord, TurnRuntime};
 use crate::provider::keychain::KeychainStore;
@@ -39,7 +40,6 @@ use crate::session::materializer::DispatchDeps;
 use crate::session::outcome_merge::{merge_outcomes, turn_outcome_from_loop};
 use crate::session::skills::SkillTurnState;
 use crate::skills::SkillPromptFragment;
-use crate::window;
 
 use super::{now_epoch_ms, TimelineEntry, ACP_BRIDGE_BIN_ENV, GATEWAY_SERVER_NAME};
 
@@ -295,7 +295,7 @@ impl super::Session {
                 // track by decision: the loop runtime is the only built-in
                 // loop (each predecessor retired, #670 / #919); there is no
                 // runtime switch and no fallback.
-                let mut request = window::assemble_tool_turn(
+                let mut request = turn_window::assemble_tool_turn(
                     question,
                     &self.working_set,
                     &turns,
@@ -698,7 +698,7 @@ impl super::Session {
         let mcp_server = McpServer::stdio_bridge(GATEWAY_SERVER_NAME, bin_path, Vec::new(), env);
         // 4. Assemble the prompt blocks (leading context: locale + schema;
         //    skill block before question; M-contract via gateway tool table).
-        let prompt_blocks = window::assemble_acp_turn(
+        let prompt_blocks = turn_window::assemble_acp_turn(
             question,
             &self.working_set,
             history,
