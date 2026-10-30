@@ -50,6 +50,7 @@
 use std::path::Path;
 use std::time::{Duration, Instant};
 
+use tauri::image::Image;
 use tauri::menu::IsMenuItem;
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::{AppHandle, Emitter, Manager};
@@ -62,6 +63,17 @@ use crate::workspace::WorkspaceRegistry;
 
 /// The tray's registered id; the rebuild path re-resolves the tray by it.
 const TRAY_ID: &str = "main-tray";
+
+/// Embedded black template silhouette (issue #1151): black RGB + original
+/// alpha, @2x (44px) density. macOS is the only runtime consumer -- its
+/// tray backend renders at a fixed point height, so the denser asset
+/// downsamples cleanly on standard and retina alike. The 22px sibling
+/// (`tray-template.png`) sits in the icon source set, unbundled, without
+/// runtime wiring.
+// Off macOS the constant's only consumer is the asset-contract test
+// below; the production icon path never embeds it.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+const TRAY_TEMPLATE_PNG: &[u8] = include_bytes!("../icons/tray-template@2x.png");
 
 /// Emitted when a tray menu session item is clicked. Payload is the `recipe.json`
 /// path (the stable session identity, ADR-0089) -- the frontend resolves the
@@ -603,6 +615,27 @@ fn plan_tray_event(event: &TrayIconEvent) -> TrayEventPlan {
     }
 }
 
+/// Resolve the tray icon (issue #1151). macOS prefers the embedded black
+/// template silhouette flagged for `icon_as_template` so the menu bar
+/// inverts it for light/dark mode; every other platform keeps the
+/// full-color default window icon -- their trays have no template
+/// mechanism. A template decode failure (the asset is compile-time
+/// embedded, so this is belt-and-suspenders) falls back to the color
+/// icon instead of adding a new failure path -- `None` stays reserved
+/// for a genuinely icon-less build.
+fn tray_icon(app: &AppHandle) -> Option<(Image<'_>, bool)> {
+    #[cfg(target_os = "macos")]
+    {
+        match Image::from_bytes(TRAY_TEMPLATE_PNG) {
+            Ok(image) => return Some((image, true)),
+            Err(e) => {
+                log::warn!("template tray icon decode failed; using the color icon: {e}")
+            }
+        }
+    }
+    app.default_window_icon().cloned().map(|icon| (icon, false))
+}
+
 /// Register the system tray. Returns whether it is live; the caller keys the
 /// close-to-hide semantics off this (ADR-0125 Decision 2 -- an unavailable
 /// tray keeps close = real exit). The initial menu carries no sessions (zero
@@ -610,7 +643,7 @@ fn plan_tray_event(event: &TrayIconEvent) -> TrayEventPlan {
 /// after registration so the very first menu open shows live data without
 /// requiring a prior click.
 pub(crate) fn init(app: &AppHandle) -> bool {
-    let Some(icon) = app.default_window_icon() else {
+    let Some((icon, is_template)) = tray_icon(app) else {
         log::warn!("no default window icon for the tray; tray residency unavailable");
         return false;
     };
@@ -622,7 +655,10 @@ pub(crate) fn init(app: &AppHandle) -> bool {
         }
     };
     let built = TrayIconBuilder::with_id(TRAY_ID)
-        .icon(icon.clone())
+        .icon(icon)
+        // Template flagging only takes effect on macOS; elsewhere this is a
+        // no-op pass-through of `false`.
+        .icon_as_template(is_template)
         .tooltip("TOPTOPDuck")
         .menu(&menu)
         // Tauri v2's default shows the menu on LEFT click too; the resident
@@ -1238,5 +1274,26 @@ mod tests {
         let plan = plan_tray_event(&enter());
         assert!(!plan.reveal);
         assert!(plan.rebuild);
+    }
+
+    #[test]
+    fn embedded_template_icon_decodes_black_at_retina_size() {
+        // Pins the template contract (issue #1151): decodable PNG, @2x
+        // square, every visible pixel pure-black RGB (template rendering
+        // recolors from the alpha channel alone; black RGB pins Apple's
+        // template spec), and a shape actually present. Swapping in any
+        // color asset must turn this red.
+        let icon =
+            Image::from_bytes(TRAY_TEMPLATE_PNG).expect("embedded template tray icon must decode");
+        assert_eq!((icon.width(), icon.height()), (44, 44));
+        let rgba = icon.rgba();
+        assert!(
+            rgba.chunks_exact(4).all(|px| px[..3] == [0, 0, 0]),
+            "template pixels must be pure black RGB"
+        );
+        assert!(
+            rgba.chunks_exact(4).any(|px| px[3] > 0),
+            "silhouette must keep visible alpha"
+        );
     }
 }
