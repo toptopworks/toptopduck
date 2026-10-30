@@ -1447,7 +1447,9 @@ fn session_metadata_serializes_flat_snake_case() {
     // session_id in issue #462 to disambiguate from the runtime UUID). Pin the
     // full field order so a rename / reorder is caught before types.ts drifts.
     // ADR-0127 (issue #1174) appends the organization flags joined from the
-    // sidecar; the frontend type follows in #1175.
+    // sidecar; the frontend type follows in #1175. ADR-0137 (issue #1381)
+    // appends the workspace binding (explicit null when the session never
+    // reached a disk-need moment).
     use toptopduck_lib::{RecipePath, SessionMetadata, SourceSummary};
     assert_wire(
         &SessionMetadata {
@@ -1462,8 +1464,26 @@ fn session_metadata_serializes_flat_snake_case() {
             format_version: 1,
             pinned: false,
             archived: false,
+            workspace: Some("/home/user/project".into()),
         },
-        r#"{"recipe_path":"/x/analysis.json","display_name":"analysis","last_modified_at":1700000000000,"source_summary":{"first_source_name":"orders","source_count":1,"turn_count":2},"format_version":1,"pinned":false,"archived":false}"#,
+        r#"{"recipe_path":"/x/analysis.json","display_name":"analysis","last_modified_at":1700000000000,"source_summary":{"first_source_name":"orders","source_count":1,"turn_count":2},"format_version":1,"pinned":false,"archived":false,"workspace":"/home/user/project"}"#,
+    );
+    assert_wire(
+        &SessionMetadata {
+            recipe_path: RecipePath::new("/x/chat.json"),
+            display_name: "chat".into(),
+            last_modified_at: 1_700_000_000_000,
+            source_summary: SourceSummary {
+                first_source_name: None,
+                source_count: 0,
+                turn_count: 1,
+            },
+            format_version: 1,
+            pinned: false,
+            archived: false,
+            workspace: None,
+        },
+        r#"{"recipe_path":"/x/chat.json","display_name":"chat","last_modified_at":1700000000000,"source_summary":{"first_source_name":null,"source_count":0,"turn_count":1},"format_version":1,"pinned":false,"archived":false,"workspace":null}"#,
     );
 }
 

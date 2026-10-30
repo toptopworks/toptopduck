@@ -5,7 +5,7 @@
 //! the working set + recipe), productive-SQL-chain replay (driving the shared
 //! [`Materializer`] trait), and conversation timeline rebuild (pure logic).
 //! It does NOT hold the [`super::Session`] -- phase methods borrow `working_set` /
-//! [`TurnDeps`] and return structured results.
+//! [`DispatchDeps`] and return structured results.
 //!
 //! [`super::Session::open_recipe`] is the entry point that owns the full 5-phase
 //! orchestration: phase 1 (source re-ingest via [`super::Session::resume_sources`] +
@@ -31,7 +31,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use super::companion;
-use super::materializer::{Materializer, TurnDeps};
+use super::materializer::{DispatchDeps, Materializer};
 use super::{
     ActiveAbandoned, ActiveResolution, ResumeError, ResumeEvent, SourceIssue, SourceNotice,
     SourceResolution, TimelineEntry, TurnAudit,
@@ -189,7 +189,7 @@ pub(crate) struct ReplayBreak {
 /// the shared cancel token, the [`Materializer`] (the same trait object the
 /// live-turn agent loop drives through the `materialize` tool), and the
 /// recipe -- never the `Session`. Each phase method borrows `working_set` /
-/// [`TurnDeps`] and returns a structured result; `Session::open_recipe` applies
+/// [`DispatchDeps`] and returns a structured result; `Session::open_recipe` applies
 /// it.
 ///
 /// Why a deep module (ADR-0053 Why 1/3): reading resume means reading this file
@@ -316,7 +316,7 @@ impl<'a> Resumer<'a> {
     /// `None` means the whole chain replayed.
     pub(crate) fn replay(
         &mut self,
-        deps: &mut TurnDeps<'_>,
+        deps: &mut DispatchDeps<'_>,
         on_progress: &mut impl FnMut(ResumeEvent),
     ) -> Result<Option<ReplayBreak>, ResumeError> {
         let chain = self.recipe.productive_chain();
@@ -336,7 +336,7 @@ impl<'a> Resumer<'a> {
                 reference_name: turn.reference_name.clone(),
             });
             // Re-materialize via the shared materializer (ADR-0053): resume is
-            // LLM-free -- it re-executes stored SQL. TurnDeps borrows the same
+            // LLM-free -- it re-executes stored SQL. DispatchDeps borrows the same
             // shared state the live turn path borrows; the block scope releases
             // those borrows before rename_display takes its own &mut.
             // self.cancel is &Arc<CancelToken>; deref coercion hands the
@@ -860,17 +860,6 @@ impl super::Session {
             resume_baseline,
         );
 
-        // #1202: backfill the persisted artifacts into the fresh cwd before
-        // the resume phases -- the replayed history narrates past deliveries,
-        // and the next turn references them from the working directory
-        // instead of recomputing. The duck path is bound (adopt_resumed
-        // above), so the artifacts dir derives from the same source as the
-        // settle-time materialize.
-        super::artifacts::backfill_into_cwd(
-            super::artifacts::artifacts_dir(session.recipe_path()).as_deref(),
-            &session.temp_path,
-        );
-
         // ADR-0136 D3: the companion watermark decides the restore shape.
         // Point the engine at the tree companion FIRST (slot only -- the open
         // itself stays on-demand), then probe. A hit (companion present,
@@ -915,7 +904,7 @@ impl super::Session {
         // Phase 2/3/4 via the Resumer deep module (ADR-0053 Decision 3): the
         // Resumer borrows the shared cancel + the SAME Materializer trait
         // object the live-turn agent loop drives + the recipe. It does NOT
-        // hold the Session -- each phase method borrows working_set / TurnDeps
+        // hold the Session -- each phase method borrows working_set / DispatchDeps
         // and returns a structured result, which open_recipe applies. Scoped so
         // the Resumer (and its disjoint-field borrows of session.cancel /
         // session.materializer) drops before phase 5's &mut session persist.
@@ -923,7 +912,6 @@ impl super::Session {
             // Computed before the Resumer's disjoint-field borrows of session
             // begin -- recipe_path() takes &session, which the mutable
             // materializer borrow inside Resumer::new excludes.
-            let assets_dir = super::sql_assets::assets_dir(session.recipe_path());
             let snapshot_dir = session.snapshot_dir();
             let mut resumer = Resumer::new(&session.cancel, &mut *session.materializer, &recipe);
             let replay_break = if restored {
@@ -941,15 +929,23 @@ impl super::Session {
                 // Phase 3: replay the productive SQL chain (partial on
                 // failure -- K-1 results preserved, K rendered as Failed,
                 // AC6).
-                let mut deps = TurnDeps {
+                let mut deps = DispatchDeps {
                     engine: &session.admin_engine,
                     source_files: &mut session.source_files,
+                    source_readers: Some(&mut session.persister.source_readers),
                     working_set: &mut session.working_set,
                     result_row_cap: session.result_row_cap,
                     result_count_cap: session.result_count_cap,
                     temp_path: &session.temp_path,
+                    // ADR-0137 (issue #1381): the replay deps stay
+                    // disconnected from the workspace axis -- resume is
+                    // pure-state re-derivation, never a disk-need moment
+                    // (nothing launches; the SQL domain re-reads source
+                    // files only).
+                    workspace: None,
+                    workspaces_root: None,
+                    workspace_registry: None,
                     snapshot_dir,
-                    assets_dir,
                     tool_output_refs: &mut session.tool_output_refs,
                 };
                 resumer.replay(&mut deps, &mut on_progress)?
@@ -1000,6 +996,11 @@ impl super::Session {
             thought_level: recipe.thought_level.clone(),
             cached_discovered: recipe.cached_discovered.clone(),
             last_runtime: recipe.last_runtime.clone(),
+            // ADR-0137 (issue #1381): the workspace binding restores verbatim
+            // -- immutable by contract, `None` for a pre-#1381 recipe (the
+            // session then lazy-mints at its next disk-need moment like a
+            // fresh directory-less session).
+            workspace: recipe.workspace.clone(),
         };
 
         // Phase 5: persist the post-resume state. adopt_resumed already set
@@ -1134,7 +1135,12 @@ impl super::Session {
             loop {
                 let src = recipe.sources[i].clone();
                 let path = Self::resolve_source_path(recipe_path, &src)?;
-                match self.resume_ingest_at(&src.reference_name, &src.display_name, &path) {
+                match self.resume_ingest_at(
+                    &src.reference_name,
+                    &src.display_name,
+                    &path,
+                    src.reader.as_deref(),
+                ) {
                     Ok(descriptor) => {
                         if descriptor.fingerprint == src.fingerprint {
                             // Match -- restore the recipe's display label over
@@ -1243,26 +1249,49 @@ impl super::Session {
         reference_name: &str,
         display_name: &str,
         path: &Path,
+        recorded_reader: Option<&str>,
     ) -> Result<DatasetDescriptor, LoadError> {
-        let dispatched = crate::ingest::dispatch(path);
-        let reader = match dispatched {
-            crate::ingest::Dispatched::Xls => return Err(LoadError::LegacyExcel),
-            crate::ingest::Dispatched::Xlsx => {
-                return Err(LoadError::Other {
-                    detail: "resume 不支持 Excel 工作簿（多 sheet 语义）".into(),
-                });
+        // Reader authority is the fn name the SQL used at registration
+        // (ADR-0137 D4): the persisted spelling is re-validated through the
+        // same fn-name normalizer, so only the three tabular spellings can
+        // reach the copy-in template (a tampered recipe cannot smuggle
+        // arbitrary SQL in through `reader`). `None` -- manual-ingest
+        // sources, legacy recipes, and a present-but-unrecognized spelling
+        // (recipe corruption until proven otherwise, logged below) --
+        // dispatches by file extension, exactly as before.
+        if let Some(spelling) = recorded_reader {
+            if super::derived_source::programmatic_reader(spelling).is_none() {
+                log::warn!(
+                    target: "toptopduck::session",
+                    "source {reference_name} carries an unrecognized reader spelling {spelling:?}; falling back to extension dispatch"
+                );
             }
-            _ => match crate::ingest::reader_for(&dispatched) {
+        }
+        let reader: &'static str =
+            match recorded_reader.and_then(super::derived_source::programmatic_reader) {
                 Some(r) => r,
                 None => {
-                    let requested = match dispatched {
-                        crate::ingest::Dispatched::Unsupported(ext) => ext,
-                        _ => String::new(),
-                    };
-                    return Err(LoadError::UnsupportedFormat { requested });
+                    let dispatched = crate::ingest::dispatch(path);
+                    match dispatched {
+                        crate::ingest::Dispatched::Xls => return Err(LoadError::LegacyExcel),
+                        crate::ingest::Dispatched::Xlsx => {
+                            return Err(LoadError::Other {
+                                detail: "resume 不支持 Excel 工作簿（多 sheet 语义）".into(),
+                            });
+                        }
+                        _ => match crate::ingest::reader_for(&dispatched) {
+                            Some(r) => r,
+                            None => {
+                                let requested = match dispatched {
+                                    crate::ingest::Dispatched::Unsupported(ext) => ext,
+                                    _ => String::new(),
+                                };
+                                return Err(LoadError::UnsupportedFormat { requested });
+                            }
+                        },
+                    }
                 }
-            },
-        };
+            };
         // copy-in + attach under the explicit reference name (no de-conflict:
         // the recipe's name is already unique, ADR-0036 parse-time check).
         let snap =
@@ -1282,6 +1311,11 @@ impl super::Session {
         }
         self.source_files
             .insert(reference_name.to_string(), snap.file_path);
+        // Refill the reader-recording map (ADR-0137 D4): the post-resume
+        // persist rewrites the recipe, and the field must survive it.
+        self.persister
+            .source_readers
+            .insert(reference_name.to_string(), reader.to_string());
         let descriptor = DatasetDescriptor {
             reference_name: reference_name.to_string(),
             display_name: display_name.to_string(),
@@ -1336,6 +1370,14 @@ impl super::Session {
                 });
             }
             self.source_files.insert(src.reference_name.clone(), file);
+            // Reader provenance rides with the recipe (ADR-0137 D4): the
+            // hit leg never re-reads files, but the post-resume persist
+            // rewrites the recipe -- refill so the field survives it.
+            if let Some(reader) = &src.reader {
+                self.persister
+                    .source_readers
+                    .insert(src.reference_name.clone(), reader.clone());
+            }
         }
         // Restore the settled working-set shape verbatim: descriptors, result
         // membership, provenance edges, and the active source pointer. The
@@ -1458,6 +1500,7 @@ mod tests {
             relative_path: None,
             rectify: RectifyProvenance::NotApplicable,
             fingerprint: format!("fp_{name}"),
+            reader: None,
         }
     }
 
@@ -1552,17 +1595,17 @@ mod tests {
             .expect("test recipe builds")
     }
 
-    /// A throwaway `TurnDeps` for phase 3. `FakeMaterializer` never touches
+    /// A throwaway `DispatchDeps` for phase 3. `FakeMaterializer` never touches
     /// DuckDB / the working set / the temp dir, so the contents are inert --
-    /// the struct only needs to satisfy the `&mut TurnDeps` parameter so the
+    /// the struct only needs to satisfy the `&mut DispatchDeps` parameter so the
     /// live signature is tested, not a parallel test-only one.
     fn inert_deps<'a>(
         engine: &'a AdminEngine,
         ws: &'a mut WorkingSet,
         sources: &'a mut HashMap<String, std::path::PathBuf>,
         tool_output_refs: &'a mut HashMap<String, crate::session::materializer::CachedDerivedRef>,
-    ) -> TurnDeps<'a> {
-        TurnDeps::test_deps(engine, ws, sources, Path::new("."), tool_output_refs)
+    ) -> DispatchDeps<'a> {
+        DispatchDeps::test_deps(engine, ws, sources, Path::new("."), tool_output_refs)
     }
 
     // --- phase 2: resolve_active --------------------------------------------
@@ -2014,7 +2057,6 @@ mod tests {
         turn.artifacts = vec![crate::model::TurnArtifact {
             path: "/sessions/abc/artifacts/report.pdf".into(),
             file_name: "report.pdf".into(),
-            durable: true,
         }];
         let recipe = recipe_with(vec![RecipeEntry::Turn(turn)], None);
         let mut ws = WorkingSet::default();
@@ -2030,7 +2072,6 @@ mod tests {
             vec![crate::model::TurnArtifact {
                 path: "/sessions/abc/artifacts/report.pdf".into(),
                 file_name: "report.pdf".into(),
-                durable: true,
             }],
             "the manifest round-trips verbatim across close/reopen"
         );

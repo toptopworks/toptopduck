@@ -50,7 +50,7 @@ const { appConfigWith } = vi.hoisted(() => {
       },
       export: { last_dir: null, default_format: "csv" },
       tunables: { window_turns: 6, far_window: 12 },
-      shell: { sidebar_collapsed: false, sidebar_grouping: "flat" },
+      shell: { sidebar_collapsed: false },
       cli_tools: { tools: [] },
       mcp_servers: { servers: [] },
       sessions_dir: null,
@@ -249,7 +249,7 @@ describe("App theme (ADR-0050 black-box)", () => {
       // the pre-#814 shell rendered light here and flipped only when
       // getAppConfig landed. The seed paints dark from the first render.
       installMatchMedia(false);
-      vi.stubGlobal(BOOT_SEED_GLOBAL, { theme: "dark", locale: "zh-CN" });
+      vi.stubGlobal(BOOT_SEED_GLOBAL, { theme: "dark", locale: "zh-CN", sidebar_collapsed: false });
       vi.mocked(getAppConfig).mockImplementation(() => new Promise<AppConfig>(() => {}));
       render(<App />);
       expect(document.documentElement.classList.contains("dark")).toBe(true);
@@ -257,7 +257,7 @@ describe("App theme (ADR-0050 black-box)", () => {
 
     it("overwrites the seed once the IPC config resolves (IPC stays authoritative)", async () => {
       installMatchMedia(false);
-      vi.stubGlobal(BOOT_SEED_GLOBAL, { theme: "dark", locale: "zh-CN" });
+      vi.stubGlobal(BOOT_SEED_GLOBAL, { theme: "dark", locale: "zh-CN", sidebar_collapsed: false });
       vi.mocked(getAppConfig).mockResolvedValue(appConfigWith("light"));
       render(<App />);
       // Seed painted dark on the first render; the resolved full config

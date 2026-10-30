@@ -1,13 +1,21 @@
-//! Gateway-layer filesystem path whitelist (ADR-0080, ADR-0088).
+//! Gateway-layer filesystem path whitelist (ADR-0080, ADR-0088; read face
+//! relaxed by ADR-0137 Decision 4).
 //!
-//! The agent's file access via `read_*` functions is constrained to the
-//! **session source set (read-only) + the session working temp dir
-//! (read-write)**. DuckDB offers no per-path engine ACL, so the constraint is
-//! enforced at the gateway layer: a tool extracts every literal file path it
-//! would hand the engine (the `read_*` paths inside an explore/materialize
-//! query) and validates each against this whitelist *before* execution. An
-//! out-of-bounds path becomes a structured tool error the agent self-corrects
-//! from (ADR-0077); it never reaches the engine, and never fails silently.
+//! The agent's file access via `read_*` functions is constrained on the read
+//! face to the **session source set (read-only) + the session working temp
+//! dir (read-write) + any ABSOLUTE path on disk** (ADR-0137 D4: a referenced
+//! file is either snapshotted through the same copy-in pipeline as manual
+//! ingest on the materialize face, or read in place by explore; relative
+//! spellings stay confined to the roots only when they reach this gateway
+//! as relative -- i.e. sessions with no bound workspace, since ADR-0137 D3
+//! absolutizes relative spellings against the workspace BEFORE the gateway,
+//! surfacing them as absolute full-path reads). DuckDB offers no per-path
+//! engine ACL, so the constraint is enforced at the gateway layer: a tool
+//! extracts every literal file path it would hand the engine (the `read_*`
+//! paths inside an explore/materialize query) and validates each against
+//! this whitelist *before* execution. A refused path becomes a structured
+//! tool error the agent self-corrects from (ADR-0077); it never reaches the
+//! engine, and never fails silently.
 //!
 //! This whitelist is the **sole** file-reachability constraint for `read_*`
 //! (ADR-0088): the engine-level `disabled_filesystems` lockdown was removed so
@@ -25,16 +33,19 @@
 //!
 //! Threat model (ADR-0080): the agent is a non-adversarial LLM the user chose
 //! to run, not a dedicated SQL-injection adversary. Path extraction
-//! ([`crate::tools::read_paths`]) is conservative -- a non-literal `read_*`
+//! ([`crate::analysis_tools::read_paths`]) is conservative -- a non-literal `read_*`
 //! path is refused by the preflight, and a `read_*` in an unhandled AST
 //! variant is an accepted residual risk (ADR-0088 Why 4). Per-session
 //! instance isolation (ADR-0027) bounds any blast radius to the session that
 //! owns the engine.
 //!
-//! Symlink handling: canonicalization follows symlinks to their real target,
-//! so an in-bounds symlink that points outside is resolved to the out-of-bounds
-//! target and refused. This is a best-effort, read-time check (not TOCTOU-hard)
-//! -- consistent with the non-adversarial threat model.
+//! Symlink handling: canonicalization follows symlinks to their real target
+//! (an unresolvable link is an `Unresolvable` refusal, and the write face
+//! checks the resolved path). The READ face no longer refuses an in-bounds
+//! link pointing outside: an absolute spelling carries ADR-0137 D4's
+//! full-path allowance through the link, exactly as the engine would read
+//! the outside target by its own absolute path -- the ADR-0080 read-side
+//! symlink containment is superseded by the relax.
 
 use std::path::{Path, PathBuf};
 
@@ -86,7 +97,9 @@ impl FsAclError {
         match self.reason {
             FsAclReason::OutsideAllowedArea => format!(
                 "path `{}` is outside the allowed session source set (read-only) \
-                 and working temp dir (read-write)",
+                 and working temp dir (read-write); a relative spelling that reached \
+                 this check resolves against the process working directory -- \
+                 reference the file by an absolute path",
                 self.requested
             ),
             FsAclReason::ReadOnlyRoot => format!(
@@ -102,7 +115,7 @@ impl FsAclError {
 
 /// The session's allowed filesystem roots, built per call from the live source
 /// set + the session temp dir. Cheap to build (a handful of canonicalized
-/// paths); a tool constructs one per call from [`crate::session::materializer::TurnDeps`].
+/// paths); a tool constructs one per call from [`crate::session::materializer::DispatchDeps`].
 ///
 /// - `source_roots`: the canonicalized ORIGINAL source file paths (the files
 ///   the user handed the session). Read-only -- the agent may re-read a raw
@@ -111,30 +124,21 @@ impl FsAclError {
 ///   files the agent produces live here and are cleared on session drop
 ///   (ADR-0029 invariant 2). The per-source `.duckdb` snapshots also live here;
 ///   SQL still sees them READ_ONLY via catalog attach, independent of this ACL.
-/// - `assets_root`: the canonicalized per-session `assets/` dir (ADR-0089),
-///   a READ-ONLY subtree. Unlike `source_roots` (exact per-file entries) this
-///   is a directory-tree rule: SQL-reference dead files land there under
-///   settle-time disambiguated names nobody enumerates in advance, so the
-///   allowance covers whatever the subtree holds.
 pub(crate) struct FsAcl {
     source_roots: Vec<PathBuf>,
     temp_root: PathBuf,
-    assets_root: Option<PathBuf>,
 }
 
 impl FsAcl {
     /// Build the whitelist from the working set's source paths + the session
-    /// temp dir + the per-session assets/ dir (ADR-0089: SQL-reference dead
-    /// files live there so replay -- and a live follow-up referencing a
-    /// materialized copy -- can read_* them; read-only, the same immutable
-    /// rule as sources). A root whose original file no longer exists on disk
+    /// temp dir. A root whose original file no longer exists on disk
     /// (canonicalization fails) is dropped from `source_roots` -- it cannot be
     /// read_* anyway, and carrying a phantom root would be dead policy.
-    pub(crate) fn new(
-        working_set: &WorkingSet,
-        temp_path: &Path,
-        assets_dir: Option<&Path>,
-    ) -> Self {
+    /// The legacy `assets/` read allowance is retired (issue #1390): a
+    /// pre-#1383 recipe's dead-file replay now refuses at the read face like
+    /// any other missing file (Unresolvable) or rides ADR-0137 D4's
+    /// full-path allowance when the file still exists on disk.
+    pub(crate) fn new(working_set: &WorkingSet, temp_path: &Path) -> Self {
         let temp_root = canonicalize(temp_path).unwrap_or_else(|| temp_path.to_path_buf());
         let source_roots = working_set
             .source_paths()
@@ -144,7 +148,6 @@ impl FsAcl {
         Self {
             source_roots,
             temp_root,
-            assets_root: assets_dir.and_then(canonicalize),
         }
     }
 
@@ -153,8 +156,10 @@ impl FsAcl {
     /// `requested` is the path string exactly as the agent supplied it to a
     /// `read_*` call: it may be absolute, or relative (resolved against the
     /// process CWD, mirroring how DuckDB resolves a relative `read_*` path).
-    /// Symlinks are followed by canonicalization, so an in-bounds symlink
-    /// pointing outside resolves to the out-of-bounds target and is refused.
+    /// Symlinks are followed by canonicalization; for READS an absolute
+    /// spelling through an outside-pointing link rides ADR-0137 D4's
+    /// full-path allowance (see the module doc), while writes validate
+    /// against the resolved path.
     ///
     /// Read mode: the path must exist (canonicalize the full path). Write mode:
     /// the parent must exist (canonicalize the parent, rejoin the file name) so
@@ -175,21 +180,20 @@ impl FsAcl {
                 }),
             };
         }
-        // The read-only assets subtree (ADR-0089): read OK, write refused --
-        // dead files are replay inputs, not scratch space.
-        if let Some(root) = &self.assets_root {
-            if resolved.starts_with(root) {
-                return match mode {
-                    AccessMode::Read => Ok(()),
-                    AccessMode::Write => Err(FsAclError {
-                        requested: requested.to_string(),
-                        reason: FsAclReason::ReadOnlyRoot,
-                    }),
-                };
-            }
-        }
         // The read-write temp root: anything underneath is allowed either mode.
         if resolved.starts_with(&self.temp_root) {
+            return Ok(());
+        }
+        // ADR-0137 Decision 4: the read face opens to full-path references --
+        // an ABSOLUTE spelling anywhere on disk is readable. The materialize
+        // face copy-ins such references into session-tree snapshots before
+        // execution; the explore face reads them in place. Relative spellings
+        // keep resolving against the process CWD (mirroring DuckDB), so the
+        // reads still refused are relative paths landing outside every root.
+        // Write stays closed outside the roots above: an absolute write falls
+        // through to the refusal below (the same OutsideAllowedArea as a
+        // relative escape).
+        if mode == AccessMode::Read && Path::new(requested).is_absolute() {
             return Ok(());
         }
         Err(FsAclError {
@@ -267,65 +271,15 @@ mod tests {
         ws
     }
 
-    /// ADR-0089 assets face: a path inside the session's assets/ dir passes
-    /// the READ check and is refused for WRITE -- the same immutable rule as
-    /// a source root. This is the preflight half of SQL-reference dead-file
-    /// replay: without the allowance, a materialized copy is just as dead as
-    /// the temp original it replaced.
+    /// ADR-0137 D4: an absolute path outside every allowed root is READABLE
+    /// -- the full-path face. The materialize face copy-ins such references
+    /// into session-tree snapshots; explore reads them in place. A WRITE
+    /// against the same absolute path is still refused (write stays closed
+    /// outside the roots).
     #[test]
-    fn assets_dir_is_readable_and_write_refused() {
+    fn absolute_out_of_bounds_read_is_allowed_write_refused() {
         let temp = TempDir::new().unwrap();
-        let session = TempDir::new().unwrap();
-        let assets = session.path().join("assets");
-        std::fs::create_dir_all(&assets).unwrap();
-        let dead_file = assets.join("kline.csv");
-        std::fs::write(
-            &dead_file, "x
-y
-",
-        )
-        .unwrap();
-        // FsAcl canonicalizes the roots, so the file must exist on disk.
-        let acl = FsAcl::new(&WorkingSet::default(), temp.path(), Some(&assets));
-        assert!(
-            acl.check(&dead_file.to_string_lossy(), AccessMode::Read)
-                .is_ok(),
-            "assets dead file passes the read check"
-        );
-        let err = acl
-            .check(&dead_file.to_string_lossy(), AccessMode::Write)
-            .unwrap_err();
-        assert!(
-            matches!(err.reason, FsAclReason::ReadOnlyRoot),
-            "assets is read-only, got {err:?}"
-        );
-    }
-
-    /// A nonexistent assets/ dir canonicalizes to nothing and is simply not
-    /// carried -- no phantom root, no policy change for an unbound session.
-    #[test]
-    fn missing_assets_dir_is_not_carried() {
-        let temp = TempDir::new().unwrap();
-        let session = TempDir::new().unwrap();
-        let ghost = session.path().join("assets").join("gone.csv");
-        let acl = FsAcl::new(
-            &WorkingSet::default(),
-            temp.path(),
-            Some(&session.path().join("assets")),
-        );
-        assert!(
-            acl.check(&ghost.to_string_lossy(), AccessMode::Read)
-                .is_err(),
-            "a missing assets root carries no read allowance"
-        );
-    }
-
-    /// AC #2 / AC #4: an absolute path outside every allowed root is refused as
-    /// `OutsideAllowedArea`. This is the core path-escape rejection.
-    #[test]
-    fn absolute_out_of_bounds_path_is_refused() {
-        let temp = TempDir::new().unwrap();
-        let acl = FsAcl::new(&WorkingSet::default(), temp.path(), None);
+        let acl = FsAcl::new(&WorkingSet::default(), temp.path());
         // A path that does exist on disk (so canonicalization succeeds) but is
         // outside the temp dir: the temp dir's own parent is a safe stand-in.
         let outside = temp
@@ -333,19 +287,22 @@ y
             .parent()
             .and_then(|p| p.canonicalize().ok())
             .unwrap_or_else(|| PathBuf::from("/etc/hosts"));
+        acl.check(&outside.to_string_lossy(), AccessMode::Read)
+            .expect("absolute read is allowed on the full-path face (ADR-0137 D4)");
         let err = acl
-            .check(&outside.to_string_lossy(), AccessMode::Read)
+            .check(&outside.to_string_lossy(), AccessMode::Write)
             .unwrap_err();
         assert_eq!(err.reason, FsAclReason::OutsideAllowedArea);
         assert!(err.message().contains("outside the allowed"));
     }
 
-    /// AC #2 / AC #4: a relative `../` escape is resolved against the process
+    /// A relative `../` escape is resolved against the process
     /// CWD (mirroring DuckDB) and, when it lands outside every allowed root,
-    /// refused. The sibling lives in the CWD's parent so the literal `../sib`
-    /// resolves to a real on-disk file -- this exercises resolve()'s CWD
-    /// branch (an absolute-path-only check would pass even if that branch
-    /// were broken).
+    /// refused -- the relative face stays confined to the roots under ADR-0137
+    /// D4 (only absolute spellings open to full-path). The sibling lives in
+    /// the CWD's parent so the literal `../sib` resolves to a real on-disk
+    /// file -- this exercises resolve()'s CWD branch (an absolute-path-only
+    /// check would pass even if that branch were broken).
     #[test]
     fn relative_dotdot_escape_is_refused() {
         let temp = TempDir::new().unwrap();
@@ -364,7 +321,7 @@ y
             .file_name()
             .and_then(|n| n.to_str())
             .expect("escape-target filename is valid UTF-8");
-        let acl = FsAcl::new(&WorkingSet::default(), temp.path(), None);
+        let acl = FsAcl::new(&WorkingSet::default(), temp.path());
         // The literal relative path: resolve() joins it against the CWD and
         // canonicalizes to cwd.parent/target_name, which is outside temp_root.
         let err = acl
@@ -379,12 +336,20 @@ y
         // escape_file cleans up via Drop on scope exit (incl. panic).
     }
 
-    /// AC #2 / AC #4: an in-bounds symlink that points outside is resolved to
-    /// its real out-of-bounds target and refused. Canonicalization follows the
-    /// link, so the ACL never authorizes a path by its in-bounds alias.
+    /// An in-bounds symlink pointing outside: canonicalization resolves the
+    /// link to its real target, but the requested spelling is ABSOLUTE, so
+    /// ADR-0137 D4's full-path face carries the read -- the engine follows
+    /// the link at exec, exactly as it would read the outside target by its
+    /// own absolute path. The ADR-0080 symlink containment is superseded for
+    /// the read face by the full-path relax; the relative face stays confined.
+    /// The write face is NOT asserted here: resolve() canonicalizes the
+    /// PARENT only in Write mode (pre-existing semantics -- a not-yet-created
+    /// leaf must validate against its parent root), so the in-bounds link
+    /// spelling validates against the temp root either way; write-through-
+    /// link posture is out of this PR's scope.
     #[test]
     #[cfg(unix)]
-    fn symlink_escape_is_refused() {
+    fn symlink_to_outside_is_readable_on_the_full_path_face() {
         use std::os::unix::fs::symlink;
         let temp = TempDir::new().unwrap();
         let outside = TempDir::new().unwrap();
@@ -393,13 +358,9 @@ y
         // Place a symlink INSIDE the temp dir pointing at the outside file.
         let link = temp.path().join("alias.csv");
         symlink(&outside_file, &link).unwrap();
-        let acl = FsAcl::new(&WorkingSet::default(), temp.path(), None);
-        // Reading via the in-bounds link alias canonicalizes to the outside
-        // target -> refused (not authorized by the in-bounds alias).
-        let err = acl
-            .check(&link.to_string_lossy(), AccessMode::Read)
-            .unwrap_err();
-        assert_eq!(err.reason, FsAclReason::OutsideAllowedArea);
+        let acl = FsAcl::new(&WorkingSet::default(), temp.path());
+        acl.check(&link.to_string_lossy(), AccessMode::Read)
+            .expect("absolute spelling reads through the link (ADR-0137 D4)");
     }
 
     /// An in-bounds temp dir path is allowed for both read and write. This is
@@ -409,7 +370,7 @@ y
         let temp = TempDir::new().unwrap();
         let file = temp.path().join("scratch.csv");
         fs::write(&file, "x").unwrap();
-        let acl = FsAcl::new(&WorkingSet::default(), temp.path(), None);
+        let acl = FsAcl::new(&WorkingSet::default(), temp.path());
         acl.check(&file.to_string_lossy(), AccessMode::Read)
             .expect("read inside temp dir allowed");
         // Write to a not-yet-existing file inside the temp dir: parent resolves,
@@ -428,7 +389,7 @@ y
         let src_file = src.path().join("people.csv");
         fs::write(&src_file, "x").unwrap();
         let ws = ws_with_source(&src_file.to_string_lossy());
-        let acl = FsAcl::new(&ws, temp.path(), None);
+        let acl = FsAcl::new(&ws, temp.path());
         acl.check(&src_file.to_string_lossy(), AccessMode::Read)
             .expect("reading a source file allowed");
         let err = acl
@@ -443,7 +404,7 @@ y
     #[test]
     fn missing_read_target_is_unresolvable() {
         let temp = TempDir::new().unwrap();
-        let acl = FsAcl::new(&WorkingSet::default(), temp.path(), None);
+        let acl = FsAcl::new(&WorkingSet::default(), temp.path());
         let ghost = temp.path().join("does-not-exist.csv");
         let err = acl
             .check(&ghost.to_string_lossy(), AccessMode::Read)
@@ -459,7 +420,7 @@ y
     fn vanished_source_is_not_carried_as_a_root() {
         let temp = TempDir::new().unwrap();
         let ws = ws_with_source("/no/such/path/vanished.csv");
-        let acl = FsAcl::new(&ws, temp.path(), None);
+        let acl = FsAcl::new(&ws, temp.path());
         assert!(acl.source_roots.is_empty(), "vanished source not carried");
     }
 
@@ -476,8 +437,12 @@ y
 
     /// `Path::starts_with` matches component-by-component, so a path whose
     /// STRING prefix matches temp_root but is a distinct component (e.g.
-    /// `/tmp/sess` vs `/tmp/sess_evil`) is NOT authorized. Regression guard
-    /// against a future string-prefix refactor.
+    /// `/tmp/sess` vs `/tmp/sess_evil`) is NOT authorized. Guarded on the
+    /// WRITE face -- the read face opens absolute spellings everywhere under
+    /// ADR-0137 D4, so the component-wise property decides writes and the
+    /// reads that still arrive here as relative spellings (a scratch write
+    /// into `sess_evil` must stay outside the temp root).
+    /// Regression guard against a future string-prefix refactor.
     #[test]
     fn temp_root_prefix_is_component_wise_not_string() {
         let parent = TempDir::new().unwrap();
@@ -489,21 +454,21 @@ y
         fs::create_dir(&evil_dir).unwrap();
         let evil_file = evil_dir.join("secret.csv");
         fs::write(&evil_file, "x").unwrap();
-        let acl = FsAcl::new(&WorkingSet::default(), &temp_root, None);
+        let acl = FsAcl::new(&WorkingSet::default(), &temp_root);
         let err = acl
-            .check(&evil_file.to_string_lossy(), AccessMode::Read)
+            .check(&evil_file.to_string_lossy(), AccessMode::Write)
             .unwrap_err();
         assert_eq!(err.reason, FsAclReason::OutsideAllowedArea);
     }
 
-    /// AC #2 / AC #4 (Windows): an in-bounds symlink pointing outside resolves
-    /// to the out-of-bounds target via canonicalize and is refused, mirroring
-    /// the unix symlink test on the CI target platform. Symlink creation needs
-    /// Developer Mode or admin on Windows; skip on permission denial so CI is
-    /// not flaky.
+    /// (Windows) A directory symlink inside temp pointing outside: the
+    /// absolute spelling carries the read under ADR-0137 D4's full-path face,
+    /// mirroring the unix symlink test on the CI target platform. Symlink
+    /// creation needs Developer Mode or admin on Windows; skip on permission
+    /// denial so CI is not flaky.
     #[test]
     #[cfg(windows)]
-    fn symlink_escape_is_refused_windows() {
+    fn symlink_to_outside_is_readable_on_the_full_path_face_windows() {
         use std::os::windows::fs::symlink_dir;
         let temp = TempDir::new().unwrap();
         let outside = TempDir::new().unwrap();
@@ -515,13 +480,9 @@ y
             eprintln!("skipped: Windows symlink creation needs Developer Mode / admin");
             return;
         }
-        let acl = FsAcl::new(&WorkingSet::default(), temp.path(), None);
-        // Reading via the in-bounds link alias canonicalizes to the outside
-        // dir -> refused (not authorized by the in-bounds alias).
-        let err = acl
-            .check(&link.to_string_lossy(), AccessMode::Read)
-            .unwrap_err();
-        assert_eq!(err.reason, FsAclReason::OutsideAllowedArea);
+        let acl = FsAcl::new(&WorkingSet::default(), temp.path());
+        acl.check(&link.to_string_lossy(), AccessMode::Read)
+            .expect("absolute spelling reads through the link (ADR-0137 D4)");
     }
 
     /// Issue #432 AC#2: a file inside the `tool_output/` subdirectory under the
@@ -540,27 +501,8 @@ y
         fs::create_dir(&tool_output).unwrap();
         let file = tool_output.join("result.csv");
         fs::write(&file, "x").unwrap();
-        let acl = FsAcl::new(&WorkingSet::default(), temp.path(), None);
+        let acl = FsAcl::new(&WorkingSet::default(), temp.path());
         acl.check(&file.to_string_lossy(), AccessMode::Read)
             .expect("read inside tool_output/ allowed");
-    }
-
-    /// Issue #432 AC#4: a file OUTSIDE the temp root + source roots is still
-    /// refused, even though the `tool_output/` subdir exists. The whitelist
-    /// boundary does not widen -- `tool_output/` is under temp_root, not a new
-    /// independent root.
-    #[test]
-    fn file_outside_temp_root_still_refused_with_tool_output_present() {
-        let temp = TempDir::new().unwrap();
-        fs::create_dir(temp.path().join("tool_output")).unwrap();
-        // A file in a completely separate temp dir.
-        let outside = TempDir::new().unwrap();
-        let outside_file = outside.path().join("secret.csv");
-        fs::write(&outside_file, "x").unwrap();
-        let acl = FsAcl::new(&WorkingSet::default(), temp.path(), None);
-        let err = acl
-            .check(&outside_file.to_string_lossy(), AccessMode::Read)
-            .unwrap_err();
-        assert_eq!(err.reason, FsAclReason::OutsideAllowedArea);
     }
 }

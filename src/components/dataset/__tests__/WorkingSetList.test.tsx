@@ -1156,13 +1156,14 @@ describe("WorkingSetList", () => {
     expect(select.className.split(/\s+/)).not.toContain("hover:bg-accent");
   });
 
-  it("rests the icon glyphs muted, highlights the hot icon, and splits the cursor: strip arrow, select hand", () => {
+  it("rests the icon glyphs muted, highlights the hot icon, and stays clear of per-site cursor classes", () => {
     // The icon strip reads like the reference session list: each glyph rests
     // muted on the pill's accent ground and the hovered / keyboard-focused
     // icon highlights to foreground -- color alone marks the hot icon (a
-    // background tint would be invisible on the pill's own accent). The
-    // strip keeps the default arrow (the highlight carries the affordance);
-    // the select button's hand is pinned at the tail of this test.
+    // background tint would be invisible on the pill's own accent). The hand
+    // comes from the app.css base rule (button:not(:disabled)), so no row
+    // button carries a per-site cursor class -- the not.toContain pins that
+    // no scattered cursor-pointer patch creeps back in.
     renderList(
       <WorkingSetList
         sessionId="s1"
@@ -1187,16 +1188,19 @@ describe("WorkingSetList", () => {
       expect(classes).toContain("disabled:cursor-progress");
       expect(classes).toContain("disabled:opacity-50");
       expect(classes).not.toContain("cursor-pointer");
+      // Pin the arrow channel too: restoring the pre-#1434 icon-strip posture
+      // would be a per-site cursor-default class, so absence is pinned both
+      // ways (the base rule is the hand, not any local class).
+      expect(classes).not.toContain("cursor-default");
       expect(classes).not.toContain("hover:bg-accent");
     }
-    // The select button carries the hand -- its click is the row's
-    // selection, the honest affordance. The label's truncation-recovery
-    // affordance is the OS-native title now, which never touches the cursor,
-    // so the old text-vs-everywhere flip on the span is gone; the remaining
-    // cursor edges are the pill's two boundaries over the button's tail
-    // (hand -> arrow -> hand), accepted with the hand ruling.
+    // The select button takes the same base hand as the strip -- its click
+    // is the row's selection. The label's truncation-recovery affordance is
+    // the OS-native title, which never touches the cursor, so the whole
+    // button body is one continuous hand either side of the pill edge.
     const select = screen.getByRole("button", { name: /^people/ });
-    expect(select.className.split(/\s+/)).toContain("cursor-pointer");
+    expect(select.className.split(/\s+/)).not.toContain("cursor-pointer");
+    expect(select.className.split(/\s+/)).not.toContain("cursor-default");
   });
 
   it("truncates the label but not the row-count note; the full name rides the native title (issue #790)", () => {

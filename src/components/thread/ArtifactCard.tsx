@@ -98,13 +98,13 @@ function ArtifactRow({
       className={cn(
         // result-link's bareButtonReset posture: a real button with the
         // card's row chrome; full-width rows keep one hit target per file.
-        "artifact-row flex w-full cursor-pointer items-center gap-1.5 border-t px-1.5 py-1 text-left transition-colors",
+        "artifact-row flex w-full items-center gap-1.5 border-t px-1.5 py-1 text-left transition-colors",
         "hover:bg-accent",
         active && "active font-semibold",
       )}
       aria-current={active ? "true" : undefined}
       aria-label={intl.formatMessage(
-        { id: "thread.artifacts.open", defaultMessage: "Open {name} in the workspace" },
+        { id: "thread.artifacts.open", defaultMessage: "Open {name} in the right sidebar" },
         { name: artifact.file_name },
       )}
       onClick={() => onSelectFile?.(artifact.path)}

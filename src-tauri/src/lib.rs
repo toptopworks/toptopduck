@@ -22,6 +22,7 @@ pub mod approval;
 // same crate without linking this one (ADR-0085: the bridge links no app
 // crate).
 pub(crate) use bounded_line::bounded_line;
+pub mod analysis_tools;
 pub mod cancel;
 pub mod cli_tools;
 pub mod commands;
@@ -38,7 +39,7 @@ pub mod sandbox_sql;
 pub mod session;
 pub mod session_store;
 pub mod skills;
-pub mod tools;
+pub mod turn_window;
 // cfg(desktop) mirrors the tauri `tray-icon` feature's own desktop gate --
 // mobile builds neither compile the tray surface nor register it.
 #[cfg(desktop)]
@@ -46,6 +47,7 @@ pub mod tray;
 pub mod util;
 pub mod window;
 pub mod workingset;
+pub mod workspace;
 
 pub use app_config::{
     AppConfig, EngineDefaults, ExportDefaults, PrivacyDefaults, Theme, Tunables,
@@ -81,7 +83,7 @@ pub use provider::{LiveProvider, Provider, ProviderError, UnwiredProvider};
 pub use session::{
     is_resuming, ActiveAbandoned, ActiveResolution, PendingConflict, RenameSessionError,
     ResumeError, ResumeEvent, ResumeProgress, Session, SourceIssue, SourceNotice, SourceResolution,
-    TurnInputs,
+    TurnDeps, TurnInputs, TurnPorts,
 };
 pub use session_store::{
     ClosingFlag, LiveSessionSnapshot, SessionError, SessionHandle, SessionId, SessionStore,
@@ -306,6 +308,17 @@ pub fn run() {
             let main_window_builder =
                 tauri::WebviewWindowBuilder::from_config(app.handle(), main_window_cfg)?
                     .initialization_script(app_config::boot_seed::boot_seed_script(&boot_cfg));
+            // Pre-paint window background (issue #881): the boot show
+            // reveals the window before the webview paints, so the gap
+            // carries the native background. The theme-resolved color
+            // rides the builder chain ahead of that reveal; the `window`
+            // module doc carries the reveal timing and the unresolved
+            // theme fallback.
+            let main_window_builder =
+                match window::background_color(boot_cfg.theme, window::os_uses_light_theme()) {
+                    Some(color) => main_window_builder.background_color(color),
+                    None => main_window_builder,
+                };
             // Tray-ready handshake state (issue #1142): managed BEFORE
             // this window build (so the page-load hook below never
             // observes a missing state) and before tray::init (so menu
@@ -427,6 +440,20 @@ pub fn run() {
                 ));
             app.manage(user_adapter_store);
 
+            // The workspace registry (ADR-0138, issue #1384):
+            // `workspaces.json` under the OS app-data dir, same resolution +
+            // honest temp-dir fallback. The domain ledger of workspaces as
+            // logical units over directories -- deliberately outside
+            // app-config (machine bookkeeping vs user preference: semantics,
+            // write frequency, and lifecycle all differ).
+            app.manage(Arc::new(crate::workspace::WorkspaceRegistry::new(
+                app_data_path(
+                    app.handle(),
+                    crate::workspace::WORKSPACES_FILE_NAME,
+                    "workspace registry",
+                ),
+            )));
+
             // System tray residency (ADR-0125, issue #1140). The tray is the
             // resident surface while the main window is hidden: closing the
             // window hides it instead of killing the process, because a
@@ -485,6 +512,10 @@ pub fn run() {
             commands::close_session,
             commands::close_session_and_wait_release,
             commands::list_live_sessions,
+            commands::list_workspaces,
+            commands::create_workspace,
+            commands::rename_workspace,
+            commands::remove_workspace,
             commands::ingest_file,
             commands::ingest_file_guided,
             commands::guidance_window,

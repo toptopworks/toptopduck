@@ -57,24 +57,17 @@ export interface Tunables {
   far_window: number;
 }
 
-// Session sidebar grouping mode (ADR-0072, issue #251). `flat` renders every
-// session in a single "Recent" group sorted by mtime descending; `time`
-// preserves the ADR-0060 Chat-style Today/Yesterday/Previous 7 days/Older
-// buckets. The variant names avoid `recent` to stay clear of the MRU-list
-// sense (ADR-0072). Mirrors the Rust `SidebarGrouping`;
-// crosses IPC as the bare lowercase variant name.
-export type SidebarGrouping = "flat" | "time";
-
-// Shell collapse preferences (ADR-0054, issue #84). The two MANUAL collapse
-// levels that are UI state (not the third -- Tauri minWidth/minHeight, a native
-// window config not a preference): session sidebar + thread rail. Both default
-// expanded; both persist via app-config (ADR-0038) and stack independently.
-// `sidebar_grouping` (ADR-0072, issue #251) extends the same shell-chrome
-// surface: the sidebar's flat/time render mode persists + restores with the two
-// collapse prefs. Mirrors the Rust `ShellPrefs`.
+// Shell collapse preferences (ADR-0054, issue #84). The MANUAL collapse level
+// that is UI state (not Tauri minWidth/minHeight, a native window config not a
+// preference): the session sidebar. Defaults expanded; persists via app-config
+// (ADR-0038).
+// The sidebar's flat/time grouping mode (ADR-0072, issue #251) was retired
+// with #1401 (the sidebar always renders the mtime-descending "Recent" list,
+// ADR-0060 recalibration): a legacy `sidebar_grouping` key in an older config
+// file is ignored at parse and dropped on the next write.
+// Mirrors the Rust `ShellPrefs`.
 export interface ShellPrefs {
   sidebar_collapsed: boolean;
-  sidebar_grouping: SidebarGrouping;
 }
 
 // The default runtime new sessions start on (ADR-0098 Decision 2, issue

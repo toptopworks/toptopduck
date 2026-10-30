@@ -20,12 +20,12 @@
 
 use serde_json::{json, Value};
 
+use crate::analysis_tools::definitions;
+use crate::analysis_tools::ToolPayload;
 use crate::cancel::CancelToken;
 use crate::guardrail::{ExecError, ExecErrorKind};
 use crate::model::{DatasetDescriptor, Promotion, RenameError};
-use crate::session::materializer::{Materializer, TurnDeps};
-use crate::tools::definitions;
-use crate::tools::ToolPayload;
+use crate::session::materializer::{DispatchDeps, Materializer};
 
 /// Parse the tool input + drive the materializer to promote the SQL's result.
 ///
@@ -36,7 +36,7 @@ use crate::tools::ToolPayload;
 /// retry).
 pub(crate) fn dispatch(
     input: &Value,
-    deps: &mut TurnDeps,
+    deps: &mut DispatchDeps,
     cancel: &CancelToken,
     materializer: &mut dyn Materializer,
 ) -> Result<ToolPayload, String> {
@@ -111,7 +111,7 @@ pub(crate) fn dispatch(
 /// can surface it to the agent -- the promotion already succeeded, so the error
 /// is NOT fatal; the caller turns it into a `label_warning` field.
 fn apply_display_label(
-    deps: &mut TurnDeps,
+    deps: &mut DispatchDeps,
     reference_name: &str,
     label: &str,
 ) -> Result<String, RenameError> {
@@ -190,9 +190,9 @@ fn err_message(result_name: &str, e: ExecError) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::analysis_tools::test_support::{inert_deps, inert_deps_with_temp};
     use crate::model::{ColumnSchema, DatasetPrivacy, RectifyProvenance};
     use crate::session::engine::AdminEngine;
-    use crate::tools::test_support::{inert_deps, inert_deps_with_temp};
 
     /// A descriptor factory for the payload-shape test.
     fn descriptor(reference_name: &str) -> DatasetDescriptor {
@@ -273,7 +273,7 @@ mod tests {
             _sql: &str,
             _cancel: &CancelToken,
             _result_name: String,
-            _deps: &mut TurnDeps,
+            _deps: &mut DispatchDeps,
         ) -> Result<DatasetDescriptor, ExecError> {
             unreachable!("materializer must not be called when sql is missing")
         }
@@ -595,13 +595,14 @@ mod tests {
         );
     }
 
-    /// AC (issue #334): a `read_*` call whose path resolves OUTSIDE the session
-    /// source set + working temp dir is refused by the gateway door BEFORE the
-    /// sandbox runs -- symmetric with `explore_refuses_out_of_bounds_read_path_
-    /// at_gateway`. The structured "outside the allowed area" message lets the
-    /// agent self-correct (ADR-0077 / ADR-0080).
+    /// ADR-0137 D4: an ABSOLUTE `read_*` path outside the session's own
+    /// directories is the full-path face -- it passes the gateway, is
+    /// programmatically copy-in'd into a session-tree snapshot (same pipeline
+    /// as manual ingest, only the trigger differs), registers as a source,
+    /// and materialize promotes the result from the rewritten catalog
+    /// reference.
     #[test]
-    fn materialize_refuses_out_of_bounds_read_path_at_gateway() {
+    fn materialize_programmatic_snapshot_for_absolute_reference() {
         use crate::session::materializer::RealMaterializer;
         use std::fs;
         use tempfile::TempDir;
@@ -614,28 +615,48 @@ mod tests {
         // A file that exists on disk but lives outside the session temp dir.
         let outside = TempDir::new().unwrap();
         let outside_file = outside.path().join("secret.csv");
-        fs::write(&outside_file, "x").unwrap();
+        fs::write(&outside_file, "val\n1\n2\n").unwrap();
         let mut deps = inert_deps_with_temp(&engine, &mut ws, &mut sources, temp.path(), &mut refs);
         let cancel = CancelToken::new();
         let mut materializer = RealMaterializer;
-        let err = dispatch(
+        let payload = dispatch(
             &json!({"sql": format!("SELECT * FROM read_csv_auto('{}')", outside_file.to_string_lossy())}),
             &mut deps,
             &cancel,
             &mut materializer,
         )
-        .unwrap_err();
+        .expect("full-path reference passes the gateway and materializes");
+        // The promotion landed and the result carries the file's rows.
+        assert_eq!(
+            payload.promotion.as_ref().unwrap().dataset.reference_name,
+            "result_1"
+        );
+        assert_eq!(payload.content["row_count"], 2);
+        // The reference registered as a source with a session-tree snapshot.
         assert!(
-            err.contains("outside the allowed"),
-            "gateway names the out-of-bounds refusal: {err}"
+            deps.working_set.get("secret").is_some(),
+            "the referenced file registered as a source"
+        );
+        let snapshot = deps.snapshot_dir.join("secret.duckdb");
+        assert!(
+            snapshot.is_file(),
+            "the copy-in snapshot landed in the session snapshot dir"
         );
         assert!(
-            err.contains("secret.csv"),
-            "error names the offending path: {err}"
+            deps.source_files.contains_key("secret"),
+            "the sandbox re-attach path knows the snapshot"
         );
-        // No promotion landed: result_1 was never registered.
-        assert_eq!(deps.working_set.len(), 0);
-        assert_eq!(deps.working_set.next_result_number(), 1);
+        // A second materialize of the same file reuses the cached ref -- one
+        // source, one snapshot, a second result (issue #440 cache shape).
+        let payload2 = dispatch(
+            &json!({"sql": format!("SELECT COUNT(*) AS n FROM read_csv_auto('{}')", outside_file.to_string_lossy())}),
+            &mut deps,
+            &cancel,
+            &mut materializer,
+        )
+        .expect("second reference reuses the cached derived ref");
+        assert_eq!(payload2.content["row_count"], 1, "COUNT over two rows");
+        assert_eq!(refs.len(), 1, "no second cache entry");
     }
 
     /// AC#2 / AC#3 (issue #310): a relative `../` escape in a `read_*` path is
@@ -696,14 +717,14 @@ mod tests {
         // escape_file cleans up via Drop on scope exit (incl. panic).
     }
 
-    /// AC#2 symlink vector (issue #310 / #402): a symlink placed INSIDE the
-    /// session temp dir but pointing at a file OUTSIDE is canonicalized to its
-    /// real out-of-bounds target and refused at the gateway door -- symmetric
-    /// with `explore::explore_refuses_symlink_escape_at_gateway`. The ACL never
-    /// authorizes a path by its in-bounds alias. No promotion lands.
+    /// Symlink vector under the full-path face (ADR-0137 D4): a symlink
+    /// inside temp pointing at a file outside is an absolute spelling whose
+    /// canonical target is a durable original -- the reference is claimed and
+    /// materialized (the ADR-0080 symlink containment is superseded for
+    /// absolute spellings; see `fs_acl`'s flipped symlink tests).
     #[test]
     #[cfg(unix)]
-    fn materialize_refuses_symlink_escape_at_gateway() {
+    fn materialize_follows_symlink_on_the_full_path_face() {
         use crate::session::materializer::RealMaterializer;
         use std::fs;
         use std::os::unix::fs::symlink;
@@ -717,47 +738,43 @@ mod tests {
         // A file outside the session temp dir -- the symlink target.
         let outside = TempDir::new().unwrap();
         let outside_file = outside.path().join("secret.csv");
-        fs::write(&outside_file, "x").unwrap();
-        // A symlink INSIDE temp pointing at the outside file. Canonicalization
-        // follows the link, so the resolved path is outside temp_root.
+        fs::write(&outside_file, "val\n1\n").unwrap();
+        // A symlink INSIDE temp pointing at the outside file. The full-path
+        // face canonicalizes to the outside original and copy-ins it.
         let link = temp.path().join("alias.csv");
         symlink(&outside_file, &link).expect("symlink creation failed");
         let mut deps = inert_deps_with_temp(&engine, &mut ws, &mut sources, temp.path(), &mut refs);
         let cancel = CancelToken::new();
         let mut materializer = RealMaterializer;
-        let err = dispatch(
+        let payload = dispatch(
             &json!({"sql": format!(
-                "SELECT * FROM read_csv_auto('{}')", link.to_string_lossy()
+                "SELECT COUNT(*) AS n FROM read_csv_auto('{}')", link.to_string_lossy()
             )}),
             &mut deps,
             &cancel,
             &mut materializer,
         )
-        .unwrap_err();
+        .expect("absolute symlink spelling materializes on the full-path face");
+        // COUNT over the one data row lands in the descriptor shape
+        // (reference_name/display_name/columns/row_count).
+        assert_eq!(payload.content["row_count"], 1);
         assert!(
-            err.contains("outside the allowed"),
-            "symlink escape refused: {err}"
+            deps.working_set.get("secret").is_some(),
+            "the canonical target registered as the source"
         );
-        assert!(
-            err.contains("alias.csv"),
-            "error names the symlink path: {err}"
-        );
-        // No promotion landed.
-        assert_eq!(deps.working_set.len(), 0);
-        assert_eq!(deps.working_set.next_result_number(), 1);
     }
 
-    /// Windows variant of `materialize_refuses_symlink_escape_at_gateway`. Uses
-    /// `symlink_dir` (mirrors `fs_acl::symlink_escape_is_refused_windows`).
-    /// Hard-panics if symlink creation fails (no Developer Mode) -- a silent
-    /// skip would make this test a vacuous pass on local Windows environments
-    /// without Developer Mode, with no signal (issue #402, consistent with
-    /// #401's NamedTempFile + .expect pattern).
+    /// Windows variant of `materialize_follows_symlink_on_the_full_path_face`.
+    /// Uses `symlink_dir`. Hard-panics if symlink creation fails (no Developer
+    /// Mode) -- a silent skip would make this test a vacuous pass on local
+    /// Windows environments without Developer Mode, with no signal (issue
+    /// #402, consistent with #401's NamedTempFile + .expect pattern).
     #[test]
     #[cfg(windows)]
     #[ignore = "requires Windows Developer Mode / admin for symlink_dir (issue #402)"]
-    fn materialize_refuses_symlink_escape_at_gateway_windows() {
+    fn materialize_follows_symlink_on_the_full_path_face_windows() {
         use crate::session::materializer::RealMaterializer;
+        use std::fs;
         use std::os::windows::fs::symlink_dir;
         use tempfile::TempDir;
 
@@ -767,6 +784,8 @@ mod tests {
         let mut refs = std::collections::HashMap::new();
         let temp = TempDir::new().unwrap();
         let outside = TempDir::new().unwrap();
+        let outside_file = outside.path().join("secret.csv");
+        fs::write(&outside_file, "val\n1\n").unwrap();
         // A directory symlink INSIDE temp pointing at the outside dir.
         let link = temp.path().join("alias");
         symlink_dir(outside.path(), &link)
@@ -774,31 +793,31 @@ mod tests {
         let mut deps = inert_deps_with_temp(&engine, &mut ws, &mut sources, temp.path(), &mut refs);
         let cancel = CancelToken::new();
         let mut materializer = RealMaterializer;
-        let err = dispatch(
+        let payload = dispatch(
             &json!({"sql": format!(
-                "SELECT * FROM read_csv_auto('{}')", link.to_string_lossy()
+                "SELECT COUNT(*) AS n FROM read_csv_auto('{}')", link.join("secret.csv").to_string_lossy()
             )}),
             &mut deps,
             &cancel,
             &mut materializer,
         )
-        .unwrap_err();
+        .expect("absolute symlink spelling materializes on the full-path face");
+        // COUNT over the one data row lands in the descriptor shape
+        // (reference_name/display_name/columns/row_count).
+        assert_eq!(payload.content["row_count"], 1);
         assert!(
-            err.contains("outside the allowed"),
-            "symlink escape refused: {err}"
+            deps.working_set.get("secret").is_some(),
+            "the canonical target registered as the source"
         );
-        assert!(
-            err.contains("\\alias") || err.contains("/alias"),
-            "error names the symlink path: {err}"
-        );
-        assert_eq!(deps.working_set.len(), 0);
-        assert_eq!(deps.working_set.next_result_number(), 1);
     }
 
     /// AC#4 (issue #310): explore and materialize return the same structured
-    /// FsAcl message for the same out-of-bounds `read_*` path. Both surfaces
-    /// share `preflight_read_sql`, so the path-naming "outside the allowed
-    /// area" message the agent self-corrects from appears in BOTH tool errors.
+    /// FsAcl message for the same refused `read_*` path. Under ADR-0137 D4
+    /// the refused face is the RELATIVE spelling (no bound workspace ->
+    /// process-CWD resolution landing outside every root; absolute spellings
+    /// now execute on the full-path face). Both surfaces share
+    /// `preflight_read_sql`, so the path-naming "outside the allowed area"
+    /// message the agent self-corrects from appears in BOTH tool errors.
     /// The materialize path wraps it in a Runtime-error prefix
     /// (`"SQL failed (target result_1): ..."`), so the two strings are NOT
     /// identical -- but the structured content the agent reads (path name +
@@ -807,18 +826,23 @@ mod tests {
     /// wording, one of the `contains` assertions fails.
     #[test]
     fn explore_and_materialize_return_symmetric_fs_acl_error() {
+        use crate::analysis_tools::explore;
         use crate::session::materializer::RealMaterializer;
-        use crate::tools::explore;
         use std::fs;
-        use tempfile::TempDir;
+        use tempfile::{NamedTempFile, TempDir};
 
-        let outside = TempDir::new().unwrap();
-        let outside_file = outside.path().join("secret.csv");
-        fs::write(&outside_file, "x").unwrap();
-        let sql = format!(
-            "SELECT * FROM read_csv_auto('{}')",
-            outside_file.to_string_lossy()
-        );
+        // A real file in the process CWD's parent: the literal `../<name>`
+        // resolves against the CWD to it, outside every session root.
+        let cwd = std::env::current_dir().unwrap();
+        let escape_file = NamedTempFile::new_in(cwd.parent().unwrap())
+            .expect("escape-target fixture: CWD parent must be writable");
+        fs::write(escape_file.path(), "x").unwrap();
+        let target_name = escape_file
+            .path()
+            .file_name()
+            .and_then(|n| n.to_str())
+            .expect("escape-target filename is valid UTF-8");
+        let sql = format!("SELECT * FROM read_csv_auto('../{target_name}')");
 
         // Explore surface.
         let engine_e = AdminEngine::materialized();
@@ -871,11 +895,11 @@ mod tests {
             "materialize error carries the FsAcl refusal: {materialize_err}"
         );
         assert!(
-            explore_err.contains("secret.csv"),
+            explore_err.contains(&format!("../{target_name}")),
             "explore error names the offending path: {explore_err}"
         );
         assert!(
-            materialize_err.contains("secret.csv"),
+            materialize_err.contains(&format!("../{target_name}")),
             "materialize error names the offending path: {materialize_err}"
         );
         // Neither surface let the call proceed -- no working-set mutation.
@@ -922,6 +946,9 @@ mod tests {
         let cols = payload.content["columns"].as_array().unwrap();
         assert_eq!(cols.len(), 1);
         assert_eq!(cols[0]["name"], "val");
+        // The temp-root file is NOT claimed by the full-path face (the
+        // temp dir keeps its read-write face for scratch) -- the working
+        // set holds only the result.
         assert_eq!(deps.working_set.len(), 1);
         assert_eq!(deps.working_set.next_result_number(), 2);
     }
@@ -963,7 +990,8 @@ mod tests {
     /// Resource error naming the cap (ADR-0005/0030). Symmetric with explore's
     /// `explore_refuses_result_exceeding_row_cap`; pins the
     /// `SandboxExecError::Resource => ExecErrorKind::Resource` mapping on the
-    /// materialize dispatch path. Hand-builds TurnDeps for the one-off cap.
+    /// materialize dispatch path. The one-off cap is set on top of the
+    /// helper's defaults.
     #[test]
     fn materialize_refuses_result_exceeding_row_cap() {
         use crate::session::materializer::RealMaterializer;
@@ -973,18 +1001,9 @@ mod tests {
         let mut sources = std::collections::HashMap::new();
         let mut refs = std::collections::HashMap::new();
         // cap = 2; range(3) yields 3 rows -> cap+1 land on the sandbox, COUNT
-        // (3) > cap (2) -> refused. Hand-built for the one-off bound.
-        let mut deps = crate::session::materializer::TurnDeps {
-            engine: &engine,
-            source_files: &mut sources,
-            working_set: &mut ws,
-            result_row_cap: 2,
-            result_count_cap: 100,
-            temp_path: std::path::Path::new("."),
-            snapshot_dir: std::path::PathBuf::from("."),
-            assets_dir: None,
-            tool_output_refs: &mut refs,
-        };
+        // (3) > cap (2) -> refused.
+        let mut deps = inert_deps(&engine, &mut ws, &mut sources, &mut refs);
+        deps.result_row_cap = 2;
         let cancel = CancelToken::new();
         let mut materializer = RealMaterializer;
         let err = dispatch(

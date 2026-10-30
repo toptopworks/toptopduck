@@ -1,7 +1,8 @@
 // Pure sidebar model (ADR-0060/0061/0089, issue #81): merges the persisted-
-// session list (list_sessions) with the open in-memory sessions, Chat-style
-// time-groups the entries, and sorts last-modified descending. Kept out of the
-// component so the merge + grouping + ordering is unit-testable without React,
+// session list (list_sessions) with the open in-memory sessions and sorts
+// last-modified descending (#1401 retired the ADR-0060 Chat-style time
+// grouping -- the body is always the single "Recent" section). Kept out of the
+// component so the merge + ordering is unit-testable without React,
 // and so the sidebar component stays a thin caller of these functions.
 //
 // Identity split (ADR-0060/0061/0089): a PERSISTED session's stable identity is
@@ -9,15 +10,9 @@
 // identity is its ephemeral UUID (createSession). Since ADR-0089 every session
 // is persisted from creation, so every OpenSession carries a non-null path —
 // the "unsaved" state no longer exists.
-//
-// Grouping mode (ADR-0072, issue #251): the user toggles between `flat` (a
-// single Recent group sorted by mtime descending, the default) and `time` (the
-// ADR-0060 Chat-style Today/Yesterday/Previous 7 days/Older buckets). The mode
-// rides the shell-chrome prefs; buildSidebarModel takes it as a parameter so
-// the component is a thin caller.
 
+import type { RecentWorkspace } from "../api";
 import type { SessionMetadata } from "../types/session";
-import type { SidebarGrouping } from "../types/app-config";
 import { searchMatcher } from "../lib/searchMatcher";
 
 /** A runtime-open session tracked by the shell (ADR-0060/0051 keep-alive).
@@ -58,16 +53,6 @@ export interface OpenSession {
   pendingSkillInvocations: string[];
 }
 
-/** The four ADR-0060 Chat-style time buckets (Today / Yesterday / Previous 7
- *  days / Older). */
-export type TimeGroupKind = "today" | "yesterday" | "last7" | "older";
-
-/** Every renderable sidebar group heading: the four time buckets plus
- *  `recent` for ADR-0072's flat mode (single group sorted by mtime descending).
- *  The per-mode correspondence (flat -> `recent`, time -> `TimeGroupKind`) is a
- *  type-level invariant on SidebarGroup's discriminated union, not this union. */
-export type SidebarGroupKind = TimeGroupKind | "recent";
-
 /** A single merged sidebar entry (persisted + optionally open). Since ADR-0089
  *  every session is persisted from creation, so `path` is always non-null. */
 export interface SidebarEntry {
@@ -92,7 +77,7 @@ export interface SidebarEntry {
   /** Productive turn count, surfaced in the sidebar row's HoverCard. */
   turnCount: number;
   /** last_modified_at, ms since epoch. A never-saved session has no mtime, so
-   *  the caller stamps it at creation to land under "Today" at the top. */
+   *  the caller stamps it at creation to land at the top of the Recent list. */
   lastModifiedAt: number;
 }
 
@@ -101,15 +86,6 @@ export interface SidebarEntry {
  *  type alias stays for intent documentation and future divergence. */
 export type SearchEntry = SidebarEntry;
 
-/** A rendered sidebar group: heading kind + its entries (already sorted). The
- *  `mode` discriminant makes the kind/mode correspondence a type-level
- *  invariant -- a flat-mode group only ever carries kind="recent"; a time-mode
- *  group only carries a TimeGroupKind. buildSidebarModel is the sole
- *  constructor; consumers narrow on `mode` when they need the guarantee. */
-export type SidebarGroup =
-  | { mode: "flat"; kind: "recent"; entries: SidebarEntry[] }
-  | { mode: "time"; kind: TimeGroupKind; entries: SidebarEntry[] };
-
 const MS_PER_DAY = 86_400_000;
 
 /** The jump dialog's result cap: the viewport holds roughly this many
@@ -117,23 +93,15 @@ const MS_PER_DAY = 86_400_000;
  *  growing unbounded. */
 export const MAX_SEARCH_RESULTS = 9;
 
+/** The section preview cap (issue #1392, the WorkBuddy precedent): the recent
+ *  body and a workspace subtree show their freshest 5 rows by default; a
+ *  "Show more (N)" tail expands the rest. */
+export const SIDEBAR_PREVIEW_CAP = 5;
+
 function startOfCalendarDay(ms: number): number {
   const d = new Date(ms);
   d.setHours(0, 0, 0, 0);
   return d.getTime();
-}
-
-/** The Calendar-day bucket an mtime falls into, relative to "now". Pure: the
- *  caller passes `now` so tests are deterministic. The buckets match the
- *  Chat-style grouping in ADR-0060 (Today / Yesterday / Previous 7 days / Older). Day boundaries
- *  are local calendar days (midnight rollover), not 24h windows. */
-export function timeGroupKind(lastModifiedAt: number, now: number): TimeGroupKind {
-  const today = startOfCalendarDay(now);
-  const entry = startOfCalendarDay(lastModifiedAt);
-  if (entry >= today) return "today";
-  if (entry >= today - MS_PER_DAY) return "yesterday";
-  if (entry >= today - 7 * MS_PER_DAY) return "last7";
-  return "older";
 }
 
 /** A dynamic-format classification of an mtime for the search row's time
@@ -142,7 +110,7 @@ export function timeGroupKind(lastModifiedAt: number, now: number): TimeGroupKin
  *  localizes via intl), else a `date` arm carrying the Date so the caller can
  *  format with Intl.DateTimeFormat -- year-included when the mtime predates the
  *  current year, month/day otherwise. Day boundaries are local calendar days
- *  (midnight rollover), matching `timeGroupKind`. */
+ *  (midnight rollover), matching `startOfCalendarDay`. */
 export type LastModifiedLabel =
   | { kind: "today" }
   | { kind: "yesterday" }
@@ -255,34 +223,29 @@ export function buildSearchEntries(
   return entries.slice(0, MAX_SEARCH_RESULTS);
 }
 
-/** The sidebar's renderable model (ADR-0127, issue #1175): the pinned section
- *  rides ABOVE the grouped body in BOTH grouping modes. `pinned` holds the
- *  pinned rows in SERVER order (the includeArchived-less response's pinned
- *  block = sidecar array position, the MRU order -- NOT mtime), preserved
- *  verbatim; `groups` is the unpinned remainder. Either collection may be
- *  empty; an empty collection renders no section. */
+/** The sidebar's renderable model (ADR-0127, issue #1175; #1401 retired the
+ *  ADR-0072 flat/time modes -- the body is always the single mtime-descending
+ *  "Recent" section). `pinned` holds the pinned rows in SERVER order (the
+ *  includeArchived-less response's pinned block = sidecar array position, the
+ *  MRU order -- NOT mtime), preserved verbatim; `recent` is the unpinned
+ *  remainder. Either collection may be empty; an empty collection renders no
+ *  section. */
 export interface SidebarModel {
   pinned: SidebarEntry[];
-  groups: SidebarGroup[];
+  recent: SidebarEntry[];
 }
 
-/** Build the merged, grouped, last-modified-descending sidebar model. Pure in
- *  (persisted, open, activeSessionId, now, grouping) -- the component supplies
- *  the raw list_sessions result + the open set + the user's grouping choice;
- *  this function does the rest. Since ADR-0089 every session is persisted from
- *  creation, so the persisted list and the open set share the same path keys --
- *  there is no separate "unsaved open" entry set.
- *
- *  Grouping (ADR-0072, issue #251): `flat` -> a single `recent` group sorted by
- *  mtime descending (the "Recent" title); `time` -> the ADR-0060 Chat-style
- *  Today / Yesterday / Previous 7 days / Older buckets. An empty sidebar yields
- *  an empty model in either mode. */
+/** Build the merged, last-modified-descending sidebar model. Pure in
+ *  (persisted, open, activeSessionId, now) -- the component supplies the raw
+ *  list_sessions result + the open set; this function does the rest. Since
+ *  ADR-0089 every session is persisted from creation, so the persisted list
+ *  and the open set share the same path keys -- there is no separate "unsaved
+ *  open" entry set. */
 export function buildSidebarModel(
   persisted: SessionMetadata[],
   open: OpenSession[],
   activeSessionId: string | null,
   now: number,
-  grouping: SidebarGrouping,
 ): SidebarModel {
   const openByPath = indexOpenByPath(open);
   const persistedPaths = new Set(persisted.map((m) => m.recipe_path));
@@ -316,45 +279,64 @@ export function buildSidebarModel(
     });
   }
 
-  // No entries -> no model (ADR-0072, recalibrated by ADR-0127: the sidebar
-  // still renders the chrome row on a bare title row, so the grouping +
-  // archived toggles stay reachable on an empty sidebar).
-  if (entries.length === 0) return { pinned: [], groups: [] };
+  // No entries -> no model (recalibrated by ADR-0127: the sidebar still
+  // renders the chrome row on a bare title row, so the archived toggle stays
+  // reachable on an empty sidebar).
+  if (entries.length === 0) return { pinned: [], recent: [] };
 
-  // Pinned rows leave the grouped body BEFORE the mtime sort: their display
+  // Pinned rows leave the recent body BEFORE the mtime sort: their display
   // order is the server's pinned-block order (sidecar array position, the MRU
   // order, ADR-0127 Decision 5), which BY_MTIME_DESC would destroy.
   const pinned = entries.filter((e) => e.pinned);
   const rest = entries.filter((e) => !e.pinned);
-  if (rest.length === 0) return { pinned, groups: [] };
+  if (rest.length === 0) return { pinned, recent: [] };
 
   rest.sort(BY_MTIME_DESC);
 
-  if (grouping === "flat") {
-    // ADR-0072 flat mode: a single Recent group, already sorted by mtime desc.
-    return { pinned, groups: [{ mode: "flat", kind: "recent", entries: rest }] };
-  }
+  // The single "Recent" section, already sorted by mtime desc (#1401: the
+  // ADR-0060 Chat-style time buckets are retired).
+  return { pinned, recent: rest };
+}
 
-  if (grouping === "time") {
-    // ADR-0060 time mode: Chat-style Today / Yesterday / Previous 7 days /
-    // Older, each omitted when empty.
-    const groups: SidebarGroup[] = [];
-    for (const kind of ["today", "yesterday", "last7", "older"] as const) {
-      const groupEntries = rest.filter(
-        (e) => timeGroupKind(e.lastModifiedAt, now) === kind,
-      );
-      if (groupEntries.length > 0) {
-        groups.push({ mode: "time", kind, entries: groupEntries });
-      }
-    }
-    return { pinned, groups };
-  }
+/** One workspace-section group (issue #1392): an explicit registry record
+ *  plus the session rows bound to its directory. */
+export interface WorkspaceGroup {
+  /** The bound canonical directory path (the registry key). */
+  path: string;
+  /** The registry display face (the title, else the directory tail). */
+  label: string;
+  /** The directory is missing on disk; the group stays with a hint. */
+  missing: boolean;
+  /** The bound session rows -- the same row shape the recent body renders,
+   *  freshest first. */
+  entries: SidebarEntry[];
+}
 
-  // Exhaustive guard: a future third SidebarGrouping variant must add a branch
-  // above, not silently fall through to time buckets. tsconfig strict lacks
-  // noImplicitReturns, so without this the implicit `return undefined` would
-  // slip; the never assignment fails tsc if a variant is added without a
-  // branch (mirrors the loadErrorDisplay/api.ts default:never+throw pattern).
-  const _exhaustive: never = grouping;
-  return _exhaustive;
+/** Build the workspace section's groups (issue #1392): the registry's
+ *  `explicit` records in server (LRU) order, each carrying the persisted
+ *  sessions whose header binds its directory -- membership derives from the
+ *  session header's `workspace` field; the registry carries no session
+ *  ledger. An explicit record with zero sessions still lists (the "New
+ *  workspace" flow creates the group before any session binds it). Rows
+ *  not bound to an explicit record stay the recent body's business. */
+export function buildWorkspaceGroups(
+  workspaces: RecentWorkspace[],
+  persisted: SessionMetadata[],
+  open: OpenSession[],
+  activeSessionId: string | null,
+): WorkspaceGroup[] {
+  const explicit = workspaces.filter((w) => w.explicit);
+  if (explicit.length === 0) return [];
+  const openByPath = indexOpenByPath(open);
+  const members = new Map<string, SidebarEntry[]>(explicit.map((w) => [w.path, []]));
+  for (const m of persisted) {
+    const bucket = m.workspace === null ? undefined : members.get(m.workspace);
+    if (bucket === undefined) continue;
+    bucket.push(persistedEntry(m, openByPath.get(m.recipe_path) ?? null, activeSessionId));
+  }
+  return explicit.map((w) => {
+    const entries = members.get(w.path) ?? [];
+    entries.sort(BY_MTIME_DESC);
+    return { path: w.path, label: w.label, missing: !w.exists, entries };
+  });
 }

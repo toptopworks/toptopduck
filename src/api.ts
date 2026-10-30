@@ -73,12 +73,63 @@ export interface CreateSessionReply {
   recipe_path: string;
 }
 
+// One recent-workspace row from the registry's LRU view (ADR-0138, issue
+// #1384): the canonical path (the create_session binding value) + the
+// display label (the record's title, defaulting to the directory tail -- a
+// full path is never the display face). `explicit` marks the sidebar's
+// workspace-section members (issue #1392); `exists` lets the selector keep
+// its existence filter on the now-unfiltered listing. Mirrors
+// `commands::RecentWorkspace`.
+export interface RecentWorkspace {
+  path: string;
+  label: string;
+  explicit: boolean;
+  exists: boolean;
+}
+
+// The workspace registry's LRU view (ADR-0138, issue #1384): EVERY record,
+// most recently used first -- dangling directories included, so the
+// sidebar's workspace section can keep a missing-directory group with a
+// state hint (issue #1392). The selector filters on `exists` and slices its
+// top 10; older workspaces resurface through the folder browse. Tolerant --
+// an unreadable registry lists empty.
+export async function listWorkspaces(): Promise<RecentWorkspace[]> {
+  return invoke<RecentWorkspace[]>("list_workspaces");
+}
+
+// Rename a workspace record (issue #1392): the display title only -- the
+// directory and its path never rewrite, duplicate titles allowed.
+export async function renameWorkspace(path: string, title: string): Promise<void> {
+  return invoke<void>("rename_workspace", { path, title });
+}
+
+// Remove a workspace record (issue #1392): a ledger edit, not a filesystem
+// delete -- the directory stays and the bound sessions fall back to the
+// sidebar's recent list.
+export async function removeWorkspace(path: string): Promise<void> {
+  return invoke<void>("remove_workspace", { path });
+}
+
+// Mint a named workspace (issue #1393): the backend re-validates the name
+// (trim, 1-64 chars, no path-illegal characters) as the trust boundary,
+// creates `{workspaces root}/<name>/`, and records it titled. An existing
+// same-name directory comes back as-is with its existing label -- the
+// "select the existing one" ruling.
+export async function createWorkspace(name: string): Promise<RecentWorkspace> {
+  return invoke<RecentWorkspace>("create_workspace", { name });
+}
+
 // Create a new session (ADR-0056/0089): the backend builds an independent
 // in-memory DuckDB instance + per-session cancel token, binds them to a
 // backend-generated id (UUID), AND immediately persists by creating a
 // per-session directory + initial recipe.json. This is the `+ tab` action.
-export async function createSession(): Promise<CreateSessionReply> {
-  return invoke<CreateSessionReply>("create_session");
+// `workspace` (ADR-0137/0138, issue #1384): the directory to bind as the
+// session's workspace; null keeps the default lazy-mint behavior (the first
+// disk-need moment mints a timestamped workspace).
+export async function createSession(
+  workspace?: string | null,
+): Promise<CreateSessionReply> {
+  return invoke<CreateSessionReply>("create_session", { workspace: workspace ?? null });
 }
 
 // Close a session (ADR-0055): fire cancel + mark closing + remove from the

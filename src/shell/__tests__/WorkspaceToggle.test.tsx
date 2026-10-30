@@ -30,11 +30,11 @@ function pinButtonAndGlyph(name: string) {
 describe("WorkspaceToggle hit-area pin", () => {
   it("pins 28px hit area and 14px glyph in the expanded state", () => {
     renderToggle(false);
-    pinButtonAndGlyph("Close workspace");
+    pinButtonAndGlyph("Collapse right sidebar");
   });
 
   it("keeps the pinned utilities in the collapsed state", () => {
     renderToggle(true);
-    pinButtonAndGlyph("Open workspace");
+    pinButtonAndGlyph("Expand right sidebar");
   });
 });

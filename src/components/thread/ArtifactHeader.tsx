@@ -12,7 +12,7 @@
 // time -- whichever action failed last; starting any action (refresh
 // included) clears the previous note.
 
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { FormattedMessage, useIntl } from "react-intl";
 import { Button } from "../ui/button";
 import {
@@ -22,9 +22,11 @@ import {
   DropdownMenuTrigger,
 } from "../ui/dropdown-menu";
 import { ExternalLink, FolderOpen, MoreHorizontal, RefreshCw, Save } from "lucide-react";
+import { Tooltip, TooltipContent, TooltipTrigger } from "../ui/tooltip";
 import { save as saveDialog } from "@tauri-apps/plugin-dialog";
 import { openPath, revealItemInDir } from "@tauri-apps/plugin-opener";
 import { copyArtifactFile } from "../../api";
+import { MENU_REENTRY_GRACE_MS } from "../../session/sidebarHoverCard";
 import { log } from "../../lib/log";
 
 type FailureKind = "open" | "folder" | "save";
@@ -45,6 +47,38 @@ export function ArtifactHeader({
   onRefresh: () => void;
 }) {
   const [failure, setFailure] = useState<FailureKind | null>(null);
+  // The more menu's open state + the tooltip's controlled open state. The
+  // tooltip is PERMANENTLY controlled (no controlled->uncontrolled flip:
+  // Radix's internal machine misbehaves across that). While the menu is
+  // open -- and for the close grace after it -- every tooltip-open intent
+  // is refused: the menu-close focus restore lands on the trigger as a
+  // programmatic focus this gate makes no attempt to classify, and that
+  // restore is exactly the phantom re-open. One deliberate cost: a
+  // keyboard-only user never pointer-enters, so their focus-opens are
+  // refused too -- the tooltip text equals the aria-label, so only the
+  // visual hint is lost (a real keyboard leg is the sibling machine's
+  // :focus-visible classifier riding these same legs).
+  const [moreOpen, setMoreOpen] = useState(false);
+  const [tipOpen, setTipOpen] = useState(false);
+  const menuClosedAtRef = useRef(0);
+  const pointerOnTriggerRef = useRef(false);
+  const triggerRef = useRef<HTMLButtonElement | null>(null);
+  // Native pointerleave backstop (the sidebar hover-card machine's same
+  // measured artifact): when the pointer leaves the trigger INTO the menu
+  // portal, the modal layer's pointer-events suppression can keep React
+  // from deriving the synthetic onPointerLeave -- the marker would strand
+  // "on" and the pointer leg would wave the Save-as focus return through.
+  // The native event is authoritative; a double-run (synthetic + native)
+  // is idempotent -- both just clear the marker.
+  useEffect(() => {
+    const el = triggerRef.current;
+    if (!el) return;
+    const onNativeLeave = () => {
+      pointerOnTriggerRef.current = false;
+    };
+    el.addEventListener("pointerleave", onNativeLeave);
+    return () => el.removeEventListener("pointerleave", onNativeLeave);
+  }, []);
   const intl = useIntl();
   const openLabel = intl.formatMessage({
     id: "workspace.artifact.openExternal",
@@ -103,33 +137,76 @@ export function ArtifactHeader({
       <div className="flex shrink-0 items-center gap-2">
         {exists ? (
           <>
-            <Button
-              type="button"
-              variant="ghost"
-              size="icon"
-              data-testid="artifact-open-external"
-              title={openLabel}
-              aria-label={openLabel}
-              className="h-7 w-7 text-muted-foreground"
-              onClick={handleOpen}
-            >
-              <ExternalLink aria-hidden="true" className="h-3.5 w-3.5" />
-            </Button>
-            <DropdownMenu>
-              <DropdownMenuTrigger asChild>
+            <Tooltip>
+              <TooltipTrigger asChild>
                 <Button
                   type="button"
                   variant="ghost"
                   size="icon"
-                  data-testid="artifact-more-menu"
-                  title={moreLabel}
-                  aria-label={moreLabel}
-                  className="h-7 w-7 text-muted-foreground"
+                  data-testid="artifact-open-external"
+                  aria-label={openLabel}
+                  className="size-7 text-muted-foreground"
+                  onClick={handleOpen}
                 >
-                  {/* The SessionHeaderMenu trigger shape (ADR-0067 #171). */}
-                  <MoreHorizontal aria-hidden="true" className="h-3.5 w-3.5" strokeWidth={2.5} />
+                  <ExternalLink aria-hidden="true" className="h-3.5 w-3.5" />
                 </Button>
-              </DropdownMenuTrigger>
+              </TooltipTrigger>
+              <TooltipContent>{openLabel}</TooltipContent>
+            </Tooltip>
+            <DropdownMenu
+              open={moreOpen}
+              onOpenChange={(open) => {
+                setMoreOpen(open);
+                if (!open) menuClosedAtRef.current = Date.now();
+              }}
+            >
+              <Tooltip
+                open={tipOpen && !moreOpen}
+                onOpenChange={(next) => {
+                  // Two refusal legs cover every phantom restore of the
+                  // menu-close focus: the pointer leg (the restore fires
+                  // while the pointer sits on the menu item, the OS file
+                  // dialog, or another window -- never on this button; a
+                  // genuine hover always re-enters with pointerenter) and
+                  // the close grace (Esc closes with the pointer still
+                  // hovering the button, so only the clock can tell that
+                  // focus from a real one). MENU_REENTRY_GRACE_MS is the
+                  // sidebar hover-card machine's same ruling.
+                  if (
+                    next &&
+                    (moreOpen ||
+                      !pointerOnTriggerRef.current ||
+                      Date.now() - menuClosedAtRef.current <
+                        MENU_REENTRY_GRACE_MS)
+                  )
+                    return;
+                  setTipOpen(next);
+                }}
+              >
+                <TooltipTrigger asChild>
+                  <DropdownMenuTrigger asChild>
+                    <Button
+                      ref={triggerRef}
+                      type="button"
+                      variant="ghost"
+                      size="icon"
+                      data-testid="artifact-more-menu"
+                      aria-label={moreLabel}
+                      className="size-7 text-muted-foreground"
+                      onPointerEnter={() => {
+                        pointerOnTriggerRef.current = true;
+                      }}
+                      onPointerLeave={() => {
+                        pointerOnTriggerRef.current = false;
+                      }}
+                    >
+                      {/* The SessionHeaderMenu trigger shape (ADR-0067 #171). */}
+                      <MoreHorizontal aria-hidden="true" className="h-3.5 w-3.5" strokeWidth={2.5} />
+                    </Button>
+                  </DropdownMenuTrigger>
+                </TooltipTrigger>
+                <TooltipContent>{moreLabel}</TooltipContent>
+              </Tooltip>
               <DropdownMenuContent align="end" aria-label={moreLabel}>
                 <DropdownMenuItem onSelect={handleRefresh}>
                   <RefreshCw aria-hidden />

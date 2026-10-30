@@ -490,7 +490,7 @@ function SkillRow({ skill, checked, onToggle }: SkillRowProps) {
         onChange={onToggle}
         disabled={disabled}
         aria-label={skill.name}
-        className="size-4 shrink-0"
+        className="size-4 shrink-0 cursor-pointer"
       />
       <label
         htmlFor={cbId}

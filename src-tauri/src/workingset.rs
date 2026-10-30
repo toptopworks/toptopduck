@@ -273,7 +273,7 @@ impl WorkingSet {
     /// [`Self::register`] (a source upload), registering a result does NOT move
     /// the active pointer -- active tracks the most-recently-uploaded *source*
     /// (ADR-0022). The resolved "current table" (most recent result, else the
-    /// source) is computed from the thread by [`crate::window::resolve_active`]
+    /// source) is computed from the thread by [`crate::turn_window::resolve_active`]
     /// (issue #27), not stored here. The result is referenceable like any source
     /// (shared FROM namespace), and its name is recorded in `results` so
     /// [`Self::sql_from`] picks the main-table form (`"<ref>"`) over the
@@ -380,25 +380,6 @@ impl WorkingSet {
 
     pub fn is_empty(&self) -> bool {
         self.datasets.is_empty()
-    }
-
-    /// Update a source's `source_path` in place (issue #433: bind_recipe migrates
-    /// derived sources from `temp_path/derived/` to the per-session `assets/`
-    /// subdirectory, ADR-0089/0087 D2).
-    /// Returns `false` if the reference name isn't registered (a stale view
-    /// racing a concurrent mutation). The path is stored verbatim — the caller
-    /// ensures it is the persistent (post-migration) location.
-    pub fn update_source_path(&mut self, reference_name: &str, new_path: &str) -> bool {
-        if let Some(slot) = self
-            .datasets
-            .iter_mut()
-            .find(|d| d.reference_name == reference_name)
-        {
-            slot.source_path = new_path.to_string();
-            true
-        } else {
-            false
-        }
     }
 
     // --- Stale cascade (issue #40, ADR-0013/0025/0040) ----------------------
@@ -1030,35 +1011,6 @@ mod tests {
         ws.register(descriptor("orders")); // source_path "/orders.csv"
         ws.register_result(result_descriptor("result_1")); // source_path ""
         assert_eq!(ws.source_paths(), vec!["/people.csv", "/orders.csv"]);
-    }
-
-    // --- update_source_path (issue #433: derived source migration) -----------
-
-    #[test]
-    fn update_source_path_updates_existing_descriptor_and_returns_true() {
-        // The happy path: a registered source's source_path is replaced in place.
-        // Used by bind_recipe to migrate derived files from temp/derived/ to
-        // the per-session assets/ subdirectory (issue #433, ADR-0087/0089 D2).
-        let mut ws = WorkingSet::default();
-        ws.register(descriptor("people")); // source_path "/people.csv"
-        let ok = ws.update_source_path("people", "/data/assets/people.csv");
-        assert!(ok, "returns true for a registered source");
-        assert_eq!(
-            ws.get("people").unwrap().source_path,
-            "/data/assets/people.csv"
-        );
-    }
-
-    #[test]
-    fn update_source_path_returns_false_for_unknown_reference() {
-        // Stale-view guard: an unregistered name returns false rather than
-        // silently creating a phantom entry.
-        let mut ws = WorkingSet::default();
-        ws.register(descriptor("people"));
-        let ok = ws.update_source_path("ghost", "/x.csv");
-        assert!(!ok, "returns false for unknown reference");
-        assert_eq!(ws.len(), 1); // no phantom created
-        assert_eq!(ws.get("people").unwrap().source_path, "/people.csv"); // untouched
     }
 
     // --- Source removal (issue #38) -------------------------------------------

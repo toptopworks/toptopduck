@@ -13,15 +13,15 @@
 
 use serde_json::{json, Value};
 
-use crate::session::materializer::TurnDeps;
-use crate::tools::definitions;
-use crate::tools::ToolPayload;
+use crate::analysis_tools::definitions;
+use crate::analysis_tools::ToolPayload;
+use crate::session::materializer::DispatchDeps;
 
 /// Parse the tool input + return the dataset's cached shape.
 ///
 /// Returns `{ reference_name, columns, row_count }` on success, or a tool-level
 /// error string for an unknown or stale reference. No DuckDB query runs.
-pub(crate) fn dispatch(input: &Value, deps: &mut TurnDeps) -> Result<ToolPayload, String> {
+pub(crate) fn dispatch(input: &Value, deps: &mut DispatchDeps) -> Result<ToolPayload, String> {
     let reference_name = definitions::get_str(input, "reference_name")?;
     let descriptor = deps
         .working_set
@@ -41,12 +41,12 @@ pub(crate) fn dispatch(input: &Value, deps: &mut TurnDeps) -> Result<ToolPayload
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::analysis_tools::test_support::inert_deps;
     use crate::model::{
         ColumnSchema, DatasetDescriptor, DatasetPrivacy, RectifyProvenance, StaleAnchor,
         StaleReason,
     };
     use crate::session::engine::AdminEngine;
-    use crate::tools::test_support::inert_deps;
     use crate::workingset::WorkingSet;
     use std::collections::HashMap;
 

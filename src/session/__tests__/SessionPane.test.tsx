@@ -4,11 +4,22 @@ import { IntlProvider } from "react-intl";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 
 import { SessionPane } from "../SessionPane";
-import { useSessionState } from "../useSessionState";
 import { artifactKeys } from "../queryKeys";
-import { getApprovalAttachments, listSkills } from "../../api";
+import {
+  artifactExists,
+  askQuestion,
+  activeDataset,
+  conversation,
+  getApprovalAttachments,
+  listSkills,
+  listWorkingSet,
+  takeSourceNotices,
+} from "../../api";
 import { TooltipProvider } from "../../components/ui/tooltip";
-import type { LiveTurn } from "../useTurnFlow";
+import { artifactTurn } from "./fixtures";
+import type { ComposerSessionFields } from "../useComposerState";
+import type { ApprovalEntry } from "../useApprovalEvents";
+import type { ThreadEntry } from "../../types/thread";
 
 // The pane-level approval wiring pins (issue #1009 review, PR #1010): both
 // approval callbacks live ONLY on the pane -- the respond callback binds the
@@ -16,22 +27,39 @@ import type { LiveTurn } from "../useTurnFlow";
 // closes it over getApprovalAttachments. Thread-level tests hand the props
 // in directly, so nothing else observed this pass-through: a dropped prop
 // or a mis-bound id would silently degrade the card (the no-loader branch
-// renders exactly the #672 capped behavior with no error note). The data
-// layer (useSessionState) is mocked to one pending approval card -- the pin
-// is the pane's own wiring, exercised through the real Thread surface.
+// renders exactly the #672 capped behavior with no error note).
+//
+// Issue #1422: the suite runs the REAL useSessionState (Thread-suite
+// posture -- the api layer is mocked, the hook is not). The pending card
+// therefore rides the live turn the real useTurnFlow builds while an ask is
+// in flight: askQuestion is mocked to a never-settling promise, the ask is
+// fired through the pane's own reported handleAsk (the ADR-0092 composer
+// fields), and the pane's approvals prop carries the pending entry the hook
+// merges into the live rows.
 
+// Capture-free onTurnProgress stub: jsdom has no Tauri event bus, and the
+// never-settling ask alone keeps the live turn in flight -- no test needs to
+// emit phases (the useTurnFlow suite owns the event-stream pins).
 vi.mock("../../api", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../../api")>();
   return {
     ...actual,
+    askQuestion: vi.fn(),
+    // The runtime read defaults to the failed-read degrade (no marker
+    // stamped) -- the same default the useTurnFlow suite pins against.
+    getSessionRuntime: vi.fn(async () => undefined),
+    cancelQuery: vi.fn(async () => {}),
+    conversation: vi.fn(),
+    listWorkingSet: vi.fn(),
+    activeDataset: vi.fn(),
+    takeSourceNotices: vi.fn(),
+    takePersistError: vi.fn(async () => null),
     getApprovalAttachments: vi.fn(),
     listSkills: vi.fn(),
+    artifactExists: vi.fn(),
+    onTurnProgress: vi.fn(async () => () => {}),
   };
 });
-
-vi.mock("../useSessionState", () => ({
-  useSessionState: vi.fn(),
-}));
 
 // Hoisted so the ArtifactView mock factory below can read it at import time.
 // The probe's recovered flag lets a test flip the crash off, so the
@@ -61,111 +89,72 @@ vi.mock("../../components/thread/ArtifactView", () => ({
 
 const SID = "sid-1";
 
-// One pending approval card riding the live turn (the same shape Thread's
-// full-chain test uses): req-1 suspended on the gate with one capped
-// broadcast attachment.
-function liveTurnWithPendingApproval(): LiveTurn {
+// The pending approval entry riding the app-level approval channel (the map
+// slice the pane hands the real hook as its approvals prop): req-1 suspended
+// on the gate with one capped broadcast attachment. useTurnFlow merges it
+// into the live turn's trailing rows, so the card renders inside the rail.
+function pendingApprovalEntry(): ApprovalEntry {
   return {
-    question: "q",
-    askedAt: 0,
-    invocationNames: [],
-    step: 1,
-    rounds: [
-      {
-        rows: [
-          {
-            key: "req-1",
-            name: "code-runner",
-            server: "CLI",
-            operationKind: "execute",
-            summary: "run /tmp/x.py",
-            approval: {
-              requestId: "req-1",
-              response: null,
-              fileAttachments: [{ param: "code", content: "print(1)" }],
-            },
-            running: false,
-            success: null,
-            resultExcerpt: "",
-          },
-        ],
-      },
-    ],
-  } as unknown as LiveTurn;
+    requestId: "req-1",
+    server: "CLI",
+    tool: "code-runner",
+    operationKind: "execute",
+    summary: "run /tmp/x.py",
+    fileAttachments: [{ param: "code", content: "print(1)" }],
+    receivedAt: 0,
+    status: { kind: "pending" },
+  };
 }
 
 const noop = () => {};
 
-// The full useSessionState return the pane consumes, minimized to the
-// pending-approval posture: an empty recorded thread, the live card, and
-// no-op handlers -- the pane's own callbacks are what is under test, and
-// the never-rendered handlers (workspace tab, dialogs) are never invoked.
-// The workspace content is parameterizable so the stage-face tests can
-// select the file branch; the shared default mock stays zero-arg because
-// the pane's real call passes the session id as the first argument.
-function paneSessionStateWithWorkspace(workspaceContent: unknown): never {
-  return {
-    thread: [],
-    liveTurn: liveTurnWithPendingApproval(),
-    workspaceCollapsed: false,
-    turnLoading: false,
-    phase: "idle",
-    handleAsk: vi.fn(),
-    handleCancel: vi.fn(),
-    handleIngestMany: vi.fn(),
-    handleToggleWorkspace: vi.fn(),
-    viewedResult: null,
-    datasets: [],
-    staleByReference: new Map(),
-    activeName: null,
-    loading: false,
-    error: null,
-    persistError: null,
-    sourceNotices: [],
-    haltedRemaining: null,
-    guidance: null,
-    guidanceError: null,
-    fetchGuidanceWindow: vi.fn(),
-    handleGuidedSubmit: vi.fn(),
-    handleGuidedCancel: vi.fn(),
-    handleSelectResult: vi.fn(),
-    handleJumpToLatest: vi.fn(),
-    handleRetryQueries: vi.fn(),
-    // ADR-0123: the working-set seam's reporting sinks, handed through the
-    // pane to the tab. The `as never` cast bypasses type checking, so a
-    // shape change here must be mirrored by hand.
-    mutationSurfaces: {
-      setError: vi.fn(),
-      setMutationLoading: vi.fn(),
-      pollPersistError: vi.fn(async () => {}),
-    },
-    queryErrors: [],
-    workspaceContent,
-  } as never;
-}
-
-function paneSessionState(): never {
-  return paneSessionStateWithWorkspace({ kind: "hero" });
+// The default session-api posture every describe re-stamps: an empty session
+// (no thread, no working set, no notices, every artifact present) with an
+// ask that never settles. Re-stamping in each beforeEach also drops a prior
+// test's conversation override.
+function stubSessionApis() {
+  vi.mocked(conversation).mockResolvedValue([]);
+  vi.mocked(listWorkingSet).mockResolvedValue([]);
+  vi.mocked(activeDataset).mockResolvedValue(null);
+  vi.mocked(takeSourceNotices).mockResolvedValue([]);
+  vi.mocked(listSkills).mockResolvedValue({
+    skills: [],
+    ignored: [],
+    root_error: null,
+  });
+  vi.mocked(artifactExists).mockResolvedValue(true);
+  vi.mocked(getApprovalAttachments).mockResolvedValue([]);
+  vi.mocked(askQuestion).mockImplementation(() => new Promise(() => {}));
 }
 
 // Empty-catalog English IntlProvider (the TraceView test convention):
 // FormattedMessage falls back to defaultMessage, so assertions anchor on
 // stable English strings.
-function renderPane() {
+function renderPane(opts?: {
+  approvals?: ApprovalEntry[];
+  thread?: ThreadEntry[];
+}) {
+  if (opts?.thread) {
+    vi.mocked(conversation).mockResolvedValue(opts.thread);
+  }
   const queryClient = new QueryClient({
     defaultOptions: { queries: { retry: false } },
   });
   const respond = vi.fn();
   const approvalEvents = {
-    approvalsBySession: new Map(),
+    approvalsBySession: new Map([[SID, opts?.approvals ?? []]]),
     pendingApprovalSids: new Set<string>(),
     respond,
     clearSession: vi.fn(),
     settleSession: vi.fn(),
   };
+  // The ADR-0092 composer-fields report: capturing the reported handlers
+  // lets a test fire the pane's OWN handleAsk (the bar's real fire path is
+  // shell-level, out of this tree).
+  let composerFields: ComposerSessionFields | null = null;
   // A factory, not an element: a rerender must hand React a FRESH element --
   // re-rendering the same element reference bails out at the root (identical
-  // props), and the mocked useSessionState would never be re-consulted.
+  // props), and the hook's state would never be re-consulted.
   const ui = () => (
     <QueryClientProvider client={queryClient}>
       {/* TooltipProvider mounts at the App level above the panes in the real
@@ -182,7 +171,9 @@ function renderPane() {
             onQuestionConsumed={noop}
             onSeedDraft={noop}
             onSeedInvocations={noop}
-            onComposerFields={noop}
+            onComposerFields={(_sid, fields) => {
+              composerFields = fields;
+            }}
             onComposerFieldsUnmount={noop}
             sessionName=""
             onFirstTurnSettled={noop}
@@ -196,29 +187,45 @@ function renderPane() {
       </TooltipProvider>
     </QueryClientProvider>
   );
-  return { ...render(ui()), ui, queryClient, respond };
+  // The ask fires the pane's reported handleAsk while askQuestion hangs, so
+  // the live turn mounts and stays in flight (void: the promise never
+  // settles; act flushes the synchronous commitLive render).
+  const ask = () => {
+    void composerFields!.handleAsk("q");
+  };
+  return { ...render(ui()), ui, queryClient, respond, ask };
+}
+
+// Open a delivered file through its rail artifact card (the real selection
+// path: the click moves viewedResult + expands the workspace).
+async function openArtifact(fileName: string) {
+  const name = `Open ${fileName} in the right sidebar`;
+  fireEvent.click(await screen.findByRole("button", { name }));
 }
 
 describe("SessionPane approval wiring", () => {
-  beforeEach(() => {
-    vi.mocked(useSessionState).mockImplementation(paneSessionState);
-    vi.mocked(listSkills).mockResolvedValue({ skills: [] } as never);
-  });
+  beforeEach(stubSessionApis);
 
   it("threads the full-view loader to the pending card with the pane's session id", async () => {
     vi.mocked(getApprovalAttachments).mockResolvedValue([
       { param: "code", content: "print(1); print(2)" },
     ]);
-    renderPane();
+    const view = renderPane({ approvals: [pendingApprovalEntry()] });
+    await act(async () => {
+      view.ask();
+    });
     fireEvent.click(screen.getByRole("button", { name: "View file values (1)" }));
     expect(getApprovalAttachments).toHaveBeenCalledWith(SID, "req-1");
     expect(await screen.findByText("print(1); print(2)")).toBeInTheDocument();
   });
 
-  it("binds the respond callback to the pane's session id", () => {
-    const { respond } = renderPane();
+  it("binds the respond callback to the pane's session id", async () => {
+    const view = renderPane({ approvals: [pendingApprovalEntry()] });
+    await act(async () => {
+      view.ask();
+    });
     fireEvent.click(screen.getByRole("button", { name: "Allow once" }));
-    expect(respond).toHaveBeenCalledWith(SID, "req-1", "allow_once");
+    expect(view.respond).toHaveBeenCalledWith(SID, "req-1", "allow_once");
   });
 });
 
@@ -228,54 +235,46 @@ describe("SessionPane approval wiring", () => {
 // crash degrade instead of pinning the next file to the previous one's card.
 describe("SessionPane artifact stage boundary", () => {
   beforeEach(() => {
-    vi.mocked(useSessionState).mockImplementation(paneSessionState);
-    vi.mocked(listSkills).mockResolvedValue({ skills: [] } as never);
+    stubSessionApis();
     artifactProbe.recovered = false;
   });
 
-  const fileContent = (path: string, fileName: string) => ({
-    kind: "file",
-    path,
-    fileName,
-    render: "markdown",
-  });
-
-  it("degrades only the artifact face when its render crashes -- the thread rail keeps rendering", () => {
-    vi.mocked(useSessionState).mockImplementation(() =>
-      paneSessionStateWithWorkspace(fileContent(BAD_ARTIFACT_PATH, "bad.md")),
-    );
-    renderPane();
+  it("degrades only the artifact face when its render crashes -- the thread rail keeps rendering", async () => {
+    renderPane({
+      thread: [artifactTurn([BAD_ARTIFACT_PATH])],
+    });
+    await openArtifact("bad.md");
 
     const card = screen.getByRole("alert");
     expect(card).toHaveAttribute("data-region", "artifact");
-    // The live card rides the same fixture: the crash did not reach the rail.
-    expect(screen.getByRole("button", { name: "Allow once" })).toBeInTheDocument();
+    // The artifact card rides the same rail: the crash did not reach it.
+    expect(
+      screen.getByRole("button", { name: "Open bad.md in the right sidebar" }),
+    ).toBeInTheDocument();
   });
 
-  it("renders another artifact normally after a crash -- the path key resets the boundary", () => {
-    vi.mocked(useSessionState).mockImplementation(() =>
-      paneSessionStateWithWorkspace(fileContent(BAD_ARTIFACT_PATH, "bad.md")),
-    );
-    const view = renderPane();
+  it("renders another artifact normally after a crash -- the path key resets the boundary", async () => {
+    renderPane({
+      thread: [artifactTurn([BAD_ARTIFACT_PATH, "C:/artifacts/out/good.md"])],
+    });
+    await openArtifact("bad.md");
     expect(screen.getByRole("alert")).toHaveAttribute("data-region", "artifact");
 
-    // Switching the viewed file remounts the keyed boundary: file B renders
-    // and file A's degrade card is gone (with the key left on the child, the
-    // boundary's error state would survive the switch and pin B to A's card).
-    vi.mocked(useSessionState).mockImplementation(() =>
-      paneSessionStateWithWorkspace(fileContent("C:/artifacts/out/good.md", "good.md")),
-    );
-    view.rerender(view.ui());
+    // Selecting the other delivered file remounts the keyed boundary: file
+    // B renders and file A's degrade card is gone (with the key left on the
+    // child, the boundary's error state would survive the switch and pin B
+    // to A's card).
+    await openArtifact("good.md");
 
     expect(screen.queryByRole("alert")).not.toBeInTheDocument();
     expect(screen.getByTestId("artifact-stub")).toHaveTextContent("good.md");
   });
 
-  it("drops the file's exists/text cache entries on retry and remounts clean", () => {
-    vi.mocked(useSessionState).mockImplementation(() =>
-      paneSessionStateWithWorkspace(fileContent(BAD_ARTIFACT_PATH, "bad.md")),
-    );
-    const { queryClient } = renderPane();
+  it("drops the file's exists/text cache entries on retry and remounts clean", async () => {
+    const { queryClient } = renderPane({
+      thread: [artifactTurn([BAD_ARTIFACT_PATH])],
+    });
+    await openArtifact("bad.md");
     // Seed both per-path entries so the drop assertion discriminates: an
     // unseeded cache is already empty and the removal would pass vacuously.
     queryClient.setQueryData(artifactKeys.exists(BAD_ARTIFACT_PATH), true);
@@ -304,31 +303,22 @@ describe("SessionPane artifact stage boundary", () => {
 // so the pause is staged by stubbing the rail's geometry and dispatching the
 // scroll event by hand (the same rig the hook suite uses).
 describe("SessionPane workspace panel postures", () => {
-  beforeEach(() => {
-    vi.mocked(useSessionState).mockImplementation(paneSessionState);
-    vi.mocked(listSkills).mockResolvedValue({ skills: [] } as never);
-  });
+  beforeEach(stubSessionApis);
 
   // #1323: the file-kind panel retires as a scroll container (the stage
   // scrolls internally); every other kind keeps the edge-docked scrolling
   // posture. jsdom does no layout, so the pin is the class itself -- the
   // rendered-DOM utility convention, not the rejected CSS-rule seam.
-  it("gives the file stage the overflow-hidden breakout posture", () => {
-    vi.mocked(useSessionState).mockImplementation(() =>
-      paneSessionStateWithWorkspace({
-        kind: "file",
-        path: "C:/artifacts/out/report.md",
-        fileName: "report.md",
-        render: "markdown",
-      }),
-    );
-    renderPane();
+  it("gives the file stage the overflow-hidden breakout posture", async () => {
+    renderPane({
+      thread: [artifactTurn(["C:/artifacts/out/report.md"])],
+    });
+    await openArtifact("report.md");
 
     expect(screen.getByRole("tabpanel").className).toContain("overflow-hidden");
   });
 
   it("keeps non-file content on the scrolling breakout posture", () => {
-    vi.mocked(useSessionState).mockImplementation(paneSessionState);
     renderPane();
 
     expect(screen.getByRole("tabpanel").className).toContain("overflow-y-auto");
@@ -336,10 +326,7 @@ describe("SessionPane workspace panel postures", () => {
 });
 
 describe("SessionPane follow pill", () => {
-  beforeEach(() => {
-    vi.mocked(useSessionState).mockImplementation(paneSessionState);
-    vi.mocked(listSkills).mockResolvedValue({ skills: [] } as never);
-  });
+  beforeEach(stubSessionApis);
 
   // The hook's align write lands inside a rAF callback; awaiting one frame
   // flushes every queued align deterministically (the hook suite stubs the

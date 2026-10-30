@@ -4,9 +4,10 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 // a global BEFORE any frontend script runs; parseBootSeed is the whitelist
 // boundary deciding whether that global is trusted, and readBootSeed is the
 // thin reader useAppConfigState calls once per mount. Rust serializes typed
-// enums, so an invalid variant can only mean the global is not ours -- both
-// fields must validate or the whole seed drops (the IPC full config stays
-// the only authority; a dropped seed reproduces the pre-#814 null behavior).
+// enums, so an invalid variant can only mean the global is not ours -- every
+// seeded field must validate or the whole seed drops (the IPC full config
+// stays the only authority; a dropped seed reproduces the pre-#814 null
+// behavior).
 
 import { BOOT_SEED_GLOBAL, parseBootSeed, readBootSeed } from "../bootSeed";
 
@@ -16,32 +17,44 @@ describe("parseBootSeed (whitelist boundary)", () => {
   });
 
   it("accepts every valid variant pair", () => {
-    expect(parseBootSeed({ theme: "dark", locale: "zh-CN" })).toEqual({
-      theme: "dark",
-      locale: "zh-CN",
-    });
-    expect(parseBootSeed({ theme: "light", locale: "en-US" })).toEqual({
-      theme: "light",
-      locale: "en-US",
-    });
-    expect(parseBootSeed({ theme: "system", locale: "system" })).toEqual({
-      theme: "system",
-      locale: "system",
-    });
+    expect(
+      parseBootSeed({ theme: "dark", locale: "zh-CN", sidebar_collapsed: true }),
+    ).toEqual({ theme: "dark", locale: "zh-CN", sidebar_collapsed: true });
+    expect(
+      parseBootSeed({ theme: "light", locale: "en-US", sidebar_collapsed: false }),
+    ).toEqual({ theme: "light", locale: "en-US", sidebar_collapsed: false });
+    expect(
+      parseBootSeed({ theme: "system", locale: "system", sidebar_collapsed: false }),
+    ).toEqual({ theme: "system", locale: "system", sidebar_collapsed: false });
   });
 
-  it("drops the whole seed when either field leaves its enum", () => {
-    expect(parseBootSeed({ theme: "dark", locale: "klingon" })).toBeNull();
-    expect(parseBootSeed({ theme: "DARK", locale: "zh-CN" })).toBeNull();
-    expect(parseBootSeed({ theme: 1, locale: "zh-CN" })).toBeNull();
-    expect(parseBootSeed({ theme: "dark" })).toBeNull();
-    expect(parseBootSeed({ locale: "zh-CN" })).toBeNull();
+  it("drops the whole seed when any seeded field fails its whitelist", () => {
+    expect(
+      parseBootSeed({ theme: "dark", locale: "klingon", sidebar_collapsed: false }),
+    ).toBeNull();
+    expect(
+      parseBootSeed({ theme: "DARK", locale: "zh-CN", sidebar_collapsed: false }),
+    ).toBeNull();
+    expect(
+      parseBootSeed({ theme: 1, locale: "zh-CN", sidebar_collapsed: false }),
+    ).toBeNull();
+    expect(
+      parseBootSeed({ theme: "dark", locale: "zh-CN", sidebar_collapsed: "no" }),
+    ).toBeNull();
+    expect(
+      parseBootSeed({ theme: "dark", locale: "zh-CN" }),
+    ).toBeNull();
   });
 
   it("tolerates unknown extra keys (mirrors the app-config serde read)", () => {
     expect(
-      parseBootSeed({ theme: "dark", locale: "zh-CN", extra: "future field" }),
-    ).toEqual({ theme: "dark", locale: "zh-CN" });
+      parseBootSeed({
+        theme: "dark",
+        locale: "zh-CN",
+        sidebar_collapsed: false,
+        extra: "future field",
+      }),
+    ).toEqual({ theme: "dark", locale: "zh-CN", sidebar_collapsed: false });
   });
 
   it("rejects non-object shapes", () => {
@@ -66,8 +79,16 @@ describe("readBootSeed", () => {
   });
 
   it("parses the injected global when present", () => {
-    vi.stubGlobal(BOOT_SEED_GLOBAL, { theme: "dark", locale: "zh-CN" });
-    expect(readBootSeed()).toEqual({ theme: "dark", locale: "zh-CN" });
+    vi.stubGlobal(BOOT_SEED_GLOBAL, {
+      theme: "dark",
+      locale: "zh-CN",
+      sidebar_collapsed: true,
+    });
+    expect(readBootSeed()).toEqual({
+      theme: "dark",
+      locale: "zh-CN",
+      sidebar_collapsed: true,
+    });
   });
 
   it("returns null when the global is absent (script did not run)", () => {

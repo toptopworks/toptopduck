@@ -107,7 +107,7 @@ export function HeaderActionButton({
           type="button"
           size="icon"
           variant="ghost"
-          className="text-muted-foreground hover:text-foreground size-7"
+          className="text-muted-foreground size-7"
           aria-label={label}
           disabled={disabled}
           onClick={onClick}
@@ -314,7 +314,7 @@ export function RowFoldChevron({
   return (
     <button
       type="button"
-      className="text-muted-foreground hover:text-foreground flex size-7 shrink-0 cursor-pointer items-center justify-center"
+      className="text-muted-foreground hover:text-foreground flex size-7 shrink-0 items-center justify-center"
       onClick={onToggle}
       aria-label={label}
       aria-expanded={expanded}
@@ -617,7 +617,7 @@ export function SourceFold({
           onChange={selectAll.onToggleAll}
           disabled={selectAll.disabled}
           aria-label={label}
-          className="size-4"
+          className="size-4 cursor-pointer"
         />
         <button
           type="button"

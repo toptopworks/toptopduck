@@ -36,7 +36,7 @@ const updatedConfig = baseAppConfig({
   engine: { memory_limit: "512MB", threads: 4, row_cap: 10_000 },
   privacy: { send_samples: false },
   tunables: { window_turns: 5, far_window: 20 },
-  shell: { sidebar_collapsed: false, sidebar_grouping: "time" },
+  shell: { sidebar_collapsed: false },
 });
 
 function renderControl(

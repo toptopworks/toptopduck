@@ -32,7 +32,6 @@ export function NavButtons() {
         type="button"
         className={NAV_BUTTON_CLASS}
         aria-label={backLabel}
-        title={backLabel}
         disabled={!canBack}
         onClick={back}
       >
@@ -42,7 +41,6 @@ export function NavButtons() {
         type="button"
         className={NAV_BUTTON_CLASS}
         aria-label={forwardLabel}
-        title={forwardLabel}
         disabled={!canForward}
         onClick={forward}
       >

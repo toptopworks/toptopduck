@@ -16,6 +16,7 @@
 //! truth, not two.
 
 use std::collections::HashSet;
+use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
@@ -107,10 +108,13 @@ use crate::model::{
 /// `artifacts` key) deserializes as the empty manifest -- the same
 /// no-op-widening posture as #847's `body` and #883's `Cancelled` reason.
 ///
-/// Still v7 (#1090): the manifest entry drops the stored `primary` flag
-/// (the primary is derived as the first entry; a pre-#1090 file's
-/// `primary` key is an ignored unknown field) and gains `durable`
-/// (`serde(default = "default_durable")`, same no-op-widening posture).
+/// Still v7 (#1090, recalibrated by ADR-0137 Decision 6 / #1383): the
+/// manifest entry drops the stored `primary` flag (the primary is
+/// derived as the first entry; a pre-#1090 file's `primary` key is an
+/// ignored unknown field) and later dropped `durable` (survival rides
+/// the session binding, not a per-entry fact; a between-#1090-and-#1383
+/// file's `durable` key is an ignored unknown field, same
+/// no-op-widening posture).
 /// Files written after #1090 no longer carry `primary`, which a
 /// pre-#1090 reader rejects at deserialize -- the unreleased-app posture
 /// the v1 `Failed` widening used, so no migration.
@@ -169,6 +173,17 @@ pub struct SourceRef {
     #[serde(default)]
     pub rectify: RectifyProvenance,
     pub fingerprint: String,
+    /// The copy-in reader the registration-time SQL function named
+    /// (ADR-0137 D4): the normalized tabular spelling (`read_json_auto` /
+    /// `read_csv_auto` / `read_parquet`) for a programmatically registered
+    /// source, `None` for manual-ingest sources and legacy recipes. A
+    /// watermark-miss replay consults this BEFORE extension dispatch so a
+    /// function-name / extension mismatch re-reads with the reader that
+    /// produced the snapshot. The one corner that names no SQL fn: a
+    /// non-tabular call on a tool_output original records the staged
+    /// file's extension-dispatched reader (the #433 fallback posture).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reader: Option<String>,
 }
 
 /// One productive turn in the replayable chain (ADR-0034): the `result_N`
@@ -411,7 +426,7 @@ const TRACE_SUMMARY_MAX: usize = 512;
 /// truncated to [`TRACE_SUMMARY_MAX`].
 pub(crate) fn synthetic_materialize_trace(sql: &str) -> Vec<RecipeTraceEntry> {
     let entry = RecipeTraceEntry {
-        name: crate::tools::definitions::TOOL_MATERIALIZE.to_string(),
+        name: crate::analysis_tools::definitions::TOOL_MATERIALIZE.to_string(),
         operation_kind: OperationKind::Write,
         summary: truncate_trace_summary(sql),
         success: true,
@@ -502,7 +517,7 @@ pub struct RecipeTurn {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub occupancy: Option<crate::model::OccupancySnapshot>,
     /// The turn's delivered-artifact manifest (ADR-0124, issue #1087):
-    /// absolute paths + file names + the durable flag, merged from the
+    /// absolute paths + file names, merged from the
     /// dual channels at settle and frozen here. Empty for turns that
     /// delivered nothing; absent-on-disk for turns recorded before the
     /// field (serde default -- strictly additive, no format_version bump,
@@ -681,7 +696,7 @@ pub struct Recipe {
     /// The active-SOURCE pointer as a reference name (ADR-0035/0037): the
     /// source the user last focused on at the source layer, stable across
     /// renames. This is distinct from `Session::active()` -- the user's
-    /// current focus, derived by `window::resolve_active` as the latest result
+    /// current focus, derived by `turn_window::resolve_active` as the latest result
     /// if any, else the active source. Resume rebuilds the working set + turn
     /// timeline deterministically, so `resolve_active` reproduces the same
     /// focus without persisting it. The source pointer is persisted because it
@@ -730,6 +745,18 @@ pub struct Recipe {
     /// recipe migrated with an empty mount fold.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub discovery_snapshot: Vec<String>,
+    /// The session's bound workspace directory (ADR-0137, issue #1381):
+    /// the canonical path agent-authored processes work in -- the external
+    /// runtime's `session/new` cwd and the built-in CLI tools' spawn cwd.
+    /// Fixed at creation (user-selected) or at the first disk-need moment
+    /// (the lazily-minted default workspace), immutable afterwards. `None`
+    /// for a session that never reached a disk-need moment (pure chat /
+    /// read-only queries) and for recipes persisted before the field; a
+    /// resume restores it verbatim. NOT a replay input. No format_version
+    /// bump -- strictly additive with a serde default, the `last_runtime`
+    /// precedent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace: Option<PathBuf>,
 }
 
 /// Why [`Recipe::build`] rejected a proposed recipe.
@@ -883,6 +910,7 @@ impl Recipe {
             thought_level: None,
             cached_discovered: None,
             last_runtime: None,
+            workspace: None,
         })
     }
 
@@ -912,6 +940,16 @@ impl Recipe {
     /// so the persisted file carries it.
     pub fn with_discovery_snapshot(mut self, names: Vec<String>) -> Recipe {
         self.discovery_snapshot = names;
+        self
+    }
+
+    /// Layer the session's workspace binding onto the recipe header
+    /// (ADR-0137, issue #1381). The same layering posture as
+    /// [`Self::with_discovery_snapshot`]: the session holds the single
+    /// truth, and the persister layers it at build time so a lazily-minted
+    /// binding reaches the next persist without a second storage to drift.
+    pub fn with_workspace(mut self, workspace: Option<PathBuf>) -> Recipe {
+        self.workspace = workspace;
         self
     }
 
@@ -992,6 +1030,7 @@ mod tests {
             relative_path: None,
             rectify: RectifyProvenance::NotApplicable,
             fingerprint: fp.to_string(),
+            reader: None,
         }
     }
 
@@ -1038,6 +1077,7 @@ mod tests {
             thought_level: None,
             cached_discovered: None,
             last_runtime: None,
+            workspace: None,
         }
     }
 
@@ -1141,6 +1181,7 @@ mod tests {
             thought_level: None,
             cached_discovered: None,
             last_runtime: None,
+            workspace: None,
         };
         let chain = recipe.productive_chain();
         assert_eq!(
@@ -1190,6 +1231,7 @@ mod tests {
             thought_level: None,
             cached_discovered: None,
             last_runtime: None,
+            workspace: None,
         };
         let json = serde_json::to_string(&recipe).expect("serialize");
         let back: Recipe = serde_json::from_str(&json).expect("deserialize");
@@ -1259,6 +1301,7 @@ mod tests {
             thought_level: None,
             cached_discovered: None,
             last_runtime: None,
+            workspace: None,
         };
         let chain = recipe.productive_chain();
         assert_eq!(
@@ -1404,6 +1447,7 @@ mod tests {
             thought_level: None,
             cached_discovered: None,
             last_runtime: None,
+            workspace: None,
         };
         let chain = recipe.productive_chain();
         assert_eq!(
@@ -1812,7 +1856,6 @@ mod tests {
         with_artifacts.artifacts = vec![crate::model::TurnArtifact {
             path: "/sessions/abc/artifacts/report.pdf".into(),
             file_name: "report.pdf".into(),
-            durable: true,
         }];
         let json = serde_json::to_string(&with_artifacts).expect("serialize");
         assert!(json.contains("\"artifacts\""), "artifacts key present");
@@ -2007,6 +2050,7 @@ mod tests {
             thought_level: None,
             cached_discovered: None,
             last_runtime: None,
+            workspace: None,
         };
         let json = serde_json::to_string(&recipe).expect("serialize");
         let back: Recipe = serde_json::from_str(&json).expect("deserialize");
@@ -2064,6 +2108,7 @@ mod tests {
             thought_level: None,
             cached_discovered: None,
             last_runtime: None,
+            workspace: None,
         };
         let json = serde_json::to_string(&recipe).expect("serialize");
         assert!(
@@ -2142,6 +2187,7 @@ mod tests {
             thought_level: None,
             cached_discovered: None,
             last_runtime: None,
+            workspace: None,
         };
         let chain = recipe.productive_chain();
         assert_eq!(chain.len(), 1);

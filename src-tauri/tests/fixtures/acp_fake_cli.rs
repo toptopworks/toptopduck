@@ -421,6 +421,16 @@ fn play_scenario(
             notify(out, agent_message("the answer is 42"));
             respond_prompt(out, &id, StopReason::EndTurn);
         }
+        // Issue #1414 (the run_turn wiring rig): the text_reply shape plus
+        // one deliverable-file mention, so the turn's settle manifest -- and
+        // with it the entry's grant port -- carries a non-empty list. The
+        // integration test pre-creates `report.html` in the session's
+        // seated workspace; the reply-text scan resolves the mention
+        // against it.
+        "text_reply_artifact" => {
+            notify(out, agent_message("the answer is 42, see report.html"));
+            respond_prompt(out, &id, StopReason::EndTurn);
+        }
         // ADR-0129 (issue #1270): the spec's usage_update is a
         // context-occupancy snapshot -- modeled in its REAL shape
         // (`used`/`size`; no input/output split exists at this boundary).
@@ -811,7 +821,7 @@ fn play_scenario(
         }
         "gateway_tool_call" => {
             // Drive one tools/call through the spawned bridge -> the app's
-            // gateway -> tools::dispatch, then report it via session/update so
+            // gateway -> analysis_tools::dispatch, then report it via session/update so
             // the engine pump folds the call into the ACP trace. Exercises the
             // full wiring: the bridge connects back, the gateway serves the
             // MCP subset, and the dispatch lands in the gateway's trace (the

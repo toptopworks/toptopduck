@@ -162,6 +162,22 @@
   button {
     font: inherit;
   }
+  /* Clickable controls carry the hand by default (Tailwind v4 preflight
+     dropped the UA cursor:pointer that v3 restored) -- the arrow is the
+     declared exception, via an explicit cursor-default utility. Native
+     buttons plus the ARIA roles the interactive primitives render as when
+     the host element is not a button (Radix menu items and list options are
+     divs/spans/li). :disabled stays out (and aria-disabled rows too), so the
+     disabled:cursor-progress / disabled:cursor-not-allowed channels keep
+     their cursor states. */
+  button:not(:disabled):not([aria-disabled="true"]),
+  [role="button"]:not(:disabled):not([aria-disabled="true"]),
+  [role="option"]:not([aria-disabled="true"]),
+  [role="menuitem"]:not([aria-disabled="true"]),
+  [role="menuitemradio"]:not([aria-disabled="true"]),
+  [role="menuitemcheckbox"]:not([aria-disabled="true"]) {
+    cursor: pointer;
+  }
 }
 
 /* Global reduced-motion cutoff (issue #1139, extends #1137). Four animation

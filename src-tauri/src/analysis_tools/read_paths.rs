@@ -45,6 +45,18 @@ use sqlparser::parser::Parser;
 /// unconstrained.
 pub(crate) struct ReadPathAnalysis {
     pub paths: Vec<String>,
+    /// The final-segment function name behind each path, parallel to `paths`
+    /// (`fn_names[i]` produced `paths[i]`). The derived-source programmatic
+    /// ingest reads it to pick the copy-in reader from the function the SQL
+    /// actually named (ADR-0137 D4) -- extension dispatch would misroute a
+    /// tabular file whose extension names a different format.
+    pub fn_names: Vec<String>,
+    /// Whether each call passed anything beyond the path literal, parallel to
+    /// `paths` (`paths_have_extra_args[i]` describes `paths[i]`). A call with
+    /// extra arguments (`delim`, `header`, `all_varchar`, ...) customizes the
+    /// parse semantics; the derived-source full-path face leaves such calls
+    /// in place so the engine honors the options at exec.
+    pub paths_have_extra_args: Vec<bool>,
     pub non_literal_read_found: bool,
 }
 
@@ -60,6 +72,8 @@ pub(crate) fn extract_read_paths(sql: &str) -> Result<ReadPathAnalysis, ()> {
     };
     let mut out = ReadPathAnalysis {
         paths: Vec::new(),
+        fn_names: Vec::new(),
+        paths_have_extra_args: Vec::new(),
         non_literal_read_found: false,
     };
     for stmt in &statements {
@@ -151,14 +165,14 @@ fn walk_table_with_joins(twj: &sqlparser::ast::TableWithJoins, out: &mut ReadPat
 fn walk_table_factor(factor: &TableFactor, out: &mut ReadPathAnalysis) {
     match factor {
         TableFactor::Function { name, args, .. } => {
-            collect_if_read_function(&name.to_string(), args.iter(), out);
+            collect_if_read_function(&name.to_string(), args, out);
         }
         TableFactor::Table {
             name,
             args: Some(tvf),
             ..
         } => {
-            collect_if_read_function(&name.to_string(), tvf.args.iter(), out);
+            collect_if_read_function(&name.to_string(), &tvf.args, out);
         }
         TableFactor::TableFunction { expr, .. } => walk_expr(expr, out),
         TableFactor::Derived { subquery, .. } => walk_query(subquery.as_ref(), out),
@@ -181,7 +195,7 @@ fn walk_expr(expr: &Expr, out: &mut ReadPathAnalysis) {
 
         Expr::Function(func) => {
             let args = function_args(func);
-            collect_if_read_function(&func.name.to_string(), args.iter(), out);
+            collect_if_read_function(&func.name.to_string(), args, out);
             // Recurse into the call's own arguments so a nested read_* (e.g.
             // read_csv_auto(read_text('x'))) is still caught.
             for arg in args {
@@ -406,11 +420,7 @@ fn arg_arg(arg: &FunctionArg) -> &FunctionArgExpr {
 /// Decision 1). Do NOT keep scanning past the first positional: later named
 /// options' string values are not paths, and mis-reading one would feed the
 /// ACL a fabricated path (ADR-0077).
-fn collect_if_read_function<'a>(
-    name: &str,
-    args: impl Iterator<Item = &'a FunctionArg>,
-    out: &mut ReadPathAnalysis,
-) {
+fn collect_if_read_function(name: &str, args: &[FunctionArg], out: &mut ReadPathAnalysis) {
     if !is_file_function(name) {
         return;
     }
@@ -424,6 +434,10 @@ fn collect_if_read_function<'a>(
             ))) = arg_arg(arg)
             {
                 out.paths.push(s.clone());
+                out.fn_names.push(file_function_name(name));
+                // Anything beyond the path (or before it) customizes the
+                // call's parse semantics -- options, never paths.
+                out.paths_have_extra_args.push(args.len() > 1);
             } else {
                 out.non_literal_read_found = true;
             }
@@ -440,14 +454,19 @@ fn collect_if_read_function<'a>(
 /// DuckDB file-reading function. Matches the final segment case-insensitively
 /// against the `read_*` family and `sniff_csv`.
 pub(crate) fn is_file_function(name: &str) -> bool {
-    // `name` renders as e.g. `read_csv_auto` or `catalog.read_csv_auto`; the
-    // final segment is the function itself.
-    let last = name
-        .rsplit_once('.')
+    let last = file_function_name(name);
+    last.starts_with("read_") || last == "sniff_csv"
+}
+
+/// The normalized final segment of a rendered function-call name: `catalog.
+/// read_csv_auto` yields `read_csv_auto` (lowercased -- SQL function names
+/// are case-insensitive in DuckDB). Shared by the matcher and the extractor's
+/// fn-name capture so the two cannot disagree on the spelling.
+fn file_function_name(name: &str) -> String {
+    name.rsplit_once('.')
         .map(|(_, last)| last)
         .unwrap_or(name)
-        .to_ascii_lowercase();
-    last.starts_with("read_") || last == "sniff_csv"
+        .to_ascii_lowercase()
 }
 
 #[cfg(test)]
@@ -461,6 +480,37 @@ mod tests {
         let result = extract_read_paths("SELECT * FROM read_csv_auto('/etc/passwd')").unwrap();
         assert_eq!(result.paths, vec!["/etc/passwd".to_string()]);
         assert!(!result.non_literal_read_found);
+    }
+
+    /// fn_names stays parallel to paths: each literal path carries the final
+    /// segment of the read function that produced it, normalized (dotted
+    /// catalog spellings and case fold to the bare lowercase name). The
+    /// programmatic-ingest reader mapping keys off this (ADR-0137 D4).
+    #[test]
+    fn extracts_the_function_name_alongside_each_path() {
+        let result = extract_read_paths(
+            "SELECT * FROM read_csv_auto('/a.csv') \
+             UNION ALL SELECT * FROM Sys.Read_Parquet('/b.parquet')",
+        )
+        .unwrap();
+        assert_eq!(
+            result.paths,
+            vec!["/a.csv".to_string(), "/b.parquet".to_string()]
+        );
+        assert_eq!(
+            result.fn_names,
+            vec!["read_csv_auto".to_string(), "read_parquet".to_string()]
+        );
+        assert_eq!(result.paths_have_extra_args, vec![false, false]);
+
+        // A call with options beyond the path flags the parse as
+        // customized -- the derived-source full-path face leaves such
+        // calls in place (options fidelity).
+        let optioned =
+            extract_read_paths("SELECT * FROM read_csv('/c.tsv', delim = ';', header = false)")
+                .unwrap();
+        assert_eq!(optioned.paths, vec!["/c.tsv".to_string()]);
+        assert_eq!(optioned.paths_have_extra_args, vec![true]);
     }
 
     /// A scalar read_* in the projection is also caught -- a read_text /

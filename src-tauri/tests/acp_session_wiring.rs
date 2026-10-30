@@ -1,11 +1,11 @@
 //! Session external-runtime wiring integration (issue #299 slice 9c).
 //!
 //! Drives the full Session -> AcpEngine -> fake-CLI -> bridge -> gateway ->
-//! tools::dispatch chain in CI. The fake-CLI's `gateway_tool_call` scenario
+//! analysis_tools::dispatch chain in CI. The fake-CLI's `gateway_tool_call` scenario
 //! spawns the real bridge binary (its path injected via the `session/new` MCP
 //! descriptor); the bridge connects back to the per-turn gateway, which serves
 //! the MCP subset and routes `tools/call` (explore, or a registered CLI tool
-//! via `cli_gateway_tool_call` -- issue #673) through `tools::dispatch` or the
+//! via `cli_gateway_tool_call` -- issue #673) through `analysis_tools::dispatch` or the
 //! shared spawn engine against the session's live resources. Real CLI E2E is
 //! manual (the #299 AC, not in CI); #300 covers the other ACP CLIs against the
 //! same engine. The trace-merge dedup is unit-tested at the merge function;
@@ -100,10 +100,12 @@ fn acp_bridge_bin() -> PathBuf {
 }
 
 /// Lock the global env, point it at the fixture (scenario + bridge binary +
-/// PATH), and build a Session wired to the fake-CLI adapter. Returns the
-/// session + the prior `PATH` + the env-lock guard (held across the turn so a
-/// sibling test cannot reset the global env mid-drive).
-fn external_session(scenario: &str) -> (Session, std::ffi::OsString, MutexGuard<'static, ()>) {
+/// PATH), and pre-warm the two fixture images: the shared front half of the
+/// harness's two entry points -- the Session-direct helper below and the
+/// store-handle route the #1414 entry pin drives. Returns the prior `PATH`
+/// and the env-lock guard (held across the turn so a sibling test cannot
+/// reset the global env mid-drive).
+fn lock_env_and_prewarm(scenario: &str) -> (std::ffi::OsString, MutexGuard<'static, ()>) {
     let guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let fake_cli = PathBuf::from(env!("CARGO_BIN_EXE_acp-fake-cli"));
     let old_path = prepend_path(fake_cli.parent().expect("fixture has a parent dir"));
@@ -134,6 +136,14 @@ fn external_session(scenario: &str) -> (Session, std::ffi::OsString, MutexGuard<
         .spawn()
         .expect("prewarm: bridge spawns");
     let _ = warm_bridge.wait().expect("prewarm: bridge exits");
+    (old_path, guard)
+}
+
+/// Build a Session wired to the fake-CLI adapter under the locked + warmed
+/// env (the Session-direct entry point; the #1414 store-handle route calls
+/// the front half directly).
+fn external_session(scenario: &str) -> (Session, std::ffi::OsString, MutexGuard<'static, ()>) {
+    let (old_path, guard) = lock_env_and_prewarm(scenario);
     let mut session = Session::new().expect("session");
     session.set_external_runtime(Some(fake_cli_adapter()));
     (session, old_path, guard)
@@ -247,7 +257,7 @@ fn a_connect_phase_token_fire_bounds_the_external_turn_with_a_hung_server() {
 
 /// The full chain: the fake-CLI's `gateway_tool_call` scenario drives one MCP
 /// `tools/call` (explore) through the spawned bridge -> the per-turn gateway
-/// -> `tools::dispatch`, then emits a terminal agent message. The turn must
+/// -> `analysis_tools::dispatch`, then emits a terminal agent message. The turn must
 /// complete `Textual` -- proving the bridge spawns + connects, the gateway
 /// serves the MCP subset, dispatch runs against the live session resources,
 /// and the scoped-thread serve rejoins the parallel engine drive without
@@ -498,6 +508,134 @@ fn external_cli_tool_call_routes_through_the_gateway() {
         cli_rows[0].success,
         "the gateway's served row is the winner"
     );
+}
+
+/// Issue #1414: the re-routed success arc. The rig's other tests drive the
+/// Session directly (`ask` / `ask_with_phase`); this one drives the
+/// session-side turn ENTRY -- `SessionHandle::run_turn` -- the function the
+/// `ask` command now delegates to, so the wiring that used to live untested
+/// inside the command body is pinned at the layer that owns it: one
+/// discovering external turn through the entry fires `on_named` exactly
+/// once (the first-question auto-name, issue #1353), lands the handshake
+/// catalog on the handle's cache (the mirror-back's Some arm, ADR-0095 --
+/// the None arm's preserve pin lives beside the entry itself), and hands
+/// the grant port the thread's referenced file list (ADR-0124 / ADR-0137
+/// Decision 6) -- non-empty here, via the artifact-mentioning reply
+/// scenario and a pre-created workspace file.
+#[test]
+fn run_turn_success_arc_names_grants_and_mirrors_back() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use toptopduck_lib::session::PosturePair;
+    use toptopduck_lib::{
+        CancelToken, LiveProviderConfig, SessionStore, TurnDeps, TurnPorts, UnwiredProvider,
+    };
+
+    let (old_path, guard) = lock_env_and_prewarm("text_reply_artifact");
+
+    // The layer under test: a store-built handle (NOT a bare Session), the
+    // fake-CLI adapter seated on the handle's runtime slot (the mirror
+    // pair's source), and a seated workspace holding the reply-mentioned
+    // deliverable (the settle scan resolves `report.html` against it).
+    let store = SessionStore::new();
+    let id = store
+        .create(
+            Arc::new(CancelToken::new()),
+            Box::new(UnwiredProvider),
+            Default::default(),
+        )
+        .expect("create session");
+    let handle = store.get(&id).expect("handle");
+    let ws = tempfile::tempdir().unwrap();
+    fs::write(ws.path().join("report.html"), "<html>42</html>").expect("write deliverable");
+    {
+        let mut s = handle.session_lock().expect("lock");
+        s.set_workspace(ws.path().to_path_buf());
+    }
+    handle.set_runtime_and_posture(Some(fake_cli_adapter()), PosturePair::default());
+
+    // Entry deps: a written config (so `load()` never walks the
+    // missing-config keychain path), an empty MCP snapshot, fresh roots.
+    let cfg_dir = tempfile::tempdir().unwrap();
+    let live = LiveProviderConfig::new(common::keychain(), cfg_dir.path().join("config.json"));
+    live.upsert_cli_tool(cli_registration())
+        .expect("write config");
+    let deps = TurnDeps {
+        live,
+        mcp_servers: Vec::new(),
+        skills_root: cfg_dir.path().join("skills"),
+        agents_root: cfg_dir.path().join("agents"),
+    };
+
+    let approval = handle.approval_state();
+    let sink = NullSink;
+    let named = Arc::new(AtomicUsize::new(0));
+    let named_sink = Arc::clone(&named);
+    let granted: Arc<Mutex<Vec<Vec<PathBuf>>>> = Arc::new(Mutex::new(Vec::new()));
+    let grant_sink = Arc::clone(&granted);
+    let outcome = handle
+        .run_turn(
+            "what is the answer?",
+            &[],
+            &deps,
+            TurnPorts {
+                approval: &approval,
+                sink: &sink,
+                on_phase: Box::new(|_| {}),
+                on_named: Box::new(move |_| {
+                    named_sink.fetch_add(1, Ordering::SeqCst);
+                }),
+                grant_scope: Box::new(move |paths| grant_sink.lock().unwrap().push(paths.to_vec())),
+            },
+        )
+        .expect("run_turn");
+    std::env::set_var("PATH", old_path);
+    drop(guard);
+    match &outcome {
+        TurnOutcome::Textual { body, .. } => {
+            assert!(
+                body.contains("see report.html"),
+                "the artifact scenario's mention rides the reply: {body:?}"
+            );
+        }
+        other => panic!("the artifact scenario must complete Textual, got {other:?}"),
+    }
+    assert_eq!(
+        named.load(Ordering::SeqCst),
+        1,
+        "the first question fires on_named exactly once"
+    );
+    let granted = granted.lock().unwrap();
+    assert_eq!(granted.len(), 1, "exactly one grant per turn");
+    assert_eq!(
+        granted[0],
+        vec![ws.path().join("report.html")],
+        "the grant list carries the reply-mentioned deliverable"
+    );
+    let cached = handle
+        .cached_discovered()
+        .expect("the mirror-back landed the handshake catalog");
+    assert_eq!(
+        cached.adapter_id.as_deref(),
+        Some("fake-cli"),
+        "the handle cache carries this turn's discovery"
+    );
+}
+
+/// One disabled CLI registration, just to make the live config file exist
+/// (see the test above): local to this suite like the sink/skill helpers.
+fn cli_registration() -> CliToolConfig {
+    CliToolConfig {
+        name: "pin".into(),
+        description: "config-existence pin".into(),
+        executable: "/bin/tool".into(),
+        argv_template: Vec::new(),
+        params: Vec::new(),
+        env: Default::default(),
+        enabled: false,
+        source: CliToolSource::User,
+        baseline: None,
+    }
 }
 
 /// Issue #646: an MCP request frame from the bridge that exceeds the

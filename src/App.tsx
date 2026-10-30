@@ -20,13 +20,15 @@ import { useSidebarResize } from "./shell/useSidebarResize";
 import { useRailResize } from "./shell/useRailResize";
 import { railMaxWidth, sidebarMaxWidth } from "./shell/layoutBounds";
 import { useProfileKeys } from "./shell/useProfileKeys";
-import {
-  useComposerState,
-  IDLE_SESSION_FIELDS,
-} from "./session/useComposerState";
+import { useShellBarSlotMetrics } from "./shell/useShellBarSlotMetrics";
+import { useBarWheelForward } from "./shell/useBarWheelForward";
+import { useComposerState } from "./session/useComposerState";
 import type { ComposerSessionFields } from "./session/useComposerState";
+import { useComposerRegistry } from "./session/composerRegistry";
 import { COMPOSER_INPUT_ID, QuestionBar } from "./components/thread/QuestionBar";
 import { ComposerAuthModeChip } from "./components/thread/ComposerAuthModeChip";
+import { ComposerWorkspacePicker } from "./components/thread/ComposerWorkspacePicker";
+import type { PendingWorkspace } from "./components/thread/ComposerWorkspacePicker";
 import { ComposerOccupancy } from "./components/thread/OccupancyRing";
 import { ComposerContextPanel } from "./components/thread/ComposerContextPanel";
 import { ComposerSkillChips } from "./components/thread/ComposerSkillChips";
@@ -55,16 +57,8 @@ import { log } from "./lib/log";
 import { createQueryClient } from "./lib/queryClient";
 import { catalogFor } from "./i18n";
 import { useTheme } from "./theme/useTheme";
-import { adapterKeys } from "./session/queryKeys";
+import { adapterKeys, workspaceKeys } from "./session/queryKeys";
 import { useTurnFailureSids } from "./session/useTurnFailureSids";
-
-// WheelEvent deltaMode values (spec constants, inlined so the handler does
-// not depend on the WheelEvent global being present) and the effective line
-// height Chromium assigns a legacy line-mode tick. The Tauri webviews emit
-// pixel deltas only; these normalize the legacy shapes defensively.
-const WHEEL_DELTA_MODE_LINE = 1;
-const WHEEL_DELTA_MODE_PAGE = 2;
-const WHEEL_LINE_HEIGHT_PX = 16;
 
 // The Chat-style three-column shell (ADR-0045/0060/0062, issue #81). App owns
 // APP-level state: the OPEN-session set + active id (ADR-0060 multi-session),
@@ -95,12 +89,8 @@ type SettingsEntry = {
 };
 
 // Module-level so the IntlProvider `onError` prop is a STABLE reference across
-// App renders. react-intl shallow-compares ALL provider props (incl. onError)
-// to decide whether to rebuild the `intl` context object; an inline arrow here
-// would rebuild `intl` every render, and every session handler that lists
-// `intl` in its useCallback deps (handleAsk / handleCancel / handleIngestMany)
-// would get a fresh identity -- which the ADR-0092 shell-level composer-fields
-// report compares by reference, looping the bar's fields registry forever.
+// App renders. Why that identity matters is the composer registry's identity
+// contract (the recorded react-intl failure); see composerRegistry.ts.
 function handleIntlError(err: Error): void {
   log.warn("i18n", err.message);
 }
@@ -206,8 +196,6 @@ export default function App() {
     switchActiveProfile,
     sidebarCollapsed,
     toggleSidebarCollapse,
-    sidebarGrouping,
-    switchSidebarGrouping,
     bootSeed,
   } = useAppConfigState({ setShellError });
 
@@ -278,7 +266,7 @@ export default function App() {
   // visibility. Deliberately NOT persisted -- every startup resets the
   // archived view to hidden (the peek semantics), so plain useState.
   const [showArchived, setShowArchived] = useState(false);
-  const { sessions, archivedSessions, sessionsError, refreshSessions } =
+  const { sessions, archivedSessions, sessionsError, sessionsLoaded, refreshSessions } =
     usePersistedSessions({ intl, includeArchived: showArchived });
   const {
     openSessions,
@@ -366,48 +354,31 @@ export default function App() {
   // never forces a close.
   const atSoftCap = openSessions.length >= SOFT_CAP_OPEN_SESSIONS;
 
-  // --- ADR-0092: Shell-level composer fields registry ---------------------
-  // Each SessionPane reports its bar-relevant fields upward via
-  // onComposerFields. The shell-level QuestionBar reads the active session's
-  // entry (or idle defaults when activeSessionId is null). handleAsk /
-  // handleCancel / handleIngestFiles are useCallback-stable inside
-  // useSessionState; turnLoading / phase change during a turn.
-  const [composerFieldsMap, setComposerFieldsMap] = useState<
-    Record<string, ComposerSessionFields>
-  >({});
-  const handleComposerFields = useCallback(
-    (sid: string, fields: ComposerSessionFields) => {
-      setComposerFieldsMap((prev) => ({ ...prev, [sid]: fields }));
-    },
-    [],
-  );
-
-  // ADR-0092: drop a session's entry on pane unmount (close / delete / error-
-  // boundary replacement). A dedicated callback makes the removal intent
-  // explicit at the type level instead of relying on a sentinel reference.
-  const handleComposerFieldsUnmount = useCallback((sid: string) => {
-    setComposerFieldsMap((prev) => {
-      if (!(sid in prev)) return prev;
-      const next = { ...prev };
-      delete next[sid];
-      return next;
-    });
-  }, []);
-
-  // The active session's bar fields (or idle when null). The useComposerState
-  // hook merges these with per-session drafts.
-  const activeSessionFields =
-    activeSessionId !== null ? composerFieldsMap[activeSessionId] : undefined;
+  // --- ADR-0092: Shell-level composer registry -----------------------------
+  // The registry owns the per-session fields registry + the scoped
+  // invocation staging (identity contract + lifecycle semantics live in its
+  // module doc); App keeps only the call + render wiring -- the report face,
+  // the staging mutators, and the merged reads.
+  const composerRegistry = useComposerRegistry(activeSessionId);
+  const {
+    report,
+    reportUnmount,
+    readFields,
+    activeSessionFields,
+    readInvocations,
+    stage,
+    withdraw,
+    consumeCold,
+    consumeView,
+    dropSession,
+  } = composerRegistry;
   // ADR-0130 (issue #1272): the composer occupancy ring -- the active
   // session's timeline is subscribed to the shared thread cache INSIDE the
   // ring's shell-side mount (App's body sits above the QueryClientProvider,
   // so the useQuery cannot live here); the denominator rides the snapshot
   // itself (#1290: a channel-reported window or the backend's catalog
   // stamp). null / absent on cold start: the ring renders nothing.
-  const composer = useComposerState(
-    activeSessionId,
-    activeSessionFields ?? IDLE_SESSION_FIELDS,
-  );
+  const composer = useComposerState(activeSessionId, activeSessionFields);
   // Destructured so handleShellSubmit's dep array holds the useCallback-stable
   // setter itself (the composer object rebuilds every render, issue #229 idiom).
   const { setDraft: setComposerDraft } = composer;
@@ -420,7 +391,7 @@ export default function App() {
   // slide into the collapsed track.
   const activeWsCollapsed =
     activeSessionId !== null &&
-    (activeSessionFields?.workspaceCollapsed ?? true);
+    (readFields(activeSessionId)?.workspaceCollapsed ?? true);
 
   // ADR-0092 Decision 6 (#500): shell-level pending composer posture for the
   // cold-start bar. Every composer control renders on the centered bar with
@@ -447,34 +418,15 @@ export default function App() {
   const [pendingAuthMode, setPendingAuthMode] =
     useState<AuthMode>(AUTH_MODE_DEFAULT);
   const [pendingFiles, setPendingFiles] = useState<string[]>([]);
-  // Skill invocation staging (ADR-0112 trigger-then-stage, calibrated by
-  // ADR-0119: a pick stages THIS turn's user invocation), two facets with
-  // different lifecycles: the cold-start list lives in shell memory (it
-  // survives a session peek and dies only on the minting submit); the
-  // session list is view-scoped -- it dies on any active-session switch /
-  // close so unstaged names never leak across sessions. The staging
-  // materializes as the turn's invocation records at submit -- the ONLY
-  // materialization moment -- and clears with it: the chips show this
-  // turn's staging only, never a persistent state.
-  const [coldInvocations, setColdInvocations] = useState<string[]>([]);
-  // Session-scope staged invocations carry their owning view id: a switch /
-  // close (or the null->session mint) stops the ids matching, so the derived
-  // read below yields [] while another session is active -- unsubmitted
-  // intents never leak across sessions, with no effect-driven reset. The
-  // intents are scoped to their session, not destroyed by the switch:
-  // switching back to the same session restores its unsubmitted intents
-  // (resume mints a fresh sid, so the restore never sees stale truth).
-  const [viewInvocations, setViewInvocations] = useState<{
-    sid: string | null;
-    names: string[];
-  }>({ sid: null, names: [] });
-  const sessionInvocations = useMemo(
-    () =>
-      activeSessionId !== null && viewInvocations.sid === activeSessionId
-        ? viewInvocations.names
-        : [],
-    [activeSessionId, viewInvocations],
-  );
+  // The session-creation workspace selector's pending value (ADR-0137/0138,
+  // issue #1384): the directory the NEXT minted session binds, consumed once
+  // by createSession's directory parameter and reset to unbound afterwards.
+  // null = the default lazy mint -- the pre-#1384 behavior.
+  const [pendingWorkspace, setPendingWorkspace] =
+    useState<PendingWorkspace | null>(null);
+  // Skill invocation staging (ADR-0112/0119) lives in the composer seam --
+  // the scoped staging map with its lifecycle semantics (peek survival,
+  // cross-facet coexistence, single-slot replacement, consume-at-submit).
 
   // The startup resolution of the persisted default_runtime against the
   // shared adapter table (ADR-0098 Decisions 2/3, issue #572): what a cold
@@ -547,7 +499,7 @@ export default function App() {
   const handleShellSubmit = useCallback(
     (question: string) => {
       if (activeSessionId !== null) {
-        const fields = composerFieldsMap[activeSessionId];
+        const fields = readFields(activeSessionId);
         if (!fields) return;
         // The ask leaves the composer: one clear up front covers all three
         // fire sites below, and the no-op window above never reaches it.
@@ -555,8 +507,8 @@ export default function App() {
         // ADR-0119 Decision 1: the staging IS this turn's user invocation --
         // it rides the ask (the backend materializes the records at submit)
         // and the staging clears at the submit boundary.
-        const intents = sessionInvocations;
-        setViewInvocations({ sid: activeSessionId, names: [] });
+        const intents = readInvocations(activeSessionId);
+        consumeView();
         fireShellAsk(fields, question, intents);
         return;
       }
@@ -583,13 +535,14 @@ export default function App() {
           ? effectivePendingRuntime.data
           : null;
       const authMode = pendingAuthMode;
-      const invocations = coldInvocations;
+      const invocations = readInvocations(null);
       const files = pendingFiles;
       void createSessionWithQuestion(
         question,
         invocations,
         { runtime, modelPosture, authMode },
         files,
+        pendingWorkspace?.path ?? null,
       ).then((created) => {
         if (created) {
           // The question rode the pendingQuestion channel into the new
@@ -599,8 +552,15 @@ export default function App() {
           setComposerDraft("");
           consumeColdStart();
           setPendingAuthMode(AUTH_MODE_DEFAULT);
-          setColdInvocations([]);
+          consumeCold();
           setPendingFiles([]);
+          // Issue #1384: the workspace selection is one-shot -- consumed by
+          // the mint, the pill returns to unbound for the next session.
+          setPendingWorkspace(null);
+          // Issue #1392: the mint's explicit bind just made (or freshened) a
+          // registry record -- the sidebar's workspace section must not wait
+          // for the next popover open to show the group.
+          void queryClient.invalidateQueries({ queryKey: workspaceKeys.all() });
           // The mint-time set IPCs landed the explicit pair in the startup
           // backfill entry (record_last_model_posture, the single write
           // point). Invalidate so a later return to cold start refetches the
@@ -616,11 +576,12 @@ export default function App() {
     },
     [
       activeSessionId,
-      composerFieldsMap,
+      readFields,
+      readInvocations,
+      consumeCold,
+      consumeView,
       setComposerDraft,
       createSessionWithQuestion,
-      sessionInvocations,
-      coldInvocations,
       queryClient,
       effectivePendingRuntime,
       pendingRuntime,
@@ -628,6 +589,7 @@ export default function App() {
       consumeColdStart,
       pendingAuthMode,
       pendingFiles,
+      pendingWorkspace,
       builtInGateOpen,
       profileKeys.activeProfileId,
       openSettings,
@@ -638,34 +600,22 @@ export default function App() {
   // handleCancel. Idle when no session is active (no turn to cancel).
   const handleShellCancel = useCallback(() => {
     if (activeSessionId !== null) {
-      const fields = composerFieldsMap[activeSessionId];
+      const fields = readFields(activeSessionId);
       if (fields) void fields.handleCancel();
     }
-  }, [activeSessionId, composerFieldsMap]);
+  }, [activeSessionId, readFields]);
 
   // ADR-0112 (issue #716): a picker selection reports here. The pick is a
   // single uniform state -- it never consults the mounted / activated caches
-  // (display data only); it always lands a chip.
+  // (display data only); it always lands a chip. The scope is the active
+  // view (null on cold start): the seam's stage merges unique in-slot and
+  // replaces the previous session's slot across sessions (its module doc
+  // carries the single-slot semantics).
   const handleSkillPick = useCallback(
     (name: string) => {
-      if (activeSessionId === null) {
-        setColdInvocations((prev) =>
-          prev.includes(name) ? prev : [...prev, name],
-        );
-        return;
-      }
-      setViewInvocations((prev) =>
-        prev.sid === activeSessionId
-          ? {
-              sid: activeSessionId,
-              names: prev.names.includes(name)
-                ? prev.names
-                : [...prev.names, name],
-            }
-          : { sid: activeSessionId, names: [name] },
-      );
+      stage(activeSessionId, [name]);
     },
-    [activeSessionId],
+    [activeSessionId, stage],
   );
 
   // Review Important 1 (#991): the pane's ingest-abort branch re-seeds the
@@ -675,20 +625,9 @@ export default function App() {
   // not just the question (merge-unique, matching the picker's own land).
   const handleSeedInvocations = useCallback(
     (sid: string, names: string[]) => {
-      if (names.length === 0) return;
-      setViewInvocations((prev) =>
-        prev.sid === sid
-          ? {
-              sid,
-              names: [
-                ...prev.names,
-                ...names.filter((n) => !prev.names.includes(n)),
-              ],
-            }
-          : { sid, names },
-      );
+      stage(sid, names);
     },
-    [],
+    [stage],
   );
 
   // The settings overlay's close handler (issue #1040): a "new-skill"
@@ -727,26 +666,14 @@ export default function App() {
   // same way -- the intent list is the only surface.
   const handleRemoveInvocation = useCallback(
     (name: string) => {
-      if (activeSessionId === null) {
-        setColdInvocations((prev) => prev.filter((n) => n !== name));
-        return;
-      }
-      setViewInvocations((prev) =>
-        prev.sid === activeSessionId
-          ? {
-              sid: activeSessionId,
-              names: prev.names.filter((n) => n !== name),
-            }
-          : prev,
-      );
+      withdraw(activeSessionId, name);
     },
-    [activeSessionId],
+    [activeSessionId, withdraw],
   );
 
-  // The bar's live chip facet: the cold-start shell memory in draft mode, the
-  // session view's intents otherwise.
-  const pendingInvocations =
-    activeSessionId === null ? coldInvocations : sessionInvocations;
+  // The bar's live chip facet: the active scope's staging (the cold slot in
+  // draft mode, the session slot otherwise).
+  const pendingInvocations = readInvocations(activeSessionId);
 
   // Backspace at the draft's start withdraws the most recent intent: the
   // chips seat before the draft's first char, so the last chip deletes like
@@ -770,6 +697,9 @@ export default function App() {
     // A closed session's draft is unreachable (the pane is gone); drop the
     // slot so the draft map tracks the open set.
     composer.dropDraft(sid);
+    // Its staged invocations are unreachable the same way -- the explicit
+    // drop replaces the sid-mismatch implicit invalidation.
+    dropSession(sid);
   };
 
   // Symmetric teardown for "delete this session" (issue #1319): the pane
@@ -778,7 +708,10 @@ export default function App() {
   // for a cold persisted / archived row (nothing open to unmount or drop).
   const deleteSessionWithCleanup = (path: string, sid: string | null) => {
     void deletePersisted(path, sid);
-    if (sid) composer.dropDraft(sid);
+    if (sid) {
+      composer.dropDraft(sid);
+      dropSession(sid);
+    }
   };
 
   // ADR-0092 (#500): shell-level file ingest. When active, delegate to the
@@ -791,7 +724,7 @@ export default function App() {
   const handleShellIngestFiles = useCallback(
     (paths: string[]) => {
       if (activeSessionId !== null) {
-        const fields = composerFieldsMap[activeSessionId];
+        const fields = readFields(activeSessionId);
         if (fields) fields.handleIngestFiles(paths);
         return;
       }
@@ -801,7 +734,7 @@ export default function App() {
         return fresh.length === 0 ? prev : [...prev, ...fresh];
       });
     },
-    [activeSessionId, composerFieldsMap],
+    [activeSessionId, readFields],
   );
 
   // --- In-app navigation history (issue #288) -----------------------------
@@ -871,54 +804,13 @@ export default function App() {
     return () => window.removeEventListener("keydown", onKey);
   }, []);
 
-  // Issue #836: the bar is an overlay on the main area, so the rail's
-  // scroll container spans the full height and its tail passes behind the
-  // bar. The rail keeps the thread's end readable above the bar with a
-  // bottom padding sized from the bar's live height: this observer
-  // publishes it as --shell-bar-h on the main area (styles.css turns it
-  // into the rail's padding-bottom). A height change (a growing draft, the
-  // picker opening) only grows or shrinks that padding -- content above
-  // never reflows, so the scroll position holds (a shrink while parked at
-  // max scroll clamps by the same delta, a visual no-op that keeps the
-  // view pinned to the tail). A centered-to-bottom flip briefly leaves
-  // the stale centered height in the var -- the taller of the two, so the
-  // frame the observer needs to catch up is conservative. (The reverse
-  // flip leaves the shorter bottom height; harmless, because closing the
-  // last session unmounts its layer in the same commit, so no rail
-  // consumes the var during the glide.) The slot never unmounts
-  // (ADR-0092 single instance), so one mount-scoped observer covers every
-  // posture.
-  const shellBarSlotRef = useRef<HTMLDivElement>(null);
-  useEffect(() => {
-    const slot = shellBarSlotRef.current;
-    const area = mainAreaRef.current;
-    if (!slot || !area) return;
-    // The rail's scrollbar column must stay uncovered (that is the point of
-    // the overlay), but thread content that overflows its reading column
-    // horizontally paints across the rail's padding up to the clip edge --
-    // so the strip's backdrop must stop at the scrollbar itself, not a full
-    // gutter short of it. Scrollbar width is constant for the app's
-    // lifetime; measure it once with a hidden scrollable probe (overlay
-    // scrollbars measure 0, which is exactly right: the notch then
-    // collapses to the 1px column border).
-    const probe = document.createElement("div");
-    probe.style.cssText =
-      "position:absolute;visibility:hidden;overflow:scroll;width:50px;height:50px";
-    document.body.appendChild(probe);
-    const scrollbarW = probe.offsetWidth - probe.clientWidth;
-    probe.remove();
-    area.style.setProperty("--rail-sb-w", `${scrollbarW}px`);
-    if (typeof ResizeObserver === "undefined") return; // jsdom (test-setup stubs it)
-    const ro = new ResizeObserver((entries) => {
-      const box = entries[0]?.borderBoxSize?.[0];
-      const height = box ? box.blockSize : (entries[0]?.contentRect.height ?? 0);
-      // A hidden slot (settings-mode's display:none) reports 0 -- keep the
-      // last real height so the rail's bound never collapses.
-      if (height > 0) area.style.setProperty("--shell-bar-h", `${height}px`);
-    });
-    ro.observe(slot);
-    return () => ro.disconnect();
-  }, []);
+  // Issue #836: the bar slot's scrollbar probe + live-height observer --
+  // named hook (see useShellBarSlotMetrics for the #836 sizing rationale).
+  // App only binds the returned slot ref at the render site.
+  const shellBarSlotRef = useShellBarSlotMetrics(mainAreaRef);
+  // Issue #834: the bar slot's wheel forward to the active pane's rail --
+  // named hook (see useBarWheelForward for the forwarding semantics).
+  const handleBarWheel = useBarWheelForward(mainAreaRef);
 
   // Theme (ADR-0050): applied to <html>, follows the persisted three-state
   // preference (boot-seeded pre-paint, defaulting to system only when both
@@ -1010,18 +902,26 @@ export default function App() {
                 <SessionSidebar
                   collapsed={sidebarCollapsed}
                   sessions={sessions}
+                  sessionsLoaded={sessionsLoaded}
                   openSessions={openSessions}
                   activeSessionId={activeSessionId}
                   disabled={busy}
                   loadError={sessionsError}
-                  grouping={sidebarGrouping}
                   pendingApprovalSids={approvalEvents.pendingApprovalSids}
                   turnFailedSids={turnFailureSids}
                   onNew={goToEmptyState}
+                  onNewInWorkspace={(path, label) => {
+                    // Issue #1392: the workspace section's ⊕ shortcut -- the
+                    // same staged pendingWorkspace channel the composer pill
+                    // uses (one-shot, consumed by the next mint), landing on
+                    // the cold-start bar where the pill shows the staged
+                    // selection.
+                    setPendingWorkspace({ path, label });
+                    goToEmptyState();
+                  }}
                   onActivate={activateSession}
                   onOpenPersisted={(path, name) =>
                     void openPersisted(path, name)}
-                  onSwitchGrouping={switchSidebarGrouping}
                   archivedSessions={archivedSessions}
                   showArchived={showArchived}
                   onToggleArchived={() => setShowArchived((v) => !v)}
@@ -1169,10 +1069,8 @@ export default function App() {
                               clearPendingQuestion(s.sid)}
                             onSeedDraft={composer.seedDraft}
                             onSeedInvocations={handleSeedInvocations}
-                            onComposerFields={handleComposerFields}
-                            onComposerFieldsUnmount={
-                              handleComposerFieldsUnmount
-                            }
+                            onComposerFields={report}
+                            onComposerFieldsUnmount={reportUnmount}
                             sessionName={s.name}
                             onFirstTurnSettled={syncSessionName}
                             approvalEvents={approvalEvents}
@@ -1195,67 +1093,7 @@ export default function App() {
                   <div
                     ref={shellBarSlotRef}
                     className={`shell-bar-slot${isColdStart ? " centered" : " bottom"}${activeWsCollapsed ? " ws-collapsed" : ""}`}
-                    onWheel={(e) => {
-                      // Issue #834: ADR-0092 lifted the bar to the shell
-                      // level, outside the rail's scroll container, so a
-                      // wheel over the bar strip finds no scrollable
-                      // ancestor and dies -- and the caret rests there
-                      // exactly while reading the latest content. Forward
-                      // the delta to the active pane's rail; scrollBy clamps
-                      // at the edges natively. Zoom gestures (ctrl+wheel /
-                      // pinch) stay with the browser -- the rail's native
-                      // surface never scrolls on them either.
-                      if (e.ctrlKey) return;
-                      // A wheel that lands on a scrollable inside the bar
-                      // itself (the multi-line textarea once it overflows,
-                      // the open skill-picker list once its rows pass its
-                      // cap) scrolls that element natively while it can
-                      // still consume the tick -- skip it so the rail does
-                      // not double-scroll behind. At the scrollable's edge
-                      // the delta has nowhere native to go (the bar has no
-                      // scrollable ancestor), so it chains to the rail
-                      // instead: the manual form of native scroll chaining.
-                      // The per-event query tracks the keep-alive layer's
-                      // .active flag without ref-lifecycle wiring; cold
-                      // start has no active layer, so the forward is a
-                      // structural no-op.
-                      for (
-                        let node = e.target as Element | null;
-                        node && node !== e.currentTarget;
-                        node = node.parentElement
-                      ) {
-                        const { overflowY } = window.getComputedStyle(node);
-                        if (
-                          (overflowY === "auto" || overflowY === "scroll") &&
-                          node.scrollHeight > node.clientHeight
-                        ) {
-                          const atTop = node.scrollTop <= 0;
-                          const atBottom =
-                            node.scrollTop + node.clientHeight >=
-                            node.scrollHeight - 1;
-                          if (
-                            e.deltaY > 0
-                              ? !atBottom
-                              : e.deltaY < 0
-                                ? !atTop
-                                : false
-                          ) {
-                            return;
-                          }
-                        }
-                      }
-                      const rail = mainAreaRef.current?.querySelector<
-                        HTMLElement
-                      >(".session-pane-layer.active .session-rail");
-                      if (!rail) return;
-                      const dy =
-                        e.deltaMode === WHEEL_DELTA_MODE_LINE
-                          ? e.deltaY * WHEEL_LINE_HEIGHT_PX
-                          : e.deltaMode === WHEEL_DELTA_MODE_PAGE
-                            ? e.deltaY * rail.clientHeight
-                            : e.deltaY;
-                      rail.scrollBy(0, dy);
-                    }}
+                    onWheel={handleBarWheel}
                   >
                     {isColdStart && (
                       <>
@@ -1349,6 +1187,25 @@ export default function App() {
                           onPendingModeChange={setPendingAuthMode}
                         />
                       </QuestionBar>
+                      {/* Cold-start only (issue #1384): the workspace
+                          selection binds the session the bar is about to
+                          mint; with a session active the binding is
+                          immutable, so the selector would be a dead
+                          control. The ChatGPT/WorkBuddy pedestal: a fully
+                          rounded strip, inset on both flanks, whose top
+                          slides BEHIND the card (negative margin; the card
+                          is positioned and paints above this unpositioned
+                          sibling) so only its lower half shows -- one
+                          composer block, no seam. pt compensates the
+                          hidden band so the row reads below the card. */}
+                      {isColdStart && (
+                        <div className="mx-3 -mt-3 flex items-center gap-1.5 rounded-lg bg-muted/70 px-1 pb-1 pt-4">
+                          <ComposerWorkspacePicker
+                            value={pendingWorkspace}
+                            onChange={setPendingWorkspace}
+                          />
+                        </div>
+                      )}
                     </div>
                   </div>
 

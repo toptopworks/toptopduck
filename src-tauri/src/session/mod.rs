@@ -23,9 +23,11 @@ pub mod sandbox;
 pub mod skills;
 pub mod snapshot;
 pub mod source_lifecycle;
-mod sql_assets;
 pub(crate) mod turn_dispatch;
+pub mod turn_entry;
 pub mod turn_runner;
+pub(crate) mod workspace;
+pub(crate) mod workspace_tools;
 
 use std::collections::HashMap;
 use std::fs;
@@ -55,7 +57,7 @@ use crate::runtime::acp::adapter::AdapterSpec;
 use crate::session::loop_contract::LoopRound;
 use crate::session::materializer::{CachedDerivedRef, Materializer, RealMaterializer};
 use crate::session_store::ClosingFlag;
-use crate::window;
+use crate::turn_window;
 use crate::workingset::{WorkingSet, DEFAULT_RESULT_COUNT_CAP};
 use crate::SessionId;
 
@@ -74,6 +76,12 @@ pub use resume::{is_resuming, resuming_count};
 // pub-module-plus-re-export dual path `resume` already rides, keeping
 // `session::TurnInputs` stable for its existing consumers.
 pub use turn_runner::TurnInputs;
+
+// Re-export the turn entry's parameter pair (issue #1414) on the same
+// pub-module-plus-re-export dual path `resume` and `turn_runner` above
+// already ride, keeping `session::TurnDeps` / `session::TurnPorts`
+// stable for the rig that consumes them.
+pub use turn_entry::{TurnDeps, TurnPorts};
 
 /// The subdirectory name under the session temp dir where external MCP tools
 /// write their output files (ADR-0087 Decision 3), and where the CLI executor
@@ -430,8 +438,9 @@ pub struct PosturePair {
 
 /// The recipe-header facts the persister layers onto every built recipe
 /// (ADR-0095, extended by ADR-0102 Decision 1): the model +
-/// thought-level selections, the discovered-catalog cache, and the last
-/// effective segment header's runtime. Plain data; mirrors the handle-held
+/// thought-level selections, the discovered-catalog cache, the last
+/// effective segment header's runtime, and the session's workspace
+/// binding (ADR-0137). Plain data; mirrors the handle-held
 /// user choices at every persist point -- the turn-top mirror, and the set
 /// commands' persist-now write, which stamps the runtime choice beside the
 /// pair it persists. At turn end `record_turn` re-stamps `last_runtime`
@@ -443,6 +452,14 @@ pub struct SessionRuntimeFacts {
     pub thought_level: Option<String>,
     pub cached_discovered: Option<crate::session::loop_contract::DiscoveredRuntime>,
     pub last_runtime: Option<LastRuntime>,
+    /// The session's workspace binding (ADR-0137, issue #1381): the canonical
+    /// directory agent-authored processes work in, fixed at creation
+    /// (user-selected) or at the first disk-need moment (lazily minted) and
+    /// immutable afterwards. Not a runtime fact semantically -- it rides this
+    /// struct because the struct is the recipe-header facts carrier, so the
+    /// binding persists + resumes through the same single storage as the
+    /// posture facts (no second copy to drift).
+    pub workspace: Option<std::path::PathBuf>,
 }
 
 pub struct Session {
@@ -453,6 +470,20 @@ pub struct Session {
     working_set: WorkingSet,
     _temp_dir: TempDir, // held to keep its dir alive; cleared on drop (ADR-0012)
     temp_path: PathBuf,
+    /// The lazy-mint source for the default workspace (ADR-0137, issue
+    /// #1381): the fixed product-domain workspaces root (the DEFAULT
+    /// sessions root's sibling), seated by the command layer at
+    /// creation / resume. The binding itself lives in
+    /// [`SessionRuntimeFacts::workspace`] -- the recipe-header facts carrier.
+    /// `None` (test constructors) disables minting; disk-need consumers then
+    /// keep the temp-dir cwd.
+    workspaces_root: Option<PathBuf>,
+    /// The workspace registry (ADR-0138, issue #1384): the organizational
+    /// ledger the bind + mint mount points record into and the close-time
+    /// reclaim deletes from. Seated by the command layer at creation /
+    /// resume, beside [`Self::workspaces_root`]; `None` (test constructors)
+    /// disconnects the ledger -- the session runs on, unrecorded.
+    workspace_registry: Option<std::sync::Arc<crate::workspace::WorkspaceRegistry>>,
     /// The LLM provider (ADR-0007/0064), held behind `Arc<dyn>` (dyn, not
     /// generic) so this struct does not parameterize `commands.rs` / `lib.rs`.
     /// [`Self::ask_with_phase`] reads the live response locale off it for the
@@ -471,7 +502,7 @@ pub struct Session {
     /// materializer injected for a `Resumer` unit test exercises the replay
     /// branch without DuckDB / a filesystem. Stateless (`RealMaterializer`);
     /// the admin connection / source_files / working_set it borrows live on
-    /// this Session and are passed per turn via [`materializer::TurnDeps`]. Held on the
+    /// this Session and are passed per turn via [`materializer::DispatchDeps`]. Held on the
     /// Session itself (not inside the loop, which is built per turn) so the
     /// resume borrow and the live-turn borrow share one object.
     materializer: Box<dyn Materializer>,
@@ -961,12 +992,14 @@ impl Session {
         // both per turn; the resume path borrows the same materializer for
         // the recipe replay. The materializer is stateless (RealMaterializer);
         // the admin connection / source_files / working_set it borrows live
-        // on this Session and are passed per turn via TurnDeps.
+        // on this Session and are passed per turn via DispatchDeps.
         Ok(Self {
             admin_engine,
             working_set: WorkingSet::default(),
             _temp_dir: temp_dir,
             temp_path,
+            workspaces_root: None,
+            workspace_registry: None,
             provider,
             materializer: Box::new(RealMaterializer),
             session_id: None,
@@ -1085,11 +1118,6 @@ impl Session {
     /// one `recipe.json` to another releases the old canonical key so a different
     /// session can open it.
     pub fn bind_recipe(&mut self, path: PathBuf, session_name: String) -> Result<(), SaveError> {
-        // Migrate derived source files from temp staging to recipe.json-adjacent
-        // (issue #433, ADR-0087 D2). Before the recipe is persisted, each
-        // derived source's source_path is updated so SourceRef carries the
-        // portable (relative-to-recipe.json) location.
-        migrate_derived_sources(&mut self.working_set, &self.temp_path, &path);
         let result = self.persister.bind(
             path,
             session_name,
@@ -1136,12 +1164,21 @@ impl Session {
         self.persister.recipe_path()
     }
 
-    /// The session's temp working directory (ADR-0012 RAII lifecycle): the
-    /// CLI tools' execution cwd and the built-in tool output area's parent.
-    /// Read access for the resume black-box pins (#1202's artifact backfill
-    /// copies land here).
-    pub fn temp_cwd(&self) -> &Path {
-        &self.temp_path
+    /// The manifest-referenced artifact paths across the held timeline
+    /// (ADR-0137 Decision 6's preview whitelist source, borrowed form):
+    /// the ask-path grant reads this instead of cloning the whole thread
+    /// through [`Self::conversation`]; the thread-read command uses the
+    /// projected [`crate::session::artifacts::referenced_paths`] on
+    /// entries it already owns.
+    pub fn referenced_artifact_paths(&self) -> Vec<PathBuf> {
+        self.timeline
+            .iter()
+            .filter_map(|entry| match entry {
+                TimelineEntry::Turn { record, .. } => Some(record),
+                _ => None,
+            })
+            .flat_map(|record| record.artifacts.iter().map(|a| PathBuf::from(&a.path)))
+            .collect()
     }
 
     /// Whether the timeline carries no content at all (ADR-0089 Decision 6):
@@ -1187,7 +1224,7 @@ impl Session {
         // the payload (`active` still names the stale result) from the UI label,
         // papering over the divergence silently.
         let turns = self.turns();
-        window::resolve_active(&self.working_set, &turns)
+        turn_window::resolve_active(&self.working_set, &turns)
             .and_then(|name| self.working_set.get(&name).cloned())
     }
 
@@ -1312,7 +1349,7 @@ impl Session {
     fn record_turn(
         &mut self,
         question: &str,
-        mut outcome: TurnOutcome,
+        outcome: TurnOutcome,
         rounds: Vec<LoopRound>,
         invocations: Vec<crate::model::SkillInvocation>,
         runtime: TurnRuntime,
@@ -1391,27 +1428,20 @@ impl Session {
         // ONCE here at settle (non-streaming -- the full reply text and the
         // tool channel are both final): the `present_files` declarations
         // merged with the reply-text scan, resolved against the session
-        // working dir (the external agent cwd / built-in tool output area),
-        // deduped, capped, and -- for temp-dir hits -- materialized into
-        // the per-session `artifacts/` directory so the manifest survives a
-        // close/reopen. Frozen on the record; existence is a render-time
-        // fact.
+        // workspace (the agent's cwd; the temp dir only for a
+        // workspace-less in-memory turn), deduped, capped. ADR-0137
+        // Decision 6 (#1383): every entry references its file IN PLACE --
+        // nothing is copied into the per-session `artifacts/` directory
+        // (that materialization face is retired; a legacy manifest pointing
+        // there still renders and replays unchanged). Frozen on the record;
+        // existence is a render-time fact.
         let artifacts = artifacts::settle_manifest(
             &presented,
             artifacts::reply_body(&outcome),
-            &self.temp_path,
-            artifacts::artifacts_dir(self.persister.recipe_path()).as_deref(),
-        );
-        // Resume resilience for temp-referencing SQL: every read_* path
-        // into the session temp dir is copied into the per-session assets/
-        // dir (a dead file) and the promotion SQL is rewritten to the
-        // persistent path -- the temp dir dies with the process, and the
-        // recipe's replay chain must not depend on it. No-op unbound or for
-        // a turn with no temp references.
-        sql_assets::materialize_sql_references(
-            &mut outcome,
-            &self.temp_path,
-            self.persister.recipe_path(),
+            self.runtime_facts
+                .workspace
+                .as_deref()
+                .unwrap_or(&self.temp_path),
         );
         self.timeline.push(TimelineEntry::Turn {
             record: TurnRecord {
@@ -1480,13 +1510,8 @@ impl Session {
     /// successful write also stamps the companion watermark (ADR-0136 D3)
     /// when the engine has materialized.
     pub fn persist_if_bound(&mut self) {
-        persist_snapshot(
-            &mut self.persister,
-            &mut self.working_set,
-            &self.temp_path,
-            &self.timeline,
-            &self.runtime_facts,
-        );
+        self.persister
+            .save_if_bound(&self.working_set, &self.timeline, &self.runtime_facts);
         // Stamp only after a write actually landed: a suspended (conflict) or
         // failed write leaves the recipe file behind while the in-memory
         // working set moved on -- stamping then would desync the watermark
@@ -1789,99 +1814,6 @@ fn fold_skill_provenance(invocations: &[crate::model::SkillInvocation]) -> Vec<S
         }
     }
     skills
-}
-
-/// The single recipe-save body behind [`Session::persist_if_bound`] and the
-/// mid-turn skill-activation channel's land-and-persist (ADR-0110 Decision 3,
-/// issue #701): migrate any staged derived sources to their portable
-/// location, then save the recipe atomically. Field-split (not a method)
-/// because the mid-turn caller holds the working set + temp path inside
-/// [`materializer::TurnDeps`] while the activation channel holds the
-/// timeline + persister -- disjoint session borrows that cannot re-widen to
-/// `&mut Session`.
-fn persist_snapshot(
-    persister: &mut recipe_persister::RecipePersister,
-    working_set: &mut WorkingSet,
-    temp_path: &Path,
-    timeline: &[TimelineEntry],
-    runtime_facts: &SessionRuntimeFacts,
-) {
-    // Migrate derived sources before building the recipe so their
-    // source_path carries the portable (recipe.json-adjacent) location instead
-    // of the temp staging path (issue #433, ADR-0087 D2). Without this,
-    // derived sources created after the initial bind_recipe would carry temp
-    // paths in the recipe — wiped on session drop, breaking resume.
-    if let Some(recipe_path) = persister.recipe_path().map(PathBuf::from) {
-        migrate_derived_sources(working_set, temp_path, &recipe_path);
-    }
-    persister.save_if_bound(working_set, timeline, runtime_facts);
-}
-
-/// Migrate derived source files from temp staging (`temp_path/derived/`) to
-/// the per-session directory's `assets/` subdirectory (ADR-0089, issue #433,
-/// ADR-0087 D2) so they survive session close and are portable with the
-/// `recipe.json` file. Updates each descriptor's `source_path` in place so the
-/// recipe's `SourceRef` carries the persistent location. Best-effort +
-/// logged: a copy failure leaves the staging path in place (the session temp
-/// dir is wiped on drop, but the recipe write still succeeds — a resume
-/// would surface the missing file as an interactive re-link).
-fn migrate_derived_sources(working_set: &mut WorkingSet, temp_path: &Path, recipe_path: &Path) {
-    let staging_dir = temp_path.join(derived_source::DERIVED_STAGING_DIR);
-    // ADR-0089: derived sources live in the per-session directory's `assets/`
-    // subdirectory (previously `{duck_stem}.assets/` adjacent to a flat recipe.json).
-    let Some(session_dir) = recipe_path.parent() else {
-        log::warn!(
-            target: "toptopduck::session",
-            "skipped derived-source migration: recipe_path has no parent: {}",
-            recipe_path.display()
-        );
-        return;
-    };
-    let assets_dir = session_dir.join(sql_assets::ASSETS_DIR_NAME);
-
-    // Collect (ref_name, old_path, new_path) for sources staged in
-    // temp_path/derived/. Iterating the working set immutably first, then
-    // applying updates mutably (borrow split).
-    let staging_prefix = staging_dir.to_string_lossy().to_string();
-    let to_migrate: Vec<(String, PathBuf, PathBuf)> = working_set
-        .list()
-        .iter()
-        .filter(|d| !working_set.is_result(&d.reference_name))
-        .filter(|d| d.source_path.starts_with(&staging_prefix))
-        .filter_map(|d| {
-            let old_path = PathBuf::from(&d.source_path);
-            let filename = PathBuf::from(old_path.file_name()?);
-            Some((
-                d.reference_name.clone(),
-                old_path,
-                assets_dir.join(filename),
-            ))
-        })
-        .collect();
-
-    if to_migrate.is_empty() {
-        return;
-    }
-
-    if let Err(e) = fs::create_dir_all(&assets_dir) {
-        log::warn!(
-            target: "toptopduck::session",
-            "failed to create derived assets dir {}: {e}",
-            assets_dir.display()
-        );
-        return;
-    }
-
-    for (ref_name, old_path, new_path) in &to_migrate {
-        if let Err(e) = fs::copy(old_path, new_path) {
-            log::warn!(
-                target: "toptopduck::session",
-                "failed to migrate derived source {ref_name}: {e}"
-            );
-            continue;
-        }
-        working_set.update_source_path(ref_name, &new_path.to_string_lossy());
-    }
 }
 
 #[cfg(test)]
@@ -3010,12 +2942,13 @@ mod tests {
         assert!(entry.trace[0].calls[0].success);
     }
 
-    /// ADR-0124 Decision 2 (issue #1087): a temp-working-dir hit
-    /// materializes into the bound session's `artifacts/` directory at
-    /// settle, so the manifest survives the session's close (the temp dir
-    /// dies with the session).
+    /// ADR-0124 Decision 2 (issue #1087), recalibrated by ADR-0137
+    /// Decision 6 (#1383): a declared hit enters the manifest IN PLACE --
+    /// nothing is copied into a per-session `artifacts/` directory (which
+    /// is never created), and the recipe persists the same in-place
+    /// manifest.
     #[test]
-    fn present_files_turn_materializes_temp_hits_into_the_session_artifacts_dir() {
+    fn present_files_turn_references_declared_hits_in_place() {
         let duck_dir = tempfile::tempdir().expect("duck dir");
         let provider = FakeProvider::new().scripted_tool_turn_seq(
             "生成网页",
@@ -3044,15 +2977,21 @@ mod tests {
             })
             .expect("the turn recorded");
         assert_eq!(entry.artifacts.len(), 1);
-        let materialized = Path::new(&entry.artifacts[0].path);
         assert_eq!(
-            materialized.parent().expect("parent"),
-            duck_dir.path().join("artifacts"),
-            "the manifest stores the materialized per-session path"
+            Path::new(&entry.artifacts[0].path),
+            session.temp_path.join("page.html"),
+            "the manifest stores the in-place path"
         );
-        assert!(materialized.is_file(), "the copy exists");
-        // And the recipe persisted the same manifest (the `recipe.json` is the
-        // reopen path -- the whole point of materialization).
+        assert!(
+            Path::new(&entry.artifacts[0].path).is_file(),
+            "the referenced file is there"
+        );
+        assert!(
+            !duck_dir.path().join("artifacts").exists(),
+            "no materialization directory is ever created"
+        );
+        // And the recipe persisted the same in-place manifest (the
+        // `recipe.json` is the reopen path).
         let recipe = session.build_recipe();
         let persisted = recipe
             .history
@@ -3066,6 +3005,68 @@ mod tests {
             .expect("the persisted turn");
         assert_eq!(persisted.len(), 1);
         assert_eq!(persisted[0].path, entry.artifacts[0].path);
+    }
+
+    /// ADR-0137 Decision 6's workspace leg (issue #1383): with a bound
+    /// workspace the settle base is the WORKSPACE -- a relative
+    /// declaration resolves against it and enters the manifest under its
+    /// own in-place absolute path, never against the session temp dir
+    /// (the #1381 TRANSITION window this closes). The sibling test above
+    /// pins the workspace-less fallback leg (the temp basis).
+    #[test]
+    fn present_files_turn_references_workspace_hits_under_the_workspace_base() {
+        let duck_dir = tempfile::tempdir().expect("duck dir");
+        let workspace_dir = tempfile::tempdir().expect("workspace dir");
+        let provider = FakeProvider::new().scripted_tool_turn_seq(
+            "生成网页",
+            vec![
+                Ok(ToolTurnReply::tool_calls(vec![ToolUse {
+                    id: "tu_pf".into(),
+                    name: "present_files".into(),
+                    input: json!({"files": ["page.html"]}),
+                }])),
+                Ok(ToolTurnReply::Text("done".into())),
+            ],
+        );
+        let mut session = Session::with_provider(Box::new(provider)).expect("session");
+        session.set_workspace(
+            workspace_dir
+                .path()
+                .canonicalize()
+                .expect("canonical workspace"),
+        );
+        session
+            .bind_recipe(duck_dir.path().join("recipe.json"), "s".into())
+            .expect("bind");
+        // The deliverable lives in the workspace; a same-named decoy in the
+        // temp dir must NOT win the resolution (the base is the workspace,
+        // not the temp dir).
+        std::fs::write(workspace_dir.path().join("page.html"), "<html/>")
+            .expect("write workspace report");
+        std::fs::write(session.temp_path.join("page.html"), "decoy").expect("write temp decoy");
+        let _ = session.ask("生成网页");
+        let entry = session
+            .conversation()
+            .into_iter()
+            .find_map(|e| match e {
+                ThreadEntry::Turn(r) if r.question == "生成网页" => Some(r),
+                _ => None,
+            })
+            .expect("the turn recorded");
+        assert_eq!(entry.artifacts.len(), 1);
+        assert_eq!(
+            Path::new(&entry.artifacts[0].path),
+            workspace_dir
+                .path()
+                .canonicalize()
+                .expect("canonical workspace")
+                .join("page.html"),
+            "a relative declaration resolves against the workspace, in place"
+        );
+        assert!(
+            !Path::new(&entry.artifacts[0].path).starts_with(&session.temp_path),
+            "the temp dir never enters the manifest while a workspace is bound"
+        );
     }
 
     #[test]
@@ -3207,99 +3208,6 @@ mod tests {
         assert!(
             mem.contains('2') || mem.contains("512"),
             "memory_limit={mem}"
-        );
-    }
-
-    // --- Derived source migration (issue #439 AC2) ----------------------------
-
-    #[test]
-    fn bind_recipe_migrates_derived_sources_to_assets_dir() {
-        // Stage a derived CSV in temp_path/derived/ (the staging area used by
-        // derived_source::process when no recipe.json is bound, ADR-0087 D4), register
-        // it in the working set with the staging path, then bind_recipe. The
-        // migration should copy the file to <duck_stem>.assets/ and update the
-        // descriptor's source_path so the recipe carries the portable location.
-        let mut session = Session::new().expect("session");
-
-        let staging_dir = session
-            .temp_path
-            .join(super::derived_source::DERIVED_STAGING_DIR);
-        std::fs::create_dir_all(&staging_dir).unwrap();
-        let staging_csv = staging_dir.join("data.csv");
-        std::fs::write(&staging_csv, "id,name\n1,alice\n").unwrap();
-
-        // Register as a non-result source pointing at the staging path.
-        session
-            .working_set
-            .register(crate::model::DatasetDescriptor {
-                reference_name: "data".to_string(),
-                display_name: "data".to_string(),
-                source_path: staging_csv.to_string_lossy().to_string(),
-                columns: vec![crate::model::ColumnSchema {
-                    name: "id".into(),
-                    canonical_type: "BIGINT".into(),
-                }],
-                row_count: 1,
-                sample: vec![vec!["1".into(), "alice".into()]],
-                fingerprint: "abc".into(),
-                rectify: crate::model::RectifyProvenance::NotApplicable,
-                privacy: crate::model::DatasetPrivacy::default(),
-                stale: None,
-            });
-
-        // Use a temp dir for the recipe.json so .assets/ goes alongside it.
-        let duck_dir = tempfile::tempdir().expect("duck dir");
-        let recipe_path = duck_dir.path().join("recipe.json");
-
-        session
-            .bind_recipe(recipe_path.clone(), "test session".into())
-            .expect("bind_recipe");
-
-        // ADR-0089: derived sources migrate to the per-session directory's
-        // `assets/` subdirectory (replacing the former `{duck_stem}.assets/`).
-        let assets_csv = duck_dir.path().join("assets").join("data.csv");
-        assert!(
-            assets_csv.exists(),
-            "derived file migrated to assets/: {assets_csv:?}"
-        );
-
-        // AC2b: descriptor source_path updated to the assets/ path.
-        let d = session
-            .working_set
-            .get("data")
-            .expect("data still registered");
-        assert!(
-            d.source_path.ends_with("assets\\data.csv")
-                || d.source_path.ends_with("assets/data.csv"),
-            "source_path updated to assets/: {}",
-            d.source_path
-        );
-        assert!(
-            !d.source_path.contains("derived"),
-            "staging path replaced: {}",
-            d.source_path
-        );
-
-        // AC2c: recipe carries the portable (relative) path. ADR-0089: the
-        // assets directory is now per-session `assets/` (not `{stem}.assets/`).
-        let recipe = crate::persistence::read_recipe(&recipe_path).expect("read recipe");
-        let src = recipe
-            .sources
-            .iter()
-            .find(|s| s.reference_name == "data")
-            .expect("data in recipe sources");
-        assert!(
-            src.source_path.ends_with("assets\\data.csv")
-                || src.source_path.ends_with("assets/data.csv"),
-            "recipe source_path is assets/: {}",
-            src.source_path
-        );
-        assert!(
-            src.relative_path
-                .as_ref()
-                .is_some_and(|p| p == "assets/data.csv" || p == "assets\\data.csv"),
-            "recipe relative_path is assets/: {:?}",
-            src.relative_path
         );
     }
 
@@ -3760,23 +3668,24 @@ mod tests {
     }
 
     /// A turn whose SQL references a scratch file in the session temp dir
-    /// survives close -> reopen: settle materializes the reference into the
-    /// per-session `assets/` dir and rewrites the promotion SQL; resume
-    /// replays the stored SQL against the persistent copy -- no ReplayBreak,
-    /// result_1 re-materializes, the recorded history stays Materialized.
-    /// The bare-path workaround shape: a python/bash tool writes the csv,
-    /// `read_csv_auto` reads it back.
+    /// survives close -> reopen through the copy-in snapshot pipeline
+    /// (ADR-0137 Decision 4): the reference persists as a snapshot at live
+    /// time, settle mints NO `assets/` dead file and leaves the SQL at its
+    /// temp spelling (ADR-0137 Decision 6, issue #1383), and the reopen
+    /// restores result_1 on a watermark hit without ever replaying the
+    /// structurally dead temp reference. The bare-path workaround shape: a
+    /// python/bash tool writes the csv, `read_csv_auto` reads it back.
     #[test]
-    fn temp_sql_reference_survives_close_and_reopen() {
+    fn temp_sql_reference_survives_close_and_reopen_via_the_snapshot_pipeline() {
         use crate::model::ThreadEntry;
 
         let dir = tempfile::tempdir().expect("session dir");
         let duck = dir.path().join("recipe.json");
 
-        // Bind FIRST: the settle-time materialization derives the assets dir
+        // Bind FIRST: the snapshot pipeline derives its tree destination
         // from the bound duck path, and createSession binds from the start
-        // (ADR-0089) -- an ask recorded before any binding has nothing to
-        // materialize for.
+        // (ADR-0089) -- an ask recorded before any binding has nowhere
+        // durable to snapshot into.
         let mut session = Session::new().expect("session");
         session.bind_recipe(duck.clone(), "t".into()).expect("bind");
 
@@ -3807,20 +3716,19 @@ mod tests {
             "the live turn materialized, got {outcome:?}"
         );
 
-        // ADR-0089 Decision 3: the assets copy is a dead file -- it never
-        // registers as a dataset, so it is absent from the working set (and
-        // with it, from the dataset UI and the fingerprint surface).
+        // The scratch reference never registers as a dataset under its own
+        // name -- only result_1 does.
         assert!(
             session.get("kline").is_none(),
-            "the materialized copy is not a dataset"
+            "the scratch reference is not a dataset"
         );
 
-        // The recorded SQL now points at the persistent copy, and the copy
-        // exists under the session dir's assets/ subtree.
-        let assets_csv = dir.path().join("assets").join("kline.csv");
+        // ADR-0137 Decision 6 (#1383): no `assets/` dead file is minted and
+        // the recorded SQL keeps its temp spelling -- persistence rides the
+        // copy-in snapshot pipeline, not a settle-time copy.
         assert!(
-            assets_csv.is_file(),
-            "scratch csv materialized under assets/"
+            !dir.path().join("assets").join("kline.csv").exists(),
+            "no dead-file copy is minted under assets/"
         );
         let recipe = session.build_recipe();
         let turn = materialized_turn(&recipe);
@@ -3834,34 +3742,20 @@ mod tests {
             promoted_sql,
             format!(
                 "SELECT COUNT(*) AS n FROM read_csv_auto('{}')",
-                assets_csv.to_string_lossy()
+                csv.to_string_lossy()
             ),
-            "the recipe's replay SQL points at the assets copy"
+            "the recorded SQL keeps its temp spelling"
         );
 
         drop(session);
 
-        // Reopen LLM-free for the replay, then ask ONE more scripted turn
-        // whose SQL references the assets copy directly: the replay chain
-        // re-executes the stored SQL against the persistent copy (green,
-        // result_1 back in the working set), and the live follow-up through
-        // the wired TurnDeps.assets_dir is allowed by the read gate -- the
-        // live half of the dual-path claim (fs_acl.rs: the same preflight a
-        // replayed turn's SQL goes through).
-        let followup_sql = format!(
-            "SELECT COUNT(*) AS n FROM read_csv_auto('{}')",
-            assets_csv.to_string_lossy()
-        );
-        let mut resumed = Session::open_recipe(
+        // Reopen LLM-free: the watermark hits against the snapshot
+        // pipeline's companion state -- result_1 restores whole without
+        // ever replaying the (structurally dead) temp reference.
+        let resumed = Session::open_recipe(
             &duck,
             std::sync::Arc::new(crate::cancel::CancelToken::new()),
-            Box::new(FakeProvider::new().scripted_tool_turn_seq(
-                "再查",
-                vec![
-                    Ok(materialize_call(&followup_sql)),
-                    Ok(ToolTurnReply::Text("done".into())),
-                ],
-            )),
+            Box::new(crate::provider::UnwiredProvider),
             Default::default(),
             |_| {},
             |_| panic!("no source issues expected"),
@@ -3870,16 +3764,7 @@ mod tests {
         .expect("resume");
         assert!(
             resumed.get("result_1").is_some(),
-            "replay re-materialized result_1 from the assets copy"
-        );
-        let outcome = resumed.ask("再查");
-        assert!(
-            matches!(outcome, TurnOutcome::Materialized { .. }),
-            "the live follow-up referencing the assets copy materialized, got {outcome:?}"
-        );
-        assert!(
-            resumed.get("result_2").is_some(),
-            "the follow-up's result registered from the assets-path read"
+            "the watermark hit restores result_1"
         );
         let any_failed = resumed.conversation().iter().any(|e| {
             matches!(
@@ -3887,7 +3772,273 @@ mod tests {
                 ThreadEntry::Turn(t) if matches!(t.outcome, TurnOutcome::Failed(_))
             )
         });
-        assert!(!any_failed, "no Failed turn after replay");
+        assert!(!any_failed, "no Failed turn after reopen");
+    }
+
+    /// A legacy recipe whose recorded SQL points into the per-session
+    /// `assets/` tree (a pre-#1383 settle's materialized copy) still
+    /// replays green on reopen while the copy is on disk: the absolute
+    /// spelling rides ADR-0137 D4's full-path face (the legacy read-gate
+    /// is retired), so the live turn's preflight allows the read, and
+    /// with the companion dropped the replay leg re-executes the stored
+    /// SQL against the copy and re-registers the result; a dead copy
+    /// degrades per ADR-0035 instead.
+    #[test]
+    fn a_legacy_assets_reference_replays_green_on_reopen() {
+        let dir = tempfile::tempdir().expect("session dir");
+        let duck = dir.path().join("recipe.json");
+        // What a pre-#1383 settle would have left: a dead file under assets/.
+        let assets_csv = dir.path().join("assets").join("kline.csv");
+        std::fs::create_dir_all(assets_csv.parent().expect("assets parent")).expect("dirs");
+        std::fs::write(&assets_csv, "v\n1\n").expect("write assets copy");
+
+        let mut session = Session::new().expect("session");
+        session.bind_recipe(duck.clone(), "t".into()).expect("bind");
+        let sql = format!(
+            "SELECT COUNT(*) AS n FROM read_csv_auto('{}')",
+            assets_csv.to_string_lossy()
+        );
+        session.provider = std::sync::Arc::new(FakeProvider::new().scripted_tool_turn_seq(
+            "查",
+            vec![
+                Ok(materialize_call(&sql)),
+                Ok(ToolTurnReply::Text("done".into())),
+            ],
+        ));
+        let outcome = session.ask("查");
+        assert!(
+            matches!(outcome, TurnOutcome::Materialized { .. }),
+            "the live turn referencing the assets copy materialized, got {outcome:?}"
+        );
+        drop(session);
+
+        // Drop the companion so the watermark cannot hit: the replay leg
+        // must re-execute the stored assets-path SQL and stay green.
+        std::fs::remove_file(dir.path().join("analytics.duckdb")).expect("drop companion");
+        let resumed = Session::open_recipe(
+            &duck,
+            std::sync::Arc::new(crate::cancel::CancelToken::new()),
+            Box::new(crate::provider::UnwiredProvider),
+            Default::default(),
+            |_| {},
+            |_| panic!("no source issues expected"),
+            |_| panic!("no active-abandoned callback expected"),
+        )
+        .expect("resume");
+        assert!(
+            resumed.get("result_1").is_some(),
+            "the replay re-registered result_1 from the assets copy"
+        );
+        let any_failed = resumed.conversation().iter().any(|e| {
+            matches!(
+                e,
+                ThreadEntry::Turn(t) if matches!(t.outcome, TurnOutcome::Failed(_))
+            )
+        });
+        assert!(!any_failed, "the legacy assets replay stays green");
+    }
+
+    /// The dead-file leg of the retired assets read-gate: when the legacy
+    /// recipe's assets copy no longer exists at reopen, resume surfaces it
+    /// through the source-missing face (the claim-time registration points
+    /// at the dead copy), and an Abort leaves the on-disk recipe untouched
+    /// -- the honest ADR-0035 degrade, no silent fallback, no dropped
+    /// record.
+    #[test]
+    fn a_dead_assets_reference_surfaces_the_source_missing_face() {
+        use crate::session::{SourceIssue, SourceResolution};
+
+        let dir = tempfile::tempdir().expect("session dir");
+        let duck = dir.path().join("recipe.json");
+        // The copy exists for the live ask (the turn materializes off it),
+        // then dies before the reopen.
+        let assets_csv = dir.path().join("assets").join("kline.csv");
+        std::fs::create_dir_all(assets_csv.parent().expect("assets parent")).expect("dirs");
+        std::fs::write(
+            &assets_csv,
+            "v
+1
+",
+        )
+        .expect("write assets copy");
+
+        let mut session = Session::new().expect("session");
+        session.bind_recipe(duck.clone(), "t".into()).expect("bind");
+        let sql = format!(
+            "SELECT COUNT(*) AS n FROM read_csv_auto('{}')",
+            assets_csv.to_string_lossy()
+        );
+        session.provider = std::sync::Arc::new(FakeProvider::new().scripted_tool_turn_seq(
+            "查",
+            vec![
+                Ok(materialize_call(&sql)),
+                Ok(ToolTurnReply::Text("done".into())),
+            ],
+        ));
+        assert!(matches!(
+            session.ask("查"),
+            TurnOutcome::Materialized { .. }
+        ));
+        drop(session);
+
+        std::fs::remove_file(&assets_csv).expect("kill the assets copy");
+        std::fs::remove_file(dir.path().join("analytics.duckdb")).expect("drop companion");
+        let issues = std::cell::RefCell::new(Vec::new());
+        let outcome = Session::open_recipe(
+            &duck,
+            std::sync::Arc::new(crate::cancel::CancelToken::new()),
+            Box::new(crate::provider::UnwiredProvider),
+            Default::default(),
+            |_| {},
+            |issue| {
+                issues.borrow_mut().push(issue);
+                SourceResolution::Abort
+            },
+            |_| panic!("no active-abandoned callback expected"),
+        );
+        assert!(outcome.is_err(), "the dead assets copy aborts the resume");
+        assert_eq!(issues.borrow().len(), 1, "exactly one source issue");
+        assert!(
+            matches!(&issues.borrow()[0], SourceIssue::Missing { .. }),
+            "the issue is the missing-file face: {:?}",
+            issues.borrow()[0]
+        );
+        assert!(
+            duck.exists(),
+            "the on-disk recipe is untouched by the abort"
+        );
+    }
+
+    /// The retired bind-time migration (issue #1390): a derived source
+    /// staged in the temp dir stays put across bind_recipe -- no `assets/`
+    /// directory is minted beside the recipe, and both the descriptor and
+    /// the persisted recipe keep the staging source_path. Persistence
+    /// rides the copy-in snapshot pipeline; a staging path that dies with
+    /// the temp dir degrades on resume through the source-missing face.
+    #[test]
+    fn bind_recipe_mints_no_assets_dir_for_staged_derived_sources() {
+        let mut session = Session::new().expect("session");
+        let staging_dir = session
+            .temp_path
+            .join(super::derived_source::DERIVED_STAGING_DIR);
+        std::fs::create_dir_all(&staging_dir).unwrap();
+        let staging_csv = staging_dir.join("data.csv");
+        std::fs::write(&staging_csv, "id,name\n1,alice\n").unwrap();
+        session
+            .working_set
+            .register(crate::model::DatasetDescriptor {
+                reference_name: "data".to_string(),
+                display_name: "data".to_string(),
+                source_path: staging_csv.to_string_lossy().to_string(),
+                columns: vec![crate::model::ColumnSchema {
+                    name: "id".into(),
+                    canonical_type: "BIGINT".into(),
+                }],
+                row_count: 1,
+                sample: vec![vec!["1".into(), "alice".into()]],
+                fingerprint: "abc".into(),
+                rectify: crate::model::RectifyProvenance::NotApplicable,
+                privacy: crate::model::DatasetPrivacy::default(),
+                stale: None,
+            });
+
+        let duck_dir = tempfile::tempdir().expect("duck dir");
+        let recipe_path = duck_dir.path().join("recipe.json");
+        session
+            .bind_recipe(recipe_path.clone(), "t".into())
+            .expect("bind_recipe");
+
+        assert!(
+            !duck_dir.path().join("assets").exists(),
+            "no assets/ minted beside the recipe"
+        );
+        let d = session.working_set.get("data").expect("data registered");
+        assert!(
+            d.source_path.contains("derived"),
+            "the staging source_path is untouched: {}",
+            d.source_path
+        );
+        let recipe = crate::persistence::read_recipe(&recipe_path).expect("read recipe");
+        let src = recipe
+            .sources
+            .iter()
+            .find(|s| s.reference_name == "data")
+            .expect("data in recipe sources");
+        assert!(
+            src.source_path.contains("derived"),
+            "the recipe keeps the staging path: {}",
+            src.source_path
+        );
+    }
+
+    /// The temp-staging spelling of the missing face: a derived source
+    /// whose descriptor still points into the session's wiped temp staging
+    /// dir (the pre-#1383 legacy recipe shape) degrades at a companion-less
+    /// reopen exactly like a dead assets copy -- one Missing issue, an
+    /// Abort, the on-disk recipe untouched. Live sessions snapshot into
+    /// the session tree; this pins the staging spelling onto the same
+    /// source-missing leg (issue #1390 review).
+    #[test]
+    fn a_wiped_staging_reference_surfaces_the_source_missing_face() {
+        use crate::session::{SourceIssue, SourceResolution};
+
+        let dir = tempfile::tempdir().expect("session dir");
+        let duck = dir.path().join("recipe.json");
+        let mut session = Session::new().expect("session");
+        session.bind_recipe(duck.clone(), "t".into()).expect("bind");
+        // Stage + register the legacy shape: source_path inside
+        // temp_path/derived/. No materialized turn runs, so no companion is
+        // minted -- the reopen takes the watermark-miss leg.
+        let staging_csv = session
+            .temp_path
+            .join(super::derived_source::DERIVED_STAGING_DIR)
+            .join("data.csv");
+        std::fs::create_dir_all(staging_csv.parent().expect("staging parent")).expect("dirs");
+        std::fs::write(&staging_csv, "id\n1\n").expect("write staging file");
+        session
+            .working_set
+            .register(crate::model::DatasetDescriptor {
+                reference_name: "data".to_string(),
+                display_name: "data".to_string(),
+                source_path: staging_csv.to_string_lossy().to_string(),
+                columns: vec![crate::model::ColumnSchema {
+                    name: "id".into(),
+                    canonical_type: "BIGINT".into(),
+                }],
+                row_count: 1,
+                sample: vec![vec!["1".into()]],
+                fingerprint: "abc".into(),
+                rectify: crate::model::RectifyProvenance::NotApplicable,
+                privacy: crate::model::DatasetPrivacy::default(),
+                stale: None,
+            });
+        session.persist_if_bound();
+        drop(session); // the TempDir wipe kills the staging file
+
+        let issues = std::cell::RefCell::new(Vec::new());
+        let outcome = Session::open_recipe(
+            &duck,
+            std::sync::Arc::new(crate::cancel::CancelToken::new()),
+            Box::new(crate::provider::UnwiredProvider),
+            Default::default(),
+            |_| {},
+            |issue| {
+                issues.borrow_mut().push(issue);
+                SourceResolution::Abort
+            },
+            |_| panic!("no active-abandoned callback expected"),
+        );
+        assert!(outcome.is_err(), "the wiped staging path aborts the resume");
+        assert_eq!(issues.borrow().len(), 1, "exactly one source issue");
+        assert!(
+            matches!(&issues.borrow()[0], SourceIssue::Missing { .. }),
+            "the issue is the missing-file face: {:?}",
+            issues.borrow()[0]
+        );
+        assert!(
+            duck.exists(),
+            "the on-disk recipe is untouched by the abort"
+        );
     }
 
     /// A persistent break cause degrades the conversation from the
@@ -3904,7 +4055,6 @@ mod tests {
 
         let dir = tempfile::tempdir().expect("session dir");
         let duck = dir.path().join("recipe.json");
-        let assets = |name: &str| dir.path().join("assets").join(name);
 
         let mut session = Session::new().expect("session");
         session.bind_recipe(duck.clone(), "t".into()).expect("bind");
@@ -3920,10 +4070,15 @@ mod tests {
             )
         };
 
-        // Three recorded turns: result_1 and result_2 both reference temp
-        // scratch files (each settles into assets/), result_3 is a plain
-        // table read with no read_* path.
-        let k1 = csv("kline.csv", "1");
+        // Three recorded turns: result_1 reads a user-directory original
+        // (outlives the session, so its replay stays green across the
+        // degrade window), result_2 reads a temp scratch file (the recorded
+        // SQL keeps its temp spelling -- ADR-0137 Decision 6 minted no
+        // assets/ copy -- and the temp dir dies with the session: the break
+        // cause), result_3 is a plain table read with no read_* path.
+        let user_dir = tempfile::tempdir().expect("user dir");
+        let k1 = user_dir.path().join("kline.csv");
+        std::fs::write(&k1, "v\n1\n").expect("user csv");
         let k2 = csv("kline2.csv", "2");
         session.provider = std::sync::Arc::new(FakeProvider::new().scripted_tool_turn_seq(
             "查",
@@ -3944,14 +4099,15 @@ mod tests {
         }
         drop(session);
 
-        // The persistent break cause: turn 2's materialized copy is gone, so
-        // every replay breaks at result_2 until the file is restored. The
-        // companion is removed too: with it present the open would HIT and
-        // restore the pre-degrade working set whole (ADR-0136 Why 3 -- the
-        // hit path's replay-break failure surface is gone); forcing the miss
-        // is what keeps the DEGRADE machinery under test (see the sibling
-        // test below for the hit-path counterpart).
-        std::fs::remove_file(assets("kline2.csv")).expect("break cause");
+        // The persistent break cause is structural since ADR-0137 Decision
+        // 6: the recorded SQL keeps its temp spelling and the temp dir died
+        // with the process, so every replay breaks at result_2 until the
+        // file is restored at its recorded path. The companion is removed
+        // too: with it present the open would HIT and restore the
+        // pre-degrade working set whole (ADR-0136 Why 3 -- the hit path's
+        // replay-break failure surface is gone); forcing the miss is what
+        // keeps the DEGRADE machinery under test (see the sibling test
+        // below for the hit-path counterpart).
         std::fs::remove_file(dir.path().join("analytics.duckdb")).expect("drop companion");
 
         // Reopen 1: replay breaks at result_2 -> turns 2 and 3 degrade
@@ -4014,9 +4170,13 @@ mod tests {
         assert!(s2.get("result_1").is_some());
         drop(s2);
 
-        // Restore the dead reference: the next resume replays the whole
-        // chain green and the entire conversation returns to Materialized.
-        std::fs::write(assets("kline2.csv"), "v\n2\n").expect("restore");
+        // Restore the dead reference at its recorded temp path (the dir
+        // itself died with the session, so it is recreated): the next
+        // resume replays the whole chain green and the entire conversation
+        // returns to Materialized.
+        std::fs::create_dir_all(k2.parent().expect("temp parent"))
+            .and_then(|_| std::fs::write(&k2, "v\n2\n"))
+            .expect("restore");
         let s3 = Session::open_recipe(
             &duck,
             std::sync::Arc::new(crate::cancel::CancelToken::new()),
@@ -4040,11 +4200,14 @@ mod tests {
     }
 
     /// The ADR-0136 hit-path counterpart of the degrade test above: with the
-    /// companion intact, a replay ASSET deleted after settle does NOT degrade
-    /// the reopen -- the watermark hits, the working set restores whole, and
-    /// the replay-break failure surface simply never runs (ADR-0136 Why 3:
-    /// recovery determinism -- the settled data survives in the companion,
-    /// independent of the replay path's dead reference).
+    /// companion intact, a structurally dead replay reference after settle
+    /// does NOT degrade the reopen -- the watermark hits, the working set
+    /// restores whole, and the replay-break failure surface simply never
+    /// runs (ADR-0136 Why 3: recovery determinism -- the settled data
+    /// survives in the companion, independent of the replay path's dead
+    /// reference). Since ADR-0137 Decision 6 (#1383) the dead reference is
+    /// the NORMAL shape: no `assets/` dead file is ever minted and the
+    /// recorded SQL keeps its temp spelling.
     #[test]
     fn a_deleted_replay_asset_does_not_degrade_a_watermark_hit_reopen() {
         use crate::provider::UnwiredProvider;
@@ -4076,9 +4239,14 @@ mod tests {
         ));
         drop(session);
 
-        // The replay asset dies, the companion stays -- the watermark still
-        // matches the settled chain.
-        std::fs::remove_file(assets("kline.csv")).expect("asset gone");
+        // The dead-file copy the original test deleted is never minted
+        // (ADR-0137 Decision 6) -- the dead reference is the recorded SQL's
+        // temp spelling itself, and the companion still matches the settled
+        // chain.
+        assert!(
+            !assets("kline.csv").exists(),
+            "no dead-file copy was minted under assets/"
+        );
 
         let resumed = Session::open_recipe(
             &duck,

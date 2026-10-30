@@ -115,7 +115,7 @@ export function VizFence({
           className={cn(
             "[&_.viz-chart]:m-0",
             stageLabel !== null &&
-            "cursor-pointer rounded-md outline-none transition-shadow focus-visible:ring-[3px] focus-visible:ring-ring/50",
+            "rounded-md outline-none transition-shadow focus-visible:ring-[3px] focus-visible:ring-ring/50",
             selected && "ring-1 ring-primary",
           )}
         >

@@ -23,7 +23,7 @@ import { pickDataFiles } from "../dataset/pickDataFiles";
 // Session-active bars omit the chip (pendingFiles is undefined).
 
 const TRIGGER_CLASS =
-  "composer-context-trigger relative inline-flex size-9 items-center justify-center rounded-md border border-border bg-card text-foreground transition-colors hover:bg-muted cursor-pointer disabled:pointer-events-none disabled:opacity-50";
+  "composer-context-trigger relative inline-flex size-9 items-center justify-center rounded-md border border-border bg-card text-foreground transition-colors hover:bg-muted disabled:pointer-events-none disabled:opacity-50";
 
 // The pending-queue chip chrome: the muted surface + small text match the
 // composer's trigger chips; max-w keeps a long queue from stretching the
@@ -98,7 +98,7 @@ export function ComposerContextPanel({
           <span className="truncate">{pendingCount}</span>
           <button
             type="button"
-            className="hover:text-foreground cursor-pointer rounded-sm p-0.5 transition-colors"
+            className="hover:text-foreground rounded-sm p-0.5 transition-colors"
             aria-label={intl.formatMessage({
               id: "composer.contextPanel.clearPendingFiles",
               defaultMessage: "Clear queued files",

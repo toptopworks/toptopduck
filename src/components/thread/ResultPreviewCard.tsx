@@ -45,7 +45,7 @@ export function ResultPreviewCard({
         // when #847 put terminal prose between the link row and the card,
         // leaving this the stream's only offset item (and in narrow
         // columns the margin rides past the max-w-full cap outright).
-        "result-preview block mt-4 max-w-full overflow-x-auto cursor-pointer",
+        "result-preview block mt-4 max-w-full overflow-x-auto",
         // The bare border rides the app.css base layer's var(--border) (same
         // as shadcn card / badge chrome); active flips it to --primary.
         "rounded-md border bg-background text-left text-xs transition-colors",
@@ -60,7 +60,7 @@ export function ResultPreviewCard({
       aria-label={intl.formatMessage(
         {
           id: "thread.preview.aria",
-          defaultMessage: "Preview of {name} (first rows), open it in the workspace",
+          defaultMessage: "Preview of {name} (first rows), open it in the right sidebar",
         },
         { name: dataset.reference_name },
       )}

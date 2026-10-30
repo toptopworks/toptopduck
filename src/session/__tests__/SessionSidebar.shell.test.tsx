@@ -1,5 +1,12 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
-import { act, fireEvent, render, screen, within } from "@testing-library/react";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import {
+  act,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+  within,
+} from "@testing-library/react";
 import { IntlProvider } from "react-intl";
 import {
   createContext,
@@ -14,6 +21,29 @@ import type { OpenSession } from "../sidebarModel";
 import type { SessionMetadata } from "../../types/session";
 import type { ProviderConfig } from "../../types/provider";
 import { TooltipProvider } from "@/components/ui/tooltip";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+
+// The sidebar's workspace section queries the registry listing (issue
+// #1392) and its menu fires the rename/remove/create IPCs; the shell tests
+// are display-contract tests, so the listing is an empty registry and the
+// mutations resolve unless a test overrides them.
+vi.mock("../../api", () => ({
+  listWorkspaces: vi.fn().mockResolvedValue([]),
+  renameWorkspace: vi.fn().mockResolvedValue(undefined),
+  removeWorkspace: vi.fn().mockResolvedValue(undefined),
+  createWorkspace: vi.fn().mockResolvedValue(undefined),
+}));
+vi.mock("@tauri-apps/plugin-opener", () => ({
+  openPath: vi.fn().mockResolvedValue(undefined),
+}));
+import { openPath } from "@tauri-apps/plugin-opener";
+import {
+  createWorkspace,
+  listWorkspaces,
+  removeWorkspace,
+  renameWorkspace,
+} from "../../api";
+import { SIDEBAR_EXPANSION_KEY } from "../sidebarExpansion";
 
 // Radix DropdownMenu's pointer-event handling recurses under jsdom (the
 // SessionHeaderMenu suite's known limitation), so the dropdown-menu module is
@@ -117,17 +147,29 @@ vi.mock("@/components/ui/dropdown-menu", () => {
 // renderSettings) to avoid a cross-domain name clash with the settings
 // domain's renderSettings helper. TooltipProvider mirrors the App ancestor
 // (the connection footer's dual-state gear carries a Tooltip, issue #282).
-function renderShell(ui: ReactElement) {
-  return render(
-    <TooltipProvider>
-      <IntlProvider locale="en" messages={{}} onError={() => {}}>{ui}</IntlProvider>
-    </TooltipProvider>,
+// The full provider stack, shared by renderShell AND the rerender calls:
+// RTL's rerender replaces the WHOLE tree, so the wrappers (the QueryClient
+// included -- the workspace listing query reads it, issue #1392) must ride
+// along. A fresh client per tree keeps the query cache test-local.
+function shellTree(ui: ReactElement) {
+  return (
+    <QueryClientProvider
+      client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}
+    >
+      <TooltipProvider>
+        <IntlProvider locale="en" messages={{}} onError={() => {}}>{ui}</IntlProvider>
+      </TooltipProvider>
+    </QueryClientProvider>
   );
 }
 
+function renderShell(ui: ReactElement) {
+  return render(shellTree(ui));
+}
+
 // Two never-saved open sessions: the active one carries .active.open; the other
-// carries .open:not(.active). Both land in the Today group (buildSidebarModel
-// stamps `now` for unsaved sessions).
+// carries .open:not(.active). Both land at the top of the Recent list
+// (buildSidebarModel stamps `now` for unsaved sessions).
 function twoOpenSessions(): OpenSession[] {
   return [
     { sid: "sess-active", name: "Active", path: "/sessions/sess-active/recipe.json", pendingIngestPaths: [], pendingQuestion: null, pendingSkillInvocations: [] },
@@ -141,15 +183,15 @@ describe("SessionSidebar shell-skeleton visuals (ADR-0067, issue #171)", () => {
       <SessionSidebar
         collapsed={false}
         sessions={[]}
+        sessionsLoaded={true}
         openSessions={twoOpenSessions()}
         activeSessionId="sess-active"
         disabled={false}
         loadError={null}
         onNew={() => {}}
+        onNewInWorkspace={() => {}}
         onActivate={() => {}}
         onOpenPersisted={() => {}}
-        grouping="flat"
-        onSwitchGrouping={() => {}}
         archivedSessions={[]}
         showArchived={false}
         onToggleArchived={() => {}}
@@ -183,15 +225,15 @@ describe("SessionSidebar shell-skeleton visuals (ADR-0067, issue #171)", () => {
       <SessionSidebar
         collapsed={false}
         sessions={[]}
+        sessionsLoaded={true}
         openSessions={twoOpenSessions()}
         activeSessionId="sess-active"
         disabled={false}
         loadError={null}
         onNew={() => {}}
+        onNewInWorkspace={() => {}}
         onActivate={() => {}}
         onOpenPersisted={() => {}}
-        grouping="flat"
-        onSwitchGrouping={() => {}}
         archivedSessions={[]}
         showArchived={false}
         onToggleArchived={() => {}}
@@ -221,15 +263,15 @@ describe("SessionSidebar shell-skeleton visuals (ADR-0067, issue #171)", () => {
       <SessionSidebar
         collapsed={false}
         sessions={[]}
+        sessionsLoaded={true}
         openSessions={twoOpenSessions()}
         activeSessionId="sess-active"
         disabled={false}
         loadError={null}
         onNew={() => {}}
+        onNewInWorkspace={() => {}}
         onActivate={() => {}}
         onOpenPersisted={() => {}}
-        grouping="flat"
-        onSwitchGrouping={() => {}}
         archivedSessions={[]}
         showArchived={false}
         onToggleArchived={() => {}}
@@ -266,20 +308,21 @@ describe("SessionSidebar shell-skeleton visuals (ADR-0067, issue #171)", () => {
       format_version: 1,
       pinned: false,
       archived: false,
+      workspace: null,
     };
     const { container } = renderShell(
       <SessionSidebar
         collapsed={false}
         sessions={[persisted]}
+        sessionsLoaded={true}
         openSessions={[]}
         activeSessionId={null}
         disabled={false}
         loadError={null}
         onNew={() => {}}
+        onNewInWorkspace={() => {}}
         onActivate={() => {}}
         onOpenPersisted={() => {}}
-        grouping="flat"
-        onSwitchGrouping={() => {}}
         archivedSessions={[]}
         showArchived={false}
         onToggleArchived={() => {}}
@@ -306,20 +349,21 @@ describe("SessionSidebar shell-skeleton visuals (ADR-0067, issue #171)", () => {
       format_version: 1,
       pinned: false,
       archived: false,
+      workspace: null,
     };
     const { container } = renderShell(
       <SessionSidebar
         collapsed={false}
         sessions={[persisted]}
+        sessionsLoaded={true}
         openSessions={[]}
         activeSessionId={null}
         disabled={false}
         loadError={null}
         onNew={() => {}}
+        onNewInWorkspace={() => {}}
         onActivate={() => {}}
         onOpenPersisted={() => {}}
-        grouping="flat"
-        onSwitchGrouping={() => {}}
         archivedSessions={[]}
         showArchived={false}
         onToggleArchived={() => {}}
@@ -369,15 +413,15 @@ describe("SessionSidebar shell-skeleton visuals (ADR-0067, issue #171)", () => {
       <SessionSidebar
         collapsed={false}
         sessions={[]}
+        sessionsLoaded={true}
         openSessions={[]}
         activeSessionId={null}
         disabled={false}
         loadError={null}
         onNew={() => {}}
+        onNewInWorkspace={() => {}}
         onActivate={() => {}}
         onOpenPersisted={() => {}}
-        grouping="flat"
-        onSwitchGrouping={() => {}}
         archivedSessions={[]}
         showArchived={false}
         onToggleArchived={() => {}}
@@ -415,22 +459,22 @@ describe("SessionSidebar shell-skeleton visuals (ADR-0067, issue #171)", () => {
 
   it("sidebar-search-button is disabled when the shell is busy (issue #250)", () => {
     // busy shell -> disabled propagates to the search button (parity with the
-    // New button / context-menu / grouping toggle): the modal must not open
+    // New button / context-menu): the modal must not open
     // mid-resume / mid-save.
     const onOpenSearch = vi.fn();
     const { container } = renderShell(
       <SessionSidebar
         collapsed={false}
         sessions={[]}
+        sessionsLoaded={true}
         openSessions={[]}
         activeSessionId={null}
         disabled={true}
         loadError={null}
         onNew={() => {}}
+        onNewInWorkspace={() => {}}
         onActivate={() => {}}
         onOpenPersisted={() => {}}
-        grouping="flat"
-        onSwitchGrouping={() => {}}
         archivedSessions={[]}
         showArchived={false}
         onToggleArchived={() => {}}
@@ -450,20 +494,20 @@ describe("SessionSidebar shell-skeleton visuals (ADR-0067, issue #171)", () => {
     expect(onOpenSearch).not.toHaveBeenCalled();
   });
 
-  it("sidebar-new-button is a fused bg-secondary Pencil + text button, not solid primary (ADR-0072, issue #250)", () => {
+  it("sidebar-new-button is a fused bg-secondary SquarePen + text button, not solid primary (ADR-0072, issue #250)", () => {
     const { container } = renderShell(
       <SessionSidebar
         collapsed={false}
         sessions={[]}
+        sessionsLoaded={true}
         openSessions={[]}
         activeSessionId={null}
         disabled={false}
         loadError={null}
         onNew={() => {}}
+        onNewInWorkspace={() => {}}
         onActivate={() => {}}
         onOpenPersisted={() => {}}
-        grouping="flat"
-        onSwitchGrouping={() => {}}
         archivedSessions={[]}
         showArchived={false}
         onToggleArchived={() => {}}
@@ -487,271 +531,13 @@ describe("SessionSidebar shell-skeleton visuals (ADR-0067, issue #171)", () => {
     expect(classes).not.toContain("bg-primary");
     expect(classes).not.toContain("text-primary-foreground");
     expect(classes).not.toContain("border-primary");
-    // Pencil leading icon + the "New session" label text.
+    // SquarePen leading icon + the "New session" label text.
     const icon = newBtn?.querySelector("svg");
     expect(icon).not.toBeNull();
-    expect(icon).toHaveClass("lucide-pencil");
+    expect(icon).toHaveClass("lucide-square-pen");
     expect(icon).toHaveAttribute("aria-hidden", "true");
     expect(newBtn).toHaveTextContent("New session");
   });
-});
-
-describe("SessionSidebar grouping toggle (ADR-0072, issue #251)", () => {
-  // One persisted session so a group renders and the toggle's hover affordance
-  // has an anchor (the first group-title row).
-  function onePersisted(): SessionMetadata {
-    return {
-      recipe_path: "/x/solo.json",
-      display_name: "Solo",
-      last_modified_at: Date.now(),
-      source_summary: { first_source_name: null, source_count: 0, turn_count: 0 },
-      format_version: 1,
-      pinned: false,
-      archived: false,
-    };
-  }
-
-  it("keeps the chrome row on an empty sidebar (ADR-0127 all-archived escape)", () => {
-    // ADR-0072 -> ADR-0127 recalibration: an empty sidebar renders no group
-    // title, but the chrome row (grouping + archived toggles) still renders
-    // on a bare title row -- an all-archived sidebar must keep the archived
-    // view reachable, or the hidden rows would be stranded forever.
-    const { container } = renderShell(
-      <SessionSidebar
-        collapsed={false}
-        sessions={[]}
-        openSessions={[]}
-        activeSessionId={null}
-        disabled={false}
-        loadError={null}
-        grouping="flat"
-        onNew={() => {}}
-        onActivate={() => {}}
-        onOpenPersisted={() => {}}
-        onSwitchGrouping={() => {}}
-        archivedSessions={[]}
-        showArchived={false}
-        onToggleArchived={() => {}}
-        onSetPinned={() => {}}
-        onArchive={() => {}}
-        onDelete={() => {}}
-        onRename={() => {}}
-        onClose={() => {}}
-        onOpenSearch={() => {}}
-        provider={null}
-        onOpenSettings={() => {}}
-      />,
-    );
-    expect(container.querySelector(".sidebar-grouping-toggle")).not.toBeNull();
-  });
-
-  it("reveals the toggle on the first group-title row and opens the popover on click", () => {
-    const onSwitchGrouping = vi.fn();
-    const { container } = renderShell(
-      <SessionSidebar
-        collapsed={false}
-        sessions={[onePersisted()]}
-        openSessions={[]}
-        activeSessionId={null}
-        disabled={false}
-        loadError={null}
-        grouping="flat"
-        onNew={() => {}}
-        onActivate={() => {}}
-        onOpenPersisted={() => {}}
-        onSwitchGrouping={onSwitchGrouping}
-        archivedSessions={[]}
-        showArchived={false}
-        onToggleArchived={() => {}}
-        onSetPinned={() => {}}
-        onArchive={() => {}}
-        onDelete={() => {}}
-        onRename={() => {}}
-        onClose={() => {}}
-        onOpenSearch={() => {}}
-        provider={null}
-        onOpenSettings={() => {}}
-      />,
-    );
-    // Exactly one toggle (on the first group title); flat mode renders one
-    // "Recent" group, so the toggle sits on that row.
-    const toggles = container.querySelectorAll(".sidebar-grouping-toggle");
-    expect(toggles).toHaveLength(1);
-
-    fireEvent.click(toggles[0] as HTMLButtonElement);
-
-    // Two radio options render in the Radix Popover portal (mutually-exclusive
-    // modes -> radio semantics). The flat option carries aria-checked=true (the
-    // current mode) and the trailing Check glyph; the time option is unchecked.
-    const flat = screen.getByRole("radio", { name: /In a list/i });
-    const time = screen.getByRole("radio", { name: /By time/i });
-    expect(flat).toHaveAttribute("aria-checked", "true");
-    expect(time).toHaveAttribute("aria-checked", "false");
-    expect(flat.querySelector("svg.lucide-check")).not.toBeNull();
-    expect(time.querySelector("svg.lucide-check")).toBeNull();
-
-    // Picking "By time" fires onSwitchGrouping("time") (the App wires the hook
-    // that persists the change). pick() also closes the popover, so the second
-    // option is asserted from a fresh render in the next test.
-    fireEvent.click(time);
-    expect(onSwitchGrouping).toHaveBeenCalledWith("time");
-  });
-
-  it("marks By time checked when grouping is time", () => {
-    const { container } = renderShell(
-      <SessionSidebar
-        collapsed={false}
-        sessions={[onePersisted()]}
-        openSessions={[]}
-        activeSessionId={null}
-        disabled={false}
-        loadError={null}
-        grouping="time"
-        onNew={() => {}}
-        onActivate={() => {}}
-        onOpenPersisted={() => {}}
-        onSwitchGrouping={() => {}}
-        archivedSessions={[]}
-        showArchived={false}
-        onToggleArchived={() => {}}
-        onSetPinned={() => {}}
-        onArchive={() => {}}
-        onDelete={() => {}}
-        onRename={() => {}}
-        onClose={() => {}}
-        onOpenSearch={() => {}}
-        provider={null}
-        onOpenSettings={() => {}}
-      />,
-    );
-    fireEvent.click(container.querySelector(".sidebar-grouping-toggle") as HTMLButtonElement);
-    const flat = screen.getByRole("radio", { name: /In a list/i });
-    const time = screen.getByRole("radio", { name: /By time/i });
-    expect(flat).toHaveAttribute("aria-checked", "false");
-    expect(time).toHaveAttribute("aria-checked", "true");
-    expect(time.querySelector("svg.lucide-check")).not.toBeNull();
-  });
-
-  it("carries a focus-visible outline + weak default opacity so keyboard/touch users can discover it (issue #251 review)", () => {
-    // The prior opacity-0 + group-hover-only pattern hid the trigger from
-    // non-mouse users; opacity-60 keeps it weakly visible. bareButtonReset strips
-    // the native focus ring, so focus-visible:outline-ring re-adds one (the
-    // --ring token is the project focus-indicator standard).
-    const { container } = renderShell(
-      <SessionSidebar
-        collapsed={false}
-        sessions={[onePersisted()]}
-        openSessions={[]}
-        activeSessionId={null}
-        disabled={false}
-        loadError={null}
-        grouping="flat"
-        onNew={() => {}}
-        onActivate={() => {}}
-        onOpenPersisted={() => {}}
-        onSwitchGrouping={() => {}}
-        archivedSessions={[]}
-        showArchived={false}
-        onToggleArchived={() => {}}
-        onSetPinned={() => {}}
-        onArchive={() => {}}
-        onDelete={() => {}}
-        onRename={() => {}}
-        onClose={() => {}}
-        onOpenSearch={() => {}}
-        provider={null}
-        onOpenSettings={() => {}}
-      />,
-    );
-    const trigger = container.querySelector(".sidebar-grouping-toggle") as HTMLButtonElement;
-    const classes = trigger.className.split(/\s+/);
-    expect(classes).toContain("opacity-60");
-    expect(classes).toContain("focus-visible:outline-2");
-    expect(classes).toContain("focus-visible:outline-ring");
-    expect(classes).toContain("focus-visible:outline-offset-2");
-    expect(classes).not.toContain("opacity-0");
-  });
-
-  it("disables the trigger and refuses to open the popover when the shell is busy (issue #251 review)", () => {
-    // busy shell -> disabled propagates to the trigger (button disabled) AND
-    // the popover must not open (Radix does not activate a disabled trigger).
-    // Matches the New button / context-menu disabled contract.
-    const onSwitchGrouping = vi.fn();
-    const { container } = renderShell(
-      <SessionSidebar
-        collapsed={false}
-        sessions={[onePersisted()]}
-        openSessions={[]}
-        activeSessionId={null}
-        disabled={true}
-        loadError={null}
-        grouping="flat"
-        onNew={() => {}}
-        onActivate={() => {}}
-        onOpenPersisted={() => {}}
-        onSwitchGrouping={onSwitchGrouping}
-        archivedSessions={[]}
-        showArchived={false}
-        onToggleArchived={() => {}}
-        onSetPinned={() => {}}
-        onArchive={() => {}}
-        onDelete={() => {}}
-        onRename={() => {}}
-        onClose={() => {}}
-        onOpenSearch={() => {}}
-        provider={null}
-        onOpenSettings={() => {}}
-      />,
-    );
-    const trigger = container.querySelector(".sidebar-grouping-toggle") as HTMLButtonElement;
-    expect(trigger).toBeDisabled();
-    fireEvent.click(trigger);
-    expect(screen.queryByRole("radio", { name: /In a list/i })).toBeNull();
-    expect(onSwitchGrouping).not.toHaveBeenCalled();
-  });
-
-  it("closes the popover on Escape (keyboard dismiss, issue #251 review)", () => {
-    // Radix Popover's onOpenChange(false) fires on Escape; this is the keyboard
-    // dismiss path for AT users. fireEvent.keyDown mirrors the alert-dialog
-    // Escape precedent (userEvent is not installed in this repo).
-    const { container } = renderShell(
-      <SessionSidebar
-        collapsed={false}
-        sessions={[onePersisted()]}
-        openSessions={[]}
-        activeSessionId={null}
-        disabled={false}
-        loadError={null}
-        grouping="flat"
-        onNew={() => {}}
-        onActivate={() => {}}
-        onOpenPersisted={() => {}}
-        onSwitchGrouping={() => {}}
-        archivedSessions={[]}
-        showArchived={false}
-        onToggleArchived={() => {}}
-        onSetPinned={() => {}}
-        onArchive={() => {}}
-        onDelete={() => {}}
-        onRename={() => {}}
-        onClose={() => {}}
-        onOpenSearch={() => {}}
-        provider={null}
-        onOpenSettings={() => {}}
-      />,
-    );
-    const trigger = container.querySelector(".sidebar-grouping-toggle") as HTMLButtonElement;
-    fireEvent.click(trigger);
-    const flat = screen.getByRole("radio", { name: /In a list/i });
-    expect(flat).toBeInTheDocument();
-
-    fireEvent.keyDown(flat, { key: "Escape" });
-    expect(screen.queryByRole("radio", { name: /In a list/i })).toBeNull();
-  });
-
-  // ADR-0093 (issue #511): the context-menu click-away + Escape tests are
-  // retired — the ⋯ context menu + its hand-positioned dismissal logic moved
-  // to .session-header (slice 2, #512).
 });
 
 describe("SessionSidebar settings footer (issue #282)", () => {
@@ -781,15 +567,15 @@ describe("SessionSidebar settings footer (issue #282)", () => {
       <SessionSidebar
         collapsed={false}
         sessions={[]}
+        sessionsLoaded={true}
         openSessions={[]}
         activeSessionId={null}
         disabled={false}
         loadError={null}
         onNew={() => {}}
+        onNewInWorkspace={() => {}}
         onActivate={() => {}}
         onOpenPersisted={() => {}}
-        grouping="flat"
-        onSwitchGrouping={() => {}}
         archivedSessions={[]}
         showArchived={false}
         onToggleArchived={() => {}}
@@ -836,15 +622,15 @@ describe("SessionSidebar pending-approval coloring (ADR-0083, issue #297)", () =
     return {
       collapsed: false,
       sessions: [] as SessionMetadata[],
+      sessionsLoaded: true,
       openSessions: twoOpenSessions(),
       activeSessionId: "sess-active",
       disabled: false,
       loadError: null,
       onNew: () => {},
+      onNewInWorkspace: () => {},
       onActivate: () => {},
       onOpenPersisted: () => {},
-      grouping: "flat" as const,
-      onSwitchGrouping: () => {},
       archivedSessions: [],
       showArchived: false,
       onToggleArchived: () => {},
@@ -897,15 +683,15 @@ describe("SessionSidebar turn-failed coloring (issue #1005)", () => {
     return {
       collapsed: false,
       sessions: [] as SessionMetadata[],
+      sessionsLoaded: true,
       openSessions: twoOpenSessions(),
       activeSessionId: "sess-active",
       disabled: false,
       loadError: null,
       onNew: () => {},
+      onNewInWorkspace: () => {},
       onActivate: () => {},
       onOpenPersisted: () => {},
-      grouping: "flat" as const,
-      onSwitchGrouping: () => {},
       archivedSessions: [],
       showArchived: false,
       onToggleArchived: () => {},
@@ -980,13 +766,7 @@ describe("SessionSidebar turn-failed coloring (issue #1005)", () => {
       <SessionSidebar {...baseProps()} turnFailedSids={new Set(["sess-bg"])} />,
     );
     expect(view.container.querySelector(".session-entry[data-turn-failed]")).not.toBeNull();
-    view.rerender(
-      <TooltipProvider>
-        <IntlProvider locale="en" messages={{}} onError={() => {}}>
-          <SessionSidebar {...baseProps()} />
-        </IntlProvider>
-      </TooltipProvider>,
-    );
+    view.rerender(shellTree(<SessionSidebar {...baseProps()} />));
     expect(view.container.querySelector("[data-turn-failed]")).toBeNull();
     expect(view.container.querySelector(".turn-failed")).toBeNull();
     expect(view.container.querySelector(".bg-destructive")).toBeNull();
@@ -1009,15 +789,15 @@ describe("SessionSidebar hover card content (ADR-0093, issue #513)", () => {
     return {
       collapsed: false,
       sessions: [] as SessionMetadata[],
+      sessionsLoaded: true,
       openSessions: [] as OpenSession[],
       activeSessionId: null,
       disabled: false,
       loadError: null,
       onNew: () => {},
+      onNewInWorkspace: () => {},
       onActivate: () => {},
       onOpenPersisted: () => {},
-      grouping: "flat" as const,
-      onSwitchGrouping: () => {},
       archivedSessions: [],
       showArchived: false,
       onToggleArchived: () => {},
@@ -1042,6 +822,7 @@ describe("SessionSidebar hover card content (ADR-0093, issue #513)", () => {
       format_version: 1,
       pinned: false,
       archived: false,
+      workspace: null,
     };
     vi.useFakeTimers();
     const { container } = renderShell(<SessionSidebar {...sidebarProps({ sessions: [persisted] })} />);
@@ -1068,6 +849,7 @@ describe("SessionSidebar hover card content (ADR-0093, issue #513)", () => {
       format_version: 1,
       pinned: false,
       archived: false,
+      workspace: null,
     };
     vi.useFakeTimers();
     const { container } = renderShell(<SessionSidebar {...sidebarProps({ sessions: [persisted] })} />);
@@ -1097,6 +879,7 @@ describe("SessionSidebar hover card content (ADR-0093, issue #513)", () => {
       format_version: 1,
       pinned: false,
       archived: false,
+      workspace: null,
     };
     vi.useFakeTimers();
     const { container } = renderShell(<SessionSidebar {...sidebarProps({ sessions: [persisted] })} />);
@@ -1139,6 +922,7 @@ describe("SessionSidebar hover card content (ADR-0093, issue #513)", () => {
       format_version: 1,
       pinned: false,
       archived: false,
+      workspace: null,
     };
     vi.useFakeTimers();
     const { container } = renderShell(<SessionSidebar {...sidebarProps({ sessions: [persisted] })} />);
@@ -1170,6 +954,7 @@ describe("SessionSidebar hover card content (ADR-0093, issue #513)", () => {
       format_version: 1,
       pinned: false,
       archived: false,
+      workspace: null,
     };
     vi.useFakeTimers();
     const { container } = renderShell(<SessionSidebar {...sidebarProps({ sessions: [persisted] })} />);
@@ -1197,6 +982,7 @@ describe("SessionSidebar hover card content (ADR-0093, issue #513)", () => {
       format_version: 1,
       pinned: false,
       archived: false,
+      workspace: null,
     };
     vi.useFakeTimers();
     const { container } = renderShell(<SessionSidebar {...sidebarProps({ sessions: [persisted] })} />);
@@ -1234,6 +1020,7 @@ describe("SessionSidebar hover card content (ADR-0093, issue #513)", () => {
       format_version: 1,
       pinned: false,
       archived: false,
+      workspace: null,
     };
     const { container } = renderShell(
       <SessionSidebar {...sidebarProps({ sessions: [persisted] })} />,
@@ -1282,15 +1069,15 @@ describe("SessionSidebar organization (ADR-0127, issue #1175)", () => {
     return {
       collapsed: false,
       sessions: [],
+      sessionsLoaded: true,
       openSessions: [],
       activeSessionId: null,
       disabled: false,
       loadError: null,
-      grouping: "flat" as const,
       onNew: () => {},
+      onNewInWorkspace: () => {},
       onActivate: () => {},
       onOpenPersisted: () => {},
-      onSwitchGrouping: () => {},
       archivedSessions: [],
       showArchived: false,
       onToggleArchived: () => {},
@@ -1310,9 +1097,9 @@ describe("SessionSidebar organization (ADR-0127, issue #1175)", () => {
     // Server order: the pinned block rides first (array position = MRU), so
     // Pin Old (older mtime) precedes Pin New; the body follows mtime-desc.
     return [
-      { recipe_path: "/x/p1.json", display_name: "Pin Old", last_modified_at: Date.now() - 3 * 86_400_000, source_summary: { first_source_name: null, source_count: 0, turn_count: 1 }, format_version: 1, pinned: true, archived: false },
-      { recipe_path: "/x/p2.json", display_name: "Pin New", last_modified_at: Date.now() - 86_400_000, source_summary: { first_source_name: null, source_count: 0, turn_count: 1 }, format_version: 1, pinned: true, archived: false },
-      { recipe_path: "/x/plain.json", display_name: "Plain", last_modified_at: Date.now(), source_summary: { first_source_name: null, source_count: 0, turn_count: 1 }, format_version: 1, pinned: false, archived: false },
+      { recipe_path: "/x/p1.json", display_name: "Pin Old", last_modified_at: Date.now() - 3 * 86_400_000, source_summary: { first_source_name: null, source_count: 0, turn_count: 1 }, format_version: 1, pinned: true, archived: false, workspace: null },
+      { recipe_path: "/x/p2.json", display_name: "Pin New", last_modified_at: Date.now() - 86_400_000, source_summary: { first_source_name: null, source_count: 0, turn_count: 1 }, format_version: 1, pinned: true, archived: false, workspace: null },
+      { recipe_path: "/x/plain.json", display_name: "Plain", last_modified_at: Date.now(), source_summary: { first_source_name: null, source_count: 0, turn_count: 1 }, format_version: 1, pinned: false, archived: false, workspace: null },
     ];
   }
 
@@ -1322,37 +1109,37 @@ describe("SessionSidebar organization (ADR-0127, issue #1175)", () => {
     ).map((li) => li.dataset.section ?? "");
   }
 
-  it("renders the pinned section above the grouped body in BOTH modes, server order (ADR-0127 Decision 5)", () => {
-    for (const grouping of ["flat", "time"] as const) {
-      const { container } = renderShell(
-        <SessionSidebar {...orgProps({ sessions: pinnedMeta(), grouping })} />,
-      );
-      const sections = container.querySelectorAll<HTMLElement>(
-        ".session-list > .session-group",
-      );
-      expect(sections[0].dataset.section).toBe("pinned");
-      // Array order (Pin Old before Pin New), NOT mtime order.
-      const names = Array.from(
-        sections[0].querySelectorAll(".session-name"),
-      ).map((n) => n.textContent);
-      expect(names).toEqual(["Pin Old", "Pin New"]);
-      // The body keeps its own first section; the pinned rows are gone from it.
-      expect(sections[1].dataset.section).not.toBe("pinned");
-      const bodyNames = Array.from(
-        sections[1].querySelectorAll(".session-name"),
-      ).map((n) => n.textContent);
-      expect(bodyNames).toEqual(["Plain"]);
-    }
+  it("renders the pinned section above the recent body, server order (ADR-0127 Decision 5)", () => {
+    const { container } = renderShell(
+      <SessionSidebar {...orgProps({ sessions: pinnedMeta() })} />,
+    );
+    const sections = container.querySelectorAll<HTMLElement>(
+      ".session-list > .session-group",
+    );
+    expect(sections[0].dataset.section).toBe("pinned");
+    // Array order (Pin Old before Pin New), NOT mtime order.
+    const names = Array.from(
+      sections[0].querySelectorAll(".session-name"),
+    ).map((n) => n.textContent);
+    expect(names).toEqual(["Pin Old", "Pin New"]);
+    // The permanent workspaces head sits between pinned and the body.
+    expect(sections[1].dataset.section).toBe("workspaces");
+    // The body keeps its own first section; the pinned rows are gone from it.
+    expect(sections[2].dataset.section).not.toBe("pinned");
+    const bodyNames = Array.from(
+      sections[2].querySelectorAll(".session-name"),
+    ).map((n) => n.textContent);
+    expect(bodyNames).toEqual(["Plain"]);
   });
 
   it("omits the pinned section when no rows are pinned (empty-collection rule)", () => {
     const sessions: SessionMetadata[] = [
-      { recipe_path: "/x/plain.json", display_name: "Plain", last_modified_at: Date.now(), source_summary: { first_source_name: null, source_count: 0, turn_count: 1 }, format_version: 1, pinned: false, archived: false },
+      { recipe_path: "/x/plain.json", display_name: "Plain", last_modified_at: Date.now(), source_summary: { first_source_name: null, source_count: 0, turn_count: 1 }, format_version: 1, pinned: false, archived: false, workspace: null },
     ];
     const { container } = renderShell(
       <SessionSidebar {...orgProps({ sessions })} />,
     );
-    expect(sectionNames(container)).toEqual(["recent"]);
+    expect(sectionNames(container)).toEqual(["workspaces", "recent"]);
   });
 
   it("row-menu actions fire their callbacks WITHOUT activating the row (sibling trigger)", () => {
@@ -1364,6 +1151,7 @@ describe("SessionSidebar organization (ADR-0127, issue #1175)", () => {
       <SessionSidebar
         {...orgProps({
           sessions: pinnedMeta(),
+          sessionsLoaded: true,
           onActivate,
           onOpenPersisted,
           onSetPinned,
@@ -1428,11 +1216,9 @@ describe("SessionSidebar organization (ADR-0127, issue #1175)", () => {
     fireEvent.click(toggle);
     expect(onToggleArchived).toHaveBeenCalledTimes(1);
     rerender(
-      <TooltipProvider>
-        <IntlProvider locale="en" messages={{}} onError={() => {}}>
-          <SessionSidebar {...orgProps({ showArchived: true, onToggleArchived })} />
-        </IntlProvider>
-      </TooltipProvider>,
+      shellTree(
+        <SessionSidebar {...orgProps({ showArchived: true, onToggleArchived })} />,
+      ),
     );
     expect(
       screen.getByRole("button", { name: "Show archived sessions" }),
@@ -1445,12 +1231,13 @@ describe("SessionSidebar organization (ADR-0127, issue #1175)", () => {
     const onArchive = vi.fn();
     const onDelete = vi.fn();
     const archived: SessionMetadata[] = [
-      { recipe_path: "/x/arch.json", display_name: "Archived One", last_modified_at: Date.now() - 86_400_000, source_summary: { first_source_name: null, source_count: 0, turn_count: 2 }, format_version: 1, pinned: false, archived: true },
+      { recipe_path: "/x/arch.json", display_name: "Archived One", last_modified_at: Date.now() - 86_400_000, source_summary: { first_source_name: null, source_count: 0, turn_count: 2 }, format_version: 1, pinned: false, archived: true, workspace: null },
     ];
     const { container } = renderShell(
       <SessionSidebar
         {...orgProps({
           sessions: pinnedMeta(),
+          sessionsLoaded: true,
           archivedSessions: archived,
           showArchived: true,
           onOpenPersisted,
@@ -1503,6 +1290,24 @@ describe("SessionSidebar organization (ADR-0127, issue #1175)", () => {
     expect(onDelete).toHaveBeenCalledWith("/x/arch.json", null);
   });
 
+  it("anchors the archived toggle on the RECENT section head when recent exists (issue #1437 re-anchor)", () => {
+    // The re-anchor's own placement decision: the control rides the
+    // section whose body it governs. With recent rows present the anchor
+    // must be the recent head -- NOT the first section (pinned here),
+    // which only takes the toggle when recent is absent.
+    const { container } = renderShell(
+      <SessionSidebar {...orgProps({ sessions: pinnedMeta() })} />,
+    );
+    const toggle = screen.getByRole("button", {
+      name: "Show archived sessions",
+    });
+    const anchor = toggle.closest<HTMLElement>(".session-group");
+    expect(anchor?.dataset.section).toBe("recent");
+    // Pinned renders first, so the assertion above discriminates: a revert
+    // to the pre-#1437 first-section anchor lands the toggle on "pinned".
+    expect(sectionNames(container)[0]).toBe("pinned");
+  });
+
   it("keeps the chrome row on an empty sidebar so the archived view stays reachable (all-archived escape)", () => {
     // With every session archived the default list is empty; without a
     // chrome anchor the archived toggle would be unfindable and the hidden
@@ -1521,11 +1326,12 @@ describe("SessionSidebar row actions menu (ADR-0133, issue #1319)", () => {
   function menuProps(overrides: Record<string, unknown> = {}) {
     return {
       collapsed: false,
+      sessionsLoaded: true,
       // One open row (bound via openSessions) + one cold persisted row: the
       // item sets and the sid-bearing callbacks diverge between the two.
       sessions: [
-        { recipe_path: "/x/open.json", display_name: "Open One", last_modified_at: Date.now(), source_summary: { first_source_name: null, source_count: 1, turn_count: 2 }, format_version: 1, pinned: false, archived: false },
-        { recipe_path: "/x/cold.json", display_name: "Cold One", last_modified_at: Date.now() - 86_400_000, source_summary: { first_source_name: null, source_count: 0, turn_count: 1 }, format_version: 1, pinned: false, archived: false },
+        { recipe_path: "/x/open.json", display_name: "Open One", last_modified_at: Date.now(), source_summary: { first_source_name: null, source_count: 1, turn_count: 2 }, format_version: 1, pinned: false, archived: false, workspace: null },
+        { recipe_path: "/x/cold.json", display_name: "Cold One", last_modified_at: Date.now() - 86_400_000, source_summary: { first_source_name: null, source_count: 0, turn_count: 1 }, format_version: 1, pinned: false, archived: false, workspace: null },
       ],
       openSessions: [
         { sid: "sess-1", name: "Open One", path: "/x/open.json", pendingIngestPaths: [], pendingQuestion: null, pendingSkillInvocations: [] },
@@ -1533,11 +1339,10 @@ describe("SessionSidebar row actions menu (ADR-0133, issue #1319)", () => {
       activeSessionId: null,
       disabled: false,
       loadError: null,
-      grouping: "flat" as const,
       onNew: () => {},
+      onNewInWorkspace: () => {},
       onActivate: () => {},
       onOpenPersisted: () => {},
-      onSwitchGrouping: () => {},
       archivedSessions: [],
       showArchived: false,
       onToggleArchived: () => {},
@@ -1594,7 +1399,7 @@ describe("SessionSidebar row actions menu (ADR-0133, issue #1319)", () => {
 
   it("archived row carries only Restore + Delete", () => {
     const archived: SessionMetadata[] = [
-      { recipe_path: "/x/arch.json", display_name: "Archived One", last_modified_at: Date.now() - 86_400_000, source_summary: { first_source_name: null, source_count: 0, turn_count: 2 }, format_version: 1, pinned: false, archived: true },
+      { recipe_path: "/x/arch.json", display_name: "Archived One", last_modified_at: Date.now() - 86_400_000, source_summary: { first_source_name: null, source_count: 0, turn_count: 2 }, format_version: 1, pinned: false, archived: true, workspace: null },
     ];
     const { container } = renderShell(
       <SessionSidebar
@@ -1727,19 +1532,20 @@ describe("SessionSidebar archived-view gating (issue #1175)", () => {
       format_version: 1,
       pinned: false,
       archived: true,
+      workspace: null,
     };
     const props = (showArchived: boolean) => ({
       collapsed: false,
       sessions: [] as SessionMetadata[],
+      sessionsLoaded: true,
       openSessions: [] as OpenSession[],
       activeSessionId: null,
       disabled: false,
       loadError: null,
-      grouping: "flat" as const,
       onNew: () => {},
+      onNewInWorkspace: () => {},
       onActivate: () => {},
       onOpenPersisted: () => {},
-      onSwitchGrouping: () => {},
       archivedSessions: [archived],
       showArchived,
       onToggleArchived: () => {},
@@ -1758,14 +1564,992 @@ describe("SessionSidebar archived-view gating (issue #1175)", () => {
     expect(screen.queryByText("Archived One")).toBeNull();
     // Flipping the toggle alone surfaces them (also pins the non-empty
     // collection's section rule).
-    view.rerender(
-      <TooltipProvider>
-        <IntlProvider locale="en" messages={{}} onError={() => {}}>
-          <SessionSidebar {...props(true)} />
-        </IntlProvider>
-      </TooltipProvider>,
-    );
+    view.rerender(shellTree(<SessionSidebar {...props(true)} />));
     expect(view.container.querySelector("[data-section=\"archived\"]")).not.toBeNull();
     expect(screen.getByText("Archived One")).toBeInTheDocument();
+  });
+});
+
+describe("SessionSidebar workspace section (issue #1392)", () => {
+  // The section folds + subtree expansion persist to localStorage now
+  // (issue #1404): every test starts from -- and leaves behind -- an empty
+  // store, so one test's toggles cannot leak into the next mount's
+  // initial state (jsdom storage survives across tests).
+  beforeEach(() => {
+    localStorage.removeItem(SIDEBAR_EXPANSION_KEY);
+  });
+  afterEach(() => {
+    localStorage.removeItem(SIDEBAR_EXPANSION_KEY);
+  });
+
+  function metaRow(
+    path: string,
+    name: string,
+    workspace: string | null = null,
+  ): SessionMetadata {
+    return {
+      recipe_path: path,
+      display_name: name,
+      last_modified_at: Date.now(),
+      source_summary: { first_source_name: null, source_count: 0, turn_count: 0 },
+      format_version: 1,
+      pinned: false,
+      archived: false,
+      workspace,
+    };
+  }
+
+  function wsProps(
+    overrides: Record<string, unknown> = {},
+  ): ComponentProps<typeof SessionSidebar> {
+    return {
+      collapsed: false,
+      sessions: [],
+      sessionsLoaded: true,
+      openSessions: [],
+      activeSessionId: null,
+      disabled: false,
+      loadError: null,
+      archivedSessions: [],
+      showArchived: false,
+      onNew: () => {},
+      onNewInWorkspace: vi.fn(),
+      onActivate: () => {},
+      onOpenPersisted: () => {},
+      onToggleArchived: () => {},
+      onSetPinned: () => {},
+      onArchive: () => {},
+      onDelete: () => {},
+      onRename: () => {},
+      onClose: () => {},
+      onOpenSearch: () => {},
+      provider: null,
+      onOpenSettings: () => {},
+      ...overrides,
+    } as ComponentProps<typeof SessionSidebar>;
+  }
+
+  it("renders explicit groups under a counted section head; implicit records never surface", async () => {
+    vi.mocked(listWorkspaces).mockResolvedValue([
+      { path: "/w/explicit", label: "explicit", explicit: true, exists: true },
+      { path: "/w/implicit", label: "implicit", explicit: false, exists: true },
+    ]);
+    const { container } = renderShell(
+      <SessionSidebar {...wsProps()} />,
+    );
+    // The section head is permanent now, so waiting on IT would race the
+    // listing query -- wait on the group row the record produces.
+    await waitFor(() =>
+      expect(
+        container.querySelector("[data-workspace-group=\"/w/explicit\"]"),
+      ).not.toBeNull(),
+    );
+    const section = container.querySelector(
+      "[data-section=\"workspaces\"]",
+    ) as HTMLElement;
+    expect(section.textContent).toContain("explicit");
+    expect(section.textContent).toContain("(1)");
+    expect(section.textContent).not.toContain("implicit");
+  });
+
+  it("keeps a missing-directory group with the not-found hint", async () => {
+    vi.mocked(listWorkspaces).mockResolvedValue([
+      { path: "/w/gone", label: "gone", explicit: true, exists: false },
+    ]);
+    const { container } = renderShell(
+      <SessionSidebar {...wsProps()} />,
+    );
+    await waitFor(() =>
+      expect(
+        container.querySelector("[data-workspace-group=\"/w/gone\"]"),
+      ).not.toBeNull(),
+    );
+    expect(container.querySelector("[data-section=\"workspaces\"]")?.textContent).toContain(
+      "Folder not found",
+    );
+  });
+
+  it("expands the subtree into the SAME session rows the recent body renders", async () => {
+    vi.mocked(listWorkspaces).mockResolvedValue([
+      { path: "/w/explicit", label: "explicit", explicit: true, exists: true },
+    ]);
+    const { container } = renderShell(
+      <SessionSidebar
+        {...wsProps({ sessions: [metaRow("/a.json", "alpha", "/w/explicit")] })}
+      />,
+    );
+    // The listing lands async: before it does, the row rides the recent
+    // body; after, the bound row leaves the recent body entirely (the
+    // subtree is its only face).
+    const group = await waitFor(() => {
+      const el = container.querySelector(
+        "[data-workspace-group=\"/w/explicit\"] [aria-expanded]",
+      );
+      expect(el).not.toBeNull();
+      return el as HTMLElement;
+    });
+    // Collapsed by default: the member row is absent until the group row
+    // (aria-expanded) toggles it open.
+    expect(container.querySelector(".session-entry-main")).toBeNull();
+    fireEvent.click(group);
+    const row = container.querySelector(".session-entry-main .session-name");
+    expect(row?.textContent).toContain("alpha");
+  });
+
+  it("keeps a session bound to a non-explicit workspace in the recent body", async () => {
+    vi.mocked(listWorkspaces).mockResolvedValue([
+      { path: "/w/explicit", label: "explicit", explicit: true, exists: true },
+      { path: "/w/implicit", label: "implicit", explicit: false, exists: true },
+    ]);
+    const { container } = renderShell(
+      <SessionSidebar
+        {...wsProps({
+          sessions: [
+            metaRow("/a.json", "alpha", "/w/explicit"),
+            metaRow("/i.json", "impl-row", "/w/implicit"),
+          ],
+        })}
+      />,
+    );
+    // Waiting on the explicit group row means the listing query has landed:
+    // the bound-to-explicit row left the recent body for its group, while
+    // the non-explicit binding keeps its recent face (the partition's
+    // implicit-workspace clause -- no group buckets it, ever).
+    await waitFor(() => {
+      const el = container.querySelector(
+        "[data-workspace-group=\"/w/explicit\"] [aria-expanded]",
+      );
+      expect(el).not.toBeNull();
+    });
+    const recent = container.querySelector(
+      "[data-section=\"recent\"]",
+    ) as HTMLElement;
+    expect(recent.textContent).not.toContain("alpha");
+    expect(recent.textContent).toContain("impl-row");
+    expect(container.textContent).not.toContain("implicit");
+  });
+
+  it("an open bound session rides its group only; the refetch-window open stays recent", async () => {
+    vi.mocked(listWorkspaces).mockResolvedValue([
+      { path: "/w/explicit", label: "explicit", explicit: true, exists: true },
+    ]);
+    const openRow = (sid: string, name: string, path: string) => ({
+      sid,
+      name,
+      path,
+      pendingIngestPaths: [],
+      pendingQuestion: null,
+      pendingSkillInvocations: [],
+    });
+    const view = renderShell(
+      <SessionSidebar
+        {...wsProps({
+          sessions: [metaRow("/a.json", "alpha", "/w/explicit")],
+          sessionsLoaded: true,
+          openSessions: [
+            openRow("sid-a", "alpha", "/a.json"),
+            openRow("sid-b", "freshie", "/fresh.json"),
+          ],
+        })}
+      />,
+    );
+    const { container } = view;
+    const group = await waitFor(() => {
+      const el = container.querySelector(
+        "[data-workspace-group=\"/w/explicit\"] [aria-expanded]",
+      );
+      expect(el).not.toBeNull();
+      return el as HTMLElement;
+    });
+    // The bound open session's ONLY face is its workspace group: the recent
+    // body must not resurrect it via the not-yet-persisted open loop (the
+    // open-lifetime duplicate bug).
+    const recent = container.querySelector(
+      "[data-section=\"recent\"]",
+    ) as HTMLElement;
+    expect(recent.textContent).not.toContain("alpha");
+    // The refetch-window open (its persisted scan hasn't landed) stays recent.
+    expect(recent.textContent).toContain("freshie");
+    // Collapsed by default: toggling reveals the group's face of alpha.
+    fireEvent.click(group);
+    expect(container.textContent).toContain("alpha");
+    // The persisted scan lands with freshie bound: it leaves the recent
+    // body for its group (the partition's transition half).
+    view.rerender(
+      shellTree(
+        <SessionSidebar
+          {...wsProps({
+            sessions: [
+              metaRow("/a.json", "alpha", "/w/explicit"),
+              metaRow("/fresh.json", "freshie", "/w/explicit"),
+            ],
+            openSessions: [
+              openRow("sid-a", "alpha", "/a.json"),
+              openRow("sid-b", "freshie", "/fresh.json"),
+            ],
+          })}
+        />,
+      ),
+    );
+    await waitFor(() => {
+      // The recent body is now empty: its content-driven section is gone
+      // entirely (freshie left it for the group -- the departure half), and
+      // the landed row arrived on its group face (the arrival half).
+      expect(
+        view.container.querySelector("[data-section=\"recent\"]"),
+      ).toBeNull();
+      expect(
+        view.container.querySelector(
+          "[data-workspace-group=\"/w/explicit\"]",
+        )?.textContent,
+      ).toContain("freshie");
+    });
+  });
+
+  it("a session landing in a workspace opens its group", async () => {
+    vi.mocked(listWorkspaces).mockResolvedValue([
+      { path: "/w/explicit", label: "explicit", explicit: true, exists: true },
+    ]);
+    const view = renderShell(<SessionSidebar {...wsProps()} />);
+    const group = await waitFor(() => {
+      const el = view.container.querySelector(
+        "[data-workspace-group=\"/w/explicit\"] [aria-expanded]",
+      );
+      expect(el).not.toBeNull();
+      return el as HTMLElement;
+    });
+    expect(group).toHaveAttribute("aria-expanded", "false");
+    expect(group.querySelector(".lucide-folder-closed")).not.toBeNull();
+    // The listing lands with a new bound member: the group fans open on its
+    // own -- the landed row visible without a manual toggle.
+    view.rerender(
+      shellTree(
+        <SessionSidebar
+          {...wsProps({ sessions: [metaRow("/a.json", "alpha", "/w/explicit")] })}
+        />,
+      ),
+    );
+    await waitFor(() =>
+      expect(
+        view.container.querySelector(
+          "[data-workspace-group=\"/w/explicit\"] [aria-expanded]",
+        ),
+      ).toHaveAttribute("aria-expanded", "true"),
+    );
+    expect(
+      view.container.querySelector(
+        "[data-workspace-group=\"/w/explicit\"] .session-entry-main",
+      ),
+    ).not.toBeNull();
+    expect(group.querySelector(".lucide-folder-open")).not.toBeNull();
+  });
+
+  it("a cold start's scan arrival keeps the groups collapsed", async () => {
+    vi.mocked(listWorkspaces).mockResolvedValue([
+      { path: "/w/explicit", label: "explicit", explicit: true, exists: true },
+    ]);
+    // Pre-scan: the persisted list is still empty and not yet loaded.
+    const view = renderShell(
+      <SessionSidebar {...wsProps({ sessionsLoaded: false })} />,
+    );
+    const group = await waitFor(() => {
+      const el = view.container.querySelector(
+        "[data-workspace-group=\"/w/explicit\"] [aria-expanded]",
+      );
+      expect(el).not.toBeNull();
+      return el as HTMLElement;
+    });
+    expect(group).toHaveAttribute("aria-expanded", "false");
+    // The scan lands with the persisted rows: a baseline, not a landing --
+    // every group stays collapsed and no row renders.
+    view.rerender(
+      shellTree(
+        <SessionSidebar
+          {...wsProps({
+            sessionsLoaded: true,
+            sessions: [metaRow("/a.json", "alpha", "/w/explicit")],
+          })}
+        />,
+      ),
+    );
+    await waitFor(() =>
+      expect(
+        view.container.querySelector(
+          "[data-workspace-group=\"/w/explicit\"] [aria-expanded]",
+        ),
+      ).toHaveAttribute("aria-expanded", "false"),
+    );
+    expect(
+      view.container.querySelector(
+        "[data-workspace-group=\"/w/explicit\"] .session-entry-main",
+      ),
+    ).toBeNull();
+  });
+
+  it("a landing fans its landed groups; a manual fold holds", async () => {
+    vi.mocked(listWorkspaces).mockResolvedValue([
+      { path: "/w/one", label: "one", explicit: true, exists: true },
+      { path: "/w/two", label: "two", explicit: true, exists: true },
+      { path: "/w/three", label: "three", explicit: true, exists: true },
+    ]);
+    const view = renderShell(<SessionSidebar {...wsProps()} />);
+    const head = (path: string) =>
+      view.container.querySelector(
+        `[data-workspace-group="${path}"] [aria-expanded]`,
+      );
+    await waitFor(() => expect(head("/w/two")).not.toBeNull());
+    // A real manual fold: open two, then close it.
+    fireEvent.click(head("/w/two") as HTMLElement);
+    await waitFor(() =>
+      expect(head("/w/two")).toHaveAttribute("aria-expanded", "true"),
+    );
+    fireEvent.click(head("/w/two") as HTMLElement);
+    await waitFor(() =>
+      expect(head("/w/two")).toHaveAttribute("aria-expanded", "false"),
+    );
+    // Two rows land in one pass: one and three fan open on their own;
+    // the manually folded two stays folded.
+    view.rerender(
+      shellTree(
+        <SessionSidebar
+          {...wsProps({
+            sessions: [
+              metaRow("/a.json", "alpha", "/w/one"),
+              metaRow("/c.json", "gamma", "/w/three"),
+            ],
+          })}
+        />,
+      ),
+    );
+    await waitFor(() =>
+      expect(head("/w/one")).toHaveAttribute("aria-expanded", "true"),
+    );
+    expect(head("/w/three")).toHaveAttribute("aria-expanded", "true");
+    expect(head("/w/two")).toHaveAttribute("aria-expanded", "false");
+  });
+
+  it("a row archived away and returning does not re-fan its group", async () => {
+    vi.mocked(listWorkspaces).mockResolvedValue([
+      { path: "/w/one", label: "one", explicit: true, exists: true },
+    ]);
+    const view = renderShell(<SessionSidebar {...wsProps()} />);
+    const head = () =>
+      view.container.querySelector(
+        "[data-workspace-group=\"/w/one\"] [aria-expanded]",
+      );
+    await waitFor(() => expect(head()).not.toBeNull());
+    const alpha = [metaRow("/a.json", "alpha", "/w/one")];
+    view.rerender(
+      shellTree(<SessionSidebar {...wsProps({ sessions: alpha })} />),
+    );
+    await waitFor(() =>
+      expect(head()).toHaveAttribute("aria-expanded", "true"),
+    );
+    // Fold it back; the row archives away, then returns -- a seen path is
+    // not a second landing, so the fold holds.
+    fireEvent.click(head() as HTMLElement);
+    await waitFor(() =>
+      expect(head()).toHaveAttribute("aria-expanded", "false"),
+    );
+    view.rerender(shellTree(<SessionSidebar {...wsProps()} />));
+    view.rerender(
+      shellTree(<SessionSidebar {...wsProps({ sessions: alpha })} />),
+    );
+    expect(head()).toHaveAttribute("aria-expanded", "false");
+  });
+
+  it("heads the action buttons with tooltips and the diagonal expand glyphs", async () => {
+    vi.mocked(listWorkspaces).mockResolvedValue([
+      { path: "/w/explicit", label: "explicit", explicit: true, exists: true },
+    ]);
+    const { container } = renderShell(<SessionSidebar {...wsProps()} />);
+    await waitFor(() =>
+      expect(
+        container.querySelector("[data-workspace-group=\"/w/explicit\"]"),
+      ).not.toBeNull(),
+    );
+    // Collapsed face: the outward 45° diagonal (Maximize2). The tooltip reuses
+    // the aria-label entry -- the hover channel is the Radix pointer pair
+    // (jsdom needs pointerType set explicitly; bare mouseEnter does not
+    // trigger it -- the LocalCliTab pattern).
+    const toggle = screen.getByRole("button", { name: "Expand all workspaces" });
+    expect(toggle.querySelector(".lucide-maximize-2")).not.toBeNull();
+    fireEvent.pointerEnter(toggle, { pointerType: "mouse" });
+    fireEvent.pointerMove(toggle, { pointerType: "mouse" });
+    expect(await screen.findByRole("tooltip")).toHaveTextContent(
+      "Expand all workspaces",
+    );
+    // Expand-all flips both faces: the inward diagonal (Minimize2) rides the
+    // button and the tooltip re-labels to the collapse entry.
+    fireEvent.click(toggle);
+    const expanded = screen.getByRole("button", { name: "Collapse all workspaces" });
+    expect(expanded.querySelector(".lucide-minimize-2")).not.toBeNull();
+    expect(expanded.querySelector(".lucide-maximize-2")).toBeNull();
+    // The tooltip re-labels with the flipped face (leave first: the click
+    // left the old one open on focus).
+    fireEvent.pointerLeave(expanded, { pointerType: "mouse" });
+    await waitFor(() => expect(screen.queryByRole("tooltip")).toBeNull());
+    fireEvent.pointerEnter(expanded, { pointerType: "mouse" });
+    fireEvent.pointerMove(expanded, { pointerType: "mouse" });
+    expect(await screen.findByRole("tooltip")).toHaveTextContent(
+      "Collapse all workspaces",
+    );
+    // The New workspace head button carries its own tooltip on the same
+    // channel -- opening it hands the slot over (the provider's peers
+    // self-close on the broadcast), so the content swaps in place.
+    const newWorkspace = screen.getByRole("button", { name: "New workspace" });
+    fireEvent.pointerEnter(newWorkspace, { pointerType: "mouse" });
+    fireEvent.pointerMove(newWorkspace, { pointerType: "mouse" });
+    await waitFor(() =>
+      expect(screen.getByRole("tooltip")).toHaveTextContent("New workspace"),
+    );
+  });
+
+  it("caps the subtree preview at 5 and expands the rest via Show more (N)", async () => {
+    vi.mocked(listWorkspaces).mockResolvedValue([
+      { path: "/w/big", label: "big", explicit: true, exists: true },
+    ]);
+    const members = Array.from({ length: 7 }, (_, i) =>
+      metaRow(`/m${i}.json`, `m${i}`, "/w/big"),
+    );
+    const { container } = renderShell(
+      <SessionSidebar {...wsProps({ sessions: members })} />,
+    );
+    const group = await waitFor(() => {
+      const el = container.querySelector(
+        "[data-workspace-group=\"/w/big\"] [aria-expanded]",
+      );
+      expect(el).not.toBeNull();
+      return el as HTMLElement;
+    });
+    fireEvent.click(group);
+    expect(container.querySelectorAll(".session-entry-main")).toHaveLength(5);
+    fireEvent.click(screen.getByText("Show more (2)"));
+    expect(container.querySelectorAll(".session-entry-main")).toHaveLength(7);
+  });
+
+  it("collapse resets the preview: re-expanding shows the cap again", async () => {
+    vi.mocked(listWorkspaces).mockResolvedValue([
+      { path: "/w/big", label: "big", explicit: true, exists: true },
+    ]);
+    const members = Array.from({ length: 7 }, (_, i) =>
+      metaRow(`/m${i}.json`, `m${i}`, "/w/big"),
+    );
+    const { container } = renderShell(
+      <SessionSidebar {...wsProps({ sessions: members })} />,
+    );
+    const toggle = await waitFor(() => {
+      const el = container.querySelector(
+        "[data-workspace-group=\"/w/big\"] [aria-expanded]",
+      );
+      expect(el).not.toBeNull();
+      return el as HTMLElement;
+    });
+    fireEvent.click(toggle); // expand -> preview
+    fireEvent.click(screen.getByText("Show more (2)")); // full list
+    fireEvent.click(toggle); // collapse
+    fireEvent.click(toggle); // expand again -> the preview, NOT the full list
+    expect(container.querySelectorAll(".session-entry-main")).toHaveLength(5);
+    expect(screen.getByText("Show more (2)")).toBeInTheDocument();
+  });
+
+  it("caps the recent-body preview at 5 with the Show more tail, freshest first", async () => {
+    // Descending mtimes (r0 freshest) pin the flat Recent body's row order
+    // under the cap; the model test pins the sort itself.
+    const members = Array.from({ length: 7 }, (_, i) => ({
+      ...metaRow(`/r${i}.json`, `r${i}`),
+      last_modified_at: Date.now() - i * 60_000,
+    }));
+    const { container } = renderShell(
+      <SessionSidebar {...wsProps({ sessions: members })} />,
+    );
+    const cappedRows = [...container.querySelectorAll(".session-entry-main")];
+    expect(cappedRows).toHaveLength(5);
+    ["r0", "r1", "r2", "r3", "r4"].forEach((name, i) => {
+      expect(cappedRows[i].textContent).toContain(name);
+    });
+    fireEvent.click(screen.getByText("Show more (2)"));
+    expect(container.querySelectorAll(".session-entry-main")).toHaveLength(7);
+  });
+
+  it("wires the menu three-piece and the same-workspace new-session shortcut", async () => {
+    vi.mocked(listWorkspaces).mockResolvedValue([
+      { path: "/w/explicit", label: "explicit", explicit: true, exists: true },
+    ]);
+    const onNewInWorkspace = vi.fn();
+    const { container } = renderShell(
+      <SessionSidebar {...wsProps({ onNewInWorkspace })} />,
+    );
+    await waitFor(() =>
+      expect(
+        container.querySelector("[data-workspace-group=\"/w/explicit\"]"),
+      ).not.toBeNull(),
+    );
+    // The menu rides the row-end pill; the mocked dropdown renders its
+    // items inline, so the three pieces are queryable directly. The rename
+    // modal goes LAST: an open Radix dialog hides the outside tree from
+    // accessible queries (the portaled content is the only face).
+    fireEvent.click(screen.getByRole("menuitem", { name: "Open folder" }));
+    expect(openPath).toHaveBeenCalledWith("/w/explicit");
+    vi.mocked(removeWorkspace).mockClear();
+    fireEvent.click(screen.getByRole("menuitem", { name: "Remove from list" }));
+    // The staged confirm: the mutation waits for the dialog's Action, and
+    // the body names the ledger-only consequence.
+    expect(
+      await screen.findByText("Remove explicit?"),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        "This only removes the workspace from the app. The folder and its sessions on your computer are not deleted.",
+      ),
+    ).toBeInTheDocument();
+    expect(removeWorkspace).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "Remove" }));
+    await waitFor(() =>
+      expect(removeWorkspace).toHaveBeenCalledWith("/w/explicit"),
+    );
+    // The pill's plus stages the binding on the shell channel.
+    fireEvent.click(
+      screen.getByRole("button", { name: "New session in this workspace" }),
+    );
+    expect(onNewInWorkspace).toHaveBeenCalledWith("/w/explicit", "explicit");
+    // Rename opens the modal pre-filled with the current label.
+    fireEvent.click(screen.getByRole("menuitem", { name: "Rename" }));
+    const input = await screen.findByRole("textbox", {
+      name: "Workspace name",
+    });
+    expect(input).toHaveValue("explicit");
+  });
+
+  it("remove stages the strong-confirm; cancel keeps the record", async () => {
+    vi.mocked(listWorkspaces).mockResolvedValue([
+      { path: "/w/explicit", label: "explicit", explicit: true, exists: true },
+    ]);
+    vi.mocked(removeWorkspace).mockClear();
+    const { container } = renderShell(
+      <SessionSidebar {...wsProps()} />,
+    );
+    await waitFor(() =>
+      expect(
+        container.querySelector("[data-workspace-group=\"/w/explicit\"]"),
+      ).not.toBeNull(),
+    );
+    fireEvent.click(screen.getByRole("menuitem", { name: "Remove from list" }));
+    expect(await screen.findByText("Remove explicit?")).toBeInTheDocument();
+    // Cancel (Radix auto-focuses it): the dialog drops, the record stays.
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    expect(removeWorkspace).not.toHaveBeenCalled();
+    await waitFor(() =>
+      expect(screen.queryByText("Remove explicit?")).toBeNull(),
+    );
+    // Re-opening the menu re-stages the confirm and the Action fires it.
+    fireEvent.click(screen.getByRole("menuitem", { name: "Remove from list" }));
+    await screen.findByText("Remove explicit?");
+    fireEvent.click(screen.getByRole("button", { name: "Remove" }));
+    await waitFor(() =>
+      expect(removeWorkspace).toHaveBeenCalledWith("/w/explicit"),
+    );
+  });
+
+  it("folds the section from its head; the zero-group face shows the empty hint", async () => {
+    vi.mocked(listWorkspaces).mockResolvedValue([
+      { path: "/w/explicit", label: "explicit", explicit: true, exists: true },
+    ]);
+    const { container } = renderShell(
+      <SessionSidebar {...wsProps()} />,
+    );
+    const head = await screen.findByRole("button", { name: "Workspaces(1)" });
+    fireEvent.click(head);
+    expect(head).toHaveAttribute("aria-expanded", "false");
+    expect(
+      container.querySelector("[data-workspace-group=\"/w/explicit\"]"),
+    ).toBeNull();
+    fireEvent.click(head);
+    expect(
+      container.querySelector("[data-workspace-group=\"/w/explicit\"]"),
+    ).not.toBeNull();
+  });
+
+  it("a zero-group section still renders the head with the empty hint", () => {
+    vi.mocked(listWorkspaces).mockResolvedValue([]);
+    renderShell(<SessionSidebar {...wsProps()} />);
+    expect(
+      screen.getByRole("button", { name: "Workspaces(0)" }),
+    ).toBeInTheDocument();
+    expect(screen.getByText("No sessions")).toBeInTheDocument();
+  });
+
+  it("collapsing the recent section resets its Show-more preview", () => {
+    const members = Array.from({ length: 7 }, (_, i) =>
+      metaRow(`/r${i}.json`, `r${i}`),
+    );
+    const { container } = renderShell(
+      <SessionSidebar {...wsProps({ sessions: members })} />,
+    );
+    expect(container.querySelectorAll(".session-entry-main")).toHaveLength(5);
+    fireEvent.click(screen.getByText("Show more (2)"));
+    expect(container.querySelectorAll(".session-entry-main")).toHaveLength(7);
+    const head = screen.getByRole("button", { name: "Recent(7)" });
+    fireEvent.click(head); // collapse
+    expect(container.querySelectorAll(".session-entry-main")).toHaveLength(0);
+    fireEvent.click(head); // expand again -> the cap, NOT the full list
+    expect(container.querySelectorAll(".session-entry-main")).toHaveLength(5);
+    expect(screen.getByText("Show more (2)")).toBeInTheDocument();
+  });
+
+  it("collapse-all resets every group's Show-more preview", async () => {
+    vi.mocked(listWorkspaces).mockResolvedValue([
+      { path: "/w/big", label: "big", explicit: true, exists: true },
+    ]);
+    const members = Array.from({ length: 7 }, (_, i) =>
+      metaRow(`/m${i}.json`, `m${i}`, "/w/big"),
+    );
+    const { container } = renderShell(
+      <SessionSidebar {...wsProps({ sessions: members })} />,
+    );
+    const group = await waitFor(() => {
+      const el = container.querySelector(
+        "[data-workspace-group=\"/w/big\"] [aria-expanded]",
+      );
+      expect(el).not.toBeNull();
+      return el as HTMLElement;
+    });
+    fireEvent.click(group);
+    fireEvent.click(screen.getByText("Show more (2)"));
+    expect(container.querySelectorAll(".session-entry-main")).toHaveLength(7);
+    // The bulk collapse must apply the same reset the single toggle does.
+    fireEvent.click(
+      screen.getByRole("button", { name: "Collapse all workspaces" }),
+    );
+    fireEvent.click(group);
+    expect(container.querySelectorAll(".session-entry-main")).toHaveLength(5);
+    expect(screen.getByText("Show more (2)")).toBeInTheDocument();
+  });
+
+  it("the rename modal surfaces a refusal, guards Save, and submits the trimmed title", async () => {
+    vi.mocked(listWorkspaces).mockResolvedValue([
+      { path: "/w/explicit", label: "explicit", explicit: true, exists: true },
+    ]);
+    const { container } = renderShell(
+      <SessionSidebar {...wsProps()} />,
+    );
+    await waitFor(() =>
+      expect(
+        container.querySelector("[data-workspace-group=\"/w/explicit\"]"),
+      ).not.toBeNull(),
+    );
+    fireEvent.click(screen.getByRole("menuitem", { name: "Rename" }));
+    const input = await screen.findByRole("textbox", {
+      name: "Workspace name",
+    });
+    // A backend refusal lands inline and keeps the modal open.
+    vi.mocked(renameWorkspace).mockRejectedValueOnce(
+      new Error("no workspace record for /w/explicit"),
+    );
+    fireEvent.change(input, { target: { value: "  renamed  " } });
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    expect(
+      await screen.findByText("no workspace record for /w/explicit"),
+    ).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Save" })).toBeInTheDocument();
+    // The shared guard keeps the Save button honest.
+    fireEvent.change(input, { target: { value: "a/b" } });
+    expect(screen.getByRole("button", { name: "Save" })).toBeDisabled();
+    // Back to a valid name: the retry (now resolving) submits the TRIMMED
+    // title and the success closes the modal.
+    fireEvent.change(input, { target: { value: "  renamed  " } });
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() =>
+      expect(renameWorkspace).toHaveBeenCalledWith("/w/explicit", "renamed"),
+    );
+    expect(
+      screen.queryByRole("button", { name: "Save" }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("the head's New workspace modal creates with the trimmed name and the group lands via the listing", async () => {
+    vi.mocked(listWorkspaces).mockResolvedValue([
+      { path: "/w/explicit", label: "explicit", explicit: true, exists: true },
+    ]);
+    const { container } = renderShell(
+      <SessionSidebar {...wsProps()} />,
+    );
+    await waitFor(() =>
+      expect(
+        container.querySelector("[data-workspace-group=\"/w/explicit\"]"),
+      ).not.toBeNull(),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "New workspace" }));
+    const input = await screen.findByRole("textbox", {
+      name: "Workspace name",
+    });
+    fireEvent.change(input, { target: { value: "  fresh  " } });
+    // The post-create refetch returns the grown registry -- the group must
+    // arrive through the invalidation channel, not local state.
+    vi.mocked(listWorkspaces).mockResolvedValue([
+      { path: "/w/explicit", label: "explicit", explicit: true, exists: true },
+      { path: "/w/fresh", label: "fresh", explicit: true, exists: true },
+    ]);
+    fireEvent.click(screen.getByRole("button", { name: "Create" }));
+    await waitFor(() => expect(createWorkspace).toHaveBeenCalledWith("fresh"));
+    await waitFor(() =>
+      expect(
+        container.querySelector("[data-workspace-group=\"/w/fresh\"]"),
+      ).not.toBeNull(),
+    );
+  });
+  describe("sidebar expansion persistence (issue #1404)", () => {
+    // The store cleanup rides the host describe's beforeEach/afterEach.
+    // Seed the persisted document with a partial patch: the missing faces
+    // default to empty arrays (the read validates the whole document, so the
+    // fixtures always carry all three fields).
+    function seedStore(patch: {
+      collapsedSections?: string[];
+      expandedWorkspaces?: string[];
+      seenWorkspaces?: string[];
+    }) {
+      localStorage.setItem(
+        SIDEBAR_EXPANSION_KEY,
+        JSON.stringify({
+          collapsedSections: [],
+          expandedWorkspaces: [],
+          seenWorkspaces: [],
+          ...patch,
+        }),
+      );
+    }
+
+    function storedDocument(): {
+      collapsedSections: string[];
+      expandedWorkspaces: string[];
+      seenWorkspaces: string[];
+    } {
+      return JSON.parse(localStorage.getItem(SIDEBAR_EXPANSION_KEY) as string);
+    }
+
+    const explicitGroup = {
+      path: "/w/explicit",
+      label: "explicit",
+      explicit: true,
+      exists: true,
+    };
+    const groupHead = (container: HTMLElement) =>
+      container.querySelector(
+        "[data-workspace-group=\"/w/explicit\"] [aria-expanded]",
+      ) as HTMLElement;
+
+    it("restores a persisted section fold on mount", async () => {
+      vi.mocked(listWorkspaces).mockResolvedValue([explicitGroup]);
+      seedStore({ collapsedSections: ["workspaces"] });
+      const { container } = renderShell(
+        <SessionSidebar {...wsProps()} />,
+      );
+      // findByRole: the head's count needs the listing to resolve first.
+      expect(
+        await screen.findByRole("button", { name: "Workspaces(1)" }),
+      ).toHaveAttribute("aria-expanded", "false");
+      // The fold holds after the listing resolves: the group row never
+      // renders while its section is folded.
+      expect(
+        container.querySelector("[data-workspace-group]"),
+      ).toBeNull();
+    });
+
+    it("writes a section fold back to the persisted document", () => {
+      vi.mocked(listWorkspaces).mockResolvedValue([]);
+      renderShell(<SessionSidebar {...wsProps()} />);
+      fireEvent.click(screen.getByRole("button", { name: "Workspaces(0)" }));
+      expect(storedDocument().collapsedSections).toEqual(["workspaces"]);
+    });
+
+    it("falls back to the expanded default on a corrupt document", () => {
+      vi.mocked(listWorkspaces).mockResolvedValue([]);
+      localStorage.setItem(SIDEBAR_EXPANSION_KEY, "{corrupt");
+      renderShell(<SessionSidebar {...wsProps()} />);
+      expect(
+        screen.getByRole("button", { name: "Workspaces(0)" }),
+      ).toHaveAttribute("aria-expanded", "true");
+    });
+
+    it("restores a persisted subtree expansion", async () => {
+      vi.mocked(listWorkspaces).mockResolvedValue([explicitGroup]);
+      seedStore({ expandedWorkspaces: ["/w/explicit"] });
+      const { container } = renderShell(
+        <SessionSidebar
+          {...wsProps({ sessions: [metaRow("/a.json", "alpha", "/w/explicit")] })}
+        />,
+      );
+      await waitFor(() =>
+        expect(groupHead(container)).toHaveAttribute("aria-expanded", "true"),
+      );
+      // The bound row renders without a manual toggle.
+      expect(container.textContent).toContain("alpha");
+    });
+
+    it("writes a subtree toggle back to the persisted document", async () => {
+      vi.mocked(listWorkspaces).mockResolvedValue([explicitGroup]);
+      const { container } = renderShell(
+        <SessionSidebar
+          {...wsProps({ sessions: [metaRow("/a.json", "alpha", "/w/explicit")] })}
+        />,
+      );
+      const head = await waitFor(() => {
+        const el = groupHead(container);
+        expect(el).not.toBeNull();
+        return el;
+      });
+      fireEvent.click(head); // expand
+      expect(storedDocument().expandedWorkspaces).toEqual(["/w/explicit"]);
+      fireEvent.click(head); // fold again
+      expect(storedDocument().expandedWorkspaces).toEqual([]);
+    });
+
+    it("the persisted seen baseline keeps existing rows from fanning on a cold start", async () => {
+      vi.mocked(listWorkspaces).mockResolvedValue([explicitGroup]);
+      seedStore({ seenWorkspaces: ["/a.json"] });
+      const view = renderShell(
+        <SessionSidebar {...wsProps({ sessionsLoaded: false })} />,
+      );
+      const head = await waitFor(() => {
+        const el = groupHead(view.container);
+        expect(el).not.toBeNull();
+        return el;
+      });
+      // The scan lands with a row the baseline already knows: a baseline, not
+      // a landing -- the group stays folded and no row renders.
+      view.rerender(
+        shellTree(
+          <SessionSidebar
+            {...wsProps({
+              sessionsLoaded: true,
+              sessions: [metaRow("/a.json", "alpha", "/w/explicit")],
+            })}
+          />,
+        ),
+      );
+      await waitFor(() =>
+        expect(groupHead(view.container)).toBe(head),
+      );
+      expect(head).toHaveAttribute("aria-expanded", "false");
+      expect(
+        view.container.querySelector(
+          "[data-workspace-group=\"/w/explicit\"] .session-entry-main",
+        ),
+      ).toBeNull();
+    });
+
+    it("a fresh store folds the first scan's bound rows into the seen baseline (upgrade face)", async () => {
+      vi.mocked(listWorkspaces).mockResolvedValue([explicitGroup]);
+      const view = renderShell(
+        <SessionSidebar {...wsProps({ sessionsLoaded: false })} />,
+      );
+      await waitFor(() => expect(groupHead(view.container)).not.toBeNull());
+      // No store on this first launch: the scan's bound rows join the
+      // baseline instead of fanning (the existing rows never fan), and the
+      // baseline is persisted for the next start.
+      view.rerender(
+        shellTree(
+          <SessionSidebar
+            {...wsProps({
+              sessionsLoaded: true,
+              sessions: [metaRow("/a.json", "alpha", "/w/explicit")],
+            })}
+          />,
+        ),
+      );
+      await waitFor(() =>
+        expect(storedDocument().seenWorkspaces).toEqual(["/a.json"]),
+      );
+      expect(groupHead(view.container)).toHaveAttribute("aria-expanded", "false");
+    });
+
+    it("fans a newly landed session once and records it in the persisted baseline", async () => {
+      vi.mocked(listWorkspaces).mockResolvedValue([explicitGroup]);
+      seedStore({ seenWorkspaces: ["/old.json"] });
+      const view = renderShell(
+        <SessionSidebar {...wsProps({ sessionsLoaded: false })} />,
+      );
+      await waitFor(() => expect(groupHead(view.container)).not.toBeNull());
+      // The first loaded scan records the baseline (the stored memory only):
+      // an empty bound set lands nothing.
+      view.rerender(
+        shellTree(<SessionSidebar {...wsProps({ sessionsLoaded: true })} />),
+      );
+      // A session minted AFTER that scan is a real landing: the group fans
+      // once and the baseline grows for the next start.
+      view.rerender(
+        shellTree(
+          <SessionSidebar
+            {...wsProps({
+              sessionsLoaded: true,
+              sessions: [
+                metaRow("/new.json", "newbie", "/w/explicit"),
+              ],
+            })}
+          />,
+        ),
+      );
+      await waitFor(() =>
+        expect(groupHead(view.container)).toHaveAttribute("aria-expanded", "true"),
+      );
+      expect(view.container.textContent).toContain("newbie");
+      expect(storedDocument().seenWorkspaces).toEqual([
+        "/old.json",
+        "/new.json",
+      ]);
+      // The fan-out is informational: the persisted expansion stays empty
+      // (the no-write-back ruling, pinned).
+      expect(storedDocument().expandedWorkspaces).toEqual([]);
+    });
+
+    it("the head bulk toggle persists the resolved group set", async () => {
+      const second = {
+        path: "/w/second",
+        label: "second",
+        explicit: true,
+        exists: true,
+      };
+      vi.mocked(listWorkspaces).mockResolvedValue([explicitGroup, second]);
+      const { container } = renderShell(
+        <SessionSidebar
+          {...wsProps({ sessions: [metaRow("/a.json", "alpha", "/w/explicit")] })}
+        />,
+      );
+      // Wait for the listing before clicking: the head action renders on
+      // the always-mounted section, so its presence alone does not mean
+      // the groups resolved (the pending-window guard would rightly eat
+      // an early click).
+      await waitFor(() =>
+        expect(
+          container.querySelector("[data-workspace-group=\"/w/explicit\"]"),
+        ).not.toBeNull(),
+      );
+      const toggle = await screen.findByRole("button", {
+        name: "Expand all workspaces",
+      });
+      fireEvent.click(toggle);
+      expect(storedDocument().expandedWorkspaces).toEqual([
+        "/w/explicit",
+        "/w/second",
+      ]);
+      fireEvent.click(
+        screen.getByRole("button", { name: "Collapse all workspaces" }),
+      );
+      expect(storedDocument().expandedWorkspaces).toEqual([]);
+    });
+
+    it("an expand-all while the listing is pending leaves the persisted expansion alone", () => {
+      // The head action is busy-gated only; the listing's in-flight window
+      // is clickable and an empty groups array must not wipe the store.
+      vi.mocked(listWorkspaces).mockImplementation(
+        () => new Promise<Awaited<ReturnType<typeof listWorkspaces>>>(() => {}),
+      );
+      seedStore({ expandedWorkspaces: ["/w/explicit"] });
+      renderShell(<SessionSidebar {...wsProps()} />);
+      fireEvent.click(
+        screen.getByRole("button", { name: "Expand all workspaces" }),
+      );
+      expect(storedDocument().expandedWorkspaces).toEqual(["/w/explicit"]);
+    });
   });
 });

@@ -17,7 +17,7 @@
 //! The shape is an `impl super::Session` block, not the standalone TurnRunner
 //! struct ADR-0053 Decision 1 drew: that struct's roles evolved into the
 //! materializer / loop_runtime / outcome_merge species with the session
-//! state borrowed per turn through `TurnDeps` (Decision 2/4) -- the
+//! state borrowed per turn through `DispatchDeps` (Decision 2/4) -- the
 //! boundary, not the struct, is what this file holds.
 
 use std::collections::BTreeMap;
@@ -35,11 +35,11 @@ use crate::runtime::acp::wire::McpServer;
 use crate::runtime::gateway::server::{bind_gateway, serve_connection, GatewayCtx};
 use crate::session::loop_contract::{LoopOutcome, LoopRound};
 use crate::session::loop_runtime;
-use crate::session::materializer::TurnDeps;
+use crate::session::materializer::DispatchDeps;
 use crate::session::outcome_merge::{merge_outcomes, turn_outcome_from_loop};
 use crate::session::skills::SkillTurnState;
 use crate::skills::SkillPromptFragment;
-use crate::window;
+use crate::turn_window;
 
 use super::{now_epoch_ms, TimelineEntry, ACP_BRIDGE_BIN_ENV, GATEWAY_SERVER_NAME};
 
@@ -209,7 +209,7 @@ impl super::Session {
         // Facade over the agent loop (ADR-0081, issue #318): assemble the
         // windowed tool-calling request (system prompt + tool table + windowed
         // history, via the window assembler), drive the loop with the shared
-        // session state borrowed via TurnDeps + the session's own
+        // session state borrowed via DispatchDeps + the session's own
         // materializer, map the structured LoopOutcome onto the four-way
         // TurnOutcome, then record it. `record_turn` stays on the facade (the
         // conversation timeline + persistence are session concerns, not turn
@@ -295,7 +295,7 @@ impl super::Session {
                 // track by decision: the loop runtime is the only built-in
                 // loop (each predecessor retired, #670 / #919); there is no
                 // runtime switch and no fallback.
-                let mut request = window::assemble_tool_turn(
+                let mut request = turn_window::assemble_tool_turn(
                     question,
                     &self.working_set,
                     &turns,
@@ -312,7 +312,7 @@ impl super::Session {
                 // API-invalid interleaving). `None` leaves the request
                 // thinking-disabled, byte-identical to the status quo.
                 request.thought_level = self.runtime_facts.thought_level.clone();
-                // Disjoint field borrows: `TurnDeps` borrows
+                // Disjoint field borrows: `DispatchDeps` borrows
                 // `&self.admin_engine` / `&mut self.source_files` /
                 // `&mut self.working_set` / `&self.temp_path` and the loop
                 // takes `&mut *self.materializer` (the provider crosses into
@@ -415,17 +415,44 @@ impl super::Session {
                     request
                         .tools
                         .push(crate::session::artifacts::present_files_definition());
-                    let assets_dir = crate::session::sql_assets::assets_dir(self.recipe_path());
+                    // The workspace write tools (ADR-0137, issue #1406):
+                    // mounted unconditionally on the built-in runtime's
+                    // table -- the sedimentation channel (write/edit) splits
+                    // from the python execution medium, so every session
+                    // carries the pair. The read-only discovery trio (issue
+                    // #1385) rides the same mount so the sediment is
+                    // discoverable: glob/grep find it, read judges it, the
+                    // next turn runs it. Bridge face never lists either
+                    // channel (external runtimes bring their own file tools
+                    // with full authority).
+                    request
+                        .tools
+                        .push(crate::session::workspace_tools::write_definition());
+                    request
+                        .tools
+                        .push(crate::session::workspace_tools::edit_definition());
+                    request
+                        .tools
+                        .push(crate::session::workspace_tools::discovery::glob_definition());
+                    request
+                        .tools
+                        .push(crate::session::workspace_tools::discovery::grep_definition());
+                    request
+                        .tools
+                        .push(crate::session::workspace_tools::discovery::read_definition());
                     let snapshot_dir = self.snapshot_dir();
-                    let mut deps = TurnDeps {
+                    let mut deps = DispatchDeps {
                         engine: &self.admin_engine,
                         source_files: &mut self.source_files,
+                        source_readers: Some(&mut self.persister.source_readers),
                         working_set: &mut self.working_set,
                         result_row_cap: self.result_row_cap,
                         result_count_cap: self.result_count_cap,
                         temp_path: &self.temp_path,
+                        workspace: Some(&mut self.runtime_facts.workspace),
+                        workspaces_root: self.workspaces_root.clone(),
+                        workspace_registry: self.workspace_registry.as_deref(),
                         snapshot_dir,
-                        assets_dir,
                         tool_output_refs: &mut self.tool_output_refs,
                     };
                     // The attachment read gate (ADR-0111, calibrated by
@@ -585,7 +612,7 @@ impl super::Session {
     /// descriptor at `session/new`; the CLI launches the bridge, the bridge
     /// connects back to a per-bridge gateway, and the gateway serves the
     /// built-in tool table + routes every `tools/call` through the approval
-    /// gate + [`crate::tools::dispatch`] -- the same path the built-in loop
+    /// gate + [`crate::analysis_tools::dispatch`] -- the same path the built-in loop
     /// takes (ADR-0076 single enforcement point). The gateway serve loop and
     /// the ACP engine run on two scoped threads (ADR-0085); this method joins
     /// both, merges their outcomes (trace de-duplicated: gateway authoritative
@@ -671,7 +698,7 @@ impl super::Session {
         let mcp_server = McpServer::stdio_bridge(GATEWAY_SERVER_NAME, bin_path, Vec::new(), env);
         // 4. Assemble the prompt blocks (leading context: locale + schema;
         //    skill block before question; M-contract via gateway tool table).
-        let prompt_blocks = window::assemble_acp_turn(
+        let prompt_blocks = turn_window::assemble_acp_turn(
             question,
             &self.working_set,
             history,
@@ -679,8 +706,23 @@ impl super::Session {
             inputs.skills,
             inputs.user_invocations,
         );
+        // ADR-0137 (issue #1381): the external runtime's cwd is the session
+        // workspace -- THIS spawn is the lazy-mint disk-need moment for a
+        // directory-less session, so a pure-chat session never mints one.
+        // The temp-dir cwd survives only when minting is unavailable.
+        let cwd = match self.ensure_external_cwd() {
+            Ok(cwd) => cwd,
+            Err(detail) => {
+                return (
+                    TurnOutcome::Failed(TurnFailure::Runtime { detail }),
+                    Vec::new(),
+                    None,
+                    None,
+                );
+            }
+        };
         let input = AcpTurnInput {
-            cwd: self.temp_path.to_string_lossy().to_string(),
+            cwd,
             mcp_servers: vec![mcp_server],
             // ADR-0095: the session-level model / thought-level choices ride
             // the turn input (injected per-format inside the engine: ACP
@@ -789,17 +831,22 @@ impl super::Session {
             let mcp_turn_done = crate::mcp::aggregator::TurnDoneFlag::new();
             mcp.arm_cancel_teardown(Arc::clone(&self.cancel), mcp_turn_done.flag());
             mcp.connect_all(inputs.mcp_servers, inputs.keychain);
-            let assets_dir = crate::session::sql_assets::assets_dir(self.recipe_path());
             let snapshot_dir = self.snapshot_dir();
-            let deps = TurnDeps {
+            let deps = DispatchDeps {
                 engine: &self.admin_engine,
                 source_files: &mut self.source_files,
+                source_readers: Some(&mut self.persister.source_readers),
                 working_set: &mut self.working_set,
                 result_row_cap: self.result_row_cap,
                 result_count_cap: self.result_count_cap,
                 temp_path: &self.temp_path,
+                // ADR-0137 (issue #1381): the gateway serves the SAME launch
+                // cwd seam to bridge-originated CLI tool calls -- one cwd
+                // semantics across both runtime surfaces.
+                workspace: Some(&mut self.runtime_facts.workspace),
+                workspaces_root: self.workspaces_root.clone(),
+                workspace_registry: self.workspace_registry.as_deref(),
                 snapshot_dir,
-                assets_dir,
                 tool_output_refs: &mut self.tool_output_refs,
             };
             // The bridge face's read gate (issue #714; calibrated by

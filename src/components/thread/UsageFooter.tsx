@@ -45,7 +45,7 @@ export function UsageFooter({ usage }: { usage: TokenUsage }) {
       <PopoverTrigger asChild>
         <button
           type="button"
-          className="usage-footer inline-flex h-5 shrink-0 cursor-pointer items-center gap-1 rounded-full px-2 text-xs text-muted-foreground transition-colors outline-none hover:text-foreground focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring"
+          className="usage-footer inline-flex h-5 shrink-0 items-center gap-1 rounded-full px-2 text-xs text-muted-foreground transition-colors outline-none hover:text-foreground focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring"
         >
           <Zap aria-hidden="true" className="size-4" />
           <FormattedMessage

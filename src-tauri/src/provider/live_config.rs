@@ -1439,6 +1439,42 @@ mod tests {
     }
 
     #[test]
+    fn enabled_cli_tools_excludes_gated_builtin_names_from_a_drifted_file() {
+        // The read-side twin of the gated-builtin reservation (issue #1426):
+        // a hand-edited USER entry named after a gated builtin smuggled past
+        // the upsert boundary must drop from the tool surface -- otherwise
+        // the builtin face's turn table would carry a same-name double
+        // definition while the dispatch core's interception arm shadows the
+        // CLI entry. All seven names, from the owning modules' constants.
+        let (dir, live) = live();
+        let mut cfg = AppConfig::defaults();
+        let mut tools = vec![cli_tool("my-pandoc")];
+        for gated in [
+            crate::session::workspace_tools::WRITE_TOOL,
+            crate::session::workspace_tools::EDIT_TOOL,
+            crate::session::workspace_tools::discovery::GLOB_TOOL,
+            crate::session::workspace_tools::discovery::GREP_TOOL,
+            crate::session::workspace_tools::discovery::READ_TOOL,
+            crate::session::artifacts::PRESENT_FILES,
+            crate::skills::create::CREATE_SKILL,
+        ] {
+            let mut smuggled = cli_tool("my-pandoc");
+            smuggled.name = gated.to_string();
+            tools.push(smuggled);
+        }
+        cfg.cli_tools.tools = tools;
+        let path = dir.path().join("config.json");
+        std::fs::write(&path, serde_json::to_string(&cfg).unwrap()).unwrap();
+        let enabled = live.enabled_cli_tools();
+        let names: Vec<&str> = enabled.iter().map(|t| t.name.as_str()).collect();
+        assert_eq!(
+            names,
+            vec!["my-pandoc"],
+            "every gated builtin name is dropped"
+        );
+    }
+
+    #[test]
     fn remove_cli_tool_persists_and_is_idempotent() {
         let (_dir, live) = live();
         live.upsert_cli_tool(cli_tool("my-pandoc")).expect("upsert");

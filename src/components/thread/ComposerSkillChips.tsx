@@ -42,7 +42,7 @@ export function ComposerSkillChips({ names, onRemove }: ComposerSkillChipsProps)
           {onRemove && (
             <button
               type="button"
-              className={`${bareButtonReset} hover:bg-accent -m-0.5 shrink-0 cursor-pointer rounded-sm p-0.5 text-muted-foreground outline-none focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring`}
+              className={`${bareButtonReset} hover:bg-accent -m-0.5 shrink-0 rounded-sm p-0.5 text-muted-foreground outline-none focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring`}
               aria-label={intl.formatMessage(
                 {
                   id: "composer.skillChips.removeLabel",

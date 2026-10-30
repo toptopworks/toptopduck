@@ -9,9 +9,142 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>TOPTOPDuck</title>
+    <!-- Startup splash (issue #1439): everything below is inline because the
+         bundled CSS has not loaded at first paint. The background literals are
+         the DESIGN.md canvas tokens (light #ffffff / dark #0f1410), matching
+         app.css --background so the React mount handoff has zero color jump.
+         Sizes are splash-local (transient layer, not design-system surface);
+         the logo is a byte copy of src-tauri/icons/icon.png -- update both
+         together. useTheme owns the runtime theme after mount; this layer
+         only covers first paint -> mount. -->
+    <style>
+      html {
+        background: #ffffff;
+      }
+      html.dark {
+        background: #0f1410;
+      }
+      .boot-splash {
+        position: fixed;
+        inset: 0;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        gap: 16px;
+      }
+      .boot-splash img {
+        width: 96px;
+        height: 96px;
+      }
+      .boot-status {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        gap: 16px;
+      }
+      .boot-caption {
+        /* The i18n catalog is not loaded at first paint; the body script
+           below localizes the caption from the boot seed locale (markup
+           carries the en canonical fallback, matching <html lang>). */
+        font: 500 13px/1.4 system-ui, sans-serif;
+        color: #6b7280; /* muted-foreground token, light */
+      }
+      html.dark .boot-caption {
+        color: #9ca3af; /* muted-foreground token, dark */
+      }
+      .boot-spinner {
+        width: 22px;
+        height: 22px;
+        border: 2px solid #6b7280; /* muted-foreground token, light */
+        border-top-color: transparent;
+        border-radius: 50%;
+        animation: boot-spin 0.8s linear infinite;
+      }
+      html.dark .boot-spinner {
+        border-color: #9ca3af; /* muted-foreground token, dark */
+        border-top-color: transparent;
+      }
+      @keyframes boot-spin {
+        to {
+          transform: rotate(360deg);
+        }
+      }
+      @media (prefers-reduced-motion: reduce) {
+        .boot-spinner {
+          animation: none;
+        }
+      }
+    </style>
+    <script>
+      // Splash theme floor (issue #1439): resolve the boot seed's theme
+      // (injected by the Rust init script before any frontend script runs,
+      // ADR-0113) and paint <html> before first paint. Mirrors useTheme's
+      // resolution (src/theme/useTheme.ts): "system" resolves via matchMedia
+      // (absent -> light), a missing or invalid theme falls back to the same
+      // system resolution. The gate below validates theme only, per the
+      // #1439 spec -- the all-or-nothing whole-seed whitelist lives in
+      // src/shell/bootSeed.ts (unreachable divergence: the Rust writer
+      // serializes typed enums). useTheme re-applies both writes
+      // idempotently on mount and keeps runtime theme ownership.
+      (function () {
+        const seed = window.__TOPTOPDUCK_BOOT_SEED__;
+        let theme = seed && typeof seed === "object" ? seed.theme : null;
+        if (theme !== "system" && theme !== "light" && theme !== "dark") {
+          theme = null;
+        }
+        const systemDark =
+          window.matchMedia?.("(prefers-color-scheme: dark)").matches ??
+          false;
+        const dark = theme === "dark" || (theme !== "light" && systemDark);
+        const root = document.documentElement;
+        root.classList.toggle("dark", dark);
+        root.style.colorScheme = dark ? "dark" : "light";
+      })();
+    </script>
   </head>
   <body>
-    <div id="root"></div>
+    <div id="root">
+      <!-- Static splash markup: createRoot's first render clears #root's
+           existing children (hydrateRoot would keep them), so no removal code
+           ships in main.tsx or the app. -->
+      <div class="boot-splash" role="status" aria-live="polite" aria-busy="true">
+        <img src="/logo.png" alt="" width="96" height="96" aria-hidden="true" />
+        <div class="boot-status">
+          <div class="boot-spinner" aria-hidden="true"></div>
+          <div class="boot-caption">Starting TOPTOPDuck...</div>
+        </div>
+      </div>
+    </div>
+    <script>
+      // Splash caption locale (issue #1439): resolve the boot seed's locale
+      // and localize the caption before first paint -- the i18n catalog only
+      // loads with the app bundle. Mirrors useLocale's resolution
+      // (src/i18n/useLocale.ts, ADR-0052): "system" resolves via
+      // navigator.language, and the tag mapping is resolveLocaleTag's
+      // zh* -> zh-CN, everything else -> en-US (the app has no zh-TW
+      // domain). A missing or invalid locale falls back to the same system
+      // resolution; App takes over the effective locale after mount. The
+      // resolved value also lands on documentElement.lang (mirroring App's
+      // write) so assistive tech announces the caption with the matching
+      // voice instead of reading zh text under lang="en".
+      (function () {
+        const seed = window.__TOPTOPDUCK_BOOT_SEED__;
+        let locale = seed && typeof seed === "object" ? seed.locale : null;
+        if (locale !== "system" && locale !== "zh-CN" && locale !== "en-US") {
+          locale = "system";
+        }
+        if (locale === "system") {
+          const tag = (navigator.language || "").toLowerCase();
+          locale = tag.indexOf("zh") === 0 ? "zh-CN" : "en-US";
+        }
+        document.querySelector(".boot-caption").textContent =
+          locale === "zh-CN"
+            ? "正在启动 TOPTOPDuck..."
+            : "Starting TOPTOPDuck...";
+        document.documentElement.lang = locale;
+      })();
+    </script>
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>

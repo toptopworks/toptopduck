@@ -333,6 +333,55 @@ fn resume_restores_the_header_last_runtime_and_the_rewrite_keeps_it() {
 }
 
 #[test]
+fn resume_restores_the_header_workspace_binding() {
+    // ADR-0137 (issue #1381): the workspace binding rides the recipe header
+    // and restores verbatim on resume -- immutable for the session's life.
+    // The pre-#1381 half (AC4): a header without the field resumes as None
+    // with everything else unchanged.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let duck = dir.path().join("s.json");
+    let session = build_session(&duck);
+    drop(session);
+
+    // Half 1: a header carrying the field restores the binding, and the
+    // post-resume rewrite keeps it for the next resume.
+    let disk = fs::read_to_string(&duck).expect("read duck");
+    let mut v: serde_json::Value = serde_json::from_str(&disk).expect("duck json");
+    assert!(
+        v.get("workspace").is_none(),
+        "a session that never reached a disk-need moment persists no workspace"
+    );
+    let bound = dir.path().join("user-project");
+    fs::create_dir(&bound).expect("seed workspace");
+    v["workspace"] = json!(bound.to_string_lossy());
+    fs::write(&duck, serde_json::to_string_pretty(&v).expect("serialize")).expect("write duck");
+
+    let resumed = resume_defaults(&duck, Arc::new(CancelToken::new()), |_| {}).expect("resume");
+    assert_eq!(
+        resumed.workspace(),
+        Some(bound.as_path()),
+        "the resumed Session restores the header's workspace binding"
+    );
+    drop(resumed);
+    let disk = fs::read_to_string(&duck).expect("read duck");
+    let v: serde_json::Value = serde_json::from_str(&disk).expect("duck json");
+    assert_eq!(
+        v["workspace"],
+        json!(bound.to_string_lossy().to_string()),
+        "the post-resume rewrite preserves the persisted binding"
+    );
+
+    // Half 2 (AC4): a pre-#1381 recipe (no workspace key) resumes as None.
+    let mut v: serde_json::Value = serde_json::from_str(&disk).expect("duck json");
+    v.as_object_mut()
+        .expect("recipe object")
+        .remove("workspace");
+    fs::write(&duck, serde_json::to_string_pretty(&v).expect("serialize")).expect("write duck");
+    let legacy = resume_defaults(&duck, Arc::new(CancelToken::new()), |_| {}).expect("resume");
+    assert_eq!(legacy.workspace(), None, "a pre-#1381 recipe reads as None");
+}
+
+#[test]
 fn resume_restores_invocation_semantics_state() {
     // ADR-0119 (issue #983): the v7 open path restores the discovery
     // snapshot from the header (explicit, never re-folded) and re-folds the
@@ -1019,6 +1068,7 @@ fn resume_refuses_a_relative_path_that_escapes_the_duck_dir() {
             relative_path: Some("../evil.csv".into()),
             rectify: RectifyProvenance::NotApplicable,
             fingerprint: "any".into(),
+            reader: None,
         }],
         vec![],
         None,
@@ -2638,6 +2688,7 @@ fn resume_falls_back_to_absolute_when_relative_path_is_missing() {
             relative_path: Some("inner/missing.csv".into()),
             rectify: RectifyProvenance::NotApplicable,
             fingerprint,
+            reader: None,
         }],
         vec![],
         None,
@@ -2650,6 +2701,51 @@ fn resume_falls_back_to_absolute_when_relative_path_is_missing() {
         resumed.get("data").is_some(),
         "absolute fallback resolved (relative candidate missing)",
     );
+}
+
+/// #1387 review F: a recipe carrying an unrecognized reader spelling
+/// (hand-edited corruption) must not refuse to resume or execute the
+/// string -- the replay falls back to extension dispatch through the same
+/// fn-name normalizer that bars non-tabular spellings from the copy-in
+/// template.
+#[test]
+fn resume_falls_back_to_extension_dispatch_for_an_unrecognized_reader() {
+    use toptopduck_lib::persistence::{save_atomic, Recipe, SourceRef};
+    use toptopduck_lib::RectifyProvenance;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let duck = dir.path().join("s.json");
+    let outside = dir.path().join("data.csv");
+    fs::write(&outside, "name,score\nAda,9\n").expect("write source");
+
+    // Capture the real fingerprint through one ingest.
+    let mut probe = Session::with_provider(Box::new(FakeProvider::new())).expect("session");
+    load_source(&mut probe, &outside);
+    let fingerprint = probe.get("data").expect("data").fingerprint.clone();
+    drop(probe);
+
+    let recipe = Recipe::build(
+        "tampered".into(),
+        vec![SourceRef {
+            reference_name: "data".into(),
+            display_name: "data".into(),
+            source_path: outside.to_string_lossy().to_string(),
+            relative_path: None,
+            rectify: RectifyProvenance::NotApplicable,
+            fingerprint,
+            reader: Some("read_evil".into()),
+        }],
+        vec![],
+        None,
+    )
+    .expect("build recipe");
+    save_atomic(&duck, &recipe).expect("save");
+
+    let resumed = resume_defaults(&duck, Arc::new(CancelToken::new()), |_| {}).expect("resume");
+    let page = resumed
+        .read_rows("data", 0, 10)
+        .expect("the extension fallback reads the source");
+    assert_eq!(page.rows.len(), 1, "the CSV rows came through");
 }
 
 /// AC4: a boundary-case source (relative + absolute both stored) whose file
@@ -2757,6 +2853,7 @@ fn resume_prefers_relative_when_both_paths_stored_and_match_fingerprint() {
             relative_path: Some("data.csv".into()),
             rectify: RectifyProvenance::NotApplicable,
             fingerprint: fingerprint.clone(),
+            reader: None,
         }],
         vec![],
         None,
@@ -3286,6 +3383,7 @@ fn resume_rejects_a_recipe_whose_active_points_at_an_unregistered_source() {
             relative_path: None,
             rectify: RectifyProvenance::NotApplicable,
             fingerprint,
+            reader: None,
         }],
         vec![],
         Some("people".into()),
@@ -3338,6 +3436,7 @@ fn resume_renders_a_broken_sql_turn_as_failed_and_preserves_prior_results() {
             relative_path: None,
             rectify: RectifyProvenance::NotApplicable,
             fingerprint,
+            reader: None,
         }],
         vec![
             RecipeEntry::Turn(RecipeTurn::without_audit(
@@ -3634,6 +3733,7 @@ fn save_atomic_returns_io_error_when_the_target_directory_does_not_exist() {
             relative_path: None,
             rectify: RectifyProvenance::NotApplicable,
             fingerprint: "fp".into(),
+            reader: None,
         }],
         vec![],
         None,
@@ -3674,6 +3774,7 @@ fn save_atomic_failure_leaves_existing_recipe_bytes_unchanged() {
                 relative_path: None,
                 rectify: RectifyProvenance::NotApplicable,
                 fingerprint: "fp".into(),
+                reader: None,
             }],
             vec![],
             None,
@@ -3813,135 +3914,5 @@ fn cancelled_in_flight_turn_writes_recipe_once_at_terminal_not_mid_flight() {
     assert_ne!(
         bytes_after, bytes_before,
         "terminal Cancelled outcome wrote the recipe exactly once"
-    );
-}
-
-// --- resume artifact backfill (#1202) ---------------------------------------
-
-/// #1202: a resumed session's FRESH temp cwd carries a writable copy of every
-/// persisted artifact (fork versions included), a cwd edit never reaches the
-/// persistent original, and a second resume re-backfills the identical set
-/// (idempotent across restarts).
-#[test]
-fn resume_backfills_persisted_artifacts_into_the_fresh_cwd() {
-    let dir = tempfile::tempdir().expect("tempdir");
-    let duck = dir.path().join("s.json");
-    let source = plant_people(dir.path());
-    drop(build_single_source_session(&duck, &source));
-
-    // What a previous incarnation's settle-time materialize would have left:
-    // the primary delivery plus a `_2` fork.
-    let artifacts = dir.path().join("artifacts");
-    fs::create_dir_all(&artifacts).expect("dirs");
-    fs::write(artifacts.join("dashboard.html"), "html").expect("write");
-    fs::write(artifacts.join("dashboard_2.html"), "html2").expect("write");
-
-    let resumed = resume_defaults(&duck, Arc::new(CancelToken::new()), |_| {}).expect("resume");
-    assert_eq!(
-        fs::read_to_string(resumed.temp_cwd().join("dashboard.html")).expect("copy"),
-        "html",
-        "the agent's cwd carries the delivered file under its original name"
-    );
-    assert_eq!(
-        fs::read_to_string(resumed.temp_cwd().join("dashboard_2.html")).expect("copy"),
-        "html2",
-        "a `_2` fork version backfills alongside its base"
-    );
-
-    // The cwd copy is writable and independent: deleting it never deletes
-    // the persistent original (plain copy, never a hardlink).
-    fs::remove_file(resumed.temp_cwd().join("dashboard.html")).expect("remove copy");
-    assert!(
-        artifacts.join("dashboard.html").is_file(),
-        "the persistent original survives cwd edits"
-    );
-
-    // A second restart resumes into another fresh cwd with the same set.
-    drop(resumed);
-    let resumed_again =
-        resume_defaults(&duck, Arc::new(CancelToken::new()), |_| {}).expect("resume again");
-    assert_eq!(
-        fs::read_to_string(resumed_again.temp_cwd().join("dashboard.html")).expect("copy"),
-        "html",
-        "the second resume backfills the identical set"
-    );
-}
-
-/// #1202: after a resume, the cwd working copy is the agent's own -- driving
-/// a turn never re-copies the persistent layer over an edited copy (settle
-/// does not backfill), and a re-delivery of the same name rides
-/// `materialize`'s `_2` fork with the persistent original untouched.
-#[test]
-fn resumed_cwd_copy_survives_a_turn_and_a_re_delivery_forks_2() {
-    let dir = tempfile::tempdir().expect("tempdir");
-    let duck = dir.path().join("s.json");
-    let source = plant_people(dir.path());
-    drop(build_single_source_session(&duck, &source));
-
-    // What a previous incarnation's settle-time materialize would have left.
-    let artifacts = dir.path().join("artifacts");
-    fs::create_dir_all(&artifacts).expect("dirs");
-    fs::write(artifacts.join("dashboard.html"), "original").expect("write");
-
-    let provider =
-        FakeProvider::new().scripted_tool_turn("更新仪表盘", answer("已更新 dashboard.html"));
-    let mut resumed = Session::open_recipe(
-        &duck,
-        Arc::new(CancelToken::new()),
-        Box::new(provider),
-        Default::default(),
-        |_| {},
-        |_| SourceResolution::Abort,
-        |_| ActiveResolution::Abort,
-    )
-    .expect("resume");
-
-    // The agent edits the backfilled working copy mid-session.
-    fs::write(resumed.temp_cwd().join("dashboard.html"), "edited").expect("edit copy");
-
-    let _ = resumed.ask("更新仪表盘");
-
-    // Settle never re-backfills: the edit survives the turn.
-    assert_eq!(
-        fs::read_to_string(resumed.temp_cwd().join("dashboard.html")).expect("copy"),
-        "edited",
-        "the cwd working copy keeps the turn's edit -- settle does not re-copy"
-    );
-    // The reply's re-delivery of the cwd file rode the `_2` fork with the
-    // edited content; the persistent original stands untouched.
-    assert_eq!(
-        fs::read_to_string(artifacts.join("dashboard.html")).expect("original"),
-        "original",
-        "the persistent original keeps its content"
-    );
-    assert_eq!(
-        fs::read_to_string(artifacts.join("dashboard_2.html")).expect("fork"),
-        "edited",
-        "the re-presented copy lands beside the original as a `_2` fork"
-    );
-}
-
-/// #1202 control: a session with NO artifacts directory resumes into a cwd
-/// holding only the session's own content -- the construction-time
-/// `tool_output` subdir (the replay's source snapshot now lives in the
-/// session tree, ADR-0136, not the temp cwd) -- zero behavioral change for
-/// artifact-less sessions.
-#[test]
-fn resume_without_artifacts_leaves_the_cwd_untouched() {
-    let dir = tempfile::tempdir().expect("tempdir");
-    let duck = dir.path().join("s.json");
-    let source = plant_people(dir.path());
-    drop(build_single_source_session(&duck, &source));
-
-    let resumed = resume_defaults(&duck, Arc::new(CancelToken::new()), |_| {}).expect("resume");
-    let mut names: Vec<String> = fs::read_dir(resumed.temp_cwd())
-        .expect("read cwd")
-        .map(|e| e.expect("entry").file_name().to_string_lossy().into_owned())
-        .collect();
-    names.sort();
-    assert_eq!(
-        names,
-        vec!["tool_output".to_string()],
-        "no artifacts directory -> the cwd holds only its own content",
     );
 }

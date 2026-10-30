@@ -41,7 +41,7 @@ export function FoldToggle({
       type="button"
       className={cn(
         hookClass,
-        "mt-0.5 flex items-center gap-1 cursor-pointer text-xs text-muted-foreground hover:text-foreground",
+        "mt-0.5 flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground",
         className,
       )}
       aria-expanded={expanded}

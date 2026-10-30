@@ -47,8 +47,10 @@
 //! sys-locale exactly like the Rust-side response-locale directive (the
 //! frontend never pushes locale over IPC).
 
+use std::path::Path;
 use std::time::{Duration, Instant};
 
+use tauri::image::Image;
 use tauri::menu::IsMenuItem;
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::{AppHandle, Emitter, Manager};
@@ -57,9 +59,21 @@ use crate::persistence::{scan_sessions_dir, SessionMetadata, SessionsRoot};
 use crate::provider::keychain::ProviderConfigSource;
 use crate::provider::live_config::LiveProviderConfig;
 use crate::provider::prompt::ResponseLocale;
+use crate::workspace::WorkspaceRegistry;
 
 /// The tray's registered id; the rebuild path re-resolves the tray by it.
 const TRAY_ID: &str = "main-tray";
+
+/// Embedded black template silhouette (issue #1151): black RGB + original
+/// alpha, @2x (44px) density. macOS is the only runtime consumer -- its
+/// tray backend renders at a fixed point height, so the denser asset
+/// downsamples cleanly on standard and retina alike. The 22px sibling
+/// (`tray-template.png`) sits in the icon source set, unbundled, without
+/// runtime wiring.
+// Off macOS the constant's only consumer is the asset-contract test
+// below; the production icon path never embeds it.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+const TRAY_TEMPLATE_PNG: &[u8] = include_bytes!("../icons/tray-template@2x.png");
 
 /// Emitted when a tray menu session item is clicked. Payload is the `recipe.json`
 /// path (the stable session identity, ADR-0089) -- the frontend resolves the
@@ -174,6 +188,17 @@ fn session_label<'a>(m: &'a SessionMetadata, texts: &'a TrayTexts) -> &'a str {
     }
 }
 
+/// The workspace suffix for one session row (issue #1430): the registry's
+/// explicit-record projection when the state is live -- the SAME face the
+/// sidebar's workspace section shows (issue #1392's filter; #1432). `None`
+/// (no suffix) for a lazily-minted default workspace, whose directory tail
+/// is a machine timestamp, for an unrecorded directory, and when no
+/// registry is managed -- the tray never shows a face it cannot verify, and
+/// never copies the derivation.
+fn workspace_label(registry: Option<&WorkspaceRegistry>, workspace: &str) -> Option<String> {
+    registry?.explicit_label_of(Path::new(workspace))
+}
+
 /// What a tray menu click asks for, parsed back out of the menu item id.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum TrayAction {
@@ -234,10 +259,17 @@ enum MenuEntry {
 /// sessions, window actions, and the exit -- so the eye can parse the
 /// groups without reading every label. The submenu is omitted entirely when
 /// there is nothing to hold (Decision 3: an empty submenu renders as a
-/// dead-end item on some platforms). Pure so the assembly -- order,
-/// omission, disabled header, separators, fixed entries -- is pinnable
-/// without an app handle.
-fn plan_menu(metas: &[SessionMetadata], texts: &TrayTexts) -> Vec<MenuEntry> {
+/// dead-end item on some platforms). A bound workspace suffixes its row
+/// `name - workspace` only when the projection yields a face (issues
+/// #1430 and #1432); the label projection rides
+/// in as a closure so the plan stays pure -- pinnable without an app
+/// handle or a registry -- while the assembly (order, omission, disabled
+/// header, separators, fixed entries) stays in ONE place.
+fn plan_menu(
+    metas: &[SessionMetadata],
+    texts: &TrayTexts,
+    ws_label: &dyn Fn(&str) -> Option<String>,
+) -> Vec<MenuEntry> {
     fn row(id: String, text: &str, enabled: bool) -> MenuRow {
         MenuRow {
             id,
@@ -245,10 +277,23 @@ fn plan_menu(metas: &[SessionMetadata], texts: &TrayTexts) -> Vec<MenuEntry> {
             enabled,
         }
     }
-    fn session_row(m: &SessionMetadata, texts: &TrayTexts) -> MenuRow {
+    fn session_row(
+        m: &SessionMetadata,
+        texts: &TrayTexts,
+        ws_label: &dyn Fn(&str) -> Option<String>,
+    ) -> MenuRow {
+        let name = session_label(m, texts);
+        // The separator is a literal, not a catalog entry: it is
+        // punctuation, not words (issue #1430). A `None` projection (a
+        // lazily-minted workspace, issue #1432) falls back to the plain
+        // name -- no separator either.
+        let text = match m.workspace.as_deref().and_then(ws_label) {
+            Some(label) => format!("{name} - {label}"),
+            None => name.to_string(),
+        };
         row(
             format!("{ID_SESSION_PREFIX}{}", m.recipe_path.as_str()),
-            session_label(m, texts),
+            &text,
             true,
         )
     }
@@ -260,11 +305,18 @@ fn plan_menu(metas: &[SessionMetadata], texts: &TrayTexts) -> Vec<MenuEntry> {
         texts.recent_header,
         false,
     )));
-    entries.extend(recent.iter().map(|m| MenuEntry::Row(session_row(m, texts))));
+    entries.extend(
+        recent
+            .iter()
+            .map(|m| MenuEntry::Row(session_row(m, texts, ws_label))),
+    );
     if !more.is_empty() {
         entries.push(MenuEntry::More {
             title: texts.more.to_string(),
-            children: more.iter().map(|m| session_row(m, texts)).collect(),
+            children: more
+                .iter()
+                .map(|m| session_row(m, texts, ws_label))
+                .collect(),
         });
     }
     entries.push(MenuEntry::Separator);
@@ -291,6 +343,14 @@ fn build_menu(
     metas: &[SessionMetadata],
     texts: &TrayTexts,
 ) -> tauri::Result<tauri::menu::Menu<tauri::Wry>> {
+    // Resolve the registry ONCE per build: every session row consults the
+    // projection, and one Arc clone beats a per-row state lookup (issue
+    // #1430). A missing state yields no suffix inside [`workspace_label`]
+    // -- the menu still builds.
+    let registry: Option<std::sync::Arc<WorkspaceRegistry>> = app
+        .try_state::<std::sync::Arc<WorkspaceRegistry>>()
+        .map(|s| s.inner().clone());
+    let ws_label = move |ws: &str| workspace_label(registry.as_deref(), ws);
     let materialize = |rows: &[MenuRow]| -> tauri::Result<Vec<Box<dyn IsMenuItem<tauri::Wry>>>> {
         let mut out: Vec<Box<dyn IsMenuItem<tauri::Wry>>> = Vec::with_capacity(rows.len());
         for r in rows {
@@ -301,7 +361,7 @@ fn build_menu(
         Ok(out)
     };
     let mut items: Vec<Box<dyn IsMenuItem<tauri::Wry>>> = Vec::new();
-    for entry in &plan_menu(metas, texts) {
+    for entry in &plan_menu(metas, texts, &ws_label) {
         match entry {
             MenuEntry::Row(r) => items.extend(materialize(std::slice::from_ref(r))?),
             MenuEntry::Separator => {
@@ -555,6 +615,27 @@ fn plan_tray_event(event: &TrayIconEvent) -> TrayEventPlan {
     }
 }
 
+/// Resolve the tray icon (issue #1151). macOS prefers the embedded black
+/// template silhouette flagged for `icon_as_template` so the menu bar
+/// inverts it for light/dark mode; every other platform keeps the
+/// full-color default window icon -- their trays have no template
+/// mechanism. A template decode failure (the asset is compile-time
+/// embedded, so this is belt-and-suspenders) falls back to the color
+/// icon instead of adding a new failure path -- `None` stays reserved
+/// for a genuinely icon-less build.
+fn tray_icon(app: &AppHandle) -> Option<(Image<'_>, bool)> {
+    #[cfg(target_os = "macos")]
+    {
+        match Image::from_bytes(TRAY_TEMPLATE_PNG) {
+            Ok(image) => return Some((image, true)),
+            Err(e) => {
+                log::warn!("template tray icon decode failed; using the color icon: {e}")
+            }
+        }
+    }
+    app.default_window_icon().cloned().map(|icon| (icon, false))
+}
+
 /// Register the system tray. Returns whether it is live; the caller keys the
 /// close-to-hide semantics off this (ADR-0125 Decision 2 -- an unavailable
 /// tray keeps close = real exit). The initial menu carries no sessions (zero
@@ -562,7 +643,7 @@ fn plan_tray_event(event: &TrayIconEvent) -> TrayEventPlan {
 /// after registration so the very first menu open shows live data without
 /// requiring a prior click.
 pub(crate) fn init(app: &AppHandle) -> bool {
-    let Some(icon) = app.default_window_icon() else {
+    let Some((icon, is_template)) = tray_icon(app) else {
         log::warn!("no default window icon for the tray; tray residency unavailable");
         return false;
     };
@@ -574,7 +655,10 @@ pub(crate) fn init(app: &AppHandle) -> bool {
         }
     };
     let built = TrayIconBuilder::with_id(TRAY_ID)
-        .icon(icon.clone())
+        .icon(icon)
+        // Template flagging only takes effect on macOS; elsewhere this is a
+        // no-op pass-through of `false`.
+        .icon_as_template(is_template)
         .tooltip("TOPTOPDuck")
         .menu(&menu)
         // Tauri v2's default shows the menu on LEFT click too; the resident
@@ -637,6 +721,7 @@ mod tests {
             // tray consumes already-trimmed scan output (ADR-0127).
             pinned: false,
             archived: false,
+            workspace: None,
         }
     }
 
@@ -646,6 +731,14 @@ mod tests {
 
     /// Test-only token for a separator slot in the plan kind assertions.
     const SEP: &str = "--";
+
+    /// Test workspace projection: echoes its input so an assertion also pins
+    /// WHICH workspace string the plan handed it. Unbound rows never consult
+    /// it -- an accidental unconditional consult surfaces as a visible
+    /// ` - ws#...` suffix and fails the plain-name assertions.
+    fn ws_echo(ws: &str) -> Option<String> {
+        Some(format!("ws#{ws}"))
+    }
 
     // --- texts_for (whole-table per locale, issue #1144) --------------------
 
@@ -899,7 +992,7 @@ mod tests {
         let metas: Vec<_> = (0..4)
             .map(|i| meta(&format!("s{i}.recipe.json"), "n"))
             .collect();
-        let plan = plan_menu(&metas, &texts_for(ResponseLocale::EnUS));
+        let plan = plan_menu(&metas, &texts_for(ResponseLocale::EnUS), &ws_echo);
         let rows: Vec<(&str, &str, bool)> = plan
             .iter()
             .filter_map(|e| match e {
@@ -939,13 +1032,13 @@ mod tests {
         let metas: Vec<_> = (0..3)
             .map(|i| meta(&format!("s{i}.recipe.json"), "n"))
             .collect();
-        let plan = plan_menu(&metas, &texts_for(ResponseLocale::ZhCN));
+        let plan = plan_menu(&metas, &texts_for(ResponseLocale::ZhCN), &ws_echo);
         assert!(plan.iter().all(|e| !matches!(e, MenuEntry::More { .. })));
         // With no sessions at all the header + the three fixed actions
         // plus the two zone separators remain, in layout order -- the
         // empty tray still offers new/open/quit, with no doubled
         // separator anywhere.
-        let plan = plan_menu(&[], &texts_for(ResponseLocale::ZhCN));
+        let plan = plan_menu(&[], &texts_for(ResponseLocale::ZhCN), &ws_echo);
         let kinds: Vec<&str> = plan
             .iter()
             .map(|e| match e {
@@ -974,7 +1067,7 @@ mod tests {
         let metas: Vec<_> = (0..4)
             .map(|i| meta(&format!("s{i}.recipe.json"), "n"))
             .collect();
-        let plan = plan_menu(&metas, &texts_for(ResponseLocale::EnUS));
+        let plan = plan_menu(&metas, &texts_for(ResponseLocale::EnUS), &ws_echo);
         let kinds: Vec<&str> = plan
             .iter()
             .map(|e| match e {
@@ -998,6 +1091,127 @@ mod tests {
                 ID_QUIT,
             ]
         );
+    }
+
+    // --- workspace suffix (issue #1430) --------------------------------------
+
+    #[test]
+    fn plan_suffixes_workspace_bound_rows_top_level_and_more() {
+        // Both menu faces carry the SAME `name - workspace` shape: the
+        // top-level recent rows and the "more" submenu children.
+        let bound = |path: &str, ws: &str| SessionMetadata {
+            workspace: Some(ws.into()),
+            ..meta(path, "n")
+        };
+        let metas = vec![
+            bound("s0.recipe.json", "C:\\ws\\alpha"),
+            meta("s1.recipe.json", "n"),
+            meta("s2.recipe.json", "n"),
+            bound("s3.recipe.json", "C:\\ws\\beta"),
+        ];
+        let plan = plan_menu(&metas, &texts_for(ResponseLocale::EnUS), &ws_echo);
+        match &plan[1] {
+            MenuEntry::Row(r) => assert_eq!(r.text, "n - ws#C:\\ws\\alpha"),
+            other => panic!("expected a row at index 1, got {other:?}"),
+        }
+        match &plan[4] {
+            MenuEntry::More { children, .. } => assert_eq!(
+                children.iter().map(|c| c.text.as_str()).collect::<Vec<_>>(),
+                vec!["n - ws#C:\\ws\\beta"]
+            ),
+            other => panic!("expected the more submenu at index 4, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn plan_leaves_unbound_rows_untouched() {
+        // `workspace: None` (never a disk-need moment, or a pre-field
+        // recipe): the row is the plain session name -- no suffix, no
+        // separator.
+        let metas: Vec<_> = (0..3)
+            .map(|i| meta(&format!("s{i}.recipe.json"), "n"))
+            .collect();
+        let plan = plan_menu(&metas, &texts_for(ResponseLocale::EnUS), &ws_echo);
+        let texts: Vec<&str> = plan
+            .iter()
+            .filter_map(|e| match e {
+                MenuEntry::Row(r) if r.id.starts_with(ID_SESSION_PREFIX) => Some(r.text.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(texts, vec!["n", "n", "n"]);
+    }
+
+    #[test]
+    fn plan_suffixes_the_unnamed_fallback() {
+        // A blank display name does not dodge the join: the localized
+        // "unnamed" string participates like any name.
+        let metas = vec![SessionMetadata {
+            workspace: Some("C:\\ws\\alpha".into()),
+            ..meta("a.recipe.json", "")
+        }];
+        let plan = plan_menu(&metas, &texts_for(ResponseLocale::ZhCN), &|_| {
+            Some("甲".into())
+        });
+        match &plan[1] {
+            MenuEntry::Row(r) => assert_eq!(r.text, "未命名会话 - 甲"),
+            other => panic!("expected a row at index 1, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn plan_drops_the_suffix_when_the_projection_is_none() {
+        // The lazy-mint face (issue #1432): `workspace` is bound but the
+        // projection returns None (an implicit record / an unrecorded
+        // directory) -- the row is the plain session name, no separator.
+        // Distinct from the unbound case: the workspace IS set on the row.
+        let bound = SessionMetadata {
+            workspace: Some("C:\\ws\\2026-10-29-15-48-00".into()),
+            ..meta("s0.recipe.json", "n")
+        };
+        let plan = plan_menu(&[bound], &texts_for(ResponseLocale::EnUS), &|_| {
+            None::<String>
+        });
+        match &plan[1] {
+            MenuEntry::Row(r) => assert_eq!(r.text, "n"),
+            other => panic!("expected a row at index 1, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn workspace_label_suffixed_only_for_explicit_records() {
+        // Registry live: the suffix is the EXPLICIT record's label -- the
+        // sidebar section's same face -- reached through the real write
+        // paths. A lazily-minted record (implicit, untitled) and an
+        // unrecorded directory carry no suffix: the minted tail is a
+        // machine timestamp, and the unbound path is one the user never
+        // chose as a face (issue #1432). `tempdir` (the registry tests'
+        // fixture) cleans up even on a failed assertion.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let reg = WorkspaceRegistry::new(dir.path().join(crate::workspace::WORKSPACES_FILE_NAME));
+        // Slash spellings keep Path::file_name platform-neutral: the suite
+        // runs on the Linux CI leg, where a backslash is not a separator.
+        reg.record_titled(Path::new("C:/ws/alpha"), "Alpha")
+            .expect("record");
+        reg.record_at(Path::new("C:/ws/2026-10-29-15-48-00"), None, false, 1_000)
+            .expect("record");
+        assert_eq!(
+            workspace_label(Some(&reg), "C:/ws/alpha"),
+            Some("Alpha".to_string())
+        );
+        assert_eq!(
+            workspace_label(Some(&reg), "C:/ws/2026-10-29-15-48-00"),
+            None,
+            "a lazily-minted (implicit) workspace carries no suffix"
+        );
+        assert_eq!(
+            workspace_label(Some(&reg), "C:/ws/never-recorded"),
+            None,
+            "an unrecorded directory carries no suffix"
+        );
+        // No registry managed: no face the tray could verify -- no suffix.
+        // The tray never fails to build over a label.
+        assert_eq!(workspace_label(None, "C:/ws/alpha"), None);
     }
 
     // --- plan_tray_event (rebuild trigger stays off the right click) ------
@@ -1060,5 +1274,26 @@ mod tests {
         let plan = plan_tray_event(&enter());
         assert!(!plan.reveal);
         assert!(plan.rebuild);
+    }
+
+    #[test]
+    fn embedded_template_icon_decodes_black_at_retina_size() {
+        // Pins the template contract (issue #1151): decodable PNG, @2x
+        // square, every visible pixel pure-black RGB (template rendering
+        // recolors from the alpha channel alone; black RGB pins Apple's
+        // template spec), and a shape actually present. Swapping in any
+        // color asset must turn this red.
+        let icon =
+            Image::from_bytes(TRAY_TEMPLATE_PNG).expect("embedded template tray icon must decode");
+        assert_eq!((icon.width(), icon.height()), (44, 44));
+        let rgba = icon.rgba();
+        assert!(
+            rgba.chunks_exact(4).all(|px| px[..3] == [0, 0, 0]),
+            "template pixels must be pure black RGB"
+        );
+        assert!(
+            rgba.chunks_exact(4).any(|px| px[3] > 0),
+            "silhouette must keep visible alpha"
+        );
     }
 }

@@ -13,7 +13,9 @@ import { cn } from "@/lib/utils";
 // (bg-popover / border-input / focus:bg-accent), so a select recolors with the
 // .dark class. The trigger accepts an optional leading icon slot (the theme
 // select shows a Sun/Moon/Monitor glyph) passed as part of children alongside
-// <SelectValue/>; the chevron is appended by the trigger itself.
+// <SelectValue/>; the chevron is appended by the trigger itself. The upstream
+// cursor-default on the interactive items is dropped: the app.css base rule
+// already carries the hand (the app default, not drift).
 
 function Select({ ...props }: ComponentProps<typeof SelectPrimitive.Root>) {
   return <SelectPrimitive.Root data-slot="select" {...props} />;
@@ -110,7 +112,7 @@ function SelectItem({
     <SelectPrimitive.Item
       data-slot="select-item"
       className={cn(
-        "focus:bg-accent focus:text-accent-foreground hover:bg-accent hover:text-accent-foreground [&_svg:not([class*='text-'])]:text-muted-foreground relative flex w-full cursor-default items-center gap-2 rounded-sm py-1.5 pr-8 pl-2 text-sm outline-hidden select-none data-[disabled]:pointer-events-none data-[disabled]:opacity-50 [&_svg]:pointer-events-none [&_svg]:shrink-0 [&_svg:not([class*='size-'])]:size-4 *:[span]:last:flex *:[span]:last:items-center *:[span]:last:gap-2",
+        "focus:bg-accent focus:text-accent-foreground hover:bg-accent hover:text-accent-foreground [&_svg:not([class*='text-'])]:text-muted-foreground relative flex w-full items-center gap-2 rounded-sm py-1.5 pr-8 pl-2 text-sm outline-hidden select-none data-[disabled]:pointer-events-none data-[disabled]:opacity-50 [&_svg]:pointer-events-none [&_svg]:shrink-0 [&_svg:not([class*='size-'])]:size-4 *:[span]:last:flex *:[span]:last:items-center *:[span]:last:gap-2",
         className,
       )}
       {...props}
@@ -145,7 +147,9 @@ function SelectScrollUpButton({
   return (
     <SelectPrimitive.ScrollUpButton
       data-slot="select-scroll-up-button"
-      className={cn("flex cursor-default items-center justify-center py-1", className)}
+      // The hand: a clickable div with no ARIA interactive role -- the base
+      // rule's exception policy (explicit declaration) applies.
+      className={cn("cursor-pointer flex items-center justify-center py-1", className)}
       {...props}
     >
       <ChevronUp className="size-4" />
@@ -160,7 +164,9 @@ function SelectScrollDownButton({
   return (
     <SelectPrimitive.ScrollDownButton
       data-slot="select-scroll-down-button"
-      className={cn("flex cursor-default items-center justify-center py-1", className)}
+      // The hand: a clickable div with no ARIA interactive role -- the base
+      // rule's exception policy (explicit declaration) applies.
+      className={cn("cursor-pointer flex items-center justify-center py-1", className)}
       {...props}
     >
       <ChevronDown className="size-4" />

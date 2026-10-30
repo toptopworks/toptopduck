@@ -151,7 +151,7 @@ describe("App settings overlay (ADR-0065, issue #151 ACs)", () => {
     expect(screen.getByRole("button", { name: "关闭" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "最小化" })).toBeInTheDocument();
     // ...the left slot swaps to the SETTINGS nav toggle (issue #285: the same
-    // slot the session-sidebar toggle occupies in the workspace carries the
+    // slot the session-sidebar toggle occupies in the right sidebar carries the
     // settings left-nav collapse toggle while settings are open). The
     // dual-state gear still rides the left columns' bottoms (issue #282)...
     const topbar = document.querySelector(".topbar") as HTMLElement;
@@ -159,7 +159,7 @@ describe("App settings overlay (ADR-0065, issue #151 ACs)", () => {
     expect(topbar.querySelector(".sidebar-toggle")).not.toBeNull();
     // ...and the topbar keeps its drag region.
     expect(document.querySelector(".topbar [data-tauri-drag-region]")).not.toBeNull();
-    // Returning to the workspace restores the session shell.
+    // Returning to the main view restores the session shell.
     fireEvent.click(document.querySelector(".settings-back") as HTMLElement);
     await waitFor(() =>
       expect(document.querySelector(".settings-overlay")).not.toBeInTheDocument(),
@@ -174,7 +174,7 @@ describe("App settings overlay (ADR-0065, issue #151 ACs)", () => {
     await waitFor(() =>
       expect(document.querySelector(".settings-overlay")).toBeInTheDocument(),
     );
-    // Rail-top "Back to workspace" (zh: 返回工作区); the .settings-back hook
+    // Rail-top "Back to main view" (zh: 返回主界面); the .settings-back hook
     // class distinguishes it from the gear, which shares its accessible name.
     fireEvent.click(document.querySelector(".settings-back") as HTMLElement);
     await waitFor(() =>

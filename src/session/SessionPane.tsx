@@ -103,8 +103,8 @@ interface SessionPaneProps {
    *  after the session's first turn settles with this pane's sessionId. The
    *  sid-taking shape lets the shell pass a useCallback-stable handler -- an
    *  inline per-session arrow would rebuild handleAskWithAutoName on every
-   *  App render, and the ADR-0092 composer-fields report compares handleAsk
-   *  by reference (an unstable identity loops the bar's fields registry). */
+   *  App render, and the composer registry's identity contract compares
+   *  reported handlers by reference (see composerRegistry.ts). */
   onFirstTurnSettled: (sessionId: string) => void;
   /** The app-level approval channel (ADR-0083, issue #297): the pane reads
    *  its own session's entries (merged into the live trace by useTurnFlow)
@@ -207,16 +207,17 @@ export function SessionPane({ sessionId, isActive, pendingIngestPaths, onIngestC
   const persistDetail = s.persistError ? errorDetail(s.persistError) : null;
   const queryClient = useQueryClient();
 
-  // ADR-0092: lift this session's bar-relevant fields to the shell-level bar.
-  // handleAsk / handleCancel / handleIngestFiles are useCallback-stable inside
-  // useSessionState; turnLoading / phase change during a turn; the pane's
-  // union `loading` (turn OR mutation, ADR-0040) stays pane-internal -- it
-  // must NOT reach the shell bar, or a dataset mutation's in-flight window
-  // flips the bar's Ask/Stop button (the reported flicker). workspaceCollapsed
-  // (bar-shaping, ADR-0083 fold) changes on the fold toggle + the one-shot
-  // first-Materialized expansion. The effect fires on those changes, keeping
-  // the shell's per-session composerFields registry fresh for the active
-  // session.
+  // ADR-0092: lift this session's bar-relevant fields to the shell-level bar
+  // (the composer registry owns the registry and its identity contract --
+  // see composerRegistry.ts; the reported handlers must stay
+  // useCallback-stable).
+  // The payload is the pane-side selection: the TURN-domain turnLoading /
+  // phase, NOT the union `loading` (turn OR mutation, ADR-0040) -- a dataset
+  // mutation's in-flight window must not flip the bar's Ask/Stop button (the
+  // reported flicker). workspaceCollapsed (bar-shaping, ADR-0083 fold)
+  // changes on the fold toggle + the one-shot first-Materialized expansion;
+  // the effect fires on those changes so the shell's registry entry stays
+  // fresh for the active session.
   useEffect(() => {
     onComposerFields(sessionId, {
       loading: s.turnLoading,
@@ -587,7 +588,7 @@ export function SessionPane({ sessionId, isActive, pendingIngestPaths, onIngestC
         {/* --- Workspace (ADR-0045/0062 R2) -------------------------------- */}
         <section
           className="session-workspace"
-          aria-label={intl.formatMessage({ id: "session.workspace.ariaLabel", defaultMessage: "Workspace" })}
+          aria-label={intl.formatMessage({ id: "session.workspace.ariaLabel", defaultMessage: "Right sidebar" })}
           inert={s.workspaceCollapsed}
         >
           {/* ADR-0067 (issue #173): the .workspace-tabs visual chrome (padding,
@@ -609,7 +610,7 @@ export function SessionPane({ sessionId, isActive, pendingIngestPaths, onIngestC
               aria-controls={resultPanelId}
               tabIndex={tab === "result" ? 0 : -1}
               className={cn(
-                "px-3 py-1.5 cursor-pointer text-sm border-b-2 border-b-transparent text-muted-foreground",
+                "px-3 py-1.5 text-sm border-b-2 border-b-transparent text-muted-foreground",
                 tab === "result" && "active text-primary border-b-primary font-semibold",
               )}
               onClick={() => setTab("result")}
@@ -624,7 +625,7 @@ export function SessionPane({ sessionId, isActive, pendingIngestPaths, onIngestC
               aria-controls={workingSetPanelId}
               tabIndex={tab === "workingSet" ? 0 : -1}
               className={cn(
-                "px-3 py-1.5 cursor-pointer text-sm border-b-2 border-b-transparent text-muted-foreground",
+                "px-3 py-1.5 text-sm border-b-2 border-b-transparent text-muted-foreground",
                 tab === "workingSet" && "active text-primary border-b-primary font-semibold",
               )}
               onClick={() => setTab("workingSet")}
@@ -749,7 +750,6 @@ export function SessionPane({ sessionId, isActive, pendingIngestPaths, onIngestC
                 key={`result-${regionRetryEpoch}`}
                 content={s.workspaceContent}
                 sessionId={sessionId}
-                recipePath={recipePath}
                 hasData={s.datasets.length > 0}
                 onResetRegion={resetSessionCache}
                 onResetArtifact={resetArtifactCache}
@@ -792,7 +792,7 @@ export function SessionPane({ sessionId, isActive, pendingIngestPaths, onIngestC
             type="button"
             variant="outline"
             size="icon"
-            className="rail-follow-pill size-8 cursor-pointer rounded-full shadow-md"
+            className="rail-follow-pill size-8 rounded-full shadow-md"
             aria-label="Jump to latest"
             onClick={scrollToBottom}
           >
@@ -827,7 +827,6 @@ export function SessionPane({ sessionId, isActive, pendingIngestPaths, onIngestC
 function WorkspaceResult({
   content,
   sessionId,
-  recipePath,
   hasData,
   onResetRegion,
   onResetArtifact,
@@ -837,9 +836,6 @@ function WorkspaceResult({
 }: {
   content: WorkspaceContent;
   sessionId: string;
-  /** The session's bound recipe.json path -- anchors the HTML branch's
-   *  artifacts-dir scope check (ADR-0124 Decision 4). */
-  recipePath: string;
   hasData: boolean;
   /** ADR-0058 L2 result-partition retry: remove the session slice so a
    *  remounted ResultView re-fetches fresh rows instead of re-throwing against
@@ -953,7 +949,6 @@ function WorkspaceResult({
           <ArtifactView
             artifact={{ path: content.path, file_name: content.fileName }}
             render={content.render}
-            recipePath={recipePath}
           />
         </ErrorBoundary>
       );

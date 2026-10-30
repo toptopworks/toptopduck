@@ -40,6 +40,7 @@ const SESSION_A: SessionMetadata = {
   format_version: 1,
   pinned: false,
   archived: false,
+  workspace: null,
 };
 
 describe("usePersistedSessions", () => {
@@ -169,6 +170,7 @@ describe("usePersistedSessions archived fetch (ADR-0127, issue #1175)", () => {
       ...SESSION_A,
       recipe_path: "/x/arch.json",
       archived: true,
+      workspace: null,
     };
     vi.mocked(listSessions).mockResolvedValue([SESSION_A, ARCH]);
     const { result } = renderHook(() =>
@@ -196,6 +198,7 @@ describe("usePersistedSessions archived fetch (ADR-0127, issue #1175)", () => {
       ...SESSION_A,
       recipe_path: "/x/arch.json",
       archived: true,
+      workspace: null,
     };
     vi.mocked(listSessions).mockResolvedValueOnce([SESSION_A, ARCH]);
     const { result } = renderHook(() =>

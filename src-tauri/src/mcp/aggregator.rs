@@ -696,7 +696,11 @@ impl McpAggregator {
 
     /// Route a `tools/call` whose name is `mcp__<slug>__<tool>` to the matching
     /// server, stripping the prefix so the server sees its native tool name.
-    /// Returns the server's tools/call result for the gateway to relay. The
+    /// Returns the server's tools/call result for the caller to relay.
+    /// Core-only by contract: the only production caller is the dispatch
+    /// core (`session::turn_dispatch`), which owns the approval gate, the
+    /// ADR-0115 freeze, and the trace assembly around the route -- a new
+    /// arm must call `dispatch_gated_call`, never this directly. The
     /// call runs under the server's per-call deadline (issue #889): on
     /// expiry the transport is killed, the server is marked dead for the
     /// rest of the turn (subsequent calls fail fast), and the error carries
@@ -1150,11 +1154,13 @@ pub fn is_namespaced(name: &str) -> bool {
 }
 
 /// Extract the first text block from a standard MCP `tools/call` envelope
-/// (ADR-0076, issue #301). Both runtimes reduce the envelope to a flat string
-/// via this helper, but in different roles whose asymmetry is deliberate:
-/// - The gateway uses it for the turn **trace excerpt** only; the full
-///   envelope is relayed to the model VERBATIM (structured content blocks
-///   preserved -- see `external_call_outcome` in `runtime::gateway::server`).
+/// (ADR-0076, issue #301). Both dispatch faces reduce the envelope to a flat
+/// string via this helper, but in different roles whose asymmetry is
+/// deliberate:
+/// - The bridge face uses it for the flattened `ToolResult` and the turn
+///   **trace excerpt**; the full envelope is relayed to the model VERBATIM
+///   (structured content blocks preserved -- see `external_call_outcome` in
+///   `session::turn_dispatch`).
 /// - The built-in agent loop uses it for the **model-facing
 ///   `ToolResult.content` itself**, which is a flat `String` on that path, so
 ///   a multi-block or non-text result reduces to its first text block.

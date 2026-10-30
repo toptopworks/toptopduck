@@ -80,9 +80,9 @@ pub(crate) fn find_definition(name: &str) -> Option<&'static BuiltinAgentDefinit
 /// Decision 1): a definition name is also the delegation TOOL name, so a
 /// create / rename may take neither a shipped builtin definition's name nor
 /// any reserved tool name (a built-in DuckDB tool, the `mcp__` prefix, a
-/// meta-tool, a builtin CLI entry -- the live tables, so a future tool
-/// extends the reservation for free). Static full-set membership,
-/// independent of materialization.
+/// meta-tool, a builtin CLI entry, a gated builtin -- the live tables, so
+/// a future tool extends the reservation for free). Static full-set
+/// membership, independent of materialization.
 pub(crate) fn is_reserved_agent_name(name: &str) -> bool {
     find_definition(name).is_some() || crate::cli_tools::config::is_reserved_name(name)
 }

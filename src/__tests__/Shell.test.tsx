@@ -1443,6 +1443,7 @@ describe("App resume + close-in-flight seams (issue #83)", () => {
         format_version: 1,
         pinned: false,
         archived: false,
+        workspace: null,
       },
     ]);
     const r1 = src("result_1");
@@ -1480,6 +1481,7 @@ describe("App resume + close-in-flight seams (issue #83)", () => {
         format_version: 1,
         pinned: false,
         archived: false,
+        workspace: null,
       },
     ]);
     // Hold openRecipe pending so resumeStatus stays visible for assertions.
@@ -1557,15 +1559,13 @@ describe("App resume + close-in-flight seams (issue #83)", () => {
 // moved to .session-header (slice 2, #512).
 
 // A minimal valid AppConfig for the #84 persistence tests (the shell prefs are
-// the only field under test; the rest are just-shape defaults). The helper fills
-// `sidebar_grouping: "flat"` (the serde default) so callers stay focused on the
-// collapse prefs they actually exercise (#251 added the grouping field).
+// the only field under test; the rest are just-shape defaults).
 function baseAppConfig(
   shell: Pick<AppConfig["shell"], "sidebar_collapsed">,
 ): AppConfig {
   return sharedBaseAppConfig({
     format_version: 1,
-    shell: { ...shell, sidebar_grouping: "flat" },
+    shell: { ...shell },
   });
 }
 
@@ -1597,9 +1597,8 @@ describe("App artifact presentation (issue #1088, ADR-0124 Decision 3/4)", () =>
     // row after the mount's initial load).
     vi.mocked(conversation).mockImplementation(async () => state.thread);
     // Re-establish the createSession default: clearAllMocks clears calls,
-    // not implementations, and an earlier suite's persistent clobber (a
-    // different recipe_path) would route the html/pdf scope check off the
-    // artifacts dir and degrade the iframe to the fallback face.
+    // not implementations, and an earlier suite's persistent clobber would
+    // leak a stale recipe_path into downstream assertions.
     vi.mocked(createSession).mockResolvedValue({
       session_id: "sess-1",
       recipe_path: "/sessions/sess-1/recipe.json",
@@ -1612,7 +1611,7 @@ describe("App artifact presentation (issue #1088, ADR-0124 Decision 3/4)", () =>
     // recorded turn already carries the settle-computed manifest (ADR-0124
     // Decision 2), TurnCard's render gate mounts the ArtifactCard, the
     // exists-checked row is clickable, handleSelectFile moves viewedResult
-    // onto the file view AND expands the workspace, and the in-scope HTML
+    // onto the file view AND expands the workspace, and the manifest-member HTML
     // renders the sandboxed iframe stage.
     state.workingSet = [src("people")];
     state.thread = [artifactTurn(["/sessions/sess-1/artifacts/page.html"])];
@@ -1804,7 +1803,7 @@ describe("App shell window collapse + drag-drop bisection (issue #84)", () => {
     await openSession();
     const pane = document.querySelector(".session-pane");
     expect(pane?.classList.contains("workspace-collapsed")).toBe(true);
-    expect(screen.getByRole("button", { name: "展开工作区" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "展开右侧栏" })).toBeInTheDocument();
   });
 
   it("centers the thread content in a reading column when the workspace is folded (issue #833)", async () => {
@@ -1934,10 +1933,10 @@ describe("App shell window collapse + drag-drop bisection (issue #84)", () => {
   it("opens / closes the workspace via the header toggle (manual fold)", async () => {
     render(<App />);
     await openSession();
-    fireEvent.click(screen.getByRole("button", { name: "展开工作区" }));
+    fireEvent.click(screen.getByRole("button", { name: "展开右侧栏" }));
     expect(document.querySelector(".session-pane")?.classList.contains("workspace-collapsed")).toBe(false);
     // The toggle flips to its close label once open.
-    fireEvent.click(screen.getByRole("button", { name: "收起工作区" }));
+    fireEvent.click(screen.getByRole("button", { name: "收起右侧栏" }));
     expect(document.querySelector(".session-pane")?.classList.contains("workspace-collapsed")).toBe(true);
   });
 
@@ -2077,7 +2076,7 @@ describe("App shell window collapse + drag-drop bisection (issue #84)", () => {
       expect(document.querySelector(".session-pane")?.classList.contains("workspace-collapsed")).toBe(false),
     );
     // The user folds it back; the one-shot is spent.
-    fireEvent.click(screen.getByRole("button", { name: "收起工作区" }));
+    fireEvent.click(screen.getByRole("button", { name: "收起右侧栏" }));
     expect(document.querySelector(".session-pane")?.classList.contains("workspace-collapsed")).toBe(true);
     // A SECOND promotion must not steal focus -- the fold stays.
     fireEvent.change(screen.getByLabelText("提问"), { target: { value: "第二问" } });
@@ -2223,7 +2222,8 @@ describe("App shell window collapse + drag-drop bisection (issue #84)", () => {
     );
     render(<App />);
     // Wait for getAppConfig to resolve AND the mount effect's .then to set
-    // appConfigRef.current (commitShellPrefs is a no-op until the ref lands).
+    // appConfigRef.current (the collapse persist is a no-op until the ref
+    // lands).
     await waitFor(() => expect(getAppConfig).toHaveBeenCalled());
     await act(async () => {
       await new Promise((r) => setTimeout(r, 0));
@@ -2232,10 +2232,8 @@ describe("App shell window collapse + drag-drop bisection (issue #84)", () => {
     // setAppConfig receives a config whose shell reflects the toggle.
     await waitFor(() =>
       expect(setAppConfig).toHaveBeenCalledWith(
-        // Nested objectContaining: the commit also carries sidebar_grouping
-        // (#251), which this collapse-only test stays agnostic to.
         expect.objectContaining({
-          shell: expect.objectContaining({ sidebar_collapsed: true }),
+          shell: { sidebar_collapsed: true },
         }),
       ),
     );
@@ -2449,6 +2447,7 @@ describe("App Ctrl/⌘+K session-search modal (ADR-0072, issue #252)", () => {
         format_version: 2,
         pinned: false,
         archived: false,
+        workspace: null,
       },
       {
         recipe_path: "/x/beta.json",
@@ -2458,6 +2457,7 @@ describe("App Ctrl/⌘+K session-search modal (ADR-0072, issue #252)", () => {
         format_version: 2,
         pinned: false,
         archived: false,
+        workspace: null,
       },
     ];
   }
@@ -2715,6 +2715,7 @@ describe("Composer control row (ADR-0083, issues #350/#351)", () => {
         format_version: 1,
         pinned: false,
         archived: false,
+        workspace: null,
       },
     ]);
     vi.mocked(createSession).mockResolvedValue({ session_id: "sess-resume", recipe_path: "/sessions/sess-resume/recipe.json" });
@@ -3142,8 +3143,8 @@ describe("Composer skill picker pre-activation (ADR-0112, issue #716)", () => {
     await waitFor(() =>
       expect(screen.getByRole("button", { name: "提问" })).toBeInTheDocument(),
     );
-    // A second picker pick lands the in-session chip (the viewInvocations
-    // list is the whole intent -- this surface has no mount facet).
+    // A second picker pick lands the in-session chip (the session-scope
+    // staging list is the whole intent -- this surface has no mount facet).
     fireEvent.change(bar, { target: { value: "/", selectionStart: 1 } });
     await screen.findByRole("option");
     fireEvent.keyDown(bar, { key: "Enter" });

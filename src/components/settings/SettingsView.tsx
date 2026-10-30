@@ -57,8 +57,8 @@ import {
 // App strips only the topbar's workspace children while settings are open.
 //
 // CHROME (ADR-0075): the retired single settings header is split into a left
-// RAIL -- brand + "Back to workspace" at the top, icon nav in the middle, and a
-// connection-status row + dual-state gear (back to workspace) at the bottom --
+// RAIL -- brand + "Back to main view" at the top, icon nav in the middle, and a
+// connection-status row + dual-state gear (back to main view) at the bottom --
 // while each pane owns its own hero title + description. There is NO global
 // Save/Cancel footer: every control persists itself (per-control persistence).
 //
@@ -448,7 +448,7 @@ export function SettingsView({
   // gear's accessible name / tooltip).
   const backToWorkspaceLabel = intl.formatMessage({
     id: "settings.backToWorkspace",
-    defaultMessage: "Back to workspace",
+    defaultMessage: "Back to main view",
   });
 
   return (
@@ -473,7 +473,7 @@ export function SettingsView({
             size="sm"
             // settings-back hook class (ADR-0067 selector stability) so tests can
             // target the rail-top back button distinctly from the gear (both are
-            // labelled "Back to workspace").
+            // labelled "Back to main view").
             className="settings-back w-full justify-start gap-2 text-muted-foreground"
             onClick={() => void requestClose()}
           >
@@ -490,7 +490,7 @@ export function SettingsView({
               type="button"
               className={cn(
                 bareButtonReset,
-                "settings-nav-button text-foreground flex w-full cursor-pointer items-center gap-2.5 rounded-md px-2.5 py-2 text-sm",
+                "settings-nav-button text-foreground flex w-full items-center gap-2.5 rounded-md px-2.5 py-2 text-sm",
                 "hover:bg-accent",
                 "focus-visible:outline-ring focus-visible:outline-2 focus-visible:outline-offset-2",
                 section === s && "bg-accent text-accent-foreground font-medium",

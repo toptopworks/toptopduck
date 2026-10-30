@@ -66,7 +66,7 @@ export function OccupancyRing({ entries }: OccupancyRingProps) {
       <TooltipTrigger asChild>
         <button
           type="button"
-          className="inline-flex size-4 shrink-0 cursor-pointer items-center justify-center rounded-full text-muted-foreground transition-colors hover:text-foreground outline-none focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring"
+          className="inline-flex size-4 shrink-0 items-center justify-center rounded-full text-muted-foreground transition-colors hover:text-foreground outline-none focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring"
           aria-label={intl.formatMessage({
             id: "thread.occupancy.ariaLabel",
             defaultMessage: "Context occupancy",

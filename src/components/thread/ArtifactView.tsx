@@ -14,10 +14,11 @@
 // may execute (interactive reports stay usable) but only inside the opaque
 // origin, never reading the app page or its credentials. The pdf frame pins
 // the inverse posture: no sandbox attribute at all, because the viewer
-// exposes no script surface to confine. The asset protocol's runtime scope
-// covers the per-session artifacts directory only, so an out-of-scope path
-// (a user-directory original, an unbound temp path) degrades to the face
-// rather than pointing a frame at a denial.
+// exposes no script surface to confine. Embed eligibility is manifest
+// membership alone (ADR-0137 Decision 6): the command layer grants the
+// asset protocol scope file-by-file for exactly the manifest-named files,
+// so every rendered frame is in-scope by construction and only a missing
+// file degrades to the face.
 //
 // Existence is a render-time fact (Decision 2): artifact_exists answers
 // whether the file still sits on disk; a miss degrades the body to the
@@ -31,23 +32,19 @@ import { convertFileSrc } from "@tauri-apps/api/core";
 import { readArtifactText } from "../../api";
 import { artifactKeys } from "../../session/queryKeys";
 import { useArtifactExists } from "../../session/useArtifactExists";
-import { isWithinArtifactsDir, type ArtifactRenderKind } from "../../session/workspace";
+import { type ArtifactRenderKind } from "../../session/workspace";
 import { RoundProse } from "./RoundProse";
 import { ArtifactHeader } from "./ArtifactHeader";
 
 export function ArtifactView({
   artifact,
   render,
-  recipePath,
 }: {
   /** The manifest entry the view resolves (thread-derived, settle-frozen):
    *  the path (identity) + file_name (display) the derivation carries. */
   artifact: { path: string; file_name: string };
   /** The derived render matrix branch (deriveWorkspaceContent's output). */
   render: ArtifactRenderKind;
-  /** The session's bound recipe.json path -- anchors the artifacts-dir scope check
-   *  for the html/pdf iframe branches. */
-  recipePath: string;
 }) {
   // One existence read for the whole stage: the header's action gate and the
   // body's degrade share the entry (and the rail row's cache -- the same
@@ -80,7 +77,6 @@ export function ArtifactView({
           key={refreshKey}
           artifact={artifact}
           render={render}
-          recipePath={recipePath}
           exists={exists}
         />
       </div>
@@ -95,28 +91,26 @@ export function ArtifactView({
 function ArtifactStageBody({
   artifact,
   render,
-  recipePath,
   exists,
 }: {
   artifact: { path: string; file_name: string };
   render: ArtifactRenderKind;
-  recipePath: string;
   exists: boolean;
 }) {
-  // The iframe branches share one degrade gate (Decision 2/4): the scope
-  // check is a render fact (the duck path and the manifest paths are
-  // settle/stable strings), and a missing in-scope file must render the
-  // face, not point a frame at a denial the protocol would show as the
-  // WebView's own error page.
-  const inScope = isWithinArtifactsDir(artifact.path, recipePath);
+  // The iframe branches share one degrade gate (Decision 2): existence is a
+  // render fact, and a missing file must render the face, not point a
+  // frame at a denial the protocol would show as the WebView's own error
+  // page. Scope is not a frontend question since ADR-0137 Decision 6 --
+  // embed eligibility is manifest membership, granted file-by-file behind
+  // the asset protocol.
   if (render === "html") {
-    if (!inScope || !exists) {
+    if (!exists) {
       return <ArtifactFallbackFace exists={exists} />;
     }
     return <HtmlArtifactShell path={artifact.path} fileName={artifact.file_name} />;
   }
   if (render === "pdf") {
-    if (!inScope || !exists) {
+    if (!exists) {
       return <ArtifactFallbackFace exists={exists} />;
     }
     return <PdfArtifactShell path={artifact.path} fileName={artifact.file_name} />;

@@ -57,13 +57,12 @@ use crate::runtime::acp::user_adapter_store::{
 use crate::session::loop_contract::DiscoveredRuntime;
 use crate::session::{
     PosturePair, RenameSessionError, ResumeEvent, ResumeProgress, Session, SessionRuntimeFacts,
-    TurnInputs,
+    TurnDeps, TurnPorts,
 };
 use crate::session_store::{SessionError, SessionHandle, SessionId, SessionStore};
 use crate::skills::{
-    discover_skill_sources, import_skills as import_skills_impl, resolve_prompt_fragments,
-    ImportItem, ImportMode, ImportOutcome, SkillError, SkillListing, SkillPromptFragment,
-    SkillSource, SkillSourceCandidate, SkillsRoot,
+    discover_skill_sources, import_skills as import_skills_impl, ImportItem, ImportMode,
+    ImportOutcome, SkillError, SkillListing, SkillSource, SkillSourceCandidate, SkillsRoot,
 };
 
 /// ADR-0063: the close-and-wait-release variant's wait ceiling. Aligned to
@@ -190,6 +189,41 @@ fn reject_if_in_flight(handle: &SessionHandle) -> Result<(), SessionError> {
     Ok(())
 }
 
+/// Resolve a session id string to its live session handle in one step
+/// (issue #1412): parse the id (a malformed string surfaces as
+/// [`SessionError::InvalidId`], distinct from a closed session's
+/// [`SessionError::NotFound`] -- issue #73) then look it up in the store,
+/// which releases the store lock before returning (the ADR-0056 brief-lock
+/// invariant: the calling command uses the cloned handle within this one
+/// invocation and must drop it before returning).
+fn resolve_session(
+    store: &SessionStore,
+    session_id: &str,
+) -> Result<Arc<SessionHandle>, SessionError> {
+    let id = SessionId::parse(session_id)?;
+    store.get(&id)
+}
+
+/// Run `op` against the locked [`Session`] (issue #1412): take the
+/// per-session single-flight gate (ADR-0021; a poisoned mutex surfaces as
+/// [`SessionError::Engine`]), hand the guard to `op`, and return `op`'s
+/// result. The guard drops when `op` returns, so the lock never outlives the
+/// closure. The closure must not re-enter the session gate through the
+/// captured handle -- the mutex is non-reentrant, so a nested
+/// [`SessionHandle::session_lock`] deadlocks rather than erroring (locking a
+/// different mutex on the handle, such as the runtime-posture slot, stays
+/// fine). Deliberately the sync-command shape only: issue #1412 keeps the
+/// `spawn_blocking` task bodies on their hand-written lock, and a blocking
+/// task that ever adopts this helper must clone the `Arc<SessionHandle>`
+/// and call it inside the task (the guard is `!Send`).
+fn with_session_lock<T>(
+    handle: &SessionHandle,
+    op: impl FnOnce(&mut Session) -> Result<T, SessionError>,
+) -> Result<T, SessionError> {
+    let mut s = handle.session_lock()?;
+    op(&mut s)
+}
+
 /// The wire reply from `create_session` (ADR-0089): the runtime session id +
 /// the bound `recipe.json` path. The frontend stores both so every open
 /// session is known-persisted from creation.
@@ -207,13 +241,19 @@ pub struct CreateSessionReply {
 /// session is bound from creation -- no pure-memory phase, no manual first
 /// save. Returns the id + the bound path so the frontend tracks a
 /// known-persisted session.
+// Eight Tauri-injected params (the State bundle grew with the workspace
+// registry, issue #1384); the #774 allow is the precedent.
+#[allow(clippy::too_many_arguments)]
 #[tauri::command]
 pub fn create_session(
+    app: tauri::AppHandle,
     store: State<'_, Arc<SessionStore>>,
     live: State<'_, LiveProviderConfig>,
     sessions_root: State<'_, SessionsRoot>,
     skills_root: State<'_, SkillsRoot>,
     user_store: State<'_, UserAdapterStore>,
+    registry: State<'_, Arc<crate::workspace::WorkspaceRegistry>>,
+    workspace: Option<String>,
 ) -> Result<CreateSessionReply, SessionError> {
     let cancel = Arc::new(CancelToken::new());
     // The real LLM provider (ADR-0007/0064): a LiveProvider router that reads
@@ -270,29 +310,65 @@ pub fn create_session(
         // Seat the backfill posture BEFORE the bind so the initial recipe
         // persists it (ADR-0100 Decision 1; see the helper's doc).
         apply_startup_posture(&handle, &posture)?;
-        let mut s = handle.session_lock()?;
-        // Discovery snapshot (issue #961, ADR-0118 Decision 1; the #677
-        // builtin auto-include generalized; ADR-0119 Decision 3, issue
-        // #983): the registry INTERSECT the enablement axis materializes
-        // the session's discovery snapshot -- the enabled set at creation,
-        // immutable within the session, persisted explicitly in the recipe
-        // header. A CLI-companion builtin additionally requires its
-        // companion CLI entry detected + enabled (the #677 two-axis
-        // conjunction); a knowledge-only skill (ADR-0120 Decision 7) rides
-        // the app version and takes no CLI conjunct. The builtin gate rides
-        // the BUILTIN arm only (ADR-0121: the reserved-subtree row,
-        // location-derived): a local fork owning the name shadows the
-        // builtin -- it reads `acquired: local` and rides the user arm,
-        // discoverable like any user skill unless disabled (ADR-0118
-        // Decision 1).
-        let cfg = live.load();
-        let seed = crate::skills::seed_from_config(&cfg, &live.cli_tools(), &skills_root.0);
-        s.set_discovery_snapshot(seed);
-        s.bind_recipe(recipe_path.clone(), String::new())
-            .map_err(|e| SessionError::Engine(e.to_string()))?;
-        Ok(CreateSessionReply {
-            session_id: id.clone(),
-            recipe_path: recipe_path.to_string_lossy().into_owned(),
+        with_session_lock(&handle, |s| {
+            // Discovery snapshot (issue #961, ADR-0118 Decision 1; the #677
+            // builtin auto-include generalized; ADR-0119 Decision 3, issue
+            // #983): the registry INTERSECT the enablement axis materializes
+            // the session's discovery snapshot -- the enabled set at creation,
+            // immutable within the session, persisted explicitly in the recipe
+            // header. A CLI-companion builtin additionally requires its
+            // companion CLI entry detected + enabled (the #677 two-axis
+            // conjunction); a knowledge-only skill (ADR-0120 Decision 7) rides
+            // the app version and takes no CLI conjunct. The builtin gate rides
+            // the BUILTIN arm only (ADR-0121: the reserved-subtree row,
+            // location-derived): a local fork owning the name shadows the
+            // builtin -- it reads `acquired: local` and rides the user arm,
+            // discoverable like any user skill unless disabled (ADR-0118
+            // Decision 1).
+            let cfg = live.load();
+            let seed = crate::skills::seed_from_config(&cfg, &live.cli_tools(), &skills_root.0);
+            s.set_discovery_snapshot(seed);
+            // ADR-0137 (issue #1381): seat the workspace axis BEFORE the bind so
+            // the initial recipe carries the binding. An explicitly selected
+            // directory binds canonicalized (Windows 8.3 short paths would let
+            // one directory appear under two spellings, breaking path
+            // comparison + multi-session dedup); no selection seats only the
+            // lazy-mint source -- the first disk-need moment (external turn
+            // spawn / built-in CLI tool launch) mints the default timestamped
+            // workspace, and a pure-chat session stays dirless. The mint source
+            // is FIXED in the product's Documents domain (the default sessions
+            // root's sibling): workspaces are user assets and do not follow a
+            // user-overridden sessions dir.
+            s.set_workspaces_root(Some(crate::persistence::default_workspaces_root(&app)));
+            // ADR-0138 (issue #1384): seat the registry before the bind below
+            // records the explicit selection, and for the close-time reclaim's
+            // record removal. Seated unconditionally -- the lazy-mint path
+            // records on the session's first disk need instead.
+            s.set_workspace_registry(Some(Arc::clone(registry.inner())));
+            if let Some(dir) = &workspace {
+                let canonical = std::fs::canonicalize(dir).map_err(|e| {
+                    // Distinct from launch_cwd's mkdir-failure wording: this is
+                    // the create-time "the selected directory cannot be opened"
+                    // verdict, not a mint/materialize fault. The io error's
+                    // Display carries no path -- name the user's selection.
+                    SessionError::Engine(format!("cannot open workspace directory {dir}: {e}"))
+                })?;
+                if !canonical.is_dir() {
+                    // canonicalize succeeds on a file; binding one would fail
+                    // at the first launch with the workspace-unavailable error
+                    // -- reject it at this create-time verdict instead.
+                    return Err(SessionError::Engine(format!(
+                        "workspace path is not a directory: {dir}"
+                    )));
+                }
+                s.set_workspace(canonical);
+            }
+            s.bind_recipe(recipe_path.clone(), String::new())
+                .map_err(|e| SessionError::Engine(e.to_string()))?;
+            Ok(CreateSessionReply {
+                session_id: id.clone(),
+                recipe_path: recipe_path.to_string_lossy().into_owned(),
+            })
         })
     })();
 
@@ -305,6 +381,170 @@ pub fn create_session(
     }
 
     result
+}
+
+/// One recent-workspace row for the session-creation selector (ADR-0138,
+/// issue #1384): the canonical path (the `create_session` binding value)
+/// and the display label (the record's title, defaulting to the directory
+/// tail -- a full path is never the display face). `explicit` marks the
+/// sidebar section's members (issue #1392); `exists` lets the frontend keep
+/// the selector's existence filter on the now-unfiltered listing.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct RecentWorkspace {
+    pub path: String,
+    pub label: String,
+    pub explicit: bool,
+    pub exists: bool,
+}
+
+/// The wire projection of one registry record (the listing's row; the
+/// create command inlines its reply).
+fn workspace_row(r: &crate::workspace::WorkspaceRecord) -> RecentWorkspace {
+    RecentWorkspace {
+        path: r.path.display().to_string(),
+        label: r.label(),
+        explicit: r.explicit,
+        exists: r.path.exists(),
+    }
+}
+
+/// The workspace registry's LRU view (ADR-0138, issue #1384): EVERY record,
+/// most recently used first -- dangling directories included, so the
+/// sidebar's workspace section can keep a missing-directory group with a
+/// state hint (issue #1392). The selector filters on `exists` and slices
+/// its top 10; older workspaces resurface through the folder browse.
+/// Read-only and tolerant -- an unreadable registry lists empty.
+#[tauri::command]
+pub fn list_workspaces(
+    registry: State<'_, Arc<crate::workspace::WorkspaceRegistry>>,
+) -> Vec<RecentWorkspace> {
+    registry.all().iter().map(workspace_row).collect()
+}
+
+/// Mint a NAMED workspace for the session-creation selector (issue #1393):
+/// `{workspaces root}/<name>/`, recorded with the name as the record's
+/// `title`. The name is re-validated here (the frontend guard is not a trust
+/// boundary) and rejected -- never rewritten. A same-name directory that
+/// already exists selects it instead (the "pick the existing one" ruling):
+/// no new title, the existing record's label is returned (falling back to
+/// the directory tail for a never-recorded directory), and only the LRU bump
+/// lands. On a fresh mint the titled record is part of the command, so a
+/// refused write fails the reply (the directory stays minted; a retry of the
+/// same name takes the existing-directory branch). The reply is the same
+/// projection the recent list uses, so the
+/// frontend seats it as the pending selection unchanged.
+#[tauri::command]
+pub fn create_workspace(
+    app: tauri::AppHandle,
+    registry: State<'_, Arc<crate::workspace::WorkspaceRegistry>>,
+    name: String,
+) -> Result<RecentWorkspace, String> {
+    let root = crate::persistence::default_workspaces_root(&app);
+    let (canonical, created) = crate::session::workspace::mint_named_workspace(&root, &name)?;
+    let label = if created {
+        // The record IS the command the user asked for (ADR-0138's
+        // best-effort stance covers the session-event mounts only): a
+        // refused write surfaces instead of reporting a successful create
+        // the registry cannot show. The minted directory stays; retrying
+        // the same name takes the existing-directory branch.
+        registry
+            .record_titled(&canonical, name.trim())
+            .map_err(|detail| format!("workspace created but the record failed: {detail}"))?;
+        name.trim().to_string()
+    } else {
+        // Selecting the existing directory is an explicit choice too
+        // (issue #1392): the record joins the sidebar's workspace section.
+        registry.record_selected(&canonical);
+        registry.label_of(&canonical)
+    };
+    Ok(RecentWorkspace {
+        path: canonical.display().to_string(),
+        label,
+        explicit: true,
+        exists: true,
+    })
+}
+
+/// Resolve the registry key for a path the frontend echoes back from a
+/// listing projection: canonicalize when the directory exists (the bound
+/// spelling rule), fall back to the verbatim string for a dangling record
+/// -- a missing directory cannot canonicalize, but its record stays
+/// renameable and removable (issue #1392).
+fn resolve_registry_key(path: &str) -> std::path::PathBuf {
+    std::fs::canonicalize(path).unwrap_or_else(|_| std::path::PathBuf::from(path))
+}
+
+/// Rename a workspace record (issue #1392): overwrites the display `title`
+/// only -- the directory and its path are never touched, duplicate titles
+/// are allowed, and the pill / popover / sidebar faces all re-derive from
+/// the registry on the next fetch. Strict: a missing record or a refused
+/// write surfaces to the user.
+/// The rename face's server-side guard: trim + non-empty only. The full
+/// naming rule (length cap, illegal characters, trailing dot) is the mint
+/// path's contract -- there the name becomes a directory; a rename writes
+/// the display title only, so the shared frontend guard is that rule's
+/// only enforcer on this face (issue #1392 review).
+fn rename_title(title: &str) -> Result<&str, String> {
+    let title = title.trim();
+    if title.is_empty() {
+        return Err("workspace title must not be empty".to_string());
+    }
+    Ok(title)
+}
+
+/// Apply the rename for a path the frontend echoes back from a listing
+/// projection. The echo is the recorded spelling by construction, but a
+/// directory re-created in a different case (or a junction swapped under
+/// the path) canonicalizes AWAY from the stored key -- on a canonical-key
+/// miss, retry the verbatim echo before surfacing the refusal (issue
+/// #1392 review).
+fn rename_registry_record(
+    registry: &crate::workspace::WorkspaceRegistry,
+    path: &str,
+    title: &str,
+) -> Result<(), String> {
+    let key = resolve_registry_key(path);
+    let attempt = registry.rename(&key, title);
+    if attempt.is_err() && key != std::path::Path::new(path) {
+        return registry.rename(std::path::Path::new(path), title);
+    }
+    attempt
+}
+
+/// Apply the remove-from-list for an echoed path: the same dual-spelling
+/// rule as the rename -- the idempotent miss would otherwise report
+/// success for a record the re-canonicalized key never found, leaving the
+/// group standing in the section (issue #1392 review).
+fn remove_registry_record(
+    registry: &crate::workspace::WorkspaceRegistry,
+    path: &str,
+) -> Result<(), String> {
+    let key = resolve_registry_key(path);
+    if !registry.remove_record(&key)? && key != std::path::Path::new(path) {
+        registry.remove_record(std::path::Path::new(path))?;
+    }
+    Ok(())
+}
+
+#[tauri::command]
+pub fn rename_workspace(
+    registry: State<'_, Arc<crate::workspace::WorkspaceRegistry>>,
+    path: String,
+    title: String,
+) -> Result<(), String> {
+    rename_registry_record(&registry, &path, rename_title(&title)?)
+}
+
+/// Remove a workspace record (issue #1392): a ledger edit, not a filesystem
+/// delete -- the directory stays and the sessions bound to it fall back to
+/// the sidebar's recent list (membership derives from the session header).
+/// Idempotent on an unknown path.
+#[tauri::command]
+pub fn remove_workspace(
+    registry: State<'_, Arc<crate::workspace::WorkspaceRegistry>>,
+    path: String,
+) -> Result<(), String> {
+    remove_registry_record(&registry, &path)
 }
 
 /// Close a session (ADR-0055): mark closing, fire cancel, and remove the entry
@@ -328,6 +568,8 @@ pub fn close_session(
     store: State<'_, Arc<SessionStore>>,
     session_id: String,
 ) -> Result<bool, SessionError> {
+    // Exempt from resolve_session (issue #1412): the typed id keys into
+    // close_and_cleanup_empty, which addresses by id, not by handle.
     let id = SessionId::parse(&session_id)?;
     store.close_and_cleanup_empty(&id)
 }
@@ -382,6 +624,8 @@ pub async fn close_session_and_wait_release(
     store: State<'_, Arc<SessionStore>>,
     session_id: String,
 ) -> Result<(), SessionError> {
+    // Exempt from resolve_session (issue #1412): the typed id keys into
+    // detach, which addresses by id, not by handle.
     let id = SessionId::parse(&session_id)?;
     // Detach: mark closing + fire cancel + remove from the map + return the
     // handle. After this, no new commands can target the id (get -> NotFound).
@@ -428,8 +672,7 @@ pub async fn ingest_file(
     session_id: String,
     path: String,
 ) -> Result<LoadOutcome, SessionError> {
-    let id = SessionId::parse(&session_id)?;
-    let handle = store.get(&id)?;
+    let handle = resolve_session(&store, &session_id)?;
     reject_if_resuming(&handle)?;
     let handle = Arc::clone(&handle);
     let outcome = tauri::async_runtime::spawn_blocking(move || {
@@ -452,8 +695,7 @@ pub async fn ingest_file_guided(
     path: String,
     guidance: Vec<SheetGuidance>,
 ) -> Result<LoadOutcome, SessionError> {
-    let id = SessionId::parse(&session_id)?;
-    let handle = store.get(&id)?;
+    let handle = resolve_session(&store, &session_id)?;
     reject_if_resuming(&handle)?;
     let handle = Arc::clone(&handle);
     let outcome = tauri::async_runtime::spawn_blocking(move || {
@@ -482,15 +724,14 @@ pub fn guidance_window(
     offset: usize,
     limit: usize,
 ) -> Result<Vec<Vec<String>>, SessionError> {
-    let id = SessionId::parse(&session_id)?;
-    let handle = store.get(&id)?;
-    let s = handle.session_lock()?;
-    s.guidance_window(&path, &sheet_name, offset, limit)
-        .ok_or_else(|| {
+    let handle = resolve_session(&store, &session_id)?;
+    with_session_lock(&handle, |s| {
+        s.guidance_window(&path, &sheet_name, offset, limit).ok_or_else(|| {
             SessionError::Engine(format!(
                 "no retained guidance for sheet \"{sheet_name}\" of {path} (already committed, discarded, or superseded)"
             ))
         })
+    })
 }
 
 /// Drop the session's retained guided-load parse (issue #750): the dialog's
@@ -501,11 +742,11 @@ pub fn discard_guided_retention(
     store: State<'_, Arc<SessionStore>>,
     session_id: String,
 ) -> Result<(), SessionError> {
-    let id = SessionId::parse(&session_id)?;
-    let handle = store.get(&id)?;
-    let mut s = handle.session_lock()?;
-    s.discard_guidance_retention();
-    Ok(())
+    let handle = resolve_session(&store, &session_id)?;
+    with_session_lock(&handle, |s| {
+        s.discard_guidance_retention();
+        Ok(())
+    })
 }
 
 #[tauri::command]
@@ -513,10 +754,8 @@ pub fn list_working_set(
     store: State<'_, Arc<SessionStore>>,
     session_id: String,
 ) -> Result<Vec<DatasetDescriptor>, SessionError> {
-    let id = SessionId::parse(&session_id)?;
-    let handle = store.get(&id)?;
-    let s = handle.session_lock()?;
-    Ok(s.list())
+    let handle = resolve_session(&store, &session_id)?;
+    with_session_lock(&handle, |s| Ok(s.list()))
 }
 
 #[tauri::command]
@@ -524,10 +763,8 @@ pub fn active_dataset(
     store: State<'_, Arc<SessionStore>>,
     session_id: String,
 ) -> Result<Option<DatasetDescriptor>, SessionError> {
-    let id = SessionId::parse(&session_id)?;
-    let handle = store.get(&id)?;
-    let s = handle.session_lock()?;
-    Ok(s.active())
+    let handle = resolve_session(&store, &session_id)?;
+    with_session_lock(&handle, |s| Ok(s.active()))
 }
 
 #[tauri::command]
@@ -536,10 +773,8 @@ pub fn get_dataset(
     session_id: String,
     reference_name: String,
 ) -> Result<Option<DatasetDescriptor>, SessionError> {
-    let id = SessionId::parse(&session_id)?;
-    let handle = store.get(&id)?;
-    let s = handle.session_lock()?;
-    Ok(s.get(&reference_name))
+    let handle = resolve_session(&store, &session_id)?;
+    with_session_lock(&handle, |s| Ok(s.get(&reference_name)))
 }
 
 /// Rename a dataset's display label (ADR-0037, slice 4a issue #8): display-only
@@ -553,12 +788,12 @@ pub fn rename_dataset(
     reference_name: String,
     new_display: String,
 ) -> Result<DatasetDescriptor, SessionError> {
-    let id = SessionId::parse(&session_id)?;
-    let handle = store.get(&id)?;
+    let handle = resolve_session(&store, &session_id)?;
     reject_if_resuming(&handle)?;
-    let mut s = handle.session_lock()?;
-    s.rename_display(&reference_name, &new_display)
-        .map_err(SessionError::RenameDataset)
+    with_session_lock(&handle, |s| {
+        s.rename_display(&reference_name, &new_display)
+            .map_err(SessionError::RenameDataset)
+    })
 }
 
 /// Re-upload a file onto an existing dataset's reference name (ADR-0042, issue
@@ -572,8 +807,7 @@ pub async fn replace_source(
     reference_name: String,
     path: String,
 ) -> Result<LoadOutcome, SessionError> {
-    let id = SessionId::parse(&session_id)?;
-    let handle = store.get(&id)?;
+    let handle = resolve_session(&store, &session_id)?;
     reject_if_resuming(&handle)?;
     let handle = Arc::clone(&handle);
     let outcome = tauri::async_runtime::spawn_blocking(move || {
@@ -615,11 +849,11 @@ pub fn set_dataset_privacy(
     reference_name: String,
     privacy: DatasetPrivacy,
 ) -> Result<DatasetDescriptor, SessionError> {
-    let id = SessionId::parse(&session_id)?;
-    let handle = store.get(&id)?;
+    let handle = resolve_session(&store, &session_id)?;
     reject_if_resuming(&handle)?;
-    let mut s = handle.session_lock()?;
-    privacy_update_to_result(s.set_privacy(&reference_name, privacy), &reference_name)
+    with_session_lock(&handle, |s| {
+        privacy_update_to_result(s.set_privacy(&reference_name, privacy), &reference_name)
+    })
 }
 
 /// Remove a source Dataset from the working set (issue #38/#39, ADR-0040).
@@ -640,12 +874,12 @@ pub fn remove_source(
     session_id: String,
     reference_name: String,
 ) -> Result<(), SessionError> {
-    let id = SessionId::parse(&session_id)?;
-    let handle = store.get(&id)?;
+    let handle = resolve_session(&store, &session_id)?;
     reject_if_resuming(&handle)?;
-    let mut s = handle.session_lock()?;
-    s.remove_source(&reference_name)
-        .map_err(SessionError::RemoveSource)
+    with_session_lock(&handle, |s| {
+        s.remove_source(&reference_name)
+            .map_err(SessionError::RemoveSource)
+    })
 }
 
 /// Remove the ACTIVE source and repoint focus at an explicit continuation
@@ -665,12 +899,12 @@ pub fn remove_active_source(
     reference_name: String,
     continue_with: String,
 ) -> Result<(), SessionError> {
-    let id = SessionId::parse(&session_id)?;
-    let handle = store.get(&id)?;
+    let handle = resolve_session(&store, &session_id)?;
     reject_if_resuming(&handle)?;
-    let mut s = handle.session_lock()?;
-    s.remove_active_source(&reference_name, &continue_with)
-        .map_err(SessionError::RemoveSource)
+    with_session_lock(&handle, |s| {
+        s.remove_active_source(&reference_name, &continue_with)
+            .map_err(SessionError::RemoveSource)
+    })
 }
 
 /// Preview the delete impact of one source (issue #1063): the live results a
@@ -686,10 +920,8 @@ pub fn preview_delete_impact(
     session_id: String,
     reference_name: String,
 ) -> Result<Vec<DeleteImpactEntry>, SessionError> {
-    let id = SessionId::parse(&session_id)?;
-    let handle = store.get(&id)?;
-    let s = handle.session_lock()?;
-    Ok(s.delete_impact_preview(&reference_name))
+    let handle = resolve_session(&store, &session_id)?;
+    with_session_lock(&handle, |s| Ok(s.delete_impact_preview(&reference_name)))
 }
 
 /// Ask one question (PRD #1) against the named session: run one agent turn
@@ -722,6 +954,9 @@ pub async fn ask(
     // (issue #992).
     skill_invocations: Option<Vec<String>>,
 ) -> Result<TurnOutcome, SessionError> {
+    // The id outlives the addressing ritual (the sink / turn-progress /
+    // session-named emits below address by it), so this handler keeps the
+    // hand-written parse + lookup instead of [`resolve_session`].
     let id = SessionId::parse(&session_id)?;
     let handle = store.get(&id)?;
     reject_if_resuming(&handle)?;
@@ -778,195 +1013,77 @@ pub async fn ask(
     // delegation assembly scans the agent-definitions registry under the
     // held session lock below, next to the skills + CLI reads.
     let agents_root = agents_root.0.clone();
+    // Issue #1414: the pure-data half of the session-side turn entry's
+    // inputs, assembled here at the boundary (the MCP snapshot read before
+    // the blocking window -- ADR-0106's fresh-per-turn read) and moved in
+    // as one bundle.
+    let deps = TurnDeps {
+        live,
+        mcp_servers,
+        skills_root,
+        agents_root,
+    };
     let outcome = tauri::async_runtime::spawn_blocking(move || {
-        let mut s = handle.session_lock()?;
-        // Issue #353 + ADR-0095: feed the session's runtime choice and the
-        // session-level model + thought-level pair into the turn's dispatch
-        // at the turn boundary. Both live on the handle (lock-light writes
-        // via set_session_runtime / set_session_posture); the Session consumes
-        // them for THIS turn only -- a switch lands between turns, never
-        // mid-turn, and a resumed Session reads the restored choice. The
-        // combined read takes the one slot lock (issue #600), so the pair
-        // the turn consumes is namespaced by the runtime it runs on.
-        let (external_runtime, external_posture) = handle.runtime_and_posture();
-        s.set_external_runtime(external_runtime);
-        s.set_external_model_config(external_posture);
-        // Issue #364 (ADR-0086) + #707: the skill + CLI assembly reads both
-        // session sets under this held lock (neither can change between the
-        // read and the turn) and wires `TurnInputs` in one seam -- see
-        // [`assemble_turn_inputs`].
-        let assembled = assemble_turn_inputs(
-            &s,
-            &skills_root,
-            &agents_root,
-            &live,
-            skill_invocations.as_deref().unwrap_or(&[]),
-        );
-        let inputs = assembled.turn_inputs(&mcp_servers);
-        let outcome = s.ask_with_phase_and_auto_name(
+        // Issue #1414: the domain-side turn entry consumes the transport-
+        // built ports (the approval gateway halves plus the three boundary
+        // closures), so the orchestration -- mirror pair, assembly, turn,
+        // mirror-back, grant -- runs testable without an AppHandle. The
+        // `skill_invocations` fold here stays the single normalization
+        // point (issue #992).
+        handle.run_turn(
             &question,
-            &approval,
-            &sink,
-            move |phase| {
-                // Fire-and-forget by design: the turn result rides the command
-                // reply, not this channel. But a failing sink must not be
-                // invisible -- a stuck live card with no trail is undiagnosable,
-                // so log the emit error (ADR-0029 honest-degrade; debug, since a
-                // torn-down webview fails every emit and is the expected case).
-                if let Err(e) = app_for_cb.emit(
-                    "turn-progress",
-                    &TurnProgress {
-                        session_id: sid.clone(),
-                        phase,
-                    },
-                ) {
-                    log::debug!(
-                        target: "toptopduck::commands",
-                        "turn-progress emit failed (likely a torn-down webview): {e}"
-                    );
-                }
+            skill_invocations.as_deref().unwrap_or(&[]),
+            &deps,
+            TurnPorts {
+                approval: &approval,
+                sink: &sink,
+                on_phase: Box::new(move |phase| {
+                    // Fire-and-forget by design: the turn result rides the command
+                    // reply, not this channel. But a failing sink must not be
+                    // invisible -- a stuck live card with no trail is undiagnosable,
+                    // so log the emit error (ADR-0029 honest-degrade; debug, since a
+                    // torn-down webview fails every emit and is the expected case).
+                    if let Err(e) = app_for_cb.emit(
+                        "turn-progress",
+                        &TurnProgress {
+                            session_id: sid.clone(),
+                            phase,
+                        },
+                    ) {
+                        log::debug!(
+                            target: "toptopduck::commands",
+                            "turn-progress emit failed (likely a torn-down webview): {e}"
+                        );
+                    }
+                }),
+                on_named: Box::new(move |name| {
+                    // Issue #1353: the turn-start auto-name push. Fire-and-forget
+                    // like turn-progress above -- the name also lands through the
+                    // terminal-state sync chain (syncSessionName), so a dropped
+                    // event is a missed early update, not a lost one. Debug-level
+                    // for the same reason (a torn-down webview fails every emit).
+                    if let Err(e) = app_for_named.emit(
+                        "session-named",
+                        &SessionNamedPayload {
+                            session_id: sid_for_named.clone(),
+                            name: name.to_string(),
+                        },
+                    ) {
+                        log::debug!(
+                            target: "toptopduck::commands",
+                            "session-named emit failed (likely a torn-down webview): {e}"
+                        );
+                    }
+                }),
+                grant_scope: Box::new(move |paths| {
+                    grant_artifact_asset_scope(&app_for_scope, paths)
+                }),
             },
-            move |name| {
-                // Issue #1353: the turn-start auto-name push. Fire-and-forget
-                // like turn-progress above -- the name also lands through the
-                // terminal-state sync chain (syncSessionName), so a dropped
-                // event is a missed early update, not a lost one. Debug-level
-                // for the same reason (a torn-down webview fails every emit).
-                if let Err(e) = app_for_named.emit(
-                    "session-named",
-                    &SessionNamedPayload {
-                        session_id: sid_for_named.clone(),
-                        name: name.to_string(),
-                    },
-                ) {
-                    log::debug!(
-                        target: "toptopduck::commands",
-                        "session-named emit failed (likely a torn-down webview): {e}"
-                    );
-                }
-            },
-            &inputs,
-        );
-        // ADR-0095: mirror the turn's discovered runtime catalog onto the
-        // handle (lock-light reads for the selector). An ACP turn reports
-        // the handshake catalog and a ClaudeStreamJson turn reports the
-        // `system{init}` current model (ADR-0097 Decision 5 honest
-        // rendering); the built-in / CodexEventStream `None` means "no
-        // discovery", so the mirror is skipped and the previous cache
-        // survives (issue #530 made the None arm unrepresentable at the
-        // setter).
-        if let Some(discovered) = s.last_discovered_runtime() {
-            handle.set_cached_discovered(discovered);
-        }
-        // ADR-0124 (issue #1087): a turn that materialized artifacts into
-        // the per-session `artifacts/` directory widens the asset protocol
-        // scope to it right here, before any card can render -- the
-        // artifacts dir may not have existed when the session opened.
-        grant_artifact_asset_scope(&app_for_scope, s.recipe_path());
-        Ok::<TurnOutcome, SessionError>(outcome)
+        )
     })
     .await
     .map_err(|e| SessionError::Engine(e.to_string()))??;
     Ok(outcome)
-}
-
-/// The turn-boundary skill + CLI assembly's owning buffers (issue #364/
-/// ADR-0086; the seam itself is issue #707): the data behind `TurnInputs`'s
-/// borrowed fields. `commands::ask` calls [`assemble_turn_inputs`] under the
-/// held session lock, then borrows through [`Self::turn_inputs`] -- the
-/// two-step shape exists because a `TurnInputs` borrows its buffers, so the
-/// owning values must be built first and outlive the borrowed view: no Rust
-/// signature can return a value and a borrow of that value as one tuple.
-/// The keychain rides here as a borrowed field (taken from `live` at
-/// assembly time) so the projection carries no source-config re-passes.
-struct AssembledTurnInputs<'a> {
-    skills: Vec<SkillPromptFragment>,
-    /// The user's submit-time invocations (ADR-0119, issue #983), resolved
-    /// under the held session lock so the bodies + hashes pin the submit-time
-    /// bytes.
-    user_invocations: Vec<crate::model::SkillInvocation>,
-    /// The machine-level disabled skill names (ADR-0118 enable axis): the
-    /// `invoke_skill` gate reads them mid-turn.
-    disabled_skills: Vec<String>,
-    /// The registry root borrow (ADR-0111, issue #714): the turn's read
-    /// surface resolves skill names against it live, mid-turn.
-    skills_root: &'a Path,
-    /// The live-config handle (ADR-0122 Decision 1): the `create_skill`
-    /// mint's composite needs the config write. Always `Some` from the
-    /// command boundary; the turn-input view keeps the `None` escape for
-    /// config-less test sessions.
-    live_config: Option<&'a LiveProviderConfig>,
-    cli_tools: Vec<crate::cli_tools::config::CliToolConfig>,
-    /// The turn's delegation snapshot (issue #933, ADR-0117): the enabled
-    /// agent definitions with their bound skill bodies resolved. One scan
-    /// alongside the skills + CLI reads; the guarantee is the snapshot
-    /// itself -- the turn consumes this one consistent family, while the
-    /// on-disk registry and the enablement store may change freely
-    /// afterwards (the next turn re-reads).
-    delegations: Vec<crate::agents::DelegationSpec>,
-    keychain: &'a crate::provider::keychain::KeychainStore,
-}
-
-/// Read the session's discovery snapshot (ADR-0119 Decision 3) and resolve
-/// its names into prompt fragments (name + description + verbatim body +
-/// whole-file SHA-256) against the registry root, here at the command
-/// boundary where the root lives, so the session stays I/O-free for skill
-/// content (it consumes fragments, mirroring the mcp_servers "data passed in"
-/// pattern). The user's staged invocation names materialize here too
-/// (ADR-0119 Decision 1: the body + hash pin the invocation-time bytes at
-/// the submit boundary). The caller must hold the session lock, so the
-/// snapshot cannot change between this read and the turn. One seam so
-/// neither snapshot read nor the `TurnInputs` field wiring can silently pass
-/// the wrong set (issue #707's wiring pin) -- the black-box tests
-/// hand-assemble their inputs, which left the command body itself
-/// uncovered.
-fn assemble_turn_inputs<'a>(
-    session: &Session,
-    skills_root: &'a Path,
-    agents_root: &'a Path,
-    live: &'a LiveProviderConfig,
-    user_invocation_names: &[String],
-) -> AssembledTurnInputs<'a> {
-    // ADR-0119 Decision 3 (issue #983): the assembly's skill set is the
-    // discovery SNAPSHOT, not the legacy mount fold -- the index lists the
-    // creation-time enabled set wholesale, every turn.
-    let snapshot = session.discovery_snapshot();
-    let skills = resolve_prompt_fragments(skills_root, &snapshot);
-    let disabled_skills: Vec<String> = live.load().disabled_skills.iter().cloned().collect();
-    // The enable axis gates BOTH invocation actors (ADR-0119 Decision 3), so
-    // the user channel filters disabled names at materialization time.
-    let user_invocations =
-        session.materialize_user_invocations(user_invocation_names, skills_root, &disabled_skills);
-    let cli_tools = live.enabled_cli_tools();
-    let delegations = live.delegation_specs(agents_root, skills_root);
-    AssembledTurnInputs {
-        skills,
-        user_invocations,
-        disabled_skills,
-        skills_root,
-        live_config: Some(live),
-        cli_tools,
-        delegations,
-        keychain: live.keychain(),
-    }
-}
-
-impl AssembledTurnInputs<'_> {
-    /// Project the owning buffers (plus the caller's command-level MCP
-    /// servers) into the turn's borrowed input view.
-    fn turn_inputs<'b>(&'b self, mcp_servers: &'b [McpServerConfig]) -> TurnInputs<'b> {
-        TurnInputs {
-            mcp_servers,
-            keychain: self.keychain,
-            skills: &self.skills,
-            user_invocations: &self.user_invocations,
-            disabled_skills: &self.disabled_skills,
-            skills_root: self.skills_root,
-            live_config: self.live_config,
-            cli_tools: &self.cli_tools,
-            delegations: &self.delegations,
-        }
-    }
 }
 
 /// Cancel the named session's in-flight turn (ADR-0021, issue #28). Fires THAT
@@ -979,8 +1096,7 @@ impl AssembledTurnInputs<'_> {
 /// is a best-effort signal, not a transaction.
 #[tauri::command]
 pub fn cancel(store: State<'_, Arc<SessionStore>>, session_id: String) -> Result<(), SessionError> {
-    let id = SessionId::parse(&session_id)?;
-    let handle = store.get(&id)?;
+    let handle = resolve_session(&store, &session_id)?;
     handle.fire_cancel();
     Ok(())
 }
@@ -997,16 +1113,17 @@ pub fn conversation(
     store: State<'_, Arc<SessionStore>>,
     session_id: String,
 ) -> Result<Vec<ThreadEntry>, SessionError> {
-    let id = SessionId::parse(&session_id)?;
-    let handle = store.get(&id)?;
-    let s = handle.session_lock()?;
-    let recipe_path = s.recipe_path().map(PathBuf::from);
-    let entries = s.conversation();
-    // ADR-0124 (issue #1087): a reopened session's materialized artifacts
-    // must be iframe-servable before a card can render -- grant the asset
-    // protocol scope for the per-session artifacts directory on every
-    // thread read (session open / remount; idempotent by pattern).
-    grant_artifact_asset_scope(&app, recipe_path.as_deref());
+    let handle = resolve_session(&store, &session_id)?;
+    let entries = with_session_lock(&handle, |s| Ok(s.conversation()))?;
+    // ADR-0124 (issue #1087), tightened to a file-level allowlist by
+    // ADR-0137 Decision 6 (#1383): every manifest-named file must be
+    // iframe-servable before a card can render -- the whitelist is
+    // re-granted on every thread read (session open / remount; idempotent
+    // by pattern). Deliberately post-lock (issue #1412's one reordering):
+    // the grant derives from the owned snapshot above and takes no lock the
+    // session gate orders against, so holding the guard across the
+    // app-handle call would only widen ADR-0056's window.
+    grant_artifact_asset_scope(&app, &crate::session::artifacts::referenced_paths(&entries));
     Ok(entries)
 }
 
@@ -1017,24 +1134,32 @@ pub fn conversation(
 /// payload into the webview.
 const ARTIFACT_TEXT_MAX_BYTES: u64 = 2 * 1024 * 1024;
 
-/// Widen the asset protocol's runtime scope to the session's artifacts
-/// directory (ADR-0124 Decision 4: HTML artifacts render through
-/// `asset://` in a sandboxed iframe, so the scope anchors the per-session
-/// materialization directory -- NOT the whole sessions root and never the
-/// user's directories). Idempotent: the scope is a pattern set, re-granting
-/// adds nothing. Failures log and degrade: the iframe render then fails
-/// honest (whether the card offers an external-open fallback is #1088's
-/// render-time concern, not a grant-time fact).
-fn grant_artifact_asset_scope(app: &tauri::AppHandle, recipe_path: Option<&Path>) {
-    let Some(dir) = crate::session::artifacts::artifacts_dir(recipe_path) else {
-        return;
-    };
-    if let Err(e) = app.asset_protocol_scope().allow_directory(&dir, false) {
-        log::warn!(
-            target: "toptopduck::commands",
-            "failed to grant asset scope for {}: {e}",
-            dir.display()
-        );
+/// Widen the asset protocol's runtime scope to exactly the thread's
+/// manifest-referenced files (ADR-0137 Decision 6, tightening ADR-0124
+/// Decision 4: the file-level allowlist behind iframe embeds -- a
+/// manifest-named file becomes iframe-servable wherever it lives,
+/// including a user-directory original, while the workspace directory
+/// as a whole is deliberately NOT granted). Idempotent: the scope is a
+/// pattern set, re-granting adds nothing. Failures log and degrade: the
+/// iframe render then fails honest (whether the card offers an
+/// external-open fallback is #1088's render-time concern, not a
+/// grant-time fact).
+fn grant_artifact_asset_scope(app: &tauri::AppHandle, paths: &[PathBuf]) {
+    // ADR-0137 Decision 6 (issue #1383): file-level allowlist -- exactly
+    // the files the thread's artifact manifests have referenced. The
+    // session workspace directory as a whole is deliberately NOT granted
+    // (an arbitrary html beside a deliverable must not become
+    // iframe-renderable by proximity); a legacy manifest pointing into
+    // the per-session `artifacts/` directory names files like any other,
+    // so it stays servable unchanged.
+    for path in paths {
+        if let Err(e) = app.asset_protocol_scope().allow_file(path) {
+            log::warn!(
+                target: "toptopduck::commands",
+                "failed to grant asset scope for {}: {e}",
+                path.display()
+            );
+        }
     }
 }
 
@@ -1122,8 +1247,7 @@ pub async fn read_rows(
     offset: u64,
     limit: u64,
 ) -> Result<RowPage, SessionError> {
-    let id = SessionId::parse(&session_id)?;
-    let handle = store.get(&id)?;
+    let handle = resolve_session(&store, &session_id)?;
     let handle = Arc::clone(&handle);
     tauri::async_runtime::spawn_blocking(move || {
         let s = handle.session_lock()?;
@@ -1155,8 +1279,7 @@ pub async fn export_rows_csv(
     path: String,
     confirmed: bool,
 ) -> Result<(), SessionError> {
-    let id = SessionId::parse(&session_id)?;
-    let handle = store.get(&id)?;
+    let handle = resolve_session(&store, &session_id)?;
     let handle = Arc::clone(&handle);
     tauri::async_runtime::spawn_blocking(move || {
         let s = handle.session_lock()?;
@@ -1181,8 +1304,7 @@ pub async fn read_rows_tsv(
     reference_name: String,
     confirmed: bool,
 ) -> Result<String, SessionError> {
-    let id = SessionId::parse(&session_id)?;
-    let handle = store.get(&id)?;
+    let handle = resolve_session(&store, &session_id)?;
     let handle = Arc::clone(&handle);
     tauri::async_runtime::spawn_blocking(move || {
         let s = handle.session_lock()?;
@@ -1945,11 +2067,11 @@ pub fn rename_session(
     session_id: String,
     new_name: String,
 ) -> Result<String, SessionError> {
-    let id = SessionId::parse(&session_id)?;
-    let handle = store.get(&id)?;
+    let handle = resolve_session(&store, &session_id)?;
     reject_if_resuming(&handle)?;
-    let mut s = handle.session_lock()?;
-    s.rename(&new_name).map_err(SessionError::RenameSession)
+    with_session_lock(&handle, |s| {
+        s.rename(&new_name).map_err(SessionError::RenameSession)
+    })
 }
 
 /// Read the OPEN session's current display name (ADR-0089 Decision 4). The
@@ -1963,10 +2085,10 @@ pub fn get_session_name(
     store: State<'_, Arc<SessionStore>>,
     session_id: String,
 ) -> Result<String, SessionError> {
-    let id = SessionId::parse(&session_id)?;
-    let handle = store.get(&id)?;
-    let s = handle.session_lock()?;
-    Ok(s.session_name().unwrap_or_default().to_string())
+    let handle = resolve_session(&store, &session_id)?;
+    with_session_lock(&handle, |s| {
+        Ok(s.session_name().unwrap_or_default().to_string())
+    })
 }
 
 /// The cold-rename file operation, extracted so the blank-name short-circuit
@@ -2189,6 +2311,8 @@ fn cleanup_orphaned_session_dir(
 /// session). The resumed session inherits the handle's cancel token + closing
 /// flag, so a `cancel` / `close_session` during or after resume still reaches
 /// the right session.
+// Same State-bundle shape as create_session (the registry joined, #1384).
+#[allow(clippy::too_many_arguments)]
 #[tauri::command]
 pub async fn open_recipe(
     app: tauri::AppHandle,
@@ -2196,12 +2320,16 @@ pub async fn open_recipe(
     live: State<'_, LiveProviderConfig>,
     sessions_root: State<'_, SessionsRoot>,
     user_store: State<'_, UserAdapterStore>,
+    registry: State<'_, Arc<crate::workspace::WorkspaceRegistry>>,
     session_id: String,
     path: String,
 ) -> Result<(), SessionError> {
     // Addressing failures (invalid id / unknown session / resuming) stay typed
     // as SessionError variants; the resume-domain failure rides SessionError::
-    // Resume (issue #120) -- both stay serde-structured across IPC.
+    // Resume (issue #120) -- both stay serde-structured across IPC. The id
+    // outlives the addressing ritual (the resume-progress emit + the resumed
+    // identity stamp below address by it), so this handler keeps the
+    // hand-written parse + lookup instead of [`resolve_session`].
     let id = SessionId::parse(&session_id)?;
     let handle = store.get(&id)?;
     reject_if_resuming(&handle)?;
@@ -2236,6 +2364,14 @@ pub async fn open_recipe(
     let app_for_cb = app.clone();
     let sid = id.clone();
     let sessions_root_path = sessions_root.path();
+    // ADR-0137 (issue #1381): the mint source resolves OUTSIDE the blocking
+    // task (plain data crossing, the sessions_root_path pattern) -- FIXED in
+    // the product's Documents domain, never derived from the (possibly
+    // user-overridden) sessions root.
+    let workspaces_root_path = crate::persistence::default_workspaces_root(&app);
+    // Owned Arc: the spawn_blocking closure below is 'static, so the State
+    // borrow itself cannot cross (the registry is seated inside).
+    let workspace_registry = Arc::clone(registry.inner());
     // ADR-0102 Decision 1/4 (issue #589): resume restores the session's LAST
     // runtime (segment continuation) instead of resetting to the default. The
     // default resolution is still computed here BEFORE the swap closure (the
@@ -2295,6 +2431,18 @@ pub async fn open_recipe(
         // reopens under the SAME id, so its no-progress kill log attributes
         // to the session the file belongs to.
         stamp_resumed_identity(&mut new_session, &sid);
+        // ADR-0137 (issue #1381): seat the lazy-mint source on the resumed
+        // session too, so a pre-#1381 recipe (no `workspace` header) behaves
+        // like a fresh directory-less session -- its next disk-need moment
+        // mints a default workspace. A recipe WITH a workspace restores the
+        // binding inside open_recipe; this root only ever mints. Same FIXED
+        // product-domain placement as create_session.
+        new_session.set_workspaces_root(Some(workspaces_root_path));
+        // ADR-0138 (issue #1384): seat the registry on the resumed session
+        // too -- a later first disk-need mint records, and the close-time
+        // reclaim removes. The restored binding itself never re-records
+        // (resume restores through the facts literal, not set_workspace).
+        new_session.set_workspace_registry(Some(workspace_registry));
         // ADR-0063: re-arm the close-and-wait-release drop signal for the
         // resumed session. Install a fresh (sender, receiver) pair: the sender
         // goes into the NEW session (its Drop will fire it after the canonical
@@ -2379,10 +2527,8 @@ pub fn take_persist_error(
     store: State<'_, Arc<SessionStore>>,
     session_id: String,
 ) -> Result<Option<SaveError>, SessionError> {
-    let id = SessionId::parse(&session_id)?;
-    let handle = store.get(&id)?;
-    let mut s = handle.session_lock()?;
-    Ok(s.take_persist_error())
+    let handle = resolve_session(&store, &session_id)?;
+    with_session_lock(&handle, |s| Ok(s.take_persist_error()))
 }
 
 /// Read + clear the named session's resume-hit source status notices
@@ -2398,10 +2544,8 @@ pub fn take_source_notices(
     store: State<'_, Arc<SessionStore>>,
     session_id: String,
 ) -> Result<Vec<crate::SourceNotice>, SessionError> {
-    let id = SessionId::parse(&session_id)?;
-    let handle = store.get(&id)?;
-    let mut s = handle.session_lock()?;
-    Ok(s.take_source_notices())
+    let handle = resolve_session(&store, &session_id)?;
+    with_session_lock(&handle, |s| Ok(s.take_source_notices()))
 }
 
 /// Read + clear the named session's pending external-change conflict, if any
@@ -2418,10 +2562,8 @@ pub fn take_pending_conflict(
     store: State<'_, Arc<SessionStore>>,
     session_id: String,
 ) -> Result<Option<crate::PendingConflict>, SessionError> {
-    let id = SessionId::parse(&session_id)?;
-    let handle = store.get(&id)?;
-    let mut s = handle.session_lock()?;
-    Ok(s.take_pending_conflict())
+    let handle = resolve_session(&store, &session_id)?;
+    with_session_lock(&handle, |s| Ok(s.take_pending_conflict()))
 }
 
 // --- Tiered tool approval (ADR-0080, issue #294) -------------------------
@@ -2544,8 +2686,7 @@ pub fn respond_tool_approval(
     request_id: String,
     response: ApprovalResponse,
 ) -> Result<(), SessionError> {
-    let id = SessionId::parse(&session_id)?;
-    let handle = store.get(&id)?;
+    let handle = resolve_session(&store, &session_id)?;
     reject_if_resuming(&handle)?;
     let request_uuid = uuid::Uuid::parse_str(&request_id)
         .map_err(|_| SessionError::Engine("approval request id malformed".into()))?;
@@ -2572,8 +2713,7 @@ pub fn get_approval_attachments(
     session_id: String,
     request_id: String,
 ) -> Result<Vec<FileAttachment>, SessionError> {
-    let id = SessionId::parse(&session_id)?;
-    let handle = store.get(&id)?;
+    let handle = resolve_session(&store, &session_id)?;
     let request_uuid = uuid::Uuid::parse_str(&request_id)
         .map_err(|_| SessionError::Engine("approval request id malformed".into()))?;
     handle
@@ -2591,8 +2731,7 @@ pub fn get_authorization_mode(
     store: State<'_, Arc<SessionStore>>,
     session_id: String,
 ) -> Result<AuthMode, SessionError> {
-    let id = SessionId::parse(&session_id)?;
-    let handle = store.get(&id)?;
+    let handle = resolve_session(&store, &session_id)?;
     Ok(handle.approval_state().auth_mode())
 }
 
@@ -2605,8 +2744,7 @@ pub fn set_authorization_mode(
     session_id: String,
     mode: AuthMode,
 ) -> Result<(), SessionError> {
-    let id = SessionId::parse(&session_id)?;
-    let handle = store.get(&id)?;
+    let handle = resolve_session(&store, &session_id)?;
     reject_if_resuming(&handle)?;
     handle.approval_state().set_auth_mode(mode);
     Ok(())
@@ -2620,8 +2758,7 @@ pub fn list_session_trust(
     store: State<'_, Arc<SessionStore>>,
     session_id: String,
 ) -> Result<Vec<ToolKey>, SessionError> {
-    let id = SessionId::parse(&session_id)?;
-    let handle = store.get(&id)?;
+    let handle = resolve_session(&store, &session_id)?;
     Ok(handle.approval_state().trust_list())
 }
 
@@ -2634,8 +2771,7 @@ pub fn revoke_session_trust(
     server: String,
     tool: String,
 ) -> Result<(), SessionError> {
-    let id = SessionId::parse(&session_id)?;
-    let handle = store.get(&id)?;
+    let handle = resolve_session(&store, &session_id)?;
     reject_if_resuming(&handle)?;
     handle.approval_state().revoke(&ToolKey { server, tool });
     Ok(())
@@ -3127,8 +3263,7 @@ pub fn get_session_runtime(
     store: State<'_, Arc<SessionStore>>,
     session_id: String,
 ) -> Result<SessionRuntimeChoice, SessionError> {
-    let id = SessionId::parse(&session_id)?;
-    let handle = store.get(&id)?;
+    let handle = resolve_session(&store, &session_id)?;
     Ok(runtime_choice_to_wire(handle.runtime_choice()))
 }
 
@@ -3151,8 +3286,7 @@ pub fn set_session_runtime(
     session_id: String,
     runtime: SessionRuntimeChoice,
 ) -> Result<(), SessionError> {
-    let id = SessionId::parse(&session_id)?;
-    let handle = store.get(&id)?;
+    let handle = resolve_session(&store, &session_id)?;
     reject_if_resuming(&handle)?;
     let spec = resolve_runtime_choice(runtime, &merged_adapters(&user_store))?;
     apply_runtime_switch(&handle, spec, live.inner());
@@ -3433,9 +3567,10 @@ fn apply_startup_posture(
     posture: &PosturePair,
 ) -> Result<(), SessionError> {
     handle.set_external_model_config(posture.clone());
-    let mut s = handle.session_lock()?;
-    s.set_external_model_config(posture.clone());
-    Ok(())
+    with_session_lock(handle, |s| {
+        s.set_external_model_config(posture.clone());
+        Ok(())
+    })
 }
 
 /// Read one adapter's backfill posture entry (ADR-0100, issue #581): the
@@ -3533,8 +3668,7 @@ pub fn get_session_model_config(
     store: State<'_, Arc<SessionStore>>,
     session_id: String,
 ) -> Result<SessionModelConfig, SessionError> {
-    let id = SessionId::parse(&session_id)?;
-    let handle = store.get(&id)?;
+    let handle = resolve_session(&store, &session_id)?;
     // The pair read takes the slot lock once: a concurrent set lands entirely
     // before or after this read, never as a torn (old, new) mix.
     let posture = handle.external_model_config();
@@ -3593,7 +3727,7 @@ pub fn set_session_posture(
     session_id: String,
     posture: PosturePair,
 ) -> Result<SetPosturePersistOutcome, SessionError> {
-    let handle = store.get(&SessionId::parse(&session_id)?)?;
+    let handle = resolve_session(&store, &session_id)?;
     apply_posture_set(&handle, live.inner(), posture)
 }
 
@@ -3622,28 +3756,29 @@ fn apply_posture_set(
     // write: the pair comes whole off the wire (issue #603), unmixed with
     // the slot's held value.
     let (runtime, _) = handle.runtime_and_posture();
-    let mut s = handle.session_lock()?;
-    s.set_external_model_config(posture.clone());
-    // Segment-header stamp (ADR-0102 Decision 1): same batch as the pair +
-    // the persist below.
-    s.stamp_last_runtime(runtime.clone());
-    // Persist now (via the shared auto-write path) so a selection made
-    // without a following turn survives a close (ADR-0095 Decision 6).
-    s.persist_if_bound();
-    // Snapshot the persist verdict BEFORE releasing the lock (issue #529):
-    // in-process, non-consuming -- the banner's take_persist_error channel
-    // is untouched.
-    let outcome = persist_outcome(&s);
-    // The handle write-back is conditional: a switch landing between the
-    // atomic read above and this write has already re-seeded the slot with
-    // the target adapter's posture -- dropping the stale-namespace write
-    // keeps the slot on the switch's segment (the #590 seeding semantics).
-    handle.set_posture_if_runtime(&runtime, posture.clone());
-    // ADR-0100 Decision 3 (issue #581): record the post-set pair as the
-    // adapter's startup backfill entry (the single write point shared with
-    // the cold-start pre-selection) -- best-effort, never fails the set.
-    record_last_model_posture(live, runtime, posture);
-    Ok(outcome)
+    with_session_lock(handle, |s| {
+        s.set_external_model_config(posture.clone());
+        // Segment-header stamp (ADR-0102 Decision 1): same batch as the pair +
+        // the persist below.
+        s.stamp_last_runtime(runtime.clone());
+        // Persist now (via the shared auto-write path) so a selection made
+        // without a following turn survives a close (ADR-0095 Decision 6).
+        s.persist_if_bound();
+        // Snapshot the persist verdict BEFORE releasing the lock (issue #529):
+        // in-process, non-consuming -- the banner's take_persist_error channel
+        // is untouched.
+        let outcome = persist_outcome(s);
+        // The handle write-back is conditional: a switch landing between the
+        // atomic read above and this write has already re-seeded the slot with
+        // the target adapter's posture -- dropping the stale-namespace write
+        // keeps the slot on the switch's segment (the #590 seeding semantics).
+        handle.set_posture_if_runtime(&runtime, posture.clone());
+        // ADR-0100 Decision 3 (issue #581): record the post-set pair as the
+        // adapter's startup backfill entry (the single write point shared with
+        // the cold-start pre-selection) -- best-effort, never fails the set.
+        record_last_model_posture(live, runtime, posture);
+        Ok(outcome)
+    })
 }
 
 /// The single backfill write point (ADR-0100 Decision 3, issue #581): every
@@ -4245,22 +4380,6 @@ mod tests {
                 .exists(),
             "an idempotent no-op never creates the sidecar"
         );
-    }
-
-    /// A minimal CliToolConfig for the turn-assembly projection tests: only
-    /// `name` and `enabled` matter to the assembly seam.
-    fn cli_tool(name: &str, enabled: bool) -> crate::cli_tools::config::CliToolConfig {
-        crate::cli_tools::config::CliToolConfig {
-            name: name.to_string(),
-            description: "does a thing".to_string(),
-            executable: "/bin/tool".to_string(),
-            argv_template: Vec::new(),
-            params: Vec::new(),
-            env: Default::default(),
-            enabled,
-            source: Default::default(),
-            baseline: None,
-        }
     }
 
     // --- default runtime startup resolution (issue #569, ADR-0098 D2/D3) ----
@@ -5366,6 +5485,56 @@ mod tests {
         assert_ne!(err, SessionError::NotFound);
     }
 
+    /// The two-piece session ritual composes (issue #1412): resolve_session
+    /// parses + looks up in one step, with_session_lock runs the closure
+    /// under the gate, and the closure's return value crosses both layers
+    /// unchanged -- the happy path every migrated sync handler rides. The
+    /// error arms pin the mappings: a malformed id is InvalidId before the
+    /// store is touched, a well-formed unknown id is NotFound, and the
+    /// closure's typed Err crosses with_session_lock whole.
+    #[test]
+    fn resolve_and_lock_round_trip_carries_closure_value() {
+        let store = SessionStore::new();
+        let id = store
+            .create(
+                Arc::new(CancelToken::new()),
+                Box::new(crate::UnwiredProvider),
+                Default::default(),
+            )
+            .expect("create session");
+        let handle = resolve_session(&store, &id.to_string()).expect("resolve");
+        // The write side: the closure's Result crosses with_session_lock whole.
+        with_session_lock(&handle, |s| {
+            s.rename("combo").map_err(SessionError::RenameSession)
+        })
+        .expect("lock + rename");
+        // The read side: the same two-piece path returns the closure's value.
+        let name = with_session_lock(&handle, |s| Ok(s.session_name().map(str::to_string)))
+            .expect("lock + read");
+        assert_eq!(name.as_deref(), Some("combo"));
+        // The closure's typed Err crosses with_session_lock whole, not
+        // flattened into Engine: the rename refusal keeps its variant.
+        let err = with_session_lock(&handle, |s| {
+            s.rename("   ").map_err(SessionError::RenameSession)
+        })
+        .expect_err("blank rename rejects");
+        assert_eq!(
+            err,
+            SessionError::RenameSession(RenameSessionError::EmptyName)
+        );
+        // A well-formed unknown id reaches the store and surfaces NotFound
+        // -- the #73 invalid-vs-closed distinction the helper standardizes.
+        match resolve_session(&store, "550e8400-e29b-41d4-a716-446655440000") {
+            Err(e) => assert_eq!(e, SessionError::NotFound),
+            Ok(_) => panic!("unknown id must reject"),
+        }
+        // The parse step's refusal surfaces as InvalidId through the helper.
+        match resolve_session(&store, "not-a-uuid") {
+            Err(e) => assert_eq!(e, SessionError::InvalidId),
+            Ok(_) => panic!("malformed id must reject"),
+        }
+    }
+
     /// set_dataset_privacy rejects an unknown reference name as the typed
     /// RemoveSourceError::NotFound (issue #127), not a free-text Engine
     /// string. The working-set layer returns None for an unknown name; the
@@ -5735,186 +5904,62 @@ mod tests {
         assert!(!stale_dir.exists(), "stale orphan should be deleted");
         assert!(target_dir.exists(), "resume target dir must be preserved");
     }
+    // ---- workspace record commands (issue #1392 review) ----
 
-    // --- turn-boundary skill assembly seam (issue #707) -------------------
-
-    /// Write one spec-valid skill directory under `root/<name>/` (the same
-    /// shape the black-box suite writes, kept local to this module).
-    fn put_skill(root: &Path, name: &str, description: &str, body: &str) {
-        let dir = root.join(name);
-        std::fs::create_dir_all(&dir).unwrap();
-        let content = format!("---\nname: {name}\ndescription: {description}\n---\n{body}");
-        std::fs::write(dir.join("SKILL.md"), content).unwrap();
+    #[test]
+    fn resolve_registry_key_canonicalizes_live_paths_and_keeps_dangling_verbatim() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let live = root.path().join("live");
+        std::fs::create_dir(&live).expect("mkdir");
+        assert_eq!(
+            resolve_registry_key(live.to_str().expect("utf8")),
+            std::fs::canonicalize(&live).expect("canonicalize"),
+            "an existing directory resolves to its canonical spelling"
+        );
+        let gone = root.path().join("gone");
+        assert_eq!(
+            resolve_registry_key(gone.to_str().expect("utf8")),
+            gone,
+            "a dangling echo stays verbatim (the recorded spelling)"
+        );
     }
 
-    /// The wiring pin issue #707 adds (calibrated by ADR-0119, issue #983):
-    /// the seam reads the session's discovery snapshot and wires
-    /// `TurnInputs`'s fields correctly. The black-box tests hand-assemble
-    /// their inputs, so a wrong-set field (e.g. resolving the legacy mount
-    /// fold instead of the snapshot) or `&[]` survived every test before
-    /// this pin.
     #[test]
-    fn assemble_turn_inputs_pins_the_snapshot_and_field_wiring() {
-        let tmp = tempfile::tempdir().unwrap();
-        let root = tmp.path().to_path_buf();
-        put_skill(&root, "alpha", "Alpha description.", "Alpha body.\n");
-        put_skill(&root, "beta", "Beta description.", "Beta body.\n");
-        put_skill(&root, "gamma", "Gamma description.", "Gamma body.\n");
+    fn rename_title_trims_and_refuses_empty() {
+        assert_eq!(rename_title("  New  "), Ok("New"));
+        assert!(rename_title("   ").is_err());
+        assert!(rename_title("").is_err());
+    }
 
-        let mut session =
-            Session::with_provider(Box::new(crate::UnwiredProvider)).expect("session");
-        // The snapshot is the assembly source (ADR-0119 Decision 3):
-        // materialized at creation, immutable -- here it names two of the
-        // three registry skills (gamma stays out) so a wrong-set wiring
-        // (the full registry, an ad-hoc name list) fails the pin.
-        session.set_discovery_snapshot(vec!["alpha".to_string(), "beta".to_string()]);
+    #[test]
+    fn echoed_renames_and_removes_survive_a_canonical_drift_between_key_and_disk() {
+        // The listing echoes the RECORDED spelling; a spelling that
+        // canonicalizes to something OTHER than the stored key (a
+        // junction swapped under the path, or a record whose stored
+        // spelling predates the filesystem's final form -- on Windows the
+        // canonical form carries the verbatim prefix) must not strand the
+        // user action: the rename and the remove both retry the verbatim
+        // echo on a canonical-key miss.
+        let root = tempfile::tempdir().expect("registry dir");
+        let registry = crate::workspace::WorkspaceRegistry::new(
+            root.path().join(crate::workspace::WORKSPACES_FILE_NAME),
+        );
+        let dir = root.path().join("Real");
+        std::fs::create_dir(&dir).expect("mkdir");
+        // A record whose stored spelling is NOT the directory's canonical
+        // form (canonicalize below returns a different spelling than the
+        // plain one stored here).
+        registry
+            .record_at(&dir, Some("Seed"), true, 1_000)
+            .expect("record");
 
-        let live = LiveProviderConfig::new(
-            crate::provider::keychain::KeychainStore::new(),
-            tmp.path().join("config.json"),
-        );
-        // The non-empty direction of the CLI wiring (review I1, issue #707):
-        // one enabled registration upserted through the real config path, so
-        // the projection is pinned against `cli_tools: &[]` too -- an
-        // empty-only assert is vacuously satisfied by a missing config. This
-        // also makes `load()` read the temp config file instead of the
-        // missing-config path that would query the OS keychain for the
-        // legacy blob (review C).
-        live.upsert_cli_tool(cli_tool("pandoc-guide", true))
-            .expect("upsert one enabled CLI tool");
-        // The enable axis feeds the turn inputs (review Importants 1-2,
-        // issue #983): gamma is machine-disabled through the real config
-        // path, so the staged set exercises all three halves at once -- the
-        // disabled name rides `disabled_skills`, a disabled stage lands no
-        // record, and a duplicated stage collapses to one.
-        live.set_skill_enabled("gamma", false)
-            .expect("disable gamma on the enable axis");
-        // An empty agents root (issue #933): the delegation scan reads an
-        // absent registry as the legitimate never-created state and lists
-        // nothing, pinning the empty-family projection here too.
-        let agents_tmp = tempfile::tempdir().unwrap();
-        let staged = ["beta".to_string(), "gamma".to_string(), "beta".to_string()];
-        let assembled = assemble_turn_inputs(&session, &root, agents_tmp.path(), &live, &staged);
-        let inputs = assembled.turn_inputs(&[]);
-
-        // The assembly's skill set is the discovery SNAPSHOT, wholesale --
-        // neither the legacy mount fold (gamma absent) nor the activation
-        // subset (beta absent).
-        let names: Vec<&str> = inputs.skills.iter().map(|f| f.name.as_str()).collect();
-        assert_eq!(
-            names,
-            vec!["alpha", "beta"],
-            "skills resolve from the discovery snapshot, not the mount fold or activation subset"
-        );
-        assert_eq!(
-            inputs.skills[0].description, "Alpha description.",
-            "the snapshot's rows carry the frontmatter description"
-        );
-        // The field-wiring half the pin exists for (the #707 mirror-drift
-        // class, restored -- review Important 1): both new fields are
-        // observed, so a seam that wires either one to an empty slice
-        // reddens here, and the disabled stage's empty-body degrade
-        // (review Important 2, #991) reddens on gamma's record shape.
-        assert_eq!(
-            inputs.disabled_skills,
-            &["gamma".to_string()],
-            "the machine-level disabled names ride the turn inputs"
-        );
-        assert_eq!(
-            inputs.user_invocations.len(),
-            2,
-            "one enabled staged name materializes one record (duplicates collapse) and \
-             the disabled stage lands the empty-body degrade (review Important 2, #991)"
-        );
-        assert_eq!(inputs.user_invocations[0].name, "beta");
-        assert_eq!(
-            inputs.user_invocations[0].actor,
-            crate::model::SkillLifecycleActor::User
-        );
+        let echo = dir.to_string_lossy().into_owned();
+        rename_registry_record(&registry, &echo, "T").expect("rename lands");
+        assert_eq!(registry.all()[0].title.as_deref(), Some("T"));
+        remove_registry_record(&registry, &echo).expect("remove lands");
         assert!(
-            !inputs.user_invocations[0].content_hash.is_empty(),
-            "the record pins the invocation-time whole-file hash"
+            registry.all().is_empty(),
+            "the record is gone despite the drift"
         );
-        // The disabled stage's honest-degrade record: the name lands (the
-        // badge reads the attempt), the body and hash stay empty -- nothing
-        // enters the context, no drift anchor, no read surface.
-        assert_eq!(inputs.user_invocations[1].name, "gamma");
-        assert_eq!(inputs.user_invocations[1].body, "");
-        assert_eq!(inputs.user_invocations[1].content_hash, "");
-        assert_eq!(
-            inputs.user_invocations[1].actor,
-            crate::model::SkillLifecycleActor::User
-        );
-        // The empty agents registry projects the empty delegation family
-        // (issue #933): a never-created registry is the legitimate state.
-        assert_eq!(
-            inputs.delegations,
-            &[],
-            "an empty agents root lists no delegation specs"
-        );
-
-        // The non-empty direction: one spec-valid definition on disk plus
-        // its enablement set entry project exactly one spec (the enabled
-        // filter and the file scan both have to pass), so an empty-only
-        // assert cannot be vacuously satisfied by a broken scan.
-        std::fs::write(
-            agents_tmp.path().join("analyst.md"),
-            "---
-name: analyst
-description: Open-ended analysis.
----
-You are a focused analyst.
-",
-        )
-        .expect("write agent definition");
-        live.set_agent_enabled("analyst", true)
-            .expect("enable analyst");
-        let assembled = assemble_turn_inputs(&session, &root, agents_tmp.path(), &live, &[]);
-        let inputs = assembled.turn_inputs(&[]);
-        // An empty staging projects zero user invocations; both wire
-        // forms (absent, empty) converge on this slice upstream, at
-        // the ask entry's Option fold (#992).
-        assert!(
-            inputs.user_invocations.is_empty(),
-            "an empty staging materializes no user invocation records"
-        );
-        assert_eq!(inputs.delegations.len(), 1, "the enabled entry projects");
-        assert_eq!(inputs.delegations[0].name, "analyst");
-        assert_eq!(
-            inputs.delegations[0].preamble,
-            "You are a focused analyst.
-"
-        );
-        // Every mounted skill resolves with its description + body verbatim.
-        assert_eq!(inputs.skills.len(), 2, "every mounted skill resolves");
-        let alpha = inputs
-            .skills
-            .iter()
-            .find(|f| f.name == "alpha")
-            .expect("alpha fragment");
-        assert_eq!(alpha.description, "Alpha description.");
-        assert_eq!(alpha.body, "Alpha body.\n");
-        assert!(
-            !alpha.content_hash.is_empty(),
-            "the whole-file hash is recorded"
-        );
-        let beta = inputs
-            .skills
-            .iter()
-            .find(|f| f.name == "beta")
-            .expect("beta fragment");
-        assert_eq!(beta.description, "Beta description.");
-        assert_eq!(beta.body, "Beta body.\n");
-        // The command-level wiring rides the same projection: the enabled
-        // CLI registration flows through (an empty-direction assert alone
-        // could not catch `cli_tools: &[]`), and the empty MCP set
-        // contributes nothing.
-        assert_eq!(
-            inputs.cli_tools.len(),
-            1,
-            "the enabled CLI tool rides the seam"
-        );
-        assert_eq!(inputs.cli_tools[0].name, "pandoc-guide");
-        assert!(inputs.mcp_servers.is_empty());
     }
 }

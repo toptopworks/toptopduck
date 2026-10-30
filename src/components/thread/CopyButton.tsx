@@ -61,7 +61,7 @@ export function CopyButton({ text, label }: { text: string; label: string }) {
           variant="ghost"
           // Constant box: the ack never widens the button, so the meta row
           // holds still under the pointer while the flip holds.
-          className="copy-button shrink-0 size-6 p-1 text-muted-foreground hover:text-foreground"
+          className="copy-button shrink-0 size-6 p-1 text-muted-foreground"
           onClick={() => {
             void copy();
           }}

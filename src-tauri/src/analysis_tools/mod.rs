@@ -1,12 +1,16 @@
-//! The built-in DuckDB tool server (ADR-0076 gateway skeleton, issue #292).
+//! The built-in analysis tool family (ADR-0076 gateway skeleton, issue #292).
 //!
 //! This module is the app-side MCP gateway's built-in tool source: the four
 //! DuckDB tools (`explore` / `materialize` / `describe` / `sample`) the gateway
 //! advertises to a runtime, plus the dispatch that routes a model-emitted
 //! [`ToolUse`] to the matching executor. The per-session tool table
-//! ([`builtin_table`]) carries exactly these four definitions today; user-
-//! configured MCP servers (#301) and skill-declared tools join the same table
-//! at the gateway aggregation layer in a later slice.
+//! ([`builtin_table`]) carries exactly these four definitions and feeds
+//! both faces: the built-in loop's turn assembly and the bridge face's
+//! `tools/list`. The later builtin families (skills, workspace write +
+//! discovery, artifact delivery) live in their own domain modules and mount
+//! per-family at turn assembly -- never on this table, never bridged (external
+//! runtimes bring their own equivalents); external MCP tools surface through
+//! the fixed meta-tool trio (ADR-0105).
 //!
 //! The [`Materializer`] trait the `materialize` tool delegates to is the SAME
 //! trait the turn runtimes' shared dispatch core ([`crate::session::turn_dispatch`],
@@ -29,7 +33,7 @@ pub mod sample;
 use crate::cancel::CancelToken;
 use crate::model::Promotion;
 use crate::provider::tool_calling::{ToolDefinition, ToolResult, ToolUse};
-use crate::session::materializer::{Materializer, TurnDeps};
+use crate::session::materializer::{DispatchDeps, Materializer};
 use serde_json::Value;
 
 /// The per-session tool table (ADR-0076): the built-in DuckDB tool definitions
@@ -49,7 +53,7 @@ pub fn builtin_table() -> Vec<ToolDefinition> {
 /// `dataset` + `sql`); the read-shaped tools set `promotion: None`. The dispatch
 /// wrapper assembles this into a [`ToolOutcome`] for the orchestration layer.
 ///
-/// `pub(super)` because this is the tools-module-internal seam between an
+/// `pub(super)` because this is the module-internal seam between an
 /// executor and [`dispatch`]; the orchestration layer consumes [`ToolOutcome`],
 /// not this struct. The field names (`content` / `promotion`) intentionally
 /// mirror [`ToolOutcome`] so the wrapper is a plain re-pack.
@@ -95,13 +99,17 @@ pub struct ToolOutcome {
 /// error rather than the turn blindly retrying). An unknown tool name is itself a
 /// tool error so the model can stop calling it.
 ///
-/// `pub(crate)` because the signature borrows [`TurnDeps`] and [`Materializer`]
-/// (both `pub(crate)`) -- the only consumer today is the in-crate agent loop
-/// (#295), which shares the session's materializer through here so a
-/// `materialize` call inherits numbering + caps from the legacy single-SQL path.
+/// `pub(crate)` because the signature borrows [`DispatchDeps`] and [`Materializer`]
+/// (both `pub(crate)`) -- the only consumer today is the dispatch core
+/// (`session::turn_dispatch`, #295's agent loop routes through it), which
+/// shares the session's materializer through here so a `materialize` call
+/// inherits numbering + caps from the legacy single-SQL path. Core-only by
+/// contract: every call must ride `dispatch_gated_call`, which owns the
+/// approval gate, the ADR-0115 freeze, the #321 panic guard, and the trace
+/// assembly around this.
 pub(crate) fn dispatch(
     call: &ToolUse,
-    deps: &mut TurnDeps,
+    deps: &mut DispatchDeps,
     cancel: &CancelToken,
     materializer: &mut dyn Materializer,
 ) -> ToolOutcome {
@@ -138,12 +146,12 @@ pub(crate) fn dispatch(
 #[cfg(test)]
 pub(crate) mod test_support {
     use crate::session::engine::AdminEngine;
-    use crate::session::materializer::TurnDeps;
+    use crate::session::materializer::DispatchDeps;
     use crate::workingset::WorkingSet;
     use std::collections::HashMap;
     use std::path::Path;
 
-    /// A throwaway [`TurnDeps`] over a locally-owned materialized engine +
+    /// A throwaway [`DispatchDeps`] over a locally-owned materialized engine +
     /// sources + working set, with inert cap defaults and `temp_path = "."`.
     /// Suitable for tool executors that never touch the filesystem (explore /
     /// describe / sample). Centralized so the four-tool dispatch tests cannot
@@ -155,8 +163,8 @@ pub(crate) mod test_support {
         ws: &'a mut WorkingSet,
         sources: &'a mut HashMap<String, std::path::PathBuf>,
         tool_output_refs: &'a mut HashMap<String, crate::session::materializer::CachedDerivedRef>,
-    ) -> TurnDeps<'a> {
-        TurnDeps::test_deps(engine, ws, sources, Path::new("."), tool_output_refs)
+    ) -> DispatchDeps<'a> {
+        DispatchDeps::test_deps(engine, ws, sources, Path::new("."), tool_output_refs)
     }
 
     /// Same inert cap defaults as [`inert_deps`] but with a caller-owned
@@ -170,19 +178,19 @@ pub(crate) mod test_support {
         sources: &'a mut HashMap<String, std::path::PathBuf>,
         temp_path: &'a Path,
         tool_output_refs: &'a mut HashMap<String, crate::session::materializer::CachedDerivedRef>,
-    ) -> TurnDeps<'a> {
-        TurnDeps::test_deps(engine, ws, sources, temp_path, tool_output_refs)
+    ) -> DispatchDeps<'a> {
+        DispatchDeps::test_deps(engine, ws, sources, temp_path, tool_output_refs)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::analysis_tools::test_support::inert_deps;
     use crate::model::DatasetDescriptor;
     use crate::provider::tool_calling::ToolUse;
     use crate::session::engine::AdminEngine;
     use crate::session::materializer::FakeMaterializer;
-    use crate::tools::test_support::inert_deps;
     use crate::workingset::WorkingSet;
     use serde_json::json;
     use std::collections::HashMap;
@@ -320,9 +328,9 @@ mod tests {
     /// stale name cannot silently break routing at the gateway boundary.
     #[test]
     fn dispatch_routes_explore_sample_and_materialize() {
+        use crate::analysis_tools::test_support::inert_deps_with_temp;
         use crate::model::{ColumnSchema, DatasetPrivacy, RectifyProvenance};
         use crate::session::materializer::RealMaterializer;
-        use crate::tools::test_support::inert_deps_with_temp;
         use tempfile::TempDir;
 
         let engine = AdminEngine::materialized();

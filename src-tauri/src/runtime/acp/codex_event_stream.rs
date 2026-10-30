@@ -1036,7 +1036,7 @@ fn outcome(
     LoopOutcome {
         termination,
         // Promotions are gateway-side (ADR-0085: the bridge -> gateway ->
-        // tools::dispatch path); the JSON event stream engine owns only the
+        // analysis_tools::dispatch path); the JSON event stream engine owns only the
         // event-driving half.
         promotions: Vec::new(),
         // ADR-0103 (issue #613): the trajectory settles per round (each

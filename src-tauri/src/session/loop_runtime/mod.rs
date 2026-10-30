@@ -11,7 +11,7 @@
 //! built with.
 //!
 //! Threading: the session's dispatch
-//! collaborators (`TurnDeps`, materializer, `McpAggregator`) are not `Sync`
+//! collaborators (`DispatchDeps`, materializer, `McpAggregator`) are not `Sync`
 //! and never leave the caller's thread, so `run` serves dispatch requests
 //! on the caller's thread (through the shared `dispatch_gated_call` core)
 //! while a scoped driver thread runs the rig loop on a dedicated
@@ -61,10 +61,10 @@ use crate::session::loop_contract::{
     TraceEntry, DEFAULT_NO_PROGRESS_CAP, DEFAULT_STEP_CAP, MAX_WINDOW_RESUMES, TRACE_EXCERPT_MAX,
     WINDOW_CONVERGENCE_NUDGE,
 };
-use crate::session::materializer::{Materializer, TurnDeps};
+use crate::session::materializer::{DispatchDeps, Materializer};
 use crate::session::progress::ProgressClock;
 use crate::session::turn_dispatch::{
-    classify_call, dispatch_gated_call, panic_to_transient, DispatchAbort, GateCtx,
+    classify_call, dispatch_gated_call, panic_to_transient, CallFace, DispatchAbort, GateCtx,
 };
 
 use adapter::{DispatchOutcome, DispatchRequest, PhaseSink, SharedTurnState};
@@ -137,10 +137,11 @@ impl LoopRuntime {
         }
     }
 
-    /// Override the caps (the test seam). Test-only at the call sites: the
-    /// production wiring always runs the ADR-0081 defaults.
-    #[allow(dead_code)]
-    pub(crate) fn with_caps(mut self, step_cap: u32, no_progress_cap: Option<Duration>) -> Self {
+    /// Override the caps (the test seam). `#[cfg(test)]`: every call site
+    /// lives in this module's suite, and the production wiring always runs
+    /// the ADR-0081 defaults.
+    #[cfg(test)]
+    fn with_caps(mut self, step_cap: u32, no_progress_cap: Option<Duration>) -> Self {
         self.step_cap = step_cap;
         self.no_progress_cap = no_progress_cap;
         self
@@ -149,10 +150,10 @@ impl LoopRuntime {
     /// Stamp an output cap onto the bridged face (the test seam for the
     /// dispatch-stamp pin, issue #1001): production reaches the stamp only
     /// through the live factory, so this exists for the module suite to
-    /// drive a stamped runtime against the scripted bridge. Test-only at
-    /// the call sites; mirrors [`Self::with_caps`]'s posture.
-    #[allow(dead_code)]
-    pub(crate) fn with_output_cap(mut self, output_cap: u32) -> Self {
+    /// drive a stamped runtime against the scripted bridge. `#[cfg(test)]`,
+    /// mirroring [`Self::with_caps`]'s posture.
+    #[cfg(test)]
+    fn with_output_cap(mut self, output_cap: u32) -> Self {
         self.output_cap = Some(output_cap);
         self
     }
@@ -181,7 +182,7 @@ impl LoopRuntime {
     pub(crate) fn run(
         &self,
         request: &ToolTurnRequest,
-        deps: &mut TurnDeps,
+        deps: &mut DispatchDeps,
         materializer: &mut dyn Materializer,
         mcp: &mut McpAggregator,
         cli: &[crate::cli_tools::config::CliToolConfig],
@@ -233,7 +234,7 @@ impl LoopRuntime {
             }
             // No-progress watchdog (ADR-0115): the cap times ONLY the
             // generation segment -- the fold's stream activity re-arms it
-            // (touch), and the dispatch server below freezes it across
+            // (touch), and the dispatch core freezes it across
             // gateway tool executions / CLI tool runs / approval pendings.
             // The watcher hook reads the latched clock to fork the stop
             // reason, and the termination derivation below lands the turn
@@ -386,13 +387,9 @@ impl LoopRuntime {
                 // choice is a local per-iteration decision.
                 let phases = forward_sink_for(&phases, delegation_id.as_deref());
                 let mut forward = |phase: TurnPhase| adapter::emit_phase(&phases, phase);
-                // Freeze across the dispatch (ADR-0115): a gateway tool
-                // execution, a CLI tool's run, or an approval pending on the
-                // condvar is a wait on an external principal -- never billed
-                // to the generation cap.
-                let _frozen = clock.as_ref().map(|c| c.freeze());
                 let outcome = match dispatch_gated_call(
                     &call,
+                    CallFace::Builtin,
                     deps,
                     materializer,
                     mcp,
@@ -407,7 +404,7 @@ impl LoopRuntime {
                 ) {
                     Err(DispatchAbort::Gate) => DispatchOutcome::GateCancelled,
                     Err(DispatchAbort::Panic(termination)) => DispatchOutcome::Aborted(termination),
-                    Ok((result, entry, promotion)) => {
+                    Ok((result, entry, promotion, _envelope)) => {
                         // Record-before-send (#921): the executed
                         // call's trace entry and promotion land on the
                         // shared state HERE, on the executing thread, before

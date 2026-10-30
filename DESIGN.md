@@ -486,6 +486,7 @@ These ride the Tailwind shadow scale directly (no custom `--shadow-*` token per 
 - **Light mode relies on hairline contrast + shadow-sm.** Cards share the same white as the canvas — the 1px `{colors.border}` plus `shadow-sm` defines the visual edge.
 - **Dark mode uses brightness steps.** Canvas (#0f1410) → Card (#181b18) is a subtle but perceptible luminance step. The green undertone in both values is visually consistent with the teal brand.
 - **Focus rings use teal.** `{colors.primary}` at 2px outline-offset. Not a shadow — a color ring.
+- **The pointer hand is the default.** Native buttons and the ARIA interactive roles (`role="button"`, `menuitem`, `menuitemradio`, `menuitemcheckbox`, `option`) carry the hand via one base-layer rule in `app.css`; hosts the rule cannot reach — `summary` / `label` / bare checkboxes / clickable `div`/`span` — are interactive and declare the hand explicitly. The arrow is the declared exception for non-interactive hosts only (the archived sidebar row, the hover-only info glyph). The disabled channels stay out: busy keeps `progress`, disabled keeps `not-allowed`.
 
 ## Shapes
 
@@ -538,7 +539,7 @@ All radius values derive from a single `{rounded.md}` token (6px): `xs/sm = md -
 
 ### Inputs
 
-**`text-input` / `text-input-dark`** — Transparent background, 1px `{colors.border}` hairline, text `{colors.ink}` / `{colors.ink-dark}`, type `{typography.body-md}`, rounded `{rounded.md}` (6px), padding 8px × 12px, height 36px. Focus state replaces the border with a 2px `{colors.primary}` ring. The shadcn Input/Textarea copy-in carries a mobile-first `text-base md:text-sm` responsive override (16px below the `md` breakpoint, then 14px) — a vestigial Safari auto-zoom prevention idiom from the shadcn default; Tauri desktop ignores the mobile breakpoint.
+**`text-input` / `text-input-dark`** — Transparent background, 1px `{colors.border}` hairline, text `{colors.ink}` / `{colors.ink-dark}`, type `{typography.body-md}`, rounded `{rounded.md}` (6px), padding 8px × 12px, height 36px. Focus state leaves the border unchanged — the text caret is the focus indicator; the only ring is the `aria-invalid` error ring. The shadcn Input/Textarea copy-in carries a mobile-first `text-base md:text-sm` responsive override (16px below the `md` breakpoint, then 14px) — a vestigial Safari auto-zoom prevention idiom from the shadcn default; Tauri desktop ignores the mobile breakpoint.
 
 ### Badges
 

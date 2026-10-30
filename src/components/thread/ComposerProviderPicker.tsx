@@ -612,7 +612,7 @@ export function ComposerProviderPicker({
                   // ADR-0067 (#171): visual rules -> inline utilities. The trigger
                   // is an icon button sized to the QuestionBar row; bg-card + border
                   // ride the ADR-0050 token.
-                  className="composer-picker-trigger inline-flex items-center justify-center size-9 rounded-md border border-border bg-card text-foreground hover:bg-muted transition-colors cursor-pointer"
+                  className="composer-picker-trigger inline-flex items-center justify-center size-9 rounded-md border border-border bg-card text-foreground hover:bg-muted transition-colors"
                   aria-label={intl.formatMessage(
                     {
                       id: "composer.providerPicker.triggerAria",

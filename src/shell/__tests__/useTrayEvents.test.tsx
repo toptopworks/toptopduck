@@ -44,6 +44,7 @@ function persisted(path: string, displayName: string): SessionMetadata {
     format_version: 1,
     pinned: false,
     archived: false,
+    workspace: null,
   };
 }
 

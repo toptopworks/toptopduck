@@ -864,7 +864,8 @@ fn every_turn_is_recorded_in_the_conversation_thread_in_order() {
 // fake provider captures -- the highest seam (PRD testing philosophy: assert
 // the payload shape). The windowed context rides the system prompt's schema
 // block (datasets + samples + active pointer) and the message array (history
-// turns + the asking question); the tool table advertises the four built-ins.
+// turns + the asking question); the tool table advertises the built-in
+// family.
 
 #[test]
 fn window_assembler_windows_history_and_samples_via_fake_provider() {
@@ -890,8 +891,9 @@ fn window_assembler_windows_history_and_samples_via_fake_provider() {
     let buf = captured.lock().expect("capture lock");
     let payload = request_for(&buf, "probe");
 
-    // The built-in tool table (ADR-0076) is advertised every turn,
-    // closing with the artifact-delivery meta-tool (ADR-0124).
+    // The built-in tool table (ADR-0076) is advertised every turn, closing
+    // with the workspace write pair (issue #1406) and the read-only
+    // discovery trio (issue #1385).
     let tool_names: Vec<&str> = payload.tools.iter().map(|t| t.name.as_str()).collect();
     assert_eq!(
         tool_names,
@@ -900,7 +902,12 @@ fn window_assembler_windows_history_and_samples_via_fake_provider() {
             "materialize",
             "describe",
             "sample",
-            "present_files"
+            "present_files",
+            "write",
+            "edit",
+            "glob",
+            "grep",
+            "read"
         ]
     );
 
@@ -1128,17 +1135,13 @@ fn a_query_under_the_row_cap_materializes_normally() {
 }
 
 #[test]
-fn a_read_function_into_arbitrary_disk_is_refused_and_never_promotes() {
-    // AC2 (issue #25, read_* closure): a SELECT calling a read_* table
-    // function (read_csv_auto / read_parquet / read_json_auto) on an out-of-
-    // bounds path is refused by the gateway FsAcl whitelist before execution
-    // (ADR-0080 + ADR-0088) -- a structured tool error that routes back to
-    // the model (ADR-0077). The non-correcting script exhausts the step cap;
-    // nothing is ever read into a result.
-    //
-    // The leak target is a real temp file carrying a sentinel secret so the
-    // assertion is concrete: had the gateway not refused the out-of-bounds
-    // read_csv_auto, the secret would have materialized into result_1.
+fn a_read_function_into_arbitrary_disk_snapshots_and_promotes() {
+    // ADR-0137 D4 (supersedes issue #25 AC2's refusal posture): a SELECT
+    // calling a read_* table function on an absolute disk path is the
+    // full-path face -- the reference passes the gateway, is copy-in'd into
+    // a session-tree snapshot (same pipeline as manual ingest, only the
+    // trigger differs), registers as a source, and the result materializes
+    // from the frozen snapshot.
     let leak_dir = tempfile::tempdir().expect("temp dir");
     let leak = leak_dir.path().join("secret.csv");
     std::fs::write(&leak, "secret\nPASSWORD-LEAKED\n").expect("write leak");
@@ -1146,17 +1149,23 @@ fn a_read_function_into_arbitrary_disk_is_refused_and_never_promotes() {
         "SELECT secret FROM read_csv_auto('{}')",
         leak.to_string_lossy()
     );
-    let provider = FakeProvider::new().scripted_tool_turn("leak", materialize(&leak_sql));
+    let provider = FakeProvider::new().scripted_tool_turn_seq("leak", productive(&leak_sql));
     let mut session = Session::with_provider(Box::new(provider)).expect("session");
     load_source(&mut session, &fixture("people.csv"));
 
-    let failure = failed_failure(session.ask("leak"));
-    assert!(
-        matches!(failure, TurnFailure::Execute { .. }),
-        "read_* refusal rides the step-cap Failed turn, got {failure:?}"
+    let (name, rows, _) = materialized(session.ask("leak"));
+    assert_eq!(name, "result_1");
+    assert_eq!(rows, 1);
+    // The referenced file registered as a source pointing at the durable
+    // canonical original (manual-ingest semantics inherited verbatim).
+    let source = session
+        .get("secret")
+        .expect("the file registered as a source");
+    assert_eq!(
+        source.source_path,
+        std::fs::canonicalize(&leak).unwrap().to_string_lossy(),
+        "source_path is the canonical original"
     );
-    // Nothing promoted: the over-disk read never produced a result.
-    assert!(session.get("result_1").is_none());
 }
 
 // --- Active dataset resolution + natural-language redirect (issue #27) -----
