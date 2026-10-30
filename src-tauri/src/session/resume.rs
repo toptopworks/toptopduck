@@ -451,7 +451,12 @@ impl<'a> Resumer<'a> {
         // working set -- register the placeholders first (ADR-0013: stale is
         // not silently discarded). `end` bounds the pre-pass, not the map:
         // turns from the break on render degraded-Failed and never look up
-        // descriptors, so their promotions register nothing here.
+        // descriptors, so their promotions register nothing here. The
+        // pre-pass must also stay AFTER replay: replay's per-materialization
+        // GC runs on the session's bare default cap (the #1446 configured
+        // snapshot is applied after open_recipe returns), so stale
+        // registrations visible during replay would reclaim at the default
+        // under a user-configured higher cap.
         register_stale_placeholders(working_set, self.recipe, end);
 
         let timeline = self

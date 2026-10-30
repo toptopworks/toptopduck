@@ -12,6 +12,7 @@ use toptopduck_lib::commands::LiveSessionEntry;
 use toptopduck_lib::{
     DatasetDescriptor, DatasetPrivacy, GuidanceReason, GuidanceRequest, GuidanceSheet,
     GuidanceSheetState, LoadError, LoadOutcome, RectifyProvenance, SessionId, SheetRectify,
+    Tunables,
 };
 
 /// Serialize `value`, assert the JSON equals `expected` (the pinned wire
@@ -2232,5 +2233,25 @@ fn agent_warning_serializes_state_tagged() {
             name: "general-purpose".into(),
         },
         r#"{"state":"deferred","name":"general-purpose"}"#,
+    );
+}
+
+#[test]
+fn tunables_wire_shape_pins_the_config_mirror_keys() {
+    // Tunables crosses the wire on every app-config read/write, and the TS
+    // mirror (src/types/app-config.ts) is hand-maintained -- the #1446
+    // `far_window` -> `result_count_cap` rename rode grep across eight TS
+    // files, not types. Pin the key set here like the sibling shapes so a
+    // serde rename fails the build before the mirror drifts: a stale Rust
+    // key would round-trip a set_app_config write to the serde default with
+    // no compile error on either side. (A pre-rename `far_window` key in a
+    // config FILE is still ignored at parse -- serde default fills the
+    // missing field; this pin is about the wire shape only.)
+    assert_wire(
+        &Tunables {
+            window_turns: 3,
+            result_count_cap: 7,
+        },
+        r#"{"window_turns":3,"result_count_cap":7}"#,
     );
 }

@@ -2204,11 +2204,14 @@ mod tests {
         // equal the UNCONFIGURED config default, so the only source of M=100
         // is DEFAULT_RESULT_COUNT_CAP via Tunables -- the create/resume
         // command layer then snapshots the persisted tunable over this floor
-        // through set_result_count_cap.
+        // through set_result_count_cap. The expectation anchors the constant
+        // directly: asserting `Tunables::default()` here would travel with a
+        // Default-impl mutation (both sides derive from it), leaving the
+        // impl's tie to DEFAULT_RESULT_COUNT_CAP unanchored.
         let session = Session::new().expect("bare construction");
         assert_eq!(
             session.result_count_cap,
-            crate::app_config::model::Tunables::default().result_count_cap as usize
+            crate::workingset::DEFAULT_RESULT_COUNT_CAP
         );
     }
 

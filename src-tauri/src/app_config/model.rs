@@ -232,8 +232,10 @@ pub struct ShellPrefs {
 }
 
 /// Tunable defaults (ADR-0013/0023/0028). Persisted so a user's tuned values
-/// survive a restart. Applying them to the live orchestrator/window assembler is
-/// a follow-up slice; this artifact stores + round-trips them per issue #53 AC.
+/// survive a restart. `result_count_cap` rides each session's
+/// construction-point snapshot (#1446); applying `window_turns` to the window
+/// assembler is a follow-up slice; this artifact stores + round-trips them
+/// per issue #53 AC.
 ///
 /// The per-turn retry budget (ADR-0028) was retired with the single-SQL turn
 /// contract (ADR-0077, issue #318): the agent loop self-corrects from
@@ -434,8 +436,9 @@ impl AppConfig {
     ///   rejects `PRAGMA threads=0` -- and `row_cap` clamped to >= 1);
     /// - `window_turns` clamped to >= 1 (0 would summarize every turn, which is
     ///   nonsensical rather than dangerous) and `tunables.result_count_cap`
-    ///   clamped to >= 1 (0 would reclaim every result on sight -- the GC
-    ///   treats any count over the cap as reclaimable, #1446);
+    ///   clamped to >= 1 (0 would reclaim every stale result on sight -- the
+    ///   GC reclaims only stale results, oldest first, while the count is
+    ///   over the cap; active results survive any cap, #1446);
     /// - `last_model_postures` shape-repaired only (whitespace trimmed, an
     ///   empty value -> None, a blank adapter key dropped): a dangling entry
     ///   -- an adapter the build no longer detects, or a model the catalog no
@@ -898,8 +901,8 @@ mod tests {
     fn normalize_clamps_counts_to_at_least_one() {
         // threads=0 would make DuckDB reject the PRAGMA; row_cap=0 would
         // refuse every non-empty materialization; window_turns=0 would
-        // summarize every turn; result_count_cap=0 would GC every result
-        // (cap 0 means any count exceeds it). All clamp to >=1.
+        // summarize every turn; result_count_cap=0 would GC every stale
+        // result (cap 0 means any count exceeds it). All clamp to >=1.
         let mut cfg = AppConfig::defaults();
         cfg.engine.threads = 0;
         cfg.engine.row_cap = 0;

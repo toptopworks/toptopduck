@@ -2396,8 +2396,14 @@ pub async fn open_recipe(
     let cfg = live.load();
     let engine_defaults = cfg.engine.clone();
     // #1446: the count-cap snapshot crosses into the 'static closure as plain
-    // data, same as the engine defaults -- the resumed session takes the
-    // CURRENT config exactly like a new one (the recipe carries no tunables).
+    // data, same as the engine defaults, and is applied below before the
+    // session lands in the store -- the resumed session takes the CURRENT
+    // config exactly like a new one from its first live turn (the recipe
+    // carries no tunables). The replay inside open_recipe still runs on the
+    // bare default seed; that window is inert (replay registers only active
+    // results, so its GC finds no stale candidates) -- if replay ever sees
+    // stale registrations, the cap must cross as an open_recipe argument
+    // instead, beside the engine defaults.
     let result_count_cap = cfg.tunables.result_count_cap as usize;
     let inner = tauri::async_runtime::spawn_blocking(move || {
         let mut new_session = Session::open_recipe(
