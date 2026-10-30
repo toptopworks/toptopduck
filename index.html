@@ -94,7 +94,7 @@
           theme = null;
         }
         const systemDark =
-          window.matchMedia?.("(prefers-color-scheme: dark)")?.matches ??
+          window.matchMedia?.("(prefers-color-scheme: dark)").matches ??
           false;
         const dark = theme === "dark" || (theme !== "light" && systemDark);
         const root = document.documentElement;
@@ -124,7 +124,10 @@
       // navigator.language, and the tag mapping is resolveLocaleTag's
       // zh* -> zh-CN, everything else -> en-US (the app has no zh-TW
       // domain). A missing or invalid locale falls back to the same system
-      // resolution; App takes over the effective locale after mount.
+      // resolution; App takes over the effective locale after mount. The
+      // resolved value also lands on documentElement.lang (mirroring App's
+      // write) so assistive tech announces the caption with the matching
+      // voice instead of reading zh text under lang="en".
       (function () {
         const seed = window.__TOPTOPDUCK_BOOT_SEED__;
         let locale = seed && typeof seed === "object" ? seed.locale : null;
@@ -139,6 +142,7 @@
           locale === "zh-CN"
             ? "正在启动 TOPTOPDuck..."
             : "Starting TOPTOPDuck...";
+        document.documentElement.lang = locale;
       })();
     </script>
     <script type="module" src="/src/main.tsx"></script>
