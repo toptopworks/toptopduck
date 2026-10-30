@@ -310,12 +310,10 @@ pub fn run() {
                     .initialization_script(app_config::boot_seed::boot_seed_script(&boot_cfg));
             // Pre-paint window background (issue #881): the boot show
             // reveals the window before the webview paints, so the gap
-            // carries the native background. The theme-resolved color must
-            // ride the builder chain -- restore_state's show() runs
-            // synchronously inside build() (main-thread dispatch executes
-            // inline, not queued), so a post-build set lands only after the
-            // white frame was already composited. An unresolved system
-            // theme keeps the static `backgroundColor` in tauri.conf.json.
+            // carries the native background. The theme-resolved color
+            // rides the builder chain ahead of that reveal; the `window`
+            // module doc carries the reveal timing and the unresolved
+            // theme fallback.
             let main_window_builder =
                 match window::background_color(boot_cfg.theme, window::os_uses_light_theme()) {
                     Some(color) => main_window_builder.background_color(color),

@@ -5,11 +5,14 @@
 //! before it). This module resolves the persisted theme to the matching
 //! canvas token so the gap itself carries the right floor color.
 //!
-//! The color must ride the `WebviewWindowBuilder` chain: window-state's
-//! `restore_state` -> `show()` runs synchronously *inside* `build()`
-//! (main-thread dispatch executes inline, not queued), so a post-build
-//! `set_background_color` lands only after the white frame was already
-//! composited. An unresolved system theme (registry unreadable,
+//! The color rides the `WebviewWindowBuilder` chain so it is part of the
+//! window's creation config, in place before any frame exists. The reveal
+//! is the app-owned boot `show()` after the build -- `restore_state` never
+//! shows in this app (VISIBLE is not among the registered state flags; it
+//! applies the persisted geometry inside `build()` and nothing more), so a
+//! post-build `set_background_color` would only land in time if
+//! hand-sequenced ahead of that reveal; on the builder there is no
+//! ordering to get wrong. An unresolved system theme (registry unreadable,
 //! non-Windows) keeps the static `backgroundColor` declared in
 //! `tauri.conf.json` instead of inventing a color here.
 
@@ -17,8 +20,10 @@ use crate::app_config::model::Theme;
 use tauri::window::Color;
 
 /// Light page floor -- DESIGN.md `canvas` token (#ffffff). The window
-/// background must match the floor the first paint renders, not the card
-/// surface one brightness step above it.
+/// background must match the floor the first paint renders; the card
+/// surface is no guide here -- light cards share this white (hairline
+/// borders elevate them), and only the dark card sits a brightness step
+/// above its floor.
 const LIGHT_CANVAS: Color = Color(0xff, 0xff, 0xff, 0xff);
 
 /// Dark page floor -- DESIGN.md `canvas-dark` token (#0f1410, RGB 15, 20,
