@@ -11,8 +11,11 @@ use crate::model::{
 /// Hard ceiling on the number of registered `result_N` (ADR-0013 M=100). When
 /// a freshly materialized result pushes the count over the cap, the oldest
 /// stale results are auto-reclaimed; active results are never auto-deleted.
-/// Tunable via [`crate::session::Session::set_result_count_cap`] (tests lower
-/// it for a fast, deterministic GC trigger -- mirroring the row-cap twin).
+/// This constant is now ONLY the default-value source: the persisted,
+/// user-tunable copy lives on `Tunables.result_count_cap` (#1446 -- the
+/// create/resume command layer snapshots it onto each session via
+/// [`crate::session::Session::set_result_count_cap`]; tests lower the same
+/// setter for a fast, deterministic GC trigger).
 pub const DEFAULT_RESULT_COUNT_CAP: usize = 100;
 
 #[derive(Debug, Default)]

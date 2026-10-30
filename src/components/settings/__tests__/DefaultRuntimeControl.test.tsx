@@ -35,7 +35,7 @@ const updatedConfig = baseAppConfig({
   format_version: 1,
   engine: { memory_limit: "512MB", threads: 4, row_cap: 10_000 },
   privacy: { send_samples: false },
-  tunables: { window_turns: 5, far_window: 20 },
+  tunables: { window_turns: 5, result_count_cap: 20 },
   shell: { sidebar_collapsed: false },
 });
 

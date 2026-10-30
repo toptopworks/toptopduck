@@ -328,6 +328,10 @@ pub fn create_session(
             let cfg = live.load();
             let seed = crate::skills::seed_from_config(&cfg, &live.cli_tools(), &skills_root.0);
             s.set_discovery_snapshot(seed);
+            // #1446: the configured GC valve rides the same
+            // construction-point snapshot as the engine defaults above --
+            // later settings changes reach later sessions only.
+            s.set_result_count_cap(cfg.tunables.result_count_cap as usize);
             // ADR-0137 (issue #1381): seat the workspace axis BEFORE the bind so
             // the initial recipe carries the binding. An explicitly selected
             // directory binds canonicalized (Windows 8.3 short paths would let
@@ -2391,6 +2395,16 @@ pub async fn open_recipe(
     // closure; the snapshot is plain data) and the auto-include fold below.
     let cfg = live.load();
     let engine_defaults = cfg.engine.clone();
+    // #1446: the count-cap snapshot crosses into the 'static closure as plain
+    // data, same as the engine defaults, and is applied below before the
+    // session lands in the store -- the resumed session takes the CURRENT
+    // config exactly like a new one from its first live turn (the recipe
+    // carries no tunables). The replay inside open_recipe still runs on the
+    // bare default seed; that window is inert (replay registers only active
+    // results, so its GC finds no stale candidates) -- if replay ever sees
+    // stale registrations, the cap must cross as an open_recipe argument
+    // instead, beside the engine defaults.
+    let result_count_cap = cfg.tunables.result_count_cap as usize;
     let inner = tauri::async_runtime::spawn_blocking(move || {
         let mut new_session = Session::open_recipe(
             &path,
@@ -2438,6 +2452,10 @@ pub async fn open_recipe(
         // binding inside open_recipe; this root only ever mints. Same FIXED
         // product-domain placement as create_session.
         new_session.set_workspaces_root(Some(workspaces_root_path));
+        // #1446: apply the count-cap snapshot before the session lands in the
+        // store -- identical semantics to create_session's construction-point
+        // wiring.
+        new_session.set_result_count_cap(result_count_cap);
         // ADR-0138 (issue #1384): seat the registry on the resumed session
         // too -- a later first disk-need mint records, and the close-time
         // reclaim removes. The restored binding itself never re-records

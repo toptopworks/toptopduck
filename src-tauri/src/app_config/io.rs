@@ -303,8 +303,11 @@ pub(crate) fn parse_at(path: &Path) -> Result<AppConfig, AppConfigReadError> {
         serde_json::from_value(value).map_err(|e| AppConfigReadError::Parse(e.to_string()))?;
     // Read-path domain repair (issue #741): `normalize` only runs on writes,
     // but the engine fields are live-consumed now, so a hand-edited
-    // out-of-domain value must never reach a session snapshot.
+    // out-of-domain value must never reach a session snapshot. Same judgment
+    // for the count-cap tunable since #1446 wired it into session snapshots
+    // (0 would GC every stale result on sight).
     cfg.engine.sanitize();
+    cfg.tunables.result_count_cap = cfg.tunables.result_count_cap.max(1);
     Ok(cfg)
 }
 
@@ -542,6 +545,22 @@ mod tests {
                 row_cap: 1,
             }
         );
+    }
+
+    #[test]
+    fn hand_edited_zero_result_count_cap_is_clamped_on_read() {
+        // Same judgment as the engine fields above (#1446): the count cap is
+        // live-consumed into session snapshots now, so a hand-edited 0 -- the
+        // UI writes clamp it, the write path normalizes it -- must never ride
+        // a session snapshot (0 would GC every stale result on sight).
+        let (_dir, path) = temp("hand-edited-cap.json");
+        let hand_edited = format!(
+            "{{\"format_version\":{v},\"tunables\":{{\"result_count_cap\":0}}}}",
+            v = APP_CONFIG_FORMAT_VERSION
+        );
+        fs::write(&path, &hand_edited).expect("write");
+        let cfg = read_at(&path);
+        assert_eq!(cfg.tunables.result_count_cap, 1);
     }
 
     #[test]

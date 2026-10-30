@@ -58,7 +58,7 @@ use crate::session::loop_contract::LoopRound;
 use crate::session::materializer::{CachedDerivedRef, Materializer, RealMaterializer};
 use crate::session_store::ClosingFlag;
 use crate::turn_window;
-use crate::workingset::{WorkingSet, DEFAULT_RESULT_COUNT_CAP};
+use crate::workingset::WorkingSet;
 use crate::SessionId;
 
 // Re-export the resume global-state probe (ADR-0053 Decision 3) after its
@@ -535,9 +535,13 @@ pub struct Session {
     /// Ceiling on the number of registered `result_N` (ADR-0013 M=100). When a
     /// freshly materialized result pushes the count over the cap, the oldest
     /// stale results are auto-reclaimed; active results are never auto-deleted.
-    /// Defaults to [`DEFAULT_RESULT_COUNT_CAP`]; tunable via
-    /// [`Self::set_result_count_cap`] (tests lower it for a fast, deterministic
-    /// GC trigger -- the count-cap twin of [`Self::result_row_cap`]).
+    /// Defaults to `Tunables`' (so a bare construction matches the unconfigured
+    /// config default); the create/resume command layer overrides it from the
+    /// current app-config at the construction point (#1446 -- the same
+    /// session-level snapshot semantics as the engine defaults, so changes
+    /// reach later sessions only). Tests lower it via
+    /// [`Self::set_result_count_cap`] for a fast, deterministic GC trigger --
+    /// the count-cap twin of [`Self::result_row_cap`].
     result_count_cap: usize,
     /// Each loaded source's reference name -> the `.duckdb` snapshot file admin
     /// currently holds attached, so the sandbox can re-attach it READ_ONLY
@@ -844,8 +848,10 @@ impl Session {
     /// Tune the result-count ceiling (ADR-0013 M=100, "可调"). When the
     /// registered `result_N` count exceeds `cap`, the oldest stale results are
     /// auto-reclaimed on the next materialization; active results are never
-    /// auto-deleted. Tests lower it for a fast, deterministic GC trigger
-    /// (mirroring [`Self::set_result_row_cap`]).
+    /// auto-deleted. The command layer applies the configured
+    /// `tunables.result_count_cap` through this setter at the session's
+    /// construction point (#1446); tests lower it for a fast, deterministic
+    /// GC trigger (mirroring [`Self::set_result_row_cap`]).
     pub fn set_result_count_cap(&mut self, cap: usize) {
         self.result_count_cap = cap;
     }
@@ -1005,7 +1011,8 @@ impl Session {
             session_id: None,
             timeline: Vec::new(),
             result_row_cap: engine_defaults.row_cap,
-            result_count_cap: DEFAULT_RESULT_COUNT_CAP,
+            result_count_cap: crate::app_config::model::Tunables::default().result_count_cap
+                as usize,
             source_files: HashMap::new(),
             tool_output_refs: HashMap::new(),
             guidance_retained: None,
@@ -2188,6 +2195,23 @@ mod tests {
         assert!(
             turn.trace[1].calls[0].result_excerpt.is_empty(),
             "the success payload never enters the recipe.json (ADR-0036)"
+        );
+    }
+
+    #[test]
+    fn bare_construction_seeds_the_configured_default_count_cap() {
+        // #1446: a bare construction (no command-layer override yet) must
+        // equal the UNCONFIGURED config default, so the only source of M=100
+        // is DEFAULT_RESULT_COUNT_CAP via Tunables -- the create/resume
+        // command layer then snapshots the persisted tunable over this floor
+        // through set_result_count_cap. The expectation anchors the constant
+        // directly: asserting `Tunables::default()` here would travel with a
+        // Default-impl mutation (both sides derive from it), leaving the
+        // impl's tie to DEFAULT_RESULT_COUNT_CAP unanchored.
+        let session = Session::new().expect("bare construction");
+        assert_eq!(
+            session.result_count_cap,
+            crate::workingset::DEFAULT_RESULT_COUNT_CAP
         );
     }
 

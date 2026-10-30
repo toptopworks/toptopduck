@@ -48,13 +48,16 @@ export interface ExportDefaults {
   default_format: string;
 }
 
-// Tunable defaults (ADR-0013/0023/0028). Stored + round-tripped here; applying
-// them to the live orchestrator is a follow-up slice. The per-turn retry
-// budget was retired with the single-SQL contract (ADR-0077, issue #318); a
-// stale `retry_budget` key in an older config file is ignored at parse.
+// Tunable defaults (ADR-0013/0023/0028). Stored + round-tripped here; the
+// count cap rides each session's construction-point snapshot (#1446). The
+// per-turn retry budget was retired with the single-SQL contract (ADR-0077,
+// issue #318); a stale `retry_budget` key in an older config file is ignored
+// at parse, as is a pre-#1446 `far_window` key (renamed to
+// `result_count_cap` -- the old name suggested the prompt far-window
+// summary, which has no cap).
 export interface Tunables {
   window_turns: number;
-  far_window: number;
+  result_count_cap: number;
 }
 
 // Shell collapse preferences (ADR-0054, issue #84). The MANUAL collapse level
