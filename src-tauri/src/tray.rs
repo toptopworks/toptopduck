@@ -32,11 +32,6 @@
 //! absent (no StatusNotifierItem host), so the fallback is a real path,
 //! not defensive dead code.
 //!
-//! Tray icon (issue #1151): macOS swaps the color window icon for an
-//! embedded black template silhouette (`icon_as_template`) that the menu
-//! bar inverts for light/dark mode per platform convention; Windows and
-//! Linux keep the color icon -- their trays have no template mechanism.
-//!
 //! Tray-ready handshake (issue #1142): `app.emit` is a fire-and-forget
 //! broadcast that returns `Ok` with zero listeners, so a session-level
 //! menu click before the webview's tray listeners register would be lost
@@ -73,7 +68,8 @@ const TRAY_ID: &str = "main-tray";
 /// alpha, @2x (44px) density. macOS is the only runtime consumer -- its
 /// tray backend renders at a fixed point height, so the denser asset
 /// downsamples cleanly on standard and retina alike. The 22px sibling
-/// (`tray-template.png`) ships in the icon set without runtime wiring.
+/// (`tray-template.png`) sits in the icon source set, unbundled, without
+/// runtime wiring.
 // Off macOS the constant's only consumer is the asset-contract test
 // below; the production icon path never embeds it.
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
@@ -622,10 +618,11 @@ fn plan_tray_event(event: &TrayIconEvent) -> TrayEventPlan {
 /// Resolve the tray icon (issue #1151). macOS prefers the embedded black
 /// template silhouette flagged for `icon_as_template` so the menu bar
 /// inverts it for light/dark mode; every other platform keeps the
-/// full-color default window icon. A template decode failure (the asset
-/// is compile-time embedded, so this is belt-and-suspenders) falls back
-/// to the color icon instead of adding a new failure path -- `None`
-/// stays reserved for a genuinely icon-less build.
+/// full-color default window icon -- their trays have no template
+/// mechanism. A template decode failure (the asset is compile-time
+/// embedded, so this is belt-and-suspenders) falls back to the color
+/// icon instead of adding a new failure path -- `None` stays reserved
+/// for a genuinely icon-less build.
 fn tray_icon(app: &AppHandle) -> Option<(Image<'_>, bool)> {
     #[cfg(target_os = "macos")]
     {
@@ -1282,9 +1279,10 @@ mod tests {
     #[test]
     fn embedded_template_icon_decodes_black_at_retina_size() {
         // Pins the template contract (issue #1151): decodable PNG, @2x
-        // square, every visible pixel pure-black RGB (the menu bar only
-        // inverts alpha-carried silhouettes), and a shape actually
-        // present. Swapping in any color asset must turn this red.
+        // square, every visible pixel pure-black RGB (template rendering
+        // recolors from the alpha channel alone; black RGB pins Apple's
+        // template spec), and a shape actually present. Swapping in any
+        // color asset must turn this red.
         let icon =
             Image::from_bytes(TRAY_TEMPLATE_PNG).expect("embedded template tray icon must decode");
         assert_eq!((icon.width(), icon.height()), (44, 44));
