@@ -543,6 +543,16 @@ pub struct Session {
     /// [`Self::set_result_count_cap`] for a fast, deterministic GC trigger --
     /// the count-cap twin of [`Self::result_row_cap`].
     result_count_cap: usize,
+    /// Recent-turn window size N (ADR-0023): how many trailing turns the
+    /// window assembler ships full before folding older turns to summaries.
+    /// Defaults to `Tunables`' (so a bare construction matches the
+    /// unconfigured config default); the create/resume command layer
+    /// overrides it from the current app-config at the construction point
+    /// (#1445 -- the same session-level snapshot semantics as the engine
+    /// defaults, so changes reach later sessions only). Immutable for the
+    /// session's life; the turn runner threads it into every
+    /// `turn_window` assembly entry.
+    window_turns: usize,
     /// Each loaded source's reference name -> the `.duckdb` snapshot file admin
     /// currently holds attached, so the sandbox can re-attach it READ_ONLY
     /// (ADR-0005 read_* closure). Tracked here rather than reconstructed from
@@ -856,6 +866,14 @@ impl Session {
         self.result_count_cap = cap;
     }
 
+    /// Tune the recent-turn window size (ADR-0023 N=20, "可调"). The command
+    /// layer applies the configured `tunables.window_turns` through this
+    /// setter at the session's construction point (#1445); the turn runner
+    /// reads the field when assembling each turn's provider payload.
+    pub fn set_window_turns(&mut self, turns: usize) {
+        self.window_turns = turns;
+    }
+
     /// Set the per-session external-runtime selector (issue #299 slice 9c).
     /// Pass `Some(spec)` to drive the external ACP engine for the next turn,
     /// or `None` to revert to the built-in loop. The production path is the
@@ -1013,6 +1031,7 @@ impl Session {
             result_row_cap: engine_defaults.row_cap,
             result_count_cap: crate::app_config::model::Tunables::default().result_count_cap
                 as usize,
+            window_turns: crate::app_config::model::Tunables::default().window_turns as usize,
             source_files: HashMap::new(),
             tool_output_refs: HashMap::new(),
             guidance_retained: None,
@@ -2213,6 +2232,19 @@ mod tests {
             session.result_count_cap,
             crate::workingset::DEFAULT_RESULT_COUNT_CAP
         );
+    }
+
+    #[test]
+    fn bare_construction_seeds_the_configured_default_window() {
+        // #1445: the window twin of the count-cap pin above -- a bare
+        // construction (no command-layer override yet) must equal the
+        // UNCONFIGURED config default, so the only source of N=20 is
+        // WINDOW_TURNS via Tunables; the create/resume command layer then
+        // snapshots the persisted tunable over this floor through
+        // set_window_turns. The expectation anchors the constant directly
+        // (the count-cap pin's anti-drift rationale above applies verbatim).
+        let session = Session::new().expect("bare construction");
+        assert_eq!(session.window_turns, crate::turn_window::WINDOW_TURNS);
     }
 
     #[test]

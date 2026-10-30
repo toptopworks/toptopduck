@@ -332,6 +332,10 @@ pub fn create_session(
             // construction-point snapshot as the engine defaults above --
             // later settings changes reach later sessions only.
             s.set_result_count_cap(cfg.tunables.result_count_cap as usize);
+            // #1445: the configured window size rides the same snapshot --
+            // the turn runner windows every assembly with this value for the
+            // session's whole life.
+            s.set_window_turns(cfg.tunables.window_turns as usize);
             // ADR-0137 (issue #1381): seat the workspace axis BEFORE the bind so
             // the initial recipe carries the binding. An explicitly selected
             // directory binds canonicalized (Windows 8.3 short paths would let
@@ -2405,6 +2409,11 @@ pub async fn open_recipe(
     // stale registrations, the cap must cross as an open_recipe argument
     // instead, beside the engine defaults.
     let result_count_cap = cfg.tunables.result_count_cap as usize;
+    // #1445: the window snapshot crosses the same way -- plain data, applied
+    // below beside the count cap. The replay inside open_recipe assembles no
+    // provider payload (it re-registers results, asks nothing), so the bare
+    // default seed during replay is inert for the window too.
+    let window_turns = cfg.tunables.window_turns as usize;
     let inner = tauri::async_runtime::spawn_blocking(move || {
         let mut new_session = Session::open_recipe(
             &path,
@@ -2456,6 +2465,9 @@ pub async fn open_recipe(
         // store -- identical semantics to create_session's construction-point
         // wiring.
         new_session.set_result_count_cap(result_count_cap);
+        // #1445: same construction-point snapshot as above -- the resumed
+        // session windows with the CURRENT config from its first turn.
+        new_session.set_window_turns(window_turns);
         // ADR-0138 (issue #1384): seat the registry on the resumed session
         // too -- a later first disk-need mint records, and the close-time
         // reclaim removes. The restored binding itself never re-records

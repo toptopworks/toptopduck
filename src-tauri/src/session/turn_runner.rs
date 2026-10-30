@@ -302,6 +302,9 @@ impl super::Session {
                     locale,
                     inputs.skills,
                     inputs.user_invocations,
+                    // #1445: the session's construction-point window snapshot
+                    // (ADR-0023 N) -- immutable for the session's life.
+                    self.window_turns,
                 );
                 // ADR-0103 (issue #614): the session posture's thought-level
                 // rides the built-in turn's provider request. Read from the
@@ -705,6 +708,9 @@ impl super::Session {
             locale,
             inputs.skills,
             inputs.user_invocations,
+            // #1445: same construction-point window snapshot as the built-in
+            // arm -- both assembly faces window identically.
+            self.window_turns,
         );
         // ADR-0137 (issue #1381): the external runtime's cwd is the session
         // workspace -- THIS spawn is the lazy-mint disk-need moment for a
