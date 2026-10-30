@@ -174,6 +174,43 @@ describe("ArtifactHeader", () => {
       await screen.findByText("更多操作");
     });
 
+    it("refuses the focus return when the synthetic leave cannot derive (the portal detour)", async () => {
+      renderHeader("C:/sessions/s1/artifacts/report.pdf", true);
+      const trigger = screen.getByRole("button", { name: "更多操作" });
+      // The natural click path: the pointer OPENS the menu while still on
+      // the trigger, then moves into the menu portal. In the real app the
+      // modal layer can keep React from deriving the synthetic
+      // onPointerLeave there (the sidebar hover-card machine's CDP-measured
+      // artifact), so NO synthetic leave is fired in this test -- the
+      // marker rides "on" until the native backstop clears it.
+      fireEvent.pointerEnter(trigger);
+      fireEvent.pointerMove(trigger, { pointerType: "mouse" });
+      fireEvent.pointerDown(trigger, { button: 0, pointerType: "mouse" });
+      fireEvent.pointerUp(trigger);
+      await screen.findByRole("menu");
+      // A non-bubbling native pointerleave: the backstop's listener sees
+      // it, React's synthetic derivation (root-level, bubble-fed) does not.
+      trigger.dispatchEvent(new Event("pointerleave"));
+      activateItem(screen.getByRole("menuitem", { name: "刷新" }));
+      await waitFor(() =>
+        expect(screen.queryByRole("menu")).not.toBeInTheDocument(),
+      );
+      await new Promise((r) => setTimeout(r, MENU_REENTRY_GRACE_MS + 50));
+      fireEvent.focus(trigger);
+      await waitFor(() => {});
+      // Without the backstop the marker strands "on" and this focus return
+      // sails through every leg -- the phantom again.
+      expect(screen.queryByText("更多操作")).not.toBeInTheDocument();
+      // A genuine hover reopens. The synthetic leave models the pointer's
+      // eventual proper exit (post-menu, normal events flow again) -- it
+      // also resets Radix's one-shot pointermove edge lock, without which
+      // the re-enter's pointermove intent is swallowed by Radix itself.
+      fireEvent.pointerLeave(trigger);
+      fireEvent.pointerEnter(trigger);
+      fireEvent.pointerMove(trigger, { pointerType: "mouse" });
+      await screen.findByText("更多操作");
+    });
+
     it("exposes refresh / show-in-folder / save-as for an existing file", async () => {
       renderHeader("C:/sessions/s1/artifacts/report.pdf", true);
       await openMoreMenu();

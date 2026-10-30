@@ -1290,6 +1290,24 @@ describe("SessionSidebar organization (ADR-0127, issue #1175)", () => {
     expect(onDelete).toHaveBeenCalledWith("/x/arch.json", null);
   });
 
+  it("anchors the archived toggle on the RECENT section head when recent exists (issue #1437 re-anchor)", () => {
+    // The re-anchor's own placement decision: the control rides the
+    // section whose body it governs. With recent rows present the anchor
+    // must be the recent head -- NOT the first section (pinned here),
+    // which only takes the toggle when recent is absent.
+    const { container } = renderShell(
+      <SessionSidebar {...orgProps({ sessions: pinnedMeta() })} />,
+    );
+    const toggle = screen.getByRole("button", {
+      name: "Show archived sessions",
+    });
+    const anchor = toggle.closest<HTMLElement>(".session-group");
+    expect(anchor?.dataset.section).toBe("recent");
+    // Pinned renders first, so the assertion above discriminates: a revert
+    // to the pre-#1437 first-section anchor lands the toggle on "pinned".
+    expect(sectionNames(container)[0]).toBe("pinned");
+  });
+
   it("keeps the chrome row on an empty sidebar so the archived view stays reachable (all-archived escape)", () => {
     // With every session archived the default list is empty; without a
     // chrome anchor the archived toggle would be unfindable and the hidden

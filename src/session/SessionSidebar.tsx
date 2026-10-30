@@ -257,8 +257,8 @@ export function SessionSidebar({
   // the recent body → archived, the rest only when they have content. The
   // chrome (the archived-visibility toggle; #1401 retired the grouping
   // toggle with the time buckets) rides the RECENT section's title row --
-  // the first section keeps it reachable even on an otherwise-empty
-  // sidebar.
+  // the first section keeps it reachable whenever recent is absent
+  // (workspace-bound-only, pinned-only, or the empty sidebar).
   type SidebarSection =
     | { key: string; title: ReactNode; entries: SidebarEntry[]; variant: "main" | "archived"; capped: boolean }
     | { key: "workspaces"; variant: "workspaces" };
@@ -298,8 +298,9 @@ export function SessionSidebar({
   // One chrome element, one anchor (issue #1175, re-anchored): the
   // archived-visibility toggle rides the RECENT section's title row -- the
   // visibility it controls is the recent body's, so the control lives
-  // there; the first section takes it only when recent is absent (the
-  // empty-sidebar state), keeping the single instance alive in every state.
+  // there; the first section takes it only when recent is absent
+  // (workspace-bound-only, pinned-only, or the empty sidebar), keeping the
+  // single instance alive in every state.
   const sectionChrome = (
     <ArchivedToggle
       visible={showArchived}
@@ -384,8 +385,9 @@ export function SessionSidebar({
     return (
       <li key={section.key} className="session-group mt-3 mb-1" data-section={section.key}>
         {/* The chrome (the archived-visibility toggle, ADR-0127) rides the
-            RECENT section's title row -- one entry point for every sidebar
-            state. The trigger is hover-revealed (group-hover) but
+            RECENT section's title row (the first section's when recent is
+            absent) -- one entry point for every sidebar state. The trigger
+            is hover-revealed (group-hover) but
             stays focus-visible for AT users; the pressed state also pins it
             visible via aria-pressed. */}
         <div className="session-group-title-row group relative mb-0.5 flex items-center justify-between px-1">

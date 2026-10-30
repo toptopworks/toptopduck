@@ -12,7 +12,7 @@
 // time -- whichever action failed last; starting any action (refresh
 // included) clears the previous note.
 
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { FormattedMessage, useIntl } from "react-intl";
 import { Button } from "../ui/button";
 import {
@@ -52,13 +52,33 @@ export function ArtifactHeader({
   // Radix's internal machine misbehaves across that). While the menu is
   // open -- and for the close grace after it -- every tooltip-open intent
   // is refused: the menu-close focus restore lands on the trigger as a
-  // programmatic focus the tooltip cannot tell from a real keyboard one,
-  // and that restore is exactly the phantom re-open. The same grace and
-  // ruling the sidebar hover-card machine carries (MENU_REENTRY_GRACE_MS).
+  // programmatic focus this gate makes no attempt to classify, and that
+  // restore is exactly the phantom re-open. One deliberate cost: a
+  // keyboard-only user never pointer-enters, so their focus-opens are
+  // refused too -- the tooltip text equals the aria-label, so only the
+  // visual hint is lost (a real keyboard leg is the sibling machine's
+  // :focus-visible classifier riding these same legs).
   const [moreOpen, setMoreOpen] = useState(false);
   const [tipOpen, setTipOpen] = useState(false);
   const menuClosedAtRef = useRef(0);
   const pointerOnTriggerRef = useRef(false);
+  const triggerRef = useRef<HTMLButtonElement | null>(null);
+  // Native pointerleave backstop (the sidebar hover-card machine's same
+  // measured artifact): when the pointer leaves the trigger INTO the menu
+  // portal, the modal layer's pointer-events suppression can keep React
+  // from deriving the synthetic onPointerLeave -- the marker would strand
+  // "on" and the pointer leg would wave the Save-as focus return through.
+  // The native event is authoritative; a double-run (synthetic + native)
+  // is idempotent -- both just clear the marker.
+  useEffect(() => {
+    const el = triggerRef.current;
+    if (!el) return;
+    const onNativeLeave = () => {
+      pointerOnTriggerRef.current = false;
+    };
+    el.addEventListener("pointerleave", onNativeLeave);
+    return () => el.removeEventListener("pointerleave", onNativeLeave);
+  }, []);
   const intl = useIntl();
   const openLabel = intl.formatMessage({
     id: "workspace.artifact.openExternal",
@@ -166,6 +186,7 @@ export function ArtifactHeader({
                 <TooltipTrigger asChild>
                   <DropdownMenuTrigger asChild>
                     <Button
+                      ref={triggerRef}
                       type="button"
                       variant="ghost"
                       size="icon"

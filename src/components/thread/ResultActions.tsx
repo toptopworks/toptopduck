@@ -202,7 +202,7 @@ export function ResultActions({
                 void runPull("export", false);
               }
             }}
-            className="size-6 p-1 text-muted-foreground hover:text-foreground"
+            className="size-6 p-1 text-muted-foreground"
           >
             {busy ? (
               <Square aria-hidden="true" className="w-3.5 h-3.5" />
@@ -229,7 +229,7 @@ export function ResultActions({
                 void runPull("copy", false);
               }
             }}
-            className="size-6 p-1 text-muted-foreground hover:text-foreground"
+            className="size-6 p-1 text-muted-foreground"
           >
             {busy ? (
               <Square aria-hidden="true" className="w-3.5 h-3.5" />
