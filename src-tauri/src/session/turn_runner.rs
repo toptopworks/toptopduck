@@ -25,7 +25,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use crate::approval::{ApprovalSink, ApprovalState};
-use crate::turn_window;
 use crate::mcp::config::McpServerConfig;
 use crate::model::{TurnFailure, TurnOutcome, TurnPhase, TurnPhaseSink, TurnRecord, TurnRuntime};
 use crate::provider::keychain::KeychainStore;
@@ -40,6 +39,7 @@ use crate::session::materializer::DispatchDeps;
 use crate::session::outcome_merge::{merge_outcomes, turn_outcome_from_loop};
 use crate::session::skills::SkillTurnState;
 use crate::skills::SkillPromptFragment;
+use crate::turn_window;
 
 use super::{now_epoch_ms, TimelineEntry, ACP_BRIDGE_BIN_ENV, GATEWAY_SERVER_NAME};
 

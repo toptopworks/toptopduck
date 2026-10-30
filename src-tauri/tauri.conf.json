@@ -21,7 +21,8 @@
         "minHeight": 360,
         "center": true,
         "visible": false,
-        "decorations": false
+        "decorations": false,
+        "backgroundColor": [255, 255, 255, 255]
       }
     ],
     "security": {

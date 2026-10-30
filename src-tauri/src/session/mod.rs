@@ -40,7 +40,6 @@ use engine::AdminEngine;
 
 use crate::approval::{ApprovalRequestBody, ApprovalResponse, ApprovalSink, ApprovalState};
 use crate::cancel::CancelToken;
-use crate::turn_window;
 use crate::ingest::schema::quote_ident;
 use crate::model::{
     DatasetDescriptor, DatasetPrivacy, DeleteImpactEntry, ExportRowsError, RenameError, RowPage,
@@ -58,6 +57,7 @@ use crate::runtime::acp::adapter::AdapterSpec;
 use crate::session::loop_contract::LoopRound;
 use crate::session::materializer::{CachedDerivedRef, Materializer, RealMaterializer};
 use crate::session_store::ClosingFlag;
+use crate::turn_window;
 use crate::workingset::{WorkingSet, DEFAULT_RESULT_COUNT_CAP};
 use crate::SessionId;
 

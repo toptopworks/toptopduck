@@ -39,12 +39,13 @@ pub mod sandbox_sql;
 pub mod session;
 pub mod session_store;
 pub mod skills;
+pub mod turn_window;
 // cfg(desktop) mirrors the tauri `tray-icon` feature's own desktop gate --
 // mobile builds neither compile the tray surface nor register it.
-pub mod turn_window;
 #[cfg(desktop)]
 pub mod tray;
 pub mod util;
+pub mod window;
 pub mod workingset;
 pub mod workspace;
 
@@ -307,6 +308,19 @@ pub fn run() {
             let main_window_builder =
                 tauri::WebviewWindowBuilder::from_config(app.handle(), main_window_cfg)?
                     .initialization_script(app_config::boot_seed::boot_seed_script(&boot_cfg));
+            // Pre-paint window background (issue #881): the boot show
+            // reveals the window before the webview paints, so the gap
+            // carries the native background. The theme-resolved color must
+            // ride the builder chain -- restore_state's show() runs
+            // synchronously inside build() (main-thread dispatch executes
+            // inline, not queued), so a post-build set lands only after the
+            // white frame was already composited. An unresolved system
+            // theme keeps the static `backgroundColor` in tauri.conf.json.
+            let main_window_builder =
+                match window::background_color(boot_cfg.theme, window::os_uses_light_theme()) {
+                    Some(color) => main_window_builder.background_color(color),
+                    None => main_window_builder,
+                };
             // Tray-ready handshake state (issue #1142): managed BEFORE
             // this window build (so the page-load hook below never
             // observes a missing state) and before tray::init (so menu

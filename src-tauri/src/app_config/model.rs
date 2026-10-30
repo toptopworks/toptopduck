@@ -15,12 +15,12 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde::{Deserialize, Serialize};
 
 use crate::cli_tools::config::CliToolRegistry;
-use crate::turn_window::WINDOW_TURNS;
 use crate::guardrail::{
     is_well_formed_memory_limit, DEFAULT_MAX_RESULT_ROWS, MAX_THREADS, MEMORY_LIMIT,
 };
 use crate::mcp::config::McpServerRegistry;
 use crate::model::{ProviderConfig, DEFAULT_PROVIDER_BASE_URL, DEFAULT_PROVIDER_MODEL};
+use crate::turn_window::WINDOW_TURNS;
 
 /// App-config schema version (ADR-0038 -- separate domain from the `recipe.json`
 /// `format_version`: app-config is machine-local and migrates with the app, not
