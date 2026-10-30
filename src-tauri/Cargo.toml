@@ -123,10 +123,11 @@ tauri-build = { version = "2", features = [] }
 
 [dependencies]
 # `tray-icon` enables the system tray residency surface (ADR-0125, issue
-# #1140): TrayIconBuilder + the menu swap the rebuild path drives. The icon
-# itself reuses the default window icon (bundled by tauri-build), so no
-# separate tray asset ships.
-tauri = { version = "2", features = ["protocol-asset", "tray-icon"] }
+# #1140): TrayIconBuilder + the menu swap the rebuild path drives. On
+# macOS the icon is the embedded black template silhouette (issue #1151);
+# elsewhere it reuses the default window icon (bundled by tauri-build).
+# `image-png` unlocks Image::from_bytes for that embedded asset.
+tauri = { version = "2", features = ["protocol-asset", "tray-icon", "image-png"] }
 tauri-plugin-dialog = "2"
 # Platform detection (ADR-0074, issue #262): plugin-os over `navigator.userAgent`
 # (webview UA drift) and `cfg!(target_os)` (command + async + wiring), consistent
