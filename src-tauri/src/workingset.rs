@@ -273,7 +273,7 @@ impl WorkingSet {
     /// [`Self::register`] (a source upload), registering a result does NOT move
     /// the active pointer -- active tracks the most-recently-uploaded *source*
     /// (ADR-0022). The resolved "current table" (most recent result, else the
-    /// source) is computed from the thread by [`crate::window::resolve_active`]
+    /// source) is computed from the thread by [`crate::turn_window::resolve_active`]
     /// (issue #27), not stored here. The result is referenceable like any source
     /// (shared FROM namespace), and its name is recorded in `results` so
     /// [`Self::sql_from`] picks the main-table form (`"<ref>"`) over the

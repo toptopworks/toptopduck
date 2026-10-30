@@ -205,7 +205,7 @@ pub fn render_skill_block(skills: &[SkillPromptFragment]) -> String {
 /// M-contract (`result_N` naming) rides the gateway tool descriptions
 /// ([`crate::analysis_tools::builtin_table`]), not this block. Skill fragments are
 /// injected as a separate text block by the caller
-/// ([`crate::window::assemble_acp_turn`]).
+/// ([`crate::turn_window::assemble_acp_turn`]).
 pub fn build_acp_context_block(request: &ProviderRequest, locale: ResponseLocale) -> String {
     let mut out = String::new();
     out.push_str(response_locale_directive(locale));
@@ -323,7 +323,7 @@ pub fn build_tool_system_prompt(
 ///
 /// This is the model's only view of the user's data shape -- the full dataset
 /// never leaves the machine (ADR-0006/0011/0029), only the pruned schema +
-/// frozen sample window assembled by [`crate::window`].
+/// frozen sample window assembled by [`crate::turn_window`].
 pub fn render_schema_context(request: &ProviderRequest) -> String {
     let mut out = String::new();
     out.push_str("\n\n【数据上下文】\n");
@@ -462,11 +462,11 @@ pub fn render_response(r: &ResponsePayload) -> String {
 /// entry.
 ///
 /// Shared by the typed-message consumers — the tool-calling loop's
-/// [`crate::window::tool_turn_messages`] — so the per-turn rendering sequence
+/// [`crate::turn_window::tool_turn_messages`] — so the per-turn rendering sequence
 /// stays in one place.
 /// Each consumer maps the neutral pairs into its own wire shape; none
 /// re-derives the role sequence or the per-turn rendering. The ACP flat-text
-/// path ([`crate::window::assemble_acp_turn`]) re-derives the same sequence
+/// path ([`crate::turn_window::assemble_acp_turn`]) re-derives the same sequence
 /// because it interleaves a skill block between the history and the asking
 /// question — a structural difference that prevents direct delegation.
 pub(crate) fn render_history_messages(request: &ProviderRequest) -> Vec<(&'static str, String)> {

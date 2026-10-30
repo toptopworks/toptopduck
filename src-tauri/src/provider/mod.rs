@@ -5,7 +5,7 @@
 //! test fake, bridged onto the loop as-is). The self-written protocol adapters
 //! retired with the built-in loop (ADR-0107 Decision 1, issue #670); the
 //! windowed payload vocabulary below stays -- the window assembler
-//! (`crate::window`) builds it for both the built-in and ACP turn paths.
+//! (`crate::turn_window`) builds it for both the built-in and ACP turn paths.
 
 pub(crate) mod context_window;
 pub mod fake;
@@ -171,7 +171,7 @@ impl From<&crate::model::TurnOutcome> for ResponsePayload {
 /// The request the orchestrator hands a provider each turn (issue #24): the
 /// asking question, the windowed conversation history, and every working-set
 /// dataset pruned by the privacy controls. Built once per turn by the window
-/// assembler (`crate::window`); the retry loop re-feeds the same request, so a
+/// assembler (`crate::turn_window`); the retry loop re-feeds the same request, so a
 /// provider sees an identical payload across attempts.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ProviderRequest {

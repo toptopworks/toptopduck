@@ -20,7 +20,7 @@ use crate::guardrail::{
 };
 use crate::mcp::config::McpServerRegistry;
 use crate::model::{ProviderConfig, DEFAULT_PROVIDER_BASE_URL, DEFAULT_PROVIDER_MODEL};
-use crate::window::WINDOW_TURNS;
+use crate::turn_window::WINDOW_TURNS;
 
 /// App-config schema version (ADR-0038 -- separate domain from the `recipe.json`
 /// `format_version`: app-config is machine-local and migrates with the app, not

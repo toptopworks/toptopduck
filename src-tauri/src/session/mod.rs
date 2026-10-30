@@ -57,7 +57,7 @@ use crate::runtime::acp::adapter::AdapterSpec;
 use crate::session::loop_contract::LoopRound;
 use crate::session::materializer::{CachedDerivedRef, Materializer, RealMaterializer};
 use crate::session_store::ClosingFlag;
-use crate::window;
+use crate::turn_window;
 use crate::workingset::{WorkingSet, DEFAULT_RESULT_COUNT_CAP};
 use crate::SessionId;
 
@@ -1224,7 +1224,7 @@ impl Session {
         // the payload (`active` still names the stale result) from the UI label,
         // papering over the divergence silently.
         let turns = self.turns();
-        window::resolve_active(&self.working_set, &turns)
+        turn_window::resolve_active(&self.working_set, &turns)
             .and_then(|name| self.working_set.get(&name).cloned())
     }
 
