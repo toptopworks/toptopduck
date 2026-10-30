@@ -21,6 +21,7 @@ use crate::guardrail::{
 use crate::mcp::config::McpServerRegistry;
 use crate::model::{ProviderConfig, DEFAULT_PROVIDER_BASE_URL, DEFAULT_PROVIDER_MODEL};
 use crate::turn_window::WINDOW_TURNS;
+use crate::workingset::DEFAULT_RESULT_COUNT_CAP;
 
 /// App-config schema version (ADR-0038 -- separate domain from the `recipe.json`
 /// `format_version`: app-config is machine-local and migrates with the app, not
@@ -43,10 +44,6 @@ use crate::turn_window::WINDOW_TURNS;
 /// id that parses into `Some`, and the null form has no pre-change reader in
 /// the wild (the app is unreleased -- the ADR-0064 no-migrator stance).
 pub const APP_CONFIG_FORMAT_VERSION: u32 = 2;
-
-/// V1 default far-window cap M (ADR-0028). Mirrors the M=100 invariant; not a
-/// named constant elsewhere, so pinned here with the ADR pointer.
-const DEFAULT_FAR_WINDOW: u32 = 100;
 
 /// UI response-locale preference (ADR-0052, issue #78). Three-state, mirroring
 /// [`Theme`]: `System` defers to the OS locale at apply time, `ZhCN` / `EnUS`
@@ -249,16 +246,28 @@ pub struct Tunables {
     /// Recent-turn window size N (ADR-0023).
     #[serde(default = "default_window_turns")]
     pub window_turns: u32,
-    /// Far-window cap M (ADR-0028).
-    #[serde(default = "default_far_window")]
-    pub far_window: u32,
+    /// Result-registry GC safety valve M (ADR-0013/0028): when the session's
+    /// registered `result_N` count exceeds this cap, the oldest stale results
+    /// are auto-reclaimed on the next materialization (active results are
+    /// never auto-deleted). Seeded onto each new/resumed session's
+    /// construction-point snapshot (#1446); changes reach later sessions
+    /// only. Renamed from `far_window` (issue #1446 -- the old name suggested
+    /// the prompt far-window summary, which has no cap); a stale
+    /// `far_window` key in a pre-rename file is harmless (ignored at parse,
+    /// dropped on the next write -- the `retry_budget` precedent, no
+    /// format-version bump).
+    #[serde(default = "default_result_count_cap")]
+    pub result_count_cap: u32,
 }
 
 impl Default for Tunables {
     fn default() -> Self {
         Self {
             window_turns: WINDOW_TURNS as u32,
-            far_window: DEFAULT_FAR_WINDOW,
+            // The canonical M=100 constant lives on the workingset (the GC
+            // it caps); shared here as the default -- one source of truth
+            // (#1446).
+            result_count_cap: DEFAULT_RESULT_COUNT_CAP as u32,
         }
     }
 }
@@ -267,8 +276,8 @@ fn default_window_turns() -> u32 {
     WINDOW_TURNS as u32
 }
 
-fn default_far_window() -> u32 {
-    DEFAULT_FAR_WINDOW
+fn default_result_count_cap() -> u32 {
+    DEFAULT_RESULT_COUNT_CAP as u32
 }
 
 /// The app-config document (ADR-0038). Lives in the OS app-data directory; the
@@ -424,7 +433,9 @@ impl AppConfig {
     ///   constant when ill-formed, `threads` clamped to >= 1 -- DuckDB
     ///   rejects `PRAGMA threads=0` -- and `row_cap` clamped to >= 1);
     /// - `window_turns` clamped to >= 1 (0 would summarize every turn, which is
-    ///   nonsensical rather than dangerous);
+    ///   nonsensical rather than dangerous) and `tunables.result_count_cap`
+    ///   clamped to >= 1 (0 would reclaim every result on sight -- the GC
+    ///   treats any count over the cap as reclaimable, #1446);
     /// - `last_model_postures` shape-repaired only (whitespace trimmed, an
     ///   empty value -> None, a blank adapter key dropped): a dangling entry
     ///   -- an adapter the build no longer detects, or a model the catalog no
@@ -463,6 +474,7 @@ impl AppConfig {
         }
         self.engine.sanitize();
         self.tunables.window_turns = self.tunables.window_turns.max(1);
+        self.tunables.result_count_cap = self.tunables.result_count_cap.max(1);
         // Drop duplicate MCP server ids so the keychain-account suffix
         // (`mcp-<id>-<env_key>`, issue #301) stays unambiguous. A hand-edited
         // file with dupes keeps the first occurrence per id; the gateway
@@ -886,15 +898,18 @@ mod tests {
     fn normalize_clamps_counts_to_at_least_one() {
         // threads=0 would make DuckDB reject the PRAGMA; row_cap=0 would
         // refuse every non-empty materialization; window_turns=0 would
-        // summarize every turn. All clamp to >=1.
+        // summarize every turn; result_count_cap=0 would GC every result
+        // (cap 0 means any count exceeds it). All clamp to >=1.
         let mut cfg = AppConfig::defaults();
         cfg.engine.threads = 0;
         cfg.engine.row_cap = 0;
         cfg.tunables.window_turns = 0;
+        cfg.tunables.result_count_cap = 0;
         cfg.normalize();
         assert_eq!(cfg.engine.threads, 1);
         assert_eq!(cfg.engine.row_cap, 1);
         assert_eq!(cfg.tunables.window_turns, 1);
+        assert_eq!(cfg.tunables.result_count_cap, 1);
     }
 
     #[test]
@@ -965,6 +980,43 @@ mod tests {
         assert!(
             !rewritten.contains("sidebar_grouping"),
             "the rewrite must drop the legacy key, got: {rewritten}"
+        );
+    }
+
+    #[test]
+    fn tunables_legacy_far_window_key_is_ignored() {
+        // #1446 renamed `far_window` -> `result_count_cap` (the old name lied:
+        // it sounded like the prompt far-window summary but was the result
+        // registry's GC safety valve). Tunables has no deny_unknown_fields, so
+        // a legacy `far_window` key in an older config file is ignored at
+        // parse and dropped on the next write (the `sidebar_grouping` /
+        // `retry_budget` precedent) -- no format-version bump. The sibling
+        // values stay non-default so a regression that swallows the whole
+        // tunables block into defaults also trips this pin.
+        let json = r#"{"format_version":2,"tunables":{"window_turns":3,"far_window":40,"result_count_cap":7}}"#;
+        let cfg: AppConfig = serde_json::from_str(json).expect("legacy key is ignored");
+        assert_eq!(cfg.tunables.window_turns, 3);
+        assert_eq!(cfg.tunables.result_count_cap, 7);
+        let rewritten = serde_json::to_string(&cfg).expect("serialize");
+        assert!(
+            !rewritten.contains("far_window"),
+            "the rewrite must drop the legacy key, got: {rewritten}"
+        );
+    }
+
+    #[test]
+    fn tunables_result_count_cap_defaults_when_absent() {
+        // A pre-#1446 app-config file has a `far_window` key but no
+        // `result_count_cap`. serde(default) on the field must fill the
+        // canonical default (the workingset cap constant, ADR-0013 M=100)
+        // rather than rejecting the whole document, so the user's prior
+        // tunables survive the rename.
+        let json = r#"{"format_version":2,"tunables":{"window_turns":3,"far_window":40}}"#;
+        let cfg: AppConfig = serde_json::from_str(json).expect("pre-rename parse");
+        assert_eq!(cfg.tunables.window_turns, 3);
+        assert_eq!(
+            cfg.tunables.result_count_cap,
+            crate::workingset::DEFAULT_RESULT_COUNT_CAP as u32
         );
     }
 

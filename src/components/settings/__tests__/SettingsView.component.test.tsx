@@ -120,7 +120,7 @@ describe("SettingsView (ADR-0075 per-control persistence + rail chrome)", () => 
       ],
       active_profile: "default",
     },
-    tunables: { window_turns: 10, far_window: 30 },
+    tunables: { window_turns: 10, result_count_cap: 30 },
   });
   const profileKeysDefault = [{ profile_id: "default", has_key: false, keychain_fault: null }];
 

@@ -140,7 +140,7 @@ const { appConfigWith } = vi.hoisted(() => {
         active_profile: "default",
       },
       export: { last_dir: null, default_format: "csv" },
-      tunables: { window_turns: 6, far_window: 12 },
+      tunables: { window_turns: 6, result_count_cap: 12 },
       shell: { sidebar_collapsed: false },
       cli_tools: { tools: [] },
       mcp_servers: { servers: [] },
