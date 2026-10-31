@@ -232,10 +232,9 @@ pub struct ShellPrefs {
 }
 
 /// Tunable defaults (ADR-0013/0023/0028). Persisted so a user's tuned values
-/// survive a restart. `result_count_cap` rides each session's
-/// construction-point snapshot (#1446); applying `window_turns` to the window
-/// assembler is a follow-up slice; this artifact stores + round-trips them
-/// per issue #53 AC.
+/// survive a restart. Both fields ride each session's construction-point
+/// snapshot (`result_count_cap` #1446, `window_turns` #1445); this artifact
+/// stores + round-trips them per issue #53 AC.
 ///
 /// The per-turn retry budget (ADR-0028) was retired with the single-SQL turn
 /// contract (ADR-0077, issue #318): the agent loop self-corrects from
@@ -245,7 +244,9 @@ pub struct ShellPrefs {
 /// `window` retirement set the precedent.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Tunables {
-    /// Recent-turn window size N (ADR-0023).
+    /// Recent-turn window size N (ADR-0023). Seeded onto each new/resumed
+    /// session's construction-point snapshot (#1445); changes reach later
+    /// sessions only.
     #[serde(default = "default_window_turns")]
     pub window_turns: u32,
     /// Result-registry GC safety valve M (ADR-0013/0028): when the session's

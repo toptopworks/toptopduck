@@ -543,6 +543,16 @@ pub struct Session {
     /// [`Self::set_result_count_cap`] for a fast, deterministic GC trigger --
     /// the count-cap twin of [`Self::result_row_cap`].
     result_count_cap: usize,
+    /// Recent-turn window size N (ADR-0023): how many trailing turns the
+    /// window assembler ships full before folding older turns to summaries.
+    /// Defaults to `Tunables`' (so a bare construction matches the
+    /// unconfigured config default); the create/resume command layer
+    /// overrides it from the current app-config at the construction point
+    /// (#1445 -- the same session-level snapshot semantics as the engine
+    /// defaults, so changes reach later sessions only). Written once by the
+    /// create/resume command layer and never mutated afterward; the turn
+    /// runner threads it into every `turn_window` assembly entry.
+    window_turns: usize,
     /// Each loaded source's reference name -> the `.duckdb` snapshot file admin
     /// currently holds attached, so the sandbox can re-attach it READ_ONLY
     /// (ADR-0005 read_* closure). Tracked here rather than reconstructed from
@@ -856,6 +866,14 @@ impl Session {
         self.result_count_cap = cap;
     }
 
+    /// Tune the recent-turn window size (ADR-0023 N=20, "可调"). The command
+    /// layer applies the configured `tunables.window_turns` through this
+    /// setter at the session's construction point (#1445); the turn runner
+    /// reads the field when assembling each turn's provider payload.
+    pub fn set_window_turns(&mut self, turns: usize) {
+        self.window_turns = turns;
+    }
+
     /// Set the per-session external-runtime selector (issue #299 slice 9c).
     /// Pass `Some(spec)` to drive the external ACP engine for the next turn,
     /// or `None` to revert to the built-in loop. The production path is the
@@ -1013,6 +1031,7 @@ impl Session {
             result_row_cap: engine_defaults.row_cap,
             result_count_cap: crate::app_config::model::Tunables::default().result_count_cap
                 as usize,
+            window_turns: crate::app_config::model::Tunables::default().window_turns as usize,
             source_files: HashMap::new(),
             tool_output_refs: HashMap::new(),
             guidance_retained: None,
@@ -1830,7 +1849,7 @@ mod tests {
 
     use crate::model::{ThreadEntry, TurnFailure, TurnOutcome, TurnRuntime};
     use crate::provider::fake::FakeProvider;
-    use crate::provider::tool_calling::{ToolTurnReply, ToolUse};
+    use crate::provider::tool_calling::{ToolTurnMessage, ToolTurnReply, ToolUse};
     use crate::provider::ProviderError;
     use serde_json::json;
     use tempfile::NamedTempFile;
@@ -2212,6 +2231,73 @@ mod tests {
         assert_eq!(
             session.result_count_cap,
             crate::workingset::DEFAULT_RESULT_COUNT_CAP
+        );
+    }
+
+    #[test]
+    fn bare_construction_seeds_the_configured_default_window() {
+        // #1445: the window twin of the count-cap pin above -- a bare
+        // construction (no command-layer override yet) must equal the
+        // UNCONFIGURED config default, so the only source of N=20 is
+        // WINDOW_TURNS via Tunables; the create/resume command layer then
+        // snapshots the persisted tunable over this floor through
+        // set_window_turns. The expectation anchors the constant directly
+        // (the count-cap pin's anti-drift rationale above applies verbatim).
+        let session = Session::new().expect("bare construction");
+        assert_eq!(session.window_turns, crate::turn_window::WINDOW_TURNS);
+    }
+
+    #[test]
+    fn ask_windows_the_conversation_on_the_session_snapshot() {
+        // #1445: the window seam -- the runner must thread the session's
+        // `window_turns` into the assembly, and the bare-construction pin
+        // above cannot catch a dropped construction-point setter call or a
+        // runner-site revert to the constant (both compile clean and keep
+        // every suite green -- the failure mode the #741 engine seam test
+        // pins for the caps, here for the window). Drive four live asks at
+        // N=2 and read the assembled conversation off the fake's capture
+        // handle: the oldest turn folds to a summary (its response text
+        // never rides the window), the two recent turns ship full.
+        let provider = FakeProvider::new()
+            .scripted_tool_turn("第一问", ToolTurnReply::Text("第一答".into()))
+            .scripted_tool_turn("第二问", ToolTurnReply::Text("第二答".into()))
+            .scripted_tool_turn("第三问", ToolTurnReply::Text("第三答".into()))
+            .scripted_tool_turn("第四问", ToolTurnReply::Text("第四答".into()));
+        let handle = provider.captured_tool_turns();
+        let (mut session, _dir) = session_with_people(provider);
+        session.set_window_turns(2);
+        for question in ["第一问", "第二问", "第三问", "第四问"] {
+            let _ = session.ask(question);
+        }
+        let captured = handle.lock().unwrap();
+        assert_eq!(captured.len(), 4, "one assembled request per ask");
+        let last = captured.last().unwrap();
+        // Three history turns x two entries + the asking question.
+        assert_eq!(last.messages.len(), 7);
+        let content = |i: usize| match &last.messages[i] {
+            ToolTurnMessage::User { content } => content.clone(),
+            ToolTurnMessage::Assistant { text, .. } => text.clone().unwrap_or_default(),
+            ToolTurnMessage::ToolResult { content, .. } => content.clone(),
+        };
+        // The folded oldest turn ships its verbatim question plus the
+        // no-result summary note -- never its response text.
+        assert_eq!(content(0), "第一问");
+        assert!(content(1).contains("未生成结果"));
+        // The two in-window turns ship question + response verbatim.
+        assert_eq!(content(2), "第二问");
+        assert!(content(3).contains("第二答"));
+        assert_eq!(content(4), "第三问");
+        assert!(content(5).contains("第三答"));
+        assert_eq!(content(6), "第四问");
+        assert!(
+            !last.messages.iter().any(|m| match m {
+                ToolTurnMessage::User { content } | ToolTurnMessage::ToolResult { content, .. } =>
+                    content.contains("第一答"),
+                ToolTurnMessage::Assistant { text, .. } => {
+                    text.as_deref().is_some_and(|t| t.contains("第一答"))
+                }
+            }),
+            "the folded turn's response text never rides the window"
         );
     }
 
