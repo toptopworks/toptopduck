@@ -406,11 +406,14 @@ describe("SettingsView (ADR-0075 per-control persistence + rail chrome)", () => 
     const { onCommitAppConfig } = renderView();
     // The card renders on the General pane seeded from the stored config.
     const windowTurns = screen.getByRole("spinbutton", { name: "Recent-turn window" });
+    const cap = screen.getByRole("spinbutton", { name: "Data result cap" });
     expect(windowTurns).toHaveValue(10);
-    expect(screen.getByRole("spinbutton", { name: "Data result cap" })).toHaveValue(30);
+    expect(cap).toHaveValue(30);
+    fireEvent.change(cap, { target: { value: "5" } });
     fireEvent.change(windowTurns, { target: { value: "7" } });
     // Each field's Save commits only that field, read-modify-write over the
-    // latest config (the Engine pane precedent) via the same onCommit path.
+    // latest config (the Engine pane precedent) via the same onCommit path —
+    // the unsaved sibling draft (5) must not smuggle along with the save.
     fireEvent.click(tunablesSave(windowTurns));
     await waitFor(() => expect(onCommitAppConfig).toHaveBeenCalledTimes(1));
     const committed = onCommitAppConfig.mock.calls[0][0];
@@ -419,18 +422,44 @@ describe("SettingsView (ADR-0075 per-control persistence + rail chrome)", () => 
     expect(committed.theme).toBe(baseConfig.theme);
   });
 
-  it("empty and below-one tunables saves clamp to 1 at the save boundary", async () => {
+  it("invalid tunables saves clamp to 1 and floor fractions at the save boundary", async () => {
     const { onCommitAppConfig } = renderView();
     const cap = screen.getByRole("spinbutton", { name: "Data result cap" });
     // The field stays clearable while editing; only the commit clamps.
     fireEvent.change(cap, { target: { value: "" } });
     expect((cap as HTMLInputElement).value).toBe("");
-    for (const [i, raw] of ["", "0", "-3"].entries()) {
+    for (const [i, [raw, expected]] of [["", 1], ["0", 1], ["-3", 1], ["2.7", 2]].entries()) {
       fireEvent.change(cap, { target: { value: raw } });
       fireEvent.click(tunablesSave(cap));
       await waitFor(() => expect(onCommitAppConfig).toHaveBeenCalledTimes(i + 1));
-      expect(onCommitAppConfig.mock.calls[i][0].tunables.result_count_cap).toBe(1);
+      expect(onCommitAppConfig.mock.calls[i][0].tunables.result_count_cap).toBe(expected);
     }
+  });
+
+  it("an in-flight tunables save locks the card and swaps only its own label", async () => {
+    let resolveCommit: () => void = () => {};
+    const onCommitAppConfig = vi.fn<CommitFn>().mockImplementation(
+      () => new Promise<void>((resolve) => { resolveCommit = resolve; }),
+    );
+    renderView({ onCommitAppConfig });
+    const windowTurns = screen.getByRole("spinbutton", { name: "Recent-turn window" });
+    const cap = screen.getByRole("spinbutton", { name: "Data result cap" });
+    const windowRow = windowTurns.closest("[data-slot='settings-row']") as HTMLElement;
+    const capRow = cap.closest("[data-slot='settings-row']") as HTMLElement;
+    fireEvent.change(windowTurns, { target: { value: "7" } });
+    fireEvent.click(tunablesSave(windowTurns));
+    // While the commit is pending the whole card is locked; only the
+    // in-flight field's button swaps to Saving (the sibling keeps Save).
+    expect(windowTurns).toBeDisabled();
+    expect(cap).toBeDisabled();
+    expect(within(windowRow).getByRole("button", { name: "Saving…" })).toBeDisabled();
+    expect(within(capRow).getByRole("button", { name: "Save" })).toBeDisabled();
+    // The manual resolver only binds once the pending commit has actually
+    // reached the mock, so let the click's microtasks run before resolving.
+    await waitFor(() => expect(onCommitAppConfig).toHaveBeenCalledTimes(1));
+    resolveCommit();
+    await waitFor(() =>
+      expect(within(windowRow).getByRole("button", { name: "Save" })).toBeEnabled());
   });
 
   it("a failed tunables save surfaces an inline error and keeps the draft", async () => {
@@ -444,6 +473,23 @@ describe("SettingsView (ADR-0075 per-control persistence + rail chrome)", () => 
     // touched) and the failure never closes the view.
     expect(windowTurns).toHaveValue(7);
     expect(onClose).not.toHaveBeenCalled();
+  });
+
+  it("a failed tunables save recovers for a retry that clears the error", async () => {
+    const onCommitAppConfig = vi.fn<CommitFn>()
+      .mockRejectedValueOnce(new Error("read-only"))
+      .mockResolvedValue(undefined);
+    renderView({ onCommitAppConfig });
+    const windowTurns = screen.getByRole("spinbutton", { name: "Recent-turn window" });
+    fireEvent.change(windowTurns, { target: { value: "7" } });
+    fireEvent.click(tunablesSave(windowTurns));
+    expect(await screen.findByText("read-only")).toBeInTheDocument();
+    // The card unlocks after the failure: the same Save is clickable again
+    // and the successful retry clears the error surface.
+    fireEvent.click(tunablesSave(windowTurns));
+    await waitFor(() => expect(onCommitAppConfig).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(screen.queryByText("read-only")).not.toBeInTheDocument());
+    expect(windowTurns).toBeEnabled();
   });
 
   it("tunables drafts re-seed from the stored config on every pane mount", async () => {

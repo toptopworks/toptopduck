@@ -64,10 +64,13 @@ function patchTunables(cfg: AppConfig, field: keyof TunablesDraft, raw: string):
 // Issue #1449: the Tunables card sits between the appearance prefs and the
 // sessions directory (which stays last as the pane's structural change), and
 // follows the Engine pane's model — string drafts, per-field Save, parse +
-// clamp at the save boundary, each row's semantics as its description line —
-// but commits through onCommitImmediate (plain set_app_config, no dedicated
-// IPC). Both values are construction-point snapshots (ADR-0013/0023/0028):
-// a change reaches sessions created or resumed afterwards only.
+// clamp at the save boundary, each row's semantics as its description line.
+// It commits through onCommitImmediate (plain set_app_config), the same pipe
+// the Engine pane uses; the dedicated IPC on this pane is the sessions-dir
+// row's set_sessions_dir below. The two values are the tunables of
+// ADR-0013/0023/0028 riding each session's construction-point snapshot
+// (window_turns #1445, result_count_cap #1446): a change reaches sessions
+// created or resumed afterwards only.
 
 export type GeneralSectionProps = {
   appConfig: AppConfig;
@@ -303,9 +306,10 @@ export function GeneralSection({
 
       </SettingsCard>
 
-      {/* Tunables (#1449): the two session-engine construction-point
-       *  snapshots (ADR-0013/0023/0028), in the Engine pane's posture —
-       *  rows with their semantics as the description line. */}
+      {/* Tunables (#1449): the two session-engine tunables of
+       *  ADR-0013/0023/0028, riding each session's construction-point
+       *  snapshot (#1445/#1446), in the Engine pane's posture — rows with
+       *  their semantics as the description line. */}
       <SettingsCard className="mt-4">
         <SettingsRow
           title={(
@@ -322,14 +326,14 @@ export function GeneralSection({
           )}
           action={tunablesSaveButton("window_turns")}
         >
-          {/* The accessible name reuses the row-title key (ADR-0052), so the
-           *  input is addressable without a positional query. */}
+          {/* The accessible name reuses the row-title key so the input is
+           *  addressable without a positional query. */}
           <Input
             type="number"
             min={1}
             aria-label={intl.formatMessage({
               id: "settings.general.tunables.windowTurns",
-              defaultMessage: "Recent-turn window:",
+              defaultMessage: "Recent-turn window",
             })}
             value={tunablesDraft.window_turns}
             onChange={(e) => setTunablesDraft({ ...tunablesDraft, window_turns: e.target.value })}
@@ -357,7 +361,7 @@ export function GeneralSection({
             min={1}
             aria-label={intl.formatMessage({
               id: "settings.general.tunables.resultCountCap",
-              defaultMessage: "Result count cap:",
+              defaultMessage: "Result count cap",
             })}
             value={tunablesDraft.result_count_cap}
             onChange={(e) =>
