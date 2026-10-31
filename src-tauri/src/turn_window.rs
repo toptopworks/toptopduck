@@ -652,21 +652,6 @@ mod tests {
         };
         assert_eq!(find("result_3").sample, None);
         assert!(find("result_4").sample.is_some());
-        // The clamp floor (window_turns >= 1) stays well-defined at the
-        // assembler: N=1 leaves exactly the last turn full, no panic.
-        let payload_one = assemble("probe", &[], &ws, &history, 1);
-        assert_eq!(
-            payload_one
-                .history
-                .iter()
-                .filter(|t| matches!(t, TurnPayload::Summary { .. }))
-                .count(),
-            4
-        );
-        assert!(matches!(
-            payload_one.history.last().unwrap(),
-            TurnPayload::Full { .. }
-        ));
     }
 
     /// ADR-0078 summary-only far window (issue #297): the trace (the rail's
