@@ -216,6 +216,23 @@ describe("SettingsView (ADR-0075 per-control persistence + rail chrome)", () => 
     ) as HTMLButtonElement;
   }
 
+  // The General pane carries three Save-named buttons since the Tunables card
+  // (#1449): the two field saves plus the sessions-dir draft commit. The
+  // sessions-dir one lives in the row that owns the Browse… trigger.
+  function sessionsDirSave(): HTMLButtonElement {
+    const row = screen.getByText("Browse…").closest(
+      "[data-slot='settings-row']",
+    ) as HTMLElement;
+    return within(row).getByRole("button", { name: "Save" });
+  }
+
+  // A tunables field's Save, scoped by the row's input so the other
+  // Save-named buttons on the pane stay out of the query.
+  function tunablesSave(field: HTMLElement): HTMLButtonElement {
+    const row = field.closest("[data-slot='settings-row']") as HTMLElement;
+    return within(row).getByRole("button", { name: "Save" });
+  }
+
   // --- General pane: immediate-commit selects (no Save) --------------------
 
   it("renders theme + language selects on the General pane", async () => {
@@ -232,10 +249,13 @@ describe("SettingsView (ADR-0075 per-control persistence + rail chrome)", () => 
     expect(onCommitAppConfig.mock.calls[0][0].theme).toBe("dark");
     // The rest of the config round-trips unchanged.
     expect(onCommitAppConfig.mock.calls[0][0].engine).toEqual(baseConfig.engine);
-    // The only Save button is the sessions-dir row's draft commit; it is
-    // disabled because no directory has been picked, confirming the theme
-    // row itself has no Save button (ADR-0075 case a).
-    expect(screen.getByRole("button", { name: "Save" })).toBeDisabled();
+    // The theme row itself has no Save button (ADR-0075 case a): the Save
+    // buttons on this pane belong to the sessions-dir row and the Tunables
+    // card, neither of which lives inside the theme row.
+    const themeRow = screen.getByRole("combobox", { name: "Theme" }).closest(
+      "[data-slot='settings-row']",
+    ) as HTMLElement;
+    expect(within(themeRow).queryByRole("button", { name: "Save" })).not.toBeInTheDocument();
   });
 
   it("a failed immediate commit surfaces an inline error (revert-on-fail)", async () => {
@@ -315,7 +335,7 @@ describe("SettingsView (ADR-0075 per-control persistence + rail chrome)", () => 
   it("Save is disabled until Browse picks a directory", async () => {
     renderView();
     await screen.findByText("/home/user/Documents/TOPTOPDuck/sessions");
-    expect(screen.getByRole("button", { name: "Save" })).toBeDisabled();
+    expect(sessionsDirSave()).toBeDisabled();
   });
 
   it("Browse + Save calls setSessionsDir and syncs state", async () => {
@@ -330,9 +350,9 @@ describe("SettingsView (ADR-0075 per-control persistence + rail chrome)", () => 
     fireEvent.click(screen.getByRole("button", { name: "Browse…" }));
     await waitFor(() => expect(vi.mocked(dialogPlugin.open)).toHaveBeenCalled());
     // Save becomes enabled after picking a directory.
-    expect(screen.getByRole("button", { name: "Save" })).not.toBeDisabled();
+    expect(sessionsDirSave()).not.toBeDisabled();
 
-    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    fireEvent.click(sessionsDirSave());
     await waitFor(() => expect(vi.mocked(setSessionsDir)).toHaveBeenCalledWith("/new/sessions"));
     await waitFor(() => expect(onSessionsDirChanged).toHaveBeenCalledWith(updatedConfig));
   });
@@ -346,10 +366,10 @@ describe("SettingsView (ADR-0075 per-control persistence + rail chrome)", () => 
 
     fireEvent.click(screen.getByRole("button", { name: "Browse…" }));
     await waitFor(() => expect(vi.mocked(dialogPlugin.open)).toHaveBeenCalled());
-    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    fireEvent.click(sessionsDirSave());
     expect(await screen.findByText("not writable")).toBeInTheDocument();
     // Draft is retained so the user can retry.
-    expect(screen.getByRole("button", { name: "Save" })).not.toBeDisabled();
+    expect(sessionsDirSave()).not.toBeDisabled();
   });
 
   it("ESC is blocked while a sessions-dir Save IPC is in flight", async () => {
@@ -365,7 +385,7 @@ describe("SettingsView (ADR-0075 per-control persistence + rail chrome)", () => 
     await screen.findByText("/home/user/Documents/TOPTOPDuck/sessions");
     fireEvent.click(screen.getByRole("button", { name: "Browse…" }));
     await waitFor(() => expect(vi.mocked(dialogPlugin.open)).toHaveBeenCalled());
-    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    fireEvent.click(sessionsDirSave());
     await waitFor(() => expect(vi.mocked(setSessionsDir)).toHaveBeenCalled());
 
     // ESC must be blocked while the sessions-dir IPC is in flight (I-2).
@@ -378,6 +398,74 @@ describe("SettingsView (ADR-0075 per-control persistence + rail chrome)", () => 
     await new Promise((r) => setTimeout(r, 0));
     fireEvent.keyDown(window, { key: "Escape" });
     await waitFor(() => expect(onClose).toHaveBeenCalledTimes(1));
+  });
+
+  // --- General pane: Tunables card (issue #1449) -----------------------------
+
+  it("tunables fields save independently through the shared commit path", async () => {
+    const { onCommitAppConfig } = renderView();
+    // The card renders on the General pane seeded from the stored config.
+    const windowTurns = screen.getByRole("spinbutton", { name: "Recent-turn window" });
+    expect(windowTurns).toHaveValue(10);
+    expect(screen.getByRole("spinbutton", { name: "Data result cap" })).toHaveValue(30);
+    fireEvent.change(windowTurns, { target: { value: "7" } });
+    // Each field's Save commits only that field, read-modify-write over the
+    // latest config (the Engine pane precedent) via the same onCommit path.
+    fireEvent.click(tunablesSave(windowTurns));
+    await waitFor(() => expect(onCommitAppConfig).toHaveBeenCalledTimes(1));
+    const committed = onCommitAppConfig.mock.calls[0][0];
+    expect(committed.tunables.window_turns).toBe(7);
+    expect(committed.tunables.result_count_cap).toBe(30);
+    expect(committed.theme).toBe(baseConfig.theme);
+  });
+
+  it("empty and below-one tunables saves clamp to 1 at the save boundary", async () => {
+    const { onCommitAppConfig } = renderView();
+    const cap = screen.getByRole("spinbutton", { name: "Data result cap" });
+    // The field stays clearable while editing; only the commit clamps.
+    fireEvent.change(cap, { target: { value: "" } });
+    expect((cap as HTMLInputElement).value).toBe("");
+    for (const [i, raw] of ["", "0", "-3"].entries()) {
+      fireEvent.change(cap, { target: { value: raw } });
+      fireEvent.click(tunablesSave(cap));
+      await waitFor(() => expect(onCommitAppConfig).toHaveBeenCalledTimes(i + 1));
+      expect(onCommitAppConfig.mock.calls[i][0].tunables.result_count_cap).toBe(1);
+    }
+  });
+
+  it("a failed tunables save surfaces an inline error and keeps the draft", async () => {
+    const onCommitAppConfig = vi.fn<CommitFn>().mockRejectedValue(new Error("read-only"));
+    const { onClose } = renderView({ onCommitAppConfig });
+    const windowTurns = screen.getByRole("spinbutton", { name: "Recent-turn window" });
+    fireEvent.change(windowTurns, { target: { value: "7" } });
+    fireEvent.click(tunablesSave(windowTurns));
+    expect(await screen.findByText("read-only")).toBeInTheDocument();
+    // The typed draft survives for retry (the committed value was never
+    // touched) and the failure never closes the view.
+    expect(windowTurns).toHaveValue(7);
+    expect(onClose).not.toHaveBeenCalled();
+  });
+
+  it("tunables drafts re-seed from the stored config on every pane mount", async () => {
+    renderView();
+    const windowTurns = screen.getByRole("spinbutton", { name: "Recent-turn window" });
+    // An unsaved edit is local draft state only: leaving the pane unmounts
+    // it, and returning re-seeds from the stored config.
+    fireEvent.change(windowTurns, { target: { value: "7" } });
+    fireEvent.click(screen.getByRole("button", { name: "Analysis Engine" }));
+    fireEvent.click(screen.getByRole("button", { name: "General" }));
+    expect(screen.getByRole("spinbutton", { name: "Recent-turn window" })).toHaveValue(10);
+    expect(screen.getByRole("spinbutton", { name: "Data result cap" })).toHaveValue(30);
+  });
+
+  it("the Tunables rows carry their semantics as persistent description lines", async () => {
+    renderView();
+    // Each row's semantics stays as its description line (the Engine pane's
+    // posture); there is no separate disclosure line under the card.
+    expect(screen.getByText(/earlier turns fold into a question summary/)).toBeInTheDocument();
+    expect(screen.getByText(/the oldest unused ones are cleaned up/)).toBeInTheDocument();
+    // The pane description covers the pane's actual contents (#1449 rider).
+    expect(screen.getByText(/language, and system settings/)).toBeInTheDocument();
   });
 
   // --- Default runtime row (issue #571) -------------------------------------
