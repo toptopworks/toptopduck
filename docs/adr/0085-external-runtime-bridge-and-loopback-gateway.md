@@ -44,3 +44,4 @@ ADR-0076 定双运行时 + app 所有的 MCP 网关，留"桥接进程分发形�
 - **校准（DispatchDeps 改名）**：本文所指 `TurnDeps`（工具派发借入束）经轮次入口同名命令边界束消歧，现名 `DispatchDeps`——网关 borrow 面与 `tools::dispatch` 签名形状不变。
 - **校准（模块改名 analysis_tools）**：本文（含上方约束前置段与既有校准条）所指 `tools::dispatch`（内置 DuckDB 工具派发函数）现路径 `analysis_tools::dispatch`——`pub(crate)` 可见性、签名形状与「网关必须在 app 进程内」的约束依据不变。
 - **被 ADR-0105 取代（工具面聚合叙事）**：外部 MCP / 技能工具不逐个并入 `tools/list` 工具表——外部 MCP 工具经固定元工具三件套发现面呈现，技能元工具同族装配（ADR-0110 / ADR-0111）；未决项「网关 `tools/list` 工具表聚合」由 ADR-0105 收官。
+- **被 ADR-0139 校准**：Decision 的「`serve_connection(handle, ctx)` 阻塞驱动单连接生命周期」与「网关 serve 生命周期有界」条的 accept 非阻塞轮询 / `set_read_timeout` 读循环，读作出网链 tokio 化后由 `select!` / `tokio::time::timeout` 原生承载；不变面——回连 token 验证与单连接接受、newline-delimited JSON-RPC 桥接直通、`!Sync` 连接主线程原地借用的线程约束、serve 收尾由引擎完成信号驱动的语义保证。
