@@ -9,7 +9,7 @@
 
 pub(crate) mod context_window;
 pub mod fake;
-pub mod http;
+pub(crate) mod http;
 pub mod keychain;
 pub mod live_config;
 pub(crate) mod output_cap;

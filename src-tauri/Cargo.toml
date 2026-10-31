@@ -313,11 +313,11 @@ rig-agent = { version = "0.42", default-features = false }
 # serve the preflight probes (ADR-0139): the probe runs on a
 # `spawn_blocking` thread where the blocking flavor fits without an async
 # runtime, and the features give it the same JSON send/parse the retired
-# ureq face carried (`send_json` / `into_json`). The egress clients this
-# builds are process-shared (issue #926), so the proxy snapshot freezes at
-# the first successful build -- a mid-session proxy change waits for
-# process restart, the same posture the preflight probes' shared blocking
-# client accepts.
+# ureq face carried (`send_json` / `into_json`). Both egress clients this
+# builds are process-shared singletons -- the live face since issue #926,
+# the preflight blocking face since this change -- so each proxy snapshot
+# freezes at the first successful build: a mid-session proxy change waits
+# for process restart (documented at each singleton).
 reqwest = { version = "0.13", default-features = false, features = ["blocking", "charset", "http2", "json", "system-proxy"] }
 # Upstream rig emits its SSE/retry diagnostics through `tracing`; the app's
 # log sink is the `log` facade (tauri-plugin-log, issue #98). Declaring

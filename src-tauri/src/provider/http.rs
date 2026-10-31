@@ -1,4 +1,4 @@
-//! Shared HTTP helpers for the provider adapters (issue #244).
+//! Shared HTTP helpers for the provider domain (issue #244).
 //!
 //! One security invariant lives here, applied to every outbound LLM call
 //! (preflight and the loop runtime's model-config resolution) so the paths
@@ -14,7 +14,7 @@
 //! `Authorization` cannot travel past the first hop of a 3xx.
 
 /// A base_url that failed the [`validate_http_base_url`] check. Carries a
-/// short reason so each call site (adapter vs preflight) maps it to its own
+/// short reason so each call site (preflight vs the loop runtime) maps it to its own
 /// error vocabulary without re-deriving the diagnosis. The reason is read
 /// only via [`Display`](std::fmt::Display); the inner string is private to
 /// keep the diagnostic wording owned by this module.
@@ -47,9 +47,9 @@ pub(crate) fn validate_http_base_url(base_url: &str) -> Result<(), InvalidBaseUr
 /// boundary: a naive `&s[..LIMIT]` panics when the cut lands mid-character, and
 /// model replies / gateway error bodies (and the errors built from them) are
 /// routinely CJK -- so this path, of all paths, must not panic on multi-byte
-/// text. (`floor_char_boundary` needs 1.91, so the floor is manual.) Shared
-/// across the preflight + HTTP-error-body paths so both stay panic-free from
-/// one source.
+/// text. (`floor_char_boundary` needs 1.91, so the floor is manual.) Serves
+/// the preflight ping's detail fold (its one remaining production caller)
+/// from one panic-free source.
 pub(crate) fn truncate(s: &str) -> String {
     const LIMIT: usize = 200;
     if s.len() <= LIMIT {
