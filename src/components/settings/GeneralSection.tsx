@@ -5,9 +5,10 @@ import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
 
 import { getSessionsDir, setSessionsDir } from "../../api";
-import type { AppConfig, LocalePreference, Theme } from "../../types/app-config";
+import type { AppConfig, LocalePreference, Theme, Tunables } from "../../types/app-config";
 import { fmtError } from "../../lib/error-presentation";
 import { Button } from "../ui/button";
+import { Input } from "../ui/input";
 import {
   Select,
   SelectContent,
@@ -16,6 +17,33 @@ import {
   SelectValue,
 } from "../ui/select";
 import { PaneHeader, SettingsCard, SettingsRow } from "./settings-chrome";
+
+/** Local string draft of the tunables (#1449). Numeric fields are held as the
+ *  raw text the user typed (including "") so a field can be cleared and
+ *  retyped instead of snapping back to 1; parsing + clamping happen at the
+ *  save boundary (the Engine pane precedent: an explicit save is not a
+ *  correctness gate). */
+type TunablesDraft = {
+  window_turns: string;
+  result_count_cap: string;
+};
+
+function toTunablesDraft(t: Tunables): TunablesDraft {
+  return {
+    window_turns: String(t.window_turns),
+    result_count_cap: String(t.result_count_cap),
+  };
+}
+
+/** Apply one draft field onto the latest app-config's tunables
+ *  (read-modify-write keeps the sibling field intact); an empty / invalid /
+ *  below-one value clamps to the safe minimum of 1. */
+function patchTunables(cfg: AppConfig, field: keyof TunablesDraft, raw: string): AppConfig {
+  const parsed = Number(raw);
+  const tunables = { ...cfg.tunables };
+  tunables[field] = Number.isFinite(parsed) && parsed >= 1 ? Math.floor(parsed) : 1;
+  return { ...cfg, tunables };
+}
 
 // General pane (ADR-0075, issue #281): theme + language as compact Select
 // dropdowns that commit IMMEDIATELY (governing principle case a). Both prefs
@@ -32,6 +60,17 @@ import { PaneHeader, SettingsCard, SettingsRow } from "./settings-chrome";
 // The mixed model is acceptable: theme/locale are low-stakes immediate prefs,
 // while sessions_dir is a structural directory change that benefits from an
 // explicit commit step.
+//
+// Issue #1449: the Tunables card sits between the appearance prefs and the
+// sessions directory (which stays last as the pane's structural change), and
+// follows the Engine pane's model — string drafts, per-field Save, parse +
+// clamp at the save boundary, each row's semantics as its description line.
+// It commits through onCommitImmediate (plain set_app_config), the same pipe
+// the Engine pane uses; the dedicated IPC on this pane is the sessions-dir
+// row's set_sessions_dir below. The two values are the tunables of
+// ADR-0013/0023/0028 riding each session's construction-point snapshot
+// (window_turns #1445, result_count_cap #1446): a change reaches sessions
+// created or resumed afterwards only.
 
 export type GeneralSectionProps = {
   appConfig: AppConfig;
@@ -87,6 +126,41 @@ export function GeneralSection({
 
   async function commitLocale(locale: LocalePreference) {
     setError(await onCommitImmediate((cfg) => ({ ...cfg, locale })));
+  }
+
+  // Tunables drafts (#1449), seeded per mount; each field commits
+  // independently through onCommitImmediate and shares the pane's single
+  // error surface with the immediate-commit rows.
+  const [tunablesDraft, setTunablesDraft] = useState<TunablesDraft>(
+    toTunablesDraft(appConfig.tunables),
+  );
+  const [savingTunable, setSavingTunable] = useState<keyof TunablesDraft | null>(null);
+
+  async function saveTunable(field: keyof TunablesDraft) {
+    setSavingTunable(field);
+    setError(null);
+    setError(await onCommitImmediate((cfg) => patchTunables(cfg, field, tunablesDraft[field])));
+    setSavingTunable(null);
+  }
+
+  const tunablesSaving = savingTunable !== null;
+
+  function tunablesSaveButton(field: keyof TunablesDraft) {
+    return (
+      <Button
+        type="button"
+        size="sm"
+        variant="outline"
+        onClick={() => void saveTunable(field)}
+        disabled={tunablesSaving}
+      >
+        {savingTunable === field ? (
+          <FormattedMessage id="common.saving" defaultMessage="Saving…" />
+        ) : (
+          <FormattedMessage id="common.save" defaultMessage="Save" />
+        )}
+      </Button>
+    );
   }
 
   async function pickSessionsDir() {
@@ -145,7 +219,7 @@ export function GeneralSection({
         description={(
           <FormattedMessage
             id="settings.general.description"
-            defaultMessage="Appearance and language for the app."
+            defaultMessage="Appearance, language, and system settings."
           />
         )}
       />
@@ -232,8 +306,74 @@ export function GeneralSection({
 
       </SettingsCard>
 
-      {/* The sessions directory is its own group (a structural directory
-       * change, visually apart from the appearance prefs above). */}
+      {/* Tunables (#1449): the two session-engine tunables of
+       *  ADR-0013/0023/0028, riding each session's construction-point
+       *  snapshot (#1445/#1446), in the Engine pane's posture — rows with
+       *  their semantics as the description line. */}
+      <SettingsCard className="mt-4">
+        <SettingsRow
+          title={(
+            <FormattedMessage
+              id="settings.general.tunables.windowTurns"
+              defaultMessage="Recent-turn window"
+            />
+          )}
+          description={(
+            <FormattedMessage
+              id="settings.general.tunables.windowTurns.description"
+              defaultMessage="The most recent turns are carried into the model in full; earlier turns fold into a question summary. Applies to sessions created or reopened afterwards."
+            />
+          )}
+          action={tunablesSaveButton("window_turns")}
+        >
+          {/* The accessible name reuses the row-title key so the input is
+           *  addressable without a positional query. */}
+          <Input
+            type="number"
+            min={1}
+            aria-label={intl.formatMessage({
+              id: "settings.general.tunables.windowTurns",
+              defaultMessage: "Recent-turn window",
+            })}
+            value={tunablesDraft.window_turns}
+            onChange={(e) => setTunablesDraft({ ...tunablesDraft, window_turns: e.target.value })}
+            disabled={tunablesSaving}
+          />
+        </SettingsRow>
+
+        <SettingsRow
+          title={(
+            <FormattedMessage
+              id="settings.general.tunables.resultCountCap"
+              defaultMessage="Data result cap"
+            />
+          )}
+          description={(
+            <FormattedMessage
+              id="settings.general.tunables.resultCountCap.description"
+              defaultMessage="When a session holds more data results than the cap, the oldest unused ones are cleaned up automatically; results in use are never removed. Applies to sessions created or reopened afterwards."
+            />
+          )}
+          action={tunablesSaveButton("result_count_cap")}
+        >
+          <Input
+            type="number"
+            min={1}
+            aria-label={intl.formatMessage({
+              id: "settings.general.tunables.resultCountCap",
+              defaultMessage: "Result count cap",
+            })}
+            value={tunablesDraft.result_count_cap}
+            onChange={(e) =>
+              setTunablesDraft({ ...tunablesDraft, result_count_cap: e.target.value })}
+            disabled={tunablesSaving}
+          />
+        </SettingsRow>
+      </SettingsCard>
+
+      {/* The sessions directory is its own group at the pane's bottom (a
+       * structural directory change, visually apart from the preference
+       * cards above). */}
       <SettingsCard className="mt-4">
         <SettingsRow
           title={(
