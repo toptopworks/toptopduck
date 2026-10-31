@@ -168,7 +168,8 @@ fn effort_tier(level: &str) -> &'static str {
 /// and the init race may double-build -- the ureq precedent's stronger
 /// wording held because its builder cannot fail. Read by
 /// `egress_client_builds_only_once_across_calls`; compiled out of release
-/// builds (the probe face's `EGRESS_AGENT` counter is the precedent).
+/// builds (the probe face's `EGRESS_CLIENT_BUILDS` counter is the
+/// precedent).
 #[cfg(test)]
 static EGRESS_CLIENT_BUILDS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
 
@@ -188,7 +189,7 @@ static EGRESS_CLIENT_BUILDS: std::sync::atomic::AtomicU32 = std::sync::atomic::A
 /// and OS-configured proxies at Client build time, so a mid-session proxy
 /// or VPN change is not picked up until process exit (the per-turn rebuild
 /// re-read the snapshot every turn). Clones share the pool
-/// (`reqwest::Client` is `Arc` internally); the probe face's `EGRESS_AGENT`
+/// (`reqwest::Client` is `Arc` internally); the probe face's `EGRESS_CLIENT`
 /// singleton -- which accepts the same frozen-proxy posture -- is the
 /// precedent. Only a successful build is cached: a construction failure
 /// refuses its turn as an honest transient and stays uncached, so the next
@@ -316,7 +317,7 @@ mod tests {
     /// snapshots bracket the calls and the build count must not advance on
     /// the 2nd+ call, regardless of whether another test already
     /// initialized the client (tests run in parallel, so `before` may
-    /// already be non-zero) -- the probe face's `EGRESS_AGENT` pin is the
+    /// already be non-zero) -- the probe face's `EGRESS_CLIENT` pin is the
     /// precedent this mirrors. The `<= 3` bound tolerates racing first
     /// builds landing between the snapshots: the #1001 live-cap pin and
     /// the #1290 model-name pin are now concurrent Ok-path callers of

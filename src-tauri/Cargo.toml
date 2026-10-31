@@ -167,14 +167,13 @@ chrono = { version = "0.4", default-features = false, features = ["clock"] }
 calamine = { version = "0.30", features = ["dates"] }
 # Per-sheet temp CSV writer: correct escaping for commas/quotes/newlines in cells.
 csv = "1"
-# Real LLM transport (issue #29, ADR-0007/0019/0029): blocking HTTP client for
-# the Anthropic Messages API, called from the sync `Provider::generate` path on
-# a blocking thread. Chosen over reqwest (async) because the provider trait is
-# synchronous and runs under `spawn_blocking` -- no async runtime needed, and
-# ureq is far lighter. The `json` feature adds serde integration; TLS (rustls,
-# default) is pure-Rust and cross-platform with no native deps. This is the ONLY
-# network egress surface in the app -- the webview has no HTTP plugin and the
-# CSP blocks its external connect (ADR-0029 invariant 1).
+# MCP remote transport carrier (ADR-0139): ureq's only remaining surface. The
+# upstream LLM domain single-stacks on reqwest (live turns ride the async
+# client injected into rig, ADR-0116; the preflight probes ride
+# `reqwest::blocking`), so this stays solely as the MCP remote client's HTTP
+# transport until the MCP chain's async conversion retires it. The `json`
+# feature adds serde integration; TLS (rustls, default) is pure-Rust and
+# cross-platform with no native deps.
 ureq = { version = "2", features = ["json"] }
 # URL parsing for the provider base_url scheme check (issue #244). `url::Url::parse`
 # rejects malformed / scheme-less base_urls and exposes the scheme so the provider
@@ -310,12 +309,16 @@ rig-agent = { version = "0.42", default-features = false }
 # wire posture the egress client had before the retired loop layer's removal
 # (its defaults-on reqwest used to contribute these through the feature
 # union): OS-configured proxy resolution (GUI-launched desktop apps rarely
-# carry proxy env vars), HTTP/2, and charset decoding. The egress client
-# this builds is process-shared (issue #926), so the proxy snapshot
-# freezes at the first successful build -- a mid-session proxy change
-# waits for process restart, the same posture the probe face's egress
-# singleton accepts.
-reqwest = { version = "0.13", default-features = false, features = ["http2", "system-proxy", "charset"] }
+# carry proxy env vars), HTTP/2, and charset decoding. `blocking` + `json`
+# serve the preflight probes (ADR-0139): the probe runs on a
+# `spawn_blocking` thread where the blocking flavor fits without an async
+# runtime, and the features give it the same JSON send/parse the retired
+# ureq face carried (`send_json` / `into_json`). Both egress clients this
+# builds are process-shared singletons -- the live face since issue #926,
+# the preflight blocking face since this change -- so each proxy snapshot
+# freezes at the first successful build: a mid-session proxy change waits
+# for process restart (documented at each singleton).
+reqwest = { version = "0.13", default-features = false, features = ["blocking", "charset", "http2", "json", "system-proxy"] }
 # Upstream rig emits its SSE/retry diagnostics through `tracing`; the app's
 # log sink is the `log` facade (tauri-plugin-log, issue #98). Declaring
 # tracing with the `log` feature turns on tracing's log bridge via feature
