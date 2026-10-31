@@ -10,11 +10,13 @@
 //! security invariant against untrusted peer output, not a tunable -- it
 //! stays a compile-time constant (see [`LINE_MAX_BYTES`]).
 //!
-//! This file is deliberately pure std. The bridge binary must not link the
-//! app crate (ADR-0085: no app-crate linkage, so release LTO dead-strips
-//! Tauri/DuckDB out of the per-turn-spawned process), so this module lives
-//! in its own crate that both sides depend on -- anything non-std here
-//! breaks that constraint.
+//! This file's sync faces are deliberately pure std. The bridge binary
+//! must not link the app crate (ADR-0085: no app-crate linkage, so release
+//! LTO dead-strips Tauri/DuckDB out of the per-turn-spawned process), so
+//! this module lives in its own crate that both sides depend on -- the
+//! async read face (issue #1454) is the one gated exception: it sits
+//! behind the `async` feature, default-off, so a build that does not
+//! enable it keeps the pure-std property.
 //!
 //! An over-long line is drained and surfaced as [`LineRead::Overlong`]; the
 //! disposition is the caller's -- the ACP readers drop it with a warning, the
@@ -36,6 +38,8 @@
 //! line); the stateless form serves only callers whose reads cannot time
 //! out.
 use std::io::{BufRead, Read};
+#[cfg(feature = "async")]
+use tokio::io::{AsyncBufReadExt, AsyncReadExt};
 
 /// The byte cap on a single incoming line (issue #629): an untrusted
 /// child cannot grow the reader's buffer past this; an over-long line is
@@ -77,14 +81,16 @@ pub struct BoundedLineReader<R> {
     partial: Vec<u8>,
 }
 
-impl<R: BufRead> BoundedLineReader<R> {
+impl<R> BoundedLineReader<R> {
     pub fn new(reader: R) -> Self {
         Self {
             reader,
             partial: Vec::new(),
         }
     }
+}
 
+impl<R: BufRead> BoundedLineReader<R> {
     /// Read one line under the same cap + disposition contract as
     /// [`read_line_bounded`]. An error return (a read timeout included)
     /// leaves the partial line buffered; call again to resume it. The cap
@@ -142,6 +148,72 @@ impl<R: BufRead> BoundedLineReader<R> {
         // read_until returned without the delimiter and the budget is not
         // exhausted (handled above): EOF. A pending partial is the final
         // unterminated line; nothing pending is a clean EOF.
+        if self.partial.is_empty() {
+            return Ok(LineRead::Eof);
+        }
+        Ok(LineRead::Line(take_utf8_line(&mut self.partial)?))
+    }
+}
+
+// The async read face (issue #1454, ADR-0139): the same line-boundary and
+// cap contract as the sync faces above, driven by tokio's `AsyncBufRead`.
+// Everything here lives behind the `async` feature so a build that does
+// not enable it -- the ACP bridge's, per ADR-0085 -- stays pure std.
+//
+// The method bodies mirror the sync method's statement for statement --
+// the same `take(..).read_until(..)` primitive, awaited; the equivalence
+// tests pin the two in lockstep, so a semantic change must land on both
+// or the pins break.
+
+/// The async twin of [`read_line_bounded`]: a fresh line per call, for
+/// callers whose reads cannot be cancelled mid-line (issue #1454).
+#[cfg(feature = "async")]
+pub async fn read_line_bounded_async(
+    reader: &mut (impl tokio::io::AsyncBufRead + Unpin),
+    max: usize,
+) -> std::io::Result<LineRead> {
+    BoundedLineReader::new(&mut *reader)
+        .read_line_bounded_async(max)
+        .await
+}
+
+#[cfg(feature = "async")]
+impl<R: tokio::io::AsyncBufRead + Unpin> BoundedLineReader<R> {
+    /// The resumable async twin of [`BoundedLineReader::read_line_bounded`]
+    /// (issue #1454): identical line-boundary, cap, drain, and error
+    /// semantics. The partial line lives in the reader, not the future, so
+    /// a dropped call (a `select!` deadline firing mid-line) resumes the
+    /// same line on the next call -- the async carry of the #649 resume
+    /// contract, which is what a deadline-driven transport slice needs.
+    pub async fn read_line_bounded_async(&mut self, max: usize) -> std::io::Result<LineRead> {
+        // This method mirrors the sync `read_line_bounded` above; the
+        // comments there carry the reasoning, the equivalence tests carry
+        // the proof.
+        if max == 0 {
+            return Ok(LineRead::Eof);
+        }
+        let remaining = max.saturating_sub(self.partial.len());
+        AsyncReadExt::take(&mut self.reader, remaining as u64)
+            .read_until(b'\n', &mut self.partial)
+            .await?;
+
+        if self.partial.len() >= max && !self.partial.ends_with(b"\n") {
+            let mut scratch = Vec::new();
+            loop {
+                scratch.clear();
+                AsyncReadExt::take(&mut self.reader, max as u64)
+                    .read_until(b'\n', &mut scratch)
+                    .await?;
+                if scratch.is_empty() || scratch.ends_with(b"\n") {
+                    self.partial.clear();
+                    return Ok(LineRead::Overlong);
+                }
+            }
+        }
+
+        if self.partial.ends_with(b"\n") {
+            return Ok(LineRead::Line(take_utf8_line(&mut self.partial)?));
+        }
         if self.partial.is_empty() {
             return Ok(LineRead::Eof);
         }
@@ -459,5 +531,346 @@ mod tests {
             r.read_line_bounded(64),
             Ok(LineRead::Line(l)) if l == "tail"
         ));
+    }
+
+    // --- The async read face (issue #1454) --------------------------------
+
+    /// Same-input-same-output equivalence against the sync face: the async
+    /// face's correctness contract is *identity* with the sync reader, so
+    /// every script runs through BOTH readers and the outcome sequences
+    /// must match exactly (the sync side's own pins above stay the
+    /// semantic reference).
+    #[cfg(feature = "async")]
+    mod async_face {
+        use super::*;
+        use std::future::Future;
+        use std::pin::Pin;
+        use std::task::{Context, Poll};
+        use tokio::io::AsyncBufRead;
+
+        /// One call's outcome, errors flattened to their kind -- the
+        /// comparison key of the equivalence pin.
+        #[derive(Debug, PartialEq)]
+        enum Outcome {
+            Line(String),
+            Overlong,
+            Eof,
+            Err(std::io::ErrorKind),
+        }
+
+        impl From<std::io::Result<LineRead>> for Outcome {
+            fn from(res: std::io::Result<LineRead>) -> Self {
+                match res {
+                    Ok(LineRead::Line(l)) => Outcome::Line(l),
+                    Ok(LineRead::Overlong) => Outcome::Overlong,
+                    Ok(LineRead::Eof) => Outcome::Eof,
+                    Err(e) => Outcome::Err(e.kind()),
+                }
+            }
+        }
+
+        /// The async mirror of [`Step`], plus the one shape sync cannot
+        /// express: a park. [`AsyncStep::Pending`] reports Pending once
+        /// (the waker is never fired -- the drop-resume test drives the
+        /// poll manually), then the script advances.
+        enum AsyncStep {
+            Bytes(Vec<u8>),
+            Fail(std::io::ErrorKind),
+            Pending,
+        }
+
+        impl From<Step> for AsyncStep {
+            fn from(step: Step) -> Self {
+                match step {
+                    Step::Bytes(b) => AsyncStep::Bytes(b),
+                    Step::Fail(kind) => AsyncStep::Fail(kind),
+                }
+            }
+        }
+
+        /// The async mirror of [`Scripted`]: the same step script with no
+        /// park, so equivalence runs stay deterministic.
+        struct AsyncScripted {
+            steps: Vec<AsyncStep>,
+            pos: usize,
+        }
+
+        impl AsyncScripted {
+            fn new(steps: Vec<AsyncStep>) -> Self {
+                Self { steps, pos: 0 }
+            }
+
+            /// A script from shared sync-shape steps -- the equivalence
+            /// harness feeds both readers the same script.
+            fn from_steps(steps: Vec<Step>) -> Self {
+                Self::new(steps.into_iter().map(AsyncStep::from).collect())
+            }
+        }
+
+        impl tokio::io::AsyncRead for AsyncScripted {
+            fn poll_read(
+                self: Pin<&mut Self>,
+                cx: &mut Context<'_>,
+                buf: &mut tokio::io::ReadBuf<'_>,
+            ) -> Poll<std::io::Result<()>> {
+                let mut this = self;
+                match this.as_mut().poll_fill_buf(cx) {
+                    Poll::Ready(Ok(bytes)) => {
+                        let n = bytes.len().min(buf.remaining());
+                        buf.put_slice(&bytes[..n]);
+                        this.consume(n);
+                        Poll::Ready(Ok(()))
+                    }
+                    Poll::Ready(Err(e)) => Poll::Ready(Err(e)),
+                    Poll::Pending => Poll::Pending,
+                }
+            }
+        }
+
+        impl AsyncBufRead for AsyncScripted {
+            fn poll_fill_buf(
+                self: Pin<&mut Self>,
+                _cx: &mut Context<'_>,
+            ) -> Poll<std::io::Result<&[u8]>> {
+                let this = self.get_mut();
+                loop {
+                    match this.steps.get(this.pos) {
+                        None => return Poll::Ready(Ok(&[])),
+                        Some(AsyncStep::Fail(kind)) => {
+                            let err = std::io::Error::new(*kind, "scripted failure");
+                            this.pos += 1;
+                            return Poll::Ready(Err(err));
+                        }
+                        Some(AsyncStep::Pending) => {
+                            this.pos += 1;
+                            return Poll::Pending;
+                        }
+                        Some(AsyncStep::Bytes(b)) if b.is_empty() => this.pos += 1,
+                        Some(AsyncStep::Bytes(b)) => return Poll::Ready(Ok(b)),
+                    }
+                }
+            }
+
+            fn consume(self: Pin<&mut Self>, n: usize) {
+                let this = self.get_mut();
+                if let Some(AsyncStep::Bytes(b)) = this.steps.get_mut(this.pos) {
+                    let n = n.min(b.len());
+                    b.drain(..n);
+                }
+            }
+        }
+
+        /// One corpus entry: a name, a fresh-script factory, and the
+        /// per-call caps (a script per call lets the retry-under-smaller-cap
+        /// pin run through the same harness).
+        type ScriptCase = (&'static str, fn() -> Vec<Step>, Vec<usize>);
+
+        /// The corpus: one entry per semantic pin the sync suite carries,
+        /// plus a byte-at-a-time delivery script (the async face's own
+        /// accumulation path). The factories are non-capturing so both
+        /// readers get an identical fresh script.
+        fn corpus() -> Vec<ScriptCase> {
+            vec![
+                (
+                    "normal lines",
+                    || vec![Step::Bytes(b"one\ntwo\n".to_vec())],
+                    vec![64, 64, 64],
+                ),
+                (
+                    "overlong then next",
+                    || {
+                        vec![Step::Bytes(
+                            format!("{}\nok\n", "x".repeat(100)).into_bytes(),
+                        )]
+                    },
+                    vec![64, 64, 64],
+                ),
+                (
+                    "exact-cap terminated line",
+                    || vec![Step::Bytes(format!("{}\n", "x".repeat(63)).into_bytes())],
+                    vec![64],
+                ),
+                (
+                    "exact-max payload drops overlong",
+                    || {
+                        vec![Step::Bytes(
+                            format!("{}\nok\n", "x".repeat(64)).into_bytes(),
+                        )]
+                    },
+                    vec![64, 64],
+                ),
+                (
+                    "overlong to EOF",
+                    || vec![Step::Bytes("x".repeat(100).into_bytes())],
+                    vec![64, 64],
+                ),
+                (
+                    "final unterminated line",
+                    || vec![Step::Bytes(b"tail".to_vec())],
+                    vec![64],
+                ),
+                (
+                    "invalid UTF-8",
+                    || vec![Step::Bytes(vec![0xff, 0xfe, b'\n'])],
+                    vec![64],
+                ),
+                (
+                    "read error propagates",
+                    || {
+                        vec![
+                            Step::Fail(std::io::ErrorKind::Other),
+                            Step::Bytes(b"x\n".to_vec()),
+                        ]
+                    },
+                    vec![64, 64, 64],
+                ),
+                (
+                    "timeout mid line resumes (#649)",
+                    || {
+                        vec![
+                            Step::Bytes(b"{\"json".to_vec()),
+                            Step::Fail(std::io::ErrorKind::TimedOut),
+                            Step::Bytes(b"rpc\":\"2.0\"}\n".to_vec()),
+                        ]
+                    },
+                    vec![64, 64],
+                ),
+                (
+                    "budget shrinks across retries (#649)",
+                    || {
+                        vec![
+                            Step::Bytes(b"12345".to_vec()),
+                            Step::Fail(std::io::ErrorKind::TimedOut),
+                            Step::Bytes(b"67890\n".to_vec()),
+                            Step::Bytes(b"next\n".to_vec()),
+                        ]
+                    },
+                    vec![8, 8, 8],
+                ),
+                (
+                    "smaller cap on retry fails overlong",
+                    || {
+                        vec![
+                            Step::Bytes(b"12345".to_vec()),
+                            Step::Fail(std::io::ErrorKind::TimedOut),
+                            Step::Bytes(b"678\n".to_vec()),
+                            Step::Bytes(b"next\n".to_vec()),
+                        ]
+                    },
+                    vec![8, 4, 8],
+                ),
+                (
+                    "drain reentry after timeout",
+                    || {
+                        vec![
+                            Step::Bytes(b"12345678".to_vec()),
+                            Step::Fail(std::io::ErrorKind::TimedOut),
+                            Step::Bytes(b"tail\n".to_vec()),
+                        ]
+                    },
+                    vec![8, 8, 8],
+                ),
+                (
+                    "final unterminated after timeout",
+                    || {
+                        vec![
+                            Step::Bytes(b"tail".to_vec()),
+                            Step::Fail(std::io::ErrorKind::TimedOut),
+                        ]
+                    },
+                    vec![64, 64],
+                ),
+                (
+                    "byte-at-a-time delivery",
+                    || {
+                        b"hello\nxxx\n"
+                            .iter()
+                            .map(|&b| Step::Bytes(vec![b]))
+                            .collect()
+                    },
+                    vec![64, 64, 64],
+                ),
+            ]
+        }
+
+        fn run_sync(script: fn() -> Vec<Step>, caps: &[usize]) -> Vec<Outcome> {
+            let mut r = BoundedLineReader::new(Scripted::new(script()));
+            caps.iter()
+                .map(|&cap| r.read_line_bounded(cap).into())
+                .collect()
+        }
+
+        async fn run_async(script: fn() -> Vec<Step>, caps: &[usize]) -> Vec<Outcome> {
+            let mut r = BoundedLineReader::new(AsyncScripted::from_steps(script()));
+            let mut out = Vec::new();
+            for &cap in caps {
+                out.push(r.read_line_bounded_async(cap).await.into());
+            }
+            out
+        }
+
+        #[tokio::test]
+        async fn async_face_matches_sync_face_script_for_script() {
+            for (name, script, caps) in corpus() {
+                assert_eq!(
+                    run_sync(script, &caps),
+                    run_async(script, &caps).await,
+                    "async face diverged from sync on: {name}"
+                );
+            }
+        }
+
+        /// The stateless form is a fresh-reader-per-call wrapper, exactly
+        /// like its sync twin; one direct pin, the resumable corpus above
+        /// carries the semantics.
+        #[tokio::test]
+        async fn stateless_form_reads_lines_and_caps() {
+            let mut r = AsyncScripted::from_steps(vec![Step::Bytes(
+                format!("{}\nok\n", "x".repeat(64)).into_bytes(),
+            )]);
+            assert!(matches!(
+                read_line_bounded_async(&mut r, 64).await,
+                Ok(LineRead::Overlong)
+            ));
+            assert!(matches!(
+                read_line_bounded_async(&mut r, 64).await,
+                Ok(LineRead::Line(l)) if l == "ok\n"
+            ));
+            assert!(matches!(
+                read_line_bounded_async(&mut r, 64).await,
+                Ok(LineRead::Eof)
+            ));
+        }
+
+        /// The async-specific resume hazard (issue #1454, the #649
+        /// contract's carry): a call dropped while parked mid-line -- what
+        /// a `select!` deadline does to the read future -- must not lose
+        /// the partial line. The next call resumes and completes the SAME
+        /// line instead of re-framing from the stream's mid-line position.
+        #[tokio::test]
+        async fn dropped_call_mid_line_resumes_the_same_line() {
+            let mut r = BoundedLineReader::new(AsyncScripted::new(vec![
+                AsyncStep::Bytes(b"{\"json".to_vec()),
+                AsyncStep::Pending,
+                AsyncStep::Bytes(b"rpc\":\"2.0\"}\n".to_vec()),
+            ]));
+            // Drive the call to its park -- the first chunk lands in the
+            // partial line, the second fill_buf parks on Pending -- then
+            // cancel it: the inner block's end drops the future, the
+            // stand-in for a `select!` deadline firing mid-line.
+            {
+                let mut fut = std::pin::pin!(r.read_line_bounded_async(64));
+                let waker = std::task::Waker::noop();
+                let mut cx = Context::from_waker(waker);
+                match fut.as_mut().poll(&mut cx) {
+                    Poll::Pending => {}
+                    _ => panic!("expected the read to park on the Pending step mid-line"),
+                }
+            }
+            assert!(matches!(
+                r.read_line_bounded_async(64).await,
+                Ok(LineRead::Line(l)) if l == "{\"jsonrpc\":\"2.0\"}\n"
+            ));
+        }
     }
 }
