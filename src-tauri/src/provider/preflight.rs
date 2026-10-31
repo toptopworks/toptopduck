@@ -175,38 +175,100 @@ enum ModelsOutcome {
     NeedsFallback,
 }
 
+/// Test-only construction counter for the shared egress client (ADR-0139;
+/// the live face's `EGRESS_CLIENT_BUILDS` is the precedent): proves a
+/// completed build is not duplicated by subsequent calls, so every probe
+/// after the first draws from one shared connection pool. The claim stops
+/// short of one-build-per-process on purpose: a failed build legitimately
+/// retries (only successful builds are cached), and the init race may
+/// double-build. Read by `egress_client_builds_only_once_across_calls`;
+/// compiled out of release builds.
+#[cfg(test)]
+static EGRESS_CLIENT_BUILDS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+/// The process-shared blocking egress client for the preflight probes
+/// (ADR-0139, single-stacking the upstream LLM domain on reqwest): redirects
+/// disabled at the client (`Policy::none`), so a cross-host 3xx surfaces as
+/// an honest non-2xx status -- classified by status below -- instead of
+/// following the `Location` with the probe's credential on board. Same stack
+/// and wire posture the live turn path rides (the async reqwest client
+/// injected into rig, ADR-0116 Decision 6); the probe runs on a blocking
+/// thread under `spawn_blocking`, where the blocking flavor fits without an
+/// async runtime.
+///
+/// Built once per process and shared across probes: keep-alive reuse for
+/// repeated Test-connection presses, and one frozen proxy snapshot --
+/// reqwest resolves env vars first with the OS configuration as fallback
+/// (`system-proxy`), so the probe and the turn path agree on the proxy where
+/// the retired ureq face (implicit env-only) could silently split from the
+/// turn path on a GUI process carrying no proxy env vars. Only a successful
+/// build is cached: a construction failure refuses its probe and stays
+/// uncached, so the next press retries the build.
+static EGRESS_CLIENT: std::sync::OnceLock<reqwest::blocking::Client> = std::sync::OnceLock::new();
+
+/// Hand out the shared egress client: a clone per call, one build per
+/// process -- see [`EGRESS_CLIENT`]. A build failure is surfaced (not
+/// unwrapped) so the caller classifies it in the probe's own vocabulary.
+fn egress_client() -> Result<reqwest::blocking::Client, reqwest::Error> {
+    if let Some(client) = EGRESS_CLIENT.get() {
+        return Ok(client.clone());
+    }
+    #[cfg(test)]
+    EGRESS_CLIENT_BUILDS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let client = reqwest::blocking::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()?;
+    // First-wins under a race (two probes' first calls racing the init):
+    // both built, one pool wins; harmless. Mirrors the live face.
+    let _ = EGRESS_CLIENT.set(client.clone());
+    Ok(client)
+}
+
 /// Issue `GET {base_url}/<models_path>` and classify the result.
 fn list_models(protocol: Protocol, base_url: &str, key: &str) -> ModelsOutcome {
     let url = join_url(base_url, models_path(protocol));
-    // AC #244: shared egress agent disables redirect-following, so x-api-key
-    // (anthropic) and Authorization (openai) cannot reach a second host via a
-    // 3xx Location -- uniform with the turn path.
-    let agent = super::http::egress_agent();
-    let request = match protocol {
-        Protocol::Anthropic => agent
-            .get(&url)
-            .timeout(REQUEST_TIMEOUT)
-            .set("x-api-key", key)
-            .set("anthropic-version", ANTHROPIC_VERSION),
-        Protocol::Openai => agent
-            .get(&url)
-            .timeout(REQUEST_TIMEOUT)
-            .set("Authorization", &format!("Bearer {key}")),
+    // AC #244: the shared egress client disables redirect-following, so
+    // x-api-key (anthropic) and Authorization (openai) cannot reach a second
+    // host via a 3xx Location -- uniform with the turn path. A construction
+    // failure means no request can leave the process at all; that reads as
+    // unreachable (the probe's closest verdict) and the failed build stays
+    // uncached so the next press retries.
+    let Ok(client) = egress_client() else {
+        return ModelsOutcome::Unreachable;
     };
-    match request.call() {
-        Ok(response) => match response.into_json::<ModelsResponse>() {
-            Ok(list) => ModelsOutcome::Listed(list.into_ids()),
-            // 200 but not a `{data:[{id}]}` shape -- the endpoint answered but
-            // does not implement the models contract; a turn may still work.
-            Err(_) => ModelsOutcome::NeedsFallback,
-        },
-        Err(ureq::Error::Status(status, _)) => {
-            if is_auth_rejected(status) {
+    let request = match protocol {
+        Protocol::Anthropic => client
+            .get(&url)
+            .timeout(REQUEST_TIMEOUT)
+            .header("x-api-key", key)
+            .header("anthropic-version", ANTHROPIC_VERSION),
+        Protocol::Openai => client
+            .get(&url)
+            .timeout(REQUEST_TIMEOUT)
+            .header("Authorization", format!("Bearer {key}")),
+    };
+    match request.send() {
+        // Every response the endpoint produced (2xx/3xx/4xx/5xx) lands in
+        // the Ok arm: the no-redirect client surfaces status distinctions
+        // instead of sorting them into the transport library's error bucket,
+        // so classification reads the status directly.
+        Ok(response) => {
+            let status = response.status();
+            if is_auth_rejected(status.as_u16()) {
                 ModelsOutcome::KeyRejected
+            } else if status.is_success() {
+                match response.json::<ModelsResponse>() {
+                    Ok(list) => ModelsOutcome::Listed(list.into_ids()),
+                    // 200 but not a `{data:[{id}]}` shape -- the endpoint
+                    // answered but does not implement the models contract; a
+                    // turn may still work.
+                    Err(_) => ModelsOutcome::NeedsFallback,
+                }
             } else {
-                // 404 (path not implemented), 5xx (overloaded), or another
-                // non-auth 4xx -- the endpoint responded, so let the ping
-                // decide whether a turn actually works.
+                // 3xx (not followed), 404 (path not implemented), 5xx
+                // (overloaded), or another non-auth 4xx -- the endpoint
+                // responded, so let the ping decide whether a turn actually
+                // works.
                 ModelsOutcome::NeedsFallback
             }
         }
@@ -231,30 +293,41 @@ enum PingOutcome {
 /// Issue a minimal `POST {base_url}/<chat_path>` and classify the HTTP outcome.
 fn ping(protocol: Protocol, base_url: &str, model: &str, key: &str) -> PingOutcome {
     let url = join_url(base_url, chat_path(protocol));
-    // AC #244: shared egress agent disables redirect-following (mirrors
-    // list_models and the turn path).
-    let agent = super::http::egress_agent();
-    let request = match protocol {
-        Protocol::Anthropic => agent
-            .post(&url)
-            .timeout(REQUEST_TIMEOUT)
-            .set("x-api-key", key)
-            .set("anthropic-version", ANTHROPIC_VERSION),
-        Protocol::Openai => agent
-            .post(&url)
-            .timeout(REQUEST_TIMEOUT)
-            .set("Authorization", &format!("Bearer {key}")),
+    // AC #244: the shared egress client disables redirect-following (mirrors
+    // list_models and the turn path). A construction failure classifies as
+    // unreachable, mirroring list_models.
+    let Ok(client) = egress_client() else {
+        return PingOutcome::Unreachable;
     };
-    match request.send_json(ping_body(protocol, model)) {
-        Ok(_) => PingOutcome::Ok,
-        Err(ureq::Error::Status(status, response)) => {
-            if is_auth_rejected(status) {
+    let request = match protocol {
+        Protocol::Anthropic => client
+            .post(&url)
+            .timeout(REQUEST_TIMEOUT)
+            .header("x-api-key", key)
+            .header("anthropic-version", ANTHROPIC_VERSION),
+        Protocol::Openai => client
+            .post(&url)
+            .timeout(REQUEST_TIMEOUT)
+            .header("Authorization", format!("Bearer {key}")),
+    };
+    match request.json(&ping_body(protocol, model)).send() {
+        Ok(response) => {
+            let status = response.status();
+            if is_auth_rejected(status.as_u16()) {
                 PingOutcome::KeyRejected
+            } else if status.is_success() {
+                PingOutcome::Ok
             } else {
-                let body = response.into_string().unwrap_or_default();
-                PingOutcome::Incompatible(format!("HTTP {status}: {}", truncate(&body)))
+                // Non-auth non-2xx, including a 3xx the client refused to
+                // follow -- the endpoint does not serve the turn shape at
+                // this URL, so the verdict is incompatible (not a successful
+                // ping), with the upstream body surfaced for the details
+                // fold.
+                let body = response.text().unwrap_or_default();
+                PingOutcome::Incompatible(format!("HTTP {}: {}", status.as_u16(), truncate(&body)))
             }
         }
+        // Transport (DNS / TCP / TLS / timeout) -- the endpoint is unreachable.
         Err(_) => PingOutcome::Unreachable,
     }
 }
@@ -531,7 +604,7 @@ mod tests {
     #[test]
     fn list_models_transport_error_is_endpoint_unreachable() {
         // AC: DNS/TCP/TLS failure -> EndpointUnreachable. A bogus port refuses
-        // the connection -> ureq transport error -> EndpointUnreachable, with
+        // the connection -> transport error -> EndpointUnreachable, with
         // no ping attempted (the endpoint is not reachable at all).
         let outcome = probe(
             Some("sk-test"),
@@ -675,8 +748,37 @@ mod tests {
     }
 
     #[test]
+    fn ping_fallback_3xx_is_incompatible_not_ok() {
+        // A 3xx on the chat/messages endpoint means the endpoint does not
+        // serve the turn shape at this URL (it points elsewhere) -- NOT a
+        // successful ping. Under the shared client's no-redirect policy the
+        // 3xx surfaces as a non-2xx status and classifies Incompatible with
+        // the status surfaced for the details fold; the accidental legacy
+        // reading (a no-follow 3xx landing in the transport library's Ok
+        // bucket, misread as a successful ping) must not return.
+        let mut server = mockito::Server::new();
+        server
+            .mock("GET", "/v1/models")
+            .with_status(200)
+            .with_body("<html/>")
+            .create();
+        server
+            .mock("POST", "/v1/messages")
+            .with_status(302)
+            .with_header("Location", "https://elsewhere.example/v1/messages")
+            .create();
+        let outcome = probe(Some("sk-test"), Protocol::Anthropic, &server.url(), "m");
+        match outcome {
+            ProfileTestOutcome::Incompatible { detail } => {
+                assert!(detail.contains("302"), "ping status surfaced: {detail}");
+            }
+            other => panic!("expected Incompatible, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn ping_transport_error_is_endpoint_unreachable() {
-        // Cover ping()'s transport branch directly: a refused port -> ureq
+        // Cover ping()'s transport branch directly: a refused port ->
         // transport error -> PingOutcome::Unreachable. Tested at the ping()
         // level rather than via probe() because probe's list-models step would
         // short-circuit on the SAME transport failure first (returning
@@ -763,12 +865,11 @@ mod tests {
     #[test]
     fn list_models_does_not_forward_x_api_key_across_host_redirect() {
         // AC #244 (three-path uniform handling): the preflight's /models GET
-        // path wires the same shared egress agent, so a 3xx redirect is NOT
-        // followed and x-api-key cannot reach a second host. ureq's default
-        // agent would follow the 302 (GET stays GET) and land x-api-key on
-        // the target; the shared agent's redirects(0) keeps the credential on
-        // the first hop. The second host's x-api-key-matching mock must
-        // record zero hits.
+        // path wires the same shared egress client, so a 3xx redirect is NOT
+        // followed and x-api-key cannot reach a second host. A
+        // redirect-following client would land x-api-key on the target; the
+        // client's no-redirect policy keeps the credential on the first hop.
+        // The second host's x-api-key-matching mock must record zero hits.
         let mut first = mockito::Server::new();
         let mut second = mockito::Server::new();
         first
@@ -783,10 +884,11 @@ mod tests {
             .with_status(200)
             .with_body(models_body(&["claude-leak"]))
             .create();
-        // The probe outcome is not asserted here -- under redirects(0) the
-        // 302 surfaces raw, list_models falls through to NeedsFallback, and
-        // the ping hits the first host (unmocked -> 501 -> Incompatible). The
-        // assertion is the absence of a cross-host x-api-key leak.
+        // The probe outcome is not asserted here -- under the no-redirect
+        // policy the 302 surfaces raw, list_models falls through to
+        // NeedsFallback, and the ping hits the first host (unmocked -> 501
+        // -> Incompatible). The assertion is the absence of a cross-host
+        // x-api-key leak.
         let _ = probe(Some("sk-secret"), Protocol::Anthropic, &first.url(), "m");
         second_leak.assert();
     }
@@ -794,12 +896,12 @@ mod tests {
     #[test]
     fn ping_fallback_does_not_forward_x_api_key_across_host_redirect() {
         // AC #244 (three-path uniform handling): the preflight's ping POST
-        // fallback wires the same shared egress agent, so a 3xx redirect on the
-        // chat/messages endpoint is NOT followed and x-api-key cannot reach a
-        // second host. Mirrors the /models GET test but forces the ping
-        // fallback first (/v1/models answers 200 non-list -> NeedsFallback ->
-        // ping POST /v1/messages returns 302). The second host's
-        // x-api-key-matching mock must record zero hits.
+        // fallback wires the same shared egress client, so a 3xx redirect on
+        // the chat/messages endpoint is NOT followed and x-api-key cannot
+        // reach a second host. Mirrors the /models GET test but forces the
+        // ping fallback first (/v1/models answers 200 non-list ->
+        // NeedsFallback -> ping POST /v1/messages returns 302). The second
+        // host's x-api-key-matching mock must record zero hits.
         let mut first = mockito::Server::new();
         let mut second = mockito::Server::new();
         first
@@ -820,5 +922,74 @@ mod tests {
             .create();
         let _ = probe(Some("sk-secret"), Protocol::Anthropic, &first.url(), "m");
         second_leak.assert();
+    }
+
+    #[test]
+    fn egress_client_does_not_follow_cross_host_redirect() {
+        // AC #244 (carried through the ADR-0139 migration): the shared
+        // blocking client pins the no-redirect policy, so a 3xx Location
+        // pointing at a SECOND host is NOT followed -- the first host
+        // receives the request, the second host receives nothing. Asserted
+        // in rejection form (the 3xx surfaces as an honest status), not just
+        // implied by the leak mocks above; built at the client level because
+        // both probes (list models + ping) share [`EGRESS_CLIENT`].
+        let mut first = mockito::Server::new();
+        let mut second = mockito::Server::new();
+        let _first_mock = first
+            .mock("POST", "/v1/messages")
+            .with_status(302)
+            .with_header("Location", &second.url())
+            .create();
+        let second_mock = second
+            .mock("POST", "/v1/messages")
+            .expect(0)
+            .with_status(200)
+            .with_body("{\"ok\":true}")
+            .create();
+
+        let client = egress_client().expect("the shared blocking client builds");
+        let target = format!("{}/v1/messages", first.url());
+        let resp = client
+            .post(&target)
+            .header("x-api-key", "sk-secret")
+            .json(&serde_json::json!({}))
+            .send()
+            .expect("an unfollowed 3xx surfaces as Ok with the 3xx status");
+        assert_eq!(
+            resp.status().as_u16(),
+            302,
+            "the 3xx surfaces raw, not followed"
+        );
+        second_mock.assert(); // expect(0): the second host was NOT reached
+    }
+
+    #[test]
+    fn egress_client_builds_only_once_across_calls() {
+        // AC #278 (carried through the ADR-0139 migration): there is one
+        // shared blocking client for the whole process, so both probes across
+        // repeated Test-connection presses draw from a single connection
+        // pool. The counter snapshots bracket the calls and the build count
+        // must not advance on the 2nd+ call, regardless of whether another
+        // test already initialized the client (tests run in parallel, so
+        // `before` may already be non-zero). The `<= 3` bound tolerates
+        // racing first builds landing between the snapshots: every mockito
+        // probe test above is a concurrent caller of `egress_client`.
+        use std::sync::atomic::Ordering;
+        let before = EGRESS_CLIENT_BUILDS.load(Ordering::Relaxed);
+        let _first = egress_client().expect("the shared blocking client builds");
+        let after_first = EGRESS_CLIENT_BUILDS.load(Ordering::Relaxed);
+        let _second = egress_client().expect("the shared blocking client builds");
+        let _third = egress_client().expect("the shared blocking client builds");
+        let after_third = EGRESS_CLIENT_BUILDS.load(Ordering::Relaxed);
+
+        assert!(
+            after_first - before <= 3,
+            "the first call builds the client at most once outside the init race (got {} builds)",
+            after_first - before
+        );
+        assert_eq!(
+            after_third, after_first,
+            "subsequent calls never rebuild the client"
+        );
     }
 }
