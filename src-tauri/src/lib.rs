@@ -33,7 +33,7 @@ pub mod cancel;
 pub mod guardrail;
 pub mod util;
 
-// Cross-domain -- consumed from more than one domain.
+// Cross-domain -- imports from several domains itself.
 pub mod sandbox_sql;
 pub mod turn_window;
 

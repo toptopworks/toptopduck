@@ -3572,8 +3572,8 @@ fn segment_start_posture(target: Option<&AdapterSpec>, live: &LiveProviderConfig
 /// Convert the app-config posture (the backfill map's value shape) onto the
 /// session-local pair (the handle slot / Session storage shape): the
 /// boundary conversion lives here because `session::store` deliberately
-/// imports no app-config types -- the two shapes are structurally identical
-/// but never aliased.
+/// imports no app-config posture types -- the two shapes are structurally
+/// identical but never aliased.
 fn session_posture(p: ModelPosture) -> PosturePair {
     PosturePair {
         model: p.model,

@@ -1,8 +1,9 @@
 //! Filesystem path whitelist enforced at the gateway (ADR-0080, ADR-0088;
 //! read face relaxed by ADR-0137 Decision 4): `analysis_tools::read_paths`
 //! extracts the literal `read_*` paths from a query, `sandbox_sql` validates
-//! each against this whitelist before execution, and `guardrail` carries the
-//! statement-level wrapping around that surface.
+//! each against this whitelist before execution and carries the
+//! statement-level wrapping around the read (`run_sandboxed_read`);
+//! execution failures are classified by `guardrail`.
 //!
 //! The agent's file access via `read_*` functions is constrained on the read
 //! face to the **session source set (read-only) + the session working temp
@@ -13,10 +14,9 @@
 //! as relative -- i.e. sessions with no bound workspace, since ADR-0137 D3
 //! absolutizes relative spellings against the workspace BEFORE this
 //! whitelist, surfacing them as absolute full-path reads). DuckDB offers no
-//! per-path engine ACL, so the constraint is enforced at the gateway, not
-//! the engine: a refused path becomes a structured tool error the agent
-//! self-corrects from (ADR-0077); it never reaches the engine, and never
-//! fails silently.
+//! per-path engine ACL, so a refused path becomes a structured tool error
+//! the agent self-corrects from (ADR-0077); it never reaches the engine,
+//! and never fails silently.
 //!
 //! This whitelist is the **sole** file-reachability constraint for `read_*`
 //! (ADR-0088): the engine-level `disabled_filesystems` lockdown was removed so
