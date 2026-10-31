@@ -100,11 +100,11 @@ jobs:
         run: cargo fmt --all --check
 
       - name: clippy
-        run: cargo clippy --workspace --all-targets --features toptopduck/test-fixtures -- -D warnings
+        run: cargo clippy --workspace --all-targets --features toptopduck/test-fixtures,bounded-line/async -- -D warnings
 
       - name: test
         if: runner.os == 'Linux'
-        run: cargo test --workspace --features toptopduck/test-fixtures
+        run: cargo test --workspace --features toptopduck/test-fixtures,bounded-line/async
 
   # Release face (ADR-0131): the bundle legs live in build.yml with a
   # push-main-only trigger — this workflow carries the quality gates only

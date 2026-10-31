@@ -651,6 +651,9 @@ dependencies = [
 [[package]]
 name = "bounded-line"
 version = "0.1.0"
+dependencies = [
+ "tokio",
+]
 
 [[package]]
 name = "brotli"

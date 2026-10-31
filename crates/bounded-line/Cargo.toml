@@ -6,3 +6,19 @@ edition = "2021"
 publish = false
 # MSRV matches the app crate (ADR-0116).
 rust-version = "1.86"
+
+[features]
+# The async read face (issue #1454, ADR-0139): opt-in and default-off so
+# the ACP bridge build stays pure std (ADR-0085) -- the transport slices
+# that need it enable the feature. CI compiles and tests it via
+# `--features bounded-line/async`.
+async = ["dep:tokio"]
+
+[dependencies]
+# Only pulled in by the `async` feature: io-util backs fill_buf/consume on
+# AsyncBufRead. No runtime features -- the caller brings its own.
+tokio = { version = "1", optional = true, features = ["io-util"] }
+
+[dev-dependencies]
+# #[tokio::test] for the equivalence pins (rt + macros).
+tokio = { version = "1", features = ["rt", "macros"] }
