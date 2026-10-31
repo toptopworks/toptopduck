@@ -375,7 +375,7 @@ pub enum LoadOutcome {
 /// the display name -- never the reference name -- so a rejection leaves the
 /// working set and every existing reference (SQL FROM, recipe chain, active
 /// pointer) unchanged. Crosses IPC as this serde struct, wrapped in
-/// [`SessionError::RenameDataset`](crate::session_store::SessionError) (issue
+/// [`SessionError::RenameDataset`](crate::session::store::SessionError) (issue
 /// #121); the frontend narrows on `kind` and renders a locale message, so the
 /// hand-written `Display` below is Rust-log-only -- NOT the IPC contract.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -411,7 +411,7 @@ impl std::error::Error for RenameError {}
 /// failures are [`TurnOutcome::Failed`] (ADR-0028), so a turn always produces an
 /// outcome. This type remains only for [`crate::session::Session::read_rows`]: a
 /// row read is not a turn, and its failures cross IPC as this serde struct,
-/// wrapped in [`SessionError::RowRead`](crate::session_store::SessionError) (issue
+/// wrapped in [`SessionError::RowRead`](crate::session::store::SessionError) (issue
 /// #121); the frontend narrows on `kind` and renders a locale message. The
 /// hand-written `Display` below is Rust-log-only -- NOT the IPC contract.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -472,7 +472,7 @@ pub enum ExportIoStep {
 /// reuses [`RowReadError`] 1:1 with the paged read; a destination-file failure
 /// (create / write / flush / rename) carries the step, the path, and the
 /// underlying detail. The whole type crosses IPC wrapped in
-/// [`SessionError::Export`](crate::session_store::SessionError) -- the
+/// [`SessionError::Export`](crate::session::store::SessionError) -- the
 /// frontend recurses `Export.data.kind` and renders the export-domain locale
 /// message (the destination half previously rode `SessionError::Engine` and
 /// rendered the generic internal-error wording). The hand-written `Display`

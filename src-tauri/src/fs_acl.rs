@@ -1,21 +1,22 @@
-//! Gateway-layer filesystem path whitelist (ADR-0080, ADR-0088; read face
-//! relaxed by ADR-0137 Decision 4).
+//! Filesystem path whitelist enforced at the gateway (ADR-0080, ADR-0088;
+//! read face relaxed by ADR-0137 Decision 4): `analysis_tools::read_paths`
+//! extracts the literal `read_*` paths from a query, `sandbox_sql` validates
+//! each against this whitelist before execution, and `guardrail` carries the
+//! statement-level wrapping around that surface.
 //!
 //! The agent's file access via `read_*` functions is constrained on the read
 //! face to the **session source set (read-only) + the session working temp
 //! dir (read-write) + any ABSOLUTE path on disk** (ADR-0137 D4: a referenced
 //! file is either snapshotted through the same copy-in pipeline as manual
 //! ingest on the materialize face, or read in place by explore; relative
-//! spellings stay confined to the roots only when they reach this gateway
+//! spellings stay confined to the roots only when they reach this whitelist
 //! as relative -- i.e. sessions with no bound workspace, since ADR-0137 D3
-//! absolutizes relative spellings against the workspace BEFORE the gateway,
-//! surfacing them as absolute full-path reads). DuckDB offers no per-path
-//! engine ACL, so the constraint is enforced at the gateway layer: a tool
-//! extracts every literal file path it would hand the engine (the `read_*`
-//! paths inside an explore/materialize query) and validates each against
-//! this whitelist *before* execution. A refused path becomes a structured
-//! tool error the agent self-corrects from (ADR-0077); it never reaches the
-//! engine, and never fails silently.
+//! absolutizes relative spellings against the workspace BEFORE this
+//! whitelist, surfacing them as absolute full-path reads). DuckDB offers no
+//! per-path engine ACL, so the constraint is enforced at the gateway, not
+//! the engine: a refused path becomes a structured tool error the agent
+//! self-corrects from (ADR-0077); it never reaches the engine, and never
+//! fails silently.
 //!
 //! This whitelist is the **sole** file-reachability constraint for `read_*`
 //! (ADR-0088): the engine-level `disabled_filesystems` lockdown was removed so

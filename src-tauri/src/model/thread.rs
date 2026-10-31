@@ -142,7 +142,7 @@ pub enum ThreadEntry {
 /// transitively marks them stale (ADR-0013/0040), so a delete always cascades
 /// instead of refusing.
 /// Crosses IPC as this serde struct, wrapped in
-/// [`SessionError::RemoveSource`](crate::session_store::SessionError) (issue
+/// [`SessionError::RemoveSource`](crate::session::store::SessionError) (issue
 /// #121); the frontend narrows on `kind` and renders a locale message, so the
 /// hand-written `Display` below is Rust-log-only -- NOT the IPC contract.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
