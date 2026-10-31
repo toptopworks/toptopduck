@@ -14,7 +14,7 @@
 //!    Decision 3): the gateway suspends that turn's call and waits for the
 //!    user's answer via the in-flow approval card (ADR-0083). The wait blocks
 //!    ONLY that turn -- every session owns its own [`ApprovalState`] on its
-//!    [`crate::session_store::SessionHandle`], so a pending approval in one
+//!    [`crate::session::store::SessionHandle`], so a pending approval in one
 //!    session never blocks another (ADR-0080 "仅阻断该轮次").
 //! 3. **"Always allow"** escalates a single `server::tool` to session-level
 //!    trust (ADR-0080 Decision 3) -- same tool, different params share trust;

@@ -14,40 +14,55 @@
 //! through a scripted FakeProvider at the ask -> outcome seam -- offline and
 //! deterministic.
 
+// Module placement rule: (1) a module whose domain has a directory must
+// live inside that directory -- drift is a bug. (2) Shells, primitives,
+// cross-domain modules, and single-file domains with no owning directory
+// legitimately stay at the crate root. (3) A domain earns its directory
+// when it grows a second file -- never pre-created.
+
+// Shells -- the Tauri app surface.
+pub mod commands;
+// cfg(desktop) mirrors the tauri `tray-icon` feature's own desktop gate --
+// mobile builds neither compile the tray surface nor register it.
+#[cfg(desktop)]
+pub mod tray;
+pub mod window;
+
+// Primitives -- no `use crate::` imports.
+pub mod cancel;
+pub mod guardrail;
+pub mod util;
+
+// Cross-domain -- imports from several domains itself.
+pub mod sandbox_sql;
+pub mod turn_window;
+
+// Single-file domains -- a directory is earned at the second file.
+pub mod fs_acl;
+pub mod provenance;
+pub mod workingset;
+
+// Domain directories.
 pub mod agents;
+pub mod analysis_tools;
 pub mod app_config;
 pub mod approval;
+pub mod cli_tools;
+pub mod ingest;
+pub mod mcp;
+pub mod model;
+pub mod persistence;
+pub mod provider;
+pub mod runtime;
+pub mod session;
+pub mod skills;
+pub mod workspace;
+
 // Re-exported from the `bounded-line` workspace crate so every
 // `crate::bounded_line::` path stays put; the ACP bridge binary links the
 // same crate without linking this one (ADR-0085: the bridge links no app
 // crate).
 pub(crate) use bounded_line::bounded_line;
-pub mod analysis_tools;
-pub mod cancel;
-pub mod cli_tools;
-pub mod commands;
-pub mod fs_acl;
-pub mod guardrail;
-pub mod ingest;
-pub mod mcp;
-pub mod model;
-pub mod persistence;
-pub mod provenance;
-pub mod provider;
-pub mod runtime;
-pub mod sandbox_sql;
-pub mod session;
-pub mod session_store;
-pub mod skills;
-pub mod turn_window;
-// cfg(desktop) mirrors the tauri `tray-icon` feature's own desktop gate --
-// mobile builds neither compile the tray surface nor register it.
-#[cfg(desktop)]
-pub mod tray;
-pub mod util;
-pub mod window;
-pub mod workingset;
-pub mod workspace;
 
 pub use app_config::{
     AppConfig, EngineDefaults, ExportDefaults, PrivacyDefaults, Theme, Tunables,
@@ -80,14 +95,14 @@ pub use provider::keychain::{KeychainStore, ProviderConfigSource, StaticConfig};
 pub use provider::live_config::LiveProviderConfig;
 pub use provider::prompt::ResponseLocale;
 pub use provider::{LiveProvider, Provider, ProviderError, UnwiredProvider};
+pub use session::store::{
+    ClosingFlag, LiveSessionSnapshot, SessionError, SessionHandle, SessionId, SessionStore,
+    UNKNOWN_SESSION,
+};
 pub use session::{
     is_resuming, ActiveAbandoned, ActiveResolution, PendingConflict, RenameSessionError,
     ResumeError, ResumeEvent, ResumeProgress, Session, SourceIssue, SourceNotice, SourceResolution,
     TurnDeps, TurnInputs, TurnPorts,
-};
-pub use session_store::{
-    ClosingFlag, LiveSessionSnapshot, SessionError, SessionHandle, SessionId, SessionStore,
-    UNKNOWN_SESSION,
 };
 pub use skills::{
     Acquired, DiscoveredSkill, DiscoveredSkillStatus, ImportItem, ImportMode, ImportOutcome,

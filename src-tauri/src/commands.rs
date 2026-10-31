@@ -1,5 +1,5 @@
 //! Tauri command boundary (frontend <-> Rust). Thin wrappers over the
-//! multi-session [`SessionStore`](crate::session_store::SessionStore) (ADR-0056):
+//! multi-session [`SessionStore`](crate::session::store::SessionStore) (ADR-0056):
 //! every session-scoped command takes `session_id` as its first parameter,
 //! parses it into a typed [`SessionId`] (a malformed id surfaces as
 //! [`SessionError::InvalidId`], distinct from a closed session's
@@ -55,11 +55,11 @@ use crate::runtime::acp::user_adapter_store::{
     is_valid_command_token, mint_user_adapter_id, UserAdapterRow, UserAdapterStore,
 };
 use crate::session::loop_contract::DiscoveredRuntime;
+use crate::session::store::{SessionError, SessionHandle, SessionId, SessionStore};
 use crate::session::{
     PosturePair, RenameSessionError, ResumeEvent, ResumeProgress, Session, SessionRuntimeFacts,
     TurnDeps, TurnPorts,
 };
-use crate::session_store::{SessionError, SessionHandle, SessionId, SessionStore};
 use crate::skills::{
     discover_skill_sources, import_skills as import_skills_impl, ImportItem, ImportMode,
     ImportOutcome, SkillError, SkillListing, SkillSource, SkillSourceCandidate, SkillsRoot,
@@ -3571,9 +3571,9 @@ fn segment_start_posture(target: Option<&AdapterSpec>, live: &LiveProviderConfig
 
 /// Convert the app-config posture (the backfill map's value shape) onto the
 /// session-local pair (the handle slot / Session storage shape): the
-/// boundary conversion lives here because `session_store` deliberately
-/// imports no app-config types -- the two shapes are structurally identical
-/// but never aliased.
+/// boundary conversion lives here because `session::store` deliberately
+/// imports no app-config posture types -- the two shapes are structurally
+/// identical but never aliased.
 fn session_posture(p: ModelPosture) -> PosturePair {
     PosturePair {
         model: p.model,
@@ -4136,7 +4136,7 @@ pub fn tray_ready(app: tauri::AppHandle, readiness: State<'_, crate::tray::TrayR
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::session_store::UNKNOWN_SESSION;
+    use crate::session::store::UNKNOWN_SESSION;
     use crate::CancelToken;
 
     // ADR-0124 (issue #1087): the artifact presentation commands -- exists
@@ -4759,7 +4759,7 @@ mod tests {
     /// #890: the resume seam stamps the SAME id onto the reopened Session
     /// -- the kill log's session attribution on a resumed turn rides this
     /// stamp (#886), and nothing else would catch its deletion (the store's
-    /// create half is pinned in session_store; this is the resume half).
+    /// create half is pinned in session::store; this is the resume half).
     /// The closure's CALL of the seam is the accepted blind spot declared
     /// on the seam (the `apply_resumed_postures` precedent).
     #[test]
@@ -5492,7 +5492,7 @@ mod tests {
     }
 
     /// An unknown / closed session_id rejects with NotFound. The
-    /// malformed-id path (InvalidId) is covered in session_store tests; this
+    /// malformed-id path (InvalidId) is covered in session::store tests; this
     /// pins the NotFound branch the command boundary surfaces.
     #[test]
     fn unknown_session_id_rejects_not_found() {

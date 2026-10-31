@@ -21,7 +21,7 @@
 /// keep the diagnostic wording owned by this module.
 ///
 /// `Display` is derived via `thiserror` (issue #277), matching the
-/// `commands.rs` / `session_store.rs` style.
+/// `commands.rs` / `session/store.rs` style.
 #[derive(Debug, thiserror::Error)]
 #[error("invalid base_url: {0}")]
 pub(crate) struct InvalidBaseUrl(String);

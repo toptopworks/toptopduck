@@ -40,7 +40,7 @@ use crate::persistence::recipe::RECIPE_FORMAT_VERSION;
 ///
 /// Crosses IPC serde-structured (issue #120): `#[serde(tag = "kind", content =
 /// "data")]`, the adjacently-tagged shape the rest of the wire contract uses
-/// (the same as [`crate::session_store::SessionError`]). `Field(String)` needs
+/// (the same as [`crate::session::store::SessionError`]). `Field(String)` needs
 /// the adjacent `content = "data"` slot -- an internally-tagged `#[serde(tag =
 /// "kind")]` cannot carry a bare-string newtype variant. The hand-written
 /// `Display` below stays Rust-log-only; it is NOT the IPC contract.

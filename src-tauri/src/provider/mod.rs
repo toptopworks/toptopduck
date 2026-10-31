@@ -195,7 +195,7 @@ pub struct ProviderRequest {
 /// http/https") reaches the UI fold (issue #277).
 ///
 /// `Display` is derived via `thiserror` (issue #277) -- matching the
-/// `commands.rs` / `session_store.rs` style -- and is Rust-log-only, not the
+/// `commands.rs` / `session/store.rs` style -- and is Rust-log-only, not the
 /// IPC contract (the orchestrator maps each variant to a typed
 /// [`crate::model::TurnFailure`] that the frontend renders via its locale
 /// catalog).

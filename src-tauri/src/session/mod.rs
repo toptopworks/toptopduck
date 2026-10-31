@@ -23,6 +23,7 @@ pub mod sandbox;
 pub mod skills;
 pub mod snapshot;
 pub mod source_lifecycle;
+pub mod store;
 pub(crate) mod turn_dispatch;
 pub mod turn_entry;
 pub mod turn_runner;
@@ -56,7 +57,7 @@ use crate::provider::{Provider, UnwiredProvider};
 use crate::runtime::acp::adapter::AdapterSpec;
 use crate::session::loop_contract::LoopRound;
 use crate::session::materializer::{CachedDerivedRef, Materializer, RealMaterializer};
-use crate::session_store::ClosingFlag;
+use crate::session::store::ClosingFlag;
 use crate::turn_window;
 use crate::workingset::WorkingSet;
 use crate::SessionId;
@@ -120,7 +121,7 @@ fn truncate_session_name(question: &str) -> String {
 ///
 /// Crosses IPC serde-structured (issue #120): `#[serde(tag = "kind", content =
 /// "data")]`, the adjacently-tagged shape the rest of the wire contract uses
-/// (the same as [`crate::session_store::SessionError`]). The `open_recipe`
+/// (the same as [`crate::session::store::SessionError`]). The `open_recipe`
 /// command wraps this in [`SessionError::Resume`], so the frontend recurses
 /// `Resume.data.kind`
 /// and renders a locale message; the `Load` variant recurses into the nested
@@ -233,7 +234,7 @@ impl std::error::Error for ResumeError {}
 /// is a blank name; a persist write failure does NOT surface here -- it rides
 /// [`Session::take_persist_error`] (best-effort persist, self-heals on the next
 /// write). Crosses IPC as this serde struct, wrapped in
-/// [`SessionError::RenameSession`](crate::session_store::SessionError) (issue
+/// [`SessionError::RenameSession`](crate::session::store::SessionError) (issue
 /// #121); the frontend narrows on `kind` and renders a locale message. The
 /// `Display` is Rust-log-only -- NOT the IPC contract.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -422,9 +423,9 @@ pub struct ResumeProgress {
 /// a unit, so a transposed `(model, thought_level)` cannot compile
 /// silently -- two same-typed `Option<String>` parameters could. Same
 /// shape as `app_config::ModelPosture` but deliberately session-local:
-/// this module (and `session_store`) imports no app-config types, so the
-/// persisted recipe facts and the machine-preference config stay separate
-/// layers. The serde derives carry no app-config dependency -- the wire
+/// this module (and `session::store`) imports no app-config posture types,
+/// so the persisted recipe facts and the machine-preference config stay
+/// separate layers. The serde derives carry no app-config dependency -- the wire
 /// keys are this type's own field names, and unknown keys are rejected so
 /// a drifted mirror cannot silently read as `None` (issue #606).
 #[derive(Debug, Clone, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
@@ -583,7 +584,7 @@ pub struct Session {
     /// lock is taken (e.g. the command layer registers it as managed state).
     cancel: Arc<CancelToken>,
     /// ADR-0055 close-tab lifecycle: the shared closing flag, set by
-    /// `close_session` (via the [`SessionStore`](crate::session_store::SessionStore)
+    /// `close_session` (via the [`SessionStore`](crate::session::store::SessionStore)
     /// handle) and read by [`Self::ask`]'s post-turn check. When set, an
     /// in-flight turn that finishes (Cancelled or otherwise) is DISCARDED -- not
     /// appended to the thread, not persisted to the recipe -- so a closed
@@ -602,7 +603,7 @@ pub struct Session {
     /// state machine are testable without a DuckDB connection.
     persister: recipe_persister::RecipePersister,
     /// ADR-0063: the sender half of the close-and-wait-release drop signal. The
-    /// matching receiver lives on the [`SessionHandle`](crate::session_store::SessionHandle);
+    /// matching receiver lives on the [`SessionHandle`](crate::session::store::SessionHandle);
     /// the delete path awaits it after detaching the handle from the store map so
     /// [`Self::Drop`] (the canonical key release point, ADR-0035 Decision 3) is
     /// guaranteed to have run before `delete_session`'s single-writer gate fires.

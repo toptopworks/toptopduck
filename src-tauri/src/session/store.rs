@@ -1409,7 +1409,7 @@ mod tests {
     /// overwrites the catalog slot.
     #[test]
     fn external_model_config_round_trips_pair_slot_survives_restore() {
-        let store = crate::session_store::SessionStore::new();
+        let store = crate::session::store::SessionStore::new();
         let id = store
             .create(
                 Arc::new(CancelToken::new()),

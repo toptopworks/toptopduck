@@ -995,7 +995,7 @@ fn session_error_serializes_as_adjacently_tagged_kind_data() {
     // `{"kind":"X"}` with no `data`; Engine carries its detail string under
     // `data`. The thiserror `#[error(...)]` Display strings are Rust-log-only,
     // NOT the IPC contract (commands no longer map through Display; the Display
-    // wording is pinned separately in the session_store unit tests).
+    // wording is pinned separately in the session::store unit tests).
     use toptopduck_lib::SessionError;
     assert_wire(&SessionError::InvalidId, r#"{"kind":"InvalidId"}"#);
     assert_wire(&SessionError::NotFound, r#"{"kind":"NotFound"}"#);
