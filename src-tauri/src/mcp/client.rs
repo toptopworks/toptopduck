@@ -47,27 +47,36 @@
 //! `reqwest` futures on the module's bridge runtime while the [`McpClient`]
 //! trait stays synchronous -- the aggregator's deadline workers and the
 //! probe's `spawn_blocking` closures call it from plain threads, bridged
-//! one call at a time through [`block_on`]. The retired sync design's
-//! compensation layers are gone with it: the SSE reader thread's two-second
-//! stop-flag tick is now a `select!` race with an immediate wake, and the
-//! HTTP per-read cap rides `tokio::time::timeout`. When the aggregator's
-//! deadline face goes async (the chain's next slices), the transports
-//! become natively async and the bridge runtime retires.
+//! one call at a time through [`block_on`]. The stdio transport joins them
+//! on the same bridge since #1456: its child rides `tokio::process` (the
+//! pipe reads are async-native), and its kill path terminates the whole
+//! process tree (a Windows kill-on-close job object / a Unix process
+//! group, the ADR-0108 executor precedent) instead of the bare
+//! direct-child kill that orphaned a wrapper's grandchildren. The retired
+//! sync design's compensation layers are gone with it: the SSE reader
+//! thread's two-second stop-flag tick is now a `select!` race with an
+//! immediate wake, and the HTTP per-read cap rides `tokio::time::timeout`.
+//! When the aggregator's deadline face goes async (the chain's next
+//! slices), the transports become natively async and the bridge runtime
+//! retires.
 
 use std::collections::{BTreeMap, HashSet};
 use std::future::Future;
-use std::io::{BufRead, BufReader, Write};
-use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
+use std::io::{BufRead, Write};
+use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use bytes::Bytes;
 use serde_json::{json, Value};
+use tokio::io::{AsyncBufRead, AsyncWrite};
+use tokio::process::{Child, ChildStdin, ChildStdout, Command};
 
 use crate::bounded_line::{LineRead, LINE_MAX_BYTES};
 use crate::mcp::config::{McpServerConfig, McpTransport};
 use crate::mcp::MCP_PROTOCOL_VERSION;
+use crate::process_tree::{self, TreeGuard};
 use crate::runtime::gateway::framing;
 
 /// HTTP per-read timeout (issue #392; async carry, #1455): every body-chunk
@@ -76,6 +85,11 @@ use crate::runtime::gateway::framing;
 /// deadline fires — `spawn_blocking` tasks are not cancelled, so without
 /// this the thread + TCP connection would linger indefinitely.
 const HTTP_READ_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Bound on the probe's post-kill reap wait (#1456 review): a healthy kill
+/// settles the wait in well under a second; a child that somehow survives
+/// both kill legs must not park the probe command forever.
+const PROBE_REAP_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Bounded channel capacity for the body-chunk pumps (chunks, not messages:
 /// one chunk carries whatever the transport layer yielded). Backpressures a
@@ -118,6 +132,19 @@ fn transport_runtime() -> &'static tokio::runtime::Runtime {
             .build()
             .expect("the transport bridge runtime builds")
     })
+}
+
+/// Spawn a stdio server child inside the bridge runtime's context. On Unix,
+/// `tokio::process::Command::spawn` registers every pipe with the
+/// thread-local runtime's reactor and panics outside a runtime context
+/// (`PollEvented::new` -> `Handle::current`), and both spawn sites here run
+/// on plain threads -- the aggregator's deadline workers and the probe's
+/// test threads (#1456 review). Entering the bridge also keeps the pipes
+/// registered on the same runtime every later `block_on` polls through,
+/// instead of splitting registration and polling across runtimes.
+fn spawn_on_bridge(cmd: &mut Command) -> std::io::Result<Child> {
+    let _enter = transport_runtime().enter();
+    cmd.spawn()
 }
 
 /// The `tools/list` pagination guardrails (issue #900). A server may split
@@ -175,21 +202,115 @@ impl SseStopSignal {
 /// A cross-thread kill handle for one transport (issue #889). Cloned from
 /// the owning client; [`TransportKill::kill`] makes that transport's
 /// blocking read return so a parked caller unblocks:
-/// - stdio: terminate the child -> its stdout EOFs -> `read_message`
-///   reports `ServerClosed`;
+/// - stdio: terminate the child's whole process tree (a `npx`/`uvx` wrapper
+///   and its grandchildren die with it, #1456) -> the child's stdout EOFs
+///   -> `read_message` reports `ServerClosed`;
 /// - SSE: fire the stop signal -> a request parked in the stream-read
 ///   `select!` wakes immediately and reports `ServerClosed`;
 /// - HTTP: no-op -- that transport is already bounded per-read
 ///   ([`HTTP_READ_TIMEOUT`], issue #392).
 #[derive(Clone)]
 pub enum TransportKill {
-    /// Terminate the spawned stdio child. Shared with the client's `Drop`
-    /// (kill + reap stay single-owner through the mutex).
-    StdioChild(Arc<Mutex<Child>>),
+    /// Terminate the spawned stdio child's tree. Shared with the client's
+    /// `Drop` (the kill stays single-owner through the mutex; the reap is
+    /// the owning path's job -- the probe awaits it, the drop paths leave
+    /// the Unix zombie to tokio's orphan reaper).
+    StdioChild(Arc<Mutex<StdioChildHandle>>),
     /// Fire the SSE transport's stop signal (see [`SseStopSignal`]).
     SseStop(Arc<SseStopSignal>),
     /// Nothing to terminate (HTTP is per-read bounded).
     Http,
+}
+
+/// A spawned stdio server child plus its process-tree guard (#1456): the
+/// direct child (reap, belt-and-braces kill) and the tree termination face
+/// (a Windows kill-on-close job object / a Unix process group) travel as
+/// one unit, so every kill path -- deadline expiry, cancel teardown, the
+/// client's `Drop`, the probe's timeout -- takes the whole tree down
+/// instead of orphaning a wrapper's grandchildren.
+pub struct StdioChildHandle {
+    child: Child,
+    tree: Option<TreeGuard>,
+}
+
+impl std::fmt::Debug for StdioChildHandle {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // The guard carries no Debug of its own; the pid is the useful
+        // diagnostic.
+        f.debug_struct("StdioChildHandle")
+            .field("pid", &self.child.id())
+            .field("tree", &self.tree.is_some())
+            .finish()
+    }
+}
+
+impl StdioChildHandle {
+    /// Terminate the whole tree NOW, from any thread, without waiting: the
+    /// tree guard fires (job terminate / killpg), then the direct child
+    /// gets an explicit kill as the belt-and-braces backstop the guard's
+    /// `None` degradation path relies on (ADR-0108 Decision 5). Idempotent
+    /// -- killing an already-dead tree is a no-op, so deadline expiry and
+    /// cancel teardown may both fire it. The pipes EOF immediately, which
+    /// is what unblocks a parked read on the bridge runtime.
+    pub fn kill(&mut self) {
+        // Log the failures (issue #889 review): this kill is what the
+        // deadline/cancel unwind rides on, so a failed kill must be
+        // diagnosable in the field, not silent.
+        if let Some(tree) = &self.tree {
+            tree.kill_tree();
+        }
+        if let Err(e) = self.child.start_kill() {
+            log::warn!(target: "toptopduck::mcp", "stdio transport kill failed: {e}");
+        }
+    }
+
+    /// Kill the tree, then reap the child (`wait`): the probe path's
+    /// orderly teardown, called from an async context where awaiting the
+    /// reap is fine. The wait is bounded (#1456 review): a child that
+    /// somehow survives both kill legs cannot park the probe command
+    /// forever -- the timeout abandons the wait and leaves the zombie to
+    /// tokio's orphan reaper, the same contract the drop paths ride.
+    pub async fn kill_and_reap(&mut self) {
+        self.kill();
+        match tokio::time::timeout(PROBE_REAP_TIMEOUT, self.reap()).await {
+            Ok(Ok(_)) => {}
+            Ok(Err(e)) => {
+                log::warn!(target: "toptopduck::mcp", "probe child reap failed: {e}");
+            }
+            Err(_) => {
+                log::warn!(
+                    target: "toptopduck::mcp",
+                    "probe child reap timed out; leaving the zombie to the orphan reaper"
+                );
+            }
+        }
+    }
+
+    /// Reap the direct child (`wait`). A test seam over the same `wait` the
+    /// reap inside [`Self::kill_and_reap`] rides -- the probe tests assert
+    /// the reap (no zombie) rather than only log it.
+    pub async fn reap(&mut self) -> std::io::Result<std::process::ExitStatus> {
+        self.child.wait().await
+    }
+
+    pub fn take_stdin(&mut self) -> Option<ChildStdin> {
+        self.child.stdin.take()
+    }
+
+    pub fn take_stdout(&mut self) -> Option<ChildStdout> {
+        self.child.stdout.take()
+    }
+}
+
+impl Drop for StdioChildHandle {
+    fn drop(&mut self) {
+        // Belt-and-braces: an owner that drops without an explicit kill (a
+        // probe abandoned mid-await, an unwinding worker) still takes the
+        // tree down. The Unix zombie is reaped by tokio's orphan reaper
+        // (the bridge runtime outlives every handle); the Windows job
+        // handle closes inside TreeGuard's own Drop with kill-on-close.
+        self.kill();
+    }
 }
 
 impl TransportKill {
@@ -199,17 +320,7 @@ impl TransportKill {
     pub fn kill(&self) {
         match self {
             Self::StdioChild(child) => match child.lock() {
-                Ok(mut child) => {
-                    // Log the failure (issue #889 review): this kill is what
-                    // the deadline/cancel unwind rides on, so a failed kill
-                    // must be diagnosable in the field, not silent.
-                    if let Err(e) = child.kill() {
-                        log::warn!(
-                            target: "toptopduck::mcp",
-                            "stdio transport kill failed: {e}"
-                        );
-                    }
-                }
+                Ok(mut handle) => handle.kill(),
                 Err(_) => {
                     log::warn!(
                         target: "toptopduck::mcp",
@@ -241,8 +352,8 @@ impl ConnectKill {
     /// The transport side: publish the kill handle; if the deadline already
     /// expired during the spawn, kill immediately. Single-shot per connect
     /// in practice -- a second publish would silently overwrite the slot,
-    /// dropping the first handle without killing it (no current caller
-    /// publishes twice).
+    /// dropping the first handle (whose `Drop` is itself a kill backstop,
+    /// so the tree still dies; no current caller publishes twice).
     pub(crate) fn publish(&self, kill: TransportKill) {
         *self.handle.lock().expect("kill slot poisoned") = Some(kill.clone());
         if self.expired.load(Ordering::SeqCst) {
@@ -490,6 +601,61 @@ impl<R: BufRead, W: Write> McpClient for FramedClient<R, W> {
     }
 }
 
+/// The async twin of [`FramedClient`] (ADR-0139, #1456): the same
+/// newline-framed MCP JSON-RPC conversation over `tokio::process` pipe
+/// halves. The [`McpClient`] implementation bridges each wire call through
+/// [`block_on`] -- the sync consumer face (the aggregator's deadline
+/// workers, the probe's `spawn_blocking` closures) is unchanged, which is
+/// what lets the stdio transport go async one slice ahead of the
+/// aggregator (the chain's #1457). The request loop mirrors
+/// `FramedClient::request` statement for statement; the framing faces'
+/// equivalence tests pin the read/write halves in lockstep.
+struct AsyncFramedClient<R, W> {
+    reader: R,
+    writer: W,
+    next_id: i64,
+}
+
+impl<R: AsyncBufRead + Unpin, W: AsyncWrite + Unpin> AsyncFramedClient<R, W> {
+    fn new(reader: R, writer: W) -> Self {
+        Self {
+            reader,
+            writer,
+            next_id: 1,
+        }
+    }
+}
+
+impl<R: AsyncBufRead + Unpin, W: AsyncWrite + Unpin> McpClient for AsyncFramedClient<R, W> {
+    fn request(&mut self, req: Value) -> Result<Value, ClientError> {
+        let id = req.get("id").cloned();
+        block_on(framing::write_message_async(&mut self.writer, &req))
+            .map_err(ClientError::Framing)?;
+        loop {
+            let msg = block_on(framing::read_message_async(&mut self.reader))
+                .map_err(ClientError::Framing)?
+                .ok_or(ClientError::ServerClosed)?;
+            // Match only id-bearing responses; a notification (no id) or a
+            // response for another id is skipped (issue #413).
+            if msg.get("id") != id.as_ref() || id.is_none() {
+                continue;
+            }
+            return check_rpc_response(&msg);
+        }
+    }
+
+    fn send_notification(&mut self, notif: Value) -> Result<(), ClientError> {
+        block_on(framing::write_message_async(&mut self.writer, &notif))
+            .map_err(ClientError::Framing)
+    }
+
+    fn next_id(&mut self) -> i64 {
+        let id = self.next_id;
+        self.next_id += 1;
+        id
+    }
+}
+
 // ---------------------------------------------------------------------------
 // SSE event parsing (shared by HttpClient + SseClient, issue #389)
 // ---------------------------------------------------------------------------
@@ -717,9 +883,10 @@ fn malformed_sse_event(data_len: usize, e: serde_json::Error) -> ClientError {
     ))
 }
 
-/// Production wrapper: a [`FramedClient`] backed by a spawned stdio MCP
-/// server's stdin/stdout. Owns the child; `Drop` kills it (per-turn lifecycle,
-/// issue #301 Q2).
+/// Production wrapper: an [`AsyncFramedClient`] backed by a spawned stdio
+/// MCP server's stdin/stdout (tokio pipes since #1456). Owns the child and
+/// its tree guard; `Drop` terminates the whole tree (per-turn lifecycle,
+/// issue #301 Q2; wrapper grandchildren die with it, #1456).
 ///
 /// Only the stdio transport is constructed here; SSE / HTTP transports have
 /// their own client types ([`SseClient`], [`HttpClient`]). The dispatcher
@@ -728,10 +895,10 @@ fn malformed_sse_event(data_len: usize, e: serde_json::Error) -> ClientError {
 /// `stdio_command`'s `UnsupportedTransport` guard rather than silently
 /// spawning a bogus child.
 pub struct StdioClient {
-    inner: FramedClient<BufReader<ChildStdout>, ChildStdin>,
-    /// Shared so the deadline / cancel-kill paths can terminate the child
+    inner: AsyncFramedClient<tokio::io::BufReader<ChildStdout>, ChildStdin>,
+    /// Shared so the deadline / cancel-kill paths can terminate the tree
     /// while a blocking read holds the rest of the client (issue #889).
-    child: Arc<Mutex<Child>>,
+    child: Arc<Mutex<StdioChildHandle>>,
 }
 
 impl StdioClient {
@@ -749,13 +916,14 @@ impl StdioClient {
         tool_output_dir: Option<&str>,
         kill_slot: &KillSlot,
     ) -> Result<Self, ClientError> {
-        let mut child = stdio_command(config, secrets, tool_output_dir)?.spawn()?;
+        let mut child = spawn_on_bridge(&mut stdio_command(config, secrets, tool_output_dir)?)?;
         let stdin = child.stdin.take().ok_or(ClientError::NoChildStdin)?;
         let stdout = child.stdout.take().ok_or(ClientError::NoChildStdout)?;
-        let child = Arc::new(Mutex::new(child));
+        let tree = process_tree::guard(&child);
+        let child = Arc::new(Mutex::new(StdioChildHandle { child, tree }));
         kill_slot.publish(TransportKill::StdioChild(Arc::clone(&child)));
         let mut client = StdioClient {
-            inner: FramedClient::new(BufReader::new(stdout), stdin),
+            inner: AsyncFramedClient::new(tokio::io::BufReader::new(stdout), stdin),
             child,
         };
         client.initialize()?;
@@ -784,22 +952,19 @@ impl McpClient for StdioClient {
 
 impl Drop for StdioClient {
     fn drop(&mut self) {
-        // The turn is over; kill the server rather than wait for a graceful
-        // exit. Flushing stdin first signals EOF to a well-behaved server; the
-        // kill + wait that follow guarantee release even if it ignores EOF.
-        // The lock only contends while a deadline / cancel kill is mid-flight
-        // (both return without holding it, issue #889).
-        let _ = self.inner.writer.flush();
+        // The turn is over; terminate the tree rather than wait for a
+        // graceful exit. The retired sync design flushed stdin first -- a
+        // no-op on the bare pipe (no user-space buffer) -- then killed and
+        // reaped under the lock; the async carry cannot `block_on` the reap
+        // here (this Drop may land on any thread, including a runtime
+        // worker where block_on would panic), so the Unix zombie rides
+        // tokio's orphan reaper on the evergreen bridge runtime and the
+        // Windows job handle closes kill-on-close in TreeGuard's own Drop.
+        // The lock only contends while a deadline / cancel kill is
+        // mid-flight (the lock is held only for the quick terminate,
+        // released before the kill returns -- issue #889).
         match self.child.lock() {
-            Ok(mut child) => {
-                if let Err(e) = child.kill() {
-                    log::warn!(
-                        target: "toptopduck::mcp",
-                        "stdio child kill at drop failed: {e}"
-                    );
-                }
-                let _ = child.wait();
-            }
+            Ok(mut handle) => handle.kill(),
             Err(_) => {
                 log::warn!(
                     target: "toptopduck::mcp",
@@ -865,38 +1030,48 @@ fn stdio_command(
         }
         cmd.env(TOOL_OUTPUT_ENV, dir);
     }
-    crate::util::no_window(&mut cmd);
+    // The std-command face carries both platform hooks (the Unix process
+    // group and the no-window flag live on std's builder API).
+    {
+        let std_cmd = cmd.as_std_mut();
+        process_tree::prepare_command(std_cmd);
+        crate::util::no_window(std_cmd);
+    }
     Ok(cmd)
 }
 
 /// Spawn the configured stdio server child process WITHOUT driving the MCP
-/// handshake (issue #392). Returns the raw [`Child`] so the caller owns the
-/// lifecycle — specifically, the async `probe_mcp_server` command retains the
-/// Child handle outside its `spawn_blocking` closure so a timeout can kill
-/// the process. The caller passes the child's stdin/stdout to
-/// [`stdio_handshake`] inside a blocking task.
+/// handshake (issue #392). Returns the [`StdioChildHandle`] (the child plus
+/// its tree guard) so the caller owns the lifecycle — specifically, the
+/// async `probe_mcp_server` command retains the handle outside its
+/// `spawn_blocking` closure so a timeout can kill the tree. The caller
+/// takes the child's stdin/stdout and drives [`stdio_handshake`] inside a
+/// blocking task.
 ///
 /// This is split from [`StdioClient::connect_with_kill`] (which couples
 /// spawn + initialize in one call) because `spawn_blocking` tasks are NOT
 /// cancellable — if the handshake hangs inside the task, the only way to
-/// guarantee the child is killed is to keep the Child handle outside.
+/// guarantee the child is killed is to keep the handle outside.
 pub fn spawn_stdio_child(
     config: &McpServerConfig,
     secrets: &[SecretEnv],
-) -> Result<std::process::Child, ClientError> {
-    Ok(stdio_command(config, secrets, None)?.spawn()?)
+) -> Result<StdioChildHandle, ClientError> {
+    let child = spawn_on_bridge(&mut stdio_command(config, secrets, None)?)?;
+    let tree = process_tree::guard(&child);
+    Ok(StdioChildHandle { child, tree })
 }
 
 /// Drive the MCP initialize + tools/list handshake on already-spawned stdio
-/// handles (issue #392). Returns the raw tool list on success. Used by the
-/// probe command which owns the Child externally (for timeout kill); this
-/// function performs only the blocking I/O, not process management.
+/// pipe halves (issue #392). Returns the raw tool list on success. Used by
+/// the probe command which owns the child handle externally (for timeout
+/// kill); this function performs only the wire I/O (bridged one call at a
+/// time onto the transport runtime), not process management.
 pub fn stdio_handshake(
-    stdin: std::process::ChildStdin,
-    stdout: std::process::ChildStdout,
+    stdin: ChildStdin,
+    stdout: ChildStdout,
     server: &str,
 ) -> Result<Vec<Value>, ClientError> {
-    let mut client = FramedClient::new(BufReader::new(stdout), stdin);
+    let mut client = AsyncFramedClient::new(tokio::io::BufReader::new(stdout), stdin);
     client.initialize()?;
     client.list_tools(server)
 }
@@ -2327,6 +2502,73 @@ mod tests {
         let mut client = FramedClient::new(Cursor::new(server), Cursor::new(Vec::new()));
         client.list_tools("fake-mcp").expect("first call (id=1)");
         client.call("x", &json!({})).expect("second call (id=2)");
+    }
+
+    /// An in-memory `AsyncWrite` sink for the async client pins: std's Vec
+    /// implements no tokio trait (the orphan rule) and `duplex` would need a
+    /// draining reader. Writes always succeed immediately.
+    #[derive(Default)]
+    struct AsyncVecWriter(Vec<u8>);
+
+    impl tokio::io::AsyncWrite for AsyncVecWriter {
+        fn poll_write(
+            self: std::pin::Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+            buf: &[u8],
+        ) -> std::task::Poll<std::io::Result<usize>> {
+            self.get_mut().0.extend_from_slice(buf);
+            std::task::Poll::Ready(Ok(buf.len()))
+        }
+
+        fn poll_flush(
+            self: std::pin::Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<std::io::Result<()>> {
+            std::task::Poll::Ready(Ok(()))
+        }
+
+        fn poll_shutdown(
+            self: std::pin::Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<std::io::Result<()>> {
+            std::task::Poll::Ready(Ok(()))
+        }
+    }
+
+    /// The async face's id-skip loop is the production path (StdioClient and
+    /// the probe handshake ride it), so the two sync pins above must hold on
+    /// the async twin too (#1456 review): same wires, same skips. The
+    /// composed reader is the tokio-native form (a BufReader over a std
+    /// Cursor -- tokio implements AsyncRead for it natively).
+    #[test]
+    fn async_notifications_between_request_and_response_are_skipped() {
+        let server = wire(&[
+            json!({"jsonrpc": "2.0", "method": "notifications/progress", "params": {"progress": 50}}),
+            json!({"jsonrpc": "2.0", "id": 1, "result": {"tools": []}}),
+        ]);
+        let mut client = AsyncFramedClient::new(
+            tokio::io::BufReader::new(Cursor::new(server)),
+            AsyncVecWriter::default(),
+        );
+        let listed = client
+            .list_tools("fake-mcp")
+            .expect("list ok past notification");
+        assert!(listed.is_empty());
+    }
+
+    #[test]
+    fn async_response_with_other_id_is_skipped_until_match() {
+        let server = wire(&[
+            json!({"jsonrpc": "2.0", "id": 999, "result": {"tools": [{"name": "wrong"}]}}),
+            json!({"jsonrpc": "2.0", "id": 1, "result": {"tools": [{"name": "right"}]}}),
+        ]);
+        let mut client = AsyncFramedClient::new(
+            tokio::io::BufReader::new(Cursor::new(server)),
+            AsyncVecWriter::default(),
+        );
+        let listed = client.list_tools("fake-mcp").expect("list ok");
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0]["name"], "right");
     }
 
     // --- ConnectKill rendezvous (issue #889) ----------------------------------

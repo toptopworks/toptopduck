@@ -34,6 +34,7 @@ use super::builtin::which_in;
 use super::config::{render_call, CliToolConfig, RenderedFileValue};
 use crate::analysis_tools::ToolOutcome;
 use crate::cancel::CancelToken;
+use crate::process_tree::{self, TreeGuard};
 use crate::provider::tool_calling::{ToolResult, ToolUse};
 
 /// Byte cap on each of the child's output streams (stdout and stderr each),
@@ -145,7 +146,7 @@ pub fn execute(
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    tree::prepare_command(&mut command);
+    process_tree::prepare_command(&mut command);
     crate::util::no_window(&mut command);
     let mut child = match command.spawn() {
         Ok(child) => child,
@@ -186,7 +187,7 @@ pub fn execute(
     // Tree-kill guard: assigns the child to a kill-on-close job (Windows)
     // or records its process group (Unix). `None` degrades to killing the
     // direct child only -- the guarantee weakens, the call still resolves.
-    let guard = tree::guard(&child);
+    let guard = process_tree::guard(&child);
     let stdout_handle = child.stdout.take();
     let stderr_handle = child.stderr.take();
     // The stdout tee plan (issue #1215): resolved into a real file only at
@@ -681,7 +682,7 @@ fn decorate(stream: &str, read: &StreamRead, cap: usize) -> String {
 /// bounded wait replaces an unbounded one, never a hung turn.
 fn wait_bounded<T: Default>(
     handle: thread::JoinHandle<T>,
-    guard: Option<&tree::TreeGuard>,
+    guard: Option<&TreeGuard>,
     cancel: &CancelToken,
 ) -> Option<T> {
     // The cancel path already terminated the tree: no grace, straight to
@@ -718,7 +719,7 @@ fn wait_bounded<T: Default>(
 fn reap_readers(
     stdout_thread: thread::JoinHandle<StreamRead>,
     stderr_thread: thread::JoinHandle<StreamRead>,
-    guard: Option<&tree::TreeGuard>,
+    guard: Option<&TreeGuard>,
     cancel: &CancelToken,
 ) -> (StreamRead, StreamRead) {
     (
@@ -727,133 +728,6 @@ fn reap_readers(
         wait_bounded(stderr_thread, guard, cancel)
             .unwrap_or_else(|| StreamRead::detached("stderr")),
     )
-}
-
-/// Platform process-tree termination (ADR-0108 Decision 5). Windows:
-/// assign the child to a job object with kill-on-close, so closing the job
-/// handle (or terminating it) kills the whole tree. Unix: put the child in
-/// its own process group at spawn, then `killpg` on cancel.
-mod tree {
-    use std::process::{Child, Command};
-
-    /// Pre-spawn platform hook: Unix starts the child as its own process
-    /// group leader (pgid = child pid); Windows defers to [`guard`].
-    pub(super) fn prepare_command(_command: &mut Command) {
-        #[cfg(unix)]
-        {
-            use std::os::unix::process::CommandExt;
-            _command.process_group(0);
-        }
-    }
-
-    /// Post-spawn tree guard. `None` on a platform failure (degrades to
-    /// killing the direct child only -- logged by the caller's environment;
-    /// the call still resolves honestly).
-    pub(super) fn guard(child: &Child) -> Option<TreeGuard> {
-        #[cfg(windows)]
-        {
-            TreeGuard::assign(child)
-        }
-        #[cfg(unix)]
-        {
-            Some(TreeGuard {
-                pgid: child.id() as i32,
-            })
-        }
-        #[cfg(not(any(windows, unix)))]
-        {
-            let _ = child;
-            None
-        }
-    }
-
-    pub(super) struct TreeGuard {
-        #[cfg(windows)]
-        job: windows_sys::Win32::Foundation::HANDLE,
-        #[cfg(unix)]
-        pgid: i32,
-    }
-
-    impl TreeGuard {
-        /// Terminate the whole tree NOW (cancel path). Belt-and-braces: the
-        /// caller still kills + reaps the direct child afterwards.
-        pub(super) fn kill_tree(&self) {
-            #[cfg(windows)]
-            // SAFETY: `self.job` is a live job handle created by `assign`
-            // (non-null, never closed before this Drop) and TerminateJobObject
-            // on a valid handle only affects processes in that job.
-            unsafe {
-                windows_sys::Win32::System::JobObjects::TerminateJobObject(self.job, 1);
-            }
-            #[cfg(unix)]
-            // SAFETY: `self.pgid` is the child's own process group id set by
-            // `prepare_command` (process_group(0) makes the child the leader,
-            // so pgid = child pid); killpg targets only that group.
-            unsafe {
-                libc::killpg(self.pgid, libc::SIGKILL);
-            }
-            #[cfg(not(any(windows, unix)))]
-            {}
-        }
-
-        #[cfg(windows)]
-        fn assign(child: &Child) -> Option<Self> {
-            use std::os::windows::io::AsRawHandle;
-            use windows_sys::Win32::System::JobObjects::{
-                AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation,
-                SetInformationJobObject, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
-                JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
-            };
-            // SAFETY: null pointers are the documented "no security
-            // attributes / auto-generated name" arguments; the returned
-            // handle is checked before any use.
-            unsafe {
-                let job = CreateJobObjectW(std::ptr::null(), std::ptr::null());
-                if job.is_null() {
-                    return None;
-                }
-                let mut info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = std::mem::zeroed();
-                info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
-                let ok = SetInformationJobObject(
-                    job,
-                    JobObjectExtendedLimitInformation,
-                    &info as *const _ as *const _,
-                    std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
-                );
-                if ok == 0 {
-                    windows_sys::Win32::Foundation::CloseHandle(job);
-                    return None;
-                }
-                // std's child handle carries the full access a job assignment
-                // needs; a failure here degrades to direct-child kill only
-                // (the caller's child.kill() backstop still applies).
-                // SAFETY: both handles are valid (job checked non-null, the
-                // child handle is std's still-live owned handle) and this is
-                // a single assign of a live process to a live job.
-                let ok = AssignProcessToJobObject(job, child.as_raw_handle() as _);
-                if ok == 0 {
-                    windows_sys::Win32::Foundation::CloseHandle(job);
-                    return None;
-                }
-                Some(Self { job })
-            }
-        }
-    }
-
-    impl Drop for TreeGuard {
-        fn drop(&mut self) {
-            // kill-on-close backstop: even without an explicit kill_tree,
-            // dropping the job handle takes the tree down if the child is
-            // somehow still alive (Unix needs no analog -- killpg is explicit).
-            #[cfg(windows)]
-            // SAFETY: `self.job` is valid (created in `assign`, never closed
-            // elsewhere) and closing it exactly once here is the RAII
-            // contract; KILL_ON_JOB_CLOSE takes the tree down with it.
-            unsafe {
-                windows_sys::Win32::Foundation::CloseHandle(self.job);
-            }
-        }
-    }
 }
 
 #[cfg(test)]

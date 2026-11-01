@@ -1856,13 +1856,15 @@ fn route_deadline_attributed_and_server_unavailable_for_the_turn() {
     use toptopduck_lib::mcp::client::ClientError;
 
     let mut agg = McpAggregator::empty();
-    agg.connect_all(
+    let results = agg.connect_all(
         &[hang_call_config("hang-2", "HangCall", 2_000)],
         &common::keychain(),
     );
-    assert_eq!(
-        meta_names(&agg).len(),
-        3,
+    // The mounted-name count holds even when a connect failed (the trio
+    // mounts on the attempted set), so assert on the connected flag -- the
+    // observable that actually distinguishes a healthy handshake.
+    assert!(
+        results[0].connected,
         "the handshake answered normally -- only tools/call swallows"
     );
 

@@ -33,6 +33,10 @@ pub mod cancel;
 pub mod guardrail;
 pub mod util;
 
+// Platform process-tree termination (ADR-0108 Decision 5), shared by the CLI
+// tool executor and the MCP stdio transport (#1456).
+mod process_tree;
+
 // The process-shared egress client seam (ADR-0139): live turns, preflight
 // probes, and the MCP remote transports all draw from here.
 pub mod egress;

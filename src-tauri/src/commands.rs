@@ -1599,18 +1599,6 @@ pub struct McpProbeResult {
 /// initialize + tools/list cycle on a cold start.
 const PROBE_DEFAULT_TIMEOUT_MS: u32 = 30_000;
 
-/// Kill + reap a child process, logging a warning if reaping fails (the kill
-/// is best-effort; a failed wait would leak a zombie). Used by the stdio
-/// probe path where the Child handle is retained outside `spawn_blocking`.
-fn kill_and_reap_child(child: &mut std::process::Child) {
-    if let Err(e) = child.kill() {
-        log::warn!(target: "toptopduck::mcp", "probe child kill failed: {e}");
-    }
-    if let Err(e) = child.wait() {
-        log::warn!(target: "toptopduck::mcp", "probe child reap failed: {e}");
-    }
-}
-
 /// Map a timeout-bounded probe outcome to an [`McpProbeResult`]. Both the
 /// stdio and SSE/HTTP branches produce the same shape after flattening:
 /// `Result<Vec<Value>, String>` (tools on success, error string on failure)
@@ -1678,9 +1666,9 @@ pub async fn probe_mcp_server(
     let deadline = Duration::from_millis(deadline_ms as u64);
     let server_id = server.id.as_str();
 
-    // Stdio: spawn the child in the async scope so we own the Child handle
-    // for kill-on-timeout. The blocking handshake runs in spawn_blocking with
-    // the child's stdin/stdout (issue #392).
+    // Stdio: spawn the child in the async scope so we own the handle (and
+    // its tree guard) for kill-on-timeout. The blocking handshake runs in
+    // spawn_blocking with the child's stdin/stdout (issue #392).
     if let McpTransport::Stdio { .. } = &server.transport {
         let mut child = match crate::mcp::client::spawn_stdio_child(&server, &secrets) {
             Ok(c) => c,
@@ -1693,8 +1681,8 @@ pub async fn probe_mcp_server(
                 });
             }
         };
-        let stdin = child.stdin.take();
-        let stdout = child.stdout.take();
+        let stdin = child.take_stdin();
+        let stdout = child.take_stdout();
         // The blocking task needs an owned attribution label (issue #900).
         let server_label = server.display_name.clone();
 
@@ -1710,7 +1698,9 @@ pub async fn probe_mcp_server(
         })
         .await;
 
-        kill_and_reap_child(&mut child);
+        // Kill the whole tree (a wrapper's grandchildren die with it, #1456)
+        // and reap the direct child.
+        child.kill_and_reap().await;
         return Ok(probe_result_from_outcome(outcome, server_id, deadline_ms));
     }
 

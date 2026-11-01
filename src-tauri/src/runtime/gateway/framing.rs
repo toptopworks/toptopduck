@@ -12,6 +12,7 @@
 use std::io::{self, BufRead, Write};
 
 use serde_json::Value;
+use tokio::io::AsyncWriteExt;
 
 use crate::bounded_line::{BoundedLineReader, LineRead, LINE_MAX_BYTES};
 
@@ -99,6 +100,62 @@ impl<R: BufRead> FrameReader<R> {
 pub fn write_message(writer: &mut impl Write, msg: &Value) -> io::Result<()> {
     serde_json::to_writer(&mut *writer, msg)?;
     writer.write_all(b"\n")
+}
+
+// The async twins (ADR-0139, #1456): the MCP stdio transport's pipe reads
+// ride `tokio::process` handles, so the frame layer needs the same contract
+// on `AsyncBufRead` / `AsyncWrite`. The loop bodies mirror the sync faces
+// statement for statement -- only the line-read and write calls are awaited;
+// the equivalence tests below pin the two in lockstep, so a semantic change
+// must land on both or the pins break. Like the sync `read_message`, the
+// async entry is stateless per call (a partial line is discarded on a read
+// error -- the MCP client's call-local line-state contract, which does not
+// retry reads).
+
+/// The async twin of [`read_message`]: one newline-delimited JSON-RPC
+/// message from an async buffered reader, `None` at clean EOF, `Err` on an
+/// invalid or over-long line.
+pub async fn read_message_async(
+    reader: &mut (impl tokio::io::AsyncBufRead + Unpin),
+) -> io::Result<Option<Value>> {
+    let mut lines = BoundedLineReader::new(&mut *reader);
+    loop {
+        match lines.read_line_bounded_async(LINE_MAX_BYTES).await? {
+            LineRead::Eof => return Ok(None),
+            LineRead::Overlong => {
+                log::warn!(
+                    target: "toptopduck::gateway",
+                    "frame line exceeded {LINE_MAX_BYTES} bytes, failing the connection"
+                );
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("frame line exceeded {LINE_MAX_BYTES} bytes"),
+                ));
+            }
+            LineRead::Line(line) => {
+                let trimmed = line.trim_end_matches(['\r', '\n']);
+                if trimmed.is_empty() {
+                    continue;
+                }
+                return serde_json::from_str(trimmed)
+                    .map(Some)
+                    .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e));
+            }
+        }
+    }
+}
+
+/// The async twin of [`write_message`]: serializes to a buffer first (the
+/// async writer cannot host serde's sync `io::Write` emitter), then writes
+/// the bytes + the trailing newline in one call -- the same wire bytes the
+/// sync face streams.
+pub async fn write_message_async(
+    writer: &mut (impl tokio::io::AsyncWrite + Unpin),
+    msg: &Value,
+) -> io::Result<()> {
+    let mut bytes = serde_json::to_vec(msg)?;
+    bytes.push(b'\n');
+    writer.write_all(&bytes).await
 }
 
 #[cfg(test)]
@@ -258,5 +315,101 @@ mod tests {
         assert_eq!(msg["method"], "tools/list");
         // State resets after the completed line: EOF reads as EOF.
         assert!(r.read_message().expect("eof").is_none());
+    }
+
+    // -----------------------------------------------------------------------
+    // Async/sync face equivalence (ADR-0139, #1456): the async twins must
+    // answer with the same message sequence, error kind, and error text the
+    // sync faces produce on identical wire bytes, and write the same bytes.
+    // -----------------------------------------------------------------------
+
+    /// Drain one face over `wire`: every message until EOF, or the first
+    /// error (kind + text -- the observable contract a caller sees).
+    fn drain_sync(wire: &[u8]) -> Result<Vec<Value>, String> {
+        let mut reader = std::io::Cursor::new(wire.to_vec());
+        let mut out = Vec::new();
+        loop {
+            match read_message(&mut reader) {
+                Ok(Some(msg)) => out.push(msg),
+                Ok(None) => return Ok(out),
+                Err(e) => {
+                    return Err(format!("{}: {}", e.kind(), e));
+                }
+            }
+        }
+    }
+
+    async fn drain_async(wire: &[u8]) -> Result<Vec<Value>, String> {
+        let mut reader = tokio::io::BufReader::new(std::io::Cursor::new(wire.to_vec()));
+        let mut out = Vec::new();
+        loop {
+            match read_message_async(&mut reader).await {
+                Ok(Some(msg)) => out.push(msg),
+                Ok(None) => return Ok(out),
+                Err(e) => {
+                    return Err(format!("{}: {}", e.kind(), e));
+                }
+            }
+        }
+    }
+
+    /// The corpus every prior sync test pinned a slice of: a multi-message
+    /// stream with blank-line gaps, CRLF endings, and a final unterminated
+    /// frame; plus the failure shapes (invalid JSON, an over-long line) as
+    /// their own wires, since a failure ends its stream.
+    const EQUIVALENCE_CORPUS: [&[u8]; 4] = [
+        b"\n{\"jsonrpc\":\"2.0\",\"id\":1}\r\n\n{\"id\":2}\r\n{\"id\":3}",
+        b"not json\n",
+        b"\n\n{\"ok\":true}\n",
+        b"{\"split\":true}",
+    ];
+
+    #[tokio::test]
+    async fn async_read_face_matches_sync_on_the_corpus() {
+        for wire in EQUIVALENCE_CORPUS {
+            assert_eq!(
+                drain_sync(wire),
+                drain_async(wire).await,
+                "faces disagree on wire {wire:?}"
+            );
+        }
+        // The over-long shape carries its own wire (LINE_MAX_BYTES + 1 bytes)
+        // and must agree on the error, which also names the cap.
+        let mut overlong = "x".repeat(LINE_MAX_BYTES + 1).into_bytes();
+        overlong.push(b'\n');
+        assert_eq!(
+            drain_sync(&overlong),
+            drain_async(&overlong).await,
+            "faces disagree on the over-long line"
+        );
+    }
+
+    /// The write faces must emit byte-identical frames: compact JSON plus the
+    /// trailing newline, no interposed buffering artifacts.
+    #[tokio::test]
+    async fn async_write_face_emits_the_sync_bytes() {
+        let msgs = [
+            json!({"jsonrpc": "2.0", "id": 1, "method": "tools/list"}),
+            json!({"jsonrpc": "2.0", "id": 2, "result": {"tools": []}}),
+            json!({"note": "unicode \u{4e2d}\u{6587} stays one line"}),
+        ];
+        let mut sync_buf = Vec::new();
+        let mut async_buf = Vec::new();
+        for msg in &msgs {
+            write_message(&mut sync_buf, msg).expect("sync write");
+            write_message_async(&mut async_buf, msg)
+                .await
+                .expect("async write");
+        }
+        assert_eq!(sync_buf, async_buf, "faces disagree on wire bytes");
+        // And the bytes round-trip through the async reader.
+        let mut reader = tokio::io::BufReader::new(std::io::Cursor::new(async_buf));
+        for expected in &msgs {
+            let back = read_message_async(&mut reader)
+                .await
+                .expect("read back")
+                .expect("a message");
+            assert_eq!(&back, expected);
+        }
     }
 }
