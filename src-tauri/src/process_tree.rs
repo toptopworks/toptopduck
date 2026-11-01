@@ -62,22 +62,34 @@ pub(crate) fn prepare_command(_command: &mut Command) {
 }
 
 /// Post-spawn tree guard. `None` on a platform failure (degrades to killing
-/// the direct child only -- logged by the caller's environment; the call
-/// still resolves honestly).
+/// the direct child only, warned here -- the tree guarantee is these
+/// consumers' headline feature, so the degradation must be diagnosable in
+/// the field; the call still resolves honestly).
 pub(crate) fn guard(child: &impl TreeChild) -> Option<TreeGuard> {
-    #[cfg(windows)]
-    {
-        TreeGuard::assign(child)
+    let guard = platform_guard(child);
+    if guard.is_none() {
+        log::warn!(
+            target: "toptopduck::process_tree",
+            "tree guard unavailable -- kill paths degrade to the direct child only"
+        );
     }
-    #[cfg(unix)]
-    {
-        child.tree_id().map(|pid| TreeGuard { pgid: pid as i32 })
-    }
-    #[cfg(not(any(windows, unix)))]
-    {
-        let _ = child;
-        None
-    }
+    guard
+}
+
+#[cfg(windows)]
+fn platform_guard(child: &impl TreeChild) -> Option<TreeGuard> {
+    TreeGuard::assign(child)
+}
+
+#[cfg(unix)]
+fn platform_guard(child: &impl TreeChild) -> Option<TreeGuard> {
+    child.tree_id().map(|pid| TreeGuard { pgid: pid as i32 })
+}
+
+#[cfg(not(any(windows, unix)))]
+fn platform_guard(child: &impl TreeChild) -> Option<TreeGuard> {
+    let _ = child;
+    None
 }
 
 pub(crate) struct TreeGuard {
@@ -110,7 +122,21 @@ impl TreeGuard {
         // `prepare_command` (process_group(0) makes the child the leader,
         // so pgid = child pid); killpg targets only that group.
         unsafe {
-            libc::killpg(self.pgid, libc::SIGKILL);
+            if libc::killpg(self.pgid, libc::SIGKILL) == -1 {
+                // ESRCH after an earlier kill is the idempotent no-op --
+                // silent by design. Anything else (e.g. EPERM on a
+                // credential-dropping wrapper) leaves the tree's
+                // grandchildren alive, and that must be diagnosable in the
+                // field, not silent.
+                let err = std::io::Error::last_os_error();
+                if err.raw_os_error() != Some(libc::ESRCH) {
+                    log::warn!(
+                        target: "toptopduck::process_tree",
+                        "killpg({}) failed: {err}",
+                        self.pgid
+                    );
+                }
+            }
         }
         #[cfg(not(any(windows, unix)))]
         {}

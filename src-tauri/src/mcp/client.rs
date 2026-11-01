@@ -86,6 +86,11 @@ use crate::runtime::gateway::framing;
 /// this the thread + TCP connection would linger indefinitely.
 const HTTP_READ_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// Bound on the probe's post-kill reap wait (#1456 review): a healthy kill
+/// settles the wait in well under a second; a child that somehow survives
+/// both kill legs must not park the probe command forever.
+const PROBE_REAP_TIMEOUT: Duration = Duration::from_secs(5);
+
 /// Bounded channel capacity for the body-chunk pumps (chunks, not messages:
 /// one chunk carries whatever the transport layer yielded). Backpressures a
 /// flooding server so the pump blocks on send rather than accumulating
@@ -127,6 +132,19 @@ fn transport_runtime() -> &'static tokio::runtime::Runtime {
             .build()
             .expect("the transport bridge runtime builds")
     })
+}
+
+/// Spawn a stdio server child inside the bridge runtime's context. On Unix,
+/// `tokio::process::Command::spawn` registers every pipe with the
+/// thread-local runtime's reactor and panics outside a runtime context
+/// (`PollEvented::new` -> `Handle::current`), and both spawn sites here run
+/// on plain threads -- the aggregator's deadline workers and the probe's
+/// test threads (#1456 review). Entering the bridge also keeps the pipes
+/// registered on the same runtime every later `block_on` polls through,
+/// instead of splitting registration and polling across runtimes.
+fn spawn_on_bridge(cmd: &mut Command) -> std::io::Result<Child> {
+    let _enter = transport_runtime().enter();
+    cmd.spawn()
 }
 
 /// The `tools/list` pagination guardrails (issue #900). A server may split
@@ -194,7 +212,9 @@ impl SseStopSignal {
 #[derive(Clone)]
 pub enum TransportKill {
     /// Terminate the spawned stdio child's tree. Shared with the client's
-    /// `Drop` (kill + reap stay single-owner through the mutex).
+    /// `Drop` (the kill stays single-owner through the mutex; the reap is
+    /// the owning path's job -- the probe awaits it, the drop paths leave
+    /// the Unix zombie to tokio's orphan reaper).
     StdioChild(Arc<Mutex<StdioChildHandle>>),
     /// Fire the SSE transport's stop signal (see [`SseStopSignal`]).
     SseStop(Arc<SseStopSignal>),
@@ -215,8 +235,8 @@ pub struct StdioChildHandle {
 
 impl std::fmt::Debug for StdioChildHandle {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        // The child and the guard carry no Debug of their own; the pid is
-        // the useful diagnostic.
+        // The guard carries no Debug of its own; the pid is the useful
+        // diagnostic.
         f.debug_struct("StdioChildHandle")
             .field("pid", &self.child.id())
             .field("tree", &self.tree.is_some())
@@ -246,11 +266,23 @@ impl StdioChildHandle {
 
     /// Kill the tree, then reap the child (`wait`): the probe path's
     /// orderly teardown, called from an async context where awaiting the
-    /// reap is fine.
+    /// reap is fine. The wait is bounded (#1456 review): a child that
+    /// somehow survives both kill legs cannot park the probe command
+    /// forever -- the timeout abandons the wait and leaves the zombie to
+    /// tokio's orphan reaper, the same contract the drop paths ride.
     pub async fn kill_and_reap(&mut self) {
         self.kill();
-        if let Err(e) = self.reap().await {
-            log::warn!(target: "toptopduck::mcp", "probe child reap failed: {e}");
+        match tokio::time::timeout(PROBE_REAP_TIMEOUT, self.reap()).await {
+            Ok(Ok(_)) => {}
+            Ok(Err(e)) => {
+                log::warn!(target: "toptopduck::mcp", "probe child reap failed: {e}");
+            }
+            Err(_) => {
+                log::warn!(
+                    target: "toptopduck::mcp",
+                    "probe child reap timed out; leaving the zombie to the orphan reaper"
+                );
+            }
         }
     }
 
@@ -320,8 +352,8 @@ impl ConnectKill {
     /// The transport side: publish the kill handle; if the deadline already
     /// expired during the spawn, kill immediately. Single-shot per connect
     /// in practice -- a second publish would silently overwrite the slot,
-    /// dropping the first handle without killing it (no current caller
-    /// publishes twice).
+    /// dropping the first handle (whose `Drop` is itself a kill backstop,
+    /// so the tree still dies; no current caller publishes twice).
     pub(crate) fn publish(&self, kill: TransportKill) {
         *self.handle.lock().expect("kill slot poisoned") = Some(kill.clone());
         if self.expired.load(Ordering::SeqCst) {
@@ -884,7 +916,7 @@ impl StdioClient {
         tool_output_dir: Option<&str>,
         kill_slot: &KillSlot,
     ) -> Result<Self, ClientError> {
-        let mut child = stdio_command(config, secrets, tool_output_dir)?.spawn()?;
+        let mut child = spawn_on_bridge(&mut stdio_command(config, secrets, tool_output_dir)?)?;
         let stdin = child.stdin.take().ok_or(ClientError::NoChildStdin)?;
         let stdout = child.stdout.take().ok_or(ClientError::NoChildStdout)?;
         let tree = process_tree::guard(&child);
@@ -929,7 +961,8 @@ impl Drop for StdioClient {
         // tokio's orphan reaper on the evergreen bridge runtime and the
         // Windows job handle closes kill-on-close in TreeGuard's own Drop.
         // The lock only contends while a deadline / cancel kill is
-        // mid-flight (kill returns without holding it, issue #889).
+        // mid-flight (the lock is held only for the quick terminate,
+        // released before the kill returns -- issue #889).
         match self.child.lock() {
             Ok(mut handle) => handle.kill(),
             Err(_) => {
@@ -1023,7 +1056,7 @@ pub fn spawn_stdio_child(
     config: &McpServerConfig,
     secrets: &[SecretEnv],
 ) -> Result<StdioChildHandle, ClientError> {
-    let child = stdio_command(config, secrets, None)?.spawn()?;
+    let child = spawn_on_bridge(&mut stdio_command(config, secrets, None)?)?;
     let tree = process_tree::guard(&child);
     Ok(StdioChildHandle { child, tree })
 }
@@ -2469,6 +2502,73 @@ mod tests {
         let mut client = FramedClient::new(Cursor::new(server), Cursor::new(Vec::new()));
         client.list_tools("fake-mcp").expect("first call (id=1)");
         client.call("x", &json!({})).expect("second call (id=2)");
+    }
+
+    /// An in-memory `AsyncWrite` sink for the async client pins: std's Vec
+    /// implements no tokio trait (the orphan rule) and `duplex` would need a
+    /// draining reader. Writes always succeed immediately.
+    #[derive(Default)]
+    struct AsyncVecWriter(Vec<u8>);
+
+    impl tokio::io::AsyncWrite for AsyncVecWriter {
+        fn poll_write(
+            self: std::pin::Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+            buf: &[u8],
+        ) -> std::task::Poll<std::io::Result<usize>> {
+            self.get_mut().0.extend_from_slice(buf);
+            std::task::Poll::Ready(Ok(buf.len()))
+        }
+
+        fn poll_flush(
+            self: std::pin::Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<std::io::Result<()>> {
+            std::task::Poll::Ready(Ok(()))
+        }
+
+        fn poll_shutdown(
+            self: std::pin::Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<std::io::Result<()>> {
+            std::task::Poll::Ready(Ok(()))
+        }
+    }
+
+    /// The async face's id-skip loop is the production path (StdioClient and
+    /// the probe handshake ride it), so the two sync pins above must hold on
+    /// the async twin too (#1456 review): same wires, same skips. The
+    /// composed reader is the tokio-native form (a BufReader over a std
+    /// Cursor -- tokio implements AsyncRead for it natively).
+    #[test]
+    fn async_notifications_between_request_and_response_are_skipped() {
+        let server = wire(&[
+            json!({"jsonrpc": "2.0", "method": "notifications/progress", "params": {"progress": 50}}),
+            json!({"jsonrpc": "2.0", "id": 1, "result": {"tools": []}}),
+        ]);
+        let mut client = AsyncFramedClient::new(
+            tokio::io::BufReader::new(Cursor::new(server)),
+            AsyncVecWriter::default(),
+        );
+        let listed = client
+            .list_tools("fake-mcp")
+            .expect("list ok past notification");
+        assert!(listed.is_empty());
+    }
+
+    #[test]
+    fn async_response_with_other_id_is_skipped_until_match() {
+        let server = wire(&[
+            json!({"jsonrpc": "2.0", "id": 999, "result": {"tools": [{"name": "wrong"}]}}),
+            json!({"jsonrpc": "2.0", "id": 1, "result": {"tools": [{"name": "right"}]}}),
+        ]);
+        let mut client = AsyncFramedClient::new(
+            tokio::io::BufReader::new(Cursor::new(server)),
+            AsyncVecWriter::default(),
+        );
+        let listed = client.list_tools("fake-mcp").expect("list ok");
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0]["name"], "right");
     }
 
     // --- ConnectKill rendezvous (issue #889) ----------------------------------

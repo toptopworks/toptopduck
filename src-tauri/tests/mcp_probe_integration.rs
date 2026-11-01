@@ -207,15 +207,15 @@ fn kill_is_idempotent_on_an_already_dead_child() {
 /// design) would leave the grandchild holding the pipe's write end forever.
 /// Both platforms ride the same assertion: the pipe write-end closing IS
 /// the observable of the tree dying.
-#[test]
-fn kill_takes_the_spawned_grandchild_down_with_the_tree() {
-    let config = McpServerConfig {
-        id: McpServerId("test-tree".into()),
-        display_name: "test-tree".into(),
-        // `--orphan` spawns the grandchild immediately; the short `--sleep`
-        // keeps the direct child alive past the spawn-side guard assignment
-        // (a Windows job assign races an already-exited child), then it
-        // exits on its own — well before the 30 s grandchild sleep.
+/// The orphaning-tool config the tree pins share: `--orphan` spawns the
+/// grandchild immediately; the short `--sleep` keeps the direct child alive
+/// past the spawn-side guard assignment (a Windows job assign races an
+/// already-exited child), then it exits on its own — well before the 30 s
+/// grandchild sleep.
+fn orphaning_config(id: &str) -> McpServerConfig {
+    McpServerConfig {
+        id: McpServerId(id.into()),
+        display_name: id.into(),
         transport: McpTransport::stdio(
             CLI_TOOL_BIN.to_string(),
             vec!["--orphan".into(), "--sleep".into(), "500".into()],
@@ -225,13 +225,14 @@ fn kill_takes_the_spawned_grandchild_down_with_the_tree() {
         keychain_header_keys: Vec::new(),
         timeout_ms: None,
         enabled: true,
-    };
-    let mut child = spawn_stdio_child(&config, &[]).expect("spawn orphaning tool");
-    let stdout = child.take_stdout().expect("child stdout");
+    }
+}
 
-    // The read parks on the grandchild-held pipe: the direct child exits
-    // within ~500 ms without writing, and the grandchild (asleep for 30 s)
-    // never writes, so any return is the EOF the tree kill produced.
+/// Park a read on the grandchild-held stdout pipe and report the first
+/// read's outcome (Ok(0) = EOF) — the settle observable both tree pins
+/// assert on. The tests run on plain threads, so the read rides a
+/// throwaway current-thread runtime.
+fn spawn_pipe_read(stdout: tokio::process::ChildStdout) -> mpsc::Receiver<std::io::Result<usize>> {
     let (tx, rx) = mpsc::channel();
     thread::spawn(move || {
         use tokio::io::AsyncBufReadExt;
@@ -245,6 +246,19 @@ fn kill_takes_the_spawned_grandchild_down_with_the_tree() {
         });
         let _ = tx.send(n);
     });
+    rx
+}
+
+#[test]
+fn kill_takes_the_spawned_grandchild_down_with_the_tree() {
+    let mut child =
+        spawn_stdio_child(&orphaning_config("test-tree"), &[]).expect("spawn orphaning tool");
+    let stdout = child.take_stdout().expect("child stdout");
+
+    // The read parks on the grandchild-held pipe: the direct child exits
+    // within ~500 ms without writing, and the grandchild (asleep for 30 s)
+    // never writes, so any return is the EOF the tree kill produced.
+    let rx = spawn_pipe_read(stdout);
 
     // Let the direct child exit on its own first (its death must NOT settle
     // the read — only the grandchild's write end can), then fire the kill.
@@ -257,6 +271,34 @@ fn kill_takes_the_spawned_grandchild_down_with_the_tree() {
             "the read settled within 10 s — the tree kill took the \
              pipe-holding grandchild down (a bare direct-child kill would \
              leave it holding the write end forever)",
+        )
+        .expect("the pipe read itself succeeded");
+    assert_eq!(n, 0, "EOF on the grandchild-held pipe, not data");
+}
+
+/// #1456 review: the Drop backstop takes the tree down too — an owner that
+/// goes out of scope WITHOUT an explicit kill (a probe abandoned mid-await)
+/// must not leak the grandchild. Every stdio fixture self-exits on stdin
+/// EOF, so without the handle's Drop-kill this shape would still pass all
+/// suites; this pin is the backstop's only observer.
+#[test]
+fn dropping_the_handle_without_an_explicit_kill_takes_the_tree_down() {
+    let mut child =
+        spawn_stdio_child(&orphaning_config("test-drop"), &[]).expect("spawn orphaning tool");
+    let stdout = child.take_stdout().expect("child stdout");
+    let rx = spawn_pipe_read(stdout);
+
+    // Same settle precondition as the kill pin: the direct child exits on
+    // its own (~500 ms), then the owner is dropped — no kill call anywhere.
+    thread::sleep(Duration::from_millis(800));
+    drop(child);
+
+    let n = rx
+        .recv_timeout(Duration::from_secs(10))
+        .expect(
+            "the read settled within 10 s — the Drop backstop took the \
+             pipe-holding grandchild down (a kill-free Drop would leave it \
+             holding the write end for its full 30 s sleep)",
         )
         .expect("the pipe read itself succeeded");
     assert_eq!(n, 0, "EOF on the grandchild-held pipe, not data");

@@ -340,7 +340,7 @@ mod tests {
     }
 
     async fn drain_async(wire: &[u8]) -> Result<Vec<Value>, String> {
-        let mut reader = AsyncCursor::new(wire.to_vec());
+        let mut reader = tokio::io::BufReader::new(std::io::Cursor::new(wire.to_vec()));
         let mut out = Vec::new();
         loop {
             match read_message_async(&mut reader).await {
@@ -350,48 +350,6 @@ mod tests {
                     return Err(format!("{}: {}", e.kind(), e));
                 }
             }
-        }
-    }
-
-    /// The async twin of `std::io::Cursor` (tokio implements none of its
-    /// async traits for std types): an in-memory byte buffer read through
-    /// `AsyncBufRead`, ready from the first poll.
-    struct AsyncCursor {
-        bytes: Vec<u8>,
-        pos: usize,
-    }
-
-    impl AsyncCursor {
-        fn new(bytes: Vec<u8>) -> Self {
-            Self { bytes, pos: 0 }
-        }
-    }
-
-    impl tokio::io::AsyncRead for AsyncCursor {
-        fn poll_read(
-            self: std::pin::Pin<&mut Self>,
-            _cx: &mut std::task::Context<'_>,
-            buf: &mut tokio::io::ReadBuf<'_>,
-        ) -> std::task::Poll<io::Result<()>> {
-            let this = self.get_mut();
-            let n = (this.bytes.len() - this.pos).min(buf.remaining());
-            buf.put_slice(&this.bytes[this.pos..this.pos + n]);
-            this.pos += n;
-            std::task::Poll::Ready(Ok(()))
-        }
-    }
-
-    impl tokio::io::AsyncBufRead for AsyncCursor {
-        fn poll_fill_buf(
-            self: std::pin::Pin<&mut Self>,
-            _cx: &mut std::task::Context<'_>,
-        ) -> std::task::Poll<io::Result<&[u8]>> {
-            let this = self.get_mut();
-            std::task::Poll::Ready(Ok(&this.bytes[this.pos..]))
-        }
-
-        fn consume(self: std::pin::Pin<&mut Self>, amt: usize) {
-            self.get_mut().pos += amt;
         }
     }
 
@@ -445,7 +403,7 @@ mod tests {
         }
         assert_eq!(sync_buf, async_buf, "faces disagree on wire bytes");
         // And the bytes round-trip through the async reader.
-        let mut reader = AsyncCursor::new(async_buf);
+        let mut reader = tokio::io::BufReader::new(std::io::Cursor::new(async_buf));
         for expected in &msgs {
             let back = read_message_async(&mut reader)
                 .await
