@@ -21,11 +21,12 @@
 //! (zero approval, ADR-0080 Decision 1), unknown names fall through to the
 //! external arm and surface the gate's pending card.
 
-use std::io::{self, BufRead, BufReader, Write};
-use std::net::{TcpListener, TcpStream};
+use std::io;
+use std::net::TcpListener;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
+use tokio::net::tcp::OwnedWriteHalf;
 
 use serde_json::{json, Value};
 
@@ -119,8 +120,11 @@ pub struct GatewayCtx<'a> {
     /// (one live rail, one channel; the external lines' echoes stay silent,
     /// so the gateway's row is the call's only live source).
     pub events: &'a dyn TurnPhaseSink,
-    /// The turn's shared cancel token; the gate suspends on it, dispatch checks it.
-    pub cancel: &'a CancelToken,
+    /// The turn's shared cancel token; the gate suspends on it, dispatch
+    /// checks it. Owned as an `Arc` (not a borrow) since #1457: the serve's
+    /// I/O task needs a `'static` handle to observe termination, and the
+    /// production caller already holds the token behind its own `Arc`.
+    pub cancel: Arc<CancelToken>,
     /// The connected external MCP servers (slice C-gw). Owned (turn-local
     /// spawn), unlike the borrowed fields above; the caller constructs +
     /// drops it per turn. Empty when no servers are configured or the session
@@ -145,26 +149,29 @@ pub struct GatewayOutcome {
 }
 
 /// Max wall-clock wait for a bridge to connect after [`serve_connection`] starts
-/// (ADR-0085 robustness). A blocking `accept` would hang the turn forever if the
-/// bridge never connects -- the engine returns, but the gateway never sees EOF
-/// -- so the accept is a non-blocking poll bounded by this deadline. The bridge
+/// (ADR-0085 robustness). A blocking accept with no bridge would hang the
+/// turn forever -- the engine returns, but the gateway never sees EOF -- so
+/// the accept races this deadline against its beat arms. The bridge
 /// connects in well under a second in the happy path; 30s absorbs a slow CI
 /// runner + process-spawn jitter without leaking a hung turn.
 const CONNECT_DEADLINE: Duration = Duration::from_secs(30);
 
-/// How long the non-blocking accept poll sleeps between cancel/deadline checks.
-/// Short enough that a cancel surfaces in well under a second; long enough that
-/// an idle wait costs near-zero CPU.
-const ACCEPT_POLL_INTERVAL: Duration = Duration::from_millis(10);
+/// The serve beat: how often the spine's event wait re-checks the
+/// termination flags (and the keep-alive companion polls its slot) --
+/// the retired per-read timeout cadence's bound, kept on as the
+/// flag-visibility bound. The reads themselves are event-driven since
+/// #1457 -- EOF or a hard bridge death wakes them, so no read is timed
+/// out and retried, and a sender pausing mid-frame for any duration
+/// completes the frame when its bytes arrive (issue #649 made structural
+/// -- see `serve_reader`'s doc for why reads never share a select with
+/// the beat). Also the keep-alive companion's poll quantum (issue #1267).
+const SERVE_BEAT: Duration = Duration::from_millis(100);
 
-/// The accepted stream's read timeout. The serve loop checks cancel after each
-/// read returns, so a blocking read would not notice cancel mid-message; this
-/// bounds the cancel latency in the read loop to the same order as the accept
-/// poll. A `TimedOut` / `WouldBlock` is retried; the frame reader holds the
-/// partial line across retries (issue #649), so a sender pausing mid-frame
-/// for longer than this still completes the frame -- the pause only delays
-/// the loop-top cancel / engine-done checks, it never re-frames.
-const READ_TIMEOUT: Duration = Duration::from_millis(100);
+/// The accept-beat quantum: the flag-visibility bound while no bridge has
+/// connected yet. Finer than [`SERVE_BEAT`] -- the retired non-blocking
+/// accept polled at this interval, and the connect window is the one
+/// place the rewrite must not regress cancellation latency.
+const ACCEPT_BEAT: Duration = Duration::from_millis(10);
 
 /// Whether an io error kind means the bridge connection died hard (issue
 /// #801, ADR-0085 disconnect immunity): a reset, a broken pipe (POSIX
@@ -181,15 +188,6 @@ fn is_bridge_gone(kind: io::ErrorKind) -> bool {
             | io::ErrorKind::BrokenPipe
             | io::ErrorKind::ConnectionAborted
     )
-}
-
-/// A read parked under `READ_TIMEOUT` surfaces as one of these on either
-/// platform (Windows WSAETIMEDOUT maps to `TimedOut`; a non-blocking Unix
-/// read maps `EAGAIN` to `WouldBlock`). Shared by both timeout-retry arms
-/// (the serve loop's frame read and the pre-auth auth read) so the retry
-/// predicate cannot drift between the twins.
-fn is_read_timeout(kind: io::ErrorKind) -> bool {
-    matches!(kind, io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut)
 }
 
 /// The keep-alive cadence for a gated `tools/call` (issue #1267): the
@@ -212,271 +210,310 @@ fn progress_notification(token: &Value, progress: u64) -> Value {
     })
 }
 
-/// Spawn the keep-alive sender riding a progress-tokened `tools/call`
-/// (issue #1267): while the serve thread is parked in the approval gate it
-/// cannot write frames, so this companion thread holds the connection's
-/// shared write half and emits periodic progress notifications to reset the
-/// bridge client's request timeout. Returns the stop flag (the serve sets it
-/// once its handler returns) and the join handle (tests join for
-/// determinism; production drops it -- the thread exits on its own within
-/// one interval sleep, never blocking the response write).
-fn spawn_keepalive(
-    writer: Arc<Mutex<TcpStream>>,
-    token: Value,
-    interval: Duration,
-) -> (Arc<AtomicBool>, std::thread::JoinHandle<()>) {
-    let stop = Arc::new(AtomicBool::new(false));
-    let stop_c = Arc::clone(&stop);
-    let handle = std::thread::spawn(move || {
-        let mut progress: u64 = 0;
-        loop {
-            std::thread::sleep(interval);
-            if stop_c.load(Ordering::SeqCst) {
-                break;
-            }
-            progress += 1;
-            let frame = progress_notification(&token, progress);
-            let Ok(mut w) = writer.lock() else {
-                log::debug!(
-                    target: "toptopduck::gateway",
-                    "keep-alive companion exiting on a poisoned writer lock"
-                );
-                break;
-            };
-            // Re-check the flag under the lock: the earlier check ran before
-            // the lock could be contended, so only this one orders the
-            // companion's last frame (if any) before the serve's response
-            // write -- the lock, not the timing, carries the safety.
-            if stop_c.load(Ordering::SeqCst) {
-                break;
-            }
-            // A dead bridge leaves nothing to keep alive. While the gate
-            // parks the serve thread the read-side reset handling cannot
-            // run (it resumes only after the gate returns), so this failed
-            // write is the one mid-park signal that the bridge died --
-            // logged, not discarded.
-            if framing::write_message(&mut *w, &frame).is_err() {
-                log::debug!(
-                    target: "toptopduck::gateway",
-                    "keep-alive companion exiting on a failed write (bridge gone mid-park)"
-                );
-                break;
-            }
-        }
-    });
-    (stop, handle)
-}
-
-/// Accept one bridge connection, verify its token, and drive the MCP subset
-/// (`initialize` / `tools/list` / `tools/call`) until the bridge disconnects
-/// (read EOF, or a reset -- a hard bridge death, issue #801 -- or a failed
-/// response write to the dead bridge), the cancel token fires, OR the
-/// engine-completion flag (`engine_done`) is set.
-///
-/// `engine_done` is the deterministic terminator: the caller sets it when the
-/// ACP engine's prompt pump returns. The pump returning means the CLI sent its
-/// final `session/prompt` response, so every `tools/call` it sent was already
-/// served synchronously (the CLI blocks on each tools/call reply before sending
-/// the next message) -- serve has no in-flight request to drop, so returning on
-/// the flag is safe. This removes the implicit dependency on the bridge closing
-/// the TCP connection to terminate the serve loop (ADR-0085 serve-termination
-/// consequence): the bridge is spawned by the external CLI, so whether its stdin
-/// write-end closes promptly depends on the spawner, not on this process.
-///
-/// Rot-risk: this premise holds for ACP v1's request/response ordering. If a
-/// future protocol revision allows pipelining (sending the next message before
-/// the prior response) or adds cancellation notifications, this early return
-/// could drop an in-flight tools/call -- re-evaluate then.
-///
-/// Blocks for the connection's lifetime. The caller spawns it on a scoped
-/// thread and drives the ACP engine in parallel; the bridge's tool calls land
-/// their trace + promotions in the returned [`GatewayOutcome`] for the turn
-/// assembler to merge.
+/// Serve one turn's bridge connection to completion on the calling thread
+/// (the spine), with the socket's read side parked on a dedicated reader
+/// task (see [`serve_reader`]'s doc for the measured Windows wake law that
+/// forces this split): the spine accepts through the transport bridge,
+/// dispatches frames synchronously through `handle_method` (the `!Sync`
+/// DuckDB borrows stay on this thread, same constraint as the production
+/// scope body), writes responses through the shared write funnel, and
+/// observes the termination flags on a std `recv_timeout` beat -- the
+/// reader can never be woken but by the socket, so every flag check, reply
+/// write, and keep-alive frame lives on this thread or its companion
+/// (issue #1267). Returns the collected trace + promotions for the turn
+/// assembler; `Err` only for genuine serve faults (a missing bridge, a
+/// refused handshake, an intolerable I/O error).
 pub fn serve_connection(
     handle: GatewayHandle,
     mut ctx: GatewayCtx,
-    engine_done: &AtomicBool,
+    engine_done: &Arc<AtomicBool>,
 ) -> io::Result<GatewayOutcome> {
     let GatewayHandle {
         token, listener, ..
     } = handle;
-    let (stream, _peer) = match accept_bridge(&listener, ctx.cancel, engine_done, CONNECT_DEADLINE)?
-    {
+    let cancel = Arc::clone(&ctx.cancel);
+    // The accept runs on this thread through the transport bridge: one
+    // `block_on` for the whole wait parks the calling thread on the
+    // runtime's driver (a plain thread outside any async context may do
+    // exactly this -- the same shape the mcp client uses per call), with
+    // the termination flags observed on the accept's own beat arms.
+    let stream = match crate::mcp::client::block_on(async {
+        accept_bridge(listener, &cancel, engine_done, CONNECT_DEADLINE).await
+    }) {
+        Err(e) => return Err(e),
         // Cancel or engine completion fired before any bridge connected:
-        // return the empty outcome so the turn assembler's termination
-        // (single-source ACP) decides the TurnOutcome (Cancelled, or the
-        // pump-already-returned outcome), not a gateway serve error.
-        None => return Ok(GatewayOutcome::default()),
-        Some(pair) => pair,
+        // the empty outcome so the ACP termination decides the TurnOutcome.
+        Ok(None) => return Ok(GatewayOutcome::default()),
+        Ok(Some((stream, _peer))) => stream,
     };
-    // The listener accepted exactly one bridge (ADR-0085 per-bridge lifecycle);
-    // drop it to release the port + clear the kernel backlog.
-    drop(listener);
-    stream.set_read_timeout(Some(READ_TIMEOUT))?;
-    let writer = stream.try_clone()?;
-    let mut reader = BufReader::new(stream);
-    let mut writer = writer;
-
-    // The pre-auth window's termination handoff (issue #909): flags that fire
-    // between the accepted connection and the auth handshake return the empty
-    // outcome so the ACP termination decides the TurnOutcome -- the same
-    // single-source disposition as the accept arm above.
-    if !verify_bridge(&mut reader, &mut writer, &token, ctx.cancel, engine_done)? {
-        return Ok(GatewayOutcome::default());
-    }
-    // The frame reader owns the stream for the serve loop's lifetime so the
-    // partial frame survives read-timeout retries (issue #649): each retried
-    // read resumes the same line instead of re-framing from the stream's
-    // mid-line position.
-    let mut frames = framing::FrameReader::new(reader);
-    // Shared write half (issue #1267): a `tools/call` carrying a progress
-    // token gets a keep-alive companion thread that writes progress
-    // notifications while the serve thread is parked in the approval gate.
-    // Both writers serialize through this lock -- the companion re-checks
-    // its stop flag after acquiring it, so any late frame still lands
-    // before the response envelope the serve writes here.
-    let writer = Arc::new(Mutex::new(writer));
+    // The reader task owns the connection's read side for its whole life
+    // (verify, then frames) and hands the write half to the spine through
+    // the first event. See `serve_reader`'s doc for why its reads are
+    // never selected against anything (the measured Windows wake law).
+    let (event_tx, event_rx) = std::sync::mpsc::channel::<ServeEvent>();
+    crate::mcp::client::spawn_transport_task(serve_reader(
+        stream,
+        token,
+        Arc::clone(&cancel),
+        Arc::clone(engine_done),
+        event_tx,
+    ));
 
     let mut outcome = GatewayOutcome::default();
-    loop {
-        if ctx.cancel.is_requested() {
-            // The cancel exit's visible trace (issue #849: this arm firing
-            // with no user cancel in the window was the invisible gateway
-            // drop).
-            log::debug!(
-                target: "toptopduck::gateway",
-                "serve loop exiting on the cancel flag"
-            );
-            return Ok(outcome);
-        }
-        // Engine-completion signal (ADR-0085 serve-termination consequence):
-        // the prompt pump returned -> the CLI sent its final session/prompt
-        // response -> every tools/call it sent was already served
-        // synchronously, so no in-flight request is dropped by returning now.
-        // This is what unblocks the serve when the bridge keeps the TCP
-        // connection open (e.g. a stdio-spawn fd leak on Linux); the loop-top
-        // check fires within one READ_TIMEOUT of the flag being set.
-        if engine_done.load(Ordering::SeqCst) {
-            // The engine-completion twin of the cancel arm's log above
-            // (issue #849's invisible-exit lesson): without this line this
-            // exit is the only silent one among the flag-driven Ok exits
-            // (issue #915).
-            log::debug!(
-                target: "toptopduck::gateway",
-                "serve loop exiting on engine completion"
-            );
-            return Ok(outcome);
-        }
-        let msg = match frames.read_message() {
-            Ok(Some(m)) => m,
-            Ok(None) => {
-                // The post-auth companions (issue #915): the bridge-death
-                // exits below leave a trace too, so no serve-loop exit is
-                // silent.
-                log::debug!(
-                    target: "toptopduck::gateway",
-                    "serve loop exiting on the bridge's close"
-                );
-                return Ok(outcome);
-            } // bridge closed
-            // Read timeout (READ_TIMEOUT): retry so the loop-top cancel check
-            // fires. The partial line stays buffered in the frame reader --
-            // the retried read resumes the same line; no bytes pulled past
-            // the BufReader are lost.
-            Err(e) if is_read_timeout(e.kind()) => {
-                continue;
+    let mut write: Option<Arc<tokio::sync::Mutex<OwnedWriteHalf>>> = None;
+    let mut keepalive: Option<KeepaliveGuard> = None;
+    let result = loop {
+        use std::sync::mpsc::RecvTimeoutError;
+        match event_rx.recv_timeout(SERVE_BEAT) {
+            Ok(ServeEvent::Authed(writer)) => {
+                // The write half arrives with the completed handshake: the
+                // keep-alive companion starts before the first frame so the
+                // whole serve lifetime has exactly two writers (the spine
+                // and the companion), serialized by the funnel.
+                keepalive = Some(KeepaliveGuard::start(Arc::clone(&writer)));
+                write = Some(writer);
             }
-            // A bridge that dies hard (the turn's CLI exits or is killed)
-            // closes with a reset, not a FIN -- Windows surfaces it as os
-            // error 10054 (issue #801). The reset lands within milliseconds
-            // of the turn's end, so this is the arm a healthy external run
-            // typically exercises, not an exotic failure (it races the
-            // loop-top engine_done check, which the ADR bullet hedges the
-            // same way). Same disposition as the EOF arm: return what was
-            // collected and let the ACP engine's termination decide the
-            // turn (the same single-source principle the loop-top cancel
-            // arm follows).
-            Err(e) if is_bridge_gone(e.kind()) => {
-                log::debug!(
-                    target: "toptopduck::gateway",
-                    "serve loop exiting on the bridge's read-side reset"
-                );
-                return Ok(outcome);
-            }
-            Err(e) => return Err(e),
-        };
-        let id = msg.get("id").cloned();
-        let method = msg.get("method").and_then(|v| v.as_str()).unwrap_or("");
-        // The keep-alive companion (issue #1267): a `tools/call` carrying a
-        // progress token gets periodic `notifications/progress` while the
-        // serve thread may be parked in the approval gate -- resetting the
-        // bridge client's request timeout so the approval wait stays
-        // human-unbounded (ADR-0115 posture) instead of expiring on the
-        // caller's side. Token-less calls and other methods spawn nothing.
-        let keepalive_stop = if method == "tools/call" {
-            msg.get("params")
-                .and_then(|p| p.get("_meta"))
-                .and_then(|m| m.get("progressToken"))
-                .cloned()
-                .map(|token| spawn_keepalive(Arc::clone(&writer), token, KEEPALIVE_INTERVAL).0)
-        } else {
-            None
-        };
-        let response = handle_method(method, &msg, &mut ctx, &mut outcome);
-        // The serve owns the wire again: stop the companion (it exits after
-        // at most one more interval sleep; no join -- the response write
-        // must not wait on it).
-        if let Some(stop) = &keepalive_stop {
-            stop.store(true, Ordering::SeqCst);
-        }
-        if let Some(id) = id {
-            if let Some(envelope) = response.into_envelope(id) {
-                // The write twin of the read-side reset arm (issue #801): a
+            Ok(ServeEvent::Frame(msg)) => {
+                let method = msg.get("method").and_then(|v| v.as_str()).unwrap_or("");
+                let id = msg.get("id").cloned();
+                // The keep-alive window (issue #1267): a `tools/call`
+                // carrying a progress token arms the companion BEFORE the
+                // dispatch below -- the dispatch may park this thread in
+                // the approval gate for an unbounded human wait, during
+                // which only the companion writes.
+                let token = keepalive_token(&msg, method);
+                if let (Some(k), Some(t)) = (&keepalive, token) {
+                    k.arm(t);
+                }
+                let response = handle_method(method, &msg, &mut ctx, &mut outcome);
+                if let Some(k) = &keepalive {
+                    k.disarm();
+                }
+                let Some(id) = id else { continue };
+                let Some(envelope) = response.into_envelope(id) else {
+                    continue;
+                };
+                let Some(writer) = &write else { continue };
+                // The write twin of the reader's reset arm (issue #801): a
                 // bridge that dies mid-response aborts the write with a
                 // reset / broken pipe. The request was served; the turn's
                 // fate belongs to the ACP engine.
-                if let Err(e) = framing::write_message(
-                    &mut *writer.lock().expect("gateway writer lock"),
-                    &envelope,
-                ) {
+                if let Err(e) = write_response(writer, &envelope) {
                     if is_bridge_gone(e.kind()) {
                         log::debug!(
                             target: "toptopduck::gateway",
-                            "serve loop exiting on the bridge's write-side reset"
+                            "serve spine exiting: the bridge died writing a response"
                         );
-                        return Ok(outcome);
+                        break Ok(outcome);
                     }
-                    return Err(e);
+                    break Err(e);
                 }
             }
+            Ok(ServeEvent::Done(Exit::Ok)) => break Ok(outcome),
+            Ok(ServeEvent::Done(Exit::Err(e))) => break Err(e),
+            // The spine's beat (the flag-visibility bound): a flag firing
+            // while the reader parks on the socket is observed HERE, within
+            // one SERVE_BEAT -- the reader task itself can never be woken
+            // by anything but the socket (see `serve_reader`'s doc).
+            Err(RecvTimeoutError::Timeout) => {
+                if termination_fired(&cancel, engine_done) {
+                    log::debug!(
+                        target: "toptopduck::gateway",
+                        "serve spine exiting on {} during a read park",
+                        termination_source(&cancel)
+                    );
+                    break Ok(outcome);
+                }
+            }
+            Err(RecvTimeoutError::Disconnected) => break Ok(outcome),
+        }
+    };
+    if let Some(k) = keepalive {
+        k.stop();
+    }
+    result
+}
+
+/// The keep-alive token of a `tools/call` (issue #1267): the call's
+/// `_meta.progressToken`. Token-less calls and other methods keep nothing.
+fn keepalive_token(msg: &Value, method: &str) -> Option<Value> {
+    if method == "tools/call" {
+        msg.get("params")?
+            .get("_meta")?
+            .get("progressToken")
+            .cloned()
+    } else {
+        None
+    }
+}
+
+/// Write one response envelope through the shared write half -- the
+/// spine's only socket write, a bounded `block_on` on the transport
+/// runtime from a plain thread (the same shape the mcp client uses per
+/// call).
+fn write_response(writer: &tokio::sync::Mutex<OwnedWriteHalf>, envelope: &Value) -> io::Result<()> {
+    crate::mcp::client::block_on(async {
+        let mut half = writer.lock().await;
+        framing::write_message_async(&mut *half, envelope).await
+    })
+}
+
+/// What the reader task hands the spine: the completed handshake (carrying
+/// the connection's write half), one fully-read frame to dispatch, or the
+/// connection's end (collected-outcome stands vs a serve error to
+/// propagate).
+enum ServeEvent {
+    Authed(Arc<tokio::sync::Mutex<OwnedWriteHalf>>),
+    Frame(Value),
+    Done(Exit),
+}
+
+/// The connection-end shape the reader reports through
+/// [`ServeEvent::Done`].
+enum Exit {
+    /// The bridge disconnected / a termination handoff returned early / a
+    /// tolerated bridge death: the spine returns the collected outcome.
+    Ok,
+    /// A genuine serve fault (deadline expiry, an intolerable I/O error).
+    Err(io::Error),
+}
+
+/// The connection's reader (the async half of the two-part serve since
+/// #1457): verify the auth handshake, then read frames until the bridge
+/// disconnects, a tolerated bridge death surfaces, or a serve fault --
+/// handing each frame to the spine's event channel.
+///
+/// Measured Windows constraint (tokio 1.52.3, this repository's test
+/// binary, 2026-11-01 probes -- shapes pinned in #1457's review trail):
+/// once a socket read on a tokio runtime is parked, NOTHING but socket I/O
+/// wakes that task -- not a `tokio::time` sleep co-parked in the same
+/// `select!`, not a `timeout()` wrapper, not a `Notify` fired from a plain
+/// std thread, biased or not, fresh runtime or shared. Timers and channel
+/// parks WITHOUT a parked socket read wake fine, and sibling tasks on a
+/// multi-thread runtime wake fine while one task parks on a read. So this
+/// task parks on exactly one thing -- the socket read -- and everything
+/// that must remain wake-able (the termination flags, the reply writes,
+/// the keep-alive cadence) lives on other threads: the spine's
+/// `recv_timeout` beat and the keep-alive companion. A termination flag
+/// firing while this read parks is observed by the spine, which returns;
+/// this task then ends when the socket dies -- guaranteed by the turn
+/// teardown's process-tree kill, even on the Linux stdio-fd-leak shape
+/// (the detached task is the bounded cost of the wake law, one parked
+/// reader per turn).
+async fn serve_reader(
+    stream: tokio::net::TcpStream,
+    token: String,
+    cancel: Arc<CancelToken>,
+    engine_done: Arc<AtomicBool>,
+    event_tx: std::sync::mpsc::Sender<ServeEvent>,
+) {
+    let exit = match serve_reader_inner(stream, &token, &cancel, &engine_done, &event_tx).await {
+        Ok(()) => Exit::Ok,
+        Err(e) => Exit::Err(e),
+    };
+    // The spine's exit conditions travel as events; a send failure means
+    // the spine already returned (its receiver dropped) -- nothing to
+    // report.
+    let _ = event_tx.send(ServeEvent::Done(exit));
+}
+
+async fn serve_reader_inner(
+    stream: tokio::net::TcpStream,
+    token: &str,
+    cancel: &CancelToken,
+    engine_done: &AtomicBool,
+    event_tx: &std::sync::mpsc::Sender<ServeEvent>,
+) -> io::Result<()> {
+    let (read_half, mut write_half) = stream.into_split();
+    let mut reader = tokio::io::BufReader::new(read_half);
+    // The pre-auth window's termination handoff (issue #909): flags firing
+    // before or DURING the handshake return through `verify_bridge`'s own
+    // checks or the spine's beat (see the task doc above) as `Ok`, handing
+    // the turn to the ACP termination.
+    if !verify_bridge(&mut reader, &mut write_half, token, cancel, engine_done).await? {
+        return Ok(());
+    }
+    // The write half crosses to the spine (and the keep-alive companion)
+    // through the funnel; the handshake's BRIDGE_OK was already written.
+    let writer = Arc::new(tokio::sync::Mutex::new(write_half));
+    if event_tx
+        .send(ServeEvent::Authed(Arc::clone(&writer)))
+        .is_err()
+    {
+        return Ok(());
+    }
+    // The frame reader keeps the stream for the reader's lifetime; with no
+    // beat-cancellation the #649 partial-frame resume is structural: a
+    // sender pausing mid-frame for any duration completes the frame when
+    // its bytes arrive -- the read is never timed out or re-framed.
+    let mut frames = framing::FrameReader::new(reader);
+    loop {
+        match frames.read_message_async().await {
+            Ok(Some(msg)) => {
+                if event_tx.send(ServeEvent::Frame(msg)).is_err() {
+                    // The spine is gone (it returned on its beat or a
+                    // handler panic); end with what was collected.
+                    return Ok(());
+                }
+            }
+            // The post-auth companions (issue #915): the bridge-death exits
+            // leave a trace too, so no reader exit is silent.
+            Ok(None) => {
+                log::debug!(
+                    target: "toptopduck::gateway",
+                    "serve reader exiting on the bridge's close"
+                );
+                return Ok(());
+            }
+            // A bridge that dies hard (the turn's CLI exits or is killed)
+            // closes with a reset, not a FIN -- Windows surfaces it as os
+            // error 10054 (issue #801). Same disposition as the EOF arm:
+            // return what was collected and let the ACP engine's
+            // termination decide the turn.
+            Err(e) if is_bridge_gone(e.kind()) => {
+                log::debug!(
+                    target: "toptopduck::gateway",
+                    "serve reader exiting on the bridge's read-side reset"
+                );
+                return Ok(());
+            }
+            Err(e) => return Err(e),
         }
     }
 }
 
-/// Poll the listener non-blocking until a bridge connects, cancel fires,
-/// engine completion fires, or `deadline` elapses. Returns `Ok(None)` on
-/// cancel or engine completion (the serve returns an empty outcome + the ACP
-/// termination decides the TurnOutcome), `Ok(Some)` on a connection, and
-/// `Err(TimedOut)` on the deadline (a missing bridge is a real failure -- the
-/// engine would otherwise wait on a serve that never progresses).
+/// Await one bridge connection until it arrives, cancel fires, engine
+/// completion fires, or `deadline` elapses (issue #1457's retirement of
+/// the non-blocking poll loop: the async accept is event-driven, the
+/// termination flags ride the beat arm, the deadline an `Instant`). Returns
+/// `Ok(None)` on cancel or engine completion (the serve returns an empty
+/// outcome + the ACP termination decides the TurnOutcome), `Ok(Some)` on a
+/// connection, and `Err(TimedOut)` on the deadline (a missing bridge is a
+/// real failure -- the engine would otherwise wait on a serve that never
+/// progresses).
 ///
 /// The `engine_done` arm (issue #899): the engine pump returned while no
 /// bridge ever connected, so there is nothing left to serve -- waiting out
-/// the deadline would burn `CONNECT_DEADLINE` and surface as a serve error,
-/// failing a turn whose engine already finished. The same single-source
-/// principle as the cancel arm: the ACP termination (already set by the
-/// pump's return) decides the TurnOutcome, not the gateway.
-fn accept_bridge(
-    listener: &TcpListener,
+/// the deadline would burn `CONNECT_DEADLINE` and surface as a serve
+/// error, failing a turn whose engine already finished. The same
+/// single-source principle as the cancel arm: the ACP termination (already
+/// set by the pump's return) decides the TurnOutcome, not the gateway.
+///
+/// Takes the std listener by value and registers it with the current
+/// runtime (`from_std`): exactly one bridge is accepted (ADR-0085
+/// per-bridge lifecycle) and the listener drops at this function's return,
+/// releasing the port + clearing the kernel backlog.
+async fn accept_bridge(
+    listener: TcpListener,
     cancel: &CancelToken,
     engine_done: &AtomicBool,
     deadline: Duration,
-) -> io::Result<Option<(std::net::TcpStream, std::net::SocketAddr)>> {
-    listener.set_nonblocking(true)?;
-    let stop = Instant::now() + deadline;
+) -> io::Result<Option<(tokio::net::TcpStream, std::net::SocketAddr)>> {
+    let listener = tokio::net::TcpListener::from_std(listener)?;
+    let deadline_at = Instant::now() + deadline;
     loop {
         if cancel.is_requested() {
-            // Companion to the serve loop's arm: exiting here drops the
+            // Companion to the spine's beat arm: exiting here drops the
             // listener before the bridge connects (issue #849's symptom
             // surface); with no user cancel in the window this line is the
             // red flag.
@@ -487,8 +524,8 @@ fn accept_bridge(
             return Ok(None);
         }
         // Same disposition for engine completion (issue #899): the pump
-        // returned while no bridge connected, so the accept has nothing left
-        // to wait for. Companion to the serve loop's engine_done arm.
+        // returned while no bridge connected, so the accept has nothing
+        // left to wait for. Companion to the spine's beat arm.
         if engine_done.load(Ordering::SeqCst) {
             log::debug!(
                 target: "toptopduck::gateway",
@@ -496,46 +533,56 @@ fn accept_bridge(
             );
             return Ok(None);
         }
-        match listener.accept() {
-            Ok((stream, peer)) => {
-                // Restore blocking semantics on the accepted stream; the
-                // listener itself is dropped after accept (one bridge only).
-                stream.set_nonblocking(false)?;
-                return Ok(Some((stream, peer)));
+        let remaining = deadline_at.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            // The deadline: a missing bridge is a real failure, not a
+            // termination handoff.
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "bridge did not connect within deadline",
+            ));
+        }
+        tokio::select! {
+            r = listener.accept() => {
+                return match r {
+                    Ok((stream, peer)) => Ok(Some((stream, peer))),
+                    Err(e) => Err(e),
+                };
             }
-            Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
-                if Instant::now() >= stop {
+            // The beat arm (unlike a parked established-socket read, a
+            // parked accept co-exists with the timer -- measured, see
+            // `serve_reader`'s doc): loops back to the flag checks; a
+            // connection made during the beat re-wakes the accept
+            // immediately.
+            _ = tokio::time::sleep(remaining.min(ACCEPT_BEAT)) => {
+                if Instant::now() >= deadline_at {
                     return Err(io::Error::new(
                         io::ErrorKind::TimedOut,
                         "bridge did not connect within deadline",
                     ));
                 }
-                std::thread::sleep(ACCEPT_POLL_INTERVAL);
             }
-            Err(e) => return Err(e),
         }
     }
 }
 
-/// Verify the bridge's auth line (`BRIDGE_AUTH <token>`). A mismatch is the
-/// only error path -- the stream is dropped without a response so a probing
-/// client learns nothing beyond "refused" (ADR-0085 security model).
-///
-/// The termination predicate shared by verify_bridge's three arms -- the
-/// loop-top check, the EOF arm (issue #913), and the error arm's re-check
-/// (issue #911) -- so the twin flag sets cannot drift apart (the
+/// The termination predicate shared by the gateway's flag-driven exits --
+/// verify_bridge's three pre-auth arms (the loop-top check, the EOF arm
+/// (issue #913), the error arm's re-check (issue #911)) and the serve
+/// loop's read-park beat -- so the twin flag sets cannot drift apart (the
 /// is_read_timeout rationale).
-fn preauth_termination_fired(cancel: &CancelToken, engine_done: &AtomicBool) -> bool {
+fn termination_fired(cancel: &CancelToken, engine_done: &AtomicBool) -> bool {
     cancel.is_requested() || engine_done.load(Ordering::SeqCst)
 }
 
 /// The log label naming which termination flag fired, shared by the arms
-/// that log a pre-auth exit (the loop-top check, the EOF arm, and the error
-/// arm's re-check) so the twin labels cannot drift -- the
-/// [`preauth_termination_fired`] rationale. Precondition: call only where
-/// `preauth_termination_fired` has already returned true -- the else branch
-/// asserts engine completion by elimination, not by observation.
-fn preauth_termination_source(cancel: &CancelToken) -> &'static str {
+/// that log a flag-driven exit (the pre-auth loop-top check, the EOF arm,
+/// the error arm's re-check, and the serve loop's read-park beat) so the
+/// twin labels cannot drift -- the [`termination_fired`] rationale.
+/// Precondition: call only where `termination_fired` has already returned
+/// true -- the else branch asserts engine completion by elimination, not by
+/// observation.
+fn termination_source(cancel: &CancelToken) -> &'static str {
     if cancel.is_requested() {
         "the cancel flag"
     } else {
@@ -552,148 +599,246 @@ fn preauth_termination_source(cancel: &CancelToken) -> &'static str {
 /// (zero response bytes), not the operator's: a warn log at the refusal
 /// distinguishes the four arrival shapes (issue #915).
 ///
-/// The pre-auth window (issue #909): the auth read runs under READ_TIMEOUT,
-/// and a timeout retries with the termination flags re-checked first each
-/// pass -- a bridge that connects but stalls before writing its auth line
-/// while the engine completes (or cancel fires) returns `Ok(false)`, handing
-/// the turn to the ACP termination instead of surfacing the serve error that
-/// mislabels the completed turn as Failed (the same single-source
-/// disposition as the accept and serve-loop arms). A hard read error takes
-/// the same re-check in the error arm itself (issue #911): the teardown's
-/// reset landing on the parked read after a flag already fired returns
-/// `Ok(false)` too, while a reset with no flag stays a truthful error. A
-/// clean EOF takes the same flag re-check in its own arm (issue #913): the
-/// POSIX teardown FINs where the Windows kill resets, so a graceful close
-/// racing a set flag hands the turn to the ACP termination the same way.
-/// And the mismatch arm never re-checks -- a wrong token is a genuine
-/// bridge-side defect. `Ok(true)`: auth
-/// verified. The retry cadence leans on a caller-side precondition: the
-/// stream must carry a bounded read timeout (`serve_connection` sets
-/// `READ_TIMEOUT` before the call) -- a blocking-forever reader parks in
-/// the read and the loop-top flag checks never fire.
-fn verify_bridge(
-    reader: &mut impl BufRead,
-    writer: &mut impl Write,
+/// The pre-auth window (issue #909): the auth read is event-driven (async
+/// since #1457) with the termination flags observed on the serve-beat arm
+/// of the same `select!` -- a bridge that connects but stalls before
+/// writing its auth line while the engine completes (or cancel fires)
+/// returns `Ok(false)`, handing the turn to the ACP termination instead of
+/// surfacing the serve error that mislabels the completed turn as Failed
+/// (the same single-source disposition as the accept and serve-loop arms).
+/// A hard read error takes the same re-check in the error arm itself
+/// (issue #911): the teardown's reset landing on the parked read after a
+/// flag already fired returns `Ok(false)` too, while a reset with no flag
+/// stays a truthful error. A clean EOF takes the same flag re-check in its
+/// own arm (issue #913): the POSIX teardown FINs where the Windows kill
+/// resets, so a graceful close racing a set flag hands the turn to the ACP
+/// termination the same way. And the mismatch arm never re-checks -- a
+/// wrong token is a genuine bridge-side defect. `Ok(true)`: auth verified.
+async fn verify_bridge<R, W>(
+    reader: &mut R,
+    writer: &mut W,
     expected: &str,
     cancel: &CancelToken,
     engine_done: &AtomicBool,
-) -> io::Result<bool> {
-    // The resumable reader keeps the partial auth line across a retried
-    // read -- the stateless form discards it on error (issue #649's
-    // documented caveat), and a resumed handshake must not lose the head.
+) -> io::Result<bool>
+where
+    R: tokio::io::AsyncBufRead + Unpin,
+    W: tokio::io::AsyncWrite + Unpin,
+{
+    // The resumable reader keeps a partial auth line across reads -- a
+    // resumed handshake must not lose the head of a split line (issue
+    // #649).
     let mut lines = BoundedLineReader::new(reader);
     let expected_line = format!("BRIDGE_AUTH {expected}");
-    loop {
-        // The pre-auth window's loop-top check (issue #909): the same
-        // single-source disposition as the accept and serve-loop arms --
-        // the ACP termination decides the TurnOutcome, never the gateway.
-        if preauth_termination_fired(cancel, engine_done) {
-            // Companion to the accept arms' logs (issue #849's
-            // invisible-exit lesson): without this line a bridge that
-            // connected and was terminated pre-auth is indistinguishable
-            // from one that never connected.
-            log::debug!(
-                target: "toptopduck::gateway",
-                "verify_bridge exiting on {} in the pre-auth window",
-                preauth_termination_source(cancel)
-            );
-            return Ok(false);
-        }
-        let (line, refusal) = match lines.read_line_bounded(LINE_MAX_BYTES) {
-            // The raw line keeps its newline, so a Line without one is a
-            // bridge that died mid-write: the bounded reader hands a
-            // pending non-empty partial out as the final unterminated line
-            // (issue #915's truncated shape) -- the token never completed
-            // rather than mismatched.
-            Ok(LineRead::Line(line)) => {
-                if line.ends_with('\n') {
-                    (line, "a token mismatch")
-                } else {
-                    (line, "a truncated auth line")
-                }
-            }
-            // The POSIX teardown's graceful close (issue #913): killpg
-            // SIGKILL FINs the bridge's socket where the Windows job-object
-            // kill resets it (#911's error arm), so the parked auth read
-            // wakes as a clean EOF. With a termination flag already set the
-            // turn is decided and the EOF takes the same single-source
-            // disposition (the error arm's class rule: the flag, not the
-            // close's shape, owns the turn); with no flag a bridge that
-            // died pre-auth without sending its line stays the truthful
-            // refusal below.
-            Ok(LineRead::Eof) => {
-                if preauth_termination_fired(cancel, engine_done) {
-                    log::debug!(
-                        target: "toptopduck::gateway",
-                        "verify_bridge exiting on {} in the pre-auth window after a clean EOF",
-                        preauth_termination_source(cancel)
-                    );
-                    return Ok(false);
-                }
-                (String::new(), "a clean EOF with no auth line")
-            }
-            // An over-long "line" can never match the expected auth line --
-            // refuse it exactly like a token mismatch in any flag state (a
-            // genuinely over-long line from the peer is a real signal, not
-            // a teardown artifact).
-            Ok(LineRead::Overlong) => (String::new(), "an over-long line"),
-            // Read timeout (READ_TIMEOUT): retry so the loop-top flag check
-            // fires, mirroring the serve loop timeout arm.
-            Err(e) if is_read_timeout(e.kind()) => {
-                continue;
-            }
-            // A hard read error racing a termination flag (issue #911): the
-            // teardown's kill lands on the parked auth read as a reset
-            // (typically `is_bridge_gone`) AFTER engine completion or cancel
-            // already decided the turn -- the arm re-check gives it the same
-            // single-source disposition as the loop top instead of surfacing
-            // a serve error that mislabels the completed turn as Failed. The
-            // mismatch / over-long arms below deliberately do NOT re-check
-            // (a wrong token is a genuine bridge-side defect and must
-            // surface), and with no flag set this is a pre-auth hard
-            // death that stays a truthful error. The class rule is
-            // kind-agnostic: a non-UTF-8 auth line surfaces as InvalidData
-            // from the bounded reader and rides this arm's re-check too -- a
-            // set flag means the termination already decided the turn
-            // regardless of error kind.
-            Err(e) => {
-                if preauth_termination_fired(cancel, engine_done) {
-                    log::debug!(
-                        target: "toptopduck::gateway",
-                        "verify_bridge exiting on {} in the pre-auth window after a read error ({})",
-                        preauth_termination_source(cancel),
-                        e.kind()
-                    );
-                    return Ok(false);
-                }
-                return Err(e);
-            }
-        };
-        let got = line.trim_end_matches(['\r', '\n']);
-        if got == expected_line {
-            writer.write_all(b"BRIDGE_OK\n")?;
-            return Ok(true);
-        }
-        // The four arrival shapes share one error and one zero-byte wire
-        // view (the prober's, issue #643); the label is the operator's
-        // only attribution (issue #915) -- without it a bridge that died
-        // alone in the pre-auth window reads as a token mismatch when no
-        // line ever arrived. Logged at warn, not debug: release builds
-        // filter debug, and a refusal is an abnormal actionable event --
-        // unlike the lifecycle exits, which stay debug.
-        log::warn!(
+    // The pre-auth window's entry check (issue #909): the same
+    // single-source disposition as the accept arms -- the ACP termination
+    // decides the TurnOutcome, never the gateway. A flag firing WHILE the
+    // auth read parks is observed by the spine's beat instead (this read
+    // is never co-parked with anything -- see `serve_reader`'s doc): the
+    // spine returns, and this task ends when the socket dies.
+    if termination_fired(cancel, engine_done) {
+        // Companion to the accept arms' logs (issue #849's
+        // invisible-exit lesson): without this line a bridge that
+        // connected and was terminated pre-auth is indistinguishable
+        // from one that never connected.
+        log::debug!(
             target: "toptopduck::gateway",
-            "verify_bridge refused the pre-auth handshake: {refusal}"
+            "verify_bridge exiting on {} in the pre-auth window",
+            termination_source(cancel)
         );
-        return Err(io::Error::new(
-            io::ErrorKind::PermissionDenied,
-            "bridge auth token mismatch",
-        ));
+        return Ok(false);
+    }
+    let read = lines.read_line_bounded_async(LINE_MAX_BYTES).await;
+    let (line, refusal) = match read {
+        // The raw line keeps its newline, so a Line without one is a
+        // bridge that died mid-write: the bounded reader hands a
+        // pending non-empty partial out as the final unterminated line
+        // (issue #915's truncated shape) -- the token never completed
+        // rather than mismatched.
+        Ok(LineRead::Line(line)) => {
+            if line.ends_with('\n') {
+                (line, "a token mismatch")
+            } else {
+                (line, "a truncated auth line")
+            }
+        }
+        // The POSIX teardown's graceful close (issue #913): killpg
+        // SIGKILL FINs the bridge's socket where the Windows job-object
+        // kill resets it (#911's error arm), so the parked auth read
+        // wakes as a clean EOF. With a termination flag already set the
+        // turn is decided and the EOF takes the same single-source
+        // disposition (the error arm's class rule: the flag, not the
+        // close's shape, owns the turn); with no flag a bridge that
+        // died pre-auth without sending its line stays the truthful
+        // refusal below.
+        Ok(LineRead::Eof) => {
+            if termination_fired(cancel, engine_done) {
+                log::debug!(
+                    target: "toptopduck::gateway",
+                    "verify_bridge exiting on {} in the pre-auth window after a clean EOF",
+                    termination_source(cancel)
+                );
+                return Ok(false);
+            }
+            (String::new(), "a clean EOF with no auth line")
+        }
+        // An over-long "line" can never match the expected auth line --
+        // refuse it exactly like a token mismatch in any flag state (a
+        // genuinely over-long line from the peer is a real signal, not
+        // a teardown artifact).
+        Ok(LineRead::Overlong) => (String::new(), "an over-long line"),
+        // A hard read error racing a termination flag (issue #911): the
+        // teardown's kill lands on the parked auth read as a reset
+        // (typically `is_bridge_gone`) AFTER engine completion or cancel
+        // already decided the turn -- the arm re-check gives it the same
+        // single-source disposition as the loop top instead of surfacing
+        // a serve error that mislabels the completed turn as Failed. The
+        // mismatch / over-long arms below deliberately do NOT re-check
+        // (a wrong token is a genuine bridge-side defect and must
+        // surface), and with no flag set this is a pre-auth hard
+        // death that stays a truthful error. The class rule is
+        // kind-agnostic: a non-UTF-8 auth line surfaces as InvalidData
+        // from the bounded reader and rides this arm's re-check too -- a
+        // set flag means the termination already decided the turn
+        // regardless of error kind.
+        Err(e) => {
+            if termination_fired(cancel, engine_done) {
+                log::debug!(
+                    target: "toptopduck::gateway",
+                    "verify_bridge exiting on {} in the pre-auth window after a read error ({})",
+                    termination_source(cancel),
+                    e.kind()
+                );
+                return Ok(false);
+            }
+            return Err(e);
+        }
+    };
+    let got = line.trim_end_matches(['\r', '\n']);
+    if got == expected_line {
+        use tokio::io::AsyncWriteExt as _;
+        writer.write_all(b"BRIDGE_OK\n").await?;
+        return Ok(true);
+    }
+    // The four arrival shapes share one error and one zero-byte wire
+    // view (the prober's, issue #643); the label is the operator's
+    // only attribution (issue #915) -- without it a bridge that died
+    // alone in the pre-auth window reads as a token mismatch when no
+    // line ever arrived. Logged at warn, not debug: release builds
+    // filter debug, and a refusal is an abnormal actionable event --
+    // unlike the lifecycle exits, which stay debug.
+    log::warn!(
+        target: "toptopduck::gateway",
+        "verify_bridge refused the pre-auth handshake: {refusal}"
+    );
+    Err(io::Error::new(
+        io::ErrorKind::PermissionDenied,
+        "bridge auth token mismatch",
+    ))
+}
+
+/// The keep-alive companion (issue #1267): a plain std thread writing
+/// `notifications/progress` on the [`KEEPALIVE_INTERVAL`] cadence while a
+/// dispatched `tools/call` is armed -- the only writer that runs while the
+/// spine is parked inside the approval gate's unbounded human wait (the
+/// bridge client's request timeout resets on every progress notification,
+/// so an interval well under its ~60s default keeps the request alive).
+/// The spine arms before dispatch and disarms once the dispatched call
+/// returns -- BEFORE the response envelope takes the funnel; that order
+/// plus the companion's under-lock re-check keeps every progress frame
+/// ahead of the envelope (the lock, not the timing, carries the safety).
+/// Writes share the write-half funnel so they serialize with the
+/// spine's own writes. A thread (not a runtime task) by the same measured
+/// law that shapes `serve_reader`: a runtime task could only be woken by
+/// the socket, while this writer must wake on its own cadence. `stop` ends
+/// the thread within one [`SERVE_BEAT`].
+struct KeepaliveGuard {
+    slot: Arc<std::sync::Mutex<Option<Value>>>,
+    stop: Arc<AtomicBool>,
+}
+
+impl KeepaliveGuard {
+    /// Start the companion on the production cadence.
+    fn start(writer: Arc<tokio::sync::Mutex<OwnedWriteHalf>>) -> Self {
+        Self::start_with_interval(writer, KEEPALIVE_INTERVAL)
+    }
+
+    /// Test seam: the companion on an injected cadence.
+    fn start_with_interval<W>(writer: Arc<tokio::sync::Mutex<W>>, interval: Duration) -> Self
+    where
+        W: tokio::io::AsyncWrite + Unpin + Send + 'static,
+    {
+        let slot = Arc::new(std::sync::Mutex::new(None));
+        let stop = Arc::new(AtomicBool::new(false));
+        let armed = Arc::clone(&slot);
+        let flag = Arc::clone(&stop);
+        std::thread::Builder::new()
+            .name("gateway-keepalive".into())
+            .spawn(move || {
+                let mut progress: u64 = 0;
+                let mut last = Instant::now();
+                loop {
+                    std::thread::sleep(SERVE_BEAT);
+                    if flag.load(Ordering::SeqCst) {
+                        return;
+                    }
+                    // Fast path only: the authoritative slot check lives
+                    // under the write lock below -- this one just keeps an
+                    // unarmed gap from taking the funnel at all.
+                    if armed.lock().unwrap().is_none() {
+                        continue;
+                    }
+                    if last.elapsed() < interval {
+                        continue;
+                    }
+                    crate::mcp::client::block_on(async {
+                        let mut half = writer.lock().await;
+                        // The lock, not the timing, carries the safety
+                        // (issue #1267): the spine disarms BEFORE writing
+                        // the response through this same funnel, so a slot
+                        // that emptied while this lock was awaited means
+                        // the response envelope owns the write -- a frame
+                        // written now would land behind it.
+                        let armed_now = armed.lock().unwrap().clone();
+                        if let Some(token) = armed_now {
+                            // The cadence re-arms from THIS write, not the
+                            // epoch: the interval is a floor spacing, not
+                            // a phase. Advanced only on a real write, so
+                            // an unarmed gap does not eat the cadence.
+                            last = Instant::now();
+                            progress += 1;
+                            let frame = progress_notification(&token, progress);
+                            // A failed write means the bridge died
+                            // mid-park; the spine's own response write
+                            // surfaces the death.
+                            let _ = framing::write_message_async(&mut *half, &frame).await;
+                        }
+                    });
+                }
+            })
+            .expect("the keep-alive thread spawns");
+        Self { slot, stop }
+    }
+
+    /// Arm the cadence for a dispatched call carrying this token.
+    fn arm(&self, token: Value) {
+        *self.slot.lock().unwrap() = Some(token);
+    }
+
+    /// Disarm: the response was written, no further frames.
+    fn disarm(&self) {
+        *self.slot.lock().unwrap() = None;
+    }
+
+    /// End the companion thread (within one SERVE_BEAT).
+    fn stop(&self) {
+        self.stop.store(true, Ordering::SeqCst);
     }
 }
 
 /// One MCP method's outcome: a result, an error envelope, or no response (a
 /// notification the gateway acknowledges by silence).
+#[derive(Debug, PartialEq)]
 enum Response {
     Result(Value),
     Error(i64, String),
@@ -835,7 +980,7 @@ fn handle_tools_call(msg: &Value, ctx: &mut GatewayCtx, outcome: &mut GatewayOut
     let gate = GateCtx {
         approval: ctx.approval,
         sink: ctx.sink,
-        cancel: ctx.cancel,
+        cancel: &ctx.cancel,
     };
     // The live rail (issue #1242): the core emits the authoritative phase
     // pair through here; the authoritative trace entry rides the return
@@ -939,6 +1084,7 @@ fn generate_token() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
     use crate::approval::OperationKind;
     use crate::approval::{ApprovalRequestBody, ApprovalResponse, ApprovalSink, ToolKey};
     use crate::guardrail::ExecError;
@@ -958,7 +1104,9 @@ mod tests {
     use std::sync::mpsc;
     use std::sync::Arc;
     use std::thread;
+    use std::time::Instant;
     use tempfile::TempDir;
+    use tokio::io::AsyncBufRead as _;
 
     /// In-memory DuckDB + temp dir -- the same shape the agent-loop tests use.
     /// `handle_method`'s initialize / tools-list / unknown / notification paths
@@ -1069,7 +1217,7 @@ mod tests {
         let sources: &'static mut HashMap<String, PathBuf> = Box::leak(Box::new(HashMap::new()));
         let refs: &'static mut HashMap<String, crate::session::materializer::CachedDerivedRef> =
             Box::leak(Box::new(HashMap::new()));
-        let cancel: &'static CancelToken = Box::leak(Box::new(CancelToken::new()));
+        let cancel = Arc::new(CancelToken::new());
         let events: &'static NoopPhaseSink = Box::leak(Box::new(NoopPhaseSink));
         let deps =
             DispatchDeps::test_deps(&engine.admin_engine, ws, sources, engine.temp.path(), refs);
@@ -1442,6 +1590,44 @@ mod tests {
 
     // --- pure helpers ------------------------------------------------------
 
+    /// An in-memory `AsyncWrite` sink for the `Cursor`-mocked verify pins
+    /// (std's Vec implements no tokio trait, the orphan rule). Writes always
+    /// succeed immediately; `contents()` reads the bytes back (the retired
+    /// std-Vec writer's assert shape).
+    #[derive(Default)]
+    struct VecWriter(Vec<u8>);
+
+    impl VecWriter {
+        fn contents(&self) -> Vec<u8> {
+            self.0.clone()
+        }
+    }
+
+    impl tokio::io::AsyncWrite for VecWriter {
+        fn poll_write(
+            self: std::pin::Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+            buf: &[u8],
+        ) -> std::task::Poll<io::Result<usize>> {
+            self.get_mut().0.extend_from_slice(buf);
+            std::task::Poll::Ready(Ok(buf.len()))
+        }
+
+        fn poll_flush(
+            self: std::pin::Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<io::Result<()>> {
+            std::task::Poll::Ready(Ok(()))
+        }
+
+        fn poll_shutdown(
+            self: std::pin::Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<io::Result<()>> {
+            std::task::Poll::Ready(Ok(()))
+        }
+    }
+
     /// The keep-alive frame's wire shape (issue #1267): a `notifications/progress`
     /// notification echoing the request's progress token, a monotonically
     /// increasing progress counter, and a message naming the approval wait --
@@ -1459,35 +1645,46 @@ mod tests {
         assert_eq!(f3["params"]["progress"], 3, "the counter is monotonic");
     }
 
-    /// The keep-alive companion's lifecycle (issue #1267): it emits one
-    /// progress notification per interval on the shared write half while
-    /// running, and stops emitting once the serve sets the stop flag (joined
-    /// for determinism -- production drops the handle).
+    /// The keep-alive companion's lifecycle (issue #1267): while a
+    /// dispatched `tools/call` is armed, one progress notification per
+    /// interval lands on the wire (the injected interval keeps the pin
+    /// fast; production rides the 20 s constant), and disarming silences
+    /// the cadence. The duplex pipe stands in for the socket (the
+    /// companion only needs an `AsyncWrite` behind the shared funnel).
     #[test]
-    fn spawn_keepalive_emits_per_interval_then_stops() {
-        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
-        let port = listener.local_addr().expect("addr").port();
-        let client = TcpStream::connect(("127.0.0.1", port)).expect("connect");
-        let (server, _) = listener.accept().expect("accept");
-        let writer = Arc::new(Mutex::new(server));
-        let (stop, handle) = spawn_keepalive(
-            Arc::clone(&writer),
-            json!("tok-1"),
-            Duration::from_millis(30),
+    fn keepalive_frames_ride_the_dispatch_wait_until_disarmed() {
+        use tokio::io::AsyncReadExt as _;
+
+        let (mut reader, writer_end) = tokio::io::duplex(4096);
+        let writer = std::sync::Arc::new(tokio::sync::Mutex::new(writer_end));
+        let guard = KeepaliveGuard::start_with_interval(
+            std::sync::Arc::clone(&writer),
+            Duration::from_millis(120),
         );
-        let mut reader = BufReader::new(client);
-        let mut line = String::new();
-        reader.read_line(&mut line).expect("first frame");
-        let frame: Value = serde_json::from_str(line.trim()).expect("json frame");
-        assert_eq!(frame["method"], "notifications/progress");
-        assert_eq!(frame["params"]["progressToken"], "tok-1");
-        // Two more intervals prove cadence, then the stop flag ends it.
-        let mut line2 = String::new();
-        reader.read_line(&mut line2).expect("second frame");
-        let mut line3 = String::new();
-        reader.read_line(&mut line3).expect("third frame");
-        stop.store(true, Ordering::SeqCst);
-        handle.join().expect("companion exits");
+
+        guard.arm(json!("tok-1"));
+        thread::sleep(Duration::from_millis(500));
+        guard.disarm();
+        guard.stop();
+        // The last writer (the guard thread's funnel clone + this one)
+        // drops, so the drain below sees EOF.
+        drop(writer);
+        let mut buf = Vec::new();
+        let _ = crate::mcp::client::block_on(reader.read_to_end(&mut buf));
+        let frames: Vec<Value> = buf
+            .split(|b| *b == b'\n')
+            .filter(|line| !line.is_empty())
+            .map(|line| serde_json::from_slice(line).expect("a json frame"))
+            .collect();
+        assert!(
+            frames.len() >= 2 && frames.len() <= 6,
+            "keep-alive cadence while armed, then silence: {:?}",
+            frames
+        );
+        for frame in &frames {
+            assert_eq!(frame["method"], "notifications/progress");
+            assert_eq!(frame["params"]["progressToken"], "tok-1");
+        }
     }
 
     #[test]
@@ -1508,11 +1705,11 @@ mod tests {
         assert!(t.chars().all(|c| c.is_ascii_hexdigit()));
     }
 
-    #[test]
-    fn verify_bridge_accepts_correct_token_then_writes_ok() {
+    #[tokio::test]
+    async fn verify_bridge_accepts_correct_token_then_writes_ok() {
         let input = Cursor::new(b"BRIDGE_AUTH deadbeef\n".to_vec());
-        let mut reader = std::io::BufReader::new(input);
-        let mut writer = Vec::new();
+        let mut reader = tokio::io::BufReader::new(input);
+        let mut writer = VecWriter::default();
         verify_bridge(
             &mut reader,
             &mut writer,
@@ -1520,15 +1717,16 @@ mod tests {
             &CancelToken::new(),
             &AtomicBool::new(false),
         )
+        .await
         .expect("accepted");
-        assert_eq!(writer, b"BRIDGE_OK\n");
+        assert_eq!(writer.contents(), b"BRIDGE_OK\n");
     }
 
-    #[test]
-    fn verify_bridge_rejects_wrong_token_with_permission_denied() {
+    #[tokio::test]
+    async fn verify_bridge_rejects_wrong_token_with_permission_denied() {
         let input = Cursor::new(b"BRIDGE_AUTH wrong\n".to_vec());
-        let mut reader = std::io::BufReader::new(input);
-        let mut writer = Vec::new();
+        let mut reader = tokio::io::BufReader::new(input);
+        let mut writer = VecWriter::default();
         let err = verify_bridge(
             &mut reader,
             &mut writer,
@@ -1536,19 +1734,23 @@ mod tests {
             &CancelToken::new(),
             &AtomicBool::new(false),
         )
+        .await
         .expect_err("mismatch");
         assert_eq!(err.kind(), io::ErrorKind::PermissionDenied);
-        assert!(writer.is_empty(), "no response on a refused handshake");
+        assert!(
+            writer.contents().is_empty(),
+            "no response on a refused handshake"
+        );
     }
 
-    #[test]
-    fn verify_bridge_treats_clean_eof_as_refused() {
+    #[tokio::test]
+    async fn verify_bridge_treats_clean_eof_as_refused() {
         // A probing client that connects + closes without sending a token line
         // must not crash the gateway -- the bounded read reports EOF and the
         // empty line falls through to the mismatch arm (PermissionDenied).
         let input = Cursor::new(Vec::new());
-        let mut reader = std::io::BufReader::new(input);
-        let mut writer = Vec::new();
+        let mut reader = tokio::io::BufReader::new(input);
+        let mut writer = VecWriter::default();
         let err = verify_bridge(
             &mut reader,
             &mut writer,
@@ -1556,43 +1758,9 @@ mod tests {
             &CancelToken::new(),
             &AtomicBool::new(false),
         )
+        .await
         .expect_err("eof refused");
         assert_eq!(err.kind(), io::ErrorKind::PermissionDenied);
-    }
-
-    /// Issue #909 deterministic seam: a pre-auth reader whose `fill_buf`
-    /// (the read_until path) keeps surfacing the socket read-timeout error,
-    /// flipping the engine-done flag on its second stall, then turning into a
-    /// clean EOF -- a reverted flag check fails as a mismatch instead of
-    /// hanging the retry loop.
-    struct StalledPreAuthReader {
-        stalls: usize,
-        engine_done: Arc<AtomicBool>,
-    }
-    impl Read for StalledPreAuthReader {
-        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-            let available = self.fill_buf()?;
-            let n = available.len().min(buf.len());
-            buf[..n].copy_from_slice(&available[..n]);
-            self.consume(n);
-            Ok(n)
-        }
-    }
-    impl BufRead for StalledPreAuthReader {
-        fn fill_buf(&mut self) -> io::Result<&[u8]> {
-            self.stalls += 1;
-            if self.stalls == 2 {
-                self.engine_done.store(true, Ordering::SeqCst);
-            }
-            if self.stalls > 3 {
-                return Ok(&[]);
-            }
-            Err(io::Error::new(
-                io::ErrorKind::WouldBlock,
-                "simulated read timeout",
-            ))
-        }
-        fn consume(&mut self, _amt: usize) {}
     }
 
     /// Issue #911 deterministic seam: a pre-auth reader whose parked read dies
@@ -1607,24 +1775,31 @@ mod tests {
     struct RacingResetReader<'a> {
         fire: Box<dyn Fn() + 'a>,
     }
-    impl Read for RacingResetReader<'_> {
-        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-            let available = self.fill_buf()?;
-            let n = available.len().min(buf.len());
-            buf[..n].copy_from_slice(&available[..n]);
+    impl tokio::io::AsyncRead for RacingResetReader<'_> {
+        fn poll_read(
+            mut self: std::pin::Pin<&mut Self>,
+            cx: &mut std::task::Context<'_>,
+            buf: &mut tokio::io::ReadBuf<'_>,
+        ) -> std::task::Poll<io::Result<()>> {
+            let available = std::task::ready!(self.as_mut().poll_fill_buf(cx))?;
+            let n = available.len().min(buf.remaining());
+            buf.put_slice(&available[..n]);
             self.consume(n);
-            Ok(n)
+            std::task::Poll::Ready(Ok(()))
         }
     }
-    impl BufRead for RacingResetReader<'_> {
-        fn fill_buf(&mut self) -> io::Result<&[u8]> {
+    impl tokio::io::AsyncBufRead for RacingResetReader<'_> {
+        fn poll_fill_buf(
+            self: std::pin::Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<io::Result<&[u8]>> {
             (self.fire)();
-            Err(io::Error::new(
+            std::task::Poll::Ready(Err(io::Error::new(
                 io::ErrorKind::ConnectionReset,
                 "simulated teardown reset",
-            ))
+            )))
         }
-        fn consume(&mut self, _amt: usize) {}
+        fn consume(self: std::pin::Pin<&mut Self>, _amt: usize) {}
     }
 
     /// Issue #913 deterministic seam: the graceful twin of the #911 racing
@@ -1637,21 +1812,28 @@ mod tests {
     struct RacingEofReader<'a> {
         fire: Box<dyn Fn() + 'a>,
     }
-    impl Read for RacingEofReader<'_> {
-        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-            let available = self.fill_buf()?;
-            let n = available.len().min(buf.len());
-            buf[..n].copy_from_slice(&available[..n]);
+    impl tokio::io::AsyncRead for RacingEofReader<'_> {
+        fn poll_read(
+            mut self: std::pin::Pin<&mut Self>,
+            cx: &mut std::task::Context<'_>,
+            buf: &mut tokio::io::ReadBuf<'_>,
+        ) -> std::task::Poll<io::Result<()>> {
+            let available = std::task::ready!(self.as_mut().poll_fill_buf(cx))?;
+            let n = available.len().min(buf.remaining());
+            buf.put_slice(&available[..n]);
             self.consume(n);
-            Ok(n)
+            std::task::Poll::Ready(Ok(()))
         }
     }
-    impl BufRead for RacingEofReader<'_> {
-        fn fill_buf(&mut self) -> io::Result<&[u8]> {
+    impl tokio::io::AsyncBufRead for RacingEofReader<'_> {
+        fn poll_fill_buf(
+            self: std::pin::Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<io::Result<&[u8]>> {
             (self.fire)();
-            Ok(&[])
+            std::task::Poll::Ready(Ok(&[]))
         }
-        fn consume(&mut self, _amt: usize) {}
+        fn consume(self: std::pin::Pin<&mut Self>, _amt: usize) {}
     }
 
     /// Issue #913 refusal-stance seam: the fire closure runs on the fill_buf
@@ -1664,35 +1846,43 @@ mod tests {
         line: Vec<u8>,
         fire: Box<dyn Fn() + 'a>,
     }
-    impl Read for RacingWrongLineReader<'_> {
-        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-            let available = self.fill_buf()?;
-            let n = available.len().min(buf.len());
-            buf[..n].copy_from_slice(&available[..n]);
+    impl tokio::io::AsyncRead for RacingWrongLineReader<'_> {
+        fn poll_read(
+            mut self: std::pin::Pin<&mut Self>,
+            cx: &mut std::task::Context<'_>,
+            buf: &mut tokio::io::ReadBuf<'_>,
+        ) -> std::task::Poll<io::Result<()>> {
+            let available = std::task::ready!(self.as_mut().poll_fill_buf(cx))?;
+            let n = available.len().min(buf.remaining());
+            buf.put_slice(&available[..n]);
             self.consume(n);
-            Ok(n)
+            std::task::Poll::Ready(Ok(()))
         }
     }
-    impl BufRead for RacingWrongLineReader<'_> {
-        fn fill_buf(&mut self) -> io::Result<&[u8]> {
-            if !self.line.is_empty() {
-                (self.fire)();
+    impl tokio::io::AsyncBufRead for RacingWrongLineReader<'_> {
+        fn poll_fill_buf(
+            self: std::pin::Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<io::Result<&[u8]>> {
+            let this = self.get_mut();
+            if !this.line.is_empty() {
+                (this.fire)();
             }
-            Ok(&self.line)
+            std::task::Poll::Ready(Ok(&this.line))
         }
-        fn consume(&mut self, amt: usize) {
-            self.line.drain(..amt);
+        fn consume(self: std::pin::Pin<&mut Self>, amt: usize) {
+            self.get_mut().line.drain(..amt);
         }
     }
 
     /// Issue #909: a cancel that fired before the handshake begins terminates
     /// the pre-auth window without touching the stream -- the turn belongs to
     /// the ACP termination, never the gateway.
-    #[test]
-    fn verify_bridge_pre_fired_cancel_returns_terminated() {
+    #[tokio::test]
+    async fn verify_bridge_pre_fired_cancel_returns_terminated() {
         let input = Cursor::new(Vec::new());
-        let mut reader = std::io::BufReader::new(input);
-        let mut writer = Vec::new();
+        let mut reader = tokio::io::BufReader::new(input);
+        let mut writer = VecWriter::default();
         let cancel = CancelToken::new();
         cancel.request();
         let verified = verify_bridge(
@@ -1702,33 +1892,56 @@ mod tests {
             &cancel,
             &AtomicBool::new(false),
         )
+        .await
         .expect("terminated, not a refused handshake");
         assert!(!verified, "the pre-auth window ended in termination");
-        assert!(writer.is_empty(), "no response on a terminated handshake");
+        assert!(
+            writer.contents().is_empty(),
+            "no response on a terminated handshake"
+        );
     }
 
-    /// Issue #909: engine completion racing INTO the pre-auth window -- the
-    /// stalled auth read retries under READ_TIMEOUT and the loop-top re-check
-    /// hands the turn to the ACP termination (the reader flips the flag mid-
-    /// stall, so exactly one retry pass is what the assertion rides).
+    /// Issue #909 at the serve seam since #1457: a bridge that connects
+    /// but stalls before its auth line while the engine completes -- the
+    /// flag fires while the reader's auth read parks, and that read can
+    /// never be woken by anything but the socket (see `serve_reader`'s
+    /// doc), so the observation rides the spine's beat: serve returns the
+    /// empty outcome within one SERVE_BEAT of the flag and the ACP
+    /// termination decides the TurnOutcome.
     #[test]
-    fn verify_bridge_engine_done_mid_window_returns_terminated() {
+    fn serve_connection_returns_on_engine_done_during_a_stalled_pre_auth_read() {
+        let ctx = fresh_ctx();
+        let handle = bind_gateway().expect("bind");
+        let port = handle.port;
         let engine_done = Arc::new(AtomicBool::new(false));
-        let mut reader = StalledPreAuthReader {
-            stalls: 0,
-            engine_done: Arc::clone(&engine_done),
-        };
-        let mut writer = Vec::new();
-        let verified = verify_bridge(
-            &mut reader,
-            &mut writer,
-            "tok",
-            &CancelToken::new(),
-            &engine_done,
-        )
-        .expect("terminated, not a refused handshake");
-        assert!(!verified, "the pre-auth window ended in termination");
-        assert!(writer.is_empty(), "no response on a terminated handshake");
+        let done_for_engine = Arc::clone(&engine_done);
+
+        // The stalling bridge: connect, then send NO auth line -- the
+        // handshake read parks. Dropping the socket at the end is what
+        // retires the leaked reader task in the test process.
+        let client = thread::spawn(move || {
+            let _s = TcpStream::connect(("127.0.0.1", port)).expect("connect");
+            thread::sleep(Duration::from_millis(600));
+        });
+
+        // Engine stand-in: let the accept + the auth read park, then arm.
+        thread::spawn(move || {
+            thread::sleep(Duration::from_millis(250));
+            done_for_engine.store(true, Ordering::SeqCst);
+        });
+
+        let start = Instant::now();
+        let outcome = serve_connection(handle, ctx, &engine_done).expect("serve");
+        let elapsed = start.elapsed();
+        assert!(
+            elapsed < Duration::from_secs(2),
+            "serve returned promptly on engine_done during the stalled pre-auth read: {elapsed:?}"
+        );
+        assert!(
+            outcome.trace.is_empty(),
+            "a turn terminated pre-auth collects no trace"
+        );
+        let _ = client.join();
     }
 
     /// Issue #911: engine completion racing the teardown reset OUT of the
@@ -1736,14 +1949,14 @@ mod tests {
     /// the reset, so the error arm's re-check (not the loop top, which has
     /// already passed) is what hands the turn to the ACP termination. A
     /// reverted re-check mislabels the completed turn as Failed(Runtime).
-    #[test]
-    fn verify_bridge_engine_done_racing_reset_returns_terminated() {
+    #[tokio::test]
+    async fn verify_bridge_engine_done_racing_reset_returns_terminated() {
         let engine_done = Arc::new(AtomicBool::new(false));
         let flag = Arc::clone(&engine_done);
         let mut reader = RacingResetReader {
             fire: Box::new(move || flag.store(true, Ordering::SeqCst)),
         };
-        let mut writer = Vec::new();
+        let mut writer = VecWriter::default();
         let verified = verify_bridge(
             &mut reader,
             &mut writer,
@@ -1751,20 +1964,24 @@ mod tests {
             &CancelToken::new(),
             &engine_done,
         )
+        .await
         .expect("terminated, not the reset surfacing as a serve error");
         assert!(!verified, "the pre-auth window ended in termination");
-        assert!(writer.is_empty(), "no response on a terminated handshake");
+        assert!(
+            writer.contents().is_empty(),
+            "no response on a terminated handshake"
+        );
     }
 
     /// Issue #911 cancel twin: the same race with the cancel token firing
     /// inside the read that surfaces the reset.
-    #[test]
-    fn verify_bridge_cancel_racing_reset_returns_terminated() {
+    #[tokio::test]
+    async fn verify_bridge_cancel_racing_reset_returns_terminated() {
         let cancel = CancelToken::new();
         let mut reader = RacingResetReader {
             fire: Box::new(|| cancel.request()),
         };
-        let mut writer = Vec::new();
+        let mut writer = VecWriter::default();
         let verified = verify_bridge(
             &mut reader,
             &mut writer,
@@ -1772,20 +1989,24 @@ mod tests {
             &cancel,
             &AtomicBool::new(false),
         )
+        .await
         .expect("terminated, not the reset surfacing as a serve error");
         assert!(!verified, "the pre-auth window ended in termination");
-        assert!(writer.is_empty(), "no response on a terminated handshake");
+        assert!(
+            writer.contents().is_empty(),
+            "no response on a terminated handshake"
+        );
     }
 
     /// Issue #911 truthful-error half: a hard reset with NO termination flag
     /// is a genuine pre-auth bridge death -- the arm re-check must not
     /// swallow it.
-    #[test]
-    fn verify_bridge_reset_without_flags_stays_a_serve_error() {
+    #[tokio::test]
+    async fn verify_bridge_reset_without_flags_stays_a_serve_error() {
         let mut reader = RacingResetReader {
             fire: Box::new(|| {}),
         };
-        let mut writer = Vec::new();
+        let mut writer = VecWriter::default();
         let err = verify_bridge(
             &mut reader,
             &mut writer,
@@ -1793,9 +2014,13 @@ mod tests {
             &CancelToken::new(),
             &AtomicBool::new(false),
         )
+        .await
         .expect_err("no flag set -> the reset surfaces");
         assert_eq!(err.kind(), io::ErrorKind::ConnectionReset);
-        assert!(writer.is_empty(), "no response on a refused handshake");
+        assert!(
+            writer.contents().is_empty(),
+            "no response on a refused handshake"
+        );
     }
 
     /// Issue #913: engine completion racing the POSIX teardown's graceful
@@ -1805,14 +2030,14 @@ mod tests {
     /// top, which has already passed) hands the turn to the ACP
     /// termination. A reverted check mislabels the completed turn as
     /// Failed(Runtime) via the token-mismatch refusal.
-    #[test]
-    fn verify_bridge_engine_done_racing_eof_returns_terminated() {
+    #[tokio::test]
+    async fn verify_bridge_engine_done_racing_eof_returns_terminated() {
         let engine_done = Arc::new(AtomicBool::new(false));
         let flag = Arc::clone(&engine_done);
         let mut reader = RacingEofReader {
             fire: Box::new(move || flag.store(true, Ordering::SeqCst)),
         };
-        let mut writer = Vec::new();
+        let mut writer = VecWriter::default();
         let verified = verify_bridge(
             &mut reader,
             &mut writer,
@@ -1820,20 +2045,24 @@ mod tests {
             &CancelToken::new(),
             &engine_done,
         )
+        .await
         .expect("terminated, not the EOF surfacing as a refused handshake");
         assert!(!verified, "the pre-auth window ended in termination");
-        assert!(writer.is_empty(), "no response on a terminated handshake");
+        assert!(
+            writer.contents().is_empty(),
+            "no response on a terminated handshake"
+        );
     }
 
     /// Issue #913 cancel twin: the same race with the cancel token firing
     /// inside the read that returns the clean EOF.
-    #[test]
-    fn verify_bridge_cancel_racing_eof_returns_terminated() {
+    #[tokio::test]
+    async fn verify_bridge_cancel_racing_eof_returns_terminated() {
         let cancel = CancelToken::new();
         let mut reader = RacingEofReader {
             fire: Box::new(|| cancel.request()),
         };
-        let mut writer = Vec::new();
+        let mut writer = VecWriter::default();
         let verified = verify_bridge(
             &mut reader,
             &mut writer,
@@ -1841,9 +2070,13 @@ mod tests {
             &cancel,
             &AtomicBool::new(false),
         )
+        .await
         .expect("terminated, not the EOF surfacing as a refused handshake");
         assert!(!verified, "the pre-auth window ended in termination");
-        assert!(writer.is_empty(), "no response on a terminated handshake");
+        assert!(
+            writer.contents().is_empty(),
+            "no response on a terminated handshake"
+        );
     }
 
     /// Issue #913 refusal-stance pin: a wrong token with the termination
@@ -1851,15 +2084,15 @@ mod tests {
     /// (a wrong token is a genuine bridge-side defect that must surface in
     /// any flag state), so a mutation giving the refusal a flag gate dies
     /// here.
-    #[test]
-    fn verify_bridge_wrong_token_with_flags_set_stays_refused() {
+    #[tokio::test]
+    async fn verify_bridge_wrong_token_with_flags_set_stays_refused() {
         let engine_done = Arc::new(AtomicBool::new(false));
         let flag = Arc::clone(&engine_done);
         let mut reader = RacingWrongLineReader {
             line: b"BRIDGE_AUTH wrong\n".to_vec(),
             fire: Box::new(move || flag.store(true, Ordering::SeqCst)),
         };
-        let mut writer = Vec::new();
+        let mut writer = VecWriter::default();
         let err = verify_bridge(
             &mut reader,
             &mut writer,
@@ -1867,9 +2100,13 @@ mod tests {
             &CancelToken::new(),
             &engine_done,
         )
+        .await
         .expect_err("a wrong token refuses in any flag state");
         assert_eq!(err.kind(), io::ErrorKind::PermissionDenied);
-        assert!(writer.is_empty(), "no response on a refused handshake");
+        assert!(
+            writer.contents().is_empty(),
+            "no response on a refused handshake"
+        );
     }
 
     /// Issue #913 refusal-stance pin, over-long half: the same stance as
@@ -1877,8 +2114,8 @@ mod tests {
     /// over-long line with the termination flag set still refuses, so a
     /// copy-paste mutation adding the EOF arm's flag gate to the over-long
     /// arm dies here.
-    #[test]
-    fn verify_bridge_overlong_with_flags_set_stays_refused() {
+    #[tokio::test]
+    async fn verify_bridge_overlong_with_flags_set_stays_refused() {
         let engine_done = Arc::new(AtomicBool::new(false));
         let flag = Arc::clone(&engine_done);
         let wire = format!("{}\n", "x".repeat(LINE_MAX_BYTES));
@@ -1886,7 +2123,7 @@ mod tests {
             line: wire.into_bytes(),
             fire: Box::new(move || flag.store(true, Ordering::SeqCst)),
         };
-        let mut writer = Vec::new();
+        let mut writer = VecWriter::default();
         let err = verify_bridge(
             &mut reader,
             &mut writer,
@@ -1894,20 +2131,24 @@ mod tests {
             &CancelToken::new(),
             &engine_done,
         )
+        .await
         .expect_err("an over-long line refuses in any flag state");
         assert_eq!(err.kind(), io::ErrorKind::PermissionDenied);
-        assert!(writer.is_empty(), "no response on a refused handshake");
+        assert!(
+            writer.contents().is_empty(),
+            "no response on a refused handshake"
+        );
     }
 
     /// Issue #643: the pre-auth surface. An over-long auth line is refused
     /// with the same `PermissionDenied` as a token mismatch (no observable
     /// difference for a prober) instead of growing the buffer with the line.
-    #[test]
-    fn verify_bridge_refuses_an_overlong_auth_line() {
+    #[tokio::test]
+    async fn verify_bridge_refuses_an_overlong_auth_line() {
         let wire = format!("{}\n", "x".repeat(LINE_MAX_BYTES));
         let input = Cursor::new(wire.into_bytes());
-        let mut reader = std::io::BufReader::new(input);
-        let mut writer = Vec::new();
+        let mut reader = tokio::io::BufReader::new(input);
+        let mut writer = VecWriter::default();
         let err = verify_bridge(
             &mut reader,
             &mut writer,
@@ -1915,9 +2156,13 @@ mod tests {
             &CancelToken::new(),
             &AtomicBool::new(false),
         )
+        .await
         .expect_err("over-long refused");
         assert_eq!(err.kind(), io::ErrorKind::PermissionDenied);
-        assert!(writer.is_empty(), "no response on a refused handshake");
+        assert!(
+            writer.contents().is_empty(),
+            "no response on a refused handshake"
+        );
     }
 
     #[test]
@@ -2103,7 +2348,8 @@ mod tests {
             // `s` drops here -> gateway read EOF -> serve_connection returns.
         });
 
-        let outcome = serve_connection(handle, ctx, &AtomicBool::new(false)).expect("serve");
+        let outcome =
+            serve_connection(handle, ctx, &Arc::new(AtomicBool::new(false))).expect("serve");
 
         client.join().expect("client thread panicked");
         assert!(
@@ -2127,7 +2373,7 @@ mod tests {
     fn serve_connection_returns_empty_outcome_when_engine_done_prefires() {
         let handle = bind_gateway().expect("bind");
         let ctx = fresh_ctx();
-        let engine_done = AtomicBool::new(true);
+        let engine_done = Arc::new(AtomicBool::new(true));
         let start = Instant::now();
         let outcome = serve_connection(handle, ctx, &engine_done).expect("serve");
         assert!(
@@ -2230,7 +2476,7 @@ mod tests {
         client.join().expect("client thread panicked");
         engine.join().expect("engine thread panicked");
 
-        // The loop-top check fires within one READ_TIMEOUT (100ms) of the flag
+        // The loop-top check fires within one SERVE_BEAT (100ms) of the flag
         // store; the connect + exchange + 150ms park budget stays well under
         // 2s. The prior behavior parked until the whole-turn wall-clock
         // timeout (retired by ADR-0115) fired.
@@ -2296,7 +2542,8 @@ mod tests {
             thread::sleep(Duration::from_millis(300));
         });
 
-        let outcome = serve_connection(handle, ctx, &AtomicBool::new(false)).expect("serve");
+        let outcome =
+            serve_connection(handle, ctx, &Arc::new(AtomicBool::new(false))).expect("serve");
 
         client.join().expect("client thread panicked");
         assert_eq!(
@@ -2359,7 +2606,8 @@ mod tests {
             // BrokenPipe. `s` + `r` drop at thread end.
         });
 
-        let outcome = serve_connection(handle, ctx, &AtomicBool::new(false)).expect("serve");
+        let outcome =
+            serve_connection(handle, ctx, &Arc::new(AtomicBool::new(false))).expect("serve");
 
         client.join().expect("client thread panicked");
         assert!(
@@ -2436,7 +2684,7 @@ mod tests {
             }
         });
 
-        let err = serve_connection(handle, ctx, &AtomicBool::new(false))
+        let err = serve_connection(handle, ctx, &Arc::new(AtomicBool::new(false)))
             .expect_err("an over-long request frame must fail the serve");
         client.join().expect("client thread panicked");
         assert_eq!(err.kind(), io::ErrorKind::InvalidData);
@@ -2447,7 +2695,7 @@ mod tests {
     }
 
     /// Issue #649: a sender that pauses mid-frame for longer than
-    /// READ_TIMEOUT still completes the frame. Before the resumable frame
+    /// SERVE_BEAT still completes the frame. Before the resumable frame
     /// reader the retried read re-framed from the stream's mid-line
     /// position, so this exchange failed as a protocol error (the tail
     /// parsed as a malformed fresh line) instead of serving the request.
@@ -2473,7 +2721,7 @@ mod tests {
             // diagnostic failure (same rationale as the over-long test).
             s.set_read_timeout(Some(Duration::from_secs(5)))
                 .expect("set read timeout");
-            // Half an initialize frame, a pause longer than READ_TIMEOUT
+            // Half an initialize frame, a pause longer than SERVE_BEAT
             // (100ms) so the serve's read times out mid-line -- typically
             // at least twice, though the count is timing-dependent and any
             // single timeout exercises the resume -- then the frame's tail
@@ -2505,7 +2753,8 @@ mod tests {
             // `s` drops here -> gateway read EOF -> serve_connection returns.
         });
 
-        let outcome = serve_connection(handle, ctx, &AtomicBool::new(false)).expect("serve");
+        let outcome =
+            serve_connection(handle, ctx, &Arc::new(AtomicBool::new(false))).expect("serve");
         client.join().expect("client thread panicked");
         assert!(
             outcome.trace.is_empty(),
@@ -2533,7 +2782,7 @@ mod tests {
             let mut line = String::new();
             r.read_line(&mut line).expect("ok line");
             assert_eq!(line, "BRIDGE_OK\n");
-            // Head under the cap, a stall longer than READ_TIMEOUT, then the
+            // Head under the cap, a stall longer than SERVE_BEAT, then the
             // tail that pushes the line past the cap (newline-terminated so
             // the drain settles).
             let half = LINE_MAX_BYTES / 2;
@@ -2557,7 +2806,7 @@ mod tests {
             }
         });
 
-        let err = serve_connection(handle, ctx, &AtomicBool::new(false))
+        let err = serve_connection(handle, ctx, &Arc::new(AtomicBool::new(false)))
             .expect_err("an over-long frame split by a stall must still fail the serve");
         client.join().expect("client thread panicked");
         assert_eq!(err.kind(), io::ErrorKind::InvalidData);
@@ -2668,7 +2917,7 @@ mod tests {
     /// auth read, and the teardown's kill lands on the bridge as an abortive
     /// close (RST, the Windows job-object kill's shape -- the POSIX killpg
     /// teardown FINs instead, pinned by the #913 EOF twin below) that
-    /// wakes the parked read BEFORE its READ_TIMEOUT fires.
+    /// wakes the parked read BEFORE its SERVE_BEAT fires.
     /// The error arm's re-check (not the loop top, which the parked read has
     /// already passed) hands the turn to the ACP termination; a reverted
     /// re-check surfaces the reset as a serve error that mislabels the
@@ -2685,7 +2934,7 @@ mod tests {
         let client = thread::spawn(move || {
             let s = TcpStream::connect(("127.0.0.1", port)).expect("connect");
             // Serve accepts within one poll interval (10ms) and parks in the
-            // FIRST auth read, whose READ_TIMEOUT fires at ~t=110ms -- firing
+            // FIRST auth read, whose SERVE_BEAT fires at ~t=110ms -- firing
             // at 50ms keeps the flag store + the RST (20ms later, plus timer
             // grain) structurally inside that first park, so the reset is
             // what wakes the read and reaches the error arm; a later firing
@@ -2720,7 +2969,7 @@ mod tests {
             thread::sleep(Duration::from_millis(150));
             abortive_close(s);
         });
-        let err = serve_connection(handle, ctx, &AtomicBool::new(false))
+        let err = serve_connection(handle, ctx, &Arc::new(AtomicBool::new(false)))
             .expect_err("no flag set -> the pre-auth reset surfaces");
         assert_eq!(
             err.kind(),
@@ -2751,7 +3000,7 @@ mod tests {
             let s = TcpStream::connect(("127.0.0.1", port)).expect("connect");
             // Same first-park-window shape as the RST pin above (serve
             // accepts within one poll interval and parks in the FIRST auth
-            // read, whose READ_TIMEOUT fires at ~t=110ms): firing at 50ms
+            // read, whose SERVE_BEAT fires at ~t=110ms): firing at 50ms
             // and closing 20ms later keeps the flag store + the FIN
             // structurally inside that park, so the EOF is what wakes the
             // read and reaches the EOF arm. The plain drop FINs because the
@@ -2779,8 +3028,8 @@ mod tests {
     #[test]
     fn serve_connection_preauth_reset_racing_cancel_returns_empty_outcome() {
         let mut ctx = fresh_ctx();
-        let cancel: &'static CancelToken = Box::leak(Box::new(CancelToken::new()));
-        ctx.cancel = cancel;
+        let cancel = Arc::new(CancelToken::new());
+        ctx.cancel = Arc::clone(&cancel);
         let handle = bind_gateway().expect("bind");
         let port = handle.port;
 
@@ -2792,7 +3041,7 @@ mod tests {
             thread::sleep(Duration::from_millis(20));
             abortive_close(s);
         });
-        let outcome = serve_connection(handle, ctx, &AtomicBool::new(false))
+        let outcome = serve_connection(handle, ctx, &Arc::new(AtomicBool::new(false)))
             .expect("a reset racing a set cancel hands the turn to the ACP termination");
         assert!(
             outcome.trace.is_empty() && outcome.promotions.is_empty(),
@@ -2810,8 +3059,8 @@ mod tests {
     #[test]
     fn serve_connection_preauth_stall_cancel_returns_empty_outcome() {
         let mut ctx = fresh_ctx();
-        let cancel: &'static CancelToken = Box::leak(Box::new(CancelToken::new()));
-        ctx.cancel = cancel;
+        let cancel = Arc::new(CancelToken::new());
+        ctx.cancel = Arc::clone(&cancel);
         let handle = bind_gateway().expect("bind");
         let port = handle.port;
 
@@ -2827,7 +3076,7 @@ mod tests {
             thread::sleep(Duration::from_millis(200));
             drop(s);
         });
-        let outcome = serve_connection(handle, ctx, &AtomicBool::new(false))
+        let outcome = serve_connection(handle, ctx, &Arc::new(AtomicBool::new(false)))
             .expect("cancel fired in the pre-auth window hands the turn to the ACP termination");
         assert!(
             outcome.trace.is_empty() && outcome.promotions.is_empty(),
@@ -2846,8 +3095,8 @@ mod tests {
     #[test]
     fn serve_connection_preauth_eof_racing_cancel_returns_empty_outcome() {
         let mut ctx = fresh_ctx();
-        let cancel: &'static CancelToken = Box::leak(Box::new(CancelToken::new()));
-        ctx.cancel = cancel;
+        let cancel = Arc::new(CancelToken::new());
+        ctx.cancel = Arc::clone(&cancel);
         let handle = bind_gateway().expect("bind");
         let port = handle.port;
 
@@ -2864,7 +3113,7 @@ mod tests {
             thread::sleep(Duration::from_millis(20));
             drop(s);
         });
-        let outcome = serve_connection(handle, ctx, &AtomicBool::new(false))
+        let outcome = serve_connection(handle, ctx, &Arc::new(AtomicBool::new(false)))
             .expect("a graceful EOF racing a set cancel hands the turn to the ACP termination");
         assert!(
             outcome.trace.is_empty() && outcome.promotions.is_empty(),
@@ -2893,7 +3142,7 @@ mod tests {
             thread::sleep(Duration::from_millis(150));
             drop(s);
         });
-        let err = serve_connection(handle, ctx, &AtomicBool::new(false))
+        let err = serve_connection(handle, ctx, &Arc::new(AtomicBool::new(false)))
             .expect_err("no flag set -> the flagless EOF stays the refusal");
         assert_eq!(
             err.kind(),
@@ -2904,7 +3153,7 @@ mod tests {
     }
 
     /// Issue #909 resumable pre-auth read: an auth line split across a
-    /// READ_TIMEOUT stall completes once the retry resumes the partial line
+    /// SERVE_BEAT stall completes once the retry resumes the partial line
     /// (the stateless form discards the head, and the tail alone would be
     /// refused as a token mismatch).
     #[test]
@@ -2927,7 +3176,8 @@ mod tests {
             assert_eq!(line, "BRIDGE_OK\n", "the resumed line authenticated");
         });
 
-        let outcome = serve_connection(handle, ctx, &AtomicBool::new(false)).expect("serve");
+        let outcome =
+            serve_connection(handle, ctx, &Arc::new(AtomicBool::new(false))).expect("serve");
         client.join().expect("client thread panicked");
         assert!(
             outcome.trace.is_empty(),
@@ -2940,17 +3190,18 @@ mod tests {
     /// With no bridge connecting, accept_bridge returns `Err(TimedOut)` within
     /// ~deadline (not an infinite hang). Uses a short deadline so the test is
     /// fast; production uses [`CONNECT_DEADLINE`].
-    #[test]
-    fn accept_bridge_times_out_when_no_bridge_connects() {
+    #[tokio::test]
+    async fn accept_bridge_times_out_when_no_bridge_connects() {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
         let cancel = CancelToken::new();
         let start = Instant::now();
         let err = accept_bridge(
-            &listener,
+            listener,
             &cancel,
             &AtomicBool::new(false),
             Duration::from_millis(200),
         )
+        .await
         .expect_err("deadline -> Err");
         let elapsed = start.elapsed();
         assert!(
@@ -2966,18 +3217,19 @@ mod tests {
 
     /// A pre-fired cancel returns `Ok(None)` promptly (no wait), so the serve
     /// returns an empty outcome + the ACP termination decides the TurnOutcome.
-    #[test]
-    fn accept_bridge_returns_none_when_cancelled() {
+    #[tokio::test]
+    async fn accept_bridge_returns_none_when_cancelled() {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
         let cancel = CancelToken::new();
         cancel.request();
         let start = Instant::now();
         let result = accept_bridge(
-            &listener,
+            listener,
             &cancel,
             &AtomicBool::new(false),
             Duration::from_secs(30),
         )
+        .await
         .expect("cancel is Ok(None), not Err");
         assert!(result.is_none(), "cancel before connect -> None");
         assert!(
@@ -2992,13 +3244,14 @@ mod tests {
     /// and surfacing a serve error -- the pump already returned, so the turn's
     /// outcome is decided by the ACP termination (single-source), never the
     /// gateway. Mirrors the pre-fired cancel arm one test up.
-    #[test]
-    fn accept_bridge_returns_none_when_engine_done() {
+    #[tokio::test]
+    async fn accept_bridge_returns_none_when_engine_done() {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
         let cancel = CancelToken::new();
         let engine_done = AtomicBool::new(true);
         let start = Instant::now();
-        let result = accept_bridge(&listener, &cancel, &engine_done, Duration::from_secs(30))
+        let result = accept_bridge(listener, &cancel, &engine_done, Duration::from_secs(30))
+            .await
             .expect("engine_done is Ok(None), not Err");
         assert!(result.is_none(), "engine_done before connect -> None");
         assert!(
@@ -3939,7 +4192,7 @@ mod tests {
         // cancel to the Arc twin the clock publishes on (the same slot the
         // production paths share, ADR-0115).
         let token = Arc::new(CancelToken::new());
-        ctx.cancel = &**Box::leak(Box::new(Arc::clone(&token)));
+        ctx.cancel = Arc::clone(&token);
         let guard = token.begin_turn();
         ProgressClock::arm_and_publish(guard.generation(), &token, Duration::from_millis(200));
         let _guard = guard; // hold the generation alive for the serve

@@ -52,23 +52,59 @@ pub fn read_message(reader: &mut impl BufRead) -> io::Result<Option<Value>> {
 /// `WouldBlock`) resumes the same frame instead of re-framing the tail as a
 /// new line -- a peer pausing mid-frame longer than the read timeout still
 /// completes the frame.
-pub struct FrameReader<R: BufRead> {
+pub struct FrameReader<R> {
     lines: BoundedLineReader<R>,
 }
 
-impl<R: BufRead> FrameReader<R> {
+impl<R> FrameReader<R> {
     /// Wrap an already-connected reader.
     pub fn new(reader: R) -> Self {
         Self {
             lines: BoundedLineReader::new(reader),
         }
     }
+}
 
+impl<R: BufRead> FrameReader<R> {
     /// Same contract as [`read_message`]; a read timeout propagates as `Err`
     /// with the partial frame retained -- call again to resume it.
     pub fn read_message(&mut self) -> io::Result<Option<Value>> {
         loop {
             match self.lines.read_line_bounded(LINE_MAX_BYTES)? {
+                LineRead::Eof => return Ok(None),
+                LineRead::Overlong => {
+                    log::warn!(
+                        target: "toptopduck::gateway",
+                        "frame line exceeded {LINE_MAX_BYTES} bytes, failing the connection"
+                    );
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!("frame line exceeded {LINE_MAX_BYTES} bytes"),
+                    ));
+                }
+                LineRead::Line(line) => {
+                    let trimmed = line.trim_end_matches(['\r', '\n']);
+                    if trimmed.is_empty() {
+                        continue;
+                    }
+                    return serde_json::from_str(trimmed)
+                        .map(Some)
+                        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e));
+                }
+            }
+        }
+    }
+}
+
+impl<R: tokio::io::AsyncBufRead + Unpin> FrameReader<R> {
+    /// The async twin of [`Self::read_message`] (ADR-0139, #1457): the same
+    /// loop over the resumable async line reader. A `select!` that fires
+    /// mid-frame drops the read call but not the partial frame -- it lives
+    /// in the reader, not the future (the #649 resume contract on the async
+    /// face), so the next call resumes the same frame.
+    pub async fn read_message_async(&mut self) -> io::Result<Option<Value>> {
+        loop {
+            match self.lines.read_line_bounded_async(LINE_MAX_BYTES).await? {
                 LineRead::Eof => return Ok(None),
                 LineRead::Overlong => {
                     log::warn!(
