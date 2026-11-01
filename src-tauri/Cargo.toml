@@ -239,7 +239,9 @@ tauri-plugin-log = "2"
 # `tokio::sync::Notify`; `macros` backs the runner's `select!` race floor.
 # `io-util` (ADR-0139, #1455): the MCP remote transports read body streams
 # through AsyncBufRead (the bounded-line async face over the chunk pump).
-tokio = { version = "1", features = ["time", "rt", "sync", "macros", "io-util"] }
+# `process` (ADR-0139, #1456): the MCP stdio transport spawns its server
+# child through tokio::process so the pipe reads ride the async face.
+tokio = { version = "1", features = ["time", "rt", "sync", "macros", "io-util", "process"] }
 # `sqlparser` parses provider SQL to extract the FROM/JOIN reference-name set
 # for the stale-cascade provenance graph (issue #40, ADR-0013/0025/0040): each
 # materialized result_N records which working-set members its SQL named, so a
