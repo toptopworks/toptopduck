@@ -600,12 +600,12 @@ enum ServerMode {
     /// Legacy SSE: GET opens SSE stream; POST sends messages.
     Sse,
     /// Legacy SSE that accepts the POST but never forwards the response
-    /// onto the GET stream (issue #889): the client's `recv` parks on a
+    /// onto the GET stream (issue #889): the request parks on the stream read of a
     /// live-but-silent connection -- the deadline fixture for the SSE half.
     SseSilent,
     /// Legacy SSE whose silence starts at the handshake (issue #897): the
     /// endpoint event rides the GET stream, every POST is acknowledged,
-    /// but no response event is EVER forwarded -- the initialize `recv`
+    /// but no response event is EVER forwarded -- the initialize request
     /// parks mid-connect, the connect-phase half that `SseSilent` (which
     /// silences only `tools/call`) never modeled.
     SseHandshakeSilent,
@@ -644,6 +644,12 @@ enum ServerMode {
     /// the same classification explicitly (#1455), so an HTTP error status
     /// reads as an HTTP fault, not as a bogus JSON-RPC envelope.
     HttpErrorStatus,
+    /// Legacy SSE whose GET stream is stock but every POST is answered
+    /// `500` — pins the same non-2xx refusal on the SSE face (#1455): the
+    /// handshake's initialize POST rides `SseClient::request`, where a
+    /// dropped guard would read the 500 as an ack and park the call on the
+    /// stream read (which carries no bound of its own).
+    SseErrorStatus,
     /// Legacy SSE whose GET stream injects one malformed `message` event
     /// once a `tools/call` POST has been acknowledged — exercises the #647
     /// fail-fast on the async face (#1455): the waiting request gets a
@@ -828,6 +834,10 @@ Content-Type: text/event-stream
             handle_sse_stream_malformed(&mut stream, &state, base_url)
         }
         (ServerMode::SseMalformed, "POST") => handle_sse_post_malformed(&mut stream, &body, &state),
+        (ServerMode::SseErrorStatus, "GET") => handle_sse_stream(&mut stream, &state, base_url),
+        (ServerMode::SseErrorStatus, "POST") => {
+            write_response(&mut stream, 500, "application/json", "internal error")
+        }
         _ => {
             write_response(&mut stream, 404, "text/plain", "not found");
         }
@@ -1002,7 +1012,7 @@ fn handle_sse_post(stream: &mut TcpStream, body: &[u8], state: &ServerState) {
 /// POST handler for the silent-SSE fixture (issue #889): the handshake
 /// (`initialize` / `tools/list`) is answered normally so the connect phase
 /// succeeds, but a `tools/call` is acknowledged and never forwarded onto
-/// the GET stream -- the client's `recv` parks on a live-but-silent
+/// the GET stream -- the request parks on the stream read of a live-but-silent
 /// connection, the SSE half of the deadline shape.
 fn handle_sse_post_silent(stream: &mut TcpStream, body: &[u8], state: &ServerState) {
     let Some(req) = parse_sse_post(stream, body) else {
@@ -1017,7 +1027,7 @@ fn handle_sse_post_silent(stream: &mut TcpStream, body: &[u8], state: &ServerSta
 
 /// POST handler for the handshake-silent SSE fixture (issue #897): every
 /// POST is acknowledged (202) but nothing is ever enqueued -- the initialize
-/// handshake itself parks the client's `recv` on a live-but-silent
+/// handshake itself parks the request on a live-but-silent
 /// connection.
 fn handle_sse_post_handshake_silent(stream: &mut TcpStream, body: &[u8]) {
     if parse_sse_post(stream, body).is_none() {
@@ -1084,7 +1094,7 @@ fn handle_sse_post_malformed(stream: &mut TcpStream, body: &[u8], state: &Server
 /// parameterized method's POST is answered `301` + Location, every other
 /// POST behaves stock. The redirect ALSO shuts the fixture down, closing the
 /// GET stream: a mutant client that skips the redirect check parks its
-/// `recv` on a stream that will never carry the response -- with the stream
+/// stream read on a connection that will never carry the response -- with the stream
 /// closed it surfaces a terminal `ServerClosed` instead, so the pin fails
 /// with an assertion (wrong error), not a hang.
 fn handle_sse_post_redirect(
@@ -1397,8 +1407,9 @@ fn sse_transport_malformed_message_fails_the_waiting_request_and_poisons_the_str
 /// The connect-phase silent window (#1455): a stream that opens but never
 /// carries the `endpoint` event fails the connect on its own within the ack
 /// window — the retired two-second read timeout's self-resolving core, which
-/// is what lets a probe against a hung server wind down after its deadline
-/// (the probe path fires no kill signal, issue #392).
+/// is what lets a probe's bounded parks (this endpoint read, and every POST
+/// ack) wind down after their deadline (issue #392); the response-wait park
+/// carries no such bound.
 #[test]
 fn sse_transport_endpoint_silence_fails_the_connect_within_the_ack_window() {
     use std::time::Instant;
@@ -1477,6 +1488,100 @@ fn http_transport_refuses_a_non_2xx_status_as_an_http_fault() {
     );
 }
 
+/// The non-2xx refusal on the SSE face (#1455): the handshake's initialize
+/// POST (which rides `SseClient::request`) is answered `500` and must fail
+/// as a transport-level `Http` fault naming the status -- not read as an
+/// ack and left parking on the stream read, which carries no bound of its
+/// own. Asserted by VARIANT, the shape the HTTP-face pin and the four
+/// redirect pins lack: a message-string assert stays green through a
+/// variant-mapping refactor.
+#[test]
+fn sse_transport_refuses_a_non_2xx_post_as_an_http_fault() {
+    use toptopduck_lib::mcp::client::ClientError;
+
+    let server = HttpMcpServer::spawn(ServerMode::SseErrorStatus);
+    let url = format!("{}/sse", server.url());
+
+    // The connect rides a thread with a bound: a dropped guard would read
+    // the 500 as an ack and park the handshake on the stream read, which
+    // carries no bound of its own -- the pin must surface that regression
+    // as a red assert, not a hang.
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(toptopduck_lib::mcp::client::SseClient::connect(
+            &url,
+            &BTreeMap::new(),
+        ));
+    });
+    let err = match rx.recv_timeout(Duration::from_secs(10)) {
+        Ok(Err(e)) => e,
+        Ok(Ok(_)) => panic!("a 500 POST must fail the handshake, not parse the ack"),
+        Err(_) => panic!("the 500 refusal is immediate, not a park on the unbounded stream read"),
+    };
+    match err {
+        ClientError::Http(ref msg) => assert!(
+            msg.contains("HTTP error status 500"),
+            "names the refused status, got: {msg}"
+        ),
+        other => panic!("expected the Http variant, got {other:?}"),
+    }
+}
+
+/// Poisoning at stream death (#1455, review round): a call whose parked
+/// stream read ends at the GET stream's death poisons the client, so the
+/// NEXT call refuses at the entry check -- without the poison it would
+/// burn a full POST round against the now-dead listener and surface the
+/// connection refusal as an `Http` error instead. The death itself
+/// surfaces either way Windows races the fixture's close: a clean EOF
+/// (`ServerClosed`) or a reset (`Framing` transport fault) -- both arms
+/// poison, and both are accepted here.
+#[test]
+fn sse_transport_poisons_the_stream_at_eof_so_a_later_call_skips_the_post() {
+    use toptopduck_lib::mcp::client::ClientError;
+
+    let server = HttpMcpServer::spawn(ServerMode::SseSilent);
+    let url = format!("{}/sse", server.url());
+
+    let mut client = toptopduck_lib::mcp::client::SseClient::connect(&url, &BTreeMap::new())
+        .expect("the handshake is answered normally");
+
+    // Park THIS thread's call on the stream read (the SseSilent fixture
+    // acks the POST and never forwards the response), then kill the fixture
+    // from a side thread: its Drop closes the GET stream, so the parked
+    // read ends at EOF. The kill waits until the POST has actually arrived
+    // (each request is its own connection, so the header capture grows)
+    // instead of a fixed sleep a loaded parallel run can outrun.
+    let state = Arc::clone(&server.state);
+    let killer = std::thread::spawn(move || {
+        let seen = state.captured_headers.lock().expect("poisoned").len();
+        for _ in 0..500 {
+            if state.captured_headers.lock().expect("poisoned").len() > seen {
+                break;
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+        drop(server);
+    });
+    let first = client.call("echo", &json!({"message": "x"}));
+    match first {
+        Err(ClientError::ServerClosed) | Err(ClientError::Framing(_)) => {}
+        other => {
+            panic!("the stream death surfaces as ServerClosed or a Framing fault, got {other:?}")
+        }
+    }
+    killer
+        .join()
+        .expect("the fixture-drop thread exits, not panics");
+
+    // The poisoned client refuses instantly: no POST leaves, so the dead
+    // listener's connection refusal cannot surface here.
+    let second = client.call("echo", &json!({"message": "x"}));
+    assert!(
+        matches!(second, Err(ClientError::ServerClosed)),
+        "poisoned -> ServerClosed at the entry check, got {second:?}"
+    );
+}
+
 #[test]
 fn sse_transport_connect_tools_list_and_call() {
     let server = HttpMcpServer::spawn(ServerMode::Sse);
@@ -1500,7 +1605,8 @@ fn sse_transport_connect_tools_list_and_call() {
         .expect("echo call");
     assert_eq!(first_text(&echo), "Echo: hello-sse");
 
-    // Dropping the client stops the reader thread (stop flag + join).
+    // Dropping the client drops the stream receiver, which ends the pump
+    // task and its connection with it.
     drop(client);
 }
 
@@ -1540,7 +1646,8 @@ fn sse_transport_aggregator_connect_and_route() {
         .expect("route ok");
     assert_eq!(first_text(&result), "11");
 
-    // Dropping the aggregator drops the SseClient (stop flag + thread join).
+    // Dropping the aggregator drops each SseClient with it (the stream
+    // receiver's drop ends the pump and its connection).
     drop(agg);
 }
 
@@ -1861,7 +1968,7 @@ fn cancel_teardown_unblocks_a_parked_call_and_stands_down_when_done() {
 }
 
 /// The SSE half (issue #889): a live connection that acknowledges the POST
-/// but never delivers the response event parks the `recv` -- the same
+/// but never delivers the response event parks the stream read -- the same
 /// per-call deadline bounds it with the same attribution shape.
 #[test]
 fn route_deadline_bounds_a_silent_sse_connection() {
@@ -1895,7 +2002,7 @@ fn route_deadline_bounds_a_silent_sse_connection() {
     };
     assert!(
         started.elapsed() < Duration::from_secs(5),
-        "the recv park is bounded by the deadline"
+        "the stream-read park is bounded by the deadline"
     );
     let msg = err.to_string();
     assert!(
@@ -1904,9 +2011,9 @@ fn route_deadline_bounds_a_silent_sse_connection() {
     );
 }
 
-/// The SSE cancel half (issue #889): a token fire while the `recv` is
-/// parked on a silent stream sets the reader stop flag -- the reader exits,
-/// the channel disconnects, and the parked call returns `ServerClosed` well
+/// The SSE cancel half (issue #889): a token fire while the request is
+/// parked on a silent stream fires the transport's stop signal -- the
+/// parked read wakes immediately, and the call returns `ServerClosed` well
 /// under the budget.
 #[test]
 fn cancel_teardown_unblocks_a_silent_sse_park() {
@@ -1950,21 +2057,21 @@ fn cancel_teardown_unblocks_a_silent_sse_park() {
     };
     assert!(
         started.elapsed() < Duration::from_secs(10),
-        "cancel unblocks the recv park well under the 60s budget"
+        "cancel unblocks the stream-read park well under the 60s budget"
     );
     assert!(
         matches!(err, ClientError::ServerClosed),
-        "a stop-flagged reader disconnects the channel into ServerClosed, got {err:?}"
+        "a stop-fired wake breaks the parked read into ServerClosed, got {err:?}"
     );
 }
 
 /// Issue #897: the SSE half of the connect-phase cancel. The silence starts
 /// at the handshake (every POST acked, no response event ever forwarded), so
-/// the initialize `recv` parks mid-connect with nobody but the
-/// pre-registered stop flag to break it -- arming before `connect_all`
-/// means the token fire stop-flags the reader, the channel disconnects, and
-/// the connect returns a transport death within one `SSE_READ_TIMEOUT` wake
-/// instead of the 60s budget. The failure must be the killed transport,
+/// the initialize request parks mid-connect with nobody but the
+/// pre-registered stop signal to break it -- arming before `connect_all`
+/// means the token fire wakes the parked read immediately (no wake-tick
+/// window since #1455) and the connect returns a transport death well
+/// inside the 60s budget. The failure must be the killed transport,
 /// not a skip: the fire landed mid-connect, so only the first server was
 /// parked (an inverted gap check -- armed means skip -- turns the wording
 /// assertion red at 0s).

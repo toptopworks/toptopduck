@@ -311,8 +311,9 @@ rig-agent = { version = "0.42", default-features = false }
 # desktop apps rarely carry proxy env vars), HTTP/2, and charset decoding.
 # `blocking` + `json` serve the preflight probes (ADR-0139): the probe runs
 # on a `spawn_blocking` thread where the blocking flavor fits without an
-# async runtime; `json` also carries the MCP transports' send/parse (the
-# retired ureq face's `send_json` / `into_json`). Both singletons live in
+# async runtime; `json` also carries the MCP transports' request sends
+# (the retired ureq face's `send_json`; the parse side is serde_json over
+# the raw body bytes). Both singletons live in
 # `src/egress.rs` (ADR-0139's shared construction seam): the async face
 # serves the live turns (issue #926) and the MCP remote transports (#1455),
 # the blocking face the preflight probes -- so each proxy snapshot freezes

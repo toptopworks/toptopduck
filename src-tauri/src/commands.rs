@@ -1718,8 +1718,12 @@ pub async fn probe_mcp_server(
     // deadline. The outer deadline is the primary bound — spawn_blocking
     // tasks are not cancelled, so the thread lingers until the I/O returns.
     // HTTP bodies carry a per-read bound (HTTP_READ_TIMEOUT) so the task
-    // eventually resolves; the SSE transport's blocking face bridges through
-    // the client's runtime, whose parked reads wake on the stop signal.
+    // eventually resolves. The SSE face's time-bounded parks (GET headers,
+    // endpoint event, POST acks) self-resolve the same way; its
+    // response-wait park carries no bound and the probe path fires no stop
+    // signal -- a server that acks POSTs but never streams responses leaves
+    // that thread parked until process exit (pre-existing shape; the outer
+    // deadline has already answered the user by then).
     let server_for_blocking = server.clone();
     let result = tokio::time::timeout(deadline, async {
         tauri::async_runtime::spawn_blocking(move || {
