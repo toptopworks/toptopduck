@@ -250,6 +250,10 @@ pub fn serve_connection(
     // (verify, then frames) and hands the write half to the spine through
     // the first event. See `serve_reader`'s doc for why its reads are
     // never selected against anything (the measured Windows wake law).
+    // Unbounded on purpose: the bridge is this app's own child (ADR-0085)
+    // whose frames arrive only in answer to dispatched calls, so the queue
+    // holds a handful at worst -- and bounding it would trade a slow
+    // dispatch's buffered frames for a torn-down connection.
     let (event_tx, event_rx) = std::sync::mpsc::channel::<ServeEvent>();
     crate::mcp::client::spawn_transport_task(serve_reader(
         stream,
@@ -325,7 +329,19 @@ pub fn serve_connection(
                     break Ok(outcome);
                 }
             }
-            Err(RecvTimeoutError::Disconnected) => break Ok(outcome),
+            Err(RecvTimeoutError::Disconnected) => {
+                // Only reachable when the reader task ended without its
+                // Done event -- a panic (its JoinHandle is dropped, so
+                // tokio swallowed the payload); every normal exit sends
+                // Done first. Treat the collected outcome as the bridge's
+                // close, but leave the trace the panic itself did not.
+                log::warn!(
+                    target: "toptopduck::gateway",
+                    "serve reader ended without its Done event (reader panic); \
+                     returning the collected outcome"
+                );
+                break Ok(outcome);
+            }
         }
     };
     if let Some(k) = keepalive {
@@ -509,6 +525,11 @@ async fn accept_bridge(
     engine_done: &AtomicBool,
     deadline: Duration,
 ) -> io::Result<Option<(tokio::net::TcpStream, std::net::SocketAddr)>> {
+    // tokio's registration contract requires non-blocking mode and the std
+    // bind in `bind_gateway` hands the socket over still blocking -- on
+    // Linux the runtime panics at the registration instead (tokio#7172),
+    // so the conversion point owns the flip.
+    listener.set_nonblocking(true)?;
     let listener = tokio::net::TcpListener::from_std(listener)?;
     let deadline_at = Instant::now() + deadline;
     loop {
@@ -550,8 +571,9 @@ async fn accept_bridge(
                 };
             }
             // The beat arm (unlike a parked established-socket read, a
-            // parked accept co-exists with the timer -- measured, see
-            // `serve_reader`'s doc): loops back to the flag checks; a
+            // parked accept co-exists with the timer -- the measured
+            // Windows wake law spares accepts the co-park death): loops
+            // back to the flag checks; a
             // connection made during the beat re-wakes the accept
             // immediately.
             _ = tokio::time::sleep(remaining.min(ACCEPT_BEAT)) => {
@@ -600,8 +622,10 @@ fn termination_source(cancel: &CancelToken) -> &'static str {
 /// distinguishes the four arrival shapes (issue #915).
 ///
 /// The pre-auth window (issue #909): the auth read is event-driven (async
-/// since #1457) with the termination flags observed on the serve-beat arm
-/// of the same `select!` -- a bridge that connects but stalls before
+/// since #1457) and parks on that one read -- a flag firing while it parks
+/// is observed by the spine's serve beat (the spine returns and the
+/// teardown releases this read, whose EOF and error arms re-check the flag
+/// below) -- a bridge that connects but stalls before
 /// writing its auth line while the engine completes (or cancel fires)
 /// returns `Ok(false)`, handing the turn to the ACP termination instead of
 /// surfacing the serve error that mislabels the completed turn as Failed
@@ -791,7 +815,7 @@ impl KeepaliveGuard {
                     if last.elapsed() < interval {
                         continue;
                     }
-                    crate::mcp::client::block_on(async {
+                    let wrote = crate::mcp::client::block_on(async {
                         let mut half = writer.lock().await;
                         // The lock, not the timing, carries the safety
                         // (issue #1267): the spine disarms BEFORE writing
@@ -809,11 +833,28 @@ impl KeepaliveGuard {
                             progress += 1;
                             let frame = progress_notification(&token, progress);
                             // A failed write means the bridge died
-                            // mid-park; the spine's own response write
-                            // surfaces the death.
-                            let _ = framing::write_message_async(&mut *half, &frame).await;
+                            // mid-park: exit instead of re-entering this
+                            // block_on against the dead socket every
+                            // interval. The spine's own response write
+                            // surfaces the death to the turn; this log is
+                            // the only trace it leaves when the approval
+                            // gate never resolves (issue #849's lesson).
+                            if let Err(e) = framing::write_message_async(&mut *half, &frame).await {
+                                log::debug!(
+                                    target: "toptopduck::gateway",
+                                    "keep-alive companion exiting on a failed write \
+                                     (bridge gone mid-park): {e}"
+                                );
+                                return false;
+                            }
+                            true
+                        } else {
+                            true
                         }
                     });
+                    if !wrote {
+                        return;
+                    }
                 }
             })
             .expect("the keep-alive thread spawns");
@@ -836,9 +877,19 @@ impl KeepaliveGuard {
     }
 }
 
+impl Drop for KeepaliveGuard {
+    fn drop(&mut self) {
+        // A panic unwinding the spine skips its explicit `stop()` (the
+        // break arms call it; an unwind does not), so dropping the guard
+        // ends the companion too -- otherwise a stranded writer would
+        // re-enter block_on against a dead funnel every interval and pin
+        // the write half open (no FIN to the bridge).
+        self.stop.store(true, Ordering::SeqCst);
+    }
+}
+
 /// One MCP method's outcome: a result, an error envelope, or no response (a
 /// notification the gateway acknowledges by silence).
-#[derive(Debug, PartialEq)]
 enum Response {
     Result(Value),
     Error(i64, String),
@@ -1687,6 +1738,66 @@ mod tests {
         }
     }
 
+    /// The #1267 ordering invariant: a companion that parks on the funnel
+    /// while its slot empties must not write after the lock frees -- the
+    /// under-lock re-check carries the safety (the lock, not the timing).
+    /// The shape: hold the funnel from a parked task, arm the cadence (the
+    /// companion parks on the lock), disarm, then free the lock -- zero
+    /// frames may land, where a deleted re-check would push one through
+    /// the freed lock after the disarm (the behind-the-envelope shape).
+    #[test]
+    fn keepalive_frame_never_lands_after_its_call_is_disarmed_under_the_lock() {
+        use tokio::io::AsyncReadExt as _;
+
+        let (mut reader, writer_end) = tokio::io::duplex(4096);
+        let writer = std::sync::Arc::new(tokio::sync::Mutex::new(writer_end));
+        let guard = KeepaliveGuard::start_with_interval(
+            std::sync::Arc::clone(&writer),
+            Duration::from_millis(20),
+        );
+
+        // Park the funnel first (handshake: the holder reports the lock
+        // taken before the cadence arms), so the companion's first write
+        // attempt parks on the lock, not on its own timing.
+        let freed = std::sync::Arc::new(tokio::sync::Notify::new());
+        let freed_for_task = std::sync::Arc::clone(&freed);
+        let (held_tx, held_rx) = mpsc::channel::<()>();
+        let parked = crate::mcp::client::spawn_transport_task(async move {
+            let _held = writer.lock().await;
+            let _ = held_tx.send(());
+            freed_for_task.notified().await;
+        });
+        held_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("the parked task took the funnel");
+
+        guard.arm(json!("tok-1"));
+        // Let the companion cross its first beat (SERVE_BEAT), see the
+        // armed slot on the fast path, and park on the funnel lock -- the
+        // disarm must land while it is parked there.
+        thread::sleep(Duration::from_millis(220));
+        guard.disarm();
+        // Free the lock: the companion re-checks the slot UNDER it, finds
+        // it empty, and writes nothing -- give it room to prove that.
+        freed.notify_one();
+        thread::sleep(Duration::from_millis(200));
+        guard.stop();
+        let _ = crate::mcp::client::block_on(parked);
+
+        drop(guard);
+        let mut buf = Vec::new();
+        let _ = crate::mcp::client::block_on(reader.read_to_end(&mut buf));
+        let frames: Vec<Value> = buf
+            .split(|b| *b == b'\n')
+            .filter(|line| !line.is_empty())
+            .map(|line| serde_json::from_slice(line).expect("a json frame"))
+            .collect();
+        assert!(
+            frames.is_empty(),
+            "no progress frame may land after the disarm freed the lock: {frames:?}"
+        );
+    }
+
     #[test]
     fn bind_gateway_mints_port_and_64_hex_token() {
         let h = bind_gateway().expect("bind");
@@ -2404,17 +2515,21 @@ mod tests {
     /// tools/list first so the outcome reflects requests served BEFORE the flag
     /// fired (the "no in-flight request dropped" invariant).
     ///
-    /// serve runs on the test thread (its ctx borrows a `!Sync` DuckDB
-    /// `Connection`, same constraint as the production scope-body serve); the
-    /// bridge stand-in + the engine stand-in run on spawned threads.
+    /// serve runs on a spawned worker that owns its ctx (the fixture
+    /// builds the ctx inside -- the owns-everything shape of the
+    /// production scope-body serve) and the result rides a bounded
+    /// receive: the mutation this pin kills (the spine's beat flag check
+    /// deleted) parks serve forever, which must land as a red at the
+    /// bound, not a hung suite. The bridge stand-in + the engine stand-in
+    /// run on spawned threads.
     #[test]
     fn serve_connection_returns_on_engine_done_without_bridge_eof() {
-        let ctx = fresh_ctx();
         let handle = bind_gateway().expect("bind");
         let port = handle.port;
         let token = handle.token.clone();
         let engine_done = Arc::new(AtomicBool::new(false));
         let done_for_engine = Arc::clone(&engine_done);
+        let done_for_serve = Arc::clone(&engine_done);
         let (ready_tx, ready_rx) = mpsc::channel::<()>();
         let (close_tx, close_rx) = mpsc::channel::<()>();
 
@@ -2456,6 +2571,17 @@ mod tests {
             // `s` drops -> stream closes, but serve has already returned.
         });
 
+        // serve runs on a spawned worker that owns its ctx; a regression
+        // that parks it forever lands as a red at the receive bound below,
+        // not a hung suite.
+        let (serve_tx, serve_rx) = mpsc::channel::<(GatewayOutcome, Duration)>();
+        let serve = thread::spawn(move || {
+            let ctx = fresh_ctx();
+            let started = Instant::now();
+            let outcome = serve_connection(handle, ctx, &done_for_serve).expect("serve");
+            let _ = serve_tx.send((outcome, started.elapsed()));
+        });
+
         // Engine stand-in: wait for the init + list exchanges, let serve park
         // on read_message, then arm the completion flag. Mirrors the engine
         // thread setting engine_done when its prompt pump returns.
@@ -2465,16 +2591,17 @@ mod tests {
             done_for_engine.store(true, Ordering::SeqCst);
         });
 
-        // serve runs on THIS thread (ctx borrows the !Sync Connection, same
-        // shape as the production scope-body serve). Time the full call so the
-        // assertion covers connect + handshake + exchange + flag-driven return.
-        let start = Instant::now();
-        let outcome = serve_connection(handle, ctx, &engine_done).expect("serve");
-        let elapsed = start.elapsed();
+        // serve runs on the worker above, timed inside it so the assertion
+        // covers connect + handshake + exchange + flag-driven return; the
+        // bounded receive below is the pin's own failure bound.
+        let (outcome, elapsed) = serve_rx.recv_timeout(Duration::from_secs(3)).expect(
+            "serve returned on the flag (a park past 3s is the spine's beat flag check gone)",
+        );
         // Release the client's held socket now that serve has returned.
         let _ = close_tx.send(());
         client.join().expect("client thread panicked");
         engine.join().expect("engine thread panicked");
+        serve.join().expect("serve worker panicked");
 
         // The loop-top check fires within one SERVE_BEAT (100ms) of the flag
         // store; the connect + exchange + 150ms park budget stays well under

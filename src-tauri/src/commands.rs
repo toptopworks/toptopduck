@@ -1650,11 +1650,11 @@ fn probe_result_from_outcome(
 ///
 /// Async + deadline-bounded (issue #392): the entire spawn + initialize +
 /// tools/list cycle is wrapped in `tokio::time::timeout` with a deadline
-/// from `server.timeout_ms` (or the 30 s default). For stdio the child is
-/// spawned in the async scope (not inside `spawn_blocking`) so the Child
-/// handle is retained for kill-on-timeout — `spawn_blocking` tasks are NOT
-/// cancellable, and the only way to guarantee a hung child is reaped is to
-/// keep the process handle outside the blocking closure.
+/// from `server.timeout_ms` (or the 30 s default). For stdio the child
+/// handle is held outside the deadline race so a timeout still owns the
+/// kill: the handshake future is dropped at expiry (a dropped future
+/// cannot kill anything), while the handle's tree kill + reap run after
+/// it.
 #[tauri::command]
 pub async fn probe_mcp_server(
     live: State<'_, LiveProviderConfig>,
@@ -1687,12 +1687,22 @@ pub async fn probe_mcp_server(
         // The task needs an owned attribution label (issue #900).
         let server_label = server.display_name.clone();
 
+        // The handshake rides a spawned bridge task so its polls land on
+        // the runtime the pipes registered on (`spawn_on_bridge`); the
+        // deadline race stays on this command's runtime, and an expiry
+        // merely detaches the task -- the kill + reap below end it.
+        // (`block_on` itself is not an option here: it panics from inside
+        // an async context.)
         let outcome = tokio::time::timeout(deadline, async {
             match (stdin, stdout) {
                 (Some(stdin), Some(stdout)) => {
-                    crate::mcp::client::stdio_handshake(stdin, stdout, &server_label)
-                        .await
-                        .map_err(|e| e.to_string())
+                    crate::mcp::client::spawn_transport_task(async move {
+                        crate::mcp::client::stdio_handshake(stdin, stdout, &server_label)
+                            .await
+                            .map_err(|e| e.to_string())
+                    })
+                    .await
+                    .map_err(|e| e.to_string())?
                 }
                 _ => Err("child stdin/stdout not available".to_string()),
             }
@@ -1700,8 +1710,12 @@ pub async fn probe_mcp_server(
         .await;
 
         // Kill the whole tree (a wrapper's grandchildren die with it, #1456)
-        // and reap the direct child.
-        child.kill_and_reap().await;
+        // and reap the direct child -- on the bridge runtime, for the same
+        // registration/polling pairing as the handshake.
+        let mut child = child;
+        crate::mcp::client::spawn_transport_task(async move { child.kill_and_reap().await })
+            .await
+            .expect("the reap task joins");
         return Ok(probe_result_from_outcome(outcome, server_id, deadline_ms));
     }
 
@@ -1711,11 +1725,11 @@ pub async fn probe_mcp_server(
     // gone with it). HTTP bodies carry a per-read bound (HTTP_READ_TIMEOUT)
     // so a hung read still resolves under the deadline. The SSE face's
     // time-bounded parks (GET headers, endpoint event, POST acks)
-    // self-resolve the same way; its response-wait park carries no bound and
-    // the probe path fires no stop signal -- a server that acks POSTs but
-    // never streams responses leaves that read parked until process exit
-    // (pre-existing shape; the outer deadline has already answered the user
-    // by then).
+    // self-resolve the same way; its response-wait park carries no bound of
+    // its own and the probe path fires no stop signal -- a server that
+    // acks POSTs but never streams responses stays parked until the outer
+    // deadline drops the connect future, which closes the connection and
+    // ends the park (the timeout, not a transport kill, answers the user).
     let result = tokio::time::timeout(deadline, async {
         crate::mcp::client::connect_transport(&server, &secrets, &header_secrets, None)
             .await

@@ -58,9 +58,9 @@ fn stdio_config(id: &str, bin: &str) -> McpServerConfig {
 /// Kill the child's tree and reap the direct child, asserting the reap
 /// (wait() succeeding confirms the child was reaped — no zombie/leak). The
 /// tests run on plain threads, so the async reap rides the transport
-/// runtime through the same `block_on` seam the production caller uses —
-/// the child registered there at spawn, and a throwaway runtime would
-/// strand its wakers.
+/// runtime the child registered on at spawn (the same runtime the
+/// production caller polls through) — a throwaway runtime would strand
+/// its wakers.
 fn kill_and_reap(child: &mut StdioChildHandle) {
     child.kill();
     toptopduck_lib::mcp::client::block_on(child.reap()).expect("child reaped");
@@ -234,7 +234,9 @@ fn orphaning_config(id: &str) -> McpServerConfig {
 /// Park a read on the grandchild-held stdout pipe and report the first
 /// read's outcome (Ok(0) = EOF) — the settle observable both tree pins
 /// assert on. The tests run on plain threads, so the read rides a
-/// throwaway current-thread runtime.
+/// throwaway current-thread runtime — safe here and only here: it is one
+/// terminal read with no caller awaiting a later poll, unlike the
+/// carried-IO clients that must ride the bridge runtime.
 fn spawn_pipe_read(stdout: tokio::process::ChildStdout) -> mpsc::Receiver<std::io::Result<usize>> {
     let (tx, rx) = mpsc::channel();
     thread::spawn(move || {

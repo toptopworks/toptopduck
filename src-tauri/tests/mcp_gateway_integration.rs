@@ -1213,9 +1213,6 @@ fn write_response(stream: &mut TcpStream, status: u16, content_type: &str, body:
     let _ = stream.flush();
 }
 
-/// Drive one async client call on a throwaway current-thread runtime: the
-/// lib's crate-private bridge entry is not exported, and every transport
-/// call is async since #1457.
 /// Drive one async-client future on the transport bridge runtime: clients
 /// that carry live IO (the SSE stream above all) must have every poll on
 /// that one runtime -- a throwaway current-thread runtime per call leaves

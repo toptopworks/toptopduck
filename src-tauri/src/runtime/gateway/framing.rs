@@ -150,35 +150,13 @@ pub fn write_message(writer: &mut impl Write, msg: &Value) -> io::Result<()> {
 
 /// The async twin of [`read_message`]: one newline-delimited JSON-RPC
 /// message from an async buffered reader, `None` at clean EOF, `Err` on an
-/// invalid or over-long line.
+/// invalid or over-long line -- the stateless form delegating to
+/// [`FrameReader::read_message_async`], the same delegation shape as the
+/// sync twin.
 pub async fn read_message_async(
     reader: &mut (impl tokio::io::AsyncBufRead + Unpin),
 ) -> io::Result<Option<Value>> {
-    let mut lines = BoundedLineReader::new(&mut *reader);
-    loop {
-        match lines.read_line_bounded_async(LINE_MAX_BYTES).await? {
-            LineRead::Eof => return Ok(None),
-            LineRead::Overlong => {
-                log::warn!(
-                    target: "toptopduck::gateway",
-                    "frame line exceeded {LINE_MAX_BYTES} bytes, failing the connection"
-                );
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    format!("frame line exceeded {LINE_MAX_BYTES} bytes"),
-                ));
-            }
-            LineRead::Line(line) => {
-                let trimmed = line.trim_end_matches(['\r', '\n']);
-                if trimmed.is_empty() {
-                    continue;
-                }
-                return serde_json::from_str(trimmed)
-                    .map(Some)
-                    .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e));
-            }
-        }
-    }
+    FrameReader::new(&mut *reader).read_message_async().await
 }
 
 /// The async twin of [`write_message`]: serializes to a buffer first (the

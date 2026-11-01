@@ -341,28 +341,28 @@ impl McpAggregator {
         let tool_output_dir = self.tool_output_dir.clone();
         // The deadline covers connect + initialize + tools/list as one phase:
         // a stdio child that spawns but never responds parks exactly here
-        // (issue #889). `expire` races the worker's `publish` -- whichever
-        // lands second performs the kill, so a spawn that outlasts the
-        // budget still self-terminates the moment its handle exists (a 0 ms
-        // budget surfaces as this gateway fault, the config contract). The
-        // worker captures owned copies (the deadline runner parks it on a
-        // detached thread, which demands `'static`).
-        let config_for_worker = config.clone();
-        let secrets_for_worker = secrets.to_vec();
-        let header_secrets_for_worker = header_secrets.to_vec();
+        // (issue #889). `expire` races the async connect's `publish` --
+        // whichever lands second performs the kill, so a connect that
+        // outlasts the budget still self-terminates the moment its handle
+        // exists (a 0 ms budget surfaces as this gateway fault, the config
+        // contract). The async block captures owned copies (the future
+        // outlives this stack frame inside the deadline wrapper).
+        let config_for_connect = config.clone();
+        let secrets_for_connect = secrets.to_vec();
+        let header_secrets_for_connect = header_secrets.to_vec();
         let outcome = crate::mcp::client::block_on(with_deadline(
             timeout,
             move || slot_for_kill.expire(),
             async {
                 let mut client = connect_transport_with_kill(
-                    &config_for_worker,
-                    &secrets_for_worker,
-                    &header_secrets_for_worker,
+                    &config_for_connect,
+                    &secrets_for_connect,
+                    &header_secrets_for_connect,
                     tool_output_dir.as_deref(),
                     &kill_slot,
                 )
                 .await?;
-                let tools = client.list_tools(&config_for_worker.display_name).await?;
+                let tools = client.list_tools(&config_for_connect.display_name).await?;
                 Ok::<(TransportClient, Vec<Value>), ClientError>((client, tools))
             },
         ));
@@ -770,12 +770,14 @@ impl McpAggregator {
                 result.map_err(RouteError::Client)
             }
             None => {
-                // The deadline expired: the kill already fired inside the
-                // grace and the unfinished call future is dropped with it,
-                // so the client is discarded with the slot left `None` --
-                // the transport's fate is unknown (the kill may still be
-                // mid-flight), and re-homing the client would park the
-                // turn's next call against a corpse.
+                // The deadline expired: the kill fired inside the grace and
+                // either the call future never finished (dropped at the
+                // grace bound) or it finished inside the grace and its
+                // result was discarded (the deadline-abort convention) --
+                // either way the client is discarded with the slot left
+                // `None`: the transport's fate is unknown (the kill may
+                // still be mid-flight), and re-homing the client would park
+                // the turn's next call against a corpse.
                 server.dead = true;
                 // Cold-branch attribution (issue #892): the error path is
                 // the expiry arm's only consumer of these names, so the
@@ -989,6 +991,19 @@ async fn with_deadline<T>(
     kill: impl FnOnce(),
     fut: impl Future<Output = T>,
 ) -> Option<T> {
+    with_deadline_in(timeout, KILL_JOIN_GRACE, kill, fut).await
+}
+
+/// The test seam under [`with_deadline`] (#1457 review): the grace bound
+/// is injectable so the unwind stage's own semantics -- the bound exists,
+/// an in-grace result is discarded, a kill-resistant call drops at the
+/// bound -- can be pinned without sleeping the production 5 s.
+async fn with_deadline_in<T>(
+    timeout: Duration,
+    grace: Duration,
+    kill: impl FnOnce(),
+    fut: impl Future<Output = T>,
+) -> Option<T> {
     // `pin!` + `as_mut` so the budget-stage timeout consumes only a
     // reborrow: on expiry the future itself survives (Pin's drop does not
     // drop the pointee) and the grace stage re-awaits the SAME call.
@@ -1002,7 +1017,7 @@ async fn with_deadline<T>(
             // wakes through its stop signal, immediate since #1455); one
             // that cannot land leaves it parked, and dropping it beats
             // re-wedging the turn.
-            match tokio::time::timeout(KILL_JOIN_GRACE, fut).await {
+            match tokio::time::timeout(grace, fut).await {
                 Ok(_) => None,
                 Err(_) => {
                     log::warn!(
@@ -1658,5 +1673,91 @@ mod tests {
     fn extract_tool_info_empty_input_returns_empty() {
         let infos: Vec<McpToolInfo> = extract_tool_info(&[]);
         assert!(infos.is_empty());
+    }
+
+    // --- with_deadline grace stage (#1457 review) ------------------------------
+
+    /// A kill that lands on nothing (the kill-resistant wrapper shape)
+    /// must still end the call: the grace bound drops it, not never. The
+    /// drive sits on a worker behind a bounded receive -- under a
+    /// deleted-grace mutation the failure shape is a park, which must
+    /// land as a red at the bound, not a hung suite.
+    #[test]
+    fn with_deadline_drops_a_kill_resistant_call_at_the_grace_bound() {
+        let (tx, rx) = std::sync::mpsc::channel::<Option<()>>();
+        let start = std::time::Instant::now();
+        std::thread::spawn(move || {
+            let outcome = crate::mcp::client::block_on(with_deadline_in(
+                Duration::from_millis(20),
+                Duration::from_millis(80),
+                || {},
+                std::future::pending::<()>(),
+            ));
+            let _ = tx.send(outcome);
+        });
+        let outcome = rx.recv_timeout(Duration::from_secs(2)).expect(
+            "the grace bound dropped the parked call (a park past 2s is the grace stage gone)",
+        );
+        assert!(outcome.is_none(), "the grace bound drops the parked call");
+        assert!(
+            start.elapsed() >= Duration::from_millis(80),
+            "the drop waited out the grace, not an instant return"
+        );
+    }
+
+    /// A call the kill releases but which completes inside the grace is
+    /// discarded -- an in-flight response is invalidated by the kill (the
+    /// deadline-abort convention `route` records).
+    #[test]
+    fn with_deadline_discards_a_call_that_lands_inside_the_grace() {
+        let released = std::sync::Arc::new(tokio::sync::Notify::new());
+        let released_for_kill = std::sync::Arc::clone(&released);
+        let outcome = crate::mcp::client::block_on(with_deadline_in(
+            Duration::from_millis(20),
+            Duration::from_secs(2),
+            move || released_for_kill.notify_one(),
+            async move {
+                released.notified().await;
+                tokio::time::sleep(Duration::from_millis(20)).await;
+                "landed"
+            },
+        ));
+        assert!(
+            outcome.is_none(),
+            "an in-grace result is discarded, not returned"
+        );
+    }
+
+    /// A call that lands inside the budget passes through untouched -- the
+    /// kill must not even fire.
+    #[test]
+    fn with_deadline_returns_a_call_that_lands_inside_the_budget() {
+        let outcome = crate::mcp::client::block_on(with_deadline_in(
+            Duration::from_secs(5),
+            Duration::from_millis(50),
+            || panic!("the kill must not fire inside the budget"),
+            async { "landed" },
+        ));
+        assert_eq!(outcome, Some("landed"));
+    }
+
+    /// A panicking call propagates inline through the bridge (the retired
+    /// worker caught and resumed it; the async face must keep the same
+    /// propagation).
+    #[test]
+    fn with_deadline_propagates_a_call_panic_inline() {
+        let result = std::panic::catch_unwind(|| {
+            crate::mcp::client::block_on(with_deadline_in(
+                Duration::from_secs(5),
+                Duration::from_millis(50),
+                || {},
+                async { panic!("the server call panicked") },
+            ))
+        });
+        let payload = result.expect_err("the panic crosses the block_on boundary");
+        assert_eq!(
+            payload.downcast_ref::<&str>(),
+            Some(&"the server call panicked"),
+        );
     }
 }

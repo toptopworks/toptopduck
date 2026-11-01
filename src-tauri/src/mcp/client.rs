@@ -52,7 +52,9 @@
 //! consumers -- the dispatch core's route seam and the gateway serve
 //! spine, which are sync by architecture (the approval gate's
 //! human-unbounded park) -- bridge at their own boundary through
-//! [`block_on`], one runtime entry per call, never per wire operation.
+//! [`block_on`], each at its own granularity (the dispatch core per call,
+//! the serve spine per socket write -- [`block_on`]'s doc names the
+//! per-operation waits).
 
 use std::collections::{BTreeMap, HashSet};
 use std::future::Future;
@@ -74,9 +76,9 @@ use crate::runtime::gateway::framing;
 
 /// HTTP per-read timeout (issue #392; async carry, #1455): every body-chunk
 /// read on a streamable-HTTP response must progress within this bound, so a
-/// hung server's blocking worker eventually terminates after the probe
-/// deadline fires — `spawn_blocking` tasks are not cancelled, so without
-/// this the thread + TCP connection would linger indefinitely.
+/// silent stream still resolves under any outer deadline and the
+/// aggregator's kill cadence stays honest — without it the body read would
+/// park with no inner bound of its own to end it.
 const HTTP_READ_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Bound on the probe's post-kill reap wait (#1456 review): a healthy kill
@@ -98,9 +100,10 @@ const BODY_CHANNEL_BOUND: usize = 64;
 /// response to a POST may trail it indefinitely), so those ride the
 /// stop-wake `select!` instead. The bound self-resolves the parks it covers
 /// for a probe that fires no kill signal (issue #392); the response-wait
-/// park carries no bound -- a server that acks POSTs but never streams
-/// responses leaves that read parked until process exit (by then the
-/// probe's outer deadline has already answered the user).
+/// park carries no bound of its own -- a server that acks POSTs but never
+/// streams responses stays parked until the probe's outer deadline drops
+/// the whole connect future, which closes the connection and ends the park
+/// (the failure surfaces as the timeout, not a transport kill).
 const SSE_ACK_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// The transport-side tokio runtime (ADR-0139, #1455): hosts the SSE/HTTP
@@ -149,10 +152,11 @@ fn transport_runtime() -> &'static tokio::runtime::Runtime {
 /// `tokio::process::Command::spawn` registers every pipe with the
 /// thread-local runtime's reactor and panics outside a runtime context
 /// (`PollEvented::new` -> `Handle::current`), and both spawn sites here run
-/// on plain threads -- the aggregator's deadline workers and the probe's
+/// on plain threads -- the aggregator's dispatch legs and the probe's
 /// test threads (#1456 review). Entering the bridge also keeps the pipes
-/// registered on the same runtime every later `block_on` polls through,
-/// instead of splitting registration and polling across runtimes.
+/// registered on the runtime every later poll rides (a `block_on` from a
+/// plain thread, a spawned task from an async context), instead of
+/// splitting registration and polling across runtimes.
 fn spawn_on_bridge(cmd: &mut Command) -> std::io::Result<Child> {
     let _enter = transport_runtime().enter();
     cmd.spawn()
@@ -212,10 +216,10 @@ impl SseStopSignal {
 
 /// A cross-thread kill handle for one transport (issue #889). Cloned from
 /// the owning client; [`TransportKill::kill`] makes that transport's
-/// blocking read return so a parked caller unblocks:
+/// parked read return so a blocked caller unblocks:
 /// - stdio: terminate the child's whole process tree (a `npx`/`uvx` wrapper
 ///   and its grandchildren die with it, #1456) -> the child's stdout EOFs
-///   -> `read_message` reports `ServerClosed`;
+///   -> `read_message_async` reports `ServerClosed`;
 /// - SSE: fire the stop signal -> a request parked in the stream-read
 ///   `select!` wakes immediately and reports `ServerClosed`;
 /// - HTTP: no-op -- that transport is already bounded per-read
@@ -351,8 +355,9 @@ impl TransportKill {
 /// timeout. The two directions race:
 /// expiry may land before spawn finishes (the handle is not published yet),
 /// so publish re-checks the expired flag and self-terminates -- otherwise
-/// the worker would park on the handshake read after the deadline with
-/// nobody left to kill it, and the caller's scope join would never return.
+/// the connect future would keep parking on the handshake read after the
+/// deadline with nobody left to kill it: the deadline drops the future,
+/// and the late handle kills itself instead of leaking.
 #[derive(Default)]
 pub struct ConnectKill {
     handle: Mutex<Option<TransportKill>>,
@@ -1013,15 +1018,14 @@ fn stdio_command(
 /// Spawn the configured stdio server child process WITHOUT driving the MCP
 /// handshake (issue #392). Returns the [`StdioChildHandle`] (the child plus
 /// its tree guard) so the caller owns the lifecycle — specifically, the
-/// async `probe_mcp_server` command retains the handle outside its
-/// `spawn_blocking` closure so a timeout can kill the tree. The caller
-/// takes the child's stdin/stdout and drives [`stdio_handshake`] inside a
-/// blocking task.
+/// async `probe_mcp_server` command holds the handle outside its deadline
+/// race so an expiry still owns the kill. The caller takes the child's
+/// stdin/stdout and drives [`stdio_handshake`] under its own deadline.
 ///
 /// This is split from [`StdioClient::connect_with_kill`] (which couples
-/// spawn + initialize in one call) because `spawn_blocking` tasks are NOT
-/// cancellable — if the handshake hangs inside the task, the only way to
-/// guarantee the child is killed is to keep the handle outside.
+/// spawn + initialize in one call) because the handshake future is dropped
+/// at a timeout — the handle must outlive that drop for the kill + reap
+/// to run at all.
 pub fn spawn_stdio_child(
     config: &McpServerConfig,
     secrets: &[SecretEnv],
@@ -2604,8 +2608,9 @@ mod tests {
     /// The publish-after-expire ordering: `expire` may land before the
     /// transport has published its kill handle (a spawn that outlasts the
     /// budget), and the re-check inside `publish` is what kills the LATE
-    /// handle -- without it the worker parks on the handshake read after
-    /// the deadline with nobody left to kill it. The stop-signal variant
+    /// handle -- without it the connect future keeps parking on the
+    /// handshake read after the deadline with nobody left to kill it. The
+    /// stop-signal variant
     /// makes the kill observable without a process: a `publish` that
     /// merely stores the handle leaves the flag unset and fails this pin.
     #[tokio::test]
@@ -3008,9 +3013,9 @@ Content-Type: text/event-stream
     /// #1455: the HTTP per-read bound's async carry -- a streamable-HTTP
     /// response that opens an SSE body and then falls silent surfaces as
     /// `Framing(TimedOut)` within the bound. This is issue #392's guarantee
-    /// (a hung server's blocking worker terminates after the probe deadline
-    /// fires; `spawn_blocking` tasks are not cancelled) restated on the
-    /// async face, pinned here with an injected bound instead of waiting
+    /// (a silent stream still resolves within the bound; the outer
+    /// deadline drops the future) restated on the async face, pinned here
+    /// with an injected bound instead of waiting
     /// out the 30 s production constant.
     #[tokio::test]
     async fn http_client_sse_body_per_read_bound_times_out_a_silent_stream() {
