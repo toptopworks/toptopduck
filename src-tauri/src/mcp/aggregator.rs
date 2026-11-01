@@ -15,7 +15,7 @@
 //!
 //! Turn-local (issue #301 Q2): the gateway constructs one `McpAggregator` per
 //! turn via [`McpAggregator::connect_all`] and drops it at turn end, tearing
-//! down every transport (killing stdio children, stopping SSE reader threads).
+//! down every transport (killing stdio children, firing the SSE stop signal).
 //! A failed connect (transport fault, spawn fault, tools/list error) logs +
 //! skips that server rather than failing the turn -- a misconfigured server
 //! must not brick the gateway. The search catalog holds only the connected
@@ -56,11 +56,11 @@ const CANCEL_TEARDOWN_POLL: Duration = Duration::from_millis(25);
 
 /// How long the deadline side waits after the kill for the worker's read to
 /// unwind before leaking the worker (issue #889 review). The kill unwinds a
-/// single-process stdio child immediately, an SSE reader within one reader
-/// wake (at most the client's `SSE_READ_TIMEOUT`), and an HTTP read at its
-/// 30 s per-read bound -- but shapes the kill cannot reach (a wrapper stdio
-/// shim whose grandchild inherits the stdout pipe, an SSE slow-drip under
-/// the wake interval) would otherwise park the worker forever, and waiting
+/// single-process stdio child immediately, an SSE transport through its stop
+/// wake (immediate since #1455's async carry), and an HTTP read at its 30 s
+/// per-read bound -- but shapes the kill cannot reach (a wrapper stdio shim
+/// whose grandchild inherits the stdout pipe) would otherwise park the
+/// worker forever, and waiting
 /// for it would re-wedge the turn on the join, the exact state this
 /// deadline exists to close. Leaking the worker (and the client it owns)
 /// trades one thread for a bounded turn.
@@ -233,7 +233,7 @@ pub fn extract_tool_info(tools: &[Value]) -> Vec<McpToolInfo> {
 
 /// The merged view over every connected external MCP server (ADR-0076). Owns
 /// the transport clients; `Drop` tears down each one (kills the child for
-/// stdio, stops the reader thread for SSE, no-op for HTTP).
+/// stdio, drops the SSE stream and its pump, no-op for HTTP).
 pub struct McpAggregator {
     servers: Vec<AggregatedServer>,
     /// Every attempted connect this turn (successes + failures), feeding
@@ -991,7 +991,7 @@ fn run_with_deadline<T: Send + 'static>(
             kill();
             // Bounded unwind wait: a kill that lands returns the worker well
             // inside the grace (a stdio EOF is immediate, the SSE reader
-            // wakes at most every `SSE_READ_TIMEOUT`); one that cannot land
+            // wakes through its stop signal, immediate since #1455); one that cannot land
             // leaves it parked, and leaking it beats re-wedging the turn.
             match rx.recv_timeout(KILL_JOIN_GRACE) {
                 // The call's result landed after expiry: discarded -- an

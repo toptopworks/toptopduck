@@ -167,19 +167,16 @@ chrono = { version = "0.4", default-features = false, features = ["clock"] }
 calamine = { version = "0.30", features = ["dates"] }
 # Per-sheet temp CSV writer: correct escaping for commas/quotes/newlines in cells.
 csv = "1"
-# MCP remote transport carrier (ADR-0139): ureq's only remaining surface. The
-# upstream LLM domain single-stacks on reqwest (live turns ride the async
-# client injected into rig, ADR-0116; the preflight probes ride
-# `reqwest::blocking`), so this stays solely as the MCP remote client's HTTP
-# transport until the MCP chain's async conversion retires it. The `json`
-# feature adds serde integration; TLS (rustls, default) is pure-Rust and
-# cross-platform with no native deps.
-ureq = { version = "2", features = ["json"] }
+# Body chunk type the MCP transports read through (the pump channel's
+# payload; reqwest's `Response::chunk` yields it). A transitive dep of the
+# reqwest/rustls graph, declared explicitly since the transport names it.
+bytes = "1"
 # URL parsing for the provider base_url scheme check (issue #244). `url::Url::parse`
 # rejects malformed / scheme-less base_urls and exposes the scheme so the provider
 # can admit only `http`/`https`, ruling out `file:` and other exfiltration vectors
-# before any request is built. A transitive dep of ureq; declared explicitly so the
-# provider's call sites are intentional, not accidental.
+# before any request is built (the MCP SSE transport resolves its advertised
+# POST url through the same parser, issue #389). Declared explicitly so the
+# call sites are intentional, not accidental.
 url = "2"
 # OS keychain access (ADR-0029 invariant 3): the decrypted API key lives only
 # in the Rust core process. The frontend never holds it ("is it set?" returns a
@@ -240,7 +237,9 @@ tauri-plugin-log = "2"
 # `rt` + `sync` (ADR-0116, issue #917): the loop runtime drives the upstream agent loop
 # on a dedicated per-turn current-thread runtime and parks/wakes through
 # `tokio::sync::Notify`; `macros` backs the runner's `select!` race floor.
-tokio = { version = "1", features = ["time", "rt", "sync", "macros"] }
+# `io-util` (ADR-0139, #1455): the MCP remote transports read body streams
+# through AsyncBufRead (the bounded-line async face over the chunk pump).
+tokio = { version = "1", features = ["time", "rt", "sync", "macros", "io-util"] }
 # `sqlparser` parses provider SQL to extract the FROM/JOIN reference-name set
 # for the stale-cascade provenance graph (issue #40, ADR-0013/0025/0040): each
 # materialized result_N records which working-set members its SQL named, so a
@@ -288,7 +287,7 @@ toml = "0.9"
 # Bounded single-line reader (workspace member `crates/bounded-line`): shared
 # by the gateway framing / MCP SSE / ACP stdout readers here and by the
 # zero-dependency ACP bridge binary (ADR-0085 pure-std constraint, #1295).
-bounded-line = { path = "../crates/bounded-line" }
+bounded-line = { path = "../crates/bounded-line", features = ["async"] }
 # Builtin runtime (ADR-0116, issue #917): the in-process loop borrows rig's
 # kernel only -- rig-core + rig-agent, direct deps, `default-features = false`
 # (drops the `derive` proc-macro), minor-gated "0.42" with the Cargo.lock
@@ -305,19 +304,21 @@ rig-agent = { version = "0.42", default-features = false }
 # still on board. Same 0.13 line rig-core rides (already in the lock via
 # rig); `default-features = false` suppresses reqwest's default native-tls
 # so the only TLS backend is rig-core's `rustls` feature above -- the same
-# pure-Rust TLS posture ureq carries. The explicit feature set restores the
-# wire posture the egress client had before the retired loop layer's removal
-# (its defaults-on reqwest used to contribute these through the feature
-# union): OS-configured proxy resolution (GUI-launched desktop apps rarely
-# carry proxy env vars), HTTP/2, and charset decoding. `blocking` + `json`
-# serve the preflight probes (ADR-0139): the probe runs on a
-# `spawn_blocking` thread where the blocking flavor fits without an async
-# runtime, and the features give it the same JSON send/parse the retired
-# ureq face carried (`send_json` / `into_json`). Both egress clients this
-# builds are process-shared singletons -- the live face since issue #926,
-# the preflight blocking face since this change -- so each proxy snapshot
-# freezes at the first successful build: a mid-session proxy change waits
-# for process restart (documented at each singleton).
+# pure-Rust TLS posture the retired ureq face carried. The explicit feature
+# set restores the wire posture the egress client had before the retired
+# loop layer's removal (its defaults-on reqwest used to contribute these
+# through the feature union): OS-configured proxy resolution (GUI-launched
+# desktop apps rarely carry proxy env vars), HTTP/2, and charset decoding.
+# `blocking` + `json` serve the preflight probes (ADR-0139): the probe runs
+# on a `spawn_blocking` thread where the blocking flavor fits without an
+# async runtime; `json` also carries the MCP transports' request sends
+# (the retired ureq face's `send_json`; the parse side is serde_json over
+# the raw body bytes). Both singletons live in
+# `src/egress.rs` (ADR-0139's shared construction seam): the async face
+# serves the live turns (issue #926) and the MCP remote transports (#1455),
+# the blocking face the preflight probes -- so each proxy snapshot freezes
+# at the first successful build: a mid-session proxy change waits for
+# process restart (documented at the seam).
 reqwest = { version = "0.13", default-features = false, features = ["blocking", "charset", "http2", "json", "system-proxy"] }
 # Upstream rig emits its SSE/retry diagnostics through `tracing`; the app's
 # log sink is the `log` facade (tauri-plugin-log, issue #98). Declaring
