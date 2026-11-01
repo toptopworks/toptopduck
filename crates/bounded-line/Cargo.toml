@@ -15,8 +15,9 @@ rust-version = "1.86"
 async = ["dep:tokio"]
 
 [dependencies]
-# Only pulled in by the `async` feature: io-util backs fill_buf/consume on
-# AsyncBufRead. No runtime features -- the caller brings its own.
+# Only pulled in by the `async` feature: io-util backs the take/read_until
+# extension traits (fill_buf/consume are core AsyncBufRead, ungated). No
+# runtime features -- the caller brings its own.
 tokio = { version = "1", optional = true, features = ["io-util"] }
 
 [dev-dependencies]

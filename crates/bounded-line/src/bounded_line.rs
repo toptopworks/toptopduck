@@ -188,7 +188,11 @@ impl<R: tokio::io::AsyncBufRead + Unpin> BoundedLineReader<R> {
     pub async fn read_line_bounded_async(&mut self, max: usize) -> std::io::Result<LineRead> {
         // This method mirrors the sync `read_line_bounded` above; the
         // comments there carry the reasoning, the equivalence tests carry
-        // the proof.
+        // the proof. One seam the primitives force: std's `read_until`
+        // retries `Interrupted` in place while tokio's propagates it, so
+        // a reader surfacing `Interrupted` yields one transient Err here
+        // where the sync face self-heals -- tokio's own IO types never
+        // surface it.
         if max == 0 {
             return Ok(LineRead::Eof);
         }
@@ -588,8 +592,10 @@ mod tests {
             }
         }
 
-        /// The async mirror of [`Scripted`]: the same step script with no
-        /// park, so equivalence runs stay deterministic.
+        /// The async mirror of [`Scripted`]: the same step script. The type
+        /// can park -- the [`AsyncStep::Pending`] arm serves the drop-resume
+        /// test -- but the equivalence runs stay park-free and deterministic
+        /// because `from_steps` maps only Bytes and Fail.
         struct AsyncScripted {
             steps: Vec<AsyncStep>,
             pos: usize,
@@ -731,6 +737,16 @@ mod tests {
                             Step::Bytes(b"{\"json".to_vec()),
                             Step::Fail(std::io::ErrorKind::TimedOut),
                             Step::Bytes(b"rpc\":\"2.0\"}\n".to_vec()),
+                        ]
+                    },
+                    vec![64, 64],
+                ),
+                (
+                    "timeout before any bytes propagates (#649)",
+                    || {
+                        vec![
+                            Step::Fail(std::io::ErrorKind::WouldBlock),
+                            Step::Bytes(b"hello\n".to_vec()),
                         ]
                     },
                     vec![64, 64],
