@@ -1650,11 +1650,11 @@ fn probe_result_from_outcome(
 ///
 /// Async + deadline-bounded (issue #392): the entire spawn + initialize +
 /// tools/list cycle is wrapped in `tokio::time::timeout` with a deadline
-/// from `server.timeout_ms` (or the 30 s default). For stdio the child is
-/// spawned in the async scope (not inside `spawn_blocking`) so the Child
-/// handle is retained for kill-on-timeout — `spawn_blocking` tasks are NOT
-/// cancellable, and the only way to guarantee a hung child is reaped is to
-/// keep the process handle outside the blocking closure.
+/// from `server.timeout_ms` (or the 30 s default). For stdio the child
+/// handle is held outside the deadline race so a timeout still owns the
+/// kill: the handshake future is dropped at expiry (a dropped future
+/// cannot kill anything), while the handle's tree kill + reap run after
+/// it.
 #[tauri::command]
 pub async fn probe_mcp_server(
     live: State<'_, LiveProviderConfig>,
@@ -1667,8 +1667,9 @@ pub async fn probe_mcp_server(
     let server_id = server.id.as_str();
 
     // Stdio: spawn the child in the async scope so we own the handle (and
-    // its tree guard) for kill-on-timeout. The blocking handshake runs in
-    // spawn_blocking with the child's stdin/stdout (issue #392).
+    // its tree guard) for kill-on-timeout. The handshake is natively async
+    // since #1457 (the retired spawn_blocking closure existed only to host
+    // the then-synchronous wire calls), so the deadline races it directly.
     if let McpTransport::Stdio { .. } = &server.transport {
         let mut child = match crate::mcp::client::spawn_stdio_child(&server, &secrets) {
             Ok(c) => c,
@@ -1683,51 +1684,59 @@ pub async fn probe_mcp_server(
         };
         let stdin = child.take_stdin();
         let stdout = child.take_stdout();
-        // The blocking task needs an owned attribution label (issue #900).
+        // The task needs an owned attribution label (issue #900).
         let server_label = server.display_name.clone();
 
-        let join = tauri::async_runtime::spawn_blocking(move || {
-            let stdin = stdin.ok_or_else(|| "child stdin not available".to_string())?;
-            let stdout = stdout.ok_or_else(|| "child stdout not available".to_string())?;
-            crate::mcp::client::stdio_handshake(stdin, stdout, &server_label)
-                .map_err(|e| e.to_string())
-        });
-
+        // The handshake rides a spawned bridge task so its polls land on
+        // the runtime the pipes registered on (`spawn_on_bridge`); the
+        // deadline race stays on this command's runtime, and an expiry
+        // merely detaches the task -- the kill + reap below end it.
+        // (`block_on` itself is not an option here: it panics from inside
+        // an async context.)
         let outcome = tokio::time::timeout(deadline, async {
-            join.await.map_err(|e| e.to_string()).and_then(|r| r)
+            match (stdin, stdout) {
+                (Some(stdin), Some(stdout)) => {
+                    crate::mcp::client::spawn_transport_task(async move {
+                        crate::mcp::client::stdio_handshake(stdin, stdout, &server_label)
+                            .await
+                            .map_err(|e| e.to_string())
+                    })
+                    .await
+                    .map_err(|e| e.to_string())?
+                }
+                _ => Err("child stdin/stdout not available".to_string()),
+            }
         })
         .await;
 
         // Kill the whole tree (a wrapper's grandchildren die with it, #1456)
-        // and reap the direct child.
-        child.kill_and_reap().await;
+        // and reap the direct child -- on the bridge runtime, for the same
+        // registration/polling pairing as the handshake.
+        let mut child = child;
+        crate::mcp::client::spawn_transport_task(async move { child.kill_and_reap().await })
+            .await
+            .expect("the reap task joins");
         return Ok(probe_result_from_outcome(outcome, server_id, deadline_ms));
     }
 
-    // SSE/HTTP: the blocking I/O runs inside spawn_blocking wrapped in a
-    // deadline. The outer deadline is the primary bound — spawn_blocking
-    // tasks are not cancelled, so the thread lingers until the I/O returns.
-    // HTTP bodies carry a per-read bound (HTTP_READ_TIMEOUT) so the task
-    // eventually resolves. The SSE face's time-bounded parks (GET headers,
-    // endpoint event, POST acks) self-resolve the same way; its
-    // response-wait park carries no bound and the probe path fires no stop
-    // signal -- a server that acks POSTs but never streams responses leaves
-    // that thread parked until process exit (pre-existing shape; the outer
-    // deadline has already answered the user by then).
-    let server_for_blocking = server.clone();
+    // SSE/HTTP: natively async since #1457 -- the deadline races the connect
+    // + tools/list directly (the retired spawn_blocking wrapper existed only
+    // to host the synchronous wire calls; its uncancellable-thread caveat is
+    // gone with it). HTTP bodies carry a per-read bound (HTTP_READ_TIMEOUT)
+    // so a hung read still resolves under the deadline. The SSE face's
+    // time-bounded parks (GET headers, endpoint event, POST acks)
+    // self-resolve the same way; its response-wait park carries no bound of
+    // its own and the probe path fires no stop signal -- a server that
+    // acks POSTs but never streams responses stays parked until the outer
+    // deadline drops the connect future, which closes the connection and
+    // ends the park (the timeout, not a transport kill, answers the user).
     let result = tokio::time::timeout(deadline, async {
-        tauri::async_runtime::spawn_blocking(move || {
-            let mut client = crate::mcp::client::connect_transport(
-                &server_for_blocking,
-                &secrets,
-                &header_secrets,
-                None,
-            )?;
-            client.list_tools(&server_for_blocking.display_name)
-        })
-        .await
-        .map_err(|e| e.to_string())
-        .and_then(|r| r.map_err(|e| e.to_string()))
+        crate::mcp::client::connect_transport(&server, &secrets, &header_secrets, None)
+            .await
+            .map_err(|e| e.to_string())?
+            .list_tools(&server.display_name)
+            .await
+            .map_err(|e| e.to_string())
     })
     .await;
 

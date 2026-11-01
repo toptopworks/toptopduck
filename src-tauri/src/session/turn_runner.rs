@@ -896,7 +896,7 @@ impl super::Session {
                 approval,
                 sink,
                 events: &tap,
-                cancel: &self.cancel,
+                cancel: Arc::clone(&self.cancel),
                 mcp,
                 // The enabled CLI registrations ride the same turn inputs
                 // the built-in loop reads (issue #673, ADR-0108 Decision 6):

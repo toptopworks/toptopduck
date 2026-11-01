@@ -1213,6 +1213,15 @@ fn write_response(stream: &mut TcpStream, status: u16, content_type: &str, body:
     let _ = stream.flush();
 }
 
+/// Drive one async-client future on the transport bridge runtime: clients
+/// that carry live IO (the SSE stream above all) must have every poll on
+/// that one runtime -- a throwaway current-thread runtime per call leaves
+/// the carried IO's wakers bound to a dead runtime and the next call dies
+/// mid-body ("error decoding response body").
+fn drive<F: std::future::Future>(fut: F) -> F::Output {
+    toptopduck_lib::mcp::client::block_on(fut)
+}
+
 // --- HTTP transport integration tests --------------------------------------
 
 #[test]
@@ -1220,23 +1229,22 @@ fn http_transport_connect_tools_list_and_call() {
     let server = HttpMcpServer::spawn(ServerMode::Http);
     let url = format!("{}/mcp", server.url());
 
-    let mut client = toptopduck_lib::mcp::client::HttpClient::connect(&url, &BTreeMap::new())
-        .expect("http connect");
+    let mut client = drive(toptopduck_lib::mcp::client::HttpClient::connect(
+        &url,
+        &BTreeMap::new(),
+    ))
+    .expect("http connect");
 
-    let tools = client.list_tools("http-fake").expect("tools/list");
+    let tools = drive(client.list_tools("http-fake")).expect("tools/list");
     assert_eq!(tools.len(), 2, "http server advertises echo + add");
     assert_eq!(tools[0]["name"], "echo");
     assert_eq!(tools[1]["name"], "add");
 
-    let result = client
-        .call("add", &json!({"a": 7, "b": 8}))
-        .expect("tools/call");
+    let result = drive(client.call("add", &json!({"a": 7, "b": 8}))).expect("tools/call");
     let text = first_text(&result);
     assert_eq!(text, "15");
 
-    let echo = client
-        .call("echo", &json!({"message": "hello-http"}))
-        .expect("echo call");
+    let echo = drive(client.call("echo", &json!({"message": "hello-http"}))).expect("echo call");
     assert_eq!(first_text(&echo), "Echo: hello-http");
 }
 
@@ -1287,17 +1295,17 @@ fn http_transport_handles_sse_response_branch() {
     let server = HttpMcpServer::spawn(ServerMode::HttpSse);
     let url = format!("{}/mcp", server.url());
 
-    let mut client = toptopduck_lib::mcp::client::HttpClient::connect(&url, &BTreeMap::new())
-        .expect("http-sse connect");
+    let mut client = drive(toptopduck_lib::mcp::client::HttpClient::connect(
+        &url,
+        &BTreeMap::new(),
+    ))
+    .expect("http-sse connect");
 
-    let tools = client
-        .list_tools("http-sse-fake")
-        .expect("tools/list via SSE response");
+    let tools = drive(client.list_tools("http-sse-fake")).expect("tools/list via SSE response");
     assert_eq!(tools.len(), 2, "http-sse server advertises echo + add");
 
-    let result = client
-        .call("add", &json!({"a": 20, "b": 22}))
-        .expect("tools/call via SSE response");
+    let result =
+        drive(client.call("add", &json!({"a": 20, "b": 22}))).expect("tools/call via SSE response");
     assert_eq!(first_text(&result), "42");
 }
 
@@ -1311,7 +1319,10 @@ fn http_transport_sse_malformed_data_fails_as_framing() {
     let server = HttpMcpServer::spawn(ServerMode::HttpSseMalformed);
     let url = format!("{}/mcp", server.url());
 
-    let err = match toptopduck_lib::mcp::client::HttpClient::connect(&url, &BTreeMap::new()) {
+    let err = match drive(toptopduck_lib::mcp::client::HttpClient::connect(
+        &url,
+        &BTreeMap::new(),
+    )) {
         Ok(_) => panic!("malformed SSE data must fail the request"),
         Err(e) => e,
     };
@@ -1341,7 +1352,10 @@ fn sse_transport_rejects_non_endpoint_first_event() {
     let server = HttpMcpServer::spawn(ServerMode::SseBadFirstEvent);
     let url = format!("{}/sse", server.url());
 
-    let result = toptopduck_lib::mcp::client::SseClient::connect(&url, &BTreeMap::new());
+    let result = drive(toptopduck_lib::mcp::client::SseClient::connect(
+        &url,
+        &BTreeMap::new(),
+    ));
     let err = match result {
         Ok(_) => panic!("non-endpoint first event should be rejected"),
         Err(e) => e,
@@ -1368,9 +1382,12 @@ fn sse_transport_malformed_message_fails_the_waiting_request_and_poisons_the_str
     let server = HttpMcpServer::spawn(ServerMode::SseMalformed);
     let url = format!("{}/sse", server.url());
 
-    let mut client = toptopduck_lib::mcp::client::SseClient::connect(&url, &BTreeMap::new())
-        .expect("the handshake is answered normally");
-    let err = match client.call("echo", &json!({"message": "x"})) {
+    let mut client = drive(toptopduck_lib::mcp::client::SseClient::connect(
+        &url,
+        &BTreeMap::new(),
+    ))
+    .expect("the handshake is answered normally");
+    let err = match drive(client.call("echo", &json!({"message": "x"}))) {
         Ok(_) => panic!("the malformed event must fail the waiting call"),
         Err(e) => e,
     };
@@ -1390,7 +1407,7 @@ fn sse_transport_malformed_message_fails_the_waiting_request_and_poisons_the_str
     }
     // Poisoned: the next call fails fast without touching the stream.
     let started = std::time::Instant::now();
-    let err2 = match client.call("echo", &json!({"message": "x"})) {
+    let err2 = match drive(client.call("echo", &json!({"message": "x"}))) {
         Err(e) => e,
         Ok(_) => panic!("a poisoned stream must refuse later requests"),
     };
@@ -1418,7 +1435,10 @@ fn sse_transport_endpoint_silence_fails_the_connect_within_the_ack_window() {
     let url = format!("{}/sse", server.url());
 
     let started = Instant::now();
-    let err = match toptopduck_lib::mcp::client::SseClient::connect(&url, &BTreeMap::new()) {
+    let err = match drive(toptopduck_lib::mcp::client::SseClient::connect(
+        &url,
+        &BTreeMap::new(),
+    )) {
         Err(e) => e,
         Ok(_) => panic!("a stream with no endpoint event must fail the connect"),
     };
@@ -1446,11 +1466,14 @@ fn sse_transport_stop_wake_is_immediate_under_a_parked_request() {
     let server = HttpMcpServer::spawn(ServerMode::SseSilent);
     let url = format!("{}/sse", server.url());
 
-    let mut client = toptopduck_lib::mcp::client::SseClient::connect(&url, &BTreeMap::new())
-        .expect("the handshake is answered normally");
+    let mut client = drive(toptopduck_lib::mcp::client::SseClient::connect(
+        &url,
+        &BTreeMap::new(),
+    ))
+    .expect("the handshake is answered normally");
     let kill = client.kill_handle();
 
-    let caller = std::thread::spawn(move || client.call("echo", &json!({"message": "x"})));
+    let caller = std::thread::spawn(move || drive(client.call("echo", &json!({"message": "x"}))));
     // Let the call park: the POST is acknowledged, the stream stays silent.
     thread::sleep(Duration::from_millis(300));
     let started = Instant::now();
@@ -1476,8 +1499,10 @@ fn http_transport_refuses_a_non_2xx_status_as_an_http_fault() {
     let server = HttpMcpServer::spawn(ServerMode::HttpErrorStatus);
     let url = format!("{}/mcp", server.url());
 
-    let client = toptopduck_lib::mcp::client::HttpClient::connect(&url, &BTreeMap::new());
-    let err = match client {
+    let err = match drive(toptopduck_lib::mcp::client::HttpClient::connect(
+        &url,
+        &BTreeMap::new(),
+    )) {
         Err(e) => e,
         Ok(_) => panic!("a 404 POST must fail the handshake, not parse the error body"),
     };
@@ -1508,10 +1533,10 @@ fn sse_transport_refuses_a_non_2xx_post_as_an_http_fault() {
     // as a red assert, not a hang.
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
-        let _ = tx.send(toptopduck_lib::mcp::client::SseClient::connect(
+        let _ = tx.send(drive(toptopduck_lib::mcp::client::SseClient::connect(
             &url,
             &BTreeMap::new(),
-        ));
+        )));
     });
     let err = match rx.recv_timeout(Duration::from_secs(10)) {
         Ok(Err(e)) => e,
@@ -1542,8 +1567,11 @@ fn sse_transport_poisons_the_stream_at_eof_so_a_later_call_skips_the_post() {
     let server = HttpMcpServer::spawn(ServerMode::SseSilent);
     let url = format!("{}/sse", server.url());
 
-    let mut client = toptopduck_lib::mcp::client::SseClient::connect(&url, &BTreeMap::new())
-        .expect("the handshake is answered normally");
+    let mut client = drive(toptopduck_lib::mcp::client::SseClient::connect(
+        &url,
+        &BTreeMap::new(),
+    ))
+    .expect("the handshake is answered normally");
 
     // Park THIS thread's call on the stream read (the SseSilent fixture
     // acks the POST and never forwards the response), then kill the fixture
@@ -1562,7 +1590,7 @@ fn sse_transport_poisons_the_stream_at_eof_so_a_later_call_skips_the_post() {
         }
         drop(server);
     });
-    let first = client.call("echo", &json!({"message": "x"}));
+    let first = drive(client.call("echo", &json!({"message": "x"})));
     match first {
         Err(ClientError::ServerClosed) | Err(ClientError::Framing(_)) => {}
         other => {
@@ -1575,7 +1603,7 @@ fn sse_transport_poisons_the_stream_at_eof_so_a_later_call_skips_the_post() {
 
     // The poisoned client refuses instantly: no POST leaves, so the dead
     // listener's connection refusal cannot surface here.
-    let second = client.call("echo", &json!({"message": "x"}));
+    let second = drive(client.call("echo", &json!({"message": "x"})));
     assert!(
         matches!(second, Err(ClientError::ServerClosed)),
         "poisoned -> ServerClosed at the entry check, got {second:?}"
@@ -1587,22 +1615,21 @@ fn sse_transport_connect_tools_list_and_call() {
     let server = HttpMcpServer::spawn(ServerMode::Sse);
     let url = format!("{}/sse", server.url());
 
-    let mut client = toptopduck_lib::mcp::client::SseClient::connect(&url, &BTreeMap::new())
-        .expect("sse connect");
+    let mut client = drive(toptopduck_lib::mcp::client::SseClient::connect(
+        &url,
+        &BTreeMap::new(),
+    ))
+    .expect("sse connect");
 
-    let tools = client.list_tools("sse-fake").expect("tools/list");
+    let tools = drive(client.list_tools("sse-fake")).expect("tools/list");
     assert_eq!(tools.len(), 2, "sse server advertises echo + add");
     assert_eq!(tools[0]["name"], "echo");
     assert_eq!(tools[1]["name"], "add");
 
-    let result = client
-        .call("add", &json!({"a": 3, "b": 4}))
-        .expect("tools/call");
+    let result = drive(client.call("add", &json!({"a": 3, "b": 4}))).expect("tools/call");
     assert_eq!(first_text(&result), "7");
 
-    let echo = client
-        .call("echo", &json!({"message": "hello-sse"}))
-        .expect("echo call");
+    let echo = drive(client.call("echo", &json!({"message": "hello-sse"}))).expect("echo call");
     assert_eq!(first_text(&echo), "Echo: hello-sse");
 
     // Dropping the client drops the stream receiver, which ends the pump
@@ -2365,9 +2392,11 @@ fn http_transport_sends_configured_headers_on_every_post() {
     let mut headers = BTreeMap::new();
     headers.insert("X-Test-Token".into(), "plain-config-value".into());
 
-    let mut client =
-        toptopduck_lib::mcp::client::HttpClient::connect(&url, &headers).expect("http connect");
-    client.list_tools("hdr-fake").expect("tools/list");
+    let mut client = drive(toptopduck_lib::mcp::client::HttpClient::connect(
+        &url, &headers,
+    ))
+    .expect("http connect");
+    drive(client.list_tools("hdr-fake")).expect("tools/list");
 
     assert!(
         captured_has(&server, "x-test-token", "plain-config-value"),
@@ -2436,10 +2465,14 @@ fn connect_transport_injects_keychain_header_secrets_into_http_requests() {
     };
     let header_secrets: Vec<SecretEnv> =
         vec![("X-Test-Token".into(), "probe-keychain-value".into())];
-    let mut client =
-        toptopduck_lib::mcp::client::connect_transport(&config, &[], &header_secrets, None)
-            .expect("connect via the probe's transport entry");
-    client.list_tools("ProbeHdr").expect("tools/list");
+    let mut client = drive(toptopduck_lib::mcp::client::connect_transport(
+        &config,
+        &[],
+        &header_secrets,
+        None,
+    ))
+    .expect("connect via the probe's transport entry");
+    drive(client.list_tools("ProbeHdr")).expect("tools/list");
 
     assert!(
         captured_has(&server, "x-test-token", "probe-keychain-value"),
@@ -2474,10 +2507,14 @@ fn connect_transport_injects_keychain_env_secrets_into_the_child_env() {
         "TOPTOPDUCK_TEST_MCP_SECRET".into(),
         "probe-env-value".into(),
     )];
-    let mut client = toptopduck_lib::mcp::client::connect_transport(&config, &secrets, &[], None)
-        .expect("stdio connect via the probe's transport entry");
-    let result = client
-        .call("echo_env", &json!({"key": "TOPTOPDUCK_TEST_MCP_SECRET"}))
+    let mut client = drive(toptopduck_lib::mcp::client::connect_transport(
+        &config,
+        &secrets,
+        &[],
+        None,
+    ))
+    .expect("stdio connect via the probe's transport entry");
+    let result = drive(client.call("echo_env", &json!({"key": "TOPTOPDUCK_TEST_MCP_SECRET"})))
         .expect("echo_env call ok");
     let text = result
         .get("content")
@@ -2498,9 +2535,11 @@ fn sse_transport_sends_headers_on_get_stream_and_post() {
     let mut headers = BTreeMap::new();
     headers.insert("X-Test-Token".into(), "sse-config-value".into());
 
-    let mut client =
-        toptopduck_lib::mcp::client::SseClient::connect(&url, &headers).expect("sse connect");
-    client.list_tools("sse-hdr-fake").expect("tools/list");
+    let mut client = drive(toptopduck_lib::mcp::client::SseClient::connect(
+        &url, &headers,
+    ))
+    .expect("sse connect");
+    drive(client.list_tools("sse-hdr-fake")).expect("tools/list");
 
     // The GET stream + at least one POST: two requests carrying the pair.
     let captured = server.state.captured_headers.lock().expect("poisoned");
@@ -2527,9 +2566,11 @@ fn sse_transport_rejects_cross_origin_endpoint_when_headers_configured() {
     let mut headers = BTreeMap::new();
     headers.insert("X-Test-Token".into(), "v".into());
 
-    let err = toptopduck_lib::mcp::client::SseClient::connect(&url, &headers)
-        .err()
-        .expect("cross-origin endpoint must be refused");
+    let err = drive(toptopduck_lib::mcp::client::SseClient::connect(
+        &url, &headers,
+    ))
+    .err()
+    .expect("cross-origin endpoint must be refused");
     let msg = err.to_string();
     assert!(
         msg.contains("cross-origin"),
@@ -2554,9 +2595,12 @@ fn sse_transport_cross_origin_endpoint_without_headers_is_not_guard_refused() {
     let server = HttpMcpServer::spawn(ServerMode::SseCrossOriginEndpoint);
     let url = format!("{}/sse", server.url());
 
-    let err = toptopduck_lib::mcp::client::SseClient::connect(&url, &BTreeMap::new())
-        .err()
-        .expect("the dead advertised host still fails the connect");
+    let err = drive(toptopduck_lib::mcp::client::SseClient::connect(
+        &url,
+        &BTreeMap::new(),
+    ))
+    .err()
+    .expect("the dead advertised host still fails the connect");
     let msg = err.to_string();
     assert!(
         !msg.contains("cross-origin"),
@@ -2571,9 +2615,12 @@ fn http_transport_refuses_redirect_instead_of_following() {
     let server = HttpMcpServer::spawn(ServerMode::HttpRedirect);
     let url = format!("{}/mcp", server.url());
 
-    let err = toptopduck_lib::mcp::client::HttpClient::connect(&url, &BTreeMap::new())
-        .err()
-        .expect("a redirecting endpoint must fail the connect");
+    let err = drive(toptopduck_lib::mcp::client::HttpClient::connect(
+        &url,
+        &BTreeMap::new(),
+    ))
+    .err()
+    .expect("a redirecting endpoint must fail the connect");
     let msg = err.to_string();
     assert!(
         msg.contains("301") && msg.contains("/moved"),
@@ -2592,9 +2639,12 @@ fn sse_transport_refuses_redirect_on_get_stream() {
     let server = HttpMcpServer::spawn(ServerMode::SseRedirectGet);
     let url = format!("{}/sse", server.url());
 
-    let err = toptopduck_lib::mcp::client::SseClient::connect(&url, &BTreeMap::new())
-        .err()
-        .expect("a redirecting stream must fail the connect");
+    let err = drive(toptopduck_lib::mcp::client::SseClient::connect(
+        &url,
+        &BTreeMap::new(),
+    ))
+    .err()
+    .expect("a redirecting stream must fail the connect");
     let msg = err.to_string();
     assert!(
         msg.contains("301") && msg.contains("redirect") && msg.contains("/elsewhere"),
@@ -2612,9 +2662,12 @@ fn sse_transport_refuses_redirect_on_initialize_post() {
     let server = HttpMcpServer::spawn(ServerMode::SseRedirectPost("initialize"));
     let url = format!("{}/sse", server.url());
 
-    let err = toptopduck_lib::mcp::client::SseClient::connect(&url, &BTreeMap::new())
-        .err()
-        .expect("a redirecting initialize POST must fail the connect");
+    let err = drive(toptopduck_lib::mcp::client::SseClient::connect(
+        &url,
+        &BTreeMap::new(),
+    ))
+    .err()
+    .expect("a redirecting initialize POST must fail the connect");
     let msg = err.to_string();
     assert!(
         msg.contains("301") && msg.contains("redirect") && msg.contains("/sse-post-redirected"),
@@ -2633,9 +2686,12 @@ fn sse_transport_refuses_redirect_on_initialized_notification() {
     let server = HttpMcpServer::spawn(ServerMode::SseRedirectPost("notifications/initialized"));
     let url = format!("{}/sse", server.url());
 
-    let err = toptopduck_lib::mcp::client::SseClient::connect(&url, &BTreeMap::new())
-        .err()
-        .expect("a redirecting notification POST must fail the connect");
+    let err = drive(toptopduck_lib::mcp::client::SseClient::connect(
+        &url,
+        &BTreeMap::new(),
+    ))
+    .err()
+    .expect("a redirecting notification POST must fail the connect");
     let msg = err.to_string();
     assert!(
         msg.contains("301") && msg.contains("redirect") && msg.contains("/sse-post-redirected"),

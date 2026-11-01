@@ -37,32 +37,27 @@
 //! connect-phase parks ride their own time bounds -- the GET header wait,
 //! the `endpoint` event, every POST ack -- and an HTTP body read ends at
 //! its [`HTTP_READ_TIMEOUT`] per-read bound), so the deadline lives one
-//! layer up -- the aggregator parks the blocking call on a worker thread
-//! and enforces
+//! layer up -- the aggregator races the call future against
 //! [`McpServerConfig::timeout_ms`](crate::mcp::config::McpServerConfig::timeout_ms)
-//! / the gateway default via `recv_timeout`, terminating the transport
-//! through [`TransportKill`] on expiry (issue #889).
+//! / the gateway default via `tokio::time::timeout`, terminating the
+//! transport through [`TransportKill`] on expiry (issue #889).
 //!
-//! Async I/O, sync face (ADR-0139, #1455): the two remote transports ride
-//! `reqwest` futures on the module's bridge runtime while the [`McpClient`]
-//! trait stays synchronous -- the aggregator's deadline workers and the
-//! probe's `spawn_blocking` closures call it from plain threads, bridged
-//! one call at a time through [`block_on`]. The stdio transport joins them
-//! on the same bridge since #1456: its child rides `tokio::process` (the
-//! pipe reads are async-native), and its kill path terminates the whole
+//! Natively async since ADR-0139's chain (#1455 remote transports, #1456
+//! stdio, #1457 the deadline face): the [`McpClient`] trait and every
+//! transport are async, and the SSE/HTTP bodies ride `reqwest` futures
+//! whose chunk pumps run as tasks on the module's bridge runtime. The stdio
+//! child rides `tokio::process`, and its kill path terminates the whole
 //! process tree (a Windows kill-on-close job object / a Unix process
-//! group, the ADR-0108 executor precedent) instead of the bare
-//! direct-child kill that orphaned a wrapper's grandchildren. The retired
-//! sync design's compensation layers are gone with it: the SSE reader
-//! thread's two-second stop-flag tick is now a `select!` race with an
-//! immediate wake, and the HTTP per-read cap rides `tokio::time::timeout`.
-//! When the aggregator's deadline face goes async (the chain's next
-//! slices), the transports become natively async and the bridge runtime
-//! retires.
+//! group, the ADR-0108 executor precedent). The remaining synchronous
+//! consumers -- the dispatch core's route seam and the gateway serve
+//! spine, which are sync by architecture (the approval gate's
+//! human-unbounded park) -- bridge at their own boundary through
+//! [`block_on`], each at its own granularity (the dispatch core per call,
+//! the serve spine per socket write -- [`block_on`]'s doc names the
+//! per-operation waits).
 
 use std::collections::{BTreeMap, HashSet};
 use std::future::Future;
-use std::io::{BufRead, Write};
 use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -81,9 +76,9 @@ use crate::runtime::gateway::framing;
 
 /// HTTP per-read timeout (issue #392; async carry, #1455): every body-chunk
 /// read on a streamable-HTTP response must progress within this bound, so a
-/// hung server's blocking worker eventually terminates after the probe
-/// deadline fires — `spawn_blocking` tasks are not cancelled, so without
-/// this the thread + TCP connection would linger indefinitely.
+/// silent stream still resolves under any outer deadline and the
+/// aggregator's kill cadence stays honest — without it the body read would
+/// park with no inner bound of its own to end it.
 const HTTP_READ_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Bound on the probe's post-kill reap wait (#1456 review): a healthy kill
@@ -105,23 +100,42 @@ const BODY_CHANNEL_BOUND: usize = 64;
 /// response to a POST may trail it indefinitely), so those ride the
 /// stop-wake `select!` instead. The bound self-resolves the parks it covers
 /// for a probe that fires no kill signal (issue #392); the response-wait
-/// park carries no bound -- a server that acks POSTs but never streams
-/// responses leaves that read parked until process exit (by then the
-/// probe's outer deadline has already answered the user).
+/// park carries no bound of its own -- a server that acks POSTs but never
+/// streams responses stays parked until the probe's outer deadline drops
+/// the whole connect future, which closes the connection and ends the park
+/// (the failure surfaces as the timeout, not a transport kill).
 const SSE_ACK_TIMEOUT: Duration = Duration::from_secs(2);
 
-/// The transport-side tokio runtime (ADR-0139, #1455): the remote transports
-/// are async-native while their consumer face is still synchronous (it goes
-/// async in the chain's aggregator slice). Each wire call bridges through
-/// `block_on` here; the SSE stream pump tasks ride this runtime's workers.
-/// Two parked threads when idle; retires with the sync face.
+/// The transport-side tokio runtime (ADR-0139, #1455): hosts the SSE/HTTP
+/// body-chunk pump tasks, the stdio children (spawned inside its context
+/// since #1456), and the one-shot [`block_on`] drives the remaining sync
+/// seams perform per call -- the dispatch core's route path and the gateway
+/// serve spine (both plain threads by architecture). Two parked workers
+/// when idle.
 static TRANSPORT_RUNTIME: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
 
-/// Drive one transport future on the bridge runtime from a plain thread (an
-/// aggregator deadline worker or a probe `spawn_blocking` closure). Never
-/// called from an async context — the transports own every call site.
-fn block_on<T>(fut: impl Future<Output = T>) -> T {
+/// Drive one transport future on the bridge runtime from a plain thread (the
+/// aggregator's route/connect deadline face, or the gateway serve spine's
+/// per-operation waits). Never called from an async context -- nesting
+/// `Runtime::block_on` inside a runtime panics, which is exactly what keeps
+/// this seam honest. Public because integration tests drive the async client
+/// faces through it too: a client that carries live IO (the SSE stream, a
+/// stdio pipe) must have EVERY poll on this one runtime -- driving its
+/// futures on a throwaway runtime leaves the carried IO's wakers bound to a
+/// runtime that no longer exists, and the next call dies mid-body.
+pub fn block_on<T>(fut: impl Future<Output = T>) -> T {
     transport_runtime().block_on(fut)
+}
+
+/// Spawn a detached task on the bridge runtime (the SSE body pumps, the
+/// gateway's keep-alive companion). Callable from plain threads, unlike the
+/// async-context-only `tokio::spawn`.
+pub(crate) fn spawn_transport_task<F>(fut: F) -> tokio::task::JoinHandle<F::Output>
+where
+    F: Future + Send + 'static,
+    F::Output: Send + 'static,
+{
+    transport_runtime().spawn(fut)
 }
 
 fn transport_runtime() -> &'static tokio::runtime::Runtime {
@@ -138,10 +152,11 @@ fn transport_runtime() -> &'static tokio::runtime::Runtime {
 /// `tokio::process::Command::spawn` registers every pipe with the
 /// thread-local runtime's reactor and panics outside a runtime context
 /// (`PollEvented::new` -> `Handle::current`), and both spawn sites here run
-/// on plain threads -- the aggregator's deadline workers and the probe's
+/// on plain threads -- the aggregator's dispatch legs and the probe's
 /// test threads (#1456 review). Entering the bridge also keeps the pipes
-/// registered on the same runtime every later `block_on` polls through,
-/// instead of splitting registration and polling across runtimes.
+/// registered on the runtime every later poll rides (a `block_on` from a
+/// plain thread, a spawned task from an async context), instead of
+/// splitting registration and polling across runtimes.
 fn spawn_on_bridge(cmd: &mut Command) -> std::io::Result<Child> {
     let _enter = transport_runtime().enter();
     cmd.spawn()
@@ -201,10 +216,10 @@ impl SseStopSignal {
 
 /// A cross-thread kill handle for one transport (issue #889). Cloned from
 /// the owning client; [`TransportKill::kill`] makes that transport's
-/// blocking read return so a parked caller unblocks:
+/// parked read return so a blocked caller unblocks:
 /// - stdio: terminate the child's whole process tree (a `npx`/`uvx` wrapper
 ///   and its grandchildren die with it, #1456) -> the child's stdout EOFs
-///   -> `read_message` reports `ServerClosed`;
+///   -> `read_message_async` reports `ServerClosed`;
 /// - SSE: fire the stop signal -> a request parked in the stream-read
 ///   `select!` wakes immediately and reports `ServerClosed`;
 /// - HTTP: no-op -- that transport is already bounded per-read
@@ -340,8 +355,9 @@ impl TransportKill {
 /// timeout. The two directions race:
 /// expiry may land before spawn finishes (the handle is not published yet),
 /// so publish re-checks the expired flag and self-terminates -- otherwise
-/// the worker would park on the handshake read after the deadline with
-/// nobody left to kill it, and the caller's scope join would never return.
+/// the connect future would keep parking on the handshake read after the
+/// deadline with nobody left to kill it: the deadline drops the future,
+/// and the late handle kills itself instead of leaking.
 #[derive(Default)]
 pub struct ConnectKill {
     handle: Mutex<Option<TransportKill>>,
@@ -398,17 +414,22 @@ fn empty_kill_slot() -> KillSlot {
 ///   bytes differently (stdio frame / HTTP POST / SSE POST).
 /// - [`next_id`](McpClient::next_id): allocate a monotonic JSON-RPC request
 ///   id. Transport-local so each client owns its counter.
+// Native `async fn` in trait (no `#[async_trait]` box): every consumer
+// awaits the returned future inline on the calling thread -- nothing spawns
+// these futures, so the RPITIT future needs no `Send` bound and boxing per
+// call would only add allocation.
+#[allow(async_fn_in_trait)]
 pub trait McpClient {
     /// Send one JSON-RPC request and await its response (matched by `id`).
     /// Server-emitted notifications (no `id`) and responses for other ids are
     /// skipped -- an MCP server may emit progress / log notifications between
     /// requests, and they are not paired with any client request.
-    fn request(&mut self, req: Value) -> Result<Value, ClientError>;
+    async fn request(&mut self, req: Value) -> Result<Value, ClientError>;
 
     /// Send a JSON-RPC notification (no `id`, no response awaited). The
     /// `initialize` handshake uses this for the `notifications/initialized`
     /// ack; each transport sends it over its own wire.
-    fn send_notification(&mut self, notif: Value) -> Result<(), ClientError>;
+    async fn send_notification(&mut self, notif: Value) -> Result<(), ClientError>;
 
     /// Allocate the next monotonic JSON-RPC request id.
     fn next_id(&mut self) -> i64;
@@ -417,7 +438,7 @@ pub trait McpClient {
     /// response, then send the `notifications/initialized` ack. Returns the
     /// server's `InitializeResult` so the caller can log the negotiated
     /// `protocolVersion` / `serverInfo`.
-    fn initialize(&mut self) -> Result<Value, ClientError> {
+    async fn initialize(&mut self) -> Result<Value, ClientError> {
         let id = self.next_id();
         let req = json!({
             "jsonrpc": "2.0",
@@ -432,11 +453,11 @@ pub trait McpClient {
                 },
             }
         });
-        let result = self.request(req)?;
+        let result = self.request(req).await?;
         // The initialized notification completes the handshake; MCP
         // notifications are unacknowledged, so no response is awaited.
         let notif = json!({"jsonrpc": "2.0", "method": "notifications/initialized"});
-        self.send_notification(notif)?;
+        self.send_notification(notif).await?;
         Ok(result)
     }
 
@@ -456,7 +477,7 @@ pub trait McpClient {
     /// dimension -- instead of mounting a silently partial catalog.
     /// The whole traversal runs inside the caller's one connect-phase
     /// deadline (the #892 shared budget).
-    fn list_tools(&mut self, server: &str) -> Result<Vec<Value>, ClientError> {
+    async fn list_tools(&mut self, server: &str) -> Result<Vec<Value>, ClientError> {
         let mut tools: Vec<Value> = Vec::new();
         let mut seen: HashSet<String> = HashSet::new();
         let mut cursor: Option<String> = None;
@@ -467,7 +488,7 @@ pub trait McpClient {
             };
             let id = self.next_id();
             let req = json!({"jsonrpc": "2.0", "id": id, "method": "tools/list", "params": params});
-            let result = self.request(req)?;
+            let result = self.request(req).await?;
             for tool in result
                 .get("tools")
                 .and_then(Value::as_array)
@@ -534,7 +555,7 @@ pub trait McpClient {
     /// stripped the `mcp__<server_slug>__` prefix before routing here).
     /// Returns the `tools/call` result for the gateway to relay to the bridge
     /// verbatim (content + isError).
-    fn call(&mut self, name: &str, arguments: &Value) -> Result<Value, ClientError> {
+    async fn call(&mut self, name: &str, arguments: &Value) -> Result<Value, ClientError> {
         let id = self.next_id();
         let req = json!({
             "jsonrpc": "2.0",
@@ -542,14 +563,18 @@ pub trait McpClient {
             "method": "tools/call",
             "params": {"name": name, "arguments": arguments}
         });
-        self.request(req)
+        self.request(req).await
     }
 }
 
-/// A newline-framed JSON-RPC client over generic read/write halves
-/// (ADR-0076, issue #301 C1). Generic over R/W so the core handshake +
-/// request/response pairing is testable with `Cursor` mocks (no subprocess);
-/// the production [`StdioClient`] wraps a spawned child's stdin/stdout.
+/// A newline-framed JSON-RPC client over generic async read/write halves
+/// (ADR-0076, issue #301 C1; async since ADR-0139). Generic over R/W so the
+/// core handshake + request/response pairing is testable with `Cursor`
+/// mocks (no subprocess); the production [`StdioClient`] wraps a spawned
+/// child's stdin/stdout. The pre-#1457 sync twin is retired: every consumer
+/// rides the async face now, so one request loop exists and the retired
+/// mirror-drift risk (a semantic change landing on only one of two loops)
+/// is gone.
 ///
 /// Implements [`McpClient`] — the 3 required methods drive the newline
 /// framing, and the shared protocol methods (`initialize` / `list_tools` /
@@ -573,66 +598,15 @@ impl<R, W> FramedClient<R, W> {
     }
 }
 
-impl<R: BufRead, W: Write> McpClient for FramedClient<R, W> {
-    fn request(&mut self, req: Value) -> Result<Value, ClientError> {
+impl<R: AsyncBufRead + Unpin, W: AsyncWrite + Unpin> McpClient for FramedClient<R, W> {
+    async fn request(&mut self, req: Value) -> Result<Value, ClientError> {
         let id = req.get("id").cloned();
-        framing::write_message(&mut self.writer, &req).map_err(ClientError::Framing)?;
-        loop {
-            let msg = framing::read_message(&mut self.reader)
-                .map_err(ClientError::Framing)?
-                .ok_or(ClientError::ServerClosed)?;
-            // Match only id-bearing responses; a notification (no id) or a
-            // response for another id is skipped (issue #413).
-            if msg.get("id") != id.as_ref() || id.is_none() {
-                continue;
-            }
-            return check_rpc_response(&msg);
-        }
-    }
-
-    fn send_notification(&mut self, notif: Value) -> Result<(), ClientError> {
-        framing::write_message(&mut self.writer, &notif).map_err(ClientError::Framing)
-    }
-
-    fn next_id(&mut self) -> i64 {
-        let id = self.next_id;
-        self.next_id += 1;
-        id
-    }
-}
-
-/// The async twin of [`FramedClient`] (ADR-0139, #1456): the same
-/// newline-framed MCP JSON-RPC conversation over `tokio::process` pipe
-/// halves. The [`McpClient`] implementation bridges each wire call through
-/// [`block_on`] -- the sync consumer face (the aggregator's deadline
-/// workers, the probe's `spawn_blocking` closures) is unchanged, which is
-/// what lets the stdio transport go async one slice ahead of the
-/// aggregator (the chain's #1457). The request loop mirrors
-/// `FramedClient::request` statement for statement; the framing faces'
-/// equivalence tests pin the read/write halves in lockstep.
-struct AsyncFramedClient<R, W> {
-    reader: R,
-    writer: W,
-    next_id: i64,
-}
-
-impl<R: AsyncBufRead + Unpin, W: AsyncWrite + Unpin> AsyncFramedClient<R, W> {
-    fn new(reader: R, writer: W) -> Self {
-        Self {
-            reader,
-            writer,
-            next_id: 1,
-        }
-    }
-}
-
-impl<R: AsyncBufRead + Unpin, W: AsyncWrite + Unpin> McpClient for AsyncFramedClient<R, W> {
-    fn request(&mut self, req: Value) -> Result<Value, ClientError> {
-        let id = req.get("id").cloned();
-        block_on(framing::write_message_async(&mut self.writer, &req))
+        framing::write_message_async(&mut self.writer, &req)
+            .await
             .map_err(ClientError::Framing)?;
         loop {
-            let msg = block_on(framing::read_message_async(&mut self.reader))
+            let msg = framing::read_message_async(&mut self.reader)
+                .await
                 .map_err(ClientError::Framing)?
                 .ok_or(ClientError::ServerClosed)?;
             // Match only id-bearing responses; a notification (no id) or a
@@ -644,8 +618,9 @@ impl<R: AsyncBufRead + Unpin, W: AsyncWrite + Unpin> McpClient for AsyncFramedCl
         }
     }
 
-    fn send_notification(&mut self, notif: Value) -> Result<(), ClientError> {
-        block_on(framing::write_message_async(&mut self.writer, &notif))
+    async fn send_notification(&mut self, notif: Value) -> Result<(), ClientError> {
+        framing::write_message_async(&mut self.writer, &notif)
+            .await
             .map_err(ClientError::Framing)
     }
 
@@ -883,7 +858,7 @@ fn malformed_sse_event(data_len: usize, e: serde_json::Error) -> ClientError {
     ))
 }
 
-/// Production wrapper: an [`AsyncFramedClient`] backed by a spawned stdio
+/// Production wrapper: a [`FramedClient`] backed by a spawned stdio
 /// MCP server's stdin/stdout (tokio pipes since #1456). Owns the child and
 /// its tree guard; `Drop` terminates the whole tree (per-turn lifecycle,
 /// issue #301 Q2; wrapper grandchildren die with it, #1456).
@@ -895,7 +870,7 @@ fn malformed_sse_event(data_len: usize, e: serde_json::Error) -> ClientError {
 /// `stdio_command`'s `UnsupportedTransport` guard rather than silently
 /// spawning a bogus child.
 pub struct StdioClient {
-    inner: AsyncFramedClient<tokio::io::BufReader<ChildStdout>, ChildStdin>,
+    inner: FramedClient<tokio::io::BufReader<ChildStdout>, ChildStdin>,
     /// Shared so the deadline / cancel-kill paths can terminate the tree
     /// while a blocking read holds the rest of the client (issue #889).
     child: Arc<Mutex<StdioChildHandle>>,
@@ -910,7 +885,7 @@ impl StdioClient {
     /// The child handle is published to the [`KillSlot`] the moment it is
     /// spawned, so a deadline hit during the initialize handshake (whose
     /// blocking read has no native timeout) can terminate it (issue #889).
-    pub fn connect_with_kill(
+    pub async fn connect_with_kill(
         config: &McpServerConfig,
         secrets: &[SecretEnv],
         tool_output_dir: Option<&str>,
@@ -923,10 +898,10 @@ impl StdioClient {
         let child = Arc::new(Mutex::new(StdioChildHandle { child, tree }));
         kill_slot.publish(TransportKill::StdioChild(Arc::clone(&child)));
         let mut client = StdioClient {
-            inner: AsyncFramedClient::new(tokio::io::BufReader::new(stdout), stdin),
+            inner: FramedClient::new(tokio::io::BufReader::new(stdout), stdin),
             child,
         };
-        client.initialize()?;
+        client.initialize().await?;
         Ok(client)
     }
 
@@ -937,12 +912,12 @@ impl StdioClient {
 }
 
 impl McpClient for StdioClient {
-    fn request(&mut self, req: Value) -> Result<Value, ClientError> {
-        self.inner.request(req)
+    async fn request(&mut self, req: Value) -> Result<Value, ClientError> {
+        self.inner.request(req).await
     }
 
-    fn send_notification(&mut self, notif: Value) -> Result<(), ClientError> {
-        self.inner.send_notification(notif)
+    async fn send_notification(&mut self, notif: Value) -> Result<(), ClientError> {
+        self.inner.send_notification(notif).await
     }
 
     fn next_id(&mut self) -> i64 {
@@ -1043,15 +1018,14 @@ fn stdio_command(
 /// Spawn the configured stdio server child process WITHOUT driving the MCP
 /// handshake (issue #392). Returns the [`StdioChildHandle`] (the child plus
 /// its tree guard) so the caller owns the lifecycle — specifically, the
-/// async `probe_mcp_server` command retains the handle outside its
-/// `spawn_blocking` closure so a timeout can kill the tree. The caller
-/// takes the child's stdin/stdout and drives [`stdio_handshake`] inside a
-/// blocking task.
+/// async `probe_mcp_server` command holds the handle outside its deadline
+/// race so an expiry still owns the kill. The caller takes the child's
+/// stdin/stdout and drives [`stdio_handshake`] under its own deadline.
 ///
 /// This is split from [`StdioClient::connect_with_kill`] (which couples
-/// spawn + initialize in one call) because `spawn_blocking` tasks are NOT
-/// cancellable — if the handshake hangs inside the task, the only way to
-/// guarantee the child is killed is to keep the handle outside.
+/// spawn + initialize in one call) because the handshake future is dropped
+/// at a timeout — the handle must outlive that drop for the kill + reap
+/// to run at all.
 pub fn spawn_stdio_child(
     config: &McpServerConfig,
     secrets: &[SecretEnv],
@@ -1064,16 +1038,15 @@ pub fn spawn_stdio_child(
 /// Drive the MCP initialize + tools/list handshake on already-spawned stdio
 /// pipe halves (issue #392). Returns the raw tool list on success. Used by
 /// the probe command which owns the child handle externally (for timeout
-/// kill); this function performs only the wire I/O (bridged one call at a
-/// time onto the transport runtime), not process management.
-pub fn stdio_handshake(
+/// kill); this function performs only the wire I/O, not process management.
+pub async fn stdio_handshake(
     stdin: ChildStdin,
     stdout: ChildStdout,
     server: &str,
 ) -> Result<Vec<Value>, ClientError> {
-    let mut client = AsyncFramedClient::new(tokio::io::BufReader::new(stdout), stdin);
-    client.initialize()?;
-    client.list_tools(server)
+    let mut client = FramedClient::new(tokio::io::BufReader::new(stdout), stdin);
+    client.initialize().await?;
+    client.list_tools(server).await
 }
 
 // ---------------------------------------------------------------------------
@@ -1260,8 +1233,11 @@ pub struct HttpClient {
 
 impl HttpClient {
     /// Connect to the HTTP endpoint and perform the MCP initialize handshake.
-    pub fn connect(url: &str, headers: &BTreeMap<String, String>) -> Result<Self, ClientError> {
-        Self::connect_with_kill(url, headers, &empty_kill_slot())
+    pub async fn connect(
+        url: &str,
+        headers: &BTreeMap<String, String>,
+    ) -> Result<Self, ClientError> {
+        Self::connect_with_kill(url, headers, &empty_kill_slot()).await
     }
 
     /// [`Self::connect`] with a [`KillSlot`] (issue #889). HTTP is bounded
@@ -1274,14 +1250,14 @@ impl HttpClient {
     /// hops only strip `authorization`/`cookie`, so following one would
     /// forward any custom credential header to an arbitrary origin (the
     /// #244 egress-agent precedent).
-    pub fn connect_with_kill(
+    pub async fn connect_with_kill(
         url: &str,
         headers: &BTreeMap<String, String>,
         kill_slot: &KillSlot,
     ) -> Result<Self, ClientError> {
         let mut client = Self::with_parts(url, headers, HTTP_READ_TIMEOUT)?;
         kill_slot.publish(TransportKill::Http);
-        client.initialize()?;
+        client.initialize().await?;
         Ok(client)
     }
 
@@ -1337,9 +1313,9 @@ impl McpClient for HttpClient {
     /// respond with `application/json` (single JSON-RPC envelope) or
     /// `text/event-stream` (SSE carrying the envelope). Both are handled;
     /// the response is matched by JSON-RPC `id`.
-    fn request(&mut self, req: Value) -> Result<Value, ClientError> {
+    async fn request(&mut self, req: Value) -> Result<Value, ClientError> {
         let id = req.get("id").cloned();
-        block_on(async {
+        {
             // The send (connect + headers) rides read_timeout as one TOTAL
             // budget -- like the retired ureq agent's read timeout it covers
             // the header wait, so a server that never answers fails here
@@ -1400,11 +1376,11 @@ impl McpClient for HttpClient {
                     serde_json::from_slice(&body).map_err(|e| ClientError::Http(e.to_string()))?;
                 check_rpc_response(&body)
             }
-        })
+        }
     }
 
-    fn send_notification(&mut self, notif: Value) -> Result<(), ClientError> {
-        block_on(post_notification(self.post(), notif, self.read_timeout))
+    async fn send_notification(&mut self, notif: Value) -> Result<(), ClientError> {
+        post_notification(self.post(), notif, self.read_timeout).await
     }
 
     fn next_id(&mut self) -> i64 {
@@ -1461,8 +1437,11 @@ impl SseClient {
     /// definition header-authenticated (the same-origin guardrail applies);
     /// the dispatch path derives the flag from the CONFIGURED face instead
     /// (see [`Self::connect_with_kill`]).
-    pub fn connect(url: &str, headers: &BTreeMap<String, String>) -> Result<Self, ClientError> {
-        Self::connect_with_kill(url, headers, !headers.is_empty(), &empty_kill_slot())
+    pub async fn connect(
+        url: &str,
+        headers: &BTreeMap<String, String>,
+    ) -> Result<Self, ClientError> {
+        Self::connect_with_kill(url, headers, !headers.is_empty(), &empty_kill_slot()).await
     }
 
     /// [`Self::connect`] with a [`KillSlot`] (issue #889). The stop signal
@@ -1486,7 +1465,7 @@ impl SseClient {
     /// still trips the guard. A future caller hand-rolling the bool must
     /// route through the named derivation, not pass `false` alongside
     /// credentials.
-    pub fn connect_with_kill(
+    pub async fn connect_with_kill(
         url: &str,
         headers: &BTreeMap<String, String>,
         auth_configured: bool,
@@ -1498,7 +1477,7 @@ impl SseClient {
         kill_slot.publish(TransportKill::SseStop(Arc::clone(&stop)));
         let stop_for_race = Arc::clone(&stop);
 
-        let connect = block_on(async {
+        let connect = async {
             // The GET is raced against the stop wake: a kill landing before
             // or during the open breaks the connect immediately.
             let get = apply_headers(
@@ -1574,7 +1553,8 @@ impl SseClient {
                 enforce_same_origin(url, &post_url)?;
             }
             Ok::<_, ClientError>((stream, post_url))
-        });
+        }
+        .await;
         // The pump (if one started) ends with the receiver's drop on an
         // early return here.
         let (stream, post_url) = connect?;
@@ -1589,7 +1569,7 @@ impl SseClient {
             next_id: 1,
         };
 
-        client.initialize()?;
+        client.initialize().await?;
         Ok(client)
     }
 
@@ -1608,12 +1588,12 @@ impl McpClient for SseClient {
     /// POST one JSON-RPC request and await the matching response from the
     /// SSE stream. Notifications (no `id`) and responses for other ids are
     /// skipped.
-    fn request(&mut self, req: Value) -> Result<Value, ClientError> {
+    async fn request(&mut self, req: Value) -> Result<Value, ClientError> {
         if self.poisoned || self.stop.is_stopped() {
             return Err(ClientError::ServerClosed);
         }
         let id = req.get("id").cloned();
-        block_on(async {
+        {
             // The POST response is typically 202 Accepted; the actual
             // JSON-RPC response arrives on the SSE stream. Both the POST
             // and every stream read are raced against the stop wake so a
@@ -1694,11 +1674,11 @@ impl McpClient for SseClient {
                     }
                 }
             }
-        })
+        }
     }
 
-    fn send_notification(&mut self, notif: Value) -> Result<(), ClientError> {
-        block_on(post_notification(self.post(), notif, SSE_ACK_TIMEOUT))
+    async fn send_notification(&mut self, notif: Value) -> Result<(), ClientError> {
+        post_notification(self.post(), notif, SSE_ACK_TIMEOUT).await
     }
 
     fn next_id(&mut self) -> i64 {
@@ -1891,19 +1871,19 @@ impl TransportClient {
 }
 
 impl McpClient for TransportClient {
-    fn request(&mut self, req: Value) -> Result<Value, ClientError> {
+    async fn request(&mut self, req: Value) -> Result<Value, ClientError> {
         match self {
-            Self::Stdio(c) => c.request(req),
-            Self::Sse(c) => c.request(req),
-            Self::Http(c) => c.request(req),
+            Self::Stdio(c) => c.request(req).await,
+            Self::Sse(c) => c.request(req).await,
+            Self::Http(c) => c.request(req).await,
         }
     }
 
-    fn send_notification(&mut self, notif: Value) -> Result<(), ClientError> {
+    async fn send_notification(&mut self, notif: Value) -> Result<(), ClientError> {
         match self {
-            Self::Stdio(c) => c.send_notification(notif),
-            Self::Sse(c) => c.send_notification(notif),
-            Self::Http(c) => c.send_notification(notif),
+            Self::Stdio(c) => c.send_notification(notif).await,
+            Self::Sse(c) => c.send_notification(notif).await,
+            Self::Http(c) => c.send_notification(notif).await,
         }
     }
 
@@ -1921,7 +1901,7 @@ impl McpClient for TransportClient {
 /// handshake and returns a ready-to-use [`TransportClient`]. No kill slot --
 /// the probe path that uses this runs under its own deadline (issue #392);
 /// the aggregator deadline path uses [`connect_transport_with_kill`].
-pub fn connect_transport(
+pub async fn connect_transport(
     config: &McpServerConfig,
     secrets: &[SecretEnv],
     header_secrets: &[SecretEnv],
@@ -1934,6 +1914,7 @@ pub fn connect_transport(
         tool_output_dir,
         &empty_kill_slot(),
     )
+    .await
 }
 
 /// [`connect_transport`] with a [`KillSlot`] the caller reads on deadline
@@ -1945,7 +1926,7 @@ pub fn connect_transport(
 /// (issue #901), merged over the transport's configured non-secret `headers`
 /// here -- the one composition point, so both remote transports receive the
 /// complete header set and neither client type knows the keychain exists.
-pub fn connect_transport_with_kill(
+pub async fn connect_transport_with_kill(
     config: &McpServerConfig,
     secrets: &[SecretEnv],
     header_secrets: &[SecretEnv],
@@ -1955,6 +1936,7 @@ pub fn connect_transport_with_kill(
     match &config.transport {
         McpTransport::Stdio { .. } => {
             StdioClient::connect_with_kill(config, secrets, tool_output_dir, kill_slot)
+                .await
                 .map(TransportClient::Stdio)
         }
         McpTransport::Sse { url, headers } => {
@@ -1965,10 +1947,12 @@ pub fn connect_transport_with_kill(
                 auth_configured,
                 kill_slot,
             )
+            .await
             .map(TransportClient::Sse)
         }
         McpTransport::Http { url, headers } => {
             HttpClient::connect_with_kill(url, &merged_headers(headers, header_secrets), kill_slot)
+                .await
                 .map(TransportClient::Http)
         }
     }
@@ -2074,20 +2058,23 @@ mod tests {
     /// `initialize` sends id=1, awaits the id=1 response, then emits the
     /// `notifications/initialized` ack. The negotiated InitializeResult is
     /// returned verbatim.
-    #[test]
-    fn initialize_pairs_response_by_id_and_emits_initialized_notification() {
+    #[tokio::test]
+    async fn initialize_pairs_response_by_id_and_emits_initialized_notification() {
         let init_result = json!({
             "protocolVersion": "2024-11-05",
             "capabilities": {},
             "serverInfo": {"name": "fake-mcp", "version": "0.1"}
         });
         let server = wire(&[json!({"jsonrpc": "2.0", "id": 1, "result": init_result.clone()})]);
-        let mut client = FramedClient::new(Cursor::new(server), Cursor::new(Vec::new()));
-        let result = client.initialize().expect("handshake ok");
+        let mut client = FramedClient::new(
+            tokio::io::BufReader::new(Cursor::new(server)),
+            VecWriter::default(),
+        );
+        let result = client.initialize().await.expect("handshake ok");
         assert_eq!(result, init_result);
         // The writer collected the initialize request + the initialized
         // notification (in that order).
-        let mut r = Cursor::new(client.writer.get_ref().clone());
+        let mut r = Cursor::new(client.writer.contents());
         let m1 = framing::read_message(&mut r).unwrap().unwrap();
         let m2 = framing::read_message(&mut r).unwrap().unwrap();
         assert_eq!(m1["method"], "initialize");
@@ -2097,25 +2084,31 @@ mod tests {
 
     /// `list_tools` returns the server's `tools` array, verbatim. Missing
     /// `tools` degrades to empty (a server advertising no tools is valid).
-    #[test]
-    fn list_tools_returns_the_tools_array() {
+    #[tokio::test]
+    async fn list_tools_returns_the_tools_array() {
         let tools = json!([
             {"name": "search", "description": "search docs"},
             {"name": "fetch", "description": "fetch a url"}
         ]);
         let server = wire(&[json!({"jsonrpc": "2.0", "id": 1, "result": {"tools": tools}})]);
-        let mut client = FramedClient::new(Cursor::new(server), Cursor::new(Vec::new()));
-        let listed = client.list_tools("fake-mcp").expect("list ok");
+        let mut client = FramedClient::new(
+            tokio::io::BufReader::new(Cursor::new(server)),
+            VecWriter::default(),
+        );
+        let listed = client.list_tools("fake-mcp").await.expect("list ok");
         assert_eq!(listed.len(), 2);
         assert_eq!(listed[0]["name"], "search");
         assert_eq!(listed[1]["name"], "fetch");
     }
 
-    #[test]
-    fn list_tools_empty_when_result_has_no_tools_key() {
+    #[tokio::test]
+    async fn list_tools_empty_when_result_has_no_tools_key() {
         let server = wire(&[json!({"jsonrpc": "2.0", "id": 1, "result": {}})]);
-        let mut client = FramedClient::new(Cursor::new(server), Cursor::new(Vec::new()));
-        let listed = client.list_tools("fake-mcp").expect("list ok");
+        let mut client = FramedClient::new(
+            tokio::io::BufReader::new(Cursor::new(server)),
+            VecWriter::default(),
+        );
+        let listed = client.list_tools("fake-mcp").await.expect("list ok");
         assert!(listed.is_empty(), "missing tools key -> empty, not error");
     }
 
@@ -2125,8 +2118,8 @@ mod tests {
     /// -- the continuation request echoes the cursor in `params`, and the
     /// pages fold into one list in advertised order. A page with no cursor
     /// ends the traversal.
-    #[test]
-    fn list_tools_follows_next_cursor_pages() {
+    #[tokio::test]
+    async fn list_tools_follows_next_cursor_pages() {
         let server = wire(&[
             json!({"jsonrpc": "2.0", "id": 1, "result": {
                 "tools": [
@@ -2139,8 +2132,11 @@ mod tests {
                 "tools": [{"name": "fetch_page2", "description": "page 2"}]
             }}),
         ]);
-        let mut client = FramedClient::new(Cursor::new(server), Cursor::new(Vec::new()));
-        let listed = client.list_tools("fake-mcp").expect("list ok");
+        let mut client = FramedClient::new(
+            tokio::io::BufReader::new(Cursor::new(server)),
+            VecWriter::default(),
+        );
+        let listed = client.list_tools("fake-mcp").await.expect("list ok");
         let names: Vec<&str> = listed
             .iter()
             .map(|t| t["name"].as_str().expect("name"))
@@ -2148,7 +2144,7 @@ mod tests {
         assert_eq!(names, vec!["echo", "add", "fetch_page2"]);
         // The continuation request carried the cursor the previous page
         // handed back; the first request carried none.
-        let mut r = Cursor::new(client.writer.get_ref().clone());
+        let mut r = Cursor::new(client.writer.contents());
         let req1 = framing::read_message(&mut r).unwrap().unwrap();
         let req2 = framing::read_message(&mut r).unwrap().unwrap();
         assert!(
@@ -2162,8 +2158,8 @@ mod tests {
     /// fresh `nextCursor`) trips the page cap -- an explicit error naming
     /// the server, the tripped dimension, and where the traversal stood,
     /// never a silently partial catalog (the #889 attribution shape).
-    #[test]
-    fn list_tools_page_cap_trips_on_an_endingless_cursor() {
+    #[tokio::test]
+    async fn list_tools_page_cap_trips_on_an_endingless_cursor() {
         let pages: Vec<Value> = (1..=TOOLS_LIST_PAGE_CAP)
             .map(|i| {
                 json!({
@@ -2175,8 +2171,11 @@ mod tests {
             })
             .collect();
         let server = wire(&pages);
-        let mut client = FramedClient::new(Cursor::new(server), Cursor::new(Vec::new()));
-        let err = client.list_tools("cap-fake").expect_err("page cap");
+        let mut client = FramedClient::new(
+            tokio::io::BufReader::new(Cursor::new(server)),
+            VecWriter::default(),
+        );
+        let err = client.list_tools("cap-fake").await.expect_err("page cap");
         let display = err.to_string();
         match err {
             ClientError::PageCap { server, tools } => {
@@ -2196,8 +2195,8 @@ mod tests {
     /// the cap while STILL paging trips its own dimension, without paying
     /// for the next request. The at-cap complete-catalog companion below
     /// pins the boundary's other half.
-    #[test]
-    fn list_tools_tool_cap_trips_when_still_paging() {
+    #[tokio::test]
+    async fn list_tools_tool_cap_trips_when_still_paging() {
         let tools: Vec<Value> = (0..TOOLS_LIST_TOOL_CAP)
             .map(|i| json!({"name": format!("tool_{i}")}))
             .collect();
@@ -2207,8 +2206,11 @@ mod tests {
                 "nextCursor": "page-2"
             }
         })]);
-        let mut client = FramedClient::new(Cursor::new(server), Cursor::new(Vec::new()));
-        let err = client.list_tools("cap-fake").expect_err("tool cap");
+        let mut client = FramedClient::new(
+            tokio::io::BufReader::new(Cursor::new(server)),
+            VecWriter::default(),
+        );
+        let err = client.list_tools("cap-fake").await.expect_err("tool cap");
         let display = err.to_string();
         match err {
             ClientError::ToolCap {
@@ -2231,8 +2233,8 @@ mod tests {
     /// The overshoot half: the cap check is post-fold, so one page can push
     /// the count past the cap -- the error must carry the real total, not
     /// the constant (a constant-at-the-cap report would read 2048 here).
-    #[test]
-    fn list_tools_tool_cap_carries_the_overshot_count() {
+    #[tokio::test]
+    async fn list_tools_tool_cap_carries_the_overshot_count() {
         let tools: Vec<Value> = (0..TOOLS_LIST_TOOL_CAP + 100)
             .map(|i| json!({"name": format!("tool_{i}")}))
             .collect();
@@ -2242,8 +2244,11 @@ mod tests {
                 "nextCursor": "page-2"
             }
         })]);
-        let mut client = FramedClient::new(Cursor::new(server), Cursor::new(Vec::new()));
-        let err = client.list_tools("cap-fake").expect_err("tool cap");
+        let mut client = FramedClient::new(
+            tokio::io::BufReader::new(Cursor::new(server)),
+            VecWriter::default(),
+        );
+        let err = client.list_tools("cap-fake").await.expect_err("tool cap");
         match err {
             ClientError::ToolCap { tools, .. } => {
                 assert_eq!(tools, TOOLS_LIST_TOOL_CAP + 100, "the overshot total");
@@ -2256,15 +2261,19 @@ mod tests {
     /// `TOOLS_LIST_TOOL_CAP` entries in a complete page -- no continuation
     /// -- is accepted, not tripped. The cap guards unbounded traversal; a
     /// complete single response is already bounded by the frame cap.
-    #[test]
-    fn list_tools_accepts_a_cap_sized_complete_catalog() {
+    #[tokio::test]
+    async fn list_tools_accepts_a_cap_sized_complete_catalog() {
         let tools: Vec<Value> = (0..TOOLS_LIST_TOOL_CAP)
             .map(|i| json!({"name": format!("tool_{i}")}))
             .collect();
         let server = wire(&[json!({"jsonrpc": "2.0", "id": 1, "result": {"tools": tools}})]);
-        let mut client = FramedClient::new(Cursor::new(server), Cursor::new(Vec::new()));
+        let mut client = FramedClient::new(
+            tokio::io::BufReader::new(Cursor::new(server)),
+            VecWriter::default(),
+        );
         let listed = client
             .list_tools("cap-fake")
+            .await
             .expect("a complete at-cap catalog is accepted");
         assert_eq!(listed.len(), TOOLS_LIST_TOOL_CAP);
     }
@@ -2274,8 +2283,8 @@ mod tests {
     /// tool, with page 32 cursorless -- completing exactly ON the last
     /// allowed page returns the full catalog; only needing a 33rd page
     /// trips the cap.
-    #[test]
-    fn list_tools_accepts_a_cap_sized_page_run_completing_on_the_last_page() {
+    #[tokio::test]
+    async fn list_tools_accepts_a_cap_sized_page_run_completing_on_the_last_page() {
         let pages: Vec<Value> = (1..=TOOLS_LIST_PAGE_CAP)
             .map(|i| {
                 let mut result = json!({"tools": [{"name": format!("tool_{i}")}]});
@@ -2286,31 +2295,41 @@ mod tests {
             })
             .collect();
         let server = wire(&pages);
-        let mut client = FramedClient::new(Cursor::new(server), Cursor::new(Vec::new()));
+        let mut client = FramedClient::new(
+            tokio::io::BufReader::new(Cursor::new(server)),
+            VecWriter::default(),
+        );
         let listed = client
             .list_tools("cap-fake")
+            .await
             .expect("completing on the page budget's last page is accepted");
         assert_eq!(listed.len(), TOOLS_LIST_PAGE_CAP);
     }
 
     /// Issue #900 AC: an empty first page that continues to an empty second
     /// page is a valid zero-tool catalog, not a failure.
-    #[test]
-    fn list_tools_empty_pages_are_a_valid_zero_tool_catalog() {
+    #[tokio::test]
+    async fn list_tools_empty_pages_are_a_valid_zero_tool_catalog() {
         let server = wire(&[
             json!({"jsonrpc": "2.0", "id": 1, "result": {"tools": [], "nextCursor": "p2"}}),
             json!({"jsonrpc": "2.0", "id": 2, "result": {"tools": []}}),
         ]);
-        let mut client = FramedClient::new(Cursor::new(server), Cursor::new(Vec::new()));
-        let listed = client.list_tools("fake-mcp").expect("zero-tool catalog ok");
+        let mut client = FramedClient::new(
+            tokio::io::BufReader::new(Cursor::new(server)),
+            VecWriter::default(),
+        );
+        let listed = client
+            .list_tools("fake-mcp")
+            .await
+            .expect("zero-tool catalog ok");
         assert!(listed.is_empty());
     }
 
     /// Issue #900: a server re-listing a tool name on a later page must not
     /// shadow its first-seen entry -- cross-page dedup keeps the page-1
     /// entry (`query_catalog`'s catalog-fold precedent, issue #543).
-    #[test]
-    fn list_tools_cross_page_duplicate_keeps_first_sight() {
+    #[tokio::test]
+    async fn list_tools_cross_page_duplicate_keeps_first_sight() {
         let server = wire(&[
             json!({"jsonrpc": "2.0", "id": 1, "result": {
                 "tools": [
@@ -2323,8 +2342,11 @@ mod tests {
                 "tools": [{"name": "dup", "description": "later shadow"}]
             }}),
         ]);
-        let mut client = FramedClient::new(Cursor::new(server), Cursor::new(Vec::new()));
-        let listed = client.list_tools("fake-mcp").expect("list ok");
+        let mut client = FramedClient::new(
+            tokio::io::BufReader::new(Cursor::new(server)),
+            VecWriter::default(),
+        );
+        let listed = client.list_tools("fake-mcp").await.expect("list ok");
         assert_eq!(listed.len(), 2, "the re-listed name folds to one entry");
         let dup = listed
             .iter()
@@ -2337,15 +2359,19 @@ mod tests {
     /// non-string cursor is a protocol violation AND a silent-truncation
     /// hazard -- treating it as absent would recreate the bug class this
     /// traversal exists to close -- so it surfaces as a framing error.
-    #[test]
-    fn list_tools_non_string_next_cursor_is_a_framing_error() {
+    #[tokio::test]
+    async fn list_tools_non_string_next_cursor_is_a_framing_error() {
         let server = wire(&[json!({
             "jsonrpc": "2.0", "id": 1,
             "result": {"tools": [], "nextCursor": 7}
         })]);
-        let mut client = FramedClient::new(Cursor::new(server), Cursor::new(Vec::new()));
+        let mut client = FramedClient::new(
+            tokio::io::BufReader::new(Cursor::new(server)),
+            VecWriter::default(),
+        );
         let err = client
             .list_tools("fake-mcp")
+            .await
             .expect_err("non-string cursor");
         assert!(
             matches!(
@@ -2360,8 +2386,8 @@ mod tests {
     /// and are filtered downstream by `extract_tool_info` (issue #663 -- a
     /// malformed entry never reaches the catalog, so the usable count stays
     /// honest).
-    #[test]
-    fn list_tools_nameless_entries_ride_through_without_dedup() {
+    #[tokio::test]
+    async fn list_tools_nameless_entries_ride_through_without_dedup() {
         let server = wire(&[
             json!({"jsonrpc": "2.0", "id": 1, "result": {
                 "tools": [{"description": "no name"}, {"description": "no name either"}],
@@ -2369,26 +2395,33 @@ mod tests {
             }}),
             json!({"jsonrpc": "2.0", "id": 2, "result": {"tools": []}}),
         ]);
-        let mut client = FramedClient::new(Cursor::new(server), Cursor::new(Vec::new()));
-        let listed = client.list_tools("fake-mcp").expect("list ok");
+        let mut client = FramedClient::new(
+            tokio::io::BufReader::new(Cursor::new(server)),
+            VecWriter::default(),
+        );
+        let listed = client.list_tools("fake-mcp").await.expect("list ok");
         assert_eq!(listed.len(), 2);
     }
 
     /// `call` relays the server's tools/call result (content + isError).
-    #[test]
-    fn call_returns_the_tools_call_result() {
+    #[tokio::test]
+    async fn call_returns_the_tools_call_result() {
         let result = json!({
             "content": [{"type": "text", "text": "42"}],
             "isError": false
         });
         let server = wire(&[json!({"jsonrpc": "2.0", "id": 1, "result": result.clone()})]);
-        let mut client = FramedClient::new(Cursor::new(server), Cursor::new(Vec::new()));
+        let mut client = FramedClient::new(
+            tokio::io::BufReader::new(Cursor::new(server)),
+            VecWriter::default(),
+        );
         let back = client
             .call("search", &json!({"query": "duckdb"}))
+            .await
             .expect("call ok");
         assert_eq!(back, result);
         // The request carried the server-native name + arguments verbatim.
-        let mut r = Cursor::new(client.writer.get_ref().clone());
+        let mut r = Cursor::new(client.writer.contents());
         let req = framing::read_message(&mut r).unwrap().unwrap();
         assert_eq!(req["method"], "tools/call");
         assert_eq!(req["params"]["name"], "search");
@@ -2397,15 +2430,19 @@ mod tests {
 
     /// A JSON-RPC error response surfaces as `ServerError`; the gateway turns
     /// it into a tool-level error the agent self-corrects from (ADR-0077).
-    #[test]
-    fn error_response_surfaces_as_server_error() {
+    #[tokio::test]
+    async fn error_response_surfaces_as_server_error() {
         let server = wire(&[json!({
             "jsonrpc": "2.0", "id": 1,
             "error": {"code": -32602, "message": "unknown tool"}
         })]);
-        let mut client = FramedClient::new(Cursor::new(server), Cursor::new(Vec::new()));
+        let mut client = FramedClient::new(
+            tokio::io::BufReader::new(Cursor::new(server)),
+            VecWriter::default(),
+        );
         let err = client
             .call("bogus", &json!({}))
+            .await
             .expect_err("error response");
         assert!(
             matches!(err, ClientError::ServerError(_)),
@@ -2415,11 +2452,14 @@ mod tests {
 
     /// A clean EOF (server closed) before the response surfaces as ServerClosed
     /// so the gateway can distinguish "server died" from a transient fault.
-    #[test]
-    fn eof_before_response_surfaces_as_server_closed() {
+    #[tokio::test]
+    async fn eof_before_response_surfaces_as_server_closed() {
         let server = wire(&[]); // no frames at all
-        let mut client = FramedClient::new(Cursor::new(server), Cursor::new(Vec::new()));
-        let err = client.list_tools("fake-mcp").expect_err("eof");
+        let mut client = FramedClient::new(
+            tokio::io::BufReader::new(Cursor::new(server)),
+            VecWriter::default(),
+        );
+        let err = client.list_tools("fake-mcp").await.expect_err("eof");
         assert!(
             matches!(err, ClientError::ServerClosed),
             "EOF -> ServerClosed, got {err:?}"
@@ -2433,16 +2473,20 @@ mod tests {
     /// fires mid-wait -- so the error return is the only exit. The error
     /// display names the face (server transport) and the framing cause (the
     /// cap).
-    #[test]
-    fn overlong_response_frame_fails_request_as_framing_error() {
+    #[tokio::test]
+    async fn overlong_response_frame_fails_request_as_framing_error() {
         // One over-long line: bigger than the cap, newline-terminated so the
         // bounded reader settles on `Overlong` (not a final unterminated
         // line).
         let mut server = "x".repeat(LINE_MAX_BYTES + 1).into_bytes();
         server.push(b'\n');
-        let mut client = FramedClient::new(Cursor::new(server), Cursor::new(Vec::new()));
+        let mut client = FramedClient::new(
+            tokio::io::BufReader::new(Cursor::new(server)),
+            VecWriter::default(),
+        );
         let err = client
             .list_tools("fake-mcp")
+            .await
             .expect_err("over-long response");
         assert!(
             matches!(
@@ -2464,53 +2508,77 @@ mod tests {
 
     /// Server-emitted notifications (no id) between the request and its
     /// response are skipped -- the client keeps reading until the matched id.
-    #[test]
-    fn notifications_between_request_and_response_are_skipped() {
+    #[tokio::test]
+    async fn notifications_between_request_and_response_are_skipped() {
         let server = wire(&[
             json!({"jsonrpc": "2.0", "method": "notifications/progress", "params": {"progress": 50}}),
             json!({"jsonrpc": "2.0", "id": 1, "result": {"tools": []}}),
         ]);
-        let mut client = FramedClient::new(Cursor::new(server), Cursor::new(Vec::new()));
+        let mut client = FramedClient::new(
+            tokio::io::BufReader::new(Cursor::new(server)),
+            VecWriter::default(),
+        );
         let listed = client
             .list_tools("fake-mcp")
+            .await
             .expect("list ok past notification");
         assert!(listed.is_empty());
     }
 
     /// A response for a different id (an interleaved reply to a prior request)
     /// is skipped; the client waits for its own id.
-    #[test]
-    fn response_with_other_id_is_skipped_until_match() {
+    #[tokio::test]
+    async fn response_with_other_id_is_skipped_until_match() {
         let server = wire(&[
             json!({"jsonrpc": "2.0", "id": 999, "result": {"tools": [{"name": "wrong"}]}}),
             json!({"jsonrpc": "2.0", "id": 1, "result": {"tools": [{"name": "right"}]}}),
         ]);
-        let mut client = FramedClient::new(Cursor::new(server), Cursor::new(Vec::new()));
-        let listed = client.list_tools("fake-mcp").expect("list ok");
+        let mut client = FramedClient::new(
+            tokio::io::BufReader::new(Cursor::new(server)),
+            VecWriter::default(),
+        );
+        let listed = client.list_tools("fake-mcp").await.expect("list ok");
         assert_eq!(listed.len(), 1);
         assert_eq!(listed[0]["name"], "right");
     }
 
     /// Request ids are monotonic across calls -- the second request gets id=2,
     /// so its response must carry id=2 to match.
-    #[test]
-    fn ids_are_monotonic_across_requests() {
+    #[tokio::test]
+    async fn ids_are_monotonic_across_requests() {
         let server = wire(&[
             json!({"jsonrpc": "2.0", "id": 1, "result": {"tools": []}}),
             json!({"jsonrpc": "2.0", "id": 2, "result": {"content": [], "isError": false}}),
         ]);
-        let mut client = FramedClient::new(Cursor::new(server), Cursor::new(Vec::new()));
-        client.list_tools("fake-mcp").expect("first call (id=1)");
-        client.call("x", &json!({})).expect("second call (id=2)");
+        let mut client = FramedClient::new(
+            tokio::io::BufReader::new(Cursor::new(server)),
+            VecWriter::default(),
+        );
+        client
+            .list_tools("fake-mcp")
+            .await
+            .expect("first call (id=1)");
+        client
+            .call("x", &json!({}))
+            .await
+            .expect("second call (id=2)");
     }
 
-    /// An in-memory `AsyncWrite` sink for the async client pins: std's Vec
-    /// implements no tokio trait (the orphan rule) and `duplex` would need a
-    /// draining reader. Writes always succeed immediately.
+    /// An in-memory `AsyncWrite` sink for the `Cursor`-mocked client pins:
+    /// std's Vec implements no tokio trait (the orphan rule) and `duplex`
+    /// would need a draining reader. Writes always succeed immediately.
     #[derive(Default)]
-    struct AsyncVecWriter(Vec<u8>);
+    struct VecWriter(Vec<u8>);
 
-    impl tokio::io::AsyncWrite for AsyncVecWriter {
+    impl VecWriter {
+        /// The bytes written so far (the retired std-Cursor writer's
+        /// `get_ref().clone()` read shape).
+        fn contents(&self) -> Vec<u8> {
+            self.0.clone()
+        }
+    }
+
+    impl tokio::io::AsyncWrite for VecWriter {
         fn poll_write(
             self: std::pin::Pin<&mut Self>,
             _cx: &mut std::task::Context<'_>,
@@ -2535,53 +2603,18 @@ mod tests {
         }
     }
 
-    /// The async face's id-skip loop is the production path (StdioClient and
-    /// the probe handshake ride it), so the two sync pins above must hold on
-    /// the async twin too (#1456 review): same wires, same skips. The
-    /// composed reader is the tokio-native form (a BufReader over a std
-    /// Cursor -- tokio implements AsyncRead for it natively).
-    #[test]
-    fn async_notifications_between_request_and_response_are_skipped() {
-        let server = wire(&[
-            json!({"jsonrpc": "2.0", "method": "notifications/progress", "params": {"progress": 50}}),
-            json!({"jsonrpc": "2.0", "id": 1, "result": {"tools": []}}),
-        ]);
-        let mut client = AsyncFramedClient::new(
-            tokio::io::BufReader::new(Cursor::new(server)),
-            AsyncVecWriter::default(),
-        );
-        let listed = client
-            .list_tools("fake-mcp")
-            .expect("list ok past notification");
-        assert!(listed.is_empty());
-    }
-
-    #[test]
-    fn async_response_with_other_id_is_skipped_until_match() {
-        let server = wire(&[
-            json!({"jsonrpc": "2.0", "id": 999, "result": {"tools": [{"name": "wrong"}]}}),
-            json!({"jsonrpc": "2.0", "id": 1, "result": {"tools": [{"name": "right"}]}}),
-        ]);
-        let mut client = AsyncFramedClient::new(
-            tokio::io::BufReader::new(Cursor::new(server)),
-            AsyncVecWriter::default(),
-        );
-        let listed = client.list_tools("fake-mcp").expect("list ok");
-        assert_eq!(listed.len(), 1);
-        assert_eq!(listed[0]["name"], "right");
-    }
-
     // --- ConnectKill rendezvous (issue #889) ----------------------------------
 
     /// The publish-after-expire ordering: `expire` may land before the
     /// transport has published its kill handle (a spawn that outlasts the
     /// budget), and the re-check inside `publish` is what kills the LATE
-    /// handle -- without it the worker parks on the handshake read after
-    /// the deadline with nobody left to kill it. The stop-signal variant
+    /// handle -- without it the connect future keeps parking on the
+    /// handshake read after the deadline with nobody left to kill it. The
+    /// stop-signal variant
     /// makes the kill observable without a process: a `publish` that
     /// merely stores the handle leaves the flag unset and fails this pin.
-    #[test]
-    fn connect_kill_publish_after_expire_self_terminates_the_handle() {
+    #[tokio::test]
+    async fn connect_kill_publish_after_expire_self_terminates_the_handle() {
         let slot = ConnectKill::default();
         slot.expire();
         let stop = Arc::new(SseStopSignal::new());
@@ -2595,8 +2628,8 @@ mod tests {
     /// The forward ordering for contrast: publishing BEFORE expiry stores
     /// the handle without firing it (the transport is healthy); the later
     /// `expire` performs the kill itself.
-    #[test]
-    fn connect_kill_expire_after_publish_fires_the_stored_handle() {
+    #[tokio::test]
+    async fn connect_kill_expire_after_publish_fires_the_stored_handle() {
         let slot = ConnectKill::default();
         let stop = Arc::new(SseStopSignal::new());
         slot.publish(TransportKill::SseStop(Arc::clone(&stop)));
@@ -2880,8 +2913,8 @@ mod tests {
     /// retired sync design waited out its read tick (the immediacy AC's
     /// connect-window leg; the request-loop leg is pinned in the
     /// integration suite).
-    #[test]
-    fn sse_connect_stop_wake_breaks_the_endpoint_read_immediately() {
+    #[tokio::test]
+    async fn sse_connect_stop_wake_breaks_the_endpoint_read_immediately() {
         use std::io::Write as _;
         use std::net::TcpListener;
         use std::time::Instant;
@@ -2916,7 +2949,14 @@ Content-Type: text/event-stream
         let slot_for_connect = Arc::clone(&slot);
         let url = format!("http://127.0.0.1:{port}/sse");
         let connect = std::thread::spawn(move || {
-            SseClient::connect_with_kill(&url, &BTreeMap::new(), false, &slot_for_connect)
+            // A plain thread driving the async connect (the test races the
+            // kill against it from this side).
+            block_on(SseClient::connect_with_kill(
+                &url,
+                &BTreeMap::new(),
+                false,
+                &slot_for_connect,
+            ))
         });
         // The GET answers in milliseconds; fire the kill at 300 ms so the
         // stop arm must win the race against the 2 s ack window.
@@ -2941,15 +2981,15 @@ Content-Type: text/event-stream
 
     /// `check_rpc_response` returns the `result` field on success and maps an
     /// `error` field to `ClientError::ServerError`.
-    #[test]
-    fn check_rpc_response_returns_result_on_success() {
+    #[tokio::test]
+    async fn check_rpc_response_returns_result_on_success() {
         let msg = json!({"jsonrpc": "2.0", "id": 1, "result": {"tools": []}});
         let result = check_rpc_response(&msg).expect("ok");
         assert_eq!(result, json!({"tools": []}));
     }
 
-    #[test]
-    fn check_rpc_response_maps_error_field_to_server_error() {
+    #[tokio::test]
+    async fn check_rpc_response_maps_error_field_to_server_error() {
         let msg = json!({"jsonrpc": "2.0", "id": 1, "error": {"code": -1, "message": "bad"}});
         let err = check_rpc_response(&msg).expect_err("error field");
         assert!(
@@ -2960,8 +3000,8 @@ Content-Type: text/event-stream
 
     /// A response with neither `result` nor `error` (JSON-RPC protocol
     /// violation) is rejected as a framing error, not silently mapped to Null.
-    #[test]
-    fn check_rpc_response_rejects_envelope_without_result_or_error() {
+    #[tokio::test]
+    async fn check_rpc_response_rejects_envelope_without_result_or_error() {
         let msg = json!({"jsonrpc": "2.0", "id": 1});
         let err = check_rpc_response(&msg).expect_err("malformed response");
         assert!(
@@ -2973,12 +3013,12 @@ Content-Type: text/event-stream
     /// #1455: the HTTP per-read bound's async carry -- a streamable-HTTP
     /// response that opens an SSE body and then falls silent surfaces as
     /// `Framing(TimedOut)` within the bound. This is issue #392's guarantee
-    /// (a hung server's blocking worker terminates after the probe deadline
-    /// fires; `spawn_blocking` tasks are not cancelled) restated on the
-    /// async face, pinned here with an injected bound instead of waiting
+    /// (a silent stream still resolves within the bound; the outer
+    /// deadline drops the future) restated on the async face, pinned here
+    /// with an injected bound instead of waiting
     /// out the 30 s production constant.
-    #[test]
-    fn http_client_sse_body_per_read_bound_times_out_a_silent_stream() {
+    #[tokio::test]
+    async fn http_client_sse_body_per_read_bound_times_out_a_silent_stream() {
         use std::net::TcpListener;
 
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind ephemeral");
@@ -2991,6 +3031,7 @@ Content-Type: text/event-stream
         );
         let err = client
             .request(json!({"jsonrpc": "2.0", "id": 1, "method": "tools/list"}))
+            .await
             .expect_err("the silent SSE body trips the per-read bound");
         match err {
             ClientError::Framing(ref e) => assert_eq!(
@@ -3054,8 +3095,8 @@ Content-Type: text/event-stream
     // --- same-origin + header merge (issue #901) -------------------------------
 
     /// Same origin (scheme + host + port) passes the guard.
-    #[test]
-    fn enforce_same_origin_accepts_matching_origin() {
+    #[tokio::test]
+    async fn enforce_same_origin_accepts_matching_origin() {
         enforce_same_origin("http://localhost:3001/sse", "http://localhost:3001/message")
             .expect("same origin accepted");
         // The default-port elision shape: an https url with an explicit 443
@@ -3065,8 +3106,8 @@ Content-Type: text/event-stream
     }
 
     /// A different host is refused and the error names BOTH origins.
-    #[test]
-    fn enforce_same_origin_refuses_a_different_host_naming_both() {
+    #[tokio::test]
+    async fn enforce_same_origin_refuses_a_different_host_naming_both() {
         let err = enforce_same_origin(
             "http://localhost:3001/sse",
             "http://attacker.test:8080/message",
@@ -3081,8 +3122,8 @@ Content-Type: text/event-stream
     }
 
     /// A different PORT on the same host is a different origin.
-    #[test]
-    fn enforce_same_origin_refuses_a_different_port() {
+    #[tokio::test]
+    async fn enforce_same_origin_refuses_a_different_port() {
         let err = enforce_same_origin("http://localhost:3001/sse", "http://localhost:8080/message")
             .expect_err("port difference refused");
         assert!(
@@ -3093,8 +3134,8 @@ Content-Type: text/event-stream
 
     /// A different SCHEME (https vs http) on the same host+port is a
     /// different origin.
-    #[test]
-    fn enforce_same_origin_refuses_a_scheme_change() {
+    #[tokio::test]
+    async fn enforce_same_origin_refuses_a_scheme_change() {
         let err = enforce_same_origin("http://localhost:3001/sse", "https://localhost:3001/m")
             .expect_err("scheme difference refused");
         assert!(
@@ -3108,8 +3149,8 @@ Content-Type: text/event-stream
     /// as authenticated -- a declared secret whose keychain value is missing
     /// would ride the POST the moment the value appears, so the guard must
     /// not wait for the merged map to fill.
-    #[test]
-    fn sse_auth_configured_counts_declared_keys_without_configured_headers() {
+    #[tokio::test]
+    async fn sse_auth_configured_counts_declared_keys_without_configured_headers() {
         let declared = vec!["X-Test-Token".to_string()];
         assert!(
             sse_auth_configured(&BTreeMap::new(), &declared),
@@ -3131,8 +3172,8 @@ Content-Type: text/event-stream
     /// secrets compose into one map (secret values win on a name collision,
     /// which the read-time scan makes impossible in practice -- the extend is
     /// just the order-insensitive composition).
-    #[test]
-    fn merged_headers_combines_configured_and_secret_values() {
+    #[tokio::test]
+    async fn merged_headers_combines_configured_and_secret_values() {
         let mut configured = BTreeMap::new();
         configured.insert("X-Client".to_string(), "toptopduck".to_string());
         let secrets = vec![
@@ -3149,24 +3190,24 @@ Content-Type: text/event-stream
     // --- resolve_post_url SSRF guard (issue #389) -----------------------------
 
     /// A relative path like `/message` resolves against the SSE base URL.
-    #[test]
-    fn resolve_post_url_resolves_relative_path() {
+    #[tokio::test]
+    async fn resolve_post_url_resolves_relative_path() {
         let url = resolve_post_url("http://localhost:3001/sse", "/message").expect("relative");
         assert_eq!(url, "http://localhost:3001/message");
     }
 
     /// An absolute http URL to a different host is accepted (the MCP SSE
     /// transport contract allows the server to advertise any http(s) endpoint).
-    #[test]
-    fn resolve_post_url_accepts_absolute_http_url() {
+    #[tokio::test]
+    async fn resolve_post_url_accepts_absolute_http_url() {
         let url = resolve_post_url("http://localhost:3001/sse", "http://other.host:8080/mcp")
             .expect("absolute");
         assert_eq!(url, "http://other.host:8080/mcp");
     }
 
     /// A `file://` scheme in the endpoint event is rejected (SSRF guard).
-    #[test]
-    fn resolve_post_url_rejects_file_scheme() {
+    #[tokio::test]
+    async fn resolve_post_url_rejects_file_scheme() {
         let err = resolve_post_url("http://localhost:3001/sse", "file:///etc/passwd")
             .expect_err("file:// rejected");
         let msg = err.to_string();
@@ -3177,8 +3218,8 @@ Content-Type: text/event-stream
     }
 
     /// A `gopher://` scheme is rejected (SSRF guard — protocol smuggling).
-    #[test]
-    fn resolve_post_url_rejects_gopher_scheme() {
+    #[tokio::test]
+    async fn resolve_post_url_rejects_gopher_scheme() {
         let err = resolve_post_url("http://localhost:3001/sse", "gopher://attacker/x")
             .expect_err("gopher:// rejected");
         assert!(
@@ -3188,8 +3229,8 @@ Content-Type: text/event-stream
     }
 
     /// A `data:` scheme is rejected (SSRF guard).
-    #[test]
-    fn resolve_post_url_rejects_data_scheme() {
+    #[tokio::test]
+    async fn resolve_post_url_rejects_data_scheme() {
         let err = resolve_post_url("http://localhost:3001/sse", "data:text/plain,evil")
             .expect_err("data: rejected");
         assert!(

@@ -33,7 +33,7 @@ MCP/gateway 出网链是 app 最后一块同步 IO 域（loop 域已经 ADR-0116
 - ureq 依赖退役，Cargo.toml 叙事清理；`provider/http.rs` egress 面随 preflight 迁移删码，文件收缩为 URL 校验与截断工具。
 - preflight 迁 `reqwest::blocking` 为独立先行票（不在 MCP 链上，方向一致，可并行）。
 - MCP/gateway 异步化大票切片交付：bounded-line 异步读面前置基建 → HTTP/SSE 传输 → stdio（tokio::process，Windows 进程树终止语义重钉）→ aggregator/gateway deadline 面 → ureq 退役收尾。
-- **校准 ADR-0085**：网关 serve 的「`serve_connection` 阻塞驱动 + accept 非阻塞轮询 + `set_read_timeout` 读循环」读作出网链 tokio 化后由 `select!` / `tokio::time::timeout` 原生承载；不变面——回连 token 验证与单连接接受、newline-delimited JSON-RPC 桥接直通、`!Sync` 连接主线程原地借用的线程约束、serve 收尾由引擎完成信号驱动的语义保证。
-- MCP 传输的 no-redirect 守卫语义原样保留；取消/停止响应性不劣于现状（select 语义应即时）。
+- **校准 ADR-0085**：网关 serve 的「`serve_connection` 阻塞驱动 + accept 非阻塞轮询 + `set_read_timeout` 读循环」退役——accept 由 `select!` 原生承载、pre-auth 读为单源 park（旗标由 spine 节拍观察、park 读由收尾释放）；已建连接的读循环依实测平台唤醒约束（Windows + tokio：socket 读 park 后同任务任何非 IO 唤醒源不再醒，判据记录于网关 serve 实现的 `serve_reader` doc）改双工拆分——spine 线程以 std channel `recv_timeout` 节拍观察终止旗标、读任务单源 park 于 socket、keep-alive 伴写线程同为 std 线程；取消/终止响应性以旗标节拍为上界（serve 节拍 100ms、accept 节拍 10ms 承旧非阻塞轮询间隔）；不变面——回连 token 验证与单连接接受、newline-delimited JSON-RPC 桥接直通、`!Sync` 连接主线程原地借用的线程约束、serve 收尾由引擎完成信号驱动的语义保证。
+- MCP 传输的 no-redirect 守卫语义原样保留；取消/停止响应性不劣于现状（传输面 select 即时；网关 serve 面以旗标节拍为上界，节拍量级承旧轮询间隔）。
 - 代理语义统一为副产品：OS 级回落在 CI 不可测（runner 无代理配置），显式记缝并留本机人工验证步骤。
 - 非目标：rmcp 换装（触发条件见 Considered）、第三协议启用。

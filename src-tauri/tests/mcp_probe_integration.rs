@@ -12,9 +12,10 @@
 //! 3. **Paginated server** ([`mcp_paginated_server`]): the handshake folds a
 //!    two-page `tools/list` joined by `nextCursor` (issue #900).
 //!
-//! The command layer wraps these in `tokio::time::timeout` +
-//! `spawn_blocking`; here we use `std::thread` + `mpsc::recv_timeout` to
-//! exercise the same logic without needing a Tauri runtime. The child kill +
+//! The command layer wraps these in `tokio::time::timeout`; here we use
+//! `std::thread` + `mpsc::recv_timeout` to exercise the same logic without
+//! needing a Tauri runtime, driving the async faces through the transport
+//! runtime's `block_on`. The child kill +
 //! reap is the explicit invariant under test — a leaked child would hold the
 //! stdin pipe open and hang the test process at exit.
 
@@ -56,20 +57,21 @@ fn stdio_config(id: &str, bin: &str) -> McpServerConfig {
 
 /// Kill the child's tree and reap the direct child, asserting the reap
 /// (wait() succeeding confirms the child was reaped — no zombie/leak). The
-/// tests run on plain threads, so the async reap rides a throwaway
-/// current-thread runtime.
+/// tests run on plain threads, so the async reap rides the transport
+/// runtime the child registered on at spawn (the same runtime the
+/// production caller polls through) — a throwaway runtime would strand
+/// its wakers.
 fn kill_and_reap(child: &mut StdioChildHandle) {
     child.kill();
-    let rt = tokio::runtime::Builder::new_current_thread()
-        .build()
-        .expect("test reap runtime");
-    rt.block_on(child.reap()).expect("child reaped");
+    toptopduck_lib::mcp::client::block_on(child.reap()).expect("child reaped");
 }
 
 /// Run the handshake on a worker thread, returning a receiver so the caller
-/// can `recv_timeout`. Mirrors the `spawn_blocking` + `tokio::time::timeout`
-/// pattern the command uses, without requiring a Tauri runtime. `server` is
-/// the attribution label `stdio_handshake` threads into `list_tools`.
+/// can `recv_timeout`. `server` is the attribution label `stdio_handshake`
+/// threads into `list_tools`. The pipes are carried IO registered on the
+/// transport runtime at spawn, so the handshake must ride that runtime's
+/// `block_on` — a throwaway runtime would strand the pipes' wakers (see
+/// `mcp::client::block_on`'s doc).
 fn handshake_async(
     stdin: tokio::process::ChildStdin,
     stdout: tokio::process::ChildStdout,
@@ -78,7 +80,8 @@ fn handshake_async(
     let (tx, rx) = mpsc::channel();
     let server = server.to_string();
     thread::spawn(move || {
-        let result = stdio_handshake(stdin, stdout, &server).map_err(|e| e.to_string());
+        let result = toptopduck_lib::mcp::client::block_on(stdio_handshake(stdin, stdout, &server))
+            .map_err(|e| e.to_string());
         let _ = tx.send(result);
     });
     rx
@@ -231,7 +234,9 @@ fn orphaning_config(id: &str) -> McpServerConfig {
 /// Park a read on the grandchild-held stdout pipe and report the first
 /// read's outcome (Ok(0) = EOF) — the settle observable both tree pins
 /// assert on. The tests run on plain threads, so the read rides a
-/// throwaway current-thread runtime.
+/// throwaway current-thread runtime — safe here and only here: it is one
+/// terminal read with no caller awaiting a later poll, unlike the
+/// carried-IO clients that must ride the bridge runtime.
 fn spawn_pipe_read(stdout: tokio::process::ChildStdout) -> mpsc::Receiver<std::io::Result<usize>> {
     let (tx, rx) = mpsc::channel();
     thread::spawn(move || {
