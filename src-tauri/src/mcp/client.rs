@@ -16,8 +16,7 @@
 //!   transport, issue #389).
 //! - [`SseClient`]: a long-lived GET opens an SSE stream (responses arrive
 //!   here); JSON-RPC requests are POSTed to a server-advertised endpoint URL
-//!   (legacy MCP SSE transport, issue #389). A background reader thread
-//!   forwards SSE events via an mpsc channel.
+//!   (legacy MCP SSE transport, issue #389).
 //!
 //! The shared MCP protocol logic (`initialize` / `list_tools` / `call`) lives
 //! in the [`McpClient`] trait as default methods; each transport implements
@@ -33,49 +32,89 @@
 //! configured server at turn start and drops it at turn end -- no
 //! cross-turn state, no session-level handle. Per-call timeouts are NOT
 //! enforced per-read here: the transports carry no per-call deadline of
-//! their own (a stdio read ends only at the child's stdout EOF, an SSE
-//! channel recv ends only when the reader exits -- within one
-//! [`SSE_READ_TIMEOUT`] wake of the stop flag while parked in an idle
-//! read -- and an HTTP read ends
-//! at its [`HTTP_READ_TIMEOUT`] per-read bound), so the deadline lives one
+//! their own (a stdio read ends only at the child's stdout EOF, an SSE read
+//! is raced against the stop signal's wake, and an HTTP body read ends at
+//! its [`HTTP_READ_TIMEOUT`] per-read bound), so the deadline lives one
 //! layer up -- the aggregator parks the blocking call on a worker thread
 //! and enforces
 //! [`McpServerConfig::timeout_ms`](crate::mcp::config::McpServerConfig::timeout_ms)
 //! / the gateway default via `recv_timeout`, terminating the transport
-//! through [`TransportKill`] on expiry (issue #889). The transports stay
-//! pure synchronous: `McpClient`'s wire methods never poll clocks or
-//! cancel tokens.
+//! through [`TransportKill`] on expiry (issue #889).
+//!
+//! Async I/O, sync face (ADR-0139, #1455): the two remote transports ride
+//! `reqwest` futures on the module's bridge runtime while the [`McpClient`]
+//! trait stays synchronous -- the aggregator's deadline workers and the
+//! probe's `spawn_blocking` closures call it from plain threads, bridged
+//! one call at a time through [`block_on`]. The retired sync design's
+//! compensation layers are gone with it: the SSE reader thread's two-second
+//! stop-flag tick is now a `select!` race with an immediate wake, and the
+//! HTTP per-read cap rides `tokio::time::timeout`. When the aggregator's
+//! deadline face goes async (the chain's next slices), the transports
+//! become natively async and the bridge runtime retires.
 
 use std::collections::{BTreeMap, HashSet};
+use std::future::Future;
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc;
-use std::sync::{Arc, Mutex};
-use std::thread;
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
+use bytes::Bytes;
 use serde_json::{json, Value};
 
-use crate::bounded_line::{read_line_bounded, LineRead, LINE_MAX_BYTES};
+use crate::bounded_line::{LineRead, LINE_MAX_BYTES};
 use crate::mcp::config::{McpServerConfig, McpTransport};
 use crate::mcp::MCP_PROTOCOL_VERSION;
 use crate::runtime::gateway::framing;
 
-/// SSE reader-thread read timeout. Bounds the join latency in `SseClient::drop`
-/// (the reader wakes at most every this interval to re-check the stop flag).
-const SSE_READ_TIMEOUT: Duration = Duration::from_secs(2);
-
-/// HTTP per-read timeout (issue #392). Ensures a hung HTTP server's
-/// `spawn_blocking` task eventually terminates after the probe deadline
-/// fires — `spawn_blocking` tasks are not cancelled, so without this the
-/// thread + TCP connection would linger indefinitely.
+/// HTTP per-read timeout (issue #392; async carry, #1455): every body-chunk
+/// read on a streamable-HTTP response must progress within this bound, so a
+/// hung server's blocking worker eventually terminates after the probe
+/// deadline fires — `spawn_blocking` tasks are not cancelled, so without
+/// this the thread + TCP connection would linger indefinitely.
 const HTTP_READ_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// Bounded channel capacity for SSE reader → consumer message forwarding.
-/// Backpressures a flooding server so the reader blocks on send rather than
-/// accumulating unbounded messages in memory.
-const SSE_CHANNEL_BOUND: usize = 64;
+/// Bounded channel capacity for the body-chunk pumps (chunks, not messages:
+/// one chunk carries whatever the transport layer yielded). Backpressures a
+/// flooding server so the pump blocks on send rather than accumulating
+/// unbounded body bytes in memory.
+const BODY_CHANNEL_BOUND: usize = 64;
+
+/// SSE ack window (the retired sync design's two-second read timeout, kept
+/// as its honest core, #1455): the connect-phase `endpoint` event and every
+/// POST acknowledgment must arrive within this window or the call fails.
+/// The old agent's `timeout_read` carried this bound on every SSE read; the
+/// stream's LATER reads are legitimately silent for long stretches (the
+/// response to a POST may trail it indefinitely), so those ride the
+/// stop-wake `select!` instead. The bound is what lets a probe against a
+/// hung server self-resolve after the probe deadline fires (issue #392: the
+/// probe path fires no kill signal).
+const SSE_ACK_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// The transport-side tokio runtime (ADR-0139, #1455): the remote transports
+/// are async-native while their consumer face is still synchronous (it goes
+/// async in the chain's aggregator slice). Each wire call bridges through
+/// `block_on` here; the SSE stream pump tasks ride this runtime's workers.
+/// Two parked threads when idle; retires with the sync face.
+static TRANSPORT_RUNTIME: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
+
+/// Drive one transport future on the bridge runtime from a plain thread (an
+/// aggregator deadline worker or a probe `spawn_blocking` closure). Never
+/// called from an async context — the transports own every call site.
+fn block_on<T>(fut: impl Future<Output = T>) -> T {
+    transport_runtime().block_on(fut)
+}
+
+fn transport_runtime() -> &'static tokio::runtime::Runtime {
+    TRANSPORT_RUNTIME.get_or_init(|| {
+        tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .expect("the transport bridge runtime builds")
+    })
+}
 
 /// The `tools/list` pagination guardrails (issue #900). A server may split
 /// its tool list across pages joined by `nextCursor`; a server that never
@@ -95,13 +134,45 @@ const TOOLS_LIST_TOOL_CAP: usize = 2048;
 /// never touches the keychain -- it is pure transport, testable without one.
 pub type SecretEnv = (String, String);
 
+/// The SSE transport's stop signal: the flag half is what the sync
+/// [`TransportKill::kill`] face writes from any thread; the `Notify` half
+/// wakes a request parked in the async `select!` immediately. The retired
+/// sync design polled the flag on a two-second read-timeout tick — the
+/// whole point of the async carry (#1455) is that stop needs no tick.
+pub struct SseStopSignal {
+    stopped: AtomicBool,
+    wake: tokio::sync::Notify,
+}
+
+impl SseStopSignal {
+    fn new() -> Self {
+        Self {
+            stopped: AtomicBool::new(false),
+            wake: tokio::sync::Notify::new(),
+        }
+    }
+
+    /// Set the flag and wake every parked reader now. Idempotent;
+    /// `notify_one` leaves a stored permit for a caller that has not
+    /// parked yet, so a stop racing the next request's `select!` arm still
+    /// lands.
+    fn stop(&self) {
+        self.stopped.store(true, Ordering::SeqCst);
+        self.wake.notify_one();
+    }
+
+    fn is_stopped(&self) -> bool {
+        self.stopped.load(Ordering::SeqCst)
+    }
+}
+
 /// A cross-thread kill handle for one transport (issue #889). Cloned from
 /// the owning client; [`TransportKill::kill`] makes that transport's
 /// blocking read return so a parked caller unblocks:
 /// - stdio: terminate the child -> its stdout EOFs -> `read_message`
 ///   reports `ServerClosed`;
-/// - SSE: set the reader-thread stop flag -> the reader exits -> the
-///   response channel closes -> `recv` reports `ServerClosed`;
+/// - SSE: fire the stop signal -> a request parked in the stream-read
+///   `select!` wakes immediately and reports `ServerClosed`;
 /// - HTTP: no-op -- that transport is already bounded per-read
 ///   ([`HTTP_READ_TIMEOUT`], issue #392).
 #[derive(Clone)]
@@ -109,20 +180,15 @@ pub enum TransportKill {
     /// Terminate the spawned stdio child. Shared with the client's `Drop`
     /// (kill + reap stay single-owner through the mutex).
     StdioChild(Arc<Mutex<Child>>),
-    /// Signal the SSE reader thread to stop. While parked in an idle read
-    /// the reader notices the flag on its next wake -- at most one
-    /// `SSE_READ_TIMEOUT` away. The kill-resistant shapes exceed that
-    /// bound (absorbed by the caller's grace, not by the stop): a
-    /// slow-drip stream that keeps the reader inside `read_sse_event`, and
-    /// a reader blocked in a full-channel send.
-    SseStop(Arc<AtomicBool>),
+    /// Fire the SSE transport's stop signal (see [`SseStopSignal`]).
+    SseStop(Arc<SseStopSignal>),
     /// Nothing to terminate (HTTP is per-read bounded).
     Http,
 }
 
 impl TransportKill {
     /// Make the transport's blocking read return. Idempotent: killing an
-    /// already-dead child or re-setting a stop flag is a harmless no-op, so
+    /// already-dead child or re-firing a stop signal is a harmless no-op, so
     /// deadline expiry and cancel teardown may both fire it.
     pub fn kill(&self) {
         match self {
@@ -145,7 +211,7 @@ impl TransportKill {
                     );
                 }
             },
-            Self::SseStop(stop) => stop.store(true, Ordering::SeqCst),
+            Self::SseStop(signal) => signal.stop(),
             Self::Http => {}
         }
     }
@@ -433,8 +499,8 @@ struct SseEvent {
 
 /// Read one SSE event from a buffered reader, with both caps from
 /// [`LINE_MAX_BYTES`] (issue #647):
-/// - line level: lines longer than the cap are dropped by
-///   [`read_line_bounded`];
+/// - line level: lines longer than the cap are dropped by the bounded
+///   line reader;
 /// - event level: the summed bytes of one event's `data:` parts -- the "\n"
 ///   join byte included, so zero-length parts cannot slip past -- are
 ///   bounded (a stream that never sends the terminating blank line cannot
@@ -452,8 +518,15 @@ struct SseEvent {
 /// fields (`id:`, `retry:`) are ignored. Returns `Ok(None)` at clean EOF
 /// (stream closed). Multiple `data:` lines within one event are joined with
 /// `\n` per the SSE spec.
-fn read_sse_event<R: BufRead>(reader: &mut R) -> std::io::Result<Option<SseEvent>> {
-    read_sse_event_bounded(reader, LINE_MAX_BYTES)
+///
+/// Async since #1455: the remote transports read bodies through the chunk
+/// pump, so the line source is `AsyncBufRead` -- the parsing statements and
+/// the [`EventAccumulator`] state machine are the sync design's verbatim,
+/// only the line-read call is awaited.
+async fn read_sse_event(
+    reader: &mut (impl tokio::io::AsyncBufRead + Unpin),
+) -> std::io::Result<Option<SseEvent>> {
+    read_sse_event_bounded(reader, LINE_MAX_BYTES).await
 }
 
 /// The per-event parsing state of [`read_sse_event_bounded`]: the fields
@@ -555,14 +628,14 @@ impl EventAccumulator {
 /// exists for the unit tests (small caps keep fixtures tiny -- the same
 /// convention as [`read_line_bounded`]); every production caller passes
 /// [`LINE_MAX_BYTES`].
-fn read_sse_event_bounded<R: BufRead>(
+async fn read_sse_event_bounded<R: tokio::io::AsyncBufRead + Unpin>(
     reader: &mut R,
     max: usize,
 ) -> std::io::Result<Option<SseEvent>> {
     let mut acc = EventAccumulator::building();
 
     loop {
-        let line = match read_line_bounded(reader, max)? {
+        let line = match crate::bounded_line::read_line_bounded_async(&mut *reader, max).await? {
             LineRead::Eof => {
                 // EOF: return any buffered event, else None (clean close).
                 // A voided event that never reached its boundary is dropped.
@@ -626,10 +699,11 @@ fn read_sse_event_bounded<R: BufRead>(
 
 /// The failure attribution for malformed JSON in an SSE event's data,
 /// shared by the two payload consumers (the streamable-HTTP response path
-/// and the legacy reader thread): `Framing(InvalidData)` carrying the
-/// payload length and the serde error, matching the stdio path's
-/// framing::read_message contract. One source keeps the two attributions
-/// from drifting (issue #666; previously a verbatim copy at each site).
+/// and the legacy-SSE request loop's stream read): `Framing(InvalidData)`
+/// carrying the payload length and the serde error, matching the stdio
+/// path's framing::read_message contract. One source keeps the two
+/// attributions from drifting (issue #666; previously a verbatim copy at
+/// each site).
 fn malformed_sse_event(data_len: usize, e: serde_json::Error) -> ClientError {
     ClientError::Framing(std::io::Error::new(
         std::io::ErrorKind::InvalidData,
@@ -822,6 +896,136 @@ pub fn stdio_handshake(
 }
 
 // ---------------------------------------------------------------------------
+// Body pump + chunk reader (the async I/O shell, #1455)
+// ---------------------------------------------------------------------------
+
+/// Spawn a task on the transport runtime that drains `response`'s body into
+/// a bounded chunk channel, and return the channel's reader side. This is
+/// what lets [`read_sse_event`] keep its buffered-reader contract on the
+/// async face: reqwest yields the body as chunk futures, and the
+/// bounded channel carries the flooding-server backpressure the retired
+/// design's `SSE_CHANNEL_BOUND` had.
+///
+/// `read_timeout` (the HTTP face's per-read bound, issue #392) wraps every
+/// chunk read: elapsed sends the timeout error downstream and ends the pump
+/// -- each socket read must progress within the bound, exactly the retired
+/// ureq `timeout_read` semantics. `None` (the SSE GET stream) means no
+/// bound: the stream is legitimately silent for long stretches, and the
+/// consumer's stop-wake `select!` is the only break.
+///
+/// The pump ends at EOF (the receiver sees EOF), on a body error (forwarded
+/// as an error chunk), or when the receiver drops (send fails). No stop
+/// signal needed: the pump never outlives its reader.
+fn spawn_body_pump(mut response: reqwest::Response, read_timeout: Option<Duration>) -> ChunkReader {
+    let (tx, rx) = tokio::sync::mpsc::channel::<Result<Bytes, std::io::Error>>(BODY_CHANNEL_BOUND);
+    transport_runtime().spawn(async move {
+        loop {
+            // Race the read against the receiver's demise: a consumer
+            // dropped mid-park cannot cancel a parked chunk read, and
+            // without this race the pump (and the connection it holds)
+            // would linger until the server deigns to send a byte.
+            let chunk: Result<Option<Bytes>, std::io::Error> = tokio::select! {
+                chunk = async {
+                    match read_timeout {
+                        Some(bound) => match tokio::time::timeout(bound, response.chunk()).await {
+                            Ok(chunk) => chunk.map_err(|e| std::io::Error::other(e.to_string())),
+                            Err(_elapsed) => Err(std::io::Error::new(
+                                std::io::ErrorKind::TimedOut,
+                                format!("no body bytes within {bound:?} (per-read bound)"),
+                            )),
+                        },
+                        None => response
+                            .chunk()
+                            .await
+                            .map_err(|e| std::io::Error::other(e.to_string())),
+                    }
+                } => chunk,
+                _ = tx.closed() => return, // Receiver dropped (client gone).
+            };
+            match chunk {
+                Ok(Some(bytes)) => {
+                    if tx.send(Ok(bytes)).await.is_err() {
+                        break; // Receiver dropped between the race and the send.
+                    }
+                }
+                Ok(None) => break, // EOF: the dropped sender closes the channel.
+                Err(e) => {
+                    // Surface the fault (per-read timeout or transport
+                    // error) to the waiting read instead of a clean EOF --
+                    // the pump cannot log-and-exit without stranding the
+                    // consumer.
+                    let _ = tx.send(Err(e)).await;
+                    break;
+                }
+            }
+        }
+    });
+    ChunkReader {
+        rx,
+        buf: Bytes::new(),
+    }
+}
+
+/// `AsyncBufRead` over the pump's channel: `poll_fill_buf` polls the
+/// receiver, an error chunk (a per-read timeout, a transport fault)
+/// surfaces verbatim, and the channel closing reads as EOF. `Unpin` by
+/// construction -- both halves of the transport are driven from plain
+/// threads through [`block_on`].
+struct ChunkReader {
+    rx: tokio::sync::mpsc::Receiver<Result<Bytes, std::io::Error>>,
+    buf: Bytes,
+}
+
+impl tokio::io::AsyncRead for ChunkReader {
+    fn poll_read(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        out: &mut tokio::io::ReadBuf<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        let this = self.get_mut();
+        match tokio::io::AsyncBufRead::poll_fill_buf(std::pin::Pin::new(&mut *this), cx) {
+            std::task::Poll::Ready(Ok(bytes)) => {
+                let n = bytes.len().min(out.remaining());
+                out.put_slice(&bytes[..n]);
+                tokio::io::AsyncBufRead::consume(std::pin::Pin::new(this), n);
+                std::task::Poll::Ready(Ok(()))
+            }
+            std::task::Poll::Ready(Err(e)) => std::task::Poll::Ready(Err(e)),
+            std::task::Poll::Pending => std::task::Poll::Pending,
+        }
+    }
+}
+
+impl tokio::io::AsyncBufRead for ChunkReader {
+    fn poll_fill_buf(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<&[u8]>> {
+        let this = self.get_mut();
+        while this.buf.is_empty() {
+            match this.rx.poll_recv(cx) {
+                std::task::Poll::Ready(Some(Ok(bytes))) => {
+                    this.buf = bytes;
+                    // A zero-length chunk carries nothing; poll the next one.
+                    if this.buf.is_empty() {
+                        continue;
+                    }
+                }
+                std::task::Poll::Ready(Some(Err(e))) => return std::task::Poll::Ready(Err(e)),
+                std::task::Poll::Ready(None) => return std::task::Poll::Ready(Ok(&[])), // EOF
+                std::task::Poll::Pending => return std::task::Poll::Pending,
+            }
+        }
+        std::task::Poll::Ready(Ok(&this.buf))
+    }
+
+    fn consume(self: std::pin::Pin<&mut Self>, amt: usize) {
+        let this = self.get_mut();
+        this.buf = this.buf.slice(amt..);
+    }
+}
+
+// ---------------------------------------------------------------------------
 // HTTP transport client (streamable HTTP, issue #389)
 // ---------------------------------------------------------------------------
 
@@ -838,7 +1042,13 @@ pub struct HttpClient {
     /// configured non-secret values merged with the keychain-resolved secret
     /// values at dispatch time.
     headers: BTreeMap<String, String>,
-    agent: ureq::Agent,
+    /// The shared async egress client (ADR-0139's construction seam): a
+    /// clone of the process singleton, same pool as the live turns.
+    client: reqwest::Client,
+    /// The SSE-body per-read bound (issue #392's async carry). A field so
+    /// the timeout pin can inject a small bound instead of waiting out the
+    /// 30 s production constant.
+    read_timeout: Duration,
     next_id: i64,
 }
 
@@ -852,30 +1062,39 @@ impl HttpClient {
     /// per-read ([`HTTP_READ_TIMEOUT`]), so the slot holds the no-op handle
     /// purely for kill-shape uniformity across transports.
     ///
-    /// The agent never follows redirects (issue #901 guardrail): a 3xx
-    /// returns `Ok` under `redirects(0)` and surfaces as an explicit
-    /// connection error via [`check_no_redirect`] on the response status --
-    /// ureq's redirect hops only strip `authorization`/`cookie`, so following
-    /// one would forward any custom credential header to an arbitrary origin
-    /// (the #244 egress-agent precedent).
+    /// The egress client never follows redirects (issue #901 guardrail):
+    /// `Policy::none` hands a 3xx back as an Ok response, and
+    /// [`check_no_redirect`] refuses it on the status -- reqwest's redirect
+    /// hops only strip `authorization`/`cookie`, so following one would
+    /// forward any custom credential header to an arbitrary origin (the
+    /// #244 egress-agent precedent).
     pub fn connect_with_kill(
         url: &str,
         headers: &BTreeMap<String, String>,
         kill_slot: &KillSlot,
     ) -> Result<Self, ClientError> {
-        let agent = ureq::AgentBuilder::new()
-            .timeout_read(HTTP_READ_TIMEOUT)
-            .redirects(0)
-            .build();
+        let mut client = Self::with_parts(url, headers, HTTP_READ_TIMEOUT)?;
         kill_slot.publish(TransportKill::Http);
-        let mut client = Self {
-            url: url.to_string(),
-            headers: headers.clone(),
-            agent,
-            next_id: 1,
-        };
         client.initialize()?;
         Ok(client)
+    }
+
+    /// Construct the client around the shared egress singleton without any
+    /// handshake. The named construction point both public entries share.
+    fn with_parts(
+        url: &str,
+        headers: &BTreeMap<String, String>,
+        read_timeout: Duration,
+    ) -> Result<Self, ClientError> {
+        Ok(Self {
+            url: url.to_string(),
+            headers: headers.clone(),
+            client: crate::egress::async_client().map_err(|e| {
+                ClientError::Http(format!("egress client construction failed: {e}"))
+            })?,
+            read_timeout,
+            next_id: 1,
+        })
     }
 
     /// The cross-thread kill handle (issue #889) -- the no-op variant.
@@ -884,8 +1103,8 @@ impl HttpClient {
     }
 
     /// Build the POST request with [`Self::headers`] attached (issue #901).
-    fn post(&self) -> ureq::Request {
-        apply_headers(self.agent.post(&self.url), &self.headers)
+    fn post(&self) -> reqwest::RequestBuilder {
+        apply_headers(self.client.post(&self.url), &self.headers)
     }
 
     /// Test-only: a client at a URL nothing listens on. The aggregator's
@@ -894,12 +1113,16 @@ impl HttpClient {
     /// shape the dispatch-composition pins exercise.
     #[cfg(test)]
     pub(crate) fn unreachable_for_test(url: &str) -> Self {
-        Self {
-            url: url.to_string(),
-            headers: BTreeMap::new(),
-            agent: ureq::AgentBuilder::new().build(),
-            next_id: 1,
-        }
+        Self::with_parts(url, &BTreeMap::new(), HTTP_READ_TIMEOUT)
+            .expect("the egress singleton builds")
+    }
+
+    /// Test-only: an unconnected client with an injected per-read bound, so
+    /// the timeout pin observes a silent SSE body in milliseconds instead
+    /// of the 30 s production constant.
+    #[cfg(test)]
+    pub(crate) fn for_test_with_read_timeout(url: &str, read_timeout: Duration) -> Self {
+        Self::with_parts(url, &BTreeMap::new(), read_timeout).expect("the egress singleton builds")
     }
 }
 
@@ -910,43 +1133,70 @@ impl McpClient for HttpClient {
     /// the response is matched by JSON-RPC `id`.
     fn request(&mut self, req: Value) -> Result<Value, ClientError> {
         let id = req.get("id").cloned();
-        let response = self
-            .post()
-            .send_json(req)
-            .map_err(|e| ClientError::Http(e.to_string()))?;
-        check_no_redirect(&response)?;
-
-        let content_type = response.header("Content-Type").unwrap_or("");
-        if content_type.contains("text/event-stream") {
-            // Streamable-HTTP SSE response: read events and find the matching
-            // JSON-RPC response by id (notifications without id are skipped).
-            let mut reader = BufReader::new(response.into_reader());
-            loop {
-                match read_sse_event(&mut reader).map_err(ClientError::Framing)? {
-                    Some(event) => match serde_json::from_str::<Value>(&event.data) {
-                        Ok(msg) => {
-                            if msg.get("id") == id.as_ref() && id.is_some() {
-                                return check_rpc_response(&msg);
-                            }
-                        }
-                        Err(e) => {
-                            return Err(malformed_sse_event(event.data.len(), e));
-                        }
-                    },
-                    None => return Err(ClientError::ServerClosed),
+        block_on(async {
+            // The send (connect + headers) rides the per-read bound -- the
+            // retired ureq agent's read timeout covered the header wait, so
+            // a server that never answers fails here instead of parking the
+            // caller (issue #392's wind-down guarantee; the kill for this
+            // transport is a no-op by design).
+            let send = tokio::time::timeout(self.read_timeout, self.post().json(&req).send()).await;
+            let response = match send {
+                Ok(send) => send.map_err(|e| ClientError::Http(e.to_string()))?,
+                Err(_) => {
+                    return Err(ClientError::Http(format!(
+                        "no response within {:?} (per-read bound)",
+                        self.read_timeout
+                    )))
                 }
+            };
+            check_no_redirect(&response)?;
+            check_status(&response)?;
+            let content_type = content_type(&response);
+            if content_type.contains("text/event-stream") {
+                // Streamable-HTTP SSE response: read events and find the
+                // matching JSON-RPC response by id (notifications without id
+                // are skipped). The pump bounds every chunk read by
+                // [`Self::read_timeout`] -- a silent body surfaces as a
+                // `Framing(TimedOut)` error, the #392 per-read cap.
+                let mut reader = spawn_body_pump(response, Some(self.read_timeout));
+                loop {
+                    let event = read_sse_event(&mut reader)
+                        .await
+                        .map_err(ClientError::Framing)?;
+                    match event {
+                        Some(event) => match serde_json::from_str::<Value>(&event.data) {
+                            Ok(msg) => {
+                                if msg.get("id") == id.as_ref() && id.is_some() {
+                                    return check_rpc_response(&msg);
+                                }
+                            }
+                            Err(e) => {
+                                return Err(malformed_sse_event(event.data.len(), e));
+                            }
+                        },
+                        None => return Err(ClientError::ServerClosed),
+                    }
+                }
+            } else {
+                // Plain JSON response, read through the bounded pump so the
+                // per-read bound covers the body too (the retired agent's
+                // read timeout bounded every byte, not just the headers).
+                use tokio::io::AsyncReadExt as _;
+                let mut reader = spawn_body_pump(response, Some(self.read_timeout));
+                let mut body = Vec::new();
+                reader
+                    .read_to_end(&mut body)
+                    .await
+                    .map_err(ClientError::Framing)?;
+                let body: Value =
+                    serde_json::from_slice(&body).map_err(|e| ClientError::Http(e.to_string()))?;
+                check_rpc_response(&body)
             }
-        } else {
-            // Plain JSON response.
-            let body: Value = response
-                .into_json()
-                .map_err(|e| ClientError::Http(e.to_string()))?;
-            check_rpc_response(&body)
-        }
+        })
     }
 
     fn send_notification(&mut self, notif: Value) -> Result<(), ClientError> {
-        post_notification(self.post(), notif)
+        block_on(post_notification(self.post(), notif, self.read_timeout))
     }
 
     fn next_id(&mut self) -> i64 {
@@ -966,54 +1216,54 @@ impl McpClient for HttpClient {
 /// POSTed to that endpoint; responses arrive as `message` events on the SSE
 /// stream.
 ///
-/// A background thread ([`sse_reader_loop`]) continuously reads SSE events
-/// and forwards JSON-RPC messages via an [`mpsc`] channel. The main thread
-/// POSTs requests and receives responses from the channel, matching by id.
-/// The agent's `timeout_read` (2 s) lets the reader periodically check the
-/// stop flag so [`Drop`] can join the thread cleanly.
+/// The stream's body is pumped by a runtime task ([`spawn_body_pump`]) into
+/// a bounded chunk channel whose receiver side ([`ChunkReader`]) reads
+/// events on demand; a request parked on a silent stream is raced against
+/// the stop signal's wake ([`SseStopSignal`]) so a kill lands immediately
+/// — the retired sync design polled a stop flag on a two-second read
+/// timeout instead. `Drop` has no side effects: dropping the receiver ends
+/// the pump (its send fails), which tears the connection down with it.
 pub struct SseClient {
-    /// Receives JSON-RPC messages forwarded by the reader thread. `Err`
-    /// carries a reader-side failure (malformed message event, issue #647)
-    /// propagated to the waiting request.
-    response_rx: mpsc::Receiver<Result<Value, ClientError>>,
+    /// The GET stream's body reader (pump task → bounded channel → this
+    /// receiver). Reading is on demand inside `request`; no reader task
+    /// parses ahead.
+    stream: ChunkReader,
     /// The POST endpoint URL (from the server's initial `endpoint` event).
     post_url: String,
     /// Request headers attached to the SSE GET stream and every POST
     /// (issue #901) -- the transport's configured non-secret values merged
     /// with the keychain-resolved secret values at dispatch time.
     headers: BTreeMap<String, String>,
-    /// HTTP agent for POST requests (the GET agent's stream is owned by the
-    /// reader thread).
-    agent: ureq::Agent,
-    /// Stop flag shared with the reader thread.
-    stop: Arc<AtomicBool>,
-    /// The reader thread handle. `Drop` releases `response_rx` before
-    /// joining this thread (issue #667): a reader blocked in `send` on a
-    /// full channel only exits when the receiver's destruction fails that
-    /// send.
-    reader_thread: Option<thread::JoinHandle<()>>,
+    /// The shared async egress client (ADR-0139's construction seam): a
+    /// clone of the process singleton, same pool as the live turns.
+    client: reqwest::Client,
+    /// The stop signal shared with the kill face (issue #889).
+    stop: Arc<SseStopSignal>,
+    /// Set once the stream is dead for good -- a malformed message event
+    /// propagated to a waiting request (issue #647), the async carry of
+    /// the retired reader-thread exit closing the channel. Later requests
+    /// fail fast with `ServerClosed` instead of reading a poisoned stream.
+    poisoned: bool,
     next_id: i64,
 }
 
 impl SseClient {
-    /// Open the SSE stream, read the endpoint event, spawn the reader thread,
-    /// and perform the MCP initialize handshake. A caller handing a non-empty
-    /// header map is by definition header-authenticated (the same-origin
-    /// guardrail applies); the dispatch path derives the flag from the
-    /// CONFIGURED face instead (see [`Self::connect_with_kill`]).
+    /// Open the SSE stream, read the endpoint event, and perform the MCP
+    /// initialize handshake. A caller handing a non-empty header map is by
+    /// definition header-authenticated (the same-origin guardrail applies);
+    /// the dispatch path derives the flag from the CONFIGURED face instead
+    /// (see [`Self::connect_with_kill`]).
     pub fn connect(url: &str, headers: &BTreeMap<String, String>) -> Result<Self, ClientError> {
         Self::connect_with_kill(url, headers, !headers.is_empty(), &empty_kill_slot())
     }
 
-    /// [`Self::connect`] with a [`KillSlot`] (issue #889). The stop flag is
-    /// published the moment it exists -- it is the ONLY thing that breaks a
-    /// deadline or cancel during the initialize handshake: the handshake
-    /// parks on an unbounded channel `recv` (the agent's `timeout_read`
-    /// bounds the reader's socket reads, not the channel), so without the
-    /// slot a spawn that outlives its budget would park with nobody left to
-    /// kill it.
+    /// [`Self::connect`] with a [`KillSlot`] (issue #889). The stop signal
+    /// is published the moment it exists -- BEFORE the GET -- so a deadline
+    /// or cancel that lands during the handshake breaks the in-flight GET
+    /// or the parked response read through the same wake (the retired sync
+    /// design could not interrupt a blocking GET at all).
     ///
-    /// The agent never follows redirects (issue #901 guardrail; see
+    /// The egress client never follows redirects (issue #901 guardrail; see
     /// [`HttpClient::connect_with_kill`]). When `auth_configured` is set --
     /// ANY header configured on the server, secret-named or not -- the
     /// endpoint event's POST URL must share the SSE URL's origin
@@ -1034,74 +1284,102 @@ impl SseClient {
         auth_configured: bool,
         kill_slot: &KillSlot,
     ) -> Result<Self, ClientError> {
-        // The GET agent carries a read timeout so the reader thread can
-        // periodically check the stop flag (the stream is otherwise blocking
-        // forever between events).
-        let agent = ureq::AgentBuilder::new()
-            .timeout_read(SSE_READ_TIMEOUT)
-            .redirects(0)
-            .build();
-
-        let get = apply_headers(agent.get(url).set("Accept", "text/event-stream"), headers);
-        let response = get.call().map_err(|e| ClientError::Http(e.to_string()))?;
-        check_no_redirect(&response)?;
-
-        let content_type = response.header("Content-Type").unwrap_or("");
-        if !content_type.contains("text/event-stream") {
-            return Err(ClientError::Http(format!(
-                "SSE endpoint returned non-event-stream content-type: {content_type}"
-            )));
-        }
-
-        let mut reader = BufReader::new(response.into_reader());
-
-        // The first event MUST be `event: endpoint` carrying the POST URL
-        // (the MCP legacy SSE transport contract). Rejecting anything else
-        // prevents a misbehaving server's message payload from being used as
-        // the POST target.
-        let first_event = read_sse_event(&mut reader)
-            .map_err(ClientError::Framing)?
-            .ok_or(ClientError::ServerClosed)?;
-        if first_event.event.as_deref() != Some("endpoint") {
-            return Err(ClientError::Framing(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                format!(
-                    "expected `event: endpoint` first, got {:?}",
-                    first_event.event
-                ),
-            )));
-        }
-        // Resolve the POST URL relative to the SSE URL (the server may send
-        // a relative path like `/message`). Reject non-http(s) schemes to
-        // prevent SSRF via a compromised server's endpoint event.
-        let post_url = resolve_post_url(url, &first_event.data)?;
-        // Header-authenticated servers additionally require the POST URL to
-        // share the SSE stream's origin (issue #901 guardrail two).
-        if auth_configured {
-            enforce_same_origin(url, &post_url)?;
-        }
-
-        // Spawn the background reader for subsequent events. A bounded
-        // sync_channel backpressures a flooding server.
-        let (tx, rx) = mpsc::sync_channel(SSE_CHANNEL_BOUND);
-        let stop = Arc::new(AtomicBool::new(false));
-        // Publish the stop flag the moment it exists (issue #889): the
-        // deadline / cancel-kill paths terminate a parked `recv` by setting
-        // it -- the reader thread then exits, dropping the sender, and the
-        // channel disconnects.
+        let client = crate::egress::async_client()
+            .map_err(|e| ClientError::Http(format!("egress client construction failed: {e}")))?;
+        let stop = Arc::new(SseStopSignal::new());
         kill_slot.publish(TransportKill::SseStop(Arc::clone(&stop)));
-        let stop_clone = stop.clone();
-        let handle = thread::spawn(move || {
-            sse_reader_loop(reader, tx, stop_clone);
+        let stop_for_race = Arc::clone(&stop);
+
+        let connect = block_on(async {
+            // The GET is raced against the stop wake: a kill landing before
+            // or during the open breaks the connect immediately.
+            let get = apply_headers(
+                client
+                    .get(url)
+                    .header(reqwest::header::ACCEPT, "text/event-stream"),
+                headers,
+            );
+            // The GET open rides the HTTP per-read bound (the retired ureq
+            // face's connect-timeout posture): a server that never answers
+            // its headers fails here instead of parking the caller.
+            let response = tokio::select! {
+                r = tokio::time::timeout(HTTP_READ_TIMEOUT, get.send()) => match r {
+                    Ok(send) => send.map_err(|e| ClientError::Http(e.to_string()))?,
+                    Err(_) => return Err(ClientError::Http(format!(
+                        "SSE GET not answered within {HTTP_READ_TIMEOUT:?}"
+                    ))),
+                },
+                _ = stop_for_race.wake.notified() => return Err(ClientError::ServerClosed),
+            };
+            check_no_redirect(&response)?;
+            check_status(&response)?;
+            let face = content_type(&response);
+            if !face.contains("text/event-stream") {
+                return Err(ClientError::Http(format!(
+                    "SSE endpoint returned non-event-stream content-type: {face}"
+                )));
+            }
+
+            let mut stream = spawn_body_pump(response, None);
+
+            // The first event MUST be `event: endpoint` carrying the POST URL
+            // (the MCP legacy SSE transport contract). Rejecting anything
+            // else prevents a misbehaving server's message payload from
+            // being used as the POST target. Raced against the stop wake
+            // (a kill in this window breaks the connect immediately, the
+            // same select as the parked reads) and bounded by the ack
+            // window (a stream that opens but never carries the endpoint
+            // event fails here, the retired tick's self-resolving core).
+            let first_event = tokio::select! {
+                r = tokio::time::timeout(SSE_ACK_TIMEOUT, read_sse_event(&mut stream)) => {
+                    match r {
+                        Ok(read) => read
+                            .map_err(ClientError::Framing)?
+                            .ok_or(ClientError::ServerClosed)?,
+                        Err(_) => return Err(ClientError::Http(format!(
+                            "no endpoint event within {SSE_ACK_TIMEOUT:?}"
+                        ))),
+                    }
+                }
+                _ = stop_for_race.wake.notified() => return Err(ClientError::ServerClosed),
+            };
+            if first_event.event.as_deref() != Some("endpoint") {
+                return Err(ClientError::Framing(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!(
+                        "expected `event: endpoint` first, got {:?}",
+                        first_event.event
+                    ),
+                )));
+            }
+            // Resolve the POST URL relative to the SSE URL (the server may
+            // send a relative path like `/message`). Reject non-http(s)
+            // schemes to prevent SSRF via a compromised server's endpoint
+            // event.
+            let post_url = resolve_post_url(url, &first_event.data)?;
+            // Header-authenticated servers additionally require the POST URL
+            // to share the SSE stream's origin (issue #901 guardrail two).
+            if auth_configured {
+                enforce_same_origin(url, &post_url)?;
+            }
+            Ok::<_, ClientError>((stream, post_url))
         });
+        let (stream, post_url) = match connect {
+            Ok(parts) => parts,
+            Err(e) => {
+                // The pump (if one started) ends with the receiver's drop on
+                // this early return.
+                return Err(e);
+            }
+        };
 
         let mut client = Self {
-            response_rx: rx,
+            stream,
             post_url,
             headers: headers.clone(),
-            agent,
+            client,
             stop,
-            reader_thread: Some(handle),
+            poisoned: false,
             next_id: 1,
         };
 
@@ -1115,148 +1393,95 @@ impl SseClient {
     }
 
     /// Build the POST request with [`Self::headers`] attached (issue #901).
-    fn post(&self) -> ureq::Request {
-        apply_headers(self.agent.post(&self.post_url), &self.headers)
+    fn post(&self) -> reqwest::RequestBuilder {
+        apply_headers(self.client.post(&self.post_url), &self.headers)
     }
 }
 
 impl McpClient for SseClient {
-    /// POST one JSON-RPC request and await the matching response from the SSE
-    /// stream (forwarded by the reader thread via the channel). Notifications
-    /// (no `id`) and responses for other ids are skipped.
+    /// POST one JSON-RPC request and await the matching response from the
+    /// SSE stream. Notifications (no `id`) and responses for other ids are
+    /// skipped.
     fn request(&mut self, req: Value) -> Result<Value, ClientError> {
-        let id = req.get("id").cloned();
-        let response = self
-            .post()
-            .send_json(req)
-            .map_err(|e| ClientError::Http(e.to_string()))?;
-        check_no_redirect(&response)?;
-        // The POST response is typically 202 Accepted; the actual JSON-RPC
-        // response arrives on the SSE stream.
-        loop {
-            let msg = match self.response_rx.recv() {
-                Ok(Ok(msg)) => msg,
-                // A reader-side failure (malformed message event, issue #647)
-                // fails the waiting request fast instead of hanging until the
-                // turn watchdog cancels it.
-                Ok(Err(err)) => return Err(err),
-                Err(_) => return Err(ClientError::ServerClosed),
-            };
-            if msg.get("id") != id.as_ref() || id.is_none() {
-                continue;
-            }
-            return check_rpc_response(&msg);
+        if self.poisoned || self.stop.is_stopped() {
+            return Err(ClientError::ServerClosed);
         }
+        let id = req.get("id").cloned();
+        block_on(async {
+            // The POST response is typically 202 Accepted; the actual
+            // JSON-RPC response arrives on the SSE stream. Both the POST
+            // and every stream read are raced against the stop wake so a
+            // kill lands immediately (issue #889).
+            // The POST ack rides the SSE ack window (the retired agent's
+            // read bound); the RESPONSE itself arrives on the stream below
+            // and may legally trail by minutes.
+            let response = tokio::select! {
+                r = tokio::time::timeout(SSE_ACK_TIMEOUT, self.post().json(&req).send()) => {
+                    match r {
+                        Ok(send) => send.map_err(|e| ClientError::Http(e.to_string()))?,
+                        Err(_) => return Err(ClientError::Http(format!(
+                            "POST not acknowledged within {SSE_ACK_TIMEOUT:?}"
+                        ))),
+                    }
+                }
+                _ = self.stop.wake.notified() => return Err(ClientError::ServerClosed),
+            };
+            check_no_redirect(&response)?;
+            check_status(&response)?;
+            loop {
+                // Re-check before parking: a stop that fired between
+                // requests leaves a stored permit, but a select whose read
+                // arm wins the race could have consumed it unheard.
+                if self.stop.is_stopped() {
+                    return Err(ClientError::ServerClosed);
+                }
+                let event = tokio::select! {
+                    e = read_sse_event(&mut self.stream) => {
+                        e.map_err(ClientError::Framing)?
+                    }
+                    _ = self.stop.wake.notified() => return Err(ClientError::ServerClosed),
+                };
+                // Only `message` events (the default type when `event:` is
+                // omitted) carry JSON-RPC payloads; anything else is skipped.
+                let event = match event {
+                    Some(ev) if ev.event.as_deref().map(|e| e == "message").unwrap_or(true) => ev,
+                    Some(_) => continue,
+                    None => return Err(ClientError::ServerClosed), // EOF
+                };
+                match serde_json::from_str::<Value>(&event.data) {
+                    Ok(msg) => {
+                        if !msg.is_object() {
+                            continue; // Not a JSON-RPC message; skipped.
+                        }
+                        if msg.get("id") != id.as_ref() || id.is_none() {
+                            continue;
+                        }
+                        return check_rpc_response(&msg);
+                    }
+                    Err(e) => {
+                        // Malformed JSON in a message event (issue #647):
+                        // the waiting request's response is unrecoverable --
+                        // fail it fast with the streamable-HTTP path's
+                        // attribution instead of hanging until the turn
+                        // watchdog cancels -- and poison the stream so later
+                        // requests fail fast too (the retired reader thread
+                        // exited after forwarding, closing the channel).
+                        self.poisoned = true;
+                        return Err(malformed_sse_event(event.data.len(), e));
+                    }
+                }
+            }
+        })
     }
 
     fn send_notification(&mut self, notif: Value) -> Result<(), ClientError> {
-        post_notification(self.post(), notif)
+        block_on(post_notification(self.post(), notif, SSE_ACK_TIMEOUT))
     }
 
     fn next_id(&mut self) -> i64 {
         let id = self.next_id;
         self.next_id += 1;
         id
-    }
-}
-
-impl Drop for SseClient {
-    fn drop(&mut self) {
-        self.stop.store(true, Ordering::SeqCst);
-        // Release the receiver BEFORE joining. Two reader exit paths meet
-        // here: a reader blocked in `send` on a full channel never re-checks
-        // the stop flag, so only the receiver's destruction fails that send
-        // with `SendError` (field destruction would happen only after
-        // `drop()` returns -- i.e. after a join that never returns, issue
-        // #667); a reader between reads sees the stop flag at its next
-        // read-timeout wakeup (at most SSE_READ_TIMEOUT). The plain
-        // assignment is the move-a-field-out idiom for Drop: it destroys
-        // the old receiver immediately; the placeholder is a disconnected
-        // channel nobody reads after this point.
-        self.response_rx = mpsc::channel().1;
-        if let Some(handle) = self.reader_thread.take() {
-            // If the thread panicked, log the payload — panics cannot
-            // propagate from Drop, but the diagnostic should not be
-            // silently lost.
-            if let Err(payload) = handle.join() {
-                log::error!(
-                    target: "toptopduck::mcp",
-                    "SSE reader thread panicked during drop: {payload:?}"
-                );
-            }
-        }
-    }
-}
-
-/// The SSE reader thread loop: continuously reads SSE events and forwards
-/// JSON-RPC messages ([`SseEvent`] with `event: message` or default) through
-/// the channel. Exits when `stop` is set, the stream closes / errors, or a
-/// malformed message event propagates its failure to the waiting request and
-/// stops the reader (issue #647). Read timeouts (from the agent's
-/// `timeout_read`) are treated as a wakeup to re-check the stop flag — the
-/// TCP connection stays open between timeouts.
-fn sse_reader_loop<R: BufRead + Send>(
-    mut reader: R,
-    tx: mpsc::SyncSender<Result<Value, ClientError>>,
-    stop: Arc<AtomicBool>,
-) {
-    while !stop.load(Ordering::SeqCst) {
-        match read_sse_event(&mut reader) {
-            Ok(Some(event)) => {
-                // Only forward `message` events (the default event type when
-                // `event:` is omitted). The initial `endpoint` event was
-                // consumed in `connect` before the thread started.
-                let is_message = event
-                    .event
-                    .as_deref()
-                    .map(|e| e == "message")
-                    .unwrap_or(true);
-                if is_message {
-                    match serde_json::from_str::<Value>(&event.data) {
-                        Ok(msg) => {
-                            if msg.is_object() && tx.send(Ok(msg)).is_err() {
-                                break; // Channel closed (client dropped).
-                            }
-                        }
-                        Err(e) => {
-                            // Malformed JSON in a message event: the waiting
-                            // request's response is unrecoverable. Propagate
-                            // the failure (the streamable-HTTP path's
-                            // `Framing(InvalidData)` attribution) instead of
-                            // warn-and-continue, which left the request
-                            // hanging until the turn watchdog cancelled it.
-                            // Best-effort send: a closed channel just means
-                            // the client already dropped.
-                            let err = malformed_sse_event(event.data.len(), e);
-                            log::warn!(
-                                target: "toptopduck::mcp",
-                                "SSE reader: {err}; stopping reader thread"
-                            );
-                            let _ = tx.send(Err(err));
-                            break;
-                        }
-                    }
-                }
-            }
-            Ok(None) => break, // EOF (stream closed).
-            Err(ref e)
-                if matches!(
-                    e.kind(),
-                    std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock
-                ) =>
-            {
-                continue; // Read timeout → re-check stop flag.
-            }
-            Err(e) => {
-                // Unrecoverable stream error (TCP RST, broken pipe, etc.):
-                // log so the operator can distinguish this from a clean close.
-                log::warn!(
-                    target: "toptopduck::mcp",
-                    "SSE reader: stream error, shutting down reader thread: {e}"
-                );
-                break;
-            }
-        }
     }
 }
 
@@ -1284,44 +1509,86 @@ fn check_rpc_response(msg: &Value) -> Result<Value, ClientError> {
 /// POST a JSON-RPC notification (no `id`, no response awaited) over an HTTP
 /// transport. The response body is intentionally discarded — MCP
 /// notifications are fire-and-forget; the server typically returns 202.
-/// Statuses >= 400 surface as `ClientError::Http` via `ureq`'s error
-/// channel; a 3xx returns `Ok` under `redirects(0)` and is refused by
-/// [`check_no_redirect`] (issue #901).
-fn post_notification(request: ureq::Request, notif: Value) -> Result<(), ClientError> {
-    let response = request
-        .send_json(notif)
-        .map_err(|e| ClientError::Http(e.to_string()))?;
+/// A non-2xx (redirect included) is refused by the shared response checks
+/// (issue #901).
+async fn post_notification(
+    request: reqwest::RequestBuilder,
+    notif: Value,
+    ack_timeout: Duration,
+) -> Result<(), ClientError> {
+    let send = tokio::time::timeout(ack_timeout, request.json(&notif).send()).await;
+    let response = match send {
+        Ok(send) => send.map_err(|e| ClientError::Http(e.to_string()))?,
+        Err(_) => {
+            return Err(ClientError::Http(format!(
+                "POST not acknowledged within {ack_timeout:?}"
+            )))
+        }
+    };
     // A notification's 3xx is still an explicit redirect refusal (issue
     // #901), not a silent drop -- the handshake ack must not quietly vanish.
-    check_no_redirect(&response)
+    check_no_redirect(&response)?;
+    check_status(&response)
 }
 
 /// Attach `headers` to a request (issue #901): the one injection loop shared
 /// by both remote transports' POST builders and the SSE GET open.
-fn apply_headers(mut request: ureq::Request, headers: &BTreeMap<String, String>) -> ureq::Request {
+fn apply_headers(
+    builder: reqwest::RequestBuilder,
+    headers: &BTreeMap<String, String>,
+) -> reqwest::RequestBuilder {
+    let mut builder = builder;
     for (name, value) in headers {
-        request = request.set(name, value);
+        builder = builder.header(name, value);
     }
-    request
+    builder
 }
 
-/// Guard the no-redirect agents' SUCCESS path (issue #901): ureq 2 with
-/// `redirects(0)` returns a 3xx as `Ok(response)` (only statuses >= 400
-/// surface as `Err::Status` -- verified against ureq 2.12's `do_call`), so
-/// the redirect refusal is checked on the response status itself. Following
+/// Guard the no-redirect client's SUCCESS path (issue #901): reqwest under
+/// `Policy::none` returns a 3xx as an Ok response (verified down the
+/// vendored tower-http chain in the preflight migration's review), so the
+/// redirect refusal is checked on the response status itself. Following
 /// would forward custom credential headers to an arbitrary origin (the #244
 /// egress-agent lesson), so the refusal must name the redirect explicitly.
-fn check_no_redirect(response: &ureq::Response) -> Result<(), ClientError> {
-    let code = response.status();
+fn check_no_redirect(response: &reqwest::Response) -> Result<(), ClientError> {
+    let code = response.status().as_u16();
     if (300..400).contains(&code) {
         let location = response
-            .header("Location")
+            .headers()
+            .get(reqwest::header::LOCATION)
+            .and_then(|v| v.to_str().ok())
             .unwrap_or("<no Location header>");
         return Err(ClientError::Http(format!(
             "HTTP {code} redirect to {location} refused: redirects are not followed"
         )));
     }
     Ok(())
+}
+
+/// Refuse non-2xx statuses as transport-level HTTP errors: the retired ureq
+/// face surfaced statuses >= 400 from its error channel (an `Err` from
+/// send), while reqwest hands every status back as Ok — this check keeps
+/// the old classification, so a 404 with a JSON body reads as an HTTP
+/// fault, not as a bogus JSON-RPC envelope.
+fn check_status(response: &reqwest::Response) -> Result<(), ClientError> {
+    if !response.status().is_success() {
+        return Err(ClientError::Http(format!(
+            "HTTP error status {}",
+            response.status().as_u16()
+        )));
+    }
+    Ok(())
+}
+
+/// The response's Content-Type face, as a lossy string for the
+/// `text/event-stream` contains-checks (absent header reads as empty).
+fn content_type(response: &reqwest::Response) -> String {
+    response
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_string()
 }
 
 /// Whether an SSE connect counts as header-authenticated for the same-origin
@@ -2021,17 +2288,17 @@ mod tests {
     /// transport has published its kill handle (a spawn that outlasts the
     /// budget), and the re-check inside `publish` is what kills the LATE
     /// handle -- without it the worker parks on the handshake read after
-    /// the deadline with nobody left to kill it. The stop-flag variant
+    /// the deadline with nobody left to kill it. The stop-signal variant
     /// makes the kill observable without a process: a `publish` that
     /// merely stores the handle leaves the flag unset and fails this pin.
     #[test]
     fn connect_kill_publish_after_expire_self_terminates_the_handle() {
         let slot = ConnectKill::default();
         slot.expire();
-        let stop = Arc::new(AtomicBool::new(false));
+        let stop = Arc::new(SseStopSignal::new());
         slot.publish(TransportKill::SseStop(Arc::clone(&stop)));
         assert!(
-            stop.load(Ordering::SeqCst),
+            stop.is_stopped(),
             "publish after expire must kill the late handle, not just store it"
         );
     }
@@ -2042,29 +2309,27 @@ mod tests {
     #[test]
     fn connect_kill_expire_after_publish_fires_the_stored_handle() {
         let slot = ConnectKill::default();
-        let stop = Arc::new(AtomicBool::new(false));
+        let stop = Arc::new(SseStopSignal::new());
         slot.publish(TransportKill::SseStop(Arc::clone(&stop)));
         assert!(
-            !stop.load(Ordering::SeqCst),
+            !stop.is_stopped(),
             "a healthy connect's publish does not fire its own kill"
         );
         slot.expire();
-        assert!(
-            stop.load(Ordering::SeqCst),
-            "expire kills whatever is published"
-        );
+        assert!(stop.is_stopped(), "expire kills whatever is published");
     }
 
-    // --- SSE event parsing (issue #389) --------------------------------------
+    // --- SSE event parsing (issue #389; async face since #1455) --------------------------------------
 
     /// `read_sse_event` parses one event terminated by a blank line. The
     /// `event:` and `data:` fields are captured; comments and unknown fields
     /// are skipped.
-    #[test]
-    fn read_sse_event_parses_event_and_data_fields() {
+    #[tokio::test]
+    async fn read_sse_event_parses_event_and_data_fields() {
         let wire = b"event: endpoint\ndata: http://localhost:3001/message\n\n";
-        let mut reader = Cursor::new(wire.to_vec());
+        let mut reader: &[u8] = &wire[..];
         let event = read_sse_event(&mut reader)
+            .await
             .expect("read")
             .expect("an event");
         assert_eq!(event.event.as_deref(), Some("endpoint"));
@@ -2073,11 +2338,12 @@ mod tests {
 
     /// Multiple `data:` lines within one event are joined with `\n` (the SSE
     /// spec contract). A single leading space after `data:` is stripped.
-    #[test]
-    fn read_sse_event_joins_multi_line_data() {
+    #[tokio::test]
+    async fn read_sse_event_joins_multi_line_data() {
         let wire = b"data: line1\ndata: line2\ndata:  extra space\n\n";
-        let mut reader = Cursor::new(wire.to_vec());
+        let mut reader: &[u8] = &wire[..];
         let event = read_sse_event(&mut reader)
+            .await
             .expect("read")
             .expect("an event");
         assert_eq!(event.data, "line1\nline2\n extra space");
@@ -2085,11 +2351,12 @@ mod tests {
 
     /// An event with no `event:` field defaults to `None` (the SSE default
     /// event type is `"message"`, which the reader loop treats as a message).
-    #[test]
-    fn read_sse_event_defaults_event_to_none_when_absent() {
+    #[tokio::test]
+    async fn read_sse_event_defaults_event_to_none_when_absent() {
         let wire = b"data: {\"jsonrpc\":\"2.0\",\"id\":1}\n\n";
-        let mut reader = Cursor::new(wire.to_vec());
+        let mut reader: &[u8] = &wire[..];
         let event = read_sse_event(&mut reader)
+            .await
             .expect("read")
             .expect("an event");
         assert!(event.event.is_none());
@@ -2098,11 +2365,12 @@ mod tests {
 
     /// Comments (lines starting with `:`) and blank lines between events are
     /// skipped so keepalive gaps do not produce spurious empty events.
-    #[test]
-    fn read_sse_event_skips_comments_and_keepalive_blanks() {
+    #[tokio::test]
+    async fn read_sse_event_skips_comments_and_keepalive_blanks() {
         let wire = b": keepalive\n\nevent: message\ndata: hello\n\n";
-        let mut reader = Cursor::new(wire.to_vec());
+        let mut reader: &[u8] = &wire[..];
         let event = read_sse_event(&mut reader)
+            .await
             .expect("read")
             .expect("an event");
         assert_eq!(event.event.as_deref(), Some("message"));
@@ -2111,30 +2379,32 @@ mod tests {
 
     /// A clean EOF (stream closed) at the start returns `Ok(None)` so the
     /// caller can distinguish "stream ended" from "partial event".
-    #[test]
-    fn read_sse_event_returns_none_at_clean_eof() {
-        let mut reader = Cursor::new(Vec::new());
-        let event = read_sse_event(&mut reader).expect("read on empty");
+    #[tokio::test]
+    async fn read_sse_event_returns_none_at_clean_eof() {
+        let mut reader: &[u8] = b"";
+        let event = read_sse_event(&mut reader).await.expect("read on empty");
         assert!(event.is_none(), "EOF -> None, not error");
     }
 
     /// Two consecutive events: the first read returns event 1, the second
     /// returns event 2, and the third returns `None` (EOF).
-    #[test]
-    fn read_sse_event_reads_two_consecutive_events_then_eof() {
+    #[tokio::test]
+    async fn read_sse_event_reads_two_consecutive_events_then_eof() {
         let wire = b"event: endpoint\ndata: url1\n\nevent: message\ndata: msg1\n\n";
-        let mut reader = Cursor::new(wire.to_vec());
+        let mut reader: &[u8] = &wire[..];
         let e1 = read_sse_event(&mut reader)
+            .await
             .expect("read 1")
             .expect("event 1");
         assert_eq!(e1.event.as_deref(), Some("endpoint"));
         assert_eq!(e1.data, "url1");
         let e2 = read_sse_event(&mut reader)
+            .await
             .expect("read 2")
             .expect("event 2");
         assert_eq!(e2.event.as_deref(), Some("message"));
         assert_eq!(e2.data, "msg1");
-        let e3 = read_sse_event(&mut reader).expect("read 3");
+        let e3 = read_sse_event(&mut reader).await.expect("read 3");
         assert!(e3.is_none(), "third read -> EOF");
     }
 
@@ -2151,8 +2421,8 @@ mod tests {
     /// worse). The survivor's type is `message` on purpose: only a leaked
     /// message-typed event is consumed, so its stitched data actually
     /// reaches the parser and fails.
-    #[test]
-    fn read_sse_event_overlong_line_voids_event_and_resyncs_at_boundary() {
+    #[tokio::test]
+    async fn read_sse_event_overlong_line_voids_event_and_resyncs_at_boundary() {
         // First `data:` line is 30 bytes (over the 16-byte cap); the short
         // survivors (`data: tail`, `event: message`, `: comment`) are skipped
         // during the resync, not stitched or leaked into the next event.
@@ -2160,8 +2430,9 @@ mod tests {
             "data: {}\ndata: tail\nevent: message\n: comment\n\ndata: {{\"ok\":1}}\n\n",
             "a".repeat(24)
         );
-        let mut reader = Cursor::new(wire.into_bytes());
+        let mut reader: &[u8] = wire.as_bytes();
         let event = read_sse_event_bounded(&mut reader, 16)
+            .await
             .expect("read")
             .expect("the event after the voided one");
         assert!(
@@ -2170,7 +2441,9 @@ mod tests {
         );
         assert_eq!(event.data, "{\"ok\":1}");
         // The stream continues past the drop: the next read is clean EOF.
-        let next = read_sse_event_bounded(&mut reader, 16).expect("read 2");
+        let next = read_sse_event_bounded(&mut reader, 16)
+            .await
+            .expect("read 2");
         assert!(next.is_none(), "stream continues to clean EOF");
     }
 
@@ -2181,8 +2454,8 @@ mod tests {
     /// dropped. A regression that switched back to `Building` early (or
     /// returned the half-dropped event) would stitch the survivors into the
     /// next event.
-    #[test]
-    fn read_sse_event_second_overlong_during_resync_stays_resyncing() {
+    #[tokio::test]
+    async fn read_sse_event_second_overlong_during_resync_stays_resyncing() {
         // Two 30-byte lines (over the 16-byte cap) inside one voided event,
         // each followed by a short survivor of a different field kind (11
         // and 10 bytes, well under the cap); the healthy event after the
@@ -2192,8 +2465,9 @@ mod tests {
             "a".repeat(24),
             "b".repeat(24)
         );
-        let mut reader = Cursor::new(wire.into_bytes());
+        let mut reader: &[u8] = wire.as_bytes();
         let event = read_sse_event_bounded(&mut reader, 16)
+            .await
             .expect("read")
             .expect("the healthy event after the double-voided one");
         assert!(
@@ -2209,11 +2483,12 @@ mod tests {
     /// The voided event's already-accumulated fields are cleared too: an
     /// `event:` line seen before the over-long line must not leak into the
     /// next event's type.
-    #[test]
-    fn read_sse_event_overlong_line_clears_accumulated_fields() {
+    #[tokio::test]
+    async fn read_sse_event_overlong_line_clears_accumulated_fields() {
         let wire = format!("event: ping\ndata: {}\n\ndata: x\n\n", "a".repeat(24));
-        let mut reader = Cursor::new(wire.into_bytes());
+        let mut reader: &[u8] = wire.as_bytes();
         let event = read_sse_event_bounded(&mut reader, 16)
+            .await
             .expect("read")
             .expect("event after the voided one");
         assert!(
@@ -2226,14 +2501,15 @@ mod tests {
     /// Issue #647: the per-event `data:` accumulation budget (same source as
     /// the line cap) voids an event whose parts sum past it even when every
     /// individual line fits the line cap; the next event arrives normally.
-    #[test]
-    fn read_sse_event_data_budget_voids_oversized_event() {
+    #[tokio::test]
+    async fn read_sse_event_data_budget_voids_oversized_event() {
         // Each line is 13 bytes (under the 16-byte line cap) but the three
         // parts, join bytes included, sum to 24 budget bytes (over the
         // budget; the breach lands on the third part).
         let wire = "data: 1234567\ndata: 1234567\ndata: 1234567\n\ndata: ok\n\n";
-        let mut reader = Cursor::new(wire.as_bytes().to_vec());
+        let mut reader: &[u8] = wire.as_bytes();
         let event = read_sse_event_bounded(&mut reader, 16)
+            .await
             .expect("read")
             .expect("the event after the voided one");
         assert_eq!(event.data, "ok");
@@ -2244,14 +2520,15 @@ mod tests {
     /// comparison is strict). Every other budget fixture breaches well past
     /// the cap, so a regression of `>` to `>=` leaves them green and only
     /// this pin goes red.
-    #[test]
-    fn read_sse_event_accepts_data_at_exactly_the_budget() {
+    #[tokio::test]
+    async fn read_sse_event_accepts_data_at_exactly_the_budget() {
         // Two 13-byte lines (7-byte payloads + the 6-byte "data: " prefix),
         // under the 16-byte line cap; the parts' budget cost is
         // (7+1) + (7+1) = 16 = max exactly -- at the budget, not over it.
         let wire = "data: 1234567\ndata: 1234567\n\n";
-        let mut reader = Cursor::new(wire.as_bytes().to_vec());
+        let mut reader: &[u8] = wire.as_bytes();
         let event = read_sse_event_bounded(&mut reader, 16)
+            .await
             .expect("read")
             .expect("the at-budget event is accepted, not voided");
         assert_eq!(event.data, "1234567\n1234567");
@@ -2263,15 +2540,15 @@ mod tests {
     /// lines grow `data_parts` (and the joined string) without ever touching
     /// the budget -- the unbounded-memory shape the caps exist for; this
     /// fixture is the one that goes red if the `+1` is dropped.
-    #[test]
-    fn read_sse_event_voids_zero_length_data_spam() {
+    #[tokio::test]
+    async fn read_sse_event_voids_zero_length_data_spam() {
         // Eight bare `data:` lines (5 bytes each, under the 6-byte line cap)
         // under a 6-byte budget: the parts cost (0+1) each, so the seventh
         // breaches (7 > 6) and the event is voided -- None at the boundary,
         // and None again at the EOF right after it.
         let wire = "data:\ndata:\ndata:\ndata:\ndata:\ndata:\ndata:\ndata:\n\n";
-        let mut reader = Cursor::new(wire.as_bytes().to_vec());
-        let event = read_sse_event_bounded(&mut reader, 6).expect("read");
+        let mut reader: &[u8] = wire.as_bytes();
+        let event = read_sse_event_bounded(&mut reader, 6).await.expect("read");
         assert!(
             event.is_none(),
             "the zero-length-parts event is voided, not joined into newline spam"
@@ -2280,11 +2557,11 @@ mod tests {
 
     /// EOF while still resyncing (the broken event never reached its blank
     /// boundary) drops the voided event: nothing half-parsed is returned.
-    #[test]
-    fn read_sse_event_eof_while_resyncing_returns_none() {
+    #[tokio::test]
+    async fn read_sse_event_eof_while_resyncing_returns_none() {
         let wire = format!("data: {}\ndata: tail", "a".repeat(24));
-        let mut reader = Cursor::new(wire.into_bytes());
-        let event = read_sse_event_bounded(&mut reader, 16).expect("read");
+        let mut reader: &[u8] = wire.as_bytes();
+        let event = read_sse_event_bounded(&mut reader, 16).await.expect("read");
         assert!(
             event.is_none(),
             "EOF mid-resync -> None, not a partial event"
@@ -2297,295 +2574,80 @@ mod tests {
     /// unconditional `None` would silently drop the stream's last
     /// unterminated event (every other fixture ends in a blank line, so this
     /// half had zero coverage).
-    #[test]
-    fn read_sse_event_returns_pending_event_at_eof_without_blank_line() {
+    #[tokio::test]
+    async fn read_sse_event_returns_pending_event_at_eof_without_blank_line() {
         let wire = b"data: last";
-        let mut reader = Cursor::new(wire.to_vec());
+        let mut reader: &[u8] = &wire[..];
         let event = read_sse_event_bounded(&mut reader, 16)
+            .await
             .expect("read")
             .expect("the unterminated final event is returned, not dropped");
         assert_eq!(event.data, "last");
     }
 
-    /// Issue #647: a malformed `message` event propagates to the waiting
-    /// consumer as a `Framing(InvalidData)` failure (the streamable-HTTP
-    /// path's attribution) instead of warn-and-continue, which left the
-    /// pending request hanging until the turn watchdog cancelled it. After
-    /// propagating, the reader exits (drops the sender), so a later `recv()`
-    /// reports the channel closed. Issue #665: the loop runs on a real
-    /// thread and the test asserts its join result -- a reader that PANICKED
-    /// on the malformed event would also drop the sender and pass the
-    /// closed-channel assertion, so only the join distinguishes the clean
-    /// `break` exit. The wire carries one more healthy event AFTER the
-    /// malformed one: the error forward is a stop, so a deleted `break`
-    /// would forward that event and fail the closed-channel assertion --
-    /// the exit cannot ride on the EOF that follows.
+    /// #1455's kill half of the connect-phase silent window: a kill landing
+    /// while the connect parks on the endpoint read breaks it through the
+    /// stop wake immediately -- well inside the 2 s ack window -- where the
+    /// retired sync design waited out its read tick (the immediacy AC's
+    /// connect-window leg; the request-loop leg is pinned in the
+    /// integration suite).
     #[test]
-    fn sse_reader_loop_propagates_malformed_message_and_exits() {
-        let (tx, rx) = mpsc::sync_channel(SSE_CHANNEL_BOUND);
-        let wire =
-            b"data: {\"id\":1,\"ok\":true}\n\ndata: not-json\n\ndata: {\"id\":2,\"ok\":true}\n\n";
-        // Finite input: the loop runs to its exit on its own thread (no stop
-        // needed); the join result pins the exit as clean, not a panic.
-        let reader_thread = thread::spawn(move || {
-            sse_reader_loop(
-                Cursor::new(wire.to_vec()),
-                tx,
-                Arc::new(AtomicBool::new(false)),
-            );
-        });
-        let first = rx.recv().expect("healthy message forwarded");
-        assert_eq!(first.expect("Ok"), json!({"id": 1, "ok": true}));
-        let second = rx.recv().expect("malformed event forwarded as Err");
-        match second {
-            Err(ClientError::Framing(ref e)) => assert!(
-                e.kind() == std::io::ErrorKind::InvalidData,
-                "malformed -> Framing(InvalidData), got {e:?}"
-            ),
-            other => panic!("expected Err(Framing), got {other:?}"),
-        }
-        assert!(rx.recv().is_err(), "reader exits after propagating");
-        reader_thread
-            .join()
-            .expect("reader exits via break after propagating, not a panic");
-    }
-
-    /// Issue #647, consumer side: a malformed `message` event fails the
-    /// WAITING request in `SseClient::request` -- the full chain (reader
-    /// loop → channel → the `Ok(Err(err))` arm), not just the send side
-    /// pinned above. The POST endpoint is a one-shot `TcpListener` answering
-    /// `202 Accepted` (the transport contract: the response arrives on the
-    /// SSE stream, not in the POST's own body); the first forwarded message
-    /// carries a foreign id, so the request is still waiting when the reader
-    /// propagates the framing failure. A regression of the consumption arm
-    /// to log-and-continue would leave this test hanging exactly like
-    /// production hung pre-#647.
-    #[test]
-    fn sse_client_request_fails_fast_on_propagated_malformed_event() {
-        use std::io::Read;
+    fn sse_connect_stop_wake_breaks_the_endpoint_read_immediately() {
+        use std::io::Write as _;
         use std::net::TcpListener;
+        use std::time::Instant;
 
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind ephemeral");
         let port = listener.local_addr().expect("local addr").port();
-        let server = thread::spawn(move || {
-            let (mut stream, _) = listener.accept().expect("accept POST");
-            // Read timeout: a stuck client fails this thread instead of
-            // hanging the test (the ACP-chain e2e lesson).
+        let server = std::thread::spawn(move || {
+            use std::io::Read as _;
+            let (mut stream, _) = listener.accept().expect("accept GET");
             stream
                 .set_read_timeout(Some(Duration::from_secs(5)))
                 .expect("set read timeout");
-            let mut buf = Vec::new();
-            let mut chunk = [0u8; 1024];
-            // Drain the full request (headers + Content-Length body) before
-            // answering: closing with unread receive-buffer bytes makes
-            // Windows send an RST that fails the client's status-line read
-            // (os error 10053, a flake).
-            loop {
-                match stream.read(&mut chunk) {
-                    Ok(0) | Err(_) => break, // Client closed or stalled.
-                    Ok(n) => {
-                        buf.extend_from_slice(&chunk[..n]);
-                        let text = String::from_utf8_lossy(&buf);
-                        if let Some(headers_end) = text.find("\r\n\r\n") {
-                            let content_length: usize = text[..headers_end]
-                                .lines()
-                                .filter_map(|l| l.split_once(':'))
-                                .find(|(k, _)| k.trim().eq_ignore_ascii_case("content-length"))
-                                .and_then(|(_, v)| v.trim().parse().ok())
-                                .unwrap_or(0);
-                            if buf.len() >= headers_end + 4 + content_length {
-                                break;
-                            }
-                        }
-                    }
-                }
-            }
-            stream
-                .write_all(b"HTTP/1.1 202 Accepted\r\nContent-Length: 0\r\n\r\n")
-                .expect("write 202");
+            // Drain the request head, then answer SSE headers and never the
+            // endpoint event: the connect parks on the endpoint read.
+            let mut buf = [0u8; 1024];
+            let _ = stream.read(&mut buf);
+            let _ = stream.write_all(
+                b"HTTP/1.1 200 OK
+Content-Type: text/event-stream
+
+",
+            );
+            let mut sink = [0u8; 64];
+            let _ = stream.read(&mut sink); // Park until the client hangs up.
         });
 
-        // The healthy message carries a foreign id (skipped by the waiting
-        // request); the malformed event then reaches it as Err.
-        let wire = b"data: {\"id\":99,\"ok\":true}\n\ndata: not-json\n\n";
-        let (tx, rx) = mpsc::sync_channel(SSE_CHANNEL_BOUND);
-        let stop = Arc::new(AtomicBool::new(false));
-        let stop_for_reader = stop.clone();
-        let reader_thread = thread::spawn(move || {
-            sse_reader_loop(Cursor::new(wire.to_vec()), tx, stop_for_reader);
+        // The real deadline path: the slot starts empty, the transport's
+        // connect publishes ITS stop signal into it, and the deadline side
+        // `expire`s the slot (never a hand-rolled second publish -- the
+        // rendezvous is single-shot and a second publish would overwrite).
+        let slot: KillSlot = Arc::new(ConnectKill::default());
+        let slot_for_connect = Arc::clone(&slot);
+        let url = format!("http://127.0.0.1:{port}/sse");
+        let connect = std::thread::spawn(move || {
+            SseClient::connect_with_kill(&url, &BTreeMap::new(), false, &slot_for_connect)
         });
-
-        let mut client = sse_client_with_parts(
-            rx,
-            format!("http://127.0.0.1:{port}/message"),
-            stop,
-            Some(reader_thread),
+        // The GET answers in milliseconds; fire the kill at 300 ms so the
+        // stop arm must win the race against the 2 s ack window.
+        std::thread::sleep(Duration::from_millis(300));
+        let started = Instant::now();
+        slot.expire();
+        let outcome = connect.join().expect("the connect returns, not panics");
+        assert!(
+            matches!(outcome, Err(ClientError::ServerClosed)),
+            "killed endpoint park -> ServerClosed, got {:?}",
+            outcome.err()
         );
-
-        let err = client
-            .request(json!({"jsonrpc": "2.0", "id": 1, "method": "ping"}))
-            .expect_err("the malformed event fails the waiting request");
-        match err {
-            ClientError::Framing(ref e) => {
-                assert_eq!(
-                    e.kind(),
-                    std::io::ErrorKind::InvalidData,
-                    "malformed -> Framing(InvalidData), got {e:?}"
-                );
-                assert!(
-                    e.to_string().contains("malformed JSON in SSE event"),
-                    "the propagated wording, got {e}"
-                );
-            }
-            other => panic!("expected Err(Framing), got {other:?}"),
-        }
-        server.join().expect("server thread");
-    }
-
-    /// Build an `SseClient` around hand-made reader plumbing (in-module
-    /// construction, no HTTP handshake): shared by the tests that drive the
-    /// channel / reader-thread lifecycle directly.
-    fn sse_client_with_parts(
-        response_rx: mpsc::Receiver<Result<Value, ClientError>>,
-        post_url: String,
-        stop: Arc<AtomicBool>,
-        reader_thread: Option<thread::JoinHandle<()>>,
-    ) -> SseClient {
-        SseClient {
-            response_rx,
-            post_url,
-            headers: BTreeMap::new(),
-            agent: ureq::AgentBuilder::new()
-                .timeout_read(SSE_READ_TIMEOUT)
-                .build(),
-            stop,
-            reader_thread,
-            next_id: 1,
-        }
-    }
-
-    /// Shared scaffolding for the two drop pins (issues #667 / #665): fill
-    /// the channel to its bound, spawn the reader thread around a
-    /// caller-built reader, wait until the reader has entered its loop, then
-    /// assert that dropping the client (on its own thread) returns within
-    /// the timeout -- a `Drop` that hangs on the join fails the test
-    /// instead of hanging it. The reader constructor is the pins' only
-    /// substantive difference; it receives the read counter its struct
-    /// increments, keeping the entry wait deterministic (issue #666).
-    fn assert_drop_returns_when_reader_blocks<R>(
-        make_reader: impl FnOnce(Arc<std::sync::atomic::AtomicUsize>) -> R + Send + 'static,
-    ) where
-        R: BufRead + Send + 'static,
-    {
-        let (tx, rx) = mpsc::sync_channel(SSE_CHANNEL_BOUND);
-        // Fill the channel to its bound first: with no consumer, the
-        // reader's forward blocks (deterministic hang shape).
-        for _ in 0..SSE_CHANNEL_BOUND {
-            tx.send(Ok(json!({"id": 1, "ok": true}))).expect("fill");
-        }
-        let stop = Arc::new(AtomicBool::new(false));
-        let stop_for_reader = stop.clone();
-        let reads = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let reads_for_reader = reads.clone();
-        let reader_thread = thread::spawn(move || {
-            sse_reader_loop(make_reader(reads_for_reader), tx, stop_for_reader);
-        });
-        // Wait until the reader has actually entered its loop: one inner
-        // read proves the stop check passed while stop was still false, and
-        // from there the reader has no exit path before the blocked send.
-        let mut started = false;
-        for _ in 0..500 {
-            if reads.load(Ordering::SeqCst) > 0 {
-                started = true;
-                break;
-            }
-            thread::sleep(Duration::from_millis(10));
-        }
-        assert!(started, "reader never reached its first read");
-
-        let client = sse_client_with_parts(
-            rx,
-            "http://127.0.0.1:1/message".to_string(),
-            stop,
-            Some(reader_thread),
+        assert!(
+            started.elapsed() < Duration::from_millis(1_500),
+            "the stop wake lands far inside the 2 s ack window, took {:?}",
+            started.elapsed()
         );
-
-        let (done_tx, done_rx) = mpsc::channel();
-        thread::spawn(move || {
-            drop(client);
-            let _ = done_tx.send(());
-        });
-        done_rx
-            .recv_timeout(Duration::from_secs(10))
-            .expect("Drop returned within the timeout (no join hang)");
-    }
-
-    /// Issue #667: `Drop` joins the reader thread, but a reader blocked in
-    /// `send` on a full channel never re-checks the stop flag, and the
-    /// receiver's destruction happens only after `drop()` returns -- after
-    /// the join that never returns. The channel is filled to its bound
-    /// BEFORE the reader starts, so the reader's first forward blocks
-    /// deterministically; a pre-fix `Drop` hangs on the join and the 10 s
-    /// timeout fails the test instead of hanging it. The post-fix order
-    /// (release the receiver, then join) fails the blocked `send` with
-    /// `SendError` and the reader exits via its channel-closed break.
-    #[test]
-    fn sse_client_drop_returns_when_reader_blocks_on_full_channel() {
-        // An endless stream of one valid message event per read: the
-        // flooding-server shape that keeps the reader trying to forward.
-        // The read count lets the test WAIT for the reader to enter its
-        // loop instead of sleeping a fixed interval (a sleep can pass
-        // vacuously if the thread has not been scheduled yet).
-        struct FloodReader {
-            reads: Arc<std::sync::atomic::AtomicUsize>,
-        }
-        impl std::io::Read for FloodReader {
-            fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-                self.reads.fetch_add(1, Ordering::SeqCst);
-                let event = b"data: {\"id\":1,\"ok\":true}\n\n";
-                let n = event.len().min(buf.len());
-                buf[..n].copy_from_slice(&event[..n]);
-                Ok(n)
-            }
-        }
-
-        assert_drop_returns_when_reader_blocks(|reads| BufReader::new(FloodReader { reads }));
-    }
-
-    /// Issue #665: the reader's SECOND blocking send point -- the malformed
-    /// event's error forward (`tx.send(Err(...))` in the reader loop) -- must
-    /// also be released by `Drop`'s receiver release (the #667 fix). Same
-    /// shape as the Ok-path pin above: the channel is filled to its bound
-    /// BEFORE the reader starts, so the error forward blocks deterministically
-    /// (no consumer ever drains); the counted first read proves the reader
-    /// entered its loop while stop was still false -- from there it has no
-    /// exit path before the blocked send.
-    #[test]
-    fn sse_client_drop_returns_when_malformed_error_forward_blocks_on_full_channel() {
-        // One malformed message event on the first read, EOF after: the
-        // reader parses it, serde fails, and the error forward blocks.
-        struct MalformedReader {
-            reads: Arc<std::sync::atomic::AtomicUsize>,
-            first: bool,
-        }
-        impl std::io::Read for MalformedReader {
-            fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-                self.reads.fetch_add(1, Ordering::SeqCst);
-                if self.first {
-                    self.first = false;
-                    let event = b"data: not-json\n\n";
-                    let n = event.len().min(buf.len());
-                    buf[..n].copy_from_slice(&event[..n]);
-                    Ok(n)
-                } else {
-                    Ok(0)
-                }
-            }
-        }
-
-        assert_drop_returns_when_reader_blocks(|reads| {
-            BufReader::new(MalformedReader { reads, first: true })
-        });
+        server
+            .join()
+            .expect("server thread exits after the hang-up");
     }
 
     /// `check_rpc_response` returns the `result` field on success and maps an
@@ -2617,6 +2679,87 @@ mod tests {
             matches!(err, ClientError::Framing(_)),
             "neither result nor error -> Framing, got {err:?}"
         );
+    }
+
+    /// #1455: the HTTP per-read bound's async carry -- a streamable-HTTP
+    /// response that opens an SSE body and then falls silent surfaces as
+    /// `Framing(TimedOut)` within the bound. This is issue #392's guarantee
+    /// (a hung server's blocking worker terminates after the probe deadline
+    /// fires; `spawn_blocking` tasks are not cancelled) restated on the
+    /// async face, pinned here with an injected bound instead of waiting
+    /// out the 30 s production constant.
+    #[test]
+    fn http_client_sse_body_per_read_bound_times_out_a_silent_stream() {
+        use std::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind ephemeral");
+        let port = listener.local_addr().expect("local addr").port();
+        let server = thread_like_server(listener);
+
+        let mut client = HttpClient::for_test_with_read_timeout(
+            &format!("http://127.0.0.1:{port}/mcp"),
+            Duration::from_millis(200),
+        );
+        let err = client
+            .request(json!({"jsonrpc": "2.0", "id": 1, "method": "tools/list"}))
+            .expect_err("the silent SSE body trips the per-read bound");
+        match err {
+            ClientError::Framing(ref e) => assert_eq!(
+                e.kind(),
+                std::io::ErrorKind::TimedOut,
+                "silent body -> Framing(TimedOut), got {e:?}"
+            ),
+            other => panic!("expected Framing(TimedOut), got {other:?}"),
+        }
+        server
+            .join()
+            .expect("server thread exits after the hang-up");
+    }
+
+    /// The silent-SSE fixture server for the per-read bound pin above: one
+    /// POST drained fully (closing with unread receive-buffer bytes makes
+    /// Windows send an RST that fails the client's status-line read -- the
+    /// #647 fixture's lesson), then SSE headers and a declared body that
+    /// never arrives. The final read parks until the client's timeout drops
+    /// the connection.
+    fn thread_like_server(listener: std::net::TcpListener) -> std::thread::JoinHandle<()> {
+        std::thread::spawn(move || {
+            use std::io::{Read as _, Write as _};
+            let (mut stream, _) = listener.accept().expect("accept POST");
+            stream
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .expect("set read timeout");
+            let mut buf = Vec::new();
+            let mut chunk = [0u8; 1024];
+            loop {
+                match stream.read(&mut chunk) {
+                    Ok(0) | Err(_) => break, // Client closed or stalled.
+                    Ok(n) => {
+                        buf.extend_from_slice(&chunk[..n]);
+                        let text = String::from_utf8_lossy(&buf);
+                        if let Some(headers_end) = text.find("\x0d\x0a\x0d\x0a") {
+                            let content_length: usize = text[..headers_end]
+                                .lines()
+                                .filter_map(|l| l.split_once(':'))
+                                .find(|(k, _)| k.trim().eq_ignore_ascii_case("content-length"))
+                                .and_then(|(_, v)| v.trim().parse().ok())
+                                .unwrap_or(0);
+                            if buf.len() >= headers_end + 4 + content_length {
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+            stream
+                .write_all(
+                    b"HTTP/1.1 200 OK\x0d\x0aContent-Type: text/event-stream\x0d\x0aContent-Length: 64\x0d\x0a\x0d\x0a",
+                )
+                .expect("write SSE headers");
+            // Silence: hold the connection open until the client hangs up.
+            let mut sink = [0u8; 64];
+            let _ = stream.read(&mut sink);
+        })
     }
 
     // --- same-origin + header merge (issue #901) -------------------------------

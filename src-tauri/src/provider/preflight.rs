@@ -175,53 +175,16 @@ enum ModelsOutcome {
     NeedsFallback,
 }
 
-/// Test-only construction counter for the shared egress client (ADR-0139;
-/// the live face's `EGRESS_CLIENT_BUILDS` is the precedent): proves a
-/// completed build is not duplicated by subsequent calls, so every probe
-/// after the first draws from one shared connection pool. The claim stops
-/// short of one-build-per-process on purpose: a failed build legitimately
-/// retries (only successful builds are cached), and the init race may
-/// double-build. Read by `egress_client_builds_only_once_across_calls`;
-/// compiled out of release builds.
-#[cfg(test)]
-static EGRESS_CLIENT_BUILDS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
-
-/// The process-shared blocking egress client for the preflight probes
-/// (ADR-0139, single-stacking the upstream LLM domain on reqwest): redirects
-/// disabled at the client (`Policy::none`), so a cross-host 3xx surfaces as
-/// an honest non-2xx status -- classified by status below -- instead of
-/// following the `Location` with the probe's credential on board. Same stack
-/// and wire posture the live turn path rides (the async reqwest client
-/// injected into rig, ADR-0116 Decision 6); the probe runs on a blocking
-/// thread under `spawn_blocking`, where the blocking flavor fits without an
-/// async runtime.
-///
-/// Built once per process and shared across probes: keep-alive reuse for
-/// repeated Test-connection presses, and one frozen proxy snapshot --
-/// reqwest resolves env vars first with the OS configuration as fallback
-/// (`system-proxy`), so the probe and the turn path agree on the proxy where
-/// the retired ureq face (implicit env-only) could silently split from the
-/// turn path on a GUI process carrying no proxy env vars. Only a successful
-/// build is cached: a construction failure refuses its probe and stays
-/// uncached, so the next press retries the build.
-static EGRESS_CLIENT: std::sync::OnceLock<reqwest::blocking::Client> = std::sync::OnceLock::new();
-
-/// Hand out the shared egress client: a clone per call, one build per
-/// process -- see [`EGRESS_CLIENT`]. A build failure is surfaced (not
-/// unwrapped) so the caller classifies it in the probe's own vocabulary.
+/// Hand out the shared blocking egress client for the probes: the
+/// process-wide blocking singleton -- redirects pinned off, proxy snapshot
+/// frozen at the first successful build -- lives in
+/// [`crate::egress::blocking_client`] (ADR-0139's shared construction seam,
+/// the blocking twin of the async face the live turns and MCP remote
+/// transports ride). Only a successful build is cached: a construction
+/// failure is surfaced (not unwrapped) so the caller classifies it in the
+/// probe's own vocabulary, and the next press retries the build.
 fn egress_client() -> Result<reqwest::blocking::Client, reqwest::Error> {
-    if let Some(client) = EGRESS_CLIENT.get() {
-        return Ok(client.clone());
-    }
-    #[cfg(test)]
-    EGRESS_CLIENT_BUILDS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let client = reqwest::blocking::Client::builder()
-        .redirect(reqwest::redirect::Policy::none())
-        .build()?;
-    // First-wins under a race (two probes' first calls racing the init):
-    // both built, one pool wins; harmless. Mirrors the live face.
-    let _ = EGRESS_CLIENT.set(client.clone());
-    Ok(client)
+    crate::egress::blocking_client()
 }
 
 /// Issue `GET {base_url}/<models_path>` and classify the result.
@@ -953,7 +916,7 @@ mod tests {
         // receives the request, the second host receives nothing. Asserted
         // in rejection form (the 3xx surfaces as an honest status), not just
         // implied by the leak mocks above; built at the client level because
-        // both probes (list models + ping) share [`EGRESS_CLIENT`].
+        // both probes (list models + ping) share the seam's blocking client.
         let mut first = mockito::Server::new();
         let mut second = mockito::Server::new();
         let _first_mock = first
@@ -982,29 +945,5 @@ mod tests {
             "the 3xx surfaces raw, not followed"
         );
         second_mock.assert(); // expect(0): the second host was NOT reached
-    }
-
-    #[test]
-    fn egress_client_builds_only_once_across_calls() {
-        // AC #278 (carried through the ADR-0139 migration): a completed
-        // build is never duplicated by subsequent calls -- the 2nd and 3rd
-        // calls here must observe a frozen counter, which is the
-        // deterministic core of the claim. The first call's window is
-        // deliberately not asserted: every mockito probe test in this module
-        // is a concurrent first-caller of `egress_client`, so racing first
-        // builds landing between the snapshots have no derivable upper
-        // bound (CI observed four against a fixed bound of three), where
-        // the live face pins its own `<= 3` from a two-caller census.
-        use std::sync::atomic::Ordering;
-        let _first = egress_client().expect("the shared blocking client builds");
-        let after_first = EGRESS_CLIENT_BUILDS.load(Ordering::Relaxed);
-        let _second = egress_client().expect("the shared blocking client builds");
-        let _third = egress_client().expect("the shared blocking client builds");
-        let after_third = EGRESS_CLIENT_BUILDS.load(Ordering::Relaxed);
-
-        assert_eq!(
-            after_third, after_first,
-            "subsequent calls never rebuild the client"
-        );
     }
 }

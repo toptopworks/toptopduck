@@ -33,6 +33,10 @@ pub mod cancel;
 pub mod guardrail;
 pub mod util;
 
+// The process-shared egress client seam (ADR-0139): live turns, preflight
+// probes, and the MCP remote transports all draw from here.
+pub mod egress;
+
 // Cross-domain -- imports from several domains itself.
 pub mod sandbox_sql;
 pub mod turn_window;
