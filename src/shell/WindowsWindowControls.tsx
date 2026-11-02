@@ -17,8 +17,8 @@ import { fireWindowAction } from "./window-actions";
 // would otherwise leave Linux with no window chrome at all; macOS uses the
 // native Overlay-titlebar traffic lights instead).
 //
-// ADR-0052 i18n contract + fire-and-forget failure routing live on the
-// dispatcher (WindowControls.tsx) and the shared fireWindowAction helper.
+// ADR-0052 i18n contract + fire-and-forget failure routing live in this
+// component's aria-labels and the shared fireWindowAction helper.
 export function WindowsWindowControls(): ReactElement {
   const intl = useIntl();
   const [maximized, setMaximized] = useState(false);

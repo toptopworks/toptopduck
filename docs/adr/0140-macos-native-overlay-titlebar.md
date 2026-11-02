@@ -2,7 +2,7 @@
 
 ## Decision
 
-1. **macOS 窗口装饰从 borderless 切原生 Overlay titlebar**：`decorations: true` + `titleBarStyle: Overlay` + `hiddenTitle: true`——红绿灯、双击标题栏缩放/最小化（含系统「双击标题栏」用户偏好）、绿键、失焦灰显、hover glyph 全部回归系统供给。
+1. **macOS 窗口装饰从 borderless 切原生 Overlay titlebar**：`decorations: true` + `titleBarStyle: Overlay` + `hiddenTitle: true`——红绿灯、绿键、失焦灰显、hover glyph 回归系统供给；双击缩放/最小化在原生按钮带内随系统「双击标题栏」用户偏好供给（topbar 拖动区的双击维持注入脚本路径，不读偏好，见 Why#1）。
 2. **接线**：`tauri.conf.json` 窗口项加 `titleBarStyle: "Overlay"` + `hiddenTitle: true`（两者仅 macOS 生效），`decorations: false` 保留为 Windows/Linux 基线；Rust `setup` 在 macOS 构建期以 builder 链 `.decorations(true)` 覆写——平台中性参数仍以 config 为单一事实源。
 3. **前端退役**：`MacOSWindowControls`（模拟红绿灯）与 `WindowControls` 平台分发删除；macOS topbar 首元素为 `w-[78px]` 拖动区 spacer 保留原生按钮带；Windows/Linux 的 `WindowsWindowControls` 右侧三按钮与拖动区不变。
 
@@ -12,7 +12,7 @@ ADR-0074 路线 1 在 macOS 以前端模拟红绿灯承载窗控（borderless + 
 
 ## Why
 
-1. **双击语义只有原生能供给**：缩放/最小化随系统偏好走，绿键/失焦灰显/hover glyph 系统级保真零维护成本；模拟方案在 borderless 上永远残缺，且修 webview 路径买不回偏好语义。
+1. **红绿灯与偏好级双击语义只有原生能供给**：红绿灯、绿键、失焦灰显、hover glyph 系统级保真零维护成本；双击语义分两带——原生按钮带自身随系统「双击标题栏」偏好走，topbar 其余拖动区（含 inset spacer）的双击仍走 Tauri 注入脚本的 toggleMaximize、不读偏好（与 Windows/Linux 同路径）。模拟方案在 borderless 上连按钮带都残缺，且修 webview 路径买不回偏好语义。
 2. **Overlay 保住自绘 topbar 视觉**：透明标题栏 + 内容全尺寸铺满，topbar 观感与 Windows/Linux 自绘一致；只需左侧保留 inset 让位原生按钮。
 3. **切换是组件替换级**：App.tsx 平台分支 + builder 一行覆写 + inset/组件互退，非深层重构，可逆。
 
@@ -25,11 +25,12 @@ ADR-0074 路线 1 在 macOS 以前端模拟红绿灯承载窗控（borderless + 
 
 ## Consequences
 
-- **`tauri.conf.json`**：窗口项 `titleBarStyle: "Overlay"` + `hiddenTitle: true`；`decorations: false` 为 Windows/Linux 基线。
+- **`tauri.conf.json`**：窗口项 `titleBarStyle: "Overlay"` + `hiddenTitle: true`；`decorations: false` 为 Windows/Linux 基线。上游 deserializer 对未识别的 `titleBarStyle` **值**静默降级 `Visible`（字段名拼错则有 deny_unknown_fields 硬报错）——改值须核对枚举拼写。
 - **`src-tauri/src/lib.rs`**：macOS 构建期 `.decorations(true)` 覆写（`#[cfg(target_os = "macos")]`）。
 - **前端**：删 `src/shell/WindowControls.tsx` + `src/shell/MacOSWindowControls.tsx`；`App.tsx` macOS 分支渲染 inset spacer；`WindowsWindowControls` / `window-actions.ts` / `use-platform.ts` 保留。
 - **capabilities 不变**：Windows/Linux 窗控仍需 window 权限；macOS 原生按钮不经前端 IPC。
-- **i18n 不变**：`window.close` / `window.minimize` / `window.maximize` / `window.restore` 仍由 Windows/Linux 窗控消费。
+- **i18n 不变**：`window.minimize` / `window.maximize` / `window.restore` 仍由 Windows/Linux 窗控消费（close 标签历走 `common.close`）。
 - **测试面**：分发器/模拟红绿灯套件退役；macOS 放置与设置视图测试改钉 inset/drag-region 不变量。
+- **已接受（fallback 矩阵）**：`plugin-os` 注入回归（init script 被剥离/竞态/字段空串）时 `use-platform.ts` 坍缩 `FALLBACK_PLATFORM="macos"`——macOS 原生红绿灯不受影响（构建期 cfg 与插件无关），Windows/Linux 退化为零窗控（仅托盘菜单/WM 快捷键兜底）。该触发属打包/插件层回归形态：发生时其他 plugin 症状并发、`log.warn` 显式可观测，不为低概率回归引入 UA 推断常驻复杂度。**触发器**：生产出现 plugin-os 注入回归报障 → 升级 fallback 为 UA 推断并重开本条。
 - **未决（留真机验收）**：原生红绿灯在 40px topbar 内的垂直对齐观感与 inset 78px 精调值。
 - **取代关系**：ADR-0074 的 macOS 腿被本 ADR 取代；其 Windows/Linux 腿、平台检测、capabilities、i18n 各项保留。

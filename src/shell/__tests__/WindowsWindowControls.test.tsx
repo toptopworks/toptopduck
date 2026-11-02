@@ -78,7 +78,7 @@ function renderControls(ui: ReactElement) {
 }
 
 describe("WindowsWindowControls", () => {
-  it("renders minimize / maximize / close (no restore at rest)", async () => {
+  it("renders minimize / maximize / close (no restore at rest)", () => {
     renderControls(<WindowsWindowControls />);
 
     expect(screen.getByRole("button", { name: "Minimize" })).toBeInTheDocument();
@@ -97,7 +97,7 @@ describe("WindowsWindowControls", () => {
     );
   });
 
-  it("minimize / maximize / close buttons each fire their action", async () => {
+  it("minimize / maximize / close buttons each fire their action", () => {
     renderControls(<WindowsWindowControls />);
 
     fireEvent.click(screen.getByRole("button", { name: "Minimize" }));

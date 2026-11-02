@@ -24,7 +24,7 @@ vi.mock("@tauri-apps/plugin-os", () => ({ platform: platformMock }));
 
 // WindowsWindowControls (custom titlebar, ADR-0074) is the sole remaining
 // consumer of getCurrentWindow. The shared stub captures the bridge
-// handle so the WindowControls behavior tests below can fire clicks,
+// handle so the cluster behavior tests below can fire clicks,
 // emit onResized, and assert on the IPC spies.
 import { buildTauriWindowMock, type WindowBridge } from "./setup/tauriWindowMock";
 
@@ -222,7 +222,7 @@ describe("App window controls (Windows path)", () => {
   it("fires the matching window IPC on each control click", async () => {
     vi.mocked(getAppConfig).mockResolvedValue(appConfigWith("zh-CN"));
     render(<App />);
-    // Wait for the topbar (incl. WindowControls) to mount so the bridge is
+    // Wait for the topbar (incl. the window cluster) to mount so the bridge is
     // populated and the buttons are queryable.
     await waitFor(() =>
       expect(screen.getByRole("button", { name: "设置" })).toBeInTheDocument(),
@@ -302,8 +302,7 @@ describe("App window-controls platform placement (ADR-0140)", () => {
     // Windows-path suites above have already latched "windows" by the time
     // this describe runs. resetModules + dynamic re-import of App/api makes
     // use-platform re-read the mocked "macos" value instead of serving the
-    // stale cache (mirrors the per-scenario re-import in
-    // WindowControls.test.tsx).
+    // stale cache.
     vi.resetModules();
   });
 
@@ -336,5 +335,33 @@ describe("App window-controls platform placement (ADR-0140)", () => {
     ).toBeTruthy();
     // The Windows/Linux right-side cluster must NOT render on macOS.
     expect(document.querySelector(".window-controls")).toBeNull();
+  });
+
+  it("renders the right-side cluster and no inset spacer on Linux", async () => {
+    // The retired dispatcher suite's Linux case was the only test that ever
+    // pushed "linux" through App's platform predicate; without this pin a
+    // regression narrowing the tail branch to windows-only would leave the
+    // Linux desktop with no window controls under decorations:false while
+    // every other suite stays green.
+    platformMock.mockReturnValue("linux");
+    vi.resetModules();
+    const { default: App } = await import("../App");
+    const { getAppConfig } = await import("../api");
+    vi.mocked(getAppConfig).mockResolvedValue(appConfigWith("en-US"));
+    render(<App />);
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "Back" })).toBeInTheDocument(),
+    );
+
+    const topbar = document.querySelector(".topbar");
+    expect(topbar).not.toBeNull();
+    // No macOS inset spacer: the topbar's first child is the sidebar toggle,
+    // not a drag-region spacer.
+    expect(
+      (topbar as Element).firstElementChild?.hasAttribute("data-tauri-drag-region"),
+    ).toBe(false);
+    // The Windows/Linux cluster DOES render on Linux -- the sole window
+    // controls under decorations:false.
+    expect(document.querySelector(".window-controls")).not.toBeNull();
   });
 });

@@ -2,8 +2,10 @@ import { platform as readTauriPlatform } from "@tauri-apps/plugin-os";
 
 import { log } from "../lib/log";
 
-// Platform detection hook (ADR-0074, issue #262). The macOS traffic-light
-// window-controls route needs the frontend to dispatch by OS, and
+// Platform detection hook (ADR-0074, issue #262). The topbar's platform
+// dispatch needs the frontend to branch by OS (macOS reserves the native
+// traffic-light inset, ADR-0140; Windows/Linux render the right-side
+// cluster), and
 // @tauri-apps/plugin-os `platform()` is the Tauri-official signal: the plugin
 // injects the compile-time OS as a webview global via its init script, and
 // `platform()` reads it synchronously (no IPC round-trip -- only `locale()` /
@@ -20,8 +22,9 @@ import { log } from "../lib/log";
 
 /** The three desktop platforms the app ships on. Named `DesktopPlatform` to
  *  avoid shadowing @tauri-apps/plugin-os's broader `Platform` union (which
- *  also lists ios / android / *bsd / solaris); the custom titlebar (ADR-0074)
- *  only dispatches between macOS and the Windows/Linux right-side layout. */
+ *  also lists ios / android / *bsd / solaris); the topbar dispatches between
+ *  the macOS native-inset layout (ADR-0140) and the Windows/Linux
+ *  right-side cluster (ADR-0074). */
 export type DesktopPlatform = "windows" | "macos" | "linux";
 
 const FALLBACK_PLATFORM: DesktopPlatform = "macos";

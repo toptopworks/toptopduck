@@ -17,7 +17,7 @@ vi.mock("@tauri-apps/api/webviewWindow", () => ({
   getCurrentWebviewWindow: () => ({ onDragDropEvent: () => Promise.resolve(() => {}) }),
 }));
 
-// WindowControls (custom titlebar, ADR-0074) is the sole remaining
+// WindowsWindowControls (custom titlebar, ADR-0074) is the sole remaining
 // consumer of getCurrentWindow. The shared stub keeps jsdom off the real
 // runtime (which reads window.__TAURI metadata and crashes the shell-level
 // ErrorBoundary).
@@ -159,8 +159,9 @@ describe("App settings overlay (ADR-0065, issue #151 ACs)", () => {
     const topbar = document.querySelector(".topbar") as HTMLElement;
     // The sidebar-toggle slot persists -- it is now the settings-nav toggle.
     expect(topbar.querySelector(".sidebar-toggle")).not.toBeNull();
-    // ...and the topbar keeps its drag region.
-    expect(document.querySelector(".topbar [data-tauri-drag-region]")).not.toBeNull();
+    // ...and the traffic-light inset persists across the switch (jsdom falls
+    // back to macOS, so the topbar's first child is still the inset spacer).
+    expect(topbar.firstElementChild?.hasAttribute("data-tauri-drag-region")).toBe(true);
     // Returning to the main view restores the session shell.
     fireEvent.click(document.querySelector(".settings-back") as HTMLElement);
     await waitFor(() =>
