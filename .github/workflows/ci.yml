@@ -51,6 +51,10 @@ jobs:
   rust:
     name: Rust (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
+    # A hang-shaped failure (e.g. a DNS-hijacking network degrades the
+    # egress proxy pin's DNS-fast red to an unbounded block) would
+    # otherwise burn the job-level 6h default before CI reports it.
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:

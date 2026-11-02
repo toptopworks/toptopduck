@@ -1,10 +1,12 @@
 //! Egress env-proxy routing pin (issue #1458, ADR-0139).
 //!
-//! An integration-test file is its own process: the proxy env mutations
-//! below are process-global and would poison the parallel network suites in
-//! other files (they run behind a `NO_PROXY` prefix precisely to keep the
-//! system proxy off loopback). This file must therefore stay a single test
-//! -- one env setup covering both egress faces, never per-test env variants.
+//! An integration-test file is its own process, so the env mutations below
+//! cannot reach other test files' suites -- but they are process-global
+//! within this one: parallel test threads share the environment, and the
+//! OnceLock egress singletons freeze the first build's env snapshot, so a
+//! second test would draw whatever client the first one built. This file
+//! must therefore stay a single test -- one env setup covering both egress
+//! faces, never per-test env variants.
 //!
 //! The probe host lives under the reserved `.invalid` TLD (RFC 6761): if
 //! the shared recipe ever stops honoring the env proxy, the request goes
@@ -43,7 +45,12 @@ fn capturing_proxy(count: usize) -> (u16, std::thread::JoinHandle<Vec<String>>) 
                 }
             }
             let head = String::from_utf8_lossy(&buf).into_owned();
-            request_lines.push(head.lines().next().unwrap_or_default().to_string());
+            request_lines.push(
+                head.lines()
+                    .next()
+                    .unwrap_or("(no request line captured)")
+                    .to_string(),
+            );
             stream
                 .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok")
                 .expect("answer the proxied request");
@@ -53,15 +60,17 @@ fn capturing_proxy(count: usize) -> (u16, std::thread::JoinHandle<Vec<String>>) 
     (port, handle)
 }
 
-/// Point the egress faces' env at the fake proxy. Both letter cases are set
-/// (reqwest's `system-proxy` reads the conventional set), and the `NO_PROXY`
-/// bypass is removed: the developer-loop convention of running the network
-/// suites behind `NO_PROXY=127.0.0.1,localhost` would otherwise exempt the
-/// proxy itself from the egress posture under test.
+/// Point the egress faces' env at the fake proxy. The uppercase name is the
+/// one the env leg resolves (hyper-util reads each proxy variable
+/// upper-then-lower, first set wins), so one write suffices. The `NO_PROXY`
+/// pair is removed in both letter cases: a no-list entry matches the
+/// request's destination host, and the probe's `.invalid` host matches
+/// neither loopback entry -- what the removal actually clears is an
+/// inherited wildcard bypass (`NO_PROXY=*`), which would otherwise exempt
+/// the probe and send it direct.
 fn point_env_at_proxy(port: u16) {
     let proxy = format!("http://127.0.0.1:{port}");
     std::env::set_var("HTTP_PROXY", &proxy);
-    std::env::set_var("http_proxy", &proxy);
     std::env::remove_var("NO_PROXY");
     std::env::remove_var("no_proxy");
 }
@@ -78,11 +87,18 @@ fn point_env_at_proxy(port: u16) {
 #[test]
 fn egress_recipe_routes_both_faces_through_the_env_proxy() {
     const PROBE: &str = "http://egress-proxy-pin.invalid/probe";
-    let (port, proxy) = capturing_proxy(2);
+    // The face array drives the accept count and the assertions, so a new
+    // face cannot extend the one without the other: a drift either way
+    // fails the length assert or hangs the join (bounded red by the CI job
+    // timeout), never a silently truncated zip.
+    let faces = ["blocking", "async"];
+    let (port, proxy) = capturing_proxy(faces.len());
     point_env_at_proxy(port);
 
-    // Blocking face first: `reqwest::blocking` panics inside an async
-    // context, and the async leg below drives a runtime.
+    // Blocking face first: `reqwest::blocking` panics when the calling
+    // thread sits inside a runtime context. tokio's `block_on` exits that
+    // context before returning, so the order is not load-bearing -- it
+    // keeps the blocking face free of the subtlety either way.
     let blocking = blocking_client().expect("the blocking face builds");
     let response = blocking
         .get(PROBE)
@@ -104,7 +120,12 @@ fn egress_recipe_routes_both_faces_through_the_env_proxy() {
     );
 
     let request_lines = proxy.join().expect("the fake proxy observed both faces");
-    for (face, line) in ["blocking", "async"].iter().zip(&request_lines) {
+    assert_eq!(
+        request_lines.len(),
+        faces.len(),
+        "each egress face dials the proxy exactly once"
+    );
+    for (face, line) in faces.iter().zip(&request_lines) {
         assert_eq!(
             line,
             &format!("GET {PROBE} HTTP/1.1"),
