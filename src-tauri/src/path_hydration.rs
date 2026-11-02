@@ -52,12 +52,19 @@ pub(crate) fn hydrate_process_path() {
 }
 
 /// The explicit npm prefix from the environment, either spelling
-/// (`NPM_CONFIG_PREFIX` or the lowercase form npm also honors). An empty
-/// value reads as unset (an empty prefix would yield a bare `/bin`).
+/// (`NPM_CONFIG_PREFIX` or the lowercase form npm also honors).
 fn npm_config_prefix() -> Option<OsString> {
-    std::env::var_os("NPM_CONFIG_PREFIX")
-        .or_else(|| std::env::var_os("npm_config_prefix"))
-        .filter(|value| !value.is_empty())
+    resolve_npm_prefix(
+        std::env::var_os("NPM_CONFIG_PREFIX"),
+        std::env::var_os("npm_config_prefix"),
+    )
+}
+
+/// First-set-wins across the two spellings, with an empty value reading
+/// as unset (an empty prefix would join into the CWD-relative `bin`,
+/// injecting an entry that drifts with the launch directory).
+fn resolve_npm_prefix(upper: Option<OsString>, lower: Option<OsString>) -> Option<OsString> {
+    upper.or(lower).filter(|value| !value.is_empty())
 }
 
 /// Assemble the ordered user-level toolchain directory candidates for a
@@ -97,9 +104,10 @@ fn user_toolchain_dirs(home: &Path, npm_config_prefix: Option<&Path>) -> Vec<Pat
     ] {
         dirs.push(home.join(rel));
     }
-    // Version managers, newest version first within each root. fnm and
-    // mise each have a legacy and an XDG-style default data dir; a missing
-    // root contributes nothing, so scanning both costs one failed read_dir.
+    // Version managers, newest version first within each root. fnm carries
+    // three roots (legacy, XDG, and the macOS default), mise two (XDG and
+    // legacy); a missing root contributes nothing, so each extra root
+    // costs one failed read_dir.
     for (root, tail) in [
         (".nvm/versions/node", "bin"),
         (".fnm/node-versions", "installation/bin"),
@@ -143,7 +151,11 @@ fn version_bins(home: &Path, root: &str, tail: &str) -> Vec<PathBuf> {
 /// numeric one, and shorter prefixes order lower (`20` < `20.0.0`). The
 /// comparison is version-aware on purpose -- lexicographic order would
 /// rank `v1.10.0` below `v1.9.0` and pin the OLDEST runtime instead of
-/// the newest.
+/// the newest. Pre-release names (`v22.6.0-rc.1`) sort below their own
+/// stable but above older stables, with pre-release segments compared as
+/// strings -- an approximation, not semver (it misorders multi-digit
+/// pre-release numerics such as `1.0.0-2` vs `1.0.0-10`), kept at this
+/// weight deliberately for a leaf module.
 fn version_desc(a: &OsStr, b: &OsStr) -> std::cmp::Ordering {
     let segments = |name: &OsStr| {
         name.to_string_lossy()
@@ -204,6 +216,32 @@ mod tests {
             Some(&PathBuf::from("/custom/npm-prefix/bin")),
             "the env-set npm prefix bin leads the list"
         );
+        assert_eq!(
+            dirs.len(),
+            1 + 8 + 2,
+            "the prefix ride does not drop the defaults: 8 well-known + 2 system"
+        );
+    }
+
+    #[test]
+    fn npm_prefix_resolves_both_spellings_and_filters_empty() {
+        // The env-reader's two behaviors, pinned on the pure core: the
+        // lowercase spelling is a fallback, and an empty value reads as
+        // unset (it would join into the CWD-relative `bin`).
+        assert_eq!(resolve_npm_prefix(None, None), None);
+        assert_eq!(
+            resolve_npm_prefix(Some(OsString::from("/upper/prefix")), None),
+            Some(OsString::from("/upper/prefix"))
+        );
+        assert_eq!(
+            resolve_npm_prefix(None, Some(OsString::from("/lower/prefix"))),
+            Some(OsString::from("/lower/prefix"))
+        );
+        assert_eq!(
+            resolve_npm_prefix(Some(OsString::new()), None),
+            None,
+            "an empty set value reads as unset"
+        );
     }
 
     #[test]
@@ -225,6 +263,29 @@ mod tests {
         .collect();
         let actual: Vec<PathBuf> = dirs.iter().take(expected.len()).cloned().collect();
         assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn well_known_bins_outrank_version_manager_bins() {
+        // The block-level priority the doc ranks: the well-known user
+        // bins ride ahead of any version-manager per-version bin. A home
+        // carrying both makes the blocks observable together, so a swap
+        // of the two blocks cannot pass green.
+        let home = home_with_versions(".nvm/versions/node", "bin", &["v20.0.0"]);
+        std::fs::create_dir_all(home.path().join(".local/bin")).expect("mkdir well-known");
+        let dirs = user_toolchain_dirs(home.path(), None);
+        let well_known = dirs
+            .iter()
+            .position(|d| d == &home.path().join(".local/bin"))
+            .expect("well-known bin present");
+        let nvm = dirs
+            .iter()
+            .position(|d| d == &home.path().join(".nvm/versions/node/v20.0.0/bin"))
+            .expect("nvm bin present");
+        assert!(
+            well_known < nvm,
+            "the well-known bins must precede the version-manager bins"
+        );
     }
 
     #[test]
@@ -269,6 +330,24 @@ mod tests {
             mise.first(),
             Some(&home.path().join(".mise/installs/node/1.10.0/bin")),
             "1.10.0 must outrank 1.9.0"
+        );
+    }
+
+    #[test]
+    fn pre_release_names_sort_below_their_stable_but_above_older_stables() {
+        // Ordering::Less means the first argument ranks first (newest).
+        let older_stable = OsStr::new("v22.5.0");
+        let stable = OsStr::new("v22.6.0");
+        let pre_release = OsStr::new("v22.6.0-rc.1");
+        assert_eq!(
+            version_desc(pre_release, older_stable),
+            std::cmp::Ordering::Less,
+            "the pre-release outranks the older stable"
+        );
+        assert_eq!(
+            version_desc(pre_release, stable),
+            std::cmp::Ordering::Greater,
+            "the stable outranks its own pre-release"
         );
     }
 
@@ -332,7 +411,7 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn hydrate_leaves_the_windows_process_path_untouched() {
-        // CI gate note: the Rust job runs ubuntu-only, so this Windows-only
+        // CI gate note: the CI test step is Linux-only, so this Windows-only
         // pin executes in local `cargo test` runs, not CI.
         let before = std::env::var_os("PATH");
         hydrate_process_path();
