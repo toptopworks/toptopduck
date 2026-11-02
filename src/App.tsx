@@ -45,7 +45,7 @@ import { SidebarToggle } from "./shell/SidebarToggle";
 import { NavButtons } from "./shell/NavButtons";
 import { NavigationHistoryProvider } from "./shell/NavigationHistoryContext";
 import type { NavEntry } from "./shell/navigationHistory";
-import { WindowControls } from "./shell/WindowControls";
+import { WindowsWindowControls } from "./shell/WindowsWindowControls";
 import { ResumeProgress } from "./shell/ResumeProgress";
 import { ErrorBanner } from "./components/common/ErrorBanner";
 import { DegradeCard, ErrorBoundary } from "./components/common/ErrorBoundary";
@@ -121,10 +121,11 @@ export default function App() {
 
   const { shellError, setShellError } = useShellError();
 
-  // Platform dispatch (ADR-0074, issue #263): macOS traffic-light window
-  // controls render at the topbar's LEFT edge (before SidebarToggle); Windows
-  // and Linux keep the right-side cluster at the topbar's tail. usePlatform()
-  // is module-cached, so this is a cheap synchronous read in render.
+  // Platform dispatch (ADR-0140 mac / ADR-0074 Windows+Linux): macOS keeps
+  // the native Overlay-titlebar traffic lights (the topbar's left edge
+  // reserves their inset); Windows and Linux render the right-side cluster
+  // at the topbar's tail. usePlatform() is module-cached, so this is a cheap
+  // synchronous read in render.
   const platform = usePlatform();
 
   // --- App-level UI state --------------------------------------------------
@@ -947,9 +948,11 @@ export default function App() {
                 />
 
                 {/* Row 1: thin top bar (ADR-0060/0062 R1), spans the full shell
-              width as a custom titlebar (decorations: false). Shell-wide
-              controls only: the sidebar collapse toggle (left) + nav buttons
-              + window controls (right). The session name + workspace toggle
+              width as a custom titlebar (decorations: false on
+              Windows/Linux; macOS rides the native Overlay titlebar).
+              Shell-wide controls only: the sidebar collapse toggle (left) +
+              nav buttons + window controls (right, Windows/Linux). The
+              session name + workspace toggle
               live in each SessionPane's own header (session-scoped chrome
               lives with the session). The Open / Save recipe.json buttons live in
               the session sidebar (below New session). ADR-0067 (#171): visual
@@ -966,7 +969,13 @@ export default function App() {
                   className="topbar gap-3 px-4 border-b border-border bg-background"
                   data-tauri-drag-region
                 >
-                  {platform === "macos" && <WindowControls />}
+                  {platform === "macos" && (
+                    // Native traffic-light inset (ADR-0140): the macOS
+                    // Overlay titlebar floats the system buttons over the
+                    // topbar's left edge; this spacer keeps SidebarToggle
+                    // clear of them and joins the drag region.
+                    <div className="w-[78px] shrink-0" data-tauri-drag-region />
+                  )}
                   {settingsView.open ? (
                     <SidebarToggle
                       kind="settings"
@@ -1010,7 +1019,7 @@ export default function App() {
                       )}
                     </>
                   )}
-                  {platform !== "macos" && <WindowControls />}
+                  {platform !== "macos" && <WindowsWindowControls />}
                 </header>
 
                 {/* Row 3 (cols 2+): main area = session panes + shell-level bar.

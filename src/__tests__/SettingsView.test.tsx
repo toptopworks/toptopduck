@@ -140,16 +140,18 @@ describe("App settings overlay (ADR-0065, issue #151 ACs)", () => {
     vi.mocked(getAppConfig).mockResolvedValue(baseAppConfig());
     render(<App />);
     await waitFor(() => expect(getAppConfig).toHaveBeenCalled());
-    // jsdom's platform fallback is macOS (use-platform), so the traffic
-    // lights render on the topbar -- window.* resolve via the zh catalog.
-    expect(screen.getByRole("button", { name: "关闭" })).toBeInTheDocument();
+    // jsdom's platform fallback is macOS (use-platform), so the topbar's
+    // first child is the native traffic-light inset spacer (ADR-0140: macOS
+    // rides the native Overlay titlebar -- no frontend window buttons).
+    const topbarBefore = document.querySelector(".topbar") as HTMLElement;
+    expect(
+      topbarBefore.firstElementChild?.hasAttribute("data-tauri-drag-region"),
+    ).toBe(true);
     fireEvent.click(screen.getByRole("button", { name: "设置" }));
     await waitFor(() =>
       expect(document.querySelector(".settings-overlay")).toBeInTheDocument(),
     );
-    // Window controls persist across the view switch...
-    expect(screen.getByRole("button", { name: "关闭" })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "最小化" })).toBeInTheDocument();
+    // The traffic-light inset persists across the view switch...
     // ...the left slot swaps to the SETTINGS nav toggle (issue #285: the same
     // slot the session-sidebar toggle occupies in the right sidebar carries the
     // settings left-nav collapse toggle while settings are open). The

@@ -2,13 +2,12 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 
 import { log } from "../lib/log";
 
-// Window-control fire-and-forget helper (ADR-0074, issue #263). Extracted from
-// the per-component `fire` closures that MacOSWindowControls and
-// WindowsWindowControls duplicated verbatim. Centralizes the IPC + error
-// routing so both platform paths share one source of truth.
+// Window-control fire-and-forget helper (ADR-0074, issue #263). Centralizes
+// the IPC + error routing behind the Windows/Linux min/max/close cluster
+// (macOS window controls are native titlebar buttons, no frontend path).
 
-/** The three window-control actions the macOS traffic lights and the Windows
- *  min/max/close cluster can fire. These map 1:1 to Tauri Window methods;
+/** The three window-control actions the Windows/Linux min/max/close cluster
+ *  can fire. These map 1:1 to Tauri Window methods;
  *  TypeScript's union-key indexed access on `window[action]()` enforces that
  *  every member remains a `() => Promise<void>` method on the Window type — a
  *  future Tauri rename or removal breaks the build at the call site below. */

@@ -1,5 +1,7 @@
 # 自定义 titlebar：decorations:false + 跨平台 window controls（前端模拟 macOS 红绿灯）
 
+> 部分被 [ADR-0140](./0140-macos-native-overlay-titlebar.md) 取代：Decision「macOS → `MacOSWindowControls`（左侧）」与「`decorations: false`（全局）」的 macOS 腿**退役**——macOS 切原生 Overlay titlebar（`decorations: true` + `titleBarStyle: Overlay` + `hiddenTitle`），红绿灯与双击标题栏缩放/最小化回归系统供给，Why#1/2/4/6/7 与 Considered 各项的 macOS 论述随之失效。Windows/Linux 自绘窗控、`plugin-os` 平台检测、capabilities、i18n 语义**保留**。详见 ADR-0140。
+
 ## Decision
 
 窗口装饰从系统原生 titlebar 切换为**自定义 titlebar**（`decorations: false` + 自绘窗控 + 拖动区）：
