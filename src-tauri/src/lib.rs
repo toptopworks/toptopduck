@@ -357,6 +357,15 @@ pub fn run() {
                     Some(color) => main_window_builder.background_color(color),
                     None => main_window_builder,
                 };
+            // The config's `decorations: false` is the Windows/Linux frameless
+            // base (ADR-0074); macOS flips it back on so the native titlebar
+            // (`titleBarStyle: Overlay` + `hiddenTitle`, ADR-0140) supplies
+            // the traffic lights and the system double-click zoom/minimize
+            // semantics. The builder chain overrides the config value, keeping
+            // tauri.conf.json the single source of truth for the
+            // platform-neutral parameters.
+            #[cfg(target_os = "macos")]
+            let main_window_builder = main_window_builder.decorations(true);
             // Tray-ready handshake state (issue #1142): managed BEFORE
             // this window build (so the page-load hook below never
             // observes a missing state) and before tray::init (so menu

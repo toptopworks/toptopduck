@@ -12,13 +12,13 @@ import { fireWindowAction } from "./window-actions";
 // tauri.conf.json (no system chrome) and the window permissions in
 // capabilities/default.json. The topbar carries data-tauri-drag-region so the
 // empty chrome between buttons drags the window; these buttons sit as normal
-// interactive children so clicks still register. Selected by the
-// WindowControls dispatcher on every non-macOS desktop (ADR-0074: Linux also
-// lands here — global decorations:false would otherwise leave Linux with no
-// window chrome at all).
+// interactive children so clicks still register. Mounted by App.tsx on every
+// non-macOS desktop (ADR-0074: Linux also lands here — decorations:false
+// would otherwise leave Linux with no window chrome at all; macOS uses the
+// native Overlay-titlebar traffic lights instead).
 //
-// ADR-0052 i18n contract + fire-and-forget failure routing live on the
-// dispatcher (WindowControls.tsx) and the shared fireWindowAction helper.
+// ADR-0052 i18n contract + fire-and-forget failure routing live in this
+// component's aria-labels and the shared fireWindowAction helper.
 export function WindowsWindowControls(): ReactElement {
   const intl = useIntl();
   const [maximized, setMaximized] = useState(false);
