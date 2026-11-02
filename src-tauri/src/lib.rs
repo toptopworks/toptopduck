@@ -33,6 +33,11 @@ pub mod cancel;
 pub mod guardrail;
 pub mod util;
 
+// Startup PATH hydration for non-Windows desktop launches (#1467): the
+// trimmed session PATH a desktop launch inherits hides user-installed
+// runtimes from every detection and spawn surface.
+mod path_hydration;
+
 // Platform process-tree termination (ADR-0108 Decision 5), shared by the CLI
 // tool executor and the MCP stdio transport (#1456).
 mod process_tree;
@@ -146,6 +151,16 @@ use tauri::Manager;
 /// across launches) rather than crashing.
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // Startup PATH hydration (issue #1467): a desktop-launched bundle on
+    // macOS/Linux inherits the login session's trimmed PATH, hiding
+    // user-installed runtimes (npm globals under a version manager, a
+    // custom npm prefix, Homebrew) from every detection and spawn surface.
+    // Must run before the builtin startup scan in `setup` and any adapter
+    // detection -- both read the process PATH, so one write here covers
+    // detection, scanning, and spawning symmetrically. No-op on Windows
+    // (the registry PATH is inherited wholesale).
+    path_hydration::hydrate_process_path();
+
     let mut app_builder = tauri::Builder::default();
 
     // Multi-instance guard (issue #100). single-instance MUST be the first
