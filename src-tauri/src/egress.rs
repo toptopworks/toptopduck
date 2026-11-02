@@ -50,8 +50,10 @@ static BLOCKING_CLIENT: std::sync::OnceLock<reqwest::blocking::Client> = std::sy
 
 /// Hand out the shared async egress client: a clone per call, one build per
 /// process -- see [`ASYNC_CLIENT`]. A build failure is surfaced (not
-/// unwrapped) so the caller classifies it in its own vocabulary.
-pub(crate) fn async_client() -> Result<reqwest::Client, reqwest::Error> {
+/// unwrapped) so the caller classifies it in its own vocabulary. `pub` for
+/// the integration seam: the env-proxy pin (issue #1458) drives both faces
+/// from a dedicated test binary for process-global env isolation.
+pub fn async_client() -> Result<reqwest::Client, reqwest::Error> {
     if let Some(client) = ASYNC_CLIENT.get() {
         return Ok(client.clone());
     }
@@ -69,8 +71,9 @@ pub(crate) fn async_client() -> Result<reqwest::Client, reqwest::Error> {
 
 /// Hand out the shared blocking egress client: a clone per call, one build
 /// per process -- see [`BLOCKING_CLIENT`]. A build failure is surfaced (not
-/// unwrapped) so the caller classifies it in the probe's own vocabulary.
-pub(crate) fn blocking_client() -> Result<reqwest::blocking::Client, reqwest::Error> {
+/// unwrapped) so the caller classifies it in the probe's own vocabulary. `pub`
+/// for the integration seam (see [`async_client`]).
+pub fn blocking_client() -> Result<reqwest::blocking::Client, reqwest::Error> {
     if let Some(client) = BLOCKING_CLIENT.get() {
         return Ok(client.clone());
     }
