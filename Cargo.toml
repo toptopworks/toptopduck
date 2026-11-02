@@ -11,6 +11,14 @@ members = [
 [profile.dev]
 incremental = true
 
+# Dependency debuginfo trim (issue #1465): dependencies are never
+# breakpoint-inspected in dev; line tables keep backtraces resolvable while
+# shrinking the link input of every test binary (the "*" override matches
+# only non-workspace packages, so local code keeps full debug info and the
+# test profile inherits this via dev).
+[profile.dev.package."*"]
+debug = "line-tables-only"
+
 # Release binary optimization (issue #96): codegen-units=1 + lto trade build time
 # for smaller, better-optimized binaries; opt-level="s" favors size; strip drops
 # debug symbols. panic="abort" is intentionally NOT set here -- no panic boundary
