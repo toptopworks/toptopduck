@@ -91,7 +91,9 @@ fn user_toolchain_dirs(home: &Path, npm_config_prefix: Option<&Path>) -> Vec<Pat
     }
     // The well-known single user-level bins. ~/.volta/bin and ~/.asdf/shims
     // are shim directories (they hold proxies to the real installs) and
-    // still ride PATH like any bin.
+    // still ride PATH like any bin. pnpm's standalone installer defaults
+    // differ per OS (Library/pnpm on macOS, .local/share/pnpm on Linux), so
+    // both spellings ride the table like fnm's cross-platform roots.
     for rel in [
         ".local/bin",
         ".cargo/bin",
@@ -99,6 +101,7 @@ fn user_toolchain_dirs(home: &Path, npm_config_prefix: Option<&Path>) -> Vec<Pat
         ".volta/bin",
         ".asdf/shims",
         "Library/pnpm",
+        ".local/share/pnpm",
         ".npm-global/bin",
         ".npm-packages/bin",
     ] {
@@ -218,8 +221,8 @@ mod tests {
         );
         assert_eq!(
             dirs.len(),
-            1 + 8 + 2,
-            "the prefix ride does not drop the defaults: 8 well-known + 2 system"
+            1 + 9 + 2,
+            "the prefix ride does not drop the defaults: 9 well-known + 2 system"
         );
     }
 
@@ -255,6 +258,7 @@ mod tests {
             ".volta/bin",
             ".asdf/shims",
             "Library/pnpm",
+            ".local/share/pnpm",
             ".npm-global/bin",
             ".npm-packages/bin",
         ]
@@ -383,7 +387,7 @@ mod tests {
         // well-known joins plus the two system prefixes.
         let home = tempfile::tempdir().expect("tempdir");
         let dirs = user_toolchain_dirs(home.path(), None);
-        assert_eq!(dirs.len(), 8 + 2, "8 well-known dirs + 2 system prefixes");
+        assert_eq!(dirs.len(), 9 + 2, "9 well-known dirs + 2 system prefixes");
         assert!(
             !dirs.iter().any(|d| d
                 .components()
