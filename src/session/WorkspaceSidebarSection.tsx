@@ -632,7 +632,7 @@ export function WorkspaceSidebarSection({
                 <FormattedMessage id="common.cancel" defaultMessage="Cancel" />
               </Button>
               <Button type="submit" disabled={renameInvalid}>
-                <FormattedMessage id="sidebar.workspace.save" defaultMessage="Save" />
+                <FormattedMessage id="common.save" defaultMessage="Save" />
               </Button>
             </DialogFooter>
           </form>
@@ -670,7 +670,7 @@ export function WorkspaceSidebarSection({
             </DialogTitle>
           </DialogHeader>
           <form
-            className="flex flex-col gap-2"
+            className="flex min-w-0 flex-col gap-2"
             onSubmit={(e) => {
               e.preventDefault();
               if (!createInvalid) {
@@ -695,53 +695,63 @@ export function WorkspaceSidebarSection({
               })}
               aria-invalid={createInvalid && createTrimmed.length > 0}
             />
-            {/* The optional source-folder row (issue #1477): the compact
-                pick/clear pair -- no large drop zone, the modal's density
-                stays put. */}
-            <div className="flex items-center gap-2">
-              {createSource === null ? (
-                <>
-                  <span className="text-xs text-muted-foreground">
-                    <FormattedMessage
-                      id="sidebar.workspace.sourceFolder"
-                      defaultMessage="Source folder (optional)"
-                    />
-                  </span>
-                  <Button
-                    type="button"
-                    variant="outline"
-                    className="ml-auto h-7 px-2 text-xs"
-                    onClick={() => void browseForCreateSource()}
-                  >
-                    <FolderClosed className="size-3.5" aria-hidden />
-                    <FormattedMessage
-                      id="sidebar.workspace.chooseFolder"
-                      defaultMessage="Browse…"
-                    />
-                  </Button>
-                </>
-              ) : (
-                <>
-                  <span
-                    className="min-w-0 flex-1 truncate text-xs"
-                    title={createSource}
-                  >
-                    {createSource}
-                  </span>
-                  <button
-                    type="button"
-                    aria-label={intl.formatMessage({
-                      id: "sidebar.workspace.clearFolder",
-                      defaultMessage: "Clear source folder",
-                    })}
-                    className={`${bareButtonReset} flex size-7 items-center justify-center rounded-md text-muted-foreground transition-colors hover:text-foreground focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring`}
-                    onClick={() => setCreateSource(null)}
-                  >
-                    <X className="size-3.5" aria-hidden />
-                  </button>
-                </>
-              )}
-            </div>
+            {/* The optional source-folder field (issue #1477): the same
+                text-input posture as the name field above (1px hairline,
+                rounded, 36px), not a separate card face. Unpicked = the
+                whole field is the browse button wearing a placeholder;
+                picked = the path reads back in the same frame. */}
+            {createSource === null ? (
+              <button
+                type="button"
+                aria-label={intl.formatMessage({
+                  id: "sidebar.workspace.localFolder",
+                  defaultMessage: "Local folder (optional)",
+                })}
+                className="flex h-9 w-full items-center gap-2 rounded-md border px-3 text-left transition-colors hover:text-foreground focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring"
+                onClick={() => void browseForCreateSource()}
+              >
+                <FolderClosed
+                  className="size-4 shrink-0 text-muted-foreground"
+                  aria-hidden
+                />
+                <span className="min-w-0 flex-1 truncate text-sm text-muted-foreground">
+                  <FormattedMessage
+                    id="sidebar.workspace.localFolder"
+                    defaultMessage="Local folder (optional)"
+                  />
+                </span>
+                <span className="shrink-0 text-xs text-muted-foreground">
+                  <FormattedMessage
+                    id="sidebar.workspace.chooseFolder"
+                    defaultMessage="Browse…"
+                  />
+                </span>
+              </button>
+            ) : (
+              <div className="flex h-9 w-full items-center gap-2 rounded-md border px-3">
+                <FolderClosed
+                  className="size-4 shrink-0 text-muted-foreground"
+                  aria-hidden
+                />
+                <span
+                  className="min-w-0 flex-1 truncate font-mono text-xs"
+                  title={createSource}
+                >
+                  {createSource}
+                </span>
+                <button
+                  type="button"
+                  aria-label={intl.formatMessage({
+                    id: "sidebar.workspace.clearFolder",
+                    defaultMessage: "Clear local folder",
+                  })}
+                  className={`${bareButtonReset} flex size-6 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors hover:text-foreground focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring`}
+                  onClick={() => setCreateSource(null)}
+                >
+                  <X className="size-3.5" aria-hidden />
+                </button>
+              </div>
+            )}
             {createInvalid && createTrimmed.length > 0 && (
               <p className="text-xs text-destructive">
                 <FormattedMessage
@@ -759,10 +769,7 @@ export function WorkspaceSidebarSection({
               </Button>
               <Button type="submit" disabled={createInvalid}>
                 {createSource !== null ? (
-                  <FormattedMessage
-                    id="sidebar.workspace.addSubmit"
-                    defaultMessage="Add"
-                  />
+                  <FormattedMessage id="common.add" defaultMessage="Add" />
                 ) : (
                   <FormattedMessage
                     id="composer.workspace.create"

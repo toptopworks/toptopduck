@@ -2315,7 +2315,7 @@ describe("SessionSidebar workspace section (issue #1392)", () => {
     renderShell(<SessionSidebar {...wsProps()} />);
     fireEvent.click(screen.getByRole("button", { name: "New workspace" }));
     fireEvent.click(
-      await screen.findByRole("button", { name: "Browse…" }),
+      await screen.findByRole("button", { name: "Local folder (optional)" }),
     );
     // The dual-intent faces: title + submit label flip, submit stays enabled
     // on the blank name (the register path's exemption).
@@ -2344,7 +2344,7 @@ describe("SessionSidebar workspace section (issue #1392)", () => {
     vi.mocked(open).mockResolvedValueOnce("/w/picked");
     renderShell(<SessionSidebar {...wsProps()} />);
     fireEvent.click(screen.getByRole("button", { name: "New workspace" }));
-    fireEvent.click(await screen.findByRole("button", { name: "Browse…" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Local folder (optional)" }));
     const input = await screen.findByRole("textbox", {
       name: "Workspace name",
     });
@@ -2366,9 +2366,9 @@ describe("SessionSidebar workspace section (issue #1392)", () => {
     vi.mocked(open).mockResolvedValueOnce("/w/picked");
     renderShell(<SessionSidebar {...wsProps()} />);
     fireEvent.click(screen.getByRole("button", { name: "New workspace" }));
-    fireEvent.click(await screen.findByRole("button", { name: "Browse…" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Local folder (optional)" }));
     fireEvent.click(
-      await screen.findByRole("button", { name: "Clear source folder" }),
+      await screen.findByRole("button", { name: "Clear local folder" }),
     );
     expect(await screen.findByText("New workspace")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Create" })).toBeDisabled();
