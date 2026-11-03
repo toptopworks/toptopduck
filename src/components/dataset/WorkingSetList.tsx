@@ -510,6 +510,7 @@ export function WorkingSetList({
   onRename,
   onReplace,
   onDelete,
+  onPickError,
   badgeFor,
   deleteTitleFor,
   loading = false,
@@ -528,9 +529,11 @@ export function WorkingSetList({
   // the selection with it).
   activeName: string | null;
   // The detail pick (which row's detail the right pane shows): drives the
-  // accent band. Passed as the RESOLVED pick (resolveWorkingSetDetail
-  // output), so the band rides the deleted-pick fallbacks (active, then
-  // first) with the pane and never diverges from what is shown.
+  // accent band. The session face passes the RESOLVED pick
+  // (resolveWorkingSetDetail output), so the band rides the deleted-pick
+  // fallbacks (active, then first) with the pane and never diverges from
+  // what is shown; the workspace panel resolves its own pick-then-first
+  // chain inline (no active pointer), under the same contract.
   selectedName: string | null;
   onSelect: (referenceName: string) => void;
   // Display-only rename (ADR-0037, issue #8): the reference name is never
@@ -544,12 +547,18 @@ export function WorkingSetList({
   // only so tests that don't exercise replace can skip it; App always supplies
   // it, and the button is hidden when it is absent (no silent no-op).
   onReplace?: (referenceName: string, path: string) => void;
-  // Remove a source from the working set (issue #38, ADR-0040). The backend
-  // detaches the snapshot, deletes its file, drops the reference name, and
-  // appends a Deleted source lifecycle event. Optional only so tests that don't
-  // exercise delete can skip it; App always supplies it, and the button is
-  // hidden when it is absent (no silent no-op).
+  // Remove a source from the working set (issue #38, ADR-0040). On the
+  // session face the backend detaches the snapshot, deletes its file, drops
+  // the reference name, and appends a Deleted source lifecycle event; the
+  // workspace panel's delete is a manifest edit (bound sessions keep their
+  // store links, ADR-0141 D7). Optional only so tests that don't exercise
+  // delete can skip it; App always supplies it, and the button is hidden
+  // when it is absent (no silent no-op).
   onDelete?: (referenceName: string) => void;
+  // A picker-open failure's error channel: the workspace panel routes it to
+  // its banner. Absent, the rejection is dropped (the private face's
+  // long-standing posture).
+  onPickError?: (e: unknown) => void;
   // Disables the action buttons while an async op (rename / ingest / replace /
   // delete) is in flight OR while a turn is in flight (ADR-0040 execution
   // window: ask in flight -> source management disabled), preventing concurrent
@@ -602,6 +611,9 @@ export function WorkingSetList({
           extensions: ["csv", "parquet", "json", "jsonl", "ndjson"],
         },
       ],
+    }).catch((e: unknown) => {
+      onPickError?.(e);
+      return null;
     });
     if (typeof selected === "string") {
       onReplace?.(d.reference_name, selected);

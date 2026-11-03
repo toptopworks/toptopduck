@@ -306,6 +306,21 @@ pub fn materialize(workspace: &Path, src: &Path, reader: &str) -> Result<Snapsho
 fn deconflict(base: &str, entries: &[DatasetEntry]) -> String {
     let taken: std::collections::HashSet<&str> =
         entries.iter().map(|e| e.reference_name.as_str()).collect();
+    unique_against(base, &taken)
+}
+
+/// De-conflict a candidate DISPLAY name against the manifest's taken display
+/// names: the display-layer uniqueness rename enforces (DisplayTaken) must
+/// hold for entries the add path creates too, so a fresh default label never
+/// lands on a label a rename already took.
+fn deconflict_display(base: &str, entries: &[DatasetEntry]) -> String {
+    let taken: std::collections::HashSet<&str> =
+        entries.iter().map(|e| e.display_name.as_str()).collect();
+    unique_against(base, &taken)
+}
+
+/// The shared suffix walk: the first free name among base, base_2, base_3...
+fn unique_against(base: &str, taken: &std::collections::HashSet<&str>) -> String {
     if !taken.contains(base) {
         return base.to_string();
     }
@@ -330,9 +345,12 @@ pub fn add(workspace: &Path, src: &Path) -> Result<DatasetEntry, StoreError> {
         &ingest::derive_reference_name(src).unwrap_or_else(|| "dataset".to_string()),
         &entries,
     );
+    // The default label is the reference name, de-conflicted at the display
+    // layer: two rows must never share a label.
+    let display = deconflict_display(&name, &entries);
     let entry = entry_from_materialized(
         name.clone(),
-        name,
+        display,
         materialized,
         DatasetPrivacy::default(),
         src,
@@ -616,6 +634,23 @@ mod tests {
         assert_eq!(entry.source_path, src.to_string_lossy());
         let manifest = fs::read_to_string(manifest_path(workspace.path())).expect("manifest");
         assert!(manifest.contains("\"reference_name\": \"people\""));
+    }
+
+    /// The add path's default label de-conflicts at the display layer: an
+    /// add never lands on a label a rename already took (two management
+    /// rows must never share a label).
+    #[test]
+    fn add_deconflicts_the_default_label_against_renames() {
+        let workspace = ws();
+        let sources = src_dir();
+        let people = csv(sources.path(), "people.csv", PEOPLE);
+        add(workspace.path(), &people).expect("add");
+        rename(workspace.path(), "people", "Folks").expect("rename");
+        // "Folks" is free as a reference name but taken as a display label.
+        let folks = csv(sources.path(), "Folks.csv", "name,score\nAda,9\n");
+        let entry = add(workspace.path(), &folks).expect("add");
+        assert_eq!(entry.reference_name, "Folks");
+        assert_eq!(entry.display_name, "Folks_2");
     }
 
     /// The store file lands at <sha256>.duckdb and a second materialization

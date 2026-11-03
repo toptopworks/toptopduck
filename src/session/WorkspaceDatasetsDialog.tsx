@@ -175,8 +175,6 @@ export function WorkspaceDatasetsDialog({ workspace, onOpenChange }: WorkspaceDa
   }
   const path = panel?.path ?? "";
 
-  const handleOpenChange = onOpenChange;
-
   const listing = useQuery({
     queryKey: datasetKey(path),
     queryFn: () => listWorkspaceDatasets(path),
@@ -274,7 +272,7 @@ export function WorkspaceDatasetsDialog({ workspace, onOpenChange }: WorkspaceDa
     ) : null;
 
   return (
-    <Dialog open={open} onOpenChange={handleOpenChange}>
+    <Dialog open={open} onOpenChange={onOpenChange}>
       {/* The header, the add row and the error banners stay fixed; only the
           dataset management area scrolls (the working-set tab's posture:
           chrome pinned, content scrolls). min-h-0 is what lets the flex-1
@@ -327,7 +325,10 @@ export function WorkspaceDatasetsDialog({ workspace, onOpenChange }: WorkspaceDa
         )}
 
         <div className="min-h-0 flex-1 overflow-y-auto">
-          {rows.length === 0 && !listing.isPending ? (
+          {/* A failed listing renders neither face (the banner above is the
+              face): the empty card would assert an empty workspace the
+              listing never established, and invite an Add it would refuse. */}
+          {listing.isError ? null : rows.length === 0 && !listing.isPending ? (
           // The empty set renders ONE card (the working-set tab's empty
           // form, issue #792): the two-column shell never mounts empty. The
           // header's add button is the only entry (a second button in the
@@ -356,12 +357,22 @@ export function WorkspaceDatasetsDialog({ workspace, onOpenChange }: WorkspaceDa
                   activeName={null}
                   selectedName={resolvedName}
                   onSelect={setSelectedName}
-                  onRename={(name, newDisplay) => rename.mutate({ name, newDisplay })}
+                  onRename={(name, newDisplay) => {
+                    // Clear-on-fire (the private face's runSimpleMutation
+                    // posture): a stale banner must not contradict a retry's
+                    // visible success.
+                    setError(null);
+                    rename.mutate({ name, newDisplay });
+                  }}
                   onReplace={(name, file) => {
                     setError(null);
                     replace.mutate({ name, file });
                   }}
-                  onDelete={(name) => remove.mutate(name)}
+                  onDelete={(name) => {
+                    setError(null);
+                    remove.mutate(name);
+                  }}
+                  onPickError={(e: unknown) => setError(describeError(e, intl))}
                   badgeFor={badgeFor}
                   deleteTitleFor={(name) => (
                     <FormattedMessage
@@ -401,7 +412,10 @@ export function WorkspaceDatasetsDialog({ workspace, onOpenChange }: WorkspaceDa
                       sampleLoading={false}
                       sampleError={null}
                       loading={privacy.isPending}
-                      onPrivacyChange={(name, next) => privacy.mutate({ name, next })}
+                      onPrivacyChange={(name, next) => {
+                        setError(null);
+                        privacy.mutate({ name, next });
+                      }}
                     />
                   </>
                 )}

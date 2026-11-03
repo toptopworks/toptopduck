@@ -291,4 +291,91 @@ describe("WorkspaceDatasetsDialog", () => {
     // No rows, no detail pane: the empty card is the only section.
     expect(screen.queryByRole("button", { name: /^people/ })).not.toBeInTheDocument();
   });
+
+  it("renders a renamed label across the row, the heading and the delete confirm; the reference name stays the anchor line", async () => {
+    seed([entry({ display_name: "Folks" })]);
+    renderPanel();
+    // The dual-name contract's visible half: the label carries the row and
+    // the heading; the reference name survives as the SQL anchor line.
+    expect(await screen.findByRole("button", { name: /^Folks/ })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: /^Folks/ })).toBeInTheDocument();
+    expect(screen.getByText(/引用名：people/)).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /^people/ })).not.toBeInTheDocument();
+    // The destructive confirm names the label too (the target the user sees).
+    fireEvent.click(screen.getByRole("button", { name: /删除/ }));
+    expect(screen.getAllByRole("alertdialog").at(-1)!).toHaveTextContent("从此工作区移除 Folks？");
+  });
+
+  it("clears the error banner the moment a rename retry fires", async () => {
+    seed([
+      entry({}),
+      entry({ reference_name: "orders", display_name: "orders", source_path: "/src/orders.csv" }),
+    ]);
+    vi.mocked(renameWorkspaceDataset)
+      .mockRejectedValueOnce({ kind: "DisplayTaken", data: "orders" })
+      .mockResolvedValue(entry({ display_name: "Folks" }));
+    renderPanel();
+    const row = (await screen.findByRole("button", { name: /^people/ })).closest("li")!;
+    fireEvent.click(within(row).getByRole("button", { name: /重命名/ }));
+    fireEvent.change(screen.getByRole("textbox"), { target: { value: "orders" } });
+    fireEvent.click(screen.getByRole("button", { name: "保存" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("显示名 orders 已被占用");
+    // Retry with a free label: the banner clears on fire, before the IPC
+    // settles -- a stale refusal must not contradict a visible success.
+    const rowAgain = screen.getByRole("button", { name: /^people/ }).closest("li")!;
+    fireEvent.click(within(rowAgain).getByRole("button", { name: /重命名/ }));
+    fireEvent.change(screen.getByRole("textbox"), { target: { value: "Folks" } });
+    fireEvent.click(screen.getByRole("button", { name: "保存" }));
+    await waitFor(() => expect(screen.queryByRole("alert")).not.toBeInTheDocument());
+    await waitFor(() =>
+      expect(renameWorkspaceDataset).toHaveBeenLastCalledWith("/ws", "people", "Folks"),
+    );
+  });
+
+  it("maps the backend's blank-label refusal onto the banner (defense in depth)", async () => {
+    // The row dialog's trim guard makes this near-unreachable from the UI;
+    // the mapping is the backend refusal's honest landing spot.
+    seed([entry({})]);
+    vi.mocked(renameWorkspaceDataset).mockRejectedValue({ kind: "InvalidLabel" });
+    renderPanel();
+    fireEvent.click(await screen.findByRole("button", { name: /重命名/ }));
+    fireEvent.change(screen.getByRole("textbox"), { target: { value: "Folks" } });
+    fireEvent.click(screen.getByRole("button", { name: "保存" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("显示名不能为空白");
+  });
+
+  it("locks the row actions while a removal is in flight", async () => {
+    let resolveRemove: (() => void) | undefined;
+    vi.mocked(removeWorkspaceDataset).mockImplementation(
+      () =>
+        new Promise<void>((resolve) => {
+          resolveRemove = resolve;
+        }),
+    );
+    seed([entry({})]);
+    renderPanel();
+    fireEvent.click(await screen.findByRole("button", { name: /删除/ }));
+    fireEvent.click(
+      within(screen.getAllByRole("alertdialog").at(-1)!).getByRole("button", { name: "删除" }),
+    );
+    // busy rides the loading prop: the row's rename / replace / delete lock
+    // until the remove settles (the private face's posture).
+    expect(await screen.findByRole("button", { name: /重命名/ })).toBeDisabled();
+    expect(screen.getByRole("button", { name: /换源/ })).toBeDisabled();
+    resolveRemove!();
+    await waitFor(() => expect(screen.getByRole("button", { name: /重命名/ })).toBeEnabled());
+  });
+
+  it("renders neither face when the listing itself fails -- the banner is the face", async () => {
+    vi.mocked(listWorkspaceDatasets).mockRejectedValue({
+      kind: "ManifestCorrupt",
+      data: "datasets.json",
+    });
+    renderPanel();
+    expect(await screen.findByRole("alert")).toHaveTextContent(/已损坏/);
+    // No empty card asserting an empty workspace, no two-column shell: the
+    // refusal is the face, and an Add it would refuse is not invited.
+    expect(screen.queryByText(/还没有数据集/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/^数据集 · /)).not.toBeInTheDocument();
+  });
 });

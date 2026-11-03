@@ -425,9 +425,19 @@ impl super::Session {
                 .shared_attaches
                 .resolve_or_assign(&entry.reference_name, &self.working_set);
             if self.working_set.taken(&name) {
-                // Attached: refresh the descriptor's privacy from the manifest
-                // (D10 即时生效 -- the panel edit lands on this very turn).
+                // Attached: refresh the descriptor from the manifest (D10
+                // 即时生效 -- the panel edit lands on this very turn): the
+                // privacy, and the display label with it -- a panel rename
+                // reaches the attached row the same way. A label some other
+                // working-set member already holds is refused (display-layer
+                // uniqueness), so the label refresh is best-effort.
                 self.working_set.set_privacy(&name, entry.privacy.clone());
+                if let Err(e) = self.working_set.rename_display(&name, &entry.display_name) {
+                    log::debug!(
+                        target: "toptopduck::session",
+                        "shared label refresh skipped for {name}: {e}"
+                    );
+                }
                 continue;
             }
             cards.push(crate::turn_window::shared_card(&name, entry));
@@ -521,7 +531,7 @@ impl super::Session {
                         // panel re-add or replace revives the name.
                         let anchor = StaleAnchor {
                             reference_name: entry.reference_name.clone(),
-                            display_name: entry.reference_name.clone(),
+                            display_name: entry.display_name.clone(),
                             reason: StaleReason::Replaced,
                         };
                         let placeholder =
@@ -1051,6 +1061,59 @@ mod tests {
         )]);
         let cards = session.shared_cards();
         assert!(cards.is_empty(), "attached entries ride the working set");
+    }
+
+    /// A panel rename before the attach rides in: the attached descriptor's
+    /// label is the manifest's display name, not the 挂名.
+    #[test]
+    fn attach_carries_the_renamed_display_label() {
+        let (workspace, tree) = ws();
+        add_people(workspace.path());
+        datasets::rename(workspace.path(), "people", "Folks").expect("rename");
+        let mut working_set = WorkingSet::default();
+        let engine = crate::session::engine::AdminEngine::materialized();
+        let mut source_files = HashMap::new();
+        let mut attaches = SharedAttaches::default();
+        resolve_refs(
+            "SELECT * FROM \"people\".data",
+            &engine,
+            &mut source_files,
+            &mut working_set,
+            &tree.path().join("snapshots"),
+            workspace.path(),
+            &mut attaches,
+        )
+        .expect("resolve");
+        let d = working_set.get("people").expect("attached");
+        assert_eq!(d.display_name, "Folks");
+    }
+
+    /// A panel rename after the attach lands on the attached row on the very
+    /// next card pass (the D10 refresh, the label riding with the privacy).
+    #[test]
+    fn shared_cards_refreshes_an_attached_label_after_a_panel_rename() {
+        let (workspace, _tree) = ws();
+        let entry = add_people(workspace.path());
+        let mut session = crate::session::Session::with_provider(Box::new(
+            crate::provider::fake::FakeProvider::new(),
+        ))
+        .expect("session");
+        session.set_workspace(std::fs::canonicalize(workspace.path()).expect("canonical"));
+        session.restore_shared_attaches(&[crate::persistence::recipe::RecipeEntry::SharedAttach(
+            SharedAttachEvent {
+                reference_name: "people".into(),
+                entry_name: "people".into(),
+                fingerprint: entry.fingerprint,
+            },
+        )]);
+        datasets::rename(workspace.path(), "people", "Folks").expect("rename");
+        let cards = session.shared_cards();
+        assert!(cards.is_empty(), "still attached, no card");
+        let d = session.working_set.get("people").expect("attached");
+        assert_eq!(
+            d.display_name, "Folks",
+            "the rename reached the attached row"
+        );
     }
 
     /// D6 reserved 挂名: a card-time reservation (de-conflicted because a
