@@ -3972,8 +3972,10 @@ mod tests {
 
         drop(session);
 
-        // Reopen: the restore runs before replay and re-attaches by the
-        // triple -- the name is live and no turn renders Failed.
+        // Reopen: the companion probe runs BEFORE the shared restore (the
+        // attach would activate the engine's RW handle on the companion
+        // file and force a false miss -- see resume.rs), the restore
+        // re-attaches by the triple, and no turn renders Failed.
         let resumed = Session::open_recipe(
             &duck,
             std::sync::Arc::new(crate::cancel::CancelToken::new()),
@@ -3986,13 +3988,17 @@ mod tests {
         .expect("resume");
         let people = resumed.get("people").expect("the attach restored");
         assert!(people.stale.is_none(), "the restored name is live");
-        // NOTE: the reopen currently renders the replayed turn Failed with
-        // "Table with name result_1 already exists" when the companion probe
-        // misses (the tree's snapshot inventory vs the hard-linked shared
-        // store file) and phase 3 re-materializes over the persisted
-        // result_1 snapshot. Pre-existing at the PR head, first exposed by
-        // this full-cycle test -- tracked for a dedicated fix, not asserted
-        // here (an assert-true would bake the break in).
+        assert!(
+            resumed.get("result_1").is_some(),
+            "the companion hit restores result_1 whole"
+        );
+        assert!(
+            !resumed.conversation().iter().any(|e| matches!(
+                e,
+                ThreadEntry::Turn(t) if matches!(t.outcome, TurnOutcome::Failed(_))
+            )),
+            "no Failed turn after reopen"
+        );
     }
 
     /// A legacy recipe whose recorded SQL points into the per-session

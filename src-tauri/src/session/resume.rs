@@ -880,13 +880,6 @@ impl super::Session {
         // attach restore below can resolve the manifest; the phase-5 facts
         // block re-writes it verbatim (same value, idempotent).
         session.runtime_facts.workspace = recipe.workspace.clone();
-        // ADR-0141 D9: restore the recorded shared attaches before any
-        // replay / hit-restore consumption -- a fingerprint match re-attaches
-        // from the workspace store (zero conversion), a miss or a gone entry
-        // registers the 挂名 stale so replay SQL refuses honestly. Idempotent
-        // against the companion hit path (an already-attached name only
-        // records its table entry).
-        session.restore_shared_attaches(&recipe.history);
         let restored = if let Some(meta) = super::companion::probe(path, &recipe) {
             // A probe-validated companion failing mid-restore is a fresh
             // corruption (TOCTOU window), not a cache miss: the replay
@@ -906,6 +899,18 @@ impl super::Session {
         if !restored {
             super::companion::discard(path);
         }
+        // ADR-0141 D9: restore the recorded shared attaches before any
+        // replay consumption -- a fingerprint match re-attaches from the
+        // workspace store (zero conversion), a miss or a gone entry
+        // registers the 挂名 stale so replay SQL refuses honestly.
+        // Idempotent against the companion hit path (an already-attached
+        // name only records its table entry). This runs AFTER the companion
+        // probe, not before: the attach's ATTACH statement activates the
+        // admin engine's RW handle on the companion file itself, and a
+        // read-only probe against that handle fails the open -- a false
+        // miss that forced the replay path and re-materialized result_N
+        // over tables the companion already held.
+        session.restore_shared_attaches(&recipe.history);
 
         // Phase 1 (replay path only): re-read + verify each source
         // (interactive re-link / rebuild). Returns the set of rebuilt
@@ -1418,9 +1423,12 @@ impl super::Session {
             self.working_set
                 .record_provenance(result, deps.iter().cloned().collect());
         }
-        if let Some(active) = &meta.active {
-            self.working_set.set_active(active);
-        }
+        // Restore the settled active pointer verbatim, None included: the
+        // register loop above leaves `active` on the LAST descriptor's name
+        // (register is an active-mover), and a settle-time None must clear
+        // that residue -- otherwise a shared-attach name ordered last would
+        // resurrect as active and violate the persister's sources invariant.
+        self.working_set.set_active_source(meta.active.as_deref());
         // Source status: stat-level only. A file that no longer resolves or
         // stats is Missing; a (mtime, size) difference from the settle-time
         // stamp is Changed. No content check -- reading the file is exactly
