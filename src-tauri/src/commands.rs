@@ -555,6 +555,130 @@ pub fn remove_workspace(
     remove_registry_record(&registry, &path)
 }
 
+/// Why a workspace-dataset command failed (ADR-0141): the adjacently-tagged
+/// `{kind, data}` shape the other command errors use, so the panel can render
+/// the xlsx redirect and the corrupt-manifest posture distinctly instead of a
+/// bare engine string.
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(tag = "kind", content = "data")]
+pub enum WorkspaceDatasetError {
+    /// xlsx is out of the shared face's first cut (ADR-0141 D11): the catalog
+    /// owns the "convert to CSV/Parquet or use a session-private source"
+    /// redirect this kind triggers.
+    XlsxRejected,
+    LegacyExcel,
+    UnsupportedFormat(String),
+    /// The manifest exists but does not parse (preserved as `.corrupt` and
+    /// refused, ADR-0141 D8).
+    ManifestCorrupt(String),
+    NotFound,
+    Io(String),
+}
+
+impl From<crate::workspace::datasets::StoreError> for WorkspaceDatasetError {
+    fn from(e: crate::workspace::datasets::StoreError) -> Self {
+        use crate::workspace::datasets::StoreError;
+        match e {
+            StoreError::XlsxRejected => WorkspaceDatasetError::XlsxRejected,
+            StoreError::LegacyExcel => WorkspaceDatasetError::LegacyExcel,
+            StoreError::UnsupportedFormat { requested } => {
+                WorkspaceDatasetError::UnsupportedFormat(requested)
+            }
+            StoreError::ManifestCorrupt { detail } => {
+                WorkspaceDatasetError::ManifestCorrupt(detail)
+            }
+            StoreError::NotFound => WorkspaceDatasetError::NotFound,
+            StoreError::Io { detail } => WorkspaceDatasetError::Io(detail),
+        }
+    }
+}
+
+/// The shared-dataset panel's list face (ADR-0141 D4/D8): every manifest
+/// entry, flagged (not hidden) when its store file is missing.
+#[tauri::command]
+pub fn list_workspace_datasets(
+    workspace: String,
+) -> Result<Vec<crate::workspace::ListedDataset>, WorkspaceDatasetError> {
+    crate::workspace::datasets::list(std::path::Path::new(&workspace)).map_err(Into::into)
+}
+
+/// Add a source file to the workspace store (ADR-0141 D2): runs the DuckDB
+/// copy-in off the async/UI thread (a large first-time source converts for
+/// minutes, the same AC the session ingest has).
+#[tauri::command]
+pub async fn add_workspace_dataset(
+    workspace: String,
+    path: String,
+) -> Result<crate::workspace::DatasetEntry, WorkspaceDatasetError> {
+    tauri::async_runtime::spawn_blocking(move || {
+        crate::workspace::datasets::add(
+            std::path::Path::new(&workspace),
+            std::path::Path::new(&path),
+        )
+        .map_err(Into::into)
+    })
+    .await
+    .map_err(|e| WorkspaceDatasetError::Io(e.to_string()))?
+}
+
+/// Remove a shared dataset (ADR-0141 D7): the manifest drops the name at
+/// once; bound sessions keep their hard links until they end. Runs off the
+/// async/UI thread -- the manifest mutation lock may be held by a converting
+/// add for minutes.
+#[tauri::command]
+pub async fn remove_workspace_dataset(
+    workspace: String,
+    reference_name: String,
+) -> Result<(), WorkspaceDatasetError> {
+    tauri::async_runtime::spawn_blocking(move || {
+        crate::workspace::datasets::remove(std::path::Path::new(&workspace), &reference_name)
+            .map_err(Into::into)
+    })
+    .await
+    .map_err(|e| WorkspaceDatasetError::Io(e.to_string()))?
+}
+
+/// Replace a shared dataset's content under the stable name (ADR-0141 D7).
+/// Copy-in runs off the async/UI thread.
+#[tauri::command]
+pub async fn replace_workspace_dataset(
+    workspace: String,
+    reference_name: String,
+    path: String,
+) -> Result<crate::workspace::DatasetEntry, WorkspaceDatasetError> {
+    tauri::async_runtime::spawn_blocking(move || {
+        crate::workspace::datasets::replace(
+            std::path::Path::new(&workspace),
+            &reference_name,
+            std::path::Path::new(&path),
+        )
+        .map_err(Into::into)
+    })
+    .await
+    .map_err(|e| WorkspaceDatasetError::Io(e.to_string()))?
+}
+
+/// Update a shared dataset's privacy (ADR-0141 D10): a workspace-level asset
+/// attribute, effective for every bound session on its next turn. Runs off
+/// the async/UI thread like the other mutators (the shared manifest lock).
+#[tauri::command]
+pub async fn set_workspace_dataset_privacy(
+    workspace: String,
+    reference_name: String,
+    privacy: crate::model::DatasetPrivacy,
+) -> Result<crate::workspace::DatasetEntry, WorkspaceDatasetError> {
+    tauri::async_runtime::spawn_blocking(move || {
+        crate::workspace::datasets::set_privacy(
+            std::path::Path::new(&workspace),
+            &reference_name,
+            privacy,
+        )
+        .map_err(Into::into)
+    })
+    .await
+    .map_err(|e| WorkspaceDatasetError::Io(e.to_string()))?
+}
+
 /// Close a session (ADR-0055): mark closing, fire cancel, and remove the entry
 /// from the store. Returns immediately -- it does NOT wait for an in-flight
 /// ask. If a turn is in flight, cancel fires (HTTP still runs to completion

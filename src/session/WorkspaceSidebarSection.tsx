@@ -24,6 +24,7 @@ import {
   FolderX,
   Maximize2,
   Minimize2,
+  Database,
   MoreHorizontal,
   Pencil,
   Plus,
@@ -64,6 +65,7 @@ import { log } from "@/lib/log";
 import { usePointerCloseIntent } from "@/lib/usePointerCloseIntent";
 import { isInvalidWorkspaceName } from "@/lib/workspaceName";
 import { createWorkspace, removeWorkspace, renameWorkspace } from "../api";
+import { WorkspaceDatasetsDialog } from "./WorkspaceDatasetsDialog";
 import { readSidebarExpansion, saveSidebarExpansion } from "./sidebarExpansion";
 import { workspaceKeys } from "./queryKeys";
 import { SIDEBAR_PREVIEW_CAP as PREVIEW_CAP } from "./sidebarModel";
@@ -162,6 +164,9 @@ export function WorkspaceSidebarSection({
   // staging posture): the menu item stages the group, the dialog's confirm
   // fires the mutation.
   const [removing, setRemoving] = useState<WorkspaceGroup | null>(null);
+  // The shared-dataset panel's target (ADR-0141 D4): the workspace the modal
+  // manages; null keeps it closed.
+  const [managing, setManaging] = useState<{ path: string; label: string } | null>(null);
 
   function toggleGroup(path: string) {
     const next = new Set(expanded);
@@ -491,6 +496,7 @@ export function WorkspaceSidebarSection({
                       disabled={disabled}
                       onRename={() => openRename(g)}
                       onRemove={() => setRemoving(g)}
+                      onManageDatasets={() => setManaging({ path: g.path, label: g.label })}
                     />
                   </div>
                 </div>
@@ -600,6 +606,14 @@ export function WorkspaceSidebarSection({
         </DialogContent>
       </Dialog>
 
+      {/* ADR-0141 D4: the shared-dataset management panel. */}
+      <WorkspaceDatasetsDialog
+        workspace={managing}
+        onOpenChange={(next) => {
+          if (!next) setManaging(null);
+        }}
+      />
+
       {/* The new-workspace modal: the selector's create modal, mirrored for
           the section head's entry. A success lands in the listing (the
           record is explicit) and the group appears immediately. */}
@@ -673,11 +687,13 @@ function WorkspaceGroupMenu({
   disabled,
   onRename,
   onRemove,
+  onManageDatasets,
 }: {
   group: WorkspaceGroup;
   disabled: boolean;
   onRename: () => void;
   onRemove: () => void;
+  onManageDatasets: () => void;
 }) {
   const intl = useIntl();
   const menuLabel = intl.formatMessage({
@@ -725,6 +741,15 @@ function WorkspaceGroupMenu({
         <DropdownMenuItem onSelect={onRename}>
           <Pencil aria-hidden />
           <FormattedMessage id="common.rename" defaultMessage="Rename" />
+        </DropdownMenuItem>
+        {/* ADR-0141 D4: the shared-dataset management panel's entry. A
+            missing directory has no manifest to manage. */}
+        <DropdownMenuItem disabled={group.missing} onSelect={onManageDatasets}>
+          <Database aria-hidden />
+          <FormattedMessage
+            id="sidebar.workspace.manageDatasets"
+            defaultMessage="Shared datasets…"
+          />
         </DropdownMenuItem>
         <DropdownMenuSeparator />
         <DropdownMenuItem variant="destructive" onSelect={onRemove}>

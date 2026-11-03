@@ -211,6 +211,7 @@ fn resume_restores_working_set_history_and_active() {
             ThreadEntry::Turn(t) => t.question.clone(),
             ThreadEntry::Source(ev) => format!("<{}>", ev.reference_name),
             ThreadEntry::Skill(ev) => format!("[{}]", ev.name),
+            ThreadEntry::SharedAttach(ev) => format!("{{share {}}}", ev.reference_name),
         })
         .collect();
     let before_result_count = session
@@ -244,6 +245,7 @@ fn resume_restores_working_set_history_and_active() {
             ThreadEntry::Turn(t) => t.question.clone(),
             ThreadEntry::Source(ev) => format!("<{}>", ev.reference_name),
             ThreadEntry::Skill(ev) => format!("[{}]", ev.name),
+            ThreadEntry::SharedAttach(ev) => format!("{{share {}}}", ev.reference_name),
         })
         .collect();
     assert_eq!(

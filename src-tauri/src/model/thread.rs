@@ -133,6 +133,30 @@ pub enum ThreadEntry {
     Turn(TurnRecord),
     Source(SourceLifecycleEvent),
     Skill(SkillLifecycleEvent),
+    /// A workspace shared dataset attached lazily mid-session (ADR-0141 D9).
+    /// Recipe-round-trip only: it crosses IPC so the projection stays total,
+    /// but the thread renders no row for it (the attach is agent-triggered,
+    /// not a user lifecycle action -- the same no-row posture as the
+    /// pre-v7 skill events).
+    SharedAttach(SharedAttachEvent),
+}
+
+/// A workspace shared dataset's attach record (ADR-0141 D9): first-class in
+/// the recipe's history so resume can restore the attach BEFORE replay -- the
+/// replayed SQL names the attach, and a restored session must answer to the
+/// same name. The triple is complete: 挂名 (what SQL references), the manifest
+/// entry's own name (the workspace vocabulary, which the attach name may
+/// diverge from under de-conflict), and the fingerprint at attach time (the
+/// resume freshness check -- a match re-attaches, a miss or a gone entry
+/// turns the name stale).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SharedAttachEvent {
+    /// The session-side attach name SQL references (卡片名恒等于挂名, D3).
+    pub reference_name: String,
+    /// The manifest entry's own reference name (D6's shared vocabulary).
+    pub entry_name: String,
+    /// The manifest fingerprint at attach time (the store key, D2).
+    pub fingerprint: String,
 }
 
 /// Why a source removal was rejected (issues #38/#39/#40). Two honest refusals

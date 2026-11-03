@@ -493,13 +493,28 @@ pub fn run() {
             // logical units over directories -- deliberately outside
             // app-config (machine bookkeeping vs user preference: semantics,
             // write frequency, and lifecycle all differ).
-            app.manage(Arc::new(crate::workspace::WorkspaceRegistry::new(
-                app_data_path(
+            let workspace_registry =
+                Arc::new(crate::workspace::WorkspaceRegistry::new(app_data_path(
                     app.handle(),
                     crate::workspace::WORKSPACES_FILE_NAME,
                     "workspace registry",
-                ),
-            )));
+                )));
+            // ADR-0141 D8: the startup orphan sweep. Store files no manifest
+            // entry references are zero-risk deletes; a corrupt manifest
+            // aborts that workspace's sweep (honest refusal -- deleting
+            // against an unreadable manifest could destroy the only copy).
+            // Logged per workspace, never fatal to boot.
+            for record in workspace_registry.all() {
+                if record.path.exists() {
+                    if let Err(detail) = crate::workspace::datasets::sweep_orphans(&record.path) {
+                        log::warn!(
+                            "workspace dataset orphan sweep skipped for {}: {detail}",
+                            record.path.display()
+                        );
+                    }
+                }
+            }
+            app.manage(workspace_registry);
 
             // System tray residency (ADR-0125, issue #1140). The tray is the
             // resident surface while the main window is hidden: closing the
@@ -563,6 +578,11 @@ pub fn run() {
             commands::create_workspace,
             commands::rename_workspace,
             commands::remove_workspace,
+            commands::list_workspace_datasets,
+            commands::add_workspace_dataset,
+            commands::remove_workspace_dataset,
+            commands::replace_workspace_dataset,
+            commands::set_workspace_dataset_privacy,
             commands::ingest_file,
             commands::ingest_file_guided,
             commands::guidance_window,

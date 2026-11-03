@@ -26,6 +26,10 @@ import type {
   SkillSource,
 } from "./types/skills";
 import type {
+  ListedWorkspaceDataset,
+  WorkspaceDatasetEntry,
+} from "./types/workspace-datasets";
+import type {
   ResumeProgress,
   SaveError,
   SessionMetadata,
@@ -117,6 +121,63 @@ export async function removeWorkspace(path: string): Promise<void> {
 // "select the existing one" ruling.
 export async function createWorkspace(name: string): Promise<RecentWorkspace> {
   return invoke<RecentWorkspace>("create_workspace", { name });
+}
+
+// --- Workspace shared datasets (ADR-0141) ----------------------------------
+
+// The panel's list face: every manifest entry, flagged (not hidden) when its
+// store file is missing. `workspace` is the canonical path the sidebar's
+// listing projection carries.
+export async function listWorkspaceDatasets(
+  workspace: string,
+): Promise<ListedWorkspaceDataset[]> {
+  return invoke<ListedWorkspaceDataset[]>("list_workspace_datasets", { workspace });
+}
+
+// Add a source file to the workspace store (content-keyed; a repeated
+// content hits the store and skips conversion). Runs the copy-in off the UI
+// thread server-side.
+export async function addWorkspaceDataset(
+  workspace: string,
+  path: string,
+): Promise<WorkspaceDatasetEntry> {
+  return invoke<WorkspaceDatasetEntry>("add_workspace_dataset", { workspace, path });
+}
+
+// Remove a shared dataset: the manifest drops the name immediately; bound
+// sessions keep their hard links until they end.
+export async function removeWorkspaceDataset(
+  workspace: string,
+  referenceName: string,
+): Promise<void> {
+  return invoke<void>("remove_workspace_dataset", { workspace, referenceName });
+}
+
+// Replace a shared dataset's content under the stable name.
+export async function replaceWorkspaceDataset(
+  workspace: string,
+  referenceName: string,
+  path: string,
+): Promise<WorkspaceDatasetEntry> {
+  return invoke<WorkspaceDatasetEntry>("replace_workspace_dataset", {
+    workspace,
+    referenceName,
+    path,
+  });
+}
+
+// Update a shared dataset's privacy -- a workspace-level asset attribute,
+// effective for every bound session on its next turn.
+export async function setWorkspaceDatasetPrivacy(
+  workspace: string,
+  referenceName: string,
+  privacy: DatasetPrivacy,
+): Promise<WorkspaceDatasetEntry> {
+  return invoke<WorkspaceDatasetEntry>("set_workspace_dataset_privacy", {
+    workspace,
+    referenceName,
+    privacy,
+  });
 }
 
 // Create a new session (ADR-0056/0089): the backend builds an independent

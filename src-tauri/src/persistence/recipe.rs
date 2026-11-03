@@ -119,6 +119,12 @@ use crate::model::{
 /// pre-#1090 reader rejects at deserialize -- the unreleased-app posture
 /// the v1 `Failed` widening used, so no migration.
 ///
+/// Still v7 (#1473): [`RecipeEntry`] gains the `SharedAttach` variant (a
+/// workspace shared-dataset attach riding the history, ADR-0141 D9). A
+/// pre-#1473 reader rejects the new variant at deserialize -- the same
+/// unreleased-app posture as #1090 above, so no version bump and no
+/// migration.
+///
 /// v7 (ADR-0119, issue #983) retires persistent skill activation for
 /// turn-scoped invocation: [`RecipeTurn`] gains `invocations` (the turn's
 /// invocation records -- name + body + actor + `content_hash`, turn input
@@ -228,6 +234,12 @@ pub enum RecipeEntry {
     /// and the frontend renders no row for them (ADR-0119 Decision 2: the
     /// timeline's visual species are turns and source events only).
     Skill(SkillLifecycleEvent),
+    /// A workspace shared-dataset attach (ADR-0141 D9): the 挂名 / entry
+    /// name / fingerprint triple resume restores the attaches from, BEFORE
+    /// replay.
+    /// Isomorphic to [`Self::Skill`]'s persistence posture -- a first-class
+    /// history slot, never a turn, no rendered thread row.
+    SharedAttach(crate::model::SharedAttachEvent),
 }
 
 /// One entry in a turn's persisted execution trace (ADR-0078). The trace is a
@@ -893,6 +905,10 @@ impl Recipe {
                         });
                     }
                 }
+                // ADR-0141 D9: a shared attach carries its own integrity (a
+                // non-empty triple) but nothing build-gated depends on it --
+                // accept as-is, preserving the resume-restore input verbatim.
+                RecipeEntry::SharedAttach(_) => {}
             }
         }
         Ok(Recipe {
@@ -991,7 +1007,9 @@ impl Recipe {
                         .collect::<Vec<_>>(),
                     _ => Vec::new(),
                 },
-                RecipeEntry::Source(_) | RecipeEntry::Skill(_) => Vec::new(),
+                RecipeEntry::Source(_) | RecipeEntry::Skill(_) | RecipeEntry::SharedAttach(_) => {
+                    Vec::new()
+                }
             })
             .collect()
     }

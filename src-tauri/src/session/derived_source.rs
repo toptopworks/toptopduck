@@ -253,8 +253,20 @@ pub(crate) fn process(sql: &str, deps: &mut DispatchDeps) -> Result<String, Exec
             Plan::FullPath { canonical, .. } => ingest::derive_reference_name(canonical),
         };
         let ref_name = match ref_name {
-            Some(base) => deps.working_set.deconflict(&base),
-            None => deps.working_set.deconflict("derived"),
+            // ADR-0141 D6: every private registration (manual ingest and
+            // derived staging alike) yields to the shared vocabulary.
+            Some(base) => crate::session::shared_datasets::deconflict_with_shared(
+                &base,
+                deps.working_set,
+                deps.bound_workspace(),
+                deps.shared_attaches.as_deref(),
+            ),
+            None => crate::session::shared_datasets::deconflict_with_shared(
+                "derived",
+                deps.working_set,
+                deps.bound_workspace(),
+                deps.shared_attaches.as_deref(),
+            ),
         };
 
         let outcome = match &plan {

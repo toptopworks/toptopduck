@@ -20,6 +20,7 @@ pub mod recipe_persister;
 pub mod resume;
 mod rows_io;
 pub mod sandbox;
+pub mod shared_datasets;
 pub mod skills;
 pub mod snapshot;
 pub mod source_lifecycle;
@@ -570,6 +571,10 @@ pub struct Session {
     /// does not need this: recipe SQL already has catalog refs, so process()'s
     /// extract_read_paths finds no read_* calls.
     tool_output_refs: HashMap<String, CachedDerivedRef>,
+    /// The workspace shared-dataset attach table (ADR-0141 D6/D9): 挂名 →
+    /// manifest entry + attach fingerprint. Sticky per session; restored from
+    /// the recipe's SharedAttach events at resume.
+    shared_attaches: shared_datasets::SharedAttaches,
     /// The parsed sheets of a workbook parked on the guided-load dialog (issue
     /// #750): auto-tidy parsed the workbook fully for the `NeedsGuidance`
     /// outcome, and holding the parse until the dialog resolves makes
@@ -691,6 +696,10 @@ pub(super) enum TimelineEntry {
     Source(SourceLifecycleEvent),
     /// A skill lifecycle event (ADR-0086): first-class timeline slot, not a turn.
     Skill(SkillLifecycleEvent),
+    /// A workspace shared-dataset attach (ADR-0141 D9): recipe-round-trip slot
+    /// (persist + resume restore); never a turn and never a rendered thread
+    /// row.
+    SharedAttach(crate::model::SharedAttachEvent),
 }
 
 impl TimelineEntry {
@@ -703,6 +712,7 @@ impl TimelineEntry {
             TimelineEntry::Turn { record, .. } => ThreadEntry::Turn(record.clone()),
             TimelineEntry::Source(ev) => ThreadEntry::Source(ev.clone()),
             TimelineEntry::Skill(ev) => ThreadEntry::Skill(ev.clone()),
+            TimelineEntry::SharedAttach(ev) => ThreadEntry::SharedAttach(ev.clone()),
         }
     }
 }
@@ -1035,6 +1045,7 @@ impl Session {
             window_turns: crate::app_config::model::Tunables::default().window_turns as usize,
             source_files: HashMap::new(),
             tool_output_refs: HashMap::new(),
+            shared_attaches: shared_datasets::SharedAttaches::default(),
             guidance_retained: None,
             cancel,
             closing: ClosingFlag::new(),
@@ -1385,6 +1396,16 @@ impl Session {
         usage: Option<crate::model::TurnUsage>,
         occupancy: Option<crate::model::OccupancySnapshot>,
     ) -> TurnOutcome {
+        // ADR-0141 D9: mid-turn shared attaches land their timeline entries at
+        // settle (the dispatch path cannot reach the timeline directly). They
+        // precede the turn entry -- the attach happened before the SQL that
+        // consumed it, and rebuild-order is the resume restore's input.
+        for event in self.shared_attaches.take_pending_events() {
+            self.timeline.push(TimelineEntry::SharedAttach(event));
+        }
+        // ADR-0141 D7: the turn boundary thaws the per-turn validation cache
+        // (panel replaces / deletes land on the next turn's first mention).
+        self.shared_attaches.advance_turn();
         // Identical repeats collapse (review Important 3, issue #983): the
         // user channel dedupes at staging, so this catches the agent's
         // identical re-invoke -- one invocation renders, persists, and
@@ -1642,7 +1663,9 @@ impl Session {
             .iter()
             .filter_map(|entry| match entry {
                 TimelineEntry::Turn { record, .. } => Some(record.clone()),
-                TimelineEntry::Source(_) | TimelineEntry::Skill(_) => None,
+                TimelineEntry::Source(_)
+                | TimelineEntry::Skill(_)
+                | TimelineEntry::SharedAttach(_) => None,
             })
             .collect()
     }
@@ -3884,6 +3907,98 @@ mod tests {
             )
         });
         assert!(!any_failed, "no Failed turn after reopen");
+    }
+
+    /// ADR-0141 D9, the full wiring chain with a REAL turn: a bound session's
+    /// SQL first mention lazily attaches a workspace shared dataset, settle
+    /// drains the pending event onto the timeline (before the turn entry),
+    /// the persister carries the event in history while keeping the shared
+    /// source OUT of recipe.sources, and a reopen restores the attach by its
+    /// triple before replay -- no Failed turn, the name stays live.
+    #[test]
+    fn a_shared_attach_rides_the_full_session_cycle() {
+        use super::TimelineEntry;
+        let ws_dir = tempfile::tempdir().expect("workspace");
+        let csv = ws_dir.path().join("people.csv");
+        std::fs::write(&csv, "name,score\nAda,9\n").expect("write csv");
+        crate::workspace::datasets::add(ws_dir.path(), &csv).expect("add shared");
+
+        let duck_dir = tempfile::tempdir().expect("session dir");
+        let duck = duck_dir.path().join("recipe.json");
+        let provider = FakeProvider::new().scripted_tool_turn_seq(
+            "多少人",
+            vec![
+                Ok(materialize_call(
+                    "SELECT COUNT(*) AS n FROM \"people\".data",
+                )),
+                Ok(ToolTurnReply::Text("done".into())),
+            ],
+        );
+        let mut session = Session::with_provider(Box::new(provider)).expect("session");
+        session.set_workspace(std::fs::canonicalize(ws_dir.path()).expect("canonical"));
+        session
+            .bind_recipe(duck.clone(), "shared".into())
+            .expect("bind");
+        let outcome = session.ask("多少人");
+        assert!(
+            matches!(outcome, TurnOutcome::Materialized { .. }),
+            "the shared reference resolves and materializes, got {outcome:?}"
+        );
+
+        // Settle drained the pending attach event onto the timeline.
+        assert!(
+            session.timeline.iter().any(
+                |e| matches!(e, TimelineEntry::SharedAttach(ev) if ev.reference_name == "people")
+            ),
+            "the attach lands a timeline entry at settle"
+        );
+
+        // The recipe carries the event in history and keeps the shared
+        // source out of recipe.sources (resume re-attaches from the store,
+        // it never re-reads the original CSV path).
+        let recipe = session.build_recipe();
+        assert!(
+            recipe.history.iter().any(|e| matches!(
+                e,
+                crate::persistence::recipe::RecipeEntry::SharedAttach(ev)
+                    if ev.reference_name == "people"
+            )),
+            "the event rides the persisted history"
+        );
+        assert!(
+            recipe.sources.iter().all(|s| s.reference_name != "people"),
+            "the shared attach is not persisted as a recipe source"
+        );
+
+        drop(session);
+
+        // Reopen: the companion probe runs BEFORE the shared restore (the
+        // attach would activate the engine's RW handle on the companion
+        // file and force a false miss -- see resume.rs), the restore
+        // re-attaches by the triple, and no turn renders Failed.
+        let resumed = Session::open_recipe(
+            &duck,
+            std::sync::Arc::new(crate::cancel::CancelToken::new()),
+            Box::new(crate::provider::UnwiredProvider),
+            Default::default(),
+            |_| {},
+            |_| panic!("no source issues expected"),
+            |_| panic!("no active-abandoned callback expected"),
+        )
+        .expect("resume");
+        let people = resumed.get("people").expect("the attach restored");
+        assert!(people.stale.is_none(), "the restored name is live");
+        assert!(
+            resumed.get("result_1").is_some(),
+            "the companion hit restores result_1 whole"
+        );
+        assert!(
+            !resumed.conversation().iter().any(|e| matches!(
+                e,
+                ThreadEntry::Turn(t) if matches!(t.outcome, TurnOutcome::Failed(_))
+            )),
+            "no Failed turn after reopen"
+        );
     }
 
     /// A legacy recipe whose recorded SQL points into the per-session
