@@ -485,6 +485,27 @@ pub struct RegisteredWorkspace {
     pub record_existed: bool,
 }
 
+/// The register command's validation face (issue #1477), extracted as a
+/// plain helper so its refusal arms are pinnable: the strict validation
+/// [`register_workspace_directory`]'s doc describes, returning the
+/// canonical directory and the normalized title (None = blank, the label
+/// lands on the directory tail).
+fn validated_registration<'a>(
+    path: &str,
+    title: Option<&'a str>,
+) -> Result<(std::path::PathBuf, Option<&'a str>), String> {
+    let canonical =
+        std::fs::canonicalize(path).map_err(|e| format!("workspace directory unavailable: {e}"))?;
+    if !canonical.is_dir() {
+        return Err(format!("not a directory: {}", canonical.display()));
+    }
+    let title = title.map(str::trim).filter(|t| !t.is_empty());
+    if let Some(t) = title {
+        crate::session::workspace::validate_workspace_name(t)?;
+    }
+    Ok((canonical, title))
+}
+
 /// Register an existing directory as a workspace (issue #1477): the
 /// no-session registration path behind the create modal's source-folder
 /// branch, so datasets can be pre-loaded before any session opens. Strict
@@ -504,15 +525,7 @@ pub fn register_workspace_directory(
     path: String,
     title: Option<String>,
 ) -> Result<RegisteredWorkspace, String> {
-    let canonical = std::fs::canonicalize(&path)
-        .map_err(|e| format!("workspace directory unavailable: {e}"))?;
-    if !canonical.is_dir() {
-        return Err(format!("not a directory: {}", canonical.display()));
-    }
-    let title = title.as_deref().map(str::trim).filter(|t| !t.is_empty());
-    if let Some(t) = title {
-        crate::session::workspace::validate_workspace_name(t)?;
-    }
+    let (canonical, title) = validated_registration(&path, title.as_deref())?;
     let record_existed = registry
         .record_explicit(&canonical, title)
         .map_err(|detail| format!("workspace registration failed: {detail}"))?;
@@ -4446,6 +4459,56 @@ mod tests {
         assert!(
             err.contains("cannot write export"),
             "the error names the lane: {err}"
+        );
+    }
+
+    // Issue #1477: the register command's validation face as a plain
+    // helper -- the refusal arms the State-taking command could never pin.
+    #[test]
+    fn validated_registration_refuses_a_missing_path() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let err = validated_registration(dir.path().join("gone").to_str().expect("utf-8"), None)
+            .expect_err("a missing path refuses");
+        assert!(
+            err.starts_with("workspace directory unavailable"),
+            "the refusal names the unavailable directory: {err}"
+        );
+    }
+
+    #[test]
+    fn validated_registration_refuses_a_file_path() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let file = dir.path().join("file.txt");
+        std::fs::write(&file, "x").expect("write");
+        let err = validated_registration(file.to_str().expect("utf-8"), None)
+            .expect_err("a file path never registers");
+        assert!(
+            err.starts_with("not a directory"),
+            "the refusal names the non-directory: {err}"
+        );
+    }
+
+    #[test]
+    fn validated_registration_trims_the_title_and_blanks_fall_to_none() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path().to_str().expect("utf-8");
+        let (canonical, title) = validated_registration(root, Some("  named  "))
+            .expect("an existing directory with a valid title validates");
+        assert!(canonical.is_dir());
+        assert_eq!(title, Some("named"), "the title lands trimmed");
+        let (_, blank) = validated_registration(root, Some("   "))
+            .expect("a blank title is legal on the register path");
+        assert_eq!(blank, None, "the label falls back to the directory tail");
+    }
+
+    #[test]
+    fn validated_registration_faces_the_full_name_guard() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let err = validated_registration(dir.path().to_str().expect("utf-8"), Some("a/b"))
+            .expect_err("an illegal title refuses through the backend guard");
+        assert_eq!(
+            err,
+            "workspace name contains a path-illegal or control character"
         );
     }
 

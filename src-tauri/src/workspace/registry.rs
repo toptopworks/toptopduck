@@ -127,8 +127,9 @@ impl WorkspaceRegistry {
 
     /// The named-workspace creation mount point (issue #1393): a fresh mint
     /// records with the user's name as the `title`. On an existing record the
-    /// call degrades to [`Self::record`] -- the bump only, the title never
-    /// rewrites (identity is immutable, ADR-0138 Decision 3). Unlike
+    /// call takes the LRU bump plus the one-way explicit upgrade -- this
+    /// mount registers explicitly -- never rewriting the title (identity is
+    /// immutable, ADR-0138 Decision 3). Unlike
     /// [`Self::record`] this mount FAILS the caller: it serves the explicit
     /// create command, whose essence is the record itself -- not bookkeeping
     /// riding a session event, which is the reach of ADR-0138's best-effort
@@ -259,8 +260,9 @@ impl WorkspaceRegistry {
     }
 
     /// [`Self::record`] with an injectable clock and title for tests. The
-    /// title lands only on a NEW record -- an existing one takes the LRU bump
-    /// alone (a titled call on a known path degrades to the plain record).
+    /// title lands only on a NEW record -- an existing one takes the LRU
+    /// bump, plus the one-way explicit upgrade when the call carries
+    /// `explicit` (the title never rewrites).
     /// Returns whether the record already existed: the same-machine seam the
     /// strict wrapping [`Self::record_explicit`] projects upward.
     pub(crate) fn record_at(

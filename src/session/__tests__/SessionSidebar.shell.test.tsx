@@ -2373,6 +2373,53 @@ describe("SessionSidebar workspace section (issue #1392)", () => {
     expect(await screen.findByText("New workspace")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Create" })).toBeDisabled();
   });
+
+  it("a register refusal lands inline and keeps the create modal open", async () => {
+    // The register branch's strict String channel (a folder deleted between
+    // pick and submit, a registry write refusal, a backend name rejection)
+    // surfaces through the create modal's inline error face -- the refusal
+    // keeps the modal open, the retry is the user's call.
+    vi.mocked(open).mockResolvedValueOnce("/w/picked");
+    vi.mocked(registerWorkspaceDirectory).mockRejectedValueOnce(
+      new Error("workspace directory unavailable: no such path"),
+    );
+    renderShell(<SessionSidebar {...wsProps()} />);
+    fireEvent.click(screen.getByRole("button", { name: "New workspace" }));
+    fireEvent.click(
+      await screen.findByRole("button", { name: "Local folder (optional)" }),
+    );
+    expect(await screen.findByText("Add workspace")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Add" }));
+    expect(
+      await screen.findByText(
+        "workspace directory unavailable: no such path",
+      ),
+    ).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Add" })).toBeInTheDocument();
+  });
+
+  it("cancelling with a picked folder resets the source on reopen", async () => {
+    // A cancel must not smuggle the picked folder into the next open: the
+    // reopen starts on the mint face (a stale register path would silently
+    // submit a wrong persistent registration).
+    vi.mocked(open).mockResolvedValueOnce("/w/picked");
+    renderShell(<SessionSidebar {...wsProps()} />);
+    fireEvent.click(screen.getByRole("button", { name: "New workspace" }));
+    fireEvent.click(
+      await screen.findByRole("button", { name: "Local folder (optional)" }),
+    );
+    expect(await screen.findByText("Add workspace")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    await waitFor(() =>
+      expect(
+        screen.queryByRole("button", { name: "Cancel" }),
+      ).not.toBeInTheDocument(),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "New workspace" }));
+    expect(await screen.findByText("New workspace")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Create" })).toBeDisabled();
+  });
+
   describe("sidebar expansion persistence (issue #1404)", () => {
     // The store cleanup rides the host describe's beforeEach/afterEach.
     // Seed the persisted document with a partial patch: the missing faces
