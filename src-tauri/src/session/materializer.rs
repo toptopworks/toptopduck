@@ -142,6 +142,11 @@ pub(crate) struct DispatchDeps<'a> {
     /// drop. Not persisted to recipe — resume reconstructs refs from recipe
     /// SQL.
     pub tool_output_refs: &'a mut HashMap<String, CachedDerivedRef>,
+    /// The session's shared-dataset mount table (ADR-0141 D3/D6/D9): the lazy
+    /// attach + fingerprint validation resolve through it before the gateway
+    /// door. `None` (test constructors) disconnects the shared face -- shared
+    /// references then behave as plain unknown names.
+    pub shared_attaches: Option<&'a mut crate::session::shared_datasets::SharedAttaches>,
 }
 
 impl<'a> DispatchDeps<'a> {
@@ -199,6 +204,7 @@ impl<'a> DispatchDeps<'a> {
             workspace_registry: None,
             snapshot_dir: temp_path.to_path_buf(),
             tool_output_refs,
+            shared_attaches: None,
         }
     }
 
@@ -283,6 +289,35 @@ impl Materializer for RealMaterializer {
         // cascade coverage. On resume, the recipe's SQL already has catalog
         // refs (recorded from the rewritten SQL), so this is a no-op then.
         let sql = derived_source::process(sql, deps)?;
+
+        // ADR-0141 D3/D7: resolve the SQL's shared-dataset references ahead
+        // of the gateway door -- a first mention lazily mounts (hard link +
+        // READ_ONLY attach + register), and an already-referenced mount
+        // validates against the workspace manifest (a fingerprint change
+        // remounts the new content; a gone entry retires the name + cascade
+        // and refuses here, as stale). No-op for unbound sessions.
+        if let (Some(workspace), Some(mounts)) = (
+            deps.bound_workspace().map(std::path::Path::to_path_buf),
+            deps.shared_attaches.as_deref_mut(),
+        ) {
+            crate::session::shared_datasets::resolve_refs(
+                &sql,
+                deps.engine,
+                deps.source_files,
+                deps.working_set,
+                &deps.snapshot_dir,
+                &workspace,
+                mounts,
+            )
+            .map_err(|e| match e {
+                crate::session::shared_datasets::SharedRefError::Stale(s) => {
+                    ExecError::new(ExecErrorKind::StaleReference, s)
+                }
+                crate::session::shared_datasets::SharedRefError::Runtime(s) => {
+                    ExecError::new(ExecErrorKind::Runtime, s)
+                }
+            })?;
+        }
 
         // Gateway door (ADR-0013 stale-ref + ADR-0080 read_* whitelist), shared
         // with the explore path. The materialize path also runs the FsAcl

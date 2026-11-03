@@ -80,7 +80,11 @@ pub fn analyze(sql: &str, ws: &WorkingSet) -> Dependencies {
 /// compound name (`"people".data` -> `people`) matches the working set's
 /// reference-name key; the `.data` suffix is the source-snapshot catalog tag
 /// (ADR-0012), not part of the reference identity.
-fn extract_references(sql: &str) -> Option<HashSet<String>> {
+///
+/// `pub(crate)` for the shared-dataset lazy-attach resolver (ADR-0141 D3),
+/// which needs the RAW reference names -- not the working-set intersection
+/// [`analyze`] returns -- to recognize a first mention of a shared name.
+pub(crate) fn extract_references(sql: &str) -> Option<HashSet<String>> {
     let statements = Parser::parse_sql(&DuckDbDialect {}, sql).ok()?;
     let mut out = HashSet::new();
     for stmt in &statements {

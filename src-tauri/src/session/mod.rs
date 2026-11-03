@@ -20,6 +20,7 @@ pub mod recipe_persister;
 pub mod resume;
 mod rows_io;
 pub mod sandbox;
+pub mod shared_datasets;
 pub mod skills;
 pub mod snapshot;
 pub mod source_lifecycle;
@@ -570,6 +571,10 @@ pub struct Session {
     /// does not need this: recipe SQL already has catalog refs, so process()'s
     /// extract_read_paths finds no read_* calls.
     tool_output_refs: HashMap<String, CachedDerivedRef>,
+    /// The workspace shared-dataset attach table (ADR-0141 D6/D9): 挂名 →
+    /// manifest entry + mount fingerprint. Sticky per session; restored from
+    /// the recipe's SharedAttach events at resume.
+    shared_attaches: shared_datasets::SharedAttaches,
     /// The parsed sheets of a workbook parked on the guided-load dialog (issue
     /// #750): auto-tidy parsed the workbook fully for the `NeedsGuidance`
     /// outcome, and holding the parse until the dialog resolves makes
@@ -691,6 +696,10 @@ pub(super) enum TimelineEntry {
     Source(SourceLifecycleEvent),
     /// A skill lifecycle event (ADR-0086): first-class timeline slot, not a turn.
     Skill(SkillLifecycleEvent),
+    /// A workspace shared-dataset mount (ADR-0141 D9): recipe-round-trip slot
+    /// (persist + resume restore); never a turn and never a rendered thread
+    /// row.
+    SharedAttach(crate::model::SharedAttachEvent),
 }
 
 impl TimelineEntry {
@@ -703,6 +712,7 @@ impl TimelineEntry {
             TimelineEntry::Turn { record, .. } => ThreadEntry::Turn(record.clone()),
             TimelineEntry::Source(ev) => ThreadEntry::Source(ev.clone()),
             TimelineEntry::Skill(ev) => ThreadEntry::Skill(ev.clone()),
+            TimelineEntry::SharedAttach(ev) => ThreadEntry::SharedAttach(ev.clone()),
         }
     }
 }
@@ -1035,6 +1045,7 @@ impl Session {
             window_turns: crate::app_config::model::Tunables::default().window_turns as usize,
             source_files: HashMap::new(),
             tool_output_refs: HashMap::new(),
+            shared_attaches: shared_datasets::SharedAttaches::default(),
             guidance_retained: None,
             cancel,
             closing: ClosingFlag::new(),
@@ -1385,6 +1396,13 @@ impl Session {
         usage: Option<crate::model::TurnUsage>,
         occupancy: Option<crate::model::OccupancySnapshot>,
     ) -> TurnOutcome {
+        // ADR-0141 D9: mid-turn shared mounts land their timeline entries at
+        // settle (the dispatch path cannot reach the timeline directly). They
+        // precede the turn entry -- the mount happened before the SQL that
+        // consumed it, and rebuild-order is the resume restore's input.
+        for event in self.shared_attaches.take_pending_events() {
+            self.timeline.push(TimelineEntry::SharedAttach(event));
+        }
         // Identical repeats collapse (review Important 3, issue #983): the
         // user channel dedupes at staging, so this catches the agent's
         // identical re-invoke -- one invocation renders, persists, and
@@ -1642,7 +1660,9 @@ impl Session {
             .iter()
             .filter_map(|entry| match entry {
                 TimelineEntry::Turn { record, .. } => Some(record.clone()),
-                TimelineEntry::Source(_) | TimelineEntry::Skill(_) => None,
+                TimelineEntry::Source(_)
+                | TimelineEntry::Skill(_)
+                | TimelineEntry::SharedAttach(_) => None,
             })
             .collect()
     }

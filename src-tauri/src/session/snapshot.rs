@@ -18,6 +18,7 @@ use crate::model::{ColumnSchema, LoadError};
 /// Number of sample rows frozen at load (ADR-0026 contract value).
 const SAMPLE_ROW_COUNT: i64 = 3;
 
+#[derive(Debug)]
 pub struct Snapshot {
     pub file_path: PathBuf,
     pub columns: Vec<ColumnSchema>,

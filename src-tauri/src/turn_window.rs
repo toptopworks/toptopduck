@@ -53,11 +53,12 @@ pub fn assemble(
     working_set: &WorkingSet,
     history: &[TurnRecord],
     window_turns: usize,
+    shared: &[DatasetRef],
 ) -> ProviderRequest {
     ProviderRequest {
         question: render_turn_input(question, user_invocations),
         history: assemble_history(history, window_turns),
-        datasets: assemble_datasets(working_set, history, window_turns),
+        datasets: assemble_datasets(working_set, history, window_turns, shared),
         active: resolve_active(working_set, history),
     }
 }
@@ -81,6 +82,10 @@ pub fn assemble(
 /// The agent loop owns the request for the whole turn: each round-trip re-sends
 /// this system + tool table with the conversation extended by the prior tool
 /// batch (the mid-turn tool results never re-window the schema context).
+// The 8th parameter (the shared card face, ADR-0141 D3) rides the same
+// assembly as the working-set cards; collapsing the signature would re-churn
+// every caller for a lint count.
+#[allow(clippy::too_many_arguments)]
 pub fn assemble_tool_turn(
     question: &str,
     working_set: &WorkingSet,
@@ -89,6 +94,7 @@ pub fn assemble_tool_turn(
     skills: &[SkillPromptFragment],
     user_invocations: &[crate::model::SkillInvocation],
     window_turns: usize,
+    shared: &[DatasetRef],
 ) -> ToolTurnRequest {
     let request = assemble(
         question,
@@ -96,6 +102,7 @@ pub fn assemble_tool_turn(
         working_set,
         history,
         window_turns,
+        shared,
     );
     ToolTurnRequest {
         system: build_tool_system_prompt(&request, locale, skills),
@@ -130,6 +137,7 @@ pub fn assemble_tool_turn(
 /// skill's index row, no bodies; ADR-0110 Decision 8 calibrated by
 /// ADR-0119, issue #702 parity). An empty snapshot adds no block, so the
 /// pre-skill block order is preserved.
+#[allow(clippy::too_many_arguments)]
 pub fn assemble_acp_turn(
     question: &str,
     working_set: &WorkingSet,
@@ -138,6 +146,7 @@ pub fn assemble_acp_turn(
     skills: &[SkillPromptFragment],
     user_invocations: &[crate::model::SkillInvocation],
     window_turns: usize,
+    shared: &[DatasetRef],
 ) -> Vec<ContentBlock> {
     let request = assemble(
         question,
@@ -145,6 +154,7 @@ pub fn assemble_acp_turn(
         working_set,
         history,
         window_turns,
+        shared,
     );
     let mut blocks = Vec::with_capacity(request.history.len() * 2 + 3);
     // Leading context block (locale + schema only, ADR-0086).
@@ -299,6 +309,7 @@ fn assemble_datasets(
     working_set: &WorkingSet,
     history: &[TurnRecord],
     window_turns: usize,
+    shared: &[DatasetRef],
 ) -> Vec<DatasetRef> {
     let in_window_results = recent_result_names(history, window_turns);
     working_set
@@ -309,7 +320,38 @@ fn assemble_datasets(
         // never stale (removed outright, not soft-invalidated).
         .filter(|d| d.stale.is_none())
         .map(|d| dataset_ref(d, working_set, &in_window_results))
+        // ADR-0141 D3: the bound workspace's un-attached shared datasets
+        // ride beside the working-set cards (attached ones are working-set
+        // members already). The caller resolves 挂名s; here they are plain
+        // payload rows.
+        .chain(shared.iter().cloned())
         .collect()
+}
+
+/// One un-attached shared dataset's card (ADR-0141 D3): same privacy pruning
+/// and always-in-window posture as a working-set source card -- the manifest
+/// entry is the shape source, the 挂名 is the SQL identity (`卡片名恒等于挂名`).
+pub(crate) fn shared_card(
+    reference_name: &str,
+    entry: &crate::workspace::DatasetEntry,
+) -> DatasetRef {
+    let type_only = type_only_set(&entry.privacy.type_only_columns);
+    // A shared card is always "in-window" (the source posture, ADR-0023) --
+    // samples ship unless privacy withholds them.
+    let sample = entry.privacy.send_samples.then(|| {
+        entry
+            .sample
+            .iter()
+            .map(|row| pruned_row(row, &entry.columns, &type_only))
+            .collect()
+    });
+    DatasetRef {
+        reference_name: reference_name.to_string(),
+        sql_ref: format!("\"{}\".data", reference_name.replace('"', "\"\"")),
+        columns: pruned_columns(&entry.columns, &type_only),
+        row_count: entry.row_count,
+        sample,
+    }
 }
 
 /// Assemble one dataset's payload. A source is always in-window (ADR-0023 --
@@ -559,6 +601,7 @@ mod tests {
             &[],
             &[],
             WINDOW_TURNS,
+            &[],
         );
         assert_eq!(request.max_tokens, OUTPUT_TOKEN_CAP);
         assert_eq!(request.thought_level, None);
@@ -568,7 +611,7 @@ mod tests {
     fn under_window_every_turn_is_full() {
         // <= N=20 turns: no summaries -- the whole thread ships full.
         let (ws, history) = source_plus_turns(5);
-        let payload = assemble("probe", &[], &ws, &history, WINDOW_TURNS);
+        let payload = assemble("probe", &[], &ws, &history, WINDOW_TURNS, &[]);
         assert_eq!(payload.history.len(), 5);
         assert!(payload
             .history
@@ -587,7 +630,7 @@ mod tests {
         // 21 turns: the oldest (turn 1 -> result_1) falls out of the N=20 window
         // and becomes a summary; the recent 20 stay full (ADR-0023).
         let (ws, history) = source_plus_turns(21);
-        let payload = assemble("probe", &[], &ws, &history, WINDOW_TURNS);
+        let payload = assemble("probe", &[], &ws, &history, WINDOW_TURNS, &[]);
         assert_eq!(payload.history.len(), 21);
         let summaries = payload
             .history
@@ -629,7 +672,7 @@ mod tests {
         // samples (the same ADR-0023/0026 invariants the N=20 boundary tests
         // pin, at a different N -- this is the "可调" pin).
         let (ws, history) = source_plus_turns(5);
-        let payload = assemble("probe", &[], &ws, &history, 2);
+        let payload = assemble("probe", &[], &ws, &history, 2, &[]);
         assert_eq!(payload.history.len(), 5);
         let summaries = payload
             .history
@@ -751,7 +794,7 @@ mod tests {
             usage: None,
             occupancy: None,
         }];
-        let payload = assemble("probe", &[], &ws, &history, WINDOW_TURNS);
+        let payload = assemble("probe", &[], &ws, &history, WINDOW_TURNS, &[]);
         let full = format!("{:?}", payload.history);
         assert!(
             !full.contains(trace_failure_excerpt),
@@ -770,7 +813,7 @@ mod tests {
         // trace and falls out of the N=20 window into a Summary.
         let (ws2, mut history2) = source_plus_turns(21);
         history2[0].trace = poisoned_trace;
-        let payload2 = assemble("probe", &[], &ws2, &history2, WINDOW_TURNS);
+        let payload2 = assemble("probe", &[], &ws2, &history2, WINDOW_TURNS, &[]);
         let summary = format!("{:?}", payload2.history);
         assert!(
             !summary.contains(trace_failure_excerpt),
@@ -793,7 +836,7 @@ mod tests {
         // ADR-0026: a result_N whose turn is beyond the window ships no sample;
         // in-window results and every source do.
         let (ws, history) = source_plus_turns(21);
-        let payload = assemble("probe", &[], &ws, &history, WINDOW_TURNS);
+        let payload = assemble("probe", &[], &ws, &history, WINDOW_TURNS, &[]);
         let find = |name: &str| {
             payload
                 .datasets
@@ -848,7 +891,7 @@ mod tests {
             usage: None,
             occupancy: None,
         }];
-        let payload = assemble("probe", &[], &ws, &history, WINDOW_TURNS);
+        let payload = assemble("probe", &[], &ws, &history, WINDOW_TURNS, &[]);
         let find = |name: &str| {
             payload
                 .datasets
@@ -870,7 +913,7 @@ mod tests {
     fn source_schema_is_always_full() {
         // ADR-0023: every source ships its full schema regardless of window.
         let (ws, history) = source_plus_turns(21);
-        let payload = assemble("probe", &[], &ws, &history, WINDOW_TURNS);
+        let payload = assemble("probe", &[], &ws, &history, WINDOW_TURNS, &[]);
         let people = payload
             .datasets
             .iter()
@@ -895,7 +938,7 @@ mod tests {
                 type_only_columns: vec![],
             },
         );
-        let payload = assemble("any", &[], &ws, &[], WINDOW_TURNS);
+        let payload = assemble("any", &[], &ws, &[], WINDOW_TURNS, &[]);
         let people = payload
             .datasets
             .iter()
@@ -919,7 +962,7 @@ mod tests {
                 type_only_columns: vec!["name".into()],
             },
         );
-        let payload = assemble("any", &[], &ws, &[], WINDOW_TURNS);
+        let payload = assemble("any", &[], &ws, &[], WINDOW_TURNS, &[]);
         let people = payload
             .datasets
             .iter()
@@ -957,7 +1000,7 @@ mod tests {
             ws.register_result(result_desc(&name));
             history.push(materialized_turn(&format!("turn {k}"), &name));
         }
-        let payload = assemble("probe", &[], &ws, &history, WINDOW_TURNS);
+        let payload = assemble("probe", &[], &ws, &history, WINDOW_TURNS, &[]);
         match &payload.history[0] {
             TurnPayload::Summary {
                 question_excerpt, ..
@@ -1076,7 +1119,7 @@ mod tests {
         // The resolved active rides the payload's `active` field -- the contract
         // the provider sees. After result_3, active = result_3, not the source.
         let (ws, history) = source_plus_turns(3);
-        let payload = assemble("probe", &[], &ws, &history, WINDOW_TURNS);
+        let payload = assemble("probe", &[], &ws, &history, WINDOW_TURNS, &[]);
         assert_eq!(payload.active.as_deref(), Some("result_3"));
     }
 
@@ -1090,7 +1133,7 @@ mod tests {
             &[("order_id", "BIGINT")],
             vec![vec!["1".to_string()]],
         ));
-        let payload = assemble("probe", &[], &ws, &[], WINDOW_TURNS);
+        let payload = assemble("probe", &[], &ws, &[], WINDOW_TURNS, &[]);
         assert_eq!(payload.active.as_deref(), Some("orders"));
     }
 
@@ -1124,7 +1167,7 @@ mod tests {
         }
         assert_eq!(history.len(), WINDOW_TURNS + 1);
 
-        let payload = assemble("probe", &[], &ws, &history, WINDOW_TURNS);
+        let payload = assemble("probe", &[], &ws, &history, WINDOW_TURNS, &[]);
         // Guards: the window really did fold result_1's turn and withhold its
         // sample -- without these, this test stops proving the out-of-window case.
         assert!(matches!(payload.history[0], TurnPayload::Summary { .. }));
@@ -1174,6 +1217,7 @@ mod tests {
             &[],
             &[],
             WINDOW_TURNS,
+            &[],
         );
         let leading = blocks.first().expect("at least one block");
         let text = leading.as_text().expect("leading block is text");
@@ -1202,6 +1246,7 @@ mod tests {
             &skills,
             &[],
             WINDOW_TURNS,
+            &[],
         );
         // Last block = the user's question.
         let last = blocks.last().expect("at least one block");
@@ -1242,6 +1287,7 @@ mod tests {
             &[],
             &[],
             WINDOW_TURNS,
+            &[],
         );
         // Last block is the question, second-to-last is a history block (not a
         // skill block).
@@ -1257,6 +1303,7 @@ mod tests {
             &skills,
             &[],
             WINDOW_TURNS,
+            &[],
         );
         assert_eq!(
             blocks_with.len(),
@@ -1282,6 +1329,7 @@ mod tests {
             &[],
             &[],
             WINDOW_TURNS,
+            &[],
         );
         let both = vec![
             acp_fragment("pdf-tools", "Read PDFs.", "Extract tables first.\n"),
@@ -1295,6 +1343,7 @@ mod tests {
             &both,
             &[],
             WINDOW_TURNS,
+            &[],
         );
         assert_eq!(blocks.len(), base.len() + 1, "exactly one skill block");
         let text = blocks[blocks.len() - 2].as_text().unwrap();
@@ -1328,6 +1377,7 @@ mod tests {
             &skills,
             &[],
             WINDOW_TURNS,
+            &[],
         );
         let text = blocks[blocks.len() - 2].as_text().unwrap();
         let b = text.find("beta").unwrap();
@@ -1355,6 +1405,7 @@ mod tests {
             &before,
             &[],
             WINDOW_TURNS,
+            &[],
         );
         let text = blocks[blocks.len() - 2].as_text().unwrap();
         assert!(text.contains("pdf-tools"), "both rows pre-shrink");
@@ -1373,6 +1424,7 @@ mod tests {
             &after,
             &[],
             WINDOW_TURNS,
+            &[],
         );
         let text = blocks[blocks.len() - 2].as_text().unwrap();
         assert!(

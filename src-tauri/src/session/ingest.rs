@@ -130,7 +130,13 @@ impl super::Session {
 
     fn ingest_structured(&mut self, path: &Path, reader: &str) -> LoadOutcome {
         let reference_name = match ingest::derive_reference_name(path) {
-            Some(n) => self.working_set.deconflict(&n),
+            // ADR-0141 D6: the private face yields to the shared vocabulary.
+            Some(n) => super::shared_datasets::deconflict_with_shared(
+                &n,
+                &self.working_set,
+                self.runtime_facts.workspace.as_deref(),
+                Some(&self.shared_attaches),
+            ),
             None => {
                 return LoadOutcome::Error(LoadError::Io {
                     detail: "无法从路径推导数据集名".into(),

@@ -636,6 +636,7 @@ impl<'a> Resumer<'a> {
                 }
                 RecipeEntry::Source(ev) => Ok(TimelineEntry::Source(ev.clone())),
                 RecipeEntry::Skill(ev) => Ok(TimelineEntry::Skill(ev.clone())),
+                RecipeEntry::SharedAttach(ev) => Ok(TimelineEntry::SharedAttach(ev.clone())),
             })
             .collect::<Result<Vec<_>, ResumeError>>()?;
         Ok(timeline)
@@ -875,6 +876,17 @@ impl super::Session {
         // existing replay path below rebuilds it verbatim (legacy
         // pure-recipe sessions enter the hit path this way after one replay).
         session.point_engine_at_tree();
+        // ADR-0137: the workspace binding restores EARLY here so the shared
+        // attach restore below can resolve the manifest; the phase-5 facts
+        // block re-writes it verbatim (same value, idempotent).
+        session.runtime_facts.workspace = recipe.workspace.clone();
+        // ADR-0141 D9: restore the recorded shared attaches before any
+        // replay / hit-restore consumption -- a fingerprint match re-attaches
+        // from the workspace store (zero conversion), a miss or a gone entry
+        // registers the 挂名 stale so replay SQL refuses honestly. Idempotent
+        // against the companion hit path (an already-attached name only
+        // records its table entry).
+        session.restore_shared_attaches(&recipe.history);
         let restored = if let Some(meta) = super::companion::probe(path, &recipe) {
             // A probe-validated companion failing mid-restore is a fresh
             // corruption (TOCTOU window), not a cache miss: the replay
@@ -952,6 +964,12 @@ impl super::Session {
                     workspace_registry: None,
                     snapshot_dir,
                     tool_output_refs: &mut session.tool_output_refs,
+                    // ADR-0141 D9: the shared axis stays disconnected for the
+                    // replay -- the restore above already re-attached (or
+                    // staled) every recorded mount, so the replayed SQL finds
+                    // its names in the working set; no new lazy attach can
+                    // legitimately fire mid-replay.
+                    shared_attaches: None,
                 };
                 resumer.replay(&mut deps, &mut on_progress)?
             };

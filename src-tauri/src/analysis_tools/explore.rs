@@ -106,6 +106,32 @@ fn run_explore(
     let sql =
         crate::session::derived_source::absolutize_workspace_reads(sql, deps.bound_workspace())
             .map_err(|e| e.detail)?;
+    // ADR-0141 D3/D7: the same shared-reference resolution the materialize
+    // path runs ahead of its gateway door -- explore's first mention of a
+    // shared name mounts it, and a re-mention validates against the manifest
+    // (a gone entry refuses here as stale, matching the materialize wording).
+    if let (Some(workspace), Some(mounts)) = (
+        deps.bound_workspace().map(std::path::Path::to_path_buf),
+        deps.shared_attaches.as_deref_mut(),
+    ) {
+        crate::session::shared_datasets::resolve_refs(
+            &sql,
+            deps.engine,
+            deps.source_files,
+            deps.working_set,
+            &deps.snapshot_dir,
+            &workspace,
+            mounts,
+        )
+        .map_err(|e| match e {
+            crate::session::shared_datasets::SharedRefError::Stale(s) => {
+                format!(
+                    "stale reference: `{s}` has been invalidated and may not anchor a new query"
+                )
+            }
+            crate::session::shared_datasets::SharedRefError::Runtime(s) => s,
+        })?;
+    }
     // Gateway door (ADR-0013 stale-ref + ADR-0080 read_* whitelist), shared
     // with the materialize path. Explore ignores the dependency set -- it
     // never promotes, so it records no provenance.

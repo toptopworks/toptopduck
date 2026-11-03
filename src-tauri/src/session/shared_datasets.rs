@@ -1,0 +1,768 @@
+//! The session-side face of the workspace shared-dataset store (ADR-0141):
+//! the sticky attach table (挂名), the lazy first-reference attach, the
+//! at-reference-time fingerprint validation (re-attach / retire), and the
+//! resume restore. The session NEVER writes the store or the manifest from
+//! here -- this module only links (`hard_link`, copy fallback) + attaches
+//! READ_ONLY + registers, the exact posture of a private ingest with the
+//! store standing in for the source file.
+
+use std::collections::{HashMap, HashSet};
+use std::fs;
+use std::path::{Path, PathBuf};
+
+use crate::ingest::schema::attach_sql;
+use crate::model::{
+    DatasetDescriptor, RectifyProvenance, SharedAttachEvent, StaleAnchor, StaleReason,
+};
+use crate::session::engine::AdminEngine;
+use crate::workingset::WorkingSet;
+use crate::workspace::datasets;
+use crate::workspace::DatasetEntry;
+
+/// Why a shared-reference resolution refused the call. Maps onto the two
+/// gateway-door error kinds the callers already render distinctly.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum SharedRefError {
+    /// The attached source's workspace entry is gone (ADR-0141 D7): the name
+    /// (and its cascade) turned stale and may not anchor a new query.
+    Stale(String),
+    /// Anything else (corrupt manifest, missing store file, attach failure) --
+    /// honest runtime text the agent / user can act on (D8).
+    Runtime(String),
+}
+
+/// One sticky attach record: the manifest entry a 挂名 resolves to, plus the
+/// fingerprint at attach time (empty until the first attach lands -- card-time
+/// pre-assignments reserve the name before any SQL references it).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct AttachRecord {
+    pub entry_name: String,
+    pub fingerprint: String,
+}
+
+/// The per-session shared attach table (ADR-0141 D6/D9): 挂名 → manifest
+/// entry. Sticky by design -- a name SQL has referenced (or a card has shown)
+/// never drifts within a session, so recorded SQL keeps answering to it.
+#[derive(Debug, Default)]
+pub(crate) struct SharedAttaches {
+    attaches: HashMap<String, AttachRecord>,
+    /// Attach events landed mid-turn, drained onto the timeline at settle (the
+    /// dispatch path cannot touch the timeline directly; the turn's record
+    /// step flushes these beside the turn entry).
+    pending: Vec<SharedAttachEvent>,
+}
+
+impl SharedAttaches {
+    /// Events landed since the last drain (the settle step consumes them).
+    pub(crate) fn take_pending_events(&mut self) -> Vec<SharedAttachEvent> {
+        std::mem::take(&mut self.pending)
+    }
+
+    /// The record behind a 挂名, if attached (or pre-assigned).
+    pub(crate) fn record(&self, name: &str) -> Option<&AttachRecord> {
+        self.attaches.get(name)
+    }
+
+    /// Resolve (or pre-assign) the 挂名 for a manifest entry: a recorded attach
+    /// keeps its name; a fresh entry takes its own name when free, else the
+    /// first free `name_N` against BOTH the working set and the existing 挂名s
+    /// -- the private de-conflict scheme inverted onto the shared vocabulary
+    /// (D6: 仅私有既成占用时共享挂消歧名).
+    pub(crate) fn resolve_or_assign(&mut self, entry_name: &str, ws: &WorkingSet) -> String {
+        if let Some(name) = self
+            .attaches
+            .iter()
+            .find(|(_, rec)| rec.entry_name == entry_name)
+            .map(|(name, _)| name.clone())
+        {
+            return name;
+        }
+        let taken = |n: &str| ws.taken(n) || self.attaches.contains_key(n);
+        let name = if !taken(entry_name) {
+            entry_name.to_string()
+        } else {
+            (2..)
+                .map(|n| format!("{entry_name}_{n}"))
+                .find(|candidate| !taken(candidate))
+                .expect("the numeric suffix space cannot exhaust")
+        };
+        self.attaches.insert(
+            name.clone(),
+            AttachRecord {
+                entry_name: entry_name.to_string(),
+                fingerprint: String::new(),
+            },
+        );
+        name
+    }
+}
+
+/// ADR-0141 D6 私有让位: the shared vocabulary joins a private
+/// registration's de-conflict occupancy -- the bound workspace's manifest
+/// entry names plus the session's attach reservations (sticky 挂名s, empty
+/// card-time reservations included: a name a card showed must never be lost
+/// to a later private registration -- the dead-card rule, D3).
+pub(crate) fn deconflict_with_shared(
+    candidate: &str,
+    working_set: &WorkingSet,
+    workspace: Option<&Path>,
+    attaches: Option<&SharedAttaches>,
+) -> String {
+    let mut reserved: HashSet<String> = HashSet::new();
+    if let Some(table) = attaches {
+        reserved.extend(table.attaches.keys().cloned());
+    }
+    if let Some(dir) = workspace {
+        match datasets::load_entries(dir) {
+            Ok(entries) => reserved.extend(entries.into_iter().map(|e| e.reference_name)),
+            Err(e) => log::warn!(
+                target: "toptopduck::session",
+                "shared name reservation degraded (manifest unreadable): {e}"
+            ),
+        }
+    }
+    working_set.deconflict_with(candidate, &reserved)
+}
+
+/// Link the store file into the session tree (hard link preferred -- the
+/// link count IS the reference count, D2's lifecycle outsourcing; a copy
+/// stands in when the volumes refuse to link, trading disk for correctness).
+fn link_into_tree(store: &Path, dest: &Path) -> Result<(), String> {
+    if let Some(parent) = dest.parent() {
+        // A shared attach may be the tree's FIRST snapshot (no private ingest
+        // has run) -- the snapshots dir does not exist yet.
+        let _ = fs::create_dir_all(parent);
+    }
+    let _ = fs::remove_file(dest);
+    if fs::hard_link(store, dest).is_ok() {
+        return Ok(());
+    }
+    fs::copy(store, dest).map(|_| ()).map_err(|e| {
+        format!(
+            "store link failed ({} -> {}): {e}",
+            store.display(),
+            dest.display()
+        )
+    })
+}
+
+/// Attach one shared dataset into the session: link + ATTACH READ_ONLY +
+/// register (active pointer preserved -- a lazy attach is not a user upload).
+fn attach_shared(
+    engine: &AdminEngine,
+    source_files: &mut HashMap<String, PathBuf>,
+    working_set: &mut WorkingSet,
+    snapshot_dir: &Path,
+    workspace: &Path,
+    name: &str,
+    entry: &DatasetEntry,
+) -> Result<(), String> {
+    let store = datasets::store_file(workspace, &entry.fingerprint);
+    if !store.exists() {
+        return Err(format!(
+            "共享数据集「{name}」的存储文件缺失（工作区清单条目 {entry}）；请在工作区管理面板重新添加该数据集",
+            entry = entry.reference_name
+        ));
+    }
+    let dest = snapshot_dir.join(format!("{name}.duckdb"));
+    link_into_tree(&store, &dest)?;
+    if let Err(e) = engine.execute_batch(&attach_sql(&dest.to_string_lossy(), name)) {
+        let _ = fs::remove_file(&dest);
+        return Err(format!("failed to attach shared dataset {name}: {e}"));
+    }
+    source_files.insert(name.to_string(), dest);
+    let descriptor = attached_descriptor(name, entry, None);
+    let prev_active = working_set.active_name().map(str::to_string);
+    if working_set.taken(name) {
+        // A re-attach swaps the content under the held name -- replace the
+        // descriptor, never a second registration (a duplicate entry would
+        // shadow the fresh one in get()/list()).
+        working_set.replace(descriptor);
+    } else {
+        working_set.register(descriptor);
+    }
+    working_set.set_active_source(prev_active.as_deref());
+    Ok(())
+}
+
+/// The working-set descriptor for a shared attach. `fingerprint` rides the
+/// manifest's content key (the resume/validate identity, D9) -- not a derived
+/// table hash. `stale` carries the resume-miss anchor (D9: a mismatched or
+/// gone entry registers the name stale so replay SQL refuses honestly).
+fn attached_descriptor(
+    name: &str,
+    entry: &DatasetEntry,
+    stale: Option<StaleAnchor>,
+) -> DatasetDescriptor {
+    DatasetDescriptor {
+        reference_name: name.to_string(),
+        // The readable label is the manifest entry's own name -- the workspace
+        // vocabulary, stable across sessions even when the 挂名 de-conflicted.
+        display_name: entry.reference_name.clone(),
+        source_path: entry.source_path.clone(),
+        columns: entry.columns.clone(),
+        row_count: entry.row_count,
+        sample: entry.sample.clone(),
+        fingerprint: entry.fingerprint.clone(),
+        rectify: RectifyProvenance::NotApplicable,
+        privacy: entry.privacy.clone(),
+        stale,
+    }
+}
+
+/// Resolve the SQL's shared references at dispatch time (ADR-0141 D3/D7),
+/// BEFORE the gateway door: validate every referenced attach against the
+/// manifest (a fingerprint change re_attaches the new content; a gone entry
+/// retires the name + cascade and refuses as stale), then lazily attach every
+/// first-mentioned shared name. Zero new synchronization -- all checks ride
+/// the reference itself.
+pub(crate) fn resolve_refs(
+    sql: &str,
+    engine: &AdminEngine,
+    source_files: &mut HashMap<String, PathBuf>,
+    working_set: &mut WorkingSet,
+    snapshot_dir: &Path,
+    workspace: &Path,
+    attaches: &mut SharedAttaches,
+) -> Result<(), SharedRefError> {
+    let Some(refs) = crate::provenance::extract_references(sql) else {
+        return Ok(()); // unparseable: the conservative fallback owns it
+    };
+    let entries =
+        datasets::load_entries(workspace).map_err(|e| SharedRefError::Runtime(e.to_string()))?;
+    // Linear find over the manifest (a workspace holds dozens of entries at
+    // most); avoids the Option<&&T> double-reference a map get produces.
+    let entry_by_name = |n: &str| entries.iter().find(|e| e.reference_name == n);
+
+    // 1) Validate referenced attaches (records with a landed fingerprint only --
+    //    empty-fingerprint records are card-time name reservations the lazy
+    //    arm below materializes).
+    let referenced_attaches: Vec<String> = refs
+        .iter()
+        .filter(|r| {
+            attaches
+                .record(r)
+                .is_some_and(|rec| !rec.fingerprint.is_empty())
+        })
+        .cloned()
+        .collect();
+    for name in referenced_attaches {
+        let record = attaches.record(&name).expect("checked above").clone();
+        match entry_by_name(&record.entry_name) {
+            None => {
+                // D7 delete: the entry is gone. Retire the name + cascade,
+                // refuse the call as stale (the agent sees what died).
+                let anchor = StaleAnchor {
+                    reference_name: record.entry_name.clone(),
+                    display_name: record.entry_name.clone(),
+                    reason: StaleReason::Deleted,
+                };
+                let reach = working_set.retire_shared_source(&name, anchor);
+                log::info!(
+                    target: "toptopduck::session",
+                    "shared dataset {name} retired (entry {} gone); stale cascade: {reach:?}",
+                    record.entry_name
+                );
+                return Err(SharedRefError::Stale(name));
+            }
+            Some(entry) if *entry.fingerprint != record.fingerprint => {
+                // D3/D7 replace: re-attach the new content under the same name.
+                // Same cascade posture as a private re-upload (ADR-0025) --
+                // dependents turn stale, the name itself stays live.
+                detach(engine, &name);
+                if let Err(detail) = attach_shared(
+                    engine,
+                    source_files,
+                    working_set,
+                    snapshot_dir,
+                    workspace,
+                    &name,
+                    entry,
+                ) {
+                    return Err(SharedRefError::Runtime(detail));
+                }
+                if let Some(rec) = attaches.attaches.get_mut(&name) {
+                    rec.fingerprint = entry.fingerprint.clone();
+                }
+                let anchor = StaleAnchor {
+                    reference_name: record.entry_name.clone(),
+                    display_name: record.entry_name.clone(),
+                    reason: StaleReason::Replaced,
+                };
+                working_set.retire_shared_source(&name, anchor);
+                // retire marked the fresh descriptor stale -- undo that half:
+                // the cascade (dependents) keeps, the name itself is live.
+                // (retire_shared_source is the shared engine for both halves;
+                // a re-attach is a delete+add under one name.)
+                unmark(working_set, &name);
+            }
+            Some(_) => {} // fresh: nothing to do
+        }
+    }
+
+    // 2) Lazy attach: a reference matching a manifest entry (or a card-time
+    //    reservation for one) that the working set does not already hold.
+    let mut reference_list: Vec<&String> = refs.iter().collect();
+    reference_list.sort(); // deterministic attach order
+    reference_list.dedup();
+    for name in reference_list {
+        if working_set.taken(name) {
+            continue; // a private source or a attached shared source owns it
+        }
+        // Direct entry-name match, or a reserved 挂名 standing in for one.
+        let entry: Option<&DatasetEntry> = entry_by_name(name).or_else(|| {
+            attaches
+                .record(name)
+                .filter(|rec| rec.fingerprint.is_empty())
+                .and_then(|rec| entry_by_name(&rec.entry_name))
+        });
+        let Some(entry) = entry else { continue };
+        if let Err(detail) = attach_shared(
+            engine,
+            source_files,
+            working_set,
+            snapshot_dir,
+            workspace,
+            name,
+            entry,
+        ) {
+            return Err(SharedRefError::Runtime(detail));
+        }
+        attaches.attaches.insert(
+            name.clone(),
+            AttachRecord {
+                entry_name: entry.reference_name.clone(),
+                fingerprint: entry.fingerprint.clone(),
+            },
+        );
+        attaches.pending.push(SharedAttachEvent {
+            reference_name: name.clone(),
+            entry_name: entry.reference_name.clone(),
+            fingerprint: entry.fingerprint.clone(),
+        });
+    }
+    Ok(())
+}
+
+/// DETACH a attach's catalog (best-effort; the tree link stays until the
+/// session tree is torn down or a re-attach replaces it).
+fn detach(engine: &AdminEngine, name: &str) {
+    let escaped = name.replace('"', "\"\"");
+    if let Err(e) = engine.execute_batch(&format!("DETACH \"{escaped}\";")) {
+        log::warn!(
+            target: "toptopduck::session",
+            "DETACH failed for shared attach {name}: {e}"
+        );
+    }
+}
+
+/// Clear a descriptor's stale anchor (the re-attach path: the cascade's
+/// dependents keep their anchors, the name itself is live again).
+fn unmark(working_set: &mut WorkingSet, name: &str) {
+    // set_privacy's slot lookup pattern; direct field clear through replace.
+    if let Some(d) = working_set.get(name).cloned() {
+        let mut fresh = d;
+        fresh.stale = None;
+        let prev_active = working_set.active_name().map(str::to_string);
+        working_set.replace(fresh);
+        working_set.set_active_source(prev_active.as_deref());
+    }
+}
+
+impl super::Session {
+    /// ADR-0141 D3/D10: the turn-injection cards for the bound workspace's
+    /// shared datasets. Attached entries ride the working set (their privacy
+    /// refreshed from the manifest so a panel edit applies next turn); only
+    /// un-attached entries return here -- the caller appends them beside the
+    /// working-set cards. A manifest that fails to read degrades to no cards
+    /// (the SQL path reports the honest error; the card face never blocks a
+    /// turn).
+    pub(super) fn shared_cards(&mut self) -> Vec<crate::provider::DatasetRef> {
+        let Some(workspace) = self.runtime_facts.workspace.clone() else {
+            return Vec::new();
+        };
+        let entries = match datasets::load_entries(&workspace) {
+            Ok(entries) => entries,
+            Err(e) => {
+                log::warn!(
+                    target: "toptopduck::session",
+                    "shared dataset cards degraded (manifest unreadable): {e}"
+                );
+                return Vec::new();
+            }
+        };
+        let mut cards = Vec::new();
+        for entry in &entries {
+            let name = self
+                .shared_attaches
+                .resolve_or_assign(&entry.reference_name, &self.working_set);
+            if self.working_set.taken(&name) {
+                // Attached: refresh the descriptor's privacy from the manifest
+                // (D10 即时生效 -- the panel edit lands on this very turn).
+                self.working_set.set_privacy(&name, entry.privacy.clone());
+                continue;
+            }
+            cards.push(crate::turn_window::shared_card(&name, entry));
+        }
+        cards
+    }
+
+    /// ADR-0141 D9: restore the recorded shared attaches at resume, before
+    /// replay. A fingerprint match re-attaches from the store (zero
+    /// conversion); a miss or a gone entry registers the 挂名 stale so the
+    /// replayed SQL refuses as a stale reference instead of an unknown name.
+    /// Idempotent against the companion hit path (an already-attached 挂名
+    /// only records its table entry).
+    pub(super) fn restore_shared_attaches(
+        &mut self,
+        history: &[crate::persistence::recipe::RecipeEntry],
+    ) {
+        let Some(workspace) = self.runtime_facts.workspace.clone() else {
+            return;
+        };
+        let entries = match datasets::load_entries(&workspace) {
+            Ok(entries) => entries,
+            Err(e) => {
+                log::warn!(
+                    target: "toptopduck::session",
+                    "shared attach restore degraded (manifest unreadable): {e}"
+                );
+                Vec::new()
+            }
+        };
+        let entry_by_name = |n: &str| entries.iter().find(|e| e.reference_name == n);
+        let snapshot_dir = self.snapshot_dir();
+        for event in history.iter().filter_map(|e| match e {
+            crate::persistence::recipe::RecipeEntry::SharedAttach(ev) => Some(ev),
+            _ => None,
+        }) {
+            self.shared_attaches.attaches.insert(
+                event.reference_name.clone(),
+                AttachRecord {
+                    entry_name: event.entry_name.clone(),
+                    fingerprint: event.fingerprint.clone(),
+                },
+            );
+            if self.working_set.taken(&event.reference_name) {
+                continue; // companion hit already attached this attach
+            }
+            match entry_by_name(&event.entry_name)
+                .filter(|entry| entry.fingerprint == event.fingerprint)
+            {
+                Some(entry) => {
+                    if let Err(detail) = attach_shared(
+                        &self.admin_engine,
+                        &mut self.source_files,
+                        &mut self.working_set,
+                        &snapshot_dir,
+                        &workspace,
+                        &event.reference_name,
+                        entry,
+                    ) {
+                        log::warn!(
+                            target: "toptopduck::session",
+                            "shared attach {} restore failed: {detail}",
+                            event.reference_name
+                        );
+                    }
+                }
+                None => {
+                    // Mismatch or gone: register the 挂名 with a stale anchor
+                    // so its SQL refuses honestly (D9).
+                    let gone = entry_by_name(&event.entry_name).is_none();
+                    let anchor = StaleAnchor {
+                        reference_name: event.entry_name.clone(),
+                        display_name: event.entry_name.clone(),
+                        reason: if gone {
+                            StaleReason::Deleted
+                        } else {
+                            StaleReason::Replaced
+                        },
+                    };
+                    let placeholder = attached_descriptor(
+                        &event.reference_name,
+                        {
+                            // No entry to mirror: a minimal shape carrying the
+                            // recorded identity fields.
+                            &DatasetEntry {
+                                reference_name: event.entry_name.clone(),
+                                fingerprint: event.fingerprint.clone(),
+                                columns: Vec::new(),
+                                row_count: 0,
+                                sample: Vec::new(),
+                                privacy: Default::default(),
+                                source_path: String::new(),
+                            }
+                        },
+                        Some(anchor),
+                    );
+                    let prev_active = self.working_set.active_name().map(str::to_string);
+                    self.working_set.register(placeholder);
+                    self.working_set.set_active_source(prev_active.as_deref());
+                }
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn ws() -> (tempfile::TempDir, tempfile::TempDir) {
+        (
+            tempfile::tempdir().expect("workspace"),
+            tempfile::tempdir().expect("tree"),
+        )
+    }
+
+    fn add_people(workspace: &Path) -> DatasetEntry {
+        let src_dir = tempfile::tempdir().expect("sources");
+        let src = src_dir.path().join("people.csv");
+        std::fs::write(&src, "name,score\nAda,9\n").expect("write");
+        datasets::add(workspace, &src).expect("add")
+    }
+
+    /// A first reference lazily attaches: working-set member, source_files
+    /// entry, tree hard link, sticky record, and a pending event -- and the
+    /// active pointer does NOT move (a attach is not a user upload).
+    #[test]
+    fn first_reference_lazily_attaches() {
+        let (workspace, tree) = ws();
+        let entry = add_people(workspace.path());
+        let mut working_set = WorkingSet::default();
+        working_set.register(DatasetDescriptor {
+            reference_name: "private".into(),
+            display_name: "private".into(),
+            source_path: String::new(),
+            columns: vec![],
+            row_count: 0,
+            sample: vec![],
+            fingerprint: String::new(),
+            rectify: RectifyProvenance::NotApplicable,
+            privacy: Default::default(),
+            stale: None,
+        });
+        let prev_active = working_set.active_name().map(str::to_string);
+
+        let engine = crate::session::engine::AdminEngine::materialized();
+        let mut source_files = HashMap::new();
+        let mut attaches = SharedAttaches::default();
+        let snapshots = tree.path().join("snapshots");
+
+        resolve_refs(
+            "SELECT * FROM \"people\".data",
+            &engine,
+            &mut source_files,
+            &mut working_set,
+            &snapshots,
+            workspace.path(),
+            &mut attaches,
+        )
+        .expect("resolve");
+
+        assert!(working_set.taken("people"), "attached into the working set");
+        assert!(source_files.contains_key("people"));
+        assert!(snapshots.join("people.duckdb").exists(), "tree link landed");
+        assert_eq!(working_set.active_name(), prev_active.as_deref());
+        assert_eq!(
+            attaches.take_pending_events(),
+            vec![SharedAttachEvent {
+                reference_name: "people".into(),
+                entry_name: "people".into(),
+                fingerprint: entry.fingerprint,
+            }]
+        );
+    }
+
+    /// An unbound reference is untouched: a SQL naming no shared dataset
+    /// attaches nothing (the unknown-name error stays the engine's).
+    #[test]
+    fn unknown_reference_attaches_nothing() {
+        let (workspace, tree) = ws();
+        add_people(workspace.path());
+        let mut working_set = WorkingSet::default();
+        let engine = crate::session::engine::AdminEngine::materialized();
+        let mut source_files = HashMap::new();
+        let mut attaches = SharedAttaches::default();
+        resolve_refs(
+            "SELECT 1 AS x",
+            &engine,
+            &mut source_files,
+            &mut working_set,
+            tree.path(),
+            workspace.path(),
+            &mut attaches,
+        )
+        .expect("resolve");
+        assert!(source_files.is_empty());
+        assert!(attaches.take_pending_events().is_empty());
+    }
+
+    /// A workspace delete after attach retires the name: the next reference
+    /// refuses as stale and the working-set member carries the anchor.
+    #[test]
+    fn deleted_entry_refuses_as_stale() {
+        let (workspace, tree) = ws();
+        add_people(workspace.path());
+        let mut working_set = WorkingSet::default();
+        let engine = crate::session::engine::AdminEngine::materialized();
+        let mut source_files = HashMap::new();
+        let mut attaches = SharedAttaches::default();
+        let snapshots = tree.path().join("snapshots");
+        resolve_refs(
+            "SELECT * FROM \"people\".data",
+            &engine,
+            &mut source_files,
+            &mut working_set,
+            &snapshots,
+            workspace.path(),
+            &mut attaches,
+        )
+        .expect("first resolve");
+
+        datasets::remove(workspace.path(), "people").expect("remove");
+        let err = resolve_refs(
+            "SELECT * FROM \"people\".data",
+            &engine,
+            &mut source_files,
+            &mut working_set,
+            &snapshots,
+            workspace.path(),
+            &mut attaches,
+        )
+        .expect_err("refused");
+        assert_eq!(err, SharedRefError::Stale("people".to_string()));
+        assert!(working_set.is_stale("people"), "the attach turned stale");
+    }
+
+    /// A workspace replace after attach re_attaches on the next reference: the
+    /// name stays live, the descriptor follows the new content.
+    #[test]
+    fn replaced_entry_re_attaches_under_the_same_name() {
+        let (workspace, tree) = ws();
+        let sources = tempfile::tempdir().expect("sources");
+        let src = sources.path().join("people.csv");
+        std::fs::write(&src, "name,score\nAda,9\n").expect("write v1");
+        add_people(workspace.path());
+        let mut working_set = WorkingSet::default();
+        let engine = crate::session::engine::AdminEngine::materialized();
+        let mut source_files = HashMap::new();
+        let mut attaches = SharedAttaches::default();
+        let snapshots = tree.path().join("snapshots");
+        resolve_refs(
+            "SELECT * FROM \"people\".data",
+            &engine,
+            &mut source_files,
+            &mut working_set,
+            &snapshots,
+            workspace.path(),
+            &mut attaches,
+        )
+        .expect("first resolve");
+
+        let v2 = sources.path().join("people_v2.csv");
+        std::fs::write(&v2, "name,score\nAda,9\nLin,8\n").expect("write v2");
+        datasets::replace(workspace.path(), "people", &v2).expect("replace");
+
+        resolve_refs(
+            "SELECT * FROM \"people\".data",
+            &engine,
+            &mut source_files,
+            &mut working_set,
+            &snapshots,
+            workspace.path(),
+            &mut attaches,
+        )
+        .expect("re-attach resolve");
+        let descriptor = working_set.get("people").expect("still attached");
+        assert!(descriptor.stale.is_none(), "the name stays live");
+        let record = attaches.record("people").expect("record kept");
+        assert_eq!(record.fingerprint, descriptor.fingerprint);
+    }
+
+    /// D6 私有让位: with the workspace manifest holding `people`, a private
+    /// registration's de-conflict yields -- the candidate takes people_2 and
+    /// the shared face keeps its vocabulary name.
+    #[test]
+    fn private_registration_yields_to_the_shared_vocabulary() {
+        let (workspace, _tree) = ws();
+        add_people(workspace.path());
+        let working_set = WorkingSet::default();
+        let mut attaches = SharedAttaches::default();
+        // Card-time reservation of the shared name (as shared_cards would).
+        attaches.resolve_or_assign("people", &working_set);
+        let name = deconflict_with_shared(
+            "people",
+            &working_set,
+            Some(workspace.path()),
+            Some(&attaches),
+        );
+        assert_eq!(name, "people_2", "private yields, shared keeps");
+        // Unbound: the occupancy is the working set alone (private face
+        // unchanged, AC「私有面行为零变化」).
+        let unbound = deconflict_with_shared("people", &working_set, None, None);
+        assert_eq!(unbound, "people", "no workspace, no shared occupancy");
+    }
+
+    /// D9 resume restore: a fingerprint-matching event re-attaches from the
+    /// store (working-set member + tree link), and a fingerprint-mismatched
+    /// event registers the 挂名 stale.
+    #[test]
+    fn resume_restore_reattaches_on_match_and_stales_on_miss() {
+        let (workspace, _tree) = ws();
+        let entry = add_people(workspace.path());
+        let mut session = crate::session::Session::with_provider(Box::new(
+            crate::provider::fake::FakeProvider::new(),
+        ))
+        .expect("session");
+        session.set_workspace(std::fs::canonicalize(workspace.path()).expect("canonical"));
+        let matched = crate::persistence::recipe::RecipeEntry::SharedAttach(SharedAttachEvent {
+            reference_name: "people".into(),
+            entry_name: "people".into(),
+            fingerprint: entry.fingerprint,
+        });
+        session.restore_shared_attaches(&[matched]);
+        assert!(session.list().iter().any(|d| d.reference_name == "people"));
+
+        let mismatched = crate::persistence::recipe::RecipeEntry::SharedAttach(SharedAttachEvent {
+            reference_name: "orders".into(),
+            entry_name: "orders".into(),
+            fingerprint: "deadbeef".into(),
+        });
+        session.restore_shared_attaches(&[mismatched]);
+        assert!(
+            session
+                .list()
+                .iter()
+                .any(|d| d.reference_name == "orders" && d.stale.is_some()),
+            "a miss registers the name stale"
+        );
+    }
+
+    /// 挂名 stickiness: a private member squatting the entry name pushes the
+    /// attach to a de-conflicted name, and that name stays stable.
+    #[test]
+    fn name_deconflicts_against_private_occupancy() {
+        let (workspace, _tree) = ws();
+        add_people(workspace.path());
+        let mut working_set = WorkingSet::default();
+        working_set.register(DatasetDescriptor {
+            reference_name: "people".into(),
+            display_name: "people".into(),
+            source_path: String::new(),
+            columns: vec![],
+            row_count: 0,
+            sample: vec![],
+            fingerprint: String::new(),
+            rectify: RectifyProvenance::NotApplicable,
+            privacy: Default::default(),
+            stale: None,
+        });
+        let mut attaches = SharedAttaches::default();
+        let first = attaches.resolve_or_assign("people", &working_set);
+        assert_eq!(first, "people_2", "squatting private name is avoided");
+        let again = attaches.resolve_or_assign("people", &working_set);
+        assert_eq!(again, "people_2", "the assigned name is sticky");
+    }
+}

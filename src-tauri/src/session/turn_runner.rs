@@ -295,6 +295,7 @@ impl super::Session {
                 // track by decision: the loop runtime is the only built-in
                 // loop (each predecessor retired, #670 / #919); there is no
                 // runtime switch and no fallback.
+                let shared_cards = self.shared_cards();
                 let mut request = turn_window::assemble_tool_turn(
                     question,
                     &self.working_set,
@@ -305,6 +306,12 @@ impl super::Session {
                     // #1445: the session's construction-point window snapshot
                     // (ADR-0023 N) -- immutable for the session's life.
                     self.window_turns,
+                    // ADR-0141 D3: the bound workspace's shared cards ride
+                    // the schema context beside the working-set cards.
+                    // Hoisted: card building takes &mut self (attach-name
+                    // assignment + privacy refresh), disjoint from the
+                    // immutable borrows the call itself takes.
+                    &shared_cards,
                 );
                 // ADR-0103 (issue #614): the session posture's thought-level
                 // rides the built-in turn's provider request. Read from the
@@ -457,6 +464,7 @@ impl super::Session {
                         workspace_registry: self.workspace_registry.as_deref(),
                         snapshot_dir,
                         tool_output_refs: &mut self.tool_output_refs,
+                        shared_attaches: Some(&mut self.shared_attaches),
                     };
                     // The attachment read gate (ADR-0111, calibrated by
                     // ADR-0119): pure classification (no transitions, no
@@ -701,6 +709,7 @@ impl super::Session {
         let mcp_server = McpServer::stdio_bridge(GATEWAY_SERVER_NAME, bin_path, Vec::new(), env);
         // 4. Assemble the prompt blocks (leading context: locale + schema;
         //    skill block before question; M-contract via gateway tool table).
+        let shared_cards = self.shared_cards();
         let prompt_blocks = turn_window::assemble_acp_turn(
             question,
             &self.working_set,
@@ -711,6 +720,11 @@ impl super::Session {
             // #1445: same construction-point window snapshot as the built-in
             // arm -- both assembly faces window identically.
             self.window_turns,
+            // ADR-0141 D3: the bound workspace's shared cards ride the
+            // context block beside the working-set cards (mounted ones are
+            // working-set members already). Hoisted for the same disjoint-
+            // borrow reason as the built-in arm.
+            &shared_cards,
         );
         // ADR-0137 (issue #1381): the external runtime's cwd is the session
         // workspace -- THIS spawn is the lazy-mint disk-need moment for a
@@ -854,6 +868,7 @@ impl super::Session {
                 workspace_registry: self.workspace_registry.as_deref(),
                 snapshot_dir,
                 tool_output_refs: &mut self.tool_output_refs,
+                shared_attaches: Some(&mut self.shared_attaches),
             };
             // The bridge face's read gate (issue #714; calibrated by
             // ADR-0119): the same immutable bundle the built-in loop's
