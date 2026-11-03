@@ -55,6 +55,7 @@ import { Alert } from "./components/ui/alert";
 import { TooltipProvider } from "./components/ui/tooltip";
 import { log } from "./lib/log";
 import { createQueryClient } from "./lib/queryClient";
+import { StagedWorkspaceSweep } from "./shell/useStagedWorkspaceSweep";
 import { catalogFor } from "./i18n";
 import { useTheme } from "./theme/useTheme";
 import { adapterKeys, workspaceKeys } from "./session/queryKeys";
@@ -850,6 +851,7 @@ export default function App() {
 
   return (
     <QueryClientProvider client={queryClient}>
+      <StagedWorkspaceSweep staged={pendingWorkspace} onReset={setPendingWorkspace} />
       {/* TooltipProvider (ADR-0050/0054, issue #106): one ancestor high in the
           tree so every tail-ellipsis card truncation site (Thread rail cards)
           can mount a Radix Tooltip without per-site providers. delayDuration 0
