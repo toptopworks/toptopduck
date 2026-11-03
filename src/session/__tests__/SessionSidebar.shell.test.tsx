@@ -32,14 +32,20 @@ vi.mock("../../api", () => ({
   renameWorkspace: vi.fn().mockResolvedValue(undefined),
   removeWorkspace: vi.fn().mockResolvedValue(undefined),
   createWorkspace: vi.fn().mockResolvedValue(undefined),
+  registerWorkspaceDirectory: vi.fn().mockResolvedValue(undefined),
+}));
+vi.mock("@tauri-apps/plugin-dialog", () => ({
+  open: vi.fn().mockResolvedValue(null),
 }));
 vi.mock("@tauri-apps/plugin-opener", () => ({
   openPath: vi.fn().mockResolvedValue(undefined),
 }));
+import { open } from "@tauri-apps/plugin-dialog";
 import { openPath } from "@tauri-apps/plugin-opener";
 import {
   createWorkspace,
   listWorkspaces,
+  registerWorkspaceDirectory,
   removeWorkspace,
   renameWorkspace,
 } from "../../api";
@@ -2297,6 +2303,75 @@ describe("SessionSidebar workspace section (issue #1392)", () => {
         container.querySelector("[data-workspace-group=\"/w/fresh\"]"),
       ).not.toBeNull(),
     );
+  });
+
+  it("the source-folder branch registers the picked directory with a blank name allowed", async () => {
+    // Issue #1477: picking a folder flips the modal to the register path --
+    // the blank name is legal (the label falls back to the directory tail),
+    // the call goes to registerWorkspaceDirectory, never the mint.
+    vi.mocked(createWorkspace).mockClear();
+    vi.mocked(registerWorkspaceDirectory).mockClear();
+    vi.mocked(open).mockResolvedValueOnce("/w/picked");
+    renderShell(<SessionSidebar {...wsProps()} />);
+    fireEvent.click(screen.getByRole("button", { name: "New workspace" }));
+    fireEvent.click(
+      await screen.findByRole("button", { name: "Browse…" }),
+    );
+    // The dual-intent faces: title + submit label flip, submit stays enabled
+    // on the blank name (the register path's exemption).
+    expect(await screen.findByText("Add workspace")).toBeInTheDocument();
+    const submit = screen.getByRole("button", { name: "Add" });
+    expect(submit).not.toBeDisabled();
+    fireEvent.click(submit);
+    await waitFor(() =>
+      expect(registerWorkspaceDirectory).toHaveBeenCalledWith(
+        "/w/picked",
+        null,
+      ),
+    );
+    expect(createWorkspace).not.toHaveBeenCalled();
+    // The success closes the modal.
+    await waitFor(() =>
+      expect(screen.queryByRole("button", { name: "Add" })).not.toBeInTheDocument(),
+    );
+  });
+
+  it("the source-folder branch carries a non-blank name through the full guard as the title", async () => {
+    // A non-blank name keeps the full guard on the register path too --
+    // the illegal shape disables the submit, the valid trimmed shape rides
+    // as the title.
+    vi.mocked(registerWorkspaceDirectory).mockClear();
+    vi.mocked(open).mockResolvedValueOnce("/w/picked");
+    renderShell(<SessionSidebar {...wsProps()} />);
+    fireEvent.click(screen.getByRole("button", { name: "New workspace" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Browse…" }));
+    const input = await screen.findByRole("textbox", {
+      name: "Workspace name",
+    });
+    fireEvent.change(input, { target: { value: "a/b" } });
+    expect(screen.getByRole("button", { name: "Add" })).toBeDisabled();
+    fireEvent.change(input, { target: { value: "  fresh  " } });
+    fireEvent.click(screen.getByRole("button", { name: "Add" }));
+    await waitFor(() =>
+      expect(registerWorkspaceDirectory).toHaveBeenCalledWith(
+        "/w/picked",
+        "fresh",
+      ),
+    );
+  });
+
+  it("clearing the source folder falls back to the mint face", async () => {
+    // The clear control restores the mint branch: title and submit label
+    // flip back, and the blank name is illegal again there.
+    vi.mocked(open).mockResolvedValueOnce("/w/picked");
+    renderShell(<SessionSidebar {...wsProps()} />);
+    fireEvent.click(screen.getByRole("button", { name: "New workspace" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Browse…" }));
+    fireEvent.click(
+      await screen.findByRole("button", { name: "Clear source folder" }),
+    );
+    expect(await screen.findByText("New workspace")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Create" })).toBeDisabled();
   });
   describe("sidebar expansion persistence (issue #1404)", () => {
     // The store cleanup rides the host describe's beforeEach/afterEach.

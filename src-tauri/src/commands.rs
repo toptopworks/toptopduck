@@ -473,6 +473,60 @@ pub fn create_workspace(
     })
 }
 
+/// The register-an-existing-directory reply (issue #1477): the listing
+/// projection plus the honest idempotency marker -- `record_existed` true
+/// means the directory already carried a registry record (the LRU bump +
+/// one-way explicit upgrade path, the title kept), false a freshly seated
+/// one.
+#[derive(Debug, serde::Serialize)]
+pub struct RegisteredWorkspace {
+    #[serde(flatten)]
+    pub workspace: RecentWorkspace,
+    pub record_existed: bool,
+}
+
+/// Register an existing directory as a workspace (issue #1477): the
+/// no-session registration path behind the create modal's source-folder
+/// branch, so datasets can be pre-loaded before any session opens. Strict
+/// validation: the directory must exist (canonicalize refuses a missing
+/// path -- no stray directory is minted -- and expands the Windows 8.3
+/// short spelling away, so one directory cannot register under two
+/// spellings) and be a directory. Zero writes at the target -- only the
+/// app-side registry file changes. An already-recorded directory is
+/// idempotent success: the LRU bump, the one-way explicit upgrade, the
+/// title kept (ADR-0138 Decision 3). A blank title falls to the directory
+/// tail; a non-blank one faces the full named-workspace rule -- the
+/// backend is the trust boundary, the error face mirroring
+/// [`create_workspace`]'s String channel.
+#[tauri::command]
+pub fn register_workspace_directory(
+    registry: State<'_, Arc<crate::workspace::WorkspaceRegistry>>,
+    path: String,
+    title: Option<String>,
+) -> Result<RegisteredWorkspace, String> {
+    let canonical = std::fs::canonicalize(&path)
+        .map_err(|e| format!("workspace directory unavailable: {e}"))?;
+    if !canonical.is_dir() {
+        return Err(format!("not a directory: {}", canonical.display()));
+    }
+    let title = title.as_deref().map(str::trim).filter(|t| !t.is_empty());
+    if let Some(t) = title {
+        crate::session::workspace::validate_workspace_name(t)?;
+    }
+    let record_existed = registry
+        .record_explicit(&canonical, title)
+        .map_err(|detail| format!("workspace registration failed: {detail}"))?;
+    Ok(RegisteredWorkspace {
+        workspace: RecentWorkspace {
+            path: canonical.display().to_string(),
+            label: registry.label_of(&canonical),
+            explicit: true,
+            exists: true,
+        },
+        record_existed,
+    })
+}
+
 /// Resolve the registry key for a path the frontend echoes back from a
 /// listing projection: canonicalize when the directory exists (the bound
 /// spelling rule), fall back to the verbatim string for a dangling record
