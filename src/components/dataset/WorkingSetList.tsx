@@ -167,6 +167,7 @@ function DatasetRow({
   isSelected,
   loading,
   tip,
+  extraBadge,
   onSelect,
   onOpenRename,
   onOpenDelete,
@@ -183,6 +184,9 @@ function DatasetRow({
   isSelected: boolean;
   loading: boolean;
   tip: RowTipControls;
+  // An optional extra marker beside the stale chip's slot (the workspace
+  // panel flags a missing store file here); the private face passes none.
+  extraBadge?: ReactNode;
   onSelect: (referenceName: string) => void;
   onOpenRename: (d: DatasetDescriptor, trigger: HTMLButtonElement) => void;
   onOpenDelete?: (d: DatasetDescriptor, trigger: HTMLButtonElement) => void;
@@ -311,6 +315,7 @@ function DatasetRow({
           )}
         </div>
       </div>
+      {extraBadge}
       {d.stale && (
         // #793: a short chip with the full causal sentence on the tooltip --
         // the sentence used to wrap inside the badge and break the chip shape
@@ -433,11 +438,22 @@ function WorkingSetRenameDialog({
 function WorkingSetDeleteDialog({
   sessionId,
   target,
+  titleFor,
   onCancel,
   onConfirm,
 }: {
-  sessionId: string;
+  // Session addressing for the impact preview (issue #1063); the workspace
+  // panel has no session, and its confirm renders without the preview.
+  sessionId?: string;
   target: DatasetDescriptor;
+  // The confirm title's copy slot: the private face names the working set,
+  // the workspace panel overrides with its own neutral wording. A renderer
+  // over the display name -- NOT a {id, defaultMessage} data shape, whose
+  // dynamic id is invisible to the formatjs extractor and would leave the
+  // catalog entry dangling as `extra` in the CI guard. Both faces therefore
+  // spell their title as a static <FormattedMessage> literal at their own
+  // call site.
+  titleFor?: (name: string) => ReactNode;
   onCancel: () => void;
   onConfirm: () => void;
 }) {
@@ -446,11 +462,15 @@ function WorkingSetDeleteDialog({
       <AlertDialogContent onEscapeKeyDown={(e) => e.preventDefault()}>
         <AlertDialogHeader>
           <AlertDialogTitle>
-            <FormattedMessage
-              id="workingSet.delete.confirm"
-              defaultMessage="Remove {name} from the working set?"
-              values={{ name: target.display_name }}
-            />
+            {titleFor !== undefined ? (
+              titleFor(target.display_name)
+            ) : (
+              <FormattedMessage
+                id="workingSet.delete.confirm"
+                defaultMessage="Remove {name} from the working set?"
+                values={{ name: target.display_name }}
+              />
+            )}
           </AlertDialogTitle>
           <AlertDialogDescription>
             <FormattedMessage
@@ -460,8 +480,11 @@ function WorkingSetDeleteDialog({
           </AlertDialogDescription>
         </AlertDialogHeader>
         {/* The pre-delete impact preview (issue #1063); DeleteImpactList
-            owns the rendering contract. */}
-        <DeleteImpactList sessionId={sessionId} referenceName={target.reference_name} />
+            owns the rendering contract. Session-scoped: the workspace
+            panel's confirm (no session) renders without it. */}
+        {sessionId !== undefined && (
+          <DeleteImpactList sessionId={sessionId} referenceName={target.reference_name} />
+        )}
         <AlertDialogFooter>
           <AlertDialogCancel onClick={onCancel}>
             <FormattedMessage id="common.cancel" defaultMessage="Cancel" />
@@ -487,11 +510,16 @@ export function WorkingSetList({
   onRename,
   onReplace,
   onDelete,
+  onPickError,
+  badgeFor,
+  deleteTitleFor,
   loading = false,
 }: {
   // Session addressing for the delete dialog's impact preview (issue #1063);
-  // the rows themselves render from the `datasets` snapshot prop.
-  sessionId: string;
+  // the rows themselves render from the `datasets` snapshot prop. Optional:
+  // the workspace panel (no session) omits it, and its delete confirm
+  // renders without the impact preview.
+  sessionId?: string;
   datasets: DatasetDescriptor[];
   // The ACTIVE dataset (server truth, ADR-0051): bolds the row's label. The
   // authoritative naming is the tab header's Targets chip; bold is the row's
@@ -501,9 +529,11 @@ export function WorkingSetList({
   // the selection with it).
   activeName: string | null;
   // The detail pick (which row's detail the right pane shows): drives the
-  // accent band. Passed as the RESOLVED pick (resolveWorkingSetDetail
-  // output), so the band rides the deleted-pick fallbacks (active, then
-  // first) with the pane and never diverges from what is shown.
+  // accent band. The session face passes the RESOLVED pick
+  // (resolveWorkingSetDetail output), so the band rides the deleted-pick
+  // fallbacks (active, then first) with the pane and never diverges from
+  // what is shown; the workspace panel resolves its own pick-then-first
+  // chain inline (no active pointer), under the same contract.
   selectedName: string | null;
   onSelect: (referenceName: string) => void;
   // Display-only rename (ADR-0037, issue #8): the reference name is never
@@ -517,17 +547,30 @@ export function WorkingSetList({
   // only so tests that don't exercise replace can skip it; App always supplies
   // it, and the button is hidden when it is absent (no silent no-op).
   onReplace?: (referenceName: string, path: string) => void;
-  // Remove a source from the working set (issue #38, ADR-0040). The backend
-  // detaches the snapshot, deletes its file, drops the reference name, and
-  // appends a Deleted source lifecycle event. Optional only so tests that don't
-  // exercise delete can skip it; App always supplies it, and the button is
-  // hidden when it is absent (no silent no-op).
+  // Remove a source from the working set (issue #38, ADR-0040). On the
+  // session face the backend detaches the snapshot, deletes its file, drops
+  // the reference name, and appends a Deleted source lifecycle event; the
+  // workspace panel's delete is a manifest edit (bound sessions keep their
+  // store links, ADR-0141 D7). Optional only so tests that don't exercise
+  // delete can skip it; App always supplies it, and the button is hidden
+  // when it is absent (no silent no-op).
   onDelete?: (referenceName: string) => void;
+  // A picker-open failure's error channel: the workspace panel routes it to
+  // its banner. Absent, the rejection is dropped (the private face's
+  // long-standing posture).
+  onPickError?: (e: unknown) => void;
   // Disables the action buttons while an async op (rename / ingest / replace /
   // delete) is in flight OR while a turn is in flight (ADR-0040 execution
   // window: ask in flight -> source management disabled), preventing concurrent
   // IPC and source-vs-turn interleaving.
   loading?: boolean;
+  // An extra per-row marker beside the stale chip's slot: the workspace
+  // panel flags a missing store file. Undefined rows render nothing; the
+  // private face passes none.
+  badgeFor?: (d: DatasetDescriptor) => ReactNode;
+  // The delete confirm's title copy slot (see WorkingSetDeleteDialog); the
+  // private face keeps its working-set wording.
+  deleteTitleFor?: (name: string) => ReactNode;
 }) {
   const intl = useIntl();
   // Which row's rename / delete dialog is open (issue #759). The dialogs
@@ -568,6 +611,9 @@ export function WorkingSetList({
           extensions: ["csv", "parquet", "json", "jsonl", "ndjson"],
         },
       ],
+    }).catch((e: unknown) => {
+      onPickError?.(e);
+      return null;
     });
     if (typeof selected === "string") {
       onReplace?.(d.reference_name, selected);
@@ -595,6 +641,7 @@ export function WorkingSetList({
             isSelected={d.reference_name === selectedName}
             loading={loading}
             tip={tip}
+            extraBadge={badgeFor?.(d)}
             onSelect={onSelect}
             onOpenRename={openRename}
             onPickReplace={onReplace ? pickReplace : undefined}
@@ -616,6 +663,7 @@ export function WorkingSetList({
         <WorkingSetDeleteDialog
           sessionId={sessionId}
           target={deleteTarget}
+          titleFor={deleteTitleFor}
           onCancel={closeDelete}
           onConfirm={() => {
             onDelete?.(deleteTarget.reference_name);

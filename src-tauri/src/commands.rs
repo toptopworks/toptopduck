@@ -572,6 +572,10 @@ pub enum WorkspaceDatasetError {
     /// refused, ADR-0141 D8).
     ManifestCorrupt(String),
     NotFound,
+    /// A rename arrived with a blank display label.
+    InvalidLabel,
+    /// The rename's label is already shown by another entry.
+    DisplayTaken(String),
     Io(String),
 }
 
@@ -588,6 +592,8 @@ impl From<crate::workspace::datasets::StoreError> for WorkspaceDatasetError {
                 WorkspaceDatasetError::ManifestCorrupt(detail)
             }
             StoreError::NotFound => WorkspaceDatasetError::NotFound,
+            StoreError::InvalidLabel => WorkspaceDatasetError::InvalidLabel,
+            StoreError::DisplayTaken(label) => WorkspaceDatasetError::DisplayTaken(label),
             StoreError::Io { detail } => WorkspaceDatasetError::Io(detail),
         }
     }
@@ -651,6 +657,28 @@ pub async fn replace_workspace_dataset(
             std::path::Path::new(&workspace),
             &reference_name,
             std::path::Path::new(&path),
+        )
+        .map_err(Into::into)
+    })
+    .await
+    .map_err(|e| WorkspaceDatasetError::Io(e.to_string()))?
+}
+
+/// Rename a shared dataset's display label (ADR-0037's dual-name scheme on
+/// the shared face): the reference name, the resume triple and the injection
+/// card are untouched. Runs off the async/UI thread like the other mutators
+/// (the shared manifest lock).
+#[tauri::command]
+pub async fn rename_workspace_dataset(
+    workspace: String,
+    reference_name: String,
+    new_display: String,
+) -> Result<crate::workspace::DatasetEntry, WorkspaceDatasetError> {
+    tauri::async_runtime::spawn_blocking(move || {
+        crate::workspace::datasets::rename(
+            std::path::Path::new(&workspace),
+            &reference_name,
+            &new_display,
         )
         .map_err(Into::into)
     })

@@ -583,6 +583,7 @@ pub fn run() {
             commands::remove_workspace_dataset,
             commands::replace_workspace_dataset,
             commands::set_workspace_dataset_privacy,
+            commands::rename_workspace_dataset,
             commands::ingest_file,
             commands::ingest_file_guided,
             commands::guidance_window,

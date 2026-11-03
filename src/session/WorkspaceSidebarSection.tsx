@@ -748,7 +748,7 @@ function WorkspaceGroupMenu({
           <Database aria-hidden />
           <FormattedMessage
             id="sidebar.workspace.manageDatasets"
-            defaultMessage="Shared datasets…"
+            defaultMessage="Datasets"
           />
         </DropdownMenuItem>
         <DropdownMenuSeparator />
