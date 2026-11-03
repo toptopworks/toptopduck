@@ -5,30 +5,30 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { useStagedWorkspaceSweep } from "../useStagedWorkspaceSweep";
 import { listWorkspaces } from "../../api";
 import { workspaceKeys } from "../../session/queryKeys";
+import type { PendingWorkspace } from "../../components/thread/ComposerWorkspacePicker";
 
-// The staged-workspace sweep (the removed-workspace reset): a staged pick is
-// App shell state the sidebar's remove mutation cannot reach, so the sweep
-// mirrors the registry listing while a pick is staged and resets it when a
-// refetch drops the record's path. The tests drive the hook directly over a
-// real QueryClient -- the mutation side is pinned as the invalidate, exactly
-// what the sidebar's remove onSuccess fires.
-//
-// The once-listed guard matters: a browse-picked directory never was a
-// registry record, so a plain "not in the listing" reset would sweep it on
-// the first refresh -- the second test pins that it survives.
+// Pins for useStagedWorkspaceSweep; the sweep's contract and the once-listed
+// guard are documented at the hook. The tests drive the hook directly over a
+// real QueryClient -- the mutation side is pinned as the invalidate, the same
+// invalidateQueries the sidebar's remove onSuccess fires
+// (WorkspaceSidebarSection.tsx); if that call site changes its invalidation
+// strategy, these pins must be re-checked against it. The second test pins
+// the guard's browse-survival half.
 
 vi.mock("../../api", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../../api")>();
   return { ...actual, listWorkspaces: vi.fn() };
 });
 
-function renderSweep(staged: { path: string; label: string } | null) {
+function renderSweep(staged: PendingWorkspace | null) {
   const onReset = vi.fn();
+  // staleTime mirrors the app default the sweep rides (src/lib/queryClient.ts)
+  // so harness refetches stay invalidate-driven like production.
   const queryClient = new QueryClient({
-    defaultOptions: { queries: { retry: false } },
+    defaultOptions: { queries: { retry: false, staleTime: Infinity } },
   });
   const view = renderHook(
-    ({ staged: s }: { staged: { path: string; label: string } | null }) =>
+    ({ staged: s }: { staged: PendingWorkspace | null }) =>
       useStagedWorkspaceSweep({ staged: s, onReset }),
     { initialProps: { staged }, wrapper: ({ children }) => (
       <QueryClientProvider client={queryClient}>{children}</QueryClientProvider>
@@ -74,6 +74,11 @@ describe("useStagedWorkspaceSweep", () => {
     // batched behind it, so the effect (and the reset) lands on the next
     // flushed render -- poll for it instead of asserting synchronously.
     await waitFor(() => expect(onReset).toHaveBeenCalledWith(null));
+
+    // The production reset feeds back: App nulls the pick, the effect re-runs
+    // with staged null -- no crash on the re-run, and exactly one reset.
+    view.rerender({ staged: null });
+    expect(onReset).toHaveBeenCalledTimes(1);
   });
 
   it("keeps a browse-picked directory staged across registry refetches", async () => {
