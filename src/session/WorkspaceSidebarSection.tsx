@@ -29,7 +29,9 @@ import {
   Pencil,
   Plus,
   SquarePen,
+  X,
 } from "lucide-react";
+import { open } from "@tauri-apps/plugin-dialog";
 import { openPath } from "@tauri-apps/plugin-opener";
 
 import { Button } from "@/components/ui/button";
@@ -64,7 +66,12 @@ import { bareButtonReset } from "@/lib/buttonReset";
 import { log } from "@/lib/log";
 import { usePointerCloseIntent } from "@/lib/usePointerCloseIntent";
 import { isInvalidWorkspaceName } from "@/lib/workspaceName";
-import { createWorkspace, removeWorkspace, renameWorkspace } from "../api";
+import {
+  createWorkspace,
+  registerWorkspaceDirectory,
+  removeWorkspace,
+  renameWorkspace,
+} from "../api";
 import { WorkspaceDatasetsDialog } from "./WorkspaceDatasetsDialog";
 import { readSidebarExpansion, saveSidebarExpansion } from "./sidebarExpansion";
 import { workspaceKeys } from "./queryKeys";
@@ -159,6 +166,9 @@ export function WorkspaceSidebarSection({
   // The new-workspace modal's draft (the selector's create modal, mirrored).
   const [createOpen, setCreateOpen] = useState(false);
   const [createInput, setCreateInput] = useState("");
+  // The optional source folder (issue #1477): null = the mint path
+  // (create_workspace as-is), a path = the register path.
+  const [createSource, setCreateSource] = useState<string | null>(null);
   const [createError, setCreateError] = useState<string | null>(null);
   // The remove-from-list strong-confirm target (the DeleteSessionDialog
   // staging posture): the menu item stages the group, the dialog's confirm
@@ -274,7 +284,18 @@ export function WorkspaceSidebarSection({
   function closeCreate() {
     setCreateOpen(false);
     setCreateInput("");
+    setCreateSource(null);
     setCreateError(null);
+  }
+
+  // The source-folder browse (issue #1477): the composer picker's channel
+  // (`open({ directory: true })`). null = cancelled; the multi-select
+  // shapes never arise (no `multiple`).
+  async function browseForCreateSource() {
+    const picked = await open({ directory: true });
+    if (typeof picked === "string") {
+      setCreateSource(picked);
+    }
   }
 
   const invalidate = () => {
@@ -306,7 +327,13 @@ export function WorkspaceSidebarSection({
   });
 
   const create = useMutation({
-    mutationFn: (name: string) => createWorkspace(name),
+    // The two intent branches (issue #1477): a source folder registers the
+    // existing directory (a blank name goes title-less -- the label falls
+    // back to the directory tail), no folder keeps the named mint.
+    mutationFn: ({ name, source }: { name: string; source: string | null }) =>
+      source !== null
+        ? registerWorkspaceDirectory(source, name.length > 0 ? name : null)
+        : createWorkspace(name),
     onSuccess: () => {
       invalidate();
       closeCreate();
@@ -318,7 +345,13 @@ export function WorkspaceSidebarSection({
   const renameTrimmed = renameInput.trim();
   const renameInvalid = isInvalidWorkspaceName(renameTrimmed);
   const createTrimmed = createInput.trim();
-  const createInvalid = isInvalidWorkspaceName(createTrimmed);
+  // With a source folder the blank name is legal (the label falls back to
+  // the directory tail); a non-blank name still faces the full shared
+  // guard -- the backend re-validates as the trust boundary.
+  const createInvalid =
+    createSource !== null
+      ? createTrimmed.length > 0 && isInvalidWorkspaceName(createTrimmed)
+      : isInvalidWorkspaceName(createTrimmed);
   // The head face keys on groups that actually render: stale expanded
   // entries for gone groups must not distort the toggle (an all-collapsed
   // list would otherwise wear the collapse face and eat a click).
@@ -599,7 +632,7 @@ export function WorkspaceSidebarSection({
                 <FormattedMessage id="common.cancel" defaultMessage="Cancel" />
               </Button>
               <Button type="submit" disabled={renameInvalid}>
-                <FormattedMessage id="sidebar.workspace.save" defaultMessage="Save" />
+                <FormattedMessage id="common.save" defaultMessage="Save" />
               </Button>
             </DialogFooter>
           </form>
@@ -614,24 +647,35 @@ export function WorkspaceSidebarSection({
         }}
       />
 
-      {/* The new-workspace modal: the selector's create modal, mirrored for
-          the section head's entry. A success lands in the listing (the
-          record is explicit) and the group appears immediately. */}
+      {/* The new-workspace modal (the selector's create modal, mirrored for
+          the section head's entry) with the #1477 dual intent: a name mints,
+          a source folder registers the existing directory -- the title and
+          the submit label flip with the branch, a success lands in the
+          listing either way (the record is explicit). */}
       <Dialog open={createOpen} onOpenChange={(next) => !next && closeCreate()}>
         <DialogContent className="sm:max-w-sm">
           <DialogHeader>
             <DialogTitle>
-              <FormattedMessage
-                id="composer.workspace.newWorkspace"
-                defaultMessage="New workspace"
-              />
+              {createSource !== null ? (
+                <FormattedMessage
+                  id="sidebar.workspace.addTitle"
+                  defaultMessage="Add workspace"
+                />
+              ) : (
+                <FormattedMessage
+                  id="composer.workspace.newWorkspace"
+                  defaultMessage="New workspace"
+                />
+              )}
             </DialogTitle>
           </DialogHeader>
           <form
-            className="flex flex-col gap-2"
+            className="flex min-w-0 flex-col gap-2"
             onSubmit={(e) => {
               e.preventDefault();
-              if (!createInvalid) create.mutate(createTrimmed);
+              if (!createInvalid) {
+                create.mutate({ name: createTrimmed, source: createSource });
+              }
             }}
           >
             <Input
@@ -651,6 +695,63 @@ export function WorkspaceSidebarSection({
               })}
               aria-invalid={createInvalid && createTrimmed.length > 0}
             />
+            {/* The optional source-folder field (issue #1477): the same
+                text-input posture as the name field above (1px hairline,
+                rounded, 36px), not a separate card face. Unpicked = the
+                whole field is the browse button wearing a placeholder;
+                picked = the path reads back in the same frame. */}
+            {createSource === null ? (
+              <button
+                type="button"
+                aria-label={intl.formatMessage({
+                  id: "sidebar.workspace.localFolder",
+                  defaultMessage: "Local folder (optional)",
+                })}
+                className="flex h-9 w-full items-center gap-2 rounded-md border px-3 text-left transition-colors hover:text-foreground focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring"
+                onClick={() => void browseForCreateSource()}
+              >
+                <FolderClosed
+                  className="size-4 shrink-0 text-muted-foreground"
+                  aria-hidden
+                />
+                <span className="min-w-0 flex-1 truncate text-sm text-muted-foreground">
+                  <FormattedMessage
+                    id="sidebar.workspace.localFolder"
+                    defaultMessage="Local folder (optional)"
+                  />
+                </span>
+                <span className="shrink-0 text-xs text-muted-foreground">
+                  <FormattedMessage
+                    id="sidebar.workspace.chooseFolder"
+                    defaultMessage="Browse…"
+                  />
+                </span>
+              </button>
+            ) : (
+              <div className="flex h-9 w-full items-center gap-2 rounded-md border px-3">
+                <FolderClosed
+                  className="size-4 shrink-0 text-muted-foreground"
+                  aria-hidden
+                />
+                <span
+                  className="min-w-0 flex-1 truncate font-mono text-xs"
+                  title={createSource}
+                >
+                  {createSource}
+                </span>
+                <button
+                  type="button"
+                  aria-label={intl.formatMessage({
+                    id: "sidebar.workspace.clearFolder",
+                    defaultMessage: "Clear local folder",
+                  })}
+                  className={`${bareButtonReset} flex size-6 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors hover:text-foreground focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring`}
+                  onClick={() => setCreateSource(null)}
+                >
+                  <X className="size-3.5" aria-hidden />
+                </button>
+              </div>
+            )}
             {createInvalid && createTrimmed.length > 0 && (
               <p className="text-xs text-destructive">
                 <FormattedMessage
@@ -667,7 +768,14 @@ export function WorkspaceSidebarSection({
                 <FormattedMessage id="common.cancel" defaultMessage="Cancel" />
               </Button>
               <Button type="submit" disabled={createInvalid}>
-                <FormattedMessage id="composer.workspace.create" defaultMessage="Create" />
+                {createSource !== null ? (
+                  <FormattedMessage id="common.add" defaultMessage="Add" />
+                ) : (
+                  <FormattedMessage
+                    id="composer.workspace.create"
+                    defaultMessage="Create"
+                  />
+                )}
               </Button>
             </DialogFooter>
           </form>

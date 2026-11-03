@@ -123,6 +123,32 @@ export async function createWorkspace(name: string): Promise<RecentWorkspace> {
   return invoke<RecentWorkspace>("create_workspace", { name });
 }
 
+// The register-an-existing-directory reply (issue #1477): the listing
+// projection plus the honest idempotency marker -- `record_existed` true
+// means the directory already carried a registry record (the LRU bump +
+// one-way explicit upgrade; the title kept). Mirrors
+// `commands::RegisteredWorkspace`; the snake_case field follows the wire
+// projection convention (the datasets faces' `reference_name` et al.).
+export interface RegisteredWorkspace extends RecentWorkspace {
+  record_existed: boolean;
+}
+
+// Register an existing directory as a workspace (issue #1477): the
+// no-session registration path behind the sidebar create modal's
+// source-folder branch. The backend validates strictly (exists + is_dir;
+// the canonicalize expands 8.3 spellings) and re-validates a non-blank
+// title as the trust boundary; a null title falls back to the directory
+// tail. Idempotent on an already-recorded directory.
+export async function registerWorkspaceDirectory(
+  path: string,
+  title: string | null,
+): Promise<RegisteredWorkspace> {
+  return invoke<RegisteredWorkspace>("register_workspace_directory", {
+    path,
+    title,
+  });
+}
+
 // --- Workspace shared datasets (ADR-0141) ----------------------------------
 
 // The panel's list face: every manifest entry, flagged (not hidden) when its

@@ -127,14 +127,29 @@ impl WorkspaceRegistry {
 
     /// The named-workspace creation mount point (issue #1393): a fresh mint
     /// records with the user's name as the `title`. On an existing record the
-    /// call degrades to [`Self::record`] -- the bump only, the title never
-    /// rewrites (identity is immutable, ADR-0138 Decision 3). Unlike
+    /// call takes the LRU bump plus the one-way explicit upgrade -- this
+    /// mount registers explicitly -- never rewriting the title (identity is
+    /// immutable, ADR-0138 Decision 3). Unlike
     /// [`Self::record`] this mount FAILS the caller: it serves the explicit
     /// create command, whose essence is the record itself -- not bookkeeping
     /// riding a session event, which is the reach of ADR-0138's best-effort
     /// stance. A record that never lands must not report a successful create.
+    /// The untitled-registration mount [`Self::record_explicit`] (issue
+    /// #1477) is this mount's general shape; the titled call is its
+    /// always-titled special case.
     pub fn record_titled(&self, canonical: &Path, title: &str) -> Result<(), String> {
-        self.record_at(canonical, Some(title), true, now_millis())
+        self.record_explicit(canonical, Some(title)).map(|_| ())
+    }
+
+    /// The existing-directory registration mount (issue #1477): the
+    /// register-without-a-session command's essence -- [`Self::record_at`]
+    /// with `explicit=true` and the registry's own clock, FAILING the
+    /// caller like [`Self::record_titled`] (the record IS the command the
+    /// user asked for). Returns whether the record already existed (the
+    /// bump + one-way upgrade path) so the command layer can project an
+    /// honest idempotency marker.
+    pub fn record_explicit(&self, canonical: &Path, title: Option<&str>) -> Result<bool, String> {
+        self.record_at(canonical, title, true, now_millis())
     }
 
     /// The create-session explicit-binding mount (issue #1392): the user
@@ -245,25 +260,30 @@ impl WorkspaceRegistry {
     }
 
     /// [`Self::record`] with an injectable clock and title for tests. The
-    /// title lands only on a NEW record -- an existing one takes the LRU bump
-    /// alone (a titled call on a known path degrades to the plain record).
+    /// title lands only on a NEW record -- an existing one takes the LRU
+    /// bump, plus the one-way explicit upgrade when the call carries
+    /// `explicit` (the title never rewrites).
+    /// Returns whether the record already existed: the same-machine seam the
+    /// strict wrapping [`Self::record_explicit`] projects upward.
     pub(crate) fn record_at(
         &self,
         canonical: &Path,
         title: Option<&str>,
         explicit: bool,
         now: u64,
-    ) -> Result<(), String> {
+    ) -> Result<bool, String> {
         let Ok(_guard) = self.write_lock.lock() else {
             return Err("workspace registry write lock poisoned".to_string());
         };
         let mut records = self.load_for_write()?;
+        let mut existed = false;
         match records.iter_mut().find(|r| r.path == canonical) {
             // Same canonical path: one record, LRU bump only (created_at, id,
             // and title are identity and never rewrite). The explicit mark is
             // the one-way upgrade: a lazily-minted record the user later
             // binds explicitly joins the sidebar section for good.
             Some(existing) => {
+                existed = true;
                 existing.last_used_at = now;
                 if explicit {
                     existing.explicit = true;
@@ -278,7 +298,8 @@ impl WorkspaceRegistry {
                 last_used_at: now,
             }),
         }
-        self.save(&records)
+        self.save(&records)?;
+        Ok(existed)
     }
 
     /// Returns whether a record was deleted (false = never recorded /
@@ -684,6 +705,73 @@ mod tests {
         assert!(
             reg.record_titled(&dir, "Alpha").is_err(),
             "a refused write surfaces as Err, not a warn"
+        );
+    }
+
+    #[test]
+    fn record_explicit_seats_a_fresh_explicit_record_and_reports_it_new() {
+        // The registration mount (issue #1477): a fresh directory seats an
+        // explicit record -- title optional, the label deriving from the
+        // tail -- and the `existed` marker reports the fresh path so the
+        // command layer can project an honest idempotency face.
+        let root = tempfile::tempdir().expect("tempdir");
+        let reg = registry(&root);
+        let dir = dir_under(root.path(), "my-project");
+        let existed = reg.record_explicit(&dir, None).expect("record");
+        assert!(!existed, "a fresh registration reports new");
+        let recent = reg.recent();
+        assert_eq!(recent.len(), 1);
+        assert!(recent[0].explicit, "the registration is explicit");
+        assert_eq!(recent[0].title, None, "no title lands");
+        assert_eq!(recent[0].label(), "my-project", "the tail is the face");
+
+        let named = dir_under(root.path(), "alpha");
+        reg.record_explicit(&named, Some("Alpha")).expect("record");
+        let recent = reg.recent();
+        assert_eq!(recent.len(), 2);
+        assert_eq!(
+            recent[0].title.as_deref(),
+            Some("Alpha"),
+            "a non-blank title seats as the record's face"
+        );
+    }
+
+    #[test]
+    fn record_explicit_upgrades_an_existing_record_and_reports_it_existed() {
+        // Idempotent success (issue #1477): the same directory again is the
+        // LRU bump plus the one-way explicit upgrade -- the title never
+        // rewrites (ADR-0138 Decision 3), no second record forks, and the
+        // `existed` marker tells the two outcomes apart.
+        let root = tempfile::tempdir().expect("tempdir");
+        let reg = registry(&root);
+        let dir = dir_under(root.path(), "alpha");
+        reg.record_at(&dir, Some("Original"), false, 1_000)
+            .expect("seed an implicit titled record");
+        let existed = reg
+            .record_explicit(&dir, Some("Sneaky Rename"))
+            .expect("register again");
+        assert!(existed, "a known directory reports existed");
+        let recent = reg.recent();
+        assert_eq!(recent.len(), 1, "no fork");
+        assert_eq!(
+            recent[0].title.as_deref(),
+            Some("Original"),
+            "the title is identity and never rewrites"
+        );
+        assert!(recent[0].explicit, "the one-way upgrade lands");
+    }
+
+    #[test]
+    fn record_explicit_fails_the_caller_when_the_write_refuses() {
+        // Strict like the other explicit-user-action mounts: a refused
+        // write surfaces as Err, never a warn-and-continue.
+        let root = tempfile::tempdir().expect("tempdir");
+        std::fs::write(root.path().join(WORKSPACES_FILE_NAME), "{ not json").expect("corrupt");
+        let reg = registry(&root);
+        let dir = dir_under(root.path(), "alpha");
+        assert!(
+            reg.record_explicit(&dir, None).is_err(),
+            "a refused write surfaces as Err"
         );
     }
 

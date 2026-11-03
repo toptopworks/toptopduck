@@ -576,6 +576,7 @@ pub fn run() {
             commands::list_live_sessions,
             commands::list_workspaces,
             commands::create_workspace,
+            commands::register_workspace_directory,
             commands::rename_workspace,
             commands::remove_workspace,
             commands::list_workspace_datasets,
