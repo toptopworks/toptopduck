@@ -50,19 +50,19 @@ function describeError(e: unknown, intl: ReturnType<typeof useIntl>): string {
     switch (e.kind) {
       case "XlsxRejected":
         return intl.formatMessage({
-          id: "workspaceDatasets.error.xlsx",
+          id: "workspace.datasets.error.xlsx",
           defaultMessage:
             "xlsx is not supported on the shared face; convert to CSV/Parquet or use a session-private source",
         });
       case "LegacyExcel":
         return intl.formatMessage({
-          id: "workspaceDatasets.error.legacyExcel",
+          id: "workspace.datasets.error.legacyExcel",
           defaultMessage: "Legacy .xls is not supported; save as .xlsx or CSV",
         });
       case "UnsupportedFormat":
         return intl.formatMessage(
           {
-            id: "workspaceDatasets.error.unsupported",
+            id: "workspace.datasets.error.unsupported",
             defaultMessage: "Unsupported format: {format}",
           },
           { format: e.data },
@@ -70,14 +70,14 @@ function describeError(e: unknown, intl: ReturnType<typeof useIntl>): string {
       case "ManifestCorrupt":
         return intl.formatMessage(
           {
-            id: "workspaceDatasets.error.corrupt",
+            id: "workspace.datasets.error.corrupt",
             defaultMessage:
               "The workspace dataset manifest is corrupt (a copy was preserved); fix or remove datasets.json before editing",
           },
         );
       case "NotFound":
         return intl.formatMessage({
-          id: "workspaceDatasets.error.notFound",
+          id: "workspace.datasets.error.notFound",
           defaultMessage: "No shared dataset with that name",
         });
       case "Io":
@@ -143,7 +143,7 @@ export function WorkspaceDatasetsDialog({ workspace, onOpenChange }: WorkspaceDa
   const pickerFilters = [
     {
       name: intl.formatMessage({
-        id: "workspaceDatasets.fileFilter",
+        id: "workspace.datasets.fileFilter",
         defaultMessage: "Shared data files",
       }),
       extensions: SHARED_EXTENSIONS,
@@ -178,14 +178,14 @@ export function WorkspaceDatasetsDialog({ workspace, onOpenChange }: WorkspaceDa
         <DialogHeader>
           <DialogTitle>
             <FormattedMessage
-              id="workspaceDatasets.title"
+              id="workspace.datasets.title"
               defaultMessage="Shared datasets — {workspace}"
               values={{ workspace: workspace?.label ?? "" }}
             />
           </DialogTitle>
           <DialogDescription>
             <FormattedMessage
-              id="workspaceDatasets.description"
+              id="workspace.datasets.description"
               defaultMessage="Datasets shared by every session bound to this workspace; the first SQL mention attaches them automatically."
             />
           </DialogDescription>
@@ -194,7 +194,7 @@ export function WorkspaceDatasetsDialog({ workspace, onOpenChange }: WorkspaceDa
         <div className="flex justify-end">
           <Button variant="outline" size="sm" onClick={() => void pickAndAdd()}>
             <Upload className="h-4 w-4" aria-hidden />
-            <FormattedMessage id="workspaceDatasets.add" defaultMessage="Add dataset…" />
+            <FormattedMessage id="workspace.datasets.add" defaultMessage="Add dataset…" />
           </Button>
         </div>
 
@@ -221,7 +221,7 @@ export function WorkspaceDatasetsDialog({ workspace, onOpenChange }: WorkspaceDa
                   {d.file_missing && (
                     <span className="text-destructive ml-2 text-xs">
                       <FormattedMessage
-                        id="workspaceDatasets.missingFile"
+                        id="workspace.datasets.missingFile"
                         defaultMessage="(store file missing — re-add or replace)"
                       />
                     </span>
@@ -229,7 +229,7 @@ export function WorkspaceDatasetsDialog({ workspace, onOpenChange }: WorkspaceDa
                 </p>
                 <p className="text-muted-foreground truncate text-xs">
                   <FormattedMessage
-                    id="workspaceDatasets.rowMeta"
+                    id="workspace.datasets.rowMeta"
                     defaultMessage="{rows} rows · {cols} columns · {source}"
                     values={{
                       rows: d.row_count,
@@ -250,7 +250,7 @@ export function WorkspaceDatasetsDialog({ workspace, onOpenChange }: WorkspaceDa
                       })}
                   />
                   <FormattedMessage
-                    id="workspaceDatasets.sendSamples"
+                    id="workspace.datasets.sendSamples"
                     defaultMessage="send samples"
                   />
                 </label>
@@ -263,7 +263,7 @@ export function WorkspaceDatasetsDialog({ workspace, onOpenChange }: WorkspaceDa
                   }}
                 >
                   <RefreshCw className="h-4 w-4" aria-hidden />
-                  <FormattedMessage id="workspaceDatasets.replace" defaultMessage="Replace" />
+                  <FormattedMessage id="workspace.datasets.replace" defaultMessage="Replace" />
                 </Button>
                 {armedDelete === d.reference_name ? (
                   <Button
@@ -272,7 +272,7 @@ export function WorkspaceDatasetsDialog({ workspace, onOpenChange }: WorkspaceDa
                     onClick={() => remove.mutate(d.reference_name)}
                   >
                     <FormattedMessage
-                      id="workspaceDatasets.confirmDelete"
+                      id="workspace.datasets.confirmDelete"
                       defaultMessage="Confirm delete"
                     />
                   </Button>
@@ -286,7 +286,7 @@ export function WorkspaceDatasetsDialog({ workspace, onOpenChange }: WorkspaceDa
                     }}
                   >
                     <Trash2 className="h-4 w-4" aria-hidden />
-                    <FormattedMessage id="workspaceDatasets.delete" defaultMessage="Delete" />
+                    <FormattedMessage id="workspace.datasets.delete" defaultMessage="Delete" />
                   </Button>
                 )}
               </div>
@@ -296,7 +296,7 @@ export function WorkspaceDatasetsDialog({ workspace, onOpenChange }: WorkspaceDa
             <li className="text-muted-foreground flex items-center gap-2 p-3 text-sm">
               <FolderOpen className="h-4 w-4" aria-hidden />
               <FormattedMessage
-                id="workspaceDatasets.empty"
+                id="workspace.datasets.empty"
                 defaultMessage="No shared datasets yet."
               />
             </li>
