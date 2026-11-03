@@ -110,8 +110,8 @@ fn run_explore(
     // ADR-0141 D3/D7: the same shared-reference resolution the materialize
     // path runs ahead of its gateway door -- explore's first mention of a
     // shared name attaches it, and a re-mention validates against the
-    // manifest (a gone entry refuses here as stale, matching the materialize
-    // wording).
+    // manifest (a gone entry refuses here as stale, the same wording as
+    // explore's own stale-refusal arm below).
     deps.resolve_shared_refs(&sql).map_err(|e| match e {
         SharedRefError::Stale(s) => {
             format!("stale reference: `{s}` has been invalidated and may not anchor a new query")

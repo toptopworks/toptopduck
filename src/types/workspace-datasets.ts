@@ -1,6 +1,5 @@
 // Workspace shared dataset contracts (ADR-0141), mirroring the Rust
-// `workspace::datasets` shapes. Option fields are `| null` per the project's
-// no-skip_serializing_if convention, NOT optional.
+// `workspace::datasets` shapes.
 
 import type { ColumnSchema, DatasetPrivacy } from "./dataset";
 

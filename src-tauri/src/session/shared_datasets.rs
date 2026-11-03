@@ -309,6 +309,14 @@ pub(crate) fn resolve_refs(
                 // (retire_shared_source is the shared engine for both halves;
                 // a re-attach is a delete+add under one name.)
                 unmark(working_set, &name);
+                // D9: the re-attach lands a FRESH history event -- the recipe
+                // must record the fingerprint the session now serves, or a
+                // resume matches the stale triple and breaks replay.
+                attaches.pending.push(SharedAttachEvent {
+                    reference_name: name.clone(),
+                    entry_name: entry.reference_name.clone(),
+                    fingerprint: entry.fingerprint.clone(),
+                });
             }
             Some(_) => {} // fresh: nothing to do
         }
@@ -321,7 +329,6 @@ pub(crate) fn resolve_refs(
     //    reservation for one) that the working set does not already hold.
     let mut reference_list: Vec<&String> = refs.iter().collect();
     reference_list.sort(); // deterministic attach order
-    reference_list.dedup();
     for name in reference_list {
         if working_set.taken(name) {
             continue; // a private source or a attached shared source owns it
@@ -428,9 +435,12 @@ impl super::Session {
     }
 
     /// ADR-0141 D9: restore the recorded shared attaches at resume, before
-    /// replay. A fingerprint match re-attaches from the store (zero
-    /// conversion); a miss or a gone entry registers the 挂名 stale so the
-    /// replayed SQL refuses as a stale reference instead of an unknown name.
+    /// replay. The LAST recorded event per attach name is the truth (a
+    /// mid-session replace lands a fresh triple). A fingerprint match
+    /// re-attaches from the store (zero conversion); a miss, a gone entry,
+    /// or a failed re-attach registers the 挂名 stale so the replayed SQL
+    /// refuses as a stale reference instead of an unknown name or a
+    /// misleading DuckDB catalog error.
     /// Idempotent against the companion hit path (an already-attached 挂名
     /// only records its table entry).
     pub(super) fn restore_shared_attaches(
@@ -452,10 +462,28 @@ impl super::Session {
         };
         let entry_by_name = |n: &str| entries.iter().find(|e| e.reference_name == n);
         let snapshot_dir = self.snapshot_dir();
-        for event in history.iter().filter_map(|e| match e {
-            crate::persistence::recipe::RecipeEntry::SharedAttach(ev) => Some(ev),
-            _ => None,
-        }) {
+        let events: Vec<&SharedAttachEvent> = history
+            .iter()
+            .filter_map(|e| match e {
+                crate::persistence::recipe::RecipeEntry::SharedAttach(ev) => Some(ev),
+                _ => None,
+            })
+            .collect();
+        // The LAST event per attach name is the truth: a mid-session panel
+        // replace re-attaches under the same name and lands a fresh triple
+        // (the validation arm pushes one), so an earlier event's stale
+        // registration must not shadow the latest state.
+        let mut latest: Vec<&SharedAttachEvent> = Vec::new();
+        for event in events {
+            match latest
+                .iter()
+                .position(|e| e.reference_name == event.reference_name)
+            {
+                Some(i) => latest[i] = event,
+                None => latest.push(event),
+            }
+        }
+        for event in latest {
             self.shared_attaches.attaches.insert(
                 event.reference_name.clone(),
                 AttachRecord {
@@ -484,6 +512,22 @@ impl super::Session {
                             "shared attach {} restore failed: {detail}",
                             event.reference_name
                         );
+                        // D9 honesty: the triple must not vanish silently.
+                        // Register the 挂名 stale-anchored so the replayed
+                        // SQL refuses at the gate with the stale wording
+                        // instead of passing preflight and dying at DuckDB
+                        // execution under a misleading catalog error; a
+                        // panel re-add or replace revives the name.
+                        let anchor = StaleAnchor {
+                            reference_name: entry.reference_name.clone(),
+                            display_name: entry.reference_name.clone(),
+                            reason: StaleReason::Replaced,
+                        };
+                        let placeholder =
+                            attached_descriptor(&event.reference_name, entry, Some(anchor));
+                        let prev_active = self.working_set.active_name().map(str::to_string);
+                        self.working_set.register(placeholder);
+                        self.working_set.set_active_source(prev_active.as_deref());
                     }
                 }
                 None => {
@@ -682,6 +726,11 @@ mod tests {
             &mut attaches,
         )
         .expect("first resolve");
+        let v1 = working_set
+            .get("people")
+            .expect("attached")
+            .fingerprint
+            .clone();
 
         let v2 = sources.path().join("people_v2.csv");
         std::fs::write(&v2, "name,score\nAda,9\nLin,8\n").expect("write v2");
@@ -702,6 +751,17 @@ mod tests {
         assert!(descriptor.stale.is_none(), "the name stays live");
         let record = attaches.record("people").expect("record kept");
         assert_eq!(record.fingerprint, descriptor.fingerprint);
+        assert_ne!(record.fingerprint, v1, "the new content landed");
+        // The re-attach lands a fresh history event carrying the served
+        // fingerprint -- the resume triple must not stay at v1.
+        assert_eq!(
+            attaches.pending.len(),
+            2,
+            "the first attach and the re-attach each push"
+        );
+        let latest_event = attaches.pending.last().expect("two events");
+        assert_eq!(latest_event.reference_name, "people");
+        assert_eq!(latest_event.fingerprint, record.fingerprint);
     }
 
     /// D7 freeze: a panel replace mid-turn does NOT re-attach inside the
@@ -839,6 +899,19 @@ mod tests {
             Some(&attaches),
         );
         assert_eq!(name, "people_2", "private yields, shared keeps");
+        // The manifest occupancy stands on its own -- no attach reservation
+        // needed (pin: a candidate colliding with a manifest entry yields
+        // even when the attaches table is empty).
+        let manifest_only = deconflict_with_shared(
+            "people",
+            &WorkingSet::default(),
+            Some(workspace.path()),
+            None,
+        );
+        assert_eq!(
+            manifest_only, "people_2",
+            "manifest names occupy on their own"
+        );
         // Unbound: the occupancy is the working set alone (private face
         // unchanged, AC「私有面行为零变化」).
         let unbound = deconflict_with_shared("people", &working_set, None, None);
@@ -878,6 +951,153 @@ mod tests {
                 .any(|d| d.reference_name == "orders" && d.stale.is_some()),
             "a miss registers the name stale"
         );
+
+        // A LIVE entry under a different fingerprint (the panel replaced it
+        // while the session was closed) registers Replaced-stale -- it must
+        // not silently re-attach the new content under the stale triple.
+        let sales_src = tempfile::tempdir().expect("sales");
+        let sales = sales_src.path().join("sales.csv");
+        std::fs::write(&sales, "sku,n\nA,1\n").expect("write sales");
+        datasets::add(workspace.path(), &sales).expect("add sales");
+        let live_mismatch =
+            crate::persistence::recipe::RecipeEntry::SharedAttach(SharedAttachEvent {
+                reference_name: "sales".into(),
+                entry_name: "sales".into(),
+                fingerprint: "deadbeef".into(),
+            });
+        session.restore_shared_attaches(&[live_mismatch]);
+        let sales_list = session.list();
+        let sales_descriptor = sales_list
+            .iter()
+            .find(|d| d.reference_name == "sales")
+            .expect("sales registered");
+        let anchor = sales_descriptor
+            .stale
+            .as_ref()
+            .expect("stale, not attached");
+        assert_eq!(
+            anchor.reason,
+            StaleReason::Replaced,
+            "a live entry mismatching the fingerprint is Replaced, not Deleted"
+        );
+    }
+
+    /// D9: a mid-session panel replace lands a SECOND event under the same
+    /// 挂名; restore must take the latest triple -- the manifest's live
+    /// fingerprint re-attaches and the older event does not shadow it stale.
+    #[test]
+    fn restore_uses_the_latest_event_per_name() {
+        let (workspace, _tree) = ws();
+        let entry_v1 = add_people(workspace.path());
+        let sources = tempfile::tempdir().expect("sources");
+        let v2 = sources.path().join("people_v2.csv");
+        std::fs::write(&v2, "name,score\nAda,9\nLin,8\n").expect("write v2");
+        let entry_v2 = datasets::replace(workspace.path(), "people", &v2).expect("replace");
+        assert_ne!(entry_v1.fingerprint, entry_v2.fingerprint);
+        let mut session = crate::session::Session::with_provider(Box::new(
+            crate::provider::fake::FakeProvider::new(),
+        ))
+        .expect("session");
+        session.set_workspace(std::fs::canonicalize(workspace.path()).expect("canonical"));
+        let event = |fingerprint: String| {
+            crate::persistence::recipe::RecipeEntry::SharedAttach(SharedAttachEvent {
+                reference_name: "people".into(),
+                entry_name: "people".into(),
+                fingerprint,
+            })
+        };
+        session.restore_shared_attaches(&[
+            event(entry_v1.fingerprint),
+            event(entry_v2.fingerprint.clone()),
+        ]);
+        let list = session.list();
+        let descriptor = list
+            .iter()
+            .find(|d| d.reference_name == "people")
+            .expect("restored");
+        assert!(descriptor.stale.is_none(), "the latest event attaches");
+        assert_eq!(descriptor.fingerprint, entry_v2.fingerprint);
+    }
+
+    /// D3 card face: an un-attached manifest entry returns a card named by
+    /// its 挂名; once attached, the entry rides the working set (no card) --
+    /// the visible-and-queryable invariant's two halves.
+    #[test]
+    fn shared_cards_face_lists_unattached_and_drops_attached() {
+        let (workspace, _tree) = ws();
+        let entry = add_people(workspace.path());
+        let mut session = crate::session::Session::with_provider(Box::new(
+            crate::provider::fake::FakeProvider::new(),
+        ))
+        .expect("session");
+        session.set_workspace(std::fs::canonicalize(workspace.path()).expect("canonical"));
+        let cards = session.shared_cards();
+        assert_eq!(cards.len(), 1, "one un-attached entry, one card");
+        assert_eq!(cards[0].reference_name, "people");
+        assert!(
+            cards[0].sql_ref.contains("\"people\".data"),
+            "the card's SQL fragment names the attach: {}",
+            cards[0].sql_ref
+        );
+
+        session.restore_shared_attaches(&[crate::persistence::recipe::RecipeEntry::SharedAttach(
+            SharedAttachEvent {
+                reference_name: "people".into(),
+                entry_name: "people".into(),
+                fingerprint: entry.fingerprint,
+            },
+        )]);
+        let cards = session.shared_cards();
+        assert!(cards.is_empty(), "attached entries ride the working set");
+    }
+
+    /// D6 reserved 挂名: a card-time reservation (de-conflicted because a
+    /// private source squats the entry name) attaches on the SQL's first
+    /// mention of the reserved name -- the card the agent saw must answer.
+    #[test]
+    fn a_reserved_card_name_attaches_on_first_mention() {
+        let (workspace, tree) = ws();
+        let entry = add_people(workspace.path());
+        let mut working_set = WorkingSet::default();
+        working_set.register(DatasetDescriptor {
+            reference_name: "people".into(),
+            display_name: "people".into(),
+            source_path: String::new(),
+            columns: vec![],
+            row_count: 0,
+            sample: vec![],
+            fingerprint: String::new(),
+            rectify: RectifyProvenance::NotApplicable,
+            privacy: Default::default(),
+            stale: None,
+        });
+        let mut attaches = SharedAttaches::default();
+        // Card time: the manifest's people reserves people_2 under the
+        // private squat (the shared_cards flow).
+        let reserved = attaches.resolve_or_assign("people", &working_set);
+        assert_eq!(reserved, "people_2");
+
+        let engine = crate::session::engine::AdminEngine::materialized();
+        let mut source_files = HashMap::new();
+        let snapshots = tree.path().join("snapshots");
+        resolve_refs(
+            "SELECT * FROM \"people_2\".data",
+            &engine,
+            &mut source_files,
+            &mut working_set,
+            &snapshots,
+            workspace.path(),
+            &mut attaches,
+        )
+        .expect("the reserved name attaches");
+        let descriptor = working_set
+            .get("people_2")
+            .expect("attached under the reserved name");
+        assert!(descriptor.stale.is_none());
+        assert_eq!(descriptor.fingerprint, entry.fingerprint);
+        let record = attaches.record("people_2").expect("record landed");
+        assert_eq!(record.entry_name, "people");
+        assert_eq!(record.fingerprint, entry.fingerprint);
     }
 
     /// 挂名 stickiness: a private member squatting the entry name pushes the

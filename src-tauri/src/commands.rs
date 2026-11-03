@@ -622,14 +622,20 @@ pub async fn add_workspace_dataset(
 }
 
 /// Remove a shared dataset (ADR-0141 D7): the manifest drops the name at
-/// once; bound sessions keep their hard links until they end.
+/// once; bound sessions keep their hard links until they end. Runs off the
+/// async/UI thread -- the manifest mutation lock may be held by a converting
+/// add for minutes.
 #[tauri::command]
-pub fn remove_workspace_dataset(
+pub async fn remove_workspace_dataset(
     workspace: String,
     reference_name: String,
 ) -> Result<(), WorkspaceDatasetError> {
-    crate::workspace::datasets::remove(std::path::Path::new(&workspace), &reference_name)
-        .map_err(Into::into)
+    tauri::async_runtime::spawn_blocking(move || {
+        crate::workspace::datasets::remove(std::path::Path::new(&workspace), &reference_name)
+            .map_err(Into::into)
+    })
+    .await
+    .map_err(|e| WorkspaceDatasetError::Io(e.to_string()))?
 }
 
 /// Replace a shared dataset's content under the stable name (ADR-0141 D7).
@@ -653,19 +659,24 @@ pub async fn replace_workspace_dataset(
 }
 
 /// Update a shared dataset's privacy (ADR-0141 D10): a workspace-level asset
-/// attribute, effective for every bound session on its next turn.
+/// attribute, effective for every bound session on its next turn. Runs off
+/// the async/UI thread like the other mutators (the shared manifest lock).
 #[tauri::command]
-pub fn set_workspace_dataset_privacy(
+pub async fn set_workspace_dataset_privacy(
     workspace: String,
     reference_name: String,
     privacy: crate::model::DatasetPrivacy,
 ) -> Result<crate::workspace::DatasetEntry, WorkspaceDatasetError> {
-    crate::workspace::datasets::set_privacy(
-        std::path::Path::new(&workspace),
-        &reference_name,
-        privacy,
-    )
-    .map_err(Into::into)
+    tauri::async_runtime::spawn_blocking(move || {
+        crate::workspace::datasets::set_privacy(
+            std::path::Path::new(&workspace),
+            &reference_name,
+            privacy,
+        )
+        .map_err(Into::into)
+    })
+    .await
+    .map_err(|e| WorkspaceDatasetError::Io(e.to_string()))?
 }
 
 /// Close a session (ADR-0055): mark closing, fire cancel, and remove the entry

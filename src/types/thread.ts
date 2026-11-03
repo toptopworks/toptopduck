@@ -337,13 +337,26 @@ export interface SkillInvocation {
   content_hash: string;
 }
 
+// A workspace shared dataset's attach record (ADR-0141 D9): the attach name
+// SQL references, the manifest entry's own name (may diverge under
+// de-conflict), and the fingerprint at attach time. Crosses IPC but renders
+// no thread row -- the same no-row posture as the skill events.
+export interface SharedAttachEvent {
+  reference_name: string;
+  entry_name: string;
+  fingerprint: string;
+}
+
 // One entry of the unified conversation timeline (ADR-0040/0086): a Turn
-// (question + outcome), a source lifecycle event, OR a skill lifecycle event.
-// Adjacently-tagged (`{entry, data}`) so the frontend narrows on `entry`.
-// Mirrors the Rust ThreadEntry; the conversation() command returns
-// ThreadEntry[]. Only the Turn variant enters the LLM window -- the backend
-// filters source + skill events out before assembly.
+// (question + outcome), a source lifecycle event, a skill lifecycle event,
+// OR a shared-dataset attach event. Adjacently-tagged (`{entry, data}`) so
+// the frontend narrows on `entry`. Mirrors the Rust ThreadEntry; the
+// conversation() command returns ThreadEntry[]. Only the Turn variant
+// enters the LLM window -- the backend filters source + skill events out
+// before assembly. The SharedAttach variant renders no row either
+// (recipe-round-trip only; consumers narrow positively and skip it).
 export type ThreadEntry =
   | { entry: "Turn"; data: TurnRecord }
   | { entry: "Source"; data: SourceLifecycleEvent }
-  | { entry: "Skill"; data: SkillLifecycleEvent };
+  | { entry: "Skill"; data: SkillLifecycleEvent }
+  | { entry: "SharedAttach"; data: SharedAttachEvent };

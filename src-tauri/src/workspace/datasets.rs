@@ -123,17 +123,20 @@ impl From<LoadError> for StoreError {
     }
 }
 
-/// A materialization result: the derived snapshot plus whether the store
-/// already held this content (a hit performs zero conversion, ADR-0141 D2).
-#[derive(Debug)]
-pub struct Materialized {
-    pub snapshot: Snapshot,
-    pub hit: bool,
-}
-
-/// Serialize all manifest writes process-wide (ADR-0141 D2 "进程内串行写").
+/// Serializes manifest mutations process-wide (issue #1473: in-process
+/// serialized manifest writes). Held across each mutator's whole
+/// load-materialize-write cycle -- not just the write -- so concurrent
+/// panel operations (the multi-file picker fans every add out at once)
+/// cannot interleave their read-modify-write passes and lose entries.
 // One global lock; per-workspace locks if contention ever matters.
 static MANIFEST_WRITE_LOCK: Mutex<()> = Mutex::new(());
+
+/// The process-wide manifest mutation guard (see MANIFEST_WRITE_LOCK).
+fn manifest_lock() -> std::sync::MutexGuard<'static, ()> {
+    MANIFEST_WRITE_LOCK
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+}
 
 /// The state directory for a workspace root.
 fn state_dir(workspace: &Path) -> PathBuf {
@@ -181,29 +184,48 @@ pub fn load_entries(workspace: &Path) -> Result<Vec<DatasetEntry>, StoreError> {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
         Err(e) => return Err(StoreError::io(e)),
     };
-    match serde_json::from_slice::<Vec<DatasetEntry>>(&bytes) {
-        Ok(entries) => Ok(entries),
-        Err(detail) => {
-            let corrupt = path.with_extension("json.corrupt");
-            if let Err(e) = fs::copy(&path, &corrupt) {
-                log::warn!(
-                    target: "toptopduck::workspace_datasets",
-                    "corrupt manifest copy-aside failed for {}: {e}",
-                    path.display()
-                );
-            }
-            Err(StoreError::ManifestCorrupt {
-                detail: detail.to_string(),
-            })
+    let refuse = |detail: String| -> Result<Vec<DatasetEntry>, StoreError> {
+        let corrupt = path.with_extension("json.corrupt");
+        if let Err(e) = fs::copy(&path, &corrupt) {
+            log::warn!(
+                target: "toptopduck::workspace_datasets",
+                "corrupt manifest copy-aside failed for {}: {e}",
+                path.display()
+            );
+        }
+        Err(StoreError::ManifestCorrupt { detail })
+    };
+    let entries = match serde_json::from_slice::<Vec<DatasetEntry>>(&bytes) {
+        Ok(entries) => entries,
+        Err(detail) => return refuse(detail.to_string()),
+    };
+    // Semantic integrity, the same honest-refusal posture as a syntax
+    // failure: a fingerprint is a content key (never empty) and reference
+    // names are the workspace vocabulary (unique). The producer never
+    // writes either bad state; a hand-edited manifest gets the copy-aside
+    // refusal instead of silent first-wins reads downstream.
+    let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
+    for entry in &entries {
+        if entry.fingerprint.is_empty() {
+            return refuse(format!(
+                "entry `{}` has an empty fingerprint",
+                entry.reference_name
+            ));
+        }
+        if !seen.insert(entry.reference_name.as_str()) {
+            return refuse(format!(
+                "duplicate reference name `{}`",
+                entry.reference_name
+            ));
         }
     }
+    Ok(entries)
 }
 
-/// Write the manifest atomically under the process-wide serial lock.
+/// Write the manifest atomically. Callers hold the process-wide serial
+/// lock across their whole load-mutate-write cycle (see
+/// MANIFEST_WRITE_LOCK); this writes only.
 fn write_entries(workspace: &Path, entries: &[DatasetEntry]) -> Result<(), StoreError> {
-    let _guard = MANIFEST_WRITE_LOCK
-        .lock()
-        .unwrap_or_else(|p| p.into_inner());
     fs::create_dir_all(state_dir(workspace)).map_err(StoreError::io)?;
     save_atomic(&manifest_path(workspace), &entries).map_err(StoreError::io)
 }
@@ -222,15 +244,11 @@ fn reopen_read_only(workspace: &Path, dest: PathBuf) -> Result<Snapshot, StoreEr
 /// existing snapshot READ_ONLY and re-derives its shape (zero conversion); a
 /// miss copies in through the shared loader under a temp name and atomically
 /// renames (single physical file, no parallel writers -- ADR-0141 D2).
-pub fn materialize(workspace: &Path, src: &Path, reader: &str) -> Result<Materialized, StoreError> {
+pub fn materialize(workspace: &Path, src: &Path, reader: &str) -> Result<Snapshot, StoreError> {
     let key = sha256_file(src)?;
     let dest = store_file(workspace, &key);
     if dest.exists() {
-        let snapshot = reopen_read_only(workspace, dest)?;
-        return Ok(Materialized {
-            snapshot,
-            hit: true,
-        });
+        return reopen_read_only(workspace, dest);
     }
 
     fs::create_dir_all(store_dir(workspace)).map_err(StoreError::io)?;
@@ -239,22 +257,15 @@ pub fn materialize(workspace: &Path, src: &Path, reader: &str) -> Result<Materia
     // success the built file is renamed into its content-keyed name.
     let snap = loader::copy_in(src, &store_dir(workspace), &temp_stem, reader)?;
     match fs::rename(&snap.file_path, &dest) {
-        Ok(()) => Ok(Materialized {
-            snapshot: Snapshot {
-                file_path: dest,
-                ..snap
-            },
-            hit: false,
+        Ok(()) => Ok(Snapshot {
+            file_path: dest,
+            ..snap
         }),
         Err(_) if dest.exists() => {
             // Another writer landed the same key first (cross-process); the
             // store's file wins and the redundant temp is dropped.
             let _ = fs::remove_file(&snap.file_path);
-            let snapshot = reopen_read_only(workspace, dest)?;
-            Ok(Materialized {
-                snapshot,
-                hit: true,
-            })
+            reopen_read_only(workspace, dest)
         }
         Err(e) => {
             let _ = fs::remove_file(&snap.file_path);
@@ -285,6 +296,7 @@ fn deconflict(base: &str, entries: &[DatasetEntry]) -> String {
 /// manifest append). The store file lands BEFORE the manifest write
 /// (ADR-0141 D2's ordering).
 pub fn add(workspace: &Path, src: &Path) -> Result<DatasetEntry, StoreError> {
+    let _guard = manifest_lock();
     let reader = dispatch_reader(src)?;
     let mut entries = load_entries(workspace)?;
     let materialized = materialize(workspace, src, reader)?;
@@ -313,17 +325,17 @@ fn store_fingerprint(store_path: &Path) -> String {
 /// share the derivation).
 fn entry_from_materialized(
     reference_name: String,
-    materialized: Materialized,
+    snapshot: Snapshot,
     privacy: DatasetPrivacy,
     src: &Path,
 ) -> DatasetEntry {
-    let fingerprint = store_fingerprint(&materialized.snapshot.file_path);
+    let fingerprint = store_fingerprint(&snapshot.file_path);
     DatasetEntry {
         reference_name,
         fingerprint,
-        columns: materialized.snapshot.columns,
-        row_count: materialized.snapshot.row_count,
-        sample: materialized.snapshot.sample,
+        columns: snapshot.columns,
+        row_count: snapshot.row_count,
+        sample: snapshot.sample,
         privacy,
         source_path: src.to_string_lossy().into_owned(),
     }
@@ -338,6 +350,7 @@ pub fn replace(
     reference_name: &str,
     src: &Path,
 ) -> Result<DatasetEntry, StoreError> {
+    let _guard = manifest_lock();
     let reader = dispatch_reader(src)?;
     let mut entries = load_entries(workspace)?;
     let idx = entries
@@ -362,6 +375,7 @@ pub fn replace(
 /// the physical file is reclaimed only when no surviving entry shares it (a
 /// session mid-turn still holds its hard link, so an unlink is always safe).
 pub fn remove(workspace: &Path, reference_name: &str) -> Result<(), StoreError> {
+    let _guard = manifest_lock();
     let mut entries = load_entries(workspace)?;
     let idx = entries
         .iter()
@@ -381,6 +395,7 @@ pub fn set_privacy(
     reference_name: &str,
     privacy: DatasetPrivacy,
 ) -> Result<DatasetEntry, StoreError> {
+    let _guard = manifest_lock();
     let mut entries = load_entries(workspace)?;
     let idx = entries
         .iter()
@@ -538,12 +553,10 @@ mod tests {
         let sources = src_dir();
         let src = csv(sources.path(), "people.csv", PEOPLE);
         let first = materialize(workspace.path(), &src, "read_csv_auto").expect("first");
-        assert!(!first.hit);
         let second = materialize(workspace.path(), &src, "read_csv_auto").expect("second");
-        assert!(second.hit, "identical content must hit the store");
         // Shape derives identically on the hit path.
-        assert_eq!(second.snapshot.row_count, first.snapshot.row_count);
-        assert_eq!(second.snapshot.columns, first.snapshot.columns);
+        assert_eq!(second.row_count, first.row_count);
+        assert_eq!(second.columns, first.columns);
         let files = fs::read_dir(store_dir(workspace.path()))
             .expect("store dir")
             .count();
@@ -560,11 +573,51 @@ mod tests {
         let b = csv(sources.path(), "people_v2.csv", "name,score\nAda,9\n");
         let first = materialize(workspace.path(), &a, "read_csv_auto").expect("a");
         let second = materialize(workspace.path(), &b, "read_csv_auto").expect("b");
-        assert!(!second.hit);
-        assert_ne!(
-            first.snapshot.file_path, second.snapshot.file_path,
-            "content keys differ"
+        assert_ne!(first.file_path, second.file_path, "content keys differ");
+    }
+
+    /// Semantic corruption refuses like a syntax failure: a duplicate
+    /// reference name or an empty fingerprint copy-asides the manifest and
+    /// blocks every mutation (the hand-edited-manifest honesty posture).
+    #[test]
+    fn duplicate_names_and_empty_fingerprints_refuse_as_corrupt() {
+        let workspace = ws();
+        let sources = src_dir();
+        let src = csv(sources.path(), "people.csv", PEOPLE);
+        add(workspace.path(), &src).expect("add");
+        // Hand-edit a duplicate of the entry into the manifest.
+        let mut entries: Vec<DatasetEntry> = serde_json::from_str(
+            &fs::read_to_string(manifest_path(workspace.path())).expect("manifest"),
+        )
+        .expect("entries");
+        entries.push(entries[0].clone());
+        fs::write(
+            manifest_path(workspace.path()),
+            serde_json::to_string(&entries).expect("serialize"),
+        )
+        .expect("write");
+        assert!(matches!(
+            load_entries(workspace.path()).expect_err("duplicate refuses"),
+            StoreError::ManifestCorrupt { .. }
+        ));
+        assert!(
+            manifest_path(workspace.path())
+                .with_extension("json.corrupt")
+                .exists(),
+            "the corrupt copy-aside lands"
         );
+        // An empty fingerprint refuses the same way (the reservation
+        // sentinel must stay a session-side encoding, never a manifest one).
+        entries[1].fingerprint = String::new();
+        fs::write(
+            manifest_path(workspace.path()),
+            serde_json::to_string(&entries).expect("serialize"),
+        )
+        .expect("write");
+        assert!(matches!(
+            load_entries(workspace.path()).expect_err("empty fingerprint refuses"),
+            StoreError::ManifestCorrupt { .. }
+        ));
     }
 
     /// Adding the same content twice shares one physical file and

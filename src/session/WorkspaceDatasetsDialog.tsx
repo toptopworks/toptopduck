@@ -4,6 +4,7 @@
 // panel owns the manifest; bound sessions read it live on their next turn.
 
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { open as openPicker } from "@tauri-apps/plugin-dialog";
 import { FolderOpen, RefreshCw, Trash2, Upload } from "lucide-react";
 import { useCallback, useState } from "react";
 import { FormattedMessage, useIntl } from "react-intl";
@@ -98,8 +99,23 @@ export function WorkspaceDatasetsDialog({ workspace, onOpenChange }: WorkspaceDa
   const path = workspace?.path ?? "";
   const [error, setError] = useState<string | null>(null);
   // The delete confirm staging (the strong-confirm posture: the row's button
-  // arms, a second click fires; any other action disarms).
+  // arms, a second click fires; arming another row, a successful remove, or
+  // closing the dialog disarms).
   const [armedDelete, setArmedDelete] = useState<string | null>(null);
+
+  // Closing resets the panel's transient state: the error banner and the
+  // delete staging must not survive into the next open (possibly another
+  // workspace's panel -- the component stays mounted in the sidebar).
+  const handleOpenChange = useCallback(
+    (next: boolean) => {
+      if (!next) {
+        setError(null);
+        setArmedDelete(null);
+      }
+      onOpenChange(next);
+    },
+    [onOpenChange],
+  );
 
   const listing = useQuery({
     queryKey: datasetKey(path),
@@ -151,10 +167,12 @@ export function WorkspaceDatasetsDialog({ workspace, onOpenChange }: WorkspaceDa
   ];
 
   const pickAndAdd = async () => {
-    const { open: openPicker } = await import("@tauri-apps/plugin-dialog");
     const selected = await openPicker({
       multiple: true,
       filters: pickerFilters,
+    }).catch((e: unknown) => {
+      setError(describeError(e, intl));
+      return null;
     });
     const files = typeof selected === "string" ? [selected] : (selected ?? []);
     for (const file of files) add.mutate(file);
@@ -162,10 +180,12 @@ export function WorkspaceDatasetsDialog({ workspace, onOpenChange }: WorkspaceDa
 
   // Replace swaps one freshly picked file under the row's name.
   const pickAndReplace = async (name: string) => {
-    const { open: openPicker } = await import("@tauri-apps/plugin-dialog");
     const selected = await openPicker({
       multiple: false,
       filters: pickerFilters,
+    }).catch((e: unknown) => {
+      setError(describeError(e, intl));
+      return null;
     });
     if (typeof selected === "string") replace.mutate({ name, file: selected });
   };
@@ -173,7 +193,7 @@ export function WorkspaceDatasetsDialog({ workspace, onOpenChange }: WorkspaceDa
   const rows = listing.data ?? [];
 
   return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
+    <Dialog open={open} onOpenChange={handleOpenChange}>
       <DialogContent className="max-h-[80vh] overflow-y-auto sm:max-w-2xl">
         <DialogHeader>
           <DialogTitle>

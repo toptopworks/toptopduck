@@ -71,9 +71,9 @@ impl WorkingSet {
 
     /// Point the active-SOURCE pointer at an existing source (or clear it).
     /// Used by the shared-dataset attach to preserve the user's default target
-    /// -- a lazy attach is agent-triggered, not a user upload, and
-    /// must not hijack `active` (ADR-0141 leaves the private upload face as
-    /// the only active-mover).
+    /// -- a lazy attach is agent-triggered, not a user upload, and must not
+    /// hijack `active` (the private ingest faces -- upload and replace --
+    /// are the active-movers; attach restores, never moves).
     pub fn set_active_source(&mut self, name: Option<&str>) {
         self.active = name.map(str::to_string);
     }
@@ -596,9 +596,11 @@ impl WorkingSet {
 
     /// Invalidate a shared-attached source in place and cascade to its
     /// dependents (ADR-0141 D7): the workspace entry behind the attach is
-    /// gone, so the reference turns stale at its next SQL mention (the lazy,
-    /// at-reference-time analogue of a private source removal -- zero new
-    /// cross-session sync). Returns the cascade's reach for logging.
+    /// gone or replaced, so the reference turns stale at its next SQL
+    /// mention (the lazy, at-reference-time analogue of a private source
+    /// removal -- zero new cross-session sync; the replace path calls this
+    /// too, then un-marks the name itself). Returns the cascade's reach for
+    /// logging.
     pub fn retire_shared_source(
         &mut self,
         reference_name: &str,
