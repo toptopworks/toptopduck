@@ -361,7 +361,7 @@ export function GeneralSection({
             min={1}
             aria-label={intl.formatMessage({
               id: "settings.general.tunables.resultCountCap",
-              defaultMessage: "Result count cap",
+              defaultMessage: "Data result cap",
             })}
             value={tunablesDraft.result_count_cap}
             onChange={(e) =>

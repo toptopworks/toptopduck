@@ -166,6 +166,20 @@ export async function replaceWorkspaceDataset(
   });
 }
 
+// Rename a shared dataset's display label (ADR-0037's dual-name scheme on
+// the shared face): the reference name and the resume triple are untouched.
+export async function renameWorkspaceDataset(
+  workspace: string,
+  referenceName: string,
+  newDisplay: string,
+): Promise<WorkspaceDatasetEntry> {
+  return invoke<WorkspaceDatasetEntry>("rename_workspace_dataset", {
+    workspace,
+    referenceName,
+    newDisplay,
+  });
+}
+
 // Update a shared dataset's privacy -- a workspace-level asset attribute,
 // effective for every bound session on its next turn.
 export async function setWorkspaceDatasetPrivacy(

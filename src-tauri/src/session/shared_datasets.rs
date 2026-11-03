@@ -207,9 +207,10 @@ fn attached_descriptor(
 ) -> DatasetDescriptor {
     DatasetDescriptor {
         reference_name: name.to_string(),
-        // The readable label is the manifest entry's own name -- the workspace
-        // vocabulary, stable across sessions even when the 挂名 de-conflicted.
-        display_name: entry.reference_name.clone(),
+        // The readable label is the manifest entry's display label -- the
+        // user-renamable name, stable across sessions even when the 挂名
+        // de-conflicted.
+        display_name: entry.display_name.clone(),
         source_path: entry.source_path.clone(),
         columns: entry.columns.clone(),
         row_count: entry.row_count,
@@ -550,6 +551,7 @@ impl super::Session {
                             // recorded identity fields.
                             &DatasetEntry {
                                 reference_name: event.entry_name.clone(),
+                                display_name: event.entry_name.clone(),
                                 fingerprint: event.fingerprint.clone(),
                                 columns: Vec::new(),
                                 row_count: 0,

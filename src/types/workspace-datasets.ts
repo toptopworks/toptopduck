@@ -7,6 +7,9 @@ import type { ColumnSchema, DatasetPrivacy } from "./dataset";
 // and the session faces read.
 export interface WorkspaceDatasetEntry {
   reference_name: string;
+  // The user-renamable display label (ADR-0037's dual-name scheme on the
+  // shared face): defaults to the reference name; rename touches only this.
+  display_name: string;
   // The SHA256 of the original source bytes -- the store key (NOT the
   // derived table fingerprint a working-set descriptor carries).
   fingerprint: string;
@@ -31,6 +34,8 @@ export type WorkspaceDatasetError =
   | { kind: "UnsupportedFormat"; data: string }
   | { kind: "ManifestCorrupt"; data: string }
   | { kind: "NotFound" }
+  | { kind: "InvalidLabel" }
+  | { kind: "DisplayTaken"; data: string }
   | { kind: "Io"; data: string };
 
 // L1 narrowing of an unknown IPC reject to a WorkspaceDatasetError (the
@@ -43,9 +48,11 @@ export function isWorkspaceDatasetError(e: unknown): e is WorkspaceDatasetError 
     case "XlsxRejected":
     case "LegacyExcel":
     case "NotFound":
+    case "InvalidLabel":
       return true;
     case "UnsupportedFormat":
     case "ManifestCorrupt":
+    case "DisplayTaken":
     case "Io":
       return typeof (e as { data?: unknown }).data === "string";
     default:

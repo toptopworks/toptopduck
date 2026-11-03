@@ -38,6 +38,14 @@ const TEMP_PREFIX: &str = ".tmp_";
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct DatasetEntry {
     pub reference_name: String,
+    /// Display label (ADR-0037's dual-name scheme on the shared face): the
+    /// user-renamable label the panel shows. Defaults to the reference name
+    /// on add; rename touches only this field, so the reference name stays
+    /// the SQL / attach / injection anchor. Old manifests without the field
+    /// deserialize empty and fall back to the reference name in
+    /// [`load_entries`].
+    #[serde(default)]
+    pub display_name: String,
     pub fingerprint: String,
     pub columns: Vec<ColumnSchema>,
     pub row_count: u64,
@@ -75,6 +83,12 @@ pub enum StoreError {
         detail: String,
     },
     NotFound,
+    /// A rename arrived with a blank display label (the private
+    /// rename_display scheme: trimmed, then refused).
+    InvalidLabel,
+    /// The rename's label is already shown by another entry (display-layer
+    /// uniqueness).
+    DisplayTaken(String),
     Io {
         detail: String,
     },
@@ -104,7 +118,11 @@ impl std::fmt::Display for StoreError {
             StoreError::ManifestCorrupt { detail } => {
                 write!(f, "workspace dataset manifest is corrupt (copy preserved): {detail}")
             }
-            StoreError::NotFound => write!(f, "no shared dataset with that reference name"),
+            StoreError::NotFound => write!(f, "no dataset with that reference name"),
+            StoreError::InvalidLabel => write!(f, "a display name may not be blank"),
+            StoreError::DisplayTaken(label) => {
+                write!(f, "display name `{label}` is already taken")
+            }
             StoreError::Io { detail } => write!(f, "{detail}"),
         }
     }
@@ -195,10 +213,18 @@ pub fn load_entries(workspace: &Path) -> Result<Vec<DatasetEntry>, StoreError> {
         }
         Err(StoreError::ManifestCorrupt { detail })
     };
-    let entries = match serde_json::from_slice::<Vec<DatasetEntry>>(&bytes) {
+    let mut entries = match serde_json::from_slice::<Vec<DatasetEntry>>(&bytes) {
         Ok(entries) => entries,
         Err(detail) => return refuse(detail.to_string()),
     };
+    // Old manifests predate the display label: an absent field deserializes
+    // empty and falls back to the reference name here, so every read sees a
+    // real label and the next manifest write lands the field.
+    for entry in &mut entries {
+        if entry.display_name.is_empty() {
+            entry.display_name = entry.reference_name.clone();
+        }
+    }
     // Semantic integrity, the same honest-refusal posture as a syntax
     // failure: a fingerprint is a content key (never empty) and reference
     // names are the workspace vocabulary (unique). The producer never
@@ -304,7 +330,13 @@ pub fn add(workspace: &Path, src: &Path) -> Result<DatasetEntry, StoreError> {
         &ingest::derive_reference_name(src).unwrap_or_else(|| "dataset".to_string()),
         &entries,
     );
-    let entry = entry_from_materialized(name, materialized, DatasetPrivacy::default(), src);
+    let entry = entry_from_materialized(
+        name.clone(),
+        name,
+        materialized,
+        DatasetPrivacy::default(),
+        src,
+    );
     entries.push(entry.clone());
     write_entries(workspace, &entries)?;
     Ok(entry)
@@ -325,6 +357,7 @@ fn store_fingerprint(store_path: &Path) -> String {
 /// share the derivation).
 fn entry_from_materialized(
     reference_name: String,
+    display_name: String,
     snapshot: Snapshot,
     privacy: DatasetPrivacy,
     src: &Path,
@@ -332,6 +365,7 @@ fn entry_from_materialized(
     let fingerprint = store_fingerprint(&snapshot.file_path);
     DatasetEntry {
         reference_name,
+        display_name,
         fingerprint,
         columns: snapshot.columns,
         row_count: snapshot.row_count,
@@ -361,6 +395,9 @@ pub fn replace(
     let old_fingerprint = entries[idx].fingerprint.clone();
     let entry = entry_from_materialized(
         reference_name.to_string(),
+        // The display label survives a content swap (the rename outlives
+        // replace, same as the private face).
+        entries[idx].display_name.clone(),
         materialized,
         entries[idx].privacy.clone(),
         src,
@@ -411,6 +448,42 @@ pub fn set_privacy(
         type_only_columns: cols,
         ..privacy
     };
+    let entry = entries[idx].clone();
+    write_entries(workspace, &entries)?;
+    Ok(entry)
+}
+
+/// Rename an entry's display label (ADR-0037's dual-name scheme on the
+/// shared face): changes only the display name, never the reference name --
+/// SQL references, the resume triple and the injection card are untouched.
+/// The label is trimmed; a blank result refuses. Uniqueness is enforced
+/// against OTHER entries' labels only -- a no-op rename to the entry's own
+/// current label is allowed.
+pub fn rename(
+    workspace: &Path,
+    reference_name: &str,
+    new_display: &str,
+) -> Result<DatasetEntry, StoreError> {
+    let _guard = manifest_lock();
+    let mut entries = load_entries(workspace)?;
+    let idx = entries
+        .iter()
+        .position(|e| e.reference_name == reference_name)
+        .ok_or(StoreError::NotFound)?;
+    // Trim before any check: surrounding whitespace must not perturb
+    // display-layer uniqueness, and a blank label is rejected.
+    let label = new_display.trim();
+    if label.is_empty() {
+        return Err(StoreError::InvalidLabel);
+    }
+    let taken_by_other = entries
+        .iter()
+        .enumerate()
+        .any(|(i, e)| i != idx && e.display_name == label);
+    if taken_by_other {
+        return Err(StoreError::DisplayTaken(label.to_string()));
+    }
+    entries[idx].display_name = label.to_string();
     let entry = entries[idx].clone();
     write_entries(workspace, &entries)?;
     Ok(entry)
@@ -772,6 +845,126 @@ mod tests {
         let after = list(workspace.path()).expect("list");
         assert_eq!(after.len(), 1, "entry stays visible");
         assert!(after[0].file_missing, "missing file is flagged");
+    }
+
+    /// add pins the fresh entry's display label to the reference name
+    /// (the dual-name default), and the label lands on disk.
+    #[test]
+    fn add_defaults_display_name_to_reference_name() {
+        let workspace = ws();
+        let sources = src_dir();
+        let src = csv(sources.path(), "people.csv", PEOPLE);
+        let entry = add(workspace.path(), &src).expect("add");
+        assert_eq!(entry.display_name, "people");
+        let manifest = fs::read_to_string(manifest_path(workspace.path())).expect("manifest");
+        assert!(manifest.contains("\"display_name\": \"people\""));
+    }
+
+    /// rename changes only the display label (ADR-0037's dual-name scheme on
+    /// the shared face): the reference name, fingerprint and privacy stay
+    /// untouched, and the new label lands on disk.
+    #[test]
+    fn rename_changes_only_label_not_reference() {
+        let workspace = ws();
+        let sources = src_dir();
+        let src = csv(sources.path(), "people.csv", PEOPLE);
+        let original = add(workspace.path(), &src).expect("add");
+        let renamed = rename(workspace.path(), "people", "Folks").expect("rename");
+        assert_eq!(renamed.display_name, "Folks");
+        assert_eq!(renamed.reference_name, "people");
+        assert_eq!(renamed.fingerprint, original.fingerprint);
+        assert_eq!(renamed.privacy, original.privacy);
+        let reloaded = load_entries(workspace.path()).expect("reload");
+        assert_eq!(reloaded[0].display_name, "Folks", "label persisted");
+    }
+
+    /// rename rejects a blank label, trims surrounding whitespace, and a
+    /// rename to the entry's own current label is a no-op (the private
+    /// rename_display scheme).
+    #[test]
+    fn rename_rejects_blank_trims_and_allows_own_label() {
+        let workspace = ws();
+        let sources = src_dir();
+        let src = csv(sources.path(), "people.csv", PEOPLE);
+        add(workspace.path(), &src).expect("add");
+        assert_eq!(
+            rename(workspace.path(), "people", "   "),
+            Err(StoreError::InvalidLabel)
+        );
+        let trimmed = rename(workspace.path(), "people", "  Folks  ").expect("trimmed");
+        assert_eq!(trimmed.display_name, "Folks");
+        let own = rename(workspace.path(), "people", "Folks").expect("own label");
+        assert_eq!(own.display_name, "Folks");
+    }
+
+    /// Display-layer uniqueness: a label taken by ANOTHER entry refuses and
+    /// nothing lands; an unknown reference name is an honest NotFound.
+    #[test]
+    fn rename_refuses_taken_label_and_unknown_name() {
+        let workspace = ws();
+        let sources = src_dir();
+        let src = csv(sources.path(), "people.csv", PEOPLE);
+        add(workspace.path(), &src).expect("add a");
+        add(workspace.path(), &src).expect("add b");
+        assert_eq!(
+            rename(workspace.path(), "people", "people_2"),
+            Err(StoreError::DisplayTaken("people_2".into()))
+        );
+        let reloaded = load_entries(workspace.path()).expect("reload");
+        assert!(
+            reloaded.iter().all(|e| e.display_name == e.reference_name),
+            "the refused rename landed nothing"
+        );
+        assert_eq!(
+            rename(workspace.path(), "ghost", "Any"),
+            Err(StoreError::NotFound)
+        );
+    }
+
+    /// replace preserves the display label -- a rename survives a content
+    /// swap (the private face's replace semantics).
+    #[test]
+    fn replace_preserves_display_name() {
+        let workspace = ws();
+        let sources = src_dir();
+        add(workspace.path(), &csv(sources.path(), "people.csv", PEOPLE)).expect("add");
+        rename(workspace.path(), "people", "Folks").expect("rename");
+        let next = csv(
+            sources.path(),
+            "people_v2.csv",
+            "name,score\nAda,9\nLin,8\n",
+        );
+        let replaced = replace(workspace.path(), "people", &next).expect("replace");
+        assert_eq!(replaced.display_name, "Folks", "label survives the swap");
+        assert_eq!(replaced.reference_name, "people");
+    }
+
+    /// A manifest written before the display label existed loads with the
+    /// label falling back to the reference name, and the next manifest write
+    /// lands the field (the old-manifest upgrade posture).
+    #[test]
+    fn old_manifest_without_display_name_falls_back_to_reference_name() {
+        let workspace = ws();
+        let sources = src_dir();
+        let src = csv(sources.path(), "people.csv", PEOPLE);
+        add(workspace.path(), &src).expect("add");
+        let fingerprint = load_entries(workspace.path()).expect("load")[0]
+            .fingerprint
+            .clone();
+        // Hand-write a pre-field manifest: no display_name anywhere.
+        let raw = format!(
+            "[{{\"reference_name\":\"people\",\"fingerprint\":\"{fingerprint}\",\"columns\":[],\"row_count\":2,\"sample\":[],\"source_path\":\"x\"}}]"
+        );
+        fs::write(manifest_path(workspace.path()), raw).expect("write old manifest");
+        let loaded = load_entries(workspace.path()).expect("load old");
+        assert_eq!(loaded[0].display_name, "people", "label falls back");
+        // The next write persists the recovered label.
+        set_privacy(workspace.path(), "people", DatasetPrivacy::default()).expect("write");
+        let manifest = fs::read_to_string(manifest_path(workspace.path())).expect("manifest");
+        assert!(
+            manifest.contains("\"display_name\": \"people\""),
+            "{manifest}"
+        );
     }
 
     /// xlsx is refused on the shared face (ADR-0141 D11); .xls and unknown
