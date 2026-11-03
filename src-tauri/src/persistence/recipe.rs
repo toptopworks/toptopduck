@@ -229,7 +229,8 @@ pub enum RecipeEntry {
     /// timeline's visual species are turns and source events only).
     Skill(SkillLifecycleEvent),
     /// A workspace shared-dataset attach (ADR-0141 D9): the 挂名 / entry
-    /// name / fingerprint triple resume restores mounts from, BEFORE replay.
+    /// name / fingerprint triple resume restores the attaches from, BEFORE
+    /// replay.
     /// Isomorphic to [`Self::Skill`]'s persistence posture -- a first-class
     /// history slot, never a turn, no rendered thread row.
     SharedAttach(crate::model::SharedAttachEvent),

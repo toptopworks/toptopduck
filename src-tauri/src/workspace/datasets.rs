@@ -132,7 +132,7 @@ pub struct Materialized {
 }
 
 /// Serialize all manifest writes process-wide (ADR-0141 D2 "进程内串行写").
-// ponytail: one global lock; per-workspace locks if contention ever matters.
+// One global lock; per-workspace locks if contention ever matters.
 static MANIFEST_WRITE_LOCK: Mutex<()> = Mutex::new(());
 
 /// The state directory for a workspace root.
@@ -208,6 +208,16 @@ fn write_entries(workspace: &Path, entries: &[DatasetEntry]) -> Result<(), Store
     save_atomic(&manifest_path(workspace), &entries).map_err(StoreError::io)
 }
 
+/// Re-open a landed store file READ_ONLY and re-derive its shape (the
+/// zero-conversion hit path, ADR-0141 D2).
+fn reopen_read_only(workspace: &Path, dest: PathBuf) -> Result<Snapshot, StoreError> {
+    let config = Config::default()
+        .access_mode(AccessMode::ReadOnly)
+        .map_err(StoreError::io)?;
+    let conn = Connection::open_with_flags(&dest, config).map_err(StoreError::io)?;
+    Snapshot::from_connection(&conn, dest, &store_dir(workspace)).map_err(StoreError::from)
+}
+
 /// Materialize `src` into the store under its content key: a hit opens the
 /// existing snapshot READ_ONLY and re-derives its shape (zero conversion); a
 /// miss copies in through the shared loader under a temp name and atomically
@@ -216,12 +226,7 @@ pub fn materialize(workspace: &Path, src: &Path, reader: &str) -> Result<Materia
     let key = sha256_file(src)?;
     let dest = store_file(workspace, &key);
     if dest.exists() {
-        let config = Config::default()
-            .access_mode(AccessMode::ReadOnly)
-            .map_err(StoreError::io)?;
-        let conn = Connection::open_with_flags(&dest, config).map_err(StoreError::io)?;
-        let snapshot = Snapshot::from_connection(&conn, dest, &store_dir(workspace))
-            .map_err(StoreError::from)?;
+        let snapshot = reopen_read_only(workspace, dest)?;
         return Ok(Materialized {
             snapshot,
             hit: true,
@@ -245,12 +250,7 @@ pub fn materialize(workspace: &Path, src: &Path, reader: &str) -> Result<Materia
             // Another writer landed the same key first (cross-process); the
             // store's file wins and the redundant temp is dropped.
             let _ = fs::remove_file(&snap.file_path);
-            let config = Config::default()
-                .access_mode(AccessMode::ReadOnly)
-                .map_err(StoreError::io)?;
-            let conn = Connection::open_with_flags(&dest, config).map_err(StoreError::io)?;
-            let snapshot = Snapshot::from_connection(&conn, dest, &store_dir(workspace))
-                .map_err(StoreError::from)?;
+            let snapshot = reopen_read_only(workspace, dest)?;
             Ok(Materialized {
                 snapshot,
                 hit: true,
@@ -292,15 +292,7 @@ pub fn add(workspace: &Path, src: &Path) -> Result<DatasetEntry, StoreError> {
         &ingest::derive_reference_name(src).unwrap_or_else(|| "dataset".to_string()),
         &entries,
     );
-    let entry = DatasetEntry {
-        reference_name: name,
-        fingerprint: store_fingerprint(&materialized.snapshot.file_path),
-        columns: materialized.snapshot.columns,
-        row_count: materialized.snapshot.row_count,
-        sample: materialized.snapshot.sample,
-        privacy: DatasetPrivacy::default(),
-        source_path: src.to_string_lossy().into_owned(),
-    };
+    let entry = entry_from_materialized(name, materialized, DatasetPrivacy::default(), src);
     entries.push(entry.clone());
     write_entries(workspace, &entries)?;
     Ok(entry)
@@ -314,6 +306,27 @@ fn store_fingerprint(store_path: &Path) -> String {
         .and_then(|s| s.to_str())
         .unwrap_or_default()
         .to_string()
+}
+
+/// An entry from a fresh materialization: shape facts from the snapshot, the
+/// content key recovered from the store file name (the add and replace faces
+/// share the derivation).
+fn entry_from_materialized(
+    reference_name: String,
+    materialized: Materialized,
+    privacy: DatasetPrivacy,
+    src: &Path,
+) -> DatasetEntry {
+    let fingerprint = store_fingerprint(&materialized.snapshot.file_path);
+    DatasetEntry {
+        reference_name,
+        fingerprint,
+        columns: materialized.snapshot.columns,
+        row_count: materialized.snapshot.row_count,
+        sample: materialized.snapshot.sample,
+        privacy,
+        source_path: src.to_string_lossy().into_owned(),
+    }
 }
 
 /// Replace an entry's content under the same reference name (ADR-0141 D7):
@@ -333,15 +346,12 @@ pub fn replace(
         .ok_or(StoreError::NotFound)?;
     let materialized = materialize(workspace, src, reader)?;
     let old_fingerprint = entries[idx].fingerprint.clone();
-    let entry = DatasetEntry {
-        reference_name: reference_name.to_string(),
-        fingerprint: store_fingerprint(&materialized.snapshot.file_path),
-        columns: materialized.snapshot.columns,
-        row_count: materialized.snapshot.row_count,
-        sample: materialized.snapshot.sample,
-        privacy: entries[idx].privacy.clone(),
-        source_path: src.to_string_lossy().into_owned(),
-    };
+    let entry = entry_from_materialized(
+        reference_name.to_string(),
+        materialized,
+        entries[idx].privacy.clone(),
+        src,
+    );
     entries[idx] = entry.clone();
     write_entries(workspace, &entries)?;
     reclaim_if_unreferenced(workspace, &old_fingerprint, &entries);

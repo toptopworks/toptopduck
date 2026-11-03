@@ -1,7 +1,7 @@
 //! The session-side face of the workspace shared-dataset store (ADR-0141):
 //! the sticky attach table (挂名), the lazy first-reference attach, the
-//! at-reference-time fingerprint validation (re-attach / retire), and the
-//! resume restore. The session NEVER writes the store or the manifest from
+//! first-mention-per-turn fingerprint validation (re-attach / retire,
+//! frozen within the turn -- D7), and the resume restore. The session NEVER writes the store or the manifest from
 //! here -- this module only links (`hard_link`, copy fallback) + attaches
 //! READ_ONLY + registers, the exact posture of a private ingest with the
 //! store standing in for the source file.
@@ -50,12 +50,23 @@ pub(crate) struct SharedAttaches {
     /// dispatch path cannot touch the timeline directly; the turn's record
     /// step flushes these beside the turn entry).
     pending: Vec<SharedAttachEvent>,
+    /// Names whose fingerprints were already checked this turn (D7: a turn
+    /// serves the world of each name's first mention; mid-turn manifest
+    /// changes stay invisible until the next turn's first mention).
+    validated: HashSet<String>,
 }
 
 impl SharedAttaches {
     /// Events landed since the last drain (the settle step consumes them).
     pub(crate) fn take_pending_events(&mut self) -> Vec<SharedAttachEvent> {
         std::mem::take(&mut self.pending)
+    }
+
+    /// ADR-0141 D7 turn boundary: thaw the per-turn validation cache so the
+    /// next turn's first mention of each 挂名 re-checks the manifest (a
+    /// replace re-attaches, a gone entry retires + cascades as stale).
+    pub(crate) fn advance_turn(&mut self) {
+        self.validated.clear();
     }
 
     /// The record behind a 挂名, if attached (or pre-assigned).
@@ -211,11 +222,13 @@ fn attached_descriptor(
 }
 
 /// Resolve the SQL's shared references at dispatch time (ADR-0141 D3/D7),
-/// BEFORE the gateway door: validate every referenced attach against the
-/// manifest (a fingerprint change re_attaches the new content; a gone entry
-/// retires the name + cascade and refuses as stale), then lazily attach every
-/// first-mentioned shared name. Zero new synchronization -- all checks ride
-/// the reference itself.
+/// BEFORE the gateway door: validate each referenced attach at its first
+/// mention of the turn (a fingerprint change re_attaches the new content; a
+/// gone entry retires the name + cascade and refuses as stale), then lazily
+/// attach every first-mentioned shared name. Mid-turn manifest changes stay
+/// invisible to the running turn (D7: the hard link keeps the old physical
+/// file answerable; the next turn's first mention picks up the change).
+/// Zero new synchronization -- all checks ride the reference itself.
 pub(crate) fn resolve_refs(
     sql: &str,
     engine: &AdminEngine,
@@ -243,6 +256,7 @@ pub(crate) fn resolve_refs(
             attaches
                 .record(r)
                 .is_some_and(|rec| !rec.fingerprint.is_empty())
+                && !attaches.validated.contains(*r)
         })
         .cloned()
         .collect();
@@ -298,6 +312,9 @@ pub(crate) fn resolve_refs(
             }
             Some(_) => {} // fresh: nothing to do
         }
+        // First mention this turn: the check above (or the re-attach it
+        // performed) is this turn's truth -- later mentions skip it (D7).
+        attaches.validated.insert(name);
     }
 
     // 2) Lazy attach: a reference matching a manifest entry (or a card-time
@@ -335,6 +352,9 @@ pub(crate) fn resolve_refs(
                 fingerprint: entry.fingerprint.clone(),
             },
         );
+        // The attach read the manifest just now: this turn's mentions of the
+        // name are settled (D7 freeze).
+        attaches.validated.insert(name.clone());
         attaches.pending.push(SharedAttachEvent {
             reference_name: name.clone(),
             entry_name: entry.reference_name.clone(),
@@ -599,8 +619,9 @@ mod tests {
         assert!(attaches.take_pending_events().is_empty());
     }
 
-    /// A workspace delete after attach retires the name: the next reference
-    /// refuses as stale and the working-set member carries the anchor.
+    /// A workspace delete after attach retires the name: the next TURN's
+    /// reference refuses as stale and the working-set member carries the
+    /// anchor.
     #[test]
     fn deleted_entry_refuses_as_stale() {
         let (workspace, tree) = ws();
@@ -622,6 +643,7 @@ mod tests {
         .expect("first resolve");
 
         datasets::remove(workspace.path(), "people").expect("remove");
+        attaches.advance_turn(); // the delete lands between turns (D7)
         let err = resolve_refs(
             "SELECT * FROM \"people\".data",
             &engine,
@@ -636,8 +658,8 @@ mod tests {
         assert!(working_set.is_stale("people"), "the attach turned stale");
     }
 
-    /// A workspace replace after attach re_attaches on the next reference: the
-    /// name stays live, the descriptor follows the new content.
+    /// A workspace replace after attach re_attaches on the next TURN's first
+    /// reference: the name stays live, the descriptor follows the new content.
     #[test]
     fn replaced_entry_re_attaches_under_the_same_name() {
         let (workspace, tree) = ws();
@@ -664,6 +686,7 @@ mod tests {
         let v2 = sources.path().join("people_v2.csv");
         std::fs::write(&v2, "name,score\nAda,9\nLin,8\n").expect("write v2");
         datasets::replace(workspace.path(), "people", &v2).expect("replace");
+        attaches.advance_turn(); // the swap lands between turns (D7)
 
         resolve_refs(
             "SELECT * FROM \"people\".data",
@@ -679,6 +702,123 @@ mod tests {
         assert!(descriptor.stale.is_none(), "the name stays live");
         let record = attaches.record("people").expect("record kept");
         assert_eq!(record.fingerprint, descriptor.fingerprint);
+    }
+
+    /// D7 freeze: a panel replace mid-turn does NOT re-attach inside the
+    /// running turn -- the same turn's later mentions keep the first
+    /// mention's world (the hard link holds the old physical file); the next
+    /// turn's first mention picks up the new content.
+    #[test]
+    fn mid_turn_replace_keeps_the_turns_world() {
+        let (workspace, tree) = ws();
+        let sources = tempfile::tempdir().expect("sources");
+        let src = sources.path().join("people.csv");
+        std::fs::write(&src, "name,score\nAda,9\n").expect("write v1");
+        add_people(workspace.path());
+        let mut working_set = WorkingSet::default();
+        let engine = crate::session::engine::AdminEngine::materialized();
+        let mut source_files = HashMap::new();
+        let mut attaches = SharedAttaches::default();
+        let snapshots = tree.path().join("snapshots");
+        resolve_refs(
+            "SELECT * FROM \"people\".data",
+            &engine,
+            &mut source_files,
+            &mut working_set,
+            &snapshots,
+            workspace.path(),
+            &mut attaches,
+        )
+        .expect("first resolve");
+        let before = working_set
+            .get("people")
+            .expect("attached")
+            .fingerprint
+            .clone();
+
+        let v2 = sources.path().join("people_v2.csv");
+        std::fs::write(&v2, "name,score\nAda,9\nLin,8\n").expect("write v2");
+        datasets::replace(workspace.path(), "people", &v2).expect("replace");
+
+        resolve_refs(
+            "SELECT * FROM \"people\".data",
+            &engine,
+            &mut source_files,
+            &mut working_set,
+            &snapshots,
+            workspace.path(),
+            &mut attaches,
+        )
+        .expect("same-turn resolve");
+        let held = working_set.get("people").expect("still attached");
+        assert_eq!(held.fingerprint, before, "the turn keeps its world");
+
+        attaches.advance_turn();
+        resolve_refs(
+            "SELECT * FROM \"people\".data",
+            &engine,
+            &mut source_files,
+            &mut working_set,
+            &snapshots,
+            workspace.path(),
+            &mut attaches,
+        )
+        .expect("next-turn resolve");
+        let swapped = working_set.get("people").expect("re-attached");
+        assert_ne!(swapped.fingerprint, before, "the swap lands next turn");
+        assert!(swapped.stale.is_none(), "the name stays live");
+    }
+
+    /// D7 freeze: a panel delete mid-turn leaves the running turn untouched
+    /// (no refusal, no cascade); the NEXT turn's first mention retires the
+    /// name + cascade and refuses as stale.
+    #[test]
+    fn mid_turn_delete_leaves_the_turn_undisturbed() {
+        let (workspace, tree) = ws();
+        add_people(workspace.path());
+        let mut working_set = WorkingSet::default();
+        let engine = crate::session::engine::AdminEngine::materialized();
+        let mut source_files = HashMap::new();
+        let mut attaches = SharedAttaches::default();
+        let snapshots = tree.path().join("snapshots");
+        resolve_refs(
+            "SELECT * FROM \"people\".data",
+            &engine,
+            &mut source_files,
+            &mut working_set,
+            &snapshots,
+            workspace.path(),
+            &mut attaches,
+        )
+        .expect("first resolve");
+
+        datasets::remove(workspace.path(), "people").expect("remove");
+
+        resolve_refs(
+            "SELECT * FROM \"people\".data",
+            &engine,
+            &mut source_files,
+            &mut working_set,
+            &snapshots,
+            workspace.path(),
+            &mut attaches,
+        )
+        .expect("same-turn resolve keeps serving");
+        assert!(!working_set.is_stale("people"), "no mid-turn cascade");
+
+        attaches.advance_turn();
+        let err = resolve_refs(
+            "SELECT * FROM \"people\".data",
+            &engine,
+            &mut source_files,
+            &mut working_set,
+            &snapshots,
+            workspace.path(),
+            &mut attaches,
+        )
+        .expect_err("refused at the next turn");
+        assert_eq!(err, SharedRefError::Stale("people".to_string()));
+        assert!(working_set.is_stale("people"), "the attach turned stale");
     }
 
     /// D6 私有让位: with the workspace manifest holding `people`, a private

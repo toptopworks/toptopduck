@@ -966,7 +966,7 @@ impl super::Session {
                     tool_output_refs: &mut session.tool_output_refs,
                     // ADR-0141 D9: the shared axis stays disconnected for the
                     // replay -- the restore above already re-attached (or
-                    // staled) every recorded mount, so the replayed SQL finds
+                    // staled) every recorded attach, so the replayed SQL finds
                     // its names in the working set; no new lazy attach can
                     // legitimately fire mid-replay.
                     shared_attaches: None,

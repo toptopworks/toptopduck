@@ -721,7 +721,7 @@ impl super::Session {
             // arm -- both assembly faces window identically.
             self.window_turns,
             // ADR-0141 D3: the bound workspace's shared cards ride the
-            // context block beside the working-set cards (mounted ones are
+            // context block beside the working-set cards (attached ones are
             // working-set members already). Hoisted for the same disjoint-
             // borrow reason as the built-in arm.
             &shared_cards,

@@ -572,7 +572,7 @@ pub struct Session {
     /// extract_read_paths finds no read_* calls.
     tool_output_refs: HashMap<String, CachedDerivedRef>,
     /// The workspace shared-dataset attach table (ADR-0141 D6/D9): 挂名 →
-    /// manifest entry + mount fingerprint. Sticky per session; restored from
+    /// manifest entry + attach fingerprint. Sticky per session; restored from
     /// the recipe's SharedAttach events at resume.
     shared_attaches: shared_datasets::SharedAttaches,
     /// The parsed sheets of a workbook parked on the guided-load dialog (issue
@@ -696,7 +696,7 @@ pub(super) enum TimelineEntry {
     Source(SourceLifecycleEvent),
     /// A skill lifecycle event (ADR-0086): first-class timeline slot, not a turn.
     Skill(SkillLifecycleEvent),
-    /// A workspace shared-dataset mount (ADR-0141 D9): recipe-round-trip slot
+    /// A workspace shared-dataset attach (ADR-0141 D9): recipe-round-trip slot
     /// (persist + resume restore); never a turn and never a rendered thread
     /// row.
     SharedAttach(crate::model::SharedAttachEvent),
@@ -1396,13 +1396,16 @@ impl Session {
         usage: Option<crate::model::TurnUsage>,
         occupancy: Option<crate::model::OccupancySnapshot>,
     ) -> TurnOutcome {
-        // ADR-0141 D9: mid-turn shared mounts land their timeline entries at
+        // ADR-0141 D9: mid-turn shared attaches land their timeline entries at
         // settle (the dispatch path cannot reach the timeline directly). They
-        // precede the turn entry -- the mount happened before the SQL that
+        // precede the turn entry -- the attach happened before the SQL that
         // consumed it, and rebuild-order is the resume restore's input.
         for event in self.shared_attaches.take_pending_events() {
             self.timeline.push(TimelineEntry::SharedAttach(event));
         }
+        // ADR-0141 D7: the turn boundary thaws the per-turn validation cache
+        // (panel replaces / deletes land on the next turn's first mention).
+        self.shared_attaches.advance_turn();
         // Identical repeats collapse (review Important 3, issue #983): the
         // user channel dedupes at staging, so this catches the agent's
         // identical re-invoke -- one invocation renders, persists, and

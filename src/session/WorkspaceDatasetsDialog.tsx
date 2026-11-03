@@ -1,11 +1,11 @@
 // The workspace shared-dataset management panel (ADR-0141 D4): a modal off
-// the sidebar's workspace-section menu -- list, drop-to-add, replace, delete,
-// privacy. Visibility follows the workspace, not any session: the panel owns
-// the manifest; bound sessions read it live on their next turn.
+// the sidebar's workspace-section menu -- list, browse-to-add, replace,
+// delete, privacy. Visibility follows the workspace, not any session: the
+// panel owns the manifest; bound sessions read it live on their next turn.
 
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { FolderOpen, RefreshCw, Trash2, Upload } from "lucide-react";
-import { useCallback, useRef, useState } from "react";
+import { useCallback, useState } from "react";
 import { FormattedMessage, useIntl } from "react-intl";
 
 import {
@@ -35,8 +35,8 @@ interface WorkspaceDatasetsDialogProps {
 }
 
 // The extensions the shared face accepts (ADR-0141 D11: xlsx is refused --
-// the picker never offers it, so the refusal path stays a drop-zone-only
-// honest error).
+// the picker never offers it; the store-side refusal stays as the honest
+// boundary for any channel that slips one through).
 const SHARED_EXTENSIONS = ["csv", "parquet", "json", "jsonl", "ndjson"];
 
 function datasetKey(path: string): readonly unknown[] {
@@ -97,12 +97,9 @@ export function WorkspaceDatasetsDialog({ workspace, onOpenChange }: WorkspaceDa
   const open = workspace !== null;
   const path = workspace?.path ?? "";
   const [error, setError] = useState<string | null>(null);
-  const [dropping, setDropping] = useState(false);
   // The delete confirm staging (the strong-confirm posture: the row's button
   // arms, a second click fires; any other action disarms).
   const [armedDelete, setArmedDelete] = useState<string | null>(null);
-  const replaceInput = useRef<HTMLInputElement | null>(null);
-  const [replacing, setReplacing] = useState<string | null>(null);
 
   const listing = useQuery({
     queryKey: datasetKey(path),
@@ -122,10 +119,7 @@ export function WorkspaceDatasetsDialog({ workspace, onOpenChange }: WorkspaceDa
   const replace = useMutation({
     mutationFn: (v: { name: string; file: string }) =>
       replaceWorkspaceDataset(path, v.name, v.file),
-    onSuccess: () => {
-      setReplacing(null);
-      invalidate();
-    },
+    onSuccess: invalidate,
     onError: (e: unknown) => setError(describeError(e, intl)),
   });
   const remove = useMutation({
@@ -143,37 +137,38 @@ export function WorkspaceDatasetsDialog({ workspace, onOpenChange }: WorkspaceDa
     onError: (e: unknown) => setError(describeError(e, intl)),
   });
 
-  // The picker: the canonical multi-select entry (the same plugin-dialog face
-  // the working set uses), restricted to the shared face's formats.
-  const pickAndAdd = useCallback(async () => {
+  // The picker: the panel's only add / replace channel (the same
+  // plugin-dialog face the working set uses). xlsx never appears -- the
+  // filter below is the first refusal edge (ADR-0141 D11).
+  const pickerFilters = [
+    {
+      name: intl.formatMessage({
+        id: "workspaceDatasets.fileFilter",
+        defaultMessage: "Shared data files",
+      }),
+      extensions: SHARED_EXTENSIONS,
+    },
+  ];
+
+  const pickAndAdd = async () => {
     const { open: openPicker } = await import("@tauri-apps/plugin-dialog");
     const selected = await openPicker({
       multiple: true,
-      filters: [
-        {
-          name: intl.formatMessage({
-            id: "workspaceDatasets.fileFilter",
-            defaultMessage: "Shared data files",
-          }),
-          extensions: SHARED_EXTENSIONS,
-        },
-      ],
+      filters: pickerFilters,
     });
     const files = typeof selected === "string" ? [selected] : (selected ?? []);
     for (const file of files) add.mutate(file);
-  }, [intl, add]);
+  };
 
-  // The drop zone: the webview hands OS drops as File objects; Tauri exposes
-  // the absolute path as the non-standard `path` property. A drop without it
-  // (a browser-grade file) falls through to the hint -- the picker remains
-  // the always-works channel.
-  const droppedFile = useCallback(
-    (file: File) => {
-      const dropped = (file as File & { path?: string }).path;
-      if (dropped) add.mutate(dropped);
-    },
-    [add],
-  );
+  // Replace swaps one freshly picked file under the row's name.
+  const pickAndReplace = async (name: string) => {
+    const { open: openPicker } = await import("@tauri-apps/plugin-dialog");
+    const selected = await openPicker({
+      multiple: false,
+      filters: pickerFilters,
+    });
+    if (typeof selected === "string") replace.mutate({ name, file: selected });
+  };
 
   const rows = listing.data ?? [];
 
@@ -196,34 +191,11 @@ export function WorkspaceDatasetsDialog({ workspace, onOpenChange }: WorkspaceDa
           </DialogDescription>
         </DialogHeader>
 
-        <div
-          onDragOver={(e) => {
-            e.preventDefault();
-            setDropping(true);
-          }}
-          onDragLeave={() => setDropping(false)}
-          onDrop={(e) => {
-            e.preventDefault();
-            setDropping(false);
-            const file = e.dataTransfer.files[0];
-            if (file) droppedFile(file);
-          }}
-          className={
-            dropping
-              ? "flex flex-col items-center gap-1 rounded-lg border border-dashed border-primary bg-primary/5 p-4 text-sm"
-              : "flex flex-col items-center gap-1 rounded-lg border border-dashed p-4 text-sm text-muted-foreground"
-          }
-        >
-          <Upload className="h-4 w-4" aria-hidden />
-          <span>
-            <FormattedMessage
-              id="workspaceDatasets.dropHint"
-              defaultMessage="Drop a CSV / Parquet / JSON file here, or"
-            />{" "}
-            <Button variant="link" className="h-auto p-0" onClick={() => void pickAndAdd()}>
-              <FormattedMessage id="workspaceDatasets.pick" defaultMessage="browse files" />
-            </Button>
-          </span>
+        <div className="flex justify-end">
+          <Button variant="outline" size="sm" onClick={() => void pickAndAdd()}>
+            <Upload className="h-4 w-4" aria-hidden />
+            <FormattedMessage id="workspaceDatasets.add" defaultMessage="Add dataset…" />
+          </Button>
         </div>
 
         {error !== null && (
@@ -268,7 +240,7 @@ export function WorkspaceDatasetsDialog({ workspace, onOpenChange }: WorkspaceDa
                 </p>
               </div>
               <div className="flex shrink-0 flex-wrap items-center gap-2">
-                <label className="text-muted-foreground flex items-center gap-1.5 text-xs">
+                <label className="text-muted-foreground flex cursor-pointer items-center gap-1.5 text-xs">
                   <Switch
                     checked={d.privacy.send_samples}
                     onCheckedChange={(checked) =>
@@ -282,27 +254,12 @@ export function WorkspaceDatasetsDialog({ workspace, onOpenChange }: WorkspaceDa
                     defaultMessage="send samples"
                   />
                 </label>
-                <input
-                  ref={replacing === d.reference_name ? replaceInput : undefined}
-                  type="file"
-                  accept={SHARED_EXTENSIONS.map((e) => `.${e}`).join(",")}
-                  className="hidden"
-                  onChange={(e) => {
-                    const file = e.target.files?.[0];
-                    e.target.value = "";
-                    if (file && replacing === d.reference_name) {
-                      const dropped = (file as File & { path?: string }).path;
-                      if (dropped) replace.mutate({ name: d.reference_name, file: dropped });
-                    }
-                  }}
-                />
                 <Button
                   variant="ghost"
                   size="sm"
                   onClick={() => {
-                    setReplacing(d.reference_name);
                     setError(null);
-                    requestAnimationFrame(() => replaceInput.current?.click());
+                    void pickAndReplace(d.reference_name);
                   }}
                 >
                   <RefreshCw className="h-4 w-4" aria-hidden />
