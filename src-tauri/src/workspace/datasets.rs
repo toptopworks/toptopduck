@@ -47,6 +47,12 @@ pub struct DatasetEntry {
     #[serde(default)]
     pub display_name: String,
     pub fingerprint: String,
+    /// The store file's byte size (issue #1485): the data body's on-disk size,
+    /// stat'ed at landing (the source file may have moved; the store file IS
+    /// the data). `#[serde(default)]` keeps older manifests deserializing to 0
+    /// -- the detail pane renders no size line for 0.
+    #[serde(default)]
+    pub size_bytes: u64,
     pub columns: Vec<ColumnSchema>,
     pub row_count: u64,
     pub sample: Vec<Vec<String>>,
@@ -397,10 +403,15 @@ fn entry_from_materialized(
     src: &Path,
 ) -> DatasetEntry {
     let fingerprint = store_fingerprint(&snapshot.file_path);
+    // Stat the store file (the data body) -- copy_in / reopen_read_only both
+    // drop their connection before returning, so the on-disk size is final
+    // (issue #1485).
+    let size_bytes = crate::session::snapshot::snapshot_len(&snapshot.file_path);
     DatasetEntry {
         reference_name,
         display_name,
         fingerprint,
+        size_bytes,
         columns: snapshot.columns,
         row_count: snapshot.row_count,
         sample: snapshot.sample,
@@ -1025,6 +1036,46 @@ mod tests {
             manifest.contains("\"display_name\": \"people\""),
             "{manifest}"
         );
+    }
+
+    /// The landed entry carries the store file's byte size (issue #1485) --
+    /// stat'ed off the store file itself (the data body), not the source.
+    #[test]
+    fn add_stats_the_store_file_size() {
+        let workspace = ws();
+        let sources = src_dir();
+        let src = csv(sources.path(), "people.csv", PEOPLE);
+        let entry = add(workspace.path(), &src).expect("add");
+        let store_len = fs::metadata(store_file(workspace.path(), &entry.fingerprint))
+            .expect("store file")
+            .len();
+        assert_eq!(entry.size_bytes, store_len, "size mirrors the store file");
+        assert!(entry.size_bytes > 0);
+        // The field rides the manifest (the next read sees it without a stat).
+        let reloaded = load_entries(workspace.path()).expect("reload");
+        assert_eq!(reloaded[0].size_bytes, store_len);
+    }
+
+    /// A manifest written before size_bytes existed loads with 0 (the old-
+    /// manifest upgrade posture); the UI renders no size line for 0, never a
+    /// fake figure. The field itself always serializes.
+    #[test]
+    fn old_manifest_without_size_bytes_loads_zero() {
+        let workspace = ws();
+        let sources = src_dir();
+        let src = csv(sources.path(), "people.csv", PEOPLE);
+        let entry = add(workspace.path(), &src).expect("add");
+        let fingerprint = entry.fingerprint.clone();
+        // Hand-write a pre-field manifest: no size_bytes anywhere.
+        let raw = format!(
+            "[{{\"reference_name\":\"people\",\"fingerprint\":\"{fingerprint}\",\"columns\":[],\"row_count\":2,\"sample\":[],\"source_path\":\"x\"}}]"
+        );
+        fs::write(manifest_path(workspace.path()), raw).expect("write old manifest");
+        let loaded = load_entries(workspace.path()).expect("load old");
+        assert_eq!(loaded[0].size_bytes, 0, "missing field defaults to 0");
+        // Serialization always carries the key (the wire contract).
+        let json = serde_json::to_value(&loaded[0]).expect("serialize");
+        assert_eq!(json["size_bytes"], serde_json::json!(0));
     }
 
     /// xlsx is refused on the shared face (ADR-0141 D11); .xls and unknown

@@ -404,6 +404,7 @@ mod tests {
             fingerprint: "fp".into(),
             rectify: RectifyProvenance::NotApplicable,
             privacy: Default::default(),
+            size_bytes: 0,
             stale: None,
         };
         let outcome = TurnOutcome::Materialized {

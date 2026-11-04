@@ -257,3 +257,21 @@ describe("DatasetDetail", () => {
     expect(screen.queryByText(/分隔符/)).not.toBeInTheDocument();
   });
 });
+
+describe("DatasetDetail size line (issue #1485)", () => {
+  it("appends the human-readable store size to the meta line when known", () => {
+    renderI18n(
+      <DatasetDetail
+        dataset={{ ...mockDataset, size_bytes: 1073741824 }}
+        {...LOADED_PREVIEW}
+      />,
+    );
+    expect(screen.getByText(/行数：5/)).toBeInTheDocument();
+    expect(screen.getByText(/大小：1\s*GB/)).toBeInTheDocument();
+  });
+
+  it("renders no size line for 0 (an old manifest row -- never a fake figure)", () => {
+    renderI18n(<DatasetDetail dataset={mockDataset} {...LOADED_PREVIEW} />);
+    expect(screen.queryByText(/大小/)).toBeNull();
+  });
+});

@@ -26,6 +26,15 @@ pub struct Snapshot {
     pub fingerprint: String,
 }
 
+/// The snapshot file's byte size (issue #1485): the data body's on-disk size.
+/// MUST be called only after the writing connection is dropped -- DuckDB
+/// flushes the main file on close, so a mid-open stat reads a partial figure.
+/// A 0 here means the stat failed -- the UI hides the size line rather than
+/// showing a fake figure.
+pub fn snapshot_len(path: &Path) -> u64 {
+    fs::metadata(path).map(|m| m.len()).unwrap_or(0)
+}
+
 /// The derived shape of a table on a connection: canonical schema, row count,
 /// frozen first-3-row sample, and content fingerprint. The storage-agnostic
 /// core of Snapshot (which adds the on-disk file path for source snapshots) and

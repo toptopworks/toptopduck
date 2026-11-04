@@ -732,6 +732,7 @@ fn register_stale_placeholders(working_set: &mut WorkingSet, recipe: &Recipe, en
                 row_count: 0,
                 sample: Vec::new(),
                 fingerprint: String::new(),
+                size_bytes: 0,
                 rectify: RectifyProvenance::NotApplicable,
                 privacy: DatasetPrivacy::default(),
                 stale: Some(anchor.clone()),
@@ -1337,6 +1338,9 @@ impl super::Session {
                 detail: format!("挂载快照失败：{e}"),
             });
         }
+        // Stat before the file_path move (the writing connection is dropped by
+        // copy_in, so the on-disk size is final, issue #1485).
+        let size_bytes = crate::session::snapshot::snapshot_len(&snap.file_path);
         self.source_files
             .insert(reference_name.to_string(), snap.file_path);
         // Refill the reader-recording map (ADR-0137 D4): the post-resume
@@ -1352,6 +1356,7 @@ impl super::Session {
             row_count: snap.row_count,
             sample: snap.sample,
             fingerprint: snap.fingerprint,
+            size_bytes,
             rectify: RectifyProvenance::NotApplicable,
             privacy: DatasetPrivacy::default(),
             stale: None,
@@ -1503,6 +1508,7 @@ mod tests {
             fingerprint: format!("fp_{name}"),
             rectify: RectifyProvenance::NotApplicable,
             privacy: DatasetPrivacy::default(),
+            size_bytes: 0,
             stale: None,
         }
     }
@@ -1519,6 +1525,7 @@ mod tests {
             fingerprint: String::new(),
             rectify: RectifyProvenance::NotApplicable,
             privacy: DatasetPrivacy::default(),
+            size_bytes: 0,
             stale: None,
         }
     }

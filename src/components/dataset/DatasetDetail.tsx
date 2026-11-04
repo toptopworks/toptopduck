@@ -1,4 +1,4 @@
-import { FormattedMessage, useIntl } from "react-intl";
+import { FormattedMessage, useIntl, type IntlShape } from "react-intl";
 import type { ColumnSchema, DatasetDescriptor, DatasetPrivacy } from "../../types/dataset";
 import { PrivacyControls } from "./PrivacyControls";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "../ui/table";
@@ -40,6 +40,25 @@ interface DatasetDetailProps {
 function isProbableSnifferFallback(columns: ColumnSchema[]): boolean {
   if (columns.length !== 1) return false;
   return /[,;|\t]/.test(columns[0].name);
+}
+
+// Human-readable byte size (issue #1485): the store file's on-disk size,
+// tiered at binary units (1024-step) so a 1GB file reads "1 GB" not
+// "1073741824 bytes". The Intl unit style localizes the unit spelling.
+function formatBytes(intl: IntlShape, bytes: number): string {
+  const units = ["byte", "kilobyte", "megabyte", "gigabyte", "terabyte"] as const;
+  let unit = 0;
+  let value = bytes;
+  while (value >= 1024 && unit < units.length - 1) {
+    value /= 1024;
+    unit += 1;
+  }
+  return intl.formatNumber(value, {
+    style: "unit",
+    unit: units[unit],
+    unitDisplay: "short",
+    maximumFractionDigits: value < 10 ? 1 : 0,
+  });
 }
 
 export function DatasetDetail({
@@ -110,6 +129,18 @@ export function DatasetDetail({
           defaultMessage="Rows: {rows}"
           values={{ rows: dataset.row_count }}
         />
+        {dataset.size_bytes > 0 && (
+          // 0 = unknown (an old manifest row / a stat failure): render no
+          // size line at all rather than a fake figure (issue #1485).
+          <>
+            {" · "}
+            <FormattedMessage
+              id="workingSet.detail.size"
+              defaultMessage="Size: {size}"
+              values={{ size: formatBytes(intl, dataset.size_bytes) }}
+            />
+          </>
+        )}
       </p>
 
       {isProbableSnifferFallback(dataset.columns) && (

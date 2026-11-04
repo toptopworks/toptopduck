@@ -1329,6 +1329,7 @@ mod tests {
                 fingerprint: String::new(),
                 rectify: RectifyProvenance::NotApplicable,
                 privacy: DatasetPrivacy::default(),
+                size_bytes: 0,
                 stale: None,
             };
             deps.working_set.register_result(descriptor);
@@ -1363,6 +1364,7 @@ mod tests {
                 fingerprint: String::new(),
                 rectify: RectifyProvenance::NotApplicable,
                 privacy: DatasetPrivacy::default(),
+                size_bytes: 0,
                 stale: None,
             })
         }
@@ -3793,6 +3795,7 @@ mod tests {
                     fingerprint: String::new(),
                     rectify: RectifyProvenance::NotApplicable,
                     privacy: DatasetPrivacy::default(),
+                    size_bytes: 0,
                     stale: None,
                 },
             )])));

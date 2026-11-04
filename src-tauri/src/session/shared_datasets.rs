@@ -216,6 +216,7 @@ fn attached_descriptor(
         row_count: entry.row_count,
         sample: entry.sample.clone(),
         fingerprint: entry.fingerprint.clone(),
+        size_bytes: entry.size_bytes,
         rectify: RectifyProvenance::NotApplicable,
         privacy: entry.privacy.clone(),
         stale,
@@ -563,6 +564,7 @@ impl super::Session {
                                 reference_name: event.entry_name.clone(),
                                 display_name: event.entry_name.clone(),
                                 fingerprint: event.fingerprint.clone(),
+                                size_bytes: 0,
                                 columns: Vec::new(),
                                 row_count: 0,
                                 sample: Vec::new(),
@@ -617,6 +619,7 @@ mod tests {
             fingerprint: String::new(),
             rectify: RectifyProvenance::NotApplicable,
             privacy: Default::default(),
+            size_bytes: 0,
             stale: None,
         });
         let prev_active = working_set.active_name().map(str::to_string);
@@ -1134,6 +1137,7 @@ mod tests {
             fingerprint: String::new(),
             rectify: RectifyProvenance::NotApplicable,
             privacy: Default::default(),
+            size_bytes: 0,
             stale: None,
         });
         let mut attaches = SharedAttaches::default();
@@ -1182,6 +1186,7 @@ mod tests {
             fingerprint: String::new(),
             rectify: RectifyProvenance::NotApplicable,
             privacy: Default::default(),
+            size_bytes: 0,
             stale: None,
         });
         let mut attaches = SharedAttaches::default();

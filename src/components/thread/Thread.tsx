@@ -1,8 +1,10 @@
 import { useCallback, useMemo, useRef, useState } from "react";
 import { FormattedMessage, useIntl } from "react-intl";
+import { Loader2 } from "lucide-react";
 import { LifecycleFold, LifecycleFoldMembers } from "./LifecycleFold";
 import { LiveTurnExchange } from "./LiveTurnExchange";
 import { SourceMarker } from "./SourceMarker";
+import { WaitElapsedSuffix } from "./WaitElapsedSuffix";
 import { TurnCard } from "./TurnCard";
 import {
   primaryReferenceName,
@@ -16,6 +18,8 @@ import {
   type LifecycleFoldInfo,
   type LifecycleRunMark,
 } from "./turn-visual";
+import type { IngestProgress } from "../../session/useIngestFlow";
+import { fileBasename } from "../../lib/basename";
 import type { LiveTurn } from "../../session/useTurnFlow";
 import { isLatestTurnFailed } from "../../session/useTurnFailureSids";
 import type { ApprovalResponse, FileAttachment } from "../../types/approval";
@@ -89,6 +93,11 @@ interface ThreadProps {
    *  exchange so the trailing status line renders the elapsed-seconds
    *  suffix. Optional; defaults to null (no suffix). */
   waitStartedAt?: number | null;
+  /** The in-flight ingest's progress block (issue #1485): rendered as a
+   *  transient status line ABOVE the live exchange while a dataset import
+   *  materializes (the long IPC has no other surface). Optional; defaults to
+   *  null (no block). */
+  ingestProgress?: IngestProgress | null;
   /** Answers a pending approval request (the live card's three buttons,
    * ADR-0083). Wired to the app-level approval hook; defaults to a no-op so
    * tests that render a pending card without the hook do not crash. */
@@ -150,6 +159,7 @@ export function Thread({
   skillIndex,
   liveTurn = null,
   waitStartedAt = null,
+  ingestProgress = null,
   onRespondApproval = NOOP_RESPOND,
   onLoadApprovalAttachments,
   onRetryTurn,
@@ -339,7 +349,12 @@ export function Thread({
 
   // A session asking its FIRST question has no entries yet but a live turn --
   // the live card must still render, so the empty bail-out needs both empty.
-  if (entries.length === 0 && liveTurn === null) return null;
+  // An in-flight ingest names the wait the same way (issue #1485): a fresh
+  // session importing its first dataset would otherwise render a blank rail
+  // for the whole (long) materialize.
+  if (entries.length === 0 && liveTurn === null && ingestProgress === null) {
+    return null;
+  }
   // ADR-0067 (issue #184): the Thread rail section does not carry a `.panel`
   // hook -- the rail itself (.session-rail in styles.css) supplies bg-card +
   // 0.5rem padding, so a panel chrome here would be redundant. The .thread
@@ -475,6 +490,33 @@ export function Thread({
           block (not an <li>) -- the ol is the recorded timeline
           (append-only, ADR-0028/0040), the live exchange is transient
           client state that never enters it. */}
+      {/* The in-flight ingest's transient block (issue #1485): a dataset
+          import is one long IPC with zero feedback -- this names the file,
+          its position in the batch, and ticks the whole-batch clock. It
+          never enters the timeline; on settle the block clears and the
+          SourceMarker (the recorded lifecycle event) lands with the
+          refresh. A distinct block (not an <li>), same posture as the live
+          exchange below. */}
+      {ingestProgress !== null && (
+        <p
+          role="status"
+          className="m-0 mb-2 flex items-center gap-1 text-xs text-muted-foreground"
+        >
+          <Loader2 aria-hidden="true" className="w-3.5 h-3.5 shrink-0 animate-spin" />
+          <span className="min-w-0 truncate">
+            <FormattedMessage
+              id="thread.ingest.progress"
+              defaultMessage="Loading {name} (file {index} of {total})…"
+              values={{
+                name: fileBasename(ingestProgress.currentPath),
+                index: ingestProgress.index,
+                total: ingestProgress.total,
+              }}
+            />
+          </span>
+          <WaitElapsedSuffix startedAt={ingestProgress.startedAt} />
+        </p>
+      )}
       {liveTurn !== null && (
         <LiveTurnExchange
           liveTurn={liveTurn}

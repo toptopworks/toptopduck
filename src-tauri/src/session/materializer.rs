@@ -401,6 +401,8 @@ impl Materializer for RealMaterializer {
             row_count: shape.row_count,
             sample: shape.sample,
             fingerprint: shape.fingerprint,
+            // A result lives in the session DB, no snapshot file (ADR-0024).
+            size_bytes: 0,
             rectify: RectifyProvenance::NotApplicable,
             privacy: DatasetPrivacy::default(),
             stale: None,

@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 
 import { WorkspaceDatasetsDialog } from "../WorkspaceDatasetsDialog";
@@ -44,6 +44,7 @@ function entry(overrides: Partial<ListedWorkspaceDataset>): ListedWorkspaceDatas
     reference_name: "people",
     display_name: "people",
     fingerprint: "f".repeat(64),
+    size_bytes: 0,
     columns: [
       { name: "name", canonical_type: "VARCHAR" },
       { name: "score", canonical_type: "BIGINT" },
@@ -65,7 +66,7 @@ function entry(overrides: Partial<ListedWorkspaceDataset>): ListedWorkspaceDatas
 // demo workspace in every test, so the element is fixed.
 function renderPanel() {
   const client = new QueryClient({
-    defaultOptions: { queries: { retry: false } },
+    defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
   });
   return render(
     <QueryClientProvider client={client}>
@@ -394,5 +395,89 @@ describe("WorkspaceDatasetsDialog", () => {
     const banner = await screen.findByRole("alert");
     expect(banner).toHaveTextContent("无法解析该数据文件");
     expect(banner).toHaveTextContent("Error when sniffing file");
+  });
+  // Issue #1485: the picker's add batch runs the mutations SEQUENTIALLY (the
+  // backend manifest lock serializes anyway), so each landed file invalidates
+  // the listing and the status line names the file in flight until the batch
+  // settles.
+  it("runs the add batch sequentially, naming the file in flight in the status line", async () => {
+    vi.mocked(listWorkspaceDatasets)
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([entry({ reference_name: "a", display_name: "a", source_path: "/src/a.csv" })])
+      .mockResolvedValue([
+        entry({ reference_name: "a", display_name: "a", source_path: "/src/a.csv" }),
+        entry({ reference_name: "b", display_name: "b", source_path: "/src/b.csv" }),
+      ]);
+    vi.mocked(open).mockResolvedValue(["/src/a.csv", "/src/b.csv"]);
+    vi.mocked(addWorkspaceDataset).mockClear();
+    const gates: Array<(e: ListedWorkspaceDataset) => void> = [];
+    vi.mocked(addWorkspaceDataset).mockImplementation(
+      () => new Promise<ListedWorkspaceDataset>((resolve) => { gates.push(resolve); }),
+    );
+    renderPanel();
+    fireEvent.click(await screen.findByRole("button", { name: "添加数据集…" }));
+    // File 1 in flight: the line names it; the second IPC has not fired.
+    expect(await screen.findByText(/正在添加 a\.csv（第 1\/2 个）/)).toBeInTheDocument();
+    expect(addWorkspaceDataset).toHaveBeenCalledTimes(1);
+    await act(async () => {
+      gates[0](entry({ reference_name: "a", display_name: "a", source_path: "/src/a.csv" }));
+    });
+    expect(await screen.findByText(/正在添加 b\.csv（第 2\/2 个）/)).toBeInTheDocument();
+    expect(addWorkspaceDataset).toHaveBeenCalledTimes(2);
+    await act(async () => {
+      gates[1](entry({ reference_name: "b", display_name: "b", source_path: "/src/b.csv" }));
+    });
+    await waitFor(() => expect(screen.queryByText(/正在添加/)).toBeNull());
+  });
+
+  it("keeps the add batch running past a failed file -- the banner names it, the rest still land", async () => {
+    // The `.catch(() => {})` over each `mutateAsync` is the documented
+    // design: one bad file must not drop the remainder. A rejected first
+    // file surfaces its error banner AND the batch advances to the second
+    // file's status line instead of parking at 1-of-2.
+    vi.mocked(listWorkspaceDatasets)
+      .mockResolvedValueOnce([])
+      .mockResolvedValue([entry({ reference_name: "b", display_name: "b", source_path: "/src/b.csv" })]);
+    vi.mocked(open).mockResolvedValue(["/src/bad.csv", "/src/b.csv"]);
+    vi.mocked(addWorkspaceDataset).mockClear();
+    let resolveGood!: (e: ListedWorkspaceDataset) => void;
+    vi.mocked(addWorkspaceDataset)
+      .mockRejectedValueOnce({
+        kind: "DataUnreadable",
+        data: `Error when sniffing file "/src/bad.csv".`,
+      })
+      .mockImplementationOnce(
+        () => new Promise<ListedWorkspaceDataset>((resolve) => { resolveGood = resolve; }),
+      );
+    renderPanel();
+    fireEvent.click(await screen.findByRole("button", { name: "添加数据集…" }));
+    // The first file's rejection lands on the banner...
+    const banner = await screen.findByRole("alert");
+    expect(banner).toHaveTextContent("无法解析该数据文件");
+    // ...and the batch still runs the second file to its own status line.
+    expect(await screen.findByText(/正在添加 b\.csv（第 2\/2 个）/)).toBeInTheDocument();
+    expect(addWorkspaceDataset).toHaveBeenCalledTimes(2);
+    await act(async () => {
+      resolveGood(entry({ reference_name: "b", display_name: "b", source_path: "/src/b.csv" }));
+    });
+    await waitFor(() => expect(screen.queryByText(/正在添加/)).toBeNull());
+  });
+
+  it("names the row in the status line while a replace round-trips and clears it on settle", async () => {
+    seed([entry({})]);
+    vi.mocked(open).mockResolvedValue("/src/people_v2.csv");
+    vi.mocked(replaceWorkspaceDataset).mockClear();
+    const gates: Array<(e: ListedWorkspaceDataset) => void> = [];
+    vi.mocked(replaceWorkspaceDataset).mockImplementation(
+      () => new Promise<ListedWorkspaceDataset>((resolve) => { gates.push(resolve); }),
+    );
+    renderPanel();
+    fireEvent.click(await screen.findByRole("button", { name: /换源/ }));
+    await waitFor(() => expect(replaceWorkspaceDataset).toHaveBeenCalled());
+    expect(await screen.findByText(/正在替换 people/)).toBeInTheDocument();
+    await act(async () => {
+      gates[0](entry({}));
+    });
+    await waitFor(() => expect(screen.queryByText(/正在替换/)).toBeNull());
   });
 });

@@ -665,6 +665,7 @@ mod tests {
             fingerprint: reference_name.into(),
             rectify: RectifyProvenance::NotApplicable,
             privacy: DatasetPrivacy::default(),
+            size_bytes: 0,
             stale: None,
         }
     }
@@ -950,6 +951,7 @@ mod tests {
             fingerprint: name.into(),
             rectify: RectifyProvenance::NotApplicable,
             privacy: DatasetPrivacy::default(),
+            size_bytes: 0,
             stale: None,
         }
     }

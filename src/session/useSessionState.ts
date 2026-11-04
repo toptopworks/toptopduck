@@ -4,7 +4,7 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { conversation, takePersistError, takeSourceNotices } from "../api";
 import { toAppError } from "../lib/error-presentation";
 import { sessionKeys } from "./queryKeys";
-import { useIngestFlow } from "./useIngestFlow";
+import { useIngestFlow, type IngestProgress } from "./useIngestFlow";
 import {
   invalidateSessionData,
   useWorkingSetData,
@@ -123,6 +123,10 @@ export interface UseSessionState {
    *  (cancel-halt / Error-halt), rendered as a workspace notice; null
    *  otherwise and cleared at the start of the next ingest. */
   haltedRemaining: number | null;
+  /** The in-flight ingest's progress block (issue #1485), or null -- the
+   *  rail's transient "Loading <file> (i of n)" line with the batch clock.
+   *  Client UI state only; set/cleared by useIngestFlow. */
+  ingestProgress: IngestProgress | null;
   // Actions.
   // Mirrors UseTurnFlow (async -> Promise<void>, honest + awaitable); the
   // QuestionBar consumer accepts it via void-return covariance.
@@ -422,6 +426,7 @@ export function useSessionState(
     guidance,
     guidanceError,
     haltedRemaining,
+    ingestProgress,
     handleIngest,
     handleIngestMany,
     handleGuidedSubmit,
@@ -512,6 +517,7 @@ export function useSessionState(
     guidance,
     guidanceError,
     haltedRemaining,
+    ingestProgress,
     handleAsk: handleAskWithAutoName,
     handleCancel,
     handleIngest,

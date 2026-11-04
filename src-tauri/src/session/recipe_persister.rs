@@ -646,6 +646,7 @@ mod tests {
             fingerprint: "fp".into(),
             rectify: crate::model::RectifyProvenance::NotApplicable,
             privacy: Default::default(),
+            size_bytes: 0,
             stale: None,
         }
     }
