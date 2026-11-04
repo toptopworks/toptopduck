@@ -447,14 +447,20 @@ export function WorkspaceDatasetsDialog({ workspace, onOpenChange }: WorkspaceDa
                   )}
                 </span>
                 <ElapsedFace seconds={uploadStatus.seconds} />
-                <button
+                {/* The dismiss rides the Button copy-in (the review round's
+                    two judgement calls): ghost's accent hover + the shared
+                    focus-visible ring, at a 20px target (16px was the
+                    panel's smallest pointer target). */}
+                <Button
                   type="button"
-                  className="ml-0.5 inline-flex size-4 shrink-0 items-center justify-center rounded-full hover:bg-accent/50"
+                  variant="ghost"
+                  size="icon"
+                  className="ml-0.5 size-5 rounded-full"
                   aria-label={intl.formatMessage({ id: "common.close" })}
                   onClick={() => setUploadStatus(null)}
                 >
                   <X className="size-3" aria-hidden />
-                </button>
+                </Button>
               </Badge>
             )
           ) : null}
