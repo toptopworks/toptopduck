@@ -434,15 +434,22 @@ pub struct WorkspaceListing {
 /// Read-only and tolerant -- an unreadable registry lists empty, and the
 /// envelope's `degraded` flag is the only way the wire can tell that
 /// fallback from a genuinely empty registry (issue #1481).
-#[tauri::command]
-pub fn list_workspaces(
-    registry: State<'_, Arc<crate::workspace::WorkspaceRegistry>>,
-) -> WorkspaceListing {
+/// The plain body of the `list_workspaces` command (issue #1481): the
+/// tuple-to-envelope projection, extracted so the flag's only wire hop
+/// pins without a running app.
+fn workspace_listing(registry: &crate::workspace::WorkspaceRegistry) -> WorkspaceListing {
     let (records, degraded) = registry.all();
     WorkspaceListing {
         workspaces: records.iter().map(workspace_row).collect(),
         degraded,
     }
+}
+
+#[tauri::command]
+pub fn list_workspaces(
+    registry: State<'_, Arc<crate::workspace::WorkspaceRegistry>>,
+) -> WorkspaceListing {
+    workspace_listing(&registry)
 }
 
 /// Mint a NAMED workspace for the session-creation selector (issue #1393):
@@ -6279,6 +6286,40 @@ mod tests {
         assert!(
             registry.all().0.is_empty(),
             "the record is gone despite the drift"
+        );
+    }
+
+    // Issue #1481: the flag's only wire hop. The envelope projection must
+    // carry the degraded flag through, or the sweep judges on a
+    // permanently-false flag -- pinned here at the command's plain body,
+    // one layer above the registry's three-face test.
+    #[test]
+    fn the_listing_command_carries_the_degraded_flag_onto_the_wire() {
+        let root = tempfile::tempdir().expect("registry dir");
+        let registry = crate::workspace::WorkspaceRegistry::new(
+            root.path().join(crate::workspace::WORKSPACES_FILE_NAME),
+        );
+        let dir = root.path().join("Alpha");
+        std::fs::create_dir(&dir).expect("mkdir");
+        registry
+            .record_at(&dir, Some("Seed"), true, 1_000)
+            .expect("record");
+        let listing = workspace_listing(&registry);
+        assert_eq!(listing.workspaces.len(), 1);
+        assert!(!listing.degraded, "a healthy read carries the flag false");
+        std::fs::write(
+            root.path().join(crate::workspace::WORKSPACES_FILE_NAME),
+            "{ not json",
+        )
+        .expect("corrupt");
+        let listing = workspace_listing(&registry);
+        assert!(
+            listing.workspaces.is_empty(),
+            "the tolerant read still empties the rows"
+        );
+        assert!(
+            listing.degraded,
+            "the corrupt read carries the flag true -- the tell"
         );
     }
 }

@@ -3,8 +3,7 @@ import { act, renderHook, waitFor } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 
 import { useStagedWorkspaceSweep } from "../useStagedWorkspaceSweep";
-import { listWorkspaces } from "../../api";
-import type { WorkspaceListing } from "../../api";
+import { listWorkspaces, type WorkspaceListing } from "../../api";
 import { workspaceKeys } from "../../session/queryKeys";
 import type { PendingWorkspace } from "../../components/thread/ComposerWorkspacePicker";
 
