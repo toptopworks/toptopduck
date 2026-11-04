@@ -31,13 +31,15 @@ interface DatasetDetailProps {
 
 // The sniffer-fallback fingerprint (issue #1483): when DuckDB's delimiter
 // search fails, the whole header line lands as ONE column whose name still
-// carries the separators. A genuine single-column dataset (a count column, a
-// join dimension) can't carry a separator inside its column name, so the
-// separator in the name is the reliable tell. Pure derivation, no wire
-// field -- and it warns, it never gates: the rows still read fine.
+// carries one of the candidate separators (comma, pipe, semicolon, tab). A
+// genuine single-column dataset (a count column, a join dimension) will not
+// carry a separator in its name -- a quoted header field is the one
+// false-positive shape, and the warning never gates, so a stray hint costs
+// nothing. Pure derivation, no wire field: it warns only, the rows still
+// read fine.
 function isProbableSnifferFallback(columns: ColumnSchema[]): boolean {
   if (columns.length !== 1) return false;
-  return /[,;\t]/.test(columns[0].name);
+  return /[,;|\t]/.test(columns[0].name);
 }
 
 export function DatasetDetail({

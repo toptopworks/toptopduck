@@ -1090,6 +1090,48 @@ mod tests {
         assert!(load_entries(workspace.path()).expect("load").is_empty());
     }
 
+    /// A BOM-carrying file with an odd total length can never be valid
+    /// UTF-16 (a BOM plus code units is always 2+2n bytes), so the retry
+    /// must not fire: the engine's decoder is permissive enough that the
+    /// garbage would land as a mojibake table instead of a refusal.
+    #[test]
+    fn odd_length_bom_csv_refuses_as_csv_unreadable() {
+        let workspace = ws();
+        let sources = src_dir();
+        let src = sources.path().join("odd.csv");
+        // Five bytes: LE BOM plus three garbage bytes -- odd, undecodable.
+        fs::write(&src, [0xFF, 0xFE, 0x80, 0x81, 0xC0]).expect("write odd");
+        let err = add(workspace.path(), &src).expect_err("an odd-length BOM file refuses");
+        assert!(
+            matches!(err, StoreError::DataUnreadable { .. }),
+            "expected DataUnreadable, got {err:?}"
+        );
+        assert!(load_entries(workspace.path()).expect("load").is_empty());
+    }
+
+    /// A UTF-16 BE BOM must also refuse: the engine's utf-16 decoding is
+    /// little-endian only, so a BE file would transcode to mojibake and
+    /// import as garbage rather than fail -- the retry is LE-only on
+    /// purpose.
+    #[test]
+    fn utf16_be_bom_csv_refuses_as_csv_unreadable() {
+        let workspace = ws();
+        let sources = src_dir();
+        let src = sources.path().join("be.csv");
+        let text = "Dataset\tName\nA\tB\n";
+        let mut bytes: Vec<u8> = vec![0xFE, 0xFF];
+        for unit in text.encode_utf16() {
+            bytes.extend_from_slice(&unit.to_be_bytes());
+        }
+        fs::write(&src, bytes).expect("write utf-16 be");
+        let err = add(workspace.path(), &src).expect_err("a BE BOM file refuses");
+        assert!(
+            matches!(err, StoreError::DataUnreadable { .. }),
+            "expected DataUnreadable, got {err:?}"
+        );
+        assert!(load_entries(workspace.path()).expect("load").is_empty());
+    }
+
     /// The LoadError::Parse -> DataUnreadable mapping keeps the engine detail
     /// (the panel appends it after the catalog sentence).
     #[test]
