@@ -11,6 +11,7 @@ import {
   activeDataset,
   conversation,
   getApprovalAttachments,
+  ingestFile,
   listSkills,
   listWorkingSet,
   takeSourceNotices,
@@ -20,6 +21,7 @@ import { artifactTurn } from "./fixtures";
 import type { ComposerSessionFields } from "../useComposerState";
 import type { ApprovalEntry } from "../useApprovalEvents";
 import type { ThreadEntry } from "../../types/thread";
+import type { DatasetDescriptor } from "../../types/dataset";
 
 // The pane-level approval wiring pins (issue #1009 review, PR #1010): both
 // approval callbacks live ONLY on the pane -- the respond callback binds the
@@ -49,6 +51,7 @@ vi.mock("../../api", async (importOriginal) => {
     // stamped) -- the same default the useTurnFlow suite pins against.
     getSessionRuntime: vi.fn(async () => undefined),
     cancelQuery: vi.fn(async () => {}),
+    ingestFile: vi.fn(),
     conversation: vi.fn(),
     listWorkingSet: vi.fn(),
     activeDataset: vi.fn(),
@@ -133,6 +136,7 @@ function stubSessionApis() {
 function renderPane(opts?: {
   approvals?: ApprovalEntry[];
   thread?: ThreadEntry[];
+  pendingIngestPaths?: string[];
 }) {
   if (opts?.thread) {
     vi.mocked(conversation).mockResolvedValue(opts.thread);
@@ -164,7 +168,7 @@ function renderPane(opts?: {
           <SessionPane
             sessionId={SID}
             isActive
-            pendingIngestPaths={[]}
+            pendingIngestPaths={opts?.pendingIngestPaths ?? []}
             onIngestConsumed={noop}
             pendingQuestion={null}
             pendingSkillInvocations={[]}
@@ -398,5 +402,58 @@ describe("SessionPane follow pill", () => {
     await flushAlign();
     expect(rig.scrollTop()).toBe(700);
     expect(screen.queryByRole("button", { name: "Jump to latest" })).not.toBeInTheDocument();
+  });
+});
+
+// The #1485 pane-level regression: the rail's fresh-session hint gated only on
+// thread/liveTurn, so a large file mid-import kept the hint under the
+// executing import's progress card -- "load data to begin" while a load IS
+// running. The same contradiction #297 fixed for the live turn; the hint now
+// gates on the ingest block too.
+describe("SessionPane rail hint vs an in-flight ingest", () => {
+  const RAIL_EMPTY =
+    "No conversations yet. Ask a question below or load data to begin.";
+  const loadedDataset: DatasetDescriptor = {
+    reference_name: "people",
+    display_name: "people",
+    source_path: "/x/big.csv",
+    row_count: 1,
+    fingerprint: "ff".repeat(32),
+    size_bytes: 0,
+    columns: [{ name: "id", canonical_type: "BIGINT" }],
+    sample: [["1"]],
+    rectify: { kind: "NotApplicable" },
+    privacy: { send_samples: true, type_only_columns: [] },
+  };
+
+  beforeEach(() => {
+    stubSessionApis();
+    vi.mocked(ingestFile).mockResolvedValue({ kind: "Loaded", data: loadedDataset });
+  });
+
+  it("hides the hint while the import executes and restores it once the batch settles", async () => {
+    // The executing window: a deferred ingestFile holds the batch in flight,
+    // so the progress block is mounted with a still-empty thread.
+    let resolveIngest!: (outcome: { kind: "Loaded"; data: DatasetDescriptor }) => void;
+    vi.mocked(ingestFile).mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          resolveIngest = resolve;
+        }),
+    );
+    renderPane({ pendingIngestPaths: ["/x/big.csv"] });
+
+    const block = await screen.findByRole("status");
+    expect(block).toHaveTextContent("big.csv");
+    expect(screen.queryByText(RAIL_EMPTY)).not.toBeInTheDocument();
+
+    // Settle the file: the block clears in the segment's exit path and the
+    // hint legitimately returns -- the load finished, the thread is still
+    // empty (the ingest never appends to it).
+    await act(async () => {
+      resolveIngest({ kind: "Loaded", data: loadedDataset });
+    });
+    expect(await screen.findByText(RAIL_EMPTY)).toBeInTheDocument();
+    expect(screen.queryByRole("status")).not.toBeInTheDocument();
   });
 });
