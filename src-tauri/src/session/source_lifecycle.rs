@@ -398,7 +398,7 @@ impl super::Session {
         // when the rename fallback fired) for the sandbox re-attach path.
         self.source_files
             .insert(reference_name.to_string(), PathBuf::from(&attach_path));
-        // The descriptor's size stat's the attached file (the data body, issue
+        // The descriptor's size stats the attached file (the data body, issue
         // #1485); the writing connection is long dropped, so the figure is final.
         let size_bytes = crate::session::snapshot::snapshot_len(Path::new(&attach_path));
         // A replace re-bases the source on extension dispatch (the new file

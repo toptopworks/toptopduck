@@ -65,8 +65,9 @@ export interface UseIngestFlowDeps {
  *  file currently materializing, its 1-based position in the batch, the batch
  *  size, and the batch's start stamp (ONE clock for the whole batch -- a
  *  per-file clock would visibly reset on every file). Rendered by the rail's
- *  live region; cleared on every batch exit (drain / park / halt) and at the
- *  start of the next ingest. Client UI state only -- never enters any cache. */
+ *  live region; cleared on every batch exit (drain / park / halt) -- the
+ *  next ingest's entry block is minted by the segment loop's head. Client
+ *  UI state only -- never enters any cache. */
 export interface IngestProgress {
   currentPath: string;
   index: number;
@@ -142,9 +143,11 @@ type IngestRoute = LoadOutcome["kind"];
 interface ParkedBatch {
   remaining: string[];
   resolve: (allLoaded: boolean) => void;
-  // The ORIGINAL batch's size and how many files already settled before the
-  // park (issue #1485): the resume segment must keep counting globally --
-  // "file 2 of 3" -- instead of restarting at "1 of 2" over the remainder.
+  // The ORIGINAL batch's size and how many files already settled by the
+  // resume (issue #1485): the count includes the parked file -- it settles
+  // through the guidance dialog before the resume segment runs -- so the
+  // resume segment must keep counting globally -- "file 3 of 4" -- instead
+  // of restarting at "1 of 2" over the remainder.
   total: number;
   consumed: number;
 }
@@ -296,11 +299,15 @@ export function useIngestFlow(
             // so a cancel or ESC in that window must find the handle here --
             // writing it only after the refresh orphaned the batch (gate hung
             // forever, remainder silently dropped).
+            // Origin-based, not segment-local (issue #1485): a resumed
+            // segment that parks AGAIN must keep the original batch's
+            // figures -- segment-local totals here would reset "file 4 of 4"
+            // to "file 2 of 2" on the second resume.
             parkedBatchRef.current = {
               remaining: rest,
               resolve,
-              total: paths.length,
-              consumed: paths.length - rest.length,
+              total: origin.total,
+              consumed: origin.consumed + (paths.length - rest.length),
             };
             outcome = "parked";
           } else {
@@ -405,15 +412,9 @@ export function useIngestFlow(
       }
       setHaltedRemaining(null);
       setError(null);
-      // Mint the batch clock + the first file's block (issue #1485); the
-      // segment loop updates per file and clears on every exit.
+      // Mint the batch clock (issue #1485); the segment loop's head owns
+      // the first file's block and every later update.
       batchStartedAtRef.current = Date.now();
-      setIngestProgress({
-        currentPath: paths[0],
-        index: 1,
-        total: paths.length,
-        startedAt: batchStartedAtRef.current,
-      });
       return new Promise<boolean>((resolve) => {
         void runBatchSegment(paths, resolve);
       });

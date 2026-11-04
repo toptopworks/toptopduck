@@ -493,9 +493,9 @@ export function Thread({
       {/* The in-flight ingest's transient block (issue #1485): a dataset
           import is one long IPC with zero feedback -- this names the file,
           its position in the batch, and ticks the whole-batch clock. It
-          never enters the timeline; on settle the SourceMarker lands (the
-          recorded lifecycle event) and the block vanishes in the same
-          commit. A distinct block (not an <li>), same posture as the live
+          never enters the timeline; on settle the block clears and the
+          SourceMarker (the recorded lifecycle event) lands with the
+          refresh. A distinct block (not an <li>), same posture as the live
           exchange below. */}
       {ingestProgress !== null && (
         <p

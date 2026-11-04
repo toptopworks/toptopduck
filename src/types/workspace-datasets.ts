@@ -14,7 +14,7 @@ export interface WorkspaceDatasetEntry {
   // derived table fingerprint a working-set descriptor carries).
   fingerprint: string;
   // The store file's byte size (issue #1485): the data body's on-disk size;
-  // 0 = unknown (an old manifest row), rendered nowhere.
+  // 0 = unknown (an old manifest row or a stat failure), rendered nowhere.
   size_bytes: number;
   columns: ColumnSchema[];
   row_count: number;

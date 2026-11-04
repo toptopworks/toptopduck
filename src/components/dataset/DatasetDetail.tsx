@@ -43,7 +43,7 @@ function isProbableSnifferFallback(columns: ColumnSchema[]): boolean {
 }
 
 // Human-readable byte size (issue #1485): the store file's on-disk size,
-// tiered at binary units (1024-step) so a 1GB file reads "1.0 GB" not
+// tiered at binary units (1024-step) so a 1GB file reads "1 GB" not
 // "1073741824 bytes". The Intl unit style localizes the unit spelling.
 function formatBytes(intl: IntlShape, bytes: number): string {
   const units = ["byte", "kilobyte", "megabyte", "gigabyte", "terabyte"] as const;

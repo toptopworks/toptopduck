@@ -430,6 +430,39 @@ describe("WorkspaceDatasetsDialog", () => {
     await waitFor(() => expect(screen.queryByText(/正在添加/)).toBeNull());
   });
 
+  it("keeps the add batch running past a failed file -- the banner names it, the rest still land", async () => {
+    // The `.catch(() => {})` over each `mutateAsync` is the documented
+    // design: one bad file must not drop the remainder. A rejected first
+    // file surfaces its error banner AND the batch advances to the second
+    // file's status line instead of parking at 1-of-2.
+    vi.mocked(listWorkspaceDatasets)
+      .mockResolvedValueOnce([])
+      .mockResolvedValue([entry({ reference_name: "b", display_name: "b", source_path: "/src/b.csv" })]);
+    vi.mocked(open).mockResolvedValue(["/src/bad.csv", "/src/b.csv"]);
+    vi.mocked(addWorkspaceDataset).mockClear();
+    let resolveGood!: (e: ListedWorkspaceDataset) => void;
+    vi.mocked(addWorkspaceDataset)
+      .mockRejectedValueOnce({
+        kind: "DataUnreadable",
+        data: `Error when sniffing file "/src/bad.csv".`,
+      })
+      .mockImplementationOnce(
+        () => new Promise<ListedWorkspaceDataset>((resolve) => { resolveGood = resolve; }),
+      );
+    renderPanel();
+    fireEvent.click(await screen.findByRole("button", { name: "添加数据集…" }));
+    // The first file's rejection lands on the banner...
+    const banner = await screen.findByRole("alert");
+    expect(banner).toHaveTextContent("无法解析该数据文件");
+    // ...and the batch still runs the second file to its own status line.
+    expect(await screen.findByText(/正在添加 b\.csv（第 2\/2 个）/)).toBeInTheDocument();
+    expect(addWorkspaceDataset).toHaveBeenCalledTimes(2);
+    await act(async () => {
+      resolveGood(entry({ reference_name: "b", display_name: "b", source_path: "/src/b.csv" }));
+    });
+    await waitFor(() => expect(screen.queryByText(/正在添加/)).toBeNull());
+  });
+
   it("names the row in the status line while a replace round-trips and clears it on settle", async () => {
     seed([entry({})]);
     vi.mocked(open).mockResolvedValue("/src/people_v2.csv");

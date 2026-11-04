@@ -125,7 +125,7 @@ fn load_outcome_loaded_carries_descriptor_in_data() {
     // so the cross-PRD contract (issue #9) is pinned here for the frontend mirror.
     assert_wire(
         &LoadOutcome::Loaded(sample_descriptor()),
-        r#"{"kind":"Loaded","data":{"reference_name":"people","display_name":"people","source_path":"/x/m.csv","columns":[],"row_count":0,"sample":[],"fingerprint":"abcd","rectify":{"kind":"NotApplicable"},"privacy":{"send_samples":true,"type_only_columns":[]}}}"#,
+        r#"{"kind":"Loaded","data":{"reference_name":"people","display_name":"people","source_path":"/x/m.csv","columns":[],"row_count":0,"sample":[],"fingerprint":"abcd","size_bytes":0,"rectify":{"kind":"NotApplicable"},"privacy":{"send_samples":true,"type_only_columns":[]}}}"#,
     );
 }
 
@@ -245,7 +245,7 @@ fn turn_outcome_materialized_carries_the_promotion_chain_and_assumption() {
             body: None,
             assumption: None,
         },
-        r#"{"kind":"Materialized","data":{"promotions":[{"dataset":{"reference_name":"people","display_name":"people","source_path":"/x/m.csv","columns":[],"row_count":0,"sample":[],"fingerprint":"abcd","rectify":{"kind":"NotApplicable"},"privacy":{"send_samples":true,"type_only_columns":[]}},"sql":"SELECT 1"}],"viz":null,"body":null,"assumption":null}}"#,
+        r#"{"kind":"Materialized","data":{"promotions":[{"dataset":{"reference_name":"people","display_name":"people","source_path":"/x/m.csv","columns":[],"row_count":0,"sample":[],"fingerprint":"abcd","size_bytes":0,"rectify":{"kind":"NotApplicable"},"privacy":{"send_samples":true,"type_only_columns":[]}},"sql":"SELECT 1"}],"viz":null,"body":null,"assumption":null}}"#,
     );
 }
 
@@ -272,7 +272,7 @@ fn turn_outcome_materialized_carries_a_viz_spec() {
             body: None,
             assumption: None,
         },
-        r#"{"kind":"Materialized","data":{"promotions":[{"dataset":{"reference_name":"people","display_name":"people","source_path":"/x/m.csv","columns":[],"row_count":0,"sample":[],"fingerprint":"abcd","rectify":{"kind":"NotApplicable"},"privacy":{"send_samples":true,"type_only_columns":[]}},"sql":"SELECT 1"}],"viz":{"kind":"bar","spec":"{\"mark\":\"bar\"}"},"body":null,"assumption":null}}"#,
+        r#"{"kind":"Materialized","data":{"promotions":[{"dataset":{"reference_name":"people","display_name":"people","source_path":"/x/m.csv","columns":[],"row_count":0,"sample":[],"fingerprint":"abcd","size_bytes":0,"rectify":{"kind":"NotApplicable"},"privacy":{"send_samples":true,"type_only_columns":[]}},"sql":"SELECT 1"}],"viz":{"kind":"bar","spec":"{\"mark\":\"bar\"}"},"body":null,"assumption":null}}"#,
     );
 }
 

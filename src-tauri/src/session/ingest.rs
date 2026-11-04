@@ -628,3 +628,30 @@ impl super::Session {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The Loaded descriptor's size_bytes must equal the store file's final
+    /// on-disk length (issue #1485): the stat runs after the writing
+    /// connection drops, and DuckDB flushes the main file on close -- a
+    /// mid-open stat reads a partial figure, so this equality pins the
+    /// ordering, not just that a stat happened.
+    #[test]
+    fn loaded_size_bytes_equals_the_store_file_length() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let src = dir.path().join("people.csv");
+        fs::write(&src, "id,name\n1,a\n2,b\n").expect("csv");
+        let mut session = crate::session::Session::new().expect("session");
+        let d = match session.ingest(&src) {
+            LoadOutcome::Loaded(d) => d,
+            other => panic!("expected Loaded, got {other:?}"),
+        };
+        let store = session
+            .snapshot_dir()
+            .join(format!("{}.duckdb", d.reference_name));
+        let len = fs::metadata(&store).expect("store file").len();
+        assert_eq!(d.size_bytes, len);
+    }
+}

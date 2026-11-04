@@ -43,6 +43,16 @@ fn loads_csv_into_working_set_as_active() {
 }
 
 #[test]
+fn descriptor_size_bytes_is_a_real_stat() {
+    // issue #1485: the private face's Loaded descriptor carries the store
+    // file's stat'ed size -- nonzero for a real file (the 0 sentinel means
+    // unknown and would hide the detail pane's size line).
+    let mut session = Session::new().expect("session");
+    let d = load_ok(&mut session, &fixture("people.csv"));
+    assert!(d.size_bytes > 0, "size must be stat'ed off the store file");
+}
+
+#[test]
 fn exposes_canonical_duckdb_types() {
     // AC2: per-column DuckDB inferred types under a single canonical name.
     // (read_csv_auto infers integers as 64-bit BIGINT by default.)

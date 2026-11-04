@@ -14,10 +14,9 @@
 
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { open as openPicker } from "@tauri-apps/plugin-dialog";
-import { Upload } from "lucide-react";
+import { Loader2, Upload } from "lucide-react";
 import { useCallback, useState, type ReactNode } from "react";
 import { FormattedMessage, useIntl } from "react-intl";
-import { Loader2 } from "lucide-react";
 
 import {
   addWorkspaceDataset,
